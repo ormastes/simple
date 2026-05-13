@@ -126,6 +126,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         "runtime_native.c",
         "runtime_thread.c",
         "runtime_fork.c",
+        "runtime_process.c",
         "runtime_memtrack.c",
     ] {
         let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));

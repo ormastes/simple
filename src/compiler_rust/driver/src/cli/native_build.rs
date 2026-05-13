@@ -17,6 +17,7 @@
 //!   --cache-dir <dir>   Cache directory for incremental builds
 //!   --no-mangle         Disable name mangling (enabled by default for symbol collision avoidance)
 //!   --backend <name>    Compilation backend (cranelift, llvm)
+//!   --cpu <name>        CPU profile: default, native, x86-64-v1..v4
 //!   --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap, rust-hosted)
 //!   --emit-archive      Emit a static archive from Simple objects instead of linking an executable
 //!   --entry-closure     Compile only modules reachable from --entry
@@ -27,7 +28,7 @@ use std::path::PathBuf;
 use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 use simple_compiler::is_native_codegen_backend_available;
-use simple_common::target::NativeCodegenBackend;
+use simple_common::target::{NativeCodegenBackend, TargetCpu};
 
 fn is_valid_runtime_bundle(value: &str) -> bool {
     matches!(
@@ -77,6 +78,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut cache_dir: Option<PathBuf> = None;
     let mut no_mangle = false;
     let mut backend = String::new();
+    let mut cpu: Option<TargetCpu> = None;
     let mut runtime_path: Option<PathBuf> = None;
     let mut runtime_bundle = String::from("auto");
     let mut entry_closure = false;
@@ -194,6 +196,32 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             }
             other if other.starts_with("--backend=") => {
                 backend = other.strip_prefix("--backend=").unwrap_or("").to_string();
+                i += 1;
+            }
+            "--cpu" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<TargetCpu>() {
+                        Ok(value) => cpu = Some(value),
+                        Err(err) => {
+                            eprintln!("error: invalid --cpu value '{}': {}", args[i + 1], err);
+                            return 1;
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("error: --cpu requires a value (default, native, x86-64-v1..v4)");
+                    return 1;
+                }
+            }
+            other if other.starts_with("--cpu=") => {
+                let value = other.strip_prefix("--cpu=").unwrap_or("");
+                match value.parse::<TargetCpu>() {
+                    Ok(parsed) => cpu = Some(parsed),
+                    Err(err) => {
+                        eprintln!("error: invalid --cpu value '{}': {}", value, err);
+                        return 1;
+                    }
+                }
                 i += 1;
             }
             "--runtime-path" => {
@@ -345,6 +373,9 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         if !backend.is_empty() {
             eprintln!("  Backend: {}", backend);
         }
+        if let Some(ref selected_cpu) = cpu {
+            eprintln!("  CPU: {}", selected_cpu);
+        }
         if let Some(ref rp) = runtime_path {
             eprintln!("  Runtime path: {}", rp.display());
         }
@@ -412,6 +443,9 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         config.backend = normalized.clone();
         // Set env var so compile_file_to_object can select backend.
         std::env::set_var("SIMPLE_BACKEND", &normalized);
+    }
+    if let Some(selected_cpu) = cpu {
+        std::env::set_var("SIMPLE_NATIVE_CPU", selected_cpu.as_str());
     }
 
     // Set target override for compile_file_to_object (thread-safe global)

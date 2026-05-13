@@ -1,0 +1,188 @@
+# ST-Link Tools Protocol Client
+# Wraps st-flash/st-info CLI tools for STM32 debug operations.
+# Uses subprocess calls — no GDB, no OpenOCD. Direct ST-LINK communication.
+
+# ST-Link probe information
+class StLinkProbeInfo:
+    serial: text
+    chip_id: i64
+    flash_size: i64
+    sram_size: i64
+    description: text
+
+# Client for st-link tools (st-flash, st-info)
+class StLinkToolsClient:
+    serial: text
+    connected: bool
+
+impl StLinkToolsClient:
+    # Connect to a specific ST-LINK probe by serial number
+    static fn connect(serial: text) -> Result<StLinkToolsClient, text>:
+        val output = rt_command_output("st-info --serial")
+        if output.len() == 0:
+            return Err("st-info not found or no probes connected")
+        if not output.contains(serial):
+            return Err("probe with serial {serial} not found")
+        Ok(StLinkToolsClient(serial: serial, connected: true))
+
+    # Create client without connection check (for testing)
+    static fn create(serial: text) -> StLinkToolsClient:
+        StLinkToolsClient(serial: serial, connected: false)
+
+    fn is_connected() -> bool:
+        self.connected
+
+    # Get probe information via st-info
+    fn probe_info() -> Result<StLinkProbeInfo, text>:
+        if not self.connected:
+            return Err("not connected")
+        val all = rt_command_output("st-info --probe")
+        val info = parse_probe_info(all, self.serial)
+        if info.serial.len() == 0:
+            return Err("probe with serial {self.serial} not found in st-info --probe output")
+        Ok(info)
+
+    # Read chip ID
+    fn chip_id() -> Result<i64, text>:
+        if not self.connected:
+            return Err("not connected")
+        val info = self.probe_info()?
+        Ok(info.chip_id)
+
+    # Read flash size in bytes
+    fn flash_size() -> Result<i64, text>:
+        if not self.connected:
+            return Err("not connected")
+        val info = self.probe_info()?
+        Ok(info.flash_size)
+
+    # Read SRAM size in bytes
+    fn sram_size() -> Result<i64, text>:
+        if not self.connected:
+            return Err("not connected")
+        val info = self.probe_info()?
+        Ok(info.sram_size)
+
+    # Read memory at address and return a hex dump string ("aa bb cc dd")
+    fn read_memory(addr: i64, size: i32) -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        val cmd = "sh -c 'tmp=$(mktemp) && st-flash --serial={self.serial} read \"$tmp\" 0x{rt_hex(addr)} {size} >/dev/null 2>&1 && od -An -t x1 \"$tmp\" && rm -f \"$tmp\"'"
+        val output = rt_command_output(cmd).trim()
+        if output.len() == 0:
+            return Err("st-flash read produced no output")
+        Ok(output)
+
+    # Flash a binary file to target
+    fn flash_write(binary_path: text, addr: i64) -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        val cmd = "st-flash --serial={self.serial} write {binary_path} 0x{rt_hex(addr)}"
+        val output = rt_command_output(cmd)
+        Ok(output)
+
+    # Erase flash
+    fn flash_erase() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        val cmd = "st-flash --serial={self.serial} erase"
+        val output = rt_command_output(cmd)
+        Ok(output)
+
+    # Reset target
+    fn reset() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        val cmd = "st-flash --serial={self.serial} reset"
+        val output = rt_command_output(cmd)
+        Ok(output)
+
+    # Disconnect (no-op for CLI tools, just marks state)
+    me disconnect():
+        self.connected = false
+
+# Parse hex string (0x... or plain) to integer
+fn parse_hex(s: text) -> i64:
+    var input = s
+    if input.starts_with("0x") or input.starts_with("0X"):
+        input = input.slice(2, input.len())
+    var result: i64 = 0
+    for ch in input:
+        val c = ch.to_string()
+        var digit: i64 = 0
+        if c >= "0" and c <= "9":
+            digit = c.to_i64() - "0".to_i64()
+        else:
+            if c >= "a" and c <= "f":
+                digit = c.to_i64() - "a".to_i64() + 10
+            else:
+                if c >= "A" and c <= "F":
+                    digit = c.to_i64() - "A".to_i64() + 10
+                else:
+                    return result
+        result = result * 16 + digit
+    result
+
+fn parse_probe_info(raw: text, serial: text) -> StLinkProbeInfo:
+    val blocks = raw.split("\n\n")
+    for block in blocks:
+        val trimmed = block.trim()
+        if trimmed.len() == 0:
+            continue
+        val info = parse_probe_block(trimmed)
+        if info.serial == serial:
+            return info
+    StLinkProbeInfo(serial: "", chip_id: 0, flash_size: 0, sram_size: 0, description: "")
+
+fn parse_probe_block(block: text) -> StLinkProbeInfo:
+    var serial = ""
+    var chip_id: i64 = 0
+    var flash_size: i64 = 0
+    var sram_size: i64 = 0
+
+    val lines = block.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("serial:"):
+            serial = trimmed[7:].trim()
+        elif trimmed.starts_with("chipid:"):
+            chip_id = parse_hex(trimmed[7:].trim())
+        elif trimmed.starts_with("flash:"):
+            flash_size = parse_decimal_prefix(trimmed[6:].trim())
+        elif trimmed.starts_with("sram:"):
+            sram_size = parse_decimal_prefix(trimmed[5:].trim())
+
+    StLinkProbeInfo(
+        serial: serial,
+        chip_id: chip_id,
+        flash_size: flash_size,
+        sram_size: sram_size,
+        description: block
+    )
+
+fn parse_decimal_prefix(s: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch < "0" or ch > "9":
+            break
+        result = result * 10 + (ch.to_i64() - "0".to_i64())
+        i = i + 1
+    result
+
+# Helper: format integer as hex string
+fn rt_hex(value: i64) -> text:
+    if value == 0:
+        return "0"
+    var result = ""
+    var v = value
+    val hex_chars = "0123456789abcdef"
+    while v > 0:
+        val digit = v % 16
+        result = hex_chars[digit] + result
+        v = v / 16
+    result
+
+# FFI declarations
+extern fn rt_command_output(cmd: text) -> text

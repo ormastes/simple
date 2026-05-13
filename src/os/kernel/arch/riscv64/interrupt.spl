@@ -20,7 +20,7 @@ use os.kernel.arch.riscv64.timer.{rv64_handle_timer_interrupt}
 use os.kernel.arch.riscv64.trap_runtime.{Rv64TrapRuntime}
 use os.kernel.arch.riscv64.trap_model.{Rv64TrapKind, classify_rv64_trap, rv64_syscall_args_from_context, rv64_apply_syscall_result}
 use os.kernel.arch.arch_context.{Riscv64Context}
-use os.kernel.arch.riscv64.syscall.{rv64_syscall_handler}
+use os.kernel.arch.riscv64.syscall.{rv64_syscall_handler, rv64_syscall_handler_state}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
@@ -326,6 +326,17 @@ fn rv64_dispatch_installed_trap(ctx: Riscv64Context) -> Result<Riscv64Context, t
         val message = "rv64 trap runtime is not installed"
         _log_trap_failure(message)
         return Err(message)
+
+    if classify_rv64_trap(ctx.scause) == Rv64TrapKind.UserEcall:
+        val state = rv64_syscall_handler_state(
+            rv64_syscall_args_from_context(ctx),
+            g_trap_runtime.scheduler,
+            g_trap_runtime.ipc,
+            g_trap_runtime.klog
+        )
+        g_trap_runtime.scheduler = state.scheduler
+        g_trap_runtime.ipc = state.ipc
+        return Ok(rv64_apply_syscall_result(ctx, state.result))
 
     val result = rv64_dispatch_trap(ctx, g_trap_runtime.scheduler, g_trap_runtime.ipc, g_trap_runtime.klog)
     if result.is_err():

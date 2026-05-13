@@ -1110,6 +1110,40 @@ pub use DiContainer
     }
 
     #[test]
+    fn test_gc_boundary_crossing_lint_name() {
+        assert_eq!(
+            LintName::parse("gc_boundary_crossing"),
+            Some(LintName::GcBoundaryCrossing)
+        );
+        assert_eq!(LintName::GcBoundaryCrossing.as_str(), "gc_boundary_crossing");
+        assert_eq!(LintName::GcBoundaryCrossing.default_level(), LintLevel::Warn);
+    }
+
+    #[test]
+    fn test_gc_boundary_warns_for_nogc_importing_gc_family() {
+        let diagnostics = check_code_at_path("src/lib/nogc_sync_mut/example.spl", "use std.gc_async_mut.task\n");
+
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::GcBoundaryCrossing));
+    }
+
+    #[test]
+    fn test_gc_boundary_warns_for_noalloc_importing_allocating_family() {
+        let diagnostics = check_code_at_path(
+            "src/lib/nogc_async_mut_noalloc/example.spl",
+            "use std.nogc_async_mut.task\n",
+        );
+
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::GcBoundaryCrossing));
+    }
+
+    #[test]
+    fn test_gc_boundary_allows_common_imports() {
+        let diagnostics = check_code_at_path("src/lib/nogc_async_mut_noalloc/example.spl", "use std.common.text\n");
+
+        assert!(!diagnostics.iter().any(|d| d.lint == LintName::GcBoundaryCrossing));
+    }
+
+    #[test]
     fn test_bypass_validity_not_triggered_for_regular_files() {
         let code = r#"
 pub struct Helper:
@@ -1128,6 +1162,7 @@ pub struct Helper:
     fn test_all_lints_includes_new_lints() {
         let all = LintName::all_lints();
         assert!(all.contains(&LintName::InitBoundaryViolation));
+        assert!(all.contains(&LintName::GcBoundaryCrossing));
         assert!(all.contains(&LintName::BypassWithCodeFiles));
     }
 

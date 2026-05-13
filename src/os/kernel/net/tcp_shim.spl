@@ -1,16 +1,12 @@
-# TCP Shim -- State-Only Stub for B2 Link Satisfaction
+# TCP Shim -- Netstack-backed TCP externs for SimpleOS.
 #
 # MDSOC: feature dimension, network layer
-# Status: B2 stub -- satisfies rt_io_tcp_* extern linkage so the stdlib
-#         tcp module compiles against SimpleOS. Does NOT transmit real
-#         network traffic. A follow-up phase will wire these functions to
-#         the live NetstackService singleton (which owns the real
-#         SocketTable + TcpConnection pool + NIC driver).
+# Status: fail-closed until the live NetstackService singleton is available.
 #
 # Architecture:
-#   - Each function manages shim-local fd state only (ShimFdEntry table).
-#   - bind/connect/accept return valid shim fds but no packets are sent.
-#   - read always returns empty; write returns byte count but discards.
+#   - Each function maps shim fds to real netstack socket fds.
+#   - bind/connect fail when the netstack is unavailable; no fake fds are issued.
+#   - read/write fail or return no data when no real socket exists.
 #   - Socket option setters (nodelay, timeouts) store flags faithfully.
 #
 # Each rt_io_tcp_* function here implements the extern declared in
@@ -32,12 +28,6 @@ fn tcp_shim_link_anchor() -> bool:
     true
 
 # ============================================================================
-# Stub-local counters (no real netstack wiring yet)
-# ============================================================================
-
-var g_next_os_fd: i32 = 1     # Fake os_fd counter for stub entries
-
-# ============================================================================
 # TCP Listener Functions
 # ============================================================================
 
@@ -46,20 +36,19 @@ fn rt_io_tcp_bind(addr: text) -> i64:
     """Create a TCP listener socket, bind to addr, and start listening.
 
     Returns a shim fd (>= 100) on success, or -1 on failure.
-    B2 stub: validates address, allocates fd, records state. No real bind.
+    Requires a live NetstackService. No fake listener is created when the
+    network stack is unavailable.
     """
     val hp = parse_host_port(addr)
     if hp == nil:
         return -1
 
-    val os_fd = if net_tcp_available():
-        net_tcp_bind(hp.unwrap().ip.value, hp.unwrap().port, 128u32).to_i32()
-    else:
-        g_next_os_fd
+    if not net_tcp_available():
+        return -1
+
+    val os_fd = net_tcp_bind(hp.unwrap().ip.value, hp.unwrap().port, 128u32).to_i32()
     if os_fd < 0:
         return -1
-    if not net_tcp_available():
-        g_next_os_fd = g_next_os_fd + 1
 
     # Allocate shim fd and track
     val shim_fd = shim_alloc_fd()
@@ -76,8 +65,7 @@ fn rt_io_tcp_bind(addr: text) -> i64:
 fn rt_io_tcp_accept(fd: i64) -> i64:
     """Accept incoming connection on a listener (blocking).
 
-    B2 stub: no real accept queue exists yet. Returns -1 (no connection).
-    Will be wired to NetstackService.poll_once() accept path in follow-up.
+    Returns -1 when no completed netstack accept is available.
     """
     val entry = shim_get(fd)
     if entry == nil:
@@ -109,7 +97,7 @@ fn rt_io_tcp_accept(fd: i64) -> i64:
 fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64:
     """Accept with timeout.
 
-    B2 stub: returns -1 (timeout). Will be wired in follow-up.
+    Returns -1 on timeout or when the netstack is unavailable.
     """
     val entry = shim_get(fd)
     if entry == nil:
@@ -138,21 +126,19 @@ fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64:
 fn rt_io_tcp_connect(addr: text) -> i64:
     """Connect to a remote address (blocking).
 
-    B2 stub: validates address, allocates fd, records peer. No real
-    handshake occurs. Returns shim fd (>= 100) or -1 on parse failure.
+    Requires a live NetstackService. No fake connection fd is created when
+    the network stack is unavailable.
     """
     val hp = parse_host_port(addr)
     if hp == nil:
         return -1
 
-    val os_fd = if net_tcp_available():
-        net_tcp_connect(hp.unwrap().ip.value, hp.unwrap().port, 2000u64).to_i32()
-    else:
-        g_next_os_fd
+    if not net_tcp_available():
+        return -1
+
+    val os_fd = net_tcp_connect(hp.unwrap().ip.value, hp.unwrap().port, 2000u64).to_i32()
     if os_fd < 0:
         return -1
-    if not net_tcp_available():
-        g_next_os_fd = g_next_os_fd + 1
 
     val shim_fd = shim_alloc_fd()
     val entry = ShimFdEntry(
@@ -180,7 +166,7 @@ fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64:
 fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]:
     """Read up to size bytes from a connected TCP stream.
 
-    B2 stub: no real recv buffer. Returns empty (EOF).
+    Returns empty if the fd is invalid or the netstack is unavailable.
     """
     val entry = shim_get(fd)
     if entry == nil:
@@ -208,7 +194,7 @@ fn rt_io_tcp_read_line(fd: i64) -> text?:
 fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64:
     """Write bytes to a connected TCP stream.
 
-    B2 stub: reports success (returns byte count) but discards data.
+    Returns -1 if the fd is invalid or the netstack is unavailable.
     """
     val entry = shim_get(fd)
     if entry == nil:
@@ -217,13 +203,13 @@ fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64:
     if net_tcp_available():
         return net_tcp_write(entry.unwrap().os_fd.to_i64(), data)
 
-    data.len().to_i64()
+    -1
 
 @export("C")
 fn rt_io_tcp_write_text(fd: i64, data: text) -> i64:
     """Write text to a connected TCP stream.
 
-    B2 stub: reports success (returns byte count) but discards data.
+    Returns -1 if the fd is invalid or the netstack is unavailable.
     """
     val entry = shim_get(fd)
     if entry == nil:
@@ -232,20 +218,19 @@ fn rt_io_tcp_write_text(fd: i64, data: text) -> i64:
     if net_tcp_available():
         return net_tcp_write(entry.unwrap().os_fd.to_i64(), rt_text_to_bytes(data))
 
-    data.len().to_i64()
+    -1
 
 @export("C")
 fn rt_io_tcp_flush(fd: i64) -> bool:
     """Flush the TCP send buffer.
 
-    B2 stub: returns true (nothing to flush).
+    Returns false when the fd is invalid or the netstack is unavailable.
     """
     val entry = shim_get(fd)
     if entry == nil:
         return false
 
-    # TODO: wire to real TcpConnection flush_send_buf
-    true
+    net_tcp_available()
 
 @export("C")
 fn rt_io_tcp_close(fd: i64) -> bool:

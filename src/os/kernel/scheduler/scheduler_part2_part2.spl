@@ -47,7 +47,7 @@ use os.kernel.scheduler.scheduler_types.{
     MAX_TASKS, PRIORITY_LEVELS, TIME_SLICE_TICKS, SCHED_TICK_NS,
     DEADLINE_BANDWIDTH_SCALE, DEADLINE_CPU_BANDWIDTH_CAP,
     DEFAULT_SCHED_CPUS, SCHED_TRACE_CAPACITY, SCHED_RT_BASE_PRIORITY_UNSET,
-    SCHED_EXEC_ARCH,
+    sched_exec_arch,
     task_control_pid, task_control_parent_pid, task_control_memory_pages,
     task_control_name, task_control_state_code, task_control_priority_code,
     task_control_ticks_remaining,
@@ -268,10 +268,10 @@ impl Scheduler:
         val path = argv[0]
         if path.len() == 0:
             return -22
-        val bytes_result = resolve_executable_bytes(path, SCHED_EXEC_ARCH)
+        val bytes_result = resolve_executable_bytes(path, sched_exec_arch())
         if bytes_result.is_err():
             return -2
-        val image_result = build_user_process_image(path, bytes_result.unwrap(), SCHED_EXEC_ARCH, argv, envp)
+        val image_result = build_user_process_image(path, bytes_result.unwrap(), sched_exec_arch(), argv, envp)
         if image_result.is_err():
             return -8
         self.exec_image(task_id, image_result.unwrap())
@@ -344,8 +344,10 @@ impl Scheduler:
         val tcb = self.tasks[slot]
         if tcb != nil:
             val task = tcb
-            if self.deadline_remaining_ns_by_slot[slot] == task.schedule.runtime_ns and
-                self.deadline_period_start_ns_by_slot[slot] == self.tick_count * SCHED_TICK_NS:
+            val remaining_replenished = self.deadline_remaining_ns_by_slot[slot] == task.schedule.runtime_ns
+            val period_restarted = self.deadline_period_start_ns_by_slot[slot] == self.tick_count * SCHED_TICK_NS
+            val replenished = remaining_replenished and period_restarted
+            if replenished:
                 self._trace(SchedulerTraceKind.DeadlineReplenish, task.id, task.assigned_cpu,
                     self.deadline_remaining_ns_by_slot[slot])
             if new_miss[slot] > self.deadline_miss_count_by_slot[slot]:

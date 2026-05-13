@@ -1,0 +1,155 @@
+# LLVM FFI — Target machine, pass manager, and memory buffer.
+
+use std.nogc_async_mut.ffi.llvm_loader.{
+    _lc0, _lc1, _lc2, _lc3, _lc4, _lcn,
+    rt_alloc, rt_free, rt_ptr_write_i64, rt_ptr_read_i64
+}
+use std.nogc_async_mut.ffi.llvm_types.{llvm_dispose_message}
+
+# ============================================================================
+# 7. Target Machine
+# ============================================================================
+
+var _targets_initialized_tm: bool = false
+
+fn llvm_initialize_all_target_infos():
+    _lc0("LLVMInitializeAllTargetInfos")
+
+fn llvm_initialize_all_targets():
+    _lc0("LLVMInitializeAllTargets")
+
+fn llvm_initialize_all_target_mcs():
+    _lc0("LLVMInitializeAllTargetMCs")
+
+fn llvm_initialize_all_asm_printers():
+    _lc0("LLVMInitializeAllAsmPrinters")
+
+fn llvm_initialize_all_asm_parsers():
+    _lc0("LLVMInitializeAllAsmParsers")
+
+fn llvm_initialize_targets():
+    if _targets_initialized_tm:
+        return
+    _targets_initialized_tm = true
+    llvm_initialize_all_target_infos()
+    llvm_initialize_all_targets()
+    llvm_initialize_all_target_mcs()
+    llvm_initialize_all_asm_printers()
+    llvm_initialize_all_asm_parsers()
+
+fn llvm_get_target_from_triple(triple: text) -> i64:
+    # LLVMGetTargetFromTriple(Triple, &Target, &ErrorMessage) -> LLVMBool
+    # Returns 0 on success, writes Target to output param
+    val target_ptr = rt_alloc(8)
+    val err_ptr = rt_alloc(8)
+    rt_ptr_write_i64(target_ptr, 0, 0)
+    rt_ptr_write_i64(err_ptr, 0, 0)
+    var args: [i64] = []
+    args.push(triple.ptr())
+    args.push(target_ptr)
+    args.push(err_ptr)
+    val result = _lcn("LLVMGetTargetFromTriple", args)
+    var target = 0
+    if result == 0:
+        target = rt_ptr_read_i64(target_ptr, 0)
+    val err_msg = rt_ptr_read_i64(err_ptr, 0)
+    if err_msg != 0:
+        llvm_dispose_message(err_msg)
+    rt_free(target_ptr)
+    rt_free(err_ptr)
+    target
+
+# reason: positional ffi llvm API
+fn llvm_create_target_machine(target: i64, triple: text, cpu: text, features: text, opt_level: i64, reloc: i64, code_model: i64) -> i64:
+    var args: [i64] = []
+    args.push(target)
+    args.push(triple.ptr())
+    args.push(cpu.ptr())
+    args.push(features.ptr())
+    args.push(opt_level)
+    args.push(reloc)
+    args.push(code_model)
+    _lcn("LLVMCreateTargetMachine", args)
+
+fn llvm_dispose_target_machine(tm: i64):
+    _lc1("LLVMDisposeTargetMachine", tm)
+
+# reason: positional ffi llvm API
+fn llvm_target_machine_emit_to_file(tm: i64, mod_: i64, filename: text, file_type: i64) -> bool:
+    # LLVMTargetMachineEmitToFile(TM, M, Filename, FileType, &ErrorMessage) -> LLVMBool
+    val err_ptr = rt_alloc(8)
+    rt_ptr_write_i64(err_ptr, 0, 0)
+    var args: [i64] = []
+    args.push(tm)
+    args.push(mod_)
+    args.push(filename.ptr())
+    args.push(file_type)
+    args.push(err_ptr)
+    val result = _lcn("LLVMTargetMachineEmitToFile", args)
+    val err_msg = rt_ptr_read_i64(err_ptr, 0)
+    if err_msg != 0:
+        llvm_dispose_message(err_msg)
+    rt_free(err_ptr)
+    result == 0
+
+fn llvm_get_default_target_triple() -> i64:
+    _lc0("LLVMGetDefaultTargetTriple")
+
+fn llvm_create_target_data_layout(tm: i64) -> i64:
+    _lc1("LLVMCreateTargetDataLayout", tm)
+
+# ============================================================================
+# 8. Pass Manager (New Pass Manager API)
+# ============================================================================
+
+# reason: positional ffi llvm API
+fn llvm_run_passes(mod_: i64, passes: text, tm: i64, options: i64) -> i64:
+    # LLVMRunPasses(Module, Passes, TM, Options) -> LLVMErrorRef (0=success)
+    _lc4("LLVMRunPasses", mod_, passes.ptr(), tm, options)
+
+fn llvm_create_pass_builder_options() -> i64:
+    _lc0("LLVMCreatePassBuilderOptions")
+
+fn llvm_dispose_pass_builder_options(options: i64):
+    _lc1("LLVMDisposePassBuilderOptions", options)
+
+fn llvm_pass_builder_options_set_verify_each(options: i64, verify: bool):
+    val v = if verify: 1 else: 0
+    _lc2("LLVMPassBuilderOptionsSetVerifyEach", options, v)
+
+# ============================================================================
+# 9. Memory Buffer (for reading emitted object code)
+# ============================================================================
+
+fn llvm_get_buffer_start(buf: i64) -> i64:
+    _lc1("LLVMGetBufferStart", buf)
+
+fn llvm_get_buffer_size(buf: i64) -> i64:
+    _lc1("LLVMGetBufferSize", buf)
+
+fn llvm_dispose_memory_buffer(buf: i64):
+    _lc1("LLVMDisposeMemoryBuffer", buf)
+
+# reason: positional ffi llvm API
+fn llvm_target_machine_emit_to_memory_buffer(tm: i64, mod_: i64, file_type: i64) -> i64:
+    # LLVMTargetMachineEmitToMemoryBuffer(TM, M, FileType, &ErrorMessage, &OutMemBuf) -> LLVMBool
+    val err_ptr = rt_alloc(8)
+    val buf_ptr = rt_alloc(8)
+    rt_ptr_write_i64(err_ptr, 0, 0)
+    rt_ptr_write_i64(buf_ptr, 0, 0)
+    var args: [i64] = []
+    args.push(tm)
+    args.push(mod_)
+    args.push(file_type)
+    args.push(err_ptr)
+    args.push(buf_ptr)
+    val result = _lcn("LLVMTargetMachineEmitToMemoryBuffer", args)
+    var buffer = 0
+    if result == 0:
+        buffer = rt_ptr_read_i64(buf_ptr, 0)
+    val err_msg = rt_ptr_read_i64(err_ptr, 0)
+    if err_msg != 0:
+        llvm_dispose_message(err_msg)
+    rt_free(err_ptr)
+    rt_free(buf_ptr)
+    buffer

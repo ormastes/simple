@@ -1178,6 +1178,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_time_now_nanos", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_micros", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_unix_micros", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_entropy_hardware_ready", &[], &[I64]),
     RuntimeFuncSpec::new("rt_sleep_ms", &[I64], &[]),
     RuntimeFuncSpec::new("rt_panic", &[I64], &[]),
     RuntimeFuncSpec::new("rt_get_args", &[], &[I64]), // () -> RuntimeValue (array of args)

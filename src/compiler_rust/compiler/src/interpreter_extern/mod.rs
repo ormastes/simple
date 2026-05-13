@@ -385,6 +385,7 @@ pub(crate) fn call_extern_function(
         "rt_random_uniform" => random::rt_random_uniform_fn(&evaluated),
         "rt_random_hex" => random::rt_random_hex_fn(&evaluated),
         "rt_random_i64" => random::rt_random_i64_fn(&evaluated),
+        "rt_entropy_hardware_ready" => random::rt_entropy_hardware_ready_fn(&evaluated),
 
         // ====================================================================
         // Atomic Operations (15 functions)

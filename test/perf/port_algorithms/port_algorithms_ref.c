@@ -5,10 +5,10 @@
 #include <sys/time.h>
 
 #define DATA_SIZE 65536ULL
-#define XXH_ITERS 80ULL
-#define CHACHA_ITERS 30ULL
-#define CRC32_ITERS 80ULL
-#define ADLER32_ITERS 80ULL
+#define XXH_ITERS 1600ULL
+#define CHACHA_ITERS 120ULL
+#define CRC32_ITERS 160ULL
+#define ADLER32_ITERS 800ULL
 
 static uint64_t now_us(void) {
     struct timeval tv;

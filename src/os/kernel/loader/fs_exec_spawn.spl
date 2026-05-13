@@ -7,15 +7,17 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.process_image.{build_user_process_image_unchecked}
-use os.kernel.scheduler.scheduler_types.{Scheduler, SchedulerBootstrapUserTaskResult}
+use os.kernel.scheduler.scheduler_types.{
+    Scheduler, SchedulerBootstrapUserTaskResult,
+    TaskControlBlock, ReadyQueue, CpuRunQueue,
+    MAX_TASKS, PRIORITY_LEVELS
+}
 use os.kernel.scheduler.scheduler_arm_bootstrap.{scheduler_create_bootstrap_user_task_pid}
 use os.kernel.types.capability_types.{CapabilitySet}
-use os.kernel.types.task_types.{TaskPriority, user_process_image_entry, user_process_image_segment_count}
+use os.kernel.types.task_types.{TaskId, TaskPriority, scheduler_flat_topology, user_process_image_entry, user_process_image_segment_count}
 
 extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
 extern fn serial_println(msg: text)
-
-use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
 
 @cfg(arm64)
 use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
@@ -83,16 +85,76 @@ fn _fs_exec_read_bytes(path: text) -> [u8]:
 fn _fs_exec_read_bytes(path: text) -> [u8]:
     g_vfs_read_executable_bytes(path)
 
-fn _fs_exec_dispatch_user_handoff(pid: u64, scheduler: Scheduler) -> i64:
-    dispatch_fs_exec_user_handoff(_fs_exec_active_arch(), pid, scheduler)
-
 pub struct FsExecPrepareResult:
     scheduler: Scheduler
     pid: i64
 
+fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
+    """Create the one-CPU scheduler state fs-exec needs without importing the full scheduler hub."""
+    var tasks: [TaskControlBlock?] = []
+    var i = 0
+    while i < MAX_TASKS:
+        tasks.push(nil)
+        i = i + 1
+    var queues: [ReadyQueue] = []
+    var p = 0
+    while p < PRIORITY_LEVELS:
+        queues.push(ReadyQueue.new())
+        p = p + 1
+    Scheduler(
+        tasks: tasks,
+        current: TaskId(id: 0),
+        current_by_cpu: [TaskId(id: 0)],
+        preempt_pending_by_cpu: [nil],
+        ready_queues: queues,
+        cpu_runqueues: [CpuRunQueue.new(0u32)],
+        topology: scheduler_flat_topology(1u32),
+        rt_runtime_ns_by_cpu: [0],
+        rt_period_ns_by_cpu: [0],
+        rt_consumed_ns_by_cpu: [0],
+        rt_replenish_ns_by_cpu: [0],
+        rt_throttled_by_cpu: [false],
+        deadline_remaining_ns_by_slot: [],
+        deadline_period_start_ns_by_slot: [],
+        deadline_miss_count_by_slot: [],
+        deadline_overrun_count_by_slot: [],
+        rt_base_priority_by_slot: [],
+        trace_events: [],
+        trace_head: 0,
+        trace_count: 0,
+        tick_count: 0,
+        next_task_id: 1
+    )
+
 pub fn fs_exec_read_executable_bytes(path: text) -> [u8]:
     """Read executable bytes through the active target's filesystem bridge."""
     _fs_exec_read_bytes(path)
+
+@cfg(arm64)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    if user_process_image_entry(image) == 0:
+        return 0
+    1
+
+@cfg(arm32)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    user_process_image_segment_count(image)
+
+@cfg(riscv64)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    user_process_image_segment_count(image)
+
+@cfg(riscv32)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    user_process_image_segment_count(image)
+
+@cfg(x86_64)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    user_process_image_segment_count(image)
+
+@cfg(x86)
+fn _fs_exec_segment_count_for_log(image) -> i32:
+    user_process_image_segment_count(image)
 
 pub fn fs_exec_prepare_spawn(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
     """Resolve bytes, build an image, and register a bootstrap user task."""
@@ -102,17 +164,17 @@ pub fn fs_exec_prepare_spawn(path: text, argv: [text], envp: [text]) -> FsExecPr
     serial_println("[fs-exec] spawn:bytes path={path} len={byte_len}")
     if byte_len <= 4:
         serial_println("[fs-exec] spawn:resolve-fail path={path}")
-        return FsExecPrepareResult(scheduler: Scheduler.new_bootstrap(), pid: -2)
+        return FsExecPrepareResult(scheduler: _fs_exec_new_bootstrap_scheduler(), pid: -2)
 
     val image = build_user_process_image_unchecked(path, bytes, _fs_exec_active_arch(), argv, envp)
     serial_println(
-        "[fs-exec] spawn:image entry={user_process_image_entry(image)} segments={user_process_image_segment_count(image)}"
+        "[fs-exec] spawn:image entry={user_process_image_entry(image)} segments={_fs_exec_segment_count_for_log(image)}"
     )
     if user_process_image_entry(image) == 0:
         serial_println("[fs-exec] spawn:image-fail path={path}")
-        return FsExecPrepareResult(scheduler: Scheduler.new_bootstrap(), pid: -8)
+        return FsExecPrepareResult(scheduler: _fs_exec_new_bootstrap_scheduler(), pid: -8)
 
-    var scheduler = Scheduler.new_bootstrap()
+    var scheduler = _fs_exec_new_bootstrap_scheduler()
     val scheduler_result: SchedulerBootstrapUserTaskResult = scheduler_create_bootstrap_user_task_pid(
         scheduler, image, TaskPriority.Normal, CapabilitySet.full()
     )
@@ -129,11 +191,6 @@ pub fn fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     val prepared = fs_exec_prepare_spawn(path, argv, envp)
     if prepared.pid <= 0:
         return prepared.pid
-
-    val handoff = _fs_exec_dispatch_user_handoff(prepared.pid as u64, prepared.scheduler)
-    if handoff != 0:
-        serial_println("[fs-exec] spawn:handoff-fail path={path} pid={prepared.pid}")
-        return -16
 
     serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
     prepared.pid

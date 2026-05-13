@@ -8,16 +8,18 @@ extern fn stdin_read_char() -> text
 extern fn print_raw(s: text)
 extern fn rt_stderr_write(s: text)
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
 
 class SimpleDapSession:
     program: text
     content: text
     current_line: i64
     breakpoints: [i64]
+    exception_filters: [text]
 
 impl SimpleDapSession:
     static fn new() -> SimpleDapSession:
-        SimpleDapSession(program: "", content: "", current_line: 1, breakpoints: [])
+        SimpleDapSession(program: "", content: "", current_line: 1, breakpoints: [], exception_filters: [])
 
     me launch(program: text):
         self.program = program
@@ -25,8 +27,27 @@ impl SimpleDapSession:
         self.current_line = _dap_first_executable_line(self.content)
 
     me set_breakpoint(line: i64) -> bool:
-        self.breakpoints.push(line)
-        _dap_line_exists(self.content, line)
+        val valid = _dap_line_exists(self.content, line)
+        if valid:
+            self.breakpoints.push(line)
+        valid
+
+    me set_exception_filters(filters: [text]):
+        self.exception_filters = filters
+
+    me step():
+        self.current_line = _dap_next_executable_line(self.content, self.current_line)
+
+    me continue_to_next_breakpoint() -> bool:
+        var target: i64 = 0
+        for bp in self.breakpoints:
+            if bp > self.current_line:
+                if target == 0 or bp < target:
+                    target = bp
+        if target > 0:
+            self.current_line = target
+            return true
+        false
 
     fn stack_body() -> text:
         val source = "{\"name\":\"" + _dap_json_escape(_dap_basename(self.program)) + "\",\"path\":\"" + _dap_json_escape(self.program) + "\"}"
@@ -99,6 +120,16 @@ fn _dap_first_executable_line(content: text) -> i64:
             return i + 1
         i = i + 1
     1
+
+fn _dap_next_executable_line(content: text, current_line: i64) -> i64:
+    val lines = _dap_split_lines(content)
+    var i = current_line
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed != "" and not trimmed.starts_with("#"):
+            return i + 1
+        i = i + 1
+    current_line
 
 fn _dap_source_variables_json(content: text) -> text:
     val lines = _dap_split_lines(content)
@@ -230,6 +261,39 @@ fn _dap_extract_field(json: text, key: text) -> text:
         j = j + 1
     parts.join("")
 
+fn _dap_extract_string_array_field(json: text, key: text) -> [text]:
+    var result: [text] = []
+    val search = "\"" + key + "\":"
+    val idx = _dap_find_text(json, search)
+    if idx < 0:
+        return result
+    val open = _dap_find_text(json.slice(idx + search.len(), json.len()), "[")
+    if open < 0:
+        return result
+    var i = idx + search.len() + open + 1
+    while i < json.len() and json.char_at(i) != "]":
+        if json.char_at(i) == "\"":
+            var value = ""
+            var j = i + 1
+            var escaped = false
+            while j < json.len():
+                val ch = json.char_at(j)
+                if escaped:
+                    value = value + ch
+                    escaped = false
+                elif ch == "\\":
+                    escaped = true
+                elif ch == "\"":
+                    result.push(value)
+                    i = j + 1
+                    j = json.len()
+                else:
+                    value = value + ch
+                j = j + 1
+        else:
+            i = i + 1
+    result
+
 fn _dap_request_seq(json: text) -> i64:
     val seq = _dap_extract_field(json, "seq")
     if seq == "":
@@ -251,6 +315,17 @@ fn _dap_response(req_seq: i64, command: text, body: text) -> text:
     json = json + "}"
     json
 
+fn _dap_error_response(req_seq: i64, command: text, message: text) -> text:
+    var json = "{"
+    json = json + "\"seq\":" + str(req_seq + 1000)
+    json = json + ",\"type\":\"response\""
+    json = json + ",\"request_seq\":" + str(req_seq)
+    json = json + ",\"success\":false"
+    json = json + ",\"command\":\"" + command + "\""
+    json = json + ",\"message\":\"" + _dap_json_escape(message) + "\""
+    json = json + "}"
+    json
+
 fn _dap_event(seq: i64, event: text, body: text) -> text:
     var json = "{"
     json = json + "\"seq\":" + str(seq)
@@ -263,7 +338,7 @@ fn _dap_event(seq: i64, event: text, body: text) -> text:
 
 fn _dap_body_for(command: text, json: text, session: SimpleDapSession) -> text:
     if command == "initialize":
-        return "{\"supportsConfigurationDoneRequest\":true,\"supportsEvaluateForHovers\":true,\"supportsStepInTargetsRequest\":false,\"supportsSetVariable\":false}"
+        return "{\"supportsConfigurationDoneRequest\":true,\"supportsEvaluateForHovers\":true,\"supportsStepInTargetsRequest\":false,\"supportsSetVariable\":false,\"exceptionBreakpointFilters\":[{\"filter\":\"caught\",\"label\":\"Caught Exceptions\",\"default\":false},{\"filter\":\"uncaught\",\"label\":\"Uncaught Exceptions\",\"default\":true}]}"
     if command == "threads":
         return "{\"threads\":[{\"id\":1,\"name\":\"main\"}]}"
     if command == "stackTrace":
@@ -279,6 +354,9 @@ fn _dap_body_for(command: text, json: text, session: SimpleDapSession) -> text:
         val verified = session.set_breakpoint(line)
         val verified_text = if verified then "true" else "false"
         return "{\"breakpoints\":[{\"verified\":" + verified_text + ",\"line\":" + str(line) + "}]}"
+    if command == "setExceptionBreakpoints":
+        session.set_exception_filters(_dap_extract_string_array_field(json, "filters"))
+        return "{}"
     "{}"
 
 fn _dap_handle(json: text, session: SimpleDapSession) -> [text]:
@@ -288,7 +366,11 @@ fn _dap_handle(json: text, session: SimpleDapSession) -> [text]:
     if command == "":
         return out
     if command == "launch":
-        session.launch(_dap_extract_field(json, "program"))
+        val program = _dap_extract_field(json, "program")
+        if program == "" or not rt_file_exists(program):
+            out.push(_dap_error_response(req_seq, command, "program not found: " + program))
+            return out
+        session.launch(program)
     out.push(_dap_response(req_seq, command, _dap_body_for(command, json, session)))
     if command == "initialize":
         out.push(_dap_event(req_seq + 2000, "initialized", ""))
@@ -296,8 +378,14 @@ fn _dap_handle(json: text, session: SimpleDapSession) -> [text]:
         out.push(_dap_event(req_seq + 2000, "stopped", "{\"reason\":\"entry\",\"threadId\":1,\"allThreadsStopped\":true}"))
     elif command == "continue":
         out.push(_dap_event(req_seq + 2000, "continued", "{\"threadId\":1,\"allThreadsContinued\":true}"))
-        out.push(_dap_event(req_seq + 2001, "terminated", ""))
-    elif command == "next" or command == "stepIn" or command == "stepOut" or command == "pause":
+        if session.continue_to_next_breakpoint():
+            out.push(_dap_event(req_seq + 2001, "stopped", "{\"reason\":\"breakpoint\",\"threadId\":1,\"allThreadsStopped\":true}"))
+        else:
+            out.push(_dap_event(req_seq + 2001, "terminated", ""))
+    elif command == "next" or command == "stepIn" or command == "stepOut":
+        session.step()
+        out.push(_dap_event(req_seq + 2000, "stopped", "{\"reason\":\"step\",\"threadId\":1,\"allThreadsStopped\":true}"))
+    elif command == "pause":
         out.push(_dap_event(req_seq + 2000, "stopped", "{\"reason\":\"step\",\"threadId\":1,\"allThreadsStopped\":true}"))
     out
 

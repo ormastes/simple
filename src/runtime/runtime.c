@@ -1469,6 +1469,15 @@ int64_t __simple_intrinsic_unlikely(int64_t cond) {
     return cond;
 }
 
+int64_t __simple_intrinsic_bounds_check(int64_t index, int64_t len) {
+    if (index < 0 || index >= len) {
+        fprintf(stderr, "PANIC: bounds_check intrinsic index=%lld len=%lld\n",
+                (long long)index, (long long)len);
+        exit(1);
+    }
+    return 0;
+}
+
 int64_t __simple_intrinsic_prefetch(void* ptr) {
     (void)ptr;
     return 0;

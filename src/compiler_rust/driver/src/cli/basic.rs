@@ -45,7 +45,7 @@ pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<Str
                 if watchdog.is_active() && is_timeout_error(&e) {
                     eprintln!("error: {}", timeout_error_message(&path, watchdog.timeout_secs()));
                 } else {
-                    eprintln!("error: {}", e);
+                    print_cli_error(&e);
                 }
                 1
             }
@@ -90,7 +90,7 @@ pub fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
                 exit_code
             }
             Err(e) => {
-                eprintln!("error: {}", e);
+                print_cli_error(&e);
                 1
             }
         }
@@ -109,6 +109,65 @@ pub fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
             eprintln!("This is a bug in the Simple compiler. Please report it.");
             101
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CliErrorDiagnostic {
+    code: Option<&'static str>,
+    message: String,
+    help: Vec<&'static str>,
+}
+
+fn print_cli_error(error: &str) {
+    let diagnostic = classify_cli_error(error);
+    match diagnostic.code {
+        Some(code) => eprintln!("error[{}]: {}", code, diagnostic.message),
+        None => eprintln!("error: {}", diagnostic.message),
+    }
+    for help in diagnostic.help {
+        eprintln!("  = help: {}", help);
+    }
+}
+
+fn classify_cli_error(error: &str) -> CliErrorDiagnostic {
+    if let Some(message) = error.strip_prefix("failed to read ") {
+        return CliErrorDiagnostic {
+            code: Some("E0001"),
+            message: format!("cannot read file: {}", message),
+            help: vec!["check that the path exists and is readable"],
+        };
+    }
+
+    if let Some(message) = error.strip_prefix("parse error: ") {
+        return CliErrorDiagnostic {
+            code: Some("E0002"),
+            message: message.to_string(),
+            help: vec!["fix the syntax at the reported location"],
+        };
+    }
+
+    if let Some(message) = error.strip_prefix("semantic: ") {
+        if message.starts_with("function `") && message.ends_with("` not found") {
+            return CliErrorDiagnostic {
+                code: Some("E1002"),
+                message: message.to_string(),
+                help: vec!["check the function name or import the module that defines it"],
+            };
+        }
+        if message == "division by zero" {
+            return CliErrorDiagnostic {
+                code: Some("E2001"),
+                message: message.to_string(),
+                help: vec!["check the divisor before dividing"],
+            };
+        }
+    }
+
+    CliErrorDiagnostic {
+        code: None,
+        message: error.to_string(),
+        help: Vec::new(),
     }
 }
 
@@ -149,5 +208,37 @@ pub fn watch_file(path: &Path) -> i32 {
             eprintln!("error: {}", e);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_undefined_function_error() {
+        let diagnostic = classify_cli_error("semantic: function `missing_function` not found");
+
+        assert_eq!(diagnostic.code, Some("E1002"));
+        assert_eq!(diagnostic.message, "function `missing_function` not found");
+        assert!(!diagnostic.help.is_empty());
+    }
+
+    #[test]
+    fn classify_division_by_zero_error() {
+        let diagnostic = classify_cli_error("semantic: division by zero");
+
+        assert_eq!(diagnostic.code, Some("E2001"));
+        assert_eq!(diagnostic.message, "division by zero");
+        assert!(!diagnostic.help.is_empty());
+    }
+
+    #[test]
+    fn keeps_unclassified_error_message() {
+        let diagnostic = classify_cli_error("codegen: backend unavailable");
+
+        assert_eq!(diagnostic.code, None);
+        assert_eq!(diagnostic.message, "codegen: backend unavailable");
+        assert!(diagnostic.help.is_empty());
     }
 }

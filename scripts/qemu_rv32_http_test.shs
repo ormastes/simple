@@ -7,7 +7,7 @@
 # server to come up, then runs nc/openssl smoke tests against it.
 #
 # Usage:
-#   sh scripts/qemu_rv32_http_test.shs [--elf <path>]
+#   sh scripts/qemu_rv32_http_test.shs [--elf <path>] [--expect-deferred]
 #
 # Defaults:
 #   --elf build/simpleos-rv32.elf
@@ -25,6 +25,7 @@ HTTP_PORT=8080
 HTTPS_PORT=8443
 BOOT_TIMEOUT=60
 SERIAL_LOG="build/qemu-rv32-serial.log"
+EXPECT_DEFERRED=false
 
 # ---- parse args ----
 while [ "$#" -gt 0 ]; do
@@ -36,10 +37,14 @@ while [ "$#" -gt 0 ]; do
     --elf=*)
       ELF="${1#*=}"
       ;;
+    --expect-deferred)
+      EXPECT_DEFERRED=true
+      ;;
     --help|-h)
-      echo "Usage: sh scripts/qemu_rv32_http_test.shs [--elf <path>]"
+      echo "Usage: sh scripts/qemu_rv32_http_test.shs [--elf <path>] [--expect-deferred]"
       echo ""
-      echo "  --elf <path>   Path to SimpleOS RV32 ELF (default: build/simpleos-rv32.elf)"
+      echo "  --elf <path>        Path to SimpleOS RV32 ELF (default: build/simpleos-rv32.elf)"
+      echo "  --expect-deferred   Pass when virtio is detected but packet RX is unavailable"
       exit 0
       ;;
     *)
@@ -53,7 +58,8 @@ done
 # ---- verify prerequisites ----
 if [ ! -f "$ELF" ]; then
   echo "error: ELF not found: ${ELF}" >&2
-  echo "  Build it first with: sh scripts/simpleos-native-build.shs --target riscv32gc-unknown-none" >&2
+  echo "  Build it first with an LLVM-enabled compiler:" >&2
+  echo "    SIMPLE_BOOTSTRAP=1 <simple> native-build --backend llvm --source src/os --source src/lib --entry src/os/kernel/arch/riscv32/boot.spl --entry-closure --linker-script src/os/kernel/arch/riscv32/linker.ld --target riscv32-unknown-none -o ${ELF}" >&2
   exit 1
 fi
 
@@ -62,7 +68,7 @@ if ! command -v qemu-system-riscv32 >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v nc >/dev/null 2>&1; then
+if [ "$EXPECT_DEFERRED" = "false" ] && ! command -v nc >/dev/null 2>&1; then
   echo "error: nc not found in PATH" >&2
   exit 1
 fi
@@ -97,11 +103,34 @@ QEMU_PID=$!
 
 echo "  QEMU PID: ${QEMU_PID}"
 
-# ---- wait for HTTP bind marker ----
-echo "[2/4] Waiting for HTTP bind marker (timeout: ${BOOT_TIMEOUT}s)..."
+# ---- wait for boot gate marker ----
+if [ "$EXPECT_DEFERRED" = "true" ]; then
+  echo "[2/4] Waiting for deferred network marker (timeout: ${BOOT_TIMEOUT}s)..."
+else
+  echo "[2/4] Waiting for HTTP bind marker (timeout: ${BOOT_TIMEOUT}s)..."
+fi
 WAITED=0
 BOOTED=false
 while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
+  if [ "$EXPECT_DEFERRED" = "true" ] &&
+    [ -f "$SERIAL_LOG" ] &&
+    grep -q "Network service ready" "$SERIAL_LOG" 2>/dev/null; then
+    echo "FAILED: network reached ready state in deferred mode" >&2
+    echo "--- serial log ---"
+    cat "$SERIAL_LOG"
+    echo "--- end serial log ---"
+    exit 1
+  fi
+  if [ "$EXPECT_DEFERRED" = "true" ] &&
+    [ -f "$SERIAL_LOG" ] &&
+    grep -q "PCI network device index" "$SERIAL_LOG" 2>/dev/null &&
+    grep -q "Network packet TX unavailable" "$SERIAL_LOG" 2>/dev/null &&
+    grep -q "HTTP server deferred" "$SERIAL_LOG" 2>/dev/null &&
+    grep -q "Entering boot idle loop" "$SERIAL_LOG" 2>/dev/null; then
+    echo "  Deferred network gate verified after ${WAITED}s"
+    echo "DEFERRED PASSED"
+    exit 0
+  fi
   if [ -f "$SERIAL_LOG" ] && grep -q "HTTP server deferred" "$SERIAL_LOG" 2>/dev/null; then
     echo "FAILED: HTTP server was deferred" >&2
     echo "--- serial log ---"

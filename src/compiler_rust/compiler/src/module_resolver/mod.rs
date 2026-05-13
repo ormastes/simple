@@ -116,6 +116,28 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_escaped_mod_file_module() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let header_gen = src.join("compiler").join("90.tools").join("header_gen");
+        fs::create_dir_all(&header_gen).unwrap();
+
+        fs::write(header_gen.join("mod.spl"), "struct HeaderGenerator:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec![
+            "compiler".into(),
+            "tools".into(),
+            "header_gen".into(),
+            "mod_".into(),
+        ]);
+        let resolved = resolver.resolve(&path, &header_gen.join("__init__.spl")).unwrap();
+
+        assert_eq!(resolved.path, header_gen.join("mod.spl"));
+        assert!(!resolved.is_directory);
+    }
+
+    #[test]
     fn test_resolve_nested_module() {
         let dir = create_test_project();
         let src = dir.path().join("src");
@@ -182,6 +204,263 @@ mod tests {
         let resolved = resolver.resolve(&path, &from_file).unwrap();
 
         assert_eq!(resolved.path, frontend_core.join("tokens.spl"));
+    }
+
+    #[test]
+    fn test_resolve_numbered_layer_alias_intermediate_segment() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let native = src.join("compiler").join("70.backend").join("backend").join("native");
+        fs::create_dir_all(&native).unwrap();
+        fs::write(native.join("mach_inst.spl"), "struct MachInst:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec![
+            "compiler".into(),
+            "backend".into(),
+            "native".into(),
+            "mach_inst".into(),
+        ]);
+        let resolved = resolver.resolve(&path, &src.join("compiler/main.spl")).unwrap();
+
+        assert_eq!(resolved.path, native.join("mach_inst.spl"));
+    }
+
+    #[test]
+    fn test_resolve_explicit_numbered_layer_segments() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let semantics = src.join("compiler").join("35.semantics");
+        fs::create_dir_all(&semantics).unwrap();
+        fs::write(semantics.join("resolve.spl"), "fn resolve(): 0").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec![
+            "compiler".into(),
+            "35".into(),
+            "semantics".into(),
+            "resolve".into(),
+        ]);
+        let resolved = resolver.resolve(&path, &src.join("compiler/main.spl")).unwrap();
+
+        assert_eq!(resolved.path, semantics.join("resolve.spl"));
+    }
+
+    #[test]
+    fn test_resolve_bare_compiler_module_from_numbered_layer() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let frontend = src.join("compiler").join("10.frontend");
+        let types = src.join("compiler").join("30.types").join("type_system");
+        fs::create_dir_all(&frontend).unwrap();
+        fs::create_dir_all(&types).unwrap();
+        fs::write(frontend.join("ast.spl"), "struct Node:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["ast".into()]);
+        let resolved = resolver.resolve(&path, &types.join("checker.spl")).unwrap();
+
+        assert_eq!(resolved.path, frontend.join("ast.spl"));
+    }
+
+    #[test]
+    fn test_resolve_compiler_shared_interpreter_alias() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let interpreter = src.join("compiler").join("95.interp").join("interpreter");
+        fs::create_dir_all(&interpreter).unwrap();
+        fs::write(interpreter.join("errors.spl"), "struct ErrorRegistry:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["compiler_shared".into(), "interpreter".into(), "errors".into()]);
+        let resolved = resolver
+            .resolve(&path, &src.join("compiler/common/error_explanations.spl"))
+            .unwrap();
+
+        assert_eq!(resolved.path, interpreter.join("errors.spl"));
+    }
+
+    #[test]
+    fn test_resolve_stdlib_package_aliases_from_family_root() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let family = src.join("lib").join("nogc_sync_mut");
+        let debug = family.join("debug");
+        let exp = family.join("src").join("exp");
+        let collections = family.join("src").join("collections");
+        let mcp_jj = family.join("mcp").join("jj");
+        let blink = src.join("lib").join("blink").join("dom");
+        let common_geometry = src.join("lib").join("common").join("geometry");
+        let common_rsa = src.join("lib").join("common").join("rsa");
+        fs::create_dir_all(&debug).unwrap();
+        fs::create_dir_all(&exp).unwrap();
+        fs::create_dir_all(&collections).unwrap();
+        fs::create_dir_all(&mcp_jj).unwrap();
+        fs::create_dir_all(&blink).unwrap();
+        fs::create_dir_all(&common_geometry).unwrap();
+        fs::create_dir_all(&common_rsa).unwrap();
+        fs::write(debug.join("coordinator.spl"), "struct DebugBackend:").unwrap();
+        fs::write(exp.join("config.spl"), "struct ExpConfig:").unwrap();
+        fs::write(collections.join("__init__.spl"), "struct List:").unwrap();
+        fs::write(mcp_jj.join("jj_runner.spl"), "struct JjRunner:").unwrap();
+        fs::write(blink.join("node.spl"), "struct DomNode:").unwrap();
+        fs::write(common_geometry.join("point.spl"), "struct Point:").unwrap();
+        fs::write(common_rsa.join("types.spl"), "struct RsaKey:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.join("lib"));
+        let from_file = family.join("debug").join("native_agent.spl");
+
+        let app_path = ModulePath::new(vec!["app".into(), "debug".into(), "coordinator".into()]);
+        let app_resolved = resolver.resolve(&app_path, &from_file).unwrap();
+        assert_eq!(app_resolved.path, debug.join("coordinator.spl"));
+
+        let mcp_jj_path = ModulePath::new(vec!["app".into(), "mcp_jj".into(), "jj_runner".into()]);
+        let mcp_jj_resolved = resolver
+            .resolve(&mcp_jj_path, &family.join("mcp/jj/helpers.spl"))
+            .unwrap();
+        assert_eq!(mcp_jj_resolved.path, mcp_jj.join("jj_runner.spl"));
+
+        let std_path = ModulePath::new(vec!["std".into(), "exp".into(), "config".into()]);
+        let std_resolved = resolver.resolve(&std_path, &from_file).unwrap();
+        assert_eq!(std_resolved.path, exp.join("config.spl"));
+
+        let core_path = ModulePath::new(vec!["core".into(), "collections".into()]);
+        let core_resolved = resolver.resolve(&core_path, &from_file).unwrap();
+        assert_eq!(core_resolved.path, collections.join("__init__.spl"));
+
+        let std_lib_path = ModulePath::new(vec![
+            "std".into(),
+            "lib".into(),
+            "blink".into(),
+            "dom".into(),
+            "node".into(),
+        ]);
+        let std_lib_resolved = resolver
+            .resolve(&std_lib_path, &src.join("lib/blink/dom/document.spl"))
+            .unwrap();
+        assert_eq!(std_lib_resolved.path, blink.join("node.spl"));
+
+        let std_common_path = ModulePath::new(vec!["std".into(), "common".into(), "geometry".into(), "point".into()]);
+        let std_common_resolved = resolver
+            .resolve(&std_common_path, &common_geometry.join("circle.spl"))
+            .unwrap();
+        assert_eq!(std_common_resolved.path, common_geometry.join("point.spl"));
+
+        let common_path = ModulePath::new(vec!["common".into(), "geometry".into(), "point".into()]);
+        let common_resolved = resolver
+            .resolve(&common_path, &common_geometry.join("__init__.spl"))
+            .unwrap();
+        assert_eq!(common_resolved.path, common_geometry.join("point.spl"));
+
+        let src_std_path = ModulePath::new(vec!["src".into(), "std".into(), "rsa".into(), "types".into()]);
+        let src_std_resolved = resolver
+            .resolve(&src_std_path, &common_rsa.join("encrypt.spl"))
+            .unwrap();
+        assert_eq!(src_std_resolved.path, common_rsa.join("types.spl"));
+    }
+
+    #[test]
+    fn test_resolve_bare_stdlib_common_package_import() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let aes = src.join("lib").join("common").join("aes");
+        fs::create_dir_all(&aes).unwrap();
+        fs::write(aes.join("types.spl"), "struct AesBlock:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.join("lib"));
+        let path = ModulePath::new(vec!["aes".into(), "types".into()]);
+        let resolved = resolver.resolve(&path, &aes.join("cipher.spl")).unwrap();
+
+        assert_eq!(resolved.path, aes.join("types.spl"));
+    }
+
+    #[test]
+    fn test_resolve_bare_canonical_std_module_import() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let compiler = src.join("compiler");
+        let verification = src
+            .join("compiler_rust")
+            .join("lib")
+            .join("std")
+            .join("src")
+            .join("verification")
+            .join("regenerate");
+        fs::create_dir_all(&compiler).unwrap();
+        fs::create_dir_all(&verification).unwrap();
+        fs::write(verification.join("__init__.spl"), "fn regenerate_all(): []").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), compiler.clone());
+        let path = ModulePath::new(vec!["verification".into(), "regenerate".into()]);
+        let resolved = resolver.resolve(&path, &compiler.join("verify.spl")).unwrap();
+
+        assert_eq!(resolved.path, verification.join("__init__.spl"));
+    }
+
+    #[test]
+    fn test_resolve_current_package_prefix_from_init() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let rules = src.join("compiler").join("90.tools").join("fix").join("rules");
+        let impl_dir = rules.join("impl");
+        fs::create_dir_all(&impl_dir).unwrap();
+        fs::write(rules.join("__init__.spl"), "export use rules.impl.*").unwrap();
+        fs::write(impl_dir.join("__init__.spl"), "export FixRule\nstruct FixRule:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["rules".into(), "impl".into()]);
+        let resolved = resolver.resolve(&path, &rules.join("__init__.spl")).unwrap();
+
+        assert_eq!(resolved.path, impl_dir.join("__init__.spl"));
+    }
+
+    #[test]
+    fn test_resolve_current_directory_relative_import() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let loader = src.join("compiler").join("99.loader").join("loader");
+        fs::create_dir_all(&loader).unwrap();
+        fs::write(loader.join("smf_cache.spl"), "struct SmfCache:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec![".".into(), "smf_cache".into()]);
+        let resolved = resolver.resolve(&path, &loader.join("smf_cache_manager.spl")).unwrap();
+
+        assert_eq!(resolved.path, loader.join("smf_cache.spl"));
+    }
+
+    #[test]
+    fn test_resolve_parent_directory_relative_import() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let loader = src.join("compiler").join("99.loader").join("loader");
+        let linker = src.join("compiler").join("99.loader").join("linker");
+        fs::create_dir_all(&loader).unwrap();
+        fs::create_dir_all(&linker).unwrap();
+        fs::write(linker.join("smf_reader.spl"), "struct SmfReaderImpl:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["..".into(), "linker".into(), "smf_reader".into()]);
+        let resolved = resolver.resolve(&path, &loader.join("smf_cache.spl")).unwrap();
+
+        assert_eq!(resolved.path, linker.join("smf_reader.spl"));
+    }
+
+    #[test]
+    fn test_resolve_grandparent_relative_import_through_numbered_layer() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let loader = src.join("compiler").join("99.loader").join("loader");
+        let monomorphize = src.join("compiler").join("40.mono").join("monomorphize");
+        fs::create_dir_all(&loader).unwrap();
+        fs::create_dir_all(&monomorphize).unwrap();
+        fs::write(monomorphize.join("note_sdn.spl"), "struct NoteSdnMetadata:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["...".into(), "monomorphize".into(), "note_sdn".into()]);
+        let resolved = resolver.resolve(&path, &loader.join("smf_cache.spl")).unwrap();
+
+        assert_eq!(resolved.path, monomorphize.join("note_sdn.spl"));
     }
 
     #[test]

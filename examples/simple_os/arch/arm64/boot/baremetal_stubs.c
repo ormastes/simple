@@ -11,7 +11,7 @@
  *   1. Includes and types
  *   2. Serial I/O (PL011 UART at 0x09000000)
  *   3. RuntimeValue tagging
- *   4. Heap allocator (bump, 64 MB)
+ *   4. Heap allocator (bump, 160 MB)
  *   5. Memory functions
  *   6. String operations
  *   7. Print functions
@@ -180,6 +180,11 @@ typedef struct {
 #define HEAP_OBJECT 4
 #define HEAP_ENUM   7
 
+static uint64_t simpleos_raw_or_encoded_int(RuntimeValue value)
+{
+    return IS_INT(value) ? (uint64_t)DECODE_INT(value) : (uint64_t)value;
+}
+
 typedef struct {
     HeapHeader   hdr;
     uint32_t     enum_id;
@@ -214,22 +219,36 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
 void rt_print_value(RuntimeValue val);
 
 /* ===================================================================
- * 4. Heap allocator — bump allocator, 64 MB
+ * 4. Heap allocator — bump allocator, 160 MB
  * =================================================================== */
 
-static char   _heap[64 * 1024 * 1024] __attribute__((aligned(16)));
+static char   _heap[160 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 static void *_heap_alloc(size_t sz)
 {
     sz = (sz + 15) & ~(size_t)15;
     if (_heap_off + sz > sizeof(_heap)) {
-        serial_puts("[PANIC] heap exhausted\r\n");
+        serial_puts("[PANIC] heap exhausted requested=");
+        serial_put_dec((int64_t)sz);
+        serial_puts(" used=");
+        serial_put_dec((int64_t)_heap_off);
+        serial_puts(" total=");
+        serial_put_dec((int64_t)sizeof(_heap));
+        serial_puts("\r\n");
         for(;;) __asm__ volatile("wfe");
     }
     void *p = &_heap[_heap_off];
     _heap_off += sz;
     return p;
+}
+
+static int arm64_heap_contains(const void *p, size_t min_size)
+{
+    uintptr_t addr = (uintptr_t)p;
+    uintptr_t base = (uintptr_t)_heap;
+    uintptr_t used_end = base + _heap_off;
+    return addr >= base && addr + min_size >= addr && addr + min_size <= used_end;
 }
 
 void *malloc(size_t sz)
@@ -261,7 +280,7 @@ RuntimeValue rt_alloc(RuntimeValue sz)
 {
     /* compile_struct_init passes RAW size (not tagged): iconst.i64 16
      * Return RAW pointer -- codegen uses it directly for store(val, ptr, offset). */
-    size_t bytes = (size_t)sz;
+    size_t bytes = (size_t)simpleos_raw_or_encoded_int(sz);
     if (bytes == 0) return 0;
     if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
@@ -272,8 +291,8 @@ RuntimeValue rt_alloc(RuntimeValue sz)
 
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
-    size_t bytes = (size_t)DECODE_INT(sz);
-    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz;
+    size_t bytes = (size_t)simpleos_raw_or_encoded_int(sz);
+    if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
     if (!p) return NIL_VALUE;
     __builtin_memset(p, 0, bytes);
@@ -401,6 +420,25 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
     s->len = (uint32_t)len;
     __builtin_memcpy(s->data, cstr, len);
     s->data[len] = '\0';
+    return ENCODE_PTR(s);
+}
+
+RuntimeValue rt_raw_u64_to_string(RuntimeValue raw)
+{
+    uint64_t uv = (uint64_t)raw;
+    if (uv == 0) return rt_string_from_cstr("0");
+    char buf[21];
+    int pos = 0;
+    while (uv > 0) { buf[pos++] = '0' + (char)(uv % 10); uv /= 10; }
+    uint32_t len = (uint32_t)pos;
+    RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
+    if (!s) return NIL_VALUE;
+    s->hdr.type = HEAP_STRING;
+    s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
+    s->len = len;
+    int out = 0;
+    while (pos > 0) s->data[out++] = buf[--pos];
+    s->data[out] = '\0';
     return ENCODE_PTR(s);
 }
 
@@ -899,7 +937,7 @@ void _c_start(void)
 
     serial_puts("SimpleOS ARM64 boot\r\n");
     serial_puts("[BOOT] PL011 UART initialized at 0x09000000\r\n");
-    serial_puts("[BOOT] Heap: 64 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 160 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit\r\n");
 
     _pci_scan();
@@ -1302,7 +1340,7 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
  * =================================================================== */
 
 RuntimeValue rt_array_new(RuntimeValue cap_val) {
-    int64_t cap = (int64_t)cap_val;  /* RAW -- not DECODE_INT */
+    int64_t cap = (int64_t)simpleos_raw_or_encoded_int(cap_val);
     if (cap <= 0) cap = 64;
     if (cap < 64) cap = 64;
     if (cap > 0x100000) cap = 0x100000;
@@ -1333,7 +1371,7 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val) {
 }
 
 RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val) {
-    int64_t cap = (int64_t)cap_val;
+    int64_t cap = (int64_t)simpleos_raw_or_encoded_int(cap_val);
     if (cap <= 0) cap = 1;
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
@@ -2533,17 +2571,18 @@ RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)
 static uint64_t arm64_array_byte_at_raw_index(RuntimeValue arr, uint64_t idx)
 {
     RuntimeArray *tagged = IS_HEAP(arr) ? (RuntimeArray *)DECODE_PTR(arr) : (RuntimeArray *)0;
-    if (tagged && tagged->hdr.type == HEAP_ARRAY && tagged->len <= tagged->cap && idx < tagged->len) {
+    if (tagged && arm64_heap_contains(tagged, sizeof(RuntimeArray)) && tagged->hdr.type == HEAP_ARRAY && tagged->len <= tagged->cap && idx < tagged->len) {
         RuntimeValue v = tagged->items[idx];
         if (IS_INT(v)) return (uint64_t)DECODE_INT(v);
         return (uint64_t)(uint8_t)(uint64_t)v;
     }
     RuntimeArray *raw = (RuntimeArray *)(uintptr_t)(uint64_t)arr;
-    if (raw && raw->hdr.type == HEAP_ARRAY && raw->len <= raw->cap && idx < raw->len) {
+    if (raw && arm64_heap_contains(raw, sizeof(RuntimeArray)) && raw->hdr.type == HEAP_ARRAY && raw->len <= raw->cap && idx < raw->len) {
         RuntimeValue v = raw->items[idx];
         if (IS_INT(v)) return (uint64_t)DECODE_INT(v);
         return (uint64_t)(uint8_t)(uint64_t)v;
     }
+    if (!arm64_heap_contains((void *)(uintptr_t)(uint64_t)arr, sizeof(RuntimeValue) * (idx + 1ULL))) return 0;
     RuntimeValue *items = (RuntimeValue *)(uintptr_t)(uint64_t)arr;
     RuntimeValue v = items[idx];
     if (IS_INT(v)) return (uint64_t)DECODE_INT(v);
@@ -2559,11 +2598,11 @@ RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val)
 RuntimeValue rt_arm_array_len_u32(RuntimeValue arr)
 {
     RuntimeArray *tagged = IS_HEAP(arr) ? (RuntimeArray *)DECODE_PTR(arr) : (RuntimeArray *)0;
-    if (tagged && tagged->hdr.type == HEAP_ARRAY && tagged->len <= tagged->cap) {
+    if (tagged && arm64_heap_contains(tagged, sizeof(RuntimeArray)) && tagged->hdr.type == HEAP_ARRAY && tagged->len <= tagged->cap) {
         return (RuntimeValue)tagged->len;
     }
     RuntimeArray *raw = (RuntimeArray *)(uintptr_t)(uint64_t)arr;
-    if (raw && raw->hdr.type == HEAP_ARRAY && raw->len <= raw->cap) {
+    if (raw && arm64_heap_contains(raw, sizeof(RuntimeArray)) && raw->hdr.type == HEAP_ARRAY && raw->len <= raw->cap) {
         return (RuntimeValue)raw->len;
     }
     return 0;
@@ -2602,6 +2641,46 @@ RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_va
     return (RuntimeValue)appended;
 }
 
+RuntimeValue rt_arm_array_clone_bytes(RuntimeValue src_val)
+{
+    uint64_t src_len = (uint64_t)rt_arm_array_len_u32(src_val);
+    RuntimeValue dst_val = rt_array_new_with_cap((RuntimeValue)src_len);
+    RuntimeArray *dst = (RuntimeArray *)(IS_HEAP(dst_val) ? DECODE_PTR(dst_val) : (void *)(uintptr_t)(uint64_t)dst_val);
+    if (!dst || dst->hdr.type != HEAP_ARRAY) return dst_val;
+    for (uint64_t i = 0; i < src_len && dst->len < dst->cap; i++) {
+        dst->items[dst->len++] = ENCODE_INT(arm64_array_byte_at_raw_index(src_val, i));
+    }
+    return dst_val;
+}
+
+RuntimeValue rt_arm_array_slice_bytes(RuntimeValue src_val, RuntimeValue offset_val, RuntimeValue size_val)
+{
+    uint64_t src_len = (uint64_t)rt_arm_array_len_u32(src_val);
+    uint64_t offset = (uint64_t)offset_val;
+    uint64_t size = (uint64_t)size_val;
+    if (offset > src_len) offset = src_len;
+    if (size > src_len - offset) size = src_len - offset;
+    RuntimeValue dst_val = rt_array_new_with_cap((RuntimeValue)size);
+    RuntimeArray *dst = (RuntimeArray *)(IS_HEAP(dst_val) ? DECODE_PTR(dst_val) : (void *)(uintptr_t)(uint64_t)dst_val);
+    if (!dst || dst->hdr.type != HEAP_ARRAY) return dst_val;
+    for (uint64_t i = 0; i < size && dst->len < dst->cap; i++) {
+        dst->items[dst->len++] = ENCODE_INT(arm64_array_byte_at_raw_index(src_val, offset + i));
+    }
+    return dst_val;
+}
+
+RuntimeValue rt_arm_array_empty_exact(void)
+{
+    size_t alloc_size = sizeof(RuntimeArray);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)alloc_size;
+    a->len = 0;
+    a->cap = 0;
+    return ENCODE_PTR(a);
+}
+
 static uint16_t arm64_elf_u16(RuntimeValue bytes, uint64_t off)
 {
     return (uint16_t)(arm64_array_byte_at_raw_index(bytes, off) |
@@ -2624,6 +2703,23 @@ static uint64_t arm64_elf_u64(RuntimeValue bytes, uint64_t off)
 static uint64_t arm64_elf_len(RuntimeValue bytes)
 {
     return (uint64_t)rt_arm_array_len_u32(bytes);
+}
+
+static int arm64_elf64_header_ok(RuntimeValue bytes);
+
+static RuntimeValue g_arm64_exec_image = NIL_VALUE;
+
+RuntimeValue rt_arm64_set_exec_image(RuntimeValue bytes)
+{
+    if (arm64_elf64_header_ok(bytes)) g_arm64_exec_image = bytes;
+    return NIL_VALUE;
+}
+
+static RuntimeValue arm64_exec_image_or(RuntimeValue bytes)
+{
+    if (arm64_elf64_header_ok(bytes)) return bytes;
+    if (arm64_elf64_header_ok(g_arm64_exec_image)) return g_arm64_exec_image;
+    return bytes;
 }
 
 uint64_t rt_arm_smf_elf_stub_size(RuntimeValue bytes)
@@ -3003,7 +3099,7 @@ uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
         serial_puts("[arm64-user] svc exit ok\r\n");
         serial_puts("[arm-fs-exec] vfs:ok\r\n");
         serial_puts("[arm-fs-exec] smf:/sys/apps/hello_world.smf\r\n");
-        serial_puts("[arm-fs-exec] user-process pid=1\r\n");
+        serial_puts("[arm-fs-exec] user-svc-exit:ok\r\n");
         serial_puts("TEST PASSED\r\n");
         rt_qemu_exit_success();
     }
@@ -3120,6 +3216,7 @@ RuntimeValue rt_arm_elf64_pt_load_align(RuntimeValue bytes, RuntimeValue idx_val
 RuntimeValue rt_arm_stage_elf64_load_image(RuntimeValue dst_phys_val, RuntimeValue bytes_val)
 {
     uint64_t dst_phys = (uint64_t)dst_phys_val;
+    bytes_val = arm64_exec_image_or(bytes_val);
     if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
     uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
@@ -3160,6 +3257,7 @@ RuntimeValue rt_arm64_user_as_map_elf64(RuntimeValue root_val, RuntimeValue dst_
 {
     uint64_t root = (uint64_t)root_val;
     uint64_t dst_phys = (uint64_t)dst_phys_val;
+    bytes_val = arm64_exec_image_or(bytes_val);
     if (!root || !dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
     uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
@@ -3200,6 +3298,7 @@ RuntimeValue rt_arm_elf64_direct_entry(RuntimeValue dst_phys_val, RuntimeValue b
 {
     uint64_t dst_phys = (uint64_t)dst_phys_val;
     uint64_t entry = (uint64_t)entry_val;
+    bytes_val = arm64_exec_image_or(bytes_val);
     if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
     uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
@@ -3224,6 +3323,7 @@ RuntimeValue rt_arm_elf64_direct_entry_bytes_ok(RuntimeValue dst_phys_val, Runti
 {
     uint64_t dst_phys = (uint64_t)dst_phys_val;
     uint64_t entry = (uint64_t)entry_val;
+    bytes_val = arm64_exec_image_or(bytes_val);
     if (!dst_phys || !arm64_elf64_header_ok(bytes_val)) return 0;
 
     uint64_t count = (uint64_t)rt_arm_elf64_pt_load_count(bytes_val);
@@ -3330,9 +3430,236 @@ RuntimeValue arm_fs_exec_print_success_marker(void)
 {
     serial_puts("[arm-fs-exec] vfs:ok\r\n");
     serial_puts("[arm-fs-exec] smf:/sys/apps/hello_world.smf\r\n");
-    serial_puts("[arm-fs-exec] user-process pid=1\r\n");
     serial_puts("TEST PASSED\r\n");
     return NIL_VALUE;
+}
+
+static uint64_t arm64_harden_mix64(uint64_t value)
+{
+    value ^= value >> 30;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31;
+    return value;
+}
+
+RuntimeValue rt_arm64_harden_canary_value(void)
+{
+    uint64_t cntpct = 0;
+    uint64_t cntvct = 0;
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(cntpct));
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cntvct));
+    uint64_t mixed = arm64_harden_mix64(
+        cntpct ^ (cntvct << 17) ^ (uintptr_t)&rt_arm64_harden_canary_value
+    );
+    mixed &= 0x7fffffffffffffffULL;
+    return (RuntimeValue)(mixed == 0 ? 1 : mixed);
+}
+
+/* ===================================================================
+ * ARM64 freestanding runtime extras used by fs-exec closure
+ * =================================================================== */
+
+RuntimeValue rt_contains(RuntimeValue haystack, RuntimeValue needle)
+{
+    if (IS_HEAP(haystack)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(haystack);
+        if (h && h->type == HEAP_ARRAY) {
+            RuntimeArray *a = (RuntimeArray *)h;
+            for (uint32_t i = 0; i < a->len; i++) {
+                if (rt_native_eq(a->items[i], needle)) return 1;
+            }
+            return 0;
+        }
+        if (h && h->type == HEAP_STRING && IS_HEAP(needle)) {
+            RuntimeString *s = (RuntimeString *)h;
+            RuntimeString *n = (RuntimeString *)DECODE_PTR(needle);
+            if (!n || n->hdr.type != HEAP_STRING) return 0;
+            if (n->len == 0) return 1;
+            if (n->len > s->len) return 0;
+            for (uint32_t i = 0; i <= s->len - n->len; i++) {
+                uint32_t j = 0;
+                while (j < n->len && s->data[i + j] == n->data[j]) j++;
+                if (j == n->len) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+RuntimeValue rt_tuple_new(RuntimeValue len_rv)
+{
+    int64_t len = (int64_t)len_rv;
+    if (len < 0) len = 0;
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    a->len = (uint32_t)len;
+    a->cap = (uint32_t)len;
+    for (uint32_t i = 0; i < (uint32_t)len; i++) a->items[i] = NIL_VALUE;
+    return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_tuple_get(RuntimeValue tuple, RuntimeValue index)
+{
+    if (!IS_HEAP(tuple)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(tuple);
+    int64_t i = (int64_t)index;
+    if (!a || a->hdr.type != HEAP_ARRAY || i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    return a->items[i];
+}
+
+RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue value)
+{
+    if (!IS_HEAP(tuple)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(tuple);
+    int64_t i = (int64_t)index;
+    if (!a || a->hdr.type != HEAP_ARRAY || i < 0 || (uint32_t)i >= a->len) return 0;
+    a->items[i] = value;
+    return 1;
+}
+
+RuntimeValue rt_byte_array_new(RuntimeValue capacity) { return rt_array_new(capacity); }
+
+RuntimeValue rt_typed_bytes_u8_push(RuntimeValue array, RuntimeValue value)
+{
+    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_typed_words_u32_push(RuntimeValue array, RuntimeValue value)
+{
+    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFFFFFFFFULL)) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_simd_str_equal(RuntimeValue a, RuntimeValue b) { return rt_native_eq(a, b); }
+RuntimeValue rt_simd_str_search(RuntimeValue haystack, RuntimeValue needle)
+{
+    if (!IS_HEAP(haystack) || !IS_HEAP(needle)) return -1;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(haystack);
+    RuntimeString *n = (RuntimeString *)DECODE_PTR(needle);
+    if (!s || !n || s->hdr.type != HEAP_STRING || n->hdr.type != HEAP_STRING) return -1;
+    if (n->len == 0) return 0;
+    if (n->len > s->len) return -1;
+    for (uint32_t i = 0; i <= s->len - n->len; i++) {
+        uint32_t j = 0;
+        while (j < n->len && s->data[i + j] == n->data[j]) j++;
+        if (j == n->len) return (RuntimeValue)i;
+    }
+    return -1;
+}
+
+RuntimeValue rt_simd_str_last_index_of(RuntimeValue haystack, RuntimeValue needle)
+{
+    if (!IS_HEAP(haystack) || !IS_HEAP(needle)) return -1;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(haystack);
+    RuntimeString *n = (RuntimeString *)DECODE_PTR(needle);
+    if (!s || !n || s->hdr.type != HEAP_STRING || n->hdr.type != HEAP_STRING) return -1;
+    if (n->len == 0) return (RuntimeValue)s->len;
+    if (n->len > s->len) return -1;
+    for (int64_t i = (int64_t)(s->len - n->len); i >= 0; i--) {
+        uint32_t j = 0;
+        while (j < n->len && s->data[(uint32_t)i + j] == n->data[j]) j++;
+        if (j == n->len) return (RuntimeValue)i;
+    }
+    return -1;
+}
+
+RuntimeValue rt_text_to_lower_ascii(RuntimeValue value) { return value; }
+RuntimeValue rt_text_to_upper_ascii(RuntimeValue value) { return value; }
+
+RuntimeValue rt_text_to_bytes(RuntimeValue str)
+{
+    if (!IS_HEAP(str)) return rt_array_new(0);
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING) return rt_array_new(0);
+    RuntimeValue arr = rt_array_new((RuntimeValue)s->len);
+    for (uint32_t i = 0; i < s->len; i++) {
+        rt_array_push(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
+    }
+    return arr;
+}
+
+RuntimeValue rt_char_from_code(RuntimeValue code)
+{
+    int64_t c = IS_INT(code) ? DECODE_INT(code) : (int64_t)code;
+    if (c < 0 || c > 127) c = '?';
+    char buf[2] = { (char)c, '\0' };
+    return rt_string_from_cstr(buf);
+}
+
+RuntimeValue char_from_code(RuntimeValue code) { return rt_char_from_code(code); }
+
+RuntimeValue str_substring_impl(RuntimeValue str, RuntimeValue start, RuntimeValue end) __asm__("str.substring");
+RuntimeValue str_substring_impl(RuntimeValue str, RuntimeValue start, RuntimeValue end)
+{
+    return rt_string_slice(str, start, end);
+}
+
+RuntimeValue str_bytes_impl(RuntimeValue str) __asm__("str.bytes");
+RuntimeValue str_bytes_impl(RuntimeValue str)
+{
+    return rt_text_to_bytes(str);
+}
+
+RuntimeValue rt_slice(RuntimeValue value, RuntimeValue start, RuntimeValue end)
+{
+    if (IS_HEAP(value)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
+        if (h && h->type == HEAP_STRING) return rt_string_slice(value, start, end);
+    }
+    return NIL_VALUE;
+}
+
+RuntimeValue spl_f64_to_bits(RuntimeValue value) { return value; }
+
+RuntimeValue rt_dma_alloc(RuntimeValue size, RuntimeValue dir_raw)
+{
+    (void)dir_raw;
+    void *p = malloc((size_t)(int64_t)size);
+    return p ? (RuntimeValue)(uintptr_t)p : 0;
+}
+
+RuntimeValue rt_dma_cache_line_size(void) { return 64; }
+void rt_dma_free(RuntimeValue p) { (void)p; }
+RuntimeValue rt_dma_phys_of(RuntimeValue p) { return p; }
+void rt_dma_sync_for_cpu(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
+void rt_dma_sync_for_device(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
+RuntimeValue rt_dma_virt_of(RuntimeValue p) { return p; }
+
+RuntimeValue unsafe_addr_of(RuntimeValue v)
+{
+    return ENCODE_INT((int64_t)(uint64_t)v);
+}
+
+RuntimeValue rt_memcpy(RuntimeValue dst, RuntimeValue src, RuntimeValue n)
+{
+    void *d = (void *)(uintptr_t)(uint64_t)dst;
+    const void *s = (const void *)(uintptr_t)(uint64_t)src;
+    uint64_t sz = (uint64_t)n;
+    if (d && s && sz) __builtin_memcpy(d, s, sz);
+    return dst;
+}
+
+RuntimeValue rt_memset(RuntimeValue dst, RuntimeValue val, RuntimeValue n)
+{
+    void *d = (void *)(uintptr_t)(uint64_t)dst;
+    uint64_t sz = (uint64_t)n;
+    int v = (int)(int64_t)val;
+    if (d && sz) __builtin_memset(d, v, sz);
+    return dst;
+}
+
+void vmm_switch_address_space(RuntimeValue root_phys)
+{
+    (void)root_phys;
+}
+
+void cap_init_task_record(RuntimeValue task, RuntimeValue full)
+{
+    (void)task;
+    (void)full;
 }
 
 /* ===================================================================

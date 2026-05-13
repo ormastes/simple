@@ -1,0 +1,798 @@
+# SIMD Intrinsics API
+#
+# User-facing SIMD API for high-performance vector operations.
+# Provides platform-independent intrinsics that compile to AVX2 (x86_64)
+# or NEON (ARM) instructions.
+#
+# Usage:
+#   use std.simd.{Vec4f, simd_add_f32x4, simd_mul_f32x4}
+#   val a = Vec4f.splat(2.0)
+#   val b = Vec4f.splat(3.0)
+#   val c = simd_add_f32x4(a, b)  # [5.0, 5.0, 5.0, 5.0]
+#
+# Supported operations:
+# - Arithmetic: add, sub, mul, div, fma (fused multiply-add)
+# - Comparison: eq, ne, lt, le, gt, ge
+# - Load/Store: from_array, to_array, load_aligned, store_aligned
+# - Reductions: horizontal_add, horizontal_max, horizontal_min
+# - Platform detection: has_avx2, has_neon, simd_width
+
+# ============================================================================
+# Platform Detection
+# ============================================================================
+
+"""
+SIMD platform capabilities detection.
+Compile-time constants for optimization.
+"""
+
+# Platform feature flags (set by compiler based on target)
+extern fn rt_simd_has_sse() -> bool
+extern fn rt_simd_has_avx() -> bool
+extern fn rt_simd_has_avx2() -> bool
+extern fn rt_simd_has_neon() -> bool
+extern fn rt_simd_has_rvv() -> bool
+extern fn rt_simd_detect_profile() -> i64
+extern fn rt_simd_profile_name() -> text
+
+# Bulk array copy — SIMD workaround for SplValue slot layout (bug_simd_bulk_copy_blocked_by_spl_array_layout).
+# Copies `count` i64 elements from `src` into `dst` at the runtime level.
+extern fn rt_array_extend_i64(dst: [i64], src: [i64], count: i64) -> bool
+
+enum SimdTier:
+    scalar
+    x86_64_sse2
+    x86_64_avx2
+    x86_64_avx512
+    aarch64_neon
+    aarch64_sve
+    aarch64_sve2
+    riscv64_rvv
+    wasm128
+
+fn detect_profile() -> SimdTier:
+    """Detect the canonical SIMD tier for the current host."""
+    match rt_simd_detect_profile():
+        case 0: SimdTier.scalar
+        case 1: SimdTier.x86_64_sse2
+        case 2: SimdTier.x86_64_avx2
+        case 3: SimdTier.x86_64_avx512
+        case 4: SimdTier.aarch64_neon
+        case 5: SimdTier.aarch64_sve
+        case 6: SimdTier.aarch64_sve2
+        case 7: SimdTier.riscv64_rvv
+        case 8: SimdTier.wasm128
+        case _: SimdTier.scalar
+
+fn profile_name() -> text:
+    """Get the canonical SIMD tier name for the current host."""
+    rt_simd_profile_name()
+
+fn has_sse() -> bool:
+    """Check if SSE (128-bit) is available."""
+    rt_simd_has_sse()
+
+fn has_avx() -> bool:
+    """Check if AVX (256-bit) is available."""
+    rt_simd_has_avx()
+
+fn has_avx2() -> bool:
+    """Check if AVX2 (256-bit integer) is available."""
+    rt_simd_has_avx2()
+
+fn has_neon() -> bool:
+    """Check if ARM NEON (128-bit) is available."""
+    rt_simd_has_neon()
+
+fn has_rvv() -> bool:
+    """Check if RISC-V vector support is available."""
+    rt_simd_has_rvv()
+
+fn simd_width() -> i64:
+    """Get maximum SIMD width in bits (128, 256, or 512)."""
+    match detect_profile():
+        case SimdTier.x86_64_avx512: 512
+        case SimdTier.x86_64_avx2: 256
+        case SimdTier.x86_64_sse2: 128
+        case SimdTier.aarch64_neon: 128
+        case SimdTier.aarch64_sve: 128
+        case SimdTier.aarch64_sve2: 128
+        case SimdTier.riscv64_rvv: 128
+        case SimdTier.wasm128: 128
+        case SimdTier.scalar:
+            if has_avx2():
+                256
+            elif has_avx():
+                256
+            elif has_sse():
+                128
+            elif has_neon():
+                128
+            elif has_rvv():
+                128
+            else:
+                0
+
+# ============================================================================
+# Vector Types
+# ============================================================================
+
+"""
+4-element f32 vector (128-bit SSE/NEON register).
+Maps to __m128 (x86) or float32x4_t (ARM).
+"""
+struct Vec4f:
+    x: f32
+    y: f32
+    z: f32
+    w: f32
+
+impl Vec4f:
+    static fn splat(value: f32) -> Vec4f:
+        """Create vector with all elements set to value."""
+        Vec4f(x: value, y: value, z: value, w: value)
+
+    static fn from_array(arr: [f32]) -> Vec4f:
+        """Create from array (must have 4+ elements)."""
+        Vec4f(x: arr[0], y: arr[1], z: arr[2], w: arr[3])
+
+    static fn zero() -> Vec4f:
+        """Zero vector."""
+        Vec4f(x: 0.0, y: 0.0, z: 0.0, w: 0.0)
+
+    fn to_array() -> [f32]:
+        """Convert to array."""
+        [self.x, self.y, self.z, self.w]
+
+"""
+8-element f32 vector (256-bit AVX register).
+Maps to __m256 (x86). Falls back to 2x Vec4f on ARM.
+"""
+struct Vec8f:
+    e0: f32
+    e1: f32
+    e2: f32
+    e3: f32
+    e4: f32
+    e5: f32
+    e6: f32
+    e7: f32
+
+impl Vec8f:
+    static fn splat(value: f32) -> Vec8f:
+        """Create vector with all elements set to value."""
+        Vec8f(
+            e0: value, e1: value, e2: value, e3: value,
+            e4: value, e5: value, e6: value, e7: value
+        )
+
+    static fn from_array(arr: [f32]) -> Vec8f:
+        """Create from array (must have 8+ elements)."""
+        Vec8f(
+            e0: arr[0], e1: arr[1], e2: arr[2], e3: arr[3],
+            e4: arr[4], e5: arr[5], e6: arr[6], e7: arr[7]
+        )
+
+    static fn zero() -> Vec8f:
+        """Zero vector."""
+        Vec8f(
+            e0: 0.0, e1: 0.0, e2: 0.0, e3: 0.0,
+            e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0
+        )
+
+    fn to_array() -> [f32]:
+        """Convert to array."""
+        [self.e0, self.e1, self.e2, self.e3, self.e4, self.e5, self.e6, self.e7]
+
+"""
+4-element f64 vector (256-bit AVX register).
+Maps to __m256d (x86). Falls back to 2x Vec2d on ARM.
+"""
+struct Vec4d:
+    x: f64
+    y: f64
+    z: f64
+    w: f64
+
+impl Vec4d:
+    static fn splat(value: f64) -> Vec4d:
+        """Create vector with all elements set to value."""
+        Vec4d(x: value, y: value, z: value, w: value)
+
+    static fn from_array(arr: [f64]) -> Vec4d:
+        """Create from array (must have 4+ elements)."""
+        Vec4d(x: arr[0], y: arr[1], z: arr[2], w: arr[3])
+
+    static fn zero() -> Vec4d:
+        """Zero vector."""
+        Vec4d(x: 0.0, y: 0.0, z: 0.0, w: 0.0)
+
+    fn to_array() -> [f64]:
+        """Convert to array."""
+        [self.x, self.y, self.z, self.w]
+
+"""
+4-element i32 vector (128-bit SSE/NEON register).
+Maps to __m128i (x86) or int32x4_t (ARM).
+"""
+struct Vec4i:
+    x: i32
+    y: i32
+    z: i32
+    w: i32
+
+impl Vec4i:
+    static fn splat(value: i32) -> Vec4i:
+        """Create vector with all elements set to value."""
+        Vec4i(x: value, y: value, z: value, w: value)
+
+    static fn from_array(arr: [i32]) -> Vec4i:
+        """Create from array (must have 4+ elements)."""
+        Vec4i(x: arr[0], y: arr[1], z: arr[2], w: arr[3])
+
+    static fn zero() -> Vec4i:
+        """Zero vector."""
+        Vec4i(x: 0, y: 0, z: 0, w: 0)
+
+    fn to_array() -> [i32]:
+        """Convert to array."""
+        [self.x, self.y, self.z, self.w]
+
+"""
+8-element i32 vector (256-bit AVX2 register).
+Maps to __m256i (x86). Falls back to 2x Vec4i on ARM.
+"""
+struct Vec8i:
+    e0: i32
+    e1: i32
+    e2: i32
+    e3: i32
+    e4: i32
+    e5: i32
+    e6: i32
+    e7: i32
+
+impl Vec8i:
+    static fn splat(value: i32) -> Vec8i:
+        """Create vector with all elements set to value."""
+        Vec8i(
+            e0: value, e1: value, e2: value, e3: value,
+            e4: value, e5: value, e6: value, e7: value
+        )
+
+    static fn from_array(arr: [i32]) -> Vec8i:
+        """Create from array (must have 8+ elements)."""
+        Vec8i(
+            e0: arr[0], e1: arr[1], e2: arr[2], e3: arr[3],
+            e4: arr[4], e5: arr[5], e6: arr[6], e7: arr[7]
+        )
+
+    static fn zero() -> Vec8i:
+        """Zero vector."""
+        Vec8i(
+            e0: 0, e1: 0, e2: 0, e3: 0,
+            e4: 0, e5: 0, e6: 0, e7: 0
+        )
+
+    fn to_array() -> [i32]:
+        """Convert to array."""
+        [self.e0, self.e1, self.e2, self.e3, self.e4, self.e5, self.e6, self.e7]
+
+# ============================================================================
+# f32x4 Intrinsics (128-bit)
+# ============================================================================
+
+extern fn rt_simd_add_f32x4(a: Vec4f, b: Vec4f) -> Vec4f
+extern fn rt_simd_sub_f32x4(a: Vec4f, b: Vec4f) -> Vec4f
+extern fn rt_simd_mul_f32x4(a: Vec4f, b: Vec4f) -> Vec4f
+extern fn rt_simd_div_f32x4(a: Vec4f, b: Vec4f) -> Vec4f
+extern fn rt_simd_fma_f32x4(a: Vec4f, b: Vec4f, c: Vec4f) -> Vec4f
+
+fn simd_add_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
+    """Add two f32x4 vectors: a + b."""
+    rt_simd_add_f32x4(a, b)
+
+fn simd_sub_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
+    """Subtract two f32x4 vectors: a - b."""
+    rt_simd_sub_f32x4(a, b)
+
+fn simd_mul_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
+    """Multiply two f32x4 vectors (element-wise): a * b."""
+    rt_simd_mul_f32x4(a, b)
+
+fn simd_div_f32x4(a: Vec4f, b: Vec4f) -> Vec4f:
+    """Divide two f32x4 vectors (element-wise): a / b."""
+    rt_simd_div_f32x4(a, b)
+
+fn simd_fma_f32x4(a: Vec4f, b: Vec4f, c: Vec4f) -> Vec4f:
+    """Fused multiply-add: a * b + c (single rounding)."""
+    rt_simd_fma_f32x4(a, b, c)
+
+# ============================================================================
+# f32x8 Intrinsics (256-bit AVX2)
+# ============================================================================
+
+extern fn rt_simd_add_f32x8(a: Vec8f, b: Vec8f) -> Vec8f
+extern fn rt_simd_sub_f32x8(a: Vec8f, b: Vec8f) -> Vec8f
+extern fn rt_simd_mul_f32x8(a: Vec8f, b: Vec8f) -> Vec8f
+extern fn rt_simd_div_f32x8(a: Vec8f, b: Vec8f) -> Vec8f
+extern fn rt_simd_fma_f32x8(a: Vec8f, b: Vec8f, c: Vec8f) -> Vec8f
+
+fn simd_add_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
+    """Add two f32x8 vectors: a + b."""
+    rt_simd_add_f32x8(a, b)
+
+fn simd_sub_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
+    """Subtract two f32x8 vectors: a - b."""
+    rt_simd_sub_f32x8(a, b)
+
+fn simd_mul_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
+    """Multiply two f32x8 vectors (element-wise): a * b."""
+    rt_simd_mul_f32x8(a, b)
+
+fn simd_div_f32x8(a: Vec8f, b: Vec8f) -> Vec8f:
+    """Divide two f32x8 vectors (element-wise): a / b."""
+    rt_simd_div_f32x8(a, b)
+
+fn simd_fma_f32x8(a: Vec8f, b: Vec8f, c: Vec8f) -> Vec8f:
+    """Fused multiply-add: a * b + c (single rounding)."""
+    rt_simd_fma_f32x8(a, b, c)
+
+# ============================================================================
+# f64x4 Intrinsics (256-bit AVX2)
+# ============================================================================
+
+extern fn rt_simd_add_f64x4(a: Vec4d, b: Vec4d) -> Vec4d
+extern fn rt_simd_sub_f64x4(a: Vec4d, b: Vec4d) -> Vec4d
+extern fn rt_simd_mul_f64x4(a: Vec4d, b: Vec4d) -> Vec4d
+extern fn rt_simd_div_f64x4(a: Vec4d, b: Vec4d) -> Vec4d
+extern fn rt_simd_fma_f64x4(a: Vec4d, b: Vec4d, c: Vec4d) -> Vec4d
+
+fn simd_add_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
+    """Add two f64x4 vectors: a + b."""
+    rt_simd_add_f64x4(a, b)
+
+fn simd_sub_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
+    """Subtract two f64x4 vectors: a - b."""
+    rt_simd_sub_f64x4(a, b)
+
+fn simd_mul_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
+    """Multiply two f64x4 vectors (element-wise): a * b."""
+    rt_simd_mul_f64x4(a, b)
+
+fn simd_div_f64x4(a: Vec4d, b: Vec4d) -> Vec4d:
+    """Divide two f64x4 vectors (element-wise): a / b."""
+    rt_simd_div_f64x4(a, b)
+
+fn simd_fma_f64x4(a: Vec4d, b: Vec4d, c: Vec4d) -> Vec4d:
+    """Fused multiply-add: a * b + c (single rounding)."""
+    rt_simd_fma_f64x4(a, b, c)
+
+# ============================================================================
+# i32x4 Intrinsics (128-bit)
+# ============================================================================
+
+extern fn rt_simd_add_i32x4(a: Vec4i, b: Vec4i) -> Vec4i
+extern fn rt_simd_sub_i32x4(a: Vec4i, b: Vec4i) -> Vec4i
+extern fn rt_simd_mul_i32x4(a: Vec4i, b: Vec4i) -> Vec4i
+extern fn rt_simd_xor_i32x4(a: Vec4i, b: Vec4i) -> Vec4i
+extern fn rt_simd_and_i32x4(a: Vec4i, b: Vec4i) -> Vec4i
+extern fn rt_simd_or_i32x4(a: Vec4i, b: Vec4i) -> Vec4i
+extern fn rt_simd_shl_i32x4(a: Vec4i, n: i64) -> Vec4i
+extern fn rt_simd_shr_i32x4(a: Vec4i, n: i64) -> Vec4i
+
+fn simd_add_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+    """Add two i32x4 vectors: a + b."""
+    rt_simd_add_i32x4(a, b)
+
+fn simd_sub_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+    """Subtract two i32x4 vectors: a - b."""
+    rt_simd_sub_i32x4(a, b)
+
+fn simd_mul_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+    """Multiply two i32x4 vectors (element-wise): a * b."""
+    rt_simd_mul_i32x4(a, b)
+
+fn simd_xor_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+    """Bitwise XOR of two i32x4 vectors."""
+    rt_simd_xor_i32x4(a, b)
+
+fn simd_and_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+    """Bitwise AND of two i32x4 vectors."""
+    rt_simd_and_i32x4(a, b)
+
+fn simd_or_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+    """Bitwise OR of two i32x4 vectors."""
+    rt_simd_or_i32x4(a, b)
+
+fn simd_shl_i32x4(a: Vec4i, n: i64) -> Vec4i:
+    """Logical left-shift each lane of an i32x4 vector by n bits (n masked to 0..31)."""
+    rt_simd_shl_i32x4(a, n)
+
+fn simd_shr_i32x4(a: Vec4i, n: i64) -> Vec4i:
+    """Logical right-shift each lane of an i32x4 vector by n bits (zero-fill, n masked to 0..31)."""
+    rt_simd_shr_i32x4(a, n)
+
+fn simd_rotl_i32x4(a: Vec4i, n: i64) -> Vec4i:
+    """Rotate-left each lane of an i32x4 vector by n bits. Pure-Simple wrapper over shl/shr/or.
+    n is masked to 0..31; rotation by 0 or 32 is identity."""
+    val m = n & 31
+    simd_or_i32x4(simd_shl_i32x4(a, m), simd_shr_i32x4(a, 32 - m))
+
+fn simd_rotr_i32x4(a: Vec4i, n: i64) -> Vec4i:
+    """Rotate-right each lane of an i32x4 vector by n bits. Pure-Simple wrapper over shr/shl/or.
+    n is masked to 0..31; rotation by 0 or 32 is identity."""
+    val m = n & 31
+    simd_or_i32x4(simd_shr_i32x4(a, m), simd_shl_i32x4(a, 32 - m))
+
+# ============================================================================
+# i32x8 Intrinsics (256-bit AVX2)
+# ============================================================================
+
+extern fn rt_simd_add_i32x8(a: Vec8i, b: Vec8i) -> Vec8i
+extern fn rt_simd_sub_i32x8(a: Vec8i, b: Vec8i) -> Vec8i
+extern fn rt_simd_mul_i32x8(a: Vec8i, b: Vec8i) -> Vec8i
+extern fn rt_simd_xor_i32x8(a: Vec8i, b: Vec8i) -> Vec8i
+extern fn rt_simd_and_i32x8(a: Vec8i, b: Vec8i) -> Vec8i
+extern fn rt_simd_or_i32x8(a: Vec8i, b: Vec8i) -> Vec8i
+extern fn rt_simd_shl_i32x8(a: Vec8i, n: i64) -> Vec8i
+extern fn rt_simd_shr_i32x8(a: Vec8i, n: i64) -> Vec8i
+
+fn simd_add_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+    """Add two i32x8 vectors: a + b."""
+    rt_simd_add_i32x8(a, b)
+
+fn simd_sub_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+    """Subtract two i32x8 vectors: a - b."""
+    rt_simd_sub_i32x8(a, b)
+
+fn simd_mul_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+    """Multiply two i32x8 vectors (element-wise): a * b."""
+    rt_simd_mul_i32x8(a, b)
+
+fn simd_xor_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+    """Bitwise XOR of two i32x8 vectors."""
+    rt_simd_xor_i32x8(a, b)
+
+fn simd_and_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+    """Bitwise AND of two i32x8 vectors."""
+    rt_simd_and_i32x8(a, b)
+
+fn simd_or_i32x8(a: Vec8i, b: Vec8i) -> Vec8i:
+    """Bitwise OR of two i32x8 vectors."""
+    rt_simd_or_i32x8(a, b)
+
+fn simd_shl_i32x8(a: Vec8i, n: i64) -> Vec8i:
+    """Logical left-shift each lane of an i32x8 vector by n bits (n masked to 0..31)."""
+    rt_simd_shl_i32x8(a, n)
+
+fn simd_shr_i32x8(a: Vec8i, n: i64) -> Vec8i:
+    """Logical right-shift each lane of an i32x8 vector by n bits (zero-fill, n masked to 0..31)."""
+    rt_simd_shr_i32x8(a, n)
+
+# ============================================================================
+# u32x4 Intrinsics (128-bit) — FR: doc/08_tracking/feature_request/simd_u32x4_i64x4_intrinsics_2026-05-02.md
+#
+# Vec4u32 = 4 × u32 lanes (128-bit); maps to __m128i (x86 SSE2) /
+# uint32x4_t (AArch64 NEON). Wrapping arithmetic per-lane; carry does NOT
+# propagate across lane boundaries.
+# ============================================================================
+
+"""
+4-element u32 vector (128-bit SSE/NEON register).
+Maps to __m128i (x86) or uint32x4_t (ARM).
+"""
+struct Vec4u32:
+    x: u32
+    y: u32
+    z: u32
+    w: u32
+
+impl Vec4u32:
+    static fn splat(value: u32) -> Vec4u32:
+        """Create vector with all 4 lanes set to value."""
+        Vec4u32(x: value, y: value, z: value, w: value)
+
+    static fn from_array(arr: [u32]) -> Vec4u32:
+        """Create from array (must have 4+ elements)."""
+        Vec4u32(x: arr[0], y: arr[1], z: arr[2], w: arr[3])
+
+    static fn zero() -> Vec4u32:
+        """Zero vector."""
+        Vec4u32(x: 0u32, y: 0u32, z: 0u32, w: 0u32)
+
+    fn to_array() -> [u32]:
+        """Convert to array."""
+        [self.x, self.y, self.z, self.w]
+
+extern fn rt_simd_add_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32
+extern fn rt_simd_sub_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32
+extern fn rt_simd_and_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32
+extern fn rt_simd_or_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32
+extern fn rt_simd_xor_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32
+
+fn simd_add_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
+    """Lane-wise wrapping add of two u32x4 vectors."""
+    rt_simd_add_u32x4(a, b)
+
+fn simd_sub_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
+    """Lane-wise wrapping subtract of two u32x4 vectors."""
+    rt_simd_sub_u32x4(a, b)
+
+fn simd_and_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
+    """Bitwise AND of two u32x4 vectors."""
+    rt_simd_and_u32x4(a, b)
+
+fn simd_or_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
+    """Bitwise OR of two u32x4 vectors."""
+    rt_simd_or_u32x4(a, b)
+
+fn simd_xor_u32x4(a: Vec4u32, b: Vec4u32) -> Vec4u32:
+    """Bitwise XOR of two u32x4 vectors."""
+    rt_simd_xor_u32x4(a, b)
+
+# ============================================================================
+# i64x4 Intrinsics (256-bit AVX2) — FR: doc/08_tracking/feature_request/simd_u32x4_i64x4_intrinsics_2026-05-02.md
+#
+# Vec4i64 = 4 × i64 lanes (256-bit AVX2); maps to __m256i (x86 AVX2) /
+# int64x2_t×2 (AArch64 NEON pair). Wrapping arithmetic per-lane.
+# Requires AVX2 on x86_64 (has_avx2() == true); falls back to scalar on ARM.
+# ============================================================================
+
+"""
+4-element i64 vector (256-bit AVX2 register).
+Maps to __m256i (x86 AVX2). Falls back to scalar pair on ARM.
+"""
+struct Vec4i64:
+    x: i64
+    y: i64
+    z: i64
+    w: i64
+
+impl Vec4i64:
+    static fn splat(value: i64) -> Vec4i64:
+        """Create vector with all 4 lanes set to value."""
+        Vec4i64(x: value, y: value, z: value, w: value)
+
+    static fn from_array(arr: [i64]) -> Vec4i64:
+        """Create from array (must have 4+ elements)."""
+        Vec4i64(x: arr[0], y: arr[1], z: arr[2], w: arr[3])
+
+    static fn zero() -> Vec4i64:
+        """Zero vector."""
+        Vec4i64(x: 0, y: 0, z: 0, w: 0)
+
+    fn to_array() -> [i64]:
+        """Convert to array."""
+        [self.x, self.y, self.z, self.w]
+
+extern fn rt_simd_add_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64
+extern fn rt_simd_sub_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64
+
+fn simd_add_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64:
+    """Lane-wise wrapping add of two i64x4 vectors (AVX2 _mm256_add_epi64)."""
+    rt_simd_add_i64x4(a, b)
+
+fn simd_sub_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64:
+    """Lane-wise wrapping subtract of two i64x4 vectors (AVX2 _mm256_sub_epi64)."""
+    rt_simd_sub_i64x4(a, b)
+
+# ============================================================================
+# u8x16 Intrinsics (128-bit) — Phase 2 of SIMD int intrinsics for crypto
+# (FR: doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md)
+#
+# Vec16u8 = 16 u8 lanes; maps to __m128i (x86 SSE2 _mm_add_epi8) /
+# uint8x16_t (AArch64 NEON vaddq_u8). u8 add wraps per-lane; carry does
+# NOT propagate across lane boundaries (this is the core property AES /
+# AES-GCM rely on for byte-shuffle/round work).
+#
+# This is the Phase 2 SEED — type carrier + add/xor ops. simd_aes_round /
+# simd_shuffle_u8x16 / PCLMUL are deferred to follow-up waves (they require
+# AES-NI exposure / different intrinsics). simd_xor_u8x16 is now available.
+# ============================================================================
+
+"""
+16-lane u8 vector (128-bit SSE/NEON register).
+Maps to __m128i (x86) or uint8x16_t (ARM).
+"""
+struct Vec16u8:
+    u0: u8
+    u1: u8
+    u2: u8
+    u3: u8
+    u4: u8
+    u5: u8
+    u6: u8
+    u7: u8
+    u8_: u8
+    u9: u8
+    u10: u8
+    u11: u8
+    u12: u8
+    u13: u8
+    u14: u8
+    u15: u8
+
+impl Vec16u8:
+    static fn splat(value: u8) -> Vec16u8:
+        """Create vector with all 16 lanes set to value."""
+        Vec16u8(
+            u0: value, u1: value, u2: value, u3: value,
+            u4: value, u5: value, u6: value, u7: value,
+            u8_: value, u9: value, u10: value, u11: value,
+            u12: value, u13: value, u14: value, u15: value,
+        )
+
+    static fn from_array(arr: [u8]) -> Vec16u8:
+        """Create from array (must have 16+ elements)."""
+        Vec16u8(
+            u0: arr[0], u1: arr[1], u2: arr[2], u3: arr[3],
+            u4: arr[4], u5: arr[5], u6: arr[6], u7: arr[7],
+            u8_: arr[8], u9: arr[9], u10: arr[10], u11: arr[11],
+            u12: arr[12], u13: arr[13], u14: arr[14], u15: arr[15],
+        )
+
+    static fn zero() -> Vec16u8:
+        """Zero vector."""
+        Vec16u8(
+            u0: 0, u1: 0, u2: 0, u3: 0,
+            u4: 0, u5: 0, u6: 0, u7: 0,
+            u8_: 0, u9: 0, u10: 0, u11: 0,
+            u12: 0, u13: 0, u14: 0, u15: 0,
+        )
+
+    fn to_array() -> [u8]:
+        """Convert to array."""
+        [
+            self.u0, self.u1, self.u2, self.u3,
+            self.u4, self.u5, self.u6, self.u7,
+            self.u8_, self.u9, self.u10, self.u11,
+            self.u12, self.u13, self.u14, self.u15,
+        ]
+
+extern fn rt_simd_add_u8x16(a: Vec16u8, b: Vec16u8) -> Vec16u8
+
+fn simd_add_u8x16(a: Vec16u8, b: Vec16u8) -> Vec16u8:
+    """Lane-wise wrapping add of two u8x16 vectors. Carry does NOT
+    propagate across lane boundaries (each lane wraps mod 256).
+    """
+    rt_simd_add_u8x16(a, b)
+
+extern fn rt_simd_xor_u8x16(a: Vec16u8, b: Vec16u8) -> Vec16u8
+
+fn simd_xor_u8x16(a: Vec16u8, b: Vec16u8) -> Vec16u8:
+    """Lane-wise XOR of two u8x16 vectors. Used for AES AddRoundKey
+    and GCM GHASH byte-level XOR steps.
+    """
+    rt_simd_xor_u8x16(a, b)
+
+# ============================================================================
+# AES Round Intrinsics (Phase 2, matches Intel _mm_aesenc_si128 ordering)
+# ============================================================================
+
+extern fn rt_simd_aes_round_u8x16(state: Vec16u8, key: Vec16u8) -> Vec16u8
+extern fn rt_simd_aes_round_last_u8x16(state: Vec16u8, key: Vec16u8) -> Vec16u8
+
+fn simd_aes_round(state: Vec16u8, key: Vec16u8) -> Vec16u8:
+    """One regular AES encryption round, matching `_mm_aesenc_si128`:
+    `MixColumns(SubBytes(ShiftRows(state))) XOR key`.
+
+    Caller is responsible for the initial AddRoundKey (XOR plaintext
+    with K0) before round 1, and for using `simd_aes_round_last` for
+    the final round (Nr) which omits MixColumns. Key expansion lives
+    in the AES helpers in `std.os.crypto.aes` — this primitive only
+    exposes the round step.
+    """
+    rt_simd_aes_round_u8x16(state, key)
+
+fn simd_aes_round_last(state: Vec16u8, key: Vec16u8) -> Vec16u8:
+    """One final AES encryption round, matching `_mm_aesenclast_si128`:
+    `SubBytes(ShiftRows(state)) XOR key`.
+
+    Use for the final (Nr) round of an AES-128/192/256 encrypt. The
+    MixColumns step is intentionally skipped per FIPS 197 §5.1.
+    """
+    rt_simd_aes_round_last_u8x16(state, key)
+
+# ============================================================================
+# u64x2 Intrinsics + PCLMUL (128-bit) — Phase 3 of SIMD int intrinsics
+# (FR: doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md)
+#
+# Vec2u64 = 2 u64 lanes; maps to __m128i (x86 SSE2) / uint64x2_t (AArch64
+# NEON). The carryless multiply (PCLMUL) primitive is the inner kernel for
+# GHASH (AES-GCM authentication tag) and Polyval. Carry does NOT propagate
+# across u64 lane boundaries.
+#
+# Two pieces needed besides the PCLMUL itself: a u64x2 XOR (used by GHASH
+# accumulation) and lo/hi accessors for round-tripping product halves back
+# into Simple-side arithmetic.
+# ============================================================================
+
+"""
+2-lane u64 vector (128-bit SSE/NEON register).
+Maps to __m128i (x86) or uint64x2_t (ARM).
+Lane 0 is the low 64 bits; lane 1 is the high 64 bits — matching the
+Intel/`_mm_set_epi64x(hi, lo)` convention so that `clmul_lo` operates on
+both inputs' lane 0 and `clmul_hi` operates on both inputs' lane 1.
+"""
+struct Vec2u64:
+    lo: u64
+    hi: u64
+
+impl Vec2u64:
+    static fn new(lo: u64, hi: u64) -> Vec2u64:
+        """Create a Vec2u64 with the given low (lane 0) and high (lane 1)
+        64-bit lanes. Mirrors `_mm_set_epi64x(hi, lo)`."""
+        Vec2u64(lo: lo, hi: hi)
+
+    static fn zero() -> Vec2u64:
+        """Zero vector."""
+        Vec2u64(lo: 0, hi: 0)
+
+    fn lane_lo() -> u64:
+        """Return the low 64-bit lane (lane 0)."""
+        self.lo
+
+    fn lane_hi() -> u64:
+        """Return the high 64-bit lane (lane 1)."""
+        self.hi
+
+extern fn rt_simd_vec2u64_new(lo: u64, hi: u64) -> Vec2u64
+extern fn rt_simd_vec2u64_lo(v: Vec2u64) -> u64
+extern fn rt_simd_vec2u64_hi(v: Vec2u64) -> u64
+
+extern fn rt_simd_clmul_lo_u64(a: Vec2u64, b: Vec2u64) -> Vec2u64
+extern fn rt_simd_clmul_hi_u64(a: Vec2u64, b: Vec2u64) -> Vec2u64
+extern fn rt_simd_xor_u64x2(a: Vec2u64, b: Vec2u64) -> Vec2u64
+
+fn simd_clmul_lo_u64(a: Vec2u64, b: Vec2u64) -> Vec2u64:
+    """Carryless multiply of `a.lo` and `b.lo` (both u64), returning the
+    128-bit product as a Vec2u64 (lane 0 = low 64 bits, lane 1 = high 64
+    bits of the product). Matches Intel `_mm_clmulepi64_si128(a, b, 0x00)`.
+
+    This is the GF(2)[x] polynomial multiplication primitive used by
+    GHASH (AES-GCM authentication) and Polyval. Carry does NOT propagate
+    in carryless multiplication — every output bit is an XOR of selected
+    AND products of input bits.
+    """
+    rt_simd_clmul_lo_u64(a, b)
+
+fn simd_clmul_hi_u64(a: Vec2u64, b: Vec2u64) -> Vec2u64:
+    """Carryless multiply of `a.hi` and `b.hi` (both u64), returning the
+    128-bit product as a Vec2u64. Matches Intel
+    `_mm_clmulepi64_si128(a, b, 0x11)`.
+
+    See `simd_clmul_lo_u64` for the GF(2)[x] semantics.
+    """
+    rt_simd_clmul_hi_u64(a, b)
+
+fn simd_xor_u64x2(a: Vec2u64, b: Vec2u64) -> Vec2u64:
+    """Bitwise XOR of two 2-lane u64 vectors. Maps to `_mm_xor_si128`
+    on x86_64 SSE2 and `veorq_u64` on AArch64 NEON. Used to accumulate
+    GHASH/Polyval products into a running 128-bit state.
+    """
+    rt_simd_xor_u64x2(a, b)
+
+# ============================================================================
+# Horizontal Operations
+# ============================================================================
+
+extern fn rt_simd_hadd_f32x4(a: Vec4f) -> f32
+extern fn rt_simd_hmax_f32x4(a: Vec4f) -> f32
+extern fn rt_simd_hmin_f32x4(a: Vec4f) -> f32
+
+fn simd_hadd_f32x4(a: Vec4f) -> f32:
+    """Horizontal add: sum all elements of vector."""
+    rt_simd_hadd_f32x4(a)
+
+fn simd_hmax_f32x4(a: Vec4f) -> f32:
+    """Horizontal max: find maximum element of vector."""
+    rt_simd_hmax_f32x4(a)
+
+fn simd_hmin_f32x4(a: Vec4f) -> f32:
+    """Horizontal min: find minimum element of vector."""
+    rt_simd_hmin_f32x4(a)
+
+# ============================================================================
+# Exports
+# ============================================================================

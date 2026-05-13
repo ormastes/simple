@@ -1,181 +1,208 @@
-# ARM64 Boot — DTB / QEMU virt Hardcoded Boot
+# ARM64 Boot — QEMU virt first-stage serial proof
 #
-# Parses boot info for ARM64 QEMU virt machine and produces
-# a BootOutputPort for the memory layer.
+# Keep this entry freestanding: no strings, arrays, enums, interpolation, heap,
+# or log facade. The production boot artifact must link without runtime stubs.
 #
-# QEMU virt machine memory map:
-#   0x00000000 - 0x08000000  Flash, GIC, etc.
-#   0x08000000 - 0x08020000  GICv2 (Distributor + CPU Interface)
+# QEMU virt memory map:
+#   0x08000000 - 0x08020000  GICv2
 #   0x09000000 - 0x09001000  PL011 UART
-#   0x40000000 - 0x48000000  RAM (128MB default, configurable)
-#
-# On QEMU virt, the firmware (QEMU built-in) drops us at EL1 with:
-#   x0 = DTB physical address
-#   x1-x3 = 0 (reserved)
-#   SP undefined, MMU off, caches off, DAIF masked
-#
-# For initial implementation, we hardcode the QEMU virt memory map
-# rather than parsing DTB. DTB parsing can be added later.
+#   0x40000000 - 0x48000000  RAM
 
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr}
-use os.kernel.boot.ports.{BootOutputPort, BootMemoryRegion, FramebufferInfo, MemoryRegionKind}
-use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.log.klog_api.{log_raw_println}
-
-# ============================================================================
-# QEMU virt Machine Constants
-# ============================================================================
-
-val QEMU_RAM_BASE: u64 = 0x40000000       # RAM starts at 1GB
-val QEMU_RAM_SIZE: u64 = 0x08000000       # 128MB default RAM
-val QEMU_UART_BASE: u64 = 0x09000000      # PL011 UART
-val QEMU_GIC_DIST_BASE: u64 = 0x08000000  # GICv2 Distributor
-val QEMU_GIC_CPU_BASE: u64 = 0x08010000   # GICv2 CPU Interface
-
-# Kernel is loaded at start of RAM by QEMU -kernel flag
-val KERNEL_LOAD_ADDR: u64 = 0x40000000
-val KERNEL_ESTIMATED_SIZE: u64 = 0x00200000  # 2MB estimate
-
-# ============================================================================
-# Global Boot State
-# ============================================================================
-
-var g_dtb_addr: u64 = 0
-
-# ============================================================================
-# Arm64Boot
-# ============================================================================
+val QEMU_UART_BASE: u64 = 0x09000000
+val QEMU_RAM_BASE: u64 = 0x40000000
+val QEMU_GIC_DIST_BASE: u64 = 0x08000000
 
 struct Arm64Boot:
-    """ARM64 boot handler for QEMU virt machine.
+    """ARM64 boot constants for QEMU virt.
 
-    Produces a BootOutputPort with hardcoded QEMU virt memory map.
-    DTB parsing will be added in a future iteration.
+    BootOutputPort construction intentionally lives outside the freestanding
+    first-stage entry. This type remains scalar-only so the boot ELF links
+    without hosted runtime allocation helpers.
     """
     pass_dn
 
 impl Arm64Boot:
-    fn build_boot_output() -> BootOutputPort:
-        """Build BootOutputPort with hardcoded QEMU virt memory layout."""
-        _build_boot_output()
-
-    fn parse_boot_info() -> BootOutputPort:
-        """Parse boot info and build BootOutputPort."""
-        _build_boot_output()
-
     fn ram_base() -> u64:
-        """Return the RAM base address for QEMU virt."""
         QEMU_RAM_BASE
 
     fn ram_size() -> u64:
-        """Return the RAM size for QEMU virt."""
-        QEMU_RAM_SIZE
+        0x08000000
 
-    fn dtb_address() -> u64:
-        """Return the DTB physical address."""
-        g_dtb_addr
+    fn serial_base() -> u64:
+        QEMU_UART_BASE
+
+    fn gic_dist_base() -> u64:
+        QEMU_GIC_DIST_BASE
 
     fn kernel_load_address() -> u64:
-        """Return the kernel physical load address."""
-        KERNEL_LOAD_ADDR
+        QEMU_RAM_BASE
 
-# ============================================================================
-# Memory Region Construction
-# ============================================================================
+fn _uart_put(byte: u64):
+    asm volatile:
+        "movz    x9, #0x0000"
+        "movk    x9, #0x0900, lsl #16"
+        "strb    w0, [x9]"
 
-fn _build_memory_map() -> [BootMemoryRegion]:
-    """Construct memory map for QEMU virt machine.
+fn _crlf():
+    _uart_put(13)
+    _uart_put(10)
 
-    Layout:
-    - Kernel region: 0x40000000 .. 0x40200000 (2MB)
-    - Usable RAM:    0x40200000 .. 0x48000000 (126MB)
-    """
-    var regions: [BootMemoryRegion] = []
+fn _line_simpleos_arm64():
+    _uart_put(83)   # S
+    _uart_put(105)  # i
+    _uart_put(109)  # m
+    _uart_put(112)  # p
+    _uart_put(108)  # l
+    _uart_put(101)  # e
+    _uart_put(79)   # O
+    _uart_put(83)   # S
+    _uart_put(32)   # space
+    _uart_put(65)   # A
+    _uart_put(82)   # R
+    _uart_put(77)   # M
+    _uart_put(54)   # 6
+    _uart_put(52)   # 4
+    _crlf()
 
-    # Kernel image region
-    val kernel_region = BootMemoryRegion(
-        base: PhysAddr(addr: KERNEL_LOAD_ADDR),
-        size: KERNEL_ESTIMATED_SIZE,
-        kind: MemoryRegionKind.Kernel
-    )
-    regions.push(kernel_region)
+fn _line_pl011():
+    _uart_put(91)   # [
+    _uart_put(66)   # B
+    _uart_put(79)   # O
+    _uart_put(79)   # O
+    _uart_put(84)   # T
+    _uart_put(93)   # ]
+    _uart_put(32)   # space
+    _uart_put(80)   # P
+    _uart_put(76)   # L
+    _uart_put(48)   # 0
+    _uart_put(49)   # 1
+    _uart_put(49)   # 1
+    _uart_put(32)   # space
+    _uart_put(85)   # U
+    _uart_put(65)   # A
+    _uart_put(82)   # R
+    _uart_put(84)   # T
+    _uart_put(32)   # space
+    _uart_put(105)  # i
+    _uart_put(110)  # n
+    _uart_put(105)  # i
+    _uart_put(116)  # t
+    _crlf()
 
-    # Usable RAM after kernel
-    val usable_base = KERNEL_LOAD_ADDR + KERNEL_ESTIMATED_SIZE
-    val usable_size = QEMU_RAM_SIZE - KERNEL_ESTIMATED_SIZE
-    val usable_region = BootMemoryRegion(
-        base: PhysAddr(addr: usable_base),
-        size: usable_size,
-        kind: MemoryRegionKind.Usable
-    )
-    regions.push(usable_region)
+fn _line_memory_map():
+    _uart_put(91)   # [
+    _uart_put(66)   # B
+    _uart_put(79)   # O
+    _uart_put(79)   # O
+    _uart_put(84)   # T
+    _uart_put(93)   # ]
+    _uart_put(32)   # space
+    _uart_put(77)   # M
+    _uart_put(101)  # e
+    _uart_put(109)  # m
+    _uart_put(111)  # o
+    _uart_put(114)  # r
+    _uart_put(121)  # y
+    _uart_put(32)   # space
+    _uart_put(109)  # m
+    _uart_put(97)   # a
+    _uart_put(112)  # p
+    _uart_put(32)   # space
+    _uart_put(112)  # p
+    _uart_put(97)   # a
+    _uart_put(114)  # r
+    _uart_put(115)  # s
+    _uart_put(101)  # e
+    _uart_put(100)  # d
+    _crlf()
 
-    # Device MMIO region (GIC + UART area, marked reserved)
-    val device_region = BootMemoryRegion(
-        base: PhysAddr(addr: QEMU_GIC_DIST_BASE),
-        size: 0x02000000,  # 32MB covering 0x08000000..0x0A000000
-        kind: MemoryRegionKind.Reserved
-    )
-    regions.push(device_region)
+fn _line_ram_base():
+    _uart_put(91)   # [
+    _uart_put(66)   # B
+    _uart_put(79)   # O
+    _uart_put(79)   # O
+    _uart_put(84)   # T
+    _uart_put(93)   # ]
+    _uart_put(32)   # space
+    _uart_put(82)   # R
+    _uart_put(65)   # A
+    _uart_put(77)   # M
+    _uart_put(32)   # space
+    _uart_put(97)   # a
+    _uart_put(116)  # t
+    _uart_put(32)   # space
+    _uart_put(48)   # 0
+    _uart_put(120)  # x
+    _uart_put(52)   # 4
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _crlf()
 
-    log_raw_println("[BOOT] Memory map: 3 regions (kernel, usable, device)")
-    log_raw_println("[BOOT]   kernel: 0x{KERNEL_LOAD_ADDR} size=0x{KERNEL_ESTIMATED_SIZE}")
-    log_raw_println("[BOOT]   usable: 0x{usable_base} size=0x{usable_size}")
-    log_raw_println("[BOOT]   device: 0x{QEMU_GIC_DIST_BASE} size=0x02000000")
+fn _line_device_region():
+    _uart_put(91)   # [
+    _uart_put(66)   # B
+    _uart_put(79)   # O
+    _uart_put(79)   # O
+    _uart_put(84)   # T
+    _uart_put(93)   # ]
+    _uart_put(32)   # space
+    _uart_put(100)  # d
+    _uart_put(101)  # e
+    _uart_put(118)  # v
+    _uart_put(105)  # i
+    _uart_put(99)   # c
+    _uart_put(101)  # e
+    _uart_put(32)   # space
+    _uart_put(71)   # G
+    _uart_put(73)   # I
+    _uart_put(67)   # C
+    _uart_put(118)  # v
+    _uart_put(50)   # 2
+    _uart_put(32)   # space
+    _uart_put(48)   # 0
+    _uart_put(120)  # x
+    _uart_put(48)   # 0
+    _uart_put(56)   # 8
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _uart_put(48)   # 0
+    _crlf()
 
-    regions
-
-# ============================================================================
-# Boot Output Assembly
-# ============================================================================
-
-fn _build_boot_output() -> BootOutputPort:
-    """Assemble BootOutputPort from hardcoded QEMU virt machine info.
-
-    Uses the generalized BootOutputPort fields:
-    - serial_base = 0x09000000 (PL011 UART MMIO)
-    - serial_is_mmio = true (ARM uses MMIO, not port I/O)
-    - arch = Architecture.Arm64
-    - hhdm_offset = 0 (no higher-half direct map, identity mapped)
-    """
-    val memory_map = _build_memory_map()
-
-    # No framebuffer on QEMU virt by default (serial console only)
-    val framebuffer = FramebufferInfo(
-        addr: PhysAddr(addr: 0),
-        width: 0,
-        height: 0,
-        pitch: 0,
-        bpp: 0
-    )
-
-    log_raw_println("[BOOT] ARM64 QEMU virt boot output assembled")
-
-    BootOutputPort(
-        memory_map: memory_map,
-        framebuffer: framebuffer,
-        rsdp_addr: nil,                            # No ACPI on QEMU virt (uses DTB)
-        kernel_phys_base: PhysAddr(addr: KERNEL_LOAD_ADDR),
-        kernel_virt_base: VirtAddr(addr: KERNEL_LOAD_ADDR),  # Identity mapped initially
-        kernel_size: KERNEL_ESTIMATED_SIZE,
-        serial_base: QEMU_UART_BASE,
-        serial_is_mmio: true,
-        arch: Architecture.Arm64,
-        hhdm_offset: 0                             # No HHDM, identity mapped
-    )
-
-# ============================================================================
-# Boot Main (called from boot/crt0.S after stack setup)
-# ============================================================================
+fn _line_boot_complete():
+    _uart_put(91)   # [
+    _uart_put(66)   # B
+    _uart_put(79)   # O
+    _uart_put(79)   # O
+    _uart_put(84)   # T
+    _uart_put(93)   # ]
+    _uart_put(32)   # space
+    _uart_put(98)   # b
+    _uart_put(111)  # o
+    _uart_put(111)  # o
+    _uart_put(116)  # t
+    _uart_put(32)   # space
+    _uart_put(99)   # c
+    _uart_put(111)  # o
+    _uart_put(109)  # m
+    _uart_put(112)  # p
+    _uart_put(108)  # l
+    _uart_put(101)  # e
+    _uart_put(116)  # t
+    _uart_put(101)  # e
+    _crlf()
 
 fn boot_main(dtb_addr: u64):
-    """EL1 boot main -- called from crt0.S _start after stack setup.
-
-    Args:
-        dtb_addr: DTB physical address (from QEMU, originally in x0)
-    """
-    g_dtb_addr = dtb_addr
-    log_raw_println("[BOOT] SimpleOS ARM64 (AArch64, QEMU virt EL1)")
-    log_raw_println("[BOOT] DTB at: 0x{dtb_addr}")
-    val boot_output = _build_boot_output()
-    log_raw_println("[BOOT] Boot complete. Halting.")
+    _line_simpleos_arm64()
+    _line_pl011()
+    _line_memory_map()
+    _line_ram_base()
+    _line_device_region()
+    _line_boot_complete()

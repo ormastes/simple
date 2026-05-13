@@ -1,214 +1,69 @@
-# @cover src/lib/nogc_async_mut/http_server N/A
+# @cover scripts/qemu_rv64_http_test.shs N/A
+# @cover scripts/qemu_rv32_http_test.shs N/A
 """
 # HTTP Server on RISC-V Baremetal Specification
 
 **Feature IDs:** #B6-HTTP-BAREMETAL
 **Category:** Infrastructure
-**Difficulty:** 4/5
 **Status:** In Progress
-**Requirements:** N/A
-**Plan:** N/A
-**Design:** N/A
-**Research:** N/A
 
-## Overview
-
-Validates that the SimpleOS HTTP server boots and serves requests on
-RISC-V baremetal (RV32 and RV64) under QEMU virt machine.  The server
-must handle basic HTTP/1.1 GET requests and TLS connections.
-
-## Syntax
-
-```simple
-# Run the QEMU integration test:
-#   sh scripts/qemu_rv64_http_test.shs
-#   sh scripts/qemu_rv32_http_test.shs
-```
-
-## Key Concepts
-
-| Concept         | Description |
-|-----------------|-------------|
-| QEMU virt       | Virtual RISC-V SoC with virtio-net |
-| virtio-net      | Paravirtualized NIC used for network I/O |
-| hostfwd         | QEMU user-mode port forwarding to host |
-| TLS self-signed | Server uses generated self-signed cert |
-| health endpoint | JSON status at /health |
-
-## Behavior
-
-- Server boots within 60 seconds on QEMU virt
-- HTTP GET / returns 200 with HTML content-type
-- HTTP GET /health returns 200 with JSON content-type
-- HTTPS GET /health returns 200 (TLS handshake succeeds)
-- Unauthenticated requests to protected routes return 401/403
-- Keep-alive connections are supported (Connection: keep-alive)
-- ICMP ping to guest is reachable via QEMU user-mode networking
-
-## Related Specifications
-
-- [RISC-V Baremetal Boot](../baremetal/rv32_boot_spec.spl) - Boot sequence
-- [HTTP Server Config](../../src/lib/nogc_async_mut/http_server/config.spl) - Server config
-
-## Implementation Notes
-
-Integration tests run via shell scripts (`scripts/qemu_rv{32,64}_http_test.shs`).
-This spec documents expected behavior for the test harness.
-Actual network I/O uses virtio-net with QEMU user-mode networking (SLIRP).
-Port forwarding maps host 8080->guest 8080 (HTTP) and 8443->guest 8443 (HTTPS).
+This spec intentionally does not claim HTTP/TLS production success while the
+RISC-V boot path lacks packet RX/TX. The default QEMU scripts remain the real
+production HTTP socket gates. Their `--expect-deferred` mode is the current
+boundary check: virtio discovery works, packet RX is unavailable, HTTP is
+deferred, and the kernel reaches the boot idle loop.
 """
 
-use std.spipe.*
+extern fn rt_file_read_text(path: text) -> text
 
+fn expect_script_has_deferred_boundary(path: text):
+    val script = rt_file_read_text(path)
 
-# ============================================================================
-# Test Group 1: HTTP Health Endpoint
-# ============================================================================
+    expect(script).to_contain("--expect-deferred")
+    expect(script).to_contain("Network packet RX unavailable")
+    expect(script).to_contain("HTTP server deferred")
+    expect(script).to_contain("Entering boot idle loop")
+    expect(script).to_contain("DEFERRED PASSED")
 
-describe "HTTP Baremetal Health Endpoint":
-    """
-    ## Health Check
+    val deferred_branch = script.find("EXPECT_DEFERRED")
+    val http_tests = script.find("Running HTTP smoke tests")
+    expect(deferred_branch).to_be_greater_than(-1)
+    expect(http_tests).to_be_greater_than(deferred_branch)
 
-    The /health endpoint must return a 200 status code with a JSON body
-    containing at minimum a status field.  This is the primary liveness probe.
-    """
+fn expect_script_default_mode_remains_http_gate(path: text):
+    val script = rt_file_read_text(path)
 
-    context "when server is running on RV64":
-        """
-        ### Scenario: RV64 QEMU virt with virtio-net
+    expect(script).to_contain("Waiting for HTTP bind marker")
+    expect(script).to_contain("FAILED: HTTP server was deferred")
+    expect(script).to_contain("GET /health (HTTP)")
+    expect(script).to_contain("GET / (HTTP)")
+    expect(script).to_contain("GET /health (HTTPS)")
+    expect(script).to_contain("ALL PASSED")
 
-        QEMU launches with `-machine virt -cpu rv64 -m 256M` and
-        virtio-net hostfwd on port 8080/8443.
-        """
+describe "HTTP baremetal QEMU gate":
+    it "keeps RV64 default mode as the production HTTP socket gate":
+        expect_script_default_mode_remains_http_gate("scripts/qemu_rv64_http_test.shs")
 
-        it "returns 200 for GET /health":
-            val expected_code = 200
-            expect(expected_code).to_equal(200)
+    it "keeps RV32 default mode as the production HTTP socket gate":
+        expect_script_default_mode_remains_http_gate("scripts/qemu_rv32_http_test.shs")
 
-        it "returns JSON content-type for /health":
-            val expected_type = "application/json"
-            expect(expected_type).to_equal("application/json")
+    it "documents RV64 deferred mode as the current non-production boundary":
+        expect_script_has_deferred_boundary("scripts/qemu_rv64_http_test.shs")
 
-    context "when server is running on RV32":
-        """
-        ### Scenario: RV32 QEMU virt with virtio-net
+    it "documents RV32 deferred mode as the current non-production boundary":
+        expect_script_has_deferred_boundary("scripts/qemu_rv32_http_test.shs")
 
-        QEMU launches with `-machine virt -cpu rv32 -m 128M` and
-        virtio-net hostfwd on port 8080/8443.
-        """
+describe "HTTP baremetal production blockers":
+    it "records missing packet RX/TX before HTTP can be production-ready":
+        val plan = rt_file_read_text("doc/plans/riscv_rtl_simpleos_boot.md")
 
-        it "returns 200 for GET /health":
-            val expected_code = 200
-            expect(expected_code).to_equal(200)
+        expect(plan).to_contain("packet RX/TX")
+        expect(plan).to_contain("QEMU HTTP test cannot yet prove an actual socket response")
+        expect(plan).to_contain("rt_io_tcp_accept_timeout()")
 
-        it "returns JSON content-type for /health":
-            val expected_type = "application/json"
-            expect(expected_type).to_equal("application/json")
+    it "records TLS as blocked rather than production-ready":
+        val plan = rt_file_read_text("doc/plans/riscv_rtl_simpleos_boot.md")
 
-
-# ============================================================================
-# Test Group 2: HTTP Root Page
-# ============================================================================
-
-describe "HTTP Baremetal Root Page":
-    """
-    ## Root Page (GET /)
-
-    The server must serve a default HTML page at the root path.
-    """
-
-    it "returns 200 for GET /":
-        val expected_code = 200
-        expect(expected_code).to_equal(200)
-
-    it "returns HTML content-type for /":
-        val expected_type = "text/html"
-        expect(expected_type).to_equal("text/html")
-
-
-# ============================================================================
-# Test Group 3: TLS (HTTPS)
-# ============================================================================
-
-describe "HTTP Baremetal TLS":
-    """
-    ## TLS / HTTPS Support
-
-    The server must accept TLS connections on port 8443 using a
-    self-signed certificate.  Clients skip certificate verification
-    for testing (curl -k).
-    """
-
-    it "completes TLS handshake on port 8443":
-        val tls_port = 8443
-        val expected_code = 200
-        expect(expected_code).to_equal(200)
-
-    it "serves health endpoint over HTTPS":
-        val expected_path = "/health"
-        val expected_code = 200
-        expect(expected_code).to_equal(200)
-
-
-# ============================================================================
-# Test Group 4: ICMP and TCP Connectivity
-# ============================================================================
-
-describe "HTTP Baremetal Network Connectivity":
-    """
-    ## Network Layer
-
-    Basic network connectivity tests through QEMU user-mode networking.
-    ICMP and TCP must both work through the virtio-net device.
-    """
-
-    it "accepts TCP connections on port 8080":
-        val tcp_port = 8080
-        expect(tcp_port).to_equal(8080)
-
-    it "accepts TCP connections on port 8443":
-        val tls_port = 8443
-        expect(tls_port).to_equal(8443)
-
-
-# ============================================================================
-# Test Group 5: Authentication and Error Handling
-# ============================================================================
-
-describe "HTTP Baremetal Auth Rejection":
-    """
-    ## Authentication
-
-    Protected endpoints must reject unauthenticated requests with
-    appropriate HTTP status codes (401 or 403).
-    """
-
-    it "rejects unauthenticated requests to protected routes":
-        val expected_code = 401
-        expect(expected_code).to_equal(401)
-
-    it "returns 403 for insufficient permissions":
-        val expected_code = 403
-        expect(expected_code).to_equal(403)
-
-
-# ============================================================================
-# Test Group 6: Keep-Alive
-# ============================================================================
-
-describe "HTTP Baremetal Keep-Alive":
-    """
-    ## Connection Keep-Alive
-
-    HTTP/1.1 connections default to keep-alive.  The server must not
-    close the connection after the first request unless the client
-    sends Connection: close.
-    """
-
-    it "supports Connection keep-alive header":
-        val expected_header = "keep-alive"
-        expect(expected_header).to_equal("keep-alive")
-
-    it "serves multiple requests on same connection":
-        val req_count = 2
-        expect(req_count).to_equal(2)
+        expect(plan).to_contain("TLS Baremetal")
+        expect(plan).to_contain("Blocked, not complete")
+        expect(plan).to_contain("Tls13AcceptResult.Failed")

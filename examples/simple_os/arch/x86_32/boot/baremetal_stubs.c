@@ -128,6 +128,45 @@ static void serial_put_dec(int32_t v)
     }
 }
 
+static void serial_put_u32(uint32_t v)
+{
+    char buf[10];
+    int pos = 0;
+    do {
+        buf[pos++] = '0' + (char)(v % 10U);
+        v /= 10U;
+    } while (v > 0U);
+    while (pos > 0) {
+        serial_putchar(buf[--pos]);
+    }
+}
+
+static uint32_t x86_32_harden_mix32(uint32_t value)
+{
+    value ^= value >> 16;
+    value *= 0x7feb352dU;
+    value ^= value >> 15;
+    value *= 0x846ca68bU;
+    value ^= value >> 16;
+    return value & 0x7fffffffU;
+}
+
+static uint32_t x86_32_harden_canary_value(void)
+{
+    uint32_t lo = 0;
+    uint32_t hi = 0;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint32_t mixed = x86_32_harden_mix32(lo ^ (hi << 11) ^ (uint32_t)(uintptr_t)&x86_32_harden_canary_value);
+    return mixed == 0U ? 1U : mixed;
+}
+
+static void x86_32_harden_print_canary(void)
+{
+    serial_puts("[harden] canary arch=x86_32 value=");
+    serial_put_u32(x86_32_harden_canary_value());
+    serial_puts("\r\n");
+}
+
 /* ===================================================================
  * 3. RuntimeValue tagging (32-bit)
  * =================================================================== */
@@ -670,6 +709,7 @@ void _start(void)
     serial_puts("[BOOT] COM1 serial initialized at 115200 baud\r\n");
     serial_puts("[BOOT] Heap: 4 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 32-bit (int/heap/float/special)\r\n");
+    x86_32_harden_print_canary();
 
     if (spl_start) {
         serial_puts("[BOOT] Calling spl_start()...\r\n");

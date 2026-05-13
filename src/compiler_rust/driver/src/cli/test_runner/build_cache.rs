@@ -406,7 +406,7 @@ mod tests {
 
         let dirs = native_test_source_dirs(tmp.path(), &entry);
 
-        assert_eq!(dirs, vec![tmp.path().join("src")]);
+        assert_eq!(dirs, vec![tmp.path().join("src"), tmp.path().join("test")]);
     }
 
     #[test]
@@ -436,12 +436,13 @@ mod tests {
         let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempdir().expect("tempdir");
         let source = temp.path().join("demo_spec.spl");
+        let base_config_path = temp.path().join("base_cpu_config.sdn");
         let config_path = temp.path().join("cpu_config.sdn");
         fs::write(&source, "test body").expect("source file");
 
         let previous_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
         let previous_override = std::env::var("SIMPLE_SIMD_TIER").ok();
-        std::env::remove_var("SIMPLE_CPU_CONFIG_PATH");
+        std::env::set_var("SIMPLE_CPU_CONFIG_PATH", &base_config_path);
         std::env::remove_var("SIMPLE_SIMD_TIER");
         reset_host_cpu_config_cache_for_tests();
 

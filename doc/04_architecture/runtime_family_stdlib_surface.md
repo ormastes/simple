@@ -6,7 +6,7 @@
 
 ## 1. Module Inventory Per Family
 
-### 1.1 `common` (799 files, ~30+ sub-modules)
+### 1.1 `common` (1166 files, 122 sub-modules)
 
 Pure utility library. No mutation, no async, no FFI.
 
@@ -25,7 +25,7 @@ Pure utility library. No mutation, no async, no FFI.
 | `diagnostics/`, `diff/`, `doctest/`, `fsm/`, `gpu/` | Developer tools |
 | Root `.spl` files | error, format, functional, hash, json, math, option, result, string, table, tap, target, text, traits, types, validation, ... |
 
-### 1.2 `nogc_sync_mut` (835 files, 63 sub-modules)
+### 1.2 `nogc_sync_mut` (1398 files, 90 sub-modules)
 
 Largest family. Primary systems-programming library.
 
@@ -78,7 +78,7 @@ Largest family. Primary systems-programming library.
 | `web_ui/` | Web UI |
 | Root `.spl` files | allocator, array, atomic, binary_io, conf, db_atomic, debug, dig, fs, fuzz, gc, glob, io, io_runtime, lazy_val, log, net, path, perf, platform, process_limits, process_monitor, rc, resource_tracker, runtime_value, runtime_wrappers, simd, spec, spipe, timing |
 
-### 1.3 `nogc_async_mut` (181 files, 13 sub-modules)
+### 1.3 `nogc_async_mut` (1665 files, 105 sub-modules)
 
 Async runtime with actor model and OTP-style supervision.
 
@@ -95,7 +95,7 @@ Async runtime with actor model and OTP-style supervision.
 | `ml/`, `torch/` | Machine learning |
 | Root `.spl` files | actor_heap, actor_scheduler, async, async_embedded, async_host, async_sffi, async_unified, concurrent, coroutine, effects, gen_event, gen_server, gen_statem, generator, mailbox, mailbox_actor, monitor, supervisor, thread_pool, thread_sffi |
 
-### 1.4 `gc_async_mut` (46 files, 5 sub-modules)
+### 1.4 `gc_async_mut` (1625 files, 92 sub-modules)
 
 GPU/ML-focused family requiring GC runtime.
 
@@ -126,7 +126,7 @@ Persistent data structures with structural sharing.
 | `ref/` | Validated atom with state transition guards |
 | `versioned/` | MVCC version-stamped snapshots |
 
-### 1.6 `nogc_async_mut_noalloc` (90 files, 13 sub-modules)
+### 1.6 `nogc_async_mut_noalloc` (125 files, 14 sub-modules)
 
 Baremetal runtime. Stack-only, no heap allocation.
 
@@ -196,9 +196,9 @@ These differences are by design and should NOT be filled:
 | Gap | Severity | Fix | Status |
 |-----|----------|-----|--------|
 | **`nogc_async_mut_noalloc` missing root `__init__.spl`** | High | Created with `@no_gc`, `pub mod` declarations, and re-exports from all 13 sub-modules | **Fixed** (this PR) |
-| **`nogc_async_immut.__init__.spl` exports only version fn** | Medium | Should re-export `PersistentMap`, `PersistentVec`, `Atom`, `Ref`, core types from sub-modules | Deferred (Gap 9 in support matrix) |
-| **`nogc_async_immut` not in interpreter search path** | Medium | Add to module loader search order after `common` | Deferred (Gap 3 in support matrix, Agent 3) |
-| **`gc_sync_mut` tests exist without source** | Low | Relocate tests to `nogc_sync_mut` or create family | Decision pending (Gap 6) |
+| **`nogc_async_immut` root export surface was skeletal** | Medium | Re-export `PersistentMap`, `PersistentVec`, `Atom`, `Ref`, coordination types, combinators, and supporting internals from sub-modules | **Fixed** |
+| **`nogc_async_immut` interpreter resolution was suspected missing** | Medium | Already present in the module loader search order after `nogc_async_mut`; remaining gap is interpreter GcMode enforcement | **Fixed for resolution** |
+| **`gc_sync_mut` tests existed without source** | Low | Relocate tests to `nogc_sync_mut` and keep `gc_sync_mut` absent until designed | **Fixed** |
 | **Duplicate GPU modules** | Low | `gpu/` exists in `common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut` with overlapping but different APIs | Intentional layering (pure types vs sync vs async vs GC) |
 | **Duplicate `compress/` and `compression/`** in `nogc_sync_mut` | Low | Likely accidental duplication; should consolidate | Not yet tracked |
 
@@ -211,10 +211,10 @@ These differences are by design and should NOT be filled:
 - [x] Document module surface per family
 
 ### 5.2 Near-term (subsequent PRs)
-- [ ] Enrich `nogc_async_immut/__init__.spl` with core type exports (Agent 4 follow-up)
-- [ ] Add `nogc_async_immut` to interpreter module loader search order (Agent 3)
+- [x] Enrich `nogc_async_immut/__init__.spl` with core type exports
+- [x] Confirm `nogc_async_immut` is in interpreter module loader search order
 - [ ] Consolidate `compress/` and `compression/` in `nogc_sync_mut`
-- [ ] Resolve `gc_sync_mut` orphaned tests (relocate to `nogc_sync_mut`)
+- [x] Resolve `gc_sync_mut` orphaned tests (relocated coverage to `nogc_sync_mut`)
 
 ### 5.3 Deferred (not needed now)
 - Do NOT create `gc_sync_immut`, `gc_sync_mut`, `nogc_sync_immut` directories

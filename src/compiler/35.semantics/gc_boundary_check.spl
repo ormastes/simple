@@ -23,6 +23,55 @@ struct FamilyImportWarning:
     imported_module: text
     message: text
 
+fn is_common_family_path(module_path: text) -> bool:
+    """Return true for the neutral common runtime family.
+
+    Common is parsed as GC by `gc_mode_from_family_prefix` because it inherits
+    the default pointer mode, but it is not a GC runtime family for import
+    boundary warnings.
+    """
+    var path = module_path
+    if path.starts_with("std."):
+        path = path[4:path.len()]
+    elif path.starts_with("lib."):
+        path = path[4:path.len()]
+    path.starts_with("common")
+
+fn normalized_family_path(module_path: text) -> text:
+    """Strip import prefixes before runtime-family classification."""
+    var path = module_path
+    if path.starts_with("std."):
+        path = path[4:path.len()]
+    elif path.starts_with("lib."):
+        path = path[4:path.len()]
+    path
+
+fn runtime_family_rank(module_path: text) -> i64:
+    """Return dependency rank for stdlib runtime families.
+
+    Lower ranks are allowed backend dependencies. Higher ranks are adapter or
+    hosted layers and must not be imported by lower layers.
+    """
+    val path = normalized_family_path(module_path)
+    if path.starts_with("common"):
+        return 0
+    if path.starts_with("nogc_async_mut_noalloc"):
+        return 1
+    if path.starts_with("nogc_async_mut"):
+        return 2
+    if path.starts_with("nogc_async_immut"):
+        return 2
+    if path.starts_with("async"):
+        return 3
+    if path.starts_with("nogc_sync_mut"):
+        return 3
+    if path.starts_with("gc_"):
+        return 4
+    -1
+
+fn is_known_runtime_family_path(module_path: text) -> bool:
+    runtime_family_rank(module_path) >= 0
+
 
 # ============================================================================
 # GC Boundary Semantic Pass
@@ -46,14 +95,31 @@ fn check_gc_boundary_imports(source_module: text, imported_modules: [text]) -> [
 
     val source_gc = gc_mode_from_family_prefix(source_module)
     val source_is_noalloc = is_noalloc_family(source_module)
+    val source_rank = runtime_family_rank(source_module)
+    val source_is_common = is_common_family_path(source_module)
 
     # Only check if source module is in a nogc family
     if source_gc.is_gc():
-        if not source_gc.explicit:
+        if not source_gc.explicit and source_rank < 0:
             return warnings  # Unknown family, skip check
 
     for imported in imported_modules:
+        val imported_rank = runtime_family_rank(imported)
+        if is_common_family_path(imported):
+            continue
+
         val imported_gc = gc_mode_from_family_prefix(imported)
+
+        # Rule 0: runtime-family dependency direction must flow from hosted
+        # adapters down toward async/no-GC backends and common contracts.
+        if source_rank >= 0 and imported_rank >= 0:
+            if imported_rank > source_rank:
+                if source_is_common or not source_is_noalloc and not (source_gc.is_nogc() and imported_gc.explicit and imported_gc.is_gc()):
+                    warnings.push(FamilyImportWarning(
+                        source_module: source_module,
+                        imported_module: imported,
+                        message: "warning[{GC_BOUNDARY_LINT_NAME}]: runtime family '{source_module}' imports higher-layer family '{imported}'"
+                    ))
 
         # Rule 1: nogc_*_noalloc must not import from any allocating family
         if source_is_noalloc:

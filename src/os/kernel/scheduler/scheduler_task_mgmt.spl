@@ -29,17 +29,13 @@ use os.kernel.ipc.notif_global.{notification_clear_waiter_global}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.scheduler.scheduler_types.{
     TaskControlBlock, WaitCollectResult, SchedulerPreemptionDecision, SchedulerPreemptionReason,
-    MAX_TASKS, TIME_SLICE_TICKS, SCHED_EXEC_ARCH,
+    MAX_TASKS, TIME_SLICE_TICKS, sched_exec_arch,
     _address_space_can_map, _scheduler_uses_direct_load_arena, _scheduler_mapped_entry,
-    _map_user_process_image, _initial_user_task_context
+    _map_user_process_image, _initial_user_task_context,
+    scheduler_next_task_id_take
 }
 
 extern fn cap_init_task_record(task: TaskId, full: bool)
-
-# Module-level task-id counter (shared with scheduler.spl via g_scheduler_next_task_id).
-# Access via scheduler_next_task_id_get / scheduler_next_task_id_bump helpers below.
-# The actual global lives in scheduler.spl.
-extern var g_scheduler_next_task_id: u64
 
 # ============================================================================
 # Task Creation
@@ -53,12 +49,8 @@ pub fn sched_create_task_impl(
     caps: CapabilitySet
 ) -> (TaskId, [TaskControlBlock?]):
     """Core logic for Scheduler.create_task."""
-    var next_id = g_scheduler_next_task_id
-    if next_id == 0 or next_id >= 0x40000000:
-        log_raw_println("[scheduler] create_task: normalized next_task_id")
-        next_id = 1
+    val next_id = scheduler_next_task_id_take()
     val id = TaskId(id: next_id)
-    g_scheduler_next_task_id = next_id + 1
 
     val slot = _find_empty_slot_in(tasks)
     if slot < 0:

@@ -874,6 +874,50 @@ fn test_build_use_map_glob_import_populates_symbol_entries() {
 }
 
 #[test]
+fn test_llvm_mangle_renames_imported_global_declarations_with_uses() {
+    let mut mir = crate::mir::MirModule::new();
+    mir.globals
+        .push(("MAX_TASKS".to_string(), crate::hir::TypeId::I64, false));
+    let mut func = crate::mir::MirFunction::new(
+        "main".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Private,
+    );
+    func.blocks[0].instructions.push(crate::mir::MirInst::GlobalLoad {
+        dest: crate::mir::VReg(0),
+        global_name: "MAX_TASKS".to_string(),
+        ty: crate::hir::TypeId::I64,
+    });
+    func.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(func);
+
+    let mut use_map = std::collections::HashMap::new();
+    use_map.insert(
+        "MAX_TASKS".to_string(),
+        "os__kernel__scheduler__scheduler_types__MAX_TASKS".to_string(),
+    );
+
+    let unresolved = super::mangle::mangle_mir(
+        &mut mir,
+        "app__entry",
+        true,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &use_map,
+        &std::collections::HashMap::new(),
+    );
+
+    assert_eq!(unresolved, 0);
+    assert_eq!(mir.globals[0].0, "os__kernel__scheduler__scheduler_types__MAX_TASKS");
+    match &mir.functions[0].blocks[0].instructions[0] {
+        crate::mir::MirInst::GlobalLoad { global_name, .. } => {
+            assert_eq!(global_name, "os__kernel__scheduler__scheduler_types__MAX_TASKS")
+        }
+        other => panic!("expected global load, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_re_exports_include_glob_imported_facade_symbols() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");

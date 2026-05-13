@@ -30,6 +30,9 @@ _start:
     mov     x0, #(1 << 31)     /* RW bit */
     msr     hcr_el2, x0
 
+    /* CPTR_EL2: do not trap EL1 FP/SIMD instructions. */
+    msr     cptr_el2, xzr
+
     /* SCTLR_EL1: disable MMU, caches, alignment check */
     mov     x0, #0
     msr     sctlr_el1, x0
@@ -54,6 +57,14 @@ _start:
     isb
     adr     x0, .Lcrt0_sctlr
     bl      .Lserial_puts_early
+
+    /* LLVM may emit SIMD loads/stores for struct initialization even in
+     * freestanding builds. Enable EL1 FP/SIMD access before C/Simple code.
+     */
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(3 << 20)
+    msr     cpacr_el1, x0
+    isb
 
     /* Set up stack pointer from linker symbol */
     adrp    x0, _stack_top

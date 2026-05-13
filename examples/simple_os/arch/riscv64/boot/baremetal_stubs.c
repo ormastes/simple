@@ -703,6 +703,31 @@ RuntimeValue rt_qemu_exit_success(void)
     return NIL_VALUE;
 }
 
+static uint64_t harden_mix64(uint64_t value)
+{
+    value ^= value >> 30;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31;
+    return value;
+}
+
+RuntimeValue rt_riscv_harden_canary_value(void)
+{
+    uint64_t cycle = 0;
+    uint64_t time = 0;
+    uint64_t instret = 0;
+    __asm__ volatile("rdcycle %0" : "=r"(cycle));
+    __asm__ volatile("rdtime %0" : "=r"(time));
+    __asm__ volatile("rdinstret %0" : "=r"(instret));
+    uint64_t mixed = harden_mix64(
+        cycle ^ (time << 17) ^ (instret << 33) ^ (uintptr_t)&rt_riscv_harden_canary_value
+    );
+    mixed &= 0x7fffffffffffffffULL;
+    return (RuntimeValue)(mixed == 0 ? 1 : mixed);
+}
+
 static void rv_memzero(void *ptr, uintptr_t len)
 {
     unsigned char *p = (unsigned char *)ptr;

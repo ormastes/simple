@@ -84,6 +84,52 @@ static void uart_puts(const char *s)
     }
 }
 
+static void uart_put_u32(uint32_t v)
+{
+    char buf[10];
+    uint32_t pos = 0;
+    do {
+        buf[pos++] = (char)('0' + (v % 10U));
+        v /= 10U;
+    } while (v > 0U && pos < sizeof(buf));
+    while (pos > 0U) {
+        uart_putc(buf[--pos]);
+    }
+}
+
+static uint32_t riscv32_harden_mix32(uint32_t value)
+{
+    value ^= value >> 16;
+    value *= 0x7feb352dU;
+    value ^= value >> 15;
+    value *= 0x846ca68bU;
+    value ^= value >> 16;
+    return value & 0x7fffffffU;
+}
+
+RuntimeValue rt_riscv32_harden_canary_value(void)
+{
+    uintptr_t cycle = 0;
+    uintptr_t time = 0;
+    uintptr_t instret = 0;
+    __asm__ volatile("rdcycle %0" : "=r"(cycle));
+    __asm__ volatile("rdtime %0" : "=r"(time));
+    __asm__ volatile("rdinstret %0" : "=r"(instret));
+    uint32_t mixed = riscv32_harden_mix32(
+        (uint32_t)cycle ^ ((uint32_t)time << 11) ^ ((uint32_t)instret << 17) ^
+        (uint32_t)(uintptr_t)&rt_riscv32_harden_canary_value
+    );
+    return (RuntimeValue)(mixed == 0U ? 1U : mixed);
+}
+
+RuntimeValue rt_riscv32_harden_print_canary(void)
+{
+    uart_puts("[harden] canary arch=riscv32 value=");
+    uart_put_u32((uint32_t)rt_riscv32_harden_canary_value());
+    uart_puts("\r\n");
+    return NIL_VALUE;
+}
+
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
 {
     uintptr_t len = (uintptr_t)len_val;

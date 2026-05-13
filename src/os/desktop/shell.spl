@@ -16,7 +16,7 @@ use common.ui.builder.{
 use os.compositor.compositor.{Compositor, WindowSurface}
 use os.compositor.app_content.{app_state_new}
 use os.drivers.framebuffer.fb_driver.{Color}
-use os.desktop.app_manifest.{AppManifest, search_apps}
+use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps}
 use os.services.wm.wm_service.{WmService, WmAction}
 use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Point, Size, Rect}
 use std.nogc_async_mut_noalloc.log.{noalloc_log_debug, noalloc_log_error}
@@ -57,6 +57,26 @@ val APP_ID_EDITOR: text = "/sys/apps/editor"
 val APP_ID_SIMPLE_BROWSER: text = "/sys/apps/simple_browser"
 val EDITOR_SMOKE_PATH: text = "/EDITOR.TXT"
 val EDITOR_SMOKE_CONTENT: text = "SimpleOS editor smoke saved from GUI"
+
+fn _app_uses_remote_window(name: text) -> bool:
+    match name:
+        case "Hello World": true
+        case "Browser Demo": true
+        case "Simple Browser": true
+        case "Simple Compiler": true
+        case "Simple Interpreter": true
+        case "Simple Loader": true
+        case "LLVM": true
+        case "Clang": true
+        case "Rust": true
+        case _:
+            name.starts_with("/sys/apps/")
+
+fn _sync_launcher_registry_with_manifests():
+    val manifests = load_app_manifests()
+    for manifest in manifests:
+        launcher_register(manifest.name, manifest.binary, manifest.icon, 0, 0)
+
 struct EditorResidentLaunch:
     tree: UITree
     saved_path: text
@@ -98,7 +118,7 @@ fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
 
 fn _register_materialized_window(shell: DesktopShell, window_id: WindowId, pid: u64, app_id: text):
     log_info("[desktop] " + "[shell] materialized-window:register:start pid={pid} wid={window_id.value} app_id={app_id}")
-    shell.compositor.set_window_identity(window_id, ProcessId(value: pid), AppId(value: app_id))
+    shell.compositor.set_window_identity(window_id.value.to_i32(), pid.to_i64(), app_id)
     log_info("[desktop] " + "[shell] materialized-window:register:compositor pid={pid} wid={window_id.value}")
     var wm = shell.wm
     wm.register_window_owner_with_identity(window_id, 0, pid, app_id)
@@ -163,36 +183,18 @@ fn _materialize_launch_fallback(shell: DesktopShell, name: text, pid: u64, app_i
     """Create compositor-owned fallback windows for launcher-owned processes."""
     match name:
         case "Browser Demo":
-            val main_tree = build_tree_with_title(column("browser_demo_resident_main", [
-                text_widget("browser_demo_title", "Browser Demo"),
-                text_widget("browser_demo_body", "filesystem process launch")
-            ]), "Browser Demo", "dark")
-            val inspector_tree = build_tree_with_title(column("browser_demo_resident_inspector", [
-                text_widget("browser_demo_inspector_title", "Browser Demo Inspector"),
-                text_widget("browser_demo_inspector_body", "filesystem process")
-            ]), "Browser Demo Inspector", "dark")
-            if _create_materialized_window(shell, "Browser Demo", 120, 90, 460, 260, main_tree, pid, app_id).value == 0:
+            if _create_materialized_surface(shell, "Browser Demo", 120, 90, 460, 260, pid, app_id).value == 0:
                 return false
-            if _create_materialized_window(
-                shell, "Browser Demo Inspector", 620, 120, 320, 220, inspector_tree, pid, app_id).value == 0:
+            if _create_materialized_surface(shell, "Browser Demo Inspector", 620, 120, 320, 220, pid, app_id).value == 0:
                 return false
             true
         case "Hello World":
-            val hello_tree = build_tree_with_title(column("hello_resident_main", [
-                text_widget("hello_resident_title", "Hello World"),
-                text_widget("hello_resident_body", "filesystem process launch")
-            ]), "Hello World", "dark")
-            _create_materialized_window(shell, "Hello World", 180, 160, 380, 220, hello_tree, pid, app_id).value != 0
+            _create_materialized_surface(shell, "Hello World", 180, 160, 380, 220, pid, app_id).value != 0
         case "Editor":
             log_raw_println("[desktop-e2e] editor-launch:start pid={pid} app=editor")
             val editor_smoke_path = "/EDITOR.TXT"
             val editor_smoke_content = "SimpleOS editor smoke saved from GUI"
-            val editor_tree = build_tree_with_title(column("editor_resident_main", [
-                text_widget("editor_resident_title", "Editor"),
-                text_widget("editor_resident_path", editor_smoke_path),
-                text_widget("editor_resident_body", editor_smoke_content)
-            ]), "Editor", "dark")
-            if _create_materialized_window(shell, "Editor", 140, 100, 760, 420, editor_tree, pid, app_id).value == 0:
+            if _create_materialized_surface(shell, "Editor", 140, 100, 760, 420, pid, app_id).value == 0:
                 log_raw_println("[desktop-e2e] editor-launch:fail pid={pid} reason=create_window_failed")
                 return false
             log_raw_println("[desktop-e2e] editor-save:ok pid={pid} path={editor_smoke_path}")
@@ -200,8 +202,7 @@ fn _materialize_launch_fallback(shell: DesktopShell, name: text, pid: u64, app_i
             log_raw_println("[desktop-e2e] editor-launch:ok pid={pid} app=editor mode=filesystem-process")
             true
         case _:
-            val tree = _build_app_tree(name)
-            _create_materialized_window(shell, name, 80, 80, 640, 400, tree, pid, app_id).value != 0
+            _create_materialized_surface(shell, name, 80, 80, 640, 400, pid, app_id).value != 0
 
 # ============================================================================
 # Keyboard Shortcut
@@ -212,6 +213,13 @@ struct KeyboardShortcut:
     modifier: text      # e.g. "Ctrl+Alt"
     key: text           # e.g. "h", "t"
     action: text        # e.g. "launch_Hello World"
+
+fn _default_shortcuts() -> [KeyboardShortcut]:
+    [
+        KeyboardShortcut(modifier: "Meta", key: "h", action: "launch_Hello World"),
+        KeyboardShortcut(modifier: "Meta", key: "t", action: "launch_Terminal"),
+        KeyboardShortcut(modifier: "Meta", key: "w", action: "launch_Simple Browser")
+    ]
 
 struct ShellProcessRow:
     """Read-only shell projection of launcher-owned process state."""
@@ -292,6 +300,11 @@ impl DesktopShell:
         """
         self.task_reaper_enabled = enabled
 
+    me register_materialized_window(window_id: WindowId, pid: u64, app_id: text):
+        self.compositor.set_window_identity(window_id.value.to_i32(), pid.to_i64(), app_id)
+        self.wm.register_window_owner_with_identity(window_id, 0, pid, app_id)
+        launcher_note_window_opened(pid)
+
     me init():
         """Initialize the desktop shell.
 
@@ -336,7 +349,7 @@ impl DesktopShell:
                 0, screen_h - TASKBAR_HEIGHT,
                 screen_w, TASKBAR_HEIGHT,
                 new_tree
-            )
+            ).value
 
     me set_clock(time_str: text):
         """Update the clock display."""
@@ -365,7 +378,7 @@ impl DesktopShell:
             launcher_x, launcher_y,
             APP_LAUNCHER_WIDTH, APP_LAUNCHER_HEIGHT,
             tree
-        )
+        ).value
         self.launcher_visible = true
 
     me close_launcher():
@@ -412,7 +425,7 @@ impl DesktopShell:
             if pid >= 0:
                 val process_id = pid.to_u64()
                 val app_id = launcher_get_process_app_id_for_pid(process_id)
-                self.compositor.set_window_identity(wid, process_id, app_id)
+                self.compositor.set_window_identity(wid.value.to_i32(), process_id.to_i64(), app_id)
                 self.wm.register_window_owner_with_identity(wid, 0, process_id, app_id)
                 launcher_note_window_opened(process_id)
             else:
@@ -438,21 +451,18 @@ impl DesktopShell:
             else:
                 app_id = _fallback_app_id_for_name(name)
             log_info("[desktop] " + "[shell] materialize-process:fallback-app-id pid={pid} app_id={app_id}")
+        elif name == "Simple Browser":
+            app_id = "/sys/apps/simple_browser"
         if app_id == "":
             return false
         if name == "Simple Browser":
             log_info("[desktop] " + "[shell] simple-browser-fallback:start pid={pid}")
-            val browser_tree = build_tree_with_title(column("simple_browser_resident_main", [
-                text_widget("simple_browser_title", "Simple Browser"),
-                text_widget("simple_browser_url", "about:network"),
-                text_widget("simple_browser_renderer", "renderer=simple_web mode=filesystem-process")
-            ]), "Simple Browser", "dark")
-            val wid = self.compositor.create_window_with_tree("Simple Browser", 120, 90, 920, 640, browser_tree)
+            val wid = self.compositor.add_surface("Simple Browser", 120, 90, 920, 640)
             log_info("[desktop] " + "[shell] simple-browser-fallback:create-window pid={pid} wid={wid.value}")
             if wid.value == 0:
                 log_info("[desktop] " + "[shell] simple-browser-fallback:create-result pid={pid} created=false reason=create-window wid=0")
                 return false
-            self.compositor.set_window_identity(wid, ProcessId(value: pid), AppId(value: app_id))
+            self.compositor.set_window_identity(wid.value.to_i32(), pid.to_i64(), app_id)
             self.wm.shadow_window_id = wid.value
             self.wm.shadow_owner_port = 0
             self.wm.shadow_process_id = pid
@@ -464,7 +474,38 @@ impl DesktopShell:
             log_info("[desktop] " + "[simple_browser] page_rendered app_id={app_id} wid={wid.value} page=about:network renderer=simple_web mode=filesystem-process pid={pid}")
             log_info("[desktop] " + "[shell] simple-browser-fallback:end pid={pid}")
             return true
-        _materialize_launch_fallback(self, name, pid, app_id)
+        match name:
+            case "Browser Demo":
+                val main_wid = self.compositor.add_surface("Browser Demo", 120, 90, 460, 260)
+                if main_wid.value == 0:
+                    return false
+                self.register_materialized_window(main_wid, pid, app_id)
+                val inspector_wid = self.compositor.add_surface("Browser Demo Inspector", 620, 120, 320, 220)
+                if inspector_wid.value == 0:
+                    return false
+                self.register_materialized_window(inspector_wid, pid, app_id)
+                true
+            case "Hello World":
+                val hello_wid = self.compositor.add_surface("Hello World", 180, 160, 380, 220)
+                if hello_wid.value == 0:
+                    return false
+                self.register_materialized_window(hello_wid, pid, app_id)
+                true
+            case "Editor":
+                log_raw_println("[desktop-e2e] editor-launch:start pid={pid} app=editor")
+                val editor_wid = self.compositor.add_surface("Editor", 140, 100, 760, 420)
+                if editor_wid.value == 0:
+                    log_raw_println("[desktop-e2e] editor-launch:fail pid={pid} reason=create_window_failed")
+                    return false
+                self.register_materialized_window(editor_wid, pid, app_id)
+                log_raw_println("[desktop-e2e] editor-launch:ok pid={pid} app=editor mode=filesystem-process")
+                true
+            case _:
+                val wid = self.compositor.add_surface(name, 80, 80, 640, 400)
+                if wid.value == 0:
+                    return false
+                self.register_materialized_window(wid, pid, app_id)
+                true
 
     me handle_shortcut(modifier: text, key: text, baremetal: bool):
         """Match a modifier+key combination against registered shortcuts.
@@ -524,7 +565,7 @@ impl DesktopShell:
                 if action.title == "Simple Browser":
                     log_info("[desktop] " + "[shell] create_window:created pid={action.process_id} wid={wid.value}")
                 # Preserve launcher/WM identity at the shell boundary.
-                self.compositor.set_window_identity(wid, action.process_id, app_id)
+                self.compositor.set_window_identity(wid.value.to_i32(), action.process_id.to_i64(), app_id)
                 if action.title == "Simple Browser":
                     log_info("[desktop] " + "[shell] create_window:identity pid={action.process_id} wid={wid.value}")
                 self.wm.register_window_owner_with_identity(
@@ -537,7 +578,7 @@ impl DesktopShell:
                     log_info("[desktop] " + "[shell] create_window:wm-owner pid={action.process_id} wid={wid.value}")
                 if action.process_id > 0:
                     launcher_note_window_opened(action.process_id)
-                if action.src_port > 0:
+                if action.src_port > 0 and self.wm.initialized:
                     if action.title == "Simple Browser":
                         log_info("[desktop] " + "[shell] create_window:reply pid={action.process_id} wid={wid.value} dst_port={action.src_port}")
                     self.wm.send_create_reply(action.src_port, wid)
@@ -556,7 +597,7 @@ impl DesktopShell:
                 val web_wid = self.compositor.create_remote_window(
                     action.title, action.x, action.y,
                     action.width, action.height, action.owner_port)
-                self.compositor.set_window_identity(web_wid, action.process_id, web_app_id)
+                self.compositor.set_window_identity(web_wid.value.to_i32(), action.process_id.to_i64(), web_app_id)
                 self.wm.register_window_owner_with_identity(
                     web_wid,
                     action.owner_port,
@@ -565,7 +606,7 @@ impl DesktopShell:
                 )
                 if action.process_id > 0:
                     launcher_note_window_opened(action.process_id)
-                if action.src_port > 0:
+                if action.src_port > 0 and self.wm.initialized:
                     self.wm.send_create_reply(action.src_port, web_wid)
                 log_info("[desktop] " + "[shell] Created web window {web_wid} for port {action.src_port}: url='{action.content}'")
             "destroy_window":
@@ -574,33 +615,42 @@ impl DesktopShell:
                 self.wm.remove_owner(action.window_id)
                 if process_id > 0:
                     launcher_note_window_closed(process_id)
-                self.wm.send_status_reply(action.src_port, 0)
+                if action.src_port > 0 and self.wm.initialized:
+                    self.wm.send_status_reply(action.src_port, 0)
                 log_info("[desktop] " + "[shell] Destroyed window {action.window_id}")
             "focus":
                 self.compositor.focus_window(action.window_id)
-                self.wm.send_status_reply(action.src_port, 0)
+                if action.src_port > 0 and self.wm.initialized:
+                    self.wm.send_status_reply(action.src_port, 0)
             "resize":
                 self.compositor.resize_window(action.window_id, action.width, action.height)
-                self.wm.send_status_reply(action.src_port, 0)
+                if action.src_port > 0 and self.wm.initialized:
+                    self.wm.send_status_reply(action.src_port, 0)
             "move":
                 self.compositor.move_window(action.window_id, action.x, action.y)
-                self.wm.send_status_reply(action.src_port, 0)
+                if action.src_port > 0 and self.wm.initialized:
+                    self.wm.send_status_reply(action.src_port, 0)
             "set_title":
                 self.compositor.set_window_title(action.window_id, action.title)
-                self.wm.send_status_reply(action.src_port, 0)
+                if action.src_port > 0 and self.wm.initialized:
+                    self.wm.send_status_reply(action.src_port, 0)
             "minimize":
                 self.compositor.minimize_window(action.window_id)
-                self.wm.send_status_reply(action.src_port, 0)
+                if action.src_port > 0 and self.wm.initialized:
+                    self.wm.send_status_reply(action.src_port, 0)
             "maximize":
                 self.compositor.maximize_window(action.window_id)
-                self.wm.send_status_reply(action.src_port, 0)
+                if action.src_port > 0 and self.wm.initialized:
+                    self.wm.send_status_reply(action.src_port, 0)
             "restore":
                 self.compositor.restore_window(action.window_id)
-                self.wm.send_status_reply(action.src_port, 0)
+                if action.src_port > 0 and self.wm.initialized:
+                    self.wm.send_status_reply(action.src_port, 0)
             "update_tree":
                 val tree = _build_remote_tree(action.window_id, action.content)
                 self.compositor.update_window_tree(action.window_id, tree)
-                self.wm.send_status_reply(action.src_port, 0)
+                if action.src_port > 0 and self.wm.initialized:
+                    self.wm.send_status_reply(action.src_port, 0)
                 log_info("[desktop] " + "[shell] Applied tree update for window {action.window_id}")
             _:
                 pass_dn
@@ -788,4 +838,3 @@ impl DesktopShell:
                 self.wm.remove_owner(window_id)
             if reaped_count > 0 or row.windows > 0:
                 log_info("[desktop] " + "[shell] reaped pid={row.pid} app_id={row.app_id} state={row.state} windows={reaped_count}")
-

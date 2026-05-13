@@ -35,9 +35,15 @@ use os.tls13.server.{
     build_server_hello, build_encrypted_extensions_server_side,
     build_certificate, build_certificate_verify,
     build_certificate_verify_signing_input,
-    tls13_accept,
-    ClientHello13, Tls13ServerConfig, Tls13AcceptResult
+    tls13_accept, tls13_accept_client_hello_record_for_test,
+    tls13_accept_client_hello_record_with_server_material_for_test,
+    tls13_accept_client_finished_record_for_test,
+    tls13_prepare_server_handshake_from_record_for_test,
+    ClientHello13, Tls13ServerConfig, Tls13AcceptResult,
+    Tls13ServerHandshakeResult
 }
+use os.tls13.handshake13.{build_finished_bytes}
+use os.tls13.record13.{RecordKey, record13_decrypt_for_suite, record13_encrypt_for_suite, RecordResult}
 use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign, ed25519_verify}
 
 # ============================================================================
@@ -123,6 +129,14 @@ fn _x25519_pub_32() -> [u8]:
     var i: u64 = 0
     while i < 32u64:
         out.push(0x50u8 + i.to_u8())
+        i = i + 1u64
+    out
+
+fn _server_scalar_32() -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32u64:
+        out.push(0x20u8 + i.to_u8())
         i = i + 1u64
     out
 
@@ -219,6 +233,29 @@ fn _ch_body_truncated() -> [u8]:
     b.push(0x03u8)
     b.push(0x03u8)
     b
+
+fn _client_hello_record(body: [u8]) -> [u8]:
+    var hs: [u8] = []
+    hs.push(0x01u8)
+    hs.push(((body.len().to_u64() >> 16) & 0xFF).to_u8())
+    hs.push(((body.len().to_u64() >> 8) & 0xFF).to_u8())
+    hs.push((body.len().to_u64() & 0xFF).to_u8())
+    var i: u64 = 0
+    while i < body.len():
+        hs.push(body[i])
+        i = i + 1u64
+
+    var rec: [u8] = []
+    rec.push(0x16u8)
+    rec.push(0x03u8)
+    rec.push(0x01u8)
+    rec.push(((hs.len().to_u64() >> 8) & 0xFF).to_u8())
+    rec.push((hs.len().to_u64() & 0xFF).to_u8())
+    i = 0u64
+    while i < hs.len():
+        rec.push(hs[i])
+        i = i + 1u64
+    rec
 
 # A CH whose X25519 key_share carries a bogus 16-byte key (must be 32).
 # RFC 8446 §4.2.8 requires the server to reject the entry, not the whole
@@ -595,13 +632,179 @@ describe "tls13_accept prerequisite gate":
             case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("missing_certificate_chain")
             case _: expect(false).to_equal(true)
 
-    it "reaches the explicit record I/O blocker once prerequisites are valid":
+    it "reaches the server crypto blocker after validating a ClientHello record":
         val cfg = Tls13ServerConfig(
             cert_chain: [_cert_der_fixture()],
             server_pkcs8: _ed25519_pkcs8(),
             server_sig_scheme: 0x0807u16,
             alpn_protocols: []
         )
-        match tls13_accept(3, cfg):
-            case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("server_record_io_pending")
+        match tls13_accept_client_hello_record_for_test(_client_hello_record(_ch_body_x25519_only()), cfg):
+            case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("server_crypto_pending")
+            case _: expect(false).to_equal(true)
+
+    it "rejects missing ClientHello record bytes before parsing handshake":
+        val cfg = Tls13ServerConfig(
+            cert_chain: [_cert_der_fixture()],
+            server_pkcs8: _ed25519_pkcs8(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+        match tls13_accept_client_hello_record_for_test([], cfg):
+            case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("no_client_hello_record")
+            case _: expect(false).to_equal(true)
+
+    it "rejects non-handshake records at the record boundary":
+        val cfg = Tls13ServerConfig(
+            cert_chain: [_cert_der_fixture()],
+            server_pkcs8: _ed25519_pkcs8(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+        match tls13_accept_client_hello_record_for_test([0x17u8, 0x03u8, 0x03u8, 0x00u8, 0x01u8, 0x00u8], cfg):
+            case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("expected_handshake_record")
+            case _: expect(false).to_equal(true)
+
+    it "reaches client Finished blocker after explicit server crypto material":
+        val cfg = Tls13ServerConfig(
+            cert_chain: [_cert_der_fixture()],
+            server_pkcs8: _ed25519_pkcs8(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+        match tls13_accept_client_hello_record_with_server_material_for_test(
+            _client_hello_record(_ch_body_x25519_only()),
+            cfg,
+            _server_random_32(),
+            _server_scalar_32()
+        ):
+            case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("client_finished_pending")
+            case _: expect(false).to_equal(true)
+
+    it "rejects invalid explicit server random before encrypted flight":
+        val cfg = Tls13ServerConfig(
+            cert_chain: [_cert_der_fixture()],
+            server_pkcs8: _ed25519_pkcs8(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+        match tls13_accept_client_hello_record_with_server_material_for_test(
+            _client_hello_record(_ch_body_x25519_only()),
+            cfg,
+            [0x01u8],
+            _server_scalar_32()
+        ):
+            case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("invalid_server_random")
+            case _: expect(false).to_equal(true)
+
+describe "tls13_prepare_server_handshake_from_record_for_test":
+
+    it "prepares X25519 server handshake traffic material from a valid ClientHello record":
+        val cfg = Tls13ServerConfig(
+            cert_chain: [_cert_der_fixture()],
+            server_pkcs8: _ed25519_pkcs8(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+        match tls13_prepare_server_handshake_from_record_for_test(
+            _client_hello_record(_ch_body_x25519_only()),
+            cfg,
+            _server_scalar_32()
+        ):
+            case Tls13ServerHandshakeResult.Prepared(material):
+                expect(material.cipher_suite).to_equal(0x1301u16)
+                expect(material.named_group).to_equal(0x001Du16)
+                expect(material.server_hello.len().to_u64() > 0u64).to_equal(true)
+                expect(material.server_keyshare_pub.len().to_u64()).to_equal(32u64)
+                expect(material.shared_secret.len().to_u64()).to_equal(32u64)
+                expect(material.handshake_secret.len().to_u64()).to_equal(32u64)
+                expect(material.client_hs_traffic.len().to_u64()).to_equal(32u64)
+                expect(material.server_hs_traffic.len().to_u64()).to_equal(32u64)
+                expect(material.client_hs_key.len().to_u64()).to_equal(16u64)
+                expect(material.client_hs_iv.len().to_u64()).to_equal(12u64)
+                expect(material.server_hs_key.len().to_u64()).to_equal(16u64)
+                expect(material.server_hs_iv.len().to_u64()).to_equal(12u64)
+                expect(material.client_app_key.len().to_u64()).to_equal(16u64)
+                expect(material.client_app_iv.len().to_u64()).to_equal(12u64)
+                expect(material.server_app_key.len().to_u64()).to_equal(16u64)
+                expect(material.server_app_iv.len().to_u64()).to_equal(12u64)
+                expect(material.expected_client_finished.len().to_u64()).to_equal(32u64)
+                expect(material.encrypted_extensions[0u64]).to_equal(0x08u8)
+                expect(material.certificate[0u64]).to_equal(0x0Bu8)
+                expect(material.certificate_verify[0u64]).to_equal(0x0Fu8)
+                expect(material.server_finished[0u64]).to_equal(0x14u8)
+                expect(material.server_hello_record[0u64]).to_equal(0x16u8)
+                expect(material.server_hello_record[1u64]).to_equal(0x03u8)
+                expect(material.server_hello_record[2u64]).to_equal(0x03u8)
+                expect(material.encrypted_extensions_record[0u64]).to_equal(0x17u8)
+                expect(material.certificate_record[0u64]).to_equal(0x17u8)
+                expect(material.certificate_verify_record[0u64]).to_equal(0x17u8)
+                expect(material.server_finished_record[0u64]).to_equal(0x17u8)
+            case _: expect(false).to_equal(true)
+
+    it "encrypts the server flight records with the prepared server handshake key":
+        val cfg = Tls13ServerConfig(
+            cert_chain: [_cert_der_fixture()],
+            server_pkcs8: _ed25519_pkcs8(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+        match tls13_prepare_server_handshake_from_record_for_test(
+            _client_hello_record(_ch_body_x25519_only()),
+            cfg,
+            _server_scalar_32()
+        ):
+            case Tls13ServerHandshakeResult.Prepared(material):
+                expect(material.server_hello_record[0u64]).to_equal(0x16u8)
+                expect(material.server_hello_record[1u64]).to_equal(0x03u8)
+                expect(material.server_hello_record[2u64]).to_equal(0x03u8)
+                val rk = RecordKey(key: material.server_hs_key, iv: material.server_hs_iv)
+                match record13_decrypt_for_suite(material.cipher_suite, rk, 0u64, material.encrypted_extensions_record):
+                    case RecordResult.Ok(content_type, data):
+                        expect(content_type).to_equal(0x16)
+                        expect(data[0u64]).to_equal(0x08u8)
+                    case RecordResult.Err(_): expect(false).to_equal(true)
+                match record13_decrypt_for_suite(material.cipher_suite, rk, 1u64, material.certificate_record):
+                    case RecordResult.Ok(content_type, data):
+                        expect(content_type).to_equal(0x16)
+                        expect(data[0u64]).to_equal(0x0Bu8)
+                    case RecordResult.Err(_): expect(false).to_equal(true)
+                match record13_decrypt_for_suite(material.cipher_suite, rk, 2u64, material.certificate_verify_record):
+                    case RecordResult.Ok(content_type, data):
+                        expect(content_type).to_equal(0x16)
+                        expect(data[0u64]).to_equal(0x0Fu8)
+                    case RecordResult.Err(_): expect(false).to_equal(true)
+                match record13_decrypt_for_suite(material.cipher_suite, rk, 3u64, material.server_finished_record):
+                    case RecordResult.Ok(content_type, data):
+                        expect(content_type).to_equal(0x16)
+                        expect(data[0u64]).to_equal(0x14u8)
+                        expect(data.len().to_u64()).to_equal(36u64)
+                    case RecordResult.Err(_): expect(false).to_equal(true)
+                val client_rk = RecordKey(key: material.client_hs_key, iv: material.client_hs_iv)
+                val client_fin = build_finished_bytes(material.expected_client_finished)
+                val client_fin_record = record13_encrypt_for_suite(material.cipher_suite, client_rk, 0u64, 0x16u8, client_fin)
+                match tls13_accept_client_finished_record_for_test(material, client_fin_record):
+                    case Tls13AcceptResult.Accepted(ctx):
+                        expect(ctx.client_app_key.len().to_u64()).to_equal(16u64)
+                        expect(ctx.client_app_iv.len().to_u64()).to_equal(12u64)
+                        expect(ctx.server_app_key.len().to_u64()).to_equal(16u64)
+                        expect(ctx.server_app_iv.len().to_u64()).to_equal(12u64)
+                        expect(ctx.client_seq).to_equal(0u64)
+                        expect(ctx.server_seq).to_equal(0u64)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "rejects invalid offline server scalar length":
+        val cfg = Tls13ServerConfig(
+            cert_chain: [_cert_der_fixture()],
+            server_pkcs8: _ed25519_pkcs8(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+        match tls13_prepare_server_handshake_from_record_for_test(
+            _client_hello_record(_ch_body_x25519_only()),
+            cfg,
+            [0x01u8]
+        ):
+            case Tls13ServerHandshakeResult.Failed(reason): expect(reason).to_equal("invalid_server_scalar")
             case _: expect(false).to_equal(true)

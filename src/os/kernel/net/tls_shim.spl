@@ -4,11 +4,10 @@
 # Status: baremetal platform shims plus explicit certificate availability gate.
 #
 # Architecture:
-#   - rt_file_read_text: @export("C") stub returns empty string on baremetal
-#     (satisfies extern declared in certificate.spl and worker.spl).
-#   - get_baremetal_tls_config(): builds a TlsConfig from embedded certs.
-#     This is shim-level wiring. It reports unavailable until real DER
-#     certificate and key material is embedded.
+#   - rt_file_read_text: @export("C") stub returns empty string on baremetal;
+#     TLS uses embedded_certs instead of filesystem certificate loading.
+#   - get_baremetal_tls_info(): returns embedded DER certificate/key material
+#     when the explicit embedded_certs availability gate is true.
 #   - Hardware entropy stubs: rt_rdrand/rt_rndr/rt_riscv_seed provide
 #     deterministic-but-nonzero values for the ChaCha20 CSPRNG seeding
 #     in src/os/crypto/random.spl. Replace with real hardware entropy
@@ -17,6 +16,9 @@
 use os.kernel.net.embedded_certs.{
     get_embedded_cert_der, get_embedded_key_der, has_embedded_certs
 }
+
+@cfg(riscv64)
+use os.kernel.arch_adapt.riscv64_entropy_time.{riscv64_boot_elapsed_us, riscv64_csr_entropy_seed}
 
 # ============================================================================
 # File I/O Stub
@@ -32,36 +34,41 @@ fn rt_file_read_text(path: text) -> text:
     ""
 
 # ============================================================================
-# Time Stub (baremetal-only)
+# Time Source (baremetal-only)
 # ============================================================================
 
 var g_fake_time_us: i64 = 1_000_000_000  # Start at ~1000 seconds in micros
 
-@cfg(baremetal)
+@cfg(riscv64)
+@export("C")
+fn rt_time_now_unix_micros() -> i64:
+    """Return RISC-V boot-relative microseconds from the hardware timer."""
+    riscv64_boot_elapsed_us().to_i64()
+
+@cfg(riscv64)
 @export("C")
 fn rt_time_now_ms() -> i64:
-    """Return current time in milliseconds.
+    """Return RISC-V boot-relative milliseconds from the hardware timer."""
+    rt_time_now_unix_micros() / 1000
 
-    Baremetal stub: returns a monotonically increasing fake clock.
-    Each call advances by 1ms to simulate time passage.
-    TODO: wire to real hardware timer (PIT/HPET/TSC).
-    """
-    val ms = g_fake_time_us / 1000
-    g_fake_time_us = g_fake_time_us + 1000
-    ms
-
-@cfg(baremetal)
+@cfg(not(riscv64))
 @export("C")
 fn rt_time_now_unix_micros() -> i64:
     """Return current time in microseconds since epoch.
 
-    Baremetal stub: returns a monotonically increasing fake clock.
+    Non-RISC-V baremetal stub: returns a monotonically increasing fake clock.
     Each call advances by 1000us (1ms).
     TODO: wire to real RTC + hardware timer.
     """
     val result = g_fake_time_us
     g_fake_time_us = g_fake_time_us + 1000
     result
+
+@cfg(not(riscv64))
+@export("C")
+fn rt_time_now_ms() -> i64:
+    """Return current time in milliseconds from the non-RISC-V fake clock."""
+    rt_time_now_unix_micros() / 1000
 
 # ============================================================================
 # Hardware Entropy Stubs (baremetal-only)
@@ -72,15 +79,21 @@ fn rt_time_now_unix_micros() -> i64:
 #   @cfg(x86_64) extern fn rt_rdrand() -> u64
 #   @cfg(arm64)  extern fn rt_rndr() -> u64
 #   @cfg(riscv64) extern fn rt_riscv_seed() -> u64
+#   @cfg(baremetal) extern fn rt_entropy_hardware_ready() -> i64
 #
 # On baremetal, these hardware instructions may not be available during early
-# boot or on all platforms. We provide deterministic-but-nonzero stubs using
-# a simple LCG, gated with @cfg(baremetal) to avoid symbol collisions with
-# the real platform implementations on hosted builds.
+# boot or on all platforms. Non-RISC-V paths still provide deterministic-
+# but-nonzero stubs using a simple LCG, gated with @cfg(baremetal) to avoid
+# symbol collisions with real platform implementations on hosted builds. RISC-V
+# mixes cycle+time+instret as a best-effort fallback, but this is still not a
+# production TLS entropy source.
 # Replace with real RDRAND/RNDR/seed instructions when hardware drivers
 # are available.
 
 var g_entropy_state: u64 = 0xDEADBEEF_CAFEBABE
+
+@cfg(baremetal)
+extern fn rt_entropy_hardware_ready() -> i64
 
 fn _lcg_next() -> u64:
     """Linear congruential generator for stub entropy.
@@ -113,44 +126,69 @@ fn rt_rndr() -> u64:
     """
     _lcg_next()
 
-@cfg(baremetal)
+@cfg(riscv64)
 @export("C")
 fn rt_riscv_seed() -> u64:
-    """RISC-V seed CSR stub for baremetal.
+    """RISC-V best-effort seed from cycle+time+instret CSR jitter.
 
-    Returns deterministic pseudo-random values from LCG.
-    TODO: replace with real seed CSR read when running on RISC-V hardware.
+    This is stronger than the old deterministic LCG placeholder, but it is not
+    a production entropy source. Replace with SBI/hardware RNG once available.
     """
-    _lcg_next()
+    riscv64_csr_entropy_seed(rt_time_now_unix_micros().to_u64())
+
+@cfg(baremetal)
+fn _platform_entropy_ready() -> bool:
+    rt_entropy_hardware_ready() > 0
+
+@cfg(not(baremetal))
+fn _platform_entropy_ready() -> bool:
+    false
 
 # ============================================================================
 # Baremetal TLS Configuration
 # ============================================================================
 
 struct BaremetalTlsInfo:
-    """Holds raw DER bytes for certificate and key on baremetal."""
+    """Holds raw DER bytes and production-readiness state for baremetal TLS."""
     cert_der: [u8]
     key_der: [u8]
     available: bool
+    production_ready: bool
+    blocker: text
+
+fn baremetal_tls_platform_ready() -> bool:
+    """Return true only when baremetal entropy is production-grade."""
+    _platform_entropy_ready()
+
+fn baremetal_tls_blocker() -> text:
+    """Return the current platform blocker for enabling TLS on baremetal."""
+    if not has_embedded_certs():
+        return "missing_embedded_certificate_material"
+    if not baremetal_tls_platform_ready():
+        return "placeholder_entropy"
+    ""
 
 fn get_baremetal_tls_info() -> BaremetalTlsInfo:
     """Get embedded TLS certificate and key info.
 
-    Returns a BaremetalTlsInfo with the embedded DER bytes when real material
-    is present.
-    Callers can use these bytes to construct TLS configurations
-    when the TLS stack becomes functional.
-
-    Synthetic placeholder material is treated as unavailable.
+    Returns a BaremetalTlsInfo with the embedded DER bytes when the
+    embedded_certs availability gate is true. Synthetic placeholder material
+    remains unavailable because embedded_certs only reports true for non-empty
+    offline-generated DER material.
     """
     if not has_embedded_certs():
         return BaremetalTlsInfo(
             cert_der: [],
             key_der: [],
-            available: false
+            available: false,
+            production_ready: false,
+            blocker: baremetal_tls_blocker()
         )
+    val blocker = baremetal_tls_blocker()
     BaremetalTlsInfo(
         cert_der: get_embedded_cert_der(),
         key_der: get_embedded_key_der(),
-        available: true
+        available: true,
+        production_ready: blocker == "",
+        blocker: blocker
     )

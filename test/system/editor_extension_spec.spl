@@ -4,6 +4,21 @@
 # Verifies manifest parsing, extension host, and built-in extensions.
 
 use std.spec
+use std.editor.extensions.api.*
+use std.editor.extensions.manifest.*
+use std.editor.extensions.builtin.md_language.*
+use std.editor.extensions.builtin.md_commands.*
+use std.editor.extensions.builtin.spl_language.*
+use std.editor.extensions.host.*
+use std.editor.view.preview_pane.*
+use std.editor.view.outline_panel.*
+use std.editor.view.dock_zone.*
+use std.editor.render.block_model.*
+use std.common.markdown.utilities.*
+use std.common.markdown.block.*
+use std.common.markdown.inline.*
+use std.common.markdown.parse.*
+use std.common.markdown.adapter.*
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -206,6 +221,65 @@ describe "editor extension — built-in Markdown language":
         expect(src.contains("\"markdown.toggleOutline\"")).to_equal(true)
         expect(src.contains("\"markdown.insertTable\"")).to_equal(true)
         expect(src.contains("\"markdown.documentStats\"")).to_equal(true)
+
+    it "activates Markdown contributions through the extension host":
+        val host = extension_host_with_builtins()
+        expect(host.command_registered("markdown.toggleOutline")).to_equal(false)
+        expect(host.find_language_for_ext(".md")).to_equal("")
+        val activated = host.activate_language("markdown")
+        expect(activated).to_equal(1)
+        expect(host.command_registered("markdown.toggleOutline")).to_equal(true)
+        expect(host.command_registered("markdown.insertTable")).to_equal(true)
+        expect(host.find_language_for_ext(".md")).to_equal("markdown")
+        expect(host.find_language_for_ext(".markdown")).to_equal("markdown")
+
+    it "dispatches Markdown command contract results with state and payload":
+        val state = md_editor_state_new()
+        val outline_result = md_commands_dispatch("markdown.toggleOutline", state, "# Root\n\n## Child\n", 0, 0)
+        expect(md_editor_state_outline_visible(md_command_result_state(outline_result))).to_equal(true)
+        expect(outline_result.status_message).to_equal("Outline shown")
+        val table_result = md_commands_dispatch("markdown.insertTable", md_command_result_state(outline_result), "", 0, 0)
+        expect(table_result.insert_text.contains("| Header 1 | Header 2 | Header 3 |")).to_equal(true)
+        expect(table_result.status_message).to_equal("")
+        val stats_result = md_commands_dispatch("markdown.documentStats", md_command_result_state(table_result), "one two\nthree", 0, 0)
+        expect(stats_result.status_message.contains("Lines: 2")).to_equal(true)
+        expect(stats_result.status_message.contains("Words: ~2")).to_equal(true)
+
+    it "queues wiki plugin commands only after activation and runtime policy checks":
+        val manifest = ExtensionManifest(
+            name: "wiki-contract-test",
+            version: "1.0.0",
+            main: "main.spl",
+            activation_events: ["onCommand:wiki.backlinks"],
+            contributes_commands: [
+                ExtensionCommand(id: "wiki.backlinks", title: "Wiki Backlinks")
+            ],
+            contributes_languages: [],
+            contributes_debug_adapters: [],
+            contributes_themes: [],
+            contributes_keybindings: []
+        )
+        val host = ExtensionHost.new()
+        host.register_manifest(manifest, "/workspace/extensions/wiki-contract-test")
+        expect(host.command_registered("wiki.backlinks")).to_equal(false)
+        val invocation = host.dispatch_external_command("wiki.backlinks", "/workspace/notes/Home.md")
+        expect(invocation.status).to_equal("pending-runtime")
+        expect(invocation.command_id).to_equal("wiki.backlinks")
+        expect(invocation.payload).to_equal("/workspace/notes/Home.md")
+        expect(host.command_registered("wiki.backlinks")).to_equal(true)
+        expect(host.pending_invocation_count()).to_equal(1)
+        expect(host.drain_invocation_queue()).to_equal(1)
+        val blocked = host.last_runtime_dispatch()
+        expect(blocked.status).to_equal("blocked-runtime")
+        expect(blocked.reason).to_equal("runtime disabled")
+        host.set_runtime_policy(extension_runtime_policy_sandboxed(["/workspace/extensions"]))
+        val invocation2 = host.dispatch_external_command("wiki.backlinks", "/workspace/notes/Other.md")
+        expect(invocation2.status).to_equal("pending-runtime")
+        expect(host.drain_invocation_queue()).to_equal(1)
+        val ready = host.last_runtime_dispatch()
+        expect(ready.status).to_equal("ready-sandbox")
+        expect(ready.command_id).to_equal("wiki.backlinks")
+        expect(ready.main).to_equal("/workspace/extensions/wiki-contract-test/main.spl")
 
 describe "editor extension — host contribution wiring":
 

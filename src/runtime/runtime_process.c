@@ -93,11 +93,7 @@ static void proc_free(struct RtProcSlot* slot) {
 
 /* ===== Public API ===== */
 
-/*
- * Fork + exec `cmd` with `args`, wiring up stdin/stdout pipes.
- * Returns the child PID on success, -1 on error.
- */
-int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
+static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
     if (!cmd || !*cmd) return -1;
 
     struct RtProcSlot* slot = proc_alloc();
@@ -114,27 +110,11 @@ int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
         return -1;
     }
 
-    /* Build argv from SplArray */
-    int64_t argc = args ? spl_array_len(args) : 0;
-    char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 2));
-    if (!argv) {
-        close(stdin_pipe[0]); close(stdin_pipe[1]);
-        close(stdout_pipe[0]); close(stdout_pipe[1]);
-        return -1;
-    }
-    argv[0] = (char*)cmd;
-    for (int64_t i = 0; i < argc; i++) {
-        SplValue v = spl_array_get(args, i);
-        argv[i + 1] = (char*)(v.tag == SPL_STRING ? spl_as_str(v) : "");
-    }
-    argv[argc + 1] = NULL;
-
     fflush(stdout);
     fflush(stderr);
 
     pid_t pid = fork();
     if (pid < 0) {
-        free(argv);
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         return -1;
@@ -160,8 +140,6 @@ int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
     }
 
     /* === PARENT === */
-    free(argv);
-
     /* Close child-side ends */
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
@@ -175,6 +153,66 @@ int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
     slot->stdout_fd = stdout_pipe[0];
 
     return (int64_t)pid;
+}
+
+/*
+ * Fork + exec `cmd` with `args`, wiring up stdin/stdout pipes.
+ * Returns the child PID on success, -1 on error.
+ */
+int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
+    int64_t argc = args ? spl_array_len(args) : 0;
+    char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 2));
+    if (!argv) return -1;
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < argc; i++) {
+        SplValue v = spl_array_get(args, i);
+        argv[i + 1] = (char*)(v.tag == SPL_STRING ? spl_as_str(v) : "");
+    }
+    argv[argc + 1] = NULL;
+    int64_t pid = rt_process_spawn_piped_argv(cmd, argv);
+    free(argv);
+    return pid;
+}
+
+int64_t rt_editor_spawn_simple_dap(void) {
+    char* argv[] = {
+        "src/compiler_rust/target/debug/simple",
+        "run",
+        "src/app/dap/simple_dap_main.spl",
+        NULL
+    };
+    return rt_process_spawn_piped_argv(argv[0], argv);
+}
+
+bool rt_editor_start_simple_dap(int64_t pid) {
+    const char* init = "Content-Length: 84\r\n\r\n{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\",\"arguments\":{\"adapterID\":\"simple\"}}";
+    const char* launch = "Content-Length: 113\r\n\r\n{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":{\"program\":\"src/app/dap/simple_dap_main.spl\",\"cwd\":\".\"}}";
+    return rt_process_write_stdin(pid, init) && rt_process_write_stdin(pid, launch);
+}
+
+bool rt_editor_poll_simple_dap_stopped(int64_t pid) {
+    static char dap_buf[65536];
+    static size_t dap_len = 0;
+    for (int i = 0; i < 16; i++) {
+        const char* chunk = rt_process_read_stdout(pid);
+        if (!chunk || !*chunk) break;
+        size_t n = strlen(chunk);
+        if (dap_len + n >= sizeof(dap_buf)) {
+            dap_len = 0;
+        }
+        memcpy(dap_buf + dap_len, chunk, n);
+        dap_len += n;
+        dap_buf[dap_len] = '\0';
+    }
+    return strstr(dap_buf, "\"type\":\"event\"") != NULL && strstr(dap_buf, "\"event\":\"stopped\"") != NULL;
+}
+
+bool rt_editor_wait_simple_dap_stopped(int64_t pid) {
+    for (int i = 0; i < 40; i++) {
+        if (rt_editor_poll_simple_dap_stopped(pid)) return true;
+        usleep(100000);
+    }
+    return false;
 }
 
 /*

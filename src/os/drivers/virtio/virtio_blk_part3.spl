@@ -1,5 +1,6 @@
 # Part 3 of src/os/drivers/virtio/virtio_blk.spl
 use os.drivers.virtio.virtio_blk.*
+use os.drivers.virtio.virtio_blk_part1.*
 # VirtIO Block Device Driver
 #
 # MDSOC: feature dimension, drivers layer
@@ -45,7 +46,7 @@ impl BlockDevice for VirtioBlkDriver:
             return Result.Err("no free descriptors")
 
         # Header: VIRTIO_BLK_T_OUT (write)
-        mmio_write32(header_addr, VIRTIO_BLK_T_OUT)
+        mmio_write32(header_addr, 1)
         mmio_write32(header_addr + 4, 0)
         val w_lba_low = lba & 0xFFFFFFFF
         val w_lba_low_u32 = w_lba_low.to_u32()
@@ -56,7 +57,7 @@ impl BlockDevice for VirtioBlkDriver:
 
         val w_d0_off = desc0 * 16
         val w_d0_off_u64 = w_d0_off.to_u64()
-        val d0_addr = g_virtio_blk_desc_addr + w_d0_off_u64
+        val d0_addr = _virtq_desc_addr(desc0.to_u32())
         val w_ha_low = header_addr & 0xFFFFFFFF
         val w_ha_low_u32 = w_ha_low.to_u32()
         mmio_write32(d0_addr, w_ha_low_u32)
@@ -64,7 +65,7 @@ impl BlockDevice for VirtioBlkDriver:
         val w_ha_high_u32 = w_ha_high.to_u32()
         mmio_write32(d0_addr + 4, w_ha_high_u32)
         mmio_write32(d0_addr + 8, 16)
-        val w_fn_u32 = VIRTQ_DESC_F_NEXT.to_u32()
+        val w_fn_u32 = 1
         val w_d1_u32 = desc1.to_u32()
         mmio_write32(d0_addr + 12, (w_fn_u32 << 16) | w_d1_u32)
 
@@ -76,7 +77,7 @@ impl BlockDevice for VirtioBlkDriver:
 
         val w_d1_off = desc1 * 16
         val w_d1_off_u64 = w_d1_off.to_u64()
-        val d1_addr = g_virtio_blk_desc_addr + w_d1_off_u64
+        val d1_addr = _virtq_desc_addr(desc1.to_u32())
         val w_da_low = data_addr & 0xFFFFFFFF
         val w_da_low_u32 = w_da_low.to_u32()
         mmio_write32(d1_addr, w_da_low_u32)
@@ -84,14 +85,14 @@ impl BlockDevice for VirtioBlkDriver:
         val w_da_high_u32 = w_da_high.to_u32()
         mmio_write32(d1_addr + 4, w_da_high_u32)
         mmio_write32(d1_addr + 8, self.sector_size)
-        val w_fn2_u32 = VIRTQ_DESC_F_NEXT.to_u32()
+        val w_fn2_u32 = 1
         val w_d2_u32 = desc2.to_u32()
         mmio_write32(d1_addr + 12, (w_fn2_u32 << 16) | w_d2_u32)
 
         # Status byte: device-writable
         val w_d2_off = desc2 * 16
         val w_d2_off_u64 = w_d2_off.to_u64()
-        val d2_addr = g_virtio_blk_desc_addr + w_d2_off_u64
+        val d2_addr = _virtq_desc_addr(desc2.to_u32())
         val w_sa_low = status_addr & 0xFFFFFFFF
         val w_sa_low_u32 = w_sa_low.to_u32()
         mmio_write32(d2_addr, w_sa_low_u32)
@@ -99,14 +100,14 @@ impl BlockDevice for VirtioBlkDriver:
         val w_sa_high_u32 = w_sa_high.to_u32()
         mmio_write32(d2_addr + 4, w_sa_high_u32)
         mmio_write32(d2_addr + 8, 1)
-        val w_fw_u32 = VIRTQ_DESC_F_WRITE.to_u32()
+        val w_fw_u32 = 2
         mmio_write32(d2_addr + 12, w_fw_u32 << 16)
 
         val w_avail_u16 = desc0.to_u16()
         _virtq_push_avail(w_avail_u16.to_u32())
         _virtio_blk_reg_write32(80, 0)
 
-        if not self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS):
+        if not self.wait_completion(1000000):
             val wfd0 = desc0.to_u16()
             val wfd1 = desc1.to_u16()
             val wfd2 = desc2.to_u16()
@@ -117,7 +118,7 @@ impl BlockDevice for VirtioBlkDriver:
             return Result.Err("virtio-blk write timeout")
 
         val status = mmio_read8(status_addr)
-        if status != VIRTIO_BLK_S_OK:
+        if status != 0:
             val wfd0 = desc0.to_u16()
             val wfd1 = desc1.to_u16()
             val wfd2 = desc2.to_u16()

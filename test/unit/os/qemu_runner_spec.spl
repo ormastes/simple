@@ -26,6 +26,7 @@ use os.qemu_runner.{
     qemu_run_options_debug_gui
 }
 use os.kernel.arch.arch_context.{Architecture}
+use os.desktop_qemu_contract.{run_x64_desktop_disk_probe}
 use os.port.simpleos_multiplatform_build.{SimpleOsLaneKind, simpleos_platform_qemu_lane}
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -770,6 +771,60 @@ describe "Qemu runner native-build prerequisites":
         expect(env_prefix).to_contain("SIMPLE_BOOT_MINIMAL=1")
         expect(env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1")).to_equal(false)
 
+    it "keeps ARM64 smoke builds on minimal boot sources without freestanding unresolved-symbol stubs":
+        val smoke = OsTarget(
+            arch: Architecture.Arm64,
+            entry: "examples/simple_os/arch/arm64/smoke_entry.spl",
+            linker_script: "examples/simple_os/arch/arm64/fs_exec_linker.ld",
+            target_triple: "aarch64-unknown-none",
+            output: "build/os/simpleos_arm64_smoke.elf",
+            qemu_system: "qemu-system-aarch64",
+            qemu_machine: "virt",
+            qemu_cpu: "cortex-a72",
+            qemu_memory: "128M",
+            qemu_bios: "",
+            qemu_extra: [],
+            gui_mode: false
+        )
+        val env_prefix = os_native_build_env_prefix(smoke, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOT_MINIMAL=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+        expect(env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1")).to_equal(false)
+
+    it "keeps ARM32 smoke builds on minimal boot sources without freestanding unresolved-symbol stubs":
+        val smoke = OsTarget(
+            arch: Architecture.Arm32,
+            entry: "examples/simple_os/arch/arm32/smoke_entry.spl",
+            linker_script: "examples/simple_os/arch/arm32/fs_exec_linker.ld",
+            target_triple: "armv7-none-eabi",
+            output: "build/os/simpleos_arm32_smoke.elf",
+            qemu_system: "qemu-system-arm",
+            qemu_machine: "virt",
+            qemu_cpu: "cortex-a15",
+            qemu_memory: "128M",
+            qemu_bios: "",
+            qemu_extra: [],
+            gui_mode: false
+        )
+        val env_prefix = os_native_build_env_prefix(smoke, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOT_MINIMAL=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+        expect(env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1")).to_equal(false)
+
+    it "keeps ARM64 fs-exec on minimal boot sources without freestanding unresolved-symbol stubs":
+        val fs_exec = scenario_target(scenario_arm64_virtio_fat32_smf())
+        val env_prefix = os_native_build_env_prefix(fs_exec, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOT_MINIMAL=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+        expect(env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1")).to_equal(false)
+
+    it "keeps ARM32 fs-exec on minimal boot sources without freestanding unresolved-symbol stubs":
+        val fs_exec = scenario_target(scenario_arm32_virtio_fat32_smf())
+        val env_prefix = os_native_build_env_prefix(fs_exec, "")
+        expect(env_prefix).to_contain("SIMPLE_BOOT_MINIMAL=1")
+        expect(env_prefix).to_contain("SIMPLE_LIB=\"$(pwd)/src\"")
+        expect(env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1")).to_equal(false)
+
     it "keeps the checked-in generated fallback aligned with the enabled override template":
         val fallback = rt_file_read_text("src/generated/simpleos_log_config.spl")
         expect(fallback).to_equal(_simpleos_log_config_source(true))
@@ -1011,6 +1066,9 @@ describe "Qemu runner desktop UEFI tool app validator":
 
         val serial = "QEMU x86_64 desktop lane\n" +
             "[phase-3-mount] fat32 ok\n" +
+            "[kernel] syscall-abi:ok arch=x86_64\n" +
+            "[kernel] scheduler:ok runqueue=user\n" +
+            "[kernel] vfs-service:ok root=/\n" +
             "[vfs] mounted fat32 device=nvme0 volume=simpleos\n" +
             "[fs-exec] spawn:image path=/sys/apps/wine_hello entry=0 segments=1 stub_bytes=128 argv_count=1 env_count=0\n" +
             "[desktop-e2e] process-backed:ok app=wine_hello pid=42\n" +
@@ -1018,9 +1076,23 @@ describe "Qemu runner desktop UEFI tool app validator":
             "[desktop-e2e] network-smoke:bounded ok packets=1\n" +
             "[desktop-e2e] container-namespace:ok pid fs ipc net capability\n" +
             "[desktop-e2e] container-rootfs:ok rootfs=/containers/wine rootfs_backend=nvfs\n" +
+            "[desktop-e2e] mdsoc-capsule:ok owner=process-container-wm\n" +
+            "[desktop-e2e] mdsoc-public-port:ok facade=exec-env\n" +
+            "[desktop-e2e] mdsoc-resident-state-owner:ok ecs=wm,process,container\n" +
             "TEST PASSED"
         expect(desktop_wine_exec_env_marker_contract_accepts(serial)).to_equal(true)
         expect(desktop_wine_exec_env_marker_contract_accepts(serial.replace("[desktop-e2e] container-rootfs:ok", "[desktop-e2e] container-rootfs:missing"))).to_equal(false)
+
+    it "stops the x64 desktop disk probe after a terminal serial pass marker":
+        val root = "build/test-x64-desktop-disk-probe"
+        val serial = root + "/serial.log"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val (stdout, _stderr, exit_code) = run_x64_desktop_disk_probe(
+            ["/bin/sh", "-c", "'printf \"boot\\\\nTEST PASSED\\\\n\"; sleep 5'"],
+            serial,
+            1500)
+        expect(exit_code).to_equal(0)
+        expect(stdout).to_contain("TEST PASSED")
 
     it "requires clang in the riscv64 hosted acceptance marker set":
         val markers = riscv64_hosted_required_marker_fragments()

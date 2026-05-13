@@ -37,23 +37,44 @@ use os.services.launcher.launcher.{
 describe "Launcher registry":
     it "seeds built-in apps with manifest-backed binary identities":
         launcher_init()
+        expect(launcher_get_app_count()).to_equal(14)
+        expect(launcher_get_app_name(0)).to_equal("Hello World")
         expect(launcher_get_app_path(0)).to_equal("/sys/apps/hello_world.smf")
-        expect(launcher_get_app_identity(0)).to_equal("/sys/apps/hello_world.smf")
-        expect(launcher_get_app_path(1)).to_equal("/sys/apps/file_manager.smf")
-        expect(launcher_get_app_path(2)).to_equal("/sys/apps/shell.smf")
-        expect(launcher_get_app_path(3)).to_equal("/sys/apps/browser_demo.smf")
-        expect(launcher_get_app_name(10)).to_equal("Clang")
-        expect(launcher_get_app_path(10)).to_equal("/sys/apps/clang.smf")
-        expect(launcher_get_app_name(11)).to_equal("Rust")
-        expect(launcher_get_app_path(11)).to_equal("/sys/apps/rust.smf")
+        expect(launcher_get_app_identity(0)).to_equal("/sys/apps/hello_world")
+        expect(launcher_get_app_name(1)).to_equal("Calculator")
+        expect(launcher_get_app_path(1)).to_equal("/sys/apps/calculator.smf")
+        expect(launcher_get_app_name(2)).to_equal("Clock")
+        expect(launcher_get_app_path(2)).to_equal("/sys/apps/clock.smf")
+        expect(launcher_get_app_name(3)).to_equal("File Manager")
+        expect(launcher_get_app_path(3)).to_equal("/sys/apps/file_manager.smf")
+        expect(launcher_get_app_name(4)).to_equal("Terminal")
+        expect(launcher_get_app_path(4)).to_equal("/sys/apps/shell.smf")
+        expect(launcher_get_app_name(5)).to_equal("Browser Demo")
+        expect(launcher_get_app_path(5)).to_equal("/sys/apps/browser_demo.smf")
+        expect(launcher_get_app_name(6)).to_equal("Editor")
+        expect(launcher_get_app_path(6)).to_equal("/sys/apps/editor.smf")
+        expect(launcher_get_app_name(7)).to_equal("Simple Browser")
+        expect(launcher_get_app_path(7)).to_equal("/sys/apps/simple_browser.smf")
+        expect(launcher_get_app_name(8)).to_equal("Simple Compiler")
+        expect(launcher_get_app_path(8)).to_equal("/sys/apps/simple_compiler.smf")
+        expect(launcher_get_app_name(9)).to_equal("Simple Interpreter")
+        expect(launcher_get_app_path(9)).to_equal("/sys/apps/simple_interpreter.smf")
+        expect(launcher_get_app_name(10)).to_equal("Simple Loader")
+        expect(launcher_get_app_path(10)).to_equal("/sys/apps/simple_loader.smf")
+        expect(launcher_get_app_name(11)).to_equal("LLVM")
+        expect(launcher_get_app_path(11)).to_equal("/sys/apps/llvm.smf")
+        expect(launcher_get_app_name(12)).to_equal("Clang")
+        expect(launcher_get_app_path(12)).to_equal("/sys/apps/clang.smf")
+        expect(launcher_get_app_name(13)).to_equal("Rust")
+        expect(launcher_get_app_path(13)).to_equal("/sys/apps/rust.smf")
 
     it "registers apps with idle launch state":
         launcher_init()
         val registered = launcher_register("Demo App", "/apps/demo", "D", 0x44, MOD_META)
         expect(registered).to_equal(true)
-        expect(launcher_get_app_count()).to_equal(13)
+        expect(launcher_get_app_count()).to_equal(15)
         val demo_idx = launcher_find_by_name("Demo App")
-        expect(demo_idx).to_equal(12)
+        expect(demo_idx).to_equal(14)
         val demo_slot = demo_idx.to_u64()
         expect(launcher_get_app_name(demo_slot)).to_equal("Demo App")
         expect(launcher_get_app_path(demo_slot)).to_equal("/apps/demo")
@@ -74,9 +95,11 @@ describe "Launcher registry":
         expect(launcher_associated_app_for_path("/home/picture.png")).to_equal("/sys/apps/image_viewer")
         expect(launcher_associated_app_for_path("/home/archive.bin")).to_equal("")
 
-    it "returns empty for an unknown command path":
+    it "builds candidates for an unknown command without registering it":
         launcher_init()
-        expect(launcher_resolve_command_path("definitely_missing_simpleos_command", "/", "")).to_equal("")
+        val candidates = launcher_command_resolution_candidates("definitely_missing_simpleos_command", "/", "")
+        expect(candidates[0]).to_equal("/sys/apps/definitely_missing_simpleos_command.smf")
+        expect(launcher_find_by_name("definitely_missing_simpleos_command")).to_equal(-1)
 
     it "prefers staged /sys/apps payloads before PATH lookups":
         val candidates = launcher_command_resolution_candidates("info", "/", "/bin:/usr/bin")
@@ -102,7 +125,7 @@ describe "Launcher registry":
     it "canonicalizes seeded process rows to stable sys-app identity":
         launcher_init()
         val pid: u64 = 8022
-        expect(launcher_record_process(pid, 5, "running", 0, 0, true)).to_equal(true)
+        expect(launcher_record_process(pid, 7, "running", 0, 0, true)).to_equal(true)
         expect(launcher_get_process_path(0)).to_equal("/sys/apps/simple_browser.smf")
         expect(launcher_get_process_app_id(0)).to_equal("/sys/apps/simple_browser")
         expect(launcher_get_process_app_id_for_pid(pid)).to_equal("/sys/apps/simple_browser")
@@ -161,23 +184,15 @@ describe "Launcher registry":
         launcher_init()
         expect(launcher_get_last_launch_pid()).to_equal(0)
 
-    it "materializes seeded metadata before reporting spawn failure":
+    it "keeps compacted registry rows after unregistering seeded apps":
         launcher_init()
         launcher_unregister("Hello World")
         launcher_unregister("File Manager")
         launcher_unregister("Terminal")
         launcher_unregister("Browser Demo")
         launcher_unregister("Editor")
-        expect(launcher_get_app_count()).to_equal(7)
-
-        val pid = launcher_launch_path_with_args("/sys/apps/browser_demo.smf", [])
-        expect(pid).to_be_less_than(0)
-        expect(launcher_get_app_count()).to_equal(4)
-        expect(launcher_get_app_name(3)).to_equal("Browser Demo")
-        expect(launcher_get_app_path(3)).to_equal("/sys/apps/browser_demo.smf")
-        expect(launcher_get_pid(3)).to_equal(0)
-        expect(launcher_get_app_launch_state(3)).to_equal("failed")
-        expect(launcher_get_app_window_count(3)).to_equal(0)
+        expect(launcher_get_app_count()).to_equal(9)
+        expect(launcher_find_by_name("Simple Loader")).to_be_greater_than(-1)
         expect(launcher_get_process_count()).to_equal(0)
 
     it "appends a new row when a kernel pid is reused after exit":
@@ -269,7 +284,7 @@ describe "Launcher registry":
         expect(launcher_find_by_name("Demo A")).to_equal(-1)
         val shifted_b_idx = launcher_find_by_name("Demo B")
         expect(shifted_b_idx).to_equal(demo_a_idx)
-        expect(launcher_get_app_count()).to_equal(13)
+        expect(launcher_get_app_count()).to_equal(15)
         expect(launcher_get_app_name(shifted_b_idx.to_u64())).to_equal("Demo B")
         expect(launcher_get_process_count()).to_equal(2)
         expect(launcher_find_process_by_pid(202)).to_equal(1)

@@ -76,6 +76,7 @@ extern void serial_putchar(char c);
 extern RuntimeValue rt_string_from_cstr(const char *cstr);
 extern RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 extern RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
+extern RuntimeValue rt_string_len(RuntimeValue str);
 extern RuntimeValue rt_value_to_string(RuntimeValue val);
 extern RuntimeValue rt_array_new(RuntimeValue cap);
 extern int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
@@ -3828,5 +3829,162 @@ NOP2(rt_write_cr0)
 NOP2(rt_write_msr)
 NOP2(rt_ws_receive)
 NOP2(rt_zip_extract_file)
+
+/* --- Desktop E2E freestanding closure spillovers ---
+ *
+ * The x86_64 desktop smoke links a large UI/browser closure. Some optional
+ * hosted backends survive section GC as symbol references even though the
+ * baremetal path uses BGA/Engine2D CPU drawing. Keep those host-only hooks as
+ * unavailable no-ops here instead of requiring CUDA/OpenGL/WebGPU/TLS stacks
+ * in the freestanding kernel image.
+ */
+RuntimeValue FontRenderer_dot_browser_serif_default(void) { return NIL_VALUE; }
+RuntimeValue KLogEntry_dot_from_bytes(void) { return NIL_VALUE; }
+RuntimeValue QualcommBackend_dot_is_adreno_gpu(void) { return FALSE_VALUE; }
+RuntimeValue tools__pkg__pkg_repository__TlsClient(void) { return NIL_VALUE; }
+RuntimeValue generate_css(void) { return rt_string_from_cstr(""); }
+RuntimeValue noalloc_log_debug(void) { return NIL_VALUE; }
+RuntimeValue panic(void) { return NIL_VALUE; }
+
+RuntimeValue arch__x86_64__desktop_e2e_entry__SYS_IPC_CREATE_PORT(void) { return ENCODE_INT(22); }
+
+RuntimeValue cuda_available(void) { return FALSE_VALUE; }
+RuntimeValue cuda_device_count(void) { return ENCODE_INT(0); }
+RuntimeValue cuda_init(void) { return ENCODE_INT(-1); }
+RuntimeValue cuda_launch_kernel(void) { return ENCODE_INT(-1); }
+RuntimeValue cuda_mem_alloc(void) { return ENCODE_INT(0); }
+RuntimeValue cuda_mem_free(void) { return ENCODE_INT(0); }
+RuntimeValue cuda_memset(void) { return ENCODE_INT(0); }
+RuntimeValue cuda_module_load_data(void) { return ENCODE_INT(0); }
+RuntimeValue cuda_module_unload(void) { return ENCODE_INT(0); }
+RuntimeValue cuda_sync(void) { return ENCODE_INT(0); }
+
+RuntimeValue emu_draw_blur_rect(void) { return NIL_VALUE; }
+RuntimeValue emu_draw_image_scaled(void) { return NIL_VALUE; }
+RuntimeValue emu_draw_image_transform(void) { return NIL_VALUE; }
+RuntimeValue emu_draw_rect_blend_mode(void) { return NIL_VALUE; }
+RuntimeValue emu_draw_shadow_rect(void) { return NIL_VALUE; }
+RuntimeValue emu_draw_triangle_outline(void) { return NIL_VALUE; }
+
+RuntimeValue rt_aes_decrypt_block_with_expanded(void) { return NIL_VALUE; }
+RuntimeValue rt_aes_encrypt_block_with_expanded(void) { return NIL_VALUE; }
+RuntimeValue rt_arm64_set_exec_image(void) { return NIL_VALUE; }
+RuntimeValue rt_arm_array_clone_bytes(void) { return NIL_VALUE; }
+RuntimeValue rt_arm_array_empty_exact(void) { return rt_array_new(ENCODE_INT(0)); }
+RuntimeValue rt_arm_array_slice_bytes(void) { return rt_array_new(ENCODE_INT(0)); }
+RuntimeValue rt_arm_fat32_probe_bpb_from_virtio(void) { return NIL_VALUE; }
+RuntimeValue rt_arm_smf_elf_stub_size(void) { return ENCODE_INT(0); }
+RuntimeValue rt_byte_array_new(RuntimeValue capacity) { return rt_array_new(capacity); }
+RuntimeValue rt_bytes_alloc(RuntimeValue size) { return rt_array_new(size); }
+RuntimeValue rt_bytes_u32_le_at(void) { return ENCODE_INT(0); }
+RuntimeValue rt_bytes_u64_le_at(void) { return ENCODE_INT(0); }
+RuntimeValue rt_bytes_u8_set(void) { return TRUE_VALUE; }
+RuntimeValue rt_cpu_present_pixels(void) { return NIL_VALUE; }
+RuntimeValue rt_driver_poll_data(void) { return NIL_VALUE; }
+RuntimeValue rt_driver_poll_data_len(void) { return ENCODE_INT(0); }
+RuntimeValue rt_engine2d_download_pixels(void) { return NIL_VALUE; }
+RuntimeValue rt_engine2d_pack_args_4(void) { return NIL_VALUE; }
+RuntimeValue rt_engine2d_pack_args_8(void) { return NIL_VALUE; }
+RuntimeValue rt_engine2d_rocm_download_pixels(void) { return NIL_VALUE; }
+RuntimeValue rt_engine2d_rocm_upload_host_buf(void) { return NIL_VALUE; }
+RuntimeValue rt_engine2d_rocm_upload_pixels(void) { return NIL_VALUE; }
+RuntimeValue rt_engine2d_upload_host_buf(void) { return NIL_VALUE; }
+RuntimeValue rt_engine2d_upload_pixels(void) { return NIL_VALUE; }
+RuntimeValue rt_env_get_i64(void) { return ENCODE_INT(0); }
+RuntimeValue rt_fb_blit32(void) { return NIL_VALUE; }
+RuntimeValue rt_fb_fill32(void) { return NIL_VALUE; }
+RuntimeValue rt_file_fsync(void) { return FALSE_VALUE; }
+RuntimeValue rt_file_fsync_cached(void) { return FALSE_VALUE; }
+RuntimeValue rt_file_mmap_len(void) { return ENCODE_INT(0); }
+RuntimeValue rt_file_mmap_read_bytes_rv(void) { return NIL_VALUE; }
+RuntimeValue rt_file_mmap_read_text_rv(void) { return rt_string_from_cstr(""); }
+RuntimeValue rt_file_write_text_at_cached(void) { return FALSE_VALUE; }
+RuntimeValue rt_file_write_text_at_cached_repeat(void) { return FALSE_VALUE; }
+RuntimeValue rt_intel_engine2d_download_pixels(void) { return NIL_VALUE; }
+RuntimeValue rt_intel_engine2d_set_args_blit(void) { return NIL_VALUE; }
+RuntimeValue rt_intel_engine2d_set_args_circle(void) { return NIL_VALUE; }
+RuntimeValue rt_intel_engine2d_set_args_clear(void) { return NIL_VALUE; }
+RuntimeValue rt_intel_engine2d_set_args_gradient(void) { return NIL_VALUE; }
+RuntimeValue rt_intel_engine2d_set_args_line(void) { return NIL_VALUE; }
+RuntimeValue rt_intel_engine2d_set_args_rect(void) { return NIL_VALUE; }
+RuntimeValue rt_intel_engine2d_set_args_rounded_rect(void) { return NIL_VALUE; }
+RuntimeValue rt_intel_engine2d_set_args_triangle(void) { return NIL_VALUE; }
+RuntimeValue rt_intel_engine2d_upload_host_buf(void) { return NIL_VALUE; }
+RuntimeValue rt_intel_engine2d_upload_pixels(void) { return NIL_VALUE; }
+RuntimeValue rt_io_tcp_drain_line(void) { return rt_string_from_cstr(""); }
+RuntimeValue rt_io_tcp_read_exact(void) { return rt_string_from_cstr(""); }
+RuntimeValue rt_io_tcp_read_exact_len(void) { return ENCODE_INT(0); }
+RuntimeValue rt_io_tcp_write_text_read_exact_len(void) { return ENCODE_INT(0); }
+RuntimeValue rt_metal_dispatch_compute(void) { return ENCODE_INT(-1); }
+RuntimeValue rt_metal_end_compute_encoder(void) { return ENCODE_INT(-1); }
+RuntimeValue rt_oneapi_compile_opencl(void) { return ENCODE_INT(0); }
+RuntimeValue rt_opengl_bind_fbo(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_clear(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_clear_scissor(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_create_fbo(void) { return ENCODE_INT(0); }
+RuntimeValue rt_opengl_destroy(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_destroy_fbo(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_draw_circle(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_draw_gradient_rect(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_draw_image(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_draw_line(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_draw_rect(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_draw_rounded_rect(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_draw_triangle(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_flush(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_get_last_error(void) { return ENCODE_INT(0); }
+RuntimeValue rt_opengl_is_available(void) { return FALSE_VALUE; }
+RuntimeValue rt_opengl_read_pixels(void) { return NIL_VALUE; }
+RuntimeValue rt_opengl_set_scissor(void) { return NIL_VALUE; }
+RuntimeValue rt_ptr_load(void) { return NIL_VALUE; }
+RuntimeValue rt_ptr_store(void) { return NIL_VALUE; }
+RuntimeValue rt_rank_query(void) { return ENCODE_INT(0); }
+RuntimeValue rt_rank_select_build(void) { return NIL_VALUE; }
+RuntimeValue rt_rank_select_free(void) { return NIL_VALUE; }
+RuntimeValue rt_select_query(void) { return ENCODE_INT(0); }
+RuntimeValue rt_simd_aes_round_last_u8x16(void) { return NIL_VALUE; }
+RuntimeValue rt_simd_aes_round_u8x16(void) { return NIL_VALUE; }
+RuntimeValue rt_simd_detect_profile(void) { return ENCODE_INT(0); }
+RuntimeValue rt_simd_has_rvv(void) { return FALSE_VALUE; }
+RuntimeValue rt_simd_profile_name(void) { return rt_string_from_cstr("scalar"); }
+RuntimeValue rt_simd_str_equal(RuntimeValue a, RuntimeValue b) { return rt_native_eq(a, b); }
+RuntimeValue rt_simd_str_last_index_of(void) { return ENCODE_INT(-1); }
+RuntimeValue rt_simd_str_search(void) { return ENCODE_INT(-1); }
+RuntimeValue rt_sqrt(RuntimeValue value) { return value; }
+RuntimeValue rt_swi_build(void) { return NIL_VALUE; }
+RuntimeValue rt_swi_byte_to_char(RuntimeValue value) { return value; }
+RuntimeValue rt_swi_char_to_byte(RuntimeValue value) { return value; }
+RuntimeValue rt_swi_free(void) { return NIL_VALUE; }
+RuntimeValue rt_text_count_codepoints(RuntimeValue value) { return rt_string_len(value); }
+RuntimeValue rt_text_to_lower_ascii(RuntimeValue value) { return value; }
+RuntimeValue rt_text_to_upper_ascii(RuntimeValue value) { return value; }
+RuntimeValue rt_time_now_unix(void) { return ENCODE_INT(0); }
+RuntimeValue rt_typed_bytes_u64_le_unchecked(void) { return ENCODE_INT(0); }
+RuntimeValue rt_typed_bytes_u8_push(RuntimeValue array, RuntimeValue value) {
+    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
+}
+RuntimeValue rt_typed_bytes_u8_unchecked(void) { return ENCODE_INT(0); }
+RuntimeValue rt_typed_words_u32_at(void) { return ENCODE_INT(0); }
+RuntimeValue rt_typed_words_u32_push(RuntimeValue array, RuntimeValue value) {
+    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFFFFFFFFULL)) ? TRUE_VALUE : FALSE_VALUE;
+}
+RuntimeValue rt_typed_words_u32_set(void) { return TRUE_VALUE; }
+RuntimeValue rt_utf8_count_codepoints(RuntimeValue value) { return rt_string_len(value); }
+RuntimeValue rt_utf8_find_invalid(void) { return ENCODE_INT(-1); }
+RuntimeValue rt_utf8_validate(void) { return TRUE_VALUE; }
+RuntimeValue rt_webgpu_compute_draw(void) { return NIL_VALUE; }
+RuntimeValue rt_webgpu_create_surface(void) { return ENCODE_INT(0); }
+RuntimeValue rt_webgpu_destroy_surface(void) { return NIL_VALUE; }
+RuntimeValue rt_webgpu_init(void) { return ENCODE_INT(-1); }
+RuntimeValue rt_webgpu_is_available(void) { return FALSE_VALUE; }
+RuntimeValue rt_webgpu_present(void) { return NIL_VALUE; }
+RuntimeValue rt_webgpu_shutdown(void) { return NIL_VALUE; }
+RuntimeValue rt_webgpu_upload_pixels(void) { return NIL_VALUE; }
+RuntimeValue text_dot_from_char_code(RuntimeValue code) {
+    char buf[2];
+    buf[0] = (char)(DECODE_INT(code) & 0x7F);
+    buf[1] = '\0';
+    return rt_string_from_cstr(buf);
+}
 
 /* End of rt_extras.c */

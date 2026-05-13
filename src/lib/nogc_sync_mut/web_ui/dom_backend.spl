@@ -1,14 +1,9 @@
-# EngineDomBackend — DomBackend implementation using the browser engine.
-# Wraps the browser engine's Document and ScriptToDomBridge to provide
-# the platform-independent DomBackend trait for desktop web_ui apps.
+# EngineDomBackend — stdlib-local DOM backend for desktop web_ui apps.
 
 use std.common.web.dom.{DomBackend, WebElement}
 use std.common.web.event.{EventBackend, WebEvent, WebEventType}
-use examples.browser.feature.dom.document.{Document, NodeStore}
-use examples.browser.feature.dom.element.{ElementOps}
-use examples.browser.transform.script_to_dom.{ScriptToDomBridge, JsMutation}
-use examples.browser.entity.dom.node_types.{DomNode, NodeKind}
-use examples.browser.shared.logging.{Logger, LogLevel}
+use common.web.node_types.{DomNode, NodeKind}
+use common.web.logging.{Logger, LogLevel}
 
 # Event listener entry for the engine backend.
 class EngineEventListener:
@@ -19,10 +14,30 @@ class EngineEventListener:
     static fn create(element_id: i64, event_type: WebEventType, handler: fn(WebEvent)) -> EngineEventListener:
         EngineEventListener(element_id: element_id, event_type: event_type, handler: handler)
 
-# DOM backend using the browser engine's Document model.
+class WebUiAttr:
+    name: text
+    value: text
+
+    static fn create(name: text, value: text) -> WebUiAttr:
+        WebUiAttr(name: name, value: value)
+
+class WebUiDomRecord:
+    node: DomNode
+    tag: text
+    text_content: text
+    attrs: [WebUiAttr]
+
+    static fn create(id: i64, kind: NodeKind, tag: text, text_content: text) -> WebUiDomRecord:
+        WebUiDomRecord(
+            node: DomNode.create(id, kind, -1, tag),
+            tag: tag,
+            text_content: text_content,
+            attrs: []
+        )
+
 class EngineDomBackend:
-    doc: Document
-    bridge: ScriptToDomBridge
+    nodes: [WebUiDomRecord]
+    next_id: i64
     logger: Logger
     dirty: bool
     listeners: List<EngineEventListener>
@@ -30,24 +45,102 @@ class EngineDomBackend:
     root_id: i64
 
     static fn create(logger: Logger) -> EngineDomBackend:
-        var store = NodeStore.create()
-        # Create minimal document structure: #document > html > body
-        val doc_id = store.allocate_node(NodeKind.Document, "#document")
-        val html_id = store.allocate_node(NodeKind.Element, "html")
-        val body_id = store.allocate_node(NodeKind.Element, "body")
-        var doc = Document.create(store)
-        doc.appendChild(doc_id, html_id)
-        doc.appendChild(html_id, body_id)
-        val s2d = ScriptToDomBridge.new(logger)
+        val doc_id = 1
+        val html_id = 2
+        val body_id = 3
+        var doc = WebUiDomRecord.create(doc_id, NodeKind.Document, "#document", "")
+        var html = WebUiDomRecord.create(html_id, NodeKind.Element, "html", "")
+        var body = WebUiDomRecord.create(body_id, NodeKind.Element, "body", "")
+        doc.node.children.push(html_id)
+        html.node.parent_id = doc_id
+        html.node.children.push(body_id)
+        body.node.parent_id = html_id
         EngineDomBackend(
-            doc: doc,
-            bridge: s2d,
+            nodes: [doc, html, body],
+            next_id: 4,
             logger: logger,
             dirty: false,
-            listeners: List<EngineEventListener>(),
+            listeners: [],
             body_id: body_id,
             root_id: html_id
         )
+
+    fn find_index(node_id: i64) -> i64:
+        var i = 0
+        while i < self.nodes.len():
+            if self.nodes[i].node.id == node_id:
+                return i
+            i = i + 1
+        -1
+
+    fn attr_value(node_id: i64, name: text) -> Option<text>:
+        val idx = self.find_index(node_id)
+        if idx < 0:
+            return nil
+        for attr in self.nodes[idx].attrs:
+            if attr.name == name:
+                return Some(attr.value)
+        nil
+
+    me set_attr_value(node_id: i64, name: text, value: text):
+        val idx = self.find_index(node_id)
+        if idx < 0:
+            return
+        var attrs: [WebUiAttr] = []
+        var found = false
+        for attr in self.nodes[idx].attrs:
+            if attr.name == name:
+                attrs.push(WebUiAttr.create(name, value))
+                found = true
+            else:
+                attrs.push(attr)
+        if not found:
+            attrs.push(WebUiAttr.create(name, value))
+        self.nodes[idx].attrs = attrs
+
+    me remove_attr_value(node_id: i64, name: text):
+        val idx = self.find_index(node_id)
+        if idx < 0:
+            return
+        var attrs: [WebUiAttr] = []
+        for attr in self.nodes[idx].attrs:
+            if attr.name != name:
+                attrs.push(attr)
+        self.nodes[idx].attrs = attrs
+
+    me append_child_id(parent_id: i64, child_id: i64):
+        val pidx = self.find_index(parent_id)
+        val cidx = self.find_index(child_id)
+        if pidx < 0 or cidx < 0:
+            return
+        self.nodes[pidx].node.children.push(child_id)
+        self.nodes[cidx].node.parent_id = parent_id
+
+    me detach_child_id(parent_id: i64, child_id: i64):
+        val pidx = self.find_index(parent_id)
+        if pidx < 0:
+            return
+        var children: [i64] = []
+        for id in self.nodes[pidx].node.children:
+            if id != child_id:
+                children.push(id)
+        self.nodes[pidx].node.children = children
+        val cidx = self.find_index(child_id)
+        if cidx >= 0:
+            self.nodes[cidx].node.parent_id = -1
+
+    fn matches_selector(rec: WebUiDomRecord, selector: text) -> bool:
+        if selector.starts_with("#"):
+            val id_value = selector.substring(1)
+            match self.attr_value(rec.node.id, "id"):
+                Some(v): return v == id_value
+                nil: return false
+        if selector.starts_with("."):
+            val class_value = selector.substring(1)
+            match self.attr_value(rec.node.id, "class"):
+                Some(v): return v.contains(class_value)
+                nil: return false
+        rec.tag == selector
 
     # Check if mutations occurred since last render.
     fn is_dirty() -> bool: self.dirty
@@ -67,103 +160,142 @@ class EngineDomBackend:
 
 impl DomBackend for EngineDomBackend:
     me create_element(tag: text) -> WebElement:
-        val id = self.doc.createElement(tag)
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.nodes.push(WebUiDomRecord.create(id, NodeKind.Element, tag, ""))
         self.dirty = true
         WebElement.from_id(id)
 
     me create_text_node(content: text) -> WebElement:
-        val id = self.doc.createTextNode(content)
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.nodes.push(WebUiDomRecord.create(id, NodeKind.Text, "#text", content))
         self.dirty = true
         WebElement.from_id(id)
 
     me append_child(parent: WebElement, child: WebElement):
-        self.doc.appendChild(parent.id, child.id)
+        self.append_child_id(parent.id, child.id)
         self.dirty = true
 
     me insert_before(parent: WebElement, new_child: WebElement, ref_child: WebElement):
-        self.doc.insertBefore(parent.id, new_child.id, ref_child.id)
+        val pidx = self.find_index(parent.id)
+        val nidx = self.find_index(new_child.id)
+        if pidx >= 0 and nidx >= 0:
+            var children: [i64] = []
+            var inserted = false
+            for id in self.nodes[pidx].node.children:
+                if id == ref_child.id:
+                    children.push(new_child.id)
+                    inserted = true
+                children.push(id)
+            if not inserted:
+                children.push(new_child.id)
+            self.nodes[pidx].node.children = children
+            self.nodes[nidx].node.parent_id = parent.id
         self.dirty = true
 
     me remove_child(parent: WebElement, child: WebElement):
-        self.doc.removeChild(parent.id, child.id)
+        self.detach_child_id(parent.id, child.id)
         self.dirty = true
 
     me replace_child(parent: WebElement, new_child: WebElement, old_child: WebElement):
-        self.doc.replaceChild(parent.id, new_child.id, old_child.id)
+        val pidx = self.find_index(parent.id)
+        val nidx = self.find_index(new_child.id)
+        if pidx >= 0 and nidx >= 0:
+            var children: [i64] = []
+            for id in self.nodes[pidx].node.children:
+                if id == old_child.id:
+                    children.push(new_child.id)
+                else:
+                    children.push(id)
+            self.nodes[pidx].node.children = children
+            self.nodes[nidx].node.parent_id = parent.id
         self.dirty = true
 
     me set_attribute(element: WebElement, name: text, value: text):
-        ElementOps.setAttribute(self.doc, element.id, name, value)
+        self.set_attr_value(element.id, name, value)
         self.dirty = true
 
     me get_attribute(element: WebElement, name: text) -> Option<text>:
-        ElementOps.getAttribute(self.doc, element.id, name)
+        self.attr_value(element.id, name)
 
     me remove_attribute(element: WebElement, name: text):
-        ElementOps.removeAttribute(self.doc, element.id, name)
+        self.remove_attr_value(element.id, name)
         self.dirty = true
 
     me set_text_content(element: WebElement, content: text):
-        val mutation = JsMutation.SetTextContent(node_id: element.id, content: content)
-        self.bridge.apply_js_mutation(mutation, self.doc)
+        val idx = self.find_index(element.id)
+        if idx >= 0:
+            self.nodes[idx].text_content = content
         self.dirty = true
 
     me get_text_content(element: WebElement) -> text:
-        val node = self.doc.store.get_text(element.id)
-        match node:
-            Some(t): t.data
-            nil: ""
+        val idx = self.find_index(element.id)
+        if idx < 0:
+            return ""
+        self.nodes[idx].text_content
 
     me set_inner_html(element: WebElement, html: text):
-        val mutation = JsMutation.SetInnerHTML(node_id: element.id, html: html)
-        self.bridge.apply_js_mutation(mutation, self.doc)
+        val idx = self.find_index(element.id)
+        if idx >= 0:
+            self.nodes[idx].text_content = html
         self.dirty = true
 
     me get_inner_html(element: WebElement) -> text:
-        ""
+        self.get_text_content(element)
 
     me add_class(element: WebElement, class_name: text):
-        val mutation = JsMutation.AddClass(node_id: element.id, class_name: class_name)
-        self.bridge.apply_js_mutation(mutation, self.doc)
+        val existing = self.get_attribute(element, "class")
+        match existing:
+            Some(v):
+                if not v.contains(class_name):
+                    self.set_attr_value(element.id, "class", "{v} {class_name}")
+            nil:
+                self.set_attr_value(element.id, "class", class_name)
         self.dirty = true
 
     me remove_class(element: WebElement, class_name: text):
-        val mutation = JsMutation.RemoveClass(node_id: element.id, class_name: class_name)
-        self.bridge.apply_js_mutation(mutation, self.doc)
+        val existing = self.get_attribute(element, "class")
+        match existing:
+            Some(v):
+                self.set_attr_value(element.id, "class", v.replace(class_name, "").trim())
+            nil:
+                pass_dn
         self.dirty = true
 
     me has_class(element: WebElement, class_name: text) -> bool:
-        val class_attr = ElementOps.getAttribute(self.doc, element.id, "class")
+        val class_attr = self.get_attribute(element, "class")
         match class_attr:
             Some(classes): classes.contains(class_name)
             nil: false
 
     me set_style(element: WebElement, property: text, value: text):
-        val mutation = JsMutation.SetStyle(node_id: element.id, property: property, value: value)
-        self.bridge.apply_js_mutation(mutation, self.doc)
+        val current = self.get_attribute(element, "style")
+        match current:
+            Some(v): self.set_attr_value(element.id, "style", "{v}; {property}: {value}")
+            nil: self.set_attr_value(element.id, "style", "{property}: {value}")
         self.dirty = true
 
     me get_style(element: WebElement, property: text) -> text:
-        ""
+        match self.get_attribute(element, "style"):
+            Some(v): v
+            nil: ""
 
     me query_selector(selector: text) -> Option<WebElement>:
-        val result = self.doc.querySelector(selector)
-        match result:
-            Some(id): Some(WebElement.from_id(id))
-            nil: nil
+        for rec in self.nodes:
+            if self.matches_selector(rec, selector):
+                return Some(WebElement.from_id(rec.node.id))
+        nil
 
     me query_selector_all(selector: text) -> List<WebElement>:
-        val ids = self.doc.querySelectorAll(selector)
-        var elements = List<WebElement>()
-        for id in ids:
-            elements.push(WebElement.from_id(id))
+        var elements: List<WebElement> = []
+        for rec in self.nodes:
+            if self.matches_selector(rec, selector):
+                elements.push(WebElement.from_id(rec.node.id))
         elements
 
     me get_element_by_id(id: text) -> Option<WebElement>:
-        val result = self.doc.getElementById(id)
-        match result:
-            Some(node_id): Some(WebElement.from_id(node_id))
-            nil: nil
+        self.query_selector("#{id}")
 
     me body() -> WebElement:
         WebElement.from_id(self.body_id)
@@ -177,7 +309,7 @@ impl EventBackend for EngineDomBackend:
         self.listeners.push(listener)
 
     me off(element: WebElement, event_type: WebEventType):
-        var kept = List<EngineEventListener>()
+        var kept: List<EngineEventListener> = []
         for listener in self.listeners:
             val matches = listener.element_id == element.id
             if not matches:

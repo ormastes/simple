@@ -162,6 +162,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_time_now_nanos",
     "rt_time_now_micros",
     "rt_time_now_unix_micros",
+    "rt_entropy_hardware_ready",
     "rt_sleep_ms",
     "rt_value_int",
     "rt_value_float",

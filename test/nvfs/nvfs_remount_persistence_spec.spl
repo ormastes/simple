@@ -6,14 +6,15 @@
 # Run: bin/simple test test/nvfs/nvfs_remount_persistence_spec.spl
 
 use std.spec
-use examples.nvfs.src.core.arena.{
+use std.fs_driver.nvfs_arena.{
     arena_create_nvme_impl, arena_append_impl, arena_readv_impl,
     arena_total_bytes_impl,
     nvfs_arena_set_block_device, nvfs_raw_write_sector, nvfs_raw_read_sector
 }
-use examples.nvfs.src.core.superblock.{
-    superblock_format_disk, superblock_probe_disk,
-    superblock_read_from_disk, NVFS_MAGIC, NVFS_VERSION
+use std.fs_driver.nvfs_superblock.{
+    nvfs_superblock_set_device, nvfs_superblock_format_disk,
+    nvfs_superblock_probe_disk, nvfs_superblock_read_from_disk,
+    NVFS_MAGIC, NVFS_VERSION
 }
 use os.port.cached_raw_image_block_device.{CachedRawImageBlockDevice}
 
@@ -34,11 +35,12 @@ describe "NVFS remount persistence — data survives across mount cycles":
     it "superblock survives format then re-read":
         var dev = _make_device()
         nvfs_arena_set_block_device(dev)
-        val fmt_ok = superblock_format_disk(0xCAFEu64, 0xBABEu64)
+        nvfs_superblock_set_device(dev)
+        val fmt_ok = nvfs_superblock_format_disk(0xCAFEu64, 0xBABEu64)
         expect(fmt_ok).to_equal(true)
-        val probe_ok = superblock_probe_disk()
+        val probe_ok = nvfs_superblock_probe_disk()
         expect(probe_ok).to_equal(true)
-        val sb = superblock_read_from_disk()
+        val sb = nvfs_superblock_read_from_disk()
         expect(sb.valid).to_equal(true)
         expect(sb.uuid_hi == 0xCAFEu64).to_equal(true)
         expect(sb.uuid_lo == 0xBABEu64).to_equal(true)
@@ -64,14 +66,15 @@ describe "NVFS remount persistence — data survives across mount cycles":
     it "full write-read cycle: format superblock + write arena + read both back":
         var dev = _make_device()
         nvfs_arena_set_block_device(dev)
-        val fmt_ok = superblock_format_disk(0x1111u64, 0x2222u64)
+        nvfs_superblock_set_device(dev)
+        val fmt_ok = nvfs_superblock_format_disk(0x1111u64, 0x2222u64)
         expect(fmt_ok).to_equal(true)
         val aid = arena_create_nvme_impl(0, 4096, 8, 16)
         expect(aid > 0).to_equal(true)
         val payload: [u8] = [0x41, 0x42, 0x43, 0x44, 0x45]
         val w = arena_append_impl(aid, payload, 0)
         expect(w).to_equal(5)
-        val sb = superblock_read_from_disk()
+        val sb = nvfs_superblock_read_from_disk()
         expect(sb.valid).to_equal(true)
         expect(sb.uuid_hi == 0x1111u64).to_equal(true)
         val arena_data = arena_readv_impl(aid, 0, 5)

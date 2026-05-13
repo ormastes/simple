@@ -45,6 +45,10 @@ pub struct LlvmBackend {
     pub(super) coverage_counter: RefCell<u32>,
     /// Import map: raw function name → mangled name for cross-module resolution
     pub(super) import_map: std::sync::Arc<std::collections::HashMap<String, String>>,
+    /// Mangled module-level data exports, used to distinguish imported data
+    /// from imported function symbols when a GlobalLoad references a symbol
+    /// that was not present in the importing module's `mir.globals`.
+    pub(super) data_exports: std::sync::Arc<std::collections::HashSet<String>>,
     /// Per-module use map from `use` statements
     pub(super) use_map: std::collections::HashMap<String, String>,
 }
@@ -144,6 +148,7 @@ impl LlvmBackend {
                 builder: RefCell::new(None),
                 coverage_counter: RefCell::new(0),
                 import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+                data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 use_map: std::collections::HashMap::new(),
             })
         }
@@ -152,6 +157,11 @@ impl LlvmBackend {
     /// Set the import map for cross-module function resolution
     pub fn set_import_map(&mut self, map: std::sync::Arc<std::collections::HashMap<String, String>>) {
         self.import_map = map;
+    }
+
+    /// Set the project-wide data export set for cross-module global references.
+    pub fn set_data_exports(&mut self, exports: std::sync::Arc<std::collections::HashSet<String>>) {
+        self.data_exports = exports;
     }
 
     /// Set the per-module use map from `use` statements
@@ -215,6 +225,30 @@ impl LlvmBackend {
                 global.set_linkage(inkwell::module::Linkage::External);
             } else {
                 global.set_linkage(inkwell::module::Linkage::External);
+            }
+        }
+
+        for func in &module_ir.functions {
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    let (name, is_store) = match inst {
+                        crate::mir::MirInst::GlobalLoad { global_name, .. } => (global_name, false),
+                        crate::mir::MirInst::GlobalStore { global_name, .. } => (global_name, true),
+                        _ => continue,
+                    };
+                    if module_ir.extern_fn_names.contains(name) {
+                        continue;
+                    }
+                    if !self.data_exports.contains(name) && !module_ir.local_globals.contains(name) {
+                        continue;
+                    }
+                    if m.get_global(name).is_some() || m.get_function(name).is_some() {
+                        continue;
+                    }
+                    let global = m.add_global(rv_type, None, name);
+                    global.set_constant(!is_store);
+                    global.set_linkage(inkwell::module::Linkage::External);
+                }
             }
         }
     }

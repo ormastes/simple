@@ -9,8 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 use simple_compiler::module_resolver::ModuleResolver;
-use simple_parser::ast::Node;
-use simple_parser::{Parser, ParseError};
+use simple_compiler::{LintChecker, LintConfig, LintLevel, LintName};
+use simple_parser::ast::{Block, Expr, ImportTarget, Node, Pattern, Type};
+use simple_parser::{NumericSuffix, Parser, ParseError};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +41,7 @@ pub struct FileCheckResult {
 #[serde(rename_all = "lowercase")]
 pub enum CheckStatus {
     Success,
+    Warning,
     Error,
 }
 
@@ -50,11 +52,17 @@ pub struct CheckError {
     pub line: usize,
     pub column: usize,
     pub severity: ErrorSeverity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub found: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub help: Vec<String>,
 }
 
 /// Error severity
@@ -92,7 +100,7 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
                     println!("Checking {}... \x1b[32mOK\x1b[0m", file.display());
                 }
             }
-            CheckStatus::Error => {
+            CheckStatus::Warning | CheckStatus::Error => {
                 if result.errors.iter().any(|error| error.severity == ErrorSeverity::Error) {
                     has_errors = true;
                 }
@@ -112,14 +120,24 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
         output_json(&all_results);
     } else if !options.quiet {
         println!();
-        if has_errors {
-            let error_count: usize = all_results
-                .iter()
-                .map(|r| r.errors.iter().filter(|e| e.severity == ErrorSeverity::Error).count())
-                .sum();
+        let error_count: usize = all_results
+            .iter()
+            .map(|r| r.errors.iter().filter(|e| e.severity == ErrorSeverity::Error).count())
+            .sum();
+        let warning_count: usize = all_results
+            .iter()
+            .map(|r| r.errors.iter().filter(|e| e.severity == ErrorSeverity::Warning).count())
+            .sum();
+        if error_count > 0 {
             println!(
                 "\x1b[31m✗ {} error(s) found in {} file(s)\x1b[0m",
                 error_count,
+                files.len()
+            );
+        } else if warning_count > 0 {
+            println!(
+                "\x1b[33m⚠ {} warning(s) found in {} file(s)\x1b[0m",
+                warning_count,
                 files.len()
             );
         } else {
@@ -178,9 +196,12 @@ fn check_file(path: &Path, source_roots: &[PathBuf]) -> FileCheckResult {
                     line: 0,
                     column: 0,
                     severity: ErrorSeverity::Error,
+                    code: Some("E0001".to_string()),
                     message: format!("cannot read file: {}", e),
                     expected: None,
                     found: None,
+                    notes: Vec::new(),
+                    help: vec!["check that the path exists and is readable".to_string()],
                 }],
             };
         }
@@ -194,6 +215,8 @@ fn check_file(path: &Path, source_roots: &[PathBuf]) -> FileCheckResult {
         Ok(module) => {
             // Parsing succeeded, validate imports
             validate_imports(path, &module.items, &mut errors, source_roots);
+            validate_gc_boundary_lints(path, &module.items, &mut errors);
+            validate_basic_type_annotations(path, &module.items, &mut errors);
         }
         Err(e) => {
             // Convert ParseError to CheckError
@@ -204,6 +227,8 @@ fn check_file(path: &Path, source_roots: &[PathBuf]) -> FileCheckResult {
     let has_hard_errors = errors.iter().any(|error| error.severity == ErrorSeverity::Error);
     let status = if has_hard_errors {
         CheckStatus::Error
+    } else if !errors.is_empty() {
+        CheckStatus::Warning
     } else {
         CheckStatus::Success
     };
@@ -212,6 +237,306 @@ fn check_file(path: &Path, source_roots: &[PathBuf]) -> FileCheckResult {
         file: path.display().to_string(),
         status,
         errors,
+    }
+}
+
+fn validate_gc_boundary_lints(file_path: &Path, items: &[Node], errors: &mut Vec<CheckError>) {
+    let mut config = LintConfig::new();
+    for lint in LintName::all_lints() {
+        config.set_level(lint, LintLevel::Allow);
+    }
+    config.set_level(LintName::GcBoundaryCrossing, LintLevel::Warn);
+
+    let mut checker = LintChecker::with_config(config).with_source_file(Some(file_path.to_path_buf()));
+    checker.check_module(items);
+
+    for diagnostic in checker.take_diagnostics() {
+        if diagnostic.lint != LintName::GcBoundaryCrossing {
+            continue;
+        }
+
+        let mut help = Vec::new();
+        if let Some(suggestion) = diagnostic.suggestion {
+            help.push(suggestion);
+        }
+
+        errors.push(CheckError {
+            file: file_path.display().to_string(),
+            line: diagnostic.span.line,
+            column: diagnostic.span.column,
+            severity: ErrorSeverity::Warning,
+            code: Some(diagnostic.lint.as_str().to_string()),
+            message: diagnostic.message,
+            expected: None,
+            found: None,
+            notes: Vec::new(),
+            help,
+        });
+    }
+}
+
+fn validate_basic_type_annotations(file_path: &Path, items: &[Node], errors: &mut Vec<CheckError>) {
+    for item in items {
+        validate_basic_type_annotation_node(file_path, item, None, errors);
+    }
+}
+
+fn validate_basic_type_annotation_node(
+    file_path: &Path,
+    item: &Node,
+    return_type: Option<&Type>,
+    errors: &mut Vec<CheckError>,
+) {
+    match item {
+        Node::Function(function) => {
+            validate_basic_type_annotation_block(file_path, &function.body, function.return_type.as_ref(), errors);
+        }
+        Node::Let(stmt) => {
+            if let (Some(expected), Some(value)) = (declared_type(&stmt.ty, &stmt.pattern), stmt.value.as_ref()) {
+                validate_literal_type(file_path, stmt.span.line, stmt.span.column, expected, value, errors);
+            }
+        }
+        Node::Const(stmt) => {
+            if let Some(expected) = stmt.ty.as_ref() {
+                validate_literal_type(
+                    file_path,
+                    stmt.span.line,
+                    stmt.span.column,
+                    expected,
+                    &stmt.value,
+                    errors,
+                );
+            }
+        }
+        Node::Static(stmt) => {
+            if let Some(expected) = stmt.ty.as_ref() {
+                validate_literal_type(
+                    file_path,
+                    stmt.span.line,
+                    stmt.span.column,
+                    expected,
+                    &stmt.value,
+                    errors,
+                );
+            }
+        }
+        Node::Return(stmt) => {
+            if let (Some(expected), Some(value)) = (return_type, stmt.value.as_ref()) {
+                validate_literal_type(file_path, stmt.span.line, stmt.span.column, expected, value, errors);
+            }
+        }
+        Node::If(stmt) => {
+            validate_basic_type_annotation_block(file_path, &stmt.then_block, return_type, errors);
+            for (_, _, block) in &stmt.elif_branches {
+                validate_basic_type_annotation_block(file_path, block, return_type, errors);
+            }
+            if let Some(block) = &stmt.else_block {
+                validate_basic_type_annotation_block(file_path, block, return_type, errors);
+            }
+        }
+        Node::For(stmt) => validate_basic_type_annotation_block(file_path, &stmt.body, return_type, errors),
+        Node::While(stmt) => validate_basic_type_annotation_block(file_path, &stmt.body, return_type, errors),
+        Node::Loop(stmt) => validate_basic_type_annotation_block(file_path, &stmt.body, return_type, errors),
+        Node::Skip(stmt) => {
+            if let simple_parser::ast::SkipBody::Block(block) = &stmt.body {
+                validate_basic_type_annotation_block(file_path, block, return_type, errors);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_basic_type_annotation_block(
+    file_path: &Path,
+    block: &Block,
+    return_type: Option<&Type>,
+    errors: &mut Vec<CheckError>,
+) {
+    for statement in &block.statements {
+        validate_basic_type_annotation_node(file_path, statement, return_type, errors);
+    }
+}
+
+fn declared_type<'a>(explicit: &'a Option<Type>, pattern: &'a Pattern) -> Option<&'a Type> {
+    explicit.as_ref().or_else(|| match pattern {
+        Pattern::Typed { ty, .. } => Some(ty),
+        _ => None,
+    })
+}
+
+fn validate_literal_type(
+    file_path: &Path,
+    line: usize,
+    column: usize,
+    expected: &Type,
+    value: &Expr,
+    errors: &mut Vec<CheckError>,
+) {
+    let Some(expected_name) = simple_type_name(expected) else {
+        return;
+    };
+    let Some(found_type) = literal_type_name(value) else {
+        return;
+    };
+    let found_name = found_type.display_name();
+    if found_name == "nil" {
+        return;
+    }
+    if type_names_compatible(expected_name, found_name) {
+        return;
+    }
+    if numeric_literal_type_compatible(expected_name, found_type) {
+        return;
+    }
+
+    errors.push(CheckError {
+        file: file_path.display().to_string(),
+        line,
+        column,
+        severity: ErrorSeverity::Error,
+        code: Some("E1003".to_string()),
+        message: format!("type mismatch: expected {}, found {}", expected_name, found_name),
+        expected: Some(expected_name.to_string()),
+        found: Some(found_name.to_string()),
+        notes: Vec::new(),
+        help: vec!["change the annotation or use a value with the declared type".to_string()],
+    });
+}
+
+fn simple_type_name(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Simple(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LiteralTypeName {
+    Exact(&'static str),
+    UnsuffixedInteger,
+    UnsuffixedFloat,
+}
+
+impl LiteralTypeName {
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Exact(name) => name,
+            Self::UnsuffixedInteger => "i64",
+            Self::UnsuffixedFloat => "f64",
+        }
+    }
+}
+
+fn literal_type_name(expr: &Expr) -> Option<LiteralTypeName> {
+    match expr {
+        Expr::Integer(_) => Some(LiteralTypeName::UnsuffixedInteger),
+        Expr::TypedInteger(_, suffix) => Some(LiteralTypeName::Exact(integer_suffix_type_name(suffix))),
+        Expr::Float(_) => Some(LiteralTypeName::UnsuffixedFloat),
+        Expr::TypedFloat(_, suffix) => Some(LiteralTypeName::Exact(float_suffix_type_name(suffix))),
+        Expr::String(_) | Expr::TypedString(_, _) | Expr::FString { .. } => Some(LiteralTypeName::Exact("text")),
+        Expr::Bool(_) => Some(LiteralTypeName::Exact("bool")),
+        Expr::Nil => Some(LiteralTypeName::Exact("nil")),
+        _ => None,
+    }
+}
+
+fn integer_suffix_type_name(suffix: &NumericSuffix) -> &'static str {
+    match suffix {
+        NumericSuffix::I8 => "i8",
+        NumericSuffix::I16 => "i16",
+        NumericSuffix::I32 => "i32",
+        NumericSuffix::I64 => "i64",
+        NumericSuffix::U8 => "u8",
+        NumericSuffix::U16 => "u16",
+        NumericSuffix::U32 => "u32",
+        NumericSuffix::U64 => "u64",
+        NumericSuffix::F32 => "f32",
+        NumericSuffix::F64 => "f64",
+        NumericSuffix::Unit(_) => "i64",
+    }
+}
+
+fn float_suffix_type_name(suffix: &NumericSuffix) -> &'static str {
+    match suffix {
+        NumericSuffix::F32 => "f32",
+        NumericSuffix::F64 => "f64",
+        NumericSuffix::Unit(_) => "f64",
+        NumericSuffix::I8
+        | NumericSuffix::I16
+        | NumericSuffix::I32
+        | NumericSuffix::I64
+        | NumericSuffix::U8
+        | NumericSuffix::U16
+        | NumericSuffix::U32
+        | NumericSuffix::U64 => "f64",
+    }
+}
+
+fn type_names_compatible(expected: &str, found: &str) -> bool {
+    is_any_type_name(expected)
+        || expected == found
+        || matches!(
+            (expected, found),
+            ("str", "text")
+                | ("String", "text")
+                | ("Text", "text")
+                | ("Bool", "bool")
+                | ("Boolean", "bool")
+                | ("Int", "i64")
+                | ("Integer", "i64")
+                | ("Float", "f64")
+        )
+}
+
+fn numeric_literal_type_compatible(expected: &str, found: LiteralTypeName) -> bool {
+    match found {
+        LiteralTypeName::UnsuffixedInteger => is_integer_type_name(expected),
+        LiteralTypeName::UnsuffixedFloat => is_float_type_name(expected),
+        LiteralTypeName::Exact(_) => false,
+    }
+}
+
+fn is_integer_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "Int"
+            | "Integer"
+    )
+}
+
+fn is_float_type_name(name: &str) -> bool {
+    matches!(name, "f32" | "f64" | "Float")
+}
+
+fn is_any_type_name(name: &str) -> bool {
+    matches!(name, "any" | "Any")
+}
+
+fn find_simple_workspace_root(start: &Path) -> Option<PathBuf> {
+    let mut current = if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        start.parent()?.to_path_buf()
+    };
+
+    loop {
+        if current.join("src/compiler").is_dir() && current.join("src/lib").is_dir() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
     }
 }
 
@@ -228,7 +553,11 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut resolvers = Vec::new();
     if source_roots.is_empty() {
-        resolvers.push(ModuleResolver::single_file(&abs_path));
+        if let Some(workspace_root) = find_simple_workspace_root(&cwd) {
+            let source_root = workspace_root.join("src");
+            resolvers.push(ModuleResolver::new(workspace_root, source_root));
+        }
+        resolvers.push(ModuleResolver::single_file_with_project_hint(&abs_path, Some(&cwd)));
     } else {
         for source_root in source_roots {
             let abs_root = if source_root.is_absolute() {
@@ -240,12 +569,47 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
         }
     }
 
+    fn target_module_path(
+        module_path: &simple_parser::ast::ModulePath,
+        target: &ImportTarget,
+    ) -> Option<simple_parser::ast::ModulePath> {
+        match target {
+            ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => {
+                let mut segments = module_path.segments.clone();
+                segments.push(name.clone());
+                Some(simple_parser::ast::ModulePath::new(segments))
+            }
+            _ => None,
+        }
+    }
+
+    fn import_resolves(
+        resolvers: &[ModuleResolver],
+        module_path: &simple_parser::ast::ModulePath,
+        target: &ImportTarget,
+        from_file: &Path,
+    ) -> bool {
+        if let Some(candidate_path) = target_module_path(module_path, target) {
+            if resolvers
+                .iter()
+                .any(|resolver| resolver.resolve(&candidate_path, from_file).is_ok())
+            {
+                return true;
+            }
+        }
+
+        resolvers
+            .iter()
+            .any(|resolver| resolver.resolve(module_path, from_file).is_ok())
+    }
+
     for item in items {
         match item {
             Node::UseStmt(use_stmt) => {
-                let resolved = resolvers
-                    .iter()
-                    .any(|resolver| resolver.resolve(&use_stmt.path, &abs_path).is_ok());
+                if use_stmt.path.segments.is_empty() {
+                    continue;
+                }
+                let resolved = import_resolves(&resolvers, &use_stmt.path, &use_stmt.target, &abs_path);
                 if !resolved {
                     let msg = resolvers
                         .iter()
@@ -258,16 +622,20 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                         line: use_stmt.span.line,
                         column: use_stmt.span.column,
                         severity: ErrorSeverity::Warning,
+                        code: Some("W0410".to_string()),
                         message: format!("unresolved import '{}': {}", use_stmt.path.segments.join("."), msg),
                         expected: None,
                         found: None,
+                        notes: Vec::new(),
+                        help: vec!["check the module path or add the source root with --source-root".to_string()],
                     });
                 }
             }
             Node::CommonUseStmt(common_use) => {
-                let resolved = resolvers
-                    .iter()
-                    .any(|resolver| resolver.resolve(&common_use.path, &abs_path).is_ok());
+                if common_use.path.segments.is_empty() {
+                    continue;
+                }
+                let resolved = import_resolves(&resolvers, &common_use.path, &common_use.target, &abs_path);
                 if !resolved {
                     let msg = resolvers
                         .iter()
@@ -279,6 +647,7 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                         line: common_use.span.line,
                         column: common_use.span.column,
                         severity: ErrorSeverity::Warning,
+                        code: Some("W0411".to_string()),
                         message: format!(
                             "unresolved common import '{}': {}",
                             common_use.path.segments.join("."),
@@ -286,13 +655,16 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                         ),
                         expected: None,
                         found: None,
+                        notes: Vec::new(),
+                        help: vec!["check the module path or add the source root with --source-root".to_string()],
                     });
                 }
             }
             Node::ExportUseStmt(export_use) => {
-                let resolved = resolvers
-                    .iter()
-                    .any(|resolver| resolver.resolve(&export_use.path, &abs_path).is_ok());
+                if export_use.path.segments.is_empty() {
+                    continue;
+                }
+                let resolved = import_resolves(&resolvers, &export_use.path, &export_use.target, &abs_path);
                 if !resolved {
                     let msg = resolvers
                         .iter()
@@ -304,6 +676,7 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                         line: export_use.span.line,
                         column: export_use.span.column,
                         severity: ErrorSeverity::Warning,
+                        code: Some("W0412".to_string()),
                         message: format!(
                             "unresolved export import '{}': {}",
                             export_use.path.segments.join("."),
@@ -311,6 +684,10 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                         ),
                         expected: None,
                         found: None,
+                        notes: Vec::new(),
+                        help: vec![
+                            "check the exported module path or add the source root with --source-root".to_string(),
+                        ],
                     });
                 }
             }
@@ -322,6 +699,10 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
 /// Convert ParseError to CheckError
 fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
     use simple_parser::ParseError;
+    let diagnostic = err.to_diagnostic();
+    let code = diagnostic.code.clone();
+    let notes = diagnostic.notes.clone();
+    let help = diagnostic.help.clone();
 
     match err {
         ParseError::SyntaxError {
@@ -331,9 +712,12 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
             line: *line,
             column: *column,
             severity: ErrorSeverity::Error,
+            code,
             message: message.clone(),
             expected: None,
             found: None,
+            notes,
+            help,
         },
         ParseError::UnexpectedToken {
             expected, found, span, ..
@@ -342,18 +726,24 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
             line: span.line,
             column: span.column,
             severity: ErrorSeverity::Error,
+            code,
             message: "unexpected token".to_string(),
             expected: Some(expected.clone()),
             found: Some(found.clone()),
+            notes,
+            help,
         },
         ParseError::MissingToken { expected, span, .. } => CheckError {
             file: path.display().to_string(),
             line: span.line,
             column: span.column,
             severity: ErrorSeverity::Error,
+            code,
             message: format!("missing expected token: {}", expected),
             expected: Some(expected.clone()),
             found: None,
+            notes,
+            help,
         },
         ParseError::UnclosedString { span, .. } => {
             let (line, column) = if let Some(s) = span { (s.line, s.column) } else { (0, 0) };
@@ -362,9 +752,12 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
                 line,
                 column,
                 severity: ErrorSeverity::Error,
+                code,
                 message: "unclosed string literal".to_string(),
                 expected: None,
                 found: None,
+                notes,
+                help,
             }
         }
         ParseError::InvalidIndentation { line, .. } => CheckError {
@@ -372,36 +765,48 @@ fn parse_error_to_check_error(err: &ParseError, path: &Path) -> CheckError {
             line: *line,
             column: 1,
             severity: ErrorSeverity::Error,
+            code,
             message: "invalid indentation".to_string(),
             expected: None,
             found: None,
+            notes,
+            help,
         },
         ParseError::InvalidPattern { span, message, .. } => CheckError {
             file: path.display().to_string(),
             line: span.line,
             column: span.column,
             severity: ErrorSeverity::Error,
+            code,
             message: format!("invalid pattern: {}", message),
             expected: None,
             found: None,
+            notes,
+            help,
         },
         ParseError::InvalidType { span, message, .. } => CheckError {
             file: path.display().to_string(),
             line: span.line,
             column: span.column,
             severity: ErrorSeverity::Error,
+            code,
             message: format!("invalid type: {}", message),
             expected: None,
             found: None,
+            notes,
+            help,
         },
         _ => CheckError {
             file: path.display().to_string(),
             line: 0,
             column: 0,
             severity: ErrorSeverity::Error,
+            code,
             message: err.to_string(),
             expected: None,
             found: None,
+            notes,
+            help,
         },
     }
 }
@@ -418,9 +823,14 @@ fn print_error(error: &CheckError) {
         ErrorSeverity::Error => "error",
         ErrorSeverity::Warning => "warning",
     };
+    let code = error
+        .code
+        .as_ref()
+        .map(|code| format!("[{}]", code))
+        .unwrap_or_default();
     println!(
-        "{}{}:{}:{}: {}{}: {}",
-        color, error.file, error.line, error.column, level, reset, error.message
+        "{}{}:{}:{}: {}{}{}: {}",
+        color, error.file, error.line, error.column, level, code, reset, error.message
     );
 
     if let Some(expected) = &error.expected {
@@ -429,17 +839,26 @@ fn print_error(error: &CheckError) {
     if let Some(found) = &error.found {
         println!("  found:    {}", found);
     }
+    for note in &error.notes {
+        println!("  = note: {}", note);
+    }
+    for help in &error.help {
+        println!("  = help: {}", help);
+    }
 }
 
 /// Output results in JSON format
 fn output_json(results: &[FileCheckResult]) {
     let all_errors: Vec<CheckError> = results.iter().flat_map(|r| r.errors.clone()).collect();
 
-    let has_errors = !all_errors.is_empty();
+    let has_errors = all_errors.iter().any(|error| error.severity == ErrorSeverity::Error);
+    let has_warnings = all_errors.iter().any(|error| error.severity == ErrorSeverity::Warning);
 
     let output = CheckResult {
         status: if has_errors {
             CheckStatus::Error
+        } else if has_warnings {
+            CheckStatus::Warning
         } else {
             CheckStatus::Success
         },
@@ -477,6 +896,185 @@ mod tests {
         let result = check_file(file.path(), &[]);
         assert_eq!(result.status, CheckStatus::Error);
         assert!(!result.errors.is_empty());
+        assert_eq!(result.errors[0].code.as_deref(), Some("E0002"));
+        assert!(!result.errors[0].help.is_empty());
+    }
+
+    #[test]
+    fn test_check_literal_type_mismatch_is_error() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "fn main():\n    val x: i64 = \"text\"").unwrap();
+
+        let result = check_file(file.path(), &[]);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].severity, ErrorSeverity::Error);
+        assert_eq!(result.errors[0].code.as_deref(), Some("E1003"));
+        assert_eq!(result.errors[0].expected.as_deref(), Some("i64"));
+        assert_eq!(result.errors[0].found.as_deref(), Some("text"));
+        assert!(!result.errors[0].help.is_empty());
+    }
+
+    #[test]
+    fn test_check_matching_literal_type_annotation_succeeds() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "fn main():\n    val x: i64 = 42").unwrap();
+
+        let result = check_file(file.path(), &[]);
+        assert_eq!(result.status, CheckStatus::Success);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_check_unsuffixed_integer_annotation_family_succeeds() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "fn main():\n    val x: i32 = 42\n    val y: u32 = 7").unwrap();
+
+        let result = check_file(file.path(), &[]);
+        assert_eq!(result.status, CheckStatus::Success);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_check_unsuffixed_float_annotation_family_succeeds() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "fn main():\n    val x: f32 = 1.5").unwrap();
+
+        let result = check_file(file.path(), &[]);
+        assert_eq!(result.status, CheckStatus::Success);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_check_return_literal_type_mismatch_is_error() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "fn value() -> bool:\n    return 1").unwrap();
+
+        let result = check_file(file.path(), &[]);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].code.as_deref(), Some("E1003"));
+        assert_eq!(result.errors[0].expected.as_deref(), Some("bool"));
+        assert_eq!(result.errors[0].found.as_deref(), Some("i64"));
+    }
+
+    #[test]
+    fn test_check_common_aliases_and_nil_sentinels_succeed() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "fn main():\n    val flag: Bool = true\n    val value: any = 1\n    val name: text = nil"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[]);
+        assert_eq!(result.status, CheckStatus::Success);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_check_unresolved_import_is_warning() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "use definitely.missing.module\nfn main():\n    val x = 1").unwrap();
+
+        let result = check_file(file.path(), &[]);
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].severity, ErrorSeverity::Warning);
+        assert_eq!(result.errors[0].code.as_deref(), Some("W0410"));
+        assert!(!result.errors[0].help.is_empty());
+    }
+
+    #[test]
+    fn test_check_allows_local_manifest_exports() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "export Foo, Bar\nfn Foo() -> i64:\n    return 1").unwrap();
+
+        let result = check_file(file.path(), &[]);
+        assert!(result.errors.iter().all(|error| error.code.as_deref() != Some("W0412")));
+    }
+
+    #[test]
+    fn test_check_skips_legacy_string_import_paths() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "import \"types\" as Types\nfn main():\n    val x = 1").unwrap();
+
+        let result = check_file(file.path(), &[]);
+        assert!(result.errors.iter().all(|error| error.code.as_deref() != Some("W0410")));
+    }
+
+    #[test]
+    fn test_check_resolves_single_import_target_as_module_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_root = dir.path().join("src").join("lib");
+        let aes = lib_root.join("common").join("aes");
+        std::fs::create_dir_all(&aes).unwrap();
+        std::fs::write(aes.join("utilities.spl"), "fn helper() -> i64:\n    return 1\n").unwrap();
+        let cipher = aes.join("cipher.spl");
+        std::fs::write(&cipher, "import aes/utilities\nfn main():\n    val x = 1\n").unwrap();
+
+        let result = check_file(&cipher, &[lib_root]);
+        assert!(result.errors.iter().all(|error| error.code.as_deref() != Some("W0410")));
+    }
+
+    #[test]
+    fn test_check_std_spec_import_resolves_in_project() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("driver crate should live under repo/src/compiler_rust")
+            .to_path_buf();
+        let temp_root = repo_root.join("target/check-tests");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let mut file = tempfile::Builder::new().suffix(".spl").tempfile_in(temp_root).unwrap();
+        writeln!(file, "use std.spec\nfn main():\n    val x = 1").unwrap();
+
+        let result = check_file(file.path(), &[]);
+        assert_eq!(result.status, CheckStatus::Success);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_check_warns_for_gc_boundary_crossing() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("driver crate should live under repo/src/compiler_rust")
+            .to_path_buf();
+        let temp_dir = repo_root.join("target/gc-boundary-check-tests/src/lib/nogc_sync_mut");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let path = temp_dir.join("gc_boundary_crossing.spl");
+        std::fs::write(&path, "use std.gc_async_mut.task\n").unwrap();
+
+        let result = check_file(&path, &[]);
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.code.as_deref() == Some("gc_boundary_crossing")));
+    }
+
+    #[test]
+    fn test_check_allows_common_runtime_import() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("driver crate should live under repo/src/compiler_rust")
+            .to_path_buf();
+        let temp_dir = repo_root.join("target/gc-boundary-check-tests/src/lib/nogc_async_mut_noalloc");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let path = temp_dir.join("common_import.spl");
+        std::fs::write(&path, "use std.common.text\n").unwrap();
+
+        let result = check_file(&path, &[]);
+        assert!(result
+            .errors
+            .iter()
+            .all(|error| error.code.as_deref() != Some("gc_boundary_crossing")));
+        assert!(result.errors.iter().all(|error| error.code.as_deref() != Some("W0410")));
     }
 
     #[test]
@@ -485,6 +1083,8 @@ mod tests {
         let result = check_file(&path, &[]);
         assert_eq!(result.status, CheckStatus::Error);
         assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].code.as_deref(), Some("E0001"));
         assert!(result.errors[0].message.contains("cannot read file"));
+        assert!(!result.errors[0].help.is_empty());
     }
 }

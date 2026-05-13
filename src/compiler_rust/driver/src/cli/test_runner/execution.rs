@@ -381,6 +381,9 @@ pub(crate) fn write_artifact_bundle(
     if let Some(err) = error {
         summary.push_str(&format!("error: {}\n", err));
     }
+    if output.is_some() {
+        summary.push_str("Individual Results:\n");
+    }
     let _ = fs::write(dir.join("summary.txt"), summary);
 
     if let Some(output) = output {
@@ -2089,7 +2092,7 @@ describe "extern hoist":
             .find("extern fn rt_file_read_text(path: text) -> text")
             .expect("extern");
         assert!(extern_idx < main_idx, "extern should stay above fn main()");
-        assert!(wrapped_source.contains("fn expect<T>(actual: T) -> Expectation<T>:"));
+        assert!(!wrapped_source.contains("fn expect<T>(actual: T) -> Expectation<T>:"));
     }
 
     #[test]
@@ -2111,8 +2114,8 @@ describe "infix":
         let wrapped = preprocess_spipe_for_smf(&spec_path).expect("preprocess");
         let wrapped_source = fs::read_to_string(wrapped).expect("read wrapped");
 
-        assert!(wrapped_source.contains("expect(value).to_equal(1)"));
-        assert!(wrapped_source.contains("expect(output).to_contain(\"ok\")"));
+        assert!(wrapped_source.contains("expect value == 1"));
+        assert!(wrapped_source.contains("expect (output).contains(\"ok\")"));
     }
 
     #[test]

@@ -402,6 +402,9 @@ impl LintChecker {
             // Check for imports bypassing __init__.spl boundaries
             self.check_init_boundary(items, &source_file);
 
+            // Check runtime family GC/noalloc dependency boundaries
+            self.check_gc_boundary_imports(items, &source_file);
+
             // Check for bypass directories with code files
             self.check_bypass_validity(items, &source_file);
         }

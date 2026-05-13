@@ -4,6 +4,7 @@
 # Verifies LSP client, diagnostic store, completion, and file watcher.
 
 use std.spec
+use std.editor.services.diagnostics.*
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -76,6 +77,41 @@ describe "editor diagnostics — store":
         expect(src.contains("struct EditorCodeAction:")).to_equal(true)
         expect(src.contains("fn diagnostics_handle_code_actions(store: DiagnosticStore, path: text, result_json: text) -> [EditorCodeAction]")).to_equal(true)
         expect(src.contains("fn code_actions_handle_response(result_json: text) -> [EditorCodeAction]")).to_equal(true)
+
+    it "replaces diagnostics for one publishDiagnostics URI and clears empty publishes":
+        val first_path = "/tmp/simple_editor_lsp_publish_first.spl"
+        val other_path = "/tmp/simple_editor_lsp_publish_other.spl"
+        var store = DiagnosticStore(diagnostics: [
+            EditorDiagnostic(path: first_path, line: 9, col: 1, end_line: 9, end_col: 2, severity: "warning", message: "stale", source: "test"),
+            EditorDiagnostic(path: other_path, line: 3, col: 1, end_line: 3, end_col: 2, severity: "error", message: "keep", source: "test")
+        ], publish_versions: [])
+        val publish_one = "{\"uri\":\"file://" + first_path + "\",\"version\":2,\"diagnostics\":[{\"range\":{\"start\":{\"line\":1,\"character\":4},\"end\":{\"line\":1,\"character\":8}},\"severity\":1,\"source\":\"simple\",\"message\":\"fresh\"}]}"
+
+        expect(diagnostics_publish_path(publish_one)).to_equal(first_path)
+        expect(diagnostics_publish_version(publish_one)).to_equal(2)
+        store = diagnostics_store_with_publish(store, publish_one)
+
+        expect(store.total_count()).to_equal(2)
+        val first_diags = store.diagnostics_for(first_path)
+        expect(first_diags.len()).to_equal(1)
+        if first_diags.len() > 0:
+            expect(first_diags[0].line).to_equal(1)
+            expect(first_diags[0].col).to_equal(4)
+            expect(first_diags[0].severity).to_equal("error")
+            expect(first_diags[0].message).to_equal("fresh")
+        expect(store.diagnostics_for(other_path).len()).to_equal(1)
+
+        val stale_publish = "{\"uri\":\"file://" + first_path + "\",\"version\":1,\"diagnostics\":[{\"range\":{\"start\":{\"line\":5,\"character\":1},\"end\":{\"line\":5,\"character\":2}},\"severity\":2,\"source\":\"simple\",\"message\":\"old\"}]}"
+        store = diagnostics_store_with_publish(store, stale_publish)
+
+        expect(store.diagnostics_for(first_path).len()).to_equal(1)
+        expect(store.diagnostics_for(first_path)[0].message).to_equal("fresh")
+
+        val clear_first = "{\"uri\":\"file://" + first_path + "\",\"version\":3,\"diagnostics\":[]}"
+        store = diagnostics_store_with_publish(store, clear_first)
+
+        expect(store.diagnostics_for(first_path).len()).to_equal(0)
+        expect(store.diagnostics_for(other_path).len()).to_equal(1)
 
 describe "editor LSP configs — language servers":
 

@@ -1,6 +1,7 @@
 use os.compositor.cursor.{CursorState}
 use os.drivers.framebuffer.fb_driver.{Color}
 use os.kernel.boot.cpu.{port_inb, port_outb}
+use common.window_protocol.geometry.{WindowId}
 
 extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
 
@@ -45,6 +46,27 @@ class Compositor:
     pending_meta_key: i32
     pending_shortcut: text
 
+    static fn with_backends(backend: any, input: any, width: i32, height: i32) -> Compositor:
+        Compositor(
+            surfaces: [],
+            focused_idx: -1,
+            fb: backend,
+            keyboard: input,
+            mouse: input,
+            cursor: CursorState(x: width / 2, y: height / 2, visible: true, hotspot_x: 1, hotspot_y: 1),
+            desktop_bg: Color.rgb(0, 48, 96),
+            next_id: 1,
+            screen_width: width,
+            screen_height: height,
+            running: false,
+            dragging: false,
+            drag_window_id: 0,
+            drag_offset_x: 0,
+            drag_offset_y: 0,
+            pending_meta_key: 0,
+            pending_shortcut: ""
+        )
+
     me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> i32:
         val id = self.next_id
         self.next_id = self.next_id + 1
@@ -64,6 +86,25 @@ class Compositor:
         ))
         self.focused_idx = self.surfaces.len() - 1
         id
+
+    me add_surface(title: text, x: i32, y: i32, width: i32, height: i32) -> WindowId:
+        WindowId(value: self.create_window(title, x, y, width, height).to_u64())
+
+    me create_window_with_tree(title: text, x: i32, y: i32, width: i32, height: i32, tree: any) -> WindowId:
+        val id = self.create_window(title, x, y, width, height)
+        self.update_window_tree(id.to_u64(), tree)
+        WindowId(value: id.to_u64())
+
+    me create_remote_window(title: text, x: i32, y: i32, width: i32, height: i32, owner_port: u64) -> WindowId:
+        val id = self.create_window(title, x, y, width, height)
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                var surface = self.surfaces[i]
+                surface.owner_port = owner_port.to_i64()
+                self.surfaces[i] = surface
+            i = i + 1
+        WindowId(value: id.to_u64())
 
     me destroy_window(id: i32):
         var out: [WindowSurface] = []
@@ -119,6 +160,70 @@ class Compositor:
                 self.surfaces[i] = surface
             i = i + 1
 
+    me resize_window(id: u64, width: i32, height: i32):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.width = width
+                surface.height = height
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me set_window_title(id: u64, title: text):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.title = title
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me minimize_window(id: u64):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.visible = false
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me maximize_window(id: u64):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.x = 0
+                surface.y = 0
+                surface.width = self.screen_width
+                surface.height = self.screen_height
+                surface.visible = true
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me restore_window(id: u64):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.visible = true
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me update_window_tree(id: u64, tree: any):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                surface.session = tree
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
     me set_window_identity(id: i32, process_id: i64, app_id: text):
         var i = 0
         while i < self.surfaces.len():
@@ -128,6 +233,39 @@ class Compositor:
                 surface.app_id = app_id
                 self.surfaces[i] = surface
             i = i + 1
+
+    fn window_count() -> i32:
+        self.surfaces.len()
+
+    fn window_titles() -> [text]:
+        var titles: [text] = []
+        for surface in self.surfaces:
+            titles = titles.push(surface.title)
+        titles
+
+    fn get_surface(id: u64) -> WindowSurface?:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                return self.surfaces[i]
+            i = i + 1
+        nil
+
+    fn window_title(id: u64) -> text:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                return self.surfaces[i].title
+            i = i + 1
+        ""
+
+    fn window_owner_port(id: u64) -> u64:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                return self.surfaces[i].owner_port.to_u64()
+            i = i + 1
+        0
 
     fn window_process_id(id: i32) -> i64:
         var i = 0
@@ -145,6 +283,15 @@ class Compositor:
             i = i + 1
         ""
 
+    fn window_count_for_app(app_id: text) -> i32:
+        var count = 0
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].app_id == app_id:
+                count = count + 1
+            i = i + 1
+        count
+
     fn window_count_for_process(process_id: i64) -> i32:
         var count = 0
         var i = 0
@@ -154,12 +301,21 @@ class Compositor:
             i = i + 1
         count
 
-    fn windows_for_process(process_id: i64) -> [WindowSurface]:
-        var out: [WindowSurface] = []
+    fn windows_for_process(process_id: i64) -> [u64]:
+        var out: [u64] = []
         var i = 0
         while i < self.surfaces.len():
             if self.surfaces[i].process_id == process_id:
-                out.push(self.surfaces[i])
+                out = out.push(self.surfaces[i].id.to_u64())
+            i = i + 1
+        out
+
+    fn windows_for_app(app_id: text) -> [u64]:
+        var out: [u64] = []
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].app_id == app_id:
+                out = out.push(self.surfaces[i].id.to_u64())
             i = i + 1
         out
 
@@ -272,3 +428,13 @@ class Compositor:
         val s = self.pending_shortcut
         self.pending_shortcut = ""
         s
+
+    me render_frame():
+        self.render_all()
+
+    me run_loop():
+        self.running = true
+        while self.running:
+            self.handle_input()
+            self.render_all()
+            self.running = false

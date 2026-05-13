@@ -4,8 +4,51 @@
 # Verifies backends, platform config, editor config, and MCP tool registry.
 
 use std.spec
+use std.editor.common.types.*
+use std.editor.common.config.*
+use std.editor.common.platform.*
+use std.editor.buffer.piece_table.*
+use std.editor.buffer.undo.*
+use std.editor.buffer.buffer.*
+use std.editor.core.document.*
+use std.editor.core.session.{EditSession}
+use std.editor.view.layout.*
+use std.editor.view.split_tree.*
+use std.editor.view.tab.*
+use std.editor.view.dock_zone.*
+use std.editor.view.preview_pane.*
+use std.editor.view.outline_panel.*
+use std.editor.view.wiki_panel.*
+use std.editor.render.block_model.*
+use std.editor.extensions.host.*
+use std.editor.extensions.manifest.*
+use std.editor.extensions.api.*
+use std.editor.extensions.builtin.md_commands.*
+use std.editor.extensions.builtin.md_language.*
+use std.editor.extensions.builtin.md_vim_motions.*
+use std.editor.extensions.builtin.spl_language.*
+use std.editor.services.diagnostics.*
+use std.editor.services.debug_session.*
+use std.editor.services.lsp_transport.*
+use std.editor.services.lsp_client.*
+use std.editor.services.md_wiki_index.*
+use std.editor.services.md_lsp_config.*
+use std.editor.services.simple_lsp_config.*
+use std.editor.services.md_doc_stats.*
+use std.editor.backend.gui_backend.*
+use std.editor.backend.headless_backend.*
+use std.common.markdown.utilities.*
+use std.common.markdown.block.*
+use std.common.markdown.inline.*
+use std.common.markdown.parse.*
+use std.common.markdown.adapter.*
+use app.editor.editor_controller.*
+use app.editor.gui_shell.*
+use app.editor.md_dispatch.*
 
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
 
 fn read_text(path: text) -> text:
     rt_file_read_text(path) ?? ""
@@ -72,7 +115,503 @@ describe "editor GUI backend — Surface integration":
     it "has gui_render_markdown_block for HTML output":
         val src = read_text("src/lib/editor/70.backend/gui_backend.spl")
         expect(src.contains("fn gui_render_markdown_block(block: RenderBlock) -> GuiRenderBlock")).to_equal(true)
-        expect(src.contains("html: text")).to_equal(true)
+
+    it "renders Obsidian callout blocks with GUI metadata":
+        val block = RenderBlock(id: 9, kind: "callout", from_line: 0, to_line: 1, content: "> [!TIP]+ Useful\n> Use [[links]]", rendered_lines: ["> [!TIP]+ Useful", "> Use [[links]]"], status: "ok")
+        val rendered = gui_render_markdown_block(block)
+        expect(rendered.html.contains("class=\"md-callout md-callout-tip\"")).to_equal(true)
+        expect(rendered.html.contains("data-callout=\"tip\"")).to_equal(true)
+        expect(rendered.html.contains("data-folded=\"false\"")).to_equal(true)
+        expect(rendered.html.contains("data-event=\"callout-fold-toggle\"")).to_equal(true)
+        expect(rendered.html.contains("TIP Useful")).to_equal(true)
+        expect(rendered.html.contains("Use [[links]]")).to_equal(true)
+        expect(rendered.html.contains("[!TIP]")).to_equal(false)
+
+        val folded_block = RenderBlock(id: 10, kind: "callout", from_line: 0, to_line: 1, content: "> [!TIP]- Useful\n> Hidden", rendered_lines: ["> [!TIP]- Useful", "> Hidden"], status: "ok")
+        val folded = gui_render_markdown_block(folded_block)
+        expect(folded.html.contains("data-folded=\"true\"")).to_equal(true)
+        expect(folded.html.contains("class=\"md-callout md-callout-tip folded\"")).to_equal(true)
+        expect(folded.html.contains("Hidden")).to_equal(false)
+
+    it "renders Obsidian embed blocks with GUI metadata":
+        val block = RenderBlock(id: 10, kind: "embed", from_line: 0, to_line: 0, content: "![[Project Alpha|Alpha embed]]", rendered_lines: ["![[Project Alpha|Alpha embed]]"], status: "ok")
+        val rendered = gui_render_markdown_block(block)
+        expect(rendered.html.contains("class=\"md-embed md-embed-note\"")).to_equal(true)
+        expect(rendered.html.contains("data-embed-kind=\"note\"")).to_equal(true)
+        expect(rendered.html.contains("data-target=\"Project Alpha\"")).to_equal(true)
+        expect(rendered.html.contains("Alpha embed")).to_equal(true)
+        expect(rendered.html.contains("![[")).to_equal(false)
+
+    it "renders resolved Obsidian note embeds as GUI transclusions":
+        val block = RenderBlock(id: 10, kind: "embed", from_line: 0, to_line: 0, content: "![[Project Alpha|Alpha embed]]", rendered_lines: ["![[Project Alpha|Alpha embed]]"], status: "ok")
+        val index = md_wiki_index_documents([
+            md_wiki_document("/vault/Project Alpha.md", "# Project Alpha\nBody <safe>")
+        ])
+        val rendered = gui_render_markdown_block_with_wiki(block, index)
+        expect(rendered.html.contains("md-transclusion")).to_equal(true)
+        expect(rendered.html.contains("data-target=\"Project Alpha\"")).to_equal(true)
+        expect(rendered.html.contains("Project Alpha")).to_equal(true)
+        expect(rendered.html.contains("Body &lt;safe&gt;")).to_equal(true)
+
+    it "renders nested resolved Obsidian note embeds as GUI transclusions":
+        val block = RenderBlock(id: 11, kind: "embed", from_line: 0, to_line: 0, content: "![[Project Alpha|Alpha embed]]", rendered_lines: ["![[Project Alpha|Alpha embed]]"], status: "ok")
+        val index = md_wiki_index_documents([
+            md_wiki_document("/vault/Project Alpha.md", "# Project Alpha\n![[Project Beta|Beta embed]]"),
+            md_wiki_document("/vault/Project Beta.md", "# Project Beta\nNested body")
+        ])
+        val rendered = gui_render_markdown_block_with_wiki(block, index)
+        expect(rendered.html.contains("data-target=\"Project Alpha\"")).to_equal(true)
+        expect(rendered.html.contains("data-target=\"Project Beta\"")).to_equal(true)
+        expect(rendered.html.contains("Beta embed")).to_equal(true)
+        expect(rendered.html.contains("Nested body")).to_equal(true)
+
+    it "renders wiki property panels as editable GUI forms":
+        val panel = wiki_panel_with_rows("Properties", [
+            WikiPanelRow(icon: "property", label: "status", detail: "active", path: "/tmp/note.md", line: 0)
+        ])
+        val html = gui_render_wiki_property_form_html(panel)
+        expect(html.contains("class=\"wiki-property-form\"")).to_equal(true)
+        expect(html.contains("data-command=\"wiki-property-set\"")).to_equal(true)
+        expect(html.contains("class=\"wiki-property-value\"")).to_equal(true)
+        expect(html.contains("data-event=\"wiki-property-submit\"")).to_equal(true)
+        expect(html.contains("data-payload=\"status|active\"")).to_equal(true)
+        val vault_html = gui_render_wiki_property_form_html_with_root(panel, "/tmp/vault")
+        expect(vault_html.contains("data-event=\"wiki-vault-property-submit\"")).to_equal(true)
+        expect(vault_html.contains("data-payload=\"/tmp/vault|status|active\"")).to_equal(true)
+
+    it "renders markdown image attachment blocks with GUI metadata":
+        val block = RenderBlock(id: 11, kind: "embed", from_line: 0, to_line: 0, content: "![Diagram](assets/diagram.png)", rendered_lines: ["![Diagram](assets/diagram.png)"], status: "ok")
+        val rendered = gui_render_markdown_block(block)
+        expect(rendered.html.contains("class=\"md-embed md-embed-image\"")).to_equal(true)
+        expect(rendered.html.contains("data-embed-kind=\"image\"")).to_equal(true)
+        expect(rendered.html.contains("data-target=\"assets/diagram.png\"")).to_equal(true)
+        expect(rendered.html.contains("<img class=\"md-embed-image-preview\" src=\"assets/diagram.png\" alt=\"Diagram\" loading=\"lazy\">")).to_equal(true)
+        expect(rendered.html.contains("Diagram")).to_equal(true)
+        expect(rendered.html.contains("![Diagram]")).to_equal(false)
+
+    it "renders inline markdown images inside mixed paragraph content":
+        val block = RenderBlock(id: 111, kind: "paragraph", from_line: 0, to_line: 0, content: "Before ![Diagram](assets/diagram.png) after <safe>", rendered_lines: ["Before ![Diagram](assets/diagram.png) after <safe>"], status: "ok")
+        val rendered = gui_render_markdown_block(block)
+        expect(rendered.html.contains("Before ")).to_equal(true)
+        expect(rendered.html.contains("class=\"md-inline-image\"")).to_equal(true)
+        expect(rendered.html.contains("class=\"md-inline-image-preview\" src=\"assets/diagram.png\" alt=\"Diagram\" loading=\"lazy\"")).to_equal(true)
+        expect(rendered.html.contains(" after &lt;safe&gt;")).to_equal(true)
+        expect(rendered.html.contains("![Diagram]")).to_equal(false)
+
+    it "renders markdown tables as structured GUI table cells":
+        val block = RenderBlock(id: 12, kind: "table", from_line: 0, to_line: 2, content: "| A | B |\n|---|---|\n| 1 | 2 |", rendered_lines: ["| A | B |", "|---|---|", "| 1 | 2 |"], status: "ok")
+        val rendered = gui_render_markdown_block(block)
+        expect(rendered.html.contains("class=\"md-table-editor\"")).to_equal(true)
+        expect(rendered.html.contains("data-event=\"table-row-insert\"")).to_equal(true)
+        expect(rendered.html.contains("data-event=\"table-column-insert\"")).to_equal(true)
+        expect(rendered.html.contains("class=\"md-table\"")).to_equal(true)
+        expect(rendered.html.contains(">A</th>")).to_equal(true)
+        expect(rendered.html.contains(">B</th>")).to_equal(true)
+        expect(rendered.html.contains("data-line=\"2\" data-col=\"0\"")).to_equal(true)
+        expect(rendered.html.contains(">1</td>")).to_equal(true)
+        expect(rendered.html.contains(">2</td>")).to_equal(true)
+        expect(rendered.html.contains("---")).to_equal(false)
+
+    it "renders markdown task list items as GUI checkboxes":
+        val block = RenderBlock(id: 13, kind: "list", from_line: 4, to_line: 5, content: "- [ ] Todo\n- [x] Done", rendered_lines: ["- [ ] Todo", "- [x] Done"], status: "ok")
+        val rendered = gui_render_markdown_block(block)
+        expect(rendered.html.contains("class=\"md-task\"")).to_equal(true)
+        expect(rendered.html.contains("class=\"md-task checked\"")).to_equal(true)
+        expect(rendered.html.contains("class=\"md-task-checkbox\"")).to_equal(true)
+        expect(rendered.html.contains("data-line=\"4\"")).to_equal(true)
+        expect(rendered.html.contains("data-line=\"5\"")).to_equal(true)
+        expect(rendered.html.contains("Todo")).to_equal(true)
+        expect(rendered.html.contains("Done")).to_equal(true)
+        expect(rendered.html.contains("[ ]")).to_equal(false)
+
+    it "renders markdown links with GUI hit-test metadata":
+        var buffer = EditorBuffer.from_text(EditorBufferId(value: 1), "Title\nSee [Target](target.md) and [[Wiki Note]]\n")
+        buffer.path = "/tmp/gui_link_source.md"
+        buffer.move_cursor(0, 0)
+        val html = gui_render_editor_area(buffer, "markdown", buffer.viewport)
+        expect(html.contains("class=\"md-link\"")).to_equal(true)
+        expect(html.contains("data-line=\"1\"")).to_equal(true)
+        expect(html.contains("data-col=\"4\"")).to_equal(true)
+        expect(html.contains("data-target=\"target.md\"")).to_equal(true)
+        expect(html.contains("data-target=\"Wiki Note\"")).to_equal(true)
+
+    it "opens markdown links from GUI click events":
+        val source_path = "/tmp/simple_gui_click_source.md"
+        val target_path = "/tmp/target.md"
+        expect(rt_file_write_text(source_path, "See [Target](target.md)\n")).to_equal(true)
+        expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(source_path)
+        var state = gui_shell_new(session)
+
+        state = gui_shell_handle_event(state, "link-click", "target.md")
+
+        expect(state.ctrl.session.active_document().path()).to_equal(target_path)
+
+    it "opens markdown links from GUI ctrl-click cursor hit testing":
+        val source_path = "/tmp/simple_gui_ctrl_click_source.md"
+        val target_path = "/tmp/simple_gui_ctrl_click_target.md"
+        expect(rt_file_write_text(source_path, "See [Target](simple_gui_ctrl_click_target.md)\n")).to_equal(true)
+        expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(source_path)
+        var state = gui_shell_new(session)
+
+        state = gui_shell_handle_event(state, "editor-ctrl-click", "0,6")
+
+        expect(state.ctrl.session.active_document().path()).to_equal(target_path)
+
+    it "toggles markdown task checkboxes from GUI task events":
+        var session = EditSession.new()
+        val path = "/tmp/simple_gui_task_toggle.md"
+        expect(rt_file_write_text(path, "- [ ] Todo\n- [x] Done\n")).to_equal(true)
+        session.open_file(path)
+        var state = gui_shell_new(session)
+
+        state = gui_shell_handle_event(state, "task-toggle", "0")
+        expect(state.ctrl.session.active_buffer().line_at(0)).to_equal("- [x] Todo")
+
+        state = gui_shell_handle_event(state, "task-toggle", "1")
+        expect(state.ctrl.session.active_buffer().line_at(1)).to_equal("- [ ] Done")
+
+    it "filters and batches markdown tasks from GUI task controls":
+        var session = EditSession.new()
+        val path = "/tmp/simple_gui_task_batch.md"
+        expect(rt_file_write_text(path, "- [ ] Todo\n- [ ] Review notes\n- [x] Done\n")).to_equal(true)
+        session.open_file(path)
+        var state = gui_shell_new(session)
+        state = gui_shell_handle_event(state, "task-filter", "done")
+        expect(state.ctrl.status_msg).to_equal("wiki tasks: done")
+        expect(state.ctrl.wiki_panel.rows.len()).to_equal(1)
+        val frame = gui_shell_render_frame(state)
+        expect(frame.editor_html.contains("class=\"task-query\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"task-query\"")).to_equal(true)
+        expect(frame.editor_html.contains("class=\"task-count\"")).to_equal(true)
+        state = gui_shell_handle_event(state, "task-filter", "all")
+        expect(state.ctrl.status_msg).to_equal("wiki tasks: all")
+        state = gui_shell_handle_event(state, "task-query", "review")
+        expect(state.ctrl.status_msg).to_equal("wiki tasks: all")
+        expect(state.ctrl.wiki_task_query).to_equal("review")
+        expect(state.ctrl.wiki_panel.rows.len()).to_equal(1)
+        expect(state.ctrl.wiki_panel.rows[0].label).to_equal("Review notes")
+        state = gui_shell_handle_event(state, "task-batch", "done")
+        expect(state.ctrl.status_msg).to_equal("tasks marked done")
+        expect(state.ctrl.session.active_buffer().line_at(0)).to_equal("- [x] Todo")
+
+    it "filters vault search results from GUI search controls":
+        var suffix = 0
+        var root = "/tmp/simple_gui_vault_search"
+        while rt_file_exists(root + "/Alpha.md") or rt_file_exists(root + "/Projects/Project.md"):
+            suffix = suffix + 1
+            root = "/tmp/simple_gui_vault_search_" + suffix.to_text()
+        expect(rt_dir_create_all(root + "/Projects")).to_equal(true)
+        val path = root + "/Alpha.md"
+        val project_path = root + "/Projects/Project.md"
+        expect(rt_file_write_text(path, "# Cache\n- cache task\nbody cache\n")).to_equal(true)
+        expect(rt_file_write_text(project_path, "# Project Cache\nproject body\n")).to_equal(true)
+        var session = EditSession.new()
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        val searched = ctrl._execute_palette_command("wiki-vault-search", root + "|cache")
+        ctrl.status_msg = searched.status_msg
+        state.ctrl = ctrl
+
+        val frame = gui_shell_render_frame(state)
+        expect(frame.editor_html.contains("vault-search-tools")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"vault-search-filter\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"vault-search-path-filter\"")).to_equal(true)
+
+        state = gui_shell_handle_event(state, "vault-search-filter", "heading")
+        expect(state.ctrl.wiki_vault_search_query).to_equal("kind:heading cache")
+        expect(state.ctrl.wiki_panel.rows.len()).to_equal(2)
+        expect(state.ctrl.wiki_panel.rows[0].label).to_equal("# Cache")
+
+        state = gui_shell_handle_event(state, "vault-search-path-filter", "Projects")
+        expect(state.ctrl.wiki_vault_search_query).to_equal("path:Projects kind:heading cache")
+        expect(state.ctrl.wiki_panel.rows.len()).to_equal(1)
+        expect(state.ctrl.wiki_panel.rows[0].path).to_equal(project_path)
+
+        state = gui_shell_handle_event(state, "vault-search-filter", "all")
+        expect(state.ctrl.wiki_vault_search_query).to_equal("path:Projects cache")
+        expect(state.ctrl.wiki_panel.rows.len()).to_equal(1)
+        expect(state.ctrl.wiki_panel.rows[0].path).to_equal(project_path)
+
+    it "renders and filters the quick switch picker from GUI controls":
+        var session = EditSession.new()
+        val alpha_path = "/tmp/simple_gui_quick_switch_alpha.md"
+        val beta_path = "/tmp/simple_gui_quick_switch_beta.md"
+        expect(rt_file_write_text(alpha_path, "# Alpha\n")).to_equal(true)
+        expect(rt_file_write_text(beta_path, "# Beta\n")).to_equal(true)
+        session.open_file(alpha_path)
+        session.open_file(beta_path)
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        val opened = ctrl._execute_palette_command("wiki-quick-switch", "")
+        ctrl.status_msg = opened.status_msg
+        state.ctrl = ctrl
+
+        val frame = gui_shell_render_frame(state)
+        expect(frame.editor_html.contains("quick-switch-tools")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"quick-switch-filter\"")).to_equal(true)
+        expect(frame.editor_html.contains("2 notes")).to_equal(true)
+
+        state = gui_shell_handle_event(state, "quick-switch-filter", "beta")
+        expect(state.ctrl.wiki_quick_switch_query).to_equal("beta")
+        expect(state.ctrl.wiki_panel.rows.len()).to_equal(1)
+        expect(state.ctrl.wiki_panel.rows[0].path).to_equal(beta_path)
+
+        state = gui_shell_handle_event(state, "quick-switch-filter", "")
+        expect(state.ctrl.wiki_quick_switch_query).to_equal("")
+        expect(state.ctrl.wiki_panel.rows.len()).to_equal(2)
+
+    it "renders and submits the daily note date picker from GUI controls":
+        val daily_root = "/tmp/simple_gui_daily_note_picker"
+        expect(rt_dir_create_all(daily_root)).to_equal(true)
+        var session = EditSession.new()
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        val opened = ctrl._execute_palette_command("daily-note-picker", "2026-05-20|" + daily_root + "|# {{title}}\nDate: {{date}}\n|{{date}}-daily|md")
+        ctrl.status_msg = opened.status_msg
+        state.ctrl = ctrl
+
+        val frame = gui_shell_render_frame(state)
+        expect(frame.editor_html.contains("daily-note-tools")).to_equal(true)
+        expect(frame.editor_html.contains("type=\"date\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"daily-note-create\"")).to_equal(true)
+        expect(frame.editor_html.contains("value=\"2026-05-20\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-folder=\"" + daily_root + "\"")).to_equal(true)
+
+        state = gui_shell_handle_event(state, "daily-note-create", "2026-05-21|" + daily_root + "|# {{title}}\nDate: {{date}}\n|{{date}}-daily|md")
+
+        expect(state.ctrl.status_msg).to_equal("created daily note: " + daily_root + "/2026-05-21-daily.md")
+        expect(state.ctrl.session.active_document().path()).to_equal(daily_root + "/2026-05-21-daily.md")
+        expect(rt_file_read_text(daily_root + "/2026-05-21-daily.md")).to_equal("# 2026-05-21-daily\nDate: 2026-05-21\n")
+
+    it "renders filters and submits the template picker variable form from GUI controls":
+        val tpl_root = "/tmp/simple_gui_template_picker"
+        val target_path = "/tmp/simple_gui_template_picker_target.md"
+        expect(rt_dir_create_all(tpl_root + "/nested")).to_equal(true)
+        expect(rt_file_write_text(tpl_root + "/Meeting.md", "## {{title}}\nDate: {{date}}\n")).to_equal(true)
+        expect(rt_file_write_text(tpl_root + "/nested/Review.md", "# {{title}}\n")).to_equal(true)
+        expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
+        var session = EditSession.new()
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        val opened = ctrl._execute_palette_command("template-picker", tpl_root + "|" + target_path + "|Planning|2026-05-22|")
+        ctrl.status_msg = opened.status_msg
+        state.ctrl = ctrl
+
+        val frame = gui_shell_render_frame(state)
+        expect(frame.editor_html.contains("template-tools")).to_equal(true)
+        expect(frame.editor_html.contains("class=\"template-query\"")).to_equal(true)
+        expect(frame.editor_html.contains("class=\"template-title\"")).to_equal(true)
+        expect(frame.editor_html.contains("class=\"template-date\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"template-picker-filter\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"template-insert\"")).to_equal(true)
+        expect(frame.editor_html.contains("2 templates")).to_equal(true)
+
+        state = gui_shell_handle_event(state, "template-picker-filter", tpl_root + "|" + target_path + "|Review|2026-05-23|review")
+        expect(state.ctrl.status_msg).to_equal("templates: 1")
+        expect(state.ctrl.wiki_template_query).to_equal("review")
+        expect(state.ctrl.wiki_panel.rows[0].label).to_equal("Review.md")
+
+        state = gui_shell_handle_event(state, "template-insert", state.ctrl.wiki_panel.rows[0].detail)
+        expect(state.ctrl.status_msg.contains("inserted template: ")).to_equal(true)
+        expect(rt_file_read_text(target_path).contains("# Review")).to_equal(true)
+
+    it "renders filters and submits the attachment picker target controls from GUI events":
+        val attachment_root = "/tmp/simple_gui_attachment_picker"
+        val target_path = "/tmp/simple_gui_attachment_picker_target.md"
+        expect(rt_dir_create_all(attachment_root + "/assets")).to_equal(true)
+        expect(rt_file_write_text(attachment_root + "/assets/screenshot.png", "png")).to_equal(true)
+        expect(rt_file_write_text(attachment_root + "/assets/diagram.svg", "svg")).to_equal(true)
+        expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
+        var session = EditSession.new()
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        val opened = ctrl._execute_palette_command("attachment-picker", attachment_root + "||" + target_path + "|attachments")
+        ctrl.status_msg = opened.status_msg
+        state.ctrl = ctrl
+
+        val frame = gui_shell_render_frame(state)
+        expect(frame.editor_html.contains("attachment-tools")).to_equal(true)
+        expect(frame.editor_html.contains("class=\"attachment-query\"")).to_equal(true)
+        expect(frame.editor_html.contains("class=\"attachment-target\"")).to_equal(true)
+        expect(frame.editor_html.contains("class=\"attachment-storage\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"attachment-picker-filter\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"attachment-insert\"")).to_equal(true)
+        expect(frame.editor_html.contains("2 attachments")).to_equal(true)
+
+        state = gui_shell_handle_event(state, "attachment-picker-filter", attachment_root + "|screen|" + target_path + "|attachments")
+        expect(state.ctrl.status_msg).to_equal("attachments: 1")
+        expect(state.ctrl.wiki_attachment_query).to_equal("screen")
+        expect(state.ctrl.wiki_panel.rows[0].label).to_equal("screenshot.png")
+
+        state = gui_shell_handle_event(state, "attachment-insert", state.ctrl.wiki_panel.rows[0].detail)
+        expect(state.ctrl.status_msg.contains("inserted attachment: attachments/screenshot")).to_equal(true)
+        expect(rt_file_read_text(target_path).contains("![screenshot.png](attachments/screenshot")).to_equal(true)
+
+    it "filters and groups Problems panel rows from GUI controls":
+        val first_path = "/tmp/simple_gui_problem_filter_first.spl"
+        val second_path = "/tmp/simple_gui_problem_filter_second.spl"
+        expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
+        expect(rt_file_write_text(second_path, "fn second():\n    return\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(first_path)
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        ctrl.diagnostic_store.set_diagnostics(first_path, [
+            EditorDiagnostic(path: first_path, line: 0, col: 3, end_line: 0, end_col: 8, severity: "warning", message: "lint warning", source: "lint"),
+            EditorDiagnostic(path: first_path, line: 1, col: 4, end_line: 1, end_col: 8, severity: "error", message: "simple error", source: "simple")
+        ])
+        ctrl.diagnostic_store.set_diagnostics(second_path, [
+            EditorDiagnostic(path: second_path, line: 1, col: 2, end_line: 1, end_col: 5, severity: "error", message: "lint error", source: "lint")
+        ])
+        val shown = ctrl._execute_palette_command("problems", "")
+        ctrl.status_msg = shown.status_msg
+        state.ctrl = ctrl
+
+        val frame = gui_shell_render_frame(state)
+        expect(frame.editor_html.contains("diagnostics-tools")).to_equal(true)
+        expect(frame.editor_html.contains("diagnostics-table")).to_equal(true)
+        expect(frame.editor_html.contains("<th>Severity</th>")).to_equal(true)
+        expect(frame.editor_html.contains("class=\"diagnostics-message\"")).to_equal(true)
+        expect(frame.editor_html.contains("class=\"diagnostics-source\"")).to_equal(true)
+        expect(frame.editor_html.contains("simple_gui_problem_filter_first.spl")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"diagnostics-filter\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"diagnostics-group\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"diagnostics-sort\"")).to_equal(true)
+
+        state = gui_shell_handle_event(state, "diagnostics-filter", "error|")
+        expect(state.ctrl.status_msg).to_equal("problems: 2")
+        expect(state.ctrl.diagnostics_panel.title).to_equal("Problems (error)")
+        expect(state.ctrl.diagnostics_panel.rows[0].label).to_equal("simple error")
+
+        state = gui_shell_handle_event(state, "diagnostics-group", "source")
+        expect(state.ctrl.status_msg).to_equal("problems: 3")
+        expect(state.ctrl.diagnostics_panel.title).to_equal("Problems grouped by source")
+        expect(state.ctrl.diagnostics_panel.rows[0].label).to_equal("lint")
+        expect(state.ctrl.diagnostics_panel.rows[3].label).to_equal("simple")
+
+        state = gui_shell_handle_event(state, "diagnostics-sort", "severity")
+        expect(state.ctrl.status_msg).to_equal("problems: 3")
+        expect(state.ctrl.diagnostics_panel.title).to_equal("Problems sorted by severity")
+        expect(state.ctrl.diagnostics_panel.rows[0].label).to_equal("simple error")
+
+    it "renders WorkspaceEdit preview controls in the LSP panel":
+        val path = "/tmp/simple_gui_workspace_edit_tools.spl"
+        expect(rt_file_write_text(path, "fn main():\n  return\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(path)
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        val edit_json = "[{\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{\"line\":1,\"character\":8}},\"newText\":\"    return\"}]"
+        ctrl._show_workspace_edit_preview(edit_json, "formatting")
+        state.ctrl = ctrl
+
+        val frame = gui_shell_render_frame(state)
+
+        expect(frame.editor_html.contains("workspace-edit-tools")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"workspace-edit-confirm\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-event=\"workspace-edit-cancel\"")).to_equal(true)
+
+    it "applies and cancels WorkspaceEdit previews from GUI controls":
+        val apply_path = "/tmp/simple_gui_workspace_edit_apply.spl"
+        expect(rt_file_write_text(apply_path, "fn main():\n  return\n")).to_equal(true)
+        var apply_session = EditSession.new()
+        apply_session.open_file(apply_path)
+        var apply_state = gui_shell_new(apply_session)
+        var apply_ctrl = apply_state.ctrl
+        val apply_json = "[{\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{\"line\":1,\"character\":8}},\"newText\":\"    return\"}]"
+        apply_ctrl._show_workspace_edit_preview(apply_json, "formatting")
+        apply_state.ctrl = apply_ctrl
+
+        apply_state = gui_shell_handle_event(apply_state, "workspace-edit-confirm", "")
+
+        expect(apply_state.ctrl.status_msg).to_equal("applied: formatting")
+        expect(apply_state.ctrl.pending_workspace_edit_json).to_equal("")
+        expect(apply_state.ctrl.session.active_buffer().line_at(1)).to_equal("    return")
+
+        val cancel_path = "/tmp/simple_gui_workspace_edit_cancel.spl"
+        expect(rt_file_write_text(cancel_path, "fn main():\n  return\n")).to_equal(true)
+        var cancel_session = EditSession.new()
+        cancel_session.open_file(cancel_path)
+        var cancel_state = gui_shell_new(cancel_session)
+        var cancel_ctrl = cancel_state.ctrl
+        val cancel_json = "[{\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{\"line\":1,\"character\":8}},\"newText\":\"    return\"}]"
+        cancel_ctrl._show_workspace_edit_preview(cancel_json, "formatting")
+        cancel_state.ctrl = cancel_ctrl
+
+        cancel_state = gui_shell_handle_event(cancel_state, "workspace-edit-cancel", "")
+
+        expect(cancel_state.ctrl.status_msg).to_equal("workspace edit cancelled")
+        expect(cancel_state.ctrl.pending_workspace_edit_json).to_equal("")
+        expect(cancel_state.ctrl.session.active_buffer().line_at(1)).to_equal("  return")
+
+    it "renders and uses LSP navigation history controls":
+        val first_path = "/tmp/simple_gui_lsp_history_first.spl"
+        val second_path = "/tmp/simple_gui_lsp_history_second.spl"
+        expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
+        expect(rt_file_write_text(second_path, "fn second():\n    return\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(second_path)
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        ctrl.lsp_location_stack = [EditorLocation(path: first_path, line: 1, col: 4)]
+        var dock = ctrl.session.dock_layout
+        dock.right_visible = true
+        dock.active_right = "lsp-panel"
+        ctrl.session.dock_layout = dock
+        state.ctrl = ctrl
+
+        expect(state.ctrl.lsp_location_stack.len()).to_equal(1)
+        val tools_html = gui_render_lsp_navigation_tools_html(state.ctrl)
+        expect(tools_html.contains("lsp-navigation-tools")).to_equal(true)
+        expect(tools_html.contains("data-event=\"lsp-back\"")).to_equal(true)
+
+        state = gui_shell_handle_event(state, "lsp-back", "")
+        expect(state.ctrl.status_msg).to_equal("lsp back: " + first_path + ":2")
+        expect(state.ctrl.session.active_document().path()).to_equal(first_path)
+        expect(state.ctrl.session.active_buffer().cursor_row).to_equal(1)
+        expect(state.ctrl.session.active_buffer().cursor_col).to_equal(4)
+        expect(state.ctrl.lsp_location_stack.len()).to_equal(0)
+
+    it "renders and selects LSP result rows from GUI clicks":
+        val first_path = "/tmp/simple_gui_lsp_result_first.spl"
+        val second_path = "/tmp/simple_gui_lsp_result_second.spl"
+        expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
+        expect(rt_file_write_text(second_path, "fn second():\n    return\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(first_path)
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        ctrl.lsp_result_panel = lsp_result_panel_from_response("references", LspResponse(id: 3, ok: true, result_json: "[{\"uri\":\"file://" + first_path + "\",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":2}}},{\"uri\":\"file://" + second_path + "\",\"range\":{\"start\":{\"line\":1,\"character\":4},\"end\":{\"line\":1,\"character\":8}}}]", error_text: ""))
+        var dock = ctrl.session.dock_layout
+        dock.right_visible = true
+        dock.active_right = "lsp-panel"
+        ctrl.session.dock_layout = dock
+        state.ctrl = ctrl
+
+        val rows_html = gui_render_lsp_result_rows_html(state.ctrl.lsp_result_panel)
+        expect(rows_html.contains("class=\"lsp-result-row selected\"")).to_equal(true)
+        expect(rows_html.contains("data-event=\"lsp-result-click\"")).to_equal(true)
+        expect(rows_html.contains("data-row=\"1\"")).to_equal(true)
+
+        state = gui_shell_handle_event(state, "lsp-result-click", "1")
+
+        expect(state.ctrl.status_msg).to_equal("lsp result selected")
+        expect(state.ctrl.lsp_result_panel.selected).to_equal(1)
+
+    it "renders LSP command argument forms for code lens rows":
+        val panel = lsp_result_panel_from_response("code-lens", LspResponse(id: 4, ok: true, result_json: "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":9}},\"command\":{\"title\":\"Run main\",\"command\":\"debug-start\",\"arguments\":[\"simple\"]}}]", error_text: ""))
+        val html = gui_render_lsp_result_rows_html(panel)
+        expect(html.contains("lsp-command-form")).to_equal(true)
+        expect(html.contains("class=\"lsp-command-name\"")).to_equal(true)
+        expect(html.contains("value=\"debug-start\"")).to_equal(true)
+        expect(html.contains("class=\"lsp-command-args\"")).to_equal(true)
+        expect(html.contains("value=\"simple\"")).to_equal(true)
+        expect(html.contains("data-event=\"code-lens-run\"")).to_equal(true)
+        expect(html.contains("data-value=\"debug-start|simple\"")).to_equal(true)
 
     it "escapes HTML in rendered output":
         val src = read_text("src/lib/editor/70.backend/gui_backend.spl")
@@ -157,6 +696,198 @@ describe "editor GUI shell":
         expect(src.contains("extern fn rt_gui_present_html")).to_equal(true)
         expect(src.contains("rt_gui_present_html(html)")).to_equal(true)
 
+    it "renders and opens wiki panel rows from GUI click events":
+        val source_path = "/tmp/simple_gui_wiki_source.md"
+        val target_path = "/tmp/simple_gui_wiki_target.md"
+        expect(rt_file_write_text(source_path, "[[simple_gui_wiki_target]]\n")).to_equal(true)
+        expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(source_path)
+        session.open_file(target_path)
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        ctrl.wiki_panel = wiki_panel_with_rows("Backlinks", [
+            WikiPanelRow(icon: "backlink", label: "source", detail: source_path + ":1", path: source_path, line: 0)
+        ])
+        var dock = ctrl.session.dock_layout
+        dock.right_visible = true
+        dock.active_right = "wiki-panel"
+        ctrl.session.dock_layout = dock
+        state.ctrl = ctrl
+
+        val gui_src = read_text("src/app/editor/gui_shell.spl")
+        expect(gui_src.contains("class=\\\"wiki-row")).to_equal(true)
+        expect(gui_src.contains("data-row=\\\"")).to_equal(true)
+        expect(gui_src.contains("data-path=\\\"")).to_equal(true)
+
+        state = gui_shell_handle_event(state, "wiki-panel-click", "0")
+        expect(state.ctrl.session.active_document().path()).to_equal(source_path)
+        expect(state.ctrl.status_msg).to_equal("wiki jump: " + source_path + ":1")
+
+    it "renders LSP hover popup HTML near the source position":
+        val html = gui_render_lsp_hover_popup_html(LspHoverPopup(visible: true, content: "fn main() <safe>", detail: "line 1:4", line: 0, col: 3))
+        expect(html.contains("class=\"lsp-hover-popup\"")).to_equal(true)
+        expect(html.contains("data-line=\"0\"")).to_equal(true)
+        expect(html.contains("data-col=\"3\"")).to_equal(true)
+        expect(html.contains("data-event=\"lsp-hover-dismiss\"")).to_equal(true)
+        expect(html.contains("fn main() &lt;safe&gt;")).to_equal(true)
+        expect(gui_render_lsp_hover_popup_html(lsp_hover_popup_hidden())).to_equal("")
+
+    it "requests and debounces LSP hover from GUI editor hover events":
+        val path = "/tmp/simple_gui_hover_event.spl"
+        expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(path)
+        var state = gui_shell_new(session)
+        val frame = gui_shell_render_frame(state)
+        expect(frame.editor_html.contains("data-event=\"editor-hover\"")).to_equal(true)
+        expect(frame.editor_html.contains("data-value=\"0,0\"")).to_equal(true)
+
+        state = gui_shell_handle_event(state, "editor-hover", "0,3")
+        expect(state.ctrl.status_msg).to_equal("hover results")
+        expect(state.ctrl.session.active_buffer().cursor_row).to_equal(0)
+        expect(state.ctrl.session.active_buffer().cursor_col).to_equal(3)
+        val next_id = state.ctrl.simple_lsp_state.client.next_id
+        var ctrl_hover = state.ctrl
+        ctrl_hover.lsp_hover_popup = LspHoverPopup(visible: true, content: "fn main()", detail: "line 1:4", line: 0, col: 3)
+        state.ctrl = ctrl_hover
+        state = gui_shell_handle_event(state, "editor-hover", "0,3")
+        expect(state.ctrl.status_msg).to_equal("hover unchanged")
+        expect(state.ctrl.simple_lsp_state.client.next_id).to_equal(next_id)
+
+    it "dismisses LSP hover popup from GUI events":
+        var session = EditSession.new()
+        var state = gui_shell_new(session)
+        state.ctrl.lsp_hover_popup = LspHoverPopup(visible: true, content: "fn main()", detail: "line 1:4", line: 0, col: 3)
+
+        state = gui_shell_handle_event(state, "lsp-hover-dismiss", "")
+
+        expect(state.ctrl.lsp_hover_popup.visible).to_equal(false)
+        expect(state.ctrl.status_msg).to_equal("hover dismissed")
+
+    it "renders and dismisses LSP signature popup from GUI events":
+        val html = gui_render_lsp_signature_popup_html(LspSignaturePopup(visible: true, label: "add(value: i64) <safe>", detail: "Returns value", active_parameter: "value: i64", line: 1, col: 8))
+        expect(html.contains("class=\"lsp-signature-popup\"")).to_equal(true)
+        expect(html.contains("data-event=\"lsp-signature-dismiss\"")).to_equal(true)
+        expect(html.contains("data-active-parameter=\"value: i64\"")).to_equal(true)
+        expect(html.contains("class=\"signature-active-parameter\"")).to_equal(true)
+        expect(html.contains(">value: i64</span>")).to_equal(true)
+        expect(html.contains("&lt;safe&gt;")).to_equal(true)
+        expect(gui_render_lsp_signature_popup_html(lsp_signature_popup_hidden())).to_equal("")
+
+        var session = EditSession.new()
+        var state = gui_shell_new(session)
+        state.ctrl.lsp_signature_popup = LspSignaturePopup(visible: true, label: "add(value: i64)", detail: "Returns value", active_parameter: "value: i64", line: 1, col: 8)
+
+        state = gui_shell_handle_event(state, "lsp-signature-dismiss", "")
+
+        expect(state.ctrl.lsp_signature_popup.visible).to_equal(false)
+        expect(state.ctrl.status_msg).to_equal("signature dismissed")
+
+    it "executes inline code lens commands from GUI events":
+        var session = EditSession.new()
+        var state = gui_shell_new(session)
+
+        state = gui_shell_handle_event(state, "code-lens-run", "debug-start|simple")
+
+        expect(state.ctrl.status_msg).to_equal("debug adapter: Launch Simple")
+        expect(state.ctrl.debug_status).to_equal("starting")
+
+    it "moves the cursor from GUI inlay hint clicks":
+        val path = "/tmp/simple_gui_inlay_hint_click.spl"
+        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(path)
+        var state = gui_shell_new(session)
+        var buffer = state.ctrl.session.active_buffer()
+        buffer.add_inlay_hint(1, 14, ": i64")
+        state.ctrl.session.update_active_buffer(buffer)
+
+        state = gui_shell_handle_event(state, "inlay-hint-click", "1,14")
+
+        expect(state.ctrl.session.active_buffer().cursor_row).to_equal(1)
+        expect(state.ctrl.session.active_buffer().cursor_col).to_equal(14)
+        expect(state.ctrl.status_msg).to_equal("inlay hint selected")
+
+    it "renders wiki graph panels as clickable GUI graph nodes":
+        var session = EditSession.new()
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        ctrl.wiki_panel = wiki_panel_with_rows("Graph", [
+            WikiPanelRow(icon: "link", label: "Target", detail: "source -> Target link resolved", path: "/tmp/simple_gui_graph_target.md", line: 0)
+        ])
+        var dock = ctrl.session.dock_layout
+        dock.right_visible = true
+        dock.active_right = "wiki-panel"
+        ctrl.session.dock_layout = dock
+        state.ctrl = ctrl
+
+        val graph_html = gui_render_wiki_graph_html(state.ctrl.wiki_panel)
+        expect(graph_html.contains("class=\"wiki-graph\"")).to_equal(true)
+        expect(graph_html.contains("data-layout=\"deterministic-grid\"")).to_equal(true)
+        expect(graph_html.contains("class=\"wiki-graph-node selected\"")).to_equal(true)
+        expect(graph_html.contains("data-event=\"wiki-panel-click\"")).to_equal(true)
+        expect(graph_html.contains("data-x=\"12\"")).to_equal(true)
+        expect(graph_html.contains("data-y=\"12\"")).to_equal(true)
+        expect(graph_html.contains("data-from-x=\"12\"")).to_equal(true)
+        expect(graph_html.contains("data-to-x=\"12\"")).to_equal(true)
+        expect(graph_html.contains("source -&gt; Target link resolved")).to_equal(true)
+
+    it "submits wiki property form edits through the existing property command":
+        val note_path = "/tmp/simple_gui_wiki_property.md"
+        expect(rt_file_write_text(note_path, "---\nstatus: active\n---\n# Note\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(note_path)
+        var state = gui_shell_new(session)
+        state = gui_shell_handle_event(state, "wiki-property-submit", "status|done")
+        expect(state.ctrl.status_msg).to_equal("property set: status")
+        expect(state.ctrl.session.active_buffer().to_text().contains("status: done")).to_equal(true)
+
+    it "submits wiki property vault edits through the bulk property command":
+        val root = "/tmp/simple_gui_wiki_property_vault"
+        expect(rt_dir_create_all(root + "/Projects")).to_equal(true)
+        val note_path = root + "/Home.md"
+        val other_path = root + "/Projects/Other.md"
+        expect(rt_file_write_text(note_path, "---\nstatus: active\n---\n# Note\n")).to_equal(true)
+        expect(rt_file_write_text(other_path, "# Other\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(note_path)
+        var state = gui_shell_new(session)
+        state = gui_shell_handle_event(state, "wiki-vault-property-submit", root + "|status|done")
+        expect(state.ctrl.status_msg).to_equal("vault property set: 2")
+        expect(state.ctrl.session.active_buffer().to_text().contains("status: done")).to_equal(true)
+        expect(rt_file_read_text(other_path).contains("status: done")).to_equal(true)
+
+    it "routes GUI table edit controls through markdown table commands":
+        val note_path = "/tmp/simple_gui_table_edit.md"
+        expect(rt_file_write_text(note_path, "| A | B |\n| --- | --- |\n| 1 | 2 |\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(note_path)
+        var state = gui_shell_new(session)
+        var buffer = state.ctrl.session.active_buffer()
+        buffer.move_cursor(2, 3)
+        state.ctrl.session.update_active_buffer(buffer)
+        state = gui_shell_handle_event(state, "table-row-insert", "")
+        expect(state.ctrl.status_msg).to_equal("table row inserted")
+        expect(state.ctrl.session.active_buffer().dirty).to_equal(true)
+        buffer = state.ctrl.session.active_buffer()
+        buffer.move_cursor(0, 3)
+        state.ctrl.session.update_active_buffer(buffer)
+        state = gui_shell_handle_event(state, "table-column-insert", "")
+        expect(state.ctrl.status_msg).to_equal("table column inserted")
+        expect(state.ctrl.session.active_buffer().dirty).to_equal(true)
+
+    it "commits GUI table cell edits back to markdown source":
+        val note_path = "/tmp/simple_gui_table_cell_edit.md"
+        expect(rt_file_write_text(note_path, "| A | B |\n| --- | --- |\n| 1 | 2 |\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(note_path)
+        var state = gui_shell_new(session)
+        state = gui_shell_handle_event(state, "table-cell-commit", "2|1|updated")
+        expect(state.ctrl.status_msg).to_equal("table cell updated")
+        expect(state.ctrl.session.active_buffer().to_text().contains("| 1 | updated |")).to_equal(true)
+        expect(state.ctrl.session.active_buffer().dirty).to_equal(true)
+
 describe "editor GUI backend — rendering":
 
     it "has gui_render_editor_area for HTML output":
@@ -167,11 +898,72 @@ describe "editor GUI backend — rendering":
     it "renders source area as an editable GUI surface":
         val src = read_text("src/lib/editor/70.backend/gui_backend.spl")
         expect(src.contains("contenteditable=\\\"true\\\"")).to_equal(true)
+        expect(src.contains("data-event=\\\"table-cell-commit\\\"")).to_equal(true)
         expect(src.contains("role=\\\"textbox\\\"")).to_equal(true)
         expect(src.contains("spellcheck=\\\"false\\\"")).to_equal(true)
         expect(src.contains("data-language=\\\"")).to_equal(true)
         expect(src.contains("data-line=\\\"")).to_equal(true)
         expect(src.contains("data-cursor=\\\"true\\\"")).to_equal(true)
+
+    it "renders active source characters with GUI hover column targets":
+        var buffer = EditorBuffer.from_text(EditorBufferId(value: 1), "main\n")
+        buffer.viewport.height = 1
+        buffer.move_cursor(0, 2)
+        val html = gui_render_editor_area(buffer, "simple", buffer.viewport)
+        expect(html.contains("class=\"hover-target\"")).to_equal(true)
+        expect(html.contains("data-event=\"editor-hover\"")).to_equal(true)
+        expect(html.contains("data-value=\"0,2\"")).to_equal(true)
+        expect(html.contains("data-col=\"2\"")).to_equal(true)
+
+    it "renders diagnostic gutter markers in GUI source lines":
+        var buffer = EditorBuffer.from_text(EditorBufferId(value: 1), "first\nsecond\n")
+        buffer.path = "/tmp/simple_editor_gui_gutter.spl"
+        buffer.viewport.height = 3
+        val html = gui_render_editor_area_with_diagnostics(buffer, "simple", buffer.viewport, buffer.path, [
+            EditorDiagnostic(path: buffer.path, line: 1, col: 0, end_line: 1, end_col: 1, severity: "error", message: "bad", source: "test")
+        ])
+
+        expect(html.contains("diagnostic-gutter error")).to_equal(true)
+        expect(html.contains("data-diagnostic=\"error\"")).to_equal(true)
+        expect(html.contains(">E</span>")).to_equal(true)
+
+    it "renders folded headers in GUI source lines":
+        var buffer = EditorBuffer.from_text(EditorBufferId(value: 1), "# One\nbody\n# Two\n")
+        buffer.viewport.height = 3
+        buffer.fold_range(0, 1)
+        val html = gui_render_editor_area(buffer, "markdown", buffer.viewport)
+        expect(html.contains("folded-header")).to_equal(true)
+        expect(html.contains("fold-badge")).to_equal(true)
+        expect(html.contains("data-event=\"fold-toggle\"")).to_equal(true)
+        expect(html.contains("data-value=\"0\"")).to_equal(true)
+        expect(html.contains("+1 folded")).to_equal(true)
+        expect(html.contains("body")).to_equal(false)
+
+    it "unfolds folded source ranges from GUI fold badges":
+        val note_path = "/tmp/simple_gui_fold_badge.md"
+        expect(rt_file_write_text(note_path, "# One\nbody\n# Two\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(note_path)
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        var buffer = ctrl.session.active_buffer()
+        buffer.fold_range(0, 1)
+        ctrl.session.update_active_buffer(buffer)
+        state.ctrl = ctrl
+        state = gui_shell_handle_event(state, "fold-toggle", "0")
+        buffer = state.ctrl.session.active_buffer()
+        expect(buffer.folded_ranges.len()).to_equal(0)
+        expect(buffer.cursor_row).to_equal(0)
+        expect(state.ctrl.status_msg).to_equal("unfolded section")
+
+    it "captures folded header markers in headless frames":
+        var buffer = EditorBuffer.from_text(EditorBufferId(value: 1), "head\nbody\nnext\n")
+        buffer.fold_range(0, 1)
+        var backend = HeadlessBackend.new(40, 5)
+        backend.capture_frame(buffer, "NORMAL", "")
+        val frame = backend.last_frame()
+        expect(frame.lines[0].contains("[+1 folded | za]")).to_equal(true)
+        expect(frame.lines[1]).to_equal("next")
 
     it "has gui_render_tab_bar_html for tab rendering":
         val src = read_text("src/lib/editor/70.backend/gui_backend.spl")
@@ -211,3 +1003,23 @@ describe "editor MCP tools":
     it "has editor_mcp_dispatch for tool execution":
         val src = read_text("src/app/editor/mcp_tools.spl")
         expect(src.contains("fn editor_mcp_dispatch(session: EditSession, tool_name: text, args: [text]) -> McpToolResult")).to_equal(true)
+
+    it "dispatches registered navigation MCP tools":
+        val src = read_text("src/app/editor/mcp_tools.spl")
+        expect(src.contains("if tool_name == \"editor.goto_definition\"")).to_equal(true)
+        expect(src.contains("ctrl._request_active_definition()")).to_equal(true)
+        expect(src.contains("ctrl_cmd._execute_palette_command(args[0], \"\")")).to_equal(true)
+
+    it "maps VSCode-style GUI shortcuts to editor IDE actions":
+        val src = read_text("src/app/editor/gui_shell.spl")
+        expect(src.contains("gui_key == \"Ctrl+Space\"")).to_equal(true)
+        expect(src.contains("gui_key == \"F12\"")).to_equal(true)
+        expect(src.contains("gui_key == \"Ctrl+.\"")).to_equal(true)
+        expect(src.contains("gui_key == \"Shift+Alt+Right\"")).to_equal(true)
+        expect(src.contains("gui_key == \"Shift+Alt+Left\"")).to_equal(true)
+        expect(src.contains("gui_key == \"F5\"")).to_equal(true)
+        expect(src.contains("_request_active_lsp_action(\"completion\")")).to_equal(true)
+        expect(src.contains("_request_active_lsp_action(\"definition\")")).to_equal(true)
+        expect(src.contains("_expand_lsp_selection_range()")).to_equal(true)
+        expect(src.contains("_shrink_lsp_selection_range()")).to_equal(true)
+        expect(src.contains("_start_debug_adapter(\"simple\")")).to_equal(true)

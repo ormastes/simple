@@ -266,9 +266,7 @@ pub struct ModuleResolver {
 impl ModuleResolver {
     /// Create a new module resolver for a project
     pub fn new(project_root: PathBuf, source_root: PathBuf) -> Self {
-        // Auto-detect stdlib location
-        let stdlib_root = project_root.join("src/lib/std/src");
-        let stdlib_root = if stdlib_root.exists() { Some(stdlib_root) } else { None };
+        let stdlib_root = detect_stdlib_root(&project_root, &source_root);
 
         Self {
             type_root: project_root.join("src").join("type"),
@@ -404,6 +402,7 @@ fn find_project_root(path: &Path) -> Option<PathBuf> {
 
 fn detect_stdlib_root(project_root: &Path, file_parent: &Path) -> Option<PathBuf> {
     let stdlib_candidates = [
+        "src/compiler_rust/lib/std/src",
         "src/lib",
         "src/std",
         "src/std/src",

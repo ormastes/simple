@@ -1,12 +1,22 @@
-# GPU Runtime-Compatible API
-# Simplified version that works with runtime parser
+# GPU Runtime-Compatible API (NoGC)
+# Simplified version that works with runtime parser.
 #
-# This is a subset of the full GPU API that avoids:
-# - struct with separate impl blocks
-# - complex generics
-# - advanced type features
+# NoGC differences from gc_async_mut/gpu_runtime:
+#   - No borrowed-view pattern (no TorchTensorWrapper/TorchStream with owns_handle: false)
+#   - Direct FFI calls via rt_torch_* functions
+#   - No temporary wrapper allocations
 
-use std.torch.{TorchTensorWrapper, TorchStream, torch_available, torch_cuda_available}
+use std.gc_async_mut.torch.ffi.{
+    rt_torch_cuda_available,
+    rt_torch_tensor_zeros,
+    rt_torch_tensor_ones,
+    rt_torch_torchtensor_cuda,
+    rt_torch_torchtensor_is_cuda,
+    rt_torch_torchtensor_numel,
+    rt_torch_stream_create,
+    rt_torch_torchstream_sync,
+    rt_torch_torchstream_query
+}
 
 # CUDA device count FFI
 extern fn rt_cuda_device_count() -> i32
@@ -17,18 +27,18 @@ extern fn rt_cuda_device_count() -> i32
 
 fn gpu_available() -> bool:
     """Check if GPU is available."""
-    torch_cuda_available()
+    rt_torch_cuda_available()
 
 fn gpu_backend_name() -> text:
     """Get GPU backend name."""
-    if torch_cuda_available():
+    if rt_torch_cuda_available():
         "CUDA"
     else:
         "CPU"
 
 fn gpu_device_count() -> i32:
     """Get number of GPU devices."""
-    if torch_cuda_available():
+    if rt_torch_cuda_available():
         rt_cuda_device_count()
     else:
         0
@@ -43,14 +53,12 @@ fn gpu_tensor_zeros(rows: i64, cols: i64) -> i64:
 
     Returns handle (use with other gpu_tensor_* functions).
     """
-    val t = TorchTensorWrapper.tensor_zeros([rows, cols])
-    t.handle
+    rt_torch_tensor_zeros([rows, cols])
 
 # reason: positional gpu_runtime mod API
 fn gpu_tensor_ones(rows: i64, cols: i64) -> i64:
     """Create ones tensor and return handle."""
-    val t = TorchTensorWrapper.tensor_ones([rows, cols])
-    t.handle
+    rt_torch_tensor_ones([rows, cols])
 
 fn gpu_tensor_to_cuda(tensor_handle: i64, device_id: i32) -> i64:
     """Move tensor to GPU.
@@ -62,19 +70,18 @@ fn gpu_tensor_to_cuda(tensor_handle: i64, device_id: i32) -> i64:
     Returns:
         New handle for GPU tensor
     """
-    val t = TorchTensorWrapper(handle: tensor_handle, owns_handle: false)
-    val gpu_t = t.cuda(device_id)
-    gpu_t.handle
+    # NoGC: direct FFI call — no temporary wrapper needed
+    rt_torch_torchtensor_cuda(tensor_handle, device_id)
 
 fn gpu_tensor_is_cuda(tensor_handle: i64) -> bool:
     """Check if tensor is on GPU."""
-    val t = TorchTensorWrapper(handle: tensor_handle, owns_handle: false)
-    t.is_cuda()
+    # NoGC: direct FFI call — no temporary wrapper needed
+    rt_torch_torchtensor_is_cuda(tensor_handle)
 
 fn gpu_tensor_numel(tensor_handle: i64) -> i64:
     """Get number of elements in tensor."""
-    val t = TorchTensorWrapper(handle: tensor_handle, owns_handle: false)
-    t.numel()
+    # NoGC: direct FFI call — no temporary wrapper needed
+    rt_torch_torchtensor_numel(tensor_handle)
 
 # ============================================================================
 # Stream Operations (Runtime Compatible)
@@ -86,18 +93,17 @@ fn gpu_stream_create(device_id: i32) -> i64:
     Returns:
         Stream handle
     """
-    val stream = TorchStream.create(device_id)
-    stream.handle
+    rt_torch_stream_create(device_id)
 
 fn gpu_stream_sync(stream_handle: i64):
     """Wait for stream to complete (blocking)."""
-    val stream = TorchStream(handle: stream_handle, owns_handle: false)
-    stream.sync()
+    # NoGC: direct FFI call — no temporary wrapper needed
+    rt_torch_torchstream_sync(stream_handle)
 
 fn gpu_stream_query(stream_handle: i64) -> bool:
     """Check if stream is complete (non-blocking)."""
-    val stream = TorchStream(handle: stream_handle, owns_handle: false)
-    stream.query()
+    # NoGC: direct FFI call — no temporary wrapper needed
+    rt_torch_torchstream_query(stream_handle)
 
 # ============================================================================
 # High-Level Helpers

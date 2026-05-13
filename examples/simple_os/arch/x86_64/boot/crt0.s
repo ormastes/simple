@@ -497,6 +497,67 @@ _fault_handler:
     movq $0x3, %rax                 /* RAX = nil (tagged special 0x3) */
     iretq
 
+/* Runtime W^X probe.
+ *
+ * Converts the first 2 MiB identity huge-page mapping into 4 KiB pages, clears
+ * RW on this probe's code page, attempts a write to that page, then restores
+ * RW. The existing recoverable #PF handler advances past the two-byte faulting
+ * store, so success is measured by the fault counter increasing.
+ */
+.global rt_harden_text_write_trap_probe
+.type rt_harden_text_write_trap_probe, @function
+rt_harden_text_write_trap_probe:
+    pushq %rbp
+    movq %rsp, %rbp
+    pushq %rbx
+    pushq %r12
+
+    movq _fault_count(%rip), %r8
+
+    leaq boot_text_pt(%rip), %rdi
+    xorq %rcx, %rcx
+    xorq %rax, %rax
+.harden_fill_pt:
+    movq %rax, %rdx
+    orq $0x3, %rdx                 /* P | RW */
+    movq %rdx, (%rdi,%rcx,8)
+    addq $0x1000, %rax
+    incq %rcx
+    cmpq $512, %rcx
+    jne .harden_fill_pt
+
+    leaq .harden_text_probe_target(%rip), %rax
+    movq %rax, %r12
+    andq $0x1fffff, %r12
+    shrq $12, %r12                 /* PT index within first 2 MiB */
+
+    movq (%rdi,%r12,8), %rbx
+    andq $~0x2, %rbx               /* clear RW for the code page */
+    movq %rbx, (%rdi,%r12,8)
+
+    leaq boot_text_pt(%rip), %rbx
+    orq $0x3, %rbx
+    movq %rbx, boot_pd(%rip)       /* replace first huge PDE with PT */
+    invlpg (%rax)
+
+.harden_text_probe_target:
+    movb %al, (%rax)               /* 2-byte write; #PF should skip it */
+
+    movq (%rdi,%r12,8), %rbx
+    orq $0x2, %rbx
+    movq %rbx, (%rdi,%r12,8)
+    invlpg (%rax)
+
+    xorq %rax, %rax
+    cmpq %r8, _fault_count(%rip)
+    jbe .harden_probe_done
+    movq $1, %rax
+.harden_probe_done:
+    popq %r12
+    popq %rbx
+    popq %rbp
+    ret
+
 /* ==================================================================
  * 64-bit GDT (5 entries for SYSCALL/SYSRET support)
  *
@@ -597,3 +658,5 @@ boot_high_pdpt:
     .space 4096
 boot_high_pd:
     .space 4096    /* 512 entries * 8 bytes = 4 KiB for 1 GiB high-MMIO map */
+boot_text_pt:
+    .space 4096    /* 512 4 KiB entries for runtime W^X text probe */

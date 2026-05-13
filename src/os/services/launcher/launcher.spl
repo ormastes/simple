@@ -29,11 +29,13 @@ use os.services.launcher.launcher_registry.{
     app_launch_count, app_last_pid, app_is_headless, app_active, app_count,
     process_pid, process_app_index, process_app_id, process_name, process_path,
     process_icon, process_state, process_exit_code, process_window_count,
-    process_is_headless, process_launch_seq, process_active, process_count,
+    process_is_headless, process_launch_seq, process_signal_backed,
+    process_active, process_count,
     process_sequence, launcher_last_launch_pid,
     launcher_command_resolution_candidates, launcher_associated_app_for_path,
     launcher_resolve_command_path, launcher_launch_path_with_args,
     launcher_open_path, launcher_record_process, launcher_process_is_process_backed,
+    launcher_process_can_signal,
     _preferred_app_exec_path, _canonical_app_identity, _app_name, _app_path,
     _app_icon, _app_key, _app_mod, _app_index_by_name, _app_index_by_path,
     _seeded_app_index_by_path, _seeded_app_name_for_path, _seeded_app_icon_for_path,
@@ -46,7 +48,31 @@ use os.services.launcher.launcher_registry.{
 use os.userlib.syscall_raw.{syscall}
 use os.posix.process_compat.{posix_spawn_with_args, posix_kill}
 use os.userlib.process.{spawn, get_task_info}
-use os.kernel.log.klog_api.{log_raw_println}
+
+fn log_raw_println(msg: text):
+    # The generic kernel log facade lowers through `print`, which is not safe
+    # in the freestanding desktop lane. Launcher state is verified through
+    # explicit harness serial markers instead.
+    pass_dn
+
+fn _launcher_seed_default_app(name: text, path: text, icon: text, key: u32, modifiers: u32):
+    if app_count >= MAX_APPS:
+        return
+    val slot = app_count
+    app_name[slot] = name
+    app_path[slot] = path
+    app_icon[slot] = icon
+    app_shortcut_key[slot] = key
+    app_shortcut_mod[slot] = modifiers
+    app_pid[slot] = 0
+    app_launch_state[slot] = "idle"
+    app_window_count[slot] = 0
+    app_exit_code[slot] = 0
+    app_launch_count[slot] = 0
+    app_last_pid[slot] = 0
+    app_is_headless[slot] = false
+    app_active[slot] = true
+    app_count = app_count + 1
 
 # ============================================================================
 # Initialization
@@ -88,26 +114,27 @@ fn launcher_init():
         process_window_count[p] = 0
         process_is_headless[p] = false
         process_launch_seq[p] = 0
+        process_signal_backed[p] = false
         process_active[p] = false
         p = p + 1
     process_count = 0
     process_sequence = 1
     launcher_last_launch_pid = 0
 
-    launcher_register("Hello World", _preferred_app_exec_path("/sys/apps/hello_world"), "H", 0x48, MOD_META)
-    launcher_register("Calculator", _preferred_app_exec_path("/sys/apps/calculator"), "=", 0x41, MOD_META | MOD_SHIFT)
-    launcher_register("Clock", _preferred_app_exec_path("/sys/apps/clock"), "T", 0x59, MOD_META | MOD_SHIFT)
-    launcher_register("File Manager", _preferred_app_exec_path("/sys/apps/file_manager"), "F", 0x46, MOD_META)
-    launcher_register("Terminal", _preferred_app_exec_path("/sys/apps/shell"), ">", 0x54, MOD_META)
-    launcher_register("Browser Demo", _preferred_app_exec_path("/sys/apps/browser_demo"), "B", 0x42, MOD_META)
-    launcher_register("Editor", _preferred_app_exec_path("/sys/apps/editor"), "E", 0x45, MOD_META)
-    launcher_register("Simple Browser", _preferred_app_exec_path("/sys/apps/simple_browser"), "W", 0x57, MOD_META)
-    launcher_register("Simple Compiler", _preferred_app_exec_path("/sys/apps/simple_compiler"), "C", 0x43, MOD_META)
-    launcher_register("Simple Interpreter", _preferred_app_exec_path("/sys/apps/simple_interpreter"), "I", 0x49, MOD_META)
-    launcher_register("Simple Loader", _preferred_app_exec_path("/sys/apps/simple_loader"), "O", 0x4F, MOD_META)
-    launcher_register("LLVM", _preferred_app_exec_path("/sys/apps/llvm"), "L", 0x4C, MOD_META)
-    launcher_register("Clang", _preferred_app_exec_path("/sys/apps/clang"), "K", 0x47, MOD_META)
-    launcher_register("Rust", _preferred_app_exec_path("/sys/apps/rust"), "R", 0x52, MOD_META)
+    _launcher_seed_default_app("Hello World", "/sys/apps/hello_world.smf", "H", 0x48, MOD_META)
+    _launcher_seed_default_app("Calculator", "/sys/apps/calculator.smf", "=", 0x41, MOD_META | MOD_SHIFT)
+    _launcher_seed_default_app("Clock", "/sys/apps/clock.smf", "T", 0x59, MOD_META | MOD_SHIFT)
+    _launcher_seed_default_app("File Manager", "/sys/apps/file_manager.smf", "F", 0x46, MOD_META)
+    _launcher_seed_default_app("Terminal", "/sys/apps/shell.smf", ">", 0x54, MOD_META)
+    _launcher_seed_default_app("Browser Demo", "/sys/apps/browser_demo.smf", "B", 0x42, MOD_META)
+    _launcher_seed_default_app("Editor", "/sys/apps/editor.smf", "E", 0x45, MOD_META)
+    _launcher_seed_default_app("Simple Browser", "/sys/apps/simple_browser.smf", "W", 0x57, MOD_META)
+    _launcher_seed_default_app("Simple Compiler", "/sys/apps/simple_compiler.smf", "C", 0x43, MOD_META)
+    _launcher_seed_default_app("Simple Interpreter", "/sys/apps/simple_interpreter.smf", "I", 0x49, MOD_META)
+    _launcher_seed_default_app("Simple Loader", "/sys/apps/simple_loader.smf", "O", 0x4F, MOD_META)
+    _launcher_seed_default_app("LLVM", "/sys/apps/llvm.smf", "L", 0x4C, MOD_META)
+    _launcher_seed_default_app("Clang", "/sys/apps/clang.smf", "K", 0x47, MOD_META)
+    _launcher_seed_default_app("Rust", "/sys/apps/rust.smf", "R", 0x52, MOD_META)
 
     log_raw_println("[launcher] Registered {app_count} default apps")
 
@@ -471,11 +498,14 @@ fn launcher_terminate(pid: u64) -> bool:
     if app_idx >= 0:
         app_launch_state[app_idx.to_u64()] = "terminating"
 
-    val result = posix_kill(pid, SIGTERM)
-    if result != 0:
-        log_raw_println("[launcher] posix_kill SIGTERM failed for PID {pid}: {result} (state kept as terminating)")
+    if launcher_process_can_signal(pid):
+        val result = posix_kill(pid, SIGTERM)
+        if result != 0:
+            log_raw_println("[launcher] posix_kill SIGTERM failed for PID {pid}: {result} (state kept as terminating)")
+        else:
+            log_raw_println("[launcher] Terminate sent to PID {pid}")
     else:
-        log_raw_println("[launcher] Terminate sent to PID {pid}")
+        log_raw_println("[launcher] Terminate recorded for registry-only PID {pid}")
     true
 
 fn launcher_note_task_probe(pid: u64, alive: bool, exit_code: i32):
@@ -627,6 +657,23 @@ fn launcher_get_process_app_id_for_pid(pid: u64) -> text:
     log_raw_println("[launcher] process-app-id:lookup:return pid={pid} source=app-slot app_idx={app_idx}")
     _canonical_app_identity(app_path[app_idx.to_u64()])
 
+fn _launcher_note_app_window_opened(pid: u64):
+    var app_idx = _app_index_by_pid(pid)
+    if app_idx < 0:
+        return
+    val aslot = app_idx.to_u64()
+    app_window_count[aslot] = app_window_count[aslot] + 1
+    app_is_headless[aslot] = false
+
+fn _launcher_note_app_window_closed(pid: u64):
+    var app_idx = _app_index_by_pid(pid)
+    if app_idx < 0:
+        return
+    val aslot = app_idx.to_u64()
+    if app_window_count[aslot] > 0:
+        app_window_count[aslot] = app_window_count[aslot] - 1
+    app_is_headless[aslot] = app_window_count[aslot] == 0
+
 fn launcher_note_window_opened(pid: u64):
     """Increment the tracked window count for a launched process."""
     var process_idx = _process_index_by_pid(pid)
@@ -638,12 +685,7 @@ fn launcher_note_window_opened(pid: u64):
     if process_state[pslot] == "running":
         process_active[pslot] = true
 
-    var app_idx = _app_index_by_pid(pid)
-    if app_idx < 0:
-        return
-    val aslot = app_idx.to_u64()
-    app_window_count[aslot] = app_window_count[aslot] + 1
-    app_is_headless[aslot] = false
+    _launcher_note_app_window_opened(pid)
 
 fn launcher_note_window_closed(pid: u64):
     """Decrement the tracked window count for a launched process."""
@@ -655,13 +697,7 @@ fn launcher_note_window_closed(pid: u64):
         process_window_count[pslot] = process_window_count[pslot] - 1
     process_is_headless[pslot] = process_window_count[pslot] == 0
 
-    var app_idx = _app_index_by_pid(pid)
-    if app_idx < 0:
-        return
-    val aslot = app_idx.to_u64()
-    if app_window_count[aslot] > 0:
-        app_window_count[aslot] = app_window_count[aslot] - 1
-    app_is_headless[aslot] = app_window_count[aslot] == 0
+    _launcher_note_app_window_closed(pid)
     if _is_synthetic_pid(pid) and process_window_count[pslot] == 0:
         launcher_mark_exited_with_code(pid, 0)
 

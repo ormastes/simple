@@ -6502,10 +6502,38 @@ RuntimeValue rt_random_bytes_c(int64_t count)
     return ENCODE_PTR(a);
 }
 
-/* rt_rdrand: pseudo-random via xorshift64 seeded from TSC */
+static int _cpu_has_rdrand(void)
+{
+#ifdef __x86_64__
+    uint32_t eax = 1, ebx = 0, ecx = 0, edx = 0;
+    __asm__ volatile("cpuid"
+                     : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     :
+                     : "memory");
+    return (ecx & (1u << 30)) != 0;
+#else
+    return 0;
+#endif
+}
+
+/* rt_rdrand: use x86 hardware RDRAND when CPUID reports it.
+ * The TSC/xorshift branch is a boot-survivability fallback only; TLS keeps
+ * production readiness blocked unless the platform entropy gate is promoted. */
 static uint64_t _xorshift_state = 0;
 int64_t rt_rdrand(void)
 {
+#ifdef __x86_64__
+    if (_cpu_has_rdrand()) {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            uint64_t value = 0;
+            unsigned char ok = 0;
+            __asm__ volatile("rdrand %0; setc %1" : "=r"(value), "=qm"(ok));
+            if (ok) {
+                return (int64_t)value;
+            }
+        }
+    }
+#endif
     if (_xorshift_state == 0) {
 #ifdef __x86_64__
         uint32_t lo, hi;
@@ -6518,6 +6546,11 @@ int64_t rt_rdrand(void)
     _xorshift_state ^= _xorshift_state >> 7;
     _xorshift_state ^= _xorshift_state << 17;
     return (int64_t)_xorshift_state;
+}
+
+int64_t rt_entropy_hardware_ready(void)
+{
+    return _cpu_has_rdrand() ? 1 : 0;
 }
 
 /* rt_ed25519_sign_test: sign-only (skip broken verify). Returns 0=pass, -1=fail */
@@ -13483,7 +13516,8 @@ RuntimeValue rt_disable_interrupts(void) { return rt_disable_interrupts_real(); 
 RuntimeValue rt_invlpg(RuntimeValue a) { return rt_invlpg_real(a); }
 RuntimeValue rt_rdtsc(void) { return rt_rdtsc_real(); }
 
-/* RDRAND — see rt_rdrand() defined earlier (TSC-based, RDRAND not available in QEMU qemu64) */
+/* RDRAND — see rt_rdrand() defined earlier (CPUID-gated hardware path with
+ * TSC/xorshift boot-survivability fallback for QEMU qemu64). */
 
 /* Generate random bytes as a [u8] array — C implementation for baremetal.
  * The Simple random_bytes() uses ChaCha20 which relies on unreliable

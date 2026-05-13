@@ -4,7 +4,7 @@
 # Checks that all infrastructure is in place for bare-metal builds.
 
 use app.io.mod.{shell_bool, shell_output, file_exists, exit}
-use std.text.{trim}
+use compiler.tools.verify.noalloc_reachable.{verify_noalloc_reachable_imports}
 
 val COLOR_GREEN = "\x1b[0;32m"
 val COLOR_RED = "\x1b[0;31m"
@@ -21,12 +21,33 @@ fn check_file(path: text) -> bool:
 
 fn check_executable(name: text, purpose: text) -> bool:
     if shell_bool("command -v {name}"):
-        val version = trim(shell_output("{name} --version 2>&1 | head -1"))
+        val version = shell_output("{name} --version 2>&1 | head -1", "").trim()
         print "{COLOR_GREEN}OK{COLOR_RESET} {name} ({version})"
         return true
     else:
         print "{COLOR_YELLOW}WARN{COLOR_RESET} {name} (not installed - required for {purpose})"
         return false
+
+fn check_no_matches(label: text, cmd: text) -> bool:
+    val matches = shell_output(cmd + " || true", "").trim()
+    if matches.len() == 0:
+        print "{COLOR_GREEN}OK{COLOR_RESET} {label}"
+        return true
+
+    print "{COLOR_RED}FAIL{COLOR_RESET} {label}"
+    print matches
+    return false
+
+fn check_noalloc_reachable_imports() -> bool:
+    val errors = verify_noalloc_reachable_imports()
+    if errors.len() == 0:
+        print "{COLOR_GREEN}OK{COLOR_RESET} no unsafe reachable imports from nogc_async_mut_noalloc"
+        return true
+
+    print "{COLOR_RED}FAIL{COLOR_RESET} no unsafe reachable imports from nogc_async_mut_noalloc"
+    for error in errors:
+        print error
+    false
 
 fn main():
     print "=== Bare-Metal Build System Verification ==="
@@ -56,11 +77,11 @@ fn main():
 
     # Check build system files
     print "Build System:"
-    if not check_file("src/app/build/baremetal.spl"):
+    if not check_file("src/app/build/baremetal.smf"):
         errors = errors + 1
-    if not check_file("src/app/build/main.spl"):
+    if not check_file("src/app/build/__init__.smf"):
         errors = errors + 1
-    if not check_file("src/app/build/types.spl"):
+    if not check_file("src/app/build/types.smf"):
         errors = errors + 1
     print ""
 
@@ -72,9 +93,35 @@ fn main():
 
     # Check documentation
     print "Documentation:"
-    if not check_file("doc/07_guide/quick_reference/baremetal_quick_start.md"):
+    if not check_file("doc/07_guide/backend/baremetal.md"):
         errors = errors + 1
-    if not check_file("doc/09_report/baremetal_build_system_integration_2026-02-14.md"):
+    if not check_file("doc/09_report/2026/02/baremetal_build_system_integration_2026-02-14.md"):
+        errors = errors + 1
+    print ""
+
+    # Check source constraints required by noalloc bare-metal presets.
+    print "Noalloc Source Constraints:"
+    if not check_no_matches(
+        "no allocating-family imports from nogc_async_mut_noalloc",
+        "rg -n '^(use|from|import)( lazy)? std\\.(nogc_sync_mut|nogc_async_mut|nogc_async_immut|gc_async_mut)\\.' src/lib/nogc_async_mut_noalloc -g '*.spl'"
+    ):
+        errors = errors + 1
+    if not check_no_matches(
+        "no app imports from nogc_async_mut_noalloc",
+        "rg -n '^(use|from|import)( lazy)? app\\.' src/lib/nogc_async_mut_noalloc -g '*.spl'"
+    ):
+        errors = errors + 1
+    if not check_no_matches(
+        "no allocation annotations in nogc_async_mut_noalloc",
+        "rg -n '^(# *)?@alloc\\b' src/lib/nogc_async_mut_noalloc -g '*.spl'"
+    ):
+        errors = errors + 1
+    if not check_no_matches(
+        "no host allocation APIs in nogc_async_mut_noalloc",
+        "rg -n '\\b(malloc|calloc|free)\\s*\\(|\\brt_alloc\\b|extern fn .*realloc' src/lib/nogc_async_mut_noalloc -g '*.spl'"
+    ):
+        errors = errors + 1
+    if not check_noalloc_reachable_imports():
         errors = errors + 1
     print ""
 

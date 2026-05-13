@@ -1,11 +1,11 @@
-use simple_parser::ast::{Node, Attribute};
+use simple_parser::ast::{Attribute, Node};
 use simple_parser::Parser;
 
 /// Helper: parse source and return the first top-level node.
 fn parse_first(src: &str) -> Node {
     let mut parser = Parser::new(src);
-    let nodes = parser.parse().expect("parse should succeed");
-    nodes.into_iter().next().expect("at least one node")
+    let module = parser.parse().expect("parse should succeed");
+    module.items.into_iter().next().expect("at least one node")
 }
 
 #[test]

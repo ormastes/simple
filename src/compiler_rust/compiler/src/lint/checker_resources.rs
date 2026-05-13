@@ -9,6 +9,53 @@ use std::path::Path;
 
 use super::LintChecker;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeFamily {
+    Common,
+    NogcSyncMut,
+    NogcAsyncMut,
+    NogcAsyncImmut,
+    NogcAsyncMutNoalloc,
+    GcAsyncMut,
+}
+
+impl RuntimeFamily {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "common" => Some(Self::Common),
+            "nogc_sync_mut" => Some(Self::NogcSyncMut),
+            "nogc_async_mut" => Some(Self::NogcAsyncMut),
+            "nogc_async_immut" => Some(Self::NogcAsyncImmut),
+            "nogc_async_mut_noalloc" => Some(Self::NogcAsyncMutNoalloc),
+            "gc_async_mut" => Some(Self::GcAsyncMut),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Common => "common",
+            Self::NogcSyncMut => "nogc_sync_mut",
+            Self::NogcAsyncMut => "nogc_async_mut",
+            Self::NogcAsyncImmut => "nogc_async_immut",
+            Self::NogcAsyncMutNoalloc => "nogc_async_mut_noalloc",
+            Self::GcAsyncMut => "gc_async_mut",
+        }
+    }
+
+    fn is_gc(self) -> bool {
+        matches!(self, Self::GcAsyncMut)
+    }
+
+    fn is_noalloc(self) -> bool {
+        matches!(self, Self::NogcAsyncMutNoalloc)
+    }
+
+    fn is_allocating(self) -> bool {
+        !matches!(self, Self::Common | Self::NogcAsyncMutNoalloc)
+    }
+}
+
 impl LintChecker {
     /// Check for potential resource leaks in functions
     ///
@@ -452,6 +499,59 @@ impl LintChecker {
         }
     }
 
+    /// Check runtime family imports for GC/noalloc dependency boundary violations.
+    pub fn check_gc_boundary_imports(&mut self, items: &[Node], source_file: &Path) {
+        let Some(source_family) = runtime_family_from_source_path(source_file) else {
+            return;
+        };
+
+        if source_family == RuntimeFamily::Common {
+            return;
+        }
+
+        fn check_use_stmts(checker: &mut LintChecker, items: &[Node], source_family: RuntimeFamily) {
+            for node in items {
+                match node {
+                    Node::UseStmt(use_stmt) => {
+                        let segments = &use_stmt.path.segments;
+                        let Some(import_family) = runtime_family_from_import_segments(segments) else {
+                            continue;
+                        };
+
+                        if import_family == RuntimeFamily::Common {
+                            continue;
+                        }
+
+                        let module_path = segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
+                        if !runtime_family_import_allowed(source_family, import_family) {
+                            checker.emit(
+                                LintName::GcBoundaryCrossing,
+                                use_stmt.span,
+                                format!(
+                                    "runtime family `{}` must not import `{}`",
+                                    source_family.name(),
+                                    module_path
+                                ),
+                                Some(
+                                    "route shared code through std.common or move the dependency to the backend family"
+                                        .to_string(),
+                                ),
+                            );
+                        }
+                    }
+                    Node::ModDecl(mod_decl) => {
+                        if let Some(ref body) = mod_decl.body {
+                            check_use_stmts(checker, body, source_family);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        check_use_stmts(self, items, source_family);
+    }
+
     /// Check if a bypass directory incorrectly contains .spl code files.
     ///
     /// When __init__.spl has `#[bypass]`, the directory must contain only
@@ -630,6 +730,48 @@ impl LintChecker {
             false
         }
     }
+}
+
+fn runtime_family_from_source_path(source_file: &Path) -> Option<RuntimeFamily> {
+    let components: Vec<String> = source_file
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect();
+
+    for pair in components.windows(2) {
+        if pair[0] == "lib" {
+            return RuntimeFamily::from_name(&pair[1]);
+        }
+    }
+
+    None
+}
+
+fn runtime_family_from_import_segments(segments: &[String]) -> Option<RuntimeFamily> {
+    let mut offset = 0;
+    if segments.first().map(|s| s.as_str()) == Some("std") || segments.first().map(|s| s.as_str()) == Some("lib") {
+        offset = 1;
+    }
+
+    segments
+        .get(offset)
+        .and_then(|segment| RuntimeFamily::from_name(segment))
+}
+
+fn runtime_family_import_allowed(source_family: RuntimeFamily, import_family: RuntimeFamily) -> bool {
+    if import_family == RuntimeFamily::Common {
+        return true;
+    }
+
+    if source_family.is_noalloc() && import_family.is_allocating() {
+        return false;
+    }
+
+    if !source_family.is_gc() && import_family.is_gc() {
+        return false;
+    }
+
+    true
 }
 
 impl Default for LintChecker {

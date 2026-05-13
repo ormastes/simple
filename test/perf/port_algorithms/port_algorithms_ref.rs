@@ -2,10 +2,10 @@ use std::time::Instant;
 use std::convert::TryInto;
 
 const DATA_SIZE: usize = 65_536;
-const XXH_ITERS: u64 = 80;
-const CHACHA_ITERS: u64 = 30;
-const CRC32_ITERS: u64 = 80;
-const ADLER32_ITERS: u64 = 80;
+const XXH_ITERS: u64 = 1600;
+const CHACHA_ITERS: u64 = 120;
+const CRC32_ITERS: u64 = 160;
+const ADLER32_ITERS: u64 = 800;
 
 fn rotl64(x: u64, r: u32) -> u64 { x.rotate_left(r) }
 fn rotl32(x: u32, r: u32) -> u32 { x.rotate_left(r) }

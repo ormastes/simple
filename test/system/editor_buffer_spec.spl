@@ -5,6 +5,10 @@
 # cursor movement, and command dispatch.
 
 use std.spec
+use std.editor.common.types.*
+use std.editor.buffer.piece_table.*
+use std.editor.buffer.undo.*
+use std.editor.buffer.buffer.*
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -189,6 +193,26 @@ describe "editor buffer — wrapper":
         expect(src.contains("me save_as(path: text) -> bool")).to_equal(true)
         expect(src.contains("rt_file_write_text")).to_equal(true)
 
+    it "serializes and restores folded ranges":
+        var buffer = EditorBuffer.from_text(EditorBufferId(value: 1), "head\nbody\nnext\n")
+        buffer.fold_range(0, 1)
+        expect(buffer.fold_state()).to_equal("0-1")
+
+        var restored = EditorBuffer.from_text(EditorBufferId(value: 2), "head\nbody\nnext\n")
+        restored.move_cursor(1, 0)
+        restored.restore_fold_state(buffer.fold_state())
+        expect(restored.has_fold_range(0, 1)).to_equal(true)
+        expect(restored.cursor_row).to_equal(0)
+        expect(restored.is_line_folded(1)).to_equal(true)
+
+    it "renders folded header markers":
+        var buffer = EditorBuffer.from_text(EditorBufferId(value: 1), "head\nbody\nnext\n")
+        buffer.fold_range(0, 1)
+        expect(buffer.folded_end_line_for_header(0)).to_equal(1)
+        expect(buffer.folded_end_line_for_header(2)).to_equal(-1)
+        expect(buffer.line_with_fold_marker(0)).to_equal("head  [+1 folded | za]")
+        expect(buffer.line_with_fold_marker(2)).to_equal("next")
+
     it "pushes undo snapshot before mutations":
         val src = read_text("src/lib/editor/10.buffer/buffer.spl")
         expect(src.contains("self.undo_stack.push(self.to_text(), self.cursor_row, self.cursor_col)")).to_equal(true)
@@ -202,6 +226,24 @@ describe "editor buffer — wrapper":
         val src = read_text("src/lib/editor/10.buffer/buffer.spl")
         expect(src.contains("me ensure_cursor_visible()")).to_equal(true)
         expect(src.contains("self.viewport.top_row = self.cursor_row")).to_equal(true)
+
+    it "replaces and deletes active selection ranges":
+        var buffer = EditorBuffer.from_text(EditorBufferId(value: 1), "alpha beta\ngamma\n")
+        buffer.set_selection_range(0, 6, 0, 10)
+        buffer.insert_at_cursor("B")
+        expect(buffer.to_text()).to_equal("alpha B\ngamma\n")
+        expect(buffer.cursor_row).to_equal(0)
+        expect(buffer.cursor_col).to_equal(7)
+        expect(buffer.selection_range.active).to_equal(false)
+
+        buffer.set_selection_range(0, 0, 0, 5)
+        buffer.delete_at_cursor()
+        expect(buffer.to_text()).to_equal(" B\ngamma\n")
+        expect(buffer.cursor_row).to_equal(0)
+        expect(buffer.cursor_col).to_equal(0)
+
+        buffer.undo()
+        expect(buffer.to_text()).to_equal("alpha B\ngamma\n")
 
 describe "editor commands — dispatch":
 
@@ -255,7 +297,7 @@ describe "editor TUI shell — rendering":
 
     it "renders line numbers and editor content":
         val src = read_text("src/app/editor/tui_shell.spl")
-        expect(src.contains("buffer.line_at(file_row)")).to_equal(true)
+        expect(src.contains("buffer.line_with_fold_marker(file_row)")).to_equal(true)
         expect(src.contains("str(file_row + 1)")).to_equal(true)
 
     it "has tab bar rendering function":

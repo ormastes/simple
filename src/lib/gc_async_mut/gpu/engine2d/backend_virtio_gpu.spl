@@ -23,8 +23,7 @@
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance, render_text_to_buffer}
-use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
-use os.kernel.boot.mmio.{mmio_write32, mmio_read32}
+use std.gpu.engine2d.virtio_gpu_surface.{VirtioGpu2DSurface}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -57,7 +56,7 @@ class VirtioGpuBackend:
     to the same byte layout on little-endian systems), then flushed
     via TRANSFER_TO_HOST_2D + RESOURCE_FLUSH.
     """
-    gpu: VirtioGpuDriver
+    gpu: VirtioGpu2DSurface
     buf: [u32]
     w: i32
     h: i32
@@ -76,7 +75,7 @@ class VirtioGpuBackend:
     mask_h: i32
     direct_fb: bool
 
-    static fn create(gpu: VirtioGpuDriver) -> VirtioGpuBackend:
+    static fn create(gpu: VirtioGpu2DSurface) -> VirtioGpuBackend:
         """Create a VirtIO-GPU backend wrapping an initialized driver.
 
         The driver must already be initialized via init_from_grant().
@@ -87,11 +86,11 @@ class VirtioGpuBackend:
             buf: [],
             w: 0,
             h: 0,
-            resource_id: gpu_resource_id(gpu),
-            fb_virt: gpu.fb_virt,
-            fb_size: gpu.fb_size,
-            gpu_w: gpu_width(gpu),
-            gpu_h: gpu_height(gpu),
+            resource_id: gpu.virtio_gpu_resource_id(),
+            fb_virt: gpu.virtio_gpu_fb_virt(),
+            fb_size: gpu.virtio_gpu_fb_size(),
+            gpu_w: gpu.virtio_gpu_width(),
+            gpu_h: gpu.virtio_gpu_height(),
             clip_x: 0,
             clip_y: 0,
             clip_w: 0,
@@ -103,18 +102,18 @@ class VirtioGpuBackend:
             direct_fb: false
         )
 
-    static fn create_direct_fb(gpu: VirtioGpuDriver, width: i32, height: i32) -> VirtioGpuBackend:
+    static fn create_direct_fb(gpu: VirtioGpu2DSurface, width: i32, height: i32) -> VirtioGpuBackend:
         """Create a direct-framebuffer VirtIO-GPU backend without calling init()."""
         VirtioGpuBackend(
             gpu: gpu,
             buf: [],
             w: width,
             h: height,
-            resource_id: gpu_resource_id(gpu),
-            fb_virt: gpu.get_fb_virt(),
-            fb_size: gpu.get_fb_size(),
-            gpu_w: gpu_width(gpu),
-            gpu_h: gpu_height(gpu),
+            resource_id: gpu.virtio_gpu_resource_id(),
+            fb_virt: gpu.virtio_gpu_fb_virt(),
+            fb_size: gpu.virtio_gpu_fb_size(),
+            gpu_w: gpu.virtio_gpu_width(),
+            gpu_h: gpu.virtio_gpu_height(),
             clip_x: 0,
             clip_y: 0,
             clip_w: width,
@@ -132,7 +131,7 @@ impl RenderBackend for VirtioGpuBackend:
         "virtio-gpu"
 
     me init(width: i32, height: i32) -> bool:
-        if not self.gpu.initialized:
+        if not self.gpu.virtio_gpu_initialized():
             return false
         self.w = width
         self.h = height
@@ -153,7 +152,7 @@ impl RenderBackend for VirtioGpuBackend:
         self.clip_w = width
         self.clip_h = height
         self.clip_active = false
-        self.resource_id = gpu_resource_id(self.gpu)
+        self.resource_id = self.gpu.virtio_gpu_resource_id()
         true
 
     me shutdown():
@@ -383,7 +382,7 @@ impl RenderBackend for VirtioGpuBackend:
 
     me present():
         self.blit_only()
-        self.gpu.flush()
+        self.gpu.virtio_gpu_flush()
 
     me blit_only():
         """Copy the local pixel buffer to the VirtIO-GPU DMA framebuffer
@@ -411,7 +410,7 @@ impl RenderBackend for VirtioGpuBackend:
         var i = 0
         while i < self.w * self.h:
             if self.direct_fb:
-                copy[i] = mmio_read32(self.fb_virt + (i.to_u64() * 4))
+                copy[i] = self.gpu.virtio_gpu_read_fb_argb(i.to_u64())
             else:
                 copy[i] = self.buf[i]
             i = i + 1
@@ -528,7 +527,7 @@ fn _vg_set_pixel(backend: VirtioGpuBackend, x: i32, y: i32, color: u32):
         return
     val idx = y * backend.w + x
     if backend.direct_fb:
-        mmio_write32(backend.fb_virt + (idx.to_u64() * 4), color)
+        backend.gpu.virtio_gpu_write_fb_argb(idx.to_u64(), color)
     else:
         backend.buf[idx] = color
 
@@ -538,7 +537,7 @@ fn _vg_get_pixel(backend: VirtioGpuBackend, x: i32, y: i32) -> u32:
         return 0u32
     val idx = y * backend.w + x
     if backend.direct_fb:
-        mmio_read32(backend.fb_virt + (idx.to_u64() * 4))
+        backend.gpu.virtio_gpu_read_fb_argb(idx.to_u64())
     else:
         backend.buf[idx]
 
@@ -578,24 +577,6 @@ fn total_pixels_to_bytes(width: i32, height: i32) -> u64:
         0
     else:
         width.to_u64() * height.to_u64() * 4
-
-fn gpu_width(gpu: VirtioGpuDriver) -> i32:
-    if gpu.width_raw != 0:
-        gpu.width_raw.to_i32()
-    else:
-        gpu.width.to_i32()
-
-fn gpu_height(gpu: VirtioGpuDriver) -> i32:
-    if gpu.height_raw != 0:
-        gpu.height_raw.to_i32()
-    else:
-        gpu.height.to_i32()
-
-fn gpu_resource_id(gpu: VirtioGpuDriver) -> u32:
-    if gpu.resource_id_raw != 0:
-        gpu.resource_id_raw.to_u32()
-    else:
-        gpu.resource_id
 
 # ============================================================================
 # Line Drawing

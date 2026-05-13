@@ -2,10 +2,121 @@
 # Provides transparent local/remote execution for tests and debugging
 # Routes execution through appropriate debug adapter (GDB, Local)
 
-use std.nogc_sync_mut.dap.adapter.mod.{DebugAdapter, AdapterConfig}
-use std.nogc_sync_mut.dap.adapter.gdb_mi.GdbMiAdapter
-use std.nogc_sync_mut.dap.adapter.local.LocalAdapter
-use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+# Noalloc-local adapter contracts. This package must not import the hosted DAP
+# implementation from `nogc_sync_mut`; hosted runners can adapt these contracts
+# at the app/OS boundary.
+
+class AdapterConfig:
+    adapter_type: text
+    host: text
+    port: i32
+    program: text
+    args: [text]
+    timeout_ms: i64
+    architecture: text
+
+    static fn local(program: text) -> AdapterConfig:
+        AdapterConfig(
+            adapter_type: "local",
+            host: "",
+            port: 0,
+            program: program,
+            args: [],
+            timeout_ms: 30000,
+            architecture: "x86_64"
+        )
+
+    static fn gdb(host: text, port: i32, program: text) -> AdapterConfig:
+        AdapterConfig(
+            adapter_type: "gdb",
+            host: host,
+            port: port,
+            program: program,
+            args: [],
+            timeout_ms: 30000,
+            architecture: "riscv32"
+        )
+
+trait DebugAdapter:
+    fn attach(program: text, args: [text]) -> Result<text, text>
+    fn detach() -> Result<text, text>
+    fn resume() -> Result<text, text>
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>
+    fn get_status() -> text
+    fn clear_context() -> Result<text, text>
+    fn reload_program(program: text) -> Result<text, text>
+
+class LocalAdapter:
+    config: AdapterConfig
+    attached: bool
+    status: text
+
+    static fn create(config: AdapterConfig) -> LocalAdapter:
+        LocalAdapter(config: config, attached: false, status: "created")
+
+impl LocalAdapter:
+    fn attach(program: text, args: [text]) -> Result<text, text>:
+        self.attached = true
+        self.status = "attached"
+        Ok("attached to {program}")
+
+    fn detach() -> Result<text, text>:
+        self.attached = false
+        self.status = "detached"
+        Ok("detached")
+
+    fn resume() -> Result<text, text>:
+        self.status = "terminated"
+        Ok("resumed")
+
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        Ok(line)
+
+    fn get_status() -> text:
+        self.status
+
+    fn clear_context() -> Result<text, text>:
+        Ok("context cleared")
+
+    fn reload_program(program: text) -> Result<text, text>:
+        self.config.program = program
+        Ok("program reloaded")
+
+class GdbMiAdapter:
+    config: AdapterConfig
+    attached: bool
+    status: text
+
+    static fn connect(config: AdapterConfig) -> Result<GdbMiAdapter, text>:
+        Ok(GdbMiAdapter(config: config, attached: true, status: "attached"))
+
+impl GdbMiAdapter:
+    fn attach(program: text, args: [text]) -> Result<text, text>:
+        self.attached = true
+        self.status = "attached"
+        Ok("attached to {program}")
+
+    fn detach() -> Result<text, text>:
+        self.attached = false
+        self.status = "detached"
+        Ok("detached")
+
+    fn resume() -> Result<text, text>:
+        self.status = "terminated"
+        Ok("resumed")
+
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        Ok(line)
+
+    fn get_status() -> text:
+        self.status
+
+    fn clear_context() -> Result<text, text>:
+        Ok("context cleared")
+
+    fn reload_program(program: text) -> Result<text, text>:
+        self.config.program = program
+        Ok("program reloaded")
 
 # Execution target configuration
 # Describes where and how to execute a program (local interpreter or remote target)

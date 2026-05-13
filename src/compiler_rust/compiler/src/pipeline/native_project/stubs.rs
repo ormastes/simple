@@ -344,10 +344,9 @@ pub(crate) fn generate_stub_object_freestanding(
              }\n\n",
         );
     }
-    if compat_symbols.contains("rt_is_none") {
+    if compat_symbols.contains("rt_is_none") || compat_symbols.contains("rt_is_some") {
         code.push_str(
-            "__stub_i64 __stub_compat_rt_is_none(__stub_i64 val) __asm__(\"rt_is_none\");\n\
-             __stub_i64 __stub_compat_rt_is_none(__stub_i64 val) {\n\
+            "static __stub_i64 __stub_compat_rt_is_none_value(__stub_i64 val) {\n\
                  if (val == 3) return 1;\n\
                  if ((((unsigned long long)val) & 0x7ULL) != 0x1ULL) return 0;\n\
                  __stub_i64* p = (__stub_i64*)((((unsigned long long)val) & ~0x7ULL));\n\
@@ -357,11 +356,19 @@ pub(crate) fn generate_stub_object_freestanding(
              }\n\n",
         );
     }
+    if compat_symbols.contains("rt_is_none") {
+        code.push_str(
+            "__stub_i64 __stub_compat_rt_is_none(__stub_i64 val) __asm__(\"rt_is_none\");\n\
+             __stub_i64 __stub_compat_rt_is_none(__stub_i64 val) {\n\
+                 return __stub_compat_rt_is_none_value(val);\n\
+             }\n\n",
+        );
+    }
     if compat_symbols.contains("rt_is_some") {
         code.push_str(
             "__stub_i64 __stub_compat_rt_is_some(__stub_i64 val) __asm__(\"rt_is_some\");\n\
              __stub_i64 __stub_compat_rt_is_some(__stub_i64 val) {\n\
-                 return __stub_compat_rt_is_none(val) ? 0 : 1;\n\
+                 return __stub_compat_rt_is_none_value(val) ? 0 : 1;\n\
              }\n\n",
         );
     }

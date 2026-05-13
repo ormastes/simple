@@ -319,6 +319,10 @@ int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
 bool        rt_process_write_stdin(int64_t pid, const char* data);
 const char* rt_process_read_stdout(int64_t pid);
 bool        rt_process_is_alive(int64_t pid);
+int64_t     rt_editor_spawn_simple_dap(void);
+bool        rt_editor_start_simple_dap(int64_t pid);
+bool        rt_editor_poll_simple_dap_stopped(int64_t pid);
+bool        rt_editor_wait_simple_dap_stopped(int64_t pid);
 
 /* ===== Environment ===== */
 
@@ -414,6 +418,7 @@ int64_t  __simple_intrinsic_trap(void);
 int64_t  __simple_intrinsic_assume(int64_t cond);
 int64_t  __simple_intrinsic_likely(int64_t cond);
 int64_t  __simple_intrinsic_unlikely(int64_t cond);
+int64_t  __simple_intrinsic_bounds_check(int64_t index, int64_t len);
 int64_t  __simple_intrinsic_prefetch(void* ptr);
 int64_t  __simple_intrinsic_memcpy(void* dst, const void* src, int64_t n);
 int64_t  __simple_intrinsic_memset(void* dst, int64_t val, int64_t n);

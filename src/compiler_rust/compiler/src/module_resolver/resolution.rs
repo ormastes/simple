@@ -17,6 +17,15 @@ use std::path::{Path, PathBuf};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::stdlib_variant::stdlib_root_candidates;
 
+const STDLIB_FAMILY_DIRS: &[&str] = &[
+    "nogc_async_mut",
+    "nogc_sync_mut",
+    "nogc_async_immut",
+    "common",
+    "gc_async_mut",
+    "nogc_async_mut_noalloc",
+];
+
 /// Find a numbered directory matching the pattern `NN.name` or `NNN.name`.
 ///
 /// The Simple compiler organizes source into numbered layers like:
@@ -45,6 +54,19 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
     None
 }
 
+fn find_explicit_numbered_dir(parent: &Path, prefix: &str, suffix: &str) -> Option<PathBuf> {
+    if prefix.is_empty() || prefix.len() > 3 || !prefix.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let path = parent.join(format!("{}.{}", prefix, suffix));
+    if path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 fn find_segment_within_numbered_dirs(parent: &Path, segment: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(parent).ok()?;
     for entry in entries.flatten() {
@@ -69,6 +91,33 @@ fn find_segment_within_numbered_dirs(parent: &Path, segment: &str) -> Option<Pat
     None
 }
 
+fn find_compiler_root(from_file: &Path) -> Option<PathBuf> {
+    let mut current = from_file.parent()?;
+    loop {
+        if current.file_name().and_then(|name| name.to_str()) == Some("compiler") {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
+fn find_stdlib_package_root(from_file: &Path) -> Option<PathBuf> {
+    let mut current = from_file.parent()?;
+    loop {
+        let parent = current.parent()?;
+        if parent.file_name().and_then(|name| name.to_str()) == Some("lib")
+            && parent
+                .parent()
+                .and_then(|grandparent| grandparent.file_name())
+                .and_then(|name| name.to_str())
+                == Some("src")
+        {
+            return Some(current.to_path_buf());
+        }
+        current = parent;
+    }
+}
+
 fn find_dotted_dir(current: &Path, segment: &str) -> Option<PathBuf> {
     let parent = current.parent()?;
     let current_name = current.file_name()?.to_str()?;
@@ -90,6 +139,16 @@ fn layered_dir_alias_name(current: &Path) -> Option<String> {
         }
     }
     Some(name.to_string())
+}
+
+fn layered_alias_child_dir(current: &Path, segment: &str) -> Option<PathBuf> {
+    let alias_name = layered_dir_alias_name(current)?;
+    let nested = current.join(alias_name).join(segment);
+    if nested.is_dir() {
+        Some(nested)
+    } else {
+        None
+    }
 }
 
 fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> Option<ResolvedModule> {
@@ -124,6 +183,18 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
         });
     }
 
+    if last == "mod_" {
+        let escaped_mod_path = dir.join("mod.spl");
+        if escaped_mod_path.exists() && escaped_mod_path.is_file() {
+            return Some(ResolvedModule {
+                path: escaped_mod_path,
+                module_path: original_path.clone(),
+                is_directory: false,
+                manifest: None,
+            });
+        }
+    }
+
     let shs_path = dir.join(format!("{}.shs", last));
     if shs_path.exists() && shs_path.is_file() {
         return Some(ResolvedModule {
@@ -156,6 +227,36 @@ fn resolve_exact_directory_module(dir: &Path, original_path: &ModulePath) -> Opt
             is_directory: true,
             manifest: None,
         });
+    }
+
+    None
+}
+
+fn resolve_module_within_numbered_dirs(
+    parent: &Path,
+    last: &str,
+    original_path: &ModulePath,
+) -> Option<ResolvedModule> {
+    let entries = std::fs::read_dir(parent).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let Some(after_dot) = name_str.find('.') else {
+            continue;
+        };
+        let prefix = &name_str[..after_dot];
+        if prefix.is_empty() || prefix.len() > 3 || !prefix.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+
+        if let Some(resolved) = resolve_module_in_dir(&path, last, original_path) {
+            return Some(resolved);
+        }
     }
 
     None
@@ -197,14 +298,7 @@ fn resolve_stdlib_from_root(
         return Ok(resolved);
     }
 
-    for subdir in &[
-        "nogc_async_mut",
-        "nogc_sync_mut",
-        "nogc_async_immut",
-        "common",
-        "gc_async_mut",
-        "nogc_async_mut_noalloc",
-    ] {
+    for subdir in STDLIB_FAMILY_DIRS {
         let candidate = root.join(subdir);
         if candidate.is_dir() {
             if let Ok(resolved) = resolver.resolve_from_base(&candidate, segments, original_path) {
@@ -214,6 +308,23 @@ fn resolve_stdlib_from_root(
     }
 
     Err(CompileError::semantic("stdlib module not found".to_string()))
+}
+
+fn resolve_stdlib_namespace_from_root(root: &Path, original_path: &ModulePath) -> ResolveResult<ResolvedModule> {
+    if let Some(resolved) = resolve_exact_directory_module(root, original_path) {
+        return Ok(resolved);
+    }
+
+    for subdir in STDLIB_FAMILY_DIRS {
+        let candidate = root.join(subdir);
+        if candidate.is_dir() {
+            if let Some(resolved) = resolve_exact_directory_module(&candidate, original_path) {
+                return Ok(resolved);
+            }
+        }
+    }
+
+    Err(CompileError::semantic("stdlib namespace not found".to_string()))
 }
 
 fn ordered_source_roots(resolver: &ModuleResolver) -> Vec<PathBuf> {
@@ -227,7 +338,111 @@ fn ordered_source_roots(resolver: &ModuleResolver) -> Vec<PathBuf> {
     roots
 }
 
+fn relative_import_base<'a>(from_file: &Path, segments: &'a [String]) -> Option<(PathBuf, &'a [String])> {
+    let mut dot_segments = 0usize;
+    let mut parent_hops = 0usize;
+
+    for segment in segments {
+        if segment.is_empty() || !segment.chars().all(|ch| ch == '.') {
+            break;
+        }
+
+        dot_segments += 1;
+        parent_hops += segment.len().saturating_sub(1);
+    }
+
+    if dot_segments == 0 {
+        return None;
+    }
+
+    let mut base = from_file.parent().unwrap_or(Path::new(".")).to_path_buf();
+    for _ in 0..parent_hops {
+        if !base.pop() {
+            break;
+        }
+    }
+
+    Some((base, &segments[dot_segments..]))
+}
+
 impl ModuleResolver {
+    fn resolve_from_stdlib_package_aliases(
+        &self,
+        package_root: &Path,
+        segments: &[String],
+        path: &ModulePath,
+    ) -> Option<ResolvedModule> {
+        if segments.is_empty() {
+            return None;
+        }
+
+        let package_src = package_root.join("src");
+        let mut attempts: Vec<(&Path, &[String])> = Vec::new();
+        attempts.push((package_root, segments));
+        let lib_root = package_root.parent();
+        if let Some(package_name) = package_root.file_name().and_then(|name| name.to_str()) {
+            if segments.len() > 1 && segments[0] == package_name {
+                attempts.push((package_root, &segments[1..]));
+            }
+        }
+        if package_src.is_dir() {
+            attempts.push((package_src.as_path(), segments));
+        }
+
+        if (segments[0] == "std" || segments[0] == "lib") && segments.len() > 1 {
+            if package_src.is_dir() {
+                attempts.push((package_src.as_path(), &segments[1..]));
+            }
+            attempts.push((package_root, &segments[1..]));
+        }
+
+        if segments[0] == "std" && segments.len() > 2 {
+            if segments[1] == "lib" {
+                if let Some(lib_root) = lib_root {
+                    attempts.push((lib_root, &segments[2..]));
+                }
+            } else {
+                attempts.push((package_root, &segments[1..]));
+                if let Some(lib_root) = lib_root {
+                    attempts.push((lib_root, &segments[1..]));
+                }
+            }
+        }
+
+        if segments[0] == "src" && segments.len() > 2 && segments[1] == "std" {
+            attempts.push((package_root, &segments[2..]));
+        }
+
+        if segments[0] == "lib" && segments.len() > 1 {
+            if let Some(lib_root) = lib_root {
+                attempts.push((lib_root, &segments[1..]));
+            }
+        }
+
+        if segments[0] == "core" && segments.len() > 1 && package_src.is_dir() {
+            attempts.push((package_src.as_path(), &segments[1..]));
+        }
+
+        if segments[0] == "app" && segments.len() > 1 {
+            attempts.push((package_root, &segments[1..]));
+            if segments.len() > 2 && segments[1] == "mcp_jj" {
+                let mut mcp_jj_segments = vec!["mcp".to_string(), "jj".to_string()];
+                mcp_jj_segments.extend(segments[2..].iter().cloned());
+                if let Ok(resolved) = self.resolve_from_base(package_root, &mcp_jj_segments, path) {
+                    return Some(resolved);
+                }
+            }
+        }
+
+        for (base, remaining) in attempts {
+            if let Ok(resolved) = self.resolve_from_base(base, remaining, path) {
+                return Some(resolved);
+            }
+        }
+
+        None
+    }
+
     /// Resolve a module path to a filesystem path
     ///
     /// # Arguments
@@ -246,6 +461,43 @@ impl ModuleResolver {
                 "empty module path".to_string(),
                 ctx,
             ));
+        }
+
+        if let Some((base_dir, remaining)) = relative_import_base(from_file, segments) {
+            let relative_result = if remaining.is_empty() {
+                if let Some(resolved) = resolve_exact_directory_module(&base_dir, path) {
+                    Ok(resolved)
+                } else {
+                    Err(CompileError::semantic("relative package module not found".to_string()))
+                }
+            } else {
+                self.resolve_from_base(&base_dir, remaining, path)
+            };
+
+            match relative_result {
+                Ok(resolved) => return Ok(resolved),
+                Err(err) => {
+                    if !remaining.is_empty() {
+                        if let Some(compiler_root) = find_compiler_root(from_file) {
+                            if let Ok(resolved) = self.resolve_from_base(&compiler_root, remaining, path) {
+                                return Ok(resolved);
+                            }
+                        }
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        if segments[0] == "compiler_shared" && segments.len() > 2 && segments[1] == "interpreter" {
+            for root in ordered_source_roots(self) {
+                let compiler_dir = root.join("compiler");
+                if compiler_dir.is_dir() {
+                    if let Ok(resolved) = self.resolve_from_base(&compiler_dir, &segments[1..], path) {
+                        return Ok(resolved);
+                    }
+                }
+            }
         }
 
         // Treat `compiler.*` as an absolute namespace import.
@@ -285,9 +537,32 @@ impl ModuleResolver {
         match self.resolve_from_base(&base_dir, remaining, path) {
             Ok(resolved) => Ok(resolved),
             Err(err) => {
+                if let Some(current_dir_name) = layered_dir_alias_name(&base_dir) {
+                    if remaining.len() > 1 && remaining[0] == current_dir_name {
+                        if let Ok(resolved) = self.resolve_from_base(&base_dir, &remaining[1..], path) {
+                            return Ok(resolved);
+                        }
+                    }
+                }
+
                 if let Some(type_segments) = normalize_type_segments(self, segments) {
                     if let Ok(resolved) = self.resolve_from_base(&self.type_root, &type_segments[1..], path) {
                         return Ok(resolved);
+                    }
+                }
+
+                if segments[0] != "crate" {
+                    if let Some(compiler_root) = find_compiler_root(from_file) {
+                        if let Ok(resolved) = self.resolve_from_base(&compiler_root, segments, path) {
+                            return Ok(resolved);
+                        }
+                    }
+
+                    if let Some(package_root) = find_stdlib_package_root(from_file) {
+                        if let Some(resolved) = self.resolve_from_stdlib_package_aliases(&package_root, segments, path)
+                        {
+                            return Ok(resolved);
+                        }
                     }
                 }
 
@@ -303,15 +578,20 @@ impl ModuleResolver {
                         segments
                     };
 
-                    if !stdlib_segments.is_empty() {
-                        let mut stdlib_roots =
-                            vec![self.project_root.join("src/lib"), self.project_root.join("src/std")];
-                        if let Some(ref stdlib_root) = self.stdlib_root {
-                            stdlib_roots.push(stdlib_root.clone());
-                        }
+                    let mut stdlib_roots = vec![self.project_root.join("src/lib"), self.project_root.join("src/std")];
+                    if let Some(ref stdlib_root) = self.stdlib_root {
+                        stdlib_roots.push(stdlib_root.clone());
+                    }
 
-                        for root in stdlib_roots {
-                            if root.is_dir() {
+                    for root in stdlib_roots {
+                        if root.is_dir() {
+                            if stdlib_segments.is_empty() {
+                                for candidate in stdlib_root_candidates(&root) {
+                                    if let Ok(resolved) = resolve_stdlib_namespace_from_root(&candidate, path) {
+                                        return Ok(resolved);
+                                    }
+                                }
+                            } else {
                                 if stdlib_segments.len() == 1 && stdlib_segments[0] == "io" {
                                     let compat_root = root.join("nogc_sync_mut");
                                     if compat_root.is_dir() {
@@ -416,11 +696,43 @@ impl ModuleResolver {
         let mut current = base.to_path_buf();
 
         // Navigate through all but the last segment
-        for segment in &segments[..segments.len() - 1] {
+        let mut index = 0usize;
+        while index < segments.len() - 1 {
+            let segment = &segments[index];
             let direct = current.join(segment);
 
             if direct.exists() {
                 current = direct;
+            } else if index + 1 < segments.len() - 1 {
+                if let Some(numbered) = find_explicit_numbered_dir(&current, segment, &segments[index + 1]) {
+                    current = numbered;
+                    index += 1;
+                } else if let Some(numbered) = find_numbered_dir(&current, segment) {
+                    // Found numbered directory (e.g., 10.frontend for segment "frontend")
+                    current = numbered;
+                } else if let Some(nested_numbered) = find_segment_within_numbered_dirs(&current, segment) {
+                    // Found the segment as a child of a numbered layer directory
+                    // (e.g. src/compiler/10.frontend/core for import compiler.core.*).
+                    current = nested_numbered;
+                } else if let Some(dotted) = find_dotted_dir(&current, segment) {
+                    // Supports dotted backend directories such as src/app/ui.web/
+                    current = dotted;
+                } else if let Some(nested_alias) = layered_alias_child_dir(&current, segment) {
+                    // Supports numbered-layer alias children in intermediate segments,
+                    // e.g. compiler.backend.native -> src/compiler/70.backend/backend/native.
+                    current = nested_alias;
+                } else {
+                    // E1034 - Unresolved Import
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNRESOLVED_IMPORT)
+                        .with_help(format!("check that the module exists at {:?}", direct))
+                        .with_note("ensure the module file or __init__.spl exists");
+
+                    return Err(CompileError::semantic_with_context(
+                        format!("cannot resolve import: module path segment `{}` not found", segment),
+                        ctx,
+                    ));
+                }
             } else if let Some(numbered) = find_numbered_dir(&current, segment) {
                 // Found numbered directory (e.g., 10.frontend for segment "frontend")
                 current = numbered;
@@ -431,6 +743,10 @@ impl ModuleResolver {
             } else if let Some(dotted) = find_dotted_dir(&current, segment) {
                 // Supports dotted backend directories such as src/app/ui.web/
                 current = dotted;
+            } else if let Some(nested_alias) = layered_alias_child_dir(&current, segment) {
+                // Supports numbered-layer alias children in intermediate segments,
+                // e.g. compiler.backend.native -> src/compiler/70.backend/backend/native.
+                current = nested_alias;
             } else {
                 // E1034 - Unresolved Import
                 let ctx = ErrorContext::new()
@@ -443,6 +759,8 @@ impl ModuleResolver {
                     ctx,
                 ));
             }
+
+            index += 1;
         }
 
         // Resolve the last segment
@@ -466,6 +784,12 @@ impl ModuleResolver {
             if let Some(resolved) = resolve_exact_directory_module(&nested_numbered_dir, original_path) {
                 return Ok(resolved);
             }
+        }
+
+        // Try modules directly inside numbered layer directories for legacy bare imports,
+        // e.g. resolving `ast` from src/compiler to src/compiler/10.frontend/ast.spl.
+        if let Some(resolved) = resolve_module_within_numbered_dirs(&current, last, original_path) {
+            return Ok(resolved);
         }
 
         // Try dotted directory fallback for the last segment

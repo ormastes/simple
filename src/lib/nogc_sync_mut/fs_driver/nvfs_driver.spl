@@ -1,0 +1,180 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+# Stdlib-owned NVFS mount-table driver.
+#
+# This wrapper keeps DriverInstance independent of examples/nvfs. It delegates
+# the current hosted filesystem behavior to DbFsDriver while preserving the
+# NvfsDriver type name used by mount-table callers.
+
+use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry, StatInfo}
+use std.fs_driver.capability.{Capability, CapabilitySet}
+use std.fs_driver.extension.{Extension}
+use std.storage.storage_class.{StorageClass}
+use std.storage.nvme_feature_policy.{samsung_mzql2960hcjr_sysfs_facts, nvme_policy_for_class}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+struct NvfsDriver:
+    name: text
+    inner: DbFsDriver
+
+impl NvfsDriver:
+    static fn new(name: text) -> NvfsDriver:
+        NvfsDriver(name: name, inner: DbFsDriver.new_hosted())
+
+    static fn new_samsung_business_nvme(name: text) -> NvfsDriver:
+        var inner = DbFsDriver.new_hosted()
+        val facts = samsung_mzql2960hcjr_sysfs_facts()
+        val policy = nvme_policy_for_class(facts, StorageClass.GENERAL_MUTABLE)
+        inner.io_unit_bytes = policy.io_unit_bytes
+        inner.batch_bytes = policy.batch_bytes
+        inner.trim_supported = policy.uses_discard
+        inner.write_zeroes_supported = policy.uses_write_zeroes
+        NvfsDriver(name: name, inner: inner)
+
+    fn preferred_io_unit_bytes() -> i64:
+        self.inner.preferred_io_unit_bytes()
+
+    fn preferred_batch_bytes() -> i64:
+        self.inner.preferred_batch_bytes()
+
+    fn has_trim_support() -> bool:
+        self.inner.has_trim_support()
+
+    fn has_write_zeroes_support() -> bool:
+        self.inner.has_write_zeroes_support()
+
+    fn mount(opts: MountOptions) -> Result<(), FsError>:
+        Ok(())
+
+    fn unmount() -> Result<(), FsError>:
+        Ok(())
+
+    fn remount(opts: MountOptions) -> Result<(), FsError>:
+        Ok(())
+
+    fn statfs() -> Result<FsStatfs, FsError>:
+        Ok(FsStatfs(
+            total_bytes: 0,
+            free_bytes: 0,
+            avail_bytes: 0,
+            files_total: 0,
+            files_free: 0,
+            block_size: 4096
+        ))
+
+    fn root() -> Result<Inode, FsError>:
+        Ok(Inode(id: 1))
+
+    fn open(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        self.inner.open_path(path, flags)
+
+    fn close(handle: FileHandle) -> Result<(), FsError>:
+        self.inner.close_handle(handle)
+
+    fn read(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        val content = self.inner.pread_handle(handle, offset, buf.len() as i64)?
+        val bytes = rt_text_to_bytes(content)
+        var i: i64 = 0
+        while i < bytes.len() as i64 and i < buf.len() as i64:
+            buf[i] = bytes[i]
+            i = i + 1
+        Ok(i)
+
+    fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        if offset != 0:
+            return Err(FsError.Unsupported)
+        var content = ""
+        var i: i64 = 0
+        while i < buf.len() as i64:
+            content = content + buf[i as i32].chr()
+            i = i + 1
+        self.inner.pwrite_handle(handle, content, offset)?
+        Ok(buf.len() as i64)
+
+    fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        self.read(handle, offset, buf)
+
+    fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        self.write(handle, offset, buf)
+
+    fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
+        Ok(FileStat(
+            inode: handle.id,
+            size: 0u64,
+            blocks: 0u64,
+            block_size: 4096,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            nlinks: 1,
+            atime_ns: 0u64,
+            mtime_ns: 0u64,
+            ctime_ns: 0u64,
+            birth_time_ns: 0u64
+        ))
+
+    fn stat(path: Path) -> Result<FileStat, FsError>:
+        val info = self.inner.stat_path(path)?
+        Ok(FileStat(
+            inode: 1u64,
+            size: info.size as u64,
+            blocks: ((info.size as u64) + 4095u64) / 4096u64,
+            block_size: 4096,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            nlinks: 1,
+            atime_ns: 0u64,
+            mtime_ns: 0u64,
+            ctime_ns: 0u64,
+            birth_time_ns: 0u64
+        ))
+
+    fn stat_path(path: Path) -> Result<StatInfo, FsError>:
+        self.inner.stat_path(path)
+
+    fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        self.inner.open_path(path, flags)
+
+    fn opendir_path(path: Path) -> Result<DirHandle, FsError>:
+        self.inner.opendir_path(path)
+
+    fn readdir_handle(handle: DirHandle) -> Result<[DirEntry], FsError>:
+        self.inner.readdir_handle(handle)
+
+    fn read_handle(handle: FileHandle, length: i64) -> Result<text, FsError>:
+        self.inner.read_handle(handle, length)
+
+    fn mkdir_path(path: text, mode: u32) -> Result<(), FsError>:
+        self.inner.mkdir_path(path, mode)
+
+    fn write_handle(handle: FileHandle, content: text) -> Result<(), FsError>:
+        self.inner.write_handle(handle, content)
+
+    fn pwrite_handle(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
+        self.inner.pwrite_handle(handle, patch, offset)
+
+    fn pread_handle(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
+        self.inner.pread_handle(handle, offset, length)
+
+    fn close_handle(handle: FileHandle) -> Result<(), FsError>:
+        self.inner.close_handle(handle)
+
+    fn unlink_path(path: text) -> Result<(), FsError>:
+        self.inner.unlink_path(path)
+
+    fn rename_path(old_path: text, new_path: text) -> Result<(), FsError>:
+        self.inner.rename_path(old_path, new_path)
+
+    fn ftruncate_handle(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
+        self.inner.ftruncate_handle(handle, new_size)
+
+    fn probe(cap: Capability) -> Option<Extension>:
+        self.inner.probe(cap)
+
+    fn capabilities() -> CapabilitySet:
+        self.inner.capabilities()

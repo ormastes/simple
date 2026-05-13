@@ -68,6 +68,7 @@ var process_exit_code: [i32; 64] = [0; 64]
 var process_window_count: [u64; 64] = [0; 64]
 var process_is_headless: [bool; 64] = [false; 64]
 var process_launch_seq: [u64; 64] = [0; 64]
+var process_signal_backed: [bool; 64] = [false; 64]
 var process_active: [bool; 64] = [false; 64]
 var process_count: u64 = 0
 var process_sequence: u64 = 1
@@ -88,10 +89,14 @@ val APP_PRIORITY: u8 = 2
 fn _launcher_path_exists(path: text) -> bool:
     if path == "":
         return false
-    if rt_file_exists(path):
-        return true
     val file_size = g_vfs_file_size(path)
-    file_size.? and file_size.unwrap().to_i64() > 0
+    if file_size.? and file_size.unwrap().to_i64() > 0:
+        return true
+    # `/sys/apps` is SimpleOS-managed storage. On baremetal the host
+    # filesystem FFI is a trap stub, so do not probe it for guest app paths.
+    if _text_has_prefix(path, "/sys/apps/"):
+        return false
+    rt_file_exists(path)
 
 fn _text_has_prefix(source: text, prefix: text) -> bool:
     if prefix.len() > source.len():
@@ -224,6 +229,17 @@ fn _is_process_backed_record(pid: u64, state: text) -> bool:
     val _state = state
     pid > 0 and not _is_synthetic_pid(pid)
 
+fn _set_process_signal_backed(pid: u64, backed: bool):
+    val idx = _process_index_by_pid(pid)
+    if idx >= 0:
+        process_signal_backed[idx.to_u64()] = backed
+
+fn launcher_process_can_signal(pid: u64) -> bool:
+    val idx = _process_index_by_pid(pid)
+    if idx < 0:
+        return pid != 0 and pid == launcher_last_launch_pid and not _is_synthetic_pid(pid)
+    process_signal_backed[idx.to_u64()]
+
 fn _app_name(idx: u64) -> text:
     if idx >= app_count:
         return ""
@@ -276,87 +292,97 @@ fn _seeded_app_index_by_path(path: text) -> i64:
     match path:
         "/sys/apps/hello_world": 0
         "/sys/apps/hello_world.smf": 0
-        "/sys/apps/file_manager": 1
-        "/sys/apps/file_manager.smf": 1
-        "/sys/apps/shell": 2
-        "/sys/apps/shell.smf": 2
-        "/sys/apps/browser_demo": 3
-        "/sys/apps/browser_demo.smf": 3
-        "/sys/apps/editor": 4
-        "/sys/apps/editor.smf": 4
-        "/sys/apps/simple_browser": 5
-        "/sys/apps/simple_browser.smf": 5
-        "/sys/apps/sbrowser.smf": 5
-        "/sys/apps/simple_compiler": 6
-        "/sys/apps/simple_compiler.smf": 6
-        "/sys/apps/scompiler.smf": 6
-        "/sys/apps/simple_interpreter": 7
-        "/sys/apps/simple_interpreter.smf": 7
-        "/sys/apps/sinterp.smf": 7
-        "/sys/apps/simple_loader": 8
-        "/sys/apps/simple_loader.smf": 8
-        "/sys/apps/sloader.smf": 8
-        "/sys/apps/llvm": 9
-        "/sys/apps/llvm.smf": 9
-        "/sys/apps/clang": 10
-        "/sys/apps/clang.smf": 10
-        "/sys/apps/rust": 11
-        "/sys/apps/rust.smf": 11
-        "/SYS/APPS/SBROWSMF.SMF": 5
-        "/SYS/APPS/SCOMPSMF.SMF": 6
-        "/SYS/APPS/SINTSMF.SMF": 7
-        "/SYS/APPS/SLOADSMF.SMF": 8
-        "/SYS/APPS/LLVMSMF.SMF": 9
-        "/SYS/APPS/CLANGSMF.SMF": 10
-        "/SYS/APPS/RUSTSMF.SMF": 11
+        "/sys/apps/calculator": 1
+        "/sys/apps/calculator.smf": 1
+        "/sys/apps/clock": 2
+        "/sys/apps/clock.smf": 2
+        "/sys/apps/file_manager": 3
+        "/sys/apps/file_manager.smf": 3
+        "/sys/apps/shell": 4
+        "/sys/apps/shell.smf": 4
+        "/sys/apps/browser_demo": 5
+        "/sys/apps/browser_demo.smf": 5
+        "/sys/apps/editor": 6
+        "/sys/apps/editor.smf": 6
+        "/sys/apps/simple_browser": 7
+        "/sys/apps/simple_browser.smf": 7
+        "/sys/apps/sbrowser.smf": 7
+        "/sys/apps/simple_compiler": 8
+        "/sys/apps/simple_compiler.smf": 8
+        "/sys/apps/scompiler.smf": 8
+        "/sys/apps/simple_interpreter": 9
+        "/sys/apps/simple_interpreter.smf": 9
+        "/sys/apps/sinterp.smf": 9
+        "/sys/apps/simple_loader": 10
+        "/sys/apps/simple_loader.smf": 10
+        "/sys/apps/sloader.smf": 10
+        "/sys/apps/llvm": 11
+        "/sys/apps/llvm.smf": 11
+        "/sys/apps/clang": 12
+        "/sys/apps/clang.smf": 12
+        "/sys/apps/rust": 13
+        "/sys/apps/rust.smf": 13
+        "/SYS/APPS/SBROWSMF.SMF": 7
+        "/SYS/APPS/SCOMPSMF.SMF": 8
+        "/SYS/APPS/SINTSMF.SMF": 9
+        "/SYS/APPS/SLOADSMF.SMF": 10
+        "/SYS/APPS/LLVMSMF.SMF": 11
+        "/SYS/APPS/CLANGSMF.SMF": 12
+        "/SYS/APPS/RUSTSMF.SMF": 13
         _: -1
 
 fn _seeded_app_name_for_path(path: text) -> text:
     match _seeded_app_index_by_path(path):
         0: "Hello World"
-        1: "File Manager"
-        2: "Terminal"
-        3: "Browser Demo"
-        4: "Editor"
-        5: "Simple Browser"
-        6: "Simple Compiler"
-        7: "Simple Interpreter"
-        8: "Simple Loader"
-        9: "LLVM"
-        10: "Clang"
-        11: "Rust"
+        1: "Calculator"
+        2: "Clock"
+        3: "File Manager"
+        4: "Terminal"
+        5: "Browser Demo"
+        6: "Editor"
+        7: "Simple Browser"
+        8: "Simple Compiler"
+        9: "Simple Interpreter"
+        10: "Simple Loader"
+        11: "LLVM"
+        12: "Clang"
+        13: "Rust"
         _: ""
 
 fn _seeded_app_icon_for_path(path: text) -> text:
     match _seeded_app_index_by_path(path):
         0: "H"
-        1: "F"
-        2: ">"
-        3: "B"
-        4: "E"
-        5: "W"
-        6: "C"
-        7: "I"
-        8: "O"
-        9: "L"
-        10: "K"
-        11: "R"
+        1: "="
+        2: "T"
+        3: "F"
+        4: ">"
+        5: "B"
+        6: "E"
+        7: "W"
+        8: "C"
+        9: "I"
+        10: "O"
+        11: "L"
+        12: "K"
+        13: "R"
         _: ""
 
 fn _seeded_app_key_for_path(path: text) -> u32:
     match _seeded_app_index_by_path(path):
         0: 0x48
-        1: 0x46
-        2: 0x54
-        3: 0x42
-        4: 0x45
-        5: 0x57
-        6: 0x43
-        7: 0x49
-        8: 0x4F
-        9: 0x4C
-        10: 0x47
-        11: 0x52
+        1: 0x41
+        2: 0x59
+        3: 0x46
+        4: 0x54
+        5: 0x42
+        6: 0x45
+        7: 0x57
+        8: 0x43
+        9: 0x49
+        10: 0x4F
+        11: 0x4C
+        12: 0x47
+        13: 0x52
         _: 0
 
 fn _ensure_seeded_app_slot(slot: u64, path: text):
@@ -365,6 +391,31 @@ fn _ensure_seeded_app_slot(slot: u64, path: text):
     val name = _seeded_app_name_for_path(path)
     if name == "":
         return
+    if slot < app_count and app_active[slot] and _canonical_app_identity(app_path[slot]) != _canonical_app_identity(path):
+        if app_count >= MAX_APPS:
+            return
+        var i = app_count
+        while i > slot:
+            app_name[i] = app_name[i - 1]
+            app_path[i] = app_path[i - 1]
+            app_icon[i] = app_icon[i - 1]
+            app_shortcut_key[i] = app_shortcut_key[i - 1]
+            app_shortcut_mod[i] = app_shortcut_mod[i - 1]
+            app_pid[i] = app_pid[i - 1]
+            app_launch_state[i] = app_launch_state[i - 1]
+            app_window_count[i] = app_window_count[i - 1]
+            app_exit_code[i] = app_exit_code[i - 1]
+            app_launch_count[i] = app_launch_count[i - 1]
+            app_last_pid[i] = app_last_pid[i - 1]
+            app_is_headless[i] = app_is_headless[i - 1]
+            app_active[i] = app_active[i - 1]
+            i = i - 1
+        app_count = app_count + 1
+        var p: u64 = 0
+        while p < MAX_PROCESSES:
+            if process_app_index[p] >= slot.to_i64():
+                process_app_index[p] = process_app_index[p] + 1
+            p = p + 1
     app_name[slot] = name
     app_path[slot] = path
     app_icon[slot] = _seeded_app_icon_for_path(path)
@@ -420,6 +471,7 @@ fn _record_detached_process(pid: u64, path: text):
         process_exit_code[slot] = 0
         process_window_count[slot] = 0
         process_is_headless[slot] = true
+        process_signal_backed[slot] = true
         process_active[slot] = true
         return
     if process_count >= MAX_PROCESSES:
@@ -436,6 +488,7 @@ fn _record_detached_process(pid: u64, path: text):
     process_window_count[process_count] = 0
     process_is_headless[process_count] = true
     process_launch_seq[process_count] = process_sequence
+    process_signal_backed[process_count] = true
     process_active[process_count] = true
     process_sequence = process_sequence + 1
     process_count = process_count + 1
@@ -559,7 +612,7 @@ fn _process_app_identity(app_index: i64, path: text) -> text:
 fn _classify_final_state(previous_state: text, exit_code: i32) -> text:
     if previous_state == "terminating":
         return "terminated"
-    if exit_code == 0:
+    if exit_code == 0 or exit_code == -1:
         return "exited"
     "crashed"
 
@@ -601,6 +654,8 @@ pub fn launcher_record_process(pid: u64, app_index: i64, state: text, exit_code:
         process_exit_code[slot] = exit_code
         process_window_count[slot] = window_count
         process_is_headless[slot] = is_headless
+        if not process_active[slot]:
+            process_signal_backed[slot] = false
         process_active[slot] = _is_running_state(state)
         if app_index >= 0:
             val existing_app_slot = app_index.to_u64()
@@ -623,6 +678,7 @@ pub fn launcher_record_process(pid: u64, app_index: i64, state: text, exit_code:
     process_window_count[process_count] = window_count
     process_is_headless[process_count] = is_headless
     process_launch_seq[process_count] = process_sequence
+    process_signal_backed[process_count] = false
     process_active[process_count] = _is_running_state(state)
     process_sequence = process_sequence + 1
     process_count = process_count + 1
@@ -710,6 +766,7 @@ fn _finalize_launch(slot: u64, name: text, pid: u64, app_id: text) -> i64:
     launcher_last_launch_pid = pid
     _sync_app_slot(slot, pid, "running", 0, 0, true)
     launcher_record_process(pid, slot.to_i64(), "running", 0, 0, true)
+    _set_process_signal_backed(pid, true)
     val canonical_app_id = _canonical_app_identity(app_id)
     log_raw_println("[launcher] Started {name} (PID {pid})")
     log_raw_println("[launcher] spawned app_id={app_id} pid={pid} name={name}")

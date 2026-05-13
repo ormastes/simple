@@ -64,7 +64,7 @@ use os.kernel.ipc.syscall_spm
 
 # Re-export handlers from sub-modules so external callers (syscall_shim.spl)
 # that use `use os.kernel.ipc.syscall.{_handle_*}` still resolve.
-use os.kernel.ipc.syscall_ipc.{_handle_ipc_send, _handle_ipc_recv, _handle_ipc_create_port, _handle_ipc_connect}
+use os.kernel.ipc.syscall_ipc.{IpcSyscallState, _handle_ipc_send, _handle_ipc_recv, _handle_ipc_create_port, _handle_ipc_connect, _handle_ipc_send_state, _handle_ipc_recv_state, _handle_ipc_create_port_state, _handle_ipc_connect_state}
 use os.kernel.ipc.syscall_security_debug.{_handle_pledge, _handle_unveil, _handle_cap_grant, _handle_debug_write}
 use os.kernel.ipc.syscall_process.{_handle_exit, _handle_yield, _handle_spawn, _handle_wait, _handle_fork, _handle_exec, _handle_waitpid, _handle_pipe, _handle_dup2, _handle_dup, _handle_dlopen, _handle_dlsym, _handle_dlclose, _handle_poll, _handle_fcntl, _handle_getpid, _handle_spawn_binary, dispatch_spawn_binary_direct}
 use os.kernel.ipc.syscall_proc_ext.{_handle_list_tasks, _handle_get_task_info, _handle_signal, _handle_set_priority, _handle_schedule, _handle_schedctl, _handle_get_parent_pid, _handle_mount, _handle_unmount}
@@ -270,6 +270,37 @@ fn syscall_dispatch(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, kl
         return syscall_dispatch_with(result.value, SyscallTrapDisposition.ScheduleNext)
     syscall_dispatch_with(result.value, SyscallTrapDisposition.ReturnToCaller)
 
+fn syscall_handler_ipc_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klog: KernelLog) -> IpcSyscallState:
+    """Dispatch IPC syscalls and return updated scheduler/IPC state.
+
+    This is the state-preserving path used by installed trap runtimes. The
+    legacy result-only syscall_handler remains for tests and call sites that
+    have not yet been converted to explicit runtime-state threading.
+    """
+    var sched_for_cap = scheduler
+    val caller = sched_for_cap.get_current()
+    fd_activate_task(caller.id)
+
+    match args.id:
+        case 20:
+            if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
+                return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
+            _handle_ipc_send_state(args, scheduler, ipc)
+        case 21:
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
+            _handle_ipc_recv_state(args, scheduler, ipc)
+        case 22:
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
+            _handle_ipc_create_port_state(args, scheduler, ipc)
+        case 23:
+            if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
+                return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
+            _handle_ipc_connect_state(args, scheduler, ipc)
+        case _:
+            IpcSyscallState(result: syscall_handler(args, scheduler, ipc, klog), scheduler: scheduler, ipc: ipc)
+
 fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klog: KernelLog) -> SyscallResult:
     """Main syscall dispatcher. Called from the SYSCALL entry stub."""
     var sched_for_cap = scheduler
@@ -299,6 +330,8 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
                 return SyscallResult(value: SYSCALL_EPERM)
             SyscallResult(value: -38)
         case 15:    # Brk
+            if not _cap_check(ipc, caller, CapabilityKind.VmMap):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_brk_for_task(args, caller.id)
         case 16:    # SystemReboot
             if not _cap_check(ipc, caller, CapabilityKind.SystemReboot):
@@ -339,16 +372,28 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
 
         # -- Notification (L4-style async events) ----------------------------
         case 24:    # NotificationCreate
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_notification_create(args)
         case 25:    # NotificationSignal
+            if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_notification_signal(args, scheduler)
         case 26:    # NotificationWait
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_notification_wait(args, scheduler)
         case 27:    # NotificationPoll
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_notification_poll(args)
         case 28:    # NotificationDestroy
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_notification_destroy(args)
         case 29:    # NotificationWaitAny
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_notification_wait_any(args, scheduler)
 
         # -- File (routed to VFS via IPC) ------------------------------------
@@ -364,7 +409,7 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             if not _cap_check(ipc, caller, CapabilityKind.FileWrite(path_prefix: "")):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_file_write(args, scheduler, ipc)
-        case 33:    # Close
+        case 33:    # Close (always allowed — releases caller-owned fd)
             _handle_file_close(args, scheduler, ipc)
         case 34:    # Stat
             if not _cap_check(ipc, caller, CapabilityKind.FileRead(path_prefix: "")):
@@ -400,15 +445,17 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             if not _cap_check(ipc, caller, CapabilityKind.FileWrite(path_prefix: "")):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_file_rmdir(args, scheduler, ipc)
-        case 46:    # Lseek
+        case 46:    # Lseek (always allowed — caller-owned fd cursor)
             _handle_lseek(args)
         case 43:    # Ftruncate
             if not _cap_check(ipc, caller, CapabilityKind.FileWrite(path_prefix: "")):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_ftruncate(args)
-        case 47:    # Getcwd
+        case 47:    # Getcwd (always allowed — caller metadata)
             _handle_getcwd(args, scheduler)
         case 48:    # Chdir
+            if not _cap_check(ipc, caller, CapabilityKind.FileRead(path_prefix: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_chdir(args, scheduler)
 
         # -- Security --------------------------------------------------------
@@ -417,6 +464,8 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
         case 41:    # Unveil (always allowed — self-restriction)
             _handle_unveil(args, scheduler, ipc)
         case 42:    # CapGrant
+            if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_cap_grant(args, scheduler, ipc)
 
         # -- Process (extended) ----------------------------------------------
@@ -505,16 +554,24 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
 
         # -- Logging ---------------------------------------------------------
         case 90:    # LogWrite
+            if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_log_write(args, scheduler, klog)
         case 91:    # LogRead
+            if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_log_read(args, klog)
 
         # -- System Info -----------------------------------------------------
         case 95:    # SysInfo
+            if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_sysinfo(args, scheduler)
-        case 96:    # GetHostname
+        case 96:    # GetHostname (always allowed — public node identity)
             _handle_get_hostname()
         case 97:    # SetHostname
+            if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_set_hostname(args)
 
         # -- Time ------------------------------------------------------------
@@ -525,26 +582,32 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
 
         # -- POSIX process / fd composition ---------------------------------
         case 57:    # Fork
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessSpawn):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_fork(args, scheduler)
         case 59:    # Exec
+            if not _cap_check(ipc, caller, CapabilityKind.FileExec(path_prefix: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_exec(args, scheduler)
-        case 61:    # WaitPid
+        case 61:    # WaitPid (always allowed — own child state)
             _handle_waitpid(args, scheduler)
-        case 62:    # Pipe
+        case 62:    # Pipe (always allowed — creates caller-owned fd pair)
             _handle_pipe(args)
-        case 63:    # Dup2
+        case 63:    # Dup2 (always allowed — caller-owned fd table)
             _handle_dup2(args)
-        case 64:    # Dup
+        case 64:    # Dup (always allowed — caller-owned fd table)
             _handle_dup(args)
         case 65:    # DlOpen
+            if not _cap_check(ipc, caller, CapabilityKind.FileExec(path_prefix: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_dlopen(args)
-        case 66:    # DlSym
+        case 66:    # DlSym (always allowed — caller-owned library handle)
             _handle_dlsym(args)
-        case 67:    # DlClose
+        case 67:    # DlClose (always allowed — releases caller-owned handle)
             _handle_dlclose(args)
-        case 68:    # Poll
+        case 68:    # Poll (always allowed — caller-owned fd readiness)
             _handle_poll(args, scheduler)
-        case 69:    # Fcntl
+        case 69:    # Fcntl (always allowed — caller-owned fd metadata)
             _handle_fcntl(args)
 
         # -- Privilege Control (G11) -----------------------------------------
@@ -555,12 +618,20 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
 
         # -- Memory Grants (G12) ---------------------------------------------
         case 99:    # sys_grant
+            if not _cap_check(ipc, caller, CapabilityKind.VmMap):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_mem_grant(args, scheduler)
         case 100:   # sys_revoke
+            if not _cap_check(ipc, caller, CapabilityKind.VmMap):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_mem_revoke(args, scheduler)
         case 101:   # sys_safecopy_from
+            if not _cap_check(ipc, caller, CapabilityKind.VmMap):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_safecopy_from(args, scheduler)
         case 102:   # sys_safecopy_to
+            if not _cap_check(ipc, caller, CapabilityKind.VmMap):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_safecopy_to(args, scheduler)
 
         # -- VM mmap / munmap (Wave 1 G13) -----------------------------------
@@ -574,7 +645,7 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             _handle_sys_munmap(args, caller.id)
 
         # -- Scheduler policy (service agent reserved ABI) -------------------
-        case 106:   # sys_schedule: cooperative reschedule point
+        case 106:   # sys_schedule: cooperative reschedule point (always allowed)
             _handle_schedule(args, scheduler)
         case 107:   # sys_schedctl: set/query scheduler policy metadata
             if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
@@ -583,42 +654,78 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
 
         # -- SPM / Privilege (spm-winfs-llm-suite) ----------------------------
         case 110:   # sys_priv_check
+            if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_spm_priv_check(args, caller.id)
         case 111:   # sys_win_register
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_spm_win_register(args)
         case 112:   # sys_approval_request
+            if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_spm_approval_request(args)
         case 113:   # sys_spm_send
+            if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_spm_send(args)
         case 114:   # sys_spm_listen
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_spm_listen(args)
         case 115:   # sys_spm_claim
+            if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_spm_claim(caller.id)
 
         # -- SOSIX immutable process sharing --------------------------------
         case 120:   # dataset_create
+            if not _cap_check(ipc, caller, CapabilityKind.SharedDataset(object_id: 0, generation: 0, rights: CAP_RIGHT_DATASET_BUILD)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_dataset_create(args)
         case 121:   # dataset_create_from_file
+            if not _cap_check(ipc, caller, CapabilityKind.SharedDataset(object_id: 0, generation: 0, rights: CAP_RIGHT_DATASET_BUILD)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_dataset_create_from_file(args)
         case 122:   # dataset_write
+            if not _cap_check(ipc, caller, CapabilityKind.SharedDataset(object_id: args.arg0, generation: 0, rights: CAP_RIGHT_WRITE)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_dataset_write(args)
         case 123:   # dataset_seal
+            if not _cap_check(ipc, caller, CapabilityKind.SharedDataset(object_id: args.arg0, generation: 0, rights: CAP_RIGHT_ADMIN)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_dataset_seal(args)
         case 124:   # dataset_map
+            if not _cap_check(ipc, caller, CapabilityKind.SharedDataset(object_id: args.arg0, generation: 0, rights: CAP_RIGHT_MAP)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_dataset_map(args)
         case 125:   # dataset_unmap
+            if not _cap_check(ipc, caller, CapabilityKind.SharedDataset(object_id: args.arg0, generation: 0, rights: CAP_RIGHT_MAP)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_dataset_unmap(args)
         case 126:   # dataset_close
+            if not _cap_check(ipc, caller, CapabilityKind.SharedDataset(object_id: args.arg0, generation: 0, rights: CAP_RIGHT_ADMIN)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_dataset_close(args)
         case 127:   # queue_create
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessQueue(queue_id: 0, generation: 0, rights: CAP_RIGHT_ADMIN)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_queue_create(args)
         case 128:   # queue_send
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessQueue(queue_id: args.arg0, generation: 0, rights: CAP_RIGHT_QUEUE_SUBMIT)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_queue_send(args)
         case 129:   # queue_recv
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessQueue(queue_id: args.arg0, generation: 0, rights: CAP_RIGHT_QUEUE_RECV)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_queue_recv(args)
         case 130:   # queue_poll
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessQueue(queue_id: args.arg0, generation: 0, rights: CAP_RIGHT_QUEUE_RECV)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_queue_poll(args)
         case 131:   # queue_close
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessQueue(queue_id: args.arg0, generation: 0, rights: CAP_RIGHT_ADMIN)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_queue_close(args)
 
         # -- Unknown ---------------------------------------------------------

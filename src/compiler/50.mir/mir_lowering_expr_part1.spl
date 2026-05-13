@@ -25,6 +25,29 @@ extern fn rt_env_get(key: text) -> text
 # ============================================================================
 
 impl MirLowering:
+    me emit_bounds_check_for_index(base_type: HirType?, base_local: LocalId, index_local: LocalId):
+        """Emit an explicit bounds_check intrinsic before MIR indexed access."""
+        if not base_type.?:
+            return
+        val len_symbol = self.len_runtime_symbol_for_hir_type(base_type.unwrap())
+        if len_symbol == "":
+            return
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(len_symbol),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b = self.builder
+        val len_result = b.emit_call(func_operand, [mir_operand_copy(base_local)], MirType.i64())
+        if len_result.?:
+            b.emit(MirInst(
+                kind: MirInstKind.Intrinsic(nil, "bounds_check", [
+                    mir_operand_copy(index_local),
+                    mir_operand_copy(len_result.unwrap())
+                ]),
+                span: nil
+            ))
+        self.builder = b
+
     me resolved_call_return_type(symbol: SymbolId) -> MirType:
         val sym = self.symbols.get(symbol)
         if sym.? and sym.unwrap().type_.?:
@@ -166,9 +189,10 @@ impl MirLowering:
                 self.lower_array_lit(elements)
 
             case Index(base, index):
-                # Array indexing: arr[i] -> GEP + Load
+                # Array indexing: arr[i] -> bounds_check + GEP + Load
                 val base_local = self.lower_expr(base)
                 val index_local = self.lower_expr(index)
+                self.emit_bounds_check_for_index(base.type_, base_local, index_local)
                 val result_type = if expr.type_.?:
                     self.lower_type(expr.type_.unwrap())
                 else:

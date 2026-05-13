@@ -1,13 +1,10 @@
-# Browser engine to SDL2 render bridge for web_ui.
-# Owns the render pipeline, rasterizer, and GPU surface.
-# Converts browser pixel format to SDL2 packed format.
+# Hosted web_ui render bridge.
+#
+# Owns a compact packed-pixel surface for SDL2 presentation. This stdlib-local
+# renderer deliberately avoids examples/browser dependencies; richer browser
+# engines can be attached above this layer through explicit adapters.
 
-use examples.browser.transform.pipeline.{RenderPipeline, DisplayList}
-use examples.browser.feature.gpu.raster.{Rasterizer}
-use examples.browser.feature.gpu.surface.{GpuSurface, SurfaceFormat}
-use examples.browser.entity.dom.paint_types.{PaintOp, DisplayItem, Color}
-use examples.browser.shared.logging.{Logger, LogLevel}
-use examples.browser.shared.error.{BrowserResult}
+use common.web.logging.{Logger, LogLevel}
 
 # Pack 4 separate RGBA channels into a single i64.
 # Format: R*16777216 + G*65536 + B*256 + A
@@ -15,39 +12,25 @@ use examples.browser.shared.error.{BrowserResult}
 fn pack_rgba(r: i64, g: i64, b: i64, a: i64) -> i64:
     r * 16777216 + g * 65536 + b * 256 + a
 
-# Convert browser GpuSurface pixels (4 i64s per pixel) to packed [i64] (1 i64 per pixel).
-# Browser format: pixels[(y*w+x)*4 + 0]=R, [+1]=G, [+2]=B, [+3]=A
-# SDL2 format: pixels[y*w+x] = R*16777216 + G*65536 + B*256 + A
-fn surface_to_packed(surface: GpuSurface, width: i64, height: i64) -> List<i64>:
+fn _white_pixel() -> i64:
+    pack_rgba(255, 255, 255, 255)
+
+fn _text_pixel() -> i64:
+    pack_rgba(32, 32, 32, 255)
+
+fn _accent_pixel() -> i64:
+    pack_rgba(37, 99, 235, 255)
+
+fn _alloc_pixels(width: i64, height: i64, pixel: i64) -> List<i64>:
+    var packed: List<i64> = []
     val pixel_count = width * height
-    var packed = List<i64>()
     var i = 0
     while i < pixel_count:
-        val base = i * 4
-        val r = surface.pixels.get(base)
-        val g = surface.pixels.get(base + 1)
-        val b = surface.pixels.get(base + 2)
-        val a = surface.pixels.get(base + 3)
-        packed.push(pack_rgba(r, g, b, a))
+        packed.push(pixel)
         i = i + 1
     packed
 
-# Convert a DisplayList (List<PaintOp>) to List<DisplayItem> with sequential z-index.
-fn ops_to_display_items(ops: List<PaintOp>) -> List<DisplayItem>:
-    var items = List<DisplayItem>()
-    var z = 0
-    for op in ops:
-        val item = DisplayItem.create(z, op)
-        items.push(item)
-        z = z + 1
-    items
-
-# The render bridge owns the browser engine pipeline and converts its output
-# to a packed pixel buffer ready for SDL2 presentation.
 class RenderBridge:
-    pipeline: RenderPipeline
-    rasterizer: Rasterizer
-    surface: GpuSurface
     logger: Logger
     width: i64
     height: i64
@@ -56,21 +39,8 @@ class RenderBridge:
     packed_pixels: List<i64>
 
     static fn create(width: i64, height: i64, logger: Logger) -> RenderBridge:
-        val pipeline = RenderPipeline.create_pipeline(logger)
-        val rasterizer = Rasterizer.new(logger)
-        val surface = GpuSurface.create(1, width, height, SurfaceFormat.RGBA8)
-        # Pre-allocate packed pixel buffer (white background)
-        var packed = List<i64>()
-        val pixel_count = width * height
-        var i = 0
-        val white_pixel = pack_rgba(255, 255, 255, 255)
-        while i < pixel_count:
-            packed.push(white_pixel)
-            i = i + 1
+        val packed = _alloc_pixels(width, height, _white_pixel())
         RenderBridge(
-            pipeline: pipeline,
-            rasterizer: rasterizer,
-            surface: surface,
             logger: logger,
             width: width,
             height: height,
@@ -84,49 +54,45 @@ class RenderBridge:
         self.current_html = html
         self.dirty = true
 
-    # Full render: HTML string -> rasterized pixels.
-    # Runs parse -> style -> layout -> paint -> rasterize.
+    # Render a compact hosted surface. This is intentionally small and
+    # dependency-free; browser-engine adapters can replace it above this layer.
     me render() -> Result<(), text>:
-        if self.current_html.len() == 0:
-            self.dirty = false
-            return Ok(())
+        self.clear_surface()
+        if self.current_html.len() > 0:
+            self.draw_content_hint()
+        self.dirty = false
+        Ok(())
 
-        # Step 1: Run the browser pipeline to get a DisplayList
-        val pipeline_result = self.pipeline.run_full_pipeline(self.current_html)
-        match pipeline_result:
-            Err(err):
-                self.logger.log(LogLevel.Error, "Render pipeline error")
-                self.dirty = false
-                return Err("Pipeline error")
-            Ok(display_list):
-                # Step 2: Convert PaintOps to DisplayItems
-                val items = ops_to_display_items(display_list.ops)
-
-                # Step 3: Clear surface to white background
-                self.clear_surface()
-
-                # Step 4: Rasterize display items onto browser surface
-                val raster_result = self.rasterizer.rasterize(items, self.surface)
-                match raster_result:
-                    Err(err):
-                        self.logger.log(LogLevel.Error, "Rasterize error")
-                        self.dirty = false
-                        return Err("Rasterize error")
-                    Ok(_):
-                        pass_dn
-
-                # Step 5: Convert browser surface to packed pixels for SDL2
-                self.packed_pixels = surface_to_packed(self.surface, self.width, self.height)
-                self.dirty = false
-                return Ok(())
-
-    # Clear the surface to white (255,255,255,255).
     me clear_surface():
-        val pixel_count = self.width * self.height
-        var i = 0
-        while i < pixel_count:
-            self.surface.set_pixel(i % self.width, i / self.width, 255, 255, 255, 255)
-            i = i + 1
+        self.packed_pixels = _alloc_pixels(self.width, self.height, _white_pixel())
+
+    me set_pixel(x: i64, y: i64, pixel: i64):
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return
+        val idx = y * self.width + x
+        if idx >= 0 and idx < self.packed_pixels.len():
+            self.packed_pixels[idx] = pixel
+
+    me fill_rect(x: i64, y: i64, w: i64, h: i64, pixel: i64):
+        var yy = y
+        while yy < y + h:
+            var xx = x
+            while xx < x + w:
+                self.set_pixel(xx, yy, pixel)
+                xx = xx + 1
+            yy = yy + 1
+
+    me draw_content_hint():
+        val bar_h = if self.height < 24: self.height else: 24
+        self.fill_rect(0, 0, self.width, bar_h, _accent_pixel())
+        val rows = if self.height < 80: 1 else: 4
+        var row = 0
+        while row < rows:
+            val y = 40 + row * 18
+            val w = self.width - 32 - row * 24
+            if w > 0:
+                self.fill_rect(16, y, w, 8, _text_pixel())
+            row = row + 1
 
     # Get packed pixel buffer ready for window_present_rgba.
     fn get_packed_pixels() -> List<i64>:
@@ -140,16 +106,7 @@ class RenderBridge:
     me resize(new_width: i64, new_height: i64):
         self.width = new_width
         self.height = new_height
-        self.surface = GpuSurface.create(1, new_width, new_height, SurfaceFormat.RGBA8)
-        # Re-allocate packed pixel buffer
-        var packed = List<i64>()
-        val pixel_count = new_width * new_height
-        var i = 0
-        val white_pixel = pack_rgba(255, 255, 255, 255)
-        while i < pixel_count:
-            packed.push(white_pixel)
-            i = i + 1
-        self.packed_pixels = packed
+        self.packed_pixels = _alloc_pixels(new_width, new_height, _white_pixel())
         self.dirty = true
 
     # Get current dimensions.

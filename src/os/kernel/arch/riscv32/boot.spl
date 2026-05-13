@@ -4,10 +4,18 @@
 # can native-build a real bootable ELF without pulling runtime formatting,
 # arrays, or boot metadata construction into the first-stage entry object.
 #
-# Boot chain: _start → boot_main → riscv_boot_mem_init → os_main
+# Boot chain: _start → boot_main → noalloc boot services → os_main
 
-use os.kernel.boot.riscv_boot_mem.{riscv_boot_mem_init}
+use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff, riscv_noalloc_boot_idle}
+use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
+use os.kernel.boot.riscv_noalloc_log.{riscv_noalloc_log_init, riscv_noalloc_log_boot_ok}
+use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
 use os.kernel.boot.os_main.{os_main}
+
+extern fn rt_riscv_uart_put(byte: u64)
+extern fn rt_riscv_qemu_heap_start() -> u64
+extern fn rt_riscv_qemu_heap_size() -> u64
+extern fn rt_riscv_noalloc_pmm_init_default() -> bool
 
 @section(".text.entry")
 @naked
@@ -32,9 +40,7 @@ fn _start():
         "j       .Lrv32_boot_halt"
 
 fn _uart_put(byte: u32):
-    asm volatile:
-        "li      t0, 0x10000000"
-        "sb      a0, 0(t0)"
+    rt_riscv_uart_put(byte as u64)
 
 fn _crlf():
     _uart_put(13)
@@ -191,8 +197,13 @@ fn boot_main(_hart_id: u32, _dtb_addr: u32):
     _line_memory_map()
     _line_ram_base()
     _line_boot_complete()
-    # Initialize memory (PMM + heap) then enter kernel main
-    riscv_boot_mem_init()
+    riscv_noalloc_log_init()
+    riscv_noalloc_handoff(_hart_id as u64, _dtb_addr as u64)
+    rt_riscv_noalloc_pmm_init_default()
+    riscv_noalloc_heap_init(rt_riscv_qemu_heap_start(), rt_riscv_qemu_heap_size())
+    riscv_noalloc_services_init(true)
+    riscv_noalloc_log_boot_ok()
     os_main()
     # Fall through to wfi halt if os_main ever returns
     _qemu_exit_success()
+    riscv_noalloc_boot_idle()

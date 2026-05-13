@@ -116,6 +116,68 @@ struct SimilarityPrep:
     low_signal_flags: [bool]
     file_count: i64
 
+fn normalize_line_for_duplicate_key(line: text) -> text:
+    line.trim()
+
+fn line_window_key(lines: [text], start: i64, window: i64) -> text:
+    var key = ""
+    var i = 0
+    while i < window and start + i < lines.len():
+        if i > 0:
+            key = key + "\n"
+        key = key + normalize_line_for_duplicate_key(lines[start + i])
+        i = i + 1
+    key
+
+fn line_window_has_signal(key: text) -> bool:
+    val trimmed = key.trim()
+    if trimmed.len() == 0:
+        return false
+    trimmed.contains("fn ") or trimmed.contains("if ") or trimmed.contains("while ") or trimmed.contains("for ") or trimmed.contains("match") or trimmed.contains("return") or trimmed.contains("val ") or trimmed.contains("var ")
+
+fn fast_line_window_duplicate_groups(files: [text], config: DuplicationConfig) -> [DuplicateGroup]:
+    var exact_map = {}
+    val window = if config.min_lines > 0: config.min_lines else: 5
+
+    for file in files:
+        val source = read_detector_source(file)
+        val lines = source.split("\n")
+        if lines.len() < window:
+            continue
+
+        var start = 0
+        while start + window <= lines.len():
+            val key = line_window_key(lines, start, window)
+            if line_window_has_signal(key):
+                val block = DuplicateBlock(
+                    file: file,
+                    line_start: start + 1,
+                    line_end: start + window,
+                    token_count: config.min_tokens,
+                    hash_value: 0,
+                    snippet_start_offset: -1,
+                    snippet_end_offset: -1,
+                    code: key
+                )
+                if exact_map.has(key):
+                    var existing = exact_map[key]
+                    existing.push(block)
+                    exact_map[key] = existing
+                else:
+                    exact_map[key] = [block]
+            start = start + 1
+
+    var groups = []
+    for key in exact_map.keys():
+        val blocks = exact_map[key]
+        if blocks.len() < 2:
+            continue
+        val group = build_duplicate_group(blocks)
+        if group.impact_score >= config.min_impact:
+            groups.push(group)
+
+    sort_by_impact(groups)
+
 fn rolling_hash(tokens: [SimpleToken], start: i64, window: i64) -> i64:
     """Compute rolling hash for token window with inlined character hashing."""
     var hash = 0
@@ -422,6 +484,51 @@ fn collect_token_window_candidates(tokens: [SimpleToken], config: DuplicationCon
     candidates
 
 fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner, hash_counts: {text: i64}) -> FileHashScanResult:
+    val tokens = load_tokens_for_file(file_path, config, cache_manager)
+    var file_hashes = {}
+    var updated_counts = hash_counts
+
+    if tokens.len() < config.min_tokens:
+        return FileHashScanResult(file_hashes: file_hashes, hash_counts: updated_counts)
+
+    val base = 31
+    val mod_val = 1000000007
+    val window_size = config.min_tokens
+    val base_power = power_mod(base, window_size - 1, mod_val)
+
+    var hash = 0
+    var j = 0
+    while j < window_size:
+        hash = (hash * base + compute_token_code(tokens[j])) % mod_val
+        j = j + 1
+
+    var i = 0
+    while i + window_size <= tokens.len():
+        if i > 0:
+            val old_code = compute_token_code(tokens[i - 1])
+            val new_code = compute_token_code(tokens[i + window_size - 1])
+            hash = (hash - (old_code * base_power) % mod_val + mod_val) % mod_val
+            hash = (hash * base + new_code) % mod_val
+
+        val start_line = tokens[i].line
+        var end_idx = (i + window_size).min(tokens.len())
+        while end_idx < tokens.len():
+            val current_end_line = tokens[end_idx - 1].line
+            if current_end_line - start_line + 1 >= config.min_lines:
+                break
+            end_idx = end_idx + 1
+
+        val end_line = tokens[end_idx - 1].line
+        if end_line - start_line + 1 >= config.min_lines:
+            val hash_key = "{hash}"
+            val existing = updated_counts[hash_key] ?? 0
+            updated_counts[hash_key] = existing + 1
+            file_hashes[hash_key] = true
+
+        i = i + 1
+    FileHashScanResult(file_hashes: file_hashes, hash_counts: updated_counts)
+
+fn collect_hash_counts_in_file_materialized(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner, hash_counts: {text: i64}) -> FileHashScanResult:
     val tokens = load_tokens_for_file(file_path, config, cache_manager)
     var file_hashes = {}
     var updated_counts = hash_counts

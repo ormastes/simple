@@ -9,6 +9,8 @@ use compiler.tools.duplicate_check.formatter.{print_text_report, print_json_repo
 use compiler.tools.duplicate_check.semantic.{run_semantic_analysis, run_semantic_analysis_local}
 use compiler.tools.duplicate_check.semantic_formatter.{print_semantic_text_report, print_semantic_json_report}
 use std.ffi.cli.{cli_get_args, cli_exit}
+use std.nogc_sync_mut.env.config.{escape_shell_value}
+use std.nogc_sync_mut.io.process_ops.{shell}
 
 fn normalize_argv(all_args: [text]) -> [text]:
     var args: [text] = []
@@ -74,6 +76,7 @@ fn print_usage():
     print "  --min-tokens N      Minimum tokens for token/cosine scans (default: 30)"
     print "  --min-lines N       Minimum duplicated lines for token/cosine scans (default: 5)"
     print "  --min-impact N      Minimum impact score for lexical reports"
+    print "  --max-allowed N     Maximum duplicate groups before non-zero exit (default: 0)"
     print "  --semantic-threshold N  Similarity threshold (default: 0.90)"
     print "  --semantic-model NAME   Ollama model (default: nomic-embed-text)"
     print "  --ollama-url URL    Ollama base URL (default: http://localhost:11434)"
@@ -135,6 +138,12 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             i = i + 2
         elif arg.starts_with("--min-impact="):
             config.min_impact = int(arg.slice("--min-impact=".len(), arg.len()))
+            i = i + 1
+        elif arg == "--max-allowed" and i + 1 < args.len():
+            config.max_allowed = int(args[i + 1])
+            i = i + 2
+        elif arg.starts_with("--max-allowed="):
+            config.max_allowed = int(arg.slice("--max-allowed=".len(), arg.len()))
             i = i + 1
         elif arg == "--format" and i + 1 < args.len():
             config.output_format = args[i + 1]
@@ -234,6 +243,24 @@ fn parse_args(args: [text]) -> DuplicationConfig:
 
     config
 
+fn shell_arg(value: text) -> text:
+    "\"" + escape_shell_value(value) + "\""
+
+fn run_fast_token_gate(target_path: text, config: DuplicationConfig) -> i64:
+    var command = "python3 scripts/audit/fast_duplicate_check.py " + shell_arg(target_path)
+    command = command + " --min-lines " + "{config.min_lines}"
+    command = command + " --format " + shell_arg(config.output_format)
+    command = command + " --max-allowed " + "{config.max_allowed}"
+    for pattern in config.exclude_patterns:
+        command = command + " --exclude " + shell_arg(pattern)
+
+    val result = shell(command)
+    if result.stdout.len() > 0:
+        print result.stdout.trim()
+    if result.stderr.len() > 0:
+        eprint result.stderr.trim()
+    result.exit_code
+
 fn main():
     init_debug()
 
@@ -270,6 +297,9 @@ fn main():
             print_semantic_text_report(report, config)
         val exit_code = if report.matches.len() > config.max_allowed: 1 else: 0
         cli_exit(exit_code)
+
+    if mode == "token":
+        cli_exit(run_fast_token_gate(target_path, config))
 
     val files = collect_files(target_path, config)
     val runtime_config = lexical_runtime_config(config, mode)

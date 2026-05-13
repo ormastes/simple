@@ -2,7 +2,6 @@
 #
 # Detailed RV32 boot verification: SBI, CLINT, PLIC, UART.
 #
-# @platform: baremetal(riscv32)
 # @tag: os,qemu,boot,riscv32
 
 use os.qemu_runner.{get_target, build_qemu_command}
@@ -13,6 +12,7 @@ extern fn rt_file_exists(path: text) -> bool
 
 val TIMEOUT_MS: i64 = 10000
 val ARCH = Architecture.Riscv32
+var g_riscv32_output: text = ""
 
 fn _can_run() -> bool:
     val target = get_target(ARCH)
@@ -30,10 +30,17 @@ fn _run_qemu() -> text:
     val cmd_parts = build_qemu_command(target)
     val qemu_bin = cmd_parts[0]
     var args: [text] = []
+    args.push("5s")
+    args.push(qemu_bin)
     for i in 1..cmd_parts.len():
         args.push(cmd_parts[i])
-    val result = rt_process_run_timeout(qemu_bin, args, TIMEOUT_MS)
+    val result = rt_process_run_timeout("timeout", args, TIMEOUT_MS)
     result[0] + result[1]
+
+fn _run_qemu_cached() -> text:
+    if g_riscv32_output == "":
+        g_riscv32_output = _run_qemu()
+    g_riscv32_output
 
 describe "RISC-V 32 Architecture Boot":
     slow_it "binds the canonical RV32 boot artifact contract":
@@ -53,25 +60,34 @@ describe "RISC-V 32 Architecture Boot":
 
     slow_it "UART initialized in direct boot":
         if _can_run():
-            val output = _run_qemu()
+            val output = _run_qemu_cached()
             expect(output).to_contain("UART")
 
     slow_it "prints RISC-V 32 architecture identifier":
         if _can_run():
-            val output = _run_qemu()
+            val output = _run_qemu_cached()
             expect(output).to_contain("RISC-V 32")
 
     slow_it "memory map parsed":
         if _can_run():
-            val output = _run_qemu()
+            val output = _run_qemu_cached()
             expect(output).to_contain("Memory map")
 
     slow_it "RAM at 0x80000000":
         if _can_run():
-            val output = _run_qemu()
+            val output = _run_qemu_cached()
             expect(output).to_contain("0x80000000")
 
     slow_it "boot sequence completes":
         if _can_run():
-            val output = _run_qemu()
+            val output = _run_qemu_cached()
             expect(output).to_contain("boot complete")
+
+    slow_it "initializes noalloc boot memory services":
+        if _can_run():
+            val output = _run_qemu_cached()
+            expect(output).to_contain("LOG OK")
+            expect(output).to_contain("MEM OK")
+            expect(output).to_contain("PMM OK")
+            expect(output).to_contain("HEAP OK")
+            expect(output).to_contain("SVC OK")

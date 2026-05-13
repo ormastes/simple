@@ -863,6 +863,10 @@ pub(crate) fn content_hash(content: &str) -> u64 {
 /// symbol names, so their cached objects cannot be shared. Without this,
 /// building one app after the other would reuse the other app's object and
 /// leave all cross-module calls unresolved (linked as stubs returning nil).
+///
+/// CPU profile also affects object code. A freestanding x86_64 build for
+/// QEMU's baseline CPU must not reuse cached host-feature objects that contain
+/// BMI/AVX instructions.
 pub(crate) fn object_cache_key(
     content: &str,
     is_entry: bool,
@@ -877,6 +881,7 @@ pub(crate) fn object_cache_key(
     backend.hash(&mut hasher);
     no_mangle.hash(&mut hasher);
     module_prefix.hash(&mut hasher);
+    std::env::var("SIMPLE_NATIVE_CPU").unwrap_or_default().hash(&mut hasher);
     active_simd_tier_name().hash(&mut hasher);
     hasher.finish()
 }

@@ -733,6 +733,21 @@ fn spl_test() -> i64:
 }
 
 #[test]
+fn test_parse_gc_module_attribute_before_export() {
+    let source = r#"
+@gc
+
+export GpuDevice
+export gpu_init, gpu_sync
+"#;
+    let module = parse(source).expect("Should parse @gc before export-only module root");
+
+    assert_eq!(module.items.len(), 2);
+    assert!(matches!(module.items[0], Node::Export(_)));
+    assert!(matches!(module.items[1], Node::Export(_)));
+}
+
+#[test]
 fn test_parse_multiple_attributes_before_extern_fn() {
     let source = format!(
         r#"

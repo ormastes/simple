@@ -1,0 +1,258 @@
+# Shader Compiler — GLSL→SPIR-V and GLSL→WGSL compilation with cache
+#
+# ShaderCompiler holds a ShaderCache keyed by a djb2 hash of the combined
+# vertex+fragment source text. On a cache hit the stored ShaderArtifact is
+# returned without recompilation.
+#
+# SPIR-V path: delegates to rt_vulkan_compile_glsl (runtime extern, stage 0=vertex,
+#              1=fragment). Returns empty arrays when the runtime is absent.
+# WGSL path:   delegates to wgsl_emit_vertex / wgsl_emit_fragment (pure text).
+
+use std.nogc_async_mut.engine.render.shader.{ShaderSource}
+use std.nogc_async_mut.engine.render.wgsl_emitter.{wgsl_emit_vertex, wgsl_emit_fragment}
+
+# ---------------------------------------------------------------------------
+# Extern: SPIR-V compilation (implemented by the Vulkan runtime layer)
+# ---------------------------------------------------------------------------
+
+extern fn rt_vulkan_compile_glsl(source: text, stage: i64) -> [u8]
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+struct ShaderArtifact:
+    spirv_vertex: [u8]
+    spirv_fragment: [u8]
+    wgsl_vertex: text
+    wgsl_fragment: text
+    is_compiled: bool
+    error_msg: text
+
+impl ShaderArtifact:
+    static fn empty() -> ShaderArtifact:
+        ShaderArtifact(
+            spirv_vertex: [],
+            spirv_fragment: [],
+            wgsl_vertex: "",
+            wgsl_fragment: "",
+            is_compiled: false,
+            error_msg: ""
+        )
+
+    static fn error(msg: text) -> ShaderArtifact:
+        ShaderArtifact(
+            spirv_vertex: [],
+            spirv_fragment: [],
+            wgsl_vertex: "",
+            wgsl_fragment: "",
+            is_compiled: false,
+            error_msg: msg
+        )
+
+struct ShaderCache:
+    keys: [i64]
+    artifacts: [ShaderArtifact]
+
+impl ShaderCache:
+    static fn new() -> ShaderCache:
+        ShaderCache(keys: [], artifacts: [])
+
+    me fn put(key: i64, artifact: ShaderArtifact):
+        self.keys = self.keys.push(key)
+        self.artifacts = self.artifacts.push(artifact)
+
+    fn find(key: i64) -> i64:
+        # Returns index into artifacts array, or -1 if not found
+        var i = 0
+        while i < self.keys.len():
+            if self.keys[i] == key:
+                return i
+            i = i + 1
+        -1
+
+struct ShaderCompiler:
+    cache: ShaderCache
+
+# ---------------------------------------------------------------------------
+# Constructor
+# ---------------------------------------------------------------------------
+
+fn shader_compiler_new() -> ShaderCompiler:
+    ShaderCompiler(cache: ShaderCache.new())
+
+# ---------------------------------------------------------------------------
+# Hashing (djb2 over the combined source text)
+# ---------------------------------------------------------------------------
+
+fn _hash_shader_source(src: ShaderSource) -> i64:
+    val combined = src.vertex_code + src.fragment_code
+    var h: i64 = 5381
+    var i = 0
+    while i < combined.len():
+        val ch_byte = combined[i:i+1]
+        # djb2: h = h * 33 + ord(ch)
+        # Use text byte value via a helper table for ASCII range
+        val b = _char_byte(ch_byte)
+        h = ((h * 33) + b) & 0x7FFFFFFFFFFFFFFF
+        i = i + 1
+    h
+
+fn _char_byte(ch: text) -> i64:
+    # Map common ASCII chars to byte values
+    if ch == "a": 97
+    else if ch == "b": 98
+    else if ch == "c": 99
+    else if ch == "d": 100
+    else if ch == "e": 101
+    else if ch == "f": 102
+    else if ch == "g": 103
+    else if ch == "h": 104
+    else if ch == "i": 105
+    else if ch == "j": 106
+    else if ch == "k": 107
+    else if ch == "l": 108
+    else if ch == "m": 109
+    else if ch == "n": 110
+    else if ch == "o": 111
+    else if ch == "p": 112
+    else if ch == "q": 113
+    else if ch == "r": 114
+    else if ch == "s": 115
+    else if ch == "t": 116
+    else if ch == "u": 117
+    else if ch == "v": 118
+    else if ch == "w": 119
+    else if ch == "x": 120
+    else if ch == "y": 121
+    else if ch == "z": 122
+    else if ch == "A": 65
+    else if ch == "B": 66
+    else if ch == "C": 67
+    else if ch == "D": 68
+    else if ch == "E": 69
+    else if ch == "F": 70
+    else if ch == "G": 71
+    else if ch == "H": 72
+    else if ch == "I": 73
+    else if ch == "J": 74
+    else if ch == "K": 75
+    else if ch == "L": 76
+    else if ch == "M": 77
+    else if ch == "N": 78
+    else if ch == "O": 79
+    else if ch == "P": 80
+    else if ch == "Q": 81
+    else if ch == "R": 82
+    else if ch == "S": 83
+    else if ch == "T": 84
+    else if ch == "U": 85
+    else if ch == "V": 86
+    else if ch == "W": 87
+    else if ch == "X": 88
+    else if ch == "Y": 89
+    else if ch == "Z": 90
+    else if ch == "0": 48
+    else if ch == "1": 49
+    else if ch == "2": 50
+    else if ch == "3": 51
+    else if ch == "4": 52
+    else if ch == "5": 53
+    else if ch == "6": 54
+    else if ch == "7": 55
+    else if ch == "8": 56
+    else if ch == "9": 57
+    else if ch == " ": 32
+    else if ch == "\n": 10
+    else if ch == "\t": 9
+    else if ch == ".": 46
+    else if ch == ",": 44
+    else if ch == ";": 59
+    else if ch == ":": 58
+    else if ch == "(": 40
+    else if ch == ")": 41
+    else if ch == "{": 123
+    else if ch == "}": 125
+    else if ch == "[": 91
+    else if ch == "]": 93
+    else if ch == "/": 47
+    else if ch == "*": 42
+    else if ch == "+": 43
+    else if ch == "-": 45
+    else if ch == "=": 61
+    else if ch == "<": 60
+    else if ch == ">": 62
+    else if ch == "_": 95
+    else if ch == "#": 35
+    else if ch == "@": 64
+    else if ch == "!": 33
+    else if ch == "&": 38
+    else if ch == "|": 124
+    else if ch == "^": 94
+    else if ch == "%": 37
+    else if ch == "~": 126
+    else if ch == "?": 63
+    else if ch == "'": 39
+    else if ch == "\"": 34
+    else if ch == "\\": 92
+    else: 63  # '?' as fallback for unknown
+
+# ---------------------------------------------------------------------------
+# SPIR-V compilation
+# ---------------------------------------------------------------------------
+
+me fn shader_compiler_get_or_compile_spirv(compiler: ShaderCompiler, src: ShaderSource) -> ShaderArtifact:
+    if not src.is_valid():
+        return ShaderArtifact.error("Invalid shader source")
+
+    val key = _hash_shader_source(src)
+    val idx = compiler.cache.find(key)
+
+    if idx >= 0:
+        # Cache hit — return stored artifact
+        return compiler.cache.artifacts[idx]
+
+    # Cache miss — compile via runtime extern
+    val spirv_vert = rt_vulkan_compile_glsl(src.vertex_code, 0)
+    val spirv_frag = rt_vulkan_compile_glsl(src.fragment_code, 1)
+
+    val artifact = ShaderArtifact(
+        spirv_vertex: spirv_vert,
+        spirv_fragment: spirv_frag,
+        wgsl_vertex: "",
+        wgsl_fragment: "",
+        is_compiled: spirv_vert.len() > 0 and spirv_frag.len() > 0,
+        error_msg: ""
+    )
+    compiler.cache.put(key, artifact)
+    artifact
+
+# ---------------------------------------------------------------------------
+# WGSL compilation
+# ---------------------------------------------------------------------------
+
+me fn shader_compiler_get_or_compile_wgsl(compiler: ShaderCompiler, src: ShaderSource) -> ShaderArtifact:
+    if not src.is_valid():
+        return ShaderArtifact.error("Invalid shader source")
+
+    # Use a WGSL-specific key offset to avoid colliding with SPIR-V entries
+    val key = _hash_shader_source(src) + 1
+
+    val idx = compiler.cache.find(key)
+    if idx >= 0:
+        return compiler.cache.artifacts[idx]
+
+    # Cache miss — transpile via wgsl_emitter
+    val wgsl_vert = wgsl_emit_vertex(src.vertex_code)
+    val wgsl_frag = wgsl_emit_fragment(src.fragment_code)
+
+    val artifact = ShaderArtifact(
+        spirv_vertex: [],
+        spirv_fragment: [],
+        wgsl_vertex: wgsl_vert,
+        wgsl_fragment: wgsl_frag,
+        is_compiled: wgsl_vert.len() > 0 and wgsl_frag.len() > 0,
+        error_msg: ""
+    )
+    compiler.cache.put(key, artifact)
+    artifact

@@ -134,3 +134,11 @@ pub fn rt_random_i64_fn(_args: &[Value]) -> Result<Value, CompileError> {
     let val: i64 = rand::rngs::OsRng.gen();
     Ok(Value::Int(val))
 }
+
+/// rt_entropy_hardware_ready - Interpreter-side host entropy readiness.
+///
+/// Hosted/interpreter mode has OS CSPRNG support but does not prove baremetal
+/// CPU entropy. Return 0 so baremetal TLS gates stay conservative in tests.
+pub fn rt_entropy_hardware_ready_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}

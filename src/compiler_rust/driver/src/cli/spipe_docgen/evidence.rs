@@ -204,34 +204,18 @@ mod tests {
 
         enrich_with_discovered_evidence(&mut doc);
 
-        let screenshot_expected = std::env::current_dir()
-            .expect("current dir")
-            .join(&screenshot_path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let tui_expected = std::env::current_dir()
-            .expect("current dir")
-            .join(&tui_path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let screenshot_expected = screenshot_path.to_string_lossy().replace('\\', "/");
+        let tui_expected = tui_path.to_string_lossy().replace('\\', "/");
         let log_expected = vec!["explicit/log.txt".to_string()];
-        let artifact_json_expected = std::env::current_dir()
-            .expect("current dir")
-            .join(&artifact_json_path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let artifact_txt_expected = std::env::current_dir()
-            .expect("current dir")
-            .join(&artifact_txt_path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let artifact_json_expected = artifact_json_path.to_string_lossy().replace('\\', "/");
+        let artifact_txt_expected = artifact_txt_path.to_string_lossy().replace('\\', "/");
 
         assert_eq!(doc.metadata.screenshots, vec![screenshot_expected]);
         assert_eq!(doc.metadata.tui_captures, vec![tui_expected]);
         assert_eq!(doc.metadata.logs, log_expected);
         assert_eq!(
             doc.metadata.artifacts,
-            vec![artifact_json_expected, artifact_txt_expected]
+            vec![artifact_txt_expected, artifact_json_expected]
         );
     }
 }

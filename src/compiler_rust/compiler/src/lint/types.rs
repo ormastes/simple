@@ -81,6 +81,8 @@ pub enum LintName {
     ExportOutsideInit,
     /// Import bypasses an __init__.spl boundary without using exports
     InitBoundaryViolation,
+    /// Runtime family import crosses GC/noalloc boundaries
+    GcBoundaryCrossing,
     /// #[bypass] attribute on a directory that contains .spl files
     BypassWithCodeFiles,
     /// Unknown decorator (@name) not in known whitelist
@@ -119,6 +121,7 @@ impl LintName {
             LintName::NonExhaustiveMatch => "non_exhaustive_match",
             LintName::ExportOutsideInit => "export_outside_init",
             LintName::InitBoundaryViolation => "init_boundary_violation",
+            LintName::GcBoundaryCrossing => "gc_boundary_crossing",
             LintName::BypassWithCodeFiles => "bypass_with_code_files",
             LintName::UnknownDecorator => "unknown_decorator",
             LintName::UnknownAttribute => "unknown_attribute",
@@ -152,6 +155,7 @@ impl LintName {
             "non_exhaustive_match" => Some(LintName::NonExhaustiveMatch),
             "export_outside_init" => Some(LintName::ExportOutsideInit),
             "init_boundary_violation" => Some(LintName::InitBoundaryViolation),
+            "gc_boundary_crossing" => Some(LintName::GcBoundaryCrossing),
             "bypass_with_code_files" => Some(LintName::BypassWithCodeFiles),
             "unknown_decorator" => Some(LintName::UnknownDecorator),
             "unknown_attribute" => Some(LintName::UnknownAttribute),
@@ -192,6 +196,7 @@ impl LintName {
             LintName::NonExhaustiveMatch => LintLevel::Warn,
             LintName::ExportOutsideInit => LintLevel::Warn,
             LintName::InitBoundaryViolation => LintLevel::Warn,
+            LintName::GcBoundaryCrossing => LintLevel::Warn,
             LintName::BypassWithCodeFiles => LintLevel::Warn,
             LintName::UnknownDecorator => LintLevel::Warn,
             LintName::UnknownAttribute => LintLevel::Warn,
@@ -619,6 +624,13 @@ Fix the import path first.
 Only after explicit user or reviewer confirmation should you add a narrowly
 scoped suppression with a concrete reason.
 "#.to_string(),
+            LintName::GcBoundaryCrossing => r#"Lint: gc_boundary_crossing
+Level: warn
+
+Warns when a runtime library file imports across unsupported GC/noalloc family
+boundaries. No-GC families must not import GC families, and noalloc runtime
+files must not import allocating runtime families.
+"#.to_string(),
             LintName::BypassWithCodeFiles => r#"Lint: bypass_with_code_files
 Level: warn (default, will become deny in v1.0)
 
@@ -841,6 +853,7 @@ scoped suppression with a concrete reason.
             LintName::NonExhaustiveMatch,
             LintName::ExportOutsideInit,
             LintName::InitBoundaryViolation,
+            LintName::GcBoundaryCrossing,
             LintName::BypassWithCodeFiles,
             LintName::UnknownDecorator,
             LintName::UnknownAttribute,

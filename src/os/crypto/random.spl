@@ -1,8 +1,8 @@
 # CSPRNG — Cryptographically Secure Pseudo-Random Number Generator
 #
-# Hardware entropy from RDRAND (x86_64) / platform-specific sources,
-# with ChaCha20-based CSPRNG for stretching.
-# No SFFI/Rust FFI beyond the single hardware RNG intrinsic.
+# Platform entropy from RDRAND/RNDR/RISC-V seed sources, with
+# ChaCha20-based CSPRNG for stretching. If those runtime hooks are stubbed by a
+# platform shim, this module is not a production entropy source.
 #
 # Reference: RFC 7539 (ChaCha20 and Poly1305)
 
@@ -156,25 +156,30 @@ var g_csprng: CsprngState = CsprngState(
     buffer: [],
     buf_pos: 0
 )
-var g_soft_rng_state: u64 = 0
 
 # ============================================================================
 # Hardware Entropy Collection
 # ============================================================================
 
+@cfg(x86_64)
 fn _hw_random_u64() -> u64:
-    """Get a 64-bit hardware random value."""
+    """Get a 64-bit hardware random value from x86_64 RDRAND."""
     rt_rdrand()
 
-fn _soft_random_u64() -> u64:
-    if g_soft_rng_state == 0:
-        g_soft_rng_state = rt_time_now_unix_micros().to_u64() ^ 0x9E3779B97F4A7C15
-        if g_soft_rng_state == 0:
-            g_soft_rng_state = 0xA5A5A5A5A5A5A5A5
-    g_soft_rng_state = g_soft_rng_state ^ (g_soft_rng_state << 13)
-    g_soft_rng_state = g_soft_rng_state ^ (g_soft_rng_state >> 7)
-    g_soft_rng_state = g_soft_rng_state ^ (g_soft_rng_state << 17)
-    g_soft_rng_state
+@cfg(x86)
+fn _hw_random_u64() -> u64:
+    """Get a 64-bit hardware random value from x86 RDRAND."""
+    rt_rdrand()
+
+@cfg(arm64)
+fn _hw_random_u64() -> u64:
+    """Get a 64-bit hardware random value from ARM RNDR."""
+    rt_rndr()
+
+@cfg(riscv64)
+fn _hw_random_u64() -> u64:
+    """Get a 64-bit hardware random value from the RISC-V seed source."""
+    rt_riscv_seed()
 
 fn csprng_seed() -> [u8]:
     """Collect 32 bytes of hardware entropy for seeding.
@@ -287,18 +292,6 @@ fn random_bytes(count: u64) -> [u8]:
 
     Returns: Array of random bytes.
     """
-    var host_bytes: [u8] = []
-    var remaining_host = count
-    while remaining_host > 0:
-        val word = _soft_random_u64()
-        var j: u64 = 0
-        while j < 8 and remaining_host > 0:
-            host_bytes.push(((word >> (j * 8)) & 0xFF).to_u8())
-            remaining_host = remaining_host - 1
-            j = j + 1
-    if host_bytes.len() == count:
-        return host_bytes
-
     if not g_csprng.initialized:
         _csprng_init()
 

@@ -1,0 +1,124 @@
+# FdTable — stdlib-owned fd table for the POSIX-over-NVFS shim.
+#
+# This is the reusable refcounting table used by std.fs.nvfs_posix. Keeping it
+# under stdlib prevents portable library code from importing examples.nvfs.*.
+
+use std.fs_driver.error.{FsError}
+
+struct NvfsFdEntry:
+    """Per-fd state tracked by the POSIX shim."""
+    arena_id: i64
+    refcount: u32
+    dead: bool
+    offset: i64
+    mode: u32
+
+struct FdTable:
+    """Dense fd allocator keyed by u32 index.
+
+    entries[0] is reserved as a sentinel ("null fd"); real fds start at 1.
+    """
+    entries: [NvfsFdEntry]
+    free_slots: [u32]
+
+impl FdTable:
+
+    static fn new() -> FdTable:
+        val sentinel = NvfsFdEntry(
+            arena_id: -1,
+            refcount: 0,
+            dead: false,
+            offset: 0,
+            mode: 0
+        )
+        FdTable(entries: [sentinel], free_slots: [])
+
+    me fn open(arena_id: i64, mode: u32) -> u32:
+        val entry = NvfsFdEntry(
+            arena_id: arena_id,
+            refcount: 1,
+            dead: false,
+            offset: 0,
+            mode: mode
+        )
+        if self.free_slots.len() as i64 > 0:
+            val last = self.free_slots.len() as i64 - 1
+            val idx = self.free_slots[last]
+            var new_free: [u32] = []
+            var i = 0
+            while i < last:
+                new_free.push(self.free_slots[i])
+                i = i + 1
+            self.free_slots = new_free
+            self.entries[idx as i64] = entry
+            return idx
+        val idx = self.entries.len() as u32
+        self.entries.push(entry)
+        idx
+
+    fn lookup(fd: u32) -> Option<NvfsFdEntry>:
+        if fd == 0:
+            return None
+        val idx = fd as i64
+        if idx >= self.entries.len() as i64:
+            return None
+        val entry = self.entries[idx]
+        if entry.refcount == 0:
+            return None
+        Some(entry)
+
+    fn refcount(fd: u32) -> u32:
+        match self.lookup(fd):
+            case Some(entry): entry.refcount
+            case None: 0
+
+    me fn dup(fd: u32) -> Result<u32, FsError>:
+        val idx = fd as i64
+        if fd == 0 or idx >= self.entries.len() as i64:
+            return Err(FsError.InvalidArg)
+        val entry = self.entries[idx]
+        if entry.refcount == 0:
+            return Err(FsError.InvalidArg)
+        val updated = NvfsFdEntry(
+            arena_id: entry.arena_id,
+            refcount: entry.refcount + 1,
+            dead: entry.dead,
+            offset: entry.offset,
+            mode: entry.mode
+        )
+        self.entries[idx] = updated
+        Ok(fd)
+
+    me fn close(fd: u32) -> Result<(), FsError>:
+        val idx = fd as i64
+        if fd == 0 or idx >= self.entries.len() as i64:
+            return Err(FsError.InvalidArg)
+        val entry = self.entries[idx]
+        if entry.refcount == 0:
+            return Err(FsError.InvalidArg)
+        val new_rc = entry.refcount - 1
+        val updated = NvfsFdEntry(
+            arena_id: entry.arena_id,
+            refcount: new_rc,
+            dead: entry.dead,
+            offset: entry.offset,
+            mode: entry.mode
+        )
+        self.entries[idx] = updated
+        if new_rc == 0:
+            self.free_slots.push(fd)
+        Ok(())
+
+    me fn mark_dead(fd: u32):
+        val idx = fd as i64
+        if fd == 0 or idx >= self.entries.len() as i64:
+            return
+        val entry = self.entries[idx]
+        val updated = NvfsFdEntry(
+            arena_id: entry.arena_id,
+            refcount: entry.refcount,
+            dead: true,
+            offset: entry.offset,
+            mode: entry.mode
+        )
+        self.entries[idx] = updated

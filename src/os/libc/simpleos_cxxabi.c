@@ -140,8 +140,35 @@ void _ZdaPvm(void *ptr, unsigned long size) {
 typedef void (*init_fn)(void);
 extern init_fn __init_array_start[] __attribute__((weak));
 extern init_fn __init_array_end[]   __attribute__((weak));
+extern unsigned long simpleos_entropy_seed_u64(void) __attribute__((weak));
+void __libc_init_array(void);
+
+unsigned long __stack_chk_guard = 0;
+
+static unsigned long simpleos_fallback_stack_seed(void) {
+    unsigned long seed = (unsigned long)&__stack_chk_guard;
+    seed ^= (unsigned long)&__libc_init_array;
+    seed ^= (unsigned long)&simpleos_fallback_stack_seed;
+    seed ^= 0x9E3779B9UL;
+    seed ^= seed >> 33;
+    seed *= 0x85EBCA6BUL;
+    seed ^= seed >> 33;
+    return seed ? seed : 0xA5A55A5AUL;
+}
+
+void __stack_chk_init(void) {
+    unsigned long seed = 0;
+    if (simpleos_entropy_seed_u64) {
+        seed = simpleos_entropy_seed_u64();
+    }
+    if (!seed) {
+        seed = simpleos_fallback_stack_seed();
+    }
+    __stack_chk_guard = seed;
+}
 
 void __libc_init_array(void) {
+    __stack_chk_init();
     if (!__init_array_start || !__init_array_end) return;
     size_t count = (size_t)(__init_array_end - __init_array_start);
     for (size_t i = 0; i < count; i++) {
@@ -154,8 +181,6 @@ void __libc_init_array(void) {
 /* ====================================================================
  * 7. Stack protection
  * ==================================================================== */
-
-unsigned long __stack_chk_guard = 0xDEADBEEFDEADBEEFUL;
 
 void __stack_chk_fail(void) {
     static const char msg[] = "*** stack smashing detected ***\n";

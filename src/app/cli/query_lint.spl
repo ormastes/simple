@@ -18,6 +18,7 @@ use compiler.semantics.lint.stub_impl.{check_stub_impl}
 use compiler.semantics.lint.star_import.{StarWildcardWarning, check_star_import_file, check_star_export_file}
 use compiler.semantics.lint.critical_file_guard.{check_all_critical_files}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
+use compiler.semantics.gc_boundary_check.{check_gc_boundary_imports, format_family_warnings}
 
 fn _emit_lint_if_readable(file: text, format: text):
     """Emit lint diagnostics if the file is readable."""
@@ -30,10 +31,7 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, [text]):
     """Run the full lint pipeline in JSON collection mode."""
     _DIAG_COLLECT_MODE = true
     _DIAG_COLLECTED = []
-    val lines = source.split("\n")
-    var count = 0
-    count = count + _emit_basic_line_lints(lines, file, "json")
-    count = count + _emit_text_heuristic_lints(lines, file, "json")
+    val count = _emit_source_lint_diagnostics(file, source, "json")
     val collected = _DIAG_COLLECTED
     _DIAG_COLLECT_MODE = false
     _DIAG_COLLECTED = []
@@ -111,6 +109,7 @@ fn _emit_basic_line_lints(lines: [text], file: text, format: text) -> i64:
 fn _emit_text_heuristic_lints(lines: [text], file: text, format: text) -> i64:
     var count = 0
     count = count + _check_unused_vars_text(lines, file, format)
+    count = count + _check_gc_boundary_imports_text(lines, file, format)
     count = count + _check_match_exhaustiveness_text(lines, file, format)
     count = count + _check_closure_capture_text(lines, file, format)
     count = count + _check_ignored_return_text(lines, file, format)
@@ -118,6 +117,68 @@ fn _emit_text_heuristic_lints(lines: [text], file: text, format: text) -> i64:
     count = count + _check_safety_text(lines, file, format)
     count = count + _check_visibility_text(lines, file, format)
     count
+
+fn _check_gc_boundary_imports_text(lines: [text], file: text, format: text) -> i64:
+    """Emit GC/runtime-family boundary warnings for direct source imports."""
+    val source_module = _runtime_module_from_file_path(file)
+    if source_module == "":
+        return 0
+
+    var imported_modules: [text] = []
+    for line in lines:
+        val imported = _extract_import_module_path(line)
+        if imported != "":
+            imported_modules.push(imported)
+
+    val warnings = check_gc_boundary_imports(source_module, imported_modules)
+    val messages = format_family_warnings(warnings)
+    var count = 0
+    for msg in messages:
+        val imported = warnings[count].imported_module
+        val line_num = _find_use_line_in_source(lines, imported)
+        if format == "json":
+            val json_msg = _escape_json(msg)
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"gc_boundary_crossing\",\"message\":\"{json_msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: {msg}"
+        count = count + 1
+    count
+
+fn _runtime_module_from_file_path(file: text) -> text:
+    """Convert a runtime-family source path to the module form used by GC checks."""
+    val marker = "src/lib/"
+    val idx = file.index_of(marker) ?? -1
+    if idx < 0:
+        return ""
+    var rel = file.substring(idx + marker.len())
+    if rel.ends_with(".spl"):
+        rel = rel.substring(0, rel.len() - 4)
+    rel.replace("/", ".")
+
+fn _extract_import_module_path(line: text) -> text:
+    val trimmed = line.trim()
+    var rest = ""
+    if trimmed.starts_with("use "):
+        rest = trimmed.substring(4).trim()
+    elif trimmed.starts_with("import "):
+        rest = trimmed.substring(7).trim()
+    else:
+        return ""
+
+    rest = _truncate_import_suffix(rest, "#")
+    rest = _truncate_import_suffix(rest, "{")
+    rest = _truncate_import_suffix(rest, "(")
+    rest = _truncate_import_suffix(rest, " as ")
+    rest = rest.trim()
+    if rest.ends_with(";"):
+        rest = rest.substring(0, rest.len() - 1).trim()
+    rest
+
+fn _truncate_import_suffix(value: text, marker: text) -> text:
+    val idx = value.index_of(marker) ?? -1
+    if idx < 0:
+        return value
+    value.substring(0, idx)
 
 fn _is_return_statement(trimmed: text) -> bool:
     """Check if a trimmed line is a return statement."""

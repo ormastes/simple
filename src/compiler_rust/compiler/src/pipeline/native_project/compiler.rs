@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rayon::prelude::*;
+use simple_common::target::TargetCpu;
 use simple_parser::ast::{Block, Expr, FunctionDef, Node, ReturnStmt, Type, Visibility};
 
 use crate::codegen::common_backend::module_prefix_from_path;
@@ -41,6 +42,15 @@ fn has_explicit_main(items: &[Node]) -> bool {
     items
         .iter()
         .any(|item| matches!(item, Node::Function(func) if func.name == "main"))
+}
+
+fn native_build_cpu_for_target(target: simple_common::target::Target) -> TargetCpu {
+    match std::env::var("SIMPLE_NATIVE_CPU") {
+        Ok(raw) if !raw.trim().is_empty() => raw
+            .parse::<TargetCpu>()
+            .unwrap_or_else(|_| TargetCpu::builtin_default_for_arch(target.arch)),
+        _ => TargetCpu::builtin_default_for_arch(target.arch),
+    }
 }
 
 fn wrap_entry_script_as_main(mut module: simple_parser::ast::Module) -> simple_parser::ast::Module {
@@ -471,9 +481,12 @@ pub(crate) fn compile_file_to_object(
                 }
             }
 
-            let mut llvm = LlvmBackend::new_with_opt_level(effective_target(), opt_level)
-                .map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
+            let target = effective_target();
+            let mut llvm =
+                LlvmBackend::new_with_opt_level_and_cpu(target, opt_level, native_build_cpu_for_target(target))
+                    .map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
             llvm.set_import_map(imports.import_map.clone());
+            llvm.set_data_exports(imports.data_exports.clone());
             llvm.set_use_map(use_map.clone());
             let obj = llvm
                 .compile(&mir)
@@ -497,8 +510,10 @@ pub(crate) fn compile_file_to_object(
     }
 
     // Cranelift backend (default)
-    let mut codegen = Codegen::for_target_with_opt_level(effective_target(), opt_level)
-        .map_err(|e| format!("{}: codegen init: {e}", file_path.display()))?;
+    let target = effective_target();
+    let mut codegen =
+        Codegen::for_target_with_opt_level_and_cpu(target, opt_level, native_build_cpu_for_target(target))
+            .map_err(|e| format!("{}: codegen init: {e}", file_path.display()))?;
     codegen.set_entry_module(is_entry);
     codegen.set_import_map(imports.import_map.clone());
     codegen.set_ambiguous_names(imports.ambiguous_names.clone());

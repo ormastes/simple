@@ -155,6 +155,12 @@ fn _result_arch_dir(arch: Architecture) -> text:
 fn _smoke_result_path(arch: Architecture) -> text:
     "{_result_arch_dir(arch)}/smoke_result.json"
 
+fn _smoke_serial_log_path(arch: Architecture) -> text:
+    "{_result_arch_dir(arch)}/smoke_serial.log"
+
+fn _smoke_serial_sample_path(arch: Architecture) -> text:
+    "{_result_arch_dir(arch)}/smoke_serial_{_now_ms()}.log"
+
 fn _bootstrap_result_path(arch: Architecture) -> text:
     "{_result_arch_dir(arch)}/bootstrap_result.json"
 
@@ -252,6 +258,9 @@ fn _write_smoke_result(target: OsTarget, success: bool, has_banner: bool, serial
     val body = _smoke_result_body(target, success, has_banner, nvfs_mounted, serial_output, exit_code, baseline_match)
     if not rt_file_write_text(_smoke_result_path(target.arch), body):
         print "[test] WARNING: could not write smoke result for {arch_display_name(target.arch)}"
+    if serial_output != "":
+        val _latest_ok = rt_file_write_text(_smoke_serial_log_path(target.arch), serial_output)
+        val _sample_ok = rt_file_write_text(_smoke_serial_sample_path(target.arch), serial_output)
     if target.arch == Architecture.X86_64 and success:
         var refresh_baseline = not rt_file_exists(baseline_path)
         if not refresh_baseline:
@@ -302,9 +311,13 @@ fn native_build_prerequisite_hint(backend: text, stderr: text) -> text:
     """Return a concise prerequisite hint for known native-build backend failures."""
     if backend == "llvm" and stderr.contains("LLVM backend requested but 'llvm' feature not enabled"):
         return "LLVM backend unavailable: rebuild the selected Simple compiler with the Rust `llvm` feature and make LLVM 18 discoverable, for example with LLVM_SYS_180_PREFIX."
+    if backend == "llvm" and stderr.contains("native backend 'llvm' is not available"):
+        return "LLVM backend unavailable: rebuild the selected Simple compiler with the Rust `llvm` feature and make LLVM 18 discoverable, for example with LLVM_SYS_180_PREFIX."
     if backend == "llvm" and stderr.contains("No suitable version of LLVM was found"):
         return "LLVM 18 is not discoverable: set LLVM_SYS_180_PREFIX or install a system LLVM 18 before building the LLVM-enabled Simple compiler."
     if backend == "cranelift" and stderr.contains("Support for this target has not been implemented yet"):
+        return "Cranelift cannot build this freestanding target; use an LLVM-enabled Simple compiler or unset SIMPLE_OS_BUILD_BACKEND for targets that default to LLVM."
+    if backend == "cranelift" and stderr.contains("Cranelift native builds do not support hosted riscv32 yet"):
         return "Cranelift cannot build this freestanding target; use an LLVM-enabled Simple compiler or unset SIMPLE_OS_BUILD_BACKEND for targets that default to LLVM."
     ""
 

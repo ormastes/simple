@@ -1,0 +1,277 @@
+extern fn rt_file_read_text(path: text) -> text
+
+describe "SimpleOS RISC-V network readiness gate":
+    it "keeps the RV64 boot handoff freestanding and QEMU-memory explicit":
+        val boot = rt_file_read_text("src/os/kernel/arch/riscv64/boot.spl")
+
+        expect(boot).to_contain("extern fn log_raw_println(msg: text)")
+        expect(boot).to_contain("extern fn rt_riscv_qemu_ram_base() -> u64")
+        expect(boot).to_contain("extern fn rt_riscv_qemu_heap_size() -> u64")
+        expect(boot).to_contain("extern fn rt_riscv_noalloc_pmm_init(")
+        expect(boot).to_contain("rt_riscv_noalloc_pmm_init(")
+        expect(boot).to_contain("riscv_noalloc_heap_init(")
+        expect(boot).to_contain("rt_riscv_qemu_ram_base()")
+        expect(boot).to_contain("rt_riscv_qemu_heap_start()")
+        expect(boot).to_contain("os_main()")
+        expect(boot.index_of("use os.kernel.log.klog_api") ?? -1).to_equal(-1)
+        expect(boot.index_of("riscv_boot_mem_init") ?? -1).to_equal(-1)
+
+    it "keeps hosted boot logging out of the HTTP handoff closure":
+        val os_main = rt_file_read_text("src/os/kernel/boot/os_main.spl")
+        val services = rt_file_read_text("src/os/kernel/boot/riscv_services.spl")
+        val http = rt_file_read_text("src/os/kernel/boot/http_baremetal.spl")
+
+        expect(os_main).to_contain("extern fn log_raw_println(msg: text)")
+        expect(services).to_contain("extern fn log_raw_println(msg: text)")
+        expect(http).to_contain("extern fn log_raw_println(msg: text)")
+        expect(os_main.index_of("use os.kernel.log.klog_api") ?? -1).to_equal(-1)
+        expect(services.index_of("use os.kernel.log.klog_api") ?? -1).to_equal(-1)
+        expect(http.index_of("use os.kernel.log.klog_api") ?? -1).to_equal(-1)
+
+    it "keeps the freestanding C runtime linked without hosted OS helpers":
+        val runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+
+        expect(runtime).to_contain("void unsafe(void)")
+        expect(runtime).to_contain("spl_i64 rt_riscv_noalloc_pmm_init(")
+        expect(runtime).to_contain("uart_line(\"PMM OK\")")
+        expect(runtime).to_contain("RT_PCI_IO_BASE")
+        expect(runtime).to_contain("#define RT_PCI_MAX_DEVICES 32")
+        expect(runtime).to_contain("RT_VIRTIO_NET_TX_QUEUE")
+        expect(runtime).to_contain("rt_submit_tx_probe")
+        expect(runtime).to_contain("RT_NET_RX_POST_COUNT")
+        expect(runtime).to_contain("RT_VIRTIO_GPU_LEGACY_DEVICE_ID")
+        expect(runtime).to_contain("RT_PCI_LEGACY_GPU_IO_PORT")
+        expect(runtime).to_contain("RT_VIRTIO_BLK_LEGACY_DEVICE_ID")
+        expect(runtime).to_contain("RT_PCI_LEGACY_BLK_IO_PORT")
+        expect(runtime).to_contain("RT_NVFS_MAGIC")
+        expect(runtime).to_contain("rt_gpu_cmd_get_display_info")
+        expect(runtime).to_contain("rt_gpu_cmd_transfer_flush")
+        expect(runtime).to_contain("spl_i64 rt_storage_init(void)")
+        expect(runtime).to_contain("spl_i64 rt_storage_read_probe(void)")
+        expect(runtime).to_contain("spl_u64 rt_riscv_qemu_ram_base(void)")
+        expect(runtime).to_contain("return 0x80000000ULL;")
+        expect(runtime).to_contain("return 0x87000000ULL;")
+        expect(runtime).to_contain("spl_i64 rt_time_now_unix_micros(void)")
+        expect(runtime).to_contain("spl_u64 rt_riscv_seed(void)")
+        expect(runtime).to_contain("spl_u64 boot_alloc = simpleos_noalloc_heap_alloc(size, align)")
+        expect(runtime).to_contain("if (boot_alloc)")
+        expect(runtime).to_contain("rt_entropy_hardware_ready(void)")
+        expect(runtime).to_contain("return 0;")
+
+    it "requires packet TX and RX readiness before reporting network ready":
+        val services = rt_file_read_text("src/os/kernel/boot/riscv_services.spl")
+
+        expect(services).to_contain("extern fn rt_net_tx_test() -> i64")
+        expect(services).to_contain("extern fn rt_net_rx_ready() -> i64")
+        expect(services).to_contain("val device_id = rt_pci_get_field(i, 6)")
+        expect(services).to_contain("device_id == 0x1000 or device_id == 0x1041")
+        expect(services).to_contain("val tx_rc = rt_net_tx_test()")
+        expect(services).to_contain("val rx_rc = rt_net_rx_ready()")
+        expect(services).to_contain("[net-riscv] Network packet TX unavailable rc=")
+        expect(services).to_contain("[net-riscv] Network packet TX ready")
+        expect(services).to_contain("[net-riscv] Network packet RX unavailable rc=")
+        expect(services).to_contain("network_ok = 1")
+
+        val tx_probe = services.find("val tx_rc = rt_net_tx_test()")
+        val rx_probe = services.find("val rx_rc = rt_net_rx_ready()")
+        val ready_set = services.find("network_ok = 1")
+        expect(tx_probe).to_be_greater_than(-1)
+        expect(rx_probe).to_be_greater_than(-1)
+        expect(rx_probe).to_be_greater_than(tx_probe)
+        expect(ready_set).to_be_greater_than(rx_probe)
+
+    it "keeps the freestanding runtime on real virtio packet IO":
+        val runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+
+        expect(runtime).to_contain("spl_i64 rt_net_tx_test(void)")
+        expect(runtime).to_contain("spl_i64 rt_net_rx_ready(void)")
+        expect(runtime).to_contain("RT_VIRTIO_NET_LEGACY_DEVICE_ID")
+        expect(runtime).to_contain("RT_VIRTIO_NET_MODERN_DEVICE_ID")
+        expect(runtime).to_contain("rt_pci_is_virtio_net")
+        expect(runtime).to_contain("rt_poll_rx_once")
+        expect(runtime).to_contain("rt_process_rx_frame")
+        expect(runtime).to_contain("rt_process_tcp")
+        expect(runtime).to_contain("rt_send_arp_reply")
+        expect(runtime).to_contain("rt_send_tcp_packet")
+        expect(runtime).to_contain("fallback_json_response")
+        expect(runtime).to_contain("fallback_html_response")
+
+    it "uses a real virtio-gpu control queue for display readiness":
+        val runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+        val services = rt_file_read_text("src/os/kernel/boot/riscv_services.spl")
+        val script = rt_file_read_text("scripts/qemu_rv64_http_test.shs")
+
+        expect(runtime).to_contain("spl_i64 rt_display_init(void)")
+        expect(runtime).to_contain("rt_pci_is_virtio_gpu")
+        expect(runtime).to_contain("RT_VIRTIO_GPU_MODERN_DEVICE_ID")
+        expect(runtime).to_contain("rt_gpu_setup_modern")
+        expect(runtime).to_contain("RT_VIRTIO_MODERN_QUEUE_DESC_LO")
+        expect(runtime).to_contain("RT_GPU_CMD_GET_DISPLAY_INFO")
+        expect(runtime).to_contain("RT_GPU_CMD_RESOURCE_CREATE_2D")
+        expect(runtime).to_contain("RT_GPU_CMD_RESOURCE_ATTACH_BACKING")
+        expect(runtime).to_contain("RT_GPU_CMD_SET_SCANOUT")
+        expect(runtime).to_contain("RT_GPU_CMD_TRANSFER_TO_HOST_2D")
+        expect(runtime).to_contain("RT_GPU_CMD_RESOURCE_FLUSH")
+        expect(runtime).to_contain("rt_gpu_fill_test_pattern")
+        expect(runtime).to_contain("return g_rt_display_ready ? RT_GPU_WIDTH : 0;")
+        expect(runtime.index_of("spl_i64 rt_display_init(void) {\n    return -1;") ?? -1).to_equal(-1)
+        expect(services).to_contain("[display-riscv] Display unavailable rc=")
+        expect(services).to_contain("[display-riscv] Display service ready: 320x240 framebuffer")
+        expect(script).to_contain("--with-display")
+        expect(script).to_contain("virtio-gpu-pci,disable-modern=on,disable-legacy=off")
+        expect(script).to_contain("Display service ready")
+
+    it "uses a real virtio-blk queue and NVFS superblock for storage readiness":
+        val runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+        val services = rt_file_read_text("src/os/kernel/boot/riscv_services.spl")
+        val script = rt_file_read_text("scripts/qemu_rv64_http_test.shs")
+
+        expect(runtime).to_contain("RT_VIRTIO_BLK_LEGACY_DEVICE_ID")
+        expect(runtime).to_contain("RT_VIRTIO_BLK_MODERN_DEVICE_ID")
+        expect(runtime).to_contain("RT_VIRTIO_BLK_QUEUE")
+        expect(runtime).to_contain("VIRTIO_BLK_T_IN")
+        expect(runtime).to_contain("rt_pci_is_virtio_blk")
+        expect(runtime).to_contain("rt_storage_read_sector")
+        expect(runtime).to_contain("rt_storage_probe_nvfs_superblock")
+        expect(runtime).to_contain("rt_storage_sector_has_nvfs_superblock")
+        expect(runtime).to_contain("RT_NVFS_MAGIC")
+        expect(runtime).to_contain("RT_NVFS_VERSION")
+        expect(runtime).to_contain("RT_VIRTQ_DESC_F_NEXT | RT_VIRTQ_DESC_F_WRITE")
+        expect(runtime).to_contain("rt_io_write16(g_rt_blk_bar0, RT_VIRTIO_PCI_QUEUE_NOTIFY, RT_VIRTIO_BLK_QUEUE)")
+        expect(runtime.index_of("spl_i64 rt_storage_init(void) {\n    return -1;") ?? -1).to_equal(-1)
+        expect(services).to_contain("extern fn rt_storage_init() -> i64")
+        expect(services).to_contain("extern fn rt_storage_read_probe() -> i64")
+        expect(services).to_contain("extern fn rt_storage_nvfs_ready() -> i64")
+        expect(services).to_contain("[storage-riscv] Storage unavailable rc=")
+        expect(services).to_contain("[storage-riscv] NVFS superblock probe passed")
+        expect(services).to_contain("[storage-riscv] Storage service ready")
+        expect(services).to_contain("fn riscv_storage_ready() -> bool")
+        expect(services).to_contain("[fs-riscv] NVFS root superblock ready")
+        expect(services).to_contain("[init] filesystem: nvfs-superblock-ready")
+        expect(services).to_contain("fn riscv_filesystem_ready() -> bool")
+        expect(script).to_contain("--with-storage")
+        expect(script).to_contain("virtio-blk-pci,drive=blk0")
+        expect(script).to_contain("\\123\\106\\126\\116\\002\\000\\000\\000")
+        expect(script).to_contain("Storage service ready")
+        expect(script).to_contain("NVFS root superblock ready")
+
+    it "routes weak C TCP fallbacks through the boot packet provider":
+        val runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+
+        expect(runtime).to_contain("__attribute__((weak)) spl_i64 rt_io_tcp_bind")
+        expect(runtime).to_contain("__attribute__((weak)) spl_i64 rt_io_tcp_write_text")
+        expect(runtime).to_contain("__attribute__((weak)) spl_i64 rt_io_tcp_close")
+        expect(runtime.index_of("return text ? (spl_i64)text->len : -1;") ?? -1).to_equal(-1)
+        expect(runtime).to_contain("return rt_boot_tcp_bind(addr);")
+        expect(runtime).to_contain("return rt_boot_tcp_accept_timeout(fd, ms);")
+        expect(runtime).to_contain("return rt_boot_tcp_write_text(fd, data);")
+        expect(runtime).to_contain("return rt_boot_tcp_close(fd) == 0 ? 11 : 19;")
+
+    it "keeps netstack init unavailable until packet TX and RX are ready":
+        val net_init = rt_file_read_text("src/os/services/netstack/netstack_init.spl")
+
+        expect(net_init).to_contain("extern fn rt_net_tx_test() -> i64")
+        expect(net_init).to_contain("extern fn rt_net_rx_ready() -> i64")
+        expect(net_init).to_contain("val tx_ready = rt_net_tx_test()")
+        expect(net_init).to_contain("val rx_ready = rt_net_rx_ready()")
+        expect(net_init).to_contain("[net-init] C network TX unavailable rc=")
+        expect(net_init).to_contain("[net-init] C network RX unavailable rc=")
+        expect(net_init).to_contain("g_net_initialized = true")
+
+        val tx_probe = net_init.find("val tx_ready = rt_net_tx_test()")
+        val rx_probe = net_init.find("val rx_ready = rt_net_rx_ready()")
+        val ready_set = net_init.find("g_net_initialized = true")
+        expect(tx_probe).to_be_greater_than(-1)
+        expect(rx_probe).to_be_greater_than(-1)
+        expect(rx_probe).to_be_greater_than(tx_probe)
+        expect(ready_set).to_be_greater_than(rx_probe)
+
+    it "does not let TCP shims fake listener or write success without netstack":
+        val shim = rt_file_read_text("src/os/kernel/net/tcp_shim.spl")
+
+        expect(shim).to_contain("No fake listener is created")
+        expect(shim).to_contain("if not net_tcp_available():\n        return -1")
+        expect(shim.index_of("g_next_os_fd") ?? -1).to_equal(-1)
+        expect(shim.index_of("data.len().to_i64()") ?? -1).to_equal(-1)
+        expect(shim).to_contain("Returns -1 if the fd is invalid or the netstack is unavailable")
+
+    it "keeps the boot-local TCP shim delegated to the packet provider":
+        val boot_shim = rt_file_read_text("src/os/kernel/boot/tcp_baremetal_min.spl")
+
+        expect(boot_shim).to_contain("extern fn rt_boot_tcp_bind(addr: text) -> i64")
+        expect(boot_shim).to_contain("fn rt_io_tcp_bind(addr: text) -> i64:\n    rt_boot_tcp_bind(addr)")
+        expect(boot_shim).to_contain("fn rt_io_tcp_write_text(fd: i64, data: text) -> i64:\n    rt_boot_tcp_write_text(fd, data)")
+
+fn expect_qemu_deferred_script_contract(path: text):
+    val script = rt_file_read_text(path)
+
+    expect(script).to_contain("--expect-deferred")
+    expect(script).to_contain("--expect-http-only")
+    expect(script).to_contain("EXPECT_DEFERRED=true")
+    expect(script).to_contain("EXPECT_HTTP_ONLY=true")
+    expect(script).to_contain("PMM OK")
+    expect(script).to_contain("HEAP OK")
+    expect(script).to_contain("Network packet TX ready")
+    expect(script).to_contain("Network packet RX unavailable")
+    expect(script).to_contain("HTTP server deferred")
+    expect(script).to_contain("Entering boot idle loop")
+    expect(script).to_contain("DEFERRED PASSED")
+    expect(script).to_contain("network reached ready state in deferred mode")
+
+    val deferred_marker = script.find("--expect-deferred")
+    val http_tests = script.find("Running HTTP smoke tests")
+    expect(deferred_marker).to_be_greater_than(-1)
+    expect(http_tests).to_be_greater_than(deferred_marker)
+
+describe "SimpleOS RISC-V QEMU HTTP scripts":
+    it "keeps the RV64 smoke script explicit about the deferred boundary":
+        expect_qemu_deferred_script_contract("scripts/qemu_rv64_http_test.shs")
+        val script = rt_file_read_text("scripts/qemu_rv64_http_test.shs")
+
+        expect(script).to_contain("Build it first with an LLVM-enabled compiler")
+        expect(script).to_contain("--source build/os/generated")
+        expect(script).to_contain("--backend llvm")
+        expect(script).to_contain("--target riscv64gc-unknown-none")
+        expect(script).to_contain("RISC-V TLS not production-ready")
+        expect(script.index_of("scripts/simpleos-native-build.shs --target riscv64gc-unknown-none") ?? -1).to_equal(-1)
+
+    it "keeps the RV32 smoke script explicit about the deferred boundary":
+        expect_qemu_deferred_script_contract("scripts/qemu_rv32_http_test.shs")
+
+    it "documents the real LLVM-backed RV32 build prerequisite":
+        val script = rt_file_read_text("scripts/qemu_rv32_http_test.shs")
+
+        expect(script).to_contain("Build it first with an LLVM-enabled compiler")
+        expect(script).to_contain("--backend llvm")
+        expect(script).to_contain("--target riscv32-unknown-none")
+        expect(script.index_of("riscv32gc-unknown-none") ?? -1).to_equal(-1)
+
+    it "maps current RV32 backend failures to actionable prerequisites":
+        val runner = rt_file_read_text("src/os/qemu_runner_part1.spl")
+
+        expect(runner).to_contain("native backend 'llvm' is not available")
+        expect(runner).to_contain("Cranelift native builds do not support hosted riscv32 yet")
+        expect(runner).to_contain("LLVM backend unavailable: rebuild the selected Simple compiler")
+
+fn expect_no_fake_network_pass(path: text):
+    val source = rt_file_read_text(path)
+
+    expect(source.index_of("_assert(true, \"Network") ?? -1).to_equal(-1)
+    expect(source.index_of("_assert(true, \"TCP socket") ?? -1).to_equal(-1)
+    expect(source.index_of("_assert(true, \"UDP socket") ?? -1).to_equal(-1)
+    expect(source.index_of("_assert(true, \"Bind call") ?? -1).to_equal(-1)
+    expect(source.index_of("_assert(true, \"TCP connect") ?? -1).to_equal(-1)
+    expect(source).to_contain("_assert(services_network_ready()")
+    expect(source).to_contain("_assert(tcp_fd >= 0")
+    expect(source).to_contain("_assert(udp_fd >= 0")
+
+describe "SimpleOS QEMU network entrypoint gates":
+    it "does not report os_network success for query/no-crash socket placeholders":
+        expect_no_fake_network_pass("test/system/os_network_spec.spl")
+        val source = rt_file_read_text("test/system/os_network_spec.spl")
+        expect(source).to_contain("_assert(net_ready, \"Network stack initialized\")")
+        expect(source).to_contain("_assert(bind_result >= 0")
+        expect(source).to_contain("_assert(conn_result >= 0")
+
+    it "does not report full-stack network success for no-crash socket placeholders":
+        expect_no_fake_network_pass("test/system/os_full_stack_spec.spl")

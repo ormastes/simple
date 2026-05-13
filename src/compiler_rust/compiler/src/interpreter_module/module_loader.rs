@@ -56,6 +56,107 @@ use super::path_resolution::resolve_module_path;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeFamily {
+    Common,
+    NogcSyncMut,
+    NogcAsyncMut,
+    NogcAsyncImmut,
+    NogcAsyncMutNoalloc,
+    GcAsyncMut,
+}
+
+impl RuntimeFamily {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "common" => Some(Self::Common),
+            "nogc_sync_mut" => Some(Self::NogcSyncMut),
+            "nogc_async_mut" => Some(Self::NogcAsyncMut),
+            "nogc_async_immut" => Some(Self::NogcAsyncImmut),
+            "nogc_async_mut_noalloc" => Some(Self::NogcAsyncMutNoalloc),
+            "gc_async_mut" => Some(Self::GcAsyncMut),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Common => "common",
+            Self::NogcSyncMut => "nogc_sync_mut",
+            Self::NogcAsyncMut => "nogc_async_mut",
+            Self::NogcAsyncImmut => "nogc_async_immut",
+            Self::NogcAsyncMutNoalloc => "nogc_async_mut_noalloc",
+            Self::GcAsyncMut => "gc_async_mut",
+        }
+    }
+
+    fn is_gc(self) -> bool {
+        matches!(self, Self::GcAsyncMut)
+    }
+
+    fn is_noalloc(self) -> bool {
+        matches!(self, Self::NogcAsyncMutNoalloc)
+    }
+
+    fn is_allocating(self) -> bool {
+        !matches!(self, Self::Common | Self::NogcAsyncMutNoalloc)
+    }
+}
+
+fn runtime_family_from_path(path: &Path) -> Option<RuntimeFamily> {
+    let components: Vec<String> = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect();
+
+    for pair in components.windows(2) {
+        if pair[0] == "lib" || pair[0] == "std" {
+            return RuntimeFamily::from_name(&pair[1]);
+        }
+    }
+
+    None
+}
+
+fn gc_boundary_warning_message(importer_path: &Path, imported_path: &Path, module_name: &str) -> Option<String> {
+    let importer_family = runtime_family_from_path(importer_path)?;
+    let imported_family = runtime_family_from_path(imported_path)?;
+
+    if importer_family == RuntimeFamily::Common
+        || imported_family == RuntimeFamily::Common
+        || importer_family == imported_family
+    {
+        return None;
+    }
+
+    if !importer_family.is_gc() && imported_family.is_gc() {
+        return Some(format!(
+            "[gc-warning] GC module '{module_name}' (family: {}) imported in no-GC context (family: {})",
+            imported_family.name(),
+            importer_family.name()
+        ));
+    }
+
+    if importer_family.is_noalloc() && imported_family.is_allocating() {
+        return Some(format!(
+            "[gc-warning] Allocating module '{module_name}' (family: {}) imported in no-alloc context (family: {})",
+            imported_family.name(),
+            importer_family.name()
+        ));
+    }
+
+    None
+}
+
+fn emit_gc_boundary_warning(importer_path: Option<&Path>, imported_path: &Path, module_name: &str) {
+    let Some(importer_path) = importer_path else {
+        return;
+    };
+    if let Some(message) = gc_boundary_warning_message(importer_path, imported_path, module_name) {
+        eprintln!("{message}");
+    }
+}
+
 fn requested_group_import_names(use_stmt: &UseStmt) -> Option<Vec<String>> {
     match &use_stmt.target {
         ImportTarget::Group(items) => Some(
@@ -452,6 +553,7 @@ pub fn load_and_merge_module(
     }
     loader_trace!("resolve", "{} -> {}", parts.join("."), module_path.display());
     debug!(module = %parts.join("."), path = ?module_path, "Resolved module path");
+    emit_gc_boundary_warning(current_file, &module_path, &parts.join("."));
     record_module_visit(&module_path, depth);
 
     // Check cache first - if we've already loaded this module, return cached exports
@@ -812,8 +914,8 @@ pub fn load_and_merge_module(
 #[cfg(test)]
 mod tests {
     use super::{
-        load_and_merge_module, loader_trace_enabled, prefer_package_init_for_member_import,
-        should_keep_selective_export,
+        gc_boundary_warning_message, load_and_merge_module, loader_trace_enabled,
+        prefer_package_init_for_member_import, should_keep_selective_export,
     };
     use crate::value::Value;
     use simple_parser::ast::{ImportTarget, ModulePath, Node, UseStmt};
@@ -821,6 +923,46 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::collections::HashMap;
+
+    #[test]
+    fn gc_boundary_warning_message_flags_nogc_to_gc_imports() {
+        let msg = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_sync_mut/app.spl"),
+            Path::new("/repo/src/std/gc_async_mut/__init__.spl"),
+            "std.gc_async_mut",
+        )
+        .expect("no-GC to GC should warn");
+
+        assert!(msg.contains("[gc-warning]"));
+        assert!(msg.contains("GC module 'std.gc_async_mut'"));
+        assert!(msg.contains("family: gc_async_mut"));
+        assert!(msg.contains("family: nogc_sync_mut"));
+    }
+
+    #[test]
+    fn gc_boundary_warning_message_flags_noalloc_to_allocating_imports() {
+        let msg = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_mut_noalloc/app.spl"),
+            Path::new("/repo/src/lib/nogc_async_mut/task.spl"),
+            "std.nogc_async_mut.task",
+        )
+        .expect("noalloc to allocating family should warn");
+
+        assert!(msg.contains("Allocating module 'std.nogc_async_mut.task'"));
+        assert!(msg.contains("family: nogc_async_mut"));
+        assert!(msg.contains("family: nogc_async_mut_noalloc"));
+    }
+
+    #[test]
+    fn gc_boundary_warning_message_allows_common_imports() {
+        let msg = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_mut_noalloc/app.spl"),
+            Path::new("/repo/src/lib/common/text.spl"),
+            "std.common.text",
+        );
+
+        assert!(msg.is_none());
+    }
 
     fn use_stmt_with_target(target: ImportTarget) -> UseStmt {
         UseStmt {

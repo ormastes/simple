@@ -117,6 +117,19 @@ pub(crate) fn mangle_mir(
     for (name, ty, is_mut) in &mir.globals {
         if let Some(mangled) = local_global_mangled.get(name) {
             new_globals.push((mangled.clone(), *ty, *is_mut));
+        } else if !is_runtime_or_builtin(name) {
+            if let Some(resolved) = resolve_name(
+                name,
+                &local_global_mangled,
+                use_map,
+                import_map,
+                &local_suffix_index,
+                suffix_index,
+            ) {
+                new_globals.push((resolved, *ty, *is_mut));
+            } else {
+                new_globals.push((name.clone(), *ty, *is_mut));
+            }
         } else {
             new_globals.push((name.clone(), *ty, *is_mut));
         }

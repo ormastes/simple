@@ -30,11 +30,11 @@ use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.scheduler.scheduler_types.{
     TaskControlBlock,
     MAX_TASKS, PRIORITY_LEVELS, TIME_SLICE_TICKS, SCHED_RT_BASE_PRIORITY_UNSET,
-    SCHED_EXEC_ARCH,
+    sched_exec_arch,
     ReadyQueue, CpuRunQueue,
     _address_space_can_map, _scheduler_uses_direct_load_arena, _scheduler_mapped_entry,
     _map_user_process_image, _initial_user_task_context,
-    Scheduler
+    Scheduler, scheduler_next_task_id_take
 }
 use os.kernel.scheduler.scheduler_task_mgmt.{
     _find_slot_in, _find_empty_slot_in,
@@ -42,8 +42,6 @@ use os.kernel.scheduler.scheduler_task_mgmt.{
 }
 
 extern fn cap_init_task_record(task: TaskId, full: bool)
-
-extern var g_scheduler_next_task_id: u64
 
 @cfg(arm64)
 extern fn rt_arm64_record_user_handoff(entry: u64, sp: u64, ttbr0_root: u64)
@@ -54,23 +52,33 @@ pub fn _record_exec_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
 
 @cfg(arm32)
 pub fn _record_exec_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
-    val _entry = entry; val _sp = sp; val _ttbr0_root = ttbr0_root
+    val _entry = entry
+    val _sp = sp
+    val _ttbr0_root = ttbr0_root
 
 @cfg(riscv64)
 pub fn _record_exec_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
-    val _entry = entry; val _sp = sp; val _ttbr0_root = ttbr0_root
+    val _entry = entry
+    val _sp = sp
+    val _ttbr0_root = ttbr0_root
 
 @cfg(riscv32)
 pub fn _record_exec_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
-    val _entry = entry; val _sp = sp; val _ttbr0_root = ttbr0_root
+    val _entry = entry
+    val _sp = sp
+    val _ttbr0_root = ttbr0_root
 
 @cfg(x86_64)
 pub fn _record_exec_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
-    val _entry = entry; val _sp = sp; val _ttbr0_root = ttbr0_root
+    val _entry = entry
+    val _sp = sp
+    val _ttbr0_root = ttbr0_root
 
 @cfg(x86)
 pub fn _record_exec_user_handoff(entry: u64, sp: u64, ttbr0_root: u64):
-    val _entry = entry; val _sp = sp; val _ttbr0_root = ttbr0_root
+    val _entry = entry
+    val _sp = sp
+    val _ttbr0_root = ttbr0_root
 
 # ============================================================================
 # Scheduler constructor body
@@ -192,10 +200,7 @@ pub fn sched_create_user_task_pid_impl(
             destroy_user_address_space(user_as)
             return (0, tasks, -1)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    var user_next_id = g_scheduler_next_task_id
-    if user_next_id == 0 or user_next_id >= 0x40000000:
-        user_next_id = 1
-    g_scheduler_next_task_id = user_next_id + 1
+    val user_next_id = scheduler_next_task_id_take()
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
         id: id, name: "user-{id.id}",
@@ -246,10 +251,7 @@ pub fn sched_create_bootstrap_user_task_pid_impl(
             destroy_user_address_space(user_as)
             return (0, tasks)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    var user_next_id = g_scheduler_next_task_id
-    if user_next_id == 0 or user_next_id >= 0x40000000:
-        user_next_id = 1
-    g_scheduler_next_task_id = user_next_id + 1
+    val user_next_id = scheduler_next_task_id_take()
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
         id: id, name: "bootstrap-user",
@@ -283,8 +285,7 @@ pub fn sched_clone_task_impl(
     if parent_tcb == nil:
         return (TaskId(id: 0), tasks, -1)
     val parent = parent_tcb
-    val child_id = TaskId(id: g_scheduler_next_task_id)
-    g_scheduler_next_task_id = g_scheduler_next_task_id + 1
+    val child_id = TaskId(id: scheduler_next_task_id_take())
     val child_slot = _find_empty_slot_in(tasks)
     if child_slot < 0:
         return (TaskId(id: 0), tasks, -1)

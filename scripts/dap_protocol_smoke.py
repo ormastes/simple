@@ -43,9 +43,40 @@ def expect_response(messages, command):
     raise AssertionError(f"missing response for {command}: {messages}")
 
 
+def expect_failed_response(messages, command):
+    for message in messages:
+        if message.get("type") == "response" and message.get("command") == command:
+            if message.get("success"):
+                raise AssertionError(f"{command} unexpectedly succeeded: {message}")
+            return message
+    raise AssertionError(f"missing failed response for {command}: {messages}")
+
+
 def collect_for(proc, command, count):
     messages = [read_message(proc) for _ in range(count)]
     return expect_response(messages, command), messages
+
+
+def assert_missing_program_fails():
+    proc = subprocess.Popen(
+        ["bin/simple", "run", "src/app/dap/simple_dap_main.spl"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        send(proc, 1, "initialize", {"adapterID": "simple"})
+        collect_for(proc, "initialize", 2)
+        send(proc, 2, "launch", {"program": "/tmp/simple_dap_missing_program.spl"})
+        failed = expect_failed_response([read_message(proc)], "launch")
+        assert "program not found" in failed.get("message", "")
+        send(proc, 3, "disconnect")
+        expect_response([read_message(proc)], "disconnect")
+        proc.stdin.close()
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
 
 
 def main():
@@ -68,6 +99,8 @@ def main():
             send(proc, 1, "initialize", {"adapterID": "simple"})
             init, init_messages = collect_for(proc, "initialize", 2)
             assert init["body"]["supportsConfigurationDoneRequest"] is True
+            filters = {item["filter"] for item in init["body"]["exceptionBreakpointFilters"]}
+            assert {"caught", "uncaught"}.issubset(filters)
             assert any(m.get("event") == "initialized" for m in init_messages)
 
             send(proc, 2, "launch", {"program": str(program), "stopOnEntry": True})
@@ -79,6 +112,14 @@ def main():
             assert bp["body"]["breakpoints"][0]["verified"] is True
             assert bp["body"]["breakpoints"][0]["line"] == 2
 
+            send(proc, 12, "setExceptionBreakpoints", {"filters": ["caught", "uncaught"]})
+            expect_response([read_message(proc)], "setExceptionBreakpoints")
+
+            send(proc, 10, "setBreakpoints", {"source": {"path": str(program)}, "breakpoints": [{"line": 999}]})
+            bad_bp, _ = collect_for(proc, "setBreakpoints", 1)
+            assert bad_bp["body"]["breakpoints"][0]["verified"] is False
+            assert bad_bp["body"]["breakpoints"][0]["line"] == 999
+
             send(proc, 4, "threads")
             threads, _ = collect_for(proc, "threads", 1)
             assert threads["body"]["threads"][0]["name"] == "main"
@@ -88,6 +129,31 @@ def main():
             frame0 = stack["body"]["stackFrames"][0]
             assert frame0["name"] == "main"
             assert frame0["source"]["path"] == str(program)
+            assert frame0["line"] == 1
+
+            send(proc, 13, "next", {"threadId": 1})
+            _, next_messages = collect_for(proc, "next", 2)
+            assert any(m.get("event") == "stopped" for m in next_messages)
+            send(proc, 14, "stackTrace", {"threadId": 1})
+            stepped_stack, _ = collect_for(proc, "stackTrace", 1)
+            assert stepped_stack["body"]["stackFrames"][0]["line"] == 2
+
+            send(proc, 15, "setBreakpoints", {"source": {"path": str(program)}, "breakpoints": [{"line": 3}]})
+            bp2, _ = collect_for(proc, "setBreakpoints", 1)
+            assert bp2["body"]["breakpoints"][0]["verified"] is True
+            assert bp2["body"]["breakpoints"][0]["line"] == 3
+
+            send(proc, 16, "continue", {"threadId": 1})
+            _, continue_messages = collect_for(proc, "continue", 3)
+            assert any(m.get("event") == "continued" for m in continue_messages)
+            assert any(m.get("event") == "stopped" and m.get("body", {}).get("reason") == "breakpoint" for m in continue_messages)
+            send(proc, 17, "stackTrace", {"threadId": 1})
+            breakpoint_stack, _ = collect_for(proc, "stackTrace", 1)
+            assert breakpoint_stack["body"]["stackFrames"][0]["line"] == 3
+
+            send(proc, 18, "continue", {"threadId": 1})
+            _, terminated_messages = collect_for(proc, "continue", 3)
+            assert any(m.get("event") == "terminated" for m in terminated_messages)
 
             send(proc, 6, "scopes", {"frameId": 1})
             scopes, _ = collect_for(proc, "scopes", 1)
@@ -103,6 +169,10 @@ def main():
             evaluated, _ = collect_for(proc, "evaluate", 1)
             assert evaluated["body"]["result"] == "42"
 
+            send(proc, 11, "evaluate", {"expression": "missing_value"})
+            missing_eval, _ = collect_for(proc, "evaluate", 1)
+            assert missing_eval["body"]["result"] == "<unavailable>"
+
             send(proc, 9, "disconnect")
             expect_response([read_message(proc)], "disconnect")
             proc.stdin.close()
@@ -112,6 +182,7 @@ def main():
         finally:
             if proc.poll() is None:
                 proc.kill()
+    assert_missing_program_fails()
     print("STATUS: PASS dap_protocol_smoke")
 
 

@@ -1,0 +1,305 @@
+# std.nogc_async_mut.engine.render.vulkan_backend3d — VulkanRenderBackend3D
+#
+# Real Vulkan graphics backend implementing RenderBackend3D.
+# Uses a command-buffer recording pattern (following Skia VkCommand):
+#   - Trait methods that issue draw/bind commands RECORD into self.cmds[]
+#   - end_frame() drains self.cmds[] and submits via rt_vulkan_* externs
+#   - create_* / init / shutdown call rt_vulkan_* externs immediately
+#
+# Graphics externs are separate from compute externs (gc_async ffi_vulkan.spl).
+
+use std.nogc_async_mut.engine.render.backend3d.{
+    RenderBackend3D,
+    PipelineHandle,
+    BufferHandle,
+    TextureHandle,
+    RenderPassHandle,
+    PipelineDesc3D,
+    TextureFormat3D
+}
+use std.nogc_async_mut.engine.render.capability3d.{
+    RenderCapability3D,
+    capability_vulkan_3d
+}
+use std.nogc_async_mut.engine.render.vulkan_commands.{
+    VulkanCommand3D,
+    VulkanCommand3DKind,
+    vk_cmd3d_begin_render_pass,
+    vk_cmd3d_set_pipeline,
+    vk_cmd3d_bind_vertex_buffer,
+    vk_cmd3d_bind_index_buffer,
+    vk_cmd3d_bind_texture,
+    vk_cmd3d_bind_uniform_buffer,
+    vk_cmd3d_draw_indexed,
+    vk_cmd3d_end_render_pass
+}
+
+# ============================================================================
+# Graphics externs — resolved at link time against Rust runtime
+# (Compute externs stay in gc_async_mut/gpu/engine2d/ffi_vulkan.spl)
+# ============================================================================
+
+extern fn rt_vulkan_init_graphics(width: i64, height: i64) -> i64
+extern fn rt_vulkan_create_graphics_buffer(byte_count: i64, usage: i64) -> i64
+extern fn rt_vulkan_upload_graphics_buffer(handle: i64, data: [u8], offset: i64)
+extern fn rt_vulkan_create_image(width: i64, height: i64, format: i64) -> i64
+extern fn rt_vulkan_upload_image(handle: i64, data: [u8])
+extern fn rt_vulkan_create_graphics_pipeline(spirv_vert: [u8], spirv_frag: [u8], stride: i64) -> i64
+extern fn rt_vulkan_begin_graphics_frame()
+extern fn rt_vulkan_begin_render_pass(color: i64, depth: i64) -> i64
+extern fn rt_vulkan_end_render_pass(rph: i64)
+extern fn rt_vulkan_cmd_set_pipeline(rph: i64, pipeline: i64)
+extern fn rt_vulkan_cmd_bind_vertex_buffer(rph: i64, buf: i64, slot: i64)
+extern fn rt_vulkan_cmd_bind_index_buffer(rph: i64, buf: i64)
+extern fn rt_vulkan_cmd_bind_texture(rph: i64, image: i64, slot: i64)
+extern fn rt_vulkan_cmd_bind_uniform_buffer(rph: i64, buf: i64, slot: i64)
+extern fn rt_vulkan_cmd_draw_indexed(rph: i64, index_count: i64, base_vertex: i64)
+extern fn rt_vulkan_end_graphics_frame()
+extern fn rt_vulkan_graphics_present()
+extern fn rt_vulkan_shutdown_graphics()
+
+# ============================================================================
+# Format encoding helper — maps TextureFormat3D to a runtime integer code
+# ============================================================================
+
+fn _texture_format_to_i64(format: TextureFormat3D) -> i64:
+    match format:
+        TextureFormat3D.Rgba8Unorm => 0
+        TextureFormat3D.Rgba8Srgb  => 1
+        TextureFormat3D.R8Unorm    => 2
+        TextureFormat3D.Depth32Float => 3
+
+# ============================================================================
+# VulkanRenderBackend3D
+#
+# Internal id tables: pipeline_ids[k] is the logical PipelineHandle.id
+# and pipeline_native[k] is the GPU-native handle returned by the extern.
+# Same pattern for buffers and textures.
+# ============================================================================
+
+class VulkanRenderBackend3D:
+    cmds: [VulkanCommand3D]
+    cap: RenderCapability3D
+    # Pipeline id → native handle mapping (parallel arrays)
+    pipeline_ids: [i64]
+    pipeline_native: [i64]
+    # Buffer id → native handle mapping
+    buffer_ids: [i64]
+    buffer_native: [i64]
+    # Texture id → native handle mapping
+    texture_ids: [i64]
+    texture_native: [i64]
+    # Auto-incrementing logical id counter
+    next_id: i64
+    width: i64
+    height: i64
+
+    static fn create() -> VulkanRenderBackend3D:
+        VulkanRenderBackend3D(
+            cmds: [],
+            cap: capability_vulkan_3d(),
+            pipeline_ids: [],
+            pipeline_native: [],
+            buffer_ids: [],
+            buffer_native: [],
+            texture_ids: [],
+            texture_native: [],
+            next_id: 1,
+            width: 0,
+            height: 0
+        )
+
+# ============================================================================
+# Internal lookup helpers (module-level to avoid chained-method issues)
+# ============================================================================
+
+fn _find_pipeline_native(ids: [i64], natives: [i64], id: i64) -> i64:
+    var i: i64 = 0
+    while i < ids.len():
+        if ids[i] == id:
+            return natives[i]
+        i = i + 1
+    0
+
+fn _find_buffer_native(ids: [i64], natives: [i64], id: i64) -> i64:
+    var i: i64 = 0
+    while i < ids.len():
+        if ids[i] == id:
+            return natives[i]
+        i = i + 1
+    0
+
+fn _find_texture_native(ids: [i64], natives: [i64], id: i64) -> i64:
+    var i: i64 = 0
+    while i < ids.len():
+        if ids[i] == id:
+            return natives[i]
+        i = i + 1
+    0
+
+# ============================================================================
+# impl RenderBackend3D for VulkanRenderBackend3D
+#
+# Recording methods record into self.cmds[].
+# end_frame() drains self.cmds[] and calls the rt_vulkan_cmd_* externs.
+# ============================================================================
+
+impl RenderBackend3D for VulkanRenderBackend3D:
+
+    fn capabilities(self) -> RenderCapability3D:
+        self.cap
+
+    fn init(self, width: i64, height: i64) -> bool:
+        val handle = rt_vulkan_init_graphics(width, height)
+        self.width = width
+        self.height = height
+        handle != 0
+
+    fn create_pipeline(self, desc: PipelineDesc3D) -> PipelineHandle:
+        val native = rt_vulkan_create_graphics_pipeline(
+            desc.vertex_shader_spirv,
+            desc.fragment_shader_spirv,
+            desc.vertex_stride
+        )
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.pipeline_ids.push(id)
+        self.pipeline_native.push(native)
+        PipelineHandle(id: id)
+
+    fn create_vertex_buffer(self, byte_count: i64) -> BufferHandle:
+        # usage 0 = vertex buffer
+        val native = rt_vulkan_create_graphics_buffer(byte_count, 0)
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.buffer_ids.push(id)
+        self.buffer_native.push(native)
+        BufferHandle(id: id)
+
+    fn create_index_buffer(self, byte_count: i64) -> BufferHandle:
+        # usage 1 = index buffer
+        val native = rt_vulkan_create_graphics_buffer(byte_count, 1)
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.buffer_ids.push(id)
+        self.buffer_native.push(native)
+        BufferHandle(id: id)
+
+    fn create_uniform_buffer(self, byte_count: i64) -> BufferHandle:
+        # usage 2 = uniform buffer
+        val native = rt_vulkan_create_graphics_buffer(byte_count, 2)
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.buffer_ids.push(id)
+        self.buffer_native.push(native)
+        BufferHandle(id: id)
+
+    fn upload_buffer(self, buf: BufferHandle, data: [u8], offset: i64):
+        val native = _find_buffer_native(self.buffer_ids, self.buffer_native, buf.id)
+        rt_vulkan_upload_graphics_buffer(native, data, offset)
+
+    fn create_texture(self, width: i64, height: i64, format: TextureFormat3D) -> TextureHandle:
+        val fmt = _texture_format_to_i64(format)
+        val native = rt_vulkan_create_image(width, height, fmt)
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.texture_ids.push(id)
+        self.texture_native.push(native)
+        TextureHandle(id: id)
+
+    fn upload_texture(self, tex: TextureHandle, data: [u8]):
+        val native = _find_texture_native(self.texture_ids, self.texture_native, tex.id)
+        rt_vulkan_upload_image(native, data)
+
+    fn begin_frame(self):
+        self.cmds = []
+        rt_vulkan_begin_graphics_frame()
+
+    fn begin_render_pass(self, color_tex: TextureHandle, depth_tex: TextureHandle) -> RenderPassHandle:
+        val color_native = _find_texture_native(self.texture_ids, self.texture_native, color_tex.id)
+        val depth_native = _find_texture_native(self.texture_ids, self.texture_native, depth_tex.id)
+        val cmd = vk_cmd3d_begin_render_pass(color_native, depth_native)
+        self.cmds.push(cmd)
+        # Return a handle whose id encodes the index so end_frame can thread the pass handle
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        RenderPassHandle(id: id)
+
+    fn set_pipeline(self, rph: RenderPassHandle, pipeline: PipelineHandle):
+        val pipeline_native = _find_pipeline_native(self.pipeline_ids, self.pipeline_native, pipeline.id)
+        val cmd = vk_cmd3d_set_pipeline(pipeline_native)
+        self.cmds.push(cmd)
+
+    fn bind_vertex_buffer(self, rph: RenderPassHandle, buf: BufferHandle, slot: i64):
+        val native = _find_buffer_native(self.buffer_ids, self.buffer_native, buf.id)
+        val cmd = vk_cmd3d_bind_vertex_buffer(native, slot)
+        self.cmds.push(cmd)
+
+    fn bind_index_buffer(self, rph: RenderPassHandle, buf: BufferHandle):
+        val native = _find_buffer_native(self.buffer_ids, self.buffer_native, buf.id)
+        val cmd = vk_cmd3d_bind_index_buffer(native)
+        self.cmds.push(cmd)
+
+    fn bind_texture(self, rph: RenderPassHandle, tex: TextureHandle, slot: i64):
+        val native = _find_texture_native(self.texture_ids, self.texture_native, tex.id)
+        val cmd = vk_cmd3d_bind_texture(native, slot)
+        self.cmds.push(cmd)
+
+    fn bind_uniform_buffer(self, rph: RenderPassHandle, buf: BufferHandle, slot: i64):
+        val native = _find_buffer_native(self.buffer_ids, self.buffer_native, buf.id)
+        val cmd = vk_cmd3d_bind_uniform_buffer(native, slot)
+        self.cmds.push(cmd)
+
+    fn draw_indexed(self, rph: RenderPassHandle, index_count: i64, base_vertex: i64):
+        val cmd = vk_cmd3d_draw_indexed(index_count, base_vertex)
+        self.cmds.push(cmd)
+
+    fn end_render_pass(self, rph: RenderPassHandle):
+        val cmd = vk_cmd3d_end_render_pass()
+        self.cmds.push(cmd)
+
+    # Drain the recorded command buffer and submit via rt_vulkan_cmd_* externs.
+    # Maintains a current_pass i64 that tracks the active GPU render pass handle
+    # opened by BeginRenderPass; all subsequent commands are issued against it.
+    fn end_frame(self):
+        var current_pass: i64 = 0
+        var i: i64 = 0
+        while i < self.cmds.len():
+            val cmd = self.cmds[i]
+            match cmd.kind:
+                VulkanCommand3DKind.BeginRenderPass =>
+                    current_pass = rt_vulkan_begin_render_pass(cmd.color_image, cmd.depth_image)
+                VulkanCommand3DKind.SetPipeline =>
+                    rt_vulkan_cmd_set_pipeline(current_pass, cmd.pipeline_id)
+                VulkanCommand3DKind.BindVertexBuffer =>
+                    rt_vulkan_cmd_bind_vertex_buffer(current_pass, cmd.buffer_id, cmd.slot)
+                VulkanCommand3DKind.BindIndexBuffer =>
+                    rt_vulkan_cmd_bind_index_buffer(current_pass, cmd.buffer_id)
+                VulkanCommand3DKind.BindTexture =>
+                    rt_vulkan_cmd_bind_texture(current_pass, cmd.image_id, cmd.slot)
+                VulkanCommand3DKind.BindUniformBuffer =>
+                    rt_vulkan_cmd_bind_uniform_buffer(current_pass, cmd.buffer_id, cmd.slot)
+                VulkanCommand3DKind.DrawIndexed =>
+                    rt_vulkan_cmd_draw_indexed(current_pass, cmd.index_count, cmd.base_vertex)
+                VulkanCommand3DKind.EndRenderPass =>
+                    rt_vulkan_end_render_pass(current_pass)
+                    current_pass = 0
+            i = i + 1
+        self.cmds = []
+        rt_vulkan_end_graphics_frame()
+
+    fn present(self):
+        rt_vulkan_graphics_present()
+
+    fn shutdown(self):
+        rt_vulkan_shutdown_graphics()
+        self.cmds = []
+        self.pipeline_ids = []
+        self.pipeline_native = []
+        self.buffer_ids = []
+        self.buffer_native = []
+        self.texture_ids = []
+        self.texture_native = []
+        self.next_id = 1
+        self.width = 0
+        self.height = 0

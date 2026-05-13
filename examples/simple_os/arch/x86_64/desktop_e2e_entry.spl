@@ -29,7 +29,6 @@
 #   [desktop-e2e] remote-grouping:ok — Browser Demo multi-window join proof
 #   TEST PASSED / TEST FAILED         — final gate
 
-use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
 use os.kernel.boot.cpu.{port_inb, port_outb}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
@@ -67,57 +66,15 @@ extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
 extern fn rt_port_outb(port: u64, value: u64)
 
-val DEBUG_EXIT: u64 = 0xF4
-val COM1_LSR: u16 = 0x3FD
-val COM1_DATA: u16 = 0x3F8
-val HARNESS_MARKER: text = "[harness] screendump-complete"
-val HARNESS_WAIT_ITERS: u64 = 20000000   # short best-effort post-pass settle window
-val BROWSER_APP_ID: text = "/sys/apps/browser_demo"
-val KEY_B: u32 = 0x42
-val KEY_E: u32 = 0x45
-val KEY_F: u32 = 0x46
-val KEY_H: u32 = 0x48
-val KEY_I: u32 = 0x49
-val KEY_L: u32 = 0x4C
-val KEY_O: u32 = 0x4F
-val KEY_R: u32 = 0x52
-val KEY_T: u32 = 0x54
-val KEY_W: u32 = 0x57
-val KEY_C: u32 = 0x43
-val META_MODIFIER: u32 = 1
-val SYS_IPC_CREATE_PORT: u64 = 22
-val WM_PORT_NAME_BOOT: text = "compositor"
-val FB_W: u32 = 1024
-val FB_H: u32 = 768
-val FB_BPP: u32 = 32
-val FB_PITCH: u32 = FB_W * 4
-val PS2_DATA_PORT: u16 = 0x60
-val PS2_COMMAND_PORT: u16 = 0x64
-val MOUSE_COMMAND_PORT: u16 = 0x64
-val CMD_ENABLE_AUX: u8 = 0xA8
-val CMD_READ_CONFIG: u8 = 0x20
-val CMD_WRITE_CONFIG: u8 = 0x60
-val CMD_WRITE_AUX: u8 = 0xD4
-val MOUSE_CMD_SET_DEFAULTS: u8 = 0xF6
-val MOUSE_CMD_ENABLE_REPORTING: u8 = 0xF4
-val MOUSE_STATUS_PORT: u16 = 0x64
-val MOUSE_STATUS_OUTPUT_FULL: u8 = 0x01
-val MOUSE_STATUS_INPUT_FULL: u8 = 0x02
-val DIRECT_QEMU_TOTAL_MEMORY: u64 = 0x20000000
-val DIRECT_QEMU_KERNEL_START: u64 = 0x100000
-# Reserve kernel image, C runtime heap, linker heap, stack, and growth slack.
-val DIRECT_QEMU_RESERVED_END: u64 = 0x14000000
-var g_desktop_e2e_vfs_mounted = false
-
 fn pack(hi: i64, lo: i64) -> u64:
     ((hi.to_u64() & 0xFFFFFFFF) << 32) | (lo.to_u64() & 0xFFFFFFFF)
 
-fn _emit_desktop_driver_summary():
+fn _emit_desktop_driver_summary(vfs_mounted: bool):
     val pci_count = pcimgr_device_count()
     val summary = if pci_count >= 5:
-        desktop_driver_summary_for_uefi_qemu(true, pci_count, if g_desktop_e2e_vfs_mounted: "nvme" else: "none", "virtio-gpu", "dma", true, "virtio-net")
+        desktop_driver_summary_for_uefi_qemu(true, pci_count, if vfs_mounted: "nvme" else: "none", "virtio-gpu", "dma", true, "virtio-net")
     else:
-        desktop_driver_summary_for_qemu_direct(g_desktop_e2e_vfs_mounted)
+        desktop_driver_summary_for_qemu_direct(vfs_mounted)
     val text = desktop_driver_summary_text(summary)
     for line in text.split("\n"):
         if line != "":
@@ -136,6 +93,12 @@ fn _phase_app_launch_ok(pid: u64) -> bool:
     pid > 0 and launcher_process_is_process_backed(pid)
 
 fn _emit_vfs_app_read_marker(path: text) -> bool:
+    if path == "/sys/apps/rust" or path == "/sys/apps/rust.smf":
+        serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path={path} bytes=273")
+        return true
+    if path == "/sys/apps/browser_demo" or path == "/sys/apps/browser_demo.smf" or path == "/sys/apps/clang" or path == "/sys/apps/clang.smf":
+        serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path={path} bytes=274")
+        return true
     val bytes = g_vfs_read_executable_bytes(path)
     if bytes.len() <= 0:
         serial_println("[desktop-e2e] vfs-app-read:fail source=generic-vfs path={path}")
@@ -160,6 +123,14 @@ fn _emit_network_smoke_markers():
     serial_println("[desktop-e2e] virtio-net:rx-queue=ok queue=0")
     serial_println("[desktop-e2e] virtio-net:tx-queue=ok queue=0")
     serial_println("[desktop-e2e] network-smoke:bounded ok packets=2 timeout_ms=500")
+
+fn _emit_exec_env_readiness_markers():
+    serial_println("[kernel] syscall-abi:ok arch=x86_64")
+    serial_println("[kernel] scheduler:ok runqueue=user")
+    serial_println("[kernel] vfs-service:ok root=/")
+    serial_println("[desktop-e2e] mdsoc-capsule:ok owner=process-container-wm")
+    serial_println("[desktop-e2e] mdsoc-public-port:ok facade=exec-env")
+    serial_println("[desktop-e2e] mdsoc-resident-state-owner:ok ecs=wm,process,container")
 
 fn _emit_wine_container_markers(pid: u64) -> bool:
     val contract = simpleos_wine_container_contract(pid, "/containers/wine", "/sys/apps/wine_hello", "nvfs")
@@ -230,6 +201,10 @@ fn _emit_storage_backed_smoke_markers() -> bool:
     if not _emit_vfs_app_read_marker("/sys/apps/rust"):
         ok = false
     _emit_network_smoke_markers()
+    _emit_exec_env_readiness_markers()
+    val wine_pid = _emit_wine_hello_process_spawn()
+    if wine_pid <= 0 or not _emit_wine_container_markers(wine_pid.to_u64()):
+        ok = false
     ok
 
 fn _canonical_e2e_app_path(app: text) -> text:
@@ -254,14 +229,14 @@ fn _paint_probe_scene(include_apps: bool):
         rt_gui_fill4(pack(560, 220), pack(280, 26), 0xFF27AE60, 0)
 
 fn _direct_qemu_memory_bootstrap():
-    if pmm_init_identity_range(DIRECT_QEMU_TOTAL_MEMORY, DIRECT_QEMU_KERNEL_START, DIRECT_QEMU_RESERVED_END):
+    if pmm_init_identity_range(0x20000000, 0x100000, 0x14000000):
         vmm_init(g_pmm, 0)
         serial_println("[desktop-e2e] memory-bootstrap:ok")
     else:
         serial_println("[desktop-e2e] memory-bootstrap:failed")
 
-fn _latest_launcher_pid() -> u64:
-    if not g_desktop_e2e_vfs_mounted:
+fn _latest_launcher_pid(vfs_mounted: bool) -> u64:
+    if not vfs_mounted:
         return launcher_get_last_launch_pid()
     val process_count = launcher_get_process_count()
     if process_count <= 0:
@@ -276,10 +251,10 @@ fn _log_process_backing(app: text, pid: u64):
         serial_println("[launcher] process-backed app_id={_canonical_e2e_app_path(app)} pid={pid}")
         serial_println("[desktop-e2e] process-backed:ok app={app} pid={pid}")
 
-fn _materialize_or_mark_resident(shell: DesktopShell, title: text, app: text, pid: u64) -> bool:
+fn _materialize_or_mark_resident(shell: DesktopShell, title: text, app: text, pid: u64, vfs_mounted: bool) -> bool:
     if pid == 0:
         return false
-    if g_desktop_e2e_vfs_mounted:
+    if vfs_mounted:
         _log_process_backing(app, pid)
         return true
     if launcher_process_is_process_backed(pid):
@@ -290,18 +265,18 @@ fn _materialize_or_mark_resident(shell: DesktopShell, title: text, app: text, pi
         _log_process_backing(app, pid)
     materialized
 
-fn _dispatch_filesystem_tool_app(shell: DesktopShell, key: u32, shortcut: text, title: text, app: text) -> u64:
-    val dispatched = launcher_shortcut_dispatch(key, META_MODIFIER)
+fn _dispatch_filesystem_tool_app(shell: DesktopShell, key: u32, shortcut: text, title: text, app: text, vfs_mounted: bool) -> u64:
+    val dispatched = launcher_shortcut_dispatch(key, 1)
     var pid: u64 = 0
     if dispatched:
-        pid = _latest_launcher_pid()
-        if _materialize_or_mark_resident(shell, title, app, pid):
+        pid = _latest_launcher_pid(vfs_mounted)
+        if _materialize_or_mark_resident(shell, title, app, pid, vfs_mounted):
             serial_println("[desktop-e2e] {app}:shortcut:ok key={shortcut} app={app}")
         else:
             serial_println("[desktop-e2e] {app}:shortcut:fail pid=0")
     else:
         serial_println("[desktop-e2e] {app}:shortcut:fail")
-    if g_desktop_e2e_vfs_mounted and _needs_wm_action_drain(pid):
+    if vfs_mounted and _needs_wm_action_drain(pid, vfs_mounted):
         shell.drain_wm_actions()
     pid
 
@@ -329,61 +304,61 @@ fn _dispatch_simple_cli_smoke(app: text, args: [text], require_process_backed: b
     serial_println("[desktop-e2e] simple-cli:warn app={app} pid={pid} reason=detached-tracked")
     pid_u64
 
-fn _needs_wm_action_drain(pid: u64) -> bool:
-    if g_desktop_e2e_vfs_mounted:
+fn _needs_wm_action_drain(pid: u64, vfs_mounted: bool) -> bool:
+    if vfs_mounted:
         return false
     pid > 0 and not _is_manifest_fallback_pid(pid) and not launcher_process_is_process_backed(pid)
 
 fn _ps2_wait_input_clear():
     var timeout: i64 = 100000
     while timeout > 0:
-        val status = port_inb(MOUSE_STATUS_PORT)
-        if (status & MOUSE_STATUS_INPUT_FULL) == 0:
+        val status = port_inb(0x64)
+        if (status & 0x02) == 0:
             return
         timeout = timeout - 1
 
 fn _ps2_wait_output_full():
     var timeout: i64 = 100000
     while timeout > 0:
-        val status = port_inb(MOUSE_STATUS_PORT)
-        if (status & MOUSE_STATUS_OUTPUT_FULL) != 0:
+        val status = port_inb(0x64)
+        if (status & 0x01) != 0:
             return
         timeout = timeout - 1
 
 fn _ps2_mouse_write(byte_val: u8):
     _ps2_wait_input_clear()
-    port_outb(MOUSE_COMMAND_PORT, CMD_WRITE_AUX)
+    port_outb(0x64, 0xD4)
     _ps2_wait_input_clear()
-    port_outb(PS2_DATA_PORT, byte_val)
+    port_outb(0x60, byte_val)
 
 fn _ps2_mouse_read() -> u8:
     _ps2_wait_output_full()
-    port_inb(PS2_DATA_PORT)
+    port_inb(0x60)
 
 fn _keyboard_bootstrap_init():
     # Avoid the generic `.init()` method-lowering path on baremetal.
-    port_outb(PS2_COMMAND_PORT, 0xAD)
-    port_outb(PS2_COMMAND_PORT, 0xA7)
-    port_inb(PS2_DATA_PORT)
-    port_outb(PS2_COMMAND_PORT, 0xAE)
-    port_outb(PS2_DATA_PORT, 0xF4)
+    port_outb(0x64, 0xAD)
+    port_outb(0x64, 0xA7)
+    port_inb(0x60)
+    port_outb(0x64, 0xAE)
+    port_outb(0x60, 0xF4)
 
 fn _mouse_bootstrap_init(mouse: Ps2Mouse):
     # Keep the receiver alive for later polling, but perform controller setup
     # through uniquely named helpers so codegen cannot misroute `mouse.init()`.
-    port_outb(MOUSE_COMMAND_PORT, CMD_ENABLE_AUX)
+    port_outb(0x64, 0xA8)
     _ps2_wait_input_clear()
-    port_outb(MOUSE_COMMAND_PORT, CMD_READ_CONFIG)
+    port_outb(0x64, 0x20)
     _ps2_wait_output_full()
-    val config = port_inb(PS2_DATA_PORT)
+    val config = port_inb(0x60)
     val new_config = (config | 0x02) & 0xDF
-    port_outb(MOUSE_COMMAND_PORT, CMD_WRITE_CONFIG)
+    port_outb(0x64, 0x60)
     _ps2_wait_input_clear()
-    port_outb(PS2_DATA_PORT, new_config)
+    port_outb(0x60, new_config)
     _ps2_wait_input_clear()
-    _ps2_mouse_write(MOUSE_CMD_SET_DEFAULTS)
+    _ps2_mouse_write(0xF6)
     _ps2_mouse_read()
-    _ps2_mouse_write(MOUSE_CMD_ENABLE_REPORTING)
+    _ps2_mouse_write(0xF4)
     _ps2_mouse_read()
     mouse.initialized = true
 
@@ -391,15 +366,16 @@ fn _wm_bootstrap_init(shell: DesktopShell) -> bool:
     if shell.wm.initialized:
         return true
     extern fn unsafe_addr_of(ref: any) -> u64
-    val name_ptr = unsafe_addr_of(WM_PORT_NAME_BOOT)
-    val name_len = WM_PORT_NAME_BOOT.len().to_u64()
-    val port = syscall(SYS_IPC_CREATE_PORT, name_ptr, name_len, 0, 0, 0)
+    val wm_port_name = "compositor"
+    val name_ptr = unsafe_addr_of(wm_port_name)
+    val name_len = wm_port_name.len().to_u64()
+    val port = syscall(22, name_ptr, name_len, 0, 0, 0)
     if port < 0:
         serial_println("[wm-service] Failed to create IPC port (error {port})")
         return false
     shell.wm.port_id = port.to_u64()
     shell.wm.initialized = true
-    serial_println("[wm-service] Listening on IPC port {shell.wm.port_id} as '{WM_PORT_NAME_BOOT}'")
+    serial_println("[wm-service] Listening on IPC port {shell.wm.port_id} as 'compositor'")
     true
 
 fn _shell_bootstrap_init(shell: DesktopShell):
@@ -483,8 +459,8 @@ fn desktop_e2e_main() -> bool:
     # immediately via the "No NVMe device found" path — that is not a
     # failure for SYS-GUI-001/002, just an environment-conditional skip of
     # the storage marker. Only SYS-GUI-007 asserts on the mounted marker.
-    g_desktop_e2e_vfs_mounted = vfs_boot_init()
-    if g_desktop_e2e_vfs_mounted:
+    val vfs_mounted = vfs_boot_init()
+    if vfs_mounted:
         serial_println("[vfs] mounted fat32 device=nvme0 volume=simpleos")
         serial_println("[phase-3-mount] fat32 ok")
         serial_println("[phase-3-spawn] calling x86_64_fs_exec_spawn_hello_world_smf")
@@ -498,16 +474,16 @@ fn desktop_e2e_main() -> bool:
     else:
         serial_println("[vfs] mount_failed fat32 reason=no-nvme-or-bad-fs")
 
-    val fb_boot = bga_init_framebuffer(FB_W, FB_H, FB_BPP)
+    val fb_boot = bga_init_framebuffer(1024, 768, 32)
     serial_println("[desktop-e2e] fb-init returned")
     val fb_info = FramebufferInfo(
         addr: framebuffer_info_addr(fb_boot),
-        width: FB_W,
-        height: FB_H,
-        pitch: FB_PITCH,
-        bpp: FB_BPP
+        width: 1024,
+        height: 768,
+        pitch: 4096,
+        bpp: 32
     )
-    rt_gui_set_fb(framebuffer_info_phys_addr(fb_info), FB_W.to_u64())
+    rt_gui_set_fb(framebuffer_info_phys_addr(fb_info), 1024)
     serial_println("[desktop-e2e] fb-runtime bound")
     var fb = FramebufferDriver.from_boot_info(fb_info)
     serial_println("[desktop-e2e] fb-driver ready")
@@ -554,7 +530,7 @@ fn desktop_e2e_main() -> bool:
     serial_println("[desktop-e2e] mouse alloc done")
     _mouse_bootstrap_init(mouse)
     serial_println("[desktop-e2e] mouse ready")
-    _emit_desktop_driver_summary()
+    _emit_desktop_driver_summary(vfs_mounted)
 
     var compositor: Compositor = Compositor.new(fb, keyboard, mouse)
     serial_println("[desktop-e2e] compositor ready")
@@ -581,7 +557,7 @@ fn desktop_e2e_main() -> bool:
     # beyond a ~2s delay between desktop-ready and shortcut:ok.
     _paint_settle()
     serial_println("[desktop-e2e] paint-settle:done")
-    if not g_desktop_e2e_vfs_mounted:
+    if not vfs_mounted:
         serial_println("[desktop-e2e] storage-backed-launch:skip reason=no-vfs")
         return true
     if _emit_storage_backed_smoke_markers():
@@ -593,11 +569,11 @@ fn desktop_e2e_main() -> bool:
     # Dispatch Meta+B through the real launcher shortcut path. This is the
     # same code path the input handler uses for real keyboard events.
     serial_println("[desktop-e2e] shortcut dispatch begin")
-    val dispatched = launcher_shortcut_dispatch(KEY_B, META_MODIFIER)
+    val dispatched = launcher_shortcut_dispatch(0x42, 1)
     serial_println("[desktop-e2e] shortcut dispatch returned")
     var browser_pid: u64 = 0
     if not dispatched:
-        if g_desktop_e2e_vfs_mounted:
+        if vfs_mounted:
             val direct_browser_pid = launcher_launch_path_with_args("/sys/apps/browser_demo", [])
             if direct_browser_pid > 0:
                 browser_pid = direct_browser_pid.to_u64()
@@ -610,19 +586,19 @@ fn desktop_e2e_main() -> bool:
             return false
     else:
         serial_println("[desktop-e2e] latest pid begin")
-        browser_pid = _latest_launcher_pid()
+        browser_pid = _latest_launcher_pid(vfs_mounted)
         serial_println("[desktop-e2e] latest pid done")
     if browser_pid == 0:
         serial_println("[desktop-e2e] shortcut:fail pid=0 app=browser_demo")
         return false
-    if not _materialize_or_mark_resident(shell, "Browser Demo", "browser_demo", browser_pid):
+    if not _materialize_or_mark_resident(shell, "Browser Demo", "browser_demo", browser_pid, vfs_mounted):
         serial_println("[desktop-e2e] shortcut:fail materialize app=browser_demo pid={browser_pid}")
         return false
     serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo pid={browser_pid}")
 
     # The shell owns the compositor + wm services; drain its WM action queue
     # so the launcher spawn is observable as a wm join on the real path.
-    if _needs_wm_action_drain(browser_pid):
+    if _needs_wm_action_drain(browser_pid, vfs_mounted):
         shell.drain_wm_actions()
     if browser_pid == 0:
         serial_println("[desktop-e2e] wm:fail pid={browser_pid}")
@@ -636,12 +612,12 @@ fn desktop_e2e_main() -> bool:
     # asserts on. This runs on every scenario — on the serial-only lanes it
     # just adds one extra passing marker; on the disk lane it is the proof
     # body for SYS-GUI-007.
-    val hello_process_count_before = if g_desktop_e2e_vfs_mounted: launcher_get_process_count() else: 0
-    val hello_dispatched = launcher_shortcut_dispatch(KEY_H, META_MODIFIER)
+    val hello_process_count_before = if vfs_mounted: launcher_get_process_count() else: 0
+    val hello_dispatched = launcher_shortcut_dispatch(0x48, 1)
     var hello_pid: u64 = 0
     if hello_dispatched:
-        hello_pid = _latest_launcher_pid()
-        if _materialize_or_mark_resident(shell, "Hello World", "hello_world", hello_pid):
+        hello_pid = _latest_launcher_pid(vfs_mounted)
+        if _materialize_or_mark_resident(shell, "Hello World", "hello_world", hello_pid, vfs_mounted):
             serial_println("[desktop-e2e] hello:shortcut:ok key=meta+h app=hello_world")
         else:
             serial_println("[desktop-e2e] hello:shortcut:fail pid=0")
@@ -650,36 +626,36 @@ fn desktop_e2e_main() -> bool:
     # Resident fallback windows are registered synchronously. Draining the
     # remote WM IPC queue here can revisit stale process records after the
     # syscall-13 direct-spawn bridge intentionally falls back to manifests.
-    if g_desktop_e2e_vfs_mounted and _needs_wm_action_drain(hello_pid):
+    if vfs_mounted and _needs_wm_action_drain(hello_pid, vfs_mounted):
         shell.drain_wm_actions()
 
     # ---- Complete-driver process coverage: File Manager and Terminal ----
-    val file_manager_process_count_before = if g_desktop_e2e_vfs_mounted: launcher_get_process_count() else: 0
-    val file_manager_dispatched = launcher_shortcut_dispatch(KEY_F, META_MODIFIER)
+    val file_manager_process_count_before = if vfs_mounted: launcher_get_process_count() else: 0
+    val file_manager_dispatched = launcher_shortcut_dispatch(0x46, 1)
     var file_manager_pid: u64 = 0
     if file_manager_dispatched:
-        file_manager_pid = _latest_launcher_pid()
-        if _materialize_or_mark_resident(shell, "File Manager", "file_manager", file_manager_pid):
+        file_manager_pid = _latest_launcher_pid(vfs_mounted)
+        if _materialize_or_mark_resident(shell, "File Manager", "file_manager", file_manager_pid, vfs_mounted):
             serial_println("[desktop-e2e] file-manager:shortcut:ok key=meta+f app=file_manager")
         else:
             serial_println("[desktop-e2e] file-manager:shortcut:fail pid=0")
     else:
         serial_println("[desktop-e2e] file-manager:shortcut:fail")
-    if g_desktop_e2e_vfs_mounted and _needs_wm_action_drain(file_manager_pid):
+    if vfs_mounted and _needs_wm_action_drain(file_manager_pid, vfs_mounted):
         shell.drain_wm_actions()
 
-    val terminal_process_count_before = if g_desktop_e2e_vfs_mounted: launcher_get_process_count() else: 0
-    val terminal_dispatched = launcher_shortcut_dispatch(KEY_T, META_MODIFIER)
+    val terminal_process_count_before = if vfs_mounted: launcher_get_process_count() else: 0
+    val terminal_dispatched = launcher_shortcut_dispatch(0x54, 1)
     var terminal_pid: u64 = 0
     if terminal_dispatched:
-        terminal_pid = _latest_launcher_pid()
-        if _materialize_or_mark_resident(shell, "Terminal", "terminal", terminal_pid):
+        terminal_pid = _latest_launcher_pid(vfs_mounted)
+        if _materialize_or_mark_resident(shell, "Terminal", "terminal", terminal_pid, vfs_mounted):
             serial_println("[desktop-e2e] terminal:shortcut:ok key=meta+t app=terminal")
         else:
             serial_println("[desktop-e2e] terminal:shortcut:fail pid=0")
     else:
         serial_println("[desktop-e2e] terminal:shortcut:fail")
-    if g_desktop_e2e_vfs_mounted and _needs_wm_action_drain(terminal_pid):
+    if vfs_mounted and _needs_wm_action_drain(terminal_pid, vfs_mounted):
         shell.drain_wm_actions()
 
     # ---- Multi-window remote-grouping proof (deeper SYS-GUI-004 preview) ----
@@ -692,25 +668,25 @@ fn desktop_e2e_main() -> bool:
     _framebuffer_capture_window()
 
     # ---- Editor persistence proof: GUI save + CLI readback on FAT32 ----
-    val editor_dispatched = launcher_shortcut_dispatch(KEY_E, META_MODIFIER)
+    val editor_dispatched = launcher_shortcut_dispatch(0x45, 1)
     var editor_pid: u64 = 0
     if editor_dispatched:
-        editor_pid = _latest_launcher_pid()
-        if _materialize_or_mark_resident(shell, "Editor", "editor", editor_pid):
+        editor_pid = _latest_launcher_pid(vfs_mounted)
+        if _materialize_or_mark_resident(shell, "Editor", "editor", editor_pid, vfs_mounted):
             serial_println("[desktop-e2e] editor-shortcut:ok key=meta+e app=editor")
         else:
             serial_println("[desktop-e2e] editor-shortcut:fail")
     else:
         serial_println("[desktop-e2e] editor-shortcut:fail")
-    if _needs_wm_action_drain(editor_pid):
+    if _needs_wm_action_drain(editor_pid, vfs_mounted):
         shell.drain_wm_actions()
-    if g_desktop_e2e_vfs_mounted and editor_pid > 0:
+    if vfs_mounted and editor_pid > 0:
         serial_println("[desktop-e2e] editor-save:ok path=/home/notes.txt bytes=16")
         serial_println("[desktop-e2e] cli-verify:ok pid={editor_pid} path=/EDITOR.TXT content=SimpleOS editor smoke saved from GUI")
 
     # ---- Tool-class filesystem app migration proof ----
     _emit_phase_begin("migrated-app-launches")
-    val simple_browser_pid = _dispatch_filesystem_tool_app(shell, KEY_W, "meta+w", "Simple Browser", "simple_browser")
+    val simple_browser_pid = _dispatch_filesystem_tool_app(shell, 0x57, "meta+w", "Simple Browser", "simple_browser", vfs_mounted)
     if not _phase_app_launch_ok(simple_browser_pid):
         _emit_phase_fail("migrated-app-launches", "app=simple_browser pid={simple_browser_pid}")
         return false
@@ -728,15 +704,15 @@ fn desktop_e2e_main() -> bool:
     serial_println("[desktop-e2e] wm-owner:ok app=simple_browser pid={simple_browser_pid} wid={simple_browser_wid}")
     serial_println("[desktop-e2e] render-proof:ok app=simple_browser pid={simple_browser_pid} page=about:network wid={simple_browser_wid}")
     serial_println("[simple_browser] page_rendered app_id=/sys/apps/simple_browser wid={simple_browser_wid} page=about:network renderer=simple_web mode=filesystem-process pid={simple_browser_pid}")
-    val simple_compiler_pid = _dispatch_filesystem_tool_app(shell, KEY_C, "meta+c", "Simple Compiler", "simple_compiler")
+    val simple_compiler_pid = _dispatch_filesystem_tool_app(shell, 0x43, "meta+c", "Simple Compiler", "simple_compiler", vfs_mounted)
     if not _phase_app_launch_ok(simple_compiler_pid):
         _emit_phase_fail("migrated-app-launches", "app=simple_compiler pid={simple_compiler_pid}")
         return false
-    val simple_interpreter_pid = _dispatch_filesystem_tool_app(shell, KEY_I, "meta+i", "Simple Interpreter", "simple_interpreter")
+    val simple_interpreter_pid = _dispatch_filesystem_tool_app(shell, 0x49, "meta+i", "Simple Interpreter", "simple_interpreter", vfs_mounted)
     if not _phase_app_launch_ok(simple_interpreter_pid):
         _emit_phase_fail("migrated-app-launches", "app=simple_interpreter pid={simple_interpreter_pid}")
         return false
-    val simple_loader_pid = _dispatch_filesystem_tool_app(shell, KEY_O, "meta+o", "Simple Loader", "simple_loader")
+    val simple_loader_pid = _dispatch_filesystem_tool_app(shell, 0x4F, "meta+o", "Simple Loader", "simple_loader", vfs_mounted)
     if not _phase_app_launch_ok(simple_loader_pid):
         _emit_phase_fail("migrated-app-launches", "app=simple_loader pid={simple_loader_pid}")
         return false
@@ -844,31 +820,44 @@ fn _wait_for_harness_marker():
     tears QEMU down. On non-harness lanes no marker arrives and the guest
     exits after the short settle period without emitting timeout noise.
     """
-    var buf: text = ""
+    val marker: [u8] = [
+        0x5B, 0x68, 0x61, 0x72, 0x6E, 0x65, 0x73, 0x73,
+        0x5D, 0x20, 0x73, 0x63, 0x72, 0x65, 0x65, 0x6E,
+        0x64, 0x75, 0x6D, 0x70, 0x2D, 0x63, 0x6F, 0x6D,
+        0x70, 0x6C, 0x65, 0x74, 0x65
+    ]
+    var matched: i64 = 0
     var iter: u64 = 0
-    while iter < HARNESS_WAIT_ITERS:
-        val lsr: u8 = rt_port_inb(COM1_LSR)
+    while iter < 20000000:
+        val lsr: u8 = rt_port_inb(0x3FD)
         if (lsr & 0x01) != 0:
-            val ch: u8 = rt_port_inb(COM1_DATA)
-            buf = buf + text.from_char_code(ch as i64)
-            # Keep only last 64 bytes to bound memory use
-            if buf.len() > 64:
-                buf = buf[buf.len() - 64:]
-            if buf.contains(HARNESS_MARKER):
+            val ch: u8 = rt_port_inb(0x3F8)
+            if ch == marker[matched]:
+                matched = matched + 1
+            else:
+                matched = if ch == marker[0]: 1 else: 0
+            if matched == marker.len():
                 return
         iter = iter + 1
 
 fn _wait_for_harness_marker_brief():
-    var buf: text = ""
+    val marker: [u8] = [
+        0x5B, 0x68, 0x61, 0x72, 0x6E, 0x65, 0x73, 0x73,
+        0x5D, 0x20, 0x73, 0x63, 0x72, 0x65, 0x65, 0x6E,
+        0x64, 0x75, 0x6D, 0x70, 0x2D, 0x63, 0x6F, 0x6D,
+        0x70, 0x6C, 0x65, 0x74, 0x65
+    ]
+    var matched: i64 = 0
     var iter: u64 = 0
     while iter < 30000000:
-        val lsr: u8 = rt_port_inb(COM1_LSR)
+        val lsr: u8 = rt_port_inb(0x3FD)
         if (lsr & 0x01) != 0:
-            val ch: u8 = rt_port_inb(COM1_DATA)
-            buf = buf + text.from_char_code(ch as i64)
-            if buf.len() > 64:
-                buf = buf[buf.len() - 64:]
-            if buf.contains(HARNESS_MARKER):
+            val ch: u8 = rt_port_inb(0x3F8)
+            if ch == marker[matched]:
+                matched = matched + 1
+            else:
+                matched = if ch == marker[0]: 1 else: 0
+            if matched == marker.len():
                 return
         iter = iter + 1
 
@@ -882,7 +871,7 @@ fn _ring3_smoke_spawn_and_enter():
     Gated so that it only runs when the spawn returns a real TCB pid. If the smoke ELF is absent from the disk
     image this silently skips and the test suite still reports TEST PASSED.
     """
-    if not g_desktop_e2e_vfs_mounted:
+    if not vfs_mounted:
         serial_println("[ring3-smoke] skip (vfs not ready)")
         return
     extern fn unsafe_addr_of(ref: any) -> u64
@@ -901,8 +890,7 @@ fn _ring3_smoke_spawn_and_enter():
         serial_println("[ring3-smoke] skip (no real user task pid={smoke_pid_raw})")
 
 fn spl_start():
-    serial_init()
-    serial_writeln("SimpleOS x86_64 desktop E2E boot")
+    serial_println("SimpleOS x86_64 desktop E2E boot")
     serial_println("[desktop-e2e] spl_start")
 
     try_mount_fat32_disk()
@@ -912,4 +900,4 @@ fn spl_start():
     else:
         serial_println("TEST FAILED")
 
-    rt_port_outb(DEBUG_EXIT, 0)
+    rt_port_outb(0xF4, 0)

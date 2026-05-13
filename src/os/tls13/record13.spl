@@ -157,12 +157,6 @@ fn record13_encrypt(rk: RecordKey, seq_num: u64, content_type: u8, plaintext: [u
 
     Returns: 5-byte header || ciphertext || 16-byte tag.
     """
-    # Compile-mode fast-path: delegate to C extern unconditionally. Pure-Simple
-    # path below uses [u8].len() / [u32] shifts that Cranelift miscompiles.
-    val fast_record = rt_tls13_record_encrypt(rk.key, rk.iv, seq_num, content_type, plaintext)
-    if fast_record.len() >= 5:
-        return fast_record
-
     # TLSInnerPlaintext = plaintext || content_type byte
     var inner: [u8] = rt_array_new_with_cap((plaintext.len() + 1).to_i64())
     var i: u64 = 0
@@ -227,10 +221,9 @@ fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResu
         return RecordResult.Err("record header: expected legacy_version_lo 0x03")
 
     # Read payload_length from header[3..4] big-endian
-    val payload_length_i = rt_tls13_record_payload_len(raw_record)
-    if payload_length_i <= 0:
+    val payload_length = (_u8_at(raw_record, 3).to_u64() << 8) | _u8_at(raw_record, 4).to_u64()
+    if payload_length == 0:
         return RecordResult.Err("record header: invalid payload length")
-    val payload_length = payload_length_i.to_u64()
     _rec_debug("payload_length={payload_length}")
 
     val header_len: u64 = 5
@@ -257,15 +250,6 @@ fn record13_decrypt(rk: RecordKey, seq_num: u64, raw_record: [u8]) -> RecordResu
 
     # Derive per-record nonce
     val nonce = record13_make_nonce(rk.iv, seq_num)
-
-    # Baremetal live lane is currently more reliable through the runtime AES-GCM helper.
-    # `fast_inner.len()` reads the runtime header, which IS reliable for arrays
-    # the C extern allocated via _tls_runtime_array_from_bytes (unlike push-built
-    # [u8], whose .len() is broken in compile mode). The unpack uses our
-    # already-known ct_len because the unpack walks bytes from the end.
-    val fast_inner = rt_tls13_aes128_gcm_decrypt(rk.key, nonce, ciphertext, aad, tag)
-    if fast_inner.len() != 0:
-        return _record_unpack_inner_with_len(fast_inner, ct_len)
 
     # AEAD decrypt
     val dec_result = aes128_gcm_decrypt(rk.key, nonce, ciphertext, aad, tag)

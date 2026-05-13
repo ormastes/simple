@@ -169,6 +169,7 @@ fn _spawn_guest_with_qmp_extras(
 ) -> Result<QemuGuestHandle, text>:
     val stderr_log = serial_log + ".stderr"
     val host_port = _extract_hostfwd_port(target.qemu_extra, scenario_extras)
+    cleanup_stale_guest_identity(qmp_socket, serial_log, stderr_log)
     if host_port > 0:
         match cleanup_stale_guest_resources(host_port, qmp_socket, serial_log, stderr_log):
             Ok(()): pass_dn
@@ -199,6 +200,7 @@ fn _spawn_guest_with_qmp_extras(
     if not wait_for_qmp_socket(qmp_socket, 10000):
         rt_process_kill(pid)
         rt_process_wait(pid, 2000)
+        cleanup_stale_guest_identity(qmp_socket, serial_log, stderr_log)
         val stderr_tail = _tail_lines(read_qemu_stderr_log_path(stderr_log), 40)
         return Err("QMP socket did not appear at {qmp_socket}\nqemu stderr:\n{stderr_tail}")
     Ok(QemuGuestHandle.create(pid, qmp_socket, serial_log, stderr_log, qemu_bin))
@@ -265,6 +267,7 @@ fn stop_guest(handle: QemuGuestHandle) -> bool:
     if handle.pid > 0 and rt_process_is_running(handle.pid):
         stopped = rt_process_kill(handle.pid)
         rt_process_wait(handle.pid, 2000)
+    cleanup_stale_guest_identity(handle.qmp_socket, handle.serial_log, handle.stderr_log)
     if rt_file_exists(handle.qmp_socket):
         rt_file_delete(handle.qmp_socket)
     if rt_file_exists(handle.serial_log):
@@ -272,6 +275,13 @@ fn stop_guest(handle: QemuGuestHandle) -> bool:
     if rt_file_exists(handle.stderr_log):
         rt_file_delete(handle.stderr_log)
     stopped
+
+fn cleanup_stale_guest_identity(qmp_socket: text, serial_log: text, stderr_log: text):
+    val cleanup_cmd =
+        "pkill -f " + _shell_quote(qmp_socket) + " >/dev/null 2>&1 || true; " +
+        "pkill -f " + _shell_quote(serial_log) + " >/dev/null 2>&1 || true; " +
+        "pkill -f " + _shell_quote(stderr_log) + " >/dev/null 2>&1 || true"
+    rt_process_run_timeout("/bin/sh", ["-c", cleanup_cmd], 5000)
 
 fn allocate_live_host_port(base_port: i64) -> Result<i64, text>:
     val pid = rt_getpid()
@@ -364,7 +374,7 @@ fn _args_with_serial_file(args: [text], serial_log: text) -> [text]:
 
 fn count_passes(output: text) -> u64:
     """Count [PASS] markers in QEMU serial output."""
-    var count: u64 = 0
+    var count: u64 = 0.to_u64()
     var pos: i64 = 0
     while true:
         val idx = output.index_of("[PASS]", pos)
@@ -376,7 +386,7 @@ fn count_passes(output: text) -> u64:
 
 fn count_failures(output: text) -> u64:
     """Count [FAIL] markers in QEMU serial output."""
-    var count: u64 = 0
+    var count: u64 = 0.to_u64()
     var pos: i64 = 0
     while true:
         val idx = output.index_of("[FAIL]", pos)
@@ -406,9 +416,9 @@ fn run_cross_arch_test(test_name: text, timeout_ms: i64, check_fn: fn(text) -> b
         Architecture.Riscv64
     ]
 
-    var passed: u64 = 0
-    var failed: u64 = 0
-    var skipped: u64 = 0
+    var passed: u64 = 0.to_u64()
+    var failed: u64 = 0.to_u64()
+    var skipped: u64 = 0.to_u64()
 
     for arch in arches:
         val name = arch_display_name(arch)
