@@ -5,7 +5,8 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     WEBGPU_COMMAND_BEGIN_RENDER_PASS, WEBGPU_COMMAND_END_RENDER_PASS,
     WEBGPU_COMMAND_BEGIN_COMPUTE_PASS, WEBGPU_COMMAND_END_COMPUTE_PASS,
     WEBGPU_COMMAND_SET_PIPELINE, WEBGPU_COMMAND_SET_BIND_GROUP,
-    WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DRAW_INDIRECT, WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT,
+    WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DRAW_INDEXED,
+    WEBGPU_COMMAND_DRAW_INDIRECT, WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT,
     WEBGPU_COMMAND_DISPATCH_WORKGROUPS,
     WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE,
     WEBGPU_COMMAND_WRITE_BUFFER, WEBGPU_COMMAND_WRITE_TEXTURE,
@@ -39,26 +40,43 @@ describe "Browser WebGPU command encoding":
             expect(encoder.set_pipeline(7)).to_equal(true)
             expect(encoder.set_bind_group(0, 4)).to_equal(true)
             expect(encoder.draw(3, 1)).to_equal(true)
+            expect(encoder.draw_indexed(6, 2, 4, -1, 1)).to_equal(true)
             expect(encoder.end_render_pass()).to_equal(true)
             val command_buffer = encoder.finish("frame-commands")
             expect(command_buffer.valid).to_equal(true)
-            expect(command_buffer.command_count()).to_equal(5)
+            expect(command_buffer.command_count()).to_equal(6)
             expect(command_buffer.commands[0].kind).to_equal(WEBGPU_COMMAND_BEGIN_RENDER_PASS)
             expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_SET_PIPELINE)
             expect(command_buffer.commands[2].kind).to_equal(WEBGPU_COMMAND_SET_BIND_GROUP)
             expect(command_buffer.commands[2].dynamic_offset_count).to_equal(0)
             expect(command_buffer.commands[3].kind).to_equal(WEBGPU_COMMAND_DRAW)
-            expect(command_buffer.commands[4].kind).to_equal(WEBGPU_COMMAND_END_RENDER_PASS)
+            expect(command_buffer.commands[4].kind).to_equal(WEBGPU_COMMAND_DRAW_INDEXED)
+            expect(command_buffer.commands[4].vertex_count).to_equal(6)
+            expect(command_buffer.commands[4].instance_count).to_equal(2)
+            expect(command_buffer.commands[4].offset).to_equal(4)
+            expect(command_buffer.commands[4].destination_offset).to_equal(-1)
+            expect(command_buffer.commands[4].dynamic_offset_count).to_equal(1)
+            expect(command_buffer.commands[5].kind).to_equal(WEBGPU_COMMAND_END_RENDER_PASS)
 
             var queue = WebGPUQueue.create()
             expect(queue.submit([command_buffer])).to_equal(true)
             expect(queue.submitted_count()).to_equal(1)
-            expect(queue.submitted_command_count()).to_equal(5)
+            expect(queue.submitted_command_count()).to_equal(6)
 
         it "rejects draw outside a render pass":
             var encoder = WebGPUCommandEncoder.create("frame")
             expect(encoder.draw(3, 1)).to_equal(false)
             expect(encoder.last_error).to_equal("GPURenderPassEncoder draw requires an active render pass")
+            expect(encoder.draw_indexed(3, 1, 0, 0, 0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder drawIndexed requires an active render pass")
+
+        it "rejects invalid indexed draw descriptors":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.draw_indexed(0, 1, 0, 0, 0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder drawIndexed counts must be positive")
+            expect(encoder.draw_indexed(3, 1, -1, 0, 0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder drawIndexed offsets must be non-negative")
 
         it "records dynamic bind group offsets":
             var encoder = WebGPUCommandEncoder.create("frame")
