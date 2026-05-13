@@ -494,6 +494,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL sample-coverage state has started: contexts expose sample coverage capabilities, clamped coverage values, and invert state for multisample-compatible render setup.
 - M27 WebGL dither capability state has started: contexts now default `DITHER` on and expose enable/disable plus `getParameter` state like browser WebGL.
 - M27 WebGL blend-color state has started: contexts expose clamped `blendColor`, `BLEND_COLOR`, and constant-color/alpha blend factors for material blending compatibility.
+- M27 WebGL implementation limit queries have started: contexts expose deterministic texture/renderbuffer/viewport limits plus color, depth, stencil, and subpixel bit-depth parameters.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
