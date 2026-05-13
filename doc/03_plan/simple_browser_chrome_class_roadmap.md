@@ -484,6 +484,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL framebuffer attachment queries have started: framebuffer attachments expose object type/name and texture attachment metadata with target, attachment, pname, and default-framebuffer validation.
 - M27 WebGL resource object probes have started: buffer, texture, framebuffer, and renderbuffer IDs can be tested for live object validity and return false while context is lost.
 - M27 WebGL resource deletion has started: buffer, texture, framebuffer, and renderbuffer deletion invalidates resource probes, clears active bindings, and removes stale attribute/framebuffer references.
+- M27 WebGL pixel readback has started: `readPixels` returns deterministic packed pixel bytes, honors `PACK_ALIGNMENT`, and validates arguments, framebuffer completeness, and context loss.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.

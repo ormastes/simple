@@ -43,7 +43,7 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT, WEBGL_TEXTURE_MIN_FILTER,
     WEBGL_TEXTURE_MAG_FILTER, WEBGL_TEXTURE_WRAP_S, WEBGL_TEXTURE_WRAP_T,
     WEBGL_NEAREST, WEBGL_LINEAR, WEBGL_LINEAR_MIPMAP_LINEAR,
-    WEBGL_CLAMP_TO_EDGE, WEBGL_REPEAT, WEBGL_UNPACK_ALIGNMENT,
+    WEBGL_CLAMP_TO_EDGE, WEBGL_REPEAT, WEBGL_PACK_ALIGNMENT, WEBGL_UNPACK_ALIGNMENT,
     WEBGL_UNPACK_FLIP_Y_WEBGL, WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL,
     WEBGL_RGB, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, WEBGL_DEPTH_BUFFER_BIT,
     WEBGL_STENCIL_BUFFER_BIT, WEBGL_COLOR_BUFFER_BIT,
@@ -585,12 +585,42 @@ describe "Browser WebGL context":
 
         it "tracks pixel store boolean flags and rejects bad alignment":
             var ctx = webgl_create_context(1, 320, 240)
+            expect(ctx.pixel_store_i(WEBGL_PACK_ALIGNMENT, 1)).to_equal(true)
+            expect(ctx.pack_alignment).to_equal(1)
             expect(ctx.pixel_store_i(WEBGL_UNPACK_FLIP_Y_WEBGL, 1)).to_equal(true)
             expect(ctx.unpack_flip_y).to_equal(true)
             expect(ctx.pixel_store_i(WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0)).to_equal(true)
             expect(ctx.unpack_premultiply_alpha).to_equal(false)
+            expect(ctx.pixel_store_i(WEBGL_PACK_ALIGNMENT, 3)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
             expect(ctx.pixel_store_i(WEBGL_UNPACK_ALIGNMENT, 3)).to_equal(false)
             expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+
+        it "returns deterministic pixel readback bytes":
+            var ctx = webgl_create_context(1, 320, 240)
+            expect(ctx.pixel_store_i(WEBGL_PACK_ALIGNMENT, 4)).to_equal(true)
+            val rgba = ctx.read_pixels(0, 0, 2, 1, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE)
+            expect(rgba.len()).to_equal(8)
+            expect(rgba[7]).to_equal(0)
+            val rgb = ctx.read_pixels(0, 0, 1, 2, WEBGL_RGB, WEBGL_UNSIGNED_BYTE)
+            expect(rgb.len()).to_equal(8)
+            expect(ctx.pixel_store_i(WEBGL_PACK_ALIGNMENT, 1)).to_equal(true)
+            expect(ctx.read_pixels(0, 0, 1, 2, WEBGL_RGB, WEBGL_UNSIGNED_BYTE).len()).to_equal(6)
+            expect(ctx.get_error()).to_equal(WEBGL_NO_ERROR)
+
+        it "validates pixel readback errors":
+            var ctx = webgl_create_context(1, 320, 240)
+            expect(ctx.read_pixels(-1, 0, 1, 1, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE).len()).to_equal(0)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.read_pixels(0, 0, 1, 1, 999, WEBGL_UNSIGNED_BYTE).len()).to_equal(0)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            val framebuffer = ctx.create_framebuffer()
+            expect(ctx.bind_framebuffer(WEBGL_FRAMEBUFFER, framebuffer.id)).to_equal(true)
+            expect(ctx.read_pixels(0, 0, 1, 1, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE).len()).to_equal(0)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_FRAMEBUFFER_OPERATION)
+            ctx.lose_context()
+            expect(ctx.read_pixels(0, 0, 1, 1, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE).len()).to_equal(0)
+            expect(ctx.get_error()).to_equal(WEBGL_CONTEXT_LOST_WEBGL)
 
         it "tracks texture filtering and wrapping parameters":
             var ctx = webgl_create_context(1, 320, 240)

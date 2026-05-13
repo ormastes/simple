@@ -148,6 +148,7 @@ pub val WEBGL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE: i32 = 36048
 pub val WEBGL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME: i32 = 36049
 pub val WEBGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL: i32 = 36050
 pub val WEBGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE: i32 = 36051
+pub val WEBGL_PACK_ALIGNMENT: i32 = 3333
 pub val WEBGL_UNPACK_ALIGNMENT: i32 = 3317
 pub val WEBGL_RGB: i32 = 6407
 pub val WEBGL_RGBA: i32 = 6408
@@ -327,6 +328,7 @@ pub class WebGLContext:
     active_texture_unit: i32
     texture_units: [WebGLTextureUnitState]
     bound_texture_2d: i32
+    pack_alignment: i32
     unpack_alignment: i32
     unpack_flip_y: bool
     unpack_premultiply_alpha: bool
@@ -1670,9 +1672,33 @@ pub class WebGLContext:
         self.render_commands.push(webgl_render_command_draw_elements(mode, count, element_type, offset))
         true
 
+    me read_pixels(x: i32, y: i32, width: i32, height: i32, format: i32, pixel_type: i32) -> [u8]:
+        if not self.ensure_context_available():
+            return []
+        if x < 0 or y < 0 or width < 0 or height < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return []
+        if webgl_texture_format_bytes(format) == 0 or pixel_type != WEBGL_UNSIGNED_BYTE:
+            self.last_error = WEBGL_INVALID_ENUM
+            return []
+        if not self.bound_framebuffer_is_complete():
+            self.last_error = WEBGL_INVALID_FRAMEBUFFER_OPERATION
+            return []
+        val required = webgl_required_texture_bytes_safe(width, height, webgl_texture_format_bytes(format), self.pack_alignment)
+        if required < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return []
+        webgl_zero_bytes(required)
+
     me pixel_store_i(pname: i32, param: i32) -> bool:
         if not self.ensure_context_available():
             return false
+        if pname == WEBGL_PACK_ALIGNMENT:
+            if param != 1 and param != 2 and param != 4 and param != 8:
+                self.last_error = WEBGL_INVALID_VALUE
+                return false
+            self.pack_alignment = param
+            return true
         if pname == WEBGL_UNPACK_ALIGNMENT:
             if param != 1 and param != 2 and param != 4 and param != 8:
                 self.last_error = WEBGL_INVALID_VALUE
@@ -2145,6 +2171,7 @@ pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLConte
         active_texture_unit: 0,
         texture_units: webgl_default_texture_units(),
         bound_texture_2d: -1,
+        pack_alignment: 4,
         unpack_alignment: 4,
         unpack_flip_y: false,
         unpack_premultiply_alpha: false,
