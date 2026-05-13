@@ -947,6 +947,8 @@ fn _convert_webgpu_calls(line: text) -> text:
     result = result.replace(".createCommandEncoder(", ".create_command_encoder(")
     result = result.replace(".createBuffer(", ".create_buffer(")
     result = _convert_webgpu_texture_descriptor(result)
+    result = _convert_webgpu_texture_view_descriptor(result)
+    result = _convert_webgpu_texture_create_view_descriptor(result)
     result = result.replace(".createTextureWithDescriptor(", ".create_texture_with_descriptor(")
     result = result.replace(".createTextureWithMipLevels(", ".create_texture_with_mip_levels(")
     result = result.replace(".createTextureWithDimension(", ".create_texture_with_dimension(")
@@ -1009,6 +1011,64 @@ fn _convert_webgpu_texture_descriptor(line: text) -> text:
     val prefix = line.slice(0, marker_idx)
     val suffix = line.slice(descriptor_end + 2, line.len())
     prefix + ".create_texture_with_descriptor(" + label + ", " + width + ", " + height + ", " + depth_or_layers + ", " + format + ", " + usage + ", " + dimension + ", " + mip_level_count + ", " + sample_count + ")" + suffix
+
+fn _convert_webgpu_texture_view_descriptor(line: text) -> text:
+    val marker = ".createTextureView({"
+    val marker_idx = line.index_of(marker)
+    if marker_idx < 0:
+        return line
+    val descriptor_start = marker_idx + marker.len()
+    val after_descriptor_start = line.slice(descriptor_start, line.len())
+    val descriptor_end_rel = after_descriptor_start.index_of("})")
+    if descriptor_end_rel < 0:
+        return line
+    val descriptor_end = descriptor_start + descriptor_end_rel
+    val descriptor = line.slice(descriptor_start, descriptor_end)
+    var texture_id = _webgpu_descriptor_value(descriptor, "textureId")
+    if texture_id == "":
+        val texture = _webgpu_descriptor_value(descriptor, "texture")
+        if texture == "":
+            return line
+        texture_id = _webgpu_texture_object_id(texture)
+    val prefix = line.slice(0, marker_idx)
+    val suffix = line.slice(descriptor_end + 2, line.len())
+    prefix + ".create_texture_view(" + _webgpu_texture_view_args(descriptor, texture_id) + ")" + suffix
+
+fn _convert_webgpu_texture_create_view_descriptor(line: text) -> text:
+    val marker = ".createView({"
+    val marker_idx = line.index_of(marker)
+    if marker_idx < 0:
+        return line
+    val descriptor_start = marker_idx + marker.len()
+    val after_descriptor_start = line.slice(descriptor_start, line.len())
+    val descriptor_end_rel = after_descriptor_start.index_of("})")
+    if descriptor_end_rel < 0:
+        return line
+    val descriptor_end = descriptor_start + descriptor_end_rel
+    val descriptor = line.slice(descriptor_start, descriptor_end)
+    val target_expr = line.slice(0, marker_idx)
+    val eq_pos = target_expr.index_of("=")
+    if eq_pos < 0:
+        return line
+    val prefix = target_expr.slice(0, eq_pos + 1)
+    val texture = target_expr.slice(eq_pos + 1, target_expr.len()).trim()
+    val suffix = line.slice(descriptor_end + 2, line.len())
+    prefix + " gpu.create_texture_view(" + _webgpu_texture_view_args(descriptor, _webgpu_texture_object_id(texture)) + ")" + suffix
+
+fn _webgpu_texture_object_id(texture: text) -> text:
+    if texture.ends_with(".id"):
+        return texture
+    texture + ".id"
+
+fn _webgpu_texture_view_args(descriptor: text, texture_id: text) -> text:
+    val label = _webgpu_descriptor_value_or_default(descriptor, "label", "\"\"")
+    val format = _webgpu_descriptor_value_or_default(descriptor, "format", "\"\"")
+    val dimension = _webgpu_descriptor_value_or_default(descriptor, "dimension", "\"\"")
+    val base_mip_level = _webgpu_descriptor_value_or_default(descriptor, "baseMipLevel", "0")
+    val mip_level_count = _webgpu_descriptor_value_or_default(descriptor, "mipLevelCount", "1")
+    val base_array_layer = _webgpu_descriptor_value_or_default(descriptor, "baseArrayLayer", "0")
+    val array_layer_count = _webgpu_descriptor_value_or_default(descriptor, "arrayLayerCount", "1")
+    label + ", " + texture_id + ", " + format + ", " + dimension + ", " + base_mip_level + ", " + mip_level_count + ", " + base_array_layer + ", " + array_layer_count
 
 fn _convert_webgpu_auto_render_pipeline_descriptor(line: text) -> text:
     val marker = ".createRenderPipeline({"
