@@ -119,22 +119,23 @@ Commands:
 - `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_adler_reduce_does_not_emit_function_symbol -- --nocapture`
 - `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_rt_array_len_does_not_emit_runtime_symbol -- --nocapture`
 - `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_len_method_does_not_emit_runtime_symbol -- --nocapture`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_typed_bytes_u64_le_unchecked_does_not_emit_runtime_symbol -- --nocapture`
 - `cargo build --manifest-path src/compiler_rust/Cargo.toml --release -p simple-driver --bin simple`
 - `src/compiler_rust/target/release/simple test test/unit/os/crypto/adler32_spec.spl --mode=interpreter --no-cache`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LLVM_PROBE=0 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
 
 | Algorithm | C MB/s | Rust MB/s | Simple Cranelift MB/s | Simple LLVM MB/s | Checksum parity | Status |
 |-----------|--------|-----------|-----------------------|------------------|-----------------|--------|
-| XXHash64 | 7790 | 7698 | 6012 | not sampled | PASS | Cranelift passes both gates in this noisy source-built sample |
-| CRC32 | 280 | 292 | 202 | not sampled | PASS | Cranelift passes both gates in this noisy source-built sample |
-| Adler-32 | 2605 | 2524 | 1336 | not sampled | PASS | Improved by length inlining and 8-byte source unroll; passes 50% C but not 70% Rust |
-| ChaCha20 | 315 | 347 | 194 | not sampled | PASS | Cranelift passes 50% C but not 70% Rust on this source-built sample |
+| XXHash64 | 14563 | 14018 | 6578 | not sampled | PASS | Source-built Cranelift sample is below the 70% Rust gate |
+| CRC32 | 455 | 451 | 203 | not sampled | PASS | Correct, but below both gates in this sample |
+| Adler-32 | 2599 | 2524 | 1896 | not sampled | PASS | Passes 70% Rust and 50% C after u64 load plus closed-form 8-byte update |
+| ChaCha20 | 317 | 346 | 206 | not sampled | PASS | Cranelift passes 50% C but not 70% Rust on this source-built sample |
 
 Interpretation:
-- Adler-32 remains pure Simple. The implementation now uses the standard 5552-byte deferred-modulo chunking, a fast `65521 = 2^16 - 15` reduction helper, and a compiler-inline `rt_typed_bytes_u8_unchecked` byte helper, preserving interpreter correctness while avoiding generic `data[i]` source indexing in the hot loop.
+- Adler-32 remains pure Simple. The implementation now uses the standard 5552-byte deferred-modulo chunking, a fast `65521 = 2^16 - 15` reduction helper, and compiler-inline typed byte helpers, preserving interpreter correctness while avoiding generic `data[i]` source indexing in the hot loop.
 - Correctness is locked by the existing 12-example Adler/Fletcher unit spec and by C/Rust/Simple checksum parity in the source-built benchmark harness.
-- The compiler/backend layer now has regression tests proving `rt_typed_bytes_u8_unchecked`, `rt_array_len`, `.len()`, and `_adler_reduce` lower without runtime/function relocations in the covered Cranelift call shapes. The `rt_array_len`/`.len()` fix improved Adler-32 from the prior `904 MB/s` source-built sample to `1221 MB/s`; the pure Simple 8-byte loop unroll moved the latest sample to `1336 MB/s`.
-- Remaining Adler-32 delta is loop/code-shape work: the source-built benchmark binary is stripped enough that symbol-level disassembly is limited, but the measured hot path remains below the 70% Rust gate. Follow-up target: make this unroll compiler-driven in MIR for simple byte reductions, then resample with a non-stripped symbol build for tighter ASM evidence.
+- The compiler/backend layer now has regression tests proving `rt_typed_bytes_u8_unchecked`, `rt_typed_bytes_u64_le_unchecked`, `rt_array_len`, `.len()`, and `_adler_reduce` lower without runtime/function relocations in the covered Cranelift call shapes. The `rt_array_len`/`.len()` fix improved Adler-32 from the prior `904 MB/s` source-built sample to `1221 MB/s`; the pure Simple 8-byte loop unroll moved the sample to `1336 MB/s`; replacing eight byte loads with one unchecked u64 little-endian load moved the sample to `1536 MB/s`; closed-form weighted `b` update for each 8-byte word moved the latest sample to `1896 MB/s`.
+- Remaining Adler-32 work is cleanup/generalization: make this unroll plus closed-form reduction compiler-driven in MIR for recognized byte reductions, then resample with a non-stripped symbol build for tighter ASM evidence.
 - Rejected follow-up: a pure Simple 16-byte Adler loop unroll checked and passed unit tests, but regressed the benchmark sample to `1103 MB/s`, so the implementation was returned to the verified 8-byte unroll.
 
 ### 2026-05-13 pure Simple CRC32 optimization-layer update
