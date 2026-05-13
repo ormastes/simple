@@ -1,0 +1,110 @@
+# Pure logic microbenchmarks for the current SimpleOS virtio-net driver.
+#
+# These benchmarks intentionally avoid live QEMU/device I/O. They measure the
+# arithmetic helpers that shape descriptor/ring work before hardware access.
+
+use test.perf.bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_header, bench_now_ns}
+use os.drivers.virtio.virtio_net.{
+    virtqueue_desc_size,
+    virtqueue_avail_size,
+    virtqueue_used_size,
+    virtqueue_total_size
+}
+
+fn bench_result(label: text, iters: i64, total_ns: i64, checksum: u64) -> BenchResult:
+    val avg = if iters > 0: total_ns / iters else: 0
+    val tput = if total_ns > 0: (iters * 1000000) / total_ns else: 0
+    BenchResult(
+        label: label + "_checksum_" + checksum.to_text(),
+        iters: iters,
+        p50_ns: avg,
+        p99_ns: avg,
+        p99_9_ns: avg,
+        min_ns: avg,
+        max_ns: avg,
+        total_ns: total_ns,
+        throughput_ops_per_s: tput
+    )
+
+fn bench_desc_size(iters: i64) -> BenchResult:
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val q = ((i % 128) + 1).to_u64()
+        checksum = checksum + virtqueue_desc_size(q)
+        i = i + 1
+    val t1 = bench_now_ns()
+    bench_result("virtqueue_desc_size", iters, t1 - t0, checksum)
+
+fn bench_avail_size(iters: i64) -> BenchResult:
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val q = ((i % 128) + 1).to_u64()
+        checksum = checksum + virtqueue_avail_size(q)
+        i = i + 1
+    val t1 = bench_now_ns()
+    bench_result("virtqueue_avail_size", iters, t1 - t0, checksum)
+
+fn bench_used_size(iters: i64) -> BenchResult:
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val q = ((i % 128) + 1).to_u64()
+        checksum = checksum + virtqueue_used_size(q)
+        i = i + 1
+    val t1 = bench_now_ns()
+    bench_result("virtqueue_used_size", iters, t1 - t0, checksum)
+
+fn bench_total_size(iters: i64) -> BenchResult:
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val q = ((i % 128) + 1).to_u64()
+        checksum = checksum + virtqueue_total_size(q)
+        i = i + 1
+    val t1 = bench_now_ns()
+    bench_result("virtqueue_total_size", iters, t1 - t0, checksum)
+
+fn bench_ring_slot_mod(iters: i64) -> BenchResult:
+    var checksum: u64 = 0
+    val qsize: u64 = 128
+    val base: u64 = 0x1000
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val idx = i.to_u64()
+        val slot = base + 4 + (idx % qsize) * 2
+        checksum = checksum + slot
+        i = i + 1
+    val t1 = bench_now_ns()
+    bench_result("virtio_ring_slot_mod", iters, t1 - t0, checksum)
+
+fn main():
+    val iters: i64 = 200000
+    print "=== SimpleOS virtio-net pure logic benchmark ==="
+    print "note: arithmetic-only; not live QEMU packet throughput."
+
+    val r1 = bench_desc_size(iters)
+    val r2 = bench_avail_size(iters)
+    val r3 = bench_used_size(iters)
+    val r4 = bench_total_size(iters)
+    val r5 = bench_ring_slot_mod(iters)
+
+    bench_print(r1)
+    bench_print(r2)
+    bench_print(r3)
+    bench_print(r4)
+    bench_print(r5)
+
+    print ""
+    print bench_csv_header()
+    print bench_csv(r1)
+    print bench_csv(r2)
+    print bench_csv(r3)
+    print bench_csv(r4)
+    print bench_csv(r5)

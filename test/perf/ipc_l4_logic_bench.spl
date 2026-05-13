@@ -1,0 +1,186 @@
+# Pure Simple IPC/L4-style logic microbenchmarks.
+#
+# This is not a syscall or scheduler benchmark. It compares the current
+# IpcManager queue logic with L4-style inline-register and buffer-transfer
+# paths that can run in interpreter mode on a developer host.
+
+use test.perf.bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_header, bench_now_ns}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.ipc_types.{IpcMessage}
+use os.kernel.types.task_types.{TaskId}
+
+struct L4InlineMessage:
+    method_id: u32
+    payload_len: u32
+    badge: u32
+    r0: u64
+    r1: u64
+    r2: u64
+    r3: u64
+    r4: u64
+    r5: u64
+    r6: u64
+    r7: u64
+
+struct L4InlineMessage32:
+    method_id: u32
+    payload_len: u32
+    badge: u32
+    r0: u32
+    r1: u32
+    r2: u32
+    r3: u32
+    r4: u32
+    r5: u32
+    r6: u32
+    r7: u32
+
+fn bench_result(label: text, iters: i64, total_ns: i64, checksum: u64) -> BenchResult:
+    val avg = if iters > 0: total_ns / iters else: 0
+    val tput = if total_ns > 0: (iters * 1000000) / total_ns else: 0
+    BenchResult(
+        label: label + "_checksum_" + checksum.to_text(),
+        iters: iters,
+        p50_ns: avg,
+        p99_ns: avg,
+        p99_9_ns: avg,
+        min_ns: avg,
+        max_ns: avg,
+        total_ns: total_ns,
+        throughput_ops_per_s: tput
+    )
+
+fn make_ipc_message(port_id: u64, i: i64) -> IpcMessage:
+    IpcMessage(
+        src_port: 1,
+        dst_port: port_id,
+        method: (i % 1024).to_u32(),
+        flags: 0,
+        payload_len: 32,
+        cap_count: 0
+    )
+
+fn bench_current_ipc_queue(iters: i64) -> BenchResult:
+    var manager = IpcManager.new()
+    val owner = TaskId(id: 7)
+    val port = manager.create_port(owner, "bench-ipc")
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val msg = make_ipc_message(port.id, i)
+        val send_rc = manager.send(msg)
+        val got = manager.recv(port, 0)
+        if got != nil:
+            checksum = checksum + got.method.to_u64() + send_rc.to_u64()
+        i = i + 1
+    val t1 = bench_now_ns()
+    bench_result("current_ipc_manager_send_recv", iters, t1 - t0, checksum)
+
+fn l4_inline_round_trip_64bit(i: i64) -> u64:
+    val msg = L4InlineMessage(
+        method_id: (i % 1024).to_u32(),
+        payload_len: 32,
+        badge: 9,
+        r0: i.to_u64(),
+        r1: i.to_u64() + 1,
+        r2: i.to_u64() + 2,
+        r3: i.to_u64() + 3,
+        r4: i.to_u64() + 4,
+        r5: i.to_u64() + 5,
+        r6: i.to_u64() + 6,
+        r7: i.to_u64() + 7
+    )
+    msg.method_id.to_u64() + msg.payload_len.to_u64() + msg.r0 + msg.r7
+
+fn l4_inline_round_trip_32bit(i: i64) -> u64:
+    val word = (i % 65536).to_u32()
+    val msg = L4InlineMessage32(
+        method_id: (i % 1024).to_u32(),
+        payload_len: 32,
+        badge: 9,
+        r0: word,
+        r1: word + 1,
+        r2: word + 2,
+        r3: word + 3,
+        r4: word + 4,
+        r5: word + 5,
+        r6: word + 6,
+        r7: word + 7
+    )
+    msg.method_id.to_u64() + msg.payload_len.to_u64() + msg.r0.to_u64() + msg.r7.to_u64()
+
+fn bench_l4_inline_registers_32bit(iters: i64) -> BenchResult:
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + l4_inline_round_trip_32bit(i)
+        i = i + 1
+    val t1 = bench_now_ns()
+    bench_result("l4_inline_registers_32bit_words", iters, t1 - t0, checksum)
+
+fn bench_l4_inline_registers_64bit(iters: i64) -> BenchResult:
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + l4_inline_round_trip_64bit(i) + 32
+        i = i + 1
+    val t1 = bench_now_ns()
+    bench_result("l4_inline_registers_64bit_words", iters, t1 - t0, checksum)
+
+fn bench_l4_buffer_transfer(iters: i64) -> BenchResult:
+    val sender: u64 = 11
+    val receiver: u64 = 12
+    val buffer_count: u64 = 64
+    var states: [u64] = []
+    var owners: [u64] = []
+    var msg_lens: [u64] = []
+    var setup: u64 = 0
+    while setup < buffer_count:
+        states.push(0)
+        owners.push(0)
+        msg_lens.push(0)
+        setup = setup + 1
+    val sender_state: u64 = 2
+    val receiver_state: u64 = 3
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val idx = (i.to_u64() % buffer_count).to_i32()
+        states[idx] = sender_state
+        owners[idx] = sender
+        msg_lens[idx] = 4096
+        owners[idx] = receiver
+        states[idx] = receiver_state
+        checksum = checksum + owners[idx] + msg_lens[idx] + states[idx]
+        states[idx] = 0
+        owners[idx] = 0
+        msg_lens[idx] = 0
+        i = i + 1
+    val t1 = bench_now_ns()
+    bench_result("l4_buffer_transfer_4096byte", iters, t1 - t0, checksum)
+
+fn main():
+    val iters: i64 = 100000
+    print "=== Pure Simple IPC/L4 logic benchmark ==="
+    print "note: logic-only; not syscall, scheduler, or cross-address-space timing."
+
+    val r1 = bench_current_ipc_queue(iters)
+    val r2 = bench_l4_inline_registers_32bit(iters)
+    val r3 = bench_l4_inline_registers_64bit(iters)
+    val r4 = bench_l4_buffer_transfer(iters)
+
+    bench_print(r1)
+    bench_print(r2)
+    bench_print(r3)
+    bench_print(r4)
+
+    print ""
+    print bench_csv_header()
+    print bench_csv(r1)
+    print bench_csv(r2)
+    print bench_csv(r3)
+    print bench_csv(r4)

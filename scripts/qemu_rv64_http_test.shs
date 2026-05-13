@@ -4,7 +4,7 @@
 # ============================================================================
 #
 # Boots SimpleOS RV64 baremetal binary under QEMU virt, waits for the HTTP
-# server to come up, then runs curl smoke tests against it.
+# server to come up, then runs nc/openssl smoke tests against it.
 #
 # Usage:
 #   sh scripts/qemu_rv64_http_test.shs [--elf <path>]
@@ -12,7 +12,7 @@
 # Defaults:
 #   --elf build/simpleos-rv64.elf
 #
-# Requires: qemu-system-riscv64, curl
+# Requires: qemu-system-riscv64, nc
 # ============================================================================
 set -eu
 
@@ -62,8 +62,8 @@ if ! command -v qemu-system-riscv64 >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v curl >/dev/null 2>&1; then
-  echo "error: curl not found in PATH" >&2
+if ! command -v nc >/dev/null 2>&1; then
+  echo "error: nc not found in PATH" >&2
   exit 1
 fi
 
@@ -89,7 +89,7 @@ qemu-system-riscv64 \
   -m 256M \
   -nographic \
   -netdev user,id=net0,hostfwd=tcp::${HTTP_PORT}-:${HTTP_PORT},hostfwd=tcp::${HTTPS_PORT}-:${HTTPS_PORT} \
-  -device virtio-net-device,netdev=net0 \
+  -device virtio-net-pci,netdev=net0 \
   -kernel "$ELF" \
   -serial file:"$SERIAL_LOG" \
   </dev/null &
@@ -97,12 +97,21 @@ QEMU_PID=$!
 
 echo "  QEMU PID: ${QEMU_PID}"
 
-# ---- wait for boot banner ----
-echo "[2/4] Waiting for boot banner (timeout: ${BOOT_TIMEOUT}s)..."
+# ---- wait for HTTP bind marker ----
+echo "[2/4] Waiting for HTTP bind marker (timeout: ${BOOT_TIMEOUT}s)..."
 WAITED=0
 BOOTED=false
 while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
-  if [ -f "$SERIAL_LOG" ] && grep -q "SimpleOS" "$SERIAL_LOG" 2>/dev/null; then
+  if [ -f "$SERIAL_LOG" ] && grep -q "HTTP server deferred" "$SERIAL_LOG" 2>/dev/null; then
+    echo "FAILED: HTTP server was deferred" >&2
+    echo "--- serial log ---"
+    cat "$SERIAL_LOG"
+    echo "--- end serial log ---"
+    exit 1
+  fi
+  if [ -f "$SERIAL_LOG" ] &&
+    grep -q "Network service ready" "$SERIAL_LOG" 2>/dev/null &&
+    grep -q "Bootstrap TCP shim bound on 0.0.0.0:8080" "$SERIAL_LOG" 2>/dev/null; then
     BOOTED=true
     break
   fi
@@ -111,7 +120,7 @@ while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
 done
 
 if [ "$BOOTED" = "false" ]; then
-  echo "FAILED: boot banner not seen within ${BOOT_TIMEOUT}s" >&2
+  echo "FAILED: HTTP bind marker not seen within ${BOOT_TIMEOUT}s" >&2
   if [ -f "$SERIAL_LOG" ]; then
     echo "--- serial log ---"
     cat "$SERIAL_LOG"
@@ -120,10 +129,46 @@ if [ "$BOOTED" = "false" ]; then
   exit 1
 fi
 
-echo "  Boot detected after ${WAITED}s"
+echo "  HTTP bind detected after ${WAITED}s"
 
-# ---- give HTTP server a moment to bind ----
-sleep 2
+http_response() {
+  method="$1"
+  path="$2"
+  printf '%s %s HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n' "$method" "$path" |
+    nc -w 5 localhost "${HTTP_PORT}" 2>/dev/null || true
+}
+
+http_status_code() {
+  line=$(http_response GET "$1" | sed -n '1p')
+  set -- $line
+  if [ "$#" -ge 2 ]; then
+    printf '%s\n' "$2"
+  else
+    printf '000\n'
+  fi
+}
+
+http_content_type() {
+  http_response GET "$1" | grep -i '^content-type:' | sed -n '1p'
+}
+
+https_status_code() {
+  if ! command -v openssl >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
+    printf 'skip\n'
+    return
+  fi
+  line=$(
+    printf 'GET /health HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n' |
+      timeout 5s openssl s_client -quiet -connect "localhost:${HTTPS_PORT}" -servername localhost 2>/dev/null |
+      sed -n '1p'
+  )
+  set -- $line
+  if [ "$#" -ge 2 ]; then
+    printf '%s\n' "$2"
+  else
+    printf '000\n'
+  fi
+}
 
 # ---- run HTTP tests ----
 echo "[3/4] Running HTTP smoke tests..."
@@ -132,7 +177,7 @@ FAIL=0
 
 # Test 1: HTTP health check
 printf '%s' "  GET /health (HTTP)... "
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${HTTP_PORT}/health" 2>/dev/null || echo "000")
+HTTP_CODE=$(http_status_code /health)
 if [ "$HTTP_CODE" = "200" ]; then
   echo "PASS (${HTTP_CODE})"
   PASS=$((PASS + 1))
@@ -143,7 +188,7 @@ fi
 
 # Test 2: HTTP root page
 printf '%s' "  GET / (HTTP)... "
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${HTTP_PORT}/" 2>/dev/null || echo "000")
+HTTP_CODE=$(http_status_code /)
 if [ "$HTTP_CODE" = "200" ]; then
   echo "PASS (${HTTP_CODE})"
   PASS=$((PASS + 1))
@@ -154,8 +199,10 @@ fi
 
 # Test 3: HTTPS health check (skip TLS verification for self-signed cert)
 printf '%s' "  GET /health (HTTPS)... "
-HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "https://localhost:${HTTPS_PORT}/health" 2>/dev/null || echo "000")
-if [ "$HTTP_CODE" = "200" ]; then
+HTTP_CODE=$(https_status_code)
+if [ "$HTTP_CODE" = "skip" ]; then
+  echo "SKIP (openssl or timeout unavailable)"
+elif [ "$HTTP_CODE" = "200" ]; then
   echo "PASS (${HTTP_CODE})"
   PASS=$((PASS + 1))
 else
@@ -165,7 +212,7 @@ fi
 
 # Test 4: Health endpoint returns JSON
 printf '%s' "  GET /health content-type... "
-CONTENT_TYPE=$(curl -s -I "http://localhost:${HTTP_PORT}/health" 2>/dev/null | grep -i "content-type" || echo "")
+CONTENT_TYPE=$(http_content_type /health)
 if echo "$CONTENT_TYPE" | grep -qi "json"; then
   echo "PASS (JSON)"
   PASS=$((PASS + 1))
@@ -176,7 +223,7 @@ fi
 
 # Test 5: Root page returns HTML
 printf '%s' "  GET / content-type... "
-CONTENT_TYPE=$(curl -s -I "http://localhost:${HTTP_PORT}/" 2>/dev/null | grep -i "content-type" || echo "")
+CONTENT_TYPE=$(http_content_type /)
 if echo "$CONTENT_TYPE" | grep -qi "html"; then
   echo "PASS (HTML)"
   PASS=$((PASS + 1))
