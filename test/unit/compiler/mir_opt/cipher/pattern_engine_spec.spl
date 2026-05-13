@@ -11,12 +11,13 @@
 #   executed.  Compiled-mode execution will exercise them.
 
 use compiler.mir_opt.pattern.rule_engine.{
-    Rule, MatchHit, OptimizerRuleLoadMode, OptimizerRuleLookupKind,
+    Rule, MatchHit, OptimizerRuleLoadMode, OptimizerRuleLookupKind, OptimizerProviderKind,
     OptimizationRuleProvider, create_rule, rule_summary,
     optimization_rule_provider_dynamic, optimization_rule_provider_should_embed,
     optimization_rule_provider_uses_direct_lookup, create_exact_rule_binding,
     lookup_exact_rule_binding, rule_lookup_stats_zero,
-    rule_lookup_stats_record
+    rule_lookup_stats_record, optimization_provider_stats_zero,
+    optimization_provider_stats_record_scope
 }
 use compiler.mir_opt.pattern.rules_crypto.{
     cipher_rule_table, cipher_rule_provider, lookup_rule_for_callee
@@ -103,16 +104,20 @@ describe "lookup_rule_for_callee — known software callees":
     it "cipher provider is built in for hot-path lookup":
         val provider = cipher_rule_provider()
         expect(provider.name).to_equal("cipher-pattern-rules")
+        expect(provider.version).to_equal("1.0.0")
+        expect(provider.kind).to_equal(OptimizerProviderKind.Pattern)
         expect(provider.load_mode).to_equal(OptimizerRuleLoadMode.Builtin)
         expect(provider.lookup_kind).to_equal(OptimizerRuleLookupKind.DirectExact)
         expect(optimization_rule_provider_should_embed(provider)).to_equal(true)
         expect(optimization_rule_provider_uses_direct_lookup(provider)).to_equal(true)
+        expect(provider.safety_class).to_equal("pure")
 
     it "dynamic providers are not embedded into the hot lookup path":
         val provider = optimization_rule_provider_dynamic("rare-extra-rules", "build/plugins/rare-rules.so")
         expect(provider.load_mode).to_equal(OptimizerRuleLoadMode.DynamicLibrary)
         expect(provider.lookup_kind).to_equal(OptimizerRuleLookupKind.DynamicExact)
         expect(optimization_rule_provider_should_embed(provider)).to_equal(false)
+        expect(provider.safety_class).to_equal("experimental")
 
     it "exact lookup bindings support reusable non-cipher rule providers":
         val rule = create_rule("match_custom_abs", "math_abs", "scalar", -1)
@@ -130,6 +135,14 @@ describe "lookup_rule_for_callee — known software callees":
         expect(two.lookups).to_equal(2)
         expect(two.hits).to_equal(1)
         expect(two.misses).to_equal(1)
+
+    it "provider stats count changed and skipped scopes":
+        val zero = optimization_provider_stats_zero()
+        val changed = optimization_provider_stats_record_scope(zero, 3)
+        val skipped = optimization_provider_stats_record_scope(changed, 0)
+        expect(skipped.scopes).to_equal(2)
+        expect(skipped.rewrites).to_equal(3)
+        expect(skipped.skipped).to_equal(1)
 
 # ============================================================================
 # PatternCost — comparator and scalar summary

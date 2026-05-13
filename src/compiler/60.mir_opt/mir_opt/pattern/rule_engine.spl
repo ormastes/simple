@@ -24,14 +24,28 @@ enum OptimizerRuleLookupKind:
     DirectExact
     IndexedExact
     DynamicExact
+    PipelinePass
+
+enum OptimizerProviderKind:
+    Syntax
+    Hir
+    Mir
+    Pattern
+    Interpreter
+    BackendMetadata
 
 struct OptimizationRuleProvider:
     name:        text
+    version:     text
+    kind:        OptimizerProviderKind
     load_mode:   OptimizerRuleLoadMode
     lookup_kind: OptimizerRuleLookupKind
     path:        text
     hot_path:    bool
     enabled:     bool
+    required_facts: [text]
+    produced_facts: [text]
+    safety_class: text
 
 struct ExactRuleBinding:
     key:  text
@@ -42,6 +56,11 @@ struct RuleLookupStats:
     hits:    i64
     misses:  i64
 
+struct OptimizationProviderStats:
+    scopes:   i64
+    rewrites: i64
+    skipped:  i64
+
 fn create_rule(name: text, intrinsic: text, requires: text, cost_delta: i64) -> Rule:
     Rule(name, intrinsic, requires, cost_delta, 1000)
 
@@ -51,21 +70,54 @@ fn create_rule_with_cost(name: text, intrinsic: text, requires: text, cost_delta
 fn optimization_rule_provider_builtin(name: text, hot_path: bool) -> OptimizationRuleProvider:
     OptimizationRuleProvider(
         name: name,
+        version: "1.0.0",
+        kind: OptimizerProviderKind.Pattern,
         load_mode: OptimizerRuleLoadMode.Builtin,
         lookup_kind: OptimizerRuleLookupKind.DirectExact,
         path: "",
         hot_path: hot_path,
-        enabled: true
+        enabled: true,
+        required_facts: [],
+        produced_facts: [],
+        safety_class: "pure"
+    )
+
+fn optimization_rule_provider_builtin_with_contract(
+    name: text,
+    kind: OptimizerProviderKind,
+    lookup_kind: OptimizerRuleLookupKind,
+    hot_path: bool,
+    required_facts: [text],
+    produced_facts: [text],
+    safety_class: text
+) -> OptimizationRuleProvider:
+    OptimizationRuleProvider(
+        name: name,
+        version: "1.0.0",
+        kind: kind,
+        load_mode: OptimizerRuleLoadMode.Builtin,
+        lookup_kind: lookup_kind,
+        path: "",
+        hot_path: hot_path,
+        enabled: true,
+        required_facts: required_facts,
+        produced_facts: produced_facts,
+        safety_class: safety_class
     )
 
 fn optimization_rule_provider_dynamic(name: text, path: text) -> OptimizationRuleProvider:
     OptimizationRuleProvider(
         name: name,
+        version: "1.0.0",
+        kind: OptimizerProviderKind.Pattern,
         load_mode: OptimizerRuleLoadMode.DynamicLibrary,
         lookup_kind: OptimizerRuleLookupKind.DynamicExact,
         path: path,
         hot_path: false,
-        enabled: true
+        enabled: true,
+        required_facts: [],
+        produced_facts: [],
+        safety_class: "experimental"
     )
 
 fn optimization_rule_provider_should_embed(provider: OptimizationRuleProvider) -> bool:
@@ -73,6 +125,17 @@ fn optimization_rule_provider_should_embed(provider: OptimizationRuleProvider) -
 
 fn optimization_rule_provider_uses_direct_lookup(provider: OptimizationRuleProvider) -> bool:
     provider.lookup_kind == OptimizerRuleLookupKind.DirectExact
+
+fn optimization_rule_provider_is_pipeline_pass(provider: OptimizationRuleProvider) -> bool:
+    provider.lookup_kind == OptimizerRuleLookupKind.PipelinePass
+
+fn optimization_rule_provider_has_required_fact(provider: OptimizationRuleProvider, fact: text) -> bool:
+    var i = 0
+    while i < provider.required_facts.len():
+        if provider.required_facts[i] == fact:
+            return true
+        i = i + 1
+    false
 
 fn create_exact_rule_binding(key: text, rule: Rule) -> ExactRuleBinding:
     ExactRuleBinding(key, rule)
@@ -94,6 +157,15 @@ fn rule_lookup_stats_record(stats: RuleLookupStats, hit: bool) -> RuleLookupStat
         RuleLookupStats(stats.lookups + 1, stats.hits + 1, stats.misses)
     else:
         RuleLookupStats(stats.lookups + 1, stats.hits, stats.misses + 1)
+
+fn optimization_provider_stats_zero() -> OptimizationProviderStats:
+    OptimizationProviderStats(0, 0, 0)
+
+fn optimization_provider_stats_record_scope(stats: OptimizationProviderStats, rewrites: i64) -> OptimizationProviderStats:
+    if rewrites > 0:
+        OptimizationProviderStats(stats.scopes + 1, stats.rewrites + rewrites, stats.skipped)
+    else:
+        OptimizationProviderStats(stats.scopes + 1, stats.rewrites, stats.skipped + 1)
 
 fn rule_summary(r: Rule) -> text:
     var name_part = r.name
