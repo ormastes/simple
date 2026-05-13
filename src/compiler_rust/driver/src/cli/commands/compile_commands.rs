@@ -286,7 +286,7 @@ fn resolve_native_strip_mode(args: &[String], target: Target, shared: bool) -> N
         return NativeStripMode::All;
     }
     if target == Target::host() && !shared {
-        NativeStripMode::Debug
+        NativeStripMode::All
     } else {
         NativeStripMode::None
     }
@@ -751,9 +751,9 @@ backend = "llvm"
     }
 
     #[test]
-    fn test_resolve_native_strip_mode_defaults_to_debug_strip_for_host_executables() {
+    fn test_resolve_native_strip_mode_defaults_to_full_strip_for_host_executables() {
         let mode = resolve_native_strip_mode(&["compile".to_string()], Target::host(), false);
-        assert_eq!(mode, NativeStripMode::Debug);
+        assert_eq!(mode, NativeStripMode::All);
     }
 
     #[test]

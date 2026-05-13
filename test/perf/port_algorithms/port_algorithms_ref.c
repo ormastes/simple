@@ -7,6 +7,8 @@
 #define DATA_SIZE 65536ULL
 #define XXH_ITERS 80ULL
 #define CHACHA_ITERS 30ULL
+#define CRC32_ITERS 80ULL
+#define ADLER32_ITERS 80ULL
 
 static uint64_t now_us(void) {
     struct timeval tv;
@@ -101,6 +103,40 @@ static uint64_t xxhash64_ref(const uint8_t *data, size_t len, uint64_t seed) {
     return xxh64_avalanche(h);
 }
 
+static uint32_t crc32_ref(const uint8_t *data, size_t len) {
+    uint32_t table[256];
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t crc = i;
+        for (uint32_t bit = 0; bit < 8; bit++) {
+            crc = (crc & 1U) ? ((crc >> 1) ^ 0xEDB88320U) : (crc >> 1);
+        }
+        table[i] = crc;
+    }
+
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0; i < len; i++) {
+        crc = (crc >> 8) ^ table[(crc ^ data[i]) & 0xFFU];
+    }
+    return crc ^ 0xFFFFFFFFU;
+}
+
+static uint32_t adler32_ref(const uint8_t *data, size_t len) {
+    uint32_t a = 1U;
+    uint32_t b = 0U;
+    size_t i = 0;
+    while (i < len) {
+        size_t end = i + 5552U;
+        if (end > len) end = len;
+        while (i < end) {
+            a += data[i++];
+            b += a;
+        }
+        a %= 65521U;
+        b %= 65521U;
+    }
+    return (b << 16) | a;
+}
+
 static void qr(uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
     *a += *b; *d = rotl32(*d ^ *a, 16);
     *c += *d; *b = rotl32(*b ^ *c, 12);
@@ -171,6 +207,16 @@ int main(void) {
     uint64_t start = now_us();
     for (uint64_t i = 0; i < XXH_ITERS; i++) checksum ^= xxhash64_ref(data, DATA_SIZE, i);
     report("xxhash64", DATA_SIZE, XXH_ITERS, now_us() - start, checksum);
+
+    checksum = 0;
+    start = now_us();
+    for (uint64_t i = 0; i < CRC32_ITERS; i++) checksum ^= ((uint64_t)crc32_ref(data, DATA_SIZE) + i);
+    report("crc32", DATA_SIZE, CRC32_ITERS, now_us() - start, checksum);
+
+    checksum = 0;
+    start = now_us();
+    for (uint64_t i = 0; i < ADLER32_ITERS; i++) checksum ^= ((uint64_t)adler32_ref(data, DATA_SIZE) + i);
+    report("adler32", DATA_SIZE, ADLER32_ITERS, now_us() - start, checksum);
 
     checksum = 0;
     start = now_us();

@@ -24,6 +24,7 @@ pub(super) fn compile_c_args(cc: &str, output: &Path, input: &Path) -> Vec<Strin
         ]
     } else {
         vec![
+            "-O3".to_string(),
             "-c".to_string(),
             "-o".to_string(),
             output.display().to_string(),
@@ -96,7 +97,7 @@ impl Default for NativeBinaryOptions {
             cpu: TargetCpu::builtin_default_for_arch(target.arch),
             layout_optimize: false,
             layout_profile: None,
-            strip: false,
+            strip: true,
             pie: true,
             shared: false,
             libraries,
@@ -130,18 +131,18 @@ impl NativeBinaryOptions {
     fn default_library_paths_for_target(target: &Target) -> Vec<PathBuf> {
         let mut library_paths = Self::detect_library_paths_for_target(target);
 
+        if *target == Target::host() {
+            if let Some(compiler_path) = Self::find_compiler_library_path() {
+                Self::push_front_unique(&mut library_paths, compiler_path);
+            }
+        }
+
         if let Some(runtime_path) = Self::find_runtime_library_path_for_target(target) {
             Self::push_front_unique(&mut library_paths, runtime_path);
         } else if *target == Target::host() {
             let cwd_debug = std::env::current_dir().ok().map(|p| p.join("target/debug"));
             if let Some(path) = cwd_debug.filter(|path| Self::runtime_lib_exists(path)) {
                 Self::push_front_unique(&mut library_paths, path);
-            }
-        }
-
-        if *target == Target::host() {
-            if let Some(compiler_path) = Self::find_compiler_library_path() {
-                Self::push_front_unique(&mut library_paths, compiler_path);
             }
         }
 
@@ -283,10 +284,7 @@ impl NativeBinaryOptions {
     }
 
     fn runtime_lib_exists(dir: &Path) -> bool {
-        let has_runtime = dir.join("libsimple_runtime.a").exists() || dir.join("simple_runtime.lib").exists();
-        let has_native_all = dir.join("libsimple_native_all.a").exists() || dir.join("simple_native_all.lib").exists();
-
-        has_runtime && has_native_all
+        dir.join("libsimple_runtime.a").exists() || dir.join("simple_runtime.lib").exists()
     }
 
     fn current_exe_is_release_shim(exe_dir: &Path) -> bool {

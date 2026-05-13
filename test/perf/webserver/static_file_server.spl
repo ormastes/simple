@@ -1,0 +1,115 @@
+# test/perf/webserver/static_file_server.spl — minimal Simple live static HTTP target.
+#
+# This exists to give live benchmark harnesses a real Simple process to target.
+# It serves one preloaded file body for a bounded number of requests, then exits.
+#
+# Environment:
+#   SIMPLE_STATIC_SERVER_ADDR      default: 127.0.0.1:18080
+#   SIMPLE_STATIC_SERVER_FILE      default: README.md
+#   SIMPLE_STATIC_SERVER_REQUESTS  default: 512
+#
+# Run:
+#   SIMPLE_STATIC_SERVER_REQUESTS=16 bin/simple run test/perf/webserver/static_file_server.spl
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_accept(fd: i64) -> i64
+extern fn rt_io_tcp_read_line(fd: i64) -> text?
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+
+fn env_text(key: text, default_value: text) -> text:
+    val value = rt_env_get(key) ?? ""
+    if value.len() > 0:
+        value
+    else:
+        default_value
+
+fn parse_i64_default(value: text, default_value: i64) -> i64:
+    val n = value.len()
+    if n == 0:
+        return default_value
+    var i: i64 = 0
+    var negative = false
+    if value[0] == '-':
+        negative = true
+        i = 1
+    var result: i64 = 0
+    var saw_digit = false
+    while i < n:
+        val ch = value[i]
+        if ch < '0' or ch > '9':
+            if saw_digit:
+                i = n
+            else:
+                return default_value
+        else:
+            saw_digit = true
+            result = result * 10 + (ch.ord() - '0'.ord())
+            i = i + 1
+    if not saw_digit:
+        return default_value
+    if negative:
+        return -result
+    result
+
+fn env_i64(key: text, default_value: i64) -> i64:
+    val value = env_text(key, "")
+    parse_i64_default(value, default_value)
+
+fn content_type(path: text) -> text:
+    val lower = path.lower()
+    if lower.ends_with(".html") or lower.ends_with(".htm"):
+        return "text/html; charset=utf-8"
+    if lower.ends_with(".css"):
+        return "text/css; charset=utf-8"
+    if lower.ends_with(".js"):
+        return "application/javascript; charset=utf-8"
+    if lower.ends_with(".json"):
+        return "application/json; charset=utf-8"
+    "text/plain; charset=utf-8"
+
+fn build_response(status: text, mime: text, body: text) -> text:
+    var response = "HTTP/1.1 {status}\r\n"
+    response = response + "Server: SimpleStaticPerf\r\n"
+    response = response + "Content-Type: {mime}\r\n"
+    response = response + "Content-Length: {body.len()}\r\n"
+    response = response + "Connection: close\r\n"
+    response = response + "\r\n"
+    response + body
+
+fn write_prebuilt_response(fd: i64, response: text):
+    val _written = rt_io_tcp_write_text(fd, response)
+
+fn main():
+    val addr = env_text("SIMPLE_STATIC_SERVER_ADDR", "127.0.0.1:18080")
+    val path = env_text("SIMPLE_STATIC_SERVER_FILE", "README.md")
+    val request_limit = env_i64("SIMPLE_STATIC_SERVER_REQUESTS", 512)
+    val body = if rt_file_exists(path):
+        rt_file_read_text(path)
+    else:
+        "missing fixture: {path}\n"
+    val status = if rt_file_exists(path): "200 OK" else: "404 Not Found"
+    val mime = content_type(path)
+    val response = build_response(status, mime, body)
+
+    val listener = rt_io_tcp_bind(addr)
+    if listener < 0:
+        print "[simple-static-server-error] bind {addr}"
+        return
+
+    print "[simple-static-server-ready] addr={addr} file={path} requests={request_limit}"
+    var served: i64 = 0
+    while served < request_limit:
+        val fd = rt_io_tcp_accept(listener)
+        if fd >= 0:
+            val request_line = rt_io_tcp_read_line(fd)
+            if request_line != nil:
+                write_prebuilt_response(fd, response)
+            val _closed = rt_io_tcp_close(fd)
+            served = served + 1
+
+    val _listener_closed = rt_io_tcp_close(listener)
+    print "[simple-static-server-done] served={served}"

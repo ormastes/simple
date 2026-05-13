@@ -195,6 +195,8 @@ pub(crate) fn compile_binop<M: Module>(
         BinOp::Div => {
             if is_float {
                 builder.ins().fdiv(lhs, rhs)
+            } else if lhs_signed == Some(false) {
+                builder.ins().udiv(lhs, rhs)
             } else {
                 builder.ins().sdiv(lhs, rhs)
             }
@@ -207,7 +209,11 @@ pub(crate) fn compile_binop<M: Module>(
                 let prod = builder.ins().fmul(floored, rhs);
                 builder.ins().fsub(lhs, prod)
             } else {
-                builder.ins().srem(lhs, rhs)
+                if lhs_signed == Some(false) {
+                    builder.ins().urem(lhs, rhs)
+                } else {
+                    builder.ins().srem(lhs, rhs)
+                }
             }
         }
         BinOp::BitAnd => {

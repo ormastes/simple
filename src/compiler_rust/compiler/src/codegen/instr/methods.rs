@@ -7,7 +7,7 @@ use cranelift_module::{Linkage, Module};
 use super::super::shared::platform_call_conv;
 use super::helpers::{
     adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, declare_named_bytes,
-    get_vreg_or_default,
+    get_vreg_or_default, inline_runtime_len_value,
 };
 use super::{InstrContext, InstrResult};
 use crate::hir::TypeId;
@@ -73,6 +73,9 @@ fn call_len_method<M: Module>(
     func_name: &str,
     receiver: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
+    if matches!(func_name, "rt_len" | "rt_array_len") {
+        return inline_runtime_len_value(builder, receiver);
+    }
     if let Some(&len_id) = ctx.runtime_funcs.get(func_name) {
         let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);
         let call = adapted_call(builder, len_ref, &[receiver]);

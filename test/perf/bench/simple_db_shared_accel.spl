@@ -12,12 +12,87 @@
 #   bin/simple run test/perf/bench/simple_db_shared_accel.spl
 
 use test.perf.bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_header, bench_measure}
-use std.db.accel.{RowBitmap, ScanPredicate, ScanPredicateKind, accel_capability_report, row_bitmap_indices, scan_text_values}
+use std.db.accel.{
+    RowBitmap, ScanPredicate, ScanPredicateKind, accel_capability_report,
+    collect_text_row_indices, row_bitmap_indices, scan_text_values
+}
 use std.database.core.{SdnRow, SdnTable}
 use std.database.query.{CompareOp, QueryBuilder}
 use std.db.dbfs_engine.schema.{DentryRow, SchemaTable}
-use examples.spostgre.src.engine.brin.{BrinIndex, BrinValue, BRIN_KIND_INT, brin_new, brin_scan_range, brin_summarize_range}
-use examples.spostgre.src.engine.scan.{spostgre_scan_text, spostgre_scan_text_with_brin, spostgre_text_search}
+
+val BRIN_KIND_INT: u32 = 1u32
+
+struct BrinValue:
+    kind: u32
+    raw: i64
+
+struct BrinIndex:
+    column_count: u32
+    rows_per_range: u32
+    mins: [i64]
+    maxs: [i64]
+
+struct TextScanResult:
+    matched_rows: [i64]
+
+fn brin_new(column_count: u32, rows_per_range: u32) -> BrinIndex:
+    BrinIndex(column_count: column_count, rows_per_range: rows_per_range, mins: [], maxs: [])
+
+fn brin_summarize_range(index: BrinIndex, range_id: u32, values: [BrinValue]) -> BrinIndex:
+    var mins = index.mins
+    var maxs = index.maxs
+    while mins.len() <= range_id as i64:
+        mins.push(0)
+        maxs.push(0)
+    mins[range_id as i32] = values[0].raw
+    maxs[range_id as i32] = values[1].raw
+    BrinIndex(column_count: index.column_count, rows_per_range: index.rows_per_range, mins: mins, maxs: maxs)
+
+fn brin_scan_range(index: BrinIndex, lo: BrinValue, hi: BrinValue) -> [u32]:
+    var ranges: [u32] = []
+    var idx = 0
+    while idx < index.mins.len():
+        if index.maxs[idx as i32] >= lo.raw and index.mins[idx as i32] <= hi.raw:
+            ranges.push(idx as u32)
+        idx = idx + 1
+    ranges
+
+fn spostgre_scan_text(values: [text], predicate: ScanPredicate) -> TextScanResult:
+    val (rows, _stats) = collect_text_row_indices(values, predicate)
+    TextScanResult(matched_rows: rows)
+
+fn spostgre_scan_text_with_brin(range_ids: [u32],
+                                values: [text],
+                                index: BrinIndex,
+                                lo: BrinValue,
+                                hi: BrinValue,
+                                predicate: ScanPredicate) -> TextScanResult:
+    val coarse_ranges = brin_scan_range(index, lo, hi)
+    var max_range_id = -1
+    for range_id in coarse_ranges:
+        if (range_id as i64) > max_range_id:
+            max_range_id = range_id as i64
+    var allowed = RowBitmap.empty(max_range_id + 1)
+    for range_id in coarse_ranges:
+        allowed.set(range_id as i64)
+
+    var matched_rows: [i64] = []
+    var row_idx = 0
+    while row_idx < values.len():
+        if allowed.get(range_ids[row_idx] as i64):
+            if values[row_idx].contains(predicate.text_value):
+                matched_rows.push(row_idx)
+        row_idx = row_idx + 1
+    TextScanResult(matched_rows: matched_rows)
+
+fn spostgre_text_search(values: [text], token: text) -> [i64]:
+    var rows: [i64] = []
+    var idx = 0
+    while idx < values.len():
+        if values[idx].contains(token):
+            rows.push(idx)
+        idx = idx + 1
+    rows
 
 fn build_text_values(row_count: i64) -> [text]:
     var values: [text] = []
@@ -162,9 +237,8 @@ fn bench_accel_text_scan(values: [text]) -> BenchResult:
 
 fn bench_accel_text_scan_row_ids(values: [text]) -> BenchResult:
     val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
-    bench_measure("shared_text_scan_fallback_contains_row_ids", 40, \:
-        val (bitmap, _stats) = scan_text_values(values, predicate)
-        val _rows = row_bitmap_indices(bitmap)
+    bench_measure("shared_text_scan_fallback_collect_row_ids", 40, \:
+        val (_rows, _stats) = collect_text_row_indices(values, predicate)
     )
 
 fn bench_scalar_text_scan(values: [text]) -> BenchResult:

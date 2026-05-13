@@ -2,7 +2,6 @@
 //! Dict FFI functions are in the dict module.
 
 use std::cmp::Ordering;
-use std::sync::{Mutex, OnceLock};
 
 use super::byte_kernels::{
     avx2_byte_find, avx2_byte_rfind, byte_split_ranges_for_tier, neon_byte_find, neon_byte_rfind, scalar_byte_find,
@@ -110,31 +109,15 @@ fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
     }
 }
 
-fn collection_provider_cache() -> &'static Mutex<Option<CollectionProviders>> {
-    static PROVIDERS: OnceLock<Mutex<Option<CollectionProviders>>> = OnceLock::new();
-    PROVIDERS.get_or_init(|| Mutex::new(None))
-}
-
 fn collection_providers() -> CollectionProviders {
-    let active_tier = active_simd_tier();
-    let mut guard = collection_provider_cache().lock().unwrap();
-    match *guard {
-        Some(providers) if providers.simd_tier == active_tier => providers,
-        _ => {
-            let providers = providers_for_tier(active_tier);
-            *guard = Some(providers);
-            providers
-        }
-    }
+    providers_for_tier(active_simd_tier())
 }
 
 pub(crate) fn active_collection_simd_tier() -> SimdTier {
     collection_providers().simd_tier
 }
 
-pub(crate) fn clear_collection_provider_cache() {
-    *collection_provider_cache().lock().unwrap() = None;
-}
+pub(crate) fn clear_collection_provider_cache() {}
 
 #[inline]
 fn compare_runtime_values(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
@@ -198,7 +181,7 @@ impl RuntimeString {
 /// Returns None if allocation fails.
 /// # Safety
 /// The caller must initialize the string data and hash.
-unsafe fn alloc_runtime_string(len: u64) -> Option<*mut RuntimeString> {
+pub(crate) unsafe fn alloc_runtime_string(len: u64) -> Option<*mut RuntimeString> {
     let size = std::mem::size_of::<RuntimeString>() + len as usize;
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
     let ptr = std::alloc::alloc(layout) as *mut RuntimeString;
@@ -888,6 +871,26 @@ pub extern "C" fn rt_string_new(bytes: *const u8, len: u64) -> RuntimeValue {
     }
 }
 
+pub(crate) fn rt_string_new_with_len_hash(bytes: *const u8, len: u64) -> RuntimeValue {
+    if bytes.is_null() && len > 0 {
+        return RuntimeValue::NIL;
+    }
+
+    unsafe {
+        let Some(ptr) = alloc_runtime_string(len) else {
+            return RuntimeValue::NIL;
+        };
+
+        if len > 0 {
+            let data_ptr = ptr.add(1) as *mut u8;
+            std::ptr::copy_nonoverlapping(bytes, data_ptr, len as usize);
+        }
+        (*ptr).hash = len;
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
 /// Get the length of a string in bytes
 #[no_mangle]
 pub extern "C" fn rt_string_len(string: RuntimeValue) -> i64 {
@@ -1362,6 +1365,13 @@ pub extern "C" fn rt_string_find(string: RuntimeValue, needle: RuntimeValue) -> 
     unsafe {
         let haystack = std::slice::from_raw_parts(str_data, str_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_data, needle_len as usize);
+        if needle_bytes.len() == 1 {
+            return haystack
+                .iter()
+                .position(|byte| *byte == needle_bytes[0])
+                .map(|idx| idx as i64)
+                .unwrap_or(-1);
+        }
         (collection_providers().byte_find)(haystack, needle_bytes, 0)
             .map(|idx| idx as i64)
             .unwrap_or(-1)
@@ -1397,9 +1407,91 @@ pub extern "C" fn rt_string_rfind(string: RuntimeValue, needle: RuntimeValue) ->
     unsafe {
         let haystack = std::slice::from_raw_parts(str_data, str_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_data, needle_len as usize);
+        if needle_bytes.len() == 1 {
+            return haystack
+                .iter()
+                .rposition(|byte| *byte == needle_bytes[0])
+                .map(|idx| idx as i64)
+                .unwrap_or(-1);
+        }
         (collection_providers().byte_rfind)(haystack, needle_bytes)
             .map(|idx| idx as i64)
             .unwrap_or(-1)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_str_search(haystack: RuntimeValue, needle: RuntimeValue) -> i64 {
+    rt_string_find(haystack, needle)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_str_last_index_of(haystack: RuntimeValue, needle: RuntimeValue) -> i64 {
+    rt_string_rfind(haystack, needle)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_str_equal(a: RuntimeValue, b: RuntimeValue) -> bool {
+    if a == b {
+        return true;
+    }
+
+    let a_len = rt_string_len(a);
+    let b_len = rt_string_len(b);
+    if a_len < 0 || b_len < 0 || a_len != b_len {
+        return false;
+    }
+
+    if a_len == 0 {
+        return true;
+    }
+
+    let a_data = rt_string_data(a);
+    let b_data = rt_string_data(b);
+    if a_data.is_null() || b_data.is_null() {
+        return false;
+    }
+
+    unsafe {
+        let a_bytes = std::slice::from_raw_parts(a_data, a_len as usize);
+        let b_bytes = std::slice::from_raw_parts(b_data, b_len as usize);
+        a_bytes == b_bytes
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_text_to_lower_ascii(value: RuntimeValue) -> RuntimeValue {
+    let len = rt_string_len(value);
+    if len < 0 {
+        return RuntimeValue::NIL;
+    }
+    let data = rt_string_data(value);
+    if data.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    unsafe {
+        let bytes = std::slice::from_raw_parts(data, len as usize);
+        let lowered: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+        rt_string_new(lowered.as_ptr(), lowered.len() as u64)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_text_to_upper_ascii(value: RuntimeValue) -> RuntimeValue {
+    let len = rt_string_len(value);
+    if len < 0 {
+        return RuntimeValue::NIL;
+    }
+    let data = rt_string_data(value);
+    if data.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    unsafe {
+        let bytes = std::slice::from_raw_parts(data, len as usize);
+        let uppered: Vec<u8> = bytes.iter().map(|b| b.to_ascii_uppercase()).collect();
+        rt_string_new(uppered.as_ptr(), uppered.len() as u64)
     }
 }
 
@@ -1484,6 +1576,11 @@ pub extern "C" fn rt_hash_text(string: RuntimeValue) -> i64 {
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize)).hash(&mut h);
     }
     h.finish() as i64
+}
+
+#[no_mangle]
+pub extern "C" fn rt_str_hash(string: RuntimeValue) -> i64 {
+    rt_hash_text(string)
 }
 
 /// Convert any value to a string representation

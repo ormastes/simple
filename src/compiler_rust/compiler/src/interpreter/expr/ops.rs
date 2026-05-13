@@ -79,6 +79,62 @@ fn as_f32(v: &Value) -> Result<f32, CompileError> {
     }
 }
 
+fn division_by_zero_error(message: &'static str, help: &'static str) -> CompileError {
+    let ctx = ErrorContext::new()
+        .with_code(codes::DIVISION_BY_ZERO)
+        .with_help(help)
+        .with_note("check that the divisor is not zero before the operation");
+    CompileError::semantic_with_context(message.to_string(), ctx)
+}
+
+fn fast_int_binop(op: &BinOp, left: i64, right: i64) -> Result<Option<Value>, CompileError> {
+    let value = match op {
+        BinOp::Add => Value::Int(left + right),
+        BinOp::Sub => Value::Int(left - right),
+        BinOp::Mul | BinOp::MatMul => Value::Int(left * right),
+        BinOp::Div => {
+            if right == 0 {
+                return Err(division_by_zero_error("division by zero", "cannot divide by zero"));
+            }
+            Value::Int(left / right)
+        }
+        BinOp::Mod => {
+            if right == 0 {
+                return Err(division_by_zero_error(
+                    "modulo by zero",
+                    "cannot perform modulo by zero",
+                ));
+            }
+            Value::Int(left % right)
+        }
+        BinOp::Lt => Value::Bool(left < right),
+        BinOp::Gt => Value::Bool(left > right),
+        BinOp::LtEq => Value::Bool(left <= right),
+        BinOp::GtEq => Value::Bool(left >= right),
+        BinOp::Eq | BinOp::Is => Value::Bool(left == right),
+        BinOp::NotEq => Value::Bool(left != right),
+        BinOp::Pow => {
+            if right < 0 {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("use float exponentiation for negative exponents");
+                return Err(CompileError::semantic_with_context(
+                    "invalid operation: negative exponent not supported for integers",
+                    ctx,
+                ));
+            }
+            Value::Int(left.pow(right as u32))
+        }
+        BinOp::BitAnd => Value::Int(left & right),
+        BinOp::BitOr => Value::Int(left | right),
+        BinOp::BitXor => Value::Int(left ^ right),
+        BinOp::ShiftLeft => Value::Int(left << right),
+        BinOp::ShiftRight => Value::Int(left >> right),
+        _ => return Ok(None),
+    };
+    Ok(Some(value))
+}
+
 /// Try to dispatch a binary operator to a dunder method on an Object value.
 /// Returns None if the left value is not an Object or doesn't have the method.
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
@@ -561,6 +617,12 @@ pub(super) fn eval_op_expr(
             // Helper to determine if we should use float arithmetic.
             // `use_f32` is true when both sides are f32-kind (neither is f64);
             // `use_float` covers both — true if any side is float-kind.
+            if let (Value::Int(left), Value::Int(right)) = (&left_val, &right_val) {
+                if let Some(value) = fast_int_binop(op, *left, *right)? {
+                    return Ok(Some(value));
+                }
+            }
+
             let f_kind = float_kind(&left_val, &right_val);
             let use_f32 = matches!(f_kind, Some(true));
             let use_float = f_kind.is_some();
@@ -1814,4 +1876,55 @@ fn matmul_vector_matrix(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
     }
 
     Ok(Value::array(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fast_value(op: BinOp, left: i64, right: i64) -> Value {
+        fast_int_binop(&op, left, right)
+            .expect("fast int operation should not fail")
+            .expect("operator should be handled by fast int path")
+    }
+
+    #[test]
+    fn fast_int_binop_handles_hot_arithmetic_and_bit_ops() {
+        assert_eq!(fast_value(BinOp::Add, 7, 5), Value::Int(12));
+        assert_eq!(fast_value(BinOp::Sub, 7, 5), Value::Int(2));
+        assert_eq!(fast_value(BinOp::Mul, 7, 5), Value::Int(35));
+        assert_eq!(fast_value(BinOp::MatMul, 7, 5), Value::Int(35));
+        assert_eq!(fast_value(BinOp::Div, 35, 5), Value::Int(7));
+        assert_eq!(fast_value(BinOp::Mod, 37, 5), Value::Int(2));
+        assert_eq!(fast_value(BinOp::BitAnd, 0b1100, 0b1010), Value::Int(0b1000));
+        assert_eq!(fast_value(BinOp::BitOr, 0b1100, 0b1010), Value::Int(0b1110));
+        assert_eq!(fast_value(BinOp::BitXor, 0b1100, 0b1010), Value::Int(0b0110));
+        assert_eq!(fast_value(BinOp::ShiftLeft, 3, 4), Value::Int(48));
+        assert_eq!(fast_value(BinOp::ShiftRight, 48, 4), Value::Int(3));
+    }
+
+    #[test]
+    fn fast_int_binop_handles_hot_comparisons() {
+        assert_eq!(fast_value(BinOp::Lt, 4, 9), Value::Bool(true));
+        assert_eq!(fast_value(BinOp::Gt, 4, 9), Value::Bool(false));
+        assert_eq!(fast_value(BinOp::LtEq, 4, 4), Value::Bool(true));
+        assert_eq!(fast_value(BinOp::GtEq, 4, 5), Value::Bool(false));
+        assert_eq!(fast_value(BinOp::Eq, 7, 7), Value::Bool(true));
+        assert_eq!(fast_value(BinOp::Is, 7, 8), Value::Bool(false));
+        assert_eq!(fast_value(BinOp::NotEq, 7, 8), Value::Bool(true));
+    }
+
+    #[test]
+    fn fast_int_binop_preserves_error_paths() {
+        assert!(fast_int_binop(&BinOp::Div, 1, 0).is_err());
+        assert!(fast_int_binop(&BinOp::Mod, 1, 0).is_err());
+        assert!(fast_int_binop(&BinOp::Pow, 2, -1).is_err());
+        assert_eq!(fast_value(BinOp::Pow, 2, 10), Value::Int(1024));
+    }
+
+    #[test]
+    fn fast_int_binop_declines_non_integer_special_forms() {
+        assert!(matches!(fast_int_binop(&BinOp::In, 1, 2), Ok(None)));
+        assert!(matches!(fast_int_binop(&BinOp::NotIn, 1, 2), Ok(None)));
+    }
 }

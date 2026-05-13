@@ -1,0 +1,140 @@
+# test/perf/bench/durable_wal_fsync.spl — Simple write-at + fsync durability probe.
+#
+# Measures the Simple runtime's path-based offset write plus rt_file_fsync path.
+# This is a real host filesystem fsync fence, not raw NVMe/FUA and not a
+# crash-recovery proof.
+#
+# Run: bin/simple run test/perf/bench/durable_wal_fsync.spl
+
+use test.perf.bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_header, bench_now_ns}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_write_text_at, file_fsync}
+
+fn _payload_256() -> text:
+    var payload = ""
+    var i: i64 = 0
+    while i < 256:
+        payload = payload + "x"
+        i = i + 1
+    payload
+
+fn _sort(samples: [i64]) -> [i64]:
+    var result: [i64] = samples
+    val n: i64 = result.len() as i64
+    var i: i64 = 1
+    while i < n:
+        val key: i64 = result[i as i32]
+        var j: i64 = i - 1
+        while j >= 0 and result[j as i32] > key:
+            result[(j + 1) as i32] = result[j as i32]
+            j = j - 1
+        result[(j + 1) as i32] = key
+        i = i + 1
+    result
+
+fn _pct(sorted: [i64], num: i64, den: i64) -> i64:
+    val n: i64 = sorted.len() as i64
+    if n == 0:
+        return 0
+    var idx: i64 = (n * num) / den
+    if idx >= n:
+        idx = n - 1
+    sorted[idx as i32]
+
+fn _result(label: text, iters: i64, samples: [i64]) -> BenchResult:
+    val sorted = _sort(samples)
+    val n: i64 = sorted.len() as i64
+    val mn: i64 = if n > 0: sorted[0] else: 0
+    val mx: i64 = if n > 0: sorted[(n - 1) as i32] else: 0
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        total = total + sorted[i as i32]
+        i = i + 1
+    val tput: i64 = if total > 0: (iters * 1000000) / total else: 0
+    BenchResult(
+        label: label,
+        iters: iters,
+        p50_ns: _pct(sorted, 50, 100),
+        p99_ns: _pct(sorted, 99, 100),
+        p99_9_ns: _pct(sorted, 999, 1000),
+        min_ns: mn,
+        max_ns: mx,
+        total_ns: total,
+        throughput_ops_per_s: tput,
+    )
+
+fn bench_fsync_each(path: text) -> BenchResult:
+    val iters: i64 = 32
+    val payload = _payload_256()
+    file_delete(path)
+    var samples: [i64] = []
+    var offset: i64 = 0
+    var i: i64 = 0
+    while i < iters:
+        val t0 = bench_now_ns()
+        val wrote = file_write_text_at(path, offset, payload)
+        val synced = file_fsync(path)
+        val t1 = bench_now_ns()
+        if wrote < 0 or not synced:
+            print "ERROR: fsync-each write failed"
+            return _result("durable_simple_write_256B_fsync_each_x32_error", 0, [])
+        samples.push(t1 - t0)
+        offset = offset + 256
+        i = i + 1
+    _result("durable_simple_write_256B_fsync_each_x32", iters, samples)
+
+fn bench_group_fsync(path: text) -> BenchResult:
+    val groups: i64 = 16
+    val group_size: i64 = 10
+    val payload = _payload_256()
+    file_delete(path)
+    var samples: [i64] = []
+    var offset: i64 = 0
+    var g: i64 = 0
+    while g < groups:
+        val t0 = bench_now_ns()
+        var j: i64 = 0
+        while j < group_size:
+            val wrote = file_write_text_at(path, offset, payload)
+            if wrote < 0:
+                print "ERROR: group write failed"
+                return _result("durable_simple_group_10x256B_fsync_x16_error", 0, [])
+            offset = offset + 256
+            j = j + 1
+        val synced = file_fsync(path)
+        val t1 = bench_now_ns()
+        if not synced:
+            print "ERROR: group fsync failed"
+            return _result("durable_simple_group_10x256B_fsync_x16_error", 0, [])
+        samples.push(t1 - t0)
+        g = g + 1
+    _result("durable_simple_group_10x256B_fsync_x16", groups, samples)
+
+fn print_durable_result(r: BenchResult):
+    bench_print(r)
+    val ops_per_s = if r.total_ns > 0: (r.iters * 1000000000) / r.total_ns else: 0
+    val avg_us = if r.iters > 0: (r.total_ns / r.iters) / 1000 else: 0
+    print "  avg_us={avg_us}  ops/s={ops_per_s}"
+
+fn main():
+    val path = "/tmp/simple_durable_wal_fsync_bench.spl.log"
+    print "=== Simple durable WAL fsync benchmark ==="
+    print "DISCLAIMER: host filesystem write-at+fsync probe, not raw NVMe/FUA or crash-recovery proof."
+    print "path={path}"
+    print ""
+
+    val r1 = bench_fsync_each(path)
+    val r2 = bench_group_fsync(path)
+
+    print_durable_result(r1)
+    print ""
+    print_durable_result(r2)
+
+    print ""
+    print "=== CSV ==="
+    print bench_csv_header()
+    print bench_csv(r1)
+    print bench_csv(r2)
+
+    val _cleanup = file_delete(path)
+    print ""

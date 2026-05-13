@@ -547,6 +547,26 @@ pub fn rt_io_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+pub fn rt_io_tcp_read_exact_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let size = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(4096).max(0) as usize;
+    let mut buf = vec![0u8; size];
+    match with_tcp_stream_mut(handle, |stream| stream.read_exact(&mut buf)) {
+        Ok(()) => Ok(Value::Array(Arc::new(
+            buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
+        ))),
+        Err(_) => Ok(Value::Array(Arc::new(Vec::new()))),
+    }
+}
+
+pub fn rt_io_tcp_read_exact_len_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let bytes = rt_io_tcp_read_exact_interp(args)?;
+    match bytes {
+        Value::Array(items) => Ok(Value::Int(items.len() as i64)),
+        _ => Ok(Value::Int(-1)),
+    }
+}
+
 pub fn rt_io_tcp_read_line_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     let mut out: Vec<u8> = Vec::new();
@@ -624,6 +644,24 @@ pub fn rt_io_tcp_write_all_interp(args: &[Value]) -> Result<Value, CompileError>
     match with_tcp_stream_mut(handle, |stream| stream.write_all(&data)) {
         Ok(()) => Ok(Value::Bool(true)),
         Err(_) => Ok(Value::Bool(false)),
+    }
+}
+
+pub fn rt_io_tcp_write_text_read_exact_len_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let text = match args.get(1) {
+        Some(Value::Str(s)) => s.as_bytes().to_vec(),
+        _ => Vec::new(),
+    };
+    let text_len = text.len();
+    match with_tcp_stream_mut(handle, |stream| {
+        stream.write_all(&text)?;
+        let mut buffer = vec![0u8; text_len];
+        stream.read_exact(&mut buffer)?;
+        Ok(text_len)
+    }) {
+        Ok(n) => Ok(Value::Int(n as i64)),
+        Err(_) => Ok(Value::Int(-1)),
     }
 }
 

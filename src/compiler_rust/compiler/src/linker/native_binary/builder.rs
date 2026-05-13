@@ -90,12 +90,15 @@ impl NativeBinaryBuilder {
             .map_err(|e| LinkerError::LinkFailed(format!("failed to write object file: {}", e)))?;
 
         let mut bootstrap_stubs: Vec<PathBuf> = Vec::new();
+        let runtime_free_object = !self.object_has_undefined_symbols(&obj_path);
         let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")
             || matches!(self.options.target.os, TargetOS::FreeBSD);
         let require_crypto = false;
         let ret_insn = asm_ret_instruction(&self.options.target);
 
-        if !self.options.shared {
+        if !self.options.shared && runtime_free_object && self.supports_runtime_free_start_shim() {
+            self.build_runtime_free_start_shim(&temp_path, &mut bootstrap_stubs)?;
+        } else if !self.options.shared {
             self.build_main_shim(&temp_path, &mut bootstrap_stubs)?;
         }
 

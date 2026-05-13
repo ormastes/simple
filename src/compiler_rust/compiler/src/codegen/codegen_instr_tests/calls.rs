@@ -600,6 +600,47 @@ fn codegen_inline_bytes_u8_at_call_accepts_narrow_index() {
 }
 
 #[test]
+fn codegen_inline_typed_bytes_u8_unchecked_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_typed_bytes_u8_unchecked", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_typed_bytes_u8_unchecked"),
+            args: vec![array, index],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_typed_bytes_u8_unchecked"));
+}
+
+#[test]
+fn codegen_inline_adler_reduce_does_not_emit_function_symbol() {
+    let object = aot_object("inline_adler_reduce", |f| {
+        let value = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt {
+            dest: value,
+            value: 131_071,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::Pure("_adler_reduce".to_string()),
+            args: vec![value],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "_adler_reduce"));
+}
+
+#[test]
 fn codegen_inline_bytes_u8_set_call_accepts_narrow_value() {
     assert!(aot_compiles("inline_bytes_u8_set", |f| {
         let array = f.new_vreg();
@@ -661,6 +702,44 @@ fn codegen_inline_rt_len_does_not_emit_runtime_symbol() {
     });
 
     assert!(!object_relocates_to_symbol(&object, "rt_len"));
+}
+
+#[test]
+fn codegen_inline_rt_array_len_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_rt_array_len", |f| {
+        let array = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_array_len"),
+            args: vec![array],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_array_len"));
+}
+
+#[test]
+fn codegen_inline_len_method_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_len_method", |f| {
+        let array = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(dest),
+            receiver: array,
+            func_name: "len".to_string(),
+            args: vec![],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_len"));
+    assert!(!object_relocates_to_symbol(&object, "rt_array_len"));
 }
 
 #[test]
@@ -748,6 +827,26 @@ fn codegen_inline_typed_bytes_u64_le_unchecked_does_not_emit_runtime_symbol() {
     });
 
     assert!(!object_relocates_to_symbol(&object, "rt_typed_bytes_u64_le_unchecked"));
+}
+
+#[test]
+fn codegen_inline_typed_bytes_u32_le_at_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_typed_bytes_u32_le_at", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_typed_bytes_u32_le_at"),
+            args: vec![array, index],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_typed_bytes_u32_le_at"));
 }
 
 #[test]

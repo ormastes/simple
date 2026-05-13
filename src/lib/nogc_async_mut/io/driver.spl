@@ -59,10 +59,10 @@ extern fn rt_driver_destroy(handle: i64)
 extern fn rt_driver_submit_accept(handle: i64, listen_fd: i64) -> i64
 extern fn rt_driver_submit_connect(handle: i64, fd: i64, addr: text, port: i64) -> i64
 extern fn rt_driver_submit_recv(handle: i64, fd: i64, buf_size: i64) -> i64
-extern fn rt_driver_submit_send(handle: i64, fd: i64, data: text, len: i64) -> i64
+extern fn rt_driver_submit_send(handle: i64, fd: i64, data: text) -> i64
 extern fn rt_driver_submit_sendfile(handle: i64, sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64
 extern fn rt_driver_submit_read(handle: i64, fd: i64, buf_size: i64, offset: i64) -> i64
-extern fn rt_driver_submit_write(handle: i64, fd: i64, data: text, len: i64, offset: i64) -> i64
+extern fn rt_driver_submit_write(handle: i64, fd: i64, data: text, offset: i64) -> i64
 extern fn rt_driver_submit_open(handle: i64, path: text, flags: i64, mode: i64) -> i64
 extern fn rt_driver_submit_close(handle: i64, fd: i64) -> i64
 extern fn rt_driver_submit_fsync(handle: i64, fd: i64) -> i64
@@ -120,61 +120,61 @@ class IoDriver:
 
     # ---- Network Operations ----
 
-    fn submit_accept(listen_fd: i64) -> i64:
+    fn submit_accept(self, listen_fd: i64) -> i64:
         """Submit async accept on a listening socket. Returns op_id."""
         rt_driver_submit_accept(self.handle, listen_fd)
 
-    fn submit_connect(fd: i64, addr: text, port: i64) -> i64:
+    fn submit_connect(self, fd: i64, addr: text, port: i64) -> i64:
         """Submit async connect. Returns op_id."""
         rt_driver_submit_connect(self.handle, fd, addr, port)
 
-    fn submit_recv(fd: i64, buf_size: i64) -> i64:
+    fn submit_recv(self, fd: i64, buf_size: i64) -> i64:
         """Submit async receive. Returns op_id."""
         rt_driver_submit_recv(self.handle, fd, buf_size)
 
-    fn submit_send(fd: i64, data: text) -> i64:
+    fn submit_send(self, fd: i64, data: text) -> i64:
         """Submit async send. Returns op_id."""
-        rt_driver_submit_send(self.handle, fd, data, data.len())
+        rt_driver_submit_send(self.handle, fd, data)
 
-    fn submit_sendfile(sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
+    fn submit_sendfile(self, sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
         """Submit async sendfile (zero-copy file-to-socket). Returns op_id."""
         rt_driver_submit_sendfile(self.handle, sock_fd, file_fd, offset, len)
 
     # ---- File I/O Operations ----
 
-    fn submit_read(fd: i64, buf_size: i64, offset: i64) -> i64:
+    fn submit_read(self, fd: i64, buf_size: i64, offset: i64) -> i64:
         """Submit async file read. Returns op_id."""
         rt_driver_submit_read(self.handle, fd, buf_size, offset)
 
-    fn submit_write(fd: i64, data: text, offset: i64) -> i64:
+    fn submit_write(self, fd: i64, data: text, offset: i64) -> i64:
         """Submit async file write. Returns op_id."""
-        rt_driver_submit_write(self.handle, fd, data, data.len(), offset)
+        rt_driver_submit_write(self.handle, fd, data, offset)
 
-    fn submit_open(path: text, flags: i64, mode: i64) -> i64:
+    fn submit_open(self, path: text, flags: i64, mode: i64) -> i64:
         """Submit async file open. Returns op_id."""
         rt_driver_submit_open(self.handle, path, flags, mode)
 
-    fn submit_close(fd: i64) -> i64:
+    fn submit_close(self, fd: i64) -> i64:
         """Submit async file close. Returns op_id."""
         rt_driver_submit_close(self.handle, fd)
 
-    fn submit_fsync(fd: i64) -> i64:
+    fn submit_fsync(self, fd: i64) -> i64:
         """Submit async fsync. Returns op_id."""
         rt_driver_submit_fsync(self.handle, fd)
 
     # ---- Timer ----
 
-    fn submit_timeout(timeout_ms: i64) -> i64:
+    fn submit_timeout(self, timeout_ms: i64) -> i64:
         """Submit a timeout. Completes after timeout_ms milliseconds. Returns op_id."""
         rt_driver_submit_timeout(self.handle, timeout_ms)
 
     # ---- Batch Control ----
 
-    fn flush() -> i64:
+    fn flush(self) -> i64:
         """Flush all queued operations to the kernel. Returns count submitted."""
         rt_driver_flush(self.handle)
 
-    fn poll(max: i64, timeout_ms: i64) -> [Completion]:
+    fn poll(self, max: i64, timeout_ms: i64) -> [Completion]:
         """Poll for completions.
 
         Args:
@@ -197,7 +197,28 @@ class IoDriver:
             i = i + 1
         result
 
-    fn poll_data(index: i64) -> text:
+    fn poll_count(self, max: i64, timeout_ms: i64) -> i64:
+        """Poll for completions and keep them in the driver snapshot.
+
+        This avoids allocating a `[Completion]` array on hot worker paths.
+        Call `poll_id`, `poll_result`, `poll_flags`, or `poll_data` with
+        indices from `0 .. count`.
+        """
+        rt_driver_poll(self.handle, max, timeout_ms)
+
+    fn poll_id(self, index: i64) -> i64:
+        """Get operation id for a completion by poll index."""
+        rt_driver_poll_id(self.handle, index)
+
+    fn poll_result(self, index: i64) -> i64:
+        """Get result for a completion by poll index."""
+        rt_driver_poll_result(self.handle, index)
+
+    fn poll_flags(self, index: i64) -> i64:
+        """Get flags for a completion by poll index."""
+        rt_driver_poll_flags(self.handle, index)
+
+    fn poll_data(self, index: i64) -> text:
         """Get recv/read data for a completion by poll index.
 
         Must be called before the next poll() — data is freed on next poll.
@@ -205,31 +226,31 @@ class IoDriver:
         """
         rt_driver_poll_data(self.handle, index)
 
-    fn poll_data_len(index: i64) -> i64:
+    fn poll_data_len(self, index: i64) -> i64:
         """Get the byte length of recv/read data for a completion."""
         rt_driver_poll_data_len(self.handle, index)
 
     # ---- Cancel ----
 
-    fn cancel(op_id: i64) -> bool:
+    fn cancel(self, op_id: i64) -> bool:
         """Cancel a pending operation. Returns true if cancellation submitted."""
         rt_driver_cancel(self.handle, op_id)
 
     # ---- Query ----
 
-    fn backend_name() -> text:
+    fn backend_name(self) -> text:
         """Return backend name: 'io_uring', 'epoll', 'kqueue', or 'iocp'."""
         rt_driver_backend_name(self.handle)
 
-    fn supports_sendfile() -> bool:
+    fn supports_sendfile(self) -> bool:
         """Check if backend supports zero-copy sendfile."""
         rt_driver_supports_sendfile(self.handle)
 
-    fn supports_zero_copy() -> bool:
+    fn supports_zero_copy(self) -> bool:
         """Check if backend supports zero-copy send."""
         rt_driver_supports_zero_copy(self.handle)
 
-    fn net_capabilities() -> NetBackendCapabilities:
+    fn net_capabilities(self) -> NetBackendCapabilities:
         """Return network acceleration capabilities for this driver."""
         net_backend_capabilities(
             self.backend_name(),

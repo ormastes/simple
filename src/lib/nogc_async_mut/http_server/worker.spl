@@ -179,12 +179,13 @@ class Worker:
                     self.draining = true
 
             self.driver.flush()
-            val completions = self.driver.poll(64, 10)
+            val completion_count = self.driver.poll_count(64, 10)
             val now = rt_time_now_ms()
 
-            for completion in completions:
-                val op_id = completion.id
-                val result = completion.result
+            var completion_index = 0
+            while completion_index < completion_count:
+                val op_id = self.driver.poll_id(completion_index)
+                val result = self.driver.poll_result(completion_index)
                 if op_id == self.accept_op_id:
                     if self.draining:
                         if result >= 0:
@@ -192,7 +193,8 @@ class Worker:
                     else:
                         self.handle_accept(result, now)
                 else:
-                    self.handle_completion(op_id, result, now)
+                    self.handle_completion(op_id, result, completion_index, now)
+                completion_index = completion_index + 1
 
             self.reap_expired(now)
 
@@ -237,7 +239,7 @@ class Worker:
     # I/O Completions
     # ========================================================================
 
-    me handle_completion(op_id: i64, result: i64, now: i64):
+    me handle_completion(op_id: i64, result: i64, completion_index: i64, now: i64):
         """Handle a non-accept I/O completion.
 
         Uses op_to_fd/op_type maps to dispatch to the correct connection.
@@ -253,6 +255,8 @@ class Worker:
         self.op_type.remove(op_id)
 
         if result < 0:
+            if typ == OP_OPEN_SENDFILE:
+                self.sendfile_pending.remove(fd)
             if typ == OP_SENDFILE:
                 val open_file = self.sendfile_open_files.get(fd)
                 if open_file.?:
@@ -266,17 +270,13 @@ class Worker:
                 # EOF — peer closed
                 self.close_connection(fd)
             else:
-                val data = self.driver.poll_data(op_id)
+                val data = self.driver.poll_data(completion_index)
                 self.handle_recv(fd, data, now)
 
         elif typ == OP_SEND:
             # Check if there's a pending sendfile for this fd
-            val pending = self.sendfile_pending.get(fd)
-            if pending.?:
-                val file_path = pending.0
-                val offset = pending.1
-                val length = pending.2
-                self.sendfile_pending.remove(fd)
+            val file_path = worker_sendfile_open_path_for_pending(self.sendfile_pending, fd)
+            if file_path.len() > 0:
                 val open_op = self.driver.submit_open(file_path, 0, 0)
                 self.op_to_fd[open_op] = fd
                 self.op_type[open_op] = OP_OPEN_SENDFILE
@@ -291,6 +291,7 @@ class Worker:
                 return
             val offset = pending.1
             val length = pending.2
+            self.sendfile_pending.remove(fd)
             self.sendfile_open_files[fd] = result
             val sf_op = self.driver.submit_sendfile(fd, result, offset, length)
             self.op_to_fd[sf_op] = fd
@@ -537,3 +538,11 @@ fn worker_static_file_fallback_response(resp: HttpResponseData) -> HttpResponseD
         body_length: 0,
         chunked: resp.chunked
     )
+
+fn worker_sendfile_open_path_for_pending(pending: Dict<i64, (text, i64, i64)>, fd: i64) -> text:
+    """Return the path to open after headers are sent without consuming state."""
+    val entry = pending.get(fd)
+    if entry.?:
+        entry.0
+    else:
+        ""

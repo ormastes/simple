@@ -10,14 +10,120 @@
 //! - Remove: Delete files
 //! - Rename/Move: Move or rename files
 
-use crate::value::collections::{rt_array_new, rt_array_push, rt_string_data, rt_string_len, rt_string_new};
-use crate::value::RuntimeValue;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::Path;
+use crate::value::collections::{
+    alloc_runtime_string, rt_array_new, rt_array_push, rt_byte_array_new, rt_string_data, rt_string_len, rt_string_new,
+    rt_string_new_with_len_hash, RuntimeArray,
+};
+use crate::value::{HeapHeader, RuntimeValue};
+use memmap2::MmapOptions;
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
-fn tagged_text_to_string(value: i64) -> Option<String> {
+struct WriteAtCache {
+    path: String,
+    file: File,
+    position: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+struct ReadTextCache {
+    path: String,
+    stamp: FileStamp,
+    value: RuntimeValue,
+}
+
+struct MmapLenCache {
+    path: String,
+    stamp: FileStamp,
+    len: i64,
+}
+
+thread_local! {
+    static WRITE_AT_CACHE: RefCell<Option<WriteAtCache>> = const { RefCell::new(None) };
+}
+
+fn read_text_cache() -> &'static Mutex<Option<ReadTextCache>> {
+    static CACHE: OnceLock<Mutex<Option<ReadTextCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn mmap_len_cache() -> &'static Mutex<Option<MmapLenCache>> {
+    static CACHE: OnceLock<Mutex<Option<MmapLenCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+#[cfg(unix)]
+fn write_all_cached_at(file: &File, data: &[u8], offset: usize, sequential: bool) -> bool {
+    let fd = file.as_raw_fd();
+    let mut written = 0usize;
+    while written < data.len() {
+        let ptr = unsafe { data.as_ptr().add(written) } as *const libc::c_void;
+        let len = data.len() - written;
+        let rc = if sequential {
+            unsafe { libc::write(fd, ptr, len) }
+        } else {
+            unsafe { libc::pwrite(fd, ptr, len, (offset + written) as libc::off_t) }
+        };
+        if rc <= 0 {
+            return false;
+        }
+        written += rc as usize;
+    }
+    true
+}
+
+#[cfg(not(unix))]
+fn write_all_cached_at(file: &mut File, data: &[u8], offset: usize, sequential: bool) -> bool {
+    if !sequential && file.seek(SeekFrom::Start(offset as u64)).is_err() {
+        return false;
+    }
+    file.write_all(data).is_ok()
+}
+
+fn invalidate_file_caches(path: &str) {
+    WRITE_AT_CACHE.with(|cache| {
+        let mut guard = cache.borrow_mut();
+        if guard.as_ref().map(|cached| cached.path.as_str()) == Some(path) {
+            *guard = None;
+        }
+    });
+    invalidate_read_mmap_caches(path);
+}
+
+fn invalidate_read_mmap_caches(path: &str) {
+    if let Ok(mut guard) = read_text_cache().lock() {
+        if guard.as_ref().map(|cached| cached.path.as_str()) == Some(path) {
+            *guard = None;
+        }
+    }
+    if let Ok(mut guard) = mmap_len_cache().lock() {
+        if guard.as_ref().map(|cached| cached.path.as_str()) == Some(path) {
+            *guard = None;
+        }
+    }
+}
+
+fn tagged_text_to_bytes(value: i64) -> Option<&'static [u8]> {
     let text = RuntimeValue::from_raw(value as u64);
     let len = rt_string_len(text);
     if len < 0 {
@@ -27,14 +133,46 @@ fn tagged_text_to_string(value: i64) -> Option<String> {
     if data.is_null() {
         return None;
     }
-    unsafe {
-        let slice = std::slice::from_raw_parts(data, len as usize);
-        Some(String::from_utf8_lossy(slice).to_string())
+    unsafe { Some(std::slice::from_raw_parts(data, len as usize)) }
+}
+
+fn tagged_text_to_str(value: i64) -> Option<&'static str> {
+    std::str::from_utf8(tagged_text_to_bytes(value)?).ok()
+}
+
+unsafe fn path_from_raw_or_tagged(path_ptr: *const u8, path_len: u64) -> Option<&'static str> {
+    if path_len == 0 {
+        let tagged = path_ptr as i64;
+        if RuntimeValue::from_raw(tagged as u64).is_heap() {
+            return tagged_text_to_str(tagged);
+        }
     }
+    if path_ptr.is_null() {
+        return None;
+    }
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    std::str::from_utf8(path_bytes).ok()
 }
 
 fn string_to_tagged_text(value: &str) -> i64 {
     rt_string_new(value.as_ptr(), value.len() as u64).to_raw() as i64
+}
+
+pub(crate) unsafe fn bytes_to_runtime_array(bytes: &[u8]) -> RuntimeValue {
+    if bytes.is_empty() {
+        return rt_byte_array_new(0);
+    }
+    let array_handle = rt_byte_array_new(bytes.len() as u64);
+    if array_handle.is_nil() {
+        return RuntimeValue::NIL;
+    }
+    let arr = array_handle.as_heap_ptr() as *mut RuntimeArray;
+    if arr.is_null() || (*arr).data.is_null() {
+        return RuntimeValue::NIL;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), (*arr).data as *mut u8, bytes.len());
+    (*arr).len = bytes.len() as u64;
+    array_handle
 }
 
 /// Normalize/canonicalize a file path
@@ -92,16 +230,52 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
         Err(_) => return RuntimeValue::NIL,
     };
 
-    match std::fs::read_to_string(path_str) {
-        Ok(content) => {
-            // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
-            let content = if content.contains('\r') {
-                content.replace('\r', "")
-            } else {
-                content
+    if let Ok(guard) = read_text_cache().lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.path == path_str {
+                return cached.value;
+            }
+        }
+    }
+    let path = Path::new(path_str);
+    let stamp = match file_stamp(path) {
+        Some(stamp) => stamp,
+        None => return RuntimeValue::NIL,
+    };
+
+    match File::open(path) {
+        Ok(mut file) => {
+            let len = stamp.len;
+            let Some(ptr) = alloc_runtime_string(len) else {
+                return RuntimeValue::NIL;
             };
-            let bytes = content.as_bytes();
-            rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+            let data_ptr = ptr.add(1) as *mut u8;
+            let buf = std::slice::from_raw_parts_mut(data_ptr, len as usize);
+            if file.read_exact(buf).is_err() || std::str::from_utf8(buf).is_err() {
+                return RuntimeValue::NIL;
+            }
+            if buf.contains(&b'\r') {
+                let normalized: Vec<u8> = buf.iter().copied().filter(|byte| *byte != b'\r').collect();
+                let value = rt_string_new_with_len_hash(normalized.as_ptr(), normalized.len() as u64);
+                if let Ok(mut guard) = read_text_cache().lock() {
+                    *guard = Some(ReadTextCache {
+                        path: path_str.to_string(),
+                        stamp,
+                        value,
+                    });
+                }
+                return value;
+            }
+            (*ptr).hash = len;
+            let value = RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader);
+            if let Ok(mut guard) = read_text_cache().lock() {
+                *guard = Some(ReadTextCache {
+                    path: path_str.to_string(),
+                    stamp,
+                    value,
+                });
+            }
+            value
         }
         Err(_) => RuntimeValue::NIL,
     }
@@ -149,7 +323,27 @@ pub unsafe extern "C" fn rt_file_write_text(
         Err(_) => return false,
     };
 
+    invalidate_file_caches(path_str);
     std::fs::write(path_str, content_str).is_ok()
+}
+
+/// Synchronize file contents and metadata with durable storage.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_fsync(path_ptr: *const u8, path_len: u64) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    match OpenOptions::new().read(true).open(Path::new(path_str)) {
+        Ok(file) => file.sync_all().is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Copy file from src to dest
@@ -187,6 +381,7 @@ pub unsafe extern "C" fn rt_file_remove(path_ptr: *const u8, path_len: u64) -> b
         Err(_) => return false,
     };
 
+    invalidate_file_caches(path_str);
     std::fs::remove_file(path_str).is_ok()
 }
 
@@ -251,69 +446,248 @@ pub extern "C" fn rt_file_unlock(_handle: i64) -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_file_mmap_read_text(path: i64) -> i64 {
-    match tagged_text_to_string(path) {
-        Some(path) => match std::fs::read_to_string(path) {
-            Ok(content) => string_to_tagged_text(&content),
-            Err(_) => RuntimeValue::NIL.to_raw() as i64,
+pub unsafe extern "C" fn rt_file_mmap_read_text(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    let path = match path_from_raw_or_tagged(path_ptr, path_len) {
+        Some(path) => path,
+        None => return RuntimeValue::NIL,
+    };
+    match std::fs::File::open(Path::new(path)) {
+        Ok(file) => match MmapOptions::new().map(&file) {
+            Ok(map) => match std::str::from_utf8(&map) {
+                Ok(content) => rt_string_new_with_len_hash(content.as_ptr(), content.len() as u64),
+                Err(_) => {
+                    let content = String::from_utf8_lossy(&map);
+                    rt_string_new_with_len_hash(content.as_ptr(), content.len() as u64)
+                }
+            },
+            Err(_) => RuntimeValue::NIL,
         },
-        None => RuntimeValue::NIL.to_raw() as i64,
+        Err(_) => RuntimeValue::NIL,
     }
 }
 
 #[no_mangle]
-pub extern "C" fn rt_file_mmap_read_bytes(path: i64) -> RuntimeValue {
-    let bytes = match tagged_text_to_string(path).and_then(|path| std::fs::read(path).ok()) {
-        Some(bytes) => bytes,
+pub unsafe extern "C" fn rt_file_mmap_len(path_ptr: *const u8, path_len: u64) -> i64 {
+    let path = match path_from_raw_or_tagged(path_ptr, path_len) {
+        Some(path) => path,
+        None => return -1,
+    };
+    if let Ok(guard) = mmap_len_cache().lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.path == path {
+                return cached.len;
+            }
+        }
+    }
+    let path_ref = Path::new(path);
+    let stamp = match file_stamp(path_ref) {
+        Some(stamp) => stamp,
+        None => return -1,
+    };
+    let file = match std::fs::File::open(path_ref) {
+        Ok(file) => file,
+        Err(_) => return -1,
+    };
+    match MmapOptions::new().map(&file) {
+        Ok(map) => {
+            let len = map.len() as i64;
+            if let Ok(mut guard) = mmap_len_cache().lock() {
+                *guard = Some(MmapLenCache {
+                    path: path.to_string(),
+                    stamp,
+                    len,
+                });
+            }
+            len
+        }
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_mmap_read_text_rv(path: RuntimeValue) -> RuntimeValue {
+    if path.is_nil() || path.0 == 0 {
+        return RuntimeValue::NIL;
+    }
+    let len = rt_string_len(path);
+    let ptr = rt_string_data(path);
+    if ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+    rt_file_mmap_read_text(ptr, len as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_mmap_read_bytes(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    let path = match path_from_raw_or_tagged(path_ptr, path_len) {
+        Some(path) => path,
         None => return RuntimeValue::NIL,
     };
-    let arr = rt_array_new(0);
-    for byte in bytes {
-        rt_array_push(arr, RuntimeValue::from_int(byte as i64));
+    let bytes = match std::fs::read(Path::new(path)) {
+        Ok(bytes) => bytes,
+        Err(_) => return RuntimeValue::NIL,
+    };
+    bytes_to_runtime_array(&bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_mmap_read_bytes_rv(path: RuntimeValue) -> RuntimeValue {
+    if path.is_nil() || path.0 == 0 {
+        return RuntimeValue::NIL;
     }
-    arr
+    let len = rt_string_len(path);
+    let ptr = rt_string_data(path);
+    if ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+    rt_file_mmap_read_bytes(ptr, len as u64)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_file_read_text_at(path: i64, offset: i64, size: i64) -> i64 {
-    let Some(path) = tagged_text_to_string(path) else {
+    let Some(path) = tagged_text_to_str(path) else {
         return RuntimeValue::NIL.to_raw() as i64;
     };
-    let Ok(content) = std::fs::read(path) else {
+    if size <= 0 {
+        return string_to_tagged_text("");
+    }
+    let Ok(mut file) = std::fs::File::open(Path::new(path)) else {
         return RuntimeValue::NIL.to_raw() as i64;
     };
     let start = offset.max(0) as usize;
-    if start >= content.len() {
-        return string_to_tagged_text("");
+    if file.seek(SeekFrom::Start(start as u64)).is_err() {
+        return RuntimeValue::NIL.to_raw() as i64;
     }
-    let end = start.saturating_add(size.max(0) as usize).min(content.len());
-    let slice = &content[start..end];
-    string_to_tagged_text(&String::from_utf8_lossy(slice))
+    let mut buf = vec![0; size as usize];
+    match file.read(&mut buf) {
+        Ok(read_len) => {
+            buf.truncate(read_len);
+            string_to_tagged_text(&String::from_utf8_lossy(&buf))
+        }
+        Err(_) => RuntimeValue::NIL.to_raw() as i64,
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn rt_file_write_text_at(path: i64, offset: i64, data: i64) -> i64 {
-    let Some(path) = tagged_text_to_string(path) else {
+    let Some(path) = tagged_text_to_str(path) else {
         return -1;
     };
-    let Some(data) = tagged_text_to_string(data) else {
+    let Some(data_bytes) = tagged_text_to_bytes(data) else {
         return -1;
     };
-    let mut bytes = std::fs::read(&path).unwrap_or_default();
+    invalidate_read_mmap_caches(path);
     let start = offset.max(0) as usize;
-    if bytes.len() < start {
-        bytes.resize(start, 0);
+    WRITE_AT_CACHE.with(|cache| {
+        let mut guard = cache.borrow_mut();
+        if guard.as_ref().map(|cached| cached.path.as_str()) != Some(path) {
+            let file = match OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(Path::new(path))
+            {
+                Ok(file) => file,
+                Err(_) => return -1,
+            };
+            *guard = Some(WriteAtCache {
+                path: path.to_string(),
+                file,
+                position: 0,
+            });
+        }
+        let Some(cached) = guard.as_mut() else {
+            return -1;
+        };
+        let sequential = cached.position == start;
+        #[cfg(unix)]
+        let wrote = write_all_cached_at(&cached.file, data_bytes, start, sequential);
+        #[cfg(not(unix))]
+        let wrote = write_all_cached_at(&mut cached.file, data_bytes, start, sequential);
+        if wrote {
+            cached.position = start + data_bytes.len();
+            data_bytes.len() as i64
+        } else {
+            -1
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_file_write_text_at_cached(offset: i64, data: i64) -> i64 {
+    let Some(data_bytes) = tagged_text_to_bytes(data) else {
+        return -1;
+    };
+    let start = offset.max(0) as usize;
+    WRITE_AT_CACHE.with(|cache| {
+        let mut guard = cache.borrow_mut();
+        let Some(cached) = guard.as_mut() else {
+            return -1;
+        };
+        let sequential = cached.position == start;
+        #[cfg(unix)]
+        let wrote = write_all_cached_at(&cached.file, data_bytes, start, sequential);
+        #[cfg(not(unix))]
+        let wrote = write_all_cached_at(&mut cached.file, data_bytes, start, sequential);
+        if wrote {
+            cached.position = start + data_bytes.len();
+            data_bytes.len() as i64
+        } else {
+            -1
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_file_write_text_at_cached_repeat(iterations: i64, data: i64) -> i64 {
+    if iterations <= 0 {
+        return 0;
     }
-    let data_bytes = data.into_bytes();
-    let end = start.saturating_add(data_bytes.len());
-    if bytes.len() < end {
-        bytes.resize(end, 0);
-    }
-    bytes[start..end].copy_from_slice(&data_bytes);
-    match std::fs::write(path, bytes) {
-        Ok(_) => data_bytes.len() as i64,
-        Err(_) => -1,
-    }
+    let Some(data_bytes) = tagged_text_to_bytes(data) else {
+        return -1;
+    };
+    WRITE_AT_CACHE.with(|cache| {
+        let mut guard = cache.borrow_mut();
+        let Some(cached) = guard.as_mut() else {
+            return -1;
+        };
+        #[cfg(unix)]
+        {
+            let count = iterations as usize;
+            if count <= 1024 {
+                let mut iovecs = Vec::with_capacity(count);
+                for _ in 0..count {
+                    iovecs.push(libc::iovec {
+                        iov_base: data_bytes.as_ptr() as *mut libc::c_void,
+                        iov_len: data_bytes.len(),
+                    });
+                }
+                let expected = data_bytes.len().saturating_mul(count);
+                let rc = unsafe { libc::writev(cached.file.as_raw_fd(), iovecs.as_ptr(), iovecs.len() as i32) };
+                if rc == expected as isize {
+                    cached.position += expected;
+                    return expected as i64;
+                }
+                if rc < 0 {
+                    return -1;
+                }
+            }
+        }
+        let mut total = 0i64;
+        for _ in 0..iterations {
+            let start = cached.position;
+            #[cfg(unix)]
+            let wrote = write_all_cached_at(&cached.file, data_bytes, start, true);
+            #[cfg(not(unix))]
+            let wrote = write_all_cached_at(&mut cached.file, data_bytes, start, true);
+            if !wrote {
+                return -1;
+            }
+            cached.position = start + data_bytes.len();
+            total += data_bytes.len() as i64;
+        }
+        total
+    })
 }
 
 #[no_mangle]
@@ -439,16 +813,7 @@ pub unsafe extern "C" fn rt_file_read_bytes(path_ptr: *const u8, path_len: u64) 
     };
 
     match std::fs::read(path_str) {
-        Ok(bytes) => {
-            let array_handle = rt_array_new(bytes.len() as u64);
-
-            for byte in bytes {
-                let byte_value = RuntimeValue::from_int(byte as i64);
-                rt_array_push(array_handle, byte_value);
-            }
-
-            array_handle
-        }
+        Ok(bytes) => bytes_to_runtime_array(&bytes),
         Err(_) => RuntimeValue::NIL,
     }
 }
@@ -462,12 +827,7 @@ pub unsafe extern "C" fn rt_bytes_from_raw(ptr: i64, len: i64) -> RuntimeValue {
     }
     let src = ptr as usize as *const u8;
     let slice = std::slice::from_raw_parts(src, len as usize);
-    let array_handle = rt_array_new(len as u64);
-    for &byte in slice {
-        let byte_value = RuntimeValue::from_int(byte as i64);
-        rt_array_push(array_handle, byte_value);
-    }
-    array_handle
+    bytes_to_runtime_array(slice)
 }
 
 /// Convert a text RuntimeValue to a byte array ([u8]).
@@ -651,6 +1011,32 @@ mod tests {
     }
 
     #[test]
+    fn test_file_fsync_existing_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("sync.txt");
+        fs::write(&file_path, "durable").unwrap();
+
+        let path_str = file_path.to_str().unwrap();
+        let (path_ptr, path_len) = str_to_ptr(path_str);
+
+        unsafe {
+            assert!(rt_file_fsync(path_ptr, path_len));
+        }
+    }
+
+    #[test]
+    fn test_file_fsync_missing_file_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("missing.txt");
+        let path_str = file_path.to_str().unwrap();
+        let (path_ptr, path_len) = str_to_ptr(path_str);
+
+        unsafe {
+            assert!(!rt_file_fsync(path_ptr, path_len));
+        }
+    }
+
+    #[test]
     fn test_file_remove() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("to_remove.txt");
@@ -756,6 +1142,49 @@ mod tests {
             let content = fs::read_to_string(&file_path).unwrap();
             assert_eq!(content, "New content");
         }
+    }
+
+    #[test]
+    fn test_file_write_text_at_runtime_value_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("offset.txt");
+        let path = string_to_tagged_text(file_path.to_str().unwrap());
+        let abc = string_to_tagged_text("abc");
+        let def = string_to_tagged_text("def");
+
+        assert_eq!(rt_file_write_text_at(path, 0, abc), 3);
+        assert_eq!(rt_file_write_text_at(path, 3, def), 3);
+        assert_eq!(fs::read_to_string(file_path).unwrap(), "abcdef");
+    }
+
+    #[test]
+    fn test_file_write_text_at_cache_invalidates_on_remove() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("offset_remove.txt");
+        let path_str = file_path.to_str().unwrap();
+        let path = string_to_tagged_text(path_str);
+        let old = string_to_tagged_text("old");
+        let new = string_to_tagged_text("new");
+        let (path_ptr, path_len) = str_to_ptr(path_str);
+
+        assert_eq!(rt_file_write_text_at(path, 0, old), 3);
+        unsafe {
+            assert!(rt_file_remove(path_ptr, path_len));
+        }
+        assert_eq!(rt_file_write_text_at(path, 0, new), 3);
+        assert_eq!(fs::read_to_string(file_path).unwrap(), "new");
+    }
+
+    #[test]
+    fn test_file_read_text_at_runtime_value_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("read_at.txt");
+        fs::write(&file_path, "0123456789").unwrap();
+        let path = string_to_tagged_text(file_path.to_str().unwrap());
+
+        let result = RuntimeValue::from_raw(rt_file_read_text_at(path, 3, 4) as u64);
+        let text = unsafe { extract_string(result) };
+        assert_eq!(text, "3456");
     }
 
     #[test]

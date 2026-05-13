@@ -384,15 +384,14 @@ impl<M: Module> CodegenBackend<M> {
     }
 
     /// Create a new backend with a pre-configured module and target
-    pub fn with_module_and_target(mut module: M, target: Target) -> BackendResult<Self> {
+    pub fn with_module_and_target(module: M, target: Target) -> BackendResult<Self> {
         let ctx = module.make_context();
-        let runtime_funcs = Self::declare_runtime_functions(&mut module, &target)?;
 
         Ok(Self {
             module,
             ctx,
             func_ids: BTreeMap::new(),
-            runtime_funcs,
+            runtime_funcs: HashMap::new(),
             global_ids: BTreeMap::new(),
             body_stub: None,
             target,
@@ -500,6 +499,24 @@ impl<M: Module> CodegenBackend<M> {
         }
 
         Ok(funcs)
+    }
+
+    fn ensure_runtime_functions_declared(&mut self) -> BackendResult<()> {
+        if self.runtime_funcs.is_empty() {
+            self.runtime_funcs = Self::declare_runtime_functions(&mut self.module, &self.target)?;
+        }
+        Ok(())
+    }
+
+    fn can_omit_runtime_imports(mir: &MirModule, functions: &[MirFunction]) -> bool {
+        mir.extern_fn_names.is_empty()
+            && mir.globals.is_empty()
+            && mir.global_init_values.is_empty()
+            && mir.global_init_strings.is_empty()
+            && mir.vtable_impls.is_empty()
+            && functions
+                .iter()
+                .all(|func| func.blocks.iter().all(|block| block.instructions.is_empty()))
     }
 
     /// Create or return a no-op body stub (fn() -> void) and return its FuncId.
@@ -982,6 +999,9 @@ impl<M: Module> CodegenBackend<M> {
         }
         let functions = unique_functions;
         let referenced_names = referenced_call_names(&functions);
+        if !Self::can_omit_runtime_imports(mir, &functions) {
+            self.ensure_runtime_functions_declared()?;
+        }
 
         // First pass: declare functions, then globals.
         // Functions must be declared first so that declare_globals can detect

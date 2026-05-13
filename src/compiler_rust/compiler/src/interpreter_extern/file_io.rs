@@ -7,7 +7,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -175,6 +175,15 @@ pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Read file through the mmap-named API.
+///
+/// The interpreter does not expose raw mapped memory, so it preserves the
+/// Simple-level API contract by returning the file text directly. Native
+/// codegen links this symbol to the runtime mmap implementation.
+pub fn rt_file_mmap_read_text(args: &[Value]) -> Result<Value, CompileError> {
+    rt_file_read_text(args)
+}
+
 /// Write text to file
 pub fn rt_file_write_text(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
@@ -182,6 +191,36 @@ pub fn rt_file_write_text(args: &[Value]) -> Result<Value, CompileError> {
     match fs::write(&path, &content) {
         Ok(_) => Ok(Value::Bool(true)),
         Err(_) => Ok(Value::Bool(false)),
+    }
+}
+
+/// Synchronize file contents and metadata with durable storage.
+pub fn rt_file_fsync(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    match OpenOptions::new().read(true).open(&path) {
+        Ok(file) => Ok(Value::Bool(file.sync_all().is_ok())),
+        Err(_) => Ok(Value::Bool(false)),
+    }
+}
+
+/// Write text at an absolute byte offset without rewriting the full file.
+pub fn rt_file_write_text_at(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let offset = match args.get(1) {
+        Some(Value::Int(n)) if *n >= 0 => *n as u64,
+        _ => return Ok(Value::Int(-1)),
+    };
+    let content = extract_content(args, 2)?;
+    let mut file = match OpenOptions::new().create(true).write(true).truncate(false).open(&path) {
+        Ok(file) => file,
+        Err(_) => return Ok(Value::Int(-1)),
+    };
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return Ok(Value::Int(-1));
+    }
+    match file.write_all(content.as_bytes()) {
+        Ok(_) => Ok(Value::Int(content.len() as i64)),
+        Err(_) => Ok(Value::Int(-1)),
     }
 }
 
@@ -289,6 +328,11 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
         }
         Err(_) => Ok(make_none()),
     }
+}
+
+/// Read file bytes through the mmap-named API in interpreter mode.
+pub fn rt_file_mmap_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    rt_file_read_bytes(args)
 }
 
 /// Identity function the optimizer must not see through.
@@ -631,6 +675,69 @@ pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     Ok(Value::Bool(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_text_at_creates_and_appends_without_rewrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("append.txt");
+        let path = path.to_string_lossy().to_string();
+
+        let first = rt_file_write_text_at(&[Value::Str(path.clone()), Value::Int(0), Value::Str("abc".to_string())])
+            .expect("first write");
+        let second = rt_file_write_text_at(&[Value::Str(path.clone()), Value::Int(3), Value::Str("def".to_string())])
+            .expect("second write");
+
+        assert_eq!(first, Value::Int(3));
+        assert_eq!(second, Value::Int(3));
+        assert_eq!(std::fs::read_to_string(path).expect("read"), "abcdef");
+    }
+
+    #[test]
+    fn fsync_reports_existing_and_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sync.txt");
+        std::fs::write(&path, "durable").expect("write");
+        let path = path.to_string_lossy().to_string();
+
+        let ok = rt_file_fsync(&[Value::Str(path)]).expect("fsync");
+        assert_eq!(ok, Value::Bool(true));
+
+        let missing = dir.path().join("missing.txt").to_string_lossy().to_string();
+        let fail = rt_file_fsync(&[Value::Str(missing)]).expect("missing fsync");
+        assert_eq!(fail, Value::Bool(false));
+    }
+
+    #[test]
+    fn mmap_named_text_and_bytes_match_read_contract() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fixture.txt");
+        std::fs::write(&path, "simple mmap").expect("write");
+        let path = path.to_string_lossy().to_string();
+
+        let text = rt_file_mmap_read_text(&[Value::Str(path.clone())]).expect("mmap text");
+        let bytes = rt_file_mmap_read_bytes(&[Value::Str(path)]).expect("mmap bytes");
+
+        assert_eq!(text, Value::Str("simple mmap".to_string()));
+        match bytes {
+            Value::Enum {
+                variant,
+                payload: Some(payload),
+                ..
+            } => {
+                assert_eq!(variant, "Some");
+                match *payload {
+                    Value::Array(values) => assert_eq!(values.len(), 11),
+                    other => panic!("unexpected payload: {other:?}"),
+                }
+            }
+            other => panic!("unexpected bytes value: {other:?}"),
+        }
+    }
 }
 
 // ============================================================================

@@ -4,6 +4,8 @@ use std::convert::TryInto;
 const DATA_SIZE: usize = 65_536;
 const XXH_ITERS: u64 = 80;
 const CHACHA_ITERS: u64 = 30;
+const CRC32_ITERS: u64 = 80;
+const ADLER32_ITERS: u64 = 80;
 
 fn rotl64(x: u64, r: u32) -> u64 { x.rotate_left(r) }
 fn rotl32(x: u32, r: u32) -> u32 { x.rotate_left(r) }
@@ -85,6 +87,44 @@ fn xxhash64_ref(data: &[u8], seed: u64) -> u64 {
     xxh64_avalanche(h)
 }
 
+fn crc32_ref(data: &[u8]) -> u32 {
+    let mut table = [0u32; 256];
+    for i in 0..256 {
+        let mut crc = i as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB88320
+            } else {
+                crc >> 1
+            };
+        }
+        table[i] = crc;
+    }
+
+    let mut crc = 0xFFFF_FFFFu32;
+    for byte in data {
+        crc = (crc >> 8) ^ table[((crc ^ *byte as u32) & 0xFF) as usize];
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+fn adler32_ref(data: &[u8]) -> u32 {
+    let mut a = 1u32;
+    let mut b = 0u32;
+    let mut i = 0usize;
+    while i < data.len() {
+        let end = (i + 5552).min(data.len());
+        while i < end {
+            a += data[i] as u32;
+            b += a;
+            i += 1;
+        }
+        a %= 65521;
+        b %= 65521;
+    }
+    (b << 16) | a
+}
+
 fn qr(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
     s[a] = s[a].wrapping_add(s[b]); s[d] = rotl32(s[d] ^ s[a], 16);
     s[c] = s[c].wrapping_add(s[d]); s[b] = rotl32(s[b] ^ s[c], 12);
@@ -142,6 +182,16 @@ fn main() {
     let start = Instant::now();
     for i in 0..XXH_ITERS { checksum ^= xxhash64_ref(&data, i); }
     report("xxhash64", DATA_SIZE as u64, XXH_ITERS, start.elapsed().as_micros(), checksum);
+
+    checksum = 0;
+    let start = Instant::now();
+    for i in 0..CRC32_ITERS { checksum ^= (crc32_ref(&data) as u64).wrapping_add(i); }
+    report("crc32", DATA_SIZE as u64, CRC32_ITERS, start.elapsed().as_micros(), checksum);
+
+    checksum = 0;
+    let start = Instant::now();
+    for i in 0..ADLER32_ITERS { checksum ^= (adler32_ref(&data) as u64).wrapping_add(i); }
+    report("adler32", DATA_SIZE as u64, ADLER32_ITERS, start.elapsed().as_micros(), checksum);
 
     let key: [u8; 32] = core::array::from_fn(|i| i as u8);
     let nonce: [u8; 12] = [0,0,0,9,0,0,0,0x4a,0,0,0,0];

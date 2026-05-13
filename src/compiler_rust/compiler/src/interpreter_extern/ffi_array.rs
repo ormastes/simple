@@ -9,7 +9,7 @@ use simple_runtime::value::RuntimeValue;
 // Import actual FFI functions from runtime
 use simple_runtime::value::{
     rt_array_clear, rt_array_extend_i64, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push,
-    rt_array_set, rt_bytes_u8_set,
+    rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set,
 };
 
 fn interpreter_byte_at(value: &Value) -> i64 {
@@ -87,6 +87,72 @@ pub fn rt_bytes_u8_at_fn(args: &[Value]) -> Result<Value, CompileError> {
         }
         _ => Ok(Value::Int(0)),
     }
+}
+
+fn normalized_byte_index(index: i64, len: usize) -> Option<usize> {
+    let mut idx = index;
+    if idx < 0 {
+        idx += len as i64;
+    }
+    if idx < 0 || idx as usize >= len {
+        return None;
+    }
+    Some(idx as usize)
+}
+
+fn interpreter_bytes_le_at(args: &[Value], width: usize, name: &str) -> Result<Value, CompileError> {
+    let arr = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            format!("{name} expects 2 arguments"),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
+
+    let index = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                format!("{name} expects 2 arguments"),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    match arr {
+        Value::Array(vec) => {
+            let Some(start) = normalized_byte_index(index, vec.len()) else {
+                return Ok(Value::Int(0));
+            };
+            if start + width > vec.len() {
+                return Ok(Value::Int(0));
+            }
+            let mut value = 0u64;
+            for offset in 0..width {
+                value |= (interpreter_byte_at(&vec[start + offset]) as u64) << (offset * 8);
+            }
+            Ok(Value::Int(value as i64))
+        }
+        Value::Int(raw) => {
+            let arr_rv = RuntimeValue::from_raw(*raw as u64);
+            let value = if width == 4 {
+                rt_bytes_u32_le_at(arr_rv, index)
+            } else {
+                rt_bytes_u64_le_at(arr_rv, index)
+            };
+            Ok(Value::Int(value))
+        }
+        _ => Ok(Value::Int(0)),
+    }
+}
+
+/// Get a little-endian u32 from a byte array.
+pub fn rt_bytes_u32_le_at_fn(args: &[Value]) -> Result<Value, CompileError> {
+    interpreter_bytes_le_at(args, 4, "rt_bytes_u32_le_at")
+}
+
+/// Get a little-endian u64 from a byte array.
+pub fn rt_bytes_u64_le_at_fn(args: &[Value]) -> Result<Value, CompileError> {
+    interpreter_bytes_le_at(args, 8, "rt_bytes_u64_le_at")
 }
 
 /// Set byte at index for heap-backed byte arrays.
@@ -320,7 +386,7 @@ pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpreter_byte_at, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn};
+    use super::{interpreter_byte_at, rt_bytes_u32_le_at_fn, rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn};
     use crate::value::Value;
     use simple_runtime::value::{rt_array_new, rt_array_push, rt_bytes_u8_at, RuntimeValue};
 
@@ -341,6 +407,38 @@ mod tests {
         let arr = Value::array(vec![Value::UInt { value: 0x2d, width: 8 }]);
         let result = rt_bytes_u8_at_fn(&[arr, Value::Int(0)]).expect("byte lookup should succeed");
         assert_eq!(result, Value::Int(0x2d));
+    }
+
+    #[test]
+    fn rt_bytes_u32_le_at_reads_interpreter_arrays() {
+        let arr = Value::array(vec![
+            Value::UInt { value: 0x78, width: 8 },
+            Value::UInt { value: 0x56, width: 8 },
+            Value::UInt { value: 0x34, width: 8 },
+            Value::UInt { value: 0x12, width: 8 },
+        ]);
+
+        let result = rt_bytes_u32_le_at_fn(&[arr, Value::Int(0)]).expect("u32 lookup should succeed");
+
+        assert_eq!(result, Value::Int(0x1234_5678));
+    }
+
+    #[test]
+    fn rt_bytes_u64_le_at_reads_interpreter_arrays() {
+        let arr = Value::array(vec![
+            Value::UInt { value: 0xef, width: 8 },
+            Value::UInt { value: 0xcd, width: 8 },
+            Value::UInt { value: 0xab, width: 8 },
+            Value::UInt { value: 0x89, width: 8 },
+            Value::UInt { value: 0x67, width: 8 },
+            Value::UInt { value: 0x45, width: 8 },
+            Value::UInt { value: 0x23, width: 8 },
+            Value::UInt { value: 0x01, width: 8 },
+        ]);
+
+        let result = rt_bytes_u64_le_at_fn(&[arr, Value::Int(0)]).expect("u64 lookup should succeed");
+
+        assert_eq!(result, Value::Int(0x0123_4567_89ab_cdef));
     }
 
     #[test]

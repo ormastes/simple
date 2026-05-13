@@ -7,6 +7,7 @@
  */
 
 #include "platform/async_driver.h"
+#include "runtime.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -144,6 +145,15 @@ static spl_driver* get_driver(int64_t handle) {
     return g_drivers[handle];
 }
 
+static char* text_to_cstr(const char* text, int64_t len) {
+    if (!text || len < 0) return NULL;
+    char* out = (char*)malloc((size_t)len + 1);
+    if (!out) return NULL;
+    if (len > 0) memcpy(out, text, (size_t)len);
+    out[len] = '\0';
+    return out;
+}
+
 static void free_handle(int64_t handle) {
     if (handle >= 0 && handle < MAX_DRIVERS)
         g_drivers[handle] = NULL;
@@ -178,10 +188,15 @@ int64_t rt_driver_submit_accept(int64_t handle, int64_t listen_fd) {
 }
 
 int64_t rt_driver_submit_connect(int64_t handle, int64_t fd,
-                                  const char* addr, int64_t port) {
+                                  const char* addr, int64_t addr_len,
+                                  int64_t port) {
     spl_driver* d = get_driver(handle);
     if (!d) return -1;
-    return spl_driver_submit_connect(d, fd, addr, port);
+    char* addr_copy = text_to_cstr(addr, addr_len);
+    if (!addr_copy) return -1;
+    int64_t result = spl_driver_submit_connect(d, fd, addr_copy, port);
+    free(addr_copy);
+    return result;
 }
 
 int64_t rt_driver_submit_recv(int64_t handle, int64_t fd, int64_t buf_size) {
@@ -221,10 +236,15 @@ int64_t rt_driver_submit_write(int64_t handle, int64_t fd,
 }
 
 int64_t rt_driver_submit_open(int64_t handle, const char* path,
-                               int64_t flags, int64_t mode) {
+                               int64_t path_len, int64_t flags,
+                               int64_t mode) {
     spl_driver* d = get_driver(handle);
     if (!d) return -1;
-    return spl_driver_submit_open(d, path, flags, mode);
+    char* path_copy = text_to_cstr(path, path_len);
+    if (!path_copy) return -1;
+    int64_t result = spl_driver_submit_open(d, path_copy, flags, mode);
+    free(path_copy);
+    return result;
 }
 
 int64_t rt_driver_submit_close(int64_t handle, int64_t fd) {
@@ -293,10 +313,10 @@ bool rt_driver_cancel(int64_t handle, int64_t op_id) {
     return spl_driver_cancel(d, op_id);
 }
 
-const char* rt_driver_backend_name(int64_t handle) {
+int64_t rt_driver_backend_name(int64_t handle) {
     spl_driver* d = get_driver(handle);
-    if (!d) return "none";
-    return spl_driver_backend_name(d);
+    const char* name = d ? spl_driver_backend_name(d) : "none";
+    return rt_string_new((const uint8_t*)name, (uint64_t)strlen(name));
 }
 
 bool rt_driver_supports_sendfile(int64_t handle) {
@@ -311,11 +331,12 @@ bool rt_driver_supports_zero_copy(int64_t handle) {
     return spl_driver_supports_zero_copy(d);
 }
 
-const char* rt_driver_poll_data(int64_t handle, int64_t index) {
+int64_t rt_driver_poll_data(int64_t handle, int64_t index) {
     (void)handle;
-    if (index < 0 || index >= g_poll_count) return "";
-    if (!g_poll_buf[index].data) return "";
-    return g_poll_buf[index].data;
+    if (index < 0 || index >= g_poll_count || !g_poll_buf[index].data) {
+        return rt_string_new(NULL, 0);
+    }
+    return rt_string_new((const uint8_t*)g_poll_buf[index].data, (uint64_t)g_poll_buf[index].data_len);
 }
 
 int64_t rt_driver_poll_data_len(int64_t handle, int64_t index) {

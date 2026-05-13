@@ -13,6 +13,7 @@ pub mod hir_core;
 pub mod loader;
 pub mod aop;
 pub mod async_runtime;
+pub mod async_driver_ffi;
 pub mod bytecode;
 #[cfg(feature = "packaging-compression")]
 pub mod compress;
@@ -385,8 +386,9 @@ pub use value::{
     native_tcp_set_keepalive, native_tcp_set_nodelay, native_tcp_set_read_timeout, native_tcp_set_write_timeout,
     native_tcp_shutdown, native_tcp_write, rt_io_tcp_accept, rt_io_tcp_accept_timeout, rt_io_tcp_bind, rt_io_tcp_close,
     rt_dns_lookup, rt_io_tcp_connect, rt_io_tcp_connect_timeout, rt_io_tcp_flush, rt_io_tcp_local_addr,
-    rt_io_tcp_peer_addr, rt_io_tcp_read, rt_io_tcp_read_line, rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout,
-    rt_io_tcp_set_write_timeout, rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_tls_client_close,
+    rt_io_tcp_peer_addr, rt_io_tcp_read, rt_io_tcp_read_exact, rt_io_tcp_read_exact_len, rt_io_tcp_read_line,
+    rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout, rt_io_tcp_set_write_timeout, rt_io_tcp_shutdown,
+    rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len, rt_tls_client_close,
     rt_tls_client_config_add_root_cert, rt_tls_client_config_enable_sni, rt_tls_client_config_free,
     rt_tls_client_config_new, rt_tls_client_config_set_alpn, rt_tls_client_config_set_verify_mode,
     rt_tls_client_connect, rt_tls_client_connect_with_sni, rt_tls_client_read, rt_tls_client_write, rt_tls_free_cert,

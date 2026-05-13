@@ -340,13 +340,17 @@ impl NativeLinker {
         // contain Simple runtime libraries (they are statically linked).
         #[cfg(target_os = "macos")]
         for path in &options.library_paths {
-            if !has_static_runtime_lib || !Self::is_simple_runtime_only_path(path) {
+            if !Self::is_system_library_path(path)
+                && (!has_static_runtime_lib || !Self::is_simple_runtime_only_path(path))
+            {
                 cmd.arg("-rpath").arg(path);
             }
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         for path in &options.library_paths {
-            if !has_static_runtime_lib || !Self::is_simple_runtime_only_path(path) {
+            if !Self::is_system_library_path(path)
+                && (!has_static_runtime_lib || !Self::is_simple_runtime_only_path(path))
+            {
                 cmd.arg(format!("--rpath={}", path.display()));
             }
         }
@@ -386,6 +390,15 @@ impl NativeLinker {
         let path_str = path.to_string_lossy();
         (path_str.contains("compiler_rust/target") || path_str.contains("target/bootstrap"))
             && path.join("libsimple_runtime.a").exists()
+    }
+
+    fn is_system_library_path(path: &Path) -> bool {
+        let Ok(path) = path.canonicalize() else {
+            return false;
+        };
+        ["/lib", "/lib64", "/usr/lib", "/usr/lib64"]
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
     }
 
     /// MSVC-specific link invocation using /OUT:, /LIBPATH:, etc.

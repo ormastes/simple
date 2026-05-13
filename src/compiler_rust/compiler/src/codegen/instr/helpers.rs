@@ -1,6 +1,7 @@
 // Helper functions for instruction compilation.
 
-use cranelift_codegen::ir::{types, InstBuilder};
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -37,6 +38,47 @@ pub(crate) fn get_vreg_or_default<M: Module>(
 
     // Default: tagged nil (TAG_SPECIAL=0b011 | SPECIAL_NIL=0 = 3)
     builder.ins().iconst(types::I64, 3)
+}
+
+pub(crate) fn inline_runtime_len_value(
+    builder: &mut FunctionBuilder,
+    value: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let invalid = builder.ins().iconst(types::I64, -1);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+
+    let type_block = builder.create_block();
+    let len_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    let tag = builder.ins().band(value, tag_mask);
+    let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+    builder.ins().brif(is_heap, type_block, &[], done_block, &[invalid]);
+
+    builder.switch_to_block(type_block);
+    let ptr_bits = builder.ins().band(value, ptr_mask);
+    let object_type = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
+    let is_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
+    let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
+    let is_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 3);
+    let is_tuple = builder.ins().icmp_imm(IntCC::Equal, object_type, 4);
+    let string_or_array = builder.ins().bor(is_string, is_array);
+    let dict_or_tuple = builder.ins().bor(is_dict, is_tuple);
+    let has_len = builder.ins().bor(string_or_array, dict_or_tuple);
+    builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
+    builder.seal_block(type_block);
+
+    builder.switch_to_block(len_block);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    builder.ins().jump(done_block, &[len]);
+    builder.seal_block(len_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    result
 }
 
 /// Helper to create a string constant in module data and return (ptr, len) values.

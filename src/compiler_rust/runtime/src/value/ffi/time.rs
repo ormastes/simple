@@ -43,6 +43,23 @@
 // Current Time Functions
 // ============================================================================
 
+/// Get monotonic time in nanoseconds from a process-local epoch.
+#[no_mangle]
+pub extern "C" fn rt_time_now_nanos() -> i64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    start.elapsed().as_nanos().min(i64::MAX as u128) as i64
+}
+
+/// Get monotonic time in microseconds from a process-local epoch.
+#[no_mangle]
+pub extern "C" fn rt_time_now_micros() -> i64 {
+    rt_time_now_nanos() / 1_000
+}
+
 /// Get current Unix timestamp in microseconds since epoch (1970-01-01 00:00:00 UTC)
 ///
 /// Returns the current system time as microseconds since Unix epoch.

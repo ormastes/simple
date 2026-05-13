@@ -11,7 +11,7 @@ use super::super::shared::platform_call_conv;
 use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{
     adapted_call, call_runtime_1, call_runtime_2, create_string_constant, get_vreg_or_default,
-    indirect_call_with_result,
+    indirect_call_with_result, inline_runtime_len_value,
 };
 use super::{InstrContext, InstrResult};
 
@@ -615,13 +615,7 @@ fn try_compile_builtin_method_call<M: Module>(
             get_vreg_or_default(ctx, builder, &args[1])
         } else {
             // Default to collection length
-            if let Some(&len_id) = ctx.runtime_funcs.get("rt_len") {
-                let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);
-                let len_call = adapted_call(builder, len_ref, &[receiver_val]);
-                builder.inst_results(len_call)[0]
-            } else {
-                builder.ins().iconst(types::I64, i64::MAX)
-            }
+            inline_runtime_len_value(builder, receiver_val)
         };
 
         // step argument (optional, defaults to 1)
@@ -637,16 +631,12 @@ fn try_compile_builtin_method_call<M: Module>(
 
     // is_empty: compile as rt_len(receiver) == 0
     if method == "is_empty" {
-        if let Some(&len_id) = ctx.runtime_funcs.get("rt_len") {
-            let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);
-            let call = adapted_call(builder, len_ref, &[receiver_val]);
-            let len_val = builder.inst_results(call)[0];
-            let zero = builder.ins().iconst(types::I64, 0);
-            let result = builder
-                .ins()
-                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, len_val, zero);
-            return Ok(Some(result));
-        }
+        let len_val = inline_runtime_len_value(builder, receiver_val);
+        let zero = builder.ins().iconst(types::I64, 0);
+        let result = builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, len_val, zero);
+        return Ok(Some(result));
     }
 
     // Numeric type conversion methods must produce a real native cast so later
@@ -856,6 +846,10 @@ fn try_compile_builtin_method_call<M: Module>(
         "contains_key" | "has_key" => "rt_contains",
         _ => return Ok(None),
     };
+
+    if runtime_func == "rt_len" {
+        return Ok(Some(inline_runtime_len_value(builder, receiver_val)));
+    }
 
     // Check if runtime function exists
     let Some(&func_id) = ctx.runtime_funcs.get(runtime_func) else {

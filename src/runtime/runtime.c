@@ -8,9 +8,21 @@
  * Test:  cc -o /tmp/runtime_test bootstrap/runtime_test.c bootstrap/runtime.c -std=c11 && /tmp/runtime_test
  */
 
-#include "platform/platform.h"
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _BSD_SOURCE
+#define _BSD_SOURCE
+#endif
 
 #include "runtime.h"
+#include "platform/platform.h"
 #include "runtime_memtrack.h"
 
 #include <stdio.h>
@@ -1131,6 +1143,18 @@ int         rt_file_copy(const char* src, const char* dst) {
 }
 int         rt_file_delete(const char* path)    { return spl_file_delete(path); }
 int64_t     rt_file_size(const char* path)      { return spl_file_size(path); }
+int         rt_file_fsync(const char* path) {
+    if (!path) return 0;
+    FILE* file = fopen(path, "rb");
+    if (!file) return 0;
+#ifdef _WIN32
+    int ok = fflush(file) == 0;
+#else
+    int ok = fsync(fileno(file)) == 0;
+#endif
+    fclose(file);
+    return ok ? 1 : 0;
+}
 
 int64_t rt_file_stat(const char* path) {
     struct stat st;

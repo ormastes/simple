@@ -9,6 +9,25 @@ use super::builder::NativeBinaryBuilder;
 use super::options::NativeBinaryOptions;
 
 impl NativeBinaryBuilder {
+    pub(super) fn object_has_undefined_symbols(&self, obj_path: &Path) -> bool {
+        let (nm_cmd, nm_args) = super::options::detect_nm_command(&self.options.target);
+        std::process::Command::new(nm_cmd)
+            .args(nm_args)
+            .arg(obj_path)
+            .output()
+            .map(|out| out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+            .unwrap_or(true)
+    }
+
+    fn runtime_free_libraries(&self) -> Vec<String> {
+        match self.options.target.os {
+            TargetOS::Linux | TargetOS::FreeBSD => vec!["c".to_string()],
+            TargetOS::MacOS => vec!["System".to_string()],
+            TargetOS::Windows => vec!["c".to_string(), "msvcrt".to_string(), "kernel32".to_string()],
+            _ => vec!["c".to_string()],
+        }
+    }
+
     /// Execute one link pass.
     ///
     /// `out_path` — output file path.
@@ -28,7 +47,9 @@ impl NativeBinaryBuilder {
         let linker_flavor = self.options.target.linker_flavor();
         let mut builder = LinkerBuilder::new().target(self.options.target);
 
-        if crt_files.len() >= 2 {
+        let runtime_free_object = !self.object_has_undefined_symbols(obj_path);
+
+        if !runtime_free_object && crt_files.len() >= 2 {
             builder = builder.object(&crt_files[0]);
             builder = builder.object(&crt_files[1]);
         }
@@ -53,7 +74,7 @@ impl NativeBinaryBuilder {
             .iter()
             .any(|lib| matches!(lib.as_str(), "simple_runtime" | "simple_native_all" | "simple_compiler"));
 
-        if !has_named_runtime_root {
+        if !runtime_free_object && !has_named_runtime_root {
             if let Some(runtime_dir) = runtime_dir.as_ref() {
                 let runtime_lib = runtime_dir.join("libsimple_runtime.a");
                 let compiler_lib = runtime_dir.join("libsimple_compiler.a");
@@ -128,21 +149,46 @@ impl NativeBinaryBuilder {
         if let Some(linker) = self.options.linker {
             builder = builder.linker(linker);
         }
-        for lib in &self.options.libraries {
+        let runtime_free_libraries;
+        let libraries = if runtime_free_object && !self.options.shared {
+            runtime_free_libraries = Vec::new();
+            &runtime_free_libraries
+        } else {
+            &self.options.libraries
+        };
+        for lib in libraries {
             builder = builder.library(lib);
         }
-        for path in &self.options.library_paths {
+        let runtime_free_library_paths;
+        let library_paths = if runtime_free_object && !self.options.shared {
+            runtime_free_library_paths = self
+                .options
+                .library_paths
+                .iter()
+                .filter(|path| {
+                    let s = path.to_string_lossy();
+                    !s.contains("compiler_rust/target") && !path.join("libsimple_runtime.a").exists()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            &runtime_free_library_paths
+        } else {
+            &self.options.library_paths
+        };
+        for path in library_paths {
             builder = builder.library_path(path);
         }
         if require_crypto {
             builder = builder.library("crypto");
         }
+        let effective_pie = self.options.pie && !runtime_free_object;
+
         if self.options.strip {
             builder = builder.strip();
         }
         if self.options.shared {
             builder = builder.shared();
-        } else if self.options.pie {
+        } else if effective_pie {
             builder = builder.pie();
         }
         if self.options.generate_map {
@@ -156,15 +202,17 @@ impl NativeBinaryBuilder {
             && matches!(linker_flavor, LinkerFlavor::Gnu)
             && !matches!(self.options.target.os, TargetOS::MacOS)
         {
-            if let Some(dynamic_linker) = self.find_dynamic_linker() {
-                builder = builder.flag(format!("--dynamic-linker={}", dynamic_linker.display()));
+            if !runtime_free_object {
+                if let Some(dynamic_linker) = self.find_dynamic_linker() {
+                    builder = builder.flag(format!("--dynamic-linker={}", dynamic_linker.display()));
+                }
             }
-            if !self.options.pie {
+            if !effective_pie {
                 builder = builder.flag("-no-pie".to_string());
             }
         }
 
-        if crt_files.len() >= 3 {
+        if !runtime_free_object && crt_files.len() >= 3 {
             builder = builder.object(&crt_files[2]);
         }
 

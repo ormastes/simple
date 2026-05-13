@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use simple_common::target::TargetOS;
+use simple_common::target::{TargetArch, TargetOS};
 
 use crate::linker::error::{LinkerError, LinkerResult};
 
@@ -125,10 +125,15 @@ const RT_KEEP: &[&str] = &[
     "rt_time_now_micros",
     "rt_time_now_unix_micros",
     "rt_file_mmap_read_text",
+    "rt_file_mmap_len",
+    "rt_file_mmap_read_text_rv",
     "rt_file_mmap_read_bytes",
+    "rt_file_mmap_read_bytes_rv",
     "rt_file_read_text_at",
     "rt_file_read_bytes_at",
     "rt_file_write_text_at",
+    "rt_file_write_text_at_cached",
+    "rt_file_write_text_at_cached_repeat",
     "rt_file_write_bytes_at",
     "rt_mmap",
     "rt_mmap_raw",
@@ -136,6 +141,30 @@ const RT_KEEP: &[&str] = &[
     "rt_munmap_raw",
     "rt_madvise",
     "rt_msync",
+    "rt_driver_create",
+    "rt_driver_destroy",
+    "rt_driver_submit_accept",
+    "rt_driver_submit_connect",
+    "rt_driver_submit_recv",
+    "rt_driver_submit_send",
+    "rt_driver_submit_sendfile",
+    "rt_driver_submit_read",
+    "rt_driver_submit_write",
+    "rt_driver_submit_open",
+    "rt_driver_submit_close",
+    "rt_driver_submit_fsync",
+    "rt_driver_submit_timeout",
+    "rt_driver_flush",
+    "rt_driver_poll",
+    "rt_driver_poll_id",
+    "rt_driver_poll_result",
+    "rt_driver_poll_flags",
+    "rt_driver_poll_data",
+    "rt_driver_poll_data_len",
+    "rt_driver_cancel",
+    "rt_driver_backend_name",
+    "rt_driver_supports_sendfile",
+    "rt_driver_supports_zero_copy",
     "rt_process_spawn_async",
     "rt_process_wait",
     "rt_process_is_running",
@@ -177,8 +206,12 @@ const RT_KEEP: &[&str] = &[
     "rt_io_tcp_connect_timeout",
     "rt_dns_lookup",
     "rt_io_tcp_read",
+    "rt_io_tcp_read_exact",
+    "rt_io_tcp_read_exact_len",
     "rt_io_tcp_read_line",
     "rt_io_tcp_write",
+    "rt_io_tcp_write_text",
+    "rt_io_tcp_write_text_read_exact_len",
     "rt_io_tcp_flush",
     "rt_io_tcp_close",
     "rt_io_tcp_local_addr",
@@ -304,6 +337,49 @@ fn gen_stub_code(
 }
 
 impl NativeBinaryBuilder {
+    pub(super) fn supports_runtime_free_start_shim(&self) -> bool {
+        matches!(
+            (self.options.target.os, self.options.target.arch),
+            (TargetOS::Linux, TargetArch::X86_64)
+        )
+    }
+
+    pub(super) fn build_runtime_free_start_shim(
+        &self,
+        temp_path: &Path,
+        bootstrap_stubs: &mut Vec<PathBuf>,
+    ) -> LinkerResult<()> {
+        let cc = detect_c_compiler(&self.options.target);
+        let stub_s = temp_path.join("_start_shim.S");
+        let stub_o = temp_path.join("_start_shim.o");
+        std::fs::write(
+            &stub_s,
+            r#"
+.global _start
+.type _start,@function
+_start:
+    call spl_main
+    mov %eax, %edi
+    mov $60, %eax
+    syscall
+"#,
+        )
+        .map_err(|e| LinkerError::LinkFailed(format!("failed to write runtime-free start shim: {}", e)))?;
+        let status = std::process::Command::new(&cc)
+            .args(compile_c_args(&cc, &stub_o, &stub_s))
+            .status()
+            .map_err(|e| LinkerError::LinkFailed(format!("failed to compile runtime-free start shim: {}", e)))?;
+        if status.success() {
+            bootstrap_stubs.push(stub_o);
+        } else {
+            eprintln!(
+                "warning: failed to build runtime-free start shim with {} (status {})",
+                cc, status
+            );
+        }
+        Ok(())
+    }
+
     /// Build the main shim (C `main()` → `spl_main()`) and add to stubs list.
     pub(super) fn build_main_shim(&self, temp_path: &Path, bootstrap_stubs: &mut Vec<PathBuf>) -> LinkerResult<()> {
         let cc = detect_c_compiler(&self.options.target);
@@ -313,7 +389,10 @@ impl NativeBinaryBuilder {
             &stub_c,
             r#"
 extern int spl_main(void);
-extern void rt_set_args(int argc, char** argv);
+__attribute__((weak)) void rt_set_args(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
+}
 int main(int argc, char** argv) {
     rt_set_args(argc, argv);
     return spl_main();

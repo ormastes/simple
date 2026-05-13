@@ -394,6 +394,44 @@ pub extern "C" fn rt_io_tcp_read(handle: i64, size: i64) -> crate::value::Runtim
 }
 
 #[no_mangle]
+pub extern "C" fn rt_io_tcp_read_exact(handle: i64, size: i64) -> crate::value::RuntimeValue {
+    if size <= 0 {
+        return crate::value::collections::rt_array_new(0);
+    }
+    let mut buffer = vec![0u8; size as usize];
+    let mut offset = 0usize;
+    while offset < buffer.len() {
+        let remaining = buffer.len() - offset;
+        let (read, err) =
+            unsafe { native_tcp_read(handle, buffer[offset..].as_mut_ptr() as i64, remaining as i64) };
+        if err != NetError::Success as i64 || read <= 0 {
+            return crate::value::collections::rt_array_new(0);
+        }
+        offset += read as usize;
+    }
+    unsafe { crate::value::ffi::file_io::file_ops::bytes_to_runtime_array(&buffer) }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_tcp_read_exact_len(handle: i64, size: i64) -> i64 {
+    if size <= 0 {
+        return 0;
+    }
+    let mut buffer = vec![0u8; size as usize];
+    let mut offset = 0usize;
+    while offset < buffer.len() {
+        let remaining = buffer.len() - offset;
+        let (read, err) =
+            unsafe { native_tcp_read(handle, buffer[offset..].as_mut_ptr() as i64, remaining as i64) };
+        if err != NetError::Success as i64 || read <= 0 {
+            return -1;
+        }
+        offset += read as usize;
+    }
+    offset as i64
+}
+
+#[no_mangle]
 pub extern "C" fn rt_io_tcp_read_line(handle: i64) -> crate::value::RuntimeValue {
     let mut bytes = Vec::new();
     with_socket_mut!(handle, TcpStream, |_| crate::value::RuntimeValue::NIL, stream => {
@@ -435,6 +473,24 @@ pub extern "C" fn rt_io_tcp_write_text(handle: i64, data: crate::value::RuntimeV
     };
     let (written, err) = unsafe { native_tcp_write(handle, ptr, len) };
     if err == NetError::Success as i64 { written } else { -err }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_tcp_write_text_read_exact_len(handle: i64, data: crate::value::RuntimeValue) -> i64 {
+    let Some((ptr, len)) = runtime_text_ptr_len(data) else {
+        return -1;
+    };
+    with_socket_mut!(handle, TcpStream, |_| -1, stream => {
+        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        if stream.write_all(bytes).is_err() {
+            return -1;
+        }
+        let mut buffer = vec![0u8; len as usize];
+        if stream.read_exact(&mut buffer).is_err() {
+            return -1;
+        }
+        len
+    })
 }
 
 #[no_mangle]

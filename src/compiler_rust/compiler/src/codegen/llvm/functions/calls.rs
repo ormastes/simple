@@ -73,7 +73,10 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_delete"
         | "rt_file_remove"
         | "rt_file_read_lines"
-        | "rt_file_read_bytes" => Some(&[0]),
+        | "rt_file_read_bytes"
+        | "rt_file_mmap_read_text"
+        | "rt_file_mmap_len"
+        | "rt_file_mmap_read_bytes" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
         "rt_file_write_text"
         | "rt_file_copy"
@@ -86,6 +89,10 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_dir_create" | "rt_dir_create_all" | "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all"
         | "rt_dir_glob" | "rt_dir_walk" | "rt_set_current_dir" | "rt_dir_exists" => Some(&[0]),
         "rt_file_find" => Some(&[0, 1]),
+
+        // Async I/O driver text arguments
+        "rt_driver_submit_open" => Some(&[1]),
+        "rt_driver_submit_connect" | "rt_driver_submit_send" | "rt_driver_submit_write" => Some(&[2]),
 
         // Path operations (single path)
         "rt_path_basename" | "rt_path_dirname" | "rt_path_ext" | "rt_path_absolute" | "rt_path_stem" => Some(&[0]),
@@ -630,6 +637,14 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u64 align", &e))?;
             }
             loaded.into_int_value()
+        } else if width == 1 {
+            let i8_type = self.context.i8_type();
+            let loaded = builder
+                .build_load(i8_type, ptr, "typed_bytes_unchecked_u8")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u8 load", &e))?;
+            builder
+                .build_int_z_extend(loaded.into_int_value(), i64_type, "typed_bytes_unchecked_u8_wide")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u8 zext", &e))?
         } else {
             let i32_type = self.context.i32_type();
             let loaded = builder
@@ -644,6 +659,68 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u32 zext", &e))?
         };
         vreg_map.insert(dest, value.into());
+        Ok(true)
+    }
+
+    #[cfg(feature = "llvm")]
+    fn compile_inline_adler_reduce(
+        &self,
+        dest: Option<crate::mir::VReg>,
+        args: &[crate::mir::VReg],
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+    ) -> Result<bool, CompileError> {
+        if args.len() != 1 {
+            return Ok(false);
+        }
+        let Some(dest) = dest else {
+            return Ok(false);
+        };
+
+        let i64_type = self.runtime_int_type();
+        let value = self
+            .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let low_mask = i64_type.const_int(0xFFFF, false);
+        let low = builder
+            .build_and(value, low_mask, "adler_reduce_low")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce low", &e))?;
+        let high = builder
+            .build_right_shift(value, i64_type.const_int(16, false), false, "adler_reduce_high")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce high", &e))?;
+        let high_times_15 = builder
+            .build_int_mul(high, i64_type.const_int(15, false), "adler_reduce_high15")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce high15", &e))?;
+        let reduced = builder
+            .build_int_add(low, high_times_15, "adler_reduce_sum")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce sum", &e))?;
+        let low = builder
+            .build_and(reduced, low_mask, "adler_reduce_low2")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce low2", &e))?;
+        let high = builder
+            .build_right_shift(reduced, i64_type.const_int(16, false), false, "adler_reduce_high2")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce high2", &e))?;
+        let high_times_15 = builder
+            .build_int_mul(high, i64_type.const_int(15, false), "adler_reduce_high15_2")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce high15 2", &e))?;
+        let reduced = builder
+            .build_int_add(low, high_times_15, "adler_reduce_sum2")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce sum2", &e))?;
+        let subtract_modulus = builder
+            .build_int_compare(
+                IntPredicate::UGE,
+                reduced,
+                i64_type.const_int(65521, false),
+                "adler_reduce_ge_mod",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce compare", &e))?;
+        let minus_modulus = builder
+            .build_int_sub(reduced, i64_type.const_int(65521, false), "adler_reduce_minus_mod")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce subtract", &e))?;
+        let selected = builder
+            .build_select(subtract_modulus, minus_modulus, reduced, "adler_reduce_select")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce select", &e))?;
+        vreg_map.insert(dest, selected);
         Ok(true)
     }
 
@@ -1479,6 +1556,14 @@ impl LlvmBackend {
         {
             return Ok(());
         }
+        if ffi_name == "rt_typed_bytes_u8_unchecked"
+            && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 1)?
+        {
+            return Ok(());
+        }
+        if ffi_name == "_adler_reduce" && self.compile_inline_adler_reduce(dest, args, vreg_map, builder)? {
+            return Ok(());
+        }
         if ffi_name == "rt_typed_bytes_u32_le_set"
             && self.compile_inline_typed_bytes_le_set_unchecked(dest, args, vreg_map, builder, 4)?
         {
@@ -1504,7 +1589,7 @@ impl LlvmBackend {
             return Ok(());
         }
 
-        if ffi_name == "rt_len" && self.compile_inline_len(dest, args, vreg_map, builder)? {
+        if matches!(ffi_name, "rt_len" | "rt_array_len") && self.compile_inline_len(dest, args, vreg_map, builder)? {
             return Ok(());
         }
 
@@ -1655,7 +1740,9 @@ impl LlvmBackend {
                     &format!("missing receiver for runtime redirect {}", rt_fn_name),
                 ));
             }
-            if rt_fn_name == "rt_len" && self.compile_inline_len(dest, args, vreg_map, builder)? {
+            if matches!(rt_fn_name, "rt_len" | "rt_array_len")
+                && self.compile_inline_len(dest, args, vreg_map, builder)?
+            {
                 return Ok(());
             }
             let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
@@ -1779,7 +1866,9 @@ impl LlvmBackend {
             if let Some(rt_fn_name) = qualified_rt_redirect {
                 let expected_arity = qualified_runtime_arity(method, rt_fn_name);
                 if expected_arity == Some(args.len()) {
-                    if rt_fn_name == "rt_len" && self.compile_inline_len(dest, args, vreg_map, builder)? {
+                    if matches!(rt_fn_name, "rt_len" | "rt_array_len")
+                        && self.compile_inline_len(dest, args, vreg_map, builder)?
+                    {
                         return Ok(());
                     }
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
@@ -1897,7 +1986,8 @@ impl LlvmBackend {
 
         // Get or declare the called function (with suffix matching safety net)
         let called_func = module
-            .get_function(resolved_name)
+            .get_function(ffi_name)
+            .or_else(|| module.get_function(resolved_name))
             .or_else(|| module.get_function(&resolved_dotted))
             .or_else(|| module.get_function(func_name_raw))
             .or_else(|| module.get_function(&raw_dotted))

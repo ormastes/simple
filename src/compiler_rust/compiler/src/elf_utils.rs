@@ -547,6 +547,14 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_raw_u64_to_string" => value::rt_raw_u64_to_string as *const () as usize,
         "rt_capture_stdout_start" => value::rt_capture_stdout_start as *const () as usize,
         "rt_capture_stderr_start" => value::rt_capture_stderr_start as *const () as usize,
+        "rt_file_mmap_len" => value::rt_file_mmap_len as *const () as usize,
+        "rt_file_mmap_read_text_rv" => value::rt_file_mmap_read_text_rv as *const () as usize,
+        "rt_file_mmap_read_bytes_rv" => value::rt_file_mmap_read_bytes_rv as *const () as usize,
+        "rt_io_tcp_read_exact" => simple_runtime::rt_io_tcp_read_exact as *const () as usize,
+        "rt_io_tcp_read_exact_len" => simple_runtime::rt_io_tcp_read_exact_len as *const () as usize,
+        "rt_io_tcp_write_text_read_exact_len" => {
+            simple_runtime::rt_io_tcp_write_text_read_exact_len as *const () as usize
+        }
 
         // Doctest I/O operations (file discovery)
         "doctest_read_file" => simple_runtime::doctest_read_file as *const () as usize,

@@ -308,6 +308,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_starts_with", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_ends_with", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_hash_text", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_str_hash", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_eq", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_data", &[I64], &[I64]), // RuntimeValue string -> raw ptr
@@ -345,6 +346,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_simd_aes_round_u8x16", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_simd_aes_round_last_u8x16", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simd_str_search", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simd_str_last_index_of", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simd_str_equal", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_text_to_lower_ascii", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_text_to_upper_ascii", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cstring_to_text", &[I64], &[I64]),
     // =========================================================================
@@ -467,6 +473,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_arm_virtio_blk_mmio_write_u32", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_virtq_desc_write", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_dma_bytes_to_array", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_typed_bytes_u8_unchecked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u8_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u32_le_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u64_le_at", &[I64, I64], &[I64]),
@@ -798,6 +805,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("native_tcp_get_nodelay", &[I64], &[I64, I64]),
     // native_tcp_peek(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_peeked: i64, error_code: i64)
     RuntimeFuncSpec::new("native_tcp_peek", &[I64, I64, I64], &[I64, I64]),
+    // rt_io_tcp_read_exact(handle: i64, size: i64) -> [u8]
+    RuntimeFuncSpec::new("rt_io_tcp_read_exact", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_read_exact_len", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_write_text_read_exact_len", &[I64, I64], &[I64]),
     // =========================================================================
     // UDP networking operations
     // =========================================================================
@@ -1157,6 +1168,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_env_temp", &[], &[I64]),        // () -> RuntimeValue
     RuntimeFuncSpec::new("rt_exit", &[I64], &[]),            // code -> ! (never returns)
     RuntimeFuncSpec::new("rt_time_now_unix", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_time_now_nanos", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_time_now_micros", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_time_now_unix_micros", &[], &[I64]),
     RuntimeFuncSpec::new("rt_sleep_ms", &[I64], &[]),
     RuntimeFuncSpec::new("rt_panic", &[I64], &[]),
     RuntimeFuncSpec::new("rt_get_args", &[], &[I64]), // () -> RuntimeValue (array of args)
@@ -1175,19 +1189,27 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_canonicalize", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_text", &[I64, I64], &[I64]),    // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_text_rv", &[I64], &[I64]),      // RuntimeValue(string) -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_mmap_read_text", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_mmap_len", &[I64, I64], &[I64]),     // path_ptr, path_len -> byte length
+    RuntimeFuncSpec::new("rt_file_mmap_read_text_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_mmap_read_bytes", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_mmap_read_bytes_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
+    RuntimeFuncSpec::new("rt_file_fsync", &[I64, I64], &[I8]),         // path -> bool
     RuntimeFuncSpec::new("rt_file_write_text_at", &[I64, I64, I64], &[I64]), // path RuntimeValue, offset, data RuntimeValue -> bytes written
-    RuntimeFuncSpec::new("rt_file_copy", &[I64, I64, I64, I64], &[I8]),      // src, dest -> bool
-    RuntimeFuncSpec::new("rt_file_remove", &[I64, I64], &[I8]),              // path -> bool
-    RuntimeFuncSpec::new("rt_file_size", &[I64, I64], &[I64]),               // path -> i64
-    RuntimeFuncSpec::new("rt_file_hash_sha256", &[I64, I64], &[I64]),        // path -> RuntimeValue
-    RuntimeFuncSpec::new("rt_file_rename", &[I64, I64, I64, I64], &[I8]),    // old, new -> bool
-    RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]),         // path -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
-    RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),         // path -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]),          // ptr, len -> RuntimeValue (byte array)
+    RuntimeFuncSpec::new("rt_file_write_text_at_cached", &[I64, I64], &[I64]), // offset, data RuntimeValue -> bytes written on prepared cache
+    RuntimeFuncSpec::new("rt_file_write_text_at_cached_repeat", &[I64, I64], &[I64]), // iterations, data RuntimeValue -> bytes written on prepared cache
+    RuntimeFuncSpec::new("rt_file_copy", &[I64, I64, I64, I64], &[I8]),               // src, dest -> bool
+    RuntimeFuncSpec::new("rt_file_remove", &[I64, I64], &[I8]),                       // path -> bool
+    RuntimeFuncSpec::new("rt_file_size", &[I64, I64], &[I64]),                        // path -> i64
+    RuntimeFuncSpec::new("rt_file_hash_sha256", &[I64, I64], &[I64]),                 // path -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_rename", &[I64, I64, I64, I64], &[I8]),             // old, new -> bool
+    RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]),                  // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]),        // path, content -> bool
+    RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),                  // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]), // ptr, len -> RuntimeValue (byte array)
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
-    RuntimeFuncSpec::new("rt_file_move", &[I64, I64, I64, I64], &[I8]),      // src, dest -> bool
+    RuntimeFuncSpec::new("rt_file_move", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool
     // =========================================================================
     // Directory Operations
     // =========================================================================
@@ -1218,6 +1240,33 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_path_stem", &[I64, I64], &[I64]),     // path -> RuntimeValue
     RuntimeFuncSpec::new("rt_path_relative", &[I64, I64, I64, I64], &[I64]), // from, to -> RuntimeValue
     RuntimeFuncSpec::new("rt_path_join", &[I64, I64, I64, I64], &[I64]), // path1, path2 -> RuntimeValue
+    // =========================================================================
+    // Async I/O Driver
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_driver_create", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_destroy", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_driver_submit_accept", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_connect", &[I64, I64, I64, I64, I64], &[I64]), // handle, fd, addr_ptr, addr_len, port
+    RuntimeFuncSpec::new("rt_driver_submit_recv", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_send", &[I64, I64, I64, I64], &[I64]), // handle, fd, data_ptr, data_len
+    RuntimeFuncSpec::new("rt_driver_submit_sendfile", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_read", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_write", &[I64, I64, I64, I64, I64], &[I64]), // handle, fd, data_ptr, data_len, offset
+    RuntimeFuncSpec::new("rt_driver_submit_open", &[I64, I64, I64, I64, I64], &[I64]), // handle, path_ptr, path_len, flags, mode
+    RuntimeFuncSpec::new("rt_driver_submit_close", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_fsync", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_timeout", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_flush", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll_id", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll_result", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll_flags", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll_data", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll_data_len", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_cancel", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_driver_backend_name", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_supports_sendfile", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_driver_supports_zero_copy", &[I64], &[I8]),
     // =========================================================================
     // Runtime Configuration
     // =========================================================================

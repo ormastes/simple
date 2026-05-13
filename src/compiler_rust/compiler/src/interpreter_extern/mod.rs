@@ -626,10 +626,15 @@ pub(crate) fn call_extern_function(
         "rt_io_tcp_connect_timeout" => interpreter_native_net::rt_io_tcp_connect_timeout_interp(&evaluated),
         "rt_dns_lookup" => interpreter_native_net::rt_dns_lookup_interp(&evaluated),
         "rt_io_tcp_read" => interpreter_native_net::rt_io_tcp_read_interp(&evaluated),
+        "rt_io_tcp_read_exact" => interpreter_native_net::rt_io_tcp_read_exact_interp(&evaluated),
+        "rt_io_tcp_read_exact_len" => interpreter_native_net::rt_io_tcp_read_exact_len_interp(&evaluated),
         "rt_io_tcp_read_line" => interpreter_native_net::rt_io_tcp_read_line_interp(&evaluated),
         "rt_io_tcp_write" => interpreter_native_net::rt_io_tcp_write_interp(&evaluated),
         "rt_io_tcp_write_all" => interpreter_native_net::rt_io_tcp_write_all_interp(&evaluated),
         "rt_io_tcp_write_text" => interpreter_native_net::rt_io_tcp_write_text_interp(&evaluated),
+        "rt_io_tcp_write_text_read_exact_len" => {
+            interpreter_native_net::rt_io_tcp_write_text_read_exact_len_interp(&evaluated)
+        }
         "rt_io_tcp_write_http" => interpreter_native_net::rt_io_tcp_write_http_interp(&evaluated),
         "rt_io_tcp_flush" => interpreter_native_net::rt_io_tcp_flush_interp(&evaluated),
         "rt_io_tcp_close" => interpreter_native_net::rt_io_tcp_close_interp(&evaluated),
@@ -1088,7 +1093,10 @@ pub(crate) fn call_extern_function(
         // File operations
         "rt_file_canonicalize" => file_io::rt_file_canonicalize(&evaluated),
         "rt_file_read_text" => file_io::rt_file_read_text(&evaluated),
+        "rt_file_mmap_read_text" => file_io::rt_file_mmap_read_text(&evaluated),
         "rt_file_write_text" => file_io::rt_file_write_text(&evaluated),
+        "rt_file_fsync" => file_io::rt_file_fsync(&evaluated),
+        "rt_file_write_text_at" => file_io::rt_file_write_text_at(&evaluated),
         "rt_file_atomic_write" => file_io::rt_file_atomic_write(&evaluated),
         "rt_file_copy" => file_io::rt_file_copy(&evaluated),
         "rt_file_remove" => file_io::rt_file_remove(&evaluated),
@@ -1096,6 +1104,7 @@ pub(crate) fn call_extern_function(
         "rt_file_read_lines" => file_io::rt_file_read_lines(&evaluated),
         "rt_file_append_text" => file_io::rt_file_append_text(&evaluated),
         "rt_file_read_bytes" => file_io::rt_file_read_bytes(&evaluated),
+        "rt_file_mmap_read_bytes" => file_io::rt_file_mmap_read_bytes(&evaluated),
         "rt_black_box" => file_io::rt_black_box(&evaluated),
         "rt_bytes_alloc" => file_io::rt_bytes_alloc(&evaluated),
         "rt_u32_alloc_filled" => file_io::rt_u32_alloc_filled(&evaluated),
@@ -1574,7 +1583,10 @@ pub(crate) fn call_extern_function(
         "rt_array_extend_i64" => ffi_array::rt_array_extend_i64_fn(&evaluated),
         // `rt_bytes_u8_at(arr, idx)` — index into a Value::Array byte buffer.
         "rt_bytes_u8_at" => ffi_array::rt_bytes_u8_at_fn(&evaluated),
+        "rt_typed_bytes_u8_unchecked" => ffi_array::rt_bytes_u8_at_fn(&evaluated),
         "rt_bytes_u8_set" => ffi_array::rt_bytes_u8_set_fn(&evaluated),
+        "rt_bytes_u32_le_at" | "rt_typed_bytes_u32_le_at" => ffi_array::rt_bytes_u32_le_at_fn(&evaluated),
+        "rt_bytes_u64_le_at" | "rt_typed_bytes_u64_le_at" => ffi_array::rt_bytes_u64_le_at_fn(&evaluated),
 
         // ====================================================================
         // FFI Dictionary Operations (7 functions)

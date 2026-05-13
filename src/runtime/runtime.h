@@ -194,6 +194,7 @@ bool     rt_file_unlock(int64_t handle);
 
 const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size);
 int64_t     rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value);
+int         rt_file_fsync(const char* path);
 
 /* ===== Memory-Mapped File I/O ===== */
 
@@ -371,6 +372,7 @@ int         rt_file_append_text(const char* path, const char* content);
 int         rt_file_delete(const char* path);
 int         rt_file_copy(const char* src, const char* dst);
 int64_t     rt_file_size(const char* path);
+int         rt_file_fsync(const char* path);
 int64_t     rt_file_stat(const char* path);
 const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);
@@ -421,7 +423,8 @@ int64_t  __simple_intrinsic_memset(void* dst, int64_t val, int64_t n);
 int64_t     rt_driver_create(int64_t queue_depth);
 void        rt_driver_destroy(int64_t handle);
 int64_t     rt_driver_submit_accept(int64_t handle, int64_t listen_fd);
-int64_t     rt_driver_submit_connect(int64_t handle, int64_t fd, const char* addr, int64_t port);
+int64_t     rt_driver_submit_connect(int64_t handle, int64_t fd, const char* addr,
+                                      int64_t addr_len, int64_t port);
 int64_t     rt_driver_submit_recv(int64_t handle, int64_t fd, int64_t buf_size);
 int64_t     rt_driver_submit_send(int64_t handle, int64_t fd, const char* data, int64_t len);
 int64_t     rt_driver_submit_sendfile(int64_t handle, int64_t sock_fd, int64_t file_fd,
@@ -429,7 +432,8 @@ int64_t     rt_driver_submit_sendfile(int64_t handle, int64_t sock_fd, int64_t f
 int64_t     rt_driver_submit_read(int64_t handle, int64_t fd, int64_t buf_size, int64_t offset);
 int64_t     rt_driver_submit_write(int64_t handle, int64_t fd, const char* data,
                                     int64_t len, int64_t offset);
-int64_t     rt_driver_submit_open(int64_t handle, const char* path, int64_t flags, int64_t mode);
+int64_t     rt_driver_submit_open(int64_t handle, const char* path, int64_t path_len,
+                                   int64_t flags, int64_t mode);
 int64_t     rt_driver_submit_close(int64_t handle, int64_t fd);
 int64_t     rt_driver_submit_fsync(int64_t handle, int64_t fd);
 int64_t     rt_driver_submit_timeout(int64_t handle, int64_t timeout_ms);
@@ -439,7 +443,7 @@ int64_t     rt_driver_poll_id(int64_t handle, int64_t index);
 int64_t     rt_driver_poll_result(int64_t handle, int64_t index);
 int64_t     rt_driver_poll_flags(int64_t handle, int64_t index);
 bool        rt_driver_cancel(int64_t handle, int64_t op_id);
-const char* rt_driver_backend_name(int64_t handle);
+int64_t     rt_driver_backend_name(int64_t handle);
 bool        rt_driver_supports_sendfile(int64_t handle);
 bool        rt_driver_supports_zero_copy(int64_t handle);
 

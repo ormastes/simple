@@ -46,18 +46,10 @@ across refactors. They are not a substitute for SSD-iq-compliant benchmarks.
 
 ---
 
-## Timing Limitation
+## Timing
 
-`bench_now_ns()` is a **monotone loop counter** (increments by 1 per call),
-not a real nanosecond clock. Simple does not yet expose `clock_gettime(CLOCK_MONOTONIC)`.
-
-- **FR-BENCH-CLOCK-001:** Add `extern fn rt_time_now_ns() -> i64` backed by
-  `clock_gettime(CLOCK_MONOTONIC)` to `src/runtime/runtime_native.c`.
-  Once landed, replace `g_bench_tick` in `test/perf/bench/lib/timing.spl` with
-  `extern fn rt_time_now_ns() -> i64`.
-
-Until then: column headers say `_ticks` not `_ns`. The percentile math
-(p50/p99/p99.9) is correct; only the unit is wrong.
+`bench_now_ns()` calls `rt_time_now_nanos()`, backed by a monotonic native clock.
+CSV columns use nanoseconds and report `kops_per_s` as `(iters * 1_000_000) / total_ns`.
 
 ---
 
@@ -71,6 +63,8 @@ bin/simple run test/perf/bench/run_all.spl
 bin/simple run test/perf/bench/fs_driver_mount_table.spl
 bin/simple run test/perf/bench/nvfs_arena_throughput.spl
 bin/simple run test/perf/bench/spostgre_wal_append.spl
+bin/simple run test/perf/bench/durable_wal_fsync.spl
+python3 test/perf/bench/durable_wal_fsync.py
 ```
 
 ---
@@ -90,7 +84,7 @@ diff doc/08_tracking/bench/baseline_2026-04-17.csv \
      doc/08_tracking/bench/baseline_2026-04-18.csv
 ```
 
-CSV columns: `label,iters,p50_ticks,p99_ticks,p99_9_ticks,min_ticks,max_ticks,total_ticks,ops_per_ktick`
+CSV columns: `label,iters,p50_ns,p99_ns,p99_9_ns,min_ns,max_ns,total_ns,kops_per_s`
 
 ---
 
@@ -102,7 +96,26 @@ CSV columns: `label,iters,p50_ticks,p99_ticks,p99_9_ticks,min_ticks,max_ticks,to
 | `test/perf/bench/fs_driver_mount_table.spl` | 3 | MountTable resolve/lookup; validates FR-STORAGE-0004 str_char_at perf |
 | `test/perf/bench/nvfs_arena_throughput.spl` | 4 | Arena append/readv/clone_range/seal via in-proc shim |
 | `test/perf/bench/spostgre_wal_append.spl` | 3 | WAL append/commit_group/recover_tail via in-proc shim |
+| `test/perf/bench/durable_wal_fsync.spl` | 2 | Simple runtime write-at+fsync durability-fence probe; not raw NVMe/FUA |
+| `test/perf/bench/durable_wal_fsync.py` | 3 | Host file write+fsync plus torn-tail recovery probe; not raw NVMe/FUA |
 | `test/perf/bench/run_all.spl` | 2 rep. | Combined runner, CSV + markdown summary |
+
+## Durable WAL Host Evidence
+
+`durable_wal_fsync.py` adds a host recovery check around the fsync timing
+probe. It writes CRC-framed records, appends a partial torn-tail record,
+recovers complete records, truncates to the last valid byte, and re-runs
+recovery after truncation. Current evidence on this host:
+
+| probe | result |
+|---|---|
+| write 256B + fsync each | p50 5.47 ms, ~189 ops/s |
+| group 10x256B + fsync | p50 4.91 ms, ~165 group-fsync ops/s |
+| torn-tail recovery | 16 records recovered, truncated to 4416 valid bytes |
+
+This proves the host-file WAL probe has a real fsync fence and a deterministic
+torn-tail recovery check. It still does not prove production DB durability on
+raw NVMe/FUA or under power-loss hardware validation.
 
 ---
 

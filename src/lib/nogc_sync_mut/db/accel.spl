@@ -112,11 +112,15 @@ struct RowBitmap:
 
     fn count() -> i64:
         var total = 0
-        var idx = 0
-        while idx < self.row_count:
-            if self.get(idx):
-                total = total + 1
-            idx = idx + 1
+        val word_limit = row_bitmap_word_count(self.row_count)
+        val tail_bits = self.row_count % 32
+        var word_idx = 0
+        while word_idx < word_limit:
+            var word = self.words[word_idx as i32]
+            if tail_bits > 0 and word_idx == word_limit - 1:
+                word = word & row_bitmap_tail_mask(tail_bits)
+            total = total + popcount_u32(word)
+            word_idx = word_idx + 1
         total
 
     fn density() -> f64:
@@ -184,6 +188,16 @@ fn row_bitmap_min_words(lhs: i64, rhs: i64) -> i64:
 fn row_bitmap_max_words(lhs: i64, rhs: i64) -> i64:
     if lhs > rhs: lhs else: rhs
 
+fn row_bitmap_tail_mask(tail_bits: i64) -> u32:
+    if tail_bits <= 0:
+        return 0xFFFFFFFFu32
+    var mask = 0u32
+    var bit = 0
+    while bit < tail_bits:
+        mask = mask | (1u32 << (bit as u32))
+        bit = bit + 1
+    mask
+
 fn row_bitmap_indices(bitmap: RowBitmap) -> [i64]:
     var result: [i64] = []
     val word_limit = row_bitmap_word_count(bitmap.row_count)
@@ -206,13 +220,10 @@ fn row_bitmap_indices(bitmap: RowBitmap) -> [i64]:
     result
 
 fn popcount_u32(word: u32) -> i64:
-    var total = 0
-    var bit_idx = 0
-    while bit_idx < 32:
-        if ((word >> (bit_idx as u32)) & 1u32) != 0u32:
-            total = total + 1
-        bit_idx = bit_idx + 1
-    total
+    var value = word
+    value = value - ((value >> 1u32) & 0x55555555u32)
+    value = (value & 0x33333333u32) + ((value >> 2u32) & 0x33333333u32)
+    (((value + (value >> 4u32)) & 0x0F0F0F0Fu32) * 0x01010101u32 >> 24u32) as i64
 
 fn accel_capability_report() -> AccelCapabilityReport:
     val tier = detect_profile()
@@ -468,35 +479,35 @@ fn collect_text_row_indices(values: [text], predicate: ScanPredicate) -> ([i64],
             val expected = predicate.text_value
             var idx = 0
             while idx < row_count:
-                if text_equals_span(values[idx], expected):
+                if values[idx] == expected:
                     rows.push(idx)
                 idx = idx + 1
         case ScanPredicateKind.Ne:
             val expected = predicate.text_value
             var idx = 0
             while idx < row_count:
-                if not text_equals_span(values[idx], expected):
+                if values[idx] != expected:
                     rows.push(idx)
                 idx = idx + 1
         case ScanPredicateKind.StartsWith:
             val expected = predicate.text_value
             var idx = 0
             while idx < row_count:
-                if text_starts_with_span(values[idx], expected):
+                if values[idx].starts_with(expected):
                     rows.push(idx)
                 idx = idx + 1
         case ScanPredicateKind.EndsWith:
             val expected = predicate.text_value
             var idx = 0
             while idx < row_count:
-                if text_ends_with_span(values[idx], expected):
+                if values[idx].ends_with(expected):
                     rows.push(idx)
                 idx = idx + 1
         case ScanPredicateKind.Contains:
             val expected = predicate.text_value
             var idx = 0
             while idx < row_count:
-                if text_contains_fragment(values[idx], expected):
+                if values[idx].contains(expected):
                     rows.push(idx)
                 idx = idx + 1
         case ScanPredicateKind.ContainsToken:
@@ -531,7 +542,7 @@ fn scan_text_values(values: [text], predicate: ScanPredicate) -> (RowBitmap, Fil
             var word_idx = 0
             var mask = 1u32
             while idx < row_count:
-                if text_equals_span(values[idx], expected):
+                if values[idx] == expected:
                     bitmap.words[word_idx as i32] = bitmap.words[word_idx as i32] | mask
                     kept = kept + 1
                 if mask == (1u32 << 31u32):
@@ -546,7 +557,7 @@ fn scan_text_values(values: [text], predicate: ScanPredicate) -> (RowBitmap, Fil
             var word_idx = 0
             var mask = 1u32
             while idx < row_count:
-                if not text_equals_span(values[idx], expected):
+                if values[idx] != expected:
                     bitmap.words[word_idx as i32] = bitmap.words[word_idx as i32] | mask
                     kept = kept + 1
                 if mask == (1u32 << 31u32):
@@ -561,7 +572,7 @@ fn scan_text_values(values: [text], predicate: ScanPredicate) -> (RowBitmap, Fil
             var word_idx = 0
             var mask = 1u32
             while idx < row_count:
-                if text_starts_with_span(values[idx], expected):
+                if values[idx].starts_with(expected):
                     bitmap.words[word_idx as i32] = bitmap.words[word_idx as i32] | mask
                     kept = kept + 1
                 if mask == (1u32 << 31u32):
@@ -576,7 +587,7 @@ fn scan_text_values(values: [text], predicate: ScanPredicate) -> (RowBitmap, Fil
             var word_idx = 0
             var mask = 1u32
             while idx < row_count:
-                if text_ends_with_span(values[idx], expected):
+                if values[idx].ends_with(expected):
                     bitmap.words[word_idx as i32] = bitmap.words[word_idx as i32] | mask
                     kept = kept + 1
                 if mask == (1u32 << 31u32):
@@ -591,7 +602,7 @@ fn scan_text_values(values: [text], predicate: ScanPredicate) -> (RowBitmap, Fil
             var word_idx = 0
             var mask = 1u32
             while idx < row_count:
-                if text_contains_fragment(values[idx], expected):
+                if values[idx].contains(expected):
                     bitmap.words[word_idx as i32] = bitmap.words[word_idx as i32] | mask
                     kept = kept + 1
                 if mask == (1u32 << 31u32):

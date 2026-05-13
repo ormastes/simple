@@ -12,7 +12,7 @@ use crate::hir::TypeId;
 use crate::mir::{CallTarget, VReg};
 
 use super::core::compile_builtin_io_call;
-use super::helpers::{adapted_call, call_runtime_3, create_cstring_constant, get_vreg_or_default};
+use super::helpers::{adapted_call, call_runtime_3, create_cstring_constant, get_vreg_or_default, inline_runtime_len_value};
 use super::{InstrContext, InstrResult};
 
 /// Check if a function name is a profiler function (to avoid recursive instrumentation)
@@ -122,42 +122,7 @@ fn compile_inline_len<M: Module>(
     };
 
     let value = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let invalid = builder.ins().iconst(types::I64, -1);
-    let tag_mask = builder.ins().iconst(types::I64, 7);
-    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
-
-    let type_block = builder.create_block();
-    let len_block = builder.create_block();
-    let done_block = builder.create_block();
-    builder.append_block_param(done_block, types::I64);
-
-    let tag = builder.ins().band(value, tag_mask);
-    let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
-    builder.ins().brif(is_heap, type_block, &[], done_block, &[invalid]);
-
-    builder.switch_to_block(type_block);
-    let ptr_bits = builder.ins().band(value, ptr_mask);
-    let object_type = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
-    let is_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
-    let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
-    let is_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 3);
-    let is_tuple = builder.ins().icmp_imm(IntCC::Equal, object_type, 4);
-    let string_or_array = builder.ins().bor(is_string, is_array);
-    let dict_or_tuple = builder.ins().bor(is_dict, is_tuple);
-    let is_collection = builder.ins().bor(string_or_array, dict_or_tuple);
-    builder
-        .ins()
-        .brif(is_collection, len_block, &[], done_block, &[invalid]);
-    builder.seal_block(type_block);
-
-    builder.switch_to_block(len_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    builder.ins().jump(done_block, &[len]);
-    builder.seal_block(len_block);
-
-    builder.switch_to_block(done_block);
-    let result = builder.block_params(done_block)[0];
-    builder.seal_block(done_block);
+    let result = inline_runtime_len_value(builder, value);
     ctx.vreg_values.insert(*dest, result);
     Ok(true)
 }
@@ -290,6 +255,9 @@ fn compile_inline_bytes_le_at<M: Module>(
     let byte_ptr = builder.ins().iadd(data_ptr, index);
     let loaded = if width == 8 {
         builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
+    } else if width == 1 {
+        let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+        builder.ins().uextend(types::I64, value)
     } else {
         let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
         builder.ins().uextend(types::I64, value)
@@ -326,11 +294,46 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
     let byte_ptr = builder.ins().iadd(data_ptr, index);
     let loaded = if width == 8 {
         builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
+    } else if width == 1 {
+        let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+        builder.ins().uextend(types::I64, value)
     } else {
         let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
         builder.ins().uextend(types::I64, value)
     };
     ctx.vreg_values.insert(*dest, loaded);
+    Ok(true)
+}
+
+fn compile_inline_adler_reduce<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 1 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let value = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let low_mask = builder.ins().iconst(types::I64, 0xFFFF);
+    let low = builder.ins().band(value, low_mask);
+    let high = builder.ins().ushr_imm(value, 16);
+    let high_times_15 = builder.ins().imul_imm(high, 15);
+    let reduced = builder.ins().iadd(low, high_times_15);
+    let low = builder.ins().band(reduced, low_mask);
+    let high = builder.ins().ushr_imm(reduced, 16);
+    let high_times_15 = builder.ins().imul_imm(high, 15);
+    let reduced = builder.ins().iadd(low, high_times_15);
+    let subtract_modulus = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, reduced, 65521);
+    let minus_modulus = builder.ins().iadd_imm(reduced, -65521);
+    let selected = builder.ins().select(subtract_modulus, minus_modulus, reduced);
+    ctx.vreg_values.insert(*dest, selected);
     Ok(true)
 }
 
@@ -565,7 +568,10 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_delete"
         | "rt_file_remove"
         | "rt_file_read_lines"
-        | "rt_file_read_bytes" => Some(&[0]),
+        | "rt_file_read_bytes"
+        | "rt_file_mmap_read_text"
+        | "rt_file_mmap_len"
+        | "rt_file_mmap_read_bytes" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
         "rt_file_write_text"
         | "rt_file_copy"
@@ -578,6 +584,10 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_dir_create" | "rt_dir_create_all" | "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all"
         | "rt_dir_glob" | "rt_dir_walk" | "rt_set_current_dir" => Some(&[0]),
         "rt_file_find" => Some(&[0, 1]),
+
+        // Async I/O driver text arguments
+        "rt_driver_submit_open" => Some(&[1]),
+        "rt_driver_submit_connect" | "rt_driver_submit_send" | "rt_driver_submit_write" => Some(&[2]),
 
         // Path operations (single path)
         "rt_path_basename" | "rt_path_dirname" | "rt_path_ext" | "rt_path_absolute" | "rt_path_stem" => Some(&[0]),
@@ -835,7 +845,7 @@ pub fn compile_call<M: Module>(
     if compile_simple_runtime_memory_intrinsic(ctx, builder, dest, func_name_for_ffi, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_len" && compile_inline_len(ctx, builder, dest, args)? {
+    if matches!(ffi_name, "rt_len" | "rt_array_len") && compile_inline_len(ctx, builder, dest, args)? {
         return Ok(());
     }
     if ffi_name == "rt_typed_bytes_u8_at" && compile_inline_bytes_u8_at(ctx, builder, dest, args, true)? {
@@ -858,6 +868,14 @@ pub fn compile_call<M: Module>(
     if ffi_name == "rt_typed_bytes_u64_le_unchecked"
         && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 8)?
     {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_bytes_u8_unchecked"
+        && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 1)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "_adler_reduce" && compile_inline_adler_reduce(ctx, builder, dest, args)? {
         return Ok(());
     }
     if ffi_name == "rt_typed_bytes_u32_le_set"
@@ -1039,7 +1057,7 @@ pub fn compile_call<M: Module>(
                 "to_lower" | "lower" => Some("rt_string_to_lower"),
                 "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
                 "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
-                "index_of" | "find" | "find_str" => Some("rt_string_index_of"),
+                "index_of" | "find" | "find_str" => Some("rt_string_find"),
                 "rfind" | "last_index_of" => Some("rt_string_rfind"),
                 "to_string" | "str" => Some("rt_to_string"),
                 "slice" | "substring" => Some("rt_slice"),

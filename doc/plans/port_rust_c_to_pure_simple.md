@@ -8,8 +8,8 @@ Scope: keep the algorithm implementations in pure Simple, keep the MDSOC compile
 
 Current evidence:
 - Correctness parity is already passing for the dependency-free C/Rust/Simple XXHash64 and ChaCha20 benchmark harness.
-- Simple now meets the XXHash64 and ChaCha20 throughput targets on the latest LLVM-enabled release artifact and explicit LLVM probe sample.
-- This local build now has an LLVM-enabled active `bin/simple`; the benchmark harness records both default native output and a `--backend=llvm` probe with checksum parity. In the latest sample the default and explicit LLVM benchmark binaries are byte-identical.
+- Simple now meets the XXHash64 and ChaCha20 throughput targets on the latest Cranelift aggressive/native sample. LLVM remains a verified comparison backend, but it is not the faster algorithm backend on the 2026-05-13 host sample.
+- This local build now has an LLVM-enabled active `bin/simple`; the benchmark harness records both default native output and a `--backend=llvm` probe with checksum parity.
 - Rust reference builds use `rustc -C opt-level=3 -C target-cpu=native`; Simple uses `simple compile --native --cpu native --opt-level aggressive`.
 - Recent Rust compiler work added typed `[u8]` load/store helpers (`rt_bytes_u8_at`, `rt_bytes_u8_set`), packed `[u8]` runtime storage for typed empty byte arrays, little-endian byte-array load and store markers that lower inline in Cranelift and LLVM, inline `rt_len` lowering for Cranelift and LLVM call sites, release-shim archive lookup, LLVM target datalayout emission, LLVM backend CLI availability, and native extern hygiene for unused broad SIMD declarations.
 - The active `bin/release/x86_64-unknown-linux-gnu/simple` artifact was refreshed from the LLVM-enabled release build on 2026-05-12; current SHA256 is `e1af8431a4bc05cad74bfd29d4aebb8436adb7fd852a035e5e9546319a35295d`.
@@ -106,7 +106,75 @@ Follow-up hardening work, in order:
 Acceptance target:
 - Correctness parity must remain PASS before any speed number counts.
 - `test/perf/run_comparison.shs` must continue showing self-hosted Simple no slower than the Rust bootstrap.
-- For XXHash64 and ChaCha20, pure Simple native should reach at least 70% of portable Rust throughput and 50% of portable C throughput. If not met, the remaining delta must be tied to a specific, verified IR/ASM difference and a named follow-up task above.
+- For XXHash64, CRC32, Adler-32, and ChaCha20, pure Simple native should reach at least 70% of portable Rust throughput and 50% of portable C throughput. If not met, the remaining delta must be tied to a specific, verified IR/ASM difference and a named follow-up task above.
+
+### 2026-05-13 pure Simple Adler-32 optimization-layer update
+
+Commands:
+- `bin/simple check src/os/crypto/adler32.spl`
+- `bin/simple test test/unit/os/crypto/adler32_spec.spl --mode=interpreter --no-cache`
+- `bin/simple check test/perf/port_algorithms/port_algorithms_simple.spl`
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_typed_bytes_u8_unchecked_does_not_emit_runtime_symbol -- --nocapture`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_adler_reduce_does_not_emit_function_symbol -- --nocapture`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_rt_array_len_does_not_emit_runtime_symbol -- --nocapture`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_len_method_does_not_emit_runtime_symbol -- --nocapture`
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml --release -p simple-driver --bin simple`
+- `src/compiler_rust/target/release/simple test test/unit/os/crypto/adler32_spec.spl --mode=interpreter --no-cache`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LLVM_PROBE=0 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple Cranelift MB/s | Simple LLVM MB/s | Checksum parity | Status |
+|-----------|--------|-----------|-----------------------|------------------|-----------------|--------|
+| XXHash64 | 7790 | 7698 | 6012 | not sampled | PASS | Cranelift passes both gates in this noisy source-built sample |
+| CRC32 | 280 | 292 | 202 | not sampled | PASS | Cranelift passes both gates in this noisy source-built sample |
+| Adler-32 | 2605 | 2524 | 1336 | not sampled | PASS | Improved by length inlining and 8-byte source unroll; passes 50% C but not 70% Rust |
+| ChaCha20 | 315 | 347 | 194 | not sampled | PASS | Cranelift passes 50% C but not 70% Rust on this source-built sample |
+
+Interpretation:
+- Adler-32 remains pure Simple. The implementation now uses the standard 5552-byte deferred-modulo chunking, a fast `65521 = 2^16 - 15` reduction helper, and a compiler-inline `rt_typed_bytes_u8_unchecked` byte helper, preserving interpreter correctness while avoiding generic `data[i]` source indexing in the hot loop.
+- Correctness is locked by the existing 12-example Adler/Fletcher unit spec and by C/Rust/Simple checksum parity in the source-built benchmark harness.
+- The compiler/backend layer now has regression tests proving `rt_typed_bytes_u8_unchecked`, `rt_array_len`, `.len()`, and `_adler_reduce` lower without runtime/function relocations in the covered Cranelift call shapes. The `rt_array_len`/`.len()` fix improved Adler-32 from the prior `904 MB/s` source-built sample to `1221 MB/s`; the pure Simple 8-byte loop unroll moved the latest sample to `1336 MB/s`.
+- Remaining Adler-32 delta is loop/code-shape work: the source-built benchmark binary is stripped enough that symbol-level disassembly is limited, but the measured hot path remains below the 70% Rust gate. Follow-up target: make this unroll compiler-driven in MIR for simple byte reductions, then resample with a non-stripped symbol build for tighter ASM evidence.
+- Rejected follow-up: a pure Simple 16-byte Adler loop unroll checked and passed unit tests, but regressed the benchmark sample to `1103 MB/s`, so the implementation was returned to the verified 8-byte unroll.
+
+### 2026-05-13 pure Simple CRC32 optimization-layer update
+
+Commands:
+- `cargo fmt --manifest-path src/compiler_rust/Cargo.toml --all`
+- `bin/simple check src/os/crypto/crc32.spl`
+- `bin/simple check test/perf/port_algorithms/port_algorithms_simple.spl`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_typed_bytes_u32_le_at_does_not_emit_runtime_symbol -- --nocapture`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler rt_bytes_u -- --nocapture`
+- `cargo run --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --bin simple -- test test/unit/os/crypto/crc32_kat_spec.spl --mode=interpreter --no-cache`
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple Cranelift MB/s | Simple LLVM MB/s | Checksum parity | Status |
+|-----------|--------|-----------|-----------------------|------------------|-----------------|--------|
+| XXHash64 | 8269 | 8295 | 14093 | 8388 | PASS | Cranelift and LLVM pass 70% Rust and 50% C |
+| CRC32 | 283 | 278 | 412 | 292 | PASS | Pure Simple byte-table path passes 70% Rust and 50% C |
+| ChaCha20 | 319 | 286 | 363 | 363 | PASS | Cranelift and LLVM pass 70% Rust and 50% C |
+
+Interpretation:
+- CRC32 remains a pure Simple implementation. The benchmark now compares C and Rust references against `os.crypto.crc32` rather than delegating to a C library.
+- The compiler/codegen optimization layer is the important part: `rt_typed_bytes_u32_le_at` is covered by a codegen regression test proving it lowers inline without a runtime relocation, and the disassembly summary shows no CRC hot-loop `rt_index_get` call after the byte-table lowering.
+- The interpreter extern layer now supports `rt_bytes_u32_le_at`/`rt_bytes_u64_le_at` plus typed aliases, so optimized pure Simple byte-buffer algorithms can run in interpreter mode without falling back to unknown extern errors once the Rust compiler binary is refreshed.
+
+### 2026-05-13 native algorithm compiler/interpreter perf update
+
+Commands:
+- `SIMPLE_LLVM_PROBE=0 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=0 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `objdump -Cd --disassemble=chacha20_xor_block_checksum_local build/perf/port_algorithms/port_algorithms_simple`
+
+| Algorithm | C MB/s | Rust MB/s | Simple Cranelift MB/s | Simple LLVM MB/s | Checksum parity | Status |
+|-----------|--------|-----------|-----------------------|------------------|-----------------|--------|
+| XXHash64 | 14285 | 8217 | 8256 | 8388 | PASS | Cranelift and LLVM pass 70% Rust and 50% C |
+| ChaCha20 | 323 | 194 | 206 | 206 | PASS | Cranelift and LLVM pass 70% Rust and 50% C |
+
+Interpretation:
+- The active default native backend and LLVM probe both pass the current acceptance gate on the final 2026-05-13 sample. Keep `--backend=llvm` in the harness as a verification and portability probe; do not assume it is consistently faster than Cranelift because adjacent samples varied by host scheduling and CPU state.
+- Cranelift aggressive/native emits BMI rotate instructions (`rorx`) for the ChaCha quarter-round idiom, so the next compiler-side wins should focus on register pressure, helper inlining, bounds/index proof, and fixed-size byte-buffer lowering rather than adding a rotate intrinsic.
+- The interpreter hot integer path now has a direct `Value::Int` binary-op fast path and targeted Rust unit coverage. This keeps interpreter arithmetic-heavy algorithm probes from paying the generic float/dunder/unsigned dispatch cost when both operands are plain signed integers.
 
 ### 2026-05-12 typed u32 byte-store and ChaCha final acceptance update
 
