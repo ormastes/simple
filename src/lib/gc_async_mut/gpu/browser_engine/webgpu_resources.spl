@@ -61,6 +61,20 @@ pub class GPUTextureHandle:
     depth_or_layers: i32
     format: text
     usage: i32
+    dimension: text
+    valid: bool
+    error: text
+
+pub class GPUTextureViewHandle:
+    id: i32
+    label: text
+    texture_id: i32
+    format: text
+    dimension: text
+    base_mip_level: i32
+    mip_level_count: i32
+    base_array_layer: i32
+    array_layer_count: i32
     valid: bool
     error: text
 
@@ -144,6 +158,7 @@ pub class WebGPUResourceTable:
     next_resource_id: i32
     buffers: [GPUBufferHandle]
     textures: [GPUTextureHandle]
+    texture_views: [GPUTextureViewHandle]
     samplers: [GPUSamplerHandle]
     bind_group_layouts: [GPUBindGroupLayoutHandle]
     bind_groups: [GPUBindGroupHandle]
@@ -154,6 +169,7 @@ pub class WebGPUResourceTable:
             next_resource_id: 1,
             buffers: [],
             textures: [],
+            texture_views: [],
             samplers: [],
             bind_group_layouts: [],
             bind_groups: [],
@@ -173,14 +189,35 @@ pub class WebGPUResourceTable:
         handle
 
     me create_texture(label: text, width: i32, height: i32, depth_or_layers: i32, format: text, usage: i32) -> GPUTextureHandle:
+        self.create_texture_with_dimension(label, width, height, depth_or_layers, format, usage, WEBGPU_TEXTURE_DIMENSION_2D)
+
+    me create_texture_with_dimension(label: text, width: i32, height: i32, depth_or_layers: i32, format: text, usage: i32, dimension: text) -> GPUTextureHandle:
         val err = webgpu_validate_texture_descriptor(width, height, depth_or_layers, format, usage)
         if err != "":
             self.last_error = err
-            return GPUTextureHandle(id: -1, label: label, width: width, height: height, depth_or_layers: depth_or_layers, format: format, usage: usage, valid: false, error: err)
+            return GPUTextureHandle(id: -1, label: label, width: width, height: height, depth_or_layers: depth_or_layers, format: format, usage: usage, dimension: dimension, valid: false, error: err)
+        if not webgpu_is_supported_texture_dimension(dimension):
+            self.last_error = "GPUTexture dimension is not supported"
+            return GPUTextureHandle(id: -1, label: label, width: width, height: height, depth_or_layers: depth_or_layers, format: format, usage: usage, dimension: dimension, valid: false, error: self.last_error)
         val id = self.next_resource_id
         self.next_resource_id = self.next_resource_id + 1
-        val handle = GPUTextureHandle(id: id, label: label, width: width, height: height, depth_or_layers: depth_or_layers, format: format, usage: usage, valid: true, error: "")
+        val handle = GPUTextureHandle(id: id, label: label, width: width, height: height, depth_or_layers: depth_or_layers, format: format, usage: usage, dimension: dimension, valid: true, error: "")
         self.textures.push(handle)
+        self.last_error = ""
+        handle
+
+    me create_texture_view(label: text, texture_id: i32, format: text, dimension: text, base_mip_level: i32, mip_level_count: i32, base_array_layer: i32, array_layer_count: i32) -> GPUTextureViewHandle:
+        val texture = webgpu_find_texture(self, texture_id)
+        val err = webgpu_validate_texture_view_descriptor(texture, format, dimension, base_mip_level, mip_level_count, base_array_layer, array_layer_count)
+        if err != "":
+            self.last_error = err
+            return GPUTextureViewHandle(id: -1, label: label, texture_id: texture_id, format: format, dimension: dimension, base_mip_level: base_mip_level, mip_level_count: mip_level_count, base_array_layer: base_array_layer, array_layer_count: array_layer_count, valid: false, error: err)
+        val id = self.next_resource_id
+        self.next_resource_id = self.next_resource_id + 1
+        val view_format = webgpu_texture_view_format_or_default(texture, format)
+        val view_dimension = webgpu_texture_view_dimension_or_default(texture, dimension)
+        val handle = GPUTextureViewHandle(id: id, label: label, texture_id: texture_id, format: view_format, dimension: view_dimension, base_mip_level: base_mip_level, mip_level_count: mip_level_count, base_array_layer: base_array_layer, array_layer_count: array_layer_count, valid: true, error: "")
+        self.texture_views.push(handle)
         self.last_error = ""
         handle
 
@@ -225,13 +262,14 @@ pub class WebGPUResourceTable:
         handle
 
     fn resource_count() -> i32:
-        self.buffers.len() + self.textures.len() + self.samplers.len() +
+        self.buffers.len() + self.textures.len() + self.texture_views.len() + self.samplers.len() +
             self.bind_group_layouts.len() + self.bind_groups.len()
 
     me clear():
         self.next_resource_id = 1
         self.buffers.clear()
         self.textures.clear()
+        self.texture_views.clear()
         self.samplers.clear()
         self.bind_group_layouts.clear()
         self.bind_groups.clear()
@@ -342,7 +380,16 @@ pub fn webgpu_find_texture(resources: WebGPUResourceTable, texture_id: i32) -> G
         if texture.id == texture_id and texture.valid:
             return texture
         i = i + 1
-    GPUTextureHandle(id: -1, label: "", width: 0, height: 0, depth_or_layers: 0, format: "", usage: 0, valid: false, error: "GPUTexture does not exist")
+    GPUTextureHandle(id: -1, label: "", width: 0, height: 0, depth_or_layers: 0, format: "", usage: 0, dimension: "", valid: false, error: "GPUTexture does not exist")
+
+pub fn webgpu_find_texture_view(resources: WebGPUResourceTable, texture_view_id: i32) -> GPUTextureViewHandle:
+    var i = 0
+    while i < resources.texture_views.len():
+        val texture_view = resources.texture_views[i]
+        if texture_view.id == texture_view_id and texture_view.valid:
+            return texture_view
+        i = i + 1
+    GPUTextureViewHandle(id: -1, label: "", texture_id: -1, format: "", dimension: "", base_mip_level: 0, mip_level_count: 0, base_array_layer: 0, array_layer_count: 0, valid: false, error: "GPUTextureView does not exist")
 
 pub fn webgpu_find_bind_group(resources: WebGPUResourceTable, bind_group_id: i32) -> GPUBindGroupHandle:
     var i = 0
@@ -390,6 +437,46 @@ pub fn webgpu_validate_extended_texture_descriptor(width: i32, height: i32, dept
     else: if view_dimension != "" and view_dimension != dimension:
         return "GPUTexture view dimension is not supported"
     ""
+
+pub fn webgpu_validate_texture_view_descriptor(texture: GPUTextureHandle, format: text, dimension: text, base_mip_level: i32, mip_level_count: i32, base_array_layer: i32, array_layer_count: i32) -> text:
+    if not texture.valid:
+        return "GPUTextureView texture does not exist"
+    if format != "" and format != texture.format:
+        return "GPUTextureView format must match texture format"
+    if dimension != "" and dimension != WEBGPU_TEXTURE_DIMENSION_2D and dimension != WEBGPU_TEXTURE_DIMENSION_3D and dimension != WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE:
+        return "GPUTextureView dimension is not supported"
+    if base_mip_level < 0:
+        return "GPUTextureView baseMipLevel must be non-negative"
+    if mip_level_count <= 0:
+        return "GPUTextureView mipLevelCount must be positive"
+    if base_mip_level + mip_level_count > webgpu_max_mip_level_count(texture.width, texture.height, texture.depth_or_layers, texture.dimension):
+        return "GPUTextureView mip range exceeds texture mip levels"
+    if base_array_layer < 0:
+        return "GPUTextureView baseArrayLayer must be non-negative"
+    if array_layer_count <= 0:
+        return "GPUTextureView arrayLayerCount must be positive"
+    if base_array_layer + array_layer_count > texture.depth_or_layers:
+        return "GPUTextureView array layer range exceeds texture layers"
+    if dimension == WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE:
+        if texture.dimension != WEBGPU_TEXTURE_DIMENSION_2D:
+            return "GPUTextureView cube views require 2d texture dimension"
+        if array_layer_count != 6:
+            return "GPUTextureView cube views require exactly six array layers"
+        if texture.width != texture.height:
+            return "GPUTextureView cube views require square faces"
+    else: if dimension != "" and dimension != texture.dimension:
+        return "GPUTextureView dimension must match texture dimension"
+    ""
+
+pub fn webgpu_texture_view_format_or_default(texture: GPUTextureHandle, format: text) -> text:
+    if format == "":
+        return texture.format
+    format
+
+pub fn webgpu_texture_view_dimension_or_default(texture: GPUTextureHandle, dimension: text) -> text:
+    if dimension == "":
+        return texture.dimension
+    dimension
 
 pub fn webgpu_max_mip_level_count(width: i32, height: i32, depth_or_layers: i32, dimension: text) -> i32:
     var largest = width
