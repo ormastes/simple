@@ -539,6 +539,90 @@ pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> boo
     rt_array_push_grow(array, value)
 }
 
+/// Push a raw byte into a `[u8]`-style runtime array without RuntimeValue boxing.
+#[no_mangle]
+pub extern "C" fn rt_typed_bytes_u8_push(array: RuntimeValue, value: i64) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        if (*arr).len >= (*arr).capacity {
+            let old_cap = (*arr).capacity;
+            let new_cap = (old_cap * 2).max(4);
+            let old_layout = if (*arr).is_byte_packed() {
+                byte_array_data_layout(old_cap)
+            } else {
+                array_data_layout(old_cap)
+            };
+            let new_layout = if (*arr).is_byte_packed() {
+                byte_array_data_layout(new_cap)
+            } else {
+                array_data_layout(new_cap)
+            };
+            let new_size = new_layout.size();
+            let new_data = if (*arr).data.is_null() {
+                std::alloc::alloc_zeroed(new_layout) as *mut RuntimeValue
+            } else {
+                std::alloc::realloc((*arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+            };
+            if new_data.is_null() {
+                return false;
+            }
+            let old_bytes = if (*arr).is_byte_packed() {
+                old_cap as usize
+            } else {
+                old_cap as usize * std::mem::size_of::<RuntimeValue>()
+            };
+            if new_size > old_bytes {
+                std::ptr::write_bytes((new_data as *mut u8).add(old_bytes), 0, new_size - old_bytes);
+            }
+            (*arr).data = new_data;
+            (*arr).capacity = new_cap;
+        }
+
+        if (*arr).is_byte_packed() {
+            *((*arr).data as *mut u8).add((*arr).len as usize) = (value & 0xff) as u8;
+        } else {
+            *(*arr).data.add((*arr).len as usize) = RuntimeValue::from_int(value & 0xff);
+        }
+        (*arr).len += 1;
+        true
+    }
+}
+
+/// Push a raw u32 into a `[u32]`-style runtime array without RuntimeValue boxing.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u32_push(array: RuntimeValue, value: i64) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        if (*arr).is_byte_packed() {
+            return false;
+        }
+        if (*arr).len >= (*arr).capacity {
+            let old_cap = (*arr).capacity;
+            let new_cap = (old_cap * 2).max(4);
+            let old_layout = array_data_layout(old_cap);
+            let new_size = array_data_layout(new_cap).size();
+            let new_data = if (*arr).data.is_null() {
+                std::alloc::alloc_zeroed(array_data_layout(new_cap)) as *mut RuntimeValue
+            } else {
+                std::alloc::realloc((*arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+            };
+            if new_data.is_null() {
+                return false;
+            }
+            let old_len_bytes = old_cap as usize * std::mem::size_of::<RuntimeValue>();
+            if new_size > old_len_bytes {
+                std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_size - old_len_bytes);
+            }
+            (*arr).data = new_data;
+            (*arr).capacity = new_cap;
+        }
+
+        *(*arr).data.add((*arr).len as usize) = RuntimeValue::from_int(value & 0xFFFF_FFFF);
+        (*arr).len += 1;
+        true
+    }
+}
+
 /// Push an element to an array, growing the array if necessary.
 /// This is the default push behavior - arrays automatically grow.
 ///

@@ -67,6 +67,30 @@ fn u32_index_set_uses_word_fast_path() {
 }
 
 #[test]
+fn u8_array_push_uses_byte_fast_path() {
+    let mir =
+        compile_to_mir("fn test():\n    var arr: [u8] = []\n    var byte: u8 = 42\n    arr.push(byte)\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_bytes_u8_push"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_push"))
+    }));
+}
+
+#[test]
+fn u32_array_push_uses_word_fast_path() {
+    let mir =
+        compile_to_mir("fn test():\n    var arr: [u32] = []\n    var word: u32 = 42\n    arr.push(word)\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_words_u32_push"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_push"))
+    }));
+}
+
+#[test]
 fn index_set_float_boxing() {
     let mir = compile_to_mir("fn test():\n    var arr = [0.0, 0.0]\n    arr[0] = 3.14\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxFloat { .. })));

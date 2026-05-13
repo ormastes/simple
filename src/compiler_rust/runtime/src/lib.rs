@@ -257,6 +257,8 @@ pub use value::{
     rt_array_pop,
     rt_array_push,
     rt_array_set,
+    rt_typed_bytes_u8_push,
+    rt_typed_words_u32_push,
     // Channel operations
     rt_channel_close,
     rt_channel_free,

@@ -153,6 +153,45 @@ impl<'a> MirLowerer<'a> {
             arg_regs.push(self.lower_expr(arg)?);
         }
 
+        if method == "push"
+            && args.len() == 1
+            && args[0].ty == TypeId::U8
+            && self
+                .type_registry
+                .and_then(|tr| tr.get(receiver.ty))
+                .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U8))
+        {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_typed_bytes_u8_push"),
+                    args: vec![receiver_reg, arg_regs[0]],
+                });
+                dest
+            });
+        }
+        if method == "push"
+            && args.len() == 1
+            && args[0].ty == TypeId::U32
+            && self
+                .type_registry
+                .and_then(|tr| tr.get(receiver.ty))
+                .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U32))
+        {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_typed_words_u32_push"),
+                    args: vec![receiver_reg, arg_regs[0]],
+                });
+                dest
+            });
+        }
+
         // Box integer arguments for array .push() — matches IndexGet unbox at line 1236.
         // Without this, wrap_value (no-op) passes raw integers to rt_array_push,
         // but IndexGet + MIR UnboxInt expects tagged (val << 3) values.

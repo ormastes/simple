@@ -916,6 +916,12 @@ These are **runtime infrastructure** externs, not crypto FFI:
 - Cranelift codegen inlines both helpers into direct runtime-array slot load/store with one bounds check; runtime, interpreter-extern, ELF, and symbol-table plumbing provide fallback linkage.
 - Regression evidence: MIR lowering tests for get/set, Cranelift no-runtime-relocation tests for get/set, runtime helper tests, `cargo check` for `simple-runtime`, `simple-common`, and `simple-compiler`, release driver rebuild, port algorithm checksum parity for XXHash64/CRC32/Adler32/ChaCha20, and cipher/compress gate `passed=10 skipped=3 failed=0`.
 
+### 2026-05-13 Typed Push Follow-Up
+
+- Added compiler/runtime fast paths for `[u8].push(u8)` and `[u32].push(u32)` so byte-buffer and word-state construction avoids `BoxInt` plus generic `rt_array_push` dispatch.
+- This is intentionally a Simple compiler/runtime optimization, not an algorithm-source rewrite; existing crypto/compression code benefits when its receiver and pushed value are statically typed.
+- Regression evidence: MIR lowering tests prove typed push calls replace `rt_array_push`, runtime tests cover grow semantics and masking, `cargo check` passes for `simple-runtime`, `simple-common`, and `simple-compiler`, and the cipher/compress gate still reports `passed=10 skipped=3 failed=0`.
+
 ---
 
 ## Critical Files (hardening and regression guard)

@@ -127,15 +127,22 @@ classification path are in place, and known blockers can be skipped explicitly:
  - Do not count speed if native compile falls back to interpreter.
  - Keep compiler/runtime optimizations separate from algorithm rewrites unless the rewrite exposes a real lowering fact such as typed byte access, length facts, or direct word loads/stores.
  
- ## 2026-05-12 Implementation Notes
- 
- - Added `test/perf/port_algorithms/run_cipher_compress_gate.shs`.
- - Added `core` and `all` inventory modes.
+## 2026-05-12 Implementation Notes
+
+- Added `test/perf/port_algorithms/run_cipher_compress_gate.shs`.
+- Added `core` and `all` inventory modes.
 - Added explicit `CIPHER_COMPRESS_ALLOW_KNOWN_FAIL=1` handling for documented blockers.
 - Added `CIPHER_COMPRESS_CONTINUE_ON_FAIL=1` for discovery runs that should collect more than the first failure.
 - Verified the post-AES compression/checksum core set passes through Snappy, then exposed the Zstd large-payload timeout.
+
+## 2026-05-13 Compiler Optimization Notes
+
+- Added typed `[u8]` and `[u32]` push lowering in the Rust compiler path so common byte-buffer and word-state builders avoid generic `rt_array_push` boxing.
+- Runtime, interpreter-extern, native symbol, and ELF resolution plumbing now expose `rt_typed_bytes_u8_push` and `rt_typed_words_u32_push`.
+- The change is shared compiler/runtime infrastructure for all algorithms; no crypto or compression algorithm source was rewritten.
+- Verification: targeted MIR/runtime tests, package checks, release driver build, checksum parity for the port benchmark, and cipher/compress gate `passed=10 skipped=3 failed=0`.
  
- ## Known Blockers
+## Known Blockers
  
  - `test/unit/lib/crypto/aes_gcm_rfc_vectors_spec.spl`: pure `os.crypto.aes_gcm` computes the wrong tag for AES-256-GCM CAVS V3 with empty AAD and 16-byte plaintext. Bug: `doc/08_tracking/bug/aes_gcm_pure_empty_aad_tag_mismatch_2026-05-12.md`.
  - `test/unit/lib/common/zstd_frame_variants_spec.spl`: large 70,000-byte single-segment payload example times out in interpreter mode. Bug: `doc/08_tracking/bug/zstd_frame_variants_large_payload_timeout_2026-05-12.md`.

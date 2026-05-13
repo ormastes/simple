@@ -1577,6 +1577,8 @@ pub(crate) fn call_extern_function(
         // See doc/08_tracking/bug/interpreter_class_field_method_dispatch_2026-04-28.md
         "rt_array_new_with_cap" => ffi_array::rt_array_new_with_cap_fn(&evaluated),
         "rt_array_push" => ffi_array::rt_array_push_fn(&evaluated),
+        "rt_typed_bytes_u8_push" => ffi_array::rt_typed_bytes_u8_push_fn(&evaluated),
+        "rt_typed_words_u32_push" => ffi_array::rt_typed_words_u32_push_fn(&evaluated),
         "rt_array_get" => ffi_array::rt_array_get_fn(&evaluated),
         "rt_array_set" => ffi_array::rt_array_set_fn(&evaluated),
         "rt_array_pop" => ffi_array::rt_array_pop_fn(&evaluated),

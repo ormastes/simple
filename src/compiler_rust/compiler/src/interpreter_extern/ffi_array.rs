@@ -9,8 +9,8 @@ use simple_runtime::value::RuntimeValue;
 // Import actual FFI functions from runtime
 use simple_runtime::value::{
     rt_array_clear, rt_array_extend_i64, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push,
-    rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set, rt_typed_words_u32_at,
-    rt_typed_words_u32_set,
+    rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set, rt_typed_bytes_u8_push,
+    rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set,
 };
 
 fn interpreter_byte_at(value: &Value) -> i64 {
@@ -293,6 +293,54 @@ pub fn rt_array_push_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     let result = rt_array_push(arr, val);
     Ok(Value::Bool(result))
+}
+
+pub fn rt_typed_bytes_u8_push_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let arr_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_typed_bytes_u8_push expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+    let value = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_typed_bytes_u8_push expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    let arr = RuntimeValue::from_raw(arr_raw as u64);
+    Ok(Value::Bool(rt_typed_bytes_u8_push(arr, value)))
+}
+
+pub fn rt_typed_words_u32_push_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let arr_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_typed_words_u32_push expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+    let value = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_typed_words_u32_push expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    let arr = RuntimeValue::from_raw(arr_raw as u64);
+    Ok(Value::Bool(rt_typed_words_u32_push(arr, value)))
 }
 
 /// Get element from array at index
