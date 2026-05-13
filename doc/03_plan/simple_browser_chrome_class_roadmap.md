@@ -476,6 +476,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL shader precision queries have started: vertex/fragment shader precision formats expose deterministic float and integer range/precision metadata and validate enum/context-loss behavior.
 - M27 WebGL explicit program validation has started: `validateProgram`-style checks update `VALIDATE_STATUS`, info logs, and invalid-program errors independently from link/use.
 - M27 WebGL object probes have started: shader/program IDs can be tested for live browser object validity and return false after deletion or context loss.
+- M27 WebGL shader-source introspection has started: valid shaders return their last assigned GLSL source while deleted, unknown, and context-lost shaders follow browser error/default behavior.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
