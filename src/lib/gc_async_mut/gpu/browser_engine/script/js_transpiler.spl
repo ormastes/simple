@@ -946,6 +946,7 @@ fn _convert_webgpu_calls(line: text) -> text:
     result = result.replace(".createComputePipeline(", ".create_compute_pipeline(")
     result = result.replace(".createCommandEncoder(", ".create_command_encoder(")
     result = result.replace(".createBuffer(", ".create_buffer(")
+    result = _convert_webgpu_texture_descriptor(result)
     result = result.replace(".createTextureWithDescriptor(", ".create_texture_with_descriptor(")
     result = result.replace(".createTextureWithMipLevels(", ".create_texture_with_mip_levels(")
     result = result.replace(".createTextureWithDimension(", ".create_texture_with_dimension(")
@@ -971,6 +972,33 @@ fn _convert_webgpu_calls(line: text) -> text:
     result = result.replace(".copyTextureToTexture(", ".copy_texture_to_texture(")
     result
 
+fn _convert_webgpu_texture_descriptor(line: text) -> text:
+    val marker = ".createTexture({"
+    val marker_idx = line.index_of(marker)
+    if marker_idx < 0:
+        return line
+    val descriptor_start = marker_idx + marker.len()
+    val after_descriptor_start = line.slice(descriptor_start, line.len())
+    val descriptor_end_rel = after_descriptor_start.index_of("})")
+    if descriptor_end_rel < 0:
+        return line
+    val descriptor_end = descriptor_start + descriptor_end_rel
+    val descriptor = line.slice(descriptor_start, descriptor_end)
+    val width = _webgpu_descriptor_value_or_default(descriptor, "width", "")
+    val height = _webgpu_descriptor_value_or_default(descriptor, "height", "")
+    val format = _webgpu_descriptor_value_or_default(descriptor, "format", "")
+    val usage = _webgpu_descriptor_value_or_default(descriptor, "usage", "")
+    if width == "" or height == "" or format == "" or usage == "":
+        return line
+    val label = _webgpu_descriptor_value_or_default(descriptor, "label", "\"\"")
+    val depth_or_layers = _webgpu_descriptor_value_or_default(descriptor, "depthOrArrayLayers", "1")
+    val dimension = _webgpu_descriptor_value_or_default(descriptor, "dimension", "\"2d\"")
+    val mip_level_count = _webgpu_descriptor_value_or_default(descriptor, "mipLevelCount", "1")
+    val sample_count = _webgpu_descriptor_value_or_default(descriptor, "sampleCount", "1")
+    val prefix = line.slice(0, marker_idx)
+    val suffix = line.slice(descriptor_end + 2, line.len())
+    prefix + ".create_texture_with_descriptor(" + label + ", " + width + ", " + height + ", " + depth_or_layers + ", " + format + ", " + usage + ", " + dimension + ", " + mip_level_count + ", " + sample_count + ")" + suffix
+
 fn _convert_webgpu_auto_render_pipeline_descriptor(line: text) -> text:
     val marker = ".createRenderPipeline({"
     val marker_idx = line.index_of(marker)
@@ -992,6 +1020,35 @@ fn _convert_webgpu_auto_render_pipeline_descriptor(line: text) -> text:
     val prefix = line.slice(0, marker_idx)
     val suffix = line.slice(descriptor_end + 2, line.len())
     prefix + ".create_render_pipeline_auto_layout(" + vertex + ", " + fragment + ")" + suffix
+
+fn _webgpu_descriptor_value_or_default(descriptor: text, property: text, default_value: text) -> text:
+    val value = _webgpu_descriptor_value(descriptor, property)
+    if value == "":
+        return default_value
+    value
+
+fn _webgpu_descriptor_value(descriptor: text, property: text) -> text:
+    val property_marker = property + ":"
+    val property_idx = descriptor.index_of(property_marker)
+    if property_idx < 0:
+        return ""
+    var value_start = property_idx + property_marker.len()
+    while value_start < descriptor.len() and descriptor.slice(value_start, value_start + 1) == " ":
+        value_start = value_start + 1
+    var value_end = value_start
+    var brace_depth = 0
+    while value_end < descriptor.len():
+        val ch = descriptor.slice(value_end, value_end + 1)
+        if ch == "{":
+            brace_depth = brace_depth + 1
+        else: if ch == "}":
+            if brace_depth == 0:
+                return descriptor.slice(value_start, value_end).trim()
+            brace_depth = brace_depth - 1
+        else: if ch == "," and brace_depth == 0:
+            return descriptor.slice(value_start, value_end).trim()
+        value_end = value_end + 1
+    descriptor.slice(value_start, value_end).trim()
 
 fn _webgpu_descriptor_module_value(descriptor: text, property: text) -> text:
     val property_marker = property + ":"
