@@ -129,6 +129,25 @@ pub unsafe extern "C" fn rt_env_get(name_ptr: *const u8, name_len: u64) -> Runti
     }
 }
 
+/// Get environment variable parsed as i64, or return the supplied default.
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_get_i64(name_ptr: *const u8, name_len: u64, default_value: i64) -> i64 {
+    if name_ptr.is_null() {
+        return default_value;
+    }
+
+    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
+    let name_str = match std::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return default_value,
+    };
+
+    match std::env::var(name_str) {
+        Ok(value) => value.parse::<i64>().unwrap_or(default_value),
+        Err(_) => default_value,
+    }
+}
+
 /// Alias for rt_env_get for backwards compatibility
 #[no_mangle]
 pub unsafe extern "C" fn rt_get_env(name_ptr: *const u8, name_len: u64) -> RuntimeValue {

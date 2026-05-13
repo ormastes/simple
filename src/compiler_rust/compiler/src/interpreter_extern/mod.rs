@@ -1586,7 +1586,9 @@ pub(crate) fn call_extern_function(
         "rt_typed_bytes_u8_unchecked" => ffi_array::rt_bytes_u8_at_fn(&evaluated),
         "rt_bytes_u8_set" => ffi_array::rt_bytes_u8_set_fn(&evaluated),
         "rt_bytes_u32_le_at" | "rt_typed_bytes_u32_le_at" => ffi_array::rt_bytes_u32_le_at_fn(&evaluated),
-        "rt_bytes_u64_le_at" | "rt_typed_bytes_u64_le_at" => ffi_array::rt_bytes_u64_le_at_fn(&evaluated),
+        "rt_bytes_u64_le_at" | "rt_typed_bytes_u64_le_at" | "rt_typed_bytes_u64_le_unchecked" => {
+            ffi_array::rt_bytes_u64_le_at_fn(&evaluated)
+        }
 
         // ====================================================================
         // FFI Dictionary Operations (7 functions)

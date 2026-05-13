@@ -474,6 +474,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_virtq_desc_write", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_dma_bytes_to_array", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_typed_bytes_u8_unchecked", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_typed_bytes_u64_le_unchecked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u8_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u32_le_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u64_le_at", &[I64, I64], &[I64]),
@@ -1156,6 +1157,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Environment Variable Operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_env_get", &[I64, I64], &[I64]), // name_ptr, name_len -> RuntimeValue
+    RuntimeFuncSpec::new("rt_env_get_i64", &[I64, I64, I64], &[I64]), // name_ptr, name_len, default -> i64
     RuntimeFuncSpec::new("rt_get_env", &[I64, I64], &[I64]), // alias for rt_env_get
     RuntimeFuncSpec::new("rt_env_set", &[I64, I64, I64, I64], &[I8]), // name_ptr, name_len, val_ptr, val_len -> bool
     RuntimeFuncSpec::new("rt_set_env", &[I64, I64, I64, I64], &[]), // alias, no return
