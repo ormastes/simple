@@ -34,7 +34,7 @@ impl<'a> MirLowerer<'a> {
                             let block = func.block_mut(current_block).unwrap();
                             block.instructions.push(MirInst::ConstInt {
                                 dest: capacity,
-                                value: 16,
+                                value: 1024,
                             });
                             block.instructions.push(MirInst::Call {
                                 dest: Some(array),

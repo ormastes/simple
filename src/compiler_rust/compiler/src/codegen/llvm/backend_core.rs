@@ -554,18 +554,6 @@ impl LlvmBackend {
         Ok(())
     }
 
-    #[cfg(feature = "llvm")]
-    fn apply_function_optimization_attrs(&self, func: FunctionValue<'static>, attrs: &[String]) {
-        let wants_inline = attrs.iter().any(|attr| {
-            attr == "inline" || attr == "always_inline" || attr == "force_inline"
-        });
-        if wants_inline {
-            let kind = Attribute::get_named_enum_kind_id("alwaysinline");
-            let always_inline = self.context.create_enum_attribute(kind, 0);
-            func.add_attribute(AttributeLoc::Function, always_inline);
-        }
-    }
-
     #[cfg(not(feature = "llvm"))]
     pub fn declare_function_with_linkage(
         &self,

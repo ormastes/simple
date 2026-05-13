@@ -79,6 +79,27 @@ fn u8_array_push_uses_byte_fast_path() {
 }
 
 #[test]
+fn empty_u8_array_uses_codec_table_capacity() {
+    let mir = compile_to_mir("fn test():\n    var arr: [u8] = []\n").unwrap();
+    let mut found_capacity = false;
+    for func in &mir.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let MirInst::Call { target, args, .. } = inst {
+                    if target == &CallTarget::from_name("rt_byte_array_new") && args.len() == 1 {
+                        let capacity_reg = args[0];
+                        found_capacity = block.instructions.iter().any(|candidate| {
+                            matches!(candidate, MirInst::ConstInt { dest, value } if *dest == capacity_reg && *value == 1024)
+                        });
+                    }
+                }
+            }
+        }
+    }
+    assert!(found_capacity);
+}
+
+#[test]
 fn u32_array_push_uses_word_fast_path() {
     let mir =
         compile_to_mir("fn test():\n    var arr: [u32] = []\n    var word: u32 = 42\n    arr.push(word)\n").unwrap();
