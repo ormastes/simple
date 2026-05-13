@@ -513,7 +513,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL clear/depth range script bridge has started: canvas wrappers and JS lowering now expose `clearDepth`, `depthRange`, `clearStencil`, `DEPTH_CLEAR_VALUE`, and `DEPTH_RANGE` for complete clear-state setup.
 - M27 WebGL buffer/attribute query script bridge has started: canvas wrappers and JS lowering now expose buffer parameter queries, vertex attribute queries/offsets, attribute disable, and active attribute reflection.
 - M27 WebGL context metadata script bridge has started: canvas wrappers and JS lowering now expose supported extensions, context-loss state, and drawing-buffer dimensions for common renderer capability checks.
-- M27 WebGL backend command coverage has started: `scissor()` now records a render command after state validation so backend clipping can replay browser WebGL scissor boxes.
+- M27 WebGL backend command coverage has started: `scissor()` and `activeTexture()` now record render commands after state validation so backend clipping and texture-unit replay can follow browser WebGL state changes.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
