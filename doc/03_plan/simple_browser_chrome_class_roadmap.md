@@ -282,6 +282,12 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - Fallback `box-shadow` parsing now distinguishes the CSS blur-radius and spread length order for single-layer shadows, covered by `test/web_platform/css/box_shadow_wpt_spec.spl`.
 - Fallback `box-shadow` tokenization now preserves functional `rgb()` color values with internal spaces for single-layer shadows, covered by `test/web_platform/css/box_shadow_wpt_spec.spl`.
 - Fallback `box-shadow` color coverage now includes alpha-composited functional `rgba()` values for single-layer shadows, covered by `test/web_platform/css/box_shadow_wpt_spec.spl`.
+- Fallback `box-shadow` color detection now routes standard named CSS colors through the shared named-color table for single-layer shadows, covered by `test/web_platform/css/box_shadow_wpt_spec.spl`.
+- Fallback `box-shadow` color token detection now recognizes `hsl()` and `hsla()` functions so they reach the shared CSS color parser for single-layer shadows, covered by `test/web_platform/css/box_shadow_wpt_spec.spl`.
+- Fallback `box-shadow` now resolves `currentColor` from the element/body color path for single-layer shadows, covered by `test/web_platform/css/box_shadow_wpt_spec.spl`.
+- Fallback `box-shadow` now renders comma-separated non-inset multi-layer shadows and removes that case from glass feature gap reporting, covered by `test/web_platform/css/box_shadow_wpt_spec.spl` and `test/web_platform/css/glass_feature_gap_spec.spl`.
+- Fallback `box-shadow` now renders simple inset shadows as inner edge bands before text painting, covered by `test/web_platform/css/box_shadow_wpt_spec.spl`.
+- Fallback block backgrounds now render simple two-color `linear-gradient()` values for vertical and horizontal directions, covered by `test/web_platform/css/background_gradient_wpt_spec.spl` and removed from glass feature gap reporting.
 
 **Work:**
 - CSS Transitions: `transition` property, interpolation engine for color/length/transform values

@@ -7,13 +7,14 @@
 
 use std.gc_async_mut.gpu.browser_engine.browser_renderer_utils.{
     browser_renderer_find_char, br_find_str,
-    browser_renderer_split_spaces,
+    browser_renderer_split_spaces, browser_renderer_split_semicolons,
     br_tag_attr_value, br_merge_style_text,
     br_style_property_value, br_style_px_or_default}
 use std.gc_async_mut.gpu.browser_engine.render_fixtures.{
     br_fill_rect, br_style_background_argb, br_style_color_argb}
 use std.gc_async_mut.gpu.browser_engine.dom_visual_effects.{split_shadow_tokens}
-use std.gc_async_mut.gpu.browser_engine.dom_color_named.{split_top_level_commas}
+use std.gc_async_mut.gpu.browser_engine.dom_color_named.{split_top_level_commas, parse_linear_gradient, GradientParseResult}
+use std.gc_async_mut.gpu.browser_engine.dom_color.{named_color_to_u32}
 use std.gc_async_mut.gpu.browser_engine.style_rule_index.{
     br_style_block_rule_for_class, br_style_block_rule_for_id,
     br_style_block_rule_for_tag, br_style_block_rule_for_universal,
@@ -103,11 +104,26 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
         if block_h <= 0 and text_val.len() > 0:
             block_h = (font_size + 4) * line_count
         val block_bg = br_style_background_argb(html, style)
-        val shadow = br_box_shadow_rect(html, style)
-        if block_w > 0 and block_h > 0 and shadow.color != 0x00000000u32:
-            pixels = br_fill_rect(pixels, width, height, margin + shadow.offset_x - shadow.spread, cursor_y + shadow.offset_y - shadow.spread, block_w + shadow.spread * 2, block_h + shadow.spread * 2, shadow.color)
+        val shadows = br_box_shadow_rects(html, style)
+        if block_w > 0 and block_h > 0:
+            var shadow_idx = shadows.len() - 1
+            while shadow_idx >= 0:
+                val shadow = shadows[shadow_idx]
+                if shadow.color != 0x00000000u32 and not shadow.inset:
+                    pixels = br_fill_rect(pixels, width, height, margin + shadow.offset_x - shadow.spread, cursor_y + shadow.offset_y - shadow.spread, block_w + shadow.spread * 2, block_h + shadow.spread * 2, shadow.color)
+                shadow_idx = shadow_idx - 1
         if block_w > 0 and block_h > 0 and block_bg != 0x00000000u32:
             pixels = br_fill_rect(pixels, width, height, margin, cursor_y, block_w, block_h, block_bg)
+        val gradient = br_style_linear_gradient(style)
+        if block_w > 0 and block_h > 0 and gradient.gradient_set:
+            pixels = br_fill_linear_gradient_rect(pixels, width, height, margin, cursor_y, block_w, block_h, gradient)
+        if block_w > 0 and block_h > 0:
+            var inset_idx = shadows.len() - 1
+            while inset_idx >= 0:
+                val shadow = shadows[inset_idx]
+                if shadow.color != 0x00000000u32 and shadow.inset:
+                    pixels = br_fill_inset_shadow(pixels, width, height, margin, cursor_y, block_w, block_h, shadow)
+                inset_idx = inset_idx - 1
         if text_val.len() > 0:
             val text_color = br_style_color_argb(html, text_style, br_body_color_argb(html))
             if has_ellipsis:
@@ -141,6 +157,7 @@ class BrBoxShadowRect:
     offset_y: i32
     spread: i32
     color: u32
+    inset: bool
 
 fn br_count_fallback_divs(lower_html: text) -> i32:
     var count = 0
@@ -158,23 +175,42 @@ fn br_char_advance_px(font_size: i32) -> i32:
         return 5
     8
 
-fn br_box_shadow_rect(html: text, style: text) -> BrBoxShadowRect:
+fn br_box_shadow_rects(html: text, style: text) -> [BrBoxShadowRect]:
     val value = br_style_property_value(style, "box-shadow")
-    if value.len() == 0 or value == "none" or split_top_level_commas(value).len() > 1 or value.contains("inset"):
-        return BrBoxShadowRect(offset_x: 0, offset_y: 0, spread: 0, color: 0x00000000u32)
+    if value.len() == 0 or value == "none":
+        return []
+    val layers = split_top_level_commas(value)
+    var shadows: [BrBoxShadowRect] = []
+    for layer in layers:
+        val shadow = br_box_shadow_layer_rect(html, style, layer)
+        if shadow.color != 0x00000000u32:
+            shadows.push(shadow)
+    shadows
+
+fn br_box_shadow_layer_rect(html: text, style: text, layer: text) -> BrBoxShadowRect:
+    val value = layer.trim()
+    if value.len() == 0:
+        return BrBoxShadowRect(offset_x: 0, offset_y: 0, spread: 0, color: 0x00000000u32, inset: false)
     val parts = split_shadow_tokens(value)
-    if parts.len() < 2:
-        return BrBoxShadowRect(offset_x: 0, offset_y: 0, spread: 0, color: 0x00000000u32)
-    val offset_x = br_parse_shadow_px(parts[0])
-    val offset_y = br_parse_shadow_px(parts[1])
+    var inset = false
+    var first_length_idx = 0
+    if parts.len() > 0 and parts[0].trim().lower() == "inset":
+        inset = true
+        first_length_idx = 1
+    if parts.len() - first_length_idx < 2:
+        return BrBoxShadowRect(offset_x: 0, offset_y: 0, spread: 0, color: 0x00000000u32, inset: false)
+    val offset_x = br_parse_shadow_px(parts[first_length_idx])
+    val offset_y = br_parse_shadow_px(parts[first_length_idx + 1])
     var blur_radius = 0
     var spread = 0
     var length_count = 2
     var color_token = "#000000"
-    var idx = 2
+    var idx = first_length_idx + 2
     while idx < parts.len():
         val token = parts[idx]
-        if br_shadow_token_is_color(token):
+        if token.trim().lower() == "inset":
+            inset = true
+        elif br_shadow_token_is_color(token):
             color_token = token
         elif length_count == 2:
             blur_radius = br_parse_shadow_px(token)
@@ -184,8 +220,26 @@ fn br_box_shadow_rect(html: text, style: text) -> BrBoxShadowRect:
             length_count = length_count + 1
         idx = idx + 1
     val paint_extent = br_shadow_positive_extent(blur_radius) + spread
-    val color = br_style_background_argb(html, "background-color:" + color_token)
-    BrBoxShadowRect(offset_x: offset_x, offset_y: offset_y, spread: paint_extent, color: color)
+    val color = if color_token.trim().lower() == "currentcolor":
+        br_style_color_argb(html, style, br_body_color_argb(html))
+    else:
+        br_style_background_argb(html, "background-color:" + color_token)
+    BrBoxShadowRect(offset_x: offset_x, offset_y: offset_y, spread: paint_extent, color: color, inset: inset)
+
+fn br_fill_inset_shadow(pixels: [u32], width: i32, height: i32, x: i32, y: i32, w: i32, h: i32, shadow: BrBoxShadowRect) -> [u32]:
+    var extent = shadow.spread
+    if extent <= 0:
+        extent = 1
+    if extent * 2 > w:
+        extent = w / 2
+    if extent * 2 > h:
+        extent = h / 2
+    var out = pixels
+    out = br_fill_rect(out, width, height, x, y, w, extent, shadow.color)
+    out = br_fill_rect(out, width, height, x, y + h - extent, w, extent, shadow.color)
+    out = br_fill_rect(out, width, height, x, y, extent, h, shadow.color)
+    out = br_fill_rect(out, width, height, x + w - extent, y, extent, h, shadow.color)
+    out
 
 fn br_shadow_positive_extent(value: i32) -> i32:
     if value < 0:
@@ -213,7 +267,77 @@ fn br_parse_shadow_px(value: text) -> i32:
 
 fn br_shadow_token_is_color(value: text) -> bool:
     val lower = value.trim().lower()
-    lower.starts_with("#") or lower.starts_with("rgb") or lower == "black" or lower == "white" or lower == "transparent" or lower == "rebeccapurple"
+    if lower.starts_with("#") or lower.starts_with("rgb") or lower.starts_with("hsl") or lower == "transparent" or lower == "currentcolor":
+        return true
+    named_color_to_u32(lower) != nil
+
+fn br_style_linear_gradient(style: text) -> GradientParseResult:
+    val empty = GradientParseResult(gradient_set: false, gradient_color1: 0, gradient_color2: 0, gradient_angle: 180)
+    val declarations = browser_renderer_split_semicolons(style)
+    var idx = declarations.len() - 1
+    while idx >= 0:
+        val decl = declarations[idx]
+        val colon = browser_renderer_find_char(decl, ":", 0)
+        if colon > 0:
+            val key = decl.slice(0, colon).trim().lower()
+            val value = decl.slice(colon + 1, decl.len()).trim()
+            if key == "background-color":
+                return empty
+            if key == "background" or key == "background-image":
+                if value.trim().starts_with("linear-gradient"):
+                    return parse_linear_gradient(value)
+                return empty
+        idx = idx - 1
+    empty
+
+fn br_fill_linear_gradient_rect(pixels: [u32], width: i32, height: i32, x: i32, y: i32, w: i32, h: i32, gradient: GradientParseResult) -> [u32]:
+    val c1 = br_rgba_to_opaque_argb_for_fallback(gradient.gradient_color1)
+    val c2 = br_rgba_to_opaque_argb_for_fallback(gradient.gradient_color2)
+    var out = pixels
+    var yy = 0
+    while yy < h:
+        var xx = 0
+        while xx < w:
+            val denom = if gradient.gradient_angle == 90 or gradient.gradient_angle == 270: br_max_i32(w - 1, 1) else: br_max_i32(h - 1, 1)
+            val raw_pos = if gradient.gradient_angle == 90 or gradient.gradient_angle == 270: xx else: yy
+            val pos = if gradient.gradient_angle == 0 or gradient.gradient_angle == 270: denom - raw_pos else: raw_pos
+            val color = br_lerp_argb(c1, c2, pos, denom)
+            out = br_fill_rect(out, width, height, x + xx, y + yy, 1, 1, color)
+            xx = xx + 1
+        yy = yy + 1
+    out
+
+fn br_lerp_argb(c1: u32, c2: u32, pos: i32, denom: i32) -> u32:
+    val a1 = ((c1 >> 24) & 0xFF) as i32
+    val r1 = ((c1 >> 16) & 0xFF) as i32
+    val g1 = ((c1 >> 8) & 0xFF) as i32
+    val b1 = (c1 & 0xFF) as i32
+    val a2 = ((c2 >> 24) & 0xFF) as i32
+    val r2 = ((c2 >> 16) & 0xFF) as i32
+    val g2 = ((c2 >> 8) & 0xFF) as i32
+    val b2 = (c2 & 0xFF) as i32
+    val a = (a1 * (denom - pos) + a2 * pos) / denom
+    val r = (r1 * (denom - pos) + r2 * pos) / denom
+    val g = (g1 * (denom - pos) + g2 * pos) / denom
+    val b = (b1 * (denom - pos) + b2 * pos) / denom
+    ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+
+fn br_rgba_to_opaque_argb_for_fallback(rgba: u32) -> u32:
+    val r = ((rgba >> 24) & 0xFF) as i32
+    val g = ((rgba >> 16) & 0xFF) as i32
+    val b = ((rgba >> 8) & 0xFF) as i32
+    val a = (rgba & 0xFF) as i32
+    if a >= 255:
+        return 0xFF000000u32 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+    val out_r = (r * a + 255 * (255 - a)) / 255
+    val out_g = (g * a + 255 * (255 - a)) / 255
+    val out_b = (b * a + 255 * (255 - a)) / 255
+    0xFF000000u32 | ((out_r as u32) << 16) | ((out_g as u32) << 8) | (out_b as u32)
+
+fn br_max_i32(a: i32, b: i32) -> i32:
+    if a > b:
+        return a
+    b
 
 fn br_strip_css_quoted_string(value: text) -> text:
     val trimmed = value.trim()
