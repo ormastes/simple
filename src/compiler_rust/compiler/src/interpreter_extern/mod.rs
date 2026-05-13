@@ -704,6 +704,7 @@ pub(crate) fn call_extern_function(
         // ====================================================================
         "rt_env_set" => system::rt_env_set(&evaluated),
         "rt_env_get" => system::rt_env_get(&evaluated),
+        "rt_env_get_i64" => system::rt_env_get_i64(&evaluated),
         "rt_env_exists" => system::rt_env_exists(&evaluated),
         "rt_env_remove" => system::rt_env_remove(&evaluated),
         "rt_env_all" => system::rt_env_all(&evaluated),

@@ -494,6 +494,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_capture_stderr_start",
     // Environment & Process operations
     "rt_env_get",
+    "rt_env_get_i64",
     "rt_env_set",
     "rt_get_env",
     "rt_set_env",

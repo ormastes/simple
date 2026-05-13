@@ -556,7 +556,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_print_str" | "rt_println_str" | "rt_eprint_str" | "rt_eprintln_str" => Some(&[0]),
 
         // Environment variables
-        "rt_env_get" | "rt_get_env" | "rt_env_exists" | "rt_env_remove" => Some(&[0]),
+        "rt_env_get" | "rt_env_get_i64" | "rt_get_env" | "rt_env_exists" | "rt_env_remove" => Some(&[0]),
         "rt_env_set" | "rt_set_env" => Some(&[0, 1]),
 
         // File I/O (single path)

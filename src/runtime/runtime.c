@@ -964,6 +964,16 @@ const char* rt_env_get(const char* key) {
     return spl_env_get(key);
 }
 
+__attribute__((weak))
+int64_t rt_env_get_i64(const char* key, int64_t default_value) {
+    const char* val = spl_env_get(key);
+    if (!val || val[0] == '\0') return default_value;
+    char* end = NULL;
+    long long parsed = strtoll(val, &end, 10);
+    if (end == val) return default_value;
+    return (int64_t)parsed;
+}
+
 /* spl_env_set — see platform/ headers */
 
 /* ================================================================

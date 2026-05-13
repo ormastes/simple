@@ -80,7 +80,7 @@ lazy_static::lazy_static! {
 }
 use simple_runtime::value::{
     rt_env_all as ffi_env_all, rt_env_cwd as ffi_env_cwd, rt_env_exists as ffi_env_exists, rt_env_get as ffi_env_get,
-    rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
+    rt_env_get_i64 as ffi_env_get_i64, rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
     rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode, rt_set_macro_trace as ffi_set_macro_trace,
     rt_platform_name as ffi_platform_name, rt_term_enable_ansi as ffi_term_enable_ansi,
 };
@@ -176,6 +176,27 @@ pub fn rt_env_get(args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
         let result = ffi_env_get(key.as_ptr(), key.len() as u64);
         Ok(runtime_to_value(result))
+    }
+}
+
+/// Get an environment variable parsed as i64.
+pub fn rt_env_get_i64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime("rt_env_get_i64 requires 2 arguments (key, default)"));
+    }
+
+    let key = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("rt_env_get_i64: key must be a string")),
+    };
+    let default_value = args[1].as_int()?;
+
+    unsafe {
+        Ok(Value::Int(ffi_env_get_i64(
+            key.as_ptr(),
+            key.len() as u64,
+            default_value,
+        )))
     }
 }
 
