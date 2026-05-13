@@ -961,6 +961,7 @@ fn _convert_webgpu_calls(line: text) -> text:
     result = result.replace(".createBindGroup(", ".create_bind_group(")
     result = result.replace(".queueSubmit(", ".queue_submit(")
     result = result.replace(".queueWriteBuffer(", ".queue_write_buffer(")
+    result = _convert_webgpu_queue_write_texture_descriptor(result)
     result = result.replace(".queueWriteTexture(", ".queue_write_texture(")
     result = _convert_webgpu_render_pass_descriptor(result)
     result = result.replace(".beginRenderPass(", ".begin_render_pass(")
@@ -1138,6 +1139,44 @@ fn _convert_webgpu_render_pass_descriptor(line: text) -> text:
     val prefix = line.slice(0, marker_idx)
     val suffix = line.slice(descriptor_end + 2, line.len())
     prefix + ".begin_render_pass_with_descriptor(gpu.resources, " + color_attachments + ", " + depth_stencil + ")" + suffix
+
+fn _convert_webgpu_queue_write_texture_descriptor(line: text) -> text:
+    val marker = ".queueWriteTexture({"
+    val marker_idx = line.index_of(marker)
+    if marker_idx < 0:
+        return line
+    val descriptor_start = marker_idx + marker.len()
+    val after_descriptor_start = line.slice(descriptor_start, line.len())
+    val descriptor_end_rel = after_descriptor_start.index_of("},")
+    if descriptor_end_rel < 0:
+        return line
+    val descriptor_end = descriptor_start + descriptor_end_rel
+    val descriptor = line.slice(descriptor_start, descriptor_end)
+    val texture = _webgpu_descriptor_value(descriptor, "texture")
+    if texture == "":
+        return line
+    val rest_start = descriptor_end + 2
+    val rest = line.slice(rest_start, line.len())
+    val first_comma = rest.index_of(",")
+    if first_comma < 0:
+        return line
+    val data_expr = rest.slice(0, first_comma).trim()
+    val size_start = rest.index_of("[")
+    val size_end = rest.index_of("]")
+    if size_start < 0 or size_end < size_start:
+        return line
+    val size_inner = rest.slice(size_start + 1, size_end)
+    val size_parts = size_inner.split(",")
+    if size_parts.len() < 2:
+        return line
+    val width = size_parts[0].trim()
+    val height = size_parts[1].trim()
+    var depth_or_layers = "1"
+    if size_parts.len() >= 3:
+        depth_or_layers = size_parts[2].trim()
+    val prefix = line.slice(0, marker_idx)
+    val suffix = line.slice(rest_start + size_end + 2, line.len())
+    prefix + ".queue_write_texture(" + _webgpu_texture_object_id(texture) + ", " + width + ", " + height + ", " + depth_or_layers + ", " + data_expr + ".len())" + suffix
 
 fn _convert_webgpu_auto_render_pipeline_descriptor(line: text) -> text:
     val marker = ".createRenderPipeline({"
