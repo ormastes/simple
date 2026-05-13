@@ -127,7 +127,7 @@ Commands:
 | Algorithm | C MB/s | Rust MB/s | Simple Cranelift MB/s | Simple LLVM MB/s | Checksum parity | Status |
 |-----------|--------|-----------|-----------------------|------------------|-----------------|--------|
 | XXHash64 | 14563 | 14018 | 6578 | not sampled | PASS | Source-built Cranelift sample is below the 70% Rust gate |
-| CRC32 | 455 | 451 | 203 | not sampled | PASS | Correct, but below both gates in this sample |
+| CRC32 | 435 | 415 | 401 | not sampled | PASS | Passes 70% Rust and 50% C after typed u64 input load plus 8-byte unroll |
 | Adler-32 | 2599 | 2524 | 1896 | not sampled | PASS | Passes 70% Rust and 50% C after u64 load plus closed-form 8-byte update |
 | ChaCha20 | 317 | 346 | 206 | not sampled | PASS | Cranelift passes 50% C but not 70% Rust on this source-built sample |
 
@@ -137,6 +137,22 @@ Interpretation:
 - The compiler/backend layer now has regression tests proving `rt_typed_bytes_u8_unchecked`, `rt_typed_bytes_u64_le_unchecked`, `rt_array_len`, `.len()`, and `_adler_reduce` lower without runtime/function relocations in the covered Cranelift call shapes. The `rt_array_len`/`.len()` fix improved Adler-32 from the prior `904 MB/s` source-built sample to `1221 MB/s`; the pure Simple 8-byte loop unroll moved the sample to `1336 MB/s`; replacing eight byte loads with one unchecked u64 little-endian load moved the sample to `1536 MB/s`; closed-form weighted `b` update for each 8-byte word moved the latest sample to `1896 MB/s`.
 - Remaining Adler-32 work is cleanup/generalization: make this unroll plus closed-form reduction compiler-driven in MIR for recognized byte reductions, then resample with a non-stripped symbol build for tighter ASM evidence.
 - Rejected follow-up: a pure Simple 16-byte Adler loop unroll checked and passed unit tests, but regressed the benchmark sample to `1103 MB/s`, so the implementation was returned to the verified 8-byte unroll.
+
+### 2026-05-13 pure Simple CRC32 hot-loop update
+
+Commands:
+- `src/compiler_rust/target/release/simple check src/os/crypto/crc32.spl`
+- `src/compiler_rust/target/release/simple test test/unit/os/crypto/crc32_kat_spec.spl --mode=interpreter --no-cache`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LLVM_PROBE=0 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple Cranelift MB/s | Checksum parity | Status |
+|-----------|--------|-----------|-----------------------|-----------------|--------|
+| CRC32 | 435 | 415 | 401 | PASS | Pure Simple update path passes 70% Rust and 50% C |
+
+Interpretation:
+- CRC32 remains pure Simple. `_crc32_update_table` now hoists `data.len()`, reads eight input bytes with one compiler-inline unchecked little-endian u64 load, applies the table-dependent CRC steps in sequence, and keeps an unchecked byte tail.
+- This removes the generic `data[i]` path from the hot loop while preserving the existing byte-table representation and streaming API behavior.
+- The remaining likely CRC32 gain is table lifetime: one-shot `crc32(data)` still builds the IEEE table for each call. A static or cached table should wait for reliable native top-level array initialization or an explicit runtime cache pattern, because this plan already documents native top-level constant initialization as a known limitation.
 
 ### 2026-05-13 pure Simple CRC32 optimization-layer update
 
