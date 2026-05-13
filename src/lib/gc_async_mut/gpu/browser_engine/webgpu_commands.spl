@@ -7,7 +7,7 @@ records so tests can validate WebGPU sequencing before native submission exists.
 use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WebGPUResourceTable,
     WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
-    WEBGPU_BUFFER_USAGE_INDIRECT,
+    WEBGPU_BUFFER_USAGE_INDEX, WEBGPU_BUFFER_USAGE_VERTEX, WEBGPU_BUFFER_USAGE_INDIRECT,
     WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
     WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT,
     webgpu_find_buffer, webgpu_find_texture, webgpu_find_bind_group,
@@ -23,6 +23,8 @@ pub val WEBGPU_COMMAND_BEGIN_COMPUTE_PASS: text = "begin-compute-pass"
 pub val WEBGPU_COMMAND_END_COMPUTE_PASS: text = "end-compute-pass"
 pub val WEBGPU_COMMAND_SET_PIPELINE: text = "set-pipeline"
 pub val WEBGPU_COMMAND_SET_BIND_GROUP: text = "set-bind-group"
+pub val WEBGPU_COMMAND_SET_VERTEX_BUFFER: text = "set-vertex-buffer"
+pub val WEBGPU_COMMAND_SET_INDEX_BUFFER: text = "set-index-buffer"
 pub val WEBGPU_COMMAND_DRAW: text = "draw"
 pub val WEBGPU_COMMAND_DRAW_INDEXED: text = "draw-indexed"
 pub val WEBGPU_COMMAND_DRAW_INDIRECT: text = "draw-indirect"
@@ -224,6 +226,54 @@ pub class WebGPUCommandEncoder:
         self.last_error = ""
         true
 
+    me set_vertex_buffer(slot: i32, buffer_id: i32, offset: i32, size: i32) -> bool:
+        if self.active_pass != "render":
+            self.last_error = "GPURenderPassEncoder setVertexBuffer requires an active render pass"
+            return false
+        val err = webgpu_validate_render_buffer_binding(slot, buffer_id, offset, size, "vertex")
+        if err != "":
+            self.last_error = err
+            return false
+        self.commands.push(webgpu_command_set_vertex_buffer(slot, buffer_id, offset, size))
+        self.last_error = ""
+        true
+
+    me set_vertex_buffer_with_resources(resources: WebGPUResourceTable, slot: i32, buffer_id: i32, offset: i32, size: i32) -> bool:
+        if self.active_pass != "render":
+            self.last_error = "GPURenderPassEncoder setVertexBuffer requires an active render pass"
+            return false
+        val err = webgpu_validate_vertex_buffer_binding_with_resources(resources, slot, buffer_id, offset, size)
+        if err != "":
+            self.last_error = err
+            return false
+        self.commands.push(webgpu_command_set_vertex_buffer(slot, buffer_id, offset, size))
+        self.last_error = ""
+        true
+
+    me set_index_buffer(buffer_id: i32, index_format: text, offset: i32, size: i32) -> bool:
+        if self.active_pass != "render":
+            self.last_error = "GPURenderPassEncoder setIndexBuffer requires an active render pass"
+            return false
+        val err = webgpu_validate_index_buffer_binding(buffer_id, index_format, offset, size)
+        if err != "":
+            self.last_error = err
+            return false
+        self.commands.push(webgpu_command_set_index_buffer(buffer_id, index_format, offset, size))
+        self.last_error = ""
+        true
+
+    me set_index_buffer_with_resources(resources: WebGPUResourceTable, buffer_id: i32, index_format: text, offset: i32, size: i32) -> bool:
+        if self.active_pass != "render":
+            self.last_error = "GPURenderPassEncoder setIndexBuffer requires an active render pass"
+            return false
+        val err = webgpu_validate_index_buffer_binding_with_resources(resources, buffer_id, index_format, offset, size)
+        if err != "":
+            self.last_error = err
+            return false
+        self.commands.push(webgpu_command_set_index_buffer(buffer_id, index_format, offset, size))
+        self.last_error = ""
+        true
+
     me draw(vertex_count: i32, instance_count: i32) -> bool:
         if self.active_pass != "render":
             self.last_error = "GPURenderPassEncoder draw requires an active render pass"
@@ -415,6 +465,12 @@ pub fn webgpu_command_bind_group(slot: i32, bind_group_id: i32) -> WebGPURecorde
 pub fn webgpu_command_bind_group_with_dynamic_offsets(slot: i32, bind_group_id: i32, dynamic_offset_count: i32) -> WebGPURecordedCommand:
     WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_BIND_GROUP, pipeline_id: -1, bind_group_id: bind_group_id, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: dynamic_offset_count, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
+pub fn webgpu_command_set_vertex_buffer(slot: i32, buffer_id: i32, offset: i32, size: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_VERTEX_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+
+pub fn webgpu_command_set_index_buffer(buffer_id: i32, index_format: text, offset: i32, size: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_INDEX_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: webgpu_index_format_bits(index_format))
+
 pub fn webgpu_command_draw(vertex_count: i32, instance_count: i32) -> WebGPURecordedCommand:
     WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: vertex_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
@@ -577,6 +633,32 @@ pub fn webgpu_validate_indirect_draw_buffer(buffer_id: i32, offset: i32, command
         return "GPURenderPassEncoder indirect draw command size is unsupported"
     ""
 
+pub fn webgpu_validate_render_buffer_binding(slot: i32, buffer_id: i32, offset: i32, size: i32, label: text) -> text:
+    if slot < 0:
+        return "GPURenderPassEncoder " + label + " buffer slot must be non-negative"
+    if buffer_id <= 0:
+        return "GPURenderPassEncoder " + label + " buffer must be valid"
+    if offset < 0:
+        return "GPURenderPassEncoder " + label + " buffer offset must be non-negative"
+    if size != -1 and size <= 0:
+        return "GPURenderPassEncoder " + label + " buffer size must be positive"
+    ""
+
+pub fn webgpu_validate_index_buffer_binding(buffer_id: i32, index_format: text, offset: i32, size: i32) -> text:
+    val basic_err = webgpu_validate_render_buffer_binding(0, buffer_id, offset, size, "index")
+    if basic_err != "":
+        return basic_err
+    if webgpu_index_format_bits(index_format) == 0:
+        return "GPURenderPassEncoder index buffer format must be uint16 or uint32"
+    ""
+
+pub fn webgpu_index_format_bits(index_format: text) -> i32:
+    if index_format == "uint16":
+        return 16
+    if index_format == "uint32":
+        return 32
+    0
+
 pub fn webgpu_validate_queue_write_buffer(buffer_id: i32, offset: i32, data_size: i32) -> text:
     if buffer_id <= 0:
         return "GPUQueue writeBuffer buffer must be valid"
@@ -621,6 +703,41 @@ pub fn webgpu_validate_bind_group_dynamic_offsets_with_resources(resources: WebG
                 return "GPUPassEncoder dynamic offset exceeds buffer size"
             dynamic_index = dynamic_index + 1
         i = i + 1
+    ""
+
+pub fn webgpu_validate_vertex_buffer_binding_with_resources(resources: WebGPUResourceTable, slot: i32, buffer_id: i32, offset: i32, size: i32) -> text:
+    val basic_err = webgpu_validate_render_buffer_binding(slot, buffer_id, offset, size, "vertex")
+    if basic_err != "":
+        return basic_err
+    val buffer = webgpu_find_buffer(resources, buffer_id)
+    if not buffer.valid:
+        return "GPURenderPassEncoder vertex buffer does not exist"
+    if (buffer.usage & WEBGPU_BUFFER_USAGE_VERTEX) == 0:
+        return "GPURenderPassEncoder vertex buffer missing VERTEX usage"
+    if webgpu_validate_render_buffer_range(buffer.size, offset, size) != "":
+        return "GPURenderPassEncoder vertex buffer binding range exceeds buffer size"
+    ""
+
+pub fn webgpu_validate_index_buffer_binding_with_resources(resources: WebGPUResourceTable, buffer_id: i32, index_format: text, offset: i32, size: i32) -> text:
+    val basic_err = webgpu_validate_index_buffer_binding(buffer_id, index_format, offset, size)
+    if basic_err != "":
+        return basic_err
+    val buffer = webgpu_find_buffer(resources, buffer_id)
+    if not buffer.valid:
+        return "GPURenderPassEncoder index buffer does not exist"
+    if (buffer.usage & WEBGPU_BUFFER_USAGE_INDEX) == 0:
+        return "GPURenderPassEncoder index buffer missing INDEX usage"
+    if webgpu_validate_render_buffer_range(buffer.size, offset, size) != "":
+        return "GPURenderPassEncoder index buffer binding range exceeds buffer size"
+    ""
+
+pub fn webgpu_validate_render_buffer_range(buffer_size: i64, offset: i32, size: i32) -> text:
+    if (offset as i64) >= buffer_size:
+        return "range exceeds buffer size"
+    if size == -1:
+        return ""
+    if (offset as i64) + (size as i64) > buffer_size:
+        return "range exceeds buffer size"
     ""
 
 pub fn webgpu_validate_buffer_copy_with_resources(resources: WebGPUResourceTable, source_buffer_id: i32, source_offset: i32, destination_buffer_id: i32, destination_offset: i32, size: i32) -> text:

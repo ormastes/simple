@@ -5,6 +5,7 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     WEBGPU_COMMAND_BEGIN_RENDER_PASS, WEBGPU_COMMAND_END_RENDER_PASS,
     WEBGPU_COMMAND_BEGIN_COMPUTE_PASS, WEBGPU_COMMAND_END_COMPUTE_PASS,
     WEBGPU_COMMAND_SET_PIPELINE, WEBGPU_COMMAND_SET_BIND_GROUP,
+    WEBGPU_COMMAND_SET_VERTEX_BUFFER, WEBGPU_COMMAND_SET_INDEX_BUFFER,
     WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DRAW_INDEXED,
     WEBGPU_COMMAND_DRAW_INDIRECT, WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT,
     WEBGPU_COMMAND_DISPATCH_WORKGROUPS,
@@ -15,12 +16,15 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     webgpu_validate_queue_write_buffer_with_resources,
     webgpu_validate_queue_write_texture_with_resources,
     webgpu_validate_bind_group_dynamic_offsets_with_resources,
+    webgpu_validate_vertex_buffer_binding_with_resources,
+    webgpu_validate_index_buffer_binding_with_resources,
     webgpu_validate_render_pass_descriptor_with_resources,
     webgpu_validate_indirect_draw_buffer_with_resources
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WebGPUResourceTable,
     WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
+    WEBGPU_BUFFER_USAGE_INDEX, WEBGPU_BUFFER_USAGE_VERTEX,
     WEBGPU_BUFFER_USAGE_UNIFORM, WEBGPU_BUFFER_USAGE_STORAGE, WEBGPU_BUFFER_USAGE_INDIRECT,
     WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
     WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT,
@@ -93,6 +97,47 @@ describe "Browser WebGPU command encoding":
             expect(encoder.begin_render_pass()).to_equal(true)
             expect(encoder.set_bind_group_with_dynamic_offsets(0, 4, [128])).to_equal(false)
             expect(encoder.last_error).to_equal("GPUPassEncoder dynamic offsets must be 256-byte aligned")
+
+        it "records vertex and index buffer bindings":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_vertex_buffer(0, 11, 16, 96)).to_equal(true)
+            expect(encoder.set_index_buffer(12, "uint32", 32, 128)).to_equal(true)
+            expect(encoder.end_render_pass()).to_equal(true)
+            val command_buffer = encoder.finish("mesh")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_SET_VERTEX_BUFFER)
+            expect(command_buffer.commands[1].slot).to_equal(0)
+            expect(command_buffer.commands[1].source_buffer_id).to_equal(11)
+            expect(command_buffer.commands[1].offset).to_equal(16)
+            expect(command_buffer.commands[1].size).to_equal(96)
+            expect(command_buffer.commands[2].kind).to_equal(WEBGPU_COMMAND_SET_INDEX_BUFFER)
+            expect(command_buffer.commands[2].source_buffer_id).to_equal(12)
+            expect(command_buffer.commands[2].offset).to_equal(32)
+            expect(command_buffer.commands[2].size).to_equal(128)
+            expect(command_buffer.commands[2].data_size).to_equal(32)
+
+        it "validates vertex and index buffer bindings against resources":
+            var resources = WebGPUResourceTable.create()
+            val vertices = resources.create_buffer("vertices", 256, WEBGPU_BUFFER_USAGE_VERTEX)
+            val indices = resources.create_buffer("indices", 128, WEBGPU_BUFFER_USAGE_INDEX)
+            val wrong = resources.create_buffer("uniforms", 64, WEBGPU_BUFFER_USAGE_UNIFORM)
+            expect(webgpu_validate_vertex_buffer_binding_with_resources(resources, 0, vertices.id, 16, 128)).to_equal("")
+            expect(webgpu_validate_index_buffer_binding_with_resources(resources, indices.id, "uint16", 0, 64)).to_equal("")
+            expect(webgpu_validate_vertex_buffer_binding_with_resources(resources, 0, wrong.id, 0, 16)).to_equal("GPURenderPassEncoder vertex buffer missing VERTEX usage")
+            expect(webgpu_validate_index_buffer_binding_with_resources(resources, wrong.id, "uint32", 0, 16)).to_equal("GPURenderPassEncoder index buffer missing INDEX usage")
+            expect(webgpu_validate_vertex_buffer_binding_with_resources(resources, 0, vertices.id, 240, 32)).to_equal("GPURenderPassEncoder vertex buffer binding range exceeds buffer size")
+            expect(webgpu_validate_index_buffer_binding_with_resources(resources, indices.id, "uint8", 0, 16)).to_equal("GPURenderPassEncoder index buffer format must be uint16 or uint32")
+
+        it "rejects invalid vertex and index buffer commands":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.set_vertex_buffer(0, 3, 0, -1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder setVertexBuffer requires an active render pass")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_vertex_buffer(-1, 3, 0, -1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder vertex buffer slot must be non-negative")
+            expect(encoder.set_index_buffer(4, "float32", 0, -1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder index buffer format must be uint16 or uint32")
 
         it "records indirect draw commands":
             var encoder = WebGPUCommandEncoder.create("frame")
