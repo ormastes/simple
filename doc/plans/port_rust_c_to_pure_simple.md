@@ -57,6 +57,11 @@ Current completed optimization items:
    - Direct calls, bare `len` redirects, qualified `len` redirects, and LLVM static method runtime mappings all route through the inline lowering before generic runtime-call emission.
    - Current evidence: the latest default and LLVM benchmark disassembly has no `rt_len` call references. `rt_index_get` remains only in non-ChaCha hot helper paths covered by broader generic index hardening.
 
+4. **Optimization provider lookup fast path**
+   - MIR pass descriptor lookup now uses direct exact dispatch for stable pass names and aliases instead of rebuilding and scanning the descriptor registry on each lookup.
+   - This keeps the Simple Optimization Plugin contract cheap for built-in hot providers while dynamic loading remains reserved for optional or seldom-used providers.
+   - Stop condition met for descriptor lookup: provider metadata remains visible, aliases such as `dce`, `const_fold`, and `vectorization` still resolve, and compiler/MIR optimizer checks pass.
+
 Follow-up hardening work, in order:
 
 1. **Bounds and index optimization**
@@ -160,6 +165,97 @@ not ad hoc algorithm rewrites or C-library delegation.
 | Compression codecs | Deflate, gzip, LZ4, Snappy, LZMA2/XZ, Zstd, Brotli, permessage-deflate | Unit/round-trip coverage exists; no C/Rust/Simple throughput ledger | TBD, target >1.00x | Pending; must be faster than C | TBD, target >1.00x | Pending; must be faster than Rust | MB/s encode and decode on fixed corpora | Optimize LZ match search, overlap copy, Huffman/FSE decode tables, bit-reader batching |
 | Compression primitives | Huffman, LZ77 overlap-copy paths, Zstd FSE/HUF/sequence/literal blocks | Phase 5 optimized selected internals; no standalone throughput ledger | TBD, target >1.00x | Pending; must be faster than C | TBD, target >1.00x | Pending; must be faster than Rust | MB/s primitive microbench | Expose reusable bitstream, copy, table-build, and symbol-decode optimizer providers |
 
+Expanded per-algorithm comparison ledger:
+
+Every row below uses the same rule: values above `1.00x` mean Simple is faster
+than that C or Rust baseline; pending rows must be measured with correctness
+parity before the speed ratio can count. The measured rows are current samples
+from the parity harness; all other rows are explicit benchmark backlog.
+
+| Family | Algorithm | Simple/C | Delta vs C | Simple/Rust | Delta vs Rust | Status |
+|--------|-----------|----------|------------|-------------|---------------|--------|
+| Non-crypto hash | XXHash64 | 0.58x | 42% slower | 1.10x | 10% faster | Measured PASS; below C |
+| Checksum | CRC32 | 0.66x | 34% slower | 1.08x | 8% faster | Measured PASS; below C |
+| Checksum | Adler-32 | 0.81x | 19% slower | 0.91x | 9% slower | Measured PASS; below C/Rust |
+| Stream cipher | ChaCha20 | 1.05x | 5% faster | 0.97x | 3% slower | Measured PASS; below Rust |
+| AEAD | AES-GCM | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| AEAD | AES-CCM | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| AEAD | AES-GCM-SIV | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| AEAD | ChaCha20-Poly1305 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| AEAD | OCB3 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block cipher | AES-128 core | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block cipher | AES-256 core | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block mode | AES-CTR | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| MAC/mode | AES-CMAC | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block mode | AES-XTS | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block cipher | ARIA | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block cipher | Camellia | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block cipher | Serpent | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block cipher | Twofish | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block cipher | SM4 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block cipher | SEED | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Block cipher | TEA | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Stream cipher | Salsa20 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Stream cipher | XSalsa20 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Stream cipher | RC4 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Stream cipher | ZUC | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Stream cipher | SNOW3G | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | SHA-1 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | SHA-224 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | SHA-256 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | SHA-384 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | SHA-512 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | SHA-3 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | cSHAKE | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| MAC | KMAC | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | BLAKE2b | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | BLAKE2s | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | BLAKE3 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | RIPEMD160 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | Tiger | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | Streebog | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | Whirlpool | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Hash | SM3 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| MAC/hash | SipHash | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| MAC | HMAC | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| KDF | HKDF | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| KDF | PBKDF2 | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| KDF | TLS PRF | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| OTP | HOTP | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| OTP | TOTP | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Auth helper | SCRAM | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
+| Password hash | Argon2 | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Password hash | Argon2d | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Password hash | bcrypt | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Password hash | scrypt | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Public-key | Curve25519 | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Public-key | Curve448 | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Public-key | P-256 | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Public-key | P-384 | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Public-key | P-521 | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Signature | Ed25519 | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Signature | Ed448 | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Signature | ECDSA | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Public-key | RSA/PSS | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Key exchange | FFDHE | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| PQC | ML-KEM | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| PQC | ML-DSA | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| PQC | SLH-DSA | TBD >1.00x | Pending | TBD >1.00x | Pending | ops/s benchmark needed |
+| Compression codec | Deflate | TBD >1.00x | Pending | TBD >1.00x | Pending | encode/decode benchmark needed |
+| Compression codec | gzip | TBD >1.00x | Pending | TBD >1.00x | Pending | encode/decode benchmark needed |
+| Compression codec | LZ4 | TBD >1.00x | Pending | TBD >1.00x | Pending | encode/decode benchmark needed |
+| Compression codec | Snappy | TBD >1.00x | Pending | TBD >1.00x | Pending | encode/decode benchmark needed |
+| Compression codec | LZMA2/XZ | TBD >1.00x | Pending | TBD >1.00x | Pending | encode/decode benchmark needed |
+| Compression codec | Zstd | TBD >1.00x | Pending | TBD >1.00x | Pending | encode/decode benchmark needed |
+| Compression codec | Brotli | TBD >1.00x | Pending | TBD >1.00x | Pending | encode/decode benchmark needed |
+| Compression codec | permessage-deflate | TBD >1.00x | Pending | TBD >1.00x | Pending | encode/decode benchmark needed |
+| Compression primitive | Huffman | TBD >1.00x | Pending | TBD >1.00x | Pending | microbench needed |
+| Compression primitive | LZ77 overlap-copy | TBD >1.00x | Pending | TBD >1.00x | Pending | microbench needed |
+| Compression primitive | Zstd FSE | TBD >1.00x | Pending | TBD >1.00x | Pending | microbench needed |
+| Compression primitive | Zstd HUF | TBD >1.00x | Pending | TBD >1.00x | Pending | microbench needed |
+| Compression primitive | Zstd sequence blocks | TBD >1.00x | Pending | TBD >1.00x | Pending | microbench needed |
+| Compression primitive | Zstd literal blocks | TBD >1.00x | Pending | TBD >1.00x | Pending | microbench needed |
+
 ### 2026-05-13 pure Simple Adler-32 optimization-layer update
 
 Commands:
@@ -204,6 +300,7 @@ Commands:
 Interpretation:
 - CRC32 remains pure Simple. `_crc32_update_table` now hoists `data.len()`, reads eight input bytes with one compiler-inline unchecked little-endian u64 load, applies the table-dependent CRC steps in sequence, and keeps an unchecked byte tail.
 - This removes the generic `data[i]` path from the hot loop while preserving the existing byte-table representation and streaming API behavior.
+- Rejected follow-up: changing the generated CRC table from packed `[u8]` plus `rt_typed_bytes_u32_le_at` to a typed `[u32]` table plus `rt_typed_words_u32_at` preserved the 10 CRC/CRC32C KAT examples, but regressed the benchmark sample to `278 MB/s` (`0.61x` C, `0.68x` Rust). Keep the byte-table path until the compiler can prove and hoist typed-word array tag/length checks or provide a static-table representation.
 - The remaining likely CRC32 gain is table lifetime: one-shot `crc32(data)` still builds the IEEE table for each call. A static or cached table should wait for reliable native top-level array initialization or an explicit runtime cache pattern, because this plan already documents native top-level constant initialization as a known limitation.
 
 ### 2026-05-13 pure Simple CRC32 optimization-layer update
