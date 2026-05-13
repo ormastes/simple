@@ -30,6 +30,12 @@ fn _vertex_wgsl() -> text:
 fn _fragment_wgsl() -> text:
     "@fragment fn main() -> @location(0) vec4f { return vec4f(1.0, 0.0, 0.0, 1.0); }"
 
+fn _vertex_wgsl_with_bindings() -> text:
+    "@vertex fn main() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n@group(0) @binding(0) var<uniform> camera: mat4x4f;"
+
+fn _fragment_wgsl_with_bindings() -> text:
+    "@fragment fn main() -> @location(0) vec4f { return vec4f(1.0, 0.0, 0.0, 1.0); }\n@group(0) @binding(1) var diffuse: texture_2d<f32>;\n@group(0) @binding(2) var linear_sampler: sampler;"
+
 fn _compute_wgsl() -> text:
     "@compute @workgroup_size(1) fn main() { }"
 
@@ -195,6 +201,51 @@ describe "Browser WebGPU context":
             expect(rp.id).to_equal(1)
             expect(cp.valid).to_equal(true)
             expect(cp.id).to_equal(2)
+
+        it "validates render pipeline layouts against reflected shader bindings":
+            var ctx = webgpu_create_context(true)
+            expect(ctx.request_adapter(GPURequestAdapterOptions.default_options())).to_equal(true)
+            expect(ctx.request_device(GPUDeviceDescriptor.create())).to_equal(true)
+            var resources = ctx.resources
+            val layout = resources.create_bind_group_layout("material", [
+                GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
+                GPUBindGroupLayoutEntry.texture(1, WEBGPU_SHADER_STAGE_FRAGMENT),
+                GPUBindGroupLayoutEntry.sampler(2, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val vs = ctx.create_shader_module("vs", _vertex_wgsl_with_bindings())
+            val fs = ctx.create_shader_module("fs", _fragment_wgsl_with_bindings())
+            val rp = ctx.create_render_pipeline_with_layouts(vs, fs, [layout])
+            expect(rp.valid).to_equal(true)
+            expect(rp.id).to_equal(1)
+
+        it "rejects render pipeline layouts that miss reflected shader resources":
+            var ctx = webgpu_create_context(true)
+            expect(ctx.request_adapter(GPURequestAdapterOptions.default_options())).to_equal(true)
+            expect(ctx.request_device(GPUDeviceDescriptor.create())).to_equal(true)
+            var resources = ctx.resources
+            val missing = resources.create_bind_group_layout("missing", [
+                GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
+                GPUBindGroupLayoutEntry.texture(1, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val wrong_visibility = resources.create_bind_group_layout("visibility", [
+                GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_FRAGMENT),
+                GPUBindGroupLayoutEntry.texture(1, WEBGPU_SHADER_STAGE_FRAGMENT),
+                GPUBindGroupLayoutEntry.sampler(2, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val wrong_type = resources.create_bind_group_layout("wrong-type", [
+                GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
+                GPUBindGroupLayoutEntry.sampler(1, WEBGPU_SHADER_STAGE_FRAGMENT),
+                GPUBindGroupLayoutEntry.sampler(2, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val vs = ctx.create_shader_module("vs", _vertex_wgsl_with_bindings())
+            val fs = ctx.create_shader_module("fs", _fragment_wgsl_with_bindings())
+            val missing_pipeline = ctx.create_render_pipeline_with_layouts(vs, fs, [missing])
+            expect(missing_pipeline.valid).to_equal(false)
+            expect(missing_pipeline.error).to_equal("GPURenderPipeline layout missing shader binding")
+            val visibility_pipeline = ctx.create_render_pipeline_with_layouts(vs, fs, [wrong_visibility])
+            expect(visibility_pipeline.error).to_equal("GPURenderPipeline layout visibility does not include shader stage")
+            val type_pipeline = ctx.create_render_pipeline_with_layouts(vs, fs, [wrong_type])
+            expect(type_pipeline.error).to_equal("GPURenderPipeline layout binding type does not match shader resource")
 
         it "rejects render pipeline with compute shader in vertex slot":
             var ctx = webgpu_create_context(true)

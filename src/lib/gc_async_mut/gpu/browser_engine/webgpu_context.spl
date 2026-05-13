@@ -22,6 +22,10 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     GPUBindGroupLayoutEntry, GPUBindGroupEntry,
     GPUBindGroupLayoutHandle, GPUBindGroupHandle,
     WEBGPU_TEXTURE_DIMENSION_2D, WEBGPU_TEXTURE_DIMENSION_3D,
+    WEBGPU_SHADER_STAGE_VERTEX, WEBGPU_SHADER_STAGE_FRAGMENT,
+    WEBGPU_BINDING_TYPE_UNIFORM_BUFFER, WEBGPU_BINDING_TYPE_STORAGE_BUFFER,
+    WEBGPU_BINDING_TYPE_READONLY_STORAGE_BUFFER, WEBGPU_BINDING_TYPE_TEXTURE,
+    WEBGPU_BINDING_TYPE_STORAGE_TEXTURE, WEBGPU_BINDING_TYPE_SAMPLER,
     webgpu_validate_extended_texture_descriptor
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_status_errors.{
@@ -187,6 +191,17 @@ pub class WebGPUContext:
         self.next_pipeline_id = self.next_pipeline_id + 1
         self.last_error = ""
         GPUPipelineHandle(id: id, kind: "render", valid: true, error: "")
+
+    me create_render_pipeline_with_layouts(vertex: GPUShaderModule, fragment: GPUShaderModule, layouts: [GPUBindGroupLayoutHandle]) -> GPUPipelineHandle:
+        val base = self.create_render_pipeline(vertex, fragment)
+        if not base.valid:
+            return base
+        val layout_err = webgpu_validate_render_pipeline_layout(vertex, fragment, layouts)
+        if layout_err != "":
+            self.last_error = layout_err
+            self.next_pipeline_id = self.next_pipeline_id - 1
+            return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: layout_err)
+        base
 
     me create_compute_pipeline(compute: GPUShaderModule) -> GPUPipelineHandle:
         if self.device_lost:
@@ -665,6 +680,54 @@ pub fn webgpu_reflect_wgsl_bindings(source: text) -> [WebGPUShaderBindingReflect
         search_start = line_end + 1
     bindings
 
+pub fn webgpu_validate_render_pipeline_layout(vertex: GPUShaderModule, fragment: GPUShaderModule, layouts: [GPUBindGroupLayoutHandle]) -> text:
+    if not vertex.valid or not fragment.valid:
+        return "GPURenderPipeline layout validation requires valid shader modules"
+    val vertex_err = webgpu_validate_shader_bindings_against_layouts(webgpu_reflect_wgsl_bindings(vertex.source), WEBGPU_SHADER_STAGE_VERTEX, layouts)
+    if vertex_err != "":
+        return vertex_err
+    webgpu_validate_shader_bindings_against_layouts(webgpu_reflect_wgsl_bindings(fragment.source), WEBGPU_SHADER_STAGE_FRAGMENT, layouts)
+
+fn webgpu_validate_shader_bindings_against_layouts(bindings: [WebGPUShaderBindingReflection], visibility: i32, layouts: [GPUBindGroupLayoutHandle]) -> text:
+    var i = 0
+    while i < bindings.len():
+        val binding = bindings[i]
+        if binding.group < 0 or binding.group >= layouts.len():
+            return "GPURenderPipeline layout missing bind group"
+        val layout = layouts[binding.group]
+        if not layout.valid:
+            return "GPURenderPipeline layout bind group is invalid"
+        val entry = webgpu_find_pipeline_layout_entry(layout.entries, binding.binding)
+        if entry.binding < 0:
+            return "GPURenderPipeline layout missing shader binding"
+        if (entry.visibility & visibility) == 0:
+            return "GPURenderPipeline layout visibility does not include shader stage"
+        if not webgpu_pipeline_layout_binding_type_matches(binding.resource_type, entry.binding_type):
+            return "GPURenderPipeline layout binding type does not match shader resource"
+        i = i + 1
+    ""
+
+fn webgpu_find_pipeline_layout_entry(entries: [GPUBindGroupLayoutEntry], binding: i32) -> GPUBindGroupLayoutEntry:
+    var i = 0
+    while i < entries.len():
+        if entries[i].binding == binding:
+            return entries[i]
+        i = i + 1
+    GPUBindGroupLayoutEntry(binding: -1, visibility: 0, binding_type: 0, has_dynamic_offset: false)
+
+fn webgpu_pipeline_layout_binding_type_matches(resource_type: text, binding_type: i32) -> bool:
+    if resource_type == "uniform-buffer":
+        return binding_type == WEBGPU_BINDING_TYPE_UNIFORM_BUFFER
+    if resource_type == "storage-buffer":
+        return binding_type == WEBGPU_BINDING_TYPE_STORAGE_BUFFER or binding_type == WEBGPU_BINDING_TYPE_READONLY_STORAGE_BUFFER
+    if resource_type == "texture":
+        return binding_type == WEBGPU_BINDING_TYPE_TEXTURE
+    if resource_type == "storage-texture":
+        return binding_type == WEBGPU_BINDING_TYPE_STORAGE_TEXTURE
+    if resource_type == "sampler":
+        return binding_type == WEBGPU_BINDING_TYPE_SAMPLER
+    false
+
 pub fn webgpu_create_render_pipeline(ctx: WebGPUContext, vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
     if ctx.device_lost:
         ctx.last_error = "device is lost"
@@ -682,6 +745,17 @@ pub fn webgpu_create_render_pipeline(ctx: WebGPUContext, vertex: GPUShaderModule
     ctx.next_pipeline_id = ctx.next_pipeline_id + 1
     ctx.last_error = ""
     GPUPipelineHandle(id: id, kind: "render", valid: true, error: "")
+
+pub fn webgpu_create_render_pipeline_with_layouts(ctx: WebGPUContext, vertex: GPUShaderModule, fragment: GPUShaderModule, layouts: [GPUBindGroupLayoutHandle]) -> GPUPipelineHandle:
+    val base = webgpu_create_render_pipeline(ctx, vertex, fragment)
+    if not base.valid:
+        return base
+    val layout_err = webgpu_validate_render_pipeline_layout(vertex, fragment, layouts)
+    if layout_err != "":
+        ctx.last_error = layout_err
+        ctx.next_pipeline_id = ctx.next_pipeline_id - 1
+        return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: layout_err)
+    base
 
 pub fn webgpu_create_compute_pipeline(ctx: WebGPUContext, compute: GPUShaderModule) -> GPUPipelineHandle:
     if ctx.device_lost:
