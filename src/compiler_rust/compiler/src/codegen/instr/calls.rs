@@ -147,6 +147,10 @@ fn compile_inline_bytes_u8_at<M: Module>(
     let tag_mask = builder.ins().iconst(types::I64, 7);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let byte_mask = builder.ins().iconst(types::I64, 0xff);
+    let index_is_unsigned = matches!(
+        ctx.vreg_types.get(&args[1]).copied(),
+        Some(TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64)
+    );
 
     let bounds_block = builder.create_block();
     let load_block = builder.create_block();
@@ -171,14 +175,20 @@ fn compile_inline_bytes_u8_at<M: Module>(
 
     builder.switch_to_block(bounds_block);
     let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
-    let negative_index = builder.ins().iadd(len, index);
-    let normalized_index = builder.ins().select(index_is_negative, negative_index, index);
-    let ge_zero = builder
-        .ins()
-        .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
-    let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
-    let in_bounds = builder.ins().band(ge_zero, lt_len);
+    let (normalized_index, in_bounds) = if index_is_unsigned {
+        let lt_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
+        (index, lt_len)
+    } else {
+        let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
+        let negative_index = builder.ins().iadd(len, index);
+        let normalized_index = builder.ins().select(index_is_negative, negative_index, index);
+        let ge_zero = builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
+        let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
+        let in_bounds = builder.ins().band(ge_zero, lt_len);
+        (normalized_index, in_bounds)
+    };
     builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
     builder.seal_block(bounds_block);
 
