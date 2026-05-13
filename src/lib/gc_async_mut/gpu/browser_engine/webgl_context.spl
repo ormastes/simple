@@ -19,7 +19,8 @@ use std.gc_async_mut.gpu.browser_engine.webgl_render_commands.{
     webgl_render_command_polygon_offset,
     webgl_render_command_sample_coverage,
     webgl_render_command_color_mask, webgl_render_command_depth_mask,
-    webgl_render_command_stencil_func, webgl_render_command_stencil_op,
+    webgl_render_command_stencil_func, webgl_render_command_stencil_func_separate,
+    webgl_render_command_stencil_op, webgl_render_command_stencil_op_separate,
     webgl_render_command_stencil_mask,
     webgl_render_command_stencil_mask_separate,
     webgl_render_command_use_program,
@@ -124,7 +125,13 @@ pub val WEBGL_STENCIL_PASS_DEPTH_FAIL: i32 = 2965
 pub val WEBGL_STENCIL_PASS_DEPTH_PASS: i32 = 2966
 pub val WEBGL_STENCIL_REF: i32 = 2967
 pub val WEBGL_STENCIL_WRITEMASK: i32 = 2968
-pub val WEBGL_STENCIL_BACK_WRITEMASK: i32 = 36004
+pub val WEBGL_STENCIL_BACK_FUNC: i32 = 34816
+pub val WEBGL_STENCIL_BACK_FAIL: i32 = 34817
+pub val WEBGL_STENCIL_BACK_PASS_DEPTH_FAIL: i32 = 34818
+pub val WEBGL_STENCIL_BACK_PASS_DEPTH_PASS: i32 = 34819
+pub val WEBGL_STENCIL_BACK_REF: i32 = 36003
+pub val WEBGL_STENCIL_BACK_VALUE_MASK: i32 = 36004
+pub val WEBGL_STENCIL_BACK_WRITEMASK: i32 = 36005
 pub val WEBGL_COLOR_CLEAR_VALUE: i32 = 3106
 pub val WEBGL_COLOR_WRITEMASK: i32 = 3107
 pub val WEBGL_BLEND_COLOR: i32 = 32773
@@ -457,9 +464,15 @@ pub class WebGLContext:
     stencil_func_value: i32
     stencil_ref_value: i32
     stencil_value_mask: i32
+    stencil_back_func_value: i32
+    stencil_back_ref_value: i32
+    stencil_back_value_mask: i32
     stencil_fail_op: i32
     stencil_zfail_op: i32
     stencil_zpass_op: i32
+    stencil_back_fail_op: i32
+    stencil_back_zfail_op: i32
+    stencil_back_zpass_op: i32
     cull_face_mode: i32
     front_face_mode: i32
     polygon_offset_factor: f64
@@ -710,6 +723,18 @@ pub class WebGLContext:
             return webgl_parameter_int(self.stencil_zfail_op)
         if pname == WEBGL_STENCIL_PASS_DEPTH_PASS:
             return webgl_parameter_int(self.stencil_zpass_op)
+        if pname == WEBGL_STENCIL_BACK_FUNC:
+            return webgl_parameter_int(self.stencil_back_func_value)
+        if pname == WEBGL_STENCIL_BACK_REF:
+            return webgl_parameter_int(self.stencil_back_ref_value)
+        if pname == WEBGL_STENCIL_BACK_VALUE_MASK:
+            return webgl_parameter_int(self.stencil_back_value_mask)
+        if pname == WEBGL_STENCIL_BACK_FAIL:
+            return webgl_parameter_int(self.stencil_back_fail_op)
+        if pname == WEBGL_STENCIL_BACK_PASS_DEPTH_FAIL:
+            return webgl_parameter_int(self.stencil_back_zfail_op)
+        if pname == WEBGL_STENCIL_BACK_PASS_DEPTH_PASS:
+            return webgl_parameter_int(self.stencil_back_zpass_op)
         if pname == WEBGL_BLEND:
             return webgl_parameter_bool(self.blend_enabled)
         if pname == WEBGL_DEPTH_TEST:
@@ -781,7 +806,33 @@ pub class WebGLContext:
         self.stencil_func_value = func
         self.stencil_ref_value = ref_value
         self.stencil_value_mask = mask
+        self.stencil_back_func_value = func
+        self.stencil_back_ref_value = ref_value
+        self.stencil_back_value_mask = mask
         self.render_commands.push(webgl_render_command_stencil_func(func, ref_value, mask))
+        true
+
+    me stencil_func_separate(face: i32, func: i32, ref_value: i32, mask: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if face != WEBGL_FRONT and face != WEBGL_BACK and face != WEBGL_FRONT_AND_BACK:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if not webgl_valid_stencil_func(func):
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if ref_value < 0 or mask < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if face == WEBGL_FRONT or face == WEBGL_FRONT_AND_BACK:
+            self.stencil_func_value = func
+            self.stencil_ref_value = ref_value
+            self.stencil_value_mask = mask
+        if face == WEBGL_BACK or face == WEBGL_FRONT_AND_BACK:
+            self.stencil_back_func_value = func
+            self.stencil_back_ref_value = ref_value
+            self.stencil_back_value_mask = mask
+        self.render_commands.push(webgl_render_command_stencil_func_separate(face, func, ref_value, mask))
         true
 
     me stencil_op(fail: i32, zfail: i32, zpass: i32) -> bool:
@@ -793,7 +844,30 @@ pub class WebGLContext:
         self.stencil_fail_op = fail
         self.stencil_zfail_op = zfail
         self.stencil_zpass_op = zpass
+        self.stencil_back_fail_op = fail
+        self.stencil_back_zfail_op = zfail
+        self.stencil_back_zpass_op = zpass
         self.render_commands.push(webgl_render_command_stencil_op(fail, zfail, zpass))
+        true
+
+    me stencil_op_separate(face: i32, fail: i32, zfail: i32, zpass: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if face != WEBGL_FRONT and face != WEBGL_BACK and face != WEBGL_FRONT_AND_BACK:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if not webgl_valid_stencil_op(fail) or not webgl_valid_stencil_op(zfail) or not webgl_valid_stencil_op(zpass):
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if face == WEBGL_FRONT or face == WEBGL_FRONT_AND_BACK:
+            self.stencil_fail_op = fail
+            self.stencil_zfail_op = zfail
+            self.stencil_zpass_op = zpass
+        if face == WEBGL_BACK or face == WEBGL_FRONT_AND_BACK:
+            self.stencil_back_fail_op = fail
+            self.stencil_back_zfail_op = zfail
+            self.stencil_back_zpass_op = zpass
+        self.render_commands.push(webgl_render_command_stencil_op_separate(face, fail, zfail, zpass))
         true
 
     me cull_face(mode: i32) -> bool:
@@ -2672,9 +2746,15 @@ pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLConte
         stencil_func_value: WEBGL_ALWAYS,
         stencil_ref_value: 0,
         stencil_value_mask: -1,
+        stencil_back_func_value: WEBGL_ALWAYS,
+        stencil_back_ref_value: 0,
+        stencil_back_value_mask: -1,
         stencil_fail_op: WEBGL_KEEP,
         stencil_zfail_op: WEBGL_KEEP,
         stencil_zpass_op: WEBGL_KEEP,
+        stencil_back_fail_op: WEBGL_KEEP,
+        stencil_back_zfail_op: WEBGL_KEEP,
+        stencil_back_zpass_op: WEBGL_KEEP,
         cull_face_mode: WEBGL_BACK,
         front_face_mode: WEBGL_CCW,
         polygon_offset_factor: 0.0,
