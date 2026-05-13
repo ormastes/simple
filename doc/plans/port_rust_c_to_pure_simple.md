@@ -607,6 +607,32 @@ Additional propagation evidence:
 
 ---
 
+### 2026-05-12 Phase 6E typed word-index lowering follow-up
+
+Commands:
+- `cargo check -p simple-runtime -p simple-compiler`
+- `cargo test -p simple-compiler u32_index_set_uses_word_fast_path`
+- `cargo test -p simple-compiler u32_array_index_uses_word_fast_path`
+- `cargo build --release --bin simple`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `SIMPLE_LIB=src bin/simple test test/unit/lib/crypto/aes_gcm_rfc_vectors_spec.spl --mode=interpreter --clean`
+
+Observed benchmark samples from the locally rebuilt release compiler:
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|-----------------|--------|
+| XXHash64 | 7825-8402 | 8217-8402 | 253-379 | PASS | Still below prebuilt `bin/simple` sample |
+| ChaCha20 | 173-182 | 195-196 | 110 | PASS | Correctness preserved; perf gap remains |
+
+Notes:
+- MIR lowering now treats proven `[u32]` array reads like `[u8]` reads: it emits `rt_words_u32_at` with an unboxed native index and narrows the result to `u32`, skipping generic `rt_index_get` and `UnboxInt`.
+- Proven `[u32]` array writes now emit `rt_words_u32_set` with raw index and word value, skipping `rt_index_set` and value boxing.
+- Regression tests lock both fast paths so future compiler changes cannot silently fall back to generic collection dispatch.
+- The local rebuilt compiler did not match the prebuilt `bin/simple` performance sample (`bin/simple`: XXHash64 up to `823 MB/s`, ChaCha20 `234 MB/s` in the same session). Treat this as a remaining native/release-build optimization gap, not a reason to replace Simple algorithms with C/Rust externs.
+- AES-GCM remains a correctness blocker independent of the typed indexing work: the V3 GHASH canary passes, while AES-256 block canaries for H/J0/first counter fail. The next fix belongs in AES block/key-schedule execution or the compiler/interpreter semantics it exercises.
+
+---
+
 ## Phase 1: Fix Compiler Bugs — DONE
 
 ### 1A. Add `auto_vectorize` and `predicate_promote` to Pipelines — DONE
