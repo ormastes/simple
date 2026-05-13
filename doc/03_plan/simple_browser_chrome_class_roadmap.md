@@ -482,6 +482,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL texture parameter queries have started: bound textures expose min/mag filter and wrap state through `getTexParameter` with pname and no-binding validation.
 - M27 WebGL renderbuffer parameter queries have started: bound renderbuffers expose internal format, width, and height with target, pname, and no-binding validation.
 - M27 WebGL framebuffer attachment queries have started: framebuffer attachments expose object type/name and texture attachment metadata with target, attachment, pname, and default-framebuffer validation.
+- M27 WebGL resource object probes have started: buffer, texture, framebuffer, and renderbuffer IDs can be tested for live object validity and return false while context is lost.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
