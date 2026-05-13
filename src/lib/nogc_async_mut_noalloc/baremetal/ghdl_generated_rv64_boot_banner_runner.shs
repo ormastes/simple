@@ -7,7 +7,7 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl"
+RTL_SRC="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/rtl"
 LINKER_SCRIPT="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv64_fw_jump.ld"
 TIMEOUT=30
 PROGRAM=""
@@ -32,7 +32,6 @@ fi
 TMP_DIR=$(mktemp -d /tmp/ghdl_generated_rv64_boot_banner_XXXXXX)
 trap "rm -rf $TMP_DIR" EXIT
 
-GEN_DIR="$TMP_DIR/generated"
 TEST_BASE="$TMP_DIR/program"
 TEST_ELF="$TEST_BASE.elf"
 FW_BIN="$TEST_BASE.fw.bin"
@@ -42,8 +41,6 @@ TEST_PKG="$TMP_DIR/test_program.vhd"
 riscv64-linux-gnu-as -march=rv64i_zicsr -mabi=lp64 -o "$TEST_BASE.o" "$PROGRAM"
 riscv64-linux-gnu-ld -m elf64lriscv -T "$LINKER_SCRIPT" --no-relax -o "$TEST_ELF" "$TEST_BASE.o"
 
-bin/simple run "$GEN_SCRIPT" -- "$GEN_DIR" >/dev/null
-RTL_DIR="$GEN_DIR/rv64/rtl"
 riscv64-linux-gnu-objcopy -O binary -j .text.fw "$TEST_ELF" "$FW_BIN"
 riscv64-linux-gnu-objcopy -O binary -j .text.payload "$TEST_ELF" "$PAYLOAD_BIN"
 
@@ -53,6 +50,7 @@ payload_data = open('$PAYLOAD_BIN', 'rb').read()
 print('library ieee;')
 print('use ieee.std_logic_1164.all;')
 print('package test_program is')
+print('    constant TEST_KIND : integer := 3;')
 print('    type byte_array_t is array (natural range <>) of std_logic_vector(7 downto 0);')
 print('    constant FW_SIZE_BYTES : integer := %d;' % len(fw_data))
 print('    constant FW_BYTES : byte_array_t(0 to %d) := (' % (len(fw_data)-1))
@@ -71,10 +69,10 @@ print('end package test_program;')
 
 cd "$TMP_DIR"
 ghdl -a --std=08 \
-    "$GEN_DIR/rv64/rtl/simple_rv64i_core_pkg.vhd" \
-    "$GEN_DIR/rv64/rtl/simple_rv64gc_core.vhd" \
+    "$RTL_SRC/simple_rv64i_core_pkg.vhd" \
     "$TEST_PKG" \
-    "$RTL_DIR/tb_generated_rv64_boot_banner.vhd"
+    "$RTL_SRC/simple_rv64gc_core.vhd" \
+    "$RTL_SRC/tb_generated_rv64_boot_banner.vhd"
 ghdl -e --std=08 tb_generated_rv64_boot_banner
 
 STOP_MS=$((TIMEOUT * 1000))

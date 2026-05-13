@@ -8,8 +8,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 SIMPLE_RUN_BIN="${SIMPLE_RUN_BINARY:-$PROJECT_ROOT/bin/simple}"
-GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl"
-TEST_PKG_GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_rv64_program_test_package.spl"
+RTL_SRC="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/rtl"
 TIMEOUT=30
 PROGRAM=""
 
@@ -33,11 +32,9 @@ fi
 TMP_DIR=$(mktemp -d /tmp/ghdl_generated_rv64_sv39_fault_XXXXXX)
 trap "rm -rf $TMP_DIR" EXIT
 
-GEN_DIR="$TMP_DIR/generated"
 TEST_BASE="$TMP_DIR/program"
 TEST_ELF="$TEST_BASE.elf"
 TEST_BIN="$TEST_BASE.bin"
-TEST_HEX="$TMP_DIR/program.hex"
 TEST_PKG="$TMP_DIR/test_program.vhd"
 
 EXT="${PROGRAM##*.}"
@@ -52,19 +49,38 @@ else
     exit 1
 fi
 
-"$SIMPLE_RUN_BIN" run "$GEN_SCRIPT" -- "$GEN_DIR" >/dev/null
 riscv64-linux-gnu-objcopy -O binary "$TEST_ELF" "$TEST_BIN"
-"$SIMPLE_RUN_BIN" run "$TEST_PKG_GEN_SCRIPT" -- \
-    "$TEST_BIN" \
-    "$TEST_HEX" \
-    "$TEST_PKG" >/dev/null
+python3 - "$TEST_BIN" "$TEST_PKG" <<'PY'
+import pathlib
+import sys
+
+data = pathlib.Path(sys.argv[1]).read_bytes()
+out = pathlib.Path(sys.argv[2])
+lines = [
+    "library ieee;",
+    "use ieee.std_logic_1164.all;",
+    "package test_program is",
+    "    constant TEST_KIND : integer := 6;",
+    "    type byte_array_t is array (natural range <>) of std_logic_vector(7 downto 0);",
+    f"    constant PROGRAM_SIZE_BYTES : integer := {len(data)};",
+    f"    constant PROGRAM_BYTES : byte_array_t(0 to {max(len(data) - 1, 0)}) := (",
+]
+if data:
+    for i, b in enumerate(data):
+        comma = "," if i < len(data) - 1 else ""
+        lines.append(f"        x\"{b:02x}\"{comma}")
+else:
+    lines.append("        x\"00\"")
+lines.extend(["    );", "end package test_program;"])
+out.write_text("\n".join(lines) + "\n", encoding="ascii")
+PY
 
 cd "$TMP_DIR"
 ghdl -a --std=08 \
-    "$GEN_DIR/rv64/rtl/simple_rv64i_core_pkg.vhd" \
-    "$GEN_DIR/rv64/rtl/simple_rv64gc_core.vhd" \
+    "$RTL_SRC/simple_rv64i_core_pkg.vhd" \
     "$TEST_PKG" \
-    "$GEN_DIR/rv64/rtl/tb_generated_rv64_sv39_fault.vhd"
+    "$RTL_SRC/simple_rv64gc_core.vhd" \
+    "$RTL_SRC/tb_generated_rv64_sv39_fault.vhd"
 ghdl -e --std=08 tb_generated_rv64_sv39_fault
 
 STOP_MS=$((TIMEOUT * 1000))

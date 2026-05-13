@@ -8,8 +8,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 SIMPLE_RUN_BIN="${SIMPLE_RUN_BINARY:-$PROJECT_ROOT/bin/simple}"
-GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl"
-TEST_PKG_GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_rv64_test_program_package.spl"
+RTL_SRC="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/rtl"
 LINKER_SCRIPT="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv64_fw_jump.ld"
 TIMEOUT=30
 PROGRAM=""
@@ -34,36 +33,58 @@ fi
 TMP_DIR=$(mktemp -d /tmp/ghdl_generated_rv64_boot_info_real_dtb_XXXXXX)
 trap "rm -rf $TMP_DIR" EXIT
 
-GEN_DIR="$TMP_DIR/generated"
 TEST_BASE="$TMP_DIR/program"
 TEST_ELF="$TEST_BASE.elf"
 FW_BIN="$TEST_BASE.fw.bin"
 PAYLOAD_BIN="$TEST_BASE.payload.bin"
-FW_HEX="$TMP_DIR/program.fw.hex"
-PAYLOAD_HEX="$TMP_DIR/program.payload.hex"
 TEST_PKG="$TMP_DIR/test_program.vhd"
-TEST_PKG_GEN_RUN="$TMP_DIR/generate_rv64_test_program_package.spl"
 
 riscv64-linux-gnu-as -march=rv64i_zicsr -mabi=lp64 -o "$TEST_BASE.o" "$PROGRAM"
 riscv64-linux-gnu-ld -m elf64lriscv -T "$LINKER_SCRIPT" --no-relax -o "$TEST_ELF" "$TEST_BASE.o"
 
-cp "$TEST_PKG_GEN_SCRIPT" "$TEST_PKG_GEN_RUN"
-"$SIMPLE_RUN_BIN" run "$GEN_SCRIPT" -- "$GEN_DIR" >/dev/null
 riscv64-linux-gnu-objcopy -O binary -j .text.fw "$TEST_ELF" "$FW_BIN"
 riscv64-linux-gnu-objcopy -O binary -j .text.payload "$TEST_ELF" "$PAYLOAD_BIN"
-"$SIMPLE_RUN_BIN" run "$TEST_PKG_GEN_RUN" -- \
-    "$FW_BIN" \
-    "$FW_HEX" \
-    "$PAYLOAD_BIN" \
-    "$PAYLOAD_HEX" \
-    "$TEST_PKG" >/dev/null
+python3 - "$FW_BIN" "$PAYLOAD_BIN" "$TEST_PKG" <<'PY'
+import pathlib
+import sys
+
+fw_data = pathlib.Path(sys.argv[1]).read_bytes()
+payload_data = pathlib.Path(sys.argv[2]).read_bytes()
+out = pathlib.Path(sys.argv[3])
+
+def bytes_literal(name, data):
+    lines = [
+        f"    constant {name}_SIZE_BYTES : integer := {len(data)};",
+        f"    constant {name}_BYTES : byte_array_t(0 to {max(len(data) - 1, 0)}) := (",
+    ]
+    if data:
+        for i, b in enumerate(data):
+            comma = "," if i < len(data) - 1 else ""
+            lines.append(f"        x\"{b:02x}\"{comma}")
+    else:
+        lines.append("        x\"00\"")
+    lines.append("    );")
+    return "\n".join(lines)
+
+out.write_text(
+    "library ieee;\n"
+    "use ieee.std_logic_1164.all;\n"
+    "package test_program is\n"
+    "    constant TEST_KIND : integer := 4;\n"
+    "    type byte_array_t is array (natural range <>) of std_logic_vector(7 downto 0);\n"
+    f"{bytes_literal('FW', fw_data)}\n"
+    f"{bytes_literal('PAYLOAD', payload_data)}\n"
+    "end package test_program;\n",
+    encoding="ascii",
+)
+PY
 
 cd "$TMP_DIR"
 ghdl -a --std=08 \
-    "$GEN_DIR/rv64/rtl/simple_rv64i_core_pkg.vhd" \
-    "$GEN_DIR/rv64/rtl/simple_rv64gc_core.vhd" \
+    "$RTL_SRC/simple_rv64i_core_pkg.vhd" \
     "$TEST_PKG" \
-    "$GEN_DIR/rv64/rtl/tb_generated_rv64_boot_info_real_dtb.vhd"
+    "$RTL_SRC/simple_rv64gc_core.vhd" \
+    "$RTL_SRC/tb_generated_rv64_boot_info_real_dtb.vhd"
 ghdl -e --std=08 tb_generated_rv64_boot_info_real_dtb
 
 STOP_MS=$((TIMEOUT * 1000))
