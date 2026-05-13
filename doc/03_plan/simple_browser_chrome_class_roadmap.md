@@ -462,6 +462,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M26 canvas-facing WebGPU auto-layout has started: `CanvasWebGPUContext` now exposes automatic render pipeline layout creation for secure page-level WebGPU flows, covered by `test/unit/browser/script/canvas_api_spec.spl`.
 - M26 script-facing WebGPU auto-layout has started: the JS transpiler now maps compact `createRenderPipeline({ layout: "auto", vertex: { module }, fragment: { module } })` calls and the explicit shorthand to the Simple canvas/core auto-layout wrapper, covered by `test/unit/browser/script/js_transpiler_spec.spl`.
 - M26 bind group pass recording has started: command encoders can now validate bind group existence, layout dynamic-offset counts, offset alignment, and buffer bounds against the live resource table while recording passes, with canvas command coverage in `test/web_platform/webgpu/webgpu_commands_spec.spl` and `test/unit/browser/script/canvas_api_spec.spl`.
+- M26 canvas-facing bind group resources have started: `CanvasWebGPUContext` now exposes bind group layout and bind group creation without requiring page-level flows to reach into the internal resource table, covered by `test/unit/browser/script/canvas_api_spec.spl`.
 
 **Work:**
 - Implement depth/stencil attachment semantics, native MSAA allocation, mip generation/use, texture arrays, cubemaps where supported, instancing, uniform/storage buffers, dynamic offsets, and indirect draw where backend supports it.
