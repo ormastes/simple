@@ -280,6 +280,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 **Current progress (2026-05-13):**
 - Fallback renderer single-layer `box-shadow` support has started: simple offset/spread shadows render before block backgrounds, and glass feature-gap reporting now reserves the remaining shadow gap for multi-layer shadows, covered by `test/web_platform/css/box_shadow_wpt_spec.spl` and `test/web_platform/css/glass_feature_gap_spec.spl`.
 - Fallback `box-shadow` parsing now distinguishes the CSS blur-radius and spread length order for single-layer shadows, covered by `test/web_platform/css/box_shadow_wpt_spec.spl`.
+- Fallback `box-shadow` tokenization now preserves functional `rgb()` color values with internal spaces for single-layer shadows, covered by `test/web_platform/css/box_shadow_wpt_spec.spl`.
 
 **Work:**
 - CSS Transitions: `transition` property, interpolation engine for color/length/transform values
