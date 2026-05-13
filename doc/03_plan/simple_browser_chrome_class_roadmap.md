@@ -474,6 +474,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL shader detachment has started: programs can detach attached shader stages, attached-shader counts update, and relinking fails once a required stage is missing.
 - M27 WebGL attached-shader introspection has started: programs can return attached shader handles, including deleted-but-still-attached shader lifecycle state.
 - M27 WebGL shader precision queries have started: vertex/fragment shader precision formats expose deterministic float and integer range/precision metadata and validate enum/context-loss behavior.
+- M27 WebGL explicit program validation has started: `validateProgram`-style checks update `VALIDATE_STATUS`, info logs, and invalid-program errors independently from link/use.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
