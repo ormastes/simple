@@ -975,6 +975,7 @@ fn _convert_webgpu_calls(line: text) -> text:
     result = result.replace(".drawIndexedIndirect(", ".draw_indexed_indirect(")
     result = result.replace(".dispatchWorkgroups(", ".dispatch_workgroups(")
     result = result.replace(".copyBufferToBuffer(", ".copy_buffer_to_buffer(")
+    result = _convert_webgpu_copy_texture_to_texture_descriptor(result)
     result = result.replace(".copyTextureToTexture(", ".copy_texture_to_texture(")
     result
 
@@ -1177,6 +1178,55 @@ fn _convert_webgpu_queue_write_texture_descriptor(line: text) -> text:
     val prefix = line.slice(0, marker_idx)
     val suffix = line.slice(rest_start + size_end + 2, line.len())
     prefix + ".queue_write_texture(" + _webgpu_texture_object_id(texture) + ", " + width + ", " + height + ", " + depth_or_layers + ", " + data_expr + ".len())" + suffix
+
+fn _convert_webgpu_copy_texture_to_texture_descriptor(line: text) -> text:
+    val marker = ".copyTextureToTexture({"
+    val marker_idx = line.index_of(marker)
+    if marker_idx < 0:
+        return line
+    val source_start = marker_idx + marker.len()
+    val after_source_start = line.slice(source_start, line.len())
+    val source_end_rel = after_source_start.index_of("},")
+    if source_end_rel < 0:
+        return line
+    val source_end = source_start + source_end_rel
+    val source_descriptor = line.slice(source_start, source_end)
+    val source_texture = _webgpu_descriptor_value(source_descriptor, "texture")
+    if source_texture == "":
+        return line
+    val destination_search_start = source_end + 2
+    val destination_search = line.slice(destination_search_start, line.len())
+    val destination_open_rel = destination_search.index_of("{")
+    if destination_open_rel < 0:
+        return line
+    val destination_start = destination_search_start + destination_open_rel + 1
+    val after_destination_start = line.slice(destination_start, line.len())
+    val destination_end_rel = after_destination_start.index_of("},")
+    if destination_end_rel < 0:
+        return line
+    val destination_end = destination_start + destination_end_rel
+    val destination_descriptor = line.slice(destination_start, destination_end)
+    val destination_texture = _webgpu_descriptor_value(destination_descriptor, "texture")
+    if destination_texture == "":
+        return line
+    val size_search_start = destination_end + 2
+    val size_search = line.slice(size_search_start, line.len())
+    val size_start = size_search.index_of("[")
+    val size_end = size_search.index_of("]")
+    if size_start < 0 or size_end < size_start:
+        return line
+    val size_inner = size_search.slice(size_start + 1, size_end)
+    val size_parts = size_inner.split(",")
+    if size_parts.len() < 2:
+        return line
+    val width = size_parts[0].trim()
+    val height = size_parts[1].trim()
+    var depth_or_layers = "1"
+    if size_parts.len() >= 3:
+        depth_or_layers = size_parts[2].trim()
+    val prefix = line.slice(0, marker_idx)
+    val suffix = line.slice(size_search_start + size_end + 2, line.len())
+    prefix + ".copy_texture_to_texture(" + _webgpu_texture_object_id(source_texture) + ", " + _webgpu_texture_object_id(destination_texture) + ", " + width + ", " + height + ", " + depth_or_layers + ")" + suffix
 
 fn _convert_webgpu_auto_render_pipeline_descriptor(line: text) -> text:
     val marker = ".createRenderPipeline({"
