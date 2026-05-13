@@ -491,6 +491,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL line-width state has started: contexts expose `lineWidth`, current `LINE_WIDTH`, and the deterministic aliased line-width range for WebGL library state sync.
 - M27 WebGL front-face state has started: contexts expose `frontFace`, `FRONT_FACE`, and clockwise/counter-clockwise validation for material culling compatibility.
 - M27 WebGL polygon-offset state has started: contexts expose `POLYGON_OFFSET_FILL`, factor, and units through capability and parameter queries for z-fighting mitigation paths.
+- M27 WebGL sample-coverage state has started: contexts expose sample coverage capabilities, clamped coverage values, and invert state for multisample-compatible render setup.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
