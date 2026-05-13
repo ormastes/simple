@@ -488,6 +488,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL drawing-buffer introspection has started: contexts expose drawing buffer width and height for renderer/library sizing logic.
 - M27 WebGL context attributes have started: contexts expose deterministic browser-style attributes for alpha, depth, stencil, antialias, premultiplied alpha, preserveDrawingBuffer, power preference, and performance-caveat behavior.
 - M27 WebGL pixel-store parameter queries have started: `getParameter` now exposes pack and unpack alignment state used by texture uploads and readback.
+- M27 WebGL line-width state has started: contexts expose `lineWidth`, current `LINE_WIDTH`, and the deterministic aliased line-width range for WebGL library state sync.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
