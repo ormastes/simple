@@ -468,6 +468,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M26 storage resource layout ergonomics have started: bind group layout entries now have explicit readonly storage buffer and storage texture constructors matching the validator and auto-layout binding types, covered by `test/web_platform/webgpu/webgpu_resources_spec.spl`.
 - M26 texture view resources have started: WebGPU resource tables now allocate deterministic texture view handles with format, mip range, array-layer range, and cubemap validation, covered by `test/web_platform/webgpu/webgpu_resources_spec.spl`.
 - M26 canvas/script texture view access has started: `CanvasWebGPUContext` exposes texture view creation and the JS transpiler lowers `createTextureView(...)` for page-level 3D texture view flows, covered by `test/unit/browser/script/canvas_api_spec.spl` and `test/unit/browser/script/js_transpiler_spec.spl`.
+- M26 bind group texture view binding has started: bind group entries can now reference validated texture view handles for sampled/storage texture layout entries while preserving existing texture-handle compatibility, covered by `test/web_platform/webgpu/webgpu_resources_spec.spl`.
 
 **Work:**
 - Implement depth/stencil attachment semantics, native MSAA allocation, mip generation/use, texture arrays, cubemaps where supported, instancing, uniform/storage buffers, dynamic offsets, and indirect draw where backend supports it.
