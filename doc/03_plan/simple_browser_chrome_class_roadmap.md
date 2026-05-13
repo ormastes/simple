@@ -479,6 +479,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL shader-source introspection has started: valid shaders return their last assigned GLSL source while deleted, unknown, and context-lost shaders follow browser error/default behavior.
 - M27 WebGL vertex attribute offset queries have started: `getVertexAttribOffset` returns configured pointer offsets and validates index/pname errors.
 - M27 WebGL buffer parameter queries have started: bound buffers expose `BUFFER_SIZE` and `BUFFER_USAGE` with WebGL target, pname, and no-binding error behavior.
+- M27 WebGL texture parameter queries have started: bound textures expose min/mag filter and wrap state through `getTexParameter` with pname and no-binding validation.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
