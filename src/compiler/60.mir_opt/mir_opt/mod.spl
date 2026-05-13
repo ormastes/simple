@@ -24,7 +24,7 @@ use compiler.mir_opt.mir_opt.cse (create_cse_pass, cse_run_on_function)
 use compiler.mir_opt.mir_opt.inline (create_inline_small_pass, create_inline_pass, create_inline_aggressive_pass, inline_run_on_function, inline_run_on_module)
 use compiler.mir_opt.mir_opt.loop_opt (create_loop_opt_conservative, create_loop_opt_pass, loop_opt_run_on_function)
 use compiler.mir_opt.mir_opt.bounds_check_elim (create_bounds_check_elim_pass, bounds_check_elim_run_on_function)
-use compiler.mir_opt.mir_opt.loop_strength (create_strength_reduction_pass, strength_reduction_run_on_function)
+use compiler.mir_opt.mir_opt.loop_strength (create_strength_reduction_pass, strength_reduction_provider, strength_reduction_run_on_function)
 use compiler.mir_opt.mir_opt.string_builder_opt (create_string_builder_opt_pass, string_builder_opt_run_on_function)
 use compiler.mir_opt.mir_opt.outline (create_outline_pass, outline_run_on_function, outline_run_on_module)
 use compiler.mir_opt.mir_opt.generator_sm (create_generator_sm_pass, generator_sm_run_on_function)
@@ -33,6 +33,11 @@ use compiler.mir_opt.mir_opt.gvn (create_gvn_pass, gvn_run_on_function)
 use compiler.mir_opt.mir_opt.predicate_promote (run_predicate_promote)
 use compiler.mir_opt.mir_opt.auto_vectorize (run_auto_vectorize)
 use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass, run_pattern_idiom_pass_x86, run_pattern_idiom_pass_generic)
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
+    optimization_rule_provider_builtin_with_contract,
+    optimization_rule_provider_is_pipeline_pass
+}
 use compiler.backend.feature_caps.{X86Caps, TargetCapsKind}
 
 # ============================================================================
@@ -100,6 +105,87 @@ trait MirPass:
     fn dependencies() -> [text]:
         """List of pass names this pass depends on."""
         []
+
+struct MirPassDescriptor:
+    stable_name: text
+    aliases: [text]
+    provider: OptimizationRuleProvider
+
+fn mir_pipeline_provider(name: text, hot_path: bool) -> OptimizationRuleProvider:
+    optimization_rule_provider_builtin_with_contract(
+        "simple.opt.mir." + name,
+        OptimizerProviderKind.Mir,
+        OptimizerRuleLookupKind.PipelinePass,
+        hot_path,
+        ["typed_mir"],
+        ["canonical_mir"],
+        "pure"
+    )
+
+fn mir_pass_descriptor(stable_name: text, aliases: [text], provider: OptimizationRuleProvider) -> MirPassDescriptor:
+    MirPassDescriptor(stable_name: stable_name, aliases: aliases, provider: provider)
+
+fn mir_pass_descriptor_for_name(pass_name: text) -> MirPassDescriptor?:
+    match pass_name:
+        case "dead_code_elimination":
+            Some(mir_pass_descriptor("dead_code_elimination", ["dce"], mir_pipeline_provider("dead_code_elimination", false)))
+        case "dce":
+            Some(mir_pass_descriptor("dead_code_elimination", ["dce"], mir_pipeline_provider("dead_code_elimination", false)))
+        case "constant_folding":
+            Some(mir_pass_descriptor("constant_folding", ["const_fold"], mir_pipeline_provider("constant_folding", false)))
+        case "const_fold":
+            Some(mir_pass_descriptor("constant_folding", ["const_fold"], mir_pipeline_provider("constant_folding", false)))
+        case "copy_propagation":
+            Some(mir_pass_descriptor("copy_propagation", [], mir_pipeline_provider("copy_propagation", false)))
+        case "common_subexpr_elim":
+            Some(mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider("common_subexpr_elim", false)))
+        case "inline_small_functions":
+            Some(mir_pass_descriptor("inline_small_functions", [], mir_pipeline_provider("inline_small_functions", false)))
+        case "inline_functions":
+            Some(mir_pass_descriptor("inline_functions", [], mir_pipeline_provider("inline_functions", false)))
+        case "inline_aggressive":
+            Some(mir_pass_descriptor("inline_aggressive", [], mir_pipeline_provider("inline_aggressive", false)))
+        case "loop_invariant_motion":
+            Some(mir_pass_descriptor("loop_invariant_motion", [], mir_pipeline_provider("loop_invariant_motion", false)))
+        case "loop_unroll":
+            Some(mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider("loop_unroll", false)))
+        case "bounds_check_elimination":
+            Some(mir_pass_descriptor("bounds_check_elimination", [], mir_pipeline_provider("bounds_check_elimination", false)))
+        case "strength_reduction":
+            Some(mir_pass_descriptor("strength_reduction", [], strength_reduction_provider()))
+        case "collection_opt":
+            Some(mir_pass_descriptor("collection_opt", [], mir_pipeline_provider("collection_opt", false)))
+        case "string_builder_opt":
+            Some(mir_pass_descriptor("string_builder_opt", [], mir_pipeline_provider("string_builder_opt", false)))
+        case "body_outlining":
+            Some(mir_pass_descriptor("body_outlining", [], mir_pipeline_provider("body_outlining", false)))
+        case "generator_state_machine":
+            Some(mir_pass_descriptor("generator_state_machine", [], mir_pipeline_provider("generator_state_machine", false)))
+        case "tail_call_optimization":
+            Some(mir_pass_descriptor("tail_call_optimization", [], mir_pipeline_provider("tail_call_optimization", false)))
+        case "global_value_numbering":
+            Some(mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider("global_value_numbering", false)))
+        case "pattern_idiom":
+            Some(mir_pass_descriptor("pattern_idiom", [], mir_pipeline_provider("pattern_idiom", true)))
+        case "vectorization":
+            Some(mir_pass_descriptor("auto_vectorize", ["vectorization"], mir_pipeline_provider("auto_vectorize", false)))
+        case "auto_vectorize":
+            Some(mir_pass_descriptor("auto_vectorize", ["vectorization"], mir_pipeline_provider("auto_vectorize", false)))
+        case "predicate_promote":
+            Some(mir_pass_descriptor("predicate_promote", [], mir_pipeline_provider("predicate_promote", false)))
+        case _:
+            nil
+
+fn mir_pass_provider_name(pass_name: text) -> text:
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if descriptor.?:
+        descriptor.unwrap().provider.name
+    else:
+        ""
+
+fn mir_pass_uses_pipeline_provider(pass_name: text) -> bool:
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    descriptor.? and optimization_rule_provider_is_pipeline_pass(descriptor.unwrap().provider)
 
 # ============================================================================
 # Pass Manager
@@ -326,7 +412,11 @@ fn optimize_function(func: MirFunction, passes: [text]) -> MirFunction:
 
 fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
     """Dispatch optimization pass by name."""
-    match pass_name:
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        return func
+    val stable_name = descriptor.unwrap().stable_name
+    match stable_name:
         case "dead_code_elimination":
             var dce = create_dce_pass()
             dce_run_on_function(dce, func)
@@ -423,7 +513,11 @@ fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
     re-dispatching run_named_pass for every function.
     """
     var result_module = module
-    match pass_name:
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        return result_module
+    val stable_name = descriptor.unwrap().stable_name
+    match stable_name:
         case "dead_code_elimination":
             for sym in module.functions.keys():
                 var p = create_dce_pass()
