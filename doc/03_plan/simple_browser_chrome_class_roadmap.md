@@ -503,6 +503,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL framebuffer/renderbuffer script bridge has started: canvas wrappers and JS lowering now expose framebuffer/renderbuffer creation, binding, storage, attachment, status, and attachment/renderbuffer parameter queries.
 - M27 WebGL indexed draw script bridge has started: canvas wrappers and JS lowering now expose `drawElements`, `LINES`, `UNSIGNED_SHORT`, and `UNSIGNED_INT` for element-array-buffer rendering paths.
 - M27 WebGL resource lifecycle script bridge has started: canvas wrappers and JS lowering now expose `is*` probes and `delete*` cleanup for buffers, textures, framebuffers, and renderbuffers.
+- M27 WebGL shader/program lifecycle script bridge has started: canvas wrappers and JS lowering now expose shader/program info logs, validation, detach, attached shader queries, delete operations, and `DELETE_STATUS`.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
