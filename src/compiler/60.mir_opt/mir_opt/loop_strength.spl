@@ -12,6 +12,11 @@
 use compiler.mir.mir_data.*
 use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizationRuleProvider, OptimizationProviderStats, OptimizerProviderKind,
+    OptimizerRuleLookupKind, optimization_rule_provider_builtin_with_contract,
+    optimization_provider_stats_zero, optimization_provider_stats_record_scope
+}
 
 # ============================================================================
 # Strength Reduction
@@ -30,18 +35,33 @@ class StrengthReduction:
     """
     reduced_count: i64
     next_local_id: i64
+    provider: OptimizationRuleProvider
+    stats: OptimizationProviderStats
 
 impl StrengthReduction:
     static fn new() -> StrengthReduction:
-        StrengthReduction(reduced_count: 0, next_local_id: 900000)
+        StrengthReduction(
+            reduced_count: 0,
+            next_local_id: 900000,
+            provider: strength_reduction_provider(),
+            stats: optimization_provider_stats_zero()
+        )
 
     me optimize_function(func: MirFunction) -> MirFunction:
         """Run strength reduction on function."""
+        if not self.provider.enabled:
+            self.stats = optimization_provider_stats_record_scope(self.stats, 0)
+            return func
+
+        val before_count = self.reduced_count
         var optimized_blocks: [MirBlock] = []
 
         for block in func.blocks:
             val optimized = self.reduce_block(block)
             optimized_blocks.push(optimized)
+
+        val function_rewrites = self.reduced_count - before_count
+        self.stats = optimization_provider_stats_record_scope(self.stats, function_rewrites)
 
         MirFunction(..func, blocks: optimized_blocks)
 
@@ -101,6 +121,8 @@ impl StrengthReduction:
         - x % 1 -> 0 (identity)
         - x % 2^n -> x & (2^n - 1) (bitmask)
         - x + 0 -> x, x - 0 -> x (identity)
+        - x | 0 -> x, x ^ 0 -> x, x & 0 -> 0
+        - x << 0 -> x, x >> 0 -> x
         """
         match op:
             case Mul:
@@ -194,6 +216,51 @@ impl StrengthReduction:
                 nil
             case Sub:
                 # x - 0 -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                nil
+            case BitOr:
+                # x | 0 -> x, 0 | x -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                val left_const = self.operand_const_int_value(left)
+                if left_const.? and left_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, right, span)
+                nil
+            case BitXor:
+                # x ^ 0 -> x, 0 ^ x -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                val left_const = self.operand_const_int_value(left)
+                if left_const.? and left_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, right, span)
+                nil
+            case BitAnd:
+                # x & 0 -> 0, 0 & x -> 0
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return Some(MirInst(
+                        kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
+                        span: span
+                    ))
+                val left_const = self.operand_const_int_value(left)
+                if left_const.? and left_const.unwrap() == 0:
+                    return Some(MirInst(
+                        kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
+                        span: span
+                    ))
+                nil
+            case Shl:
+                # x << 0 -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                nil
+            case Shr:
+                # x >> 0 -> x
                 val right_const = self.operand_const_int_value(right)
                 if right_const.? and right_const.unwrap() == 0:
                     return self.copy_operand_to_dest(dest, left, span)
@@ -332,6 +399,18 @@ impl StrengthReduction:
 fn create_strength_reduction_pass() -> StrengthReduction:
     """Create a new strength reduction pass instance."""
     StrengthReduction.new()
+
+fn strength_reduction_provider() -> OptimizationRuleProvider:
+    """Built-in Simple Optimization Plugin provider for general MIR arithmetic strength reduction."""
+    optimization_rule_provider_builtin_with_contract(
+        "simple.opt.math.strength_reduce",
+        OptimizerProviderKind.Mir,
+        OptimizerRuleLookupKind.PipelinePass,
+        true,
+        ["integer_widths", "non_negative_or_unsigned_operands"],
+        ["canonical_integer_arithmetic"],
+        "pure"
+    )
 
 fn strength_reduction_run_on_function(strength_pass: StrengthReduction, func: MirFunction) -> MirFunction:
     """Free-function wrapper for strength reduction pass dispatch."""

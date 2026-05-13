@@ -1,6 +1,11 @@
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirBlock}
-use compiler.mir_opt.mir_opt.loop_strength.{create_strength_reduction_pass}
+use compiler.mir_opt.mir_opt.loop_strength.{create_strength_reduction_pass, strength_reduction_provider}
+use compiler.mir_opt.pattern.rule_engine.{
+    OptimizerProviderKind, OptimizerRuleLookupKind,
+    optimization_rule_provider_has_required_fact,
+    optimization_rule_provider_is_pipeline_pass
+}
 
 fn _sr_lid(id: i64) -> LocalId:
     LocalId(id: id)
@@ -33,7 +38,31 @@ fn _sr_expect_bitand_mask(kind: MirInstKind, mask: i64):
         case _:
             expect false == true
 
+fn _sr_expect_copy_from(kind: MirInstKind, source_id: i64):
+    match kind:
+        case Copy(_, source):
+            expect source.id == source_id
+        case _:
+            expect false == true
+
+fn _sr_expect_int_const(kind: MirInstKind, value: i64):
+    match kind:
+        case Const(_, Int(actual), _):
+            expect actual == value
+        case _:
+            expect false == true
+
 describe "MIR strength reduction":
+    it "declares a reusable built-in MIR pipeline optimization provider":
+        val provider = strength_reduction_provider()
+        expect(provider.name).to_equal("simple.opt.math.strength_reduce")
+        expect(provider.kind).to_equal(OptimizerProviderKind.Mir)
+        expect(provider.lookup_kind).to_equal(OptimizerRuleLookupKind.PipelinePass)
+        expect(optimization_rule_provider_is_pipeline_pass(provider)).to_equal(true)
+        expect(optimization_rule_provider_has_required_fact(provider, "integer_widths")).to_equal(true)
+        expect(optimization_rule_provider_has_required_fact(provider, "non_negative_or_unsigned_operands")).to_equal(true)
+        expect(provider.produced_facts[0]).to_equal("canonical_integer_arithmetic")
+
     it "lowers net-driver style modulo by 128 to bitmask":
         _sr_expect_bitand_mask(
             _sr_reduce_one(MirInst(kind: MirInstKind.BinOp(_sr_lid(2), MirBinOp.Rem, _sr_copy(1), _sr_int(128)), span: nil)),
@@ -44,4 +73,34 @@ describe "MIR strength reduction":
         _sr_expect_bitand_mask(
             _sr_reduce_one(MirInst(kind: MirInstKind.BinOp(_sr_lid(2), MirBinOp.Rem, _sr_copy(1), _sr_int(1099511627776)), span: nil)),
             1099511627775
+        )
+
+    it "removes bit-or zero identity":
+        _sr_expect_copy_from(
+            _sr_reduce_one(MirInst(kind: MirInstKind.BinOp(_sr_lid(2), MirBinOp.BitOr, _sr_copy(1), _sr_int(0)), span: nil)),
+            1
+        )
+
+    it "removes bit-xor zero identity":
+        _sr_expect_copy_from(
+            _sr_reduce_one(MirInst(kind: MirInstKind.BinOp(_sr_lid(2), MirBinOp.BitXor, _sr_int(0), _sr_copy(1)), span: nil)),
+            1
+        )
+
+    it "folds bit-and zero annihilator":
+        _sr_expect_int_const(
+            _sr_reduce_one(MirInst(kind: MirInstKind.BinOp(_sr_lid(2), MirBinOp.BitAnd, _sr_copy(1), _sr_int(0)), span: nil)),
+            0
+        )
+
+    it "removes zero left shift":
+        _sr_expect_copy_from(
+            _sr_reduce_one(MirInst(kind: MirInstKind.BinOp(_sr_lid(2), MirBinOp.Shl, _sr_copy(1), _sr_int(0)), span: nil)),
+            1
+        )
+
+    it "removes zero right shift":
+        _sr_expect_copy_from(
+            _sr_reduce_one(MirInst(kind: MirInstKind.BinOp(_sr_lid(2), MirBinOp.Shr, _sr_copy(1), _sr_int(0)), span: nil)),
+            1
         )
