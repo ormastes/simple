@@ -486,6 +486,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL resource deletion has started: buffer, texture, framebuffer, and renderbuffer deletion invalidates resource probes, clears active bindings, and removes stale attribute/framebuffer references.
 - M27 WebGL pixel readback has started: `readPixels` returns deterministic packed pixel bytes, honors `PACK_ALIGNMENT`, and validates arguments, framebuffer completeness, and context loss.
 - M27 WebGL drawing-buffer introspection has started: contexts expose drawing buffer width and height for renderer/library sizing logic.
+- M27 WebGL context attributes have started: contexts expose deterministic browser-style attributes for alpha, depth, stencil, antialias, premultiplied alpha, preserveDrawingBuffer, power preference, and performance-caveat behavior.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
