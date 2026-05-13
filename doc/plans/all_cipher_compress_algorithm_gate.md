@@ -1,6 +1,6 @@
 # Plan: All Cipher and Compression Algorithm Gate
  
- ## Status: 2026-05-12 CURRENT
+ ## Status: 2026-05-13 CURRENT
  
  Goal: extend the existing C/Rust/Simple algorithm parity workflow from XXHash64 and ChaCha20 to the full in-repo cipher, crypto, and compression surface. The gate should prove correctness first, then performance where an apples-to-apples reference exists.
  
@@ -55,27 +55,33 @@
  - Existing XXHash64/ChaCha20 C/Rust/Simple benchmark parity still passes.
  - Any failure is classified as a specific bug document or a named follow-up, not a vague "crypto failed" bucket.
  
- Current result on 2026-05-12: strict Tier 1 is not yet green. The runner and
- classification path are in place, and known blockers can be skipped explicitly:
+Current result on 2026-05-13: strict Tier 1 is not yet green. The runner and
+classification path are in place, and known blockers can be skipped explicitly:
  
  ```bash
  CIPHER_COMPRESS_ALLOW_KNOWN_FAIL=1 test/perf/port_algorithms/run_cipher_compress_gate.shs
  ```
  
-+2026-05-12 compiler/interpreter optimization update:
-+
-+- Proven `[u32]` array reads/writes now have MIR fast paths through
-+  `rt_words_u32_at` and `rt_words_u32_set`, matching the existing typed `[u8]`
-+  strategy and avoiding generic `rt_index_get` / `rt_index_set` dispatch in
-+  ChaCha-style word-state loops.
-+- Regression tests lock the new lowering:
-+  `cargo test -p simple-compiler u32_index_set_uses_word_fast_path` and
-+  `cargo test -p simple-compiler u32_array_index_uses_word_fast_path`.
-+- The current stop condition is still correctness first. AES-GCM V3 remains a
-+  known blocker: GHASH passes with known-good H/CT, but AES-256 block canaries
-+  fail for H, J0, and first counter.
-+
- ### Tier 2: Full In-Repo Correctness
+2026-05-12 compiler/interpreter optimization update:
+
+- Proven `[u32]` array reads/writes now have MIR fast paths through
+  `rt_words_u32_at` and `rt_words_u32_set`, matching the existing typed `[u8]`
+  strategy and avoiding generic `rt_index_get` / `rt_index_set` dispatch in
+  ChaCha-style word-state loops.
+- Regression tests lock the new lowering:
+  `cargo test -p simple-compiler u32_index_set_uses_word_fast_path` and
+  `cargo test -p simple-compiler u32_array_index_uses_word_fast_path`.
+- The current stop condition is still correctness first. AES-GCM V3 remains a
+  known blocker: GHASH passes with known-good H/CT, but AES-256 block canaries
+  fail for H, J0, and first counter.
+
+2026-05-13 algorithm correctness update:
+
+- Fixed the OS Poly1305 tag serializer in `src/os/crypto/poly1305.spl`; `_put_le_u32` now returns the appended buffer and `poly1305_finalize` assigns each append.
+- Verified `test/unit/lib/crypto/poly1305_rfc8439_spec.spl`, `test/unit/os/crypto/chacha20_poly1305_spec.spl`, and `test/unit/lib/crypto/chacha20_poly1305_rfc8439_spec.spl` all pass in interpreter mode with `--no-cache`.
+- Restored the documented `test/perf/port_algorithms/run_cipher_compress_gate.shs` runner. Core mode now passes 10 specs and skips the 3 named blockers when `CIPHER_COMPRESS_ALLOW_KNOWN_FAIL=1` is set.
+
+### Tier 2: Full In-Repo Correctness
  
  Command:
  
@@ -123,11 +129,9 @@
  
  - Added `test/perf/port_algorithms/run_cipher_compress_gate.shs`.
  - Added `core` and `all` inventory modes.
- - Added explicit `CIPHER_COMPRESS_ALLOW_KNOWN_FAIL=1` handling for documented blockers.
- - Added `CIPHER_COMPRESS_CONTINUE_ON_FAIL=1` for discovery runs that should collect more than the first failure.
- - Fixed a Poly1305 value-semantics regression in `src/os/crypto/poly1305.spl`; `_put_le_u32` now returns the mutated tag buffer and callers assign the returned buffer.
- - Verified `test/unit/lib/crypto/poly1305_rfc8439_spec.spl` passes after the fix.
- - Verified the post-AES compression/checksum core set passes through Snappy, then exposed the Zstd large-payload timeout.
+- Added explicit `CIPHER_COMPRESS_ALLOW_KNOWN_FAIL=1` handling for documented blockers.
+- Added `CIPHER_COMPRESS_CONTINUE_ON_FAIL=1` for discovery runs that should collect more than the first failure.
+- Verified the post-AES compression/checksum core set passes through Snappy, then exposed the Zstd large-payload timeout.
  
  ## Known Blockers
  
