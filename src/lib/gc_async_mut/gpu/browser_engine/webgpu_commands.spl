@@ -15,7 +15,7 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     webgpu_validate_bind_group_buffer_range
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
-    GPU_TEXTURE_FORMAT_DEPTH24_PLUS
+    GPU_TEXTURE_FORMAT_DEPTH24_PLUS, GPU_TEXTURE_FORMAT_DEPTH24_PLUS_STENCIL8
 }
 pub val WEBGPU_COMMAND_BEGIN_RENDER_PASS: text = "begin-render-pass"
 pub val WEBGPU_COMMAND_END_RENDER_PASS: text = "end-render-pass"
@@ -596,7 +596,7 @@ pub fn webgpu_validate_render_pass_descriptor_with_resources(resources: WebGPURe
             return "GPURenderPassColorAttachment texture does not exist"
         if (texture.usage & WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT) == 0:
             return "GPURenderPassColorAttachment texture missing RENDER_ATTACHMENT usage"
-        if texture.format == GPU_TEXTURE_FORMAT_DEPTH24_PLUS:
+        if webgpu_is_depth_stencil_renderable_texture_format(texture.format):
             return "GPURenderPassColorAttachment format must be color-renderable"
         val dimensions_err = webgpu_validate_render_pass_attachment_dimensions(texture.width, texture.height, texture.depth_or_layers, expected_width, expected_height, expected_depth_or_layers)
         if dimensions_err != "":
@@ -614,8 +614,10 @@ pub fn webgpu_validate_render_pass_descriptor_with_resources(resources: WebGPURe
             return "GPURenderPassDepthStencilAttachment texture does not exist"
         if (depth_texture.usage & WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT) == 0:
             return "GPURenderPassDepthStencilAttachment texture missing RENDER_ATTACHMENT usage"
-        if depth_texture.format != GPU_TEXTURE_FORMAT_DEPTH24_PLUS:
+        if not webgpu_is_depth_stencil_renderable_texture_format(depth_texture.format):
             return "GPURenderPassDepthStencilAttachment format must be depth-stencil-renderable"
+        if not webgpu_is_stencil_capable_texture_format(depth_texture.format) and webgpu_depth_stencil_attachment_uses_stencil(depth_stencil_attachment):
+            return "GPURenderPassDepthStencilAttachment stencil operations require a stencil-capable format"
         val depth_ops_err = webgpu_validate_render_pass_depth_stencil_ops(depth_stencil_attachment)
         if depth_ops_err != "":
             return depth_ops_err
@@ -631,6 +633,15 @@ pub fn webgpu_render_pass_color_attachment_seen(color_attachments: [GPURenderPas
             return true
         i = i + 1
     false
+
+pub fn webgpu_is_depth_stencil_renderable_texture_format(format: text) -> bool:
+    format == GPU_TEXTURE_FORMAT_DEPTH24_PLUS or format == GPU_TEXTURE_FORMAT_DEPTH24_PLUS_STENCIL8
+
+pub fn webgpu_is_stencil_capable_texture_format(format: text) -> bool:
+    format == GPU_TEXTURE_FORMAT_DEPTH24_PLUS_STENCIL8
+
+pub fn webgpu_depth_stencil_attachment_uses_stencil(attachment: GPURenderPassDepthStencilAttachment) -> bool:
+    attachment.stencil_read_only or attachment.stencil_load_op != "" or attachment.stencil_store_op != ""
 
 pub fn webgpu_validate_render_pass_depth_stencil_ops(attachment: GPURenderPassDepthStencilAttachment) -> text:
     if not attachment.depth_read_only or attachment.depth_load_op != "":
