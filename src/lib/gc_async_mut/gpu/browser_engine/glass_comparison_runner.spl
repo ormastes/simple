@@ -11,6 +11,9 @@ use std.gc_async_mut.gpu.browser_engine.glass_demo_registry.{GlassDemo, list_gla
     list_core_glass_demos}
 use std.gc_async_mut.gpu.browser_engine.glass_pipeline_compare.{PipelineOutput,
     render_both_pipelines}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer_utils.{browser_renderer_find_char,
+    browser_renderer_split_spaces, br_find_str}
+use std.gc_async_mut.gpu.browser_engine.dom_color_named.{split_top_level_commas}
 
 # ============================================================================
 # Types
@@ -150,7 +153,7 @@ pub fn identify_missing_features(html: text) -> [text]:
         missing.push("radial-gradient()")
     if html.contains("text-shadow"):
         missing.push("text-shadow")
-    if html.contains("transform:"):
+    if glass_has_unsupported_transform(html):
         missing.push("transform")
     if html.contains("filter:"):
         missing.push("filter")
@@ -161,6 +164,94 @@ pub fn identify_missing_features(html: text) -> [text]:
 
     missing
 
+fn glass_has_unsupported_transform(html: text) -> bool:
+    val lower = html.lower()
+    var pos: i64 = 0
+    while pos < lower.len():
+        val transform_pos = br_find_str(lower, "transform:", pos)
+        if transform_pos >= 999999999:
+            return false
+        val value_start = transform_pos + 10
+        var value_end = browser_renderer_find_char(lower, ";", value_start)
+        val brace_end = browser_renderer_find_char(lower, "}", value_start)
+        if value_end >= 999999999 or (brace_end < value_end and brace_end >= 0):
+            value_end = brace_end
+        if value_end >= 999999999:
+            value_end = lower.len()
+        val value = lower.slice(value_start, value_end).trim()
+        if not glass_transform_value_is_simple_translate(value):
+            return true
+        pos = value_end + 1
+    false
+
+fn glass_transform_value_is_simple_translate(value: text) -> bool:
+    if value.len() == 0 or value == "none":
+        return true
+    if value.contains("rotate(") or value.contains("scale(") or value.contains("skew(") or value.contains("matrix(") or value.contains("perspective("):
+        return false
+    if value.starts_with("translate(") or value.starts_with("translatex(") or value.starts_with("translatey("):
+        val close = browser_renderer_find_char(value, ")", 0)
+        if close >= 999999999:
+            return false
+        if value.slice(close + 1, value.len()).trim().len() != 0:
+            return false
+        return glass_translate_args_are_supported(value)
+    false
+
+fn glass_translate_args_are_supported(value: text) -> bool:
+    val open = browser_renderer_find_char(value, "(", 0)
+    val close = browser_renderer_find_char(value, ")", open + 1)
+    if open >= 999999999 or close >= 999999999:
+        return false
+    val inner = value.slice(open + 1, close).trim()
+    if inner.len() == 0:
+        return false
+    if inner.contains("calc(") or inner.contains("em") or inner.contains("rem") or inner.contains("vw") or inner.contains("vh"):
+        return false
+    var args: [text] = []
+    if browser_renderer_find_char(inner, ",", 0) >= 999999999:
+        args = browser_renderer_split_spaces(inner)
+    else:
+        args = split_top_level_commas(inner)
+    if value.starts_with("translate("):
+        if args.len() == 0 or args.len() > 2:
+            return false
+    elif args.len() != 1:
+        return false
+    for arg in args:
+        if not glass_translate_arg_is_supported(arg):
+            return false
+    true
+
+fn glass_translate_arg_is_supported(arg: text) -> bool:
+    val trimmed = arg.trim().lower()
+    if trimmed.len() == 0:
+        return false
+    if trimmed == "0":
+        return true
+    var core = trimmed
+    if trimmed.ends_with("px"):
+        core = trimmed.slice(0, trimmed.len() - 2).trim()
+    elif trimmed.ends_with("%"):
+        core = trimmed.slice(0, trimmed.len() - 1).trim()
+    else:
+        return false
+    glass_is_integer_token(core)
+
+fn glass_is_integer_token(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    var idx = 0
+    if value.char_at(0) == "-":
+        idx = 1
+    if idx >= value.len():
+        return false
+    while idx < value.len():
+        val ch = value.char_at(idx)
+        if ch < "0" or ch > "9":
+            return false
+        idx = idx + 1
+    true
 # ============================================================================
 # Report Output
 # ============================================================================
@@ -233,6 +324,7 @@ fn glass_report_to_markdown(report: GlassComparisonReport) -> text:
     var lingrad_count: i32 = 0
     var radgrad_count: i32 = 0
     var pseudo_count: i32 = 0
+    var transform_count: i32 = 0
 
     for r in report.results:
         for f in r.missing_features:
@@ -246,11 +338,14 @@ fn glass_report_to_markdown(report: GlassComparisonReport) -> text:
                 radgrad_count = radgrad_count + 1
             elif f == "pseudo-elements (::before/::after)":
                 pseudo_count = pseudo_count + 1
+            elif f == "transform":
+                transform_count = transform_count + 1
 
     md = "{md}| backdrop-filter: blur() | {backdrop_count} | NOT SUPPORTED |\n"
     md = "{md}| box-shadow (multi-layer) | {shadow_count} | NOT SUPPORTED |\n"
     md = "{md}| linear-gradient() | {lingrad_count} | PARTIAL |\n"
     md = "{md}| radial-gradient() | {radgrad_count} | NOT SUPPORTED |\n"
+    md = "{md}| transform | {transform_count} | PARTIAL |\n"
     md = "{md}| pseudo-elements | {pseudo_count} | SUPPORTED |\n\n"
 
     # Per-demo results table

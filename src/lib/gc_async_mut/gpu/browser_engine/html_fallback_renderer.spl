@@ -7,14 +7,13 @@
 
 use std.gc_async_mut.gpu.browser_engine.browser_renderer_utils.{
     browser_renderer_find_char, br_find_str,
-    browser_renderer_split_spaces, browser_renderer_split_semicolons,
+    browser_renderer_split_spaces,
     br_tag_attr_value, br_merge_style_text,
     br_style_property_value, br_style_px_or_default}
 use std.gc_async_mut.gpu.browser_engine.render_fixtures.{
     br_fill_rect, br_style_background_argb, br_style_color_argb}
 use std.gc_async_mut.gpu.browser_engine.dom_visual_effects.{split_shadow_tokens}
-use std.gc_async_mut.gpu.browser_engine.dom_color_named.{split_top_level_commas, parse_linear_gradient, GradientParseResult}
-use std.gc_async_mut.gpu.browser_engine.dom_color.{named_color_to_u32}
+use std.gc_async_mut.gpu.browser_engine.dom_color_named.{split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.style_rule_index.{
     br_style_block_rule_for_class, br_style_block_rule_for_id,
     br_style_block_rule_for_tag, br_style_block_rule_for_universal,
@@ -103,6 +102,9 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
             line_count = wrapped.len()
         if block_h <= 0 and text_val.len() > 0:
             block_h = (font_size + 4) * line_count
+        val transform_offset = br_style_translate_offset(style, block_w, block_h)
+        val paint_x = margin + transform_offset.offset_x
+        val paint_y = cursor_y + transform_offset.offset_y
         val block_bg = br_style_background_argb(html, style)
         val shadows = br_box_shadow_rects(html, style)
         if block_w > 0 and block_h > 0:
@@ -110,38 +112,38 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
             while shadow_idx >= 0:
                 val shadow = shadows[shadow_idx]
                 if shadow.color != 0x00000000u32 and not shadow.inset:
-                    pixels = br_fill_rect(pixels, width, height, margin + shadow.offset_x - shadow.spread, cursor_y + shadow.offset_y - shadow.spread, block_w + shadow.spread * 2, block_h + shadow.spread * 2, shadow.color)
+                    pixels = br_fill_rect(pixels, width, height, paint_x + shadow.offset_x - shadow.spread, paint_y + shadow.offset_y - shadow.spread, block_w + shadow.spread * 2, block_h + shadow.spread * 2, shadow.color)
                 shadow_idx = shadow_idx - 1
         if block_w > 0 and block_h > 0 and block_bg != 0x00000000u32:
-            pixels = br_fill_rect(pixels, width, height, margin, cursor_y, block_w, block_h, block_bg)
+            pixels = br_fill_rect(pixels, width, height, paint_x, paint_y, block_w, block_h, block_bg)
         val gradient = br_style_linear_gradient(style)
         if block_w > 0 and block_h > 0 and gradient.gradient_set:
-            pixels = br_fill_linear_gradient_rect(pixels, width, height, margin, cursor_y, block_w, block_h, gradient)
+            pixels = br_fill_linear_gradient_rect(pixels, width, height, paint_x, paint_y, block_w, block_h, gradient)
         if block_w > 0 and block_h > 0:
             var inset_idx = shadows.len() - 1
             while inset_idx >= 0:
                 val shadow = shadows[inset_idx]
                 if shadow.color != 0x00000000u32 and shadow.inset:
-                    pixels = br_fill_inset_shadow(pixels, width, height, margin, cursor_y, block_w, block_h, shadow)
+                    pixels = br_fill_inset_shadow(pixels, width, height, paint_x, paint_y, block_w, block_h, shadow)
                 inset_idx = inset_idx - 1
         if text_val.len() > 0:
             val text_color = br_style_color_argb(html, text_style, br_body_color_argb(html))
             if has_ellipsis:
                 val truncated = br_apply_text_overflow_ellipsis(text_val, block_w, font_size)
-                val text_x = br_aligned_text_x(margin, block_w, truncated, font_size, text_align)
-                pixels = br_draw_block_text(pixels, width, height, text_x, cursor_y, truncated, text_color, font_size)
+                val text_x = br_aligned_text_x(paint_x, block_w, truncated, font_size, text_align)
+                pixels = br_draw_block_text(pixels, width, height, text_x, paint_y, truncated, text_color, font_size)
             else if has_wrap:
                 val lines = br_fallback_wrap_lines(text_val, block_w, font_size)
                 var li = 0
                 while li < lines.len():
                     val line = lines[li]
-                    val line_y = cursor_y + li * (font_size + 4)
-                    val text_x = br_aligned_text_x(margin, block_w, line, font_size, text_align)
+                    val line_y = paint_y + li * (font_size + 4)
+                    val text_x = br_aligned_text_x(paint_x, block_w, line, font_size, text_align)
                     pixels = br_draw_block_text(pixels, width, height, text_x, line_y, line, text_color, font_size)
                     li = li + 1
             else:
-                val text_x = br_aligned_text_x(margin, block_w, text_val, font_size, text_align)
-                pixels = br_draw_block_text(pixels, width, height, text_x, cursor_y, text_val, text_color, font_size)
+                val text_x = br_aligned_text_x(paint_x, block_w, text_val, font_size, text_align)
+                pixels = br_draw_block_text(pixels, width, height, text_x, paint_y, text_val, text_color, font_size)
         if block_h > 0:
             cursor_y = cursor_y + block_h
         div_index = div_index + 1
@@ -158,6 +160,10 @@ class BrBoxShadowRect:
     spread: i32
     color: u32
     inset: bool
+
+class BrTranslateOffset:
+    offset_x: i32
+    offset_y: i32
 
 fn br_count_fallback_divs(lower_html: text) -> i32:
     var count = 0
@@ -270,6 +276,53 @@ fn br_shadow_token_is_color(value: text) -> bool:
     if lower.starts_with("#") or lower.starts_with("rgb") or lower.starts_with("hsl") or lower == "transparent" or lower == "currentcolor":
         return true
     named_color_to_u32(lower) != nil
+
+fn br_style_translate_offset(style: text, block_w: i32, block_h: i32) -> BrTranslateOffset:
+    val transform = br_style_property_value(style, "transform").trim().lower()
+    if transform.len() == 0 or transform == "none":
+        return BrTranslateOffset(offset_x: 0, offset_y: 0)
+    if br_transform_has_unsupported_function(transform):
+        return BrTranslateOffset(offset_x: 0, offset_y: 0)
+    if transform.starts_with("translatex("):
+        return BrTranslateOffset(offset_x: br_transform_first_arg_offset(transform, block_w), offset_y: 0)
+    if transform.starts_with("translatey("):
+        return BrTranslateOffset(offset_x: 0, offset_y: br_transform_first_arg_offset(transform, block_h))
+    if transform.starts_with("translate("):
+        val args = br_transform_args(transform)
+        if args.len() == 0:
+            return BrTranslateOffset(offset_x: 0, offset_y: 0)
+        val tx = br_parse_transform_axis_offset(args[0], block_w)
+        var ty = 0
+        if args.len() > 1:
+            ty = br_parse_transform_axis_offset(args[1], block_h)
+        return BrTranslateOffset(offset_x: tx, offset_y: ty)
+    BrTranslateOffset(offset_x: 0, offset_y: 0)
+
+fn br_transform_has_unsupported_function(transform: text) -> bool:
+    transform.contains("rotate(") or transform.contains("scale(") or transform.contains("skew(") or transform.contains("matrix(") or transform.contains("perspective(")
+
+fn br_transform_first_arg_offset(transform: text, axis_size: i32) -> i32:
+    val args = br_transform_args(transform)
+    if args.len() == 0:
+        return 0
+    br_parse_transform_axis_offset(args[0], axis_size)
+
+fn br_parse_transform_axis_offset(value: text, axis_size: i32) -> i32:
+    val trimmed = value.trim().lower()
+    if trimmed.ends_with("%"):
+        val pct = trimmed.slice(0, trimmed.len() - 1).trim()
+        return axis_size * pct.to_i32() / 100
+    br_parse_shadow_px(trimmed)
+
+fn br_transform_args(transform: text) -> [text]:
+    val open = browser_renderer_find_char(transform, "(", 0)
+    val close = browser_renderer_find_char(transform, ")", open + 1)
+    if open >= 999999999 or close <= open:
+        return []
+    val args = split_top_level_commas(transform.slice(open + 1, close))
+    if args.len() == 1 and args[0].contains(" "):
+        return browser_renderer_split_spaces(args[0])
+    args
 
 fn br_style_linear_gradient(style: text) -> GradientParseResult:
     val empty = GradientParseResult(gradient_set: false, gradient_color1: 0, gradient_color2: 0, gradient_angle: 180)

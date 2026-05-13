@@ -288,6 +288,8 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - Fallback `box-shadow` now renders comma-separated non-inset multi-layer shadows and removes that case from glass feature gap reporting, covered by `test/web_platform/css/box_shadow_wpt_spec.spl` and `test/web_platform/css/glass_feature_gap_spec.spl`.
 - Fallback `box-shadow` now renders simple inset shadows as inner edge bands before text painting, covered by `test/web_platform/css/box_shadow_wpt_spec.spl`.
 - Fallback block backgrounds now render simple two-color `linear-gradient()` values for vertical and horizontal directions, covered by `test/web_platform/css/background_gradient_wpt_spec.spl` and removed from glass feature gap reporting.
+- Fallback block painting now applies simple `translate()`, `translateX()`, and `translateY()` offsets to block backgrounds, shadows, gradients, and text while keeping rotate/scale/skew/matrix transforms reported as unsupported, covered by `test/web_platform/css/transforms_wpt_spec.spl` and `test/web_platform/css/glass_feature_gap_spec.spl`.
+- Fallback simple translate painting now resolves percentage translate offsets against the element's own width/height for `translate()`, `translateX()`, and `translateY()`, covered by `test/web_platform/css/transforms_wpt_spec.spl` and reflected in glass feature-gap reporting.
 
 **Work:**
 - CSS Transitions: `transition` property, interpolation engine for color/length/transform values
