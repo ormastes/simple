@@ -984,14 +984,25 @@ fn _convert_webgpu_texture_descriptor(line: text) -> text:
         return line
     val descriptor_end = descriptor_start + descriptor_end_rel
     val descriptor = line.slice(descriptor_start, descriptor_end)
-    val width = _webgpu_descriptor_value_or_default(descriptor, "width", "")
-    val height = _webgpu_descriptor_value_or_default(descriptor, "height", "")
+    var width = _webgpu_descriptor_value_or_default(descriptor, "width", "")
+    var height = _webgpu_descriptor_value_or_default(descriptor, "height", "")
+    var depth_or_layers = _webgpu_descriptor_value_or_default(descriptor, "depthOrArrayLayers", "")
+    val size_value = _webgpu_descriptor_value(descriptor, "size")
+    if size_value.starts_with("[") and size_value.ends_with("]"):
+        val size_inner = size_value.slice(1, size_value.len() - 1)
+        val size_parts = size_inner.split(",")
+        if size_parts.len() >= 2:
+            width = size_parts[0].trim()
+            height = size_parts[1].trim()
+        if depth_or_layers == "" and size_parts.len() >= 3:
+            depth_or_layers = size_parts[2].trim()
     val format = _webgpu_descriptor_value_or_default(descriptor, "format", "")
     val usage = _webgpu_descriptor_value_or_default(descriptor, "usage", "")
     if width == "" or height == "" or format == "" or usage == "":
         return line
     val label = _webgpu_descriptor_value_or_default(descriptor, "label", "\"\"")
-    val depth_or_layers = _webgpu_descriptor_value_or_default(descriptor, "depthOrArrayLayers", "1")
+    if depth_or_layers == "":
+        depth_or_layers = "1"
     val dimension = _webgpu_descriptor_value_or_default(descriptor, "dimension", "\"2d\"")
     val mip_level_count = _webgpu_descriptor_value_or_default(descriptor, "mipLevelCount", "1")
     val sample_count = _webgpu_descriptor_value_or_default(descriptor, "sampleCount", "1")
@@ -1037,15 +1048,22 @@ fn _webgpu_descriptor_value(descriptor: text, property: text) -> text:
         value_start = value_start + 1
     var value_end = value_start
     var brace_depth = 0
+    var bracket_depth = 0
     while value_end < descriptor.len():
         val ch = descriptor.slice(value_end, value_end + 1)
         if ch == "{":
             brace_depth = brace_depth + 1
+        else: if ch == "[":
+            bracket_depth = bracket_depth + 1
+        else: if ch == "]":
+            if bracket_depth == 0:
+                return descriptor.slice(value_start, value_end).trim()
+            bracket_depth = bracket_depth - 1
         else: if ch == "}":
             if brace_depth == 0:
                 return descriptor.slice(value_start, value_end).trim()
             brace_depth = brace_depth - 1
-        else: if ch == "," and brace_depth == 0:
+        else: if ch == "," and brace_depth == 0 and bracket_depth == 0:
             return descriptor.slice(value_start, value_end).trim()
         value_end = value_end + 1
     descriptor.slice(value_start, value_end).trim()
