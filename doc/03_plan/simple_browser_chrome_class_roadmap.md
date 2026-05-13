@@ -476,6 +476,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M26 browser-style WebGPU texture descriptors have started: the JS transpiler now lowers `createTexture({ ... })` descriptor objects, including `size: [width, height, layers]`, into descriptor-complete texture allocation calls with WebGPU defaults for optional fields, covered by `test/unit/browser/script/js_transpiler_spec.spl`.
 - M26 browser-style WebGPU texture view descriptors have started: the JS transpiler now lowers descriptor-object `createTextureView({ ... })` bridges and `texture.createView({ ... })` calls into validated texture view allocation, covered by `test/unit/browser/script/js_transpiler_spec.spl`.
 - M26 browser-style WebGPU bind group descriptors have started: the JS transpiler now lowers descriptor-object `createBindGroupLayout({ ... })` and `createBindGroup({ ... })` calls into existing validated bind group resource creation, covered by `test/unit/browser/script/js_transpiler_spec.spl`.
+- M26 browser-style WebGPU render pass descriptors have started: the JS transpiler now lowers descriptor-object `beginRenderPass({ colorAttachments, depthStencilAttachment })` calls into the validated render-pass descriptor path, covered by `test/unit/browser/script/js_transpiler_spec.spl`.
 
 **Work:**
 - Implement depth/stencil attachment semantics, native MSAA allocation, mip generation/use, texture arrays, cubemaps where supported, instancing, uniform/storage buffers, dynamic offsets, and indirect draw where backend supports it.
