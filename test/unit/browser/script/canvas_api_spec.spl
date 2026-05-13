@@ -207,7 +207,8 @@ use std.gc_async_mut.gpu.browser_engine.webgl_render_commands.{
     WEBGL_RENDER_COMMAND_VERTEX_ATTRIB_4F
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
-    WEBGPU_BUFFER_USAGE_COPY_DST
+    WEBGPU_BUFFER_USAGE_COPY_DST, WEBGPU_BUFFER_USAGE_UNIFORM,
+    WEBGPU_SHADER_STAGE_VERTEX, GPUBindGroupLayoutEntry, GPUBindGroupEntry
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_context.{
     WebGPUContext
@@ -1058,6 +1059,25 @@ describe "Canvas API - WebGPU Context":
         val command_buffer = encoder.finish("frame-commands")
         expect(ctx.queue_submit([command_buffer])).to_equal(true)
         expect(ctx.gpu.queue.submitted_count()).to_equal(1)
+
+    it "records WebGPU bind groups through resource-aware canvas command encoders":
+        var ctx = canvas_get_context_webgpu(320, 240, true)
+        expect(ctx.request_device()).to_equal(true)
+        var gpu_ctx: WebGPUContext = ctx.gpu
+        var resources = gpu_ctx.resources
+        val uniform = resources.create_buffer("uniforms", 512, WEBGPU_BUFFER_USAGE_UNIFORM)
+        val layout = resources.create_bind_group_layout("dynamic", [
+            GPUBindGroupLayoutEntry.dynamic_buffer(0, WEBGPU_SHADER_STAGE_VERTEX)
+        ])
+        val bind_group = resources.create_bind_group("dynamic-0", layout.id, [
+            GPUBindGroupEntry.buffer(0, uniform.id)
+        ])
+        gpu_ctx.resources = resources
+        var encoder = gpu_ctx.create_command_encoder("frame")
+        expect(encoder.begin_render_pass()).to_equal(true)
+        expect(encoder.set_bind_group_with_dynamic_offsets_and_resources(gpu_ctx.resources, 0, bind_group.id, [256])).to_equal(true)
+        expect(encoder.set_bind_group_with_dynamic_offsets_and_resources(gpu_ctx.resources, 0, bind_group.id, [512])).to_equal(false)
+        expect(encoder.last_error).to_equal("GPUPassEncoder dynamic offset exceeds buffer size")
 
     it "creates WebGPU resources and queue writes through canvas wrappers":
         var ctx = canvas_get_context_webgpu(320, 240, true)
