@@ -497,6 +497,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL implementation limit queries have started: contexts expose deterministic texture/renderbuffer/viewport limits plus color, depth, stencil, and subpixel bit-depth parameters.
 - M27 WebGL renderer identity and shader-limit queries have started: contexts expose vendor, renderer, WebGL/GLSL version strings, compressed-texture format lists, and shader texture/uniform/varying limits for renderer startup probes.
 - M27 WebGL canvas bridge state coverage has started: script canvas wrappers now expose context attributes, `getParameter`, `isEnabled`, `disable`, line width, front-face, polygon offset, sample coverage, and blend color state.
+- M27 WebGL JS transpiler state coverage has started: browser-style `getParameter`, `getContextAttributes`, `isEnabled`, `disable`, `lineWidth`, `frontFace`, `polygonOffset`, `sampleCoverage`, and `blendColor` calls now lower to canvas WebGL helpers with matching constants.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
