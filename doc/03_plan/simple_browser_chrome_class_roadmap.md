@@ -481,6 +481,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL buffer parameter queries have started: bound buffers expose `BUFFER_SIZE` and `BUFFER_USAGE` with WebGL target, pname, and no-binding error behavior.
 - M27 WebGL texture parameter queries have started: bound textures expose min/mag filter and wrap state through `getTexParameter` with pname and no-binding validation.
 - M27 WebGL renderbuffer parameter queries have started: bound renderbuffers expose internal format, width, and height with target, pname, and no-binding validation.
+- M27 WebGL framebuffer attachment queries have started: framebuffer attachments expose object type/name and texture attachment metadata with target, attachment, pname, and default-framebuffer validation.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
