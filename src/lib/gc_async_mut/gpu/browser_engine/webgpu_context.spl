@@ -203,6 +203,27 @@ pub class WebGPUContext:
             return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: layout_err)
         base
 
+    me create_render_pipeline_auto_layout(vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
+        var resources = self.resources
+        val layout_err = webgpu_validate_auto_render_pipeline_layout(vertex, fragment)
+        if layout_err != "":
+            self.resources = resources
+            self.last_error = layout_err
+            return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: self.last_error)
+        val layouts = webgpu_create_auto_render_pipeline_layouts(resources, vertex, fragment)
+        if resources.last_error != "":
+            self.resources = resources
+            self.last_error = resources.last_error
+            return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: self.last_error)
+        var i = 0
+        while i < layouts.len():
+            resources.bind_group_layouts.push(layouts[i])
+            if resources.next_resource_id <= layouts[i].id:
+                resources.next_resource_id = layouts[i].id + 1
+            i = i + 1
+        self.resources = resources
+        self.create_render_pipeline_with_layouts(vertex, fragment, layouts)
+
     me create_compute_pipeline(compute: GPUShaderModule) -> GPUPipelineHandle:
         if self.device_lost:
             self.last_error = "device is lost"
@@ -728,6 +749,117 @@ fn webgpu_pipeline_layout_binding_type_matches(resource_type: text, binding_type
         return binding_type == WEBGPU_BINDING_TYPE_SAMPLER
     false
 
+pub fn webgpu_create_auto_render_pipeline_layouts(resources: WebGPUResourceTable, vertex: GPUShaderModule, fragment: GPUShaderModule) -> [GPUBindGroupLayoutHandle]:
+    val validation_err = webgpu_validate_auto_render_pipeline_layout(vertex, fragment)
+    if validation_err != "":
+        resources.last_error = validation_err
+        return []
+    val vertex_bindings = webgpu_reflect_wgsl_bindings(vertex.source)
+    val fragment_bindings = webgpu_reflect_wgsl_bindings(fragment.source)
+    var layouts: [GPUBindGroupLayoutHandle] = []
+    var group = 0
+    val max_group = webgpu_max_shader_binding_group(vertex_bindings, fragment_bindings)
+    while group <= max_group:
+        val entries = webgpu_create_auto_layout_entries_for_group(group, vertex_bindings, fragment_bindings)
+        val layout = resources.create_bind_group_layout("auto-group-" + group.to_text(), entries)
+        if not layout.valid:
+            resources.last_error = layout.error
+            return []
+        layouts.push(layout)
+        group = group + 1
+    resources.last_error = ""
+    layouts
+
+pub fn webgpu_validate_auto_render_pipeline_layout(vertex: GPUShaderModule, fragment: GPUShaderModule) -> text:
+    if not vertex.valid or not fragment.valid:
+        return "GPURenderPipeline auto layout requires valid shader modules"
+    val vertex_bindings = webgpu_reflect_wgsl_bindings(vertex.source)
+    val fragment_bindings = webgpu_reflect_wgsl_bindings(fragment.source)
+    var group = 0
+    val max_group = webgpu_max_shader_binding_group(vertex_bindings, fragment_bindings)
+    while group <= max_group:
+        val entries_err = webgpu_validate_auto_layout_group_is_used(group, vertex_bindings, fragment_bindings)
+        if entries_err != "":
+            return entries_err
+        group = group + 1
+    ""
+
+fn webgpu_max_shader_binding_group(vertex_bindings: [WebGPUShaderBindingReflection], fragment_bindings: [WebGPUShaderBindingReflection]) -> i32:
+    var max_group = -1
+    var i = 0
+    while i < vertex_bindings.len():
+        if vertex_bindings[i].group > max_group:
+            max_group = vertex_bindings[i].group
+        i = i + 1
+    i = 0
+    while i < fragment_bindings.len():
+        if fragment_bindings[i].group > max_group:
+            max_group = fragment_bindings[i].group
+        i = i + 1
+    max_group
+
+fn webgpu_validate_auto_layout_group_is_used(group: i32, vertex_bindings: [WebGPUShaderBindingReflection], fragment_bindings: [WebGPUShaderBindingReflection]) -> text:
+    var i = 0
+    while i < vertex_bindings.len():
+        if vertex_bindings[i].group == group:
+            return ""
+        i = i + 1
+    i = 0
+    while i < fragment_bindings.len():
+        if fragment_bindings[i].group == group:
+            return ""
+        i = i + 1
+    "GPURenderPipeline auto layout requires contiguous bind groups"
+
+fn webgpu_create_auto_layout_entries_for_group(group: i32, vertex_bindings: [WebGPUShaderBindingReflection], fragment_bindings: [WebGPUShaderBindingReflection]) -> [GPUBindGroupLayoutEntry]:
+    var entries: [GPUBindGroupLayoutEntry] = []
+    var i = 0
+    while i < vertex_bindings.len():
+        val binding = vertex_bindings[i]
+        if binding.group == group:
+            val index = webgpu_find_auto_layout_entry_index(entries, binding.binding)
+            val binding_type = webgpu_auto_layout_binding_type(binding.resource_type)
+            if index >= 0:
+                val existing = entries[index]
+                entries[index] = GPUBindGroupLayoutEntry(binding: existing.binding, visibility: existing.visibility | WEBGPU_SHADER_STAGE_VERTEX, binding_type: existing.binding_type, has_dynamic_offset: false)
+            else:
+                entries.push(GPUBindGroupLayoutEntry(binding: binding.binding, visibility: WEBGPU_SHADER_STAGE_VERTEX, binding_type: binding_type, has_dynamic_offset: false))
+        i = i + 1
+    i = 0
+    while i < fragment_bindings.len():
+        val binding = fragment_bindings[i]
+        if binding.group == group:
+            val index = webgpu_find_auto_layout_entry_index(entries, binding.binding)
+            val binding_type = webgpu_auto_layout_binding_type(binding.resource_type)
+            if index >= 0:
+                val existing = entries[index]
+                entries[index] = GPUBindGroupLayoutEntry(binding: existing.binding, visibility: existing.visibility | WEBGPU_SHADER_STAGE_FRAGMENT, binding_type: existing.binding_type, has_dynamic_offset: false)
+            else:
+                entries.push(GPUBindGroupLayoutEntry(binding: binding.binding, visibility: WEBGPU_SHADER_STAGE_FRAGMENT, binding_type: binding_type, has_dynamic_offset: false))
+        i = i + 1
+    entries
+
+fn webgpu_find_auto_layout_entry_index(entries: [GPUBindGroupLayoutEntry], binding: i32) -> i32:
+    var i = 0
+    while i < entries.len():
+        if entries[i].binding == binding:
+            return i
+        i = i + 1
+    -1
+
+fn webgpu_auto_layout_binding_type(resource_type: text) -> i32:
+    if resource_type == "uniform-buffer":
+        return WEBGPU_BINDING_TYPE_UNIFORM_BUFFER
+    if resource_type == "storage-buffer":
+        return WEBGPU_BINDING_TYPE_STORAGE_BUFFER
+    if resource_type == "texture":
+        return WEBGPU_BINDING_TYPE_TEXTURE
+    if resource_type == "storage-texture":
+        return WEBGPU_BINDING_TYPE_STORAGE_TEXTURE
+    if resource_type == "sampler":
+        return WEBGPU_BINDING_TYPE_SAMPLER
+    0
+
 pub fn webgpu_create_render_pipeline(ctx: WebGPUContext, vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
     if ctx.device_lost:
         ctx.last_error = "device is lost"
@@ -756,6 +888,27 @@ pub fn webgpu_create_render_pipeline_with_layouts(ctx: WebGPUContext, vertex: GP
         ctx.next_pipeline_id = ctx.next_pipeline_id - 1
         return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: layout_err)
     base
+
+pub fn webgpu_create_render_pipeline_auto_layout(ctx: WebGPUContext, vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
+    var resources = ctx.resources
+    val layout_err = webgpu_validate_auto_render_pipeline_layout(vertex, fragment)
+    if layout_err != "":
+        ctx.resources = resources
+        ctx.last_error = layout_err
+        return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: ctx.last_error)
+    val layouts = webgpu_create_auto_render_pipeline_layouts(resources, vertex, fragment)
+    if resources.last_error != "":
+        ctx.resources = resources
+        ctx.last_error = resources.last_error
+        return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: ctx.last_error)
+    var i = 0
+    while i < layouts.len():
+        resources.bind_group_layouts.push(layouts[i])
+        if resources.next_resource_id <= layouts[i].id:
+            resources.next_resource_id = layouts[i].id + 1
+        i = i + 1
+    ctx.resources = resources
+    webgpu_create_render_pipeline_with_layouts(ctx, vertex, fragment, layouts)
 
 pub fn webgpu_create_compute_pipeline(ctx: WebGPUContext, compute: GPUShaderModule) -> GPUPipelineHandle:
     if ctx.device_lost:
