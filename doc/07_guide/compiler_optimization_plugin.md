@@ -112,6 +112,112 @@ Do not rebuild rule tables for each lookup. Rule tables are constructed once per
 6. Verify preserved and produced facts.
 7. Run downstream validation or benchmark gates.
 
+## How To Write A Plugin
+
+Start with the smallest built-in provider that proves the optimization is general. Move to dynamic loading only after the provider contract, tests, and benchmark evidence are stable.
+
+1. Define the optimization shape.
+
+   Write the transformation as a before/after rule and list the semantic facts it needs. If the rule cannot be explained without naming one benchmark file, it is not ready to become a Simple Optimization Plugin.
+
+   ```text
+   before: local = x % 128
+   facts: 128 is a power of two; x is unsigned or proven non-negative
+   after: local = x & 127
+   ```
+
+2. Pick the stage.
+
+   Use `mir` for general arithmetic, data-flow, and control-flow rewrites. Use `pattern` for recognized call/idiom replacement. Use `interpreter` only when the optimization changes dispatch or evaluated-form caching without changing language semantics.
+
+3. Add provider metadata.
+
+   Built-in hot providers should be represented in compiler source with metadata equivalent to:
+
+   ```text
+   name: simple.opt.<domain>.<rule_set>
+   kind: mir | pattern | interpreter
+   load_mode: builtin
+   lookup_kind: direct-exact | indexed-exact | pipeline-pass
+   hot_path: true
+   required_facts: [...]
+   produced_facts: [...]
+   safety_class: pure | target-aware
+   ```
+
+   For current MIR pattern work, place shared provider primitives in `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl` and domain rule providers beside the pattern implementation, for example `rules_crypto.spl`.
+
+4. Implement lookup or traversal.
+
+   Choose the lookup form before coding:
+
+   - `direct-exact`: write direct equality checks and construct only the matched rule.
+   - `indexed-exact`: build an immutable index once, then reuse it.
+   - `pipeline-pass`: traverse module/function/block scope once per pass.
+   - `dynamic-exact`: load once, version-check once, and cache repeated symbol lookups.
+
+   Hot lookup functions must not build a whole rule table per call-site lookup.
+
+5. Gate the pass.
+
+   Add an early no-op guard when provider metadata or target capabilities prove no rewrite can apply. A pass that cannot change the module should return the original module before walking functions and blocks.
+
+6. Preserve semantics.
+
+   Do not rewrite unless the required facts are present. Do not attach stronger LLVM or MIR facts than Simple semantics prove. In particular, do not invent `noalias`, `nonnull`, `noundef`, `nsw`, `nuw`, or fast-math behavior to get a benchmark win.
+
+7. Test enabled, disabled, and unsafe cases.
+
+   Add unit tests for:
+
+   - the provider metadata;
+   - positive rewrite behavior;
+   - disabled/no-capability behavior;
+   - unknown or unsafe input that must not rewrite;
+   - lookup stats or no-op fast path behavior when the provider is hot.
+
+8. Prove performance only after parity.
+
+   First prove output/checksum parity. Then benchmark the representative workload and record compile-time or runtime impact. A plugin is accepted as a general optimization only when the evidence applies beyond one local fixture.
+
+## Built-in Plugin Skeleton
+
+```text
+fn my_rule_provider() -> OptimizationRuleProvider:
+    optimization_rule_provider_builtin("simple.opt.domain.my_rules", true)
+
+fn lookup_my_rule(symbol: text) -> Rule?:
+    if symbol == "std.domain.hot_function":
+        return Some(create_rule("match_hot_function", "domain_intrinsic", "domain_feature", -3))
+    nil
+
+fn run_my_pattern_pass(module: MirModule, target: TargetCapsKind, remarks: bool) -> MirModule:
+    if not remarks and not caps_kind_supports_any_pattern_idiom(target):
+        return module
+    # Walk only the smallest scope needed, then rewrite when lookup + facts pass.
+    module
+```
+
+## Dynamic Plugin Manifest Sketch
+
+Dynamic loading is a future ABI boundary, not the default for hot compiler paths. A dynamic provider should declare enough information for the compiler to reject incompatible plugins before execution:
+
+```text
+simple_optimization_plugin:
+  name: simple.opt.vendor.experimental
+  version: 0.1.0
+  simple_abi: 1
+  kind: pattern
+  lookup_kind: dynamic-exact
+  target_filter: [x86_64-v3, x86_64-v4]
+  required_facts: [typed_mir, target_caps]
+  produced_facts: [canonical_intrinsics]
+  entry_symbol: simple_opt_plugin_register
+  safety_class: experimental
+```
+
+Dynamic providers must be optional. If the library is missing, ABI-incompatible, or rejected by target filters, the compiler continues without that optimization.
+
 ## Optimization Levels
 
 Simple Optimization Plugins are selected by Simple optimization level before backend-specific optimization.
