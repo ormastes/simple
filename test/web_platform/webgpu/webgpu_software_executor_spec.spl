@@ -1,7 +1,14 @@
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     WebGPUCommandEncoder, WebGPUQueue, GPUCommandBufferHandle,
+    GPURenderPassColorAttachment, GPURenderPassDepthStencilAttachment,
     webgpu_command_draw
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
+    WebGPUResourceTable, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
+    GPU_TEXTURE_FORMAT_RGBA8_UNORM, GPU_TEXTURE_FORMAT_DEPTH24_PLUS
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_software_executor.{
     webgpu_software_execute_command_buffer, webgpu_software_execute_queue
@@ -24,6 +31,18 @@ describe "Browser WebGPU software executor":
         expect(result.draw_count).to_equal(2)
         expect(result.vertex_count).to_equal(6)
         expect(result.compute_pass_count).to_equal(0)
+
+    it "replays render pass attachment metadata deterministically":
+        var resources = WebGPUResourceTable.create()
+        val color = resources.create_texture("color", 320, 200, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+        val depth = resources.create_texture("depth", 320, 200, 1, GPU_TEXTURE_FORMAT_DEPTH24_PLUS, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+        var encoder = WebGPUCommandEncoder.create("frame")
+        expect(encoder.begin_render_pass_with_descriptor(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture(depth.id))).to_equal(true)
+        expect(encoder.end_render_pass()).to_equal(true)
+        val result = webgpu_software_execute_command_buffer(encoder.finish("frame"))
+        expect(result.valid).to_equal(true)
+        expect(result.render_pass_count).to_equal(1)
+        expect(result.checksum).to_equal(548)
 
     it "replays compute dispatch and queue writes":
         var encoder = WebGPUCommandEncoder.create("compute")
