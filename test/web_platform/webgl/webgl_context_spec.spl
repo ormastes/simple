@@ -4,7 +4,7 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_INVALID_OPERATION, WEBGL_INVALID_FRAMEBUFFER_OPERATION,
     WEBGL_CONTEXT_LOST_WEBGL,
     WEBGL_VERTEX_SHADER, WEBGL_FRAGMENT_SHADER,
-    WEBGL_COMPILE_STATUS, WEBGL_LINK_STATUS, WEBGL_VALIDATE_STATUS,
+    WEBGL_DELETE_STATUS, WEBGL_COMPILE_STATUS, WEBGL_LINK_STATUS, WEBGL_VALIDATE_STATUS,
     WEBGL_INFO_LOG_LENGTH, WEBGL_ATTACHED_SHADERS, WEBGL_ACTIVE_UNIFORMS,
     WEBGL_ACTIVE_ATTRIBUTES, WEBGL_CURRENT_PROGRAM, WEBGL_SHADER_TYPE, WEBGL_FLOAT_VEC4,
     WEBGL_FLOAT_MAT4, WEBGL_SAMPLER_2D, WEBGL_FLOAT, WEBGL_ARRAY_BUFFER,
@@ -928,6 +928,21 @@ describe "Browser WebGL context":
             expect(ctx.get_shader_parameter(vs.id, WEBGL_INFO_LOG_LENGTH).int_value).to_equal(0)
             expect(ctx.get_shader_info_log(vs.id)).to_equal("")
 
+        it "deletes shaders and rejects later shader commands":
+            var ctx = webgl_create_context(1, 320, 240)
+            val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+            val program = ctx.create_program()
+            expect(ctx.shader_source(vs.id, _vertex_glsl())).to_equal(true)
+            expect(ctx.compile_shader(vs.id).compiled).to_equal(true)
+            expect(ctx.delete_shader(vs.id)).to_equal(true)
+            expect(ctx.get_shader_parameter(vs.id, WEBGL_DELETE_STATUS).bool_value).to_equal(true)
+            expect(ctx.shader_source(vs.id, _vertex_glsl())).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.compile_shader(vs.id).valid).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.attach_shader(program.id, vs.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+
         it "reports program reflection parameters":
             var ctx = _linked_program_context()
             val program = ctx.programs[0]
@@ -941,6 +956,22 @@ describe "Browser WebGL context":
             expect(program.active_uniforms[1].name).to_equal("diffuse")
             expect(program.active_uniforms[1].data_type).to_equal(WEBGL_SAMPLER_2D)
             expect(ctx.get_program_info_log(program.id)).to_equal("")
+
+        it "deletes programs and clears current program state":
+            var ctx = _uniform_program_context()
+            val program = ctx.programs[0]
+            val tint = ctx.get_uniform_location(program.id, "tint")
+            expect(ctx.uniform_4f(tint, 0.25, 0.5, 0.75, 1.0)).to_equal(true)
+            expect(ctx.delete_program(program.id)).to_equal(true)
+            expect(ctx.get_parameter(WEBGL_CURRENT_PROGRAM).int_value).to_equal(-1)
+            expect(ctx.get_program_parameter(program.id, WEBGL_DELETE_STATUS).bool_value).to_equal(true)
+            expect(ctx.get_program_parameter(program.id, WEBGL_LINK_STATUS).bool_value).to_equal(false)
+            expect(ctx.use_program(program.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.uniform_values.len()).to_equal(0)
+            val shader = ctx.create_shader(WEBGL_VERTEX_SHADER)
+            expect(ctx.attach_shader(program.id, shader.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
 
         it "returns active attribute and uniform records by index":
             var ctx = _linked_program_context()

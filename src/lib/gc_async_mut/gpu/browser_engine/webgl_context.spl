@@ -684,12 +684,30 @@ pub class WebGLContext:
         self.shaders.push(handle)
         handle
 
+    me delete_shader(shader_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if shader_id == -1:
+            return true
+        val shader_index = self.find_shader_index(shader_id)
+        if shader_index < 0 or not self.shaders[shader_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var shader = self.shaders[shader_index]
+        shader.valid = false
+        shader.compiled = false
+        self.shaders[shader_index] = shader
+        true
+
     me shader_source(shader_id: i32, source: text) -> bool:
         if not self.ensure_context_available():
             return false
         var i = 0
         while i < self.shaders.len():
             if self.shaders[i].id == shader_id:
+                if not self.shaders[i].valid:
+                    self.last_error = WEBGL_INVALID_VALUE
+                    return false
                 var shader = self.shaders[i]
                 shader.source = source
                 shader.compiled = false
@@ -706,6 +724,9 @@ pub class WebGLContext:
         var i = 0
         while i < self.shaders.len():
             if self.shaders[i].id == shader_id:
+                if not self.shaders[i].valid:
+                    self.last_error = WEBGL_INVALID_VALUE
+                    return WebGLShaderHandle(id: -1, shader_type: 0, source: "", compiled: false, valid: false, info_log: "shader deleted")
                 var shader = self.shaders[i]
                 val err = webgl_validate_shader_source_for_version(shader.shader_type, shader.source, self.version)
                 shader.compiled = err == ""
@@ -726,12 +747,34 @@ pub class WebGLContext:
         self.programs.push(handle)
         handle
 
+    me delete_program(program_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if program_id == -1:
+            return true
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0 or not self.programs[program_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var program = self.programs[program_index]
+        program.valid = false
+        program.linked = false
+        program.validate_status = false
+        self.programs[program_index] = program
+        if self.current_program_id == program_id:
+            self.current_program_id = -1
+        self.remove_uniform_values_for_program(program_id)
+        true
+
     me attach_shader(program_id: i32, shader_id: i32) -> bool:
         if not self.ensure_context_available():
             return false
         val shader_index = self.find_shader_index(shader_id)
         val program_index = self.find_program_index(program_id)
         if shader_index < 0 or program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not self.shaders[shader_index].valid or not self.programs[program_index].valid:
             self.last_error = WEBGL_INVALID_VALUE
             return false
         var program = self.programs[program_index]
@@ -751,6 +794,9 @@ pub class WebGLContext:
             self.last_error = WEBGL_INVALID_VALUE
             return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "program not found", active_attribs: [], active_uniforms: [], validate_status: false)
         var program = self.programs[program_index]
+        if not program.valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "program deleted", active_attribs: [], active_uniforms: [], validate_status: false)
         val vertex_ok = self.shader_compiled(program.vertex_shader_id, WEBGL_VERTEX_SHADER)
         val fragment_ok = self.shader_compiled(program.fragment_shader_id, WEBGL_FRAGMENT_SHADER)
         if not vertex_ok or not fragment_ok:
@@ -903,7 +949,13 @@ pub class WebGLContext:
         if not self.ensure_context_available():
             return false
         val program_index = self.find_program_index(program_id)
-        if program_index < 0 or not self.programs[program_index].linked:
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if not self.programs[program_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not self.programs[program_index].linked:
             self.last_error = WEBGL_INVALID_OPERATION
             return false
         self.current_program_id = program_id
@@ -1635,7 +1687,13 @@ pub class WebGLContext:
         if location < 0:
             return webgl_empty_active_info()
         val program_index = self.find_program_index(self.current_program_id)
-        if program_index < 0 or not self.programs[program_index].linked:
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return webgl_empty_active_info()
+        if not self.programs[program_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_empty_active_info()
+        if not self.programs[program_index].linked:
             self.last_error = WEBGL_INVALID_OPERATION
             return webgl_empty_active_info()
         val program = self.programs[program_index]
@@ -1655,6 +1713,15 @@ pub class WebGLContext:
                 return
             i = i + 1
         self.uniform_values.push(value)
+
+    me remove_uniform_values_for_program(program_id: i32):
+        var kept: [WebGLUniformValue] = []
+        var i = 0
+        while i < self.uniform_values.len():
+            if self.uniform_values[i].program_id != program_id:
+                kept.push(self.uniform_values[i])
+            i = i + 1
+        self.uniform_values = kept
 
     me bound_texture_index_for_upload(target: i32) -> i32:
         if target != WEBGL_TEXTURE_2D:
@@ -1690,11 +1757,13 @@ pub class WebGLContext:
         val shader_index = self.find_shader_index(shader_id)
         if shader_index < 0:
             return false
-        self.shaders[shader_index].shader_type == shader_type and self.shaders[shader_index].compiled
+        self.shaders[shader_index].valid and self.shaders[shader_index].shader_type == shader_type and self.shaders[shader_index].compiled
 
     fn shader_source_text(shader_id: i32) -> text:
         val shader_index = self.find_shader_index(shader_id)
         if shader_index < 0:
+            return ""
+        if not self.shaders[shader_index].valid:
             return ""
         self.shaders[shader_index].source
 
