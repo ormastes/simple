@@ -26,6 +26,7 @@ pub val WEBGPU_COMMAND_SET_BIND_GROUP: text = "set-bind-group"
 pub val WEBGPU_COMMAND_SET_VERTEX_BUFFER: text = "set-vertex-buffer"
 pub val WEBGPU_COMMAND_SET_INDEX_BUFFER: text = "set-index-buffer"
 pub val WEBGPU_COMMAND_SET_SCISSOR_RECT: text = "set-scissor-rect"
+pub val WEBGPU_COMMAND_SET_VIEWPORT: text = "set-viewport"
 pub val WEBGPU_COMMAND_DRAW: text = "draw"
 pub val WEBGPU_COMMAND_DRAW_INDEXED: text = "draw-indexed"
 pub val WEBGPU_COMMAND_DRAW_INDIRECT: text = "draw-indirect"
@@ -62,6 +63,8 @@ pub class WebGPURecordedCommand:
     height: i32
     depth_or_layers: i32
     data_size: i32
+    viewport_min_depth: f64
+    viewport_max_depth: f64
 
 pub class GPUCommandBufferHandle:
     id: i32
@@ -287,6 +290,18 @@ pub class WebGPUCommandEncoder:
         self.last_error = ""
         true
 
+    me set_viewport(x: i32, y: i32, width: i32, height: i32, min_depth: f64, max_depth: f64) -> bool:
+        if self.active_pass != "render":
+            self.last_error = "GPURenderPassEncoder setViewport requires an active render pass"
+            return false
+        val err = webgpu_validate_viewport(x, y, width, height, min_depth, max_depth)
+        if err != "":
+            self.last_error = err
+            return false
+        self.commands.push(webgpu_command_set_viewport(x, y, width, height, min_depth, max_depth))
+        self.last_error = ""
+        true
+
     me draw(vertex_count: i32, instance_count: i32) -> bool:
         if self.active_pass != "render":
             self.last_error = "GPURenderPassEncoder draw requires an active render pass"
@@ -464,55 +479,58 @@ pub class WebGPUQueue:
         self.write_commands.len()
 
 pub fn webgpu_command_empty(kind: text) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: kind, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: kind, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_begin_render_pass(color_attachment_count: i32, depth_stencil_texture_id: i32, width: i32, height: i32, depth_or_layers: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_BEGIN_RENDER_PASS, pipeline_id: -1, bind_group_id: -1, slot: color_attachment_count, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: depth_stencil_texture_id, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_BEGIN_RENDER_PASS, pipeline_id: -1, bind_group_id: -1, slot: color_attachment_count, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: depth_stencil_texture_id, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_pipeline(pipeline_id: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_PIPELINE, pipeline_id: pipeline_id, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_PIPELINE, pipeline_id: pipeline_id, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_bind_group(slot: i32, bind_group_id: i32) -> WebGPURecordedCommand:
     webgpu_command_bind_group_with_dynamic_offsets(slot, bind_group_id, 0)
 
 pub fn webgpu_command_bind_group_with_dynamic_offsets(slot: i32, bind_group_id: i32, dynamic_offset_count: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_BIND_GROUP, pipeline_id: -1, bind_group_id: bind_group_id, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: dynamic_offset_count, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_BIND_GROUP, pipeline_id: -1, bind_group_id: bind_group_id, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: dynamic_offset_count, width: 0, height: 0, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_set_vertex_buffer(slot: i32, buffer_id: i32, offset: i32, size: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_VERTEX_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_VERTEX_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_set_index_buffer(buffer_id: i32, index_format: text, offset: i32, size: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_INDEX_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: webgpu_index_format_bits(index_format))
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_INDEX_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: webgpu_index_format_bits(index_format), viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_set_scissor_rect(x: i32, y: i32, width: i32, height: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_SCISSOR_RECT, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: x, destination_offset: y, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_SCISSOR_RECT, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: x, destination_offset: y, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
+
+pub fn webgpu_command_set_viewport(x: i32, y: i32, width: i32, height: i32, min_depth: f64, max_depth: f64) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_VIEWPORT, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: x, destination_offset: y, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: 0, data_size: 0, viewport_min_depth: min_depth, viewport_max_depth: max_depth)
 
 pub fn webgpu_command_draw(vertex_count: i32, instance_count: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: vertex_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: vertex_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_draw_indexed(index_count: i32, instance_count: i32, first_index: i32, base_vertex: i32, first_instance: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW_INDEXED, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: index_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: first_index, destination_offset: base_vertex, size: 0, dynamic_offset_count: first_instance, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW_INDEXED, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: index_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: first_index, destination_offset: base_vertex, size: 0, dynamic_offset_count: first_instance, width: 0, height: 0, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_draw_indirect(buffer_id: i32, offset: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW_INDIRECT, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: 16, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW_INDIRECT, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: 16, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_draw_indexed_indirect(buffer_id: i32, offset: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: 20, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: 20, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_dispatch(workgroups_x: i32, workgroups_y: i32, workgroups_z: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DISPATCH_WORKGROUPS, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: workgroups_x, workgroups_y: workgroups_y, workgroups_z: workgroups_z, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DISPATCH_WORKGROUPS, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: workgroups_x, workgroups_y: workgroups_y, workgroups_z: workgroups_z, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_copy_buffer_to_buffer(source_buffer_id: i32, source_offset: i32, destination_buffer_id: i32, destination_offset: i32, size: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: source_buffer_id, destination_buffer_id: destination_buffer_id, source_texture_id: -1, destination_texture_id: -1, offset: source_offset, destination_offset: destination_offset, size: size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: source_buffer_id, destination_buffer_id: destination_buffer_id, source_texture_id: -1, destination_texture_id: -1, offset: source_offset, destination_offset: destination_offset, size: size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_copy_texture_to_texture(source_texture_id: i32, destination_texture_id: i32, width: i32, height: i32, depth_or_layers: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: source_texture_id, destination_texture_id: destination_texture_id, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: source_texture_id, destination_texture_id: destination_texture_id, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: 0, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_write_buffer(buffer_id: i32, offset: i32, data_size: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_WRITE_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: buffer_id, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: data_size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: data_size)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_WRITE_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: buffer_id, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: data_size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: data_size, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_command_write_texture(texture_id: i32, width: i32, height: i32, depth_or_layers: i32, data_size: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_WRITE_TEXTURE, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: texture_id, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: data_size)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_WRITE_TEXTURE, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: texture_id, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: data_size, viewport_min_depth: 0.0, viewport_max_depth: 0.0)
 
 pub fn webgpu_validate_bind_group_dynamic_offsets(slot: i32, bind_group_id: i32, dynamic_offsets: [i32]) -> text:
     if slot < 0:
@@ -680,6 +698,17 @@ pub fn webgpu_validate_scissor_rect(x: i32, y: i32, width: i32, height: i32) -> 
         return "GPURenderPassEncoder scissor rect origin must be non-negative"
     if width <= 0 or height <= 0:
         return "GPURenderPassEncoder scissor rect size must be positive"
+    ""
+
+pub fn webgpu_validate_viewport(x: i32, y: i32, width: i32, height: i32, min_depth: f64, max_depth: f64) -> text:
+    if x < 0 or y < 0:
+        return "GPURenderPassEncoder viewport origin must be non-negative"
+    if width <= 0 or height <= 0:
+        return "GPURenderPassEncoder viewport size must be positive"
+    if min_depth < 0.0 or min_depth > 1.0 or max_depth < 0.0 or max_depth > 1.0:
+        return "GPURenderPassEncoder viewport depth range must be between 0 and 1"
+    if min_depth > max_depth:
+        return "GPURenderPassEncoder viewport minDepth must not exceed maxDepth"
     ""
 
 pub fn webgpu_validate_queue_write_buffer(buffer_id: i32, offset: i32, data_size: i32) -> text:
