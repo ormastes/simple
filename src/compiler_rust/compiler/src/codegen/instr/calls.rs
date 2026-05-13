@@ -423,6 +423,82 @@ fn compile_inline_typed_words_u32_set<M: Module>(
     Ok(true)
 }
 
+fn compile_inline_typed_bytes_u8_push<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 2 {
+        return Ok(false);
+    }
+    let Some(&runtime_id) = ctx.runtime_funcs.get("rt_typed_bytes_u8_push") else {
+        return Ok(false);
+    };
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let value = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let true_value = builder.ins().iconst(types::I8, 1);
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let capacity = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 16);
+    let has_capacity = builder.ins().icmp(IntCC::UnsignedLessThan, len, capacity);
+
+    let store_block = builder.create_block();
+    let grow_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I8);
+    builder.ins().brif(has_capacity, store_block, &[], grow_block, &[]);
+
+    builder.switch_to_block(store_block);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let packed_block = builder.create_block();
+    let slot_block = builder.create_block();
+    let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
+    let byte_packed = builder.ins().band_imm(gc_flags, 8);
+    let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+    builder.ins().brif(is_byte_packed, packed_block, &[], slot_block, &[]);
+    builder.seal_block(store_block);
+
+    builder.switch_to_block(packed_block);
+    let byte_ptr = builder.ins().iadd(data_ptr, len);
+    let byte_value = builder.ins().ireduce(types::I8, value);
+    builder.ins().store(MemFlags::new(), byte_value, byte_ptr, 0);
+    let next_len = builder.ins().iadd_imm(len, 1);
+    builder.ins().store(MemFlags::new(), next_len, ptr_bits, 8);
+    builder.ins().jump(done_block, &[true_value]);
+    builder.seal_block(packed_block);
+
+    builder.switch_to_block(slot_block);
+    let slot_offset = builder.ins().imul_imm(len, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let byte_mask = builder.ins().iconst(types::I64, 0xff);
+    let masked = builder.ins().band(value, byte_mask);
+    let tagged = builder.ins().ishl_imm(masked, 3);
+    builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
+    let next_len = builder.ins().iadd_imm(len, 1);
+    builder.ins().store(MemFlags::new(), next_len, ptr_bits, 8);
+    builder.ins().jump(done_block, &[true_value]);
+    builder.seal_block(slot_block);
+
+    builder.switch_to_block(grow_block);
+    let runtime_ref = ctx.module.declare_func_in_func(runtime_id, builder.func);
+    let adapted = adapt_args_to_signature(builder, runtime_ref, vec![array, value]);
+    let call = adapted_call(builder, runtime_ref, &adapted);
+    let result = builder.inst_results(call).first().copied().unwrap_or(true_value);
+    builder.ins().jump(done_block, &[result]);
+    builder.seal_block(grow_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    if let Some(dest) = dest {
+        ctx.vreg_values.insert(*dest, result);
+    }
+    Ok(true)
+}
+
 fn compile_inline_adler_reduce<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -999,6 +1075,9 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
     if ffi_name == "rt_typed_words_u32_set" && compile_inline_typed_words_u32_set(ctx, builder, dest, args)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_bytes_u8_push" && compile_inline_typed_bytes_u8_push(ctx, builder, dest, args)? {
         return Ok(());
     }
     if ffi_name == "_adler_reduce" && compile_inline_adler_reduce(ctx, builder, dest, args)? {

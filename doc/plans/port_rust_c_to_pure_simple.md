@@ -8,7 +8,7 @@ Scope: keep the algorithm implementations in pure Simple, keep the MDSOC compile
 
 Current evidence:
 - Correctness parity is already passing for the dependency-free C/Rust/Simple XXHash64 and ChaCha20 benchmark harness.
-- The latest source-built LLVM-enabled driver sample shows ChaCha20 faster than both C and Rust, while XXHash64, CRC32, and Adler-32 remain below both baselines. The acceptance gate is therefore still open for all-algorithm "faster than C/Rust" status.
+- The latest source-built LLVM-enabled driver multi-sample shows ChaCha20 consistently faster than both C and Rust, CRC32 at median `0.90x` C / `1.02x` Rust after typed byte-push inlining, XXHash64 at median `0.98x` C / `0.75x` Rust, and Adler-32 at median `0.90x` C / `0.90x` Rust. The acceptance gate is still open for all-algorithm "faster than C/Rust" status.
 - This local build now has an LLVM-enabled active `bin/simple`; the benchmark harness records both default native output and a `--backend=llvm` probe with checksum parity.
 - Rust reference builds use `rustc -C opt-level=3 -C target-cpu=native`; Simple uses `simple compile --native --cpu native --opt-level aggressive`.
 - Recent Rust compiler work added typed `[u8]` load/store helpers (`rt_bytes_u8_at`, `rt_bytes_u8_set`), packed `[u8]` runtime storage for typed empty byte arrays, little-endian byte-array load and store markers that lower inline in Cranelift and LLVM, inline `rt_len` lowering for Cranelift and LLVM call sites, release-shim archive lookup, LLVM target datalayout emission, LLVM backend CLI availability, and native extern hygiene for unused broad SIMD declarations.
@@ -66,6 +66,11 @@ Current completed optimization items:
    - Rust MIR lowering now gives typed empty `[u8]` locals a 1024-byte initial packed-array capacity instead of the generic 16-byte default.
    - This is a reusable compiler-side optimization for codec tables and scratch buffers such as CRC tables; algorithm source still stays pure Simple and does not call C/Rust helpers.
    - Stop condition met for the lowering contract: targeted MIR lowering tests prove `var arr: [u8] = []` emits `rt_byte_array_new(1024)`, and `cargo check` passes with and without LLVM features.
+
+6. **Typed byte push inline fast path**
+   - Cranelift call lowering now inlines the no-grow path for `rt_typed_bytes_u8_push`, storing directly into packed `[u8]` buffers and incrementing length, with the existing runtime helper retained as the grow fallback.
+   - This targets any pure Simple codec/hash/compression builder that pushes bytes into statically typed byte buffers, especially pre-sized CRC tables and scratch buffers.
+   - Stop condition met for this slice: the focused codegen compile test passes, `simple-compiler` checks with and without LLVM features, the release driver builds, and the parity benchmark still passes checksums.
 
 Follow-up hardening work, in order:
 
@@ -127,18 +132,19 @@ the baseline. Add new algorithms here only after checksum parity passes.
 
 | Family | Algorithm | C MB/s | Rust MB/s | Simple Cranelift MB/s | Simple LLVM MB/s | Simple vs C | Simple vs Rust | LLVM vs C | LLVM vs Rust | Parity | Status |
 |--------|-----------|--------|-----------|-----------------------|------------------|-------------|----------------|-----------|--------------|--------|--------|
-| Hash | XXHash64 | 14483 | 14018 | 11107 | not sampled | 0.77x | 0.79x | n/a | n/a | PASS | Below C/Rust; needs helper-inline and byte-buffer proof work |
-| Checksum | CRC32 | 456 | 454 | 333 | not sampled | 0.73x | 0.73x | n/a | n/a | PASS | Below C/Rust; table lifetime and byte-table lowering remain active gaps |
-| Checksum | Adler-32 | 2603 | 2582 | 2362 | not sampled | 0.91x | 0.91x | n/a | n/a | PASS | Close but below C/Rust; needs compiler-driven weighted byte-reduction generalization |
-| Cipher | ChaCha20 | 314 | 327 | 392 | not sampled | 1.25x | 1.20x | n/a | n/a | PASS | Faster than both C and Rust in latest source-built LLVM-enabled sample |
+| Hash | XXHash64 | median sample | median sample | median sample | not sampled | 0.98x median | 0.75x median | n/a | n/a | PASS | Near C, below Rust median; needs helper-inline and byte-buffer proof work |
+| Checksum | CRC32 | median sample | median sample | median sample | not sampled | 0.90x median | 1.02x median | n/a | n/a | PASS | Beats Rust median after typed byte-push inlining; still below C median |
+| Checksum | Adler-32 | median sample | median sample | median sample | not sampled | 0.90x median | 0.90x median | n/a | n/a | PASS | Close but below C/Rust; needs compiler-driven weighted byte-reduction generalization |
+| Cipher | ChaCha20 | median sample | median sample | median sample | not sampled | 1.15x median | 1.05x median | n/a | n/a | PASS | Faster than both C and Rust in latest 5-run source-built sample |
 
 Current command:
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LLVM_PROBE=0 SIMPLE_DISASM_PROBE=0 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- For the 5-run source-built sample in this section, `SIMPLE_RUNTIME_PATH` and `SIMPLE_NATIVE_ALL_PATH` pointed at `src/compiler_rust/target/release` so the clean workspace used the freshly built native runtime archives.
 - The harness now sets `SIMPLE_NATIVE_RUNTIME_BUNDLE=rust-hosted` by default and fails on native compile failure unless `SIMPLE_ALLOW_INTERPRETER_FALLBACK=1` is explicitly set. Speed rows therefore cannot silently come from the interpreter fallback.
 - The harness writes `build/perf/port_algorithms/speed_ratios.tsv` with C, Rust, Simple, `Simple/C`, `Simple/Rust`, and per-baseline faster flags. Set `SIMPLE_REQUIRE_FASTER_THAN_BASELINES=1` to make the run fail until every measured algorithm is faster than both C and Rust.
 
 Next active gaps:
-- XXHash64, CRC32, and Adler-32 are not faster than both C and Rust in the latest source-built LLVM-enabled hosted-native sample. These remain compiler/plugin optimization work, not permission to delegate to C/Rust libraries. ChaCha20 is the current measured faster-than-both proof point.
+- XXHash64 and Adler-32 are not faster than both C and Rust in the latest source-built hosted-native median sample. CRC32 now beats Rust at median but not C. These remain compiler/plugin optimization work, not permission to delegate to C/Rust libraries. ChaCha20 is the current measured faster-than-both proof point.
 - The first compiler-side Adler generalization is now the `simple.opt.math.strength_reduce` provider's two-shift small-multiply decomposition for constants such as 6, 10, 12, and 14. This targets checksum/compression byte-reduction weights without editing Adler-specific source.
 
 Coverage backlog for all currently tracked cipher/compression-style algorithms:
@@ -155,10 +161,10 @@ not ad hoc algorithm rewrites or C-library delegation.
 
 | Group | Algorithms in scope | Current Simple evidence | Simple/C | Delta vs C | Simple/Rust | Delta vs Rust | Benchmark unit | Optimization-plugin focus |
 |-------|---------------------|-------------------------|----------|------------|-------------|---------------|----------------|---------------------------|
-| Measured non-crypto hash | XXHash64 | C/Rust/Simple parity benchmark PASS | 0.77x Cranelift | 23% slower than C | 0.79x Cranelift | 21% slower than Rust | MB/s one-shot hash | Keep byte-load, rotate, bounds-proof, and helper-inline regressions locked |
-| Measured checksum | CRC32 | C/Rust/Simple parity benchmark PASS | 0.73x Cranelift | 27% slower than C | 0.73x Cranelift | 27% slower than Rust | MB/s checksum | Generalize table loop, unchecked typed byte load, static-table lifetime, and typed byte-array capacity optimizations |
-| Measured checksum | Adler-32 | C/Rust/Simple parity benchmark PASS | 0.91x Cranelift | 9% slower than C | 0.91x Cranelift | 9% slower than Rust | MB/s checksum | Finish compiler-driven weighted byte-reduction and small-multiply decomposition |
-| Measured stream cipher | ChaCha20 | C/Rust/Simple parity benchmark PASS | 1.25x Cranelift | 25% faster than C | 1.20x Cranelift | 20% faster than Rust | MB/s encryption/checksum | Preserve rotate idiom, fixed-block byte stores, helper inlining, and SIMD-safe lowering |
+| Measured non-crypto hash | XXHash64 | C/Rust/Simple parity benchmark PASS | 0.98x Cranelift median | 2% slower than C | 0.75x Cranelift median | 25% slower than Rust | MB/s one-shot hash | Keep byte-load, rotate, bounds-proof, and helper-inline regressions locked |
+| Measured checksum | CRC32 | C/Rust/Simple parity benchmark PASS | 0.90x Cranelift median | 10% slower than C | 1.02x Cranelift median | 2% faster than Rust | MB/s checksum | Generalize table loop, unchecked typed byte load, static-table lifetime, typed byte-array capacity, and byte-push inlining |
+| Measured checksum | Adler-32 | C/Rust/Simple parity benchmark PASS | 0.90x Cranelift median | 10% slower than C | 0.90x Cranelift median | 10% slower than Rust | MB/s checksum | Finish compiler-driven weighted byte-reduction and small-multiply decomposition |
+| Measured stream cipher | ChaCha20 | C/Rust/Simple parity benchmark PASS | 1.15x Cranelift median | 15% faster than C | 1.05x Cranelift median | 5% faster than Rust | MB/s encryption/checksum | Preserve rotate idiom, fixed-block byte stores, helper inlining, and SIMD-safe lowering |
 | AEAD modes | AES-GCM, AES-CCM, AES-GCM-SIV, ChaCha20-Poly1305, OCB3 | KAT/unit coverage exists for several modes; no C/Rust/Simple throughput ledger | TBD, target >1.00x | Pending; must be faster than C | TBD, target >1.00x | Pending; must be faster than Rust | MB/s encrypt+tag and decrypt+verify | Recognize block/stream XOR, GHASH/POLYVAL multiply, Poly1305 limb loops, tag compare |
 | AES block/modes | AES-128/256 core, AES-CTR, AES-CMAC, AES-XTS | KAT/unit coverage exists; no throughput ledger | TBD, target >1.00x | Pending; must be faster than C | TBD, target >1.00x | Pending; must be faster than Rust | MB/s block/mode operation | Add AES round idiom lowering, table/round constant placement, fixed 16-byte block lowering |
 | Other block ciphers | ARIA, Camellia, Serpent, Twofish, SM4, SEED, TEA | KAT/unit coverage exists for many OS ciphers; no throughput ledger | TBD, target >1.00x | Pending; must be faster than C | TBD, target >1.00x | Pending; must be faster than Rust | MB/s block/mode operation | Share S-box/table lookup optimization, rotate/xor/add idioms, fixed-block stack buffers |
@@ -179,10 +185,10 @@ from the parity harness; all other rows are explicit benchmark backlog.
 
 | Family | Algorithm | Simple/C | Delta vs C | Simple/Rust | Delta vs Rust | Status |
 |--------|-----------|----------|------------|-------------|---------------|--------|
-| Non-crypto hash | XXHash64 | 0.77x | 23% slower | 0.79x | 21% slower | Measured PASS; below C/Rust |
-| Checksum | CRC32 | 0.73x | 27% slower | 0.73x | 27% slower | Measured PASS; below C/Rust |
-| Checksum | Adler-32 | 0.91x | 9% slower | 0.91x | 9% slower | Measured PASS; below C/Rust |
-| Stream cipher | ChaCha20 | 1.25x | 25% faster | 1.20x | 20% faster | Measured PASS; faster than C/Rust |
+| Non-crypto hash | XXHash64 | 0.98x | 2% slower | 0.75x | 25% slower | Measured PASS; below C/Rust |
+| Checksum | CRC32 | 0.90x | 10% slower | 1.02x | 2% faster | Measured PASS; below C |
+| Checksum | Adler-32 | 0.90x | 10% slower | 0.90x | 10% slower | Measured PASS; below C/Rust |
+| Stream cipher | ChaCha20 | 1.15x | 15% faster | 1.05x | 5% faster | Measured PASS; faster than C/Rust |
 | AEAD | AES-GCM | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
 | AEAD | AES-CCM | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
 | AEAD | AES-GCM-SIV | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
