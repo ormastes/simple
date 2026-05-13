@@ -7,6 +7,7 @@ records so tests can validate WebGPU sequencing before native submission exists.
 use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WebGPUResourceTable,
     WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
+    WEBGPU_BUFFER_USAGE_INDIRECT,
     WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
     WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT,
     webgpu_find_buffer, webgpu_find_texture, webgpu_find_bind_group,
@@ -22,6 +23,8 @@ pub val WEBGPU_COMMAND_END_COMPUTE_PASS: text = "end-compute-pass"
 pub val WEBGPU_COMMAND_SET_PIPELINE: text = "set-pipeline"
 pub val WEBGPU_COMMAND_SET_BIND_GROUP: text = "set-bind-group"
 pub val WEBGPU_COMMAND_DRAW: text = "draw"
+pub val WEBGPU_COMMAND_DRAW_INDIRECT: text = "draw-indirect"
+pub val WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT: text = "draw-indexed-indirect"
 pub val WEBGPU_COMMAND_DISPATCH_WORKGROUPS: text = "dispatch-workgroups"
 pub val WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER: text = "copy-buffer-to-buffer"
 pub val WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE: text = "copy-texture-to-texture"
@@ -203,6 +206,30 @@ pub class WebGPUCommandEncoder:
         self.last_error = ""
         true
 
+    me draw_indirect(buffer_id: i32, offset: i32) -> bool:
+        if self.active_pass != "render":
+            self.last_error = "GPURenderPassEncoder drawIndirect requires an active render pass"
+            return false
+        val err = webgpu_validate_indirect_draw_buffer(buffer_id, offset, 16)
+        if err != "":
+            self.last_error = err
+            return false
+        self.commands.push(webgpu_command_draw_indirect(buffer_id, offset))
+        self.last_error = ""
+        true
+
+    me draw_indexed_indirect(buffer_id: i32, offset: i32) -> bool:
+        if self.active_pass != "render":
+            self.last_error = "GPURenderPassEncoder drawIndexedIndirect requires an active render pass"
+            return false
+        val err = webgpu_validate_indirect_draw_buffer(buffer_id, offset, 20)
+        if err != "":
+            self.last_error = err
+            return false
+        self.commands.push(webgpu_command_draw_indexed_indirect(buffer_id, offset))
+        self.last_error = ""
+        true
+
     me dispatch_workgroups(workgroups_x: i32, workgroups_y: i32, workgroups_z: i32) -> bool:
         if self.active_pass != "compute":
             self.last_error = "GPUComputePassEncoder dispatch requires an active compute pass"
@@ -345,6 +372,12 @@ pub fn webgpu_command_bind_group_with_dynamic_offsets(slot: i32, bind_group_id: 
 pub fn webgpu_command_draw(vertex_count: i32, instance_count: i32) -> WebGPURecordedCommand:
     WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: vertex_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
+pub fn webgpu_command_draw_indirect(buffer_id: i32, offset: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW_INDIRECT, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: 16, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+
+pub fn webgpu_command_draw_indexed_indirect(buffer_id: i32, offset: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: buffer_id, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: 20, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+
 pub fn webgpu_command_dispatch(workgroups_x: i32, workgroups_y: i32, workgroups_z: i32) -> WebGPURecordedCommand:
     WebGPURecordedCommand(kind: WEBGPU_COMMAND_DISPATCH_WORKGROUPS, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: workgroups_x, workgroups_y: workgroups_y, workgroups_z: workgroups_z, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
@@ -484,6 +517,17 @@ pub fn webgpu_validate_texture_copy(source_texture_id: i32, destination_texture_
         return "GPUCommandEncoder copyTextureToTexture size must be positive"
     ""
 
+pub fn webgpu_validate_indirect_draw_buffer(buffer_id: i32, offset: i32, command_size: i32) -> text:
+    if buffer_id <= 0:
+        return "GPURenderPassEncoder indirect draw buffer must be valid"
+    if offset < 0:
+        return "GPURenderPassEncoder indirect draw offset must be non-negative"
+    if offset % 4 != 0:
+        return "GPURenderPassEncoder indirect draw offset must be 4-byte aligned"
+    if command_size != 16 and command_size != 20:
+        return "GPURenderPassEncoder indirect draw command size is unsupported"
+    ""
+
 pub fn webgpu_validate_queue_write_buffer(buffer_id: i32, offset: i32, data_size: i32) -> text:
     if buffer_id <= 0:
         return "GPUQueue writeBuffer buffer must be valid"
@@ -569,6 +613,19 @@ pub fn webgpu_validate_texture_copy_with_resources(resources: WebGPUResourceTabl
         return "GPUCommandEncoder copyTextureToTexture source range exceeds texture size"
     if width > destination.width or height > destination.height or depth_or_layers > destination.depth_or_layers:
         return "GPUCommandEncoder copyTextureToTexture destination range exceeds texture size"
+    ""
+
+pub fn webgpu_validate_indirect_draw_buffer_with_resources(resources: WebGPUResourceTable, buffer_id: i32, offset: i32, command_size: i32) -> text:
+    val basic_err = webgpu_validate_indirect_draw_buffer(buffer_id, offset, command_size)
+    if basic_err != "":
+        return basic_err
+    val buffer = webgpu_find_buffer(resources, buffer_id)
+    if not buffer.valid:
+        return "GPURenderPassEncoder indirect draw buffer does not exist"
+    if (buffer.usage & WEBGPU_BUFFER_USAGE_INDIRECT) == 0:
+        return "GPURenderPassEncoder indirect draw buffer missing INDIRECT usage"
+    if (offset as i64) + (command_size as i64) > buffer.size:
+        return "GPURenderPassEncoder indirect draw range exceeds buffer size"
     ""
 
 pub fn webgpu_validate_queue_write_buffer_with_resources(resources: WebGPUResourceTable, buffer_id: i32, offset: i32, data_size: i32) -> text:

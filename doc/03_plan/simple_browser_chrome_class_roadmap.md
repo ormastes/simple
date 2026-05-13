@@ -452,6 +452,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 
 **Current progress (2026-05-12):**
 - M26 texture descriptor validation has started: 3D texture dimensions, MSAA sample-count constraints, mip-level constraints, texture arrays, and cubemap layer/shape rules are covered by `test/web_platform/webgpu/webgpu_resources_spec.spl`.
+- M26 indirect draw command recording has started: render passes now record `drawIndirect`/`drawIndexedIndirect`, validate indirect buffer usage/alignment/ranges, and replay deterministic executor counters through `test/web_platform/webgpu/webgpu_commands_spec.spl` and `test/web_platform/webgpu/webgpu_software_executor_spec.spl`.
 
 **Work:**
 - Implement depth/stencil attachment semantics, native MSAA allocation, mip generation/use, texture arrays, cubemaps where supported, instancing, uniform/storage buffers, dynamic offsets, and indirect draw where backend supports it.

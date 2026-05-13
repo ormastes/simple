@@ -5,7 +5,8 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     WEBGPU_COMMAND_BEGIN_RENDER_PASS, WEBGPU_COMMAND_END_RENDER_PASS,
     WEBGPU_COMMAND_BEGIN_COMPUTE_PASS, WEBGPU_COMMAND_END_COMPUTE_PASS,
     WEBGPU_COMMAND_SET_PIPELINE, WEBGPU_COMMAND_SET_BIND_GROUP,
-    WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DISPATCH_WORKGROUPS,
+    WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DRAW_INDIRECT, WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT,
+    WEBGPU_COMMAND_DISPATCH_WORKGROUPS,
     WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE,
     WEBGPU_COMMAND_WRITE_BUFFER, WEBGPU_COMMAND_WRITE_TEXTURE,
     webgpu_validate_buffer_copy_with_resources,
@@ -13,12 +14,13 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     webgpu_validate_queue_write_buffer_with_resources,
     webgpu_validate_queue_write_texture_with_resources,
     webgpu_validate_bind_group_dynamic_offsets_with_resources,
-    webgpu_validate_render_pass_descriptor_with_resources
+    webgpu_validate_render_pass_descriptor_with_resources,
+    webgpu_validate_indirect_draw_buffer_with_resources
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WebGPUResourceTable,
     WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
-    WEBGPU_BUFFER_USAGE_UNIFORM, WEBGPU_BUFFER_USAGE_STORAGE,
+    WEBGPU_BUFFER_USAGE_UNIFORM, WEBGPU_BUFFER_USAGE_STORAGE, WEBGPU_BUFFER_USAGE_INDIRECT,
     WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
     WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT,
     WEBGPU_SHADER_STAGE_VERTEX, WEBGPU_SHADER_STAGE_FRAGMENT,
@@ -73,6 +75,32 @@ describe "Browser WebGPU command encoding":
             expect(encoder.begin_render_pass()).to_equal(true)
             expect(encoder.set_bind_group_with_dynamic_offsets(0, 4, [128])).to_equal(false)
             expect(encoder.last_error).to_equal("GPUPassEncoder dynamic offsets must be 256-byte aligned")
+
+        it "records indirect draw commands":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.draw_indirect(3, 16)).to_equal(true)
+            expect(encoder.draw_indexed_indirect(3, 32)).to_equal(true)
+            expect(encoder.end_render_pass()).to_equal(true)
+            val command_buffer = encoder.finish("indirect")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.command_count()).to_equal(4)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_DRAW_INDIRECT)
+            expect(command_buffer.commands[1].source_buffer_id).to_equal(3)
+            expect(command_buffer.commands[1].offset).to_equal(16)
+            expect(command_buffer.commands[1].size).to_equal(16)
+            expect(command_buffer.commands[2].kind).to_equal(WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT)
+            expect(command_buffer.commands[2].size).to_equal(20)
+
+        it "rejects invalid indirect draw descriptors":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.draw_indirect(3, 0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder drawIndirect requires an active render pass")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.draw_indirect(0, 0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder indirect draw buffer must be valid")
+            expect(encoder.draw_indexed_indirect(3, 2)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder indirect draw offset must be 4-byte aligned")
 
         it "validates render pass color and depth attachments before recording":
             var resources = WebGPUResourceTable.create()
@@ -233,6 +261,15 @@ describe "Browser WebGPU command encoding":
             expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, bind_group.id, [256])).to_equal("GPUPassEncoder dynamic offset count must match bind group layout")
             expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, bind_group.id, [1024, 0])).to_equal("GPUPassEncoder dynamic offset exceeds buffer size")
             expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, 99, [0, 0])).to_equal("GPUPassEncoder bind group does not exist")
+
+        it "validates indirect draw buffers against resources":
+            var resources = WebGPUResourceTable.create()
+            val indirect = resources.create_buffer("indirect", 64, WEBGPU_BUFFER_USAGE_INDIRECT)
+            val wrong_usage = resources.create_buffer("uniforms", 64, WEBGPU_BUFFER_USAGE_UNIFORM)
+            expect(webgpu_validate_indirect_draw_buffer_with_resources(resources, indirect.id, 16, 16)).to_equal("")
+            expect(webgpu_validate_indirect_draw_buffer_with_resources(resources, 99, 0, 16)).to_equal("GPURenderPassEncoder indirect draw buffer does not exist")
+            expect(webgpu_validate_indirect_draw_buffer_with_resources(resources, wrong_usage.id, 0, 16)).to_equal("GPURenderPassEncoder indirect draw buffer missing INDIRECT usage")
+            expect(webgpu_validate_indirect_draw_buffer_with_resources(resources, indirect.id, 48, 20)).to_equal("GPURenderPassEncoder indirect draw range exceeds buffer size")
 
     describe "encoder and queue validation":
         it "rejects finish while a pass is active":
