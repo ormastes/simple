@@ -1142,10 +1142,86 @@ fn _convert_webgpu_bind_group_layout_descriptor(line: text) -> text:
     val entries = _webgpu_descriptor_value(descriptor, "entries")
     if entries == "":
         return line
+    val lowered_entries = _webgpu_bind_group_layout_entries(entries)
     val label = _webgpu_descriptor_value_or_default(descriptor, "label", "\"\"")
     val prefix = line.slice(0, marker_idx)
     val suffix = line.slice(descriptor_end + 2, line.len())
-    prefix + ".create_bind_group_layout(" + label + ", " + entries + ")" + suffix
+    prefix + ".create_bind_group_layout(" + label + ", " + lowered_entries + ")" + suffix
+
+fn _webgpu_bind_group_layout_entries(entries: text) -> text:
+    val trimmed = entries.trim()
+    if not trimmed.starts_with("[") or not trimmed.ends_with("]"):
+        return entries
+    val inner = trimmed.slice(1, trimmed.len() - 1)
+    var result = "["
+    var pos = 0
+    var first = true
+    while pos < inner.len():
+        while pos < inner.len() and (inner.slice(pos, pos + 1) == " " or inner.slice(pos, pos + 1) == ","):
+            pos = pos + 1
+        if pos >= inner.len():
+            break
+        if inner.slice(pos, pos + 1) != "{":
+            return entries
+        val end = _webgpu_matching_brace(inner, pos)
+        if end < 0:
+            return entries
+        val descriptor = inner.slice(pos + 1, end)
+        val lowered = _webgpu_bind_group_layout_entry(descriptor)
+        if lowered == "":
+            return entries
+        if not first:
+            result = result + ", "
+        result = result + lowered
+        first = false
+        pos = end + 1
+    result + "]"
+
+fn _webgpu_matching_brace(source: text, open_idx: i32) -> i32:
+    var depth = 0
+    var i = open_idx
+    while i < source.len():
+        val ch = source.slice(i, i + 1)
+        if ch == "{":
+            depth = depth + 1
+        else: if ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _webgpu_bind_group_layout_entry(descriptor: text) -> text:
+    val binding = _webgpu_descriptor_value(descriptor, "binding")
+    val visibility = _webgpu_descriptor_value(descriptor, "visibility")
+    if binding == "" or visibility == "":
+        return ""
+    val sampler = _webgpu_descriptor_value(descriptor, "sampler")
+    if sampler != "":
+        val sampler_type = _webgpu_descriptor_value_or_default(sampler, "type", "\"filtering\"")
+        if sampler_type.contains("comparison"):
+            return "GPUBindGroupLayoutEntry.comparison_sampler(" + binding + ", " + visibility + ")"
+        if sampler_type.contains("non-filtering"):
+            return "GPUBindGroupLayoutEntry.non_filtering_sampler(" + binding + ", " + visibility + ")"
+        return "GPUBindGroupLayoutEntry.sampler(" + binding + ", " + visibility + ")"
+    val buffer = _webgpu_descriptor_value(descriptor, "buffer")
+    if buffer != "":
+        val buffer_type = _webgpu_descriptor_value_or_default(buffer, "type", "\"uniform\"")
+        val has_dynamic_offset = _webgpu_descriptor_value_or_default(buffer, "hasDynamicOffset", "false")
+        if buffer_type.contains("storage"):
+            if has_dynamic_offset == "true":
+                return "GPUBindGroupLayoutEntry.dynamic_storage_buffer(" + binding + ", " + visibility + ")"
+            if buffer_type.contains("read-only-storage"):
+                return "GPUBindGroupLayoutEntry.readonly_storage_buffer(" + binding + ", " + visibility + ")"
+            return "GPUBindGroupLayoutEntry.storage_buffer(" + binding + ", " + visibility + ")"
+        if has_dynamic_offset == "true":
+            return "GPUBindGroupLayoutEntry.dynamic_buffer(" + binding + ", " + visibility + ")"
+        return "GPUBindGroupLayoutEntry.buffer(" + binding + ", " + visibility + ")"
+    if _webgpu_descriptor_value(descriptor, "storageTexture") != "":
+        return "GPUBindGroupLayoutEntry.storage_texture(" + binding + ", " + visibility + ")"
+    if _webgpu_descriptor_value(descriptor, "texture") != "":
+        return "GPUBindGroupLayoutEntry.texture(" + binding + ", " + visibility + ")"
+    ""
 
 fn _convert_webgpu_bind_group_descriptor(line: text) -> text:
     val marker = ".createBindGroup({"
