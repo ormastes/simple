@@ -117,23 +117,44 @@ the baseline. Add new algorithms here only after checksum parity passes.
 
 | Family | Algorithm | C MB/s | Rust MB/s | Simple Cranelift MB/s | Simple LLVM MB/s | Simple vs C | Simple vs Rust | LLVM vs C | LLVM vs Rust | Parity | Status |
 |--------|-----------|--------|-----------|-----------------------|------------------|-------------|----------------|-----------|--------------|--------|--------|
-| Hash | XXHash64 | 8269 | 8295 | 14093 | 8388 | 1.70x | 1.70x | 1.01x | 1.01x | PASS | Cranelift and LLVM meet threshold |
-| Checksum | CRC32 | 283 | 278 | 412 | 292 | 1.46x | 1.48x | 1.03x | 1.05x | PASS | Pure Simple byte-table path meets threshold |
-| Checksum | Adler-32 | 2599 | 2524 | 1896 | not sampled | 0.73x | 0.75x | n/a | n/a | PASS | Meets threshold; needs MIR generalization |
-| Cipher | ChaCha20 | 319 | 286 | 363 | 363 | 1.14x | 1.27x | 1.14x | 1.27x | PASS | Cranelift and LLVM meet threshold |
+| Hash | XXHash64 | 14727 | 7813 | 8566 | not sampled | 0.58x | 1.10x | n/a | n/a | PASS | Beats Rust but below C in the latest mandatory-native sample |
+| Checksum | CRC32 | 464 | 284 | 306 | not sampled | 0.66x | 1.08x | n/a | n/a | PASS | Beats Rust but below C; needs compiler-driven table-loop/static-table optimization |
+| Checksum | Adler-32 | 2887 | 2587 | 2350 | not sampled | 0.81x | 0.91x | n/a | n/a | PASS | Below C/Rust; needs MIR weighted byte-reduction generalization |
+| Cipher | ChaCha20 | 346 | 373 | 362 | not sampled | 1.05x | 0.97x | n/a | n/a | PASS | Beats C but below Rust in the latest mandatory-native sample |
 
-Next active gap:
-- Adler-32 is the first measured algorithm that is still slower than both C and Rust in the comparison ledger. The first compiler-side generalization is now the `simple.opt.math.strength_reduce` provider's two-shift small-multiply decomposition for constants such as 6, 10, 12, and 14. This targets checksum/compression byte-reduction weights without editing Adler-specific source.
+Current command:
+- `SIMPLE_LLVM_PROBE=0 SIMPLE_DISASM_PROBE=0 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- The harness now sets `SIMPLE_NATIVE_RUNTIME_BUNDLE=rust-hosted` by default and fails on native compile failure unless `SIMPLE_ALLOW_INTERPRETER_FALLBACK=1` is explicitly set. Speed rows therefore cannot silently come from the interpreter fallback.
 
-Coverage backlog for "all cipher/compression algorithms":
+Next active gaps:
+- XXHash64, CRC32, Adler-32, and ChaCha20 are not all faster than both C and Rust in the latest default `bin/simple` hosted-native sample. These remain compiler/plugin optimization work, not permission to delegate to C/Rust libraries.
+- The first compiler-side Adler generalization is now the `simple.opt.math.strength_reduce` provider's two-shift small-multiply decomposition for constants such as 6, 10, 12, and 14. This targets checksum/compression byte-reduction weights without editing Adler-specific source.
 
-| Family | Algorithms | Current comparison state | Required next step |
-|--------|------------|--------------------------|--------------------|
-| AEAD/block cipher | AES-GCM, AES-CCM, AES-XTS, OCB3, AES-GCM-SIV, ARIA, Camellia, Serpent, Twofish, SM4, SEED, TEA | Unit/security implementations exist, but no C/Rust/Simple MB/s parity table in this plan | Add dependency-free C/Rust reference harness plus checksum/tag parity gate |
-| Stream cipher | Salsa20, XSalsa20, RC4, ZUC, SNOW3G | Not in the current C/Rust/Simple speed ledger | Add per-byte throughput benchmark and keystream/ciphertext parity vectors |
-| Hash/compression core | SHA-224/256/384/512, BLAKE2b/s, BLAKE3, RIPEMD160, Tiger, Streebog, Whirlpool, SM3 | Not in the current C/Rust/Simple speed ledger | Add block-compression or one-shot digest parity harness with MB/s ratios |
-| Compression codec | Deflate, LZ4, Zstd, Huffman/LZ77 overlap-copy paths | Phase 5 optimized selected internals, but no current C/Rust/Simple table here | Add corpus-based encode/decode benchmarks with byte-for-byte output checks |
-| Password/KDF/PQC | Argon2, bcrypt, scrypt, PBKDF2, ML-KEM, ML-DSA, SLH-DSA | Correctness/security oriented; throughput units differ from MB/s stream algorithms | Add operation/sec tables, not MB/s, after deterministic vectors pass |
+Coverage backlog for all currently tracked cipher/compression-style algorithms:
+
+Use this table as the plan ledger. `Simple/C` and `Simple/Rust` are throughput
+ratios against portable C and Rust references; `TBD` means the Simple
+implementation has correctness coverage or source presence, but the C/Rust/Simple
+parity benchmark has not been added yet. The target is to make performance wins
+come from the Simple optimization layer and plugin interfaces, not ad hoc
+algorithm rewrites or C-library delegation.
+
+| Group | Algorithms in scope | Current Simple evidence | Simple/C | Simple/Rust | Benchmark unit | Optimization-plugin focus |
+|-------|---------------------|-------------------------|----------|-------------|----------------|---------------------------|
+| Measured non-crypto hash | XXHash64 | C/Rust/Simple parity benchmark PASS | 0.58x Cranelift | 1.10x Cranelift | MB/s one-shot hash | Keep byte-load, rotate, bounds-proof, and helper-inline regressions locked |
+| Measured checksum | CRC32 | C/Rust/Simple parity benchmark PASS | 0.66x Cranelift | 1.08x Cranelift | MB/s checksum | Generalize table loop, unchecked typed byte load, and static-table lifetime optimizations |
+| Measured checksum | Adler-32 | C/Rust/Simple parity benchmark PASS | 0.81x Cranelift | 0.91x Cranelift | MB/s checksum | Finish compiler-driven weighted byte-reduction and small-multiply decomposition |
+| Measured stream cipher | ChaCha20 | C/Rust/Simple parity benchmark PASS | 1.05x Cranelift | 0.97x Cranelift | MB/s encryption/checksum | Preserve rotate idiom, fixed-block byte stores, helper inlining, and SIMD-safe lowering |
+| AEAD modes | AES-GCM, AES-CCM, AES-GCM-SIV, ChaCha20-Poly1305, OCB3 | KAT/unit coverage exists for several modes; no C/Rust/Simple throughput ledger | TBD | TBD | MB/s encrypt+tag and decrypt+verify | Recognize block/stream XOR, GHASH/POLYVAL multiply, Poly1305 limb loops, tag compare |
+| AES block/modes | AES-128/256 core, AES-CTR, AES-CMAC, AES-XTS | KAT/unit coverage exists; no throughput ledger | TBD | TBD | MB/s block/mode operation | Add AES round idiom lowering, table/round constant placement, fixed 16-byte block lowering |
+| Other block ciphers | ARIA, Camellia, Serpent, Twofish, SM4, SEED, TEA | KAT/unit coverage exists for many OS ciphers; no throughput ledger | TBD | TBD | MB/s block/mode operation | Share S-box/table lookup optimization, rotate/xor/add idioms, fixed-block stack buffers |
+| Stream ciphers | Salsa20, XSalsa20, RC4, ZUC, SNOW3G | KAT/unit coverage exists for several stream ciphers; only ChaCha20 is measured | TBD | TBD | MB/s keystream and xor | Generalize quarter-round/word-rotate, byte-xor loops, counter update, direct keystream stores |
+| Hash functions | SHA-1, SHA-224, SHA-256, SHA-384, SHA-512, SHA-3/cSHAKE/KMAC, BLAKE2b/s, BLAKE3, RIPEMD160, Tiger, Streebog, Whirlpool, SM3, SipHash | KAT/unit coverage exists across common and OS crypto; only XXHash64 is measured | TBD | TBD | MB/s digest or compression block | Generalize message-schedule unrolls, rotate/boolean idioms, endian loads, state-vector stores |
+| MAC/KDF helpers | HMAC, HKDF, PBKDF2, TLS PRF, HOTP/TOTP, SCRAM | KAT/unit coverage exists; throughput ledger missing | TBD | TBD | ops/s and MB/s where applicable | Optimize repeated hash block setup, constant-time compare, loop-invariant salt/password state |
+| Password hashing | Argon2, Argon2d, bcrypt, scrypt | KAT/unit coverage exists; MB/s is not the right acceptance metric | TBD | TBD | ops/s at fixed memory/cost | Optimize memory-fill loops, block mixing, fixed-width rotations, and bounds-proofed scratch buffers |
+| Public-key/PQC crypto | Curve25519/448, P-256/P-384/P-521, Ed25519/448, ECDSA, RSA/PSS, FFDHE, ML-KEM, ML-DSA, SLH-DSA | Correctness/security tests exist; excluded from MB/s stream table | TBD | TBD | ops/s keygen/sign/verify/encap | Big-int/limb loop optimization, constant-time selects, NTT/vectorizable polynomial loops |
+| Compression codecs | Deflate, gzip, LZ4, Snappy, LZMA2/XZ, Zstd, Brotli, permessage-deflate | Unit/round-trip coverage exists; no C/Rust/Simple throughput ledger | TBD | TBD | MB/s encode and decode on fixed corpora | Optimize LZ match search, overlap copy, Huffman/FSE decode tables, bit-reader batching |
+| Compression primitives | Huffman, LZ77 overlap-copy paths, Zstd FSE/HUF/sequence/literal blocks | Phase 5 optimized selected internals; no standalone throughput ledger | TBD | TBD | MB/s primitive microbench | Expose reusable bitstream, copy, table-build, and symbol-decode optimizer providers |
 
 ### 2026-05-13 pure Simple Adler-32 optimization-layer update
 

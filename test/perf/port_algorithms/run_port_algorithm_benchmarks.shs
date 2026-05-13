@@ -6,6 +6,8 @@ BENCH_DIR="$ROOT/test/perf/port_algorithms"
 BUILD_DIR="$ROOT/build/perf/port_algorithms"
 SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
 SIMPLE_NATIVE_BACKEND="${SIMPLE_NATIVE_BACKEND:-}"
+SIMPLE_NATIVE_RUNTIME_BUNDLE="${SIMPLE_NATIVE_RUNTIME_BUNDLE:-rust-hosted}"
+SIMPLE_ALLOW_INTERPRETER_FALLBACK="${SIMPLE_ALLOW_INTERPRETER_FALLBACK:-0}"
 SIMPLE_LLVM_PROBE="${SIMPLE_LLVM_PROBE:-1}"
 SIMPLE_DISASM_PROBE="${SIMPLE_DISASM_PROBE:-1}"
 
@@ -62,6 +64,7 @@ echo "=================================================================="
 echo "  Port Algorithm C/Rust/Simple Benchmark"
 echo "=================================================================="
 echo "Simple: $SIMPLE_BIN"
+echo "Runtime bundle: $SIMPLE_NATIVE_RUNTIME_BUNDLE"
 if [[ -n "$SIMPLE_NATIVE_BACKEND" ]]; then
     echo "Backend: $SIMPLE_NATIVE_BACKEND"
 fi
@@ -89,10 +92,14 @@ if [[ -n "$SIMPLE_NATIVE_BACKEND" ]]; then
     simple_compile_args+=(--backend="$SIMPLE_NATIVE_BACKEND")
 fi
 simple_compile_args+=(-o "$BUILD_DIR/port_algorithms_simple")
-if "$SIMPLE_BIN" "${simple_compile_args[@]}" >/tmp/port_algorithms_simple_compile.log 2>&1; then
+if SIMPLE_NATIVE_RUNTIME_BUNDLE="$SIMPLE_NATIVE_RUNTIME_BUNDLE" "$SIMPLE_BIN" "${simple_compile_args[@]}" >/tmp/port_algorithms_simple_compile.log 2>&1; then
     "$BUILD_DIR/port_algorithms_simple" | tee "$BUILD_DIR/simple.out"
 else
-    echo "[algbench-note] simple_native_compile=failed fallback=interpreter log=/tmp/port_algorithms_simple_compile.log"
+    echo "[algbench-note] simple_native_compile=failed log=/tmp/port_algorithms_simple_compile.log"
+    if [[ "$SIMPLE_ALLOW_INTERPRETER_FALLBACK" != "1" ]]; then
+        sed -n '1,20p' /tmp/port_algorithms_simple_compile.log
+        exit 1
+    fi
     SIMPLE_LIB="$ROOT/src" "$SIMPLE_BIN" run "$BENCH_DIR/port_algorithms_simple.spl" | tee "$BUILD_DIR/simple.out"
 fi
 
@@ -100,7 +107,7 @@ if [[ "$SIMPLE_LLVM_PROBE" == "1" && "$SIMPLE_NATIVE_BACKEND" != "llvm" ]]; then
     echo "--- Simple LLVM probe ---"
     llvm_compile_log="$BUILD_DIR/simple_llvm_compile.log"
     llvm_compile_args=(compile "$BENCH_DIR/port_algorithms_simple.spl" --native --cpu native --opt-level aggressive --backend=llvm -o "$BUILD_DIR/port_algorithms_simple_llvm")
-    if "$SIMPLE_BIN" "${llvm_compile_args[@]}" >"$llvm_compile_log" 2>&1; then
+    if SIMPLE_NATIVE_RUNTIME_BUNDLE="$SIMPLE_NATIVE_RUNTIME_BUNDLE" "$SIMPLE_BIN" "${llvm_compile_args[@]}" >"$llvm_compile_log" 2>&1; then
         "$BUILD_DIR/port_algorithms_simple_llvm" | tee "$BUILD_DIR/simple_llvm.out"
     else
         echo "[algbench-note] simple_llvm_compile=failed log=$llvm_compile_log"
