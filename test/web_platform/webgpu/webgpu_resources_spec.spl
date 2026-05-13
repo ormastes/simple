@@ -8,6 +8,7 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_USAGE_COPY_DST,
     WEBGPU_SHADER_STAGE_VERTEX, WEBGPU_SHADER_STAGE_FRAGMENT,
     WEBGPU_BINDING_TYPE_READONLY_STORAGE_BUFFER, WEBGPU_BINDING_TYPE_STORAGE_TEXTURE,
+    WEBGPU_BINDING_TYPE_NON_FILTERING_SAMPLER, WEBGPU_BINDING_TYPE_COMPARISON_SAMPLER,
     WEBGPU_TEXTURE_DIMENSION_2D, WEBGPU_TEXTURE_DIMENSION_3D, WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE,
     GPUBindGroupLayoutEntry, GPUBindGroupEntry,
     webgpu_validate_buffer_descriptor, webgpu_validate_texture_descriptor,
@@ -238,6 +239,14 @@ describe "Browser WebGPU resources":
             expect(readonly.binding_type).to_equal(WEBGPU_BINDING_TYPE_READONLY_STORAGE_BUFFER)
             expect(storage_texture.binding_type).to_equal(WEBGPU_BINDING_TYPE_STORAGE_TEXTURE)
 
+        it "creates sampler layout entries for filtering non-filtering and comparison samplers":
+            val filtering = GPUBindGroupLayoutEntry.sampler(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            val nearest = GPUBindGroupLayoutEntry.non_filtering_sampler(1, WEBGPU_SHADER_STAGE_FRAGMENT)
+            val comparison = GPUBindGroupLayoutEntry.comparison_sampler(2, WEBGPU_SHADER_STAGE_FRAGMENT)
+            expect(filtering.binding_type).to_equal(6)
+            expect(nearest.binding_type).to_equal(WEBGPU_BINDING_TYPE_NON_FILTERING_SAMPLER)
+            expect(comparison.binding_type).to_equal(WEBGPU_BINDING_TYPE_COMPARISON_SAMPLER)
+
         it "accepts dynamic offsets only for buffer layout bindings":
             val ok = webgpu_validate_bind_group_layout_descriptor([
                 GPUBindGroupLayoutEntry.dynamic_buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
@@ -311,3 +320,30 @@ describe "Browser WebGPU resources":
             ])
             expect(bind_group.valid).to_equal(false)
             expect(bind_group.error).to_equal("GPUBindGroup texture view resource does not exist")
+
+        it "validates sampler bindings against filtering comparison and non-filtering layout types":
+            var resources = WebGPUResourceTable.create()
+            val filtering = resources.create_sampler_with_descriptor("linear", "repeat", "repeat", "repeat", "linear", "linear", "linear", 0.0, 32.0, "", 1)
+            val nearest = resources.create_sampler_with_descriptor("nearest", "repeat", "repeat", "repeat", "nearest", "nearest", "nearest", 0.0, 32.0, "", 1)
+            val comparison = resources.create_sampler_with_descriptor("shadow", "clamp-to-edge", "clamp-to-edge", "clamp-to-edge", "linear", "linear", "linear", 0.0, 32.0, "less-equal", 1)
+            val filtering_layout = resources.create_bind_group_layout("filtering", [
+                GPUBindGroupLayoutEntry.sampler(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val nearest_layout = resources.create_bind_group_layout("nearest", [
+                GPUBindGroupLayoutEntry.non_filtering_sampler(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val comparison_layout = resources.create_bind_group_layout("comparison", [
+                GPUBindGroupLayoutEntry.comparison_sampler(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            expect(resources.create_bind_group("filtering-ok", filtering_layout.id, [GPUBindGroupEntry.sampler(0, filtering.id)]).valid).to_equal(true)
+            expect(resources.create_bind_group("nearest-ok", nearest_layout.id, [GPUBindGroupEntry.sampler(0, nearest.id)]).valid).to_equal(true)
+            expect(resources.create_bind_group("comparison-ok", comparison_layout.id, [GPUBindGroupEntry.sampler(0, comparison.id)]).valid).to_equal(true)
+            val bad_comparison = resources.create_bind_group("comparison-bad", comparison_layout.id, [GPUBindGroupEntry.sampler(0, filtering.id)])
+            val bad_filtering = resources.create_bind_group("filtering-bad", filtering_layout.id, [GPUBindGroupEntry.sampler(0, comparison.id)])
+            val bad_nearest = resources.create_bind_group("nearest-bad", nearest_layout.id, [GPUBindGroupEntry.sampler(0, filtering.id)])
+            expect(bad_comparison.valid).to_equal(false)
+            expect(bad_comparison.error).to_equal("GPUBindGroup comparison sampler binding requires a compare sampler")
+            expect(bad_filtering.valid).to_equal(false)
+            expect(bad_filtering.error).to_equal("GPUBindGroup filtering sampler binding cannot reference a comparison sampler")
+            expect(bad_nearest.valid).to_equal(false)
+            expect(bad_nearest.error).to_equal("GPUBindGroup non-filtering sampler binding requires nearest filters")

@@ -44,6 +44,8 @@ pub val WEBGPU_BINDING_TYPE_READONLY_STORAGE_BUFFER: i32 = 3
 pub val WEBGPU_BINDING_TYPE_TEXTURE: i32 = 4
 pub val WEBGPU_BINDING_TYPE_STORAGE_TEXTURE: i32 = 5
 pub val WEBGPU_BINDING_TYPE_SAMPLER: i32 = 6
+pub val WEBGPU_BINDING_TYPE_NON_FILTERING_SAMPLER: i32 = 7
+pub val WEBGPU_BINDING_TYPE_COMPARISON_SAMPLER: i32 = 8
 
 pub class GPUBufferHandle:
     id: i32
@@ -125,6 +127,12 @@ pub class GPUBindGroupLayoutEntry:
 
     static fn sampler(binding: i32, visibility: i32) -> GPUBindGroupLayoutEntry:
         GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_SAMPLER, has_dynamic_offset: false)
+
+    static fn non_filtering_sampler(binding: i32, visibility: i32) -> GPUBindGroupLayoutEntry:
+        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_NON_FILTERING_SAMPLER, has_dynamic_offset: false)
+
+    static fn comparison_sampler(binding: i32, visibility: i32) -> GPUBindGroupLayoutEntry:
+        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_COMPARISON_SAMPLER, has_dynamic_offset: false)
 
 pub class GPUBindGroupEntry:
     binding: i32
@@ -330,13 +338,16 @@ pub class WebGPUResourceTable:
         false
 
     fn has_sampler(sampler_id: i32) -> bool:
+        self.find_sampler(sampler_id).valid
+
+    fn find_sampler(sampler_id: i32) -> GPUSamplerHandle:
         var i = 0
         while i < self.samplers.len():
             val sampler = self.samplers[i]
             if sampler.id == sampler_id and sampler.valid:
-                return true
+                return sampler
             i = i + 1
-        false
+        GPUSamplerHandle(id: -1, label: "", address_mode_u: "", address_mode_v: "", address_mode_w: "", mag_filter: "", min_filter: "", mipmap_filter: "", lod_min_clamp: 0.0, lod_max_clamp: 0.0, compare: "", max_anisotropy: 1, valid: false, error: "GPUSampler does not exist")
 
     fn validate_bind_group_entries(layout: GPUBindGroupLayoutHandle, entries: [GPUBindGroupEntry]) -> text:
         var j = 0
@@ -384,11 +395,15 @@ pub class WebGPUResourceTable:
                     return "GPUBindGroup texture resource does not exist"
                 return ""
             return "GPUBindGroup texture binding must reference a texture"
-        if layout_entry.binding_type == WEBGPU_BINDING_TYPE_SAMPLER:
+        if webgpu_is_sampler_binding_type(layout_entry.binding_type):
             if entry.sampler_id < 0 or entry.buffer_id >= 0 or entry.texture_id >= 0 or entry.texture_view_id >= 0:
                 return "GPUBindGroup sampler binding must reference a sampler"
-            if not self.has_sampler(entry.sampler_id):
+            val sampler = self.find_sampler(entry.sampler_id)
+            if not sampler.valid:
                 return "GPUBindGroup sampler resource does not exist"
+            val sampler_err = webgpu_validate_sampler_binding_compatibility(layout_entry.binding_type, sampler)
+            if sampler_err != "":
+                return sampler_err
             return ""
         "GPUBindGroup layout binding type is not supported"
 
@@ -603,12 +618,29 @@ pub fn webgpu_is_supported_binding_type(binding_type: i32) -> bool:
         binding_type == WEBGPU_BINDING_TYPE_READONLY_STORAGE_BUFFER or
         binding_type == WEBGPU_BINDING_TYPE_TEXTURE or
         binding_type == WEBGPU_BINDING_TYPE_STORAGE_TEXTURE or
-        binding_type == WEBGPU_BINDING_TYPE_SAMPLER
+        webgpu_is_sampler_binding_type(binding_type)
 
 pub fn webgpu_is_buffer_binding_type(binding_type: i32) -> bool:
     binding_type == WEBGPU_BINDING_TYPE_UNIFORM_BUFFER or
         binding_type == WEBGPU_BINDING_TYPE_STORAGE_BUFFER or
         binding_type == WEBGPU_BINDING_TYPE_READONLY_STORAGE_BUFFER
+
+pub fn webgpu_is_sampler_binding_type(binding_type: i32) -> bool:
+    binding_type == WEBGPU_BINDING_TYPE_SAMPLER or
+        binding_type == WEBGPU_BINDING_TYPE_NON_FILTERING_SAMPLER or
+        binding_type == WEBGPU_BINDING_TYPE_COMPARISON_SAMPLER
+
+pub fn webgpu_validate_sampler_binding_compatibility(binding_type: i32, sampler: GPUSamplerHandle) -> text:
+    if binding_type == WEBGPU_BINDING_TYPE_COMPARISON_SAMPLER:
+        if sampler.compare == "":
+            return "GPUBindGroup comparison sampler binding requires a compare sampler"
+        return ""
+    if sampler.compare != "":
+        return "GPUBindGroup filtering sampler binding cannot reference a comparison sampler"
+    if binding_type == WEBGPU_BINDING_TYPE_NON_FILTERING_SAMPLER:
+        if sampler.mag_filter != "nearest" or sampler.min_filter != "nearest" or sampler.mipmap_filter != "nearest":
+            return "GPUBindGroup non-filtering sampler binding requires nearest filters"
+    ""
 
 pub fn webgpu_layout_binding_seen(entries: [GPUBindGroupLayoutEntry], binding: i32, before_index: i32) -> bool:
     var i = 0
