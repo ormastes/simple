@@ -3,6 +3,41 @@
 **Date:** 2026-05-12
 **Baseline:** V3 M1–M12 landed (2026-04-14), 132/132 pixel-parity corpus, Acid2 pass, 30/30 design effects. M18 pseudo-elements/text-overflow slice is complete, but the full Chrome-class browser program remains open.
 
+## Restart Goal — New Session Entry Point
+
+**Goal:** continue the Chrome-class Simple Browser program from the current CSS fallback/browser-engine slice, then land a clean linear `main` only after verification.
+
+**Current completed slice:**
+- Fallback CSS shadows and gradients are implemented in the canonical fallback renderer.
+- Simple fallback transforms are implemented for `translate()`, `translateX()`, and `translateY()`.
+- Integer percentage translate offsets are supported relative to the element box.
+- Glass feature-gap reporting keeps unsupported transform forms visible while suppressing only the supported simple translate forms.
+- Covered files: `html_fallback_renderer.spl`, `glass_comparison_runner.spl`, `dom_color_named.spl`, and CSS WPT-style specs for transforms, glass gaps, box shadows, and background gradients.
+
+**Latest validation evidence:**
+- `bin/simple check` passed for the browser fallback source/spec slice.
+- `git diff --check` passed for the same slice.
+- `transforms_wpt_spec.spl` passed: 11 examples, 0 failures.
+- `glass_feature_gap_spec.spl` passed: 9 examples, 0 failures.
+- `box_shadow_wpt_spec.spl` passed: 10 examples, 0 failures.
+- `background_gradient_wpt_spec.spl` passed: 2 examples, 0 failures.
+
+**Current VCS state to re-check first:**
+- `main` was still at `uzq 9e2e Document remaining optimization lanes` when this note was written.
+- Browser stack seen after rebase: `qsym 15e Render fallback CSS shadows and gradients`, `rpn 0f25 Apply simple fallback translate transforms`, `vnn e9a Resolve fallback percentage translate offsets`.
+- `vnn e9a` had become empty after resolving the rebase; verify whether it should be abandoned or retained as a no-op decision record before moving `main`.
+- Working copy was clean, but the active parent had moved to unrelated DAP/editor work (`tukt 33c Add DAP protocol smoke entrypoint`). Do not include unrelated DAP/editor/FPGA/baremetal changes in browser commits.
+
+**Next session stop condition:**
+1. Inspect `jj log -r 'main|qsym|rpn|vnn|@'` and `jj status`.
+2. Ensure the browser stack is based on current `main`, with no conflicts and no unrelated files.
+3. Re-run the latest validation evidence above.
+4. Move `main` only to the verified browser stack tip.
+5. Run file-count guard before/after fetch/rebase.
+6. Push `main`; if GitHub auth blocks push, report the auth failure and leave the verified local state intact.
+
+**Remaining product goal after this slice:** continue milestones below. This slice does not finish Chrome-level browser parity; WebGL/WebGPU, Canvas 2D, JavaScript/DOM/event loop, networking, browser UI, process isolation, storage, media, DevTools, accessibility, and broad WPT/Test262 coverage remain open.
+
 ## 0. Product Target
 
 Build a Simple Browser that is production-ready for modern websites, not just a static HTML renderer.
