@@ -509,6 +509,11 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
     Ok(true)
 }
 
+fn multiply_by_15(builder: &mut FunctionBuilder, value: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+    let times_16 = builder.ins().ishl_imm(value, 4);
+    builder.ins().isub(times_16, value)
+}
+
 fn compile_inline_adler_reduce<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -526,11 +531,11 @@ fn compile_inline_adler_reduce<M: Module>(
     let low_mask = builder.ins().iconst(types::I64, 0xFFFF);
     let low = builder.ins().band(value, low_mask);
     let high = builder.ins().ushr_imm(value, 16);
-    let high_times_15 = builder.ins().imul_imm(high, 15);
+    let high_times_15 = multiply_by_15(builder, high);
     let reduced = builder.ins().iadd(low, high_times_15);
     let low = builder.ins().band(reduced, low_mask);
     let high = builder.ins().ushr_imm(reduced, 16);
-    let high_times_15 = builder.ins().imul_imm(high, 15);
+    let high_times_15 = multiply_by_15(builder, high);
     let reduced = builder.ins().iadd(low, high_times_15);
     let subtract_modulus = builder
         .ins()

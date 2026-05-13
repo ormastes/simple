@@ -3,6 +3,12 @@
  ## Status: 2026-05-13 CURRENT
  
  Goal: extend the existing C/Rust/Simple algorithm parity workflow from XXHash64 and ChaCha20 to the full in-repo cipher, crypto, and compression surface. The gate should prove correctness first, then performance where an apples-to-apples reference exists.
+
+Performance comparison rule: every cipher, checksum, hash, KDF, public-key, and
+compression row must eventually report `Simple/C` and `Simple/Rust` ratios.
+Values above `1.00x` mean Simple is faster than that baseline. Rows without a
+C/Rust/Simple parity benchmark stay `TBD, target >1.00x`; they do not count as
+complete or faster-than-baseline evidence.
  
  ## Scope
  
@@ -109,7 +115,19 @@ classification path are in place, and known blockers can be skipped explicitly:
  - Correctness parity passes before any speed number counts.
  - C, Rust, Simple default, and Simple LLVM rows exist for each benchmarked algorithm.
  - New algorithms use dependency-free C/Rust references first. External OpenSSL/zlib/libzstd comparisons are optional separate lanes.
- - Simple default and Simple LLVM each reach at least 70% of Rust and 50% of C throughput, or the delta maps to a concrete codegen/runtime issue.
+ - Simple default and Simple LLVM each exceed both portable C and portable Rust throughput (`Simple/C > 1.00x` and `Simple/Rust > 1.00x`) before an algorithm is marked complete for the optimization-plugin goal. Interim engineering gates may still record 70% Rust / 50% C progress, but those rows remain incomplete until they are faster than both baselines.
+
+Latest measured median ratios from the source-built 2026-05-13 Cranelift sample:
+MB/s columns are independent per-implementation medians. `Simple/C` and
+`Simple/Rust` are medians of the per-run ratio output, so they may differ from a
+direct division of the median MB/s columns on noisy samples.
+
+| Family | Algorithm | C median MB/s | Rust median MB/s | Simple median MB/s | Simple/C | Simple/Rust | Status |
+|--------|-----------|---------------|------------------|--------------------|----------|-------------|--------|
+| Non-crypto hash | XXHash64 | 8594 | 7884 | 8594 | 0.93x | 1.04x | Faster than Rust, still below C |
+| Checksum | CRC32 | 311 | 337 | 280 | 0.83x | 0.85x | Below C/Rust |
+| Checksum | Adler-32 | 2532 | 2610 | 2329 | 0.93x | 0.90x | Below C/Rust after reducer lowering |
+| Stream cipher | ChaCha20 | 314 | 347 | 364 | 1.15x | 1.05x | Faster than C/Rust |
  
  ## First Expansion Order
  
