@@ -506,6 +506,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL shader/program lifecycle script bridge has started: canvas wrappers and JS lowering now expose shader/program info logs, validation, detach, attached shader queries, delete operations, and `DELETE_STATUS`.
 - M27 WebGL shader precision/reflection script bridge has started: canvas wrappers and JS lowering now expose `getShaderPrecisionFormat` plus shader/program reflection constants for shader type, info-log length, attached shaders, active uniforms/attributes, current program, precision classes, vector/matrix, and sampler types.
 - M27 WebGL fixed-function state script bridge has started: canvas wrappers and JS lowering now expose depth, stencil, blend, scissor, color/depth/stencil masks, and separate blend/stencil controls backed by `getParameter` round trips.
+- M27 WebGL texture mutation script bridge has started: canvas wrappers and JS lowering now expose `getTexParameter`, `texSubImage2D`, and `generateMipmap` so script textures can query parameters, update regions, and mark mipmap generation.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
