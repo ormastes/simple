@@ -8,6 +8,7 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_INFO_LOG_LENGTH, WEBGL_ATTACHED_SHADERS, WEBGL_ACTIVE_UNIFORMS,
     WEBGL_ACTIVE_ATTRIBUTES, WEBGL_CURRENT_PROGRAM, WEBGL_SHADER_TYPE,
     WEBGL_FLOAT_VEC2, WEBGL_FLOAT_VEC3, WEBGL_FLOAT_VEC4,
+    WEBGL_INT, WEBGL_INT_VEC2, WEBGL_INT_VEC3, WEBGL_INT_VEC4,
     WEBGL_LOW_FLOAT, WEBGL_MEDIUM_FLOAT, WEBGL_HIGH_FLOAT,
     WEBGL_LOW_INT, WEBGL_MEDIUM_INT, WEBGL_HIGH_INT,
     WEBGL_FLOAT_MAT4, WEBGL_SAMPLER_2D, WEBGL_FLOAT, WEBGL_BYTE, WEBGL_SHORT,
@@ -95,7 +96,9 @@ use std.gc_async_mut.gpu.browser_engine.webgl_render_commands.{
     WEBGL_RENDER_COMMAND_STENCIL_MASK,
     WEBGL_RENDER_COMMAND_STENCIL_MASK_SEPARATE,
     WEBGL_RENDER_COMMAND_USE_PROGRAM,
-    WEBGL_RENDER_COMMAND_UNIFORM_1I, WEBGL_RENDER_COMMAND_UNIFORM_1F,
+    WEBGL_RENDER_COMMAND_UNIFORM_1I, WEBGL_RENDER_COMMAND_UNIFORM_2I,
+    WEBGL_RENDER_COMMAND_UNIFORM_3I, WEBGL_RENDER_COMMAND_UNIFORM_4I,
+    WEBGL_RENDER_COMMAND_UNIFORM_1F,
     WEBGL_RENDER_COMMAND_UNIFORM_2F, WEBGL_RENDER_COMMAND_UNIFORM_3F,
     WEBGL_RENDER_COMMAND_UNIFORM_4F, WEBGL_RENDER_COMMAND_UNIFORM_1FV,
     WEBGL_RENDER_COMMAND_UNIFORM_2FV, WEBGL_RENDER_COMMAND_UNIFORM_3FV,
@@ -170,6 +173,21 @@ fn _vector_uniform_program_context() -> std.gc_async_mut.gpu.browser_engine.webg
     val fs = ctx.create_shader(WEBGL_FRAGMENT_SHADER)
     ctx.shader_source(vs.id, "attribute vec4 position; uniform vec2 uvScale; uniform vec3 normalBias; void main() { gl_Position = position; }")
     ctx.shader_source(fs.id, "uniform vec4 tint; void main() { gl_FragColor = tint; }")
+    ctx.compile_shader(vs.id)
+    ctx.compile_shader(fs.id)
+    val program = ctx.create_program()
+    ctx.attach_shader(program.id, vs.id)
+    ctx.attach_shader(program.id, fs.id)
+    ctx.link_program(program.id)
+    ctx.use_program(program.id)
+    ctx
+
+fn _integer_uniform_program_context() -> std.gc_async_mut.gpu.browser_engine.webgl_context.WebGLContext:
+    var ctx = webgl_create_context(1, 320, 240)
+    val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+    val fs = ctx.create_shader(WEBGL_FRAGMENT_SHADER)
+    ctx.shader_source(vs.id, "attribute vec4 position; uniform int layer; uniform ivec2 flags; uniform ivec3 range; void main() { gl_Position = position; }")
+    ctx.shader_source(fs.id, "uniform ivec4 mask; void main() { gl_FragColor = vec4(1.0); }")
     ctx.compile_shader(vs.id)
     ctx.compile_shader(fs.id)
     val program = ctx.create_program()
@@ -1820,6 +1838,39 @@ describe "Browser WebGL context":
             expect(ctx.render_commands[2].x).to_equal(normal_bias)
             expect(ctx.render_commands[2].blue).to_equal(0.3)
             expect(ctx.uniform_2f(tint, 1.0, 1.0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+
+        it "stores integer uniform values by location":
+            var ctx = _integer_uniform_program_context()
+            val program = ctx.programs[0]
+            val layer = ctx.get_uniform_location(program.id, "layer")
+            val flags = ctx.get_uniform_location(program.id, "flags")
+            val range = ctx.get_uniform_location(program.id, "range")
+            val mask = ctx.get_uniform_location(program.id, "mask")
+            expect(ctx.get_active_uniform(program.id, 0).data_type).to_equal(WEBGL_INT)
+            expect(ctx.get_active_uniform(program.id, 1).data_type).to_equal(WEBGL_INT_VEC2)
+            expect(ctx.get_active_uniform(program.id, 2).data_type).to_equal(WEBGL_INT_VEC3)
+            expect(ctx.get_active_uniform(program.id, 3).data_type).to_equal(WEBGL_INT_VEC4)
+            expect(ctx.get_uniform(program.id, layer).int_value).to_equal(0)
+            expect(ctx.get_uniform(program.id, flags).int_values[1]).to_equal(0)
+            expect(ctx.uniform_1i(layer, 3)).to_equal(true)
+            expect(ctx.uniform_2i(flags, 4, 5)).to_equal(true)
+            expect(ctx.uniform_3i(range, 6, 7, 8)).to_equal(true)
+            expect(ctx.uniform_4i(mask, 9, 10, 11, 12)).to_equal(true)
+            expect(ctx.uniform_values.len()).to_equal(4)
+            expect(ctx.get_uniform(program.id, layer).int_value).to_equal(3)
+            expect(ctx.get_uniform(program.id, flags).int_values[1]).to_equal(5)
+            expect(ctx.get_uniform(program.id, range).int_values[2]).to_equal(8)
+            expect(ctx.get_uniform(program.id, mask).int_values[3]).to_equal(12)
+            expect(ctx.render_commands[1].kind).to_equal(WEBGL_RENDER_COMMAND_UNIFORM_1I)
+            expect(ctx.render_commands[1].mask).to_equal(3)
+            expect(ctx.render_commands[2].kind).to_equal(WEBGL_RENDER_COMMAND_UNIFORM_2I)
+            expect(ctx.render_commands[2].width).to_equal(5)
+            expect(ctx.render_commands[3].kind).to_equal(WEBGL_RENDER_COMMAND_UNIFORM_3I)
+            expect(ctx.render_commands[3].height).to_equal(8)
+            expect(ctx.render_commands[4].kind).to_equal(WEBGL_RENDER_COMMAND_UNIFORM_4I)
+            expect(ctx.render_commands[4].mask).to_equal(12)
+            expect(ctx.uniform_2i(layer, 1, 2)).to_equal(false)
             expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
 
         it "stores vector uniform array values by location":
