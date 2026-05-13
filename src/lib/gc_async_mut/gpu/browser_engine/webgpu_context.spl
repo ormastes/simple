@@ -393,6 +393,17 @@ pub class WebGPUContext:
         self.last_error = lost.message
         lost
 
+pub class WebGPUShaderDiagnostic:
+    """Structured WGSL diagnostic for DevTools/console surfaces."""
+    severity: text
+    line: i32
+    column: i32
+    stage: text
+    message: text
+
+    fn formatted() -> text:
+        self.severity + ": WGSL " + self.stage + " shader line " + self.line.to_text() + ":" + self.column.to_text() + ": " + self.message
+
 pub fn webgpu_create_context(secure_context: bool) -> WebGPUContext:
     WebGPUContext(
         secure_context: secure_context,
@@ -603,6 +614,30 @@ pub fn webgpu_create_shader_module(ctx: WebGPUContext, label: text, source: text
         ctx.last_error = err
     GPUShaderModule(id: id, label: label, source: source, valid: valid, stage: stage, error: err)
 
+pub fn webgpu_diagnose_wgsl(source: text) -> WebGPUShaderDiagnostic:
+    val stage = webgpu_detect_wgsl_stage(source)
+    val err = webgpu_validate_wgsl(source)
+    if err == "":
+        return WebGPUShaderDiagnostic(severity: "info", line: 1, column: 1, stage: webgpu_diagnostic_stage_label(stage), message: "WGSL shader module is valid")
+    WebGPUShaderDiagnostic(
+        severity: "error",
+        line: webgpu_wgsl_diagnostic_line(source, err),
+        column: webgpu_wgsl_diagnostic_column(source, err),
+        stage: webgpu_diagnostic_stage_label(stage),
+        message: err
+    )
+
+pub fn webgpu_shader_module_diagnostic(module: GPUShaderModule) -> WebGPUShaderDiagnostic:
+    if module.valid:
+        return WebGPUShaderDiagnostic(severity: "info", line: 1, column: 1, stage: webgpu_diagnostic_stage_label(module.stage), message: "WGSL shader module is valid")
+    WebGPUShaderDiagnostic(
+        severity: "error",
+        line: webgpu_wgsl_diagnostic_line(module.source, module.error),
+        column: webgpu_wgsl_diagnostic_column(module.source, module.error),
+        stage: webgpu_diagnostic_stage_label(module.stage),
+        message: module.error
+    )
+
 pub fn webgpu_create_render_pipeline(ctx: WebGPUContext, vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
     if ctx.device_lost:
         ctx.last_error = "device is lost"
@@ -672,6 +707,64 @@ pub fn webgpu_validate_wgsl_stage_interface(source: text, stage: text) -> text:
         if workgroup_err != "":
             return workgroup_err
     ""
+
+pub fn webgpu_diagnostic_stage_label(stage: text) -> text:
+    if stage == "":
+        return "unknown"
+    stage
+
+pub fn webgpu_wgsl_diagnostic_line(source: text, err: text) -> i32:
+    val marker = webgpu_wgsl_diagnostic_marker(err)
+    if marker == "":
+        return 1
+    webgpu_find_source_line(source, marker)
+
+pub fn webgpu_wgsl_diagnostic_column(source: text, err: text) -> i32:
+    val marker = webgpu_wgsl_diagnostic_marker(err)
+    if marker == "":
+        return 1
+    webgpu_find_source_column(source, marker)
+
+fn webgpu_wgsl_diagnostic_marker(err: text) -> text:
+    if err.contains("GLSL"):
+        return "#version"
+    if err.contains("must contain a function"):
+        return "fn "
+    if err.contains("declare @vertex"):
+        return "@"
+    if err.contains("vertex stage"):
+        return "@vertex"
+    if err.contains("fragment stage"):
+        return "@fragment"
+    if err.contains("compute stage"):
+        return "@compute"
+    ""
+
+fn webgpu_find_source_line(source: text, marker: text) -> i32:
+    val idx = source.index_of(marker)
+    if idx < 0:
+        return 1
+    var line = 1
+    var i = 0
+    while i < idx:
+        if source.slice(i, i + 1) == "\n":
+            line = line + 1
+        i = i + 1
+    line
+
+fn webgpu_find_source_column(source: text, marker: text) -> i32:
+    val idx = source.index_of(marker)
+    if idx < 0:
+        return 1
+    var column = 1
+    var i = 0
+    while i < idx:
+        if source.slice(i, i + 1) == "\n":
+            column = 1
+        else:
+            column = column + 1
+        i = i + 1
+    column
 
 pub fn webgpu_validate_wgsl_workgroup_size(source: text) -> text:
     val marker = "@workgroup_size("
