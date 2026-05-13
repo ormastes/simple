@@ -34,6 +34,23 @@ fn pattern_idiom_stats_zero() -> PatternIdiomStats:
 fn pattern_idiom_stats_with_remark() -> PatternIdiomStats:
     PatternIdiomStats(0, 0, 0, 0, true)
 
+fn x86_caps_supports_any_pattern_idiom(caps: X86Caps) -> bool:
+    caps.has_aes or caps.has_sha_ni or caps.has_sse42 or caps.has_popcnt or
+        caps.has_pclmul or caps.has_avx2 or caps.has_avx512 or caps.has_bmi1
+
+fn caps_kind_supports_any_pattern_idiom(caps_kind: TargetCapsKind) -> bool:
+    match caps_kind:
+        case None_:
+            false
+        case X86(caps):
+            x86_caps_supports_any_pattern_idiom(caps)
+        case Aarch64(caps):
+            caps.has_aes or caps.has_sha2 or caps.has_pmull or caps.has_crc32 or
+                caps.has_neon or caps.has_sve2 or caps.has_sha512
+        case Rv64(caps):
+            caps.has_zvkned or caps.has_zvknh or caps.has_zvkg or caps.has_zbb or
+                caps.has_zbkb or caps.has_zvknhb or caps.has_v
+
 # ============================================================================
 # Intrinsic name -> TargetIdiom mapping
 # ============================================================================
@@ -191,6 +208,8 @@ The dispatcher in mod.spl invokes run_pattern_idiom_pass (the no-caps
 wrapper below) under the "vectorization" pass name.
 """
 fn run_pattern_idiom_pass_x86(module: MirModule, caps: X86Caps, cipher_remark: bool) -> MirModule:
+    if not cipher_remark and not x86_caps_supports_any_pattern_idiom(caps):
+        return module
     var stats = pattern_idiom_stats_zero()
     stats.cipher_remark = cipher_remark
     var result = module
@@ -294,6 +313,8 @@ fn rewrite_block_generic(block: MirBlock, caps_kind: TargetCapsKind, stats: Patt
     )
 
 fn run_pattern_idiom_pass_generic(module: MirModule, caps_kind: TargetCapsKind, cipher_remark: bool) -> MirModule:
+    if not cipher_remark and not caps_kind_supports_any_pattern_idiom(caps_kind):
+        return module
     var stats = pattern_idiom_stats_zero()
     stats.cipher_remark = cipher_remark
     var result = module
