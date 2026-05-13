@@ -274,8 +274,12 @@ impl StrengthReduction:
 
         x * 3  → tmp = x << 1; dest = tmp + x
         x * 5  → tmp = x << 2; dest = tmp + x
+        x * 6  → tmp1 = x << 2; tmp2 = x << 1; dest = tmp1 + tmp2
         x * 7  → tmp = x << 3; dest = tmp - x
         x * 9  → tmp = x << 3; dest = tmp + x
+        x * 10 → tmp1 = x << 3; tmp2 = x << 1; dest = tmp1 + tmp2
+        x * 12 → tmp1 = x << 3; tmp2 = x << 2; dest = tmp1 + tmp2
+        x * 14 → tmp1 = x << 4; tmp2 = x << 1; dest = tmp1 - tmp2
         x * 15 → tmp = x << 4; dest = tmp - x
         """
         match op:
@@ -295,6 +299,10 @@ impl StrengthReduction:
             return []
 
         val c = const_val.unwrap()
+
+        val two_shift = self.try_decompose_two_shift_mul(dest, c, variable_operand, span)
+        if two_shift.len() > 0:
+            return two_shift
 
         # Map: constant → (shift_amount, add_or_sub)
         # x * 3  = (x << 1) + x  → shift=1, add
@@ -346,6 +354,63 @@ impl StrengthReduction:
         )
 
         [shift_inst, combine_inst]
+
+    me try_decompose_two_shift_mul(dest: LocalId, c: i64, operand: MirOperand, span: Span) -> [MirInst]:
+        """
+        Decompose small constants that need two shifted terms.
+
+        These patterns are common in checksum and byte-reduction loops where
+        weights such as 6, 10, 12, and 14 appear after unrolling.
+        """
+        var high_shift = 0
+        var low_shift = 0
+        var use_sub = false
+        var matched = false
+
+        if c == 6:
+            high_shift = 2
+            low_shift = 1
+            matched = true
+        elif c == 10:
+            high_shift = 3
+            low_shift = 1
+            matched = true
+        elif c == 12:
+            high_shift = 3
+            low_shift = 2
+            matched = true
+        elif c == 14:
+            high_shift = 4
+            low_shift = 1
+            use_sub = true
+            matched = true
+
+        if not matched:
+            return []
+
+        val high_tmp = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+        val low_tmp = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+
+        val high_inst = MirInst(
+            kind: MirInstKind.BinOp(high_tmp, MirBinOp.Shl, operand, mir_operand_const_int(high_shift)),
+            span: span
+        )
+        val low_inst = MirInst(
+            kind: MirInstKind.BinOp(low_tmp, MirBinOp.Shl, operand, mir_operand_const_int(low_shift)),
+            span: span
+        )
+
+        val high_operand = MirOperand(kind: MirOperandKind.Copy(high_tmp))
+        val low_operand = MirOperand(kind: MirOperandKind.Copy(low_tmp))
+        val combine_op = if use_sub: MirBinOp.Sub else: MirBinOp.Add
+        val combine_inst = MirInst(
+            kind: MirInstKind.BinOp(dest, combine_op, high_operand, low_operand),
+            span: span
+        )
+
+        [high_inst, low_inst, combine_inst]
 
     fn operand_const_int_value(op: MirOperand) -> i64?:
         """Extract constant integer value from operand."""

@@ -108,6 +108,33 @@ Acceptance target:
 - `test/perf/run_comparison.shs` must continue showing self-hosted Simple no slower than the Rust bootstrap.
 - For XXHash64, CRC32, Adler-32, and ChaCha20, pure Simple native should reach at least 70% of portable Rust throughput and 50% of portable C throughput. If not met, the remaining delta must be tied to a specific, verified IR/ASM difference and a named follow-up task above.
 
+### 2026-05-13 C/Rust baseline speed comparison matrix
+
+This table is the current comparison ledger for the cipher/compression-style
+algorithms with C/Rust/Simple parity data in `test/perf/port_algorithms`.
+Ratios are `Simple MB/s / baseline MB/s`; values above `1.00x` are faster than
+the baseline. Add new algorithms here only after checksum parity passes.
+
+| Family | Algorithm | C MB/s | Rust MB/s | Simple Cranelift MB/s | Simple LLVM MB/s | Simple vs C | Simple vs Rust | LLVM vs C | LLVM vs Rust | Parity | Status |
+|--------|-----------|--------|-----------|-----------------------|------------------|-------------|----------------|-----------|--------------|--------|--------|
+| Hash | XXHash64 | 8269 | 8295 | 14093 | 8388 | 1.70x | 1.70x | 1.01x | 1.01x | PASS | Cranelift and LLVM meet threshold |
+| Checksum | CRC32 | 283 | 278 | 412 | 292 | 1.46x | 1.48x | 1.03x | 1.05x | PASS | Pure Simple byte-table path meets threshold |
+| Checksum | Adler-32 | 2599 | 2524 | 1896 | not sampled | 0.73x | 0.75x | n/a | n/a | PASS | Meets threshold; needs MIR generalization |
+| Cipher | ChaCha20 | 319 | 286 | 363 | 363 | 1.14x | 1.27x | 1.14x | 1.27x | PASS | Cranelift and LLVM meet threshold |
+
+Next active gap:
+- Adler-32 is the first measured algorithm that is still slower than both C and Rust in the comparison ledger. The first compiler-side generalization is now the `simple.opt.math.strength_reduce` provider's two-shift small-multiply decomposition for constants such as 6, 10, 12, and 14. This targets checksum/compression byte-reduction weights without editing Adler-specific source.
+
+Coverage backlog for "all cipher/compression algorithms":
+
+| Family | Algorithms | Current comparison state | Required next step |
+|--------|------------|--------------------------|--------------------|
+| AEAD/block cipher | AES-GCM, AES-CCM, AES-XTS, OCB3, AES-GCM-SIV, ARIA, Camellia, Serpent, Twofish, SM4, SEED, TEA | Unit/security implementations exist, but no C/Rust/Simple MB/s parity table in this plan | Add dependency-free C/Rust reference harness plus checksum/tag parity gate |
+| Stream cipher | Salsa20, XSalsa20, RC4, ZUC, SNOW3G | Not in the current C/Rust/Simple speed ledger | Add per-byte throughput benchmark and keystream/ciphertext parity vectors |
+| Hash/compression core | SHA-224/256/384/512, BLAKE2b/s, BLAKE3, RIPEMD160, Tiger, Streebog, Whirlpool, SM3 | Not in the current C/Rust/Simple speed ledger | Add block-compression or one-shot digest parity harness with MB/s ratios |
+| Compression codec | Deflate, LZ4, Zstd, Huffman/LZ77 overlap-copy paths | Phase 5 optimized selected internals, but no current C/Rust/Simple table here | Add corpus-based encode/decode benchmarks with byte-for-byte output checks |
+| Password/KDF/PQC | Argon2, bcrypt, scrypt, PBKDF2, ML-KEM, ML-DSA, SLH-DSA | Correctness/security oriented; throughput units differ from MB/s stream algorithms | Add operation/sec tables, not MB/s, after deterministic vectors pass |
+
 ### 2026-05-13 pure Simple Adler-32 optimization-layer update
 
 Commands:
