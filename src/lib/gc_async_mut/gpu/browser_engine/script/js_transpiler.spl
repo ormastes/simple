@@ -940,6 +940,8 @@ fn _convert_webgpu_calls(line: text) -> text:
     result = result.replace("navigator.gpu.preferredCanvasFormat", "navigator_gpu_preferred_canvas_format(nav)")
     result = result.replace(".requestDevice(", ".request_device(")
     result = result.replace(".createShaderModule(", ".create_shader_module(")
+    result = _convert_webgpu_auto_render_pipeline_descriptor(result)
+    result = result.replace(".createRenderPipelineAutoLayout(", ".create_render_pipeline_auto_layout(")
     result = result.replace(".createRenderPipeline(", ".create_render_pipeline(")
     result = result.replace(".createComputePipeline(", ".create_compute_pipeline(")
     result = result.replace(".createCommandEncoder(", ".create_command_encoder(")
@@ -961,6 +963,49 @@ fn _convert_webgpu_calls(line: text) -> text:
     result = result.replace(".copyBufferToBuffer(", ".copy_buffer_to_buffer(")
     result = result.replace(".copyTextureToTexture(", ".copy_texture_to_texture(")
     result
+
+fn _convert_webgpu_auto_render_pipeline_descriptor(line: text) -> text:
+    val marker = ".createRenderPipeline({"
+    val marker_idx = line.index_of(marker)
+    if marker_idx < 0:
+        return line
+    if not (line.contains("layout: \"auto\"") or line.contains("layout:'auto'") or line.contains("layout: 'auto'")):
+        return line
+    val descriptor_start = marker_idx + marker.len()
+    val after_descriptor_start = line.slice(descriptor_start, line.len())
+    val descriptor_end_rel = after_descriptor_start.index_of("})")
+    if descriptor_end_rel < 0:
+        return line
+    val descriptor_end = descriptor_start + descriptor_end_rel
+    val descriptor = line.slice(descriptor_start, descriptor_end)
+    val vertex = _webgpu_descriptor_module_value(descriptor, "vertex")
+    val fragment = _webgpu_descriptor_module_value(descriptor, "fragment")
+    if vertex == "" or fragment == "":
+        return line
+    val prefix = line.slice(0, marker_idx)
+    val suffix = line.slice(descriptor_end + 2, line.len())
+    prefix + ".create_render_pipeline_auto_layout(" + vertex + ", " + fragment + ")" + suffix
+
+fn _webgpu_descriptor_module_value(descriptor: text, property: text) -> text:
+    val property_marker = property + ":"
+    val property_idx = descriptor.index_of(property_marker)
+    if property_idx < 0:
+        return ""
+    var value_start = property_idx + property_marker.len()
+    while value_start < descriptor.len() and descriptor.slice(value_start, value_start + 1) == " ":
+        value_start = value_start + 1
+    val remaining = descriptor.slice(value_start, descriptor.len())
+    if remaining.starts_with("{"):
+        val module_idx = remaining.index_of("module:")
+        if module_idx < 0:
+            return ""
+        value_start = value_start + module_idx + "module:".len()
+        while value_start < descriptor.len() and descriptor.slice(value_start, value_start + 1) == " ":
+            value_start = value_start + 1
+    var value_end = value_start
+    while value_end < descriptor.len() and descriptor.slice(value_end, value_end + 1) != "," and descriptor.slice(value_end, value_end + 1) != "}":
+        value_end = value_end + 1
+    descriptor.slice(value_start, value_end).trim()
 
 fn _convert_webgl_method(line: text, pattern: text, fn_name: text) -> text:
     """Convert gl.method(args) to canvas_webgl_method(gl, args)."""
