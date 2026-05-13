@@ -1,14 +1,14 @@
 # Plan: Port Rust/C Algorithms to Pure Simple + Optimize Compiler
 
-## Status: Phases 1-5 DONE; Phase 6A/6B DONE; Phase 6C DONE; Phase 6D PASS
+## Status: Phases 1-5 DONE; Phase 6A/6B DONE; Phase 6C DONE; Phase 6D REMAINS
 
 ### 2026-05-12 Current remains plan
 
 Scope: keep the algorithm implementations in pure Simple, keep the MDSOC compiler layering, and make the compiler/runtime emit optimizer-friendly native code comparable to the C and Rust reference harnesses. Do not spend more time on benchmark-only rewrites unless the same change exposes or verifies a compiler/runtime optimization.
 
 Current evidence:
-- Correctness parity is already passing for the dependency-free C/Rust/Simple XXHash64 and ChaCha20 benchmark harness.
-- The latest 2026-05-13 source-built LLVM-enabled driver 5-run sample shows ChaCha20 faster than both C and Rust at median `1.15x` C / `1.05x` Rust, XXHash64 at median `0.93x` C / `1.04x` Rust, CRC32 at median `0.83x` C / `0.85x` Rust, and Adler-32 at median `0.93x` C / `0.90x` Rust after the Adler reducer multiply-by-15 lowering. The acceptance gate is still open for all-algorithm "faster than C/Rust" status.
+- Correctness parity is passing for the dependency-free C/Rust/Simple XXHash64, CRC32, Adler-32, and ChaCha20 benchmark harness.
+- The latest 2026-05-13 source-built 3-sample median shows ChaCha20 faster than both C and Rust at `1.17x` C / `1.04x` Rust, while XXHash64 is `0.57x` C / `0.97x` Rust, CRC32 is `0.88x` C / `0.88x` Rust, and Adler-32 is `0.94x` C / `0.93x` Rust. Phase 6D remains open until every measured row is faster than both baselines.
 - This local build now has an LLVM-enabled active `bin/simple`; the benchmark harness records both default native output and a `--backend=llvm` probe with checksum parity.
 - Rust reference builds use `rustc -C opt-level=3 -C target-cpu=native`; Simple uses `simple compile --native --cpu native --opt-level aggressive`.
 - Recent Rust compiler work added typed `[u8]` load/store helpers (`rt_bytes_u8_at`, `rt_bytes_u8_set`), packed `[u8]` runtime storage for typed empty byte arrays, little-endian byte-array load and store markers that lower inline in Cranelift and LLVM, inline `rt_len` lowering for Cranelift and LLVM call sites, release-shim archive lookup, LLVM target datalayout emission, LLVM backend CLI availability, and native extern hygiene for unused broad SIMD declarations.
@@ -82,6 +82,12 @@ Current completed optimization items:
    - This is a narrow compiler/codegen strength-reduction slice for checksum-style modular reducers; it does not delegate Adler-32 to C/Rust and does not change the Simple algorithm source.
    - Stop condition met for this slice: focused Adler codegen tests pass, `simple-compiler` checks with and without LLVM features, the LLVM-enabled release driver builds, and the 5-run benchmark still passes checksum parity.
 
+9. **Adler reduction-window deferral**
+- `src/os/crypto/adler32.spl` now uses a 355328-byte reduction window for its `u64` accumulators instead of the classic 5552-byte window chosen for 32-bit accumulator safety.
+- `test/unit/os/crypto/adler32_spec.spl` adds a 6000-byte KAT so the larger reduction window is covered across the previous boundary.
+- Rejected follow-up: returning Adler to a 5552-byte window with `u32` accumulators preserved the 13 interpreter KAT examples but regressed the benchmark smoke to `0.89x` C / `0.89x` Rust, so the 355328-byte `u64` window remains the better measured source form.
+   - Stop condition met for correctness only: targeted Adler check/test pass and the strict cipher/compression gate reports `passed=13 skipped=0 failed=0`. Performance remains below C in representative samples.
+
 Follow-up hardening work, in order:
 
 1. **Bounds and index optimization**
@@ -145,10 +151,10 @@ samples are noisy. Add new algorithms here only after checksum parity passes.
 
 | Family | Algorithm | C MB/s | Rust MB/s | Simple Cranelift MB/s | Simple LLVM MB/s | Simple vs C | Simple vs Rust | LLVM vs C | LLVM vs Rust | Parity | Status |
 |--------|-----------|--------|-----------|-----------------------|------------------|-------------|----------------|-----------|--------------|--------|--------|
-| Hash | XXHash64 | 8594 median | 7884 median | 8594 median | not sampled | 0.93x median | 1.04x median | n/a | n/a | PASS | Beats Rust median after unsigned typed-byte index simplification; still below C median |
-| Checksum | CRC32 | 311 median | 337 median | 280 median | not sampled | 0.83x median | 0.85x median | n/a | n/a | PASS | Below C/Rust median; table lifetime and byte-table lowering remain active gaps |
-| Checksum | Adler-32 | 2532 median | 2610 median | 2329 median | not sampled | 0.93x median | 0.90x median | n/a | n/a | PASS | Below C/Rust after reducer lowering; needs compiler-driven weighted byte-reduction generalization |
-| Cipher | ChaCha20 | 314 median | 347 median | 364 median | not sampled | 1.15x median | 1.05x median | n/a | n/a | PASS | Faster than both C and Rust in latest 5-run source-built sample |
+| Hash | XXHash64 | 14653 median | 8578 median | 8339 median | not sampled | 0.57x median | 0.97x median | n/a | n/a | PASS | Below C/Rust in latest longer-window 3-sample median |
+| Checksum | CRC32 | 457 median | 456 median | 403 median | not sampled | 0.88x median | 0.88x median | n/a | n/a | PASS | Below C/Rust; native global table cache and literal table attempts fail native validation |
+| Checksum | Adler-32 | 2598 median | 2623 median | 2451 median | not sampled | 0.94x median | 0.93x median | n/a | n/a | PASS | Below C/Rust after longer-window median measurement |
+| Cipher | ChaCha20 | 308 median | 347 median | 361 median | not sampled | 1.17x median | 1.04x median | n/a | n/a | PASS | Faster than both C and Rust in latest longer-window 3-sample median |
 
 Current command:
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LLVM_PROBE=0 SIMPLE_DISASM_PROBE=0 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
@@ -159,6 +165,10 @@ Current command:
 Next active gaps:
 - XXHash64, CRC32, and Adler-32 are not faster than both C and Rust in the latest source-built hosted-native median sample. XXHash64 still beats Rust at median but not C. These remain compiler/plugin optimization work, not permission to delegate to C/Rust libraries. ChaCha20 is the current measured faster-than-both proof point.
 - The first compiler-side Adler generalization is now the recognized reducer lowering for the `65521 = 2^16 - 15` modulus pattern. Broader `simple.opt.math.strength_reduce` work should generalize small-multiply decomposition beyond this Adler-specific call shape without editing algorithm source.
+- Benchmark evidence is currently too noisy for single-run completion decisions. `test/perf/port_algorithms/run_port_algorithm_benchmarks.shs` now has `SIMPLE_BENCH_SAMPLES=N` and reports median MB/s. The benchmark rows also use longer timing windows: XXHash64 `1600`, CRC32 `160`, Adler-32 `800`, and ChaCha20 `120` iterations. The latest 3-sample median kept checksum parity but still failed faster-than-both: XXHash64 `0.57x` C / `0.97x` Rust, CRC32 `0.88x` C / `0.88x` Rust, Adler-32 `0.94x` C / `0.93x` Rust, and ChaCha20 `1.17x` C / `1.04x` Rust.
+- Attempted CRC32 lazy table caching passed interpreter KATs but segfaulted in the native benchmark, so it was reverted and recorded as `doc/08_tracking/bug/crc32_native_global_table_cache_segfault_2026-05-13.md`.
+- Attempted CRC32 direct `[u8]` literal table materialization passed interpreter KATs but failed native checksum parity, so it was reverted and recorded as `doc/08_tracking/bug/native_u8_array_literal_not_packed_2026-05-13.md`.
+- XXHash64 one-shot now evaluates repeated `* p2` terms once before rotate expressions in the stripe, merge, and 8-byte tail paths. Checksum parity still passes; one follow-up 3-sample run measured Simple XXHash64 at `13242 MB/s`, but the row was still below C in that run (`0.91x` C / `1.67x` Rust).
 
 Coverage backlog for all currently tracked cipher/compression-style algorithms:
 
@@ -174,10 +184,10 @@ not ad hoc algorithm rewrites or C-library delegation.
 
 | Group | Algorithms in scope | Current Simple evidence | Simple/C | Delta vs C | Simple/Rust | Delta vs Rust | Benchmark unit | Optimization-plugin focus |
 |-------|---------------------|-------------------------|----------|------------|-------------|---------------|----------------|---------------------------|
-| Measured non-crypto hash | XXHash64 | C/Rust/Simple parity benchmark PASS | 0.93x Cranelift median | 7% slower than C | 1.04x Cranelift median | 4% faster than Rust | MB/s one-shot hash | Keep byte-load, rotate, bounds-proof, and helper-inline regressions locked |
-| Measured checksum | CRC32 | C/Rust/Simple parity benchmark PASS | 0.83x Cranelift median | 17% slower than C | 0.85x Cranelift median | 15% slower than Rust | MB/s checksum | Generalize table loop, unchecked typed byte load, static-table lifetime, typed byte-array capacity, and byte-push inlining |
-| Measured checksum | Adler-32 | C/Rust/Simple parity benchmark PASS | 0.93x Cranelift median | 7% slower than C | 0.90x Cranelift median | 10% slower than Rust | MB/s checksum | Finish compiler-driven weighted byte-reduction and small-multiply decomposition |
-| Measured stream cipher | ChaCha20 | C/Rust/Simple parity benchmark PASS | 1.15x Cranelift median | 15% faster than C | 1.05x Cranelift median | 5% faster than Rust | MB/s encryption/checksum | Preserve rotate idiom, fixed-block byte stores, helper inlining, and SIMD-safe lowering |
+| Measured non-crypto hash | XXHash64 | C/Rust/Simple parity benchmark PASS | 0.57x Cranelift median | 43% slower than C | 0.97x Cranelift median | 3% slower than Rust | MB/s one-shot hash | Keep byte-load, rotate, bounds-proof, and helper-inline regressions locked |
+| Measured checksum | CRC32 | C/Rust/Simple parity benchmark PASS | 0.88x Cranelift median | 12% slower than C | 0.88x Cranelift median | 12% slower than Rust | MB/s checksum | Fix static-table/cache crash, native `[u8]` literal packing, generalize table loop, unchecked typed byte load, typed byte-array capacity, and byte-push inlining |
+| Measured checksum | Adler-32 | C/Rust/Simple parity benchmark PASS | 0.94x Cranelift median | 6% slower than C | 0.93x Cranelift median | 7% slower than Rust | MB/s checksum | Finish compiler-driven weighted byte-reduction and small-multiply decomposition |
+| Measured stream cipher | ChaCha20 | C/Rust/Simple parity benchmark PASS | 1.17x Cranelift median | 17% faster than C | 1.04x Cranelift median | 4% faster than Rust | MB/s encryption/checksum | Preserve rotate idiom, fixed-block byte stores, helper inlining, and SIMD-safe lowering |
 | AEAD modes | AES-GCM, AES-CCM, AES-GCM-SIV, ChaCha20-Poly1305, OCB3 | KAT/unit coverage exists for several modes; no C/Rust/Simple throughput ledger | TBD, target >1.00x | Pending; must be faster than C | TBD, target >1.00x | Pending; must be faster than Rust | MB/s encrypt+tag and decrypt+verify | Recognize block/stream XOR, GHASH/POLYVAL multiply, Poly1305 limb loops, tag compare |
 | AES block/modes | AES-128/256 core, AES-CTR, AES-CMAC, AES-XTS | KAT/unit coverage exists; no throughput ledger | TBD, target >1.00x | Pending; must be faster than C | TBD, target >1.00x | Pending; must be faster than Rust | MB/s block/mode operation | Add AES round idiom lowering, table/round constant placement, fixed 16-byte block lowering |
 | Other block ciphers | ARIA, Camellia, Serpent, Twofish, SM4, SEED, TEA | KAT/unit coverage exists for many OS ciphers; no throughput ledger | TBD, target >1.00x | Pending; must be faster than C | TBD, target >1.00x | Pending; must be faster than Rust | MB/s block/mode operation | Share S-box/table lookup optimization, rotate/xor/add idioms, fixed-block stack buffers |
@@ -198,10 +208,10 @@ from the parity harness; all other rows are explicit benchmark backlog.
 
 | Family | Algorithm | Simple/C | Delta vs C | Simple/Rust | Delta vs Rust | Status |
 |--------|-----------|----------|------------|-------------|---------------|--------|
-| Non-crypto hash | XXHash64 | 0.93x | 7% slower | 1.04x | 4% faster | Measured PASS; below C |
-| Checksum | CRC32 | 0.83x | 17% slower | 0.85x | 15% slower | Measured PASS; below C/Rust |
-| Checksum | Adler-32 | 0.93x | 7% slower | 0.90x | 10% slower | Measured PASS; below C/Rust |
-| Stream cipher | ChaCha20 | 1.15x | 15% faster | 1.05x | 5% faster | Measured PASS; faster than C/Rust |
+| Non-crypto hash | XXHash64 | 0.57x | 43% slower | 0.97x | 3% slower | Measured PASS; below C/Rust |
+| Checksum | CRC32 | 0.88x | 12% slower | 0.88x | 12% slower | Measured PASS; below C/Rust |
+| Checksum | Adler-32 | 0.94x | 6% slower | 0.93x | 7% slower | Measured PASS; below C/Rust |
+| Stream cipher | ChaCha20 | 1.17x | 17% faster | 1.04x | 4% faster | Measured PASS; faster than C/Rust |
 | AEAD | AES-GCM | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
 | AEAD | AES-CCM | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
 | AEAD | AES-GCM-SIV | TBD >1.00x | Pending | TBD >1.00x | Pending | Benchmark needed |
@@ -325,7 +335,7 @@ Interpretation:
 - CRC32 remains pure Simple. `_crc32_update_table` now hoists `data.len()`, reads eight input bytes with one compiler-inline unchecked little-endian u64 load, applies the table-dependent CRC steps in sequence, and keeps an unchecked byte tail.
 - This removes the generic `data[i]` path from the hot loop while preserving the existing byte-table representation and streaming API behavior.
 - Rejected follow-up: changing the generated CRC table from packed `[u8]` plus `rt_typed_bytes_u32_le_at` to a typed `[u32]` table plus `rt_typed_words_u32_at` preserved the 10 CRC/CRC32C KAT examples, but regressed the benchmark sample to `278 MB/s` (`0.61x` C, `0.68x` Rust). Keep the byte-table path until the compiler can prove and hoist typed-word array tag/length checks or provide a static-table representation.
-- The remaining likely CRC32 gain is table lifetime: one-shot `crc32(data)` still builds the IEEE table for each call. A static or cached table should wait for reliable native top-level array initialization or an explicit runtime cache pattern, because this plan already documents native top-level constant initialization as a known limitation.
+- The remaining likely CRC32 gain is table lifetime: one-shot `crc32(data)` still builds the IEEE table for each call. A static or cached table should wait for reliable native top-level array initialization, correct native packed `[u8]` literal lowering, or an explicit runtime cache pattern, because direct cache and literal-table attempts both failed native validation.
 
 ### 2026-05-13 pure Simple CRC32 optimization-layer update
 
@@ -1087,13 +1097,13 @@ These are **runtime infrastructure** externs, not crypto FFI:
 - Added a general typed `[u32]` array get/set lowering in the Rust compiler path rather than rewriting individual algorithms.
 - MIR lowering now routes typed `[u32]` reads and writes through `rt_typed_words_u32_at` / `rt_typed_words_u32_set`, avoiding generic `rt_index_get` / `rt_index_set` and boxing on word-state algorithms.
 - Cranelift codegen inlines both helpers into direct runtime-array slot load/store with one bounds check; runtime, interpreter-extern, ELF, and symbol-table plumbing provide fallback linkage.
-- Regression evidence: MIR lowering tests for get/set, Cranelift no-runtime-relocation tests for get/set, runtime helper tests, `cargo check` for `simple-runtime`, `simple-common`, and `simple-compiler`, release driver rebuild, port algorithm checksum parity for XXHash64/CRC32/Adler32/ChaCha20, and cipher/compress gate `passed=10 skipped=3 failed=0`.
+- Regression evidence: MIR lowering tests for get/set, Cranelift no-runtime-relocation tests for get/set, runtime helper tests, `cargo check` for `simple-runtime`, `simple-common`, and `simple-compiler`, release driver rebuild, port algorithm checksum parity for XXHash64/CRC32/Adler32/ChaCha20, and cipher/compress gate `passed=13 skipped=0 failed=0`.
 
 ### 2026-05-13 Typed Push Follow-Up
 
 - Added compiler/runtime fast paths for `[u8].push(u8)` and `[u32].push(u32)` so byte-buffer and word-state construction avoids `BoxInt` plus generic `rt_array_push` dispatch.
 - This is intentionally a Simple compiler/runtime optimization, not an algorithm-source rewrite; existing crypto/compression code benefits when its receiver and pushed value are statically typed.
-- Regression evidence: MIR lowering tests prove typed push calls replace `rt_array_push`, runtime tests cover grow semantics and masking, `cargo check` passes for `simple-runtime`, `simple-common`, and `simple-compiler`, and the cipher/compress gate still reports `passed=10 skipped=3 failed=0`.
+- Regression evidence: MIR lowering tests prove typed push calls replace `rt_array_push`, runtime tests cover grow semantics and masking, `cargo check` passes for `simple-runtime`, `simple-common`, and `simple-compiler`, and the cipher/compress gate reports `passed=13 skipped=0 failed=0`.
 
 ### 2026-05-13 Current Remaining Plan
 
@@ -1103,10 +1113,10 @@ checksum, hash, KDF, public-key, and compression row. Current measured medians
 still leave XXHash64, CRC32, and Adler-32 below at least one baseline; ChaCha20
 is the only measured row faster than both C and Rust.
 
-Latest continuation sample for context, not a replacement for the median gate:
-XXHash64 `0.91x` C / `1.04x` Rust, CRC32 `0.96x` C / `1.09x` Rust, Adler-32
-`0.90x` C / `1.57x` Rust, and ChaCha20 `1.16x` C / `1.21x` Rust. The sample
-confirms that C gaps still remain even when Rust is beaten.
+Latest 3-sample median for context: XXHash64 `0.57x` C / `0.97x` Rust, CRC32
+`0.88x` C / `0.88x` Rust, Adler-32 `0.94x` C / `0.93x` Rust, and ChaCha20
+`1.17x` C / `1.04x` Rust. The sample confirms that the measured optimization
+gate remains open outside ChaCha20.
 
 Remaining compiler/plugin lanes:
 

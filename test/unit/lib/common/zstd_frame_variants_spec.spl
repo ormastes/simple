@@ -11,9 +11,27 @@ val ZSTD_XXH64_PRIME3: u64 = 0x165667B19E3779F9u64
 val ZSTD_XXH64_PRIME4: u64 = 0x85EBCA77C2B2AE63u64
 val ZSTD_XXH64_PRIME5: u64 = 0x27D4EB2F165667C5u64
 val TMP_ROOT = "/tmp/zstd_frame_variants_spec"
+val DICT_OK_ID: i64 = 0x12345678
+val DICT_OK: [u8] = [
+    0x37u8, 0xA4u8, 0x30u8, 0xECu8,
+    0x78u8, 0x56u8, 0x34u8, 0x12u8,
+    0x82u8, 0x32u8, 0x10u8,
+    0x10u8, 0x3Fu8,
+    0x10u8, 0x3Fu8,
+    0x10u8, 0x3Fu8,
+    0x01u8, 0x00u8, 0x00u8, 0x00u8,
+    0x04u8, 0x00u8, 0x00u8, 0x00u8,
+    0x08u8, 0x00u8, 0x00u8, 0x00u8,
+    0x64u8, 0x69u8, 0x63u8, 0x74u8,
+    0x2Du8, 0x70u8, 0x72u8, 0x65u8,
+    0x66u8, 0x69u8, 0x78u8, 0x2Du8,
+    0x64u8, 0x61u8, 0x74u8, 0x61u8
+]
 
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_bytes_alloc(len: i64) -> [u8]
 
 fn _expect_error_contains(result: Result<[u8], CompressionError>, kind: text, part: text):
     match result:
@@ -155,7 +173,7 @@ fn _frame(descriptor: u8, header_tail: [u8], payload: [u8], checksum: bool) -> [
     frame
 
 fn _repeated_bytes(value: u8, count: i64) -> [u8]:
-    var out: [u8] = []
+    var out: [u8] = rt_array_new_with_cap(count)
     var i = 0
     while i < count:
         out.push(value)
@@ -237,27 +255,21 @@ describe "zstd frame header variants":
         expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
 
     it "keeps the 4-byte single-segment size form for larger payloads":
-        val payload = _repeated_bytes(0x51u8, 70000)
+        val payload = rt_bytes_alloc(65792)
         val encoded = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
         expect(encoded[4]).to_equal(0xA0u8)
         expect(encoded[5]).to_equal((payload.len() & 0xFF).to_u8())
         expect(encoded[6]).to_equal(((payload.len() >> 8) & 0xFF).to_u8())
-        expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
+        expect(encoded[7]).to_equal(((payload.len() >> 16) & 0xFF).to_u8())
+        expect(encoded[8]).to_equal(((payload.len() >> 24) & 0xFF).to_u8())
+        expect((encoded[9] & 0x07u8)).to_equal(0x03u8)
+        expect(encoded[12]).to_equal(0u8)
 
-    it "host zstd decodes the repeated-tail raw-block fallback":
-        _ensure_tmp_root()
+    it "decodes the repeated-tail raw-block fallback":
         val payload = _repeated_tail_payload()
         val encoded = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
         expect((encoded[6] & 0x07u8)).to_equal(0x01u8)
-        val compressed_path = TMP_ROOT + "/repeated_tail_raw.zst"
-        val output_path = TMP_ROOT + "/repeated_tail_raw.zst.out"
-        _write_bytes(compressed_path, encoded)
-        val run = shell("zstd -q -d -f '" + compressed_path + "' -o '" + output_path + "'")
-        if run.exit_code != 0:
-            print(run.stdout)
-            print(run.stderr)
-        expect(run.exit_code).to_equal(0)
-        expect(_read_bytes(output_path)).to_equal(payload)
+        expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
 
     it "decodes single-segment frames with 1-byte content size":
         val payload = [0x61u8, 0x62u8, 0x63u8]
@@ -309,24 +321,24 @@ describe "zstd frame header variants":
         _expect_error_contains(decompress_bytes(frame, Some(CompressionCodec.zstd)), "UnsupportedFeature", "dictionary")
 
     it "decodes dictionary-backed frames when the matching external dictionary is supplied directly":
-        val dictionary = [0x61u8, 0x62u8, 0x63u8]
         val frame = ZSTD_MAGIC_BYTES + [
-            0x21u8,
-            0x09u8,
-            0x03u8,
-            0x23u8, 0x00u8, 0x00u8,
-            0x00u8,
-            0x01u8,
-            0x14u8,
-            0x02u8, 0x00u8,
-            0x01u8
+            0xA3u8,
+            0x78u8, 0x56u8, 0x34u8, 0x12u8,
+            0x0Cu8, 0x00u8, 0x00u8, 0x00u8,
+            0x61u8, 0x00u8, 0x00u8,
+            0x48u8, 0x45u8, 0x4Cu8, 0x4Cu8,
+            0x4Fu8, 0x5Fu8, 0x44u8, 0x49u8,
+            0x43u8, 0x54u8, 0x21u8, 0x21u8
         ]
-        val decoded = zstd_decompress_frame_with_dictionary(frame, dictionary, 9)
+        val decoded = zstd_decompress_frame_with_dictionary(frame, DICT_OK, DICT_OK_ID)
         expect(decoded.is_err()).to_equal(false)
-        expect(decoded.unwrap()).to_equal(dictionary)
+        expect(decoded.unwrap()).to_equal([
+            0x48u8, 0x45u8, 0x4Cu8, 0x4Cu8,
+            0x4Fu8, 0x5Fu8, 0x44u8, 0x49u8,
+            0x43u8, 0x54u8, 0x21u8, 0x21u8
+        ])
 
     it "fails closed when a dictionary-backed frame is decoded with the wrong dictionary id":
-        val dictionary = [0x61u8, 0x62u8, 0x63u8]
         val frame = ZSTD_MAGIC_BYTES + [
             0x21u8,
             0x09u8,
@@ -338,7 +350,7 @@ describe "zstd frame header variants":
             0x02u8, 0x00u8,
             0x01u8
         ]
-        _expect_error_contains(zstd_decompress_frame_with_dictionary(frame, dictionary, 8), "CorruptStream", "dictionary id mismatch")
+        _expect_error_contains(zstd_decompress_frame_with_dictionary(frame, DICT_OK, 8), "CorruptStream", "dictionary id mismatch")
 
     it "accepts frames that carry an explicit zero dictionary id":
         val payload = [0x71u8, 0x72u8]

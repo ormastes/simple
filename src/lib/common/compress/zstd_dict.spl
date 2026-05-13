@@ -6,6 +6,8 @@ use compress.zstd_seq.{_zstd_parse_sequence_count, _zstd_parse_sequence_modes, _
 use compress.zstd_literals.{_zstd_parse_literals_section, _zstd_huf_build_table_from_weights, _zstd_parse_direct_weights}
 use compress.zstd_frame.{_zstd_parse_frame_header, _zstd_xxh64_bytes_for_tier}
 
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
 val ZSTD_DICT_MAGIC: u32 = 0xEC30A437u32
 
 # RFC 8478 §6 dictionary-state bundle. Used to seed the per-frame decoder when
@@ -175,6 +177,8 @@ fn _zstd_decompress_frame_for_tier_with_dictionary(input: [u8], tier: Compressio
         pos = pos + frame_header.bytes_used
         val frame_prefix_len = dictionary_state.content_prefix.len()
         var frame_out = dictionary_state.content_prefix
+        if frame_prefix_len == 0 and frame_header.content_size != nil:
+            frame_out = rt_array_new_with_cap(frame_header.content_size ?? 0)
         var repeat_offsets = dictionary_state.repeat_offsets
         var sequence_table_history = dictionary_state.sequence_history
         var huffman_table_state: ZstdHufTableState? = dictionary_state.huffman
@@ -262,5 +266,8 @@ fn _zstd_decompress_frame_for_tier_with_dictionary(input: [u8], tier: Compressio
             if actual != expected:
                 return Err(CompressionError.ChecksumMismatch("zstd content checksum"))
             pos = pos + 4
-        out = append_bytes(out, frame_out.slice(frame_prefix_len, frame_out.len()))
+        if out.len() == 0 and frame_prefix_len == 0:
+            out = frame_out
+        else:
+            out = append_bytes(out, frame_out.slice(frame_prefix_len, frame_out.len()))
     Ok(out)
