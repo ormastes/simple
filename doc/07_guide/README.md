@@ -174,6 +174,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | Guide | Description |
 |-------|-------------|
 | [compiler_optimization_levels.md](compiler_optimization_levels.md) | Compiler optimization levels |
+| [compiler_optimization_plugin.md](compiler_optimization_plugin.md) | Simple Optimization Plugin guide -- reusable optimizer providers, built-in vs dynamic load modes, safety and validation |
 
 ## Miscellaneous
 

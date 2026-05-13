@@ -145,6 +145,39 @@ for (name, stats) in results:
 print "Fastest: {fastest_name}"
 ```
 
+### Native Backend Parity
+
+For host-native compiler/backend checks, use the net-driver arithmetic parity
+benchmark. It builds the C reference with `gcc -O3 -march=native`, builds the
+Simple native benchmark with aggressive optimization, runs both, and verifies
+that checksum labels match:
+
+```bash
+test/perf/run_net_driver_logic_parity_bench.shs
+```
+
+To check both Simple native backends explicitly, compile
+`test/perf/net_driver_logic_native_bench.spl` with `--backend=cranelift` and
+`--backend=llvm`; both binaries should print the same 11 `virt...` checksum
+labels.
+
+### Linux QEMU Network Parity
+
+Use `scripts/linux_qemu_net_parity_bench.shs` when comparing the same
+C/Rust/Simple network parity workload inside a Linux QEMU guest. The harness
+requires a caller-supplied bootable guest image with SSH plus benchmark
+prerequisites:
+
+```bash
+LINUX_QEMU_IMAGE=/path/to/linux.qcow2 \
+LINUX_QEMU_SSH_USER=ubuntu \
+scripts/linux_qemu_net_parity_bench.shs
+```
+
+Useful knobs include `LINUX_QEMU_DISK=virtio|nvme`,
+`LINUX_QEMU_ACCEL=kvm:tcg`, `LINUX_QEMU_SSH_PORT`, `LINUX_QEMU_TIMEOUT`,
+`NET_PARITY_ITERS`, and `NET_PARITY_PAYLOAD`.
+
 ---
 
 ## Integration with SPipe

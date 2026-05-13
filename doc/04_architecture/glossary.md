@@ -145,6 +145,21 @@ Policy:
 - `ObjectProvider.prefer_backend` is enforced behavior, not advisory config.
 - `--fixed-be` maps to the LLVM-fixed validation path used by builds and linker tests.
 
+## Simple Optimization Plugin
+Simple Optimization Plugin is the named extension point for reusable compiler and interpreter optimizations.
+
+- It packages a semantics-preserving optimization provider so similar Simple programs can gain performance without per-application ad hoc rewrites.
+- It applies before or around backend lowering: syntax normalization, HIR, MIR, pattern idioms, interpreter dispatch, and backend-independent metadata.
+- It is not the same thing as an LLVM pass plugin. A Simple Optimization Plugin may improve LLVM IR quality, but LLVM still owns the standard IR optimizer and CPU backends.
+- Hot and bootstrap-critical providers should be built into the compiler/interpreter.
+- Optional, experimental, or out-of-tree providers may load dynamically only through a stable manifest and ABI.
+- Providers must declare facts they require and facts they produce; they must not lie about overflow, aliasing, non-nullness, or target layout.
+
+See:
+- `doc/07_guide/compiler_optimization_plugin.md`
+- `doc/04_architecture/simple_optimization_plugin.md`
+- `doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md`
+
 ## Fully shared frontend
 Frontend must be one shared implementation: Lexer -> Treesitter -> Parser.
 No duplicated parser logic in interpreter, loader, or compiler.

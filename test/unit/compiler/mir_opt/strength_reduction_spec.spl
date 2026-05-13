@@ -1,0 +1,47 @@
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirBlock}
+use compiler.mir_opt.mir_opt.loop_strength.{create_strength_reduction_pass}
+
+fn _sr_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn _sr_copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(_sr_lid(id)))
+
+fn _sr_int(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
+
+fn _sr_reduce_one(inst: MirInst) -> MirInstKind:
+    val block = MirBlock(
+        id: BlockId(id: 0),
+        label: Some("entry"),
+        instructions: [inst],
+        terminator: MirTerminator.Return(nil)
+    )
+    var sr_pass = create_strength_reduction_pass()
+    val optimized = sr_pass.reduce_block(block)
+    optimized.instructions[0].kind
+
+fn _sr_expect_bitand_mask(kind: MirInstKind, mask: i64):
+    match kind:
+        case BinOp(_, BitAnd, _, right):
+            match right.kind:
+                case Const(Int(actual), _):
+                    expect actual == mask
+                case _:
+                    expect false == true
+        case _:
+            expect false == true
+
+describe "MIR strength reduction":
+    it "lowers net-driver style modulo by 128 to bitmask":
+        _sr_expect_bitand_mask(
+            _sr_reduce_one(MirInst(kind: MirInstKind.BinOp(_sr_lid(2), MirBinOp.Rem, _sr_copy(1), _sr_int(128)), span: nil)),
+            127
+        )
+
+    it "lowers 64-bit power-of-two modulo constants to bitmask":
+        _sr_expect_bitand_mask(
+            _sr_reduce_one(MirInst(kind: MirInstKind.BinOp(_sr_lid(2), MirBinOp.Rem, _sr_copy(1), _sr_int(1099511627776)), span: nil)),
+            1099511627775
+        )

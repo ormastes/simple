@@ -79,6 +79,7 @@
 | [Scheduler Qemu Specification](scheduler_qemu_spec.md) | ❌ Stub | Stub | N/A | 4 | Summary not provided in the doc blocks. |
 | [Sdoctest Specification](sdoctest_spec.md) | ❌ Stub | Stub | N/A | 18 | Summary not provided in the doc blocks. |
 | [Search Specification](search_spec.md) | ❌ Stub | Stub | N/A | 5 | Summary not provided in the doc blocks. |
+| [Simple Optimization Plugin Specification](simple_optimization_plugin_spec.md) | ⚠️ Draft | Detailed | 3/5 | N/A | Common contract for reusable compiler/interpreter optimization providers. |
 | [Shell Api Specification](shell_api_spec.md) | ❌ Stub | Stub | N/A | 25 | Summary not provided in the doc blocks. |
 | [Stack Trace Specification](stack_trace_spec.md) | ❌ Stub | Stub | N/A | 23 | Summary not provided in the doc blocks. |
 | [Startup Specification](startup_spec.md) | ❌ Stub | Stub | N/A | 50 | Summary not provided in the doc blocks. |
@@ -317,4 +318,3 @@ These files are present in `doc/06_spec` but were not regenerated in this run.
 | wasm_compile_spec.md | Legacy markdown |
 | weak_pointers_spec.md | Legacy markdown |
 | web_framework_spec.md | Legacy markdown |
-

@@ -11,10 +11,15 @@
 #   executed.  Compiled-mode execution will exercise them.
 
 use compiler.mir_opt.pattern.rule_engine.{
-    Rule, MatchHit, create_rule, rule_summary
+    Rule, MatchHit, OptimizerRuleLoadMode, OptimizerRuleLookupKind,
+    OptimizationRuleProvider, create_rule, rule_summary,
+    optimization_rule_provider_dynamic, optimization_rule_provider_should_embed,
+    optimization_rule_provider_uses_direct_lookup, create_exact_rule_binding,
+    lookup_exact_rule_binding, rule_lookup_stats_zero,
+    rule_lookup_stats_record
 }
 use compiler.mir_opt.pattern.rules_crypto.{
-    cipher_rule_table, lookup_rule_for_callee
+    cipher_rule_table, cipher_rule_provider, lookup_rule_for_callee
 }
 use compiler.mir_opt.pattern.cost_model.{
     PatternCost, pattern_cost_default, pattern_cost_better, pattern_cost_total
@@ -94,6 +99,37 @@ describe "lookup_rule_for_callee — known software callees":
     it "unrecognised symbol returns nil":
         val result = lookup_rule_for_callee("std.common.totally.unknown.callee")
         expect(result.?).to_equal(false)
+
+    it "cipher provider is built in for hot-path lookup":
+        val provider = cipher_rule_provider()
+        expect(provider.name).to_equal("cipher-pattern-rules")
+        expect(provider.load_mode).to_equal(OptimizerRuleLoadMode.Builtin)
+        expect(provider.lookup_kind).to_equal(OptimizerRuleLookupKind.DirectExact)
+        expect(optimization_rule_provider_should_embed(provider)).to_equal(true)
+        expect(optimization_rule_provider_uses_direct_lookup(provider)).to_equal(true)
+
+    it "dynamic providers are not embedded into the hot lookup path":
+        val provider = optimization_rule_provider_dynamic("rare-extra-rules", "build/plugins/rare-rules.so")
+        expect(provider.load_mode).to_equal(OptimizerRuleLoadMode.DynamicLibrary)
+        expect(provider.lookup_kind).to_equal(OptimizerRuleLookupKind.DynamicExact)
+        expect(optimization_rule_provider_should_embed(provider)).to_equal(false)
+
+    it "exact lookup bindings support reusable non-cipher rule providers":
+        val rule = create_rule("match_custom_abs", "math_abs", "scalar", -1)
+        val bindings = [create_exact_rule_binding("std.math.abs_software", rule)]
+        val hit = lookup_exact_rule_binding(bindings, "std.math.abs_software")
+        expect(hit.?).to_equal(true)
+        expect(hit.unwrap().intrinsic).to_equal("math_abs")
+        val miss = lookup_exact_rule_binding(bindings, "std.math.sqrt")
+        expect(miss.?).to_equal(false)
+
+    it "lookup stats count hit and miss without touching rule data":
+        val zero = rule_lookup_stats_zero()
+        val one = rule_lookup_stats_record(zero, true)
+        val two = rule_lookup_stats_record(one, false)
+        expect(two.lookups).to_equal(2)
+        expect(two.hits).to_equal(1)
+        expect(two.misses).to_equal(1)
 
 # ============================================================================
 # PatternCost — comparator and scalar summary

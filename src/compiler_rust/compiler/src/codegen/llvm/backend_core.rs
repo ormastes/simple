@@ -7,6 +7,8 @@ use crate::optimizations::NativeOptimizationLevel;
 use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
 
 #[cfg(feature = "llvm")]
+use inkwell::attributes::{Attribute, AttributeLoc};
+#[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
 #[cfg(feature = "llvm")]
 use inkwell::context::Context;
@@ -59,6 +61,18 @@ impl std::fmt::Debug for LlvmBackend {
 }
 
 impl LlvmBackend {
+    #[cfg(feature = "llvm")]
+    fn apply_function_optimization_attrs(&self, func: FunctionValue<'static>, attrs: &[String]) {
+        let wants_inline = attrs
+            .iter()
+            .any(|attr| attr == "inline" || attr == "always_inline" || attr == "force_inline");
+        if wants_inline {
+            let kind = Attribute::get_named_enum_kind_id("alwaysinline");
+            let always_inline = self.context.create_enum_attribute(kind, 0);
+            func.add_attribute(AttributeLoc::Function, always_inline);
+        }
+    }
+
     #[cfg(feature = "llvm")]
     fn llvm_optimization_level(&self) -> OptimizationLevel {
         match self.opt_level {
@@ -540,6 +554,18 @@ impl LlvmBackend {
         Ok(())
     }
 
+    #[cfg(feature = "llvm")]
+    fn apply_function_optimization_attrs(&self, func: FunctionValue<'static>, attrs: &[String]) {
+        let wants_inline = attrs.iter().any(|attr| {
+            attr == "inline" || attr == "always_inline" || attr == "force_inline"
+        });
+        if wants_inline {
+            let kind = Attribute::get_named_enum_kind_id("alwaysinline");
+            let always_inline = self.context.create_enum_attribute(kind, 0);
+            func.add_attribute(AttributeLoc::Function, always_inline);
+        }
+    }
+
     #[cfg(not(feature = "llvm"))]
     pub fn declare_function_with_linkage(
         &self,
@@ -731,6 +757,15 @@ impl NativeBackend for LlvmBackend {
                 .map(|s| s.as_str())
                 .unwrap_or(&func.name);
             self.declare_function_with_linkage(resolved_name, &param_types, &func.return_type, has_body)?;
+            #[cfg(feature = "llvm")]
+            if has_body {
+                let module_ref = self.module.borrow();
+                if let Some(m) = module_ref.as_ref() {
+                    if let Some(llvm_func) = m.get_function(resolved_name) {
+                        self.apply_function_optimization_attrs(llvm_func, &func.attributes);
+                    }
+                }
+            }
         }
         #[cfg(feature = "llvm")]
         self.declare_dot_aliases_for_methods();

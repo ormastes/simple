@@ -9,6 +9,8 @@ This guide is the practical workflow for keeping Simple's LLVM path and native o
 
 Simple does not implement LLVM CPU backends for existing CPU targets. Simple emits valid LLVM IR plus exact target configuration; LLVM supplies the optimizer, target backend, instruction selection, register allocation, object emission, and related tooling.
 
+Simple-owned HIR/MIR/pattern/interpreter optimizations should use the [Simple Optimization Plugin](../compiler_optimization_plugin.md) contract. That contract is separate from LLVM pass plugins: it improves Simple's own IR and semantic facts before LLVM receives the module.
+
 Simple is responsible for:
 
 - Frontend semantics: parse, type check, resolve names, lower generics, traits, patterns, and language rules.

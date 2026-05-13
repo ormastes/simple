@@ -110,10 +110,10 @@ impl StrengthReduction:
                     val rv = right_const.unwrap()
                     # x * 0 -> 0
                     if rv == 0:
-                        return MirInst(
+                        return Some(MirInst(
                             kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
                             span: span
-                        )
+                        ))
                     # x * 1 -> x (copy)
                     if rv == 1:
                         return self.copy_operand_to_dest(dest, left, span)
@@ -124,10 +124,10 @@ impl StrengthReduction:
                     val lv = left_const.unwrap()
                     # 0 * x -> 0
                     if lv == 0:
-                        return MirInst(
+                        return Some(MirInst(
                             kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
                             span: span
-                        )
+                        ))
                     # 1 * x -> x (copy)
                     if lv == 1:
                         return self.copy_operand_to_dest(dest, right, span)
@@ -135,16 +135,16 @@ impl StrengthReduction:
                 # Power-of-2 multiply -> shift left
                 val shift = self.const_log2(right)
                 if shift.?:
-                    return MirInst(
+                    return Some(MirInst(
                         kind: MirInstKind.BinOp(dest, MirBinOp.Shl, left, mir_operand_const_int(shift.unwrap())),
                         span: span
-                    )
+                    ))
                 val shift_l = self.const_log2(left)
                 if shift_l.?:
-                    return MirInst(
+                    return Some(MirInst(
                         kind: MirInstKind.BinOp(dest, MirBinOp.Shl, right, mir_operand_const_int(shift_l.unwrap())),
                         span: span
-                    )
+                    ))
                 nil
             case Div:
                 val right_const = self.operand_const_int_value(right)
@@ -157,10 +157,10 @@ impl StrengthReduction:
                 # x / 2^n -> x >> n (for positive divisors)
                 val shift = self.const_log2(right)
                 if shift.?:
-                    return MirInst(
+                    return Some(MirInst(
                         kind: MirInstKind.BinOp(dest, MirBinOp.Shr, left, mir_operand_const_int(shift.unwrap())),
                         span: span
-                    )
+                    ))
                 nil
             case Rem:
                 val right_const = self.operand_const_int_value(right)
@@ -168,19 +168,20 @@ impl StrengthReduction:
                     val rv = right_const.unwrap()
                     # x % 1 -> 0
                     if rv == 1:
-                        return MirInst(
+                        return Some(MirInst(
                             kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
                             span: span
-                        )
+                        ))
 
                 # x % 2^n -> x & (2^n - 1) (for positive values)
                 val shift = self.const_log2(right)
                 if shift.?:
-                    val mask = (1 << shift.unwrap()) - 1
-                    return MirInst(
+                    val shift_bits = shift.unwrap()
+                    val mask = (1 << shift_bits) - 1
+                    return Some(MirInst(
                         kind: MirInstKind.BinOp(dest, MirBinOp.BitAnd, left, mir_operand_const_int(mask)),
                         span: span
-                    )
+                    ))
                 nil
             case Add:
                 # x + 0 -> x
@@ -308,12 +309,16 @@ impl StrengthReduction:
                             # Check if n is a power of 2: n & (n-1) == 0
                             val is_pow2 = (n & (n - 1)) == 0
                             if is_pow2:
-                                # Calculate log2 by checking bit positions
+                                # Calculate log2 by checking i64 bit positions.
+                                # Net-driver ring logic can use u64-sized
+                                # queue/layout constants, so do not stop at 32-bit.
                                 var shift = 0
-                                for bit in 0..31:
+                                var bit = 0
+                                while bit < 63:
                                     if (1 << bit) == n:
                                         shift = bit
-                                return shift
+                                    bit = bit + 1
+                                return Some(shift)
                             nil
                         else:
                             nil
