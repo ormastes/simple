@@ -500,6 +500,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL JS transpiler state coverage has started: browser-style `getParameter`, `getContextAttributes`, `isEnabled`, `disable`, `lineWidth`, `frontFace`, `polygonOffset`, `sampleCoverage`, and `blendColor` calls now lower to canvas WebGL helpers with matching constants.
 - M27 WebGL canvas readback bridge has started: script canvas wrappers and JS lowering now expose `getError`, `pixelStorei`, `readPixels`, pack/unpack alignment constants, and RGB readback constants.
 - M27 WebGL JS capability-query constants have started: renderer identity, shader-language version, line-width range, compressed-format list, viewport, texture, renderbuffer, shader, varying, and channel-depth query constants are now available to transpiled scripts.
+- M27 WebGL framebuffer/renderbuffer script bridge has started: canvas wrappers and JS lowering now expose framebuffer/renderbuffer creation, binding, storage, attachment, status, and attachment/renderbuffer parameter queries.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
