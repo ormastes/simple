@@ -238,6 +238,7 @@ fn md_lsp_initialize(req_id: i64) -> text:
     caps = caps + "," + _jp("definitionProvider", "true")
     caps = caps + "," + _jp("documentSymbolProvider", "true")
     caps = caps + "," + _jp("foldingRangeProvider", "true")
+    caps = caps + "," + _jp("codeActionProvider", "true")
     caps = caps + "," + _jp("textDocumentSync", "1")
     caps = caps + "}"
     val result = "{" + _jp("capabilities", caps) + "}"
@@ -467,6 +468,61 @@ fn md_lsp_folding_range(params_json: text, req_id: i64, workspace: MdWorkspace) 
     _md_lsp_ok_response(req_id, items)
 
 # ---------------------------------------------------------------------------
+# Code Actions
+# ---------------------------------------------------------------------------
+
+fn md_lsp_code_action(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
+    val uri = _md_lsp_extract_uri(params_json)
+    val pos = _md_lsp_extract_position_from_range(params_json)
+    val line_num = pos.0
+    val doc = workspace.get_document(uri)
+    val line = _md_lsp_get_line(doc.content, line_num)
+    val fixed = _md_lsp_quickfix_line(line)
+    if fixed == line:
+        return _md_lsp_ok_response(req_id, "[]")
+    val action = _md_lsp_build_line_replace_action(uri, line_num, line, fixed)
+    _md_lsp_ok_response(req_id, "[" + action + "]")
+
+fn _md_lsp_extract_position_from_range(params_json: text) -> (i64, i64):
+    val range_start = _lsp_find_field(params_json, "\"range\"")
+    if range_start < 0:
+        return _md_lsp_extract_position(params_json)
+    val range_obj = _lsp_extract_value(params_json, range_start)
+    val start_start = _lsp_find_field(range_obj, "\"start\"")
+    if start_start < 0:
+        return (0, 0)
+    val start_obj = _lsp_extract_value(range_obj, start_start)
+    val line_start = _lsp_find_field(start_obj, "\"line\"")
+    val char_start = _lsp_find_field(start_obj, "\"character\"")
+    val line_num = if line_start >= 0 then _lsp_extract_number(start_obj, line_start) else 0
+    val char_num = if char_start >= 0 then _lsp_extract_number(start_obj, char_start) else 0
+    (line_num, char_num)
+
+fn _md_lsp_quickfix_line(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed.starts_with("#"):
+        var level = 0
+        while level < trimmed.len() and trimmed.char_at(level) == "#":
+            level = level + 1
+        if level < trimmed.len() and trimmed.char_at(level) != " ":
+            return trimmed.slice(0, level) + " " + trimmed.slice(level, trimmed.len())
+    if line.contains("[]()"):
+        return line.replace("[]()", "[text](url)")
+    if line.ends_with(" ") or line.ends_with("\t"):
+        return line.trim()
+    line
+
+fn _md_lsp_build_line_replace_action(uri: text, line_num: i64, old_line: text, new_line: text) -> text:
+    val start_pos = "{" + _jp("line", str(line_num)) + "," + _jp("character", "0") + "}"
+    val end_pos = "{" + _jp("line", str(line_num)) + "," + _jp("character", str(old_line.len())) + "}"
+    val range = "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}"
+    val edit = "{" + _jp("range", range) + "," + _jp("newText", _js(new_line)) + "}"
+    val text_edits = "[" + edit + "]"
+    val changes = "{" + _jp(uri, text_edits) + "}"
+    val workspace_edit = "{" + _jp("changes", changes) + "}"
+    "{" + _jp("title", _js("Apply Markdown quick fix")) + "," + _jp("kind", _js("quickfix")) + "," + _jp("edit", workspace_edit) + "}"
+
+# ---------------------------------------------------------------------------
 # Notification handler (no response)
 # ---------------------------------------------------------------------------
 
@@ -508,6 +564,8 @@ fn md_lsp_handle_request(method: text, params_json: text, req_id: i64, workspace
         return md_lsp_document_symbol(params_json, req_id, workspace)
     if method == "textDocument/foldingRange":
         return md_lsp_folding_range(params_json, req_id, workspace)
+    if method == "textDocument/codeAction":
+        return md_lsp_code_action(params_json, req_id, workspace)
     if method == "shutdown":
         return _md_lsp_ok_response(req_id, "null")
     _md_lsp_error_response(req_id, -32601, "Method not found: " + method)

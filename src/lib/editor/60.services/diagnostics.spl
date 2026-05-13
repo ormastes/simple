@@ -12,6 +12,12 @@ struct EditorDiagnostic:
     message: text
     source: text
 
+struct EditorCodeAction:
+    title: text
+    kind: text
+    edit_json: text
+    command: text
+
 class DiagnosticStore:
     diagnostics: [EditorDiagnostic]
 
@@ -87,6 +93,24 @@ fn diagnostics_handle_publish(store: DiagnosticStore, params_json: text):
     val diags = _diag_parse_diagnostics(params_json, path)
     store.set_diagnostics(path, diags)
 
+fn diagnostics_handle_code_actions(store: DiagnosticStore, path: text, result_json: text) -> [EditorCodeAction]:
+    code_actions_handle_response(result_json)
+
+fn code_actions_handle_response(result_json: text) -> [EditorCodeAction]:
+    var actions: [EditorCodeAction] = []
+    val arr_start = _diag_find_array_start(result_json)
+    if arr_start < 0:
+        return actions
+    val entries = _diag_split_array_entries(result_json, arr_start)
+    for entry in entries:
+        actions.push(EditorCodeAction(
+            title: _diag_extract_string(entry, "\"title\""),
+            kind: _diag_extract_string(entry, "\"kind\""),
+            edit_json: _diag_extract_value_for_field(entry, "\"edit\""),
+            command: _diag_extract_value_for_field(entry, "\"command\"")
+        ))
+    actions
+
 fn _diag_extract_uri(json: text) -> text:
     val marker = "\"uri\":"
     var i = 0
@@ -126,6 +150,14 @@ fn _diag_find_diagnostics_array(json: text) -> i64:
                 j = j + 1
             if j < json.len() and json.char_at(j) == "[":
                 return j
+        i = i + 1
+    -1
+
+fn _diag_find_array_start(json: text) -> i64:
+    var i = 0
+    while i < json.len():
+        if json.char_at(i) == "[":
+            return i
         i = i + 1
     -1
 
@@ -230,3 +262,52 @@ fn _diag_extract_string(json: text, field: text) -> text:
                 return result
         i = i + 1
     ""
+
+fn _diag_extract_value_for_field(json: text, field: text) -> text:
+    var i = 0
+    while i < json.len():
+        if json.slice(i, json.len()).starts_with(field):
+            var j = i + field.len()
+            while j < json.len() and (json.char_at(j) == " " or json.char_at(j) == ":"):
+                j = j + 1
+            if j >= json.len():
+                return ""
+            val ch = json.char_at(j)
+            if ch == "{" or ch == "[":
+                return _diag_extract_balanced(json, j, ch)
+            if ch == "\"":
+                return "\"" + _diag_extract_string(json, field) + "\""
+            var result = ""
+            while j < json.len():
+                val c = json.char_at(j)
+                if c == "," or c == "}":
+                    return result.trim()
+                result = result + c
+                j = j + 1
+            return result.trim()
+        i = i + 1
+    ""
+
+fn _diag_extract_balanced(json: text, start: i64, open_ch: text) -> text:
+    val close_ch = if open_ch == "{" then "}" else "]"
+    var depth = 0
+    var i = start
+    var in_str = false
+    while i < json.len():
+        val ch = json.char_at(i)
+        if in_str:
+            if ch == "\\":
+                i = i + 1
+            elif ch == "\"":
+                in_str = false
+        else:
+            if ch == "\"":
+                in_str = true
+            elif ch == open_ch:
+                depth = depth + 1
+            elif ch == close_ch:
+                depth = depth - 1
+                if depth == 0:
+                    return json.slice(start, i + 1)
+        i = i + 1
+    json.slice(start, json.len())

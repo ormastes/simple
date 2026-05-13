@@ -39,6 +39,9 @@ class EditorController:
     settings_view: SettingsViewState
     palette_state: PaletteState
     extension_host: ExtensionHost
+    diagnostic_store: DiagnosticStore
+    code_actions: [EditorCodeAction]
+    debug_status: text
 
 impl EditorController:
 
@@ -57,7 +60,10 @@ impl EditorController:
             config: editor_config_default(),
             settings_view: nil,
             palette_state: nil,
-            extension_host: host
+            extension_host: host,
+            diagnostic_store: DiagnosticStore.new(),
+            code_actions: [],
+            debug_status: "stopped"
         )
 
     me handle_key(key: text, rects: [SplitRect]) -> EditorAction:
@@ -382,6 +388,12 @@ impl EditorController:
         if command_name.starts_with("markdown."):
             self.status_msg = "extension command not registered: " + command_name
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        if command_name == "quickfix":
+            return self._request_quickfix()
+        if command_name == "quickfix-apply":
+            return self._apply_first_quickfix()
+        if command_name == "debug-start":
+            return self._start_debug_adapter(command_payload)
         val parsed = editor_cmd_with(command_name, command_payload)
         val dispatch_result = editor_dispatch_session(self.session, parsed)
         self.status_msg = dispatch_result.message
@@ -391,6 +403,47 @@ impl EditorController:
         if dispatch_result.quit:
             self.running = false
         EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+    me _request_quickfix() -> EditorAction:
+        val doc = self.session.active_document()
+        val buffer = self.session.active_buffer()
+        if doc == nil or buffer == nil:
+            self.status_msg = "no file open"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        if doc.language_id == "markdown":
+            val content = md_buffer_content(buffer)
+            val line = buffer.line_at(buffer.cursor_row)
+            val fixed = _editor_markdown_quickfix_line(line)
+            if fixed != line:
+                val edit_json = "{\"line\":" + str(buffer.cursor_row) + ",\"newText\":\"" + _editor_escape_json(fixed) + "\"}"
+                self.code_actions = [EditorCodeAction(title: "Apply Markdown quick fix", kind: "quickfix", edit_json: edit_json, command: "")]
+                self.status_msg = "1 quick fix"
+                return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+            val diags = md_diagnose(content, doc.path())
+            if diags.len() > 0:
+                self.status_msg = "diagnostics available"
+            else:
+                self.status_msg = "no quick fixes"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        self.status_msg = "no quick fixes"
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _apply_first_quickfix() -> EditorAction:
+        if self.code_actions.len() == 0:
+            self.status_msg = "no quick fix selected"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        self.status_msg = "quick fix ready"
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _start_debug_adapter(debug_type: text) -> EditorAction:
+        val adapter_id = if debug_type == "" then "simple" else debug_type
+        val adapter = self.extension_host.find_debug_adapter(adapter_id)
+        if adapter.adapter.id == "":
+            self.status_msg = "debug adapter not found: " + adapter_id
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        self.debug_status = "starting"
+        self.status_msg = "debug adapter: " + adapter.adapter.program
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _execute_markdown_extension_command(command_name: text) -> EditorAction:
         if command_name.starts_with("markdown."):
@@ -541,6 +594,34 @@ fn _editor_split_path_list(value: text) -> [text]:
     if last != "":
         parts.push(last)
     parts
+
+fn _editor_markdown_quickfix_line(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed.starts_with("#"):
+        var level = 0
+        while level < trimmed.len() and trimmed.char_at(level) == "#":
+            level = level + 1
+        if level < trimmed.len() and trimmed.char_at(level) != " ":
+            return trimmed.slice(0, level) + " " + trimmed.slice(level, trimmed.len())
+    if line.contains("[]()"):
+        return line.replace("[]()", "[text](url)")
+    if line.ends_with(" ") or line.ends_with("\t"):
+        return line.trim()
+    line
+
+fn _editor_escape_json(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "\"":
+            result = result + "\\\""
+        elif ch == "\\":
+            result = result + "\\\\"
+        else:
+            result = result + ch
+        i = i + 1
+    result
 
 fn ctrl_handle_insert_key(buffer: EditorBuffer, key: text) -> InsertKeyResult:
     if key == "\x1b":
