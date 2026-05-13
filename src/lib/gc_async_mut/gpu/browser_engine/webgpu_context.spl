@@ -404,6 +404,12 @@ pub class WebGPUShaderDiagnostic:
     fn formatted() -> text:
         self.severity + ": WGSL " + self.stage + " shader line " + self.line.to_text() + ":" + self.column.to_text() + ": " + self.message
 
+pub class WebGPUShaderBindingReflection:
+    group: i32
+    binding: i32
+    resource_type: text
+    visibility: text
+
 pub fn webgpu_create_context(secure_context: bool) -> WebGPUContext:
     WebGPUContext(
         secure_context: secure_context,
@@ -638,6 +644,27 @@ pub fn webgpu_shader_module_diagnostic(module: GPUShaderModule) -> WebGPUShaderD
         message: module.error
     )
 
+pub fn webgpu_reflect_wgsl_bindings(source: text) -> [WebGPUShaderBindingReflection]:
+    var bindings: [WebGPUShaderBindingReflection] = []
+    val visibility = webgpu_diagnostic_stage_label(webgpu_detect_wgsl_stage(source))
+    var search_start = 0
+    while search_start < source.len():
+        val remaining: text = source.slice(search_start, source.len())
+        val group_rel = remaining.index_of("@group(")
+        if group_rel < 0:
+            return bindings
+        val group_start = search_start + group_rel
+        val group = webgpu_parse_wgsl_attribute_i32(source, group_start, "@group(")
+        val line_end = webgpu_find_source_line_end(source, group_start)
+        val line: text = source.slice(group_start, line_end)
+        val binding_rel = line.index_of("@binding(")
+        if group >= 0 and binding_rel >= 0:
+            val binding = webgpu_parse_wgsl_attribute_i32(source, group_start + binding_rel, "@binding(")
+            if binding >= 0:
+                bindings.push(WebGPUShaderBindingReflection(group: group, binding: binding, resource_type: webgpu_reflect_wgsl_resource_type(line), visibility: visibility))
+        search_start = line_end + 1
+    bindings
+
 pub fn webgpu_create_render_pipeline(ctx: WebGPUContext, vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
     if ctx.device_lost:
         ctx.last_error = "device is lost"
@@ -802,6 +829,45 @@ fn webgpu_parse_wgsl_positive_i32(value: text) -> i32:
         result = result * 10 + (ch.parse_i64() ?? 0).to_i32()
         i = i + 1
     result
+
+fn webgpu_parse_wgsl_attribute_i32(source: text, start: i32, marker: text) -> i32:
+    val value_start = start + marker.len()
+    var value_end = value_start
+    while value_end < source.len() and source.slice(value_end, value_end + 1) != ")":
+        value_end = value_end + 1
+    if value_end >= source.len():
+        return -1
+    val value = source.slice(value_start, value_end).trim()
+    if value.len() == 0:
+        return -1
+    var result = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch < "0" or ch > "9":
+            return -1
+        result = result * 10 + (ch.parse_i64() ?? 0).to_i32()
+        i = i + 1
+    result
+
+fn webgpu_find_source_line_end(source: text, start: i32) -> i32:
+    var i = start
+    while i < source.len() and source.slice(i, i + 1) != "\n":
+        i = i + 1
+    i
+
+fn webgpu_reflect_wgsl_resource_type(line: text) -> text:
+    if line.contains("sampler"):
+        return "sampler"
+    if line.contains("texture_storage"):
+        return "storage-texture"
+    if line.contains("texture"):
+        return "texture"
+    if line.contains("var<uniform>"):
+        return "uniform-buffer"
+    if line.contains("var<storage"):
+        return "storage-buffer"
+    "unknown"
 
 fn webgpu_validate_wgsl_workgroup_limits(values: [i32]) -> text:
     val limits = GPUDeviceLimits.defaults()
