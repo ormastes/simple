@@ -909,6 +909,13 @@ These are **runtime infrastructure** externs, not crypto FFI:
 
 **Next:** Broader hardening only: add an LLVM IR dump/verify surface for external `opt -verify`, generalize the typed byte/index proof beyond the benchmark hot paths, and lower more fixed-size byte-buffer patterns to stack/native storage.
 
+### 2026-05-13 Compiler-Layer Algorithm Update
+
+- Added a general typed `[u32]` array get/set lowering in the Rust compiler path rather than rewriting individual algorithms.
+- MIR lowering now routes typed `[u32]` reads and writes through `rt_typed_words_u32_at` / `rt_typed_words_u32_set`, avoiding generic `rt_index_get` / `rt_index_set` and boxing on word-state algorithms.
+- Cranelift codegen inlines both helpers into direct runtime-array slot load/store with one bounds check; runtime, interpreter-extern, ELF, and symbol-table plumbing provide fallback linkage.
+- Regression evidence: MIR lowering tests for get/set, Cranelift no-runtime-relocation tests for get/set, runtime helper tests, `cargo check` for `simple-runtime`, `simple-common`, and `simple-compiler`, release driver rebuild, port algorithm checksum parity for XXHash64/CRC32/Adler32/ChaCha20, and cipher/compress gate `passed=10 skipped=3 failed=0`.
+
 ---
 
 ## Critical Files (hardening and regression guard)

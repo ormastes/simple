@@ -65,7 +65,7 @@ classification path are in place, and known blockers can be skipped explicitly:
 2026-05-12 compiler/interpreter optimization update:
 
 - Proven `[u32]` array reads/writes now have MIR fast paths through
-  `rt_words_u32_at` and `rt_words_u32_set`, matching the existing typed `[u8]`
+  `rt_typed_words_u32_at` and `rt_typed_words_u32_set`, matching the existing typed `[u8]`
   strategy and avoiding generic `rt_index_get` / `rt_index_set` dispatch in
   ChaCha-style word-state loops.
 - Regression tests lock the new lowering:
@@ -80,6 +80,8 @@ classification path are in place, and known blockers can be skipped explicitly:
 - Fixed the OS Poly1305 tag serializer in `src/os/crypto/poly1305.spl`; `_put_le_u32` now returns the appended buffer and `poly1305_finalize` assigns each append.
 - Verified `test/unit/lib/crypto/poly1305_rfc8439_spec.spl`, `test/unit/os/crypto/chacha20_poly1305_spec.spl`, and `test/unit/lib/crypto/chacha20_poly1305_rfc8439_spec.spl` all pass in interpreter mode with `--no-cache`.
 - Restored the documented `test/perf/port_algorithms/run_cipher_compress_gate.shs` runner. Core mode now passes 10 specs and skips the 3 named blockers when `CIPHER_COMPRESS_ALLOW_KNOWN_FAIL=1` is set.
+- Added the compiler/runtime `[u32]` typed-word lowering in the Rust compiler path without changing algorithm sources. MIR now emits word get/set calls for typed `[u32]` arrays, Cranelift inlines them into direct slot load/store with bounds checks, and runtime/interpreter symbol plumbing preserves fallback behavior.
+- Verified the rebuilt compiler with the port algorithm benchmark: checksum parity passed for XXHash64, CRC32, Adler32, and ChaCha20. Core algorithm gate still passes with documented blockers skipped: `passed=10 skipped=3 failed=0`.
 
 ### Tier 2: Full In-Repo Correctness
  

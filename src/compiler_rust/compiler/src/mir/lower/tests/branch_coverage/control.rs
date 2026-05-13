@@ -55,6 +55,18 @@ fn u8_index_set_uses_byte_fast_path() {
 }
 
 #[test]
+fn u32_index_set_uses_word_fast_path() {
+    let mir =
+        compile_to_mir("fn test():\n    var arr: [u32] = [0, 0]\n    var word: u32 = 42\n    arr[1] = word\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_words_u32_set"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_index_set"))
+    }));
+}
+
+#[test]
 fn index_set_float_boxing() {
     let mir = compile_to_mir("fn test():\n    var arr = [0.0, 0.0]\n    arr[0] = 3.14\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxFloat { .. })));

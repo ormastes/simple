@@ -310,6 +310,8 @@ pub use value::{
     rt_bytes_u64_le_at,
     rt_bytes_u8_at,
     rt_bytes_u8_set,
+    rt_typed_words_u32_at,
+    rt_typed_words_u32_set,
     rt_index_get,
     rt_index_set,
     // Object operations

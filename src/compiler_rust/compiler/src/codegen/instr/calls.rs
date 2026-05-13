@@ -305,6 +305,124 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
     Ok(true)
 }
 
+fn compile_inline_typed_words_u32_at<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 2 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let word_mask = builder.ins().iconst(types::I64, 0xFFFF_FFFF);
+
+    let bounds_block = builder.create_block();
+    let load_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
+    let negative_index = builder.ins().iadd(len, index);
+    let normalized_index = builder.ins().select(index_is_negative, negative_index, index);
+    builder.ins().jump(bounds_block, &[]);
+
+    builder.switch_to_block(bounds_block);
+    let ge_zero = builder
+        .ins()
+        .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
+    let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
+    let in_bounds = builder.ins().band(ge_zero, lt_len);
+    builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
+    builder.seal_block(bounds_block);
+
+    builder.switch_to_block(load_block);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let slot_offset = builder.ins().imul_imm(normalized_index, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+    let payload = builder.ins().sshr_imm(raw, 3);
+    let word = builder.ins().band(payload, word_mask);
+    builder.ins().jump(done_block, &[word]);
+    builder.seal_block(load_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    ctx.vreg_values.insert(*dest, result);
+    Ok(true)
+}
+
+fn compile_inline_typed_words_u32_set<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 3 {
+        return Ok(false);
+    }
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let value = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let false_value = builder.ins().iconst(types::I8, 0);
+    let true_value = builder.ins().iconst(types::I8, 1);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let word_mask = builder.ins().iconst(types::I64, 0xFFFF_FFFF);
+
+    let bounds_block = builder.create_block();
+    let store_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I8);
+
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
+    let negative_index = builder.ins().iadd(len, index);
+    let normalized_index = builder.ins().select(index_is_negative, negative_index, index);
+    builder.ins().jump(bounds_block, &[]);
+
+    builder.switch_to_block(bounds_block);
+    let ge_zero = builder
+        .ins()
+        .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
+    let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
+    let in_bounds = builder.ins().band(ge_zero, lt_len);
+    builder
+        .ins()
+        .brif(in_bounds, store_block, &[], done_block, &[false_value]);
+    builder.seal_block(bounds_block);
+
+    builder.switch_to_block(store_block);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let slot_offset = builder.ins().imul_imm(normalized_index, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let masked = builder.ins().band(value, word_mask);
+    let tagged = builder.ins().ishl_imm(masked, 3);
+    builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
+    builder.ins().jump(done_block, &[true_value]);
+    builder.seal_block(store_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    if let Some(dest) = dest {
+        ctx.vreg_values.insert(*dest, result);
+    }
+    Ok(true)
+}
+
 fn compile_inline_adler_reduce<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -875,6 +993,12 @@ pub fn compile_call<M: Module>(
     if ffi_name == "rt_typed_bytes_u8_unchecked"
         && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 1)?
     {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u32_at" && compile_inline_typed_words_u32_at(ctx, builder, dest, args)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u32_set" && compile_inline_typed_words_u32_set(ctx, builder, dest, args)? {
         return Ok(());
     }
     if ffi_name == "_adler_reduce" && compile_inline_adler_reduce(ctx, builder, dest, args)? {

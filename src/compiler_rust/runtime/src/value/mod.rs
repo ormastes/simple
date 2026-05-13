@@ -131,6 +131,7 @@ pub use collections::{
     rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join, rt_string_len, rt_string_new, rt_string_replace,
     rt_string_rfind, rt_string_split, rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_lower,
     rt_string_to_upper, rt_string_trim, rt_to_string, rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set,
+    rt_typed_words_u32_at, rt_typed_words_u32_set,
 };
 pub use utf8_kernels::{
     rt_rank_query, rt_rank_select_build, rt_rank_select_free, rt_select_query, rt_swi_build, rt_swi_byte_to_char,

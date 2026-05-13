@@ -13,6 +13,8 @@ use super::{
     rt_bytes_u64_le_at,
     rt_bytes_u8_at,
     rt_bytes_u8_set,
+    rt_typed_words_u32_at,
+    rt_typed_words_u32_set,
     // Array functions
     rt_array_new,
     rt_array_pop,
@@ -160,6 +162,23 @@ fn test_bytes_u8_set_fast_path() {
     assert!(rt_bytes_u8_set(array, -1, 7));
     assert_eq!(rt_bytes_u8_at(array, 2), 7);
     assert!(!rt_bytes_u8_set(array, 3, 9));
+}
+
+#[test]
+fn test_typed_words_u32_fast_path() {
+    let array = rt_array_new(3);
+
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(3));
+
+    assert_eq!(rt_typed_words_u32_at(array, 1), 2);
+    assert!(rt_typed_words_u32_set(array, 1, 0x1_0000_0001));
+    assert_eq!(rt_typed_words_u32_at(array, 1), 1);
+    assert!(rt_typed_words_u32_set(array, -1, 0x8000_0000));
+    assert_eq!(rt_typed_words_u32_at(array, 2), 0x8000_0000);
+    assert_eq!(rt_typed_words_u32_at(array, 3), 0);
+    assert!(!rt_typed_words_u32_set(array, 3, 9));
 }
 
 #[test]

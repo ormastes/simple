@@ -96,6 +96,17 @@ fn u8_array_index_uses_byte_fast_path() {
     }));
 }
 
+#[test]
+fn u32_array_index_uses_word_fast_path() {
+    let mir = compile_to_mir("fn test() -> u32:\n    val arr: [u32] = [10, 20]\n    return arr[1]\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_words_u32_at"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_index_get"))
+    }));
+}
+
 // =============================================================================
 // Index result unboxing (lowering_expr.rs lines 938, 945)
 // =============================================================================

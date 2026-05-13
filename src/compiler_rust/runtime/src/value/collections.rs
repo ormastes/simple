@@ -418,6 +418,24 @@ pub extern "C" fn rt_bytes_u8_at(array: RuntimeValue, index: i64) -> i64 {
     }
 }
 
+/// Read a u32 element from a `[u32]`-style runtime array without generic index dispatch.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u32_at(array: RuntimeValue, index: i64) -> i64 {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    unsafe {
+        let len = (*arr).len as i64;
+        let idx = normalize_index(index, len);
+        if idx < 0 || idx >= len {
+            return 0;
+        }
+        let raw = (*arr).as_slice()[idx as usize];
+        if raw.is_int() {
+            return raw.as_int() & 0xFFFF_FFFF;
+        }
+        (raw.to_raw() as i64) & 0xFFFF_FFFF
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_bytes_u32_le_at(array: RuntimeValue, index: i64) -> i64 {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
@@ -496,6 +514,21 @@ pub extern "C" fn rt_bytes_u8_set(array: RuntimeValue, index: i64, value: i64) -
             return true;
         }
         (*arr).as_mut_slice()[idx as usize] = RuntimeValue::from_int(value & 0xFF);
+        true
+    }
+}
+
+/// Write a u32 element into a `[u32]`-style runtime array without generic index dispatch.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u32_set(array: RuntimeValue, index: i64, value: i64) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let len = (*arr).len as i64;
+        let idx = normalize_index(index, len);
+        if idx < 0 || idx >= len {
+            return false;
+        }
+        (*arr).as_mut_slice()[idx as usize] = RuntimeValue::from_int(value & 0xFFFF_FFFF);
         true
     }
 }
