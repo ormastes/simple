@@ -277,6 +277,9 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 
 **Goal:** Raise WPT to 80%+. Visual effects match Chrome for CSS3 sites.
 
+**Current progress (2026-05-13):**
+- Fallback renderer single-layer `box-shadow` support has started: simple offset/spread shadows render before block backgrounds, and glass feature-gap reporting now reserves the remaining shadow gap for multi-layer shadows, covered by `test/web_platform/css/box_shadow_wpt_spec.spl` and `test/web_platform/css/glass_feature_gap_spec.spl`.
+
 **Work:**
 - CSS Transitions: `transition` property, interpolation engine for color/length/transform values
 - CSS Animations: `@keyframes`, `animation` shorthand, timing functions (ease, cubic-bezier)

@@ -101,6 +101,9 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
         if block_h <= 0 and text_val.len() > 0:
             block_h = (font_size + 4) * line_count
         val block_bg = br_style_background_argb(html, style)
+        val shadow = br_box_shadow_rect(html, style)
+        if block_w > 0 and block_h > 0 and shadow.color != 0x00000000u32:
+            pixels = br_fill_rect(pixels, width, height, margin + shadow.offset_x - shadow.spread, cursor_y + shadow.offset_y - shadow.spread, block_w + shadow.spread * 2, block_h + shadow.spread * 2, shadow.color)
         if block_w > 0 and block_h > 0 and block_bg != 0x00000000u32:
             pixels = br_fill_rect(pixels, width, height, margin, cursor_y, block_w, block_h, block_bg)
         if text_val.len() > 0:
@@ -131,6 +134,12 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
 # Helpers
 # =========================================================================
 
+class BrBoxShadowRect:
+    offset_x: i32
+    offset_y: i32
+    spread: i32
+    color: u32
+
 fn br_count_fallback_divs(lower_html: text) -> i32:
     var count = 0
     var search_pos: i64 = 0
@@ -146,6 +155,51 @@ fn br_char_advance_px(font_size: i32) -> i32:
     if font_size <= 8:
         return 5
     8
+
+fn br_box_shadow_rect(html: text, style: text) -> BrBoxShadowRect:
+    val value = br_style_property_value(style, "box-shadow")
+    if value.len() == 0 or value == "none" or value.contains(",") or value.contains("inset"):
+        return BrBoxShadowRect(offset_x: 0, offset_y: 0, spread: 0, color: 0x00000000u32)
+    val parts = browser_renderer_split_spaces(value)
+    if parts.len() < 2:
+        return BrBoxShadowRect(offset_x: 0, offset_y: 0, spread: 0, color: 0x00000000u32)
+    val offset_x = br_parse_shadow_px(parts[0])
+    val offset_y = br_parse_shadow_px(parts[1])
+    var spread = 0
+    var color_token = "#000000"
+    if parts.len() == 3:
+        if br_shadow_token_is_color(parts[2]):
+            color_token = parts[2]
+        else:
+            spread = br_parse_shadow_px(parts[2])
+    if parts.len() >= 4:
+        spread = br_parse_shadow_px(parts[2])
+        color_token = parts[3]
+    val color = br_style_background_argb(html, "background-color:" + color_token)
+    BrBoxShadowRect(offset_x: offset_x, offset_y: offset_y, spread: spread, color: color)
+
+fn br_parse_shadow_px(value: text) -> i32:
+    val lower = value.trim().lower()
+    var numeric = ""
+    var idx = 0
+    while idx < lower.len():
+        val ch = lower.char_at(idx)
+        if (ch >= "0" and ch <= "9") or ch == "-":
+            numeric = numeric + ch
+        elif ch == ".":
+            if numeric.len() > 0:
+                return numeric.to_i32()
+            return 0
+        elif numeric.len() > 0:
+            return numeric.to_i32()
+        idx = idx + 1
+    if numeric.len() > 0:
+        return numeric.to_i32()
+    0
+
+fn br_shadow_token_is_color(value: text) -> bool:
+    val lower = value.trim().lower()
+    lower.starts_with("#") or lower.starts_with("rgb") or lower == "black" or lower == "white" or lower == "transparent" or lower == "rebeccapurple"
 
 fn br_strip_css_quoted_string(value: text) -> text:
     val trimmed = value.trim()
