@@ -472,6 +472,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL compatibility has started in pure Simple with a separate `webgl_context.spl` API model. `canvas.getContext` now recognizes `webgl`, `experimental-webgl`, and `webgl2`; initial tests cover context creation, GL error state, context loss/restore, deterministic buffer/texture IDs, shader source/compile validation, and program link/use.
 - M27 WebGL shader/program deletion has started: shader and program delete status is queryable, deleted shaders reject source/compile/attach commands, and deleted programs clear current program plus stored uniform values.
 - M27 WebGL shader detachment has started: programs can detach attached shader stages, attached-shader counts update, and relinking fails once a required stage is missing.
+- M27 WebGL attached-shader introspection has started: programs can return attached shader handles, including deleted-but-still-attached shader lifecycle state.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
