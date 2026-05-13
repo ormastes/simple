@@ -137,21 +137,26 @@ pub class GPUBindGroupLayoutEntry:
 pub class GPUBindGroupEntry:
     binding: i32
     buffer_id: i32
+    buffer_offset: i64
+    buffer_size: i64
     texture_id: i32
     texture_view_id: i32
     sampler_id: i32
 
     static fn buffer(binding: i32, buffer_id: i32) -> GPUBindGroupEntry:
-        GPUBindGroupEntry(binding: binding, buffer_id: buffer_id, texture_id: -1, texture_view_id: -1, sampler_id: -1)
+        GPUBindGroupEntry(binding: binding, buffer_id: buffer_id, buffer_offset: 0, buffer_size: -1, texture_id: -1, texture_view_id: -1, sampler_id: -1)
+
+    static fn buffer_range(binding: i32, buffer_id: i32, offset: i64, size: i64) -> GPUBindGroupEntry:
+        GPUBindGroupEntry(binding: binding, buffer_id: buffer_id, buffer_offset: offset, buffer_size: size, texture_id: -1, texture_view_id: -1, sampler_id: -1)
 
     static fn texture(binding: i32, texture_id: i32) -> GPUBindGroupEntry:
-        GPUBindGroupEntry(binding: binding, buffer_id: -1, texture_id: texture_id, texture_view_id: -1, sampler_id: -1)
+        GPUBindGroupEntry(binding: binding, buffer_id: -1, buffer_offset: 0, buffer_size: -1, texture_id: texture_id, texture_view_id: -1, sampler_id: -1)
 
     static fn texture_view(binding: i32, texture_view_id: i32) -> GPUBindGroupEntry:
-        GPUBindGroupEntry(binding: binding, buffer_id: -1, texture_id: -1, texture_view_id: texture_view_id, sampler_id: -1)
+        GPUBindGroupEntry(binding: binding, buffer_id: -1, buffer_offset: 0, buffer_size: -1, texture_id: -1, texture_view_id: texture_view_id, sampler_id: -1)
 
     static fn sampler(binding: i32, sampler_id: i32) -> GPUBindGroupEntry:
-        GPUBindGroupEntry(binding: binding, buffer_id: -1, texture_id: -1, texture_view_id: -1, sampler_id: sampler_id)
+        GPUBindGroupEntry(binding: binding, buffer_id: -1, buffer_offset: 0, buffer_size: -1, texture_id: -1, texture_view_id: -1, sampler_id: sampler_id)
 
 pub class GPUBindGroupLayoutHandle:
     id: i32
@@ -378,8 +383,12 @@ pub class WebGPUResourceTable:
         if is_buffer_binding:
             if entry.buffer_id < 0 or entry.texture_id >= 0 or entry.texture_view_id >= 0 or entry.sampler_id >= 0:
                 return "GPUBindGroup buffer binding must reference a buffer"
-            if not self.has_buffer(entry.buffer_id):
+            val buffer = webgpu_find_buffer(self, entry.buffer_id)
+            if not buffer.valid:
                 return "GPUBindGroup buffer resource does not exist"
+            val range_err = webgpu_validate_bind_group_buffer_range(buffer, entry.buffer_offset, entry.buffer_size)
+            if range_err != "":
+                return range_err
             return ""
         if is_texture_binding:
             if entry.buffer_id >= 0 or entry.sampler_id >= 0:
@@ -412,6 +421,19 @@ pub fn webgpu_validate_buffer_descriptor(size: i64, usage: i32) -> text:
         return "GPUBuffer size must be positive"
     if not webgpu_is_supported_buffer_usage(usage):
         return "GPUBuffer usage is not supported"
+    ""
+
+pub fn webgpu_validate_bind_group_buffer_range(buffer: GPUBufferHandle, offset: i64, size: i64) -> text:
+    if offset < 0:
+        return "GPUBindGroup buffer offset must be non-negative"
+    if offset >= buffer.size:
+        return "GPUBindGroup buffer binding range exceeds buffer size"
+    if size == -1:
+        return ""
+    if size <= 0:
+        return "GPUBindGroup buffer binding size must be positive"
+    if offset + size > buffer.size:
+        return "GPUBindGroup buffer binding range exceeds buffer size"
     ""
 
 pub fn webgpu_find_buffer(resources: WebGPUResourceTable, buffer_id: i32) -> GPUBufferHandle:
@@ -668,4 +690,4 @@ pub fn webgpu_find_bind_group_entry(entries: [GPUBindGroupEntry], binding: i32) 
         if entry.binding == binding:
             return entry
         i = i + 1
-    GPUBindGroupEntry(binding: -1, buffer_id: -1, texture_id: -1, texture_view_id: -1, sampler_id: -1)
+    GPUBindGroupEntry(binding: -1, buffer_id: -1, buffer_offset: 0, buffer_size: -1, texture_id: -1, texture_view_id: -1, sampler_id: -1)
