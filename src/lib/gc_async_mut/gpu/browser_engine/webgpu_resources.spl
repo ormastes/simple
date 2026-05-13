@@ -85,8 +85,14 @@ pub class GPUSamplerHandle:
     label: text
     address_mode_u: text
     address_mode_v: text
+    address_mode_w: text
     mag_filter: text
     min_filter: text
+    mipmap_filter: text
+    lod_min_clamp: f64
+    lod_max_clamp: f64
+    compare: text
+    max_anisotropy: i32
     valid: bool
     error: text
 
@@ -231,13 +237,16 @@ pub class WebGPUResourceTable:
         handle
 
     me create_sampler(label: text, address_mode_u: text, address_mode_v: text, mag_filter: text, min_filter: text) -> GPUSamplerHandle:
-        val err = webgpu_validate_sampler_descriptor(address_mode_u, address_mode_v, mag_filter, min_filter)
+        self.create_sampler_with_descriptor(label, address_mode_u, address_mode_v, "clamp-to-edge", mag_filter, min_filter, "nearest", 0.0, 32.0, "", 1)
+
+    me create_sampler_with_descriptor(label: text, address_mode_u: text, address_mode_v: text, address_mode_w: text, mag_filter: text, min_filter: text, mipmap_filter: text, lod_min_clamp: f64, lod_max_clamp: f64, compare: text, max_anisotropy: i32) -> GPUSamplerHandle:
+        val err = webgpu_validate_sampler_descriptor(address_mode_u, address_mode_v, address_mode_w, mag_filter, min_filter, mipmap_filter, lod_min_clamp, lod_max_clamp, compare, max_anisotropy)
         if err != "":
             self.last_error = err
-            return GPUSamplerHandle(id: -1, label: label, address_mode_u: address_mode_u, address_mode_v: address_mode_v, mag_filter: mag_filter, min_filter: min_filter, valid: false, error: err)
+            return GPUSamplerHandle(id: -1, label: label, address_mode_u: address_mode_u, address_mode_v: address_mode_v, address_mode_w: address_mode_w, mag_filter: mag_filter, min_filter: min_filter, mipmap_filter: mipmap_filter, lod_min_clamp: lod_min_clamp, lod_max_clamp: lod_max_clamp, compare: compare, max_anisotropy: max_anisotropy, valid: false, error: err)
         val id = self.next_resource_id
         self.next_resource_id = self.next_resource_id + 1
-        val handle = GPUSamplerHandle(id: id, label: label, address_mode_u: address_mode_u, address_mode_v: address_mode_v, mag_filter: mag_filter, min_filter: min_filter, valid: true, error: "")
+        val handle = GPUSamplerHandle(id: id, label: label, address_mode_u: address_mode_u, address_mode_v: address_mode_v, address_mode_w: address_mode_w, mag_filter: mag_filter, min_filter: min_filter, mipmap_filter: mipmap_filter, lod_min_clamp: lod_min_clamp, lod_max_clamp: lod_max_clamp, compare: compare, max_anisotropy: max_anisotropy, valid: true, error: "")
         self.samplers.push(handle)
         self.last_error = ""
         handle
@@ -517,11 +526,17 @@ pub fn webgpu_max_mip_level_count(width: i32, height: i32, depth_or_layers: i32,
         levels = levels + 1
     levels
 
-pub fn webgpu_validate_sampler_descriptor(address_mode_u: text, address_mode_v: text, mag_filter: text, min_filter: text) -> text:
-    if not webgpu_is_supported_address_mode(address_mode_u) or not webgpu_is_supported_address_mode(address_mode_v):
+pub fn webgpu_validate_sampler_descriptor(address_mode_u: text, address_mode_v: text, address_mode_w: text, mag_filter: text, min_filter: text, mipmap_filter: text, lod_min_clamp: f64, lod_max_clamp: f64, compare: text, max_anisotropy: i32) -> text:
+    if not webgpu_is_supported_address_mode(address_mode_u) or not webgpu_is_supported_address_mode(address_mode_v) or not webgpu_is_supported_address_mode(address_mode_w):
         return "GPUSampler address mode is not supported"
-    if not webgpu_is_supported_filter_mode(mag_filter) or not webgpu_is_supported_filter_mode(min_filter):
+    if not webgpu_is_supported_filter_mode(mag_filter) or not webgpu_is_supported_filter_mode(min_filter) or not webgpu_is_supported_filter_mode(mipmap_filter):
         return "GPUSampler filter mode is not supported"
+    if lod_min_clamp < 0.0 or lod_max_clamp < lod_min_clamp:
+        return "GPUSampler lod clamp range is invalid"
+    if compare != "" and not webgpu_is_supported_compare_function(compare):
+        return "GPUSampler compare function is not supported"
+    if max_anisotropy < 1:
+        return "GPUSampler maxAnisotropy must be at least 1"
     ""
 
 pub fn webgpu_validate_bind_group_layout_descriptor(entries: [GPUBindGroupLayoutEntry]) -> text:
@@ -575,6 +590,9 @@ pub fn webgpu_is_supported_address_mode(mode: text) -> bool:
 
 pub fn webgpu_is_supported_filter_mode(mode: text) -> bool:
     mode == "nearest" or mode == "linear"
+
+pub fn webgpu_is_supported_compare_function(compare: text) -> bool:
+    compare == "never" or compare == "less" or compare == "equal" or compare == "less-equal" or compare == "greater" or compare == "not-equal" or compare == "greater-equal" or compare == "always"
 
 pub fn webgpu_is_supported_shader_visibility(visibility: i32) -> bool:
     visibility > 0 and (visibility & WEBGPU_SHADER_STAGE_ALL) == visibility
