@@ -6,7 +6,8 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_VERTEX_SHADER, WEBGL_FRAGMENT_SHADER,
     WEBGL_DELETE_STATUS, WEBGL_COMPILE_STATUS, WEBGL_LINK_STATUS, WEBGL_VALIDATE_STATUS,
     WEBGL_INFO_LOG_LENGTH, WEBGL_ATTACHED_SHADERS, WEBGL_ACTIVE_UNIFORMS,
-    WEBGL_ACTIVE_ATTRIBUTES, WEBGL_CURRENT_PROGRAM, WEBGL_SHADER_TYPE, WEBGL_FLOAT_VEC4,
+    WEBGL_ACTIVE_ATTRIBUTES, WEBGL_CURRENT_PROGRAM, WEBGL_SHADER_TYPE,
+    WEBGL_FLOAT_VEC2, WEBGL_FLOAT_VEC3, WEBGL_FLOAT_VEC4,
     WEBGL_LOW_FLOAT, WEBGL_MEDIUM_FLOAT, WEBGL_HIGH_FLOAT,
     WEBGL_LOW_INT, WEBGL_MEDIUM_INT, WEBGL_HIGH_INT,
     WEBGL_FLOAT_MAT4, WEBGL_SAMPLER_2D, WEBGL_FLOAT, WEBGL_ARRAY_BUFFER,
@@ -89,6 +90,7 @@ use std.gc_async_mut.gpu.browser_engine.webgl_render_commands.{
     WEBGL_RENDER_COMMAND_STENCIL_MASK_SEPARATE,
     WEBGL_RENDER_COMMAND_USE_PROGRAM,
     WEBGL_RENDER_COMMAND_UNIFORM_1I, WEBGL_RENDER_COMMAND_UNIFORM_1F,
+    WEBGL_RENDER_COMMAND_UNIFORM_2F, WEBGL_RENDER_COMMAND_UNIFORM_3F,
     WEBGL_RENDER_COMMAND_UNIFORM_4F, WEBGL_RENDER_COMMAND_UNIFORM_MATRIX4FV,
     WEBGL_RENDER_COMMAND_BIND_BUFFER, WEBGL_RENDER_COMMAND_ACTIVE_TEXTURE,
     WEBGL_RENDER_COMMAND_BIND_TEXTURE,
@@ -144,6 +146,21 @@ fn _uniform_program_context() -> std.gc_async_mut.gpu.browser_engine.webgl_conte
     val fs = ctx.create_shader(WEBGL_FRAGMENT_SHADER)
     ctx.shader_source(vs.id, _uniform_vertex_glsl())
     ctx.shader_source(fs.id, _fragment_glsl())
+    ctx.compile_shader(vs.id)
+    ctx.compile_shader(fs.id)
+    val program = ctx.create_program()
+    ctx.attach_shader(program.id, vs.id)
+    ctx.attach_shader(program.id, fs.id)
+    ctx.link_program(program.id)
+    ctx.use_program(program.id)
+    ctx
+
+fn _vector_uniform_program_context() -> std.gc_async_mut.gpu.browser_engine.webgl_context.WebGLContext:
+    var ctx = webgl_create_context(1, 320, 240)
+    val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+    val fs = ctx.create_shader(WEBGL_FRAGMENT_SHADER)
+    ctx.shader_source(vs.id, "attribute vec4 position; uniform vec2 uvScale; uniform vec3 normalBias; void main() { gl_Position = position; }")
+    ctx.shader_source(fs.id, "uniform vec4 tint; void main() { gl_FragColor = tint; }")
     ctx.compile_shader(vs.id)
     ctx.compile_shader(fs.id)
     val program = ctx.create_program()
@@ -1682,6 +1699,30 @@ describe "Browser WebGL context":
             expect(ctx.render_commands[5].kind).to_equal(WEBGL_RENDER_COMMAND_UNIFORM_4F)
             expect(ctx.render_commands[5].red).to_equal(0.9)
             expect(ctx.get_error()).to_equal(WEBGL_NO_ERROR)
+
+        it "stores vec2 and vec3 uniform values by location":
+            var ctx = _vector_uniform_program_context()
+            val program = ctx.programs[0]
+            val uv_scale = ctx.get_uniform_location(program.id, "uvScale")
+            val normal_bias = ctx.get_uniform_location(program.id, "normalBias")
+            val tint = ctx.get_uniform_location(program.id, "tint")
+            expect(ctx.get_active_uniform(program.id, 0).data_type).to_equal(WEBGL_FLOAT_VEC2)
+            expect(ctx.get_active_uniform(program.id, 1).data_type).to_equal(WEBGL_FLOAT_VEC3)
+            expect(ctx.uniform_2f(uv_scale, 2.0, 4.0)).to_equal(true)
+            expect(ctx.uniform_3f(normal_bias, 0.1, 0.2, 0.3)).to_equal(true)
+            expect(ctx.uniform_values.len()).to_equal(2)
+            expect(ctx.uniform_values[0].data_type).to_equal(WEBGL_FLOAT_VEC2)
+            expect(ctx.uniform_values[0].float_values[1]).to_equal(4.0)
+            expect(ctx.uniform_values[1].data_type).to_equal(WEBGL_FLOAT_VEC3)
+            expect(ctx.uniform_values[1].float_values[2]).to_equal(0.3)
+            expect(ctx.render_commands[1].kind).to_equal(WEBGL_RENDER_COMMAND_UNIFORM_2F)
+            expect(ctx.render_commands[1].x).to_equal(uv_scale)
+            expect(ctx.render_commands[1].green).to_equal(4.0)
+            expect(ctx.render_commands[2].kind).to_equal(WEBGL_RENDER_COMMAND_UNIFORM_3F)
+            expect(ctx.render_commands[2].x).to_equal(normal_bias)
+            expect(ctx.render_commands[2].blue).to_equal(0.3)
+            expect(ctx.uniform_2f(tint, 1.0, 1.0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
 
         it "validates uniform setter type and matrix arguments":
             var ctx = _uniform_program_context()
