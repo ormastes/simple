@@ -125,6 +125,7 @@ the baseline. Add new algorithms here only after checksum parity passes.
 Current command:
 - `SIMPLE_LLVM_PROBE=0 SIMPLE_DISASM_PROBE=0 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
 - The harness now sets `SIMPLE_NATIVE_RUNTIME_BUNDLE=rust-hosted` by default and fails on native compile failure unless `SIMPLE_ALLOW_INTERPRETER_FALLBACK=1` is explicitly set. Speed rows therefore cannot silently come from the interpreter fallback.
+- The harness writes `build/perf/port_algorithms/speed_ratios.tsv` with C, Rust, Simple, `Simple/C`, `Simple/Rust`, and per-baseline faster flags. Set `SIMPLE_REQUIRE_FASTER_THAN_BASELINES=1` to make the run fail until every measured algorithm is faster than both C and Rust.
 
 Next active gaps:
 - XXHash64, CRC32, Adler-32, and ChaCha20 are not all faster than both C and Rust in the latest default `bin/simple` hosted-native sample. These remain compiler/plugin optimization work, not permission to delegate to C/Rust libraries.

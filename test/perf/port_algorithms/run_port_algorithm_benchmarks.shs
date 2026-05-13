@@ -8,6 +8,7 @@ SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
 SIMPLE_NATIVE_BACKEND="${SIMPLE_NATIVE_BACKEND:-}"
 SIMPLE_NATIVE_RUNTIME_BUNDLE="${SIMPLE_NATIVE_RUNTIME_BUNDLE:-rust-hosted}"
 SIMPLE_ALLOW_INTERPRETER_FALLBACK="${SIMPLE_ALLOW_INTERPRETER_FALLBACK:-0}"
+SIMPLE_REQUIRE_FASTER_THAN_BASELINES="${SIMPLE_REQUIRE_FASTER_THAN_BASELINES:-0}"
 SIMPLE_LLVM_PROBE="${SIMPLE_LLVM_PROBE:-1}"
 SIMPLE_DISASM_PROBE="${SIMPLE_DISASM_PROBE:-1}"
 
@@ -54,6 +55,30 @@ dump_runtime_relocations() {
         | grep -E ' rt_(index_get|index_set|len|string_new|bytes_u8_at|bytes_u8_set)$' \
         | sed -n '1,80p' || true
     echo ""
+}
+
+alg_mbps() {
+    local out_file="$1"
+    local alg="$2"
+    grep "alg=$alg " "$out_file" | sed -n 's/.*mbps=\([0-9][0-9]*\).*/\1/p'
+}
+
+speed_ratio() {
+    local numerator="$1"
+    local denominator="$2"
+    awk -v n="$numerator" -v d="$denominator" 'BEGIN {
+        if (d == 0) {
+            printf "n/a"
+        } else {
+            printf "%.2fx", n / d
+        }
+    }'
+}
+
+speed_gt() {
+    local lhs="$1"
+    local rhs="$2"
+    awk -v l="$lhs" -v r="$rhs" 'BEGIN { exit !(l > r) }'
 }
 
 mkdir -p "$BUILD_DIR"
@@ -180,3 +205,35 @@ echo "[algbench-ok] checksum parity passed for xxhash64, crc32, adler32, and cha
 if [[ -f "$BUILD_DIR/simple_llvm.out" ]]; then
     echo "[algbench-ok] LLVM checksum parity passed for xxhash64, crc32, adler32, and chacha20"
 fi
+
+ratio_file="$BUILD_DIR/speed_ratios.tsv"
+{
+    printf 'algorithm\tc_mbps\trust_mbps\tsimple_mbps\tsimple_vs_c\tsimple_vs_rust\tfaster_than_c\tfaster_than_rust\n'
+    speed_fail=0
+    for alg in xxhash64 crc32 adler32 chacha20; do
+        c_mbps="$(alg_mbps "$BUILD_DIR/c.out" "$alg")"
+        rust_mbps="$(alg_mbps "$BUILD_DIR/rust.out" "$alg")"
+        simple_mbps="$(alg_mbps "$BUILD_DIR/simple.out" "$alg")"
+        simple_vs_c="$(speed_ratio "$simple_mbps" "$c_mbps")"
+        simple_vs_rust="$(speed_ratio "$simple_mbps" "$rust_mbps")"
+        faster_c="no"
+        faster_rust="no"
+        if speed_gt "$simple_mbps" "$c_mbps"; then
+            faster_c="yes"
+        fi
+        if speed_gt "$simple_mbps" "$rust_mbps"; then
+            faster_rust="yes"
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$alg" "$c_mbps" "$rust_mbps" "$simple_mbps" "$simple_vs_c" "$simple_vs_rust" "$faster_c" "$faster_rust"
+        echo "[algbench-speed] alg=$alg simple_vs_c=$simple_vs_c simple_vs_rust=$simple_vs_rust faster_than_c=$faster_c faster_than_rust=$faster_rust" >&2
+        if [[ "$SIMPLE_REQUIRE_FASTER_THAN_BASELINES" == "1" && ( "$faster_c" != "yes" || "$faster_rust" != "yes" ) ]]; then
+            speed_fail=1
+        fi
+    done
+    if [[ "${speed_fail:-0}" -eq 1 ]]; then
+        echo "[algbench-error] Simple was not faster than both C and Rust for every measured algorithm" >&2
+        exit 1
+    fi
+} | tee "$ratio_file"
+echo "[algbench-note] speed_ratios=$ratio_file"
