@@ -1165,6 +1165,9 @@ int         rt_file_fsync(const char* path) {
     fclose(file);
     return ok ? 1 : 0;
 }
+int         rt_file_fsync_cached(const char* path) {
+    return rt_file_fsync(path);
+}
 
 int64_t rt_file_stat(const char* path) {
     struct stat st;

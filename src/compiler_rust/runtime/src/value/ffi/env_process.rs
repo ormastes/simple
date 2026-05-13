@@ -1133,6 +1133,26 @@ mod tests {
     }
 
     #[test]
+    fn test_env_get_i64_uses_default_for_missing_invalid_or_null() {
+        unsafe {
+            std::env::set_var("TEST_VAR_SIMPLE_I64", "42");
+            std::env::set_var("TEST_VAR_SIMPLE_I64_BAD", "not-an-int");
+
+            let (valid_ptr, valid_len) = str_to_ptr("TEST_VAR_SIMPLE_I64");
+            let (bad_ptr, bad_len) = str_to_ptr("TEST_VAR_SIMPLE_I64_BAD");
+            let (missing_ptr, missing_len) = str_to_ptr("TEST_VAR_SIMPLE_I64_MISSING");
+
+            assert_eq!(rt_env_get_i64(valid_ptr, valid_len, 7), 42);
+            assert_eq!(rt_env_get_i64(bad_ptr, bad_len, 7), 7);
+            assert_eq!(rt_env_get_i64(missing_ptr, missing_len, 7), 7);
+            assert_eq!(rt_env_get_i64(std::ptr::null(), 0, 7), 7);
+
+            std::env::remove_var("TEST_VAR_SIMPLE_I64");
+            std::env::remove_var("TEST_VAR_SIMPLE_I64_BAD");
+        }
+    }
+
+    #[test]
     fn test_env_cwd() {
         unsafe {
             let result = rt_env_cwd();

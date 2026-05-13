@@ -373,6 +373,15 @@ pub fn clear_socket_registry() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::collections::{rt_string_data, rt_string_len};
+
+    unsafe fn runtime_string(value: crate::value::RuntimeValue) -> String {
+        assert!(!value.is_nil());
+        let len = rt_string_len(value);
+        let ptr = rt_string_data(value);
+        let slice = std::slice::from_raw_parts(ptr, len as usize);
+        String::from_utf8_lossy(slice).to_string()
+    }
 
     #[test]
     fn test_socket_registry_basic() {
@@ -443,6 +452,48 @@ mod tests {
             let close_err = native_tcp_close(handle);
             assert_eq!(close_err, NetError::Success as i64);
         }
+    }
+
+    #[test]
+    fn test_tcp_read_line_consumes_only_through_newline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.write_all(b"GET / HTTP/1.1\r\nHost: example\r\n\r\n").unwrap();
+        });
+
+        let (stream, _) = listener.accept().unwrap();
+        let handle = register_tcp_stream(stream);
+
+        unsafe {
+            assert_eq!(runtime_string(rt_io_tcp_read_line(handle)), "GET / HTTP/1.1\r\n");
+            assert_eq!(runtime_string(rt_io_tcp_read_line(handle)), "Host: example\r\n");
+        }
+
+        assert_eq!(native_tcp_close(handle), NetError::Success as i64);
+        client.join().unwrap();
+    }
+
+    #[test]
+    fn test_tcp_drain_line_consumes_without_allocating_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.write_all(b"GET / HTTP/1.1\r\nHost: example\r\n\r\n").unwrap();
+        });
+
+        let (stream, _) = listener.accept().unwrap();
+        let handle = register_tcp_stream(stream);
+
+        assert_eq!(rt_io_tcp_drain_line(handle), 16);
+        unsafe {
+            assert_eq!(runtime_string(rt_io_tcp_read_line(handle)), "Host: example\r\n");
+        }
+
+        assert_eq!(native_tcp_close(handle), NetError::Success as i64);
+        client.join().unwrap();
     }
 
     #[test]

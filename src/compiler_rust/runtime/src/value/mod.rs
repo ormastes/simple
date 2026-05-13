@@ -331,10 +331,11 @@ pub use ffi::rt_time_now_seconds;
 
 // Re-export environment & process FFI functions
 pub use ffi::{
-    rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_home,
-    rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_path_probe, rt_platform_name,
-    rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run, rt_process_run_timeout,
-    rt_process_spawn, rt_process_spawn_async, rt_process_wait, rt_set_env, rt_term_enable_ansi, rt_term_get_size,
+    rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_get_i64,
+    rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_path_probe,
+    rt_platform_name, rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run,
+    rt_process_run_timeout, rt_process_spawn, rt_process_spawn_async, rt_process_wait, rt_set_env, rt_term_enable_ansi,
+    rt_term_get_size,
 };
 
 // Re-export runtime configuration FFI functions
@@ -364,6 +365,8 @@ pub use ffi::{
     rt_file_remove,
     rt_file_size,
     rt_file_hash_sha256,
+    rt_file_fsync,
+    rt_file_fsync_cached,
     rt_file_lock,
     rt_file_unlock,
     rt_file_mmap_read_text,
@@ -788,6 +791,7 @@ pub use net::{
     rt_io_tcp_close,
     rt_io_tcp_connect,
     rt_io_tcp_connect_timeout,
+    rt_io_tcp_drain_line,
     rt_io_tcp_flush,
     rt_io_tcp_local_addr,
     rt_io_tcp_peer_addr,

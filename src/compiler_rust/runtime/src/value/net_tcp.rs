@@ -431,28 +431,58 @@ pub extern "C" fn rt_io_tcp_read_exact_len(handle: i64, size: i64) -> i64 {
     offset as i64
 }
 
+fn read_line_chunked(stream: &mut TcpStream, bytes: Option<&mut Vec<u8>>) -> Result<i64, std::io::Error> {
+    let mut bytes = bytes;
+    let mut total = 0i64;
+    let mut chunk = [0u8; 1024];
+    loop {
+        match stream.peek(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let read = &chunk[..n];
+                let newline_at = read.iter().position(|&byte| byte == b'\n');
+                let take_len = match newline_at {
+                    Some(newline) => newline + 1,
+                    None => n,
+                };
+                stream.read_exact(&mut chunk[..take_len])?;
+                if let Some(out) = bytes.as_deref_mut() {
+                    out.extend_from_slice(&chunk[..take_len]);
+                }
+                total += take_len as i64;
+                if newline_at.is_some() || total >= 8192 {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
+}
+
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_read_line(handle: i64) -> crate::value::RuntimeValue {
     let mut bytes = Vec::new();
     with_socket_mut!(handle, TcpStream, |_| crate::value::RuntimeValue::NIL, stream => {
-        let mut one = [0u8; 1];
-        loop {
-            match stream.read(&mut one) {
-                Ok(0) => break,
-                Ok(_) => {
-                    bytes.push(one[0]);
-                    if one[0] == b'\n' {
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => return crate::value::RuntimeValue::NIL,
-            }
+        if read_line_chunked(stream, Some(&mut bytes)).is_err() {
+            return crate::value::RuntimeValue::NIL;
         }
         if bytes.is_empty() {
             crate::value::RuntimeValue::NIL
         } else {
             unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_tcp_drain_line(handle: i64) -> i64 {
+    with_socket_mut!(handle, TcpStream, |_| -1, stream => {
+        match read_line_chunked(stream, None) {
+            Ok(0) => -1,
+            Ok(n) => n,
+            Err(_) => -1,
         }
     })
 }

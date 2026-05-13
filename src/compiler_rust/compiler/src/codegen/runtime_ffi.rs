@@ -809,6 +809,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // rt_io_tcp_read_exact(handle: i64, size: i64) -> [u8]
     RuntimeFuncSpec::new("rt_io_tcp_read_exact", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_io_tcp_read_exact_len", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_drain_line", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_io_tcp_write_text_read_exact_len", &[I64, I64], &[I64]),
     // =========================================================================
     // UDP networking operations
@@ -1198,6 +1199,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_mmap_read_bytes_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
     RuntimeFuncSpec::new("rt_file_fsync", &[I64, I64], &[I8]),         // path -> bool
+    RuntimeFuncSpec::new("rt_file_fsync_cached", &[I64, I64], &[I8]),  // path -> bool, prefer write-at cache
     RuntimeFuncSpec::new("rt_file_write_text_at", &[I64, I64, I64], &[I64]), // path RuntimeValue, offset, data RuntimeValue -> bytes written
     RuntimeFuncSpec::new("rt_file_write_text_at_cached", &[I64, I64], &[I64]), // offset, data RuntimeValue -> bytes written on prepared cache
     RuntimeFuncSpec::new("rt_file_write_text_at_cached_repeat", &[I64, I64], &[I64]), // iterations, data RuntimeValue -> bytes written on prepared cache

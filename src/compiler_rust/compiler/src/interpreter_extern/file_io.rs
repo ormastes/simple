@@ -203,6 +203,11 @@ pub fn rt_file_fsync(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Interpreter fallback for the runtime cached fsync entrypoint.
+pub fn rt_file_fsync_cached(args: &[Value]) -> Result<Value, CompileError> {
+    rt_file_fsync(args)
+}
+
 /// Write text at an absolute byte offset without rewriting the full file.
 pub fn rt_file_write_text_at(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;

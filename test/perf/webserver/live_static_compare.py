@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live static HTTP comparison harness for Simple, nginx, and local baselines.
+"""Live static HTTP harness for Simple and an optional nginx target.
 
 This script is intentionally conservative: it benchmarks only servers that are
 explicitly supplied by URL or command, and reports SKIP when nginx or a target
@@ -41,9 +41,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--simple-cmd", default=os.getenv("SIMPLE_WEBSERVER_CMD", ""))
     parser.add_argument("--nginx-url", default=os.getenv("NGINX_WEBSERVER_URL", ""))
     parser.add_argument("--nginx-cmd", default=os.getenv("NGINX_WEBSERVER_CMD", ""))
-    parser.add_argument("--baseline-name", default=os.getenv("BASELINE_WEBSERVER_NAME", ""))
-    parser.add_argument("--baseline-url", default=os.getenv("BASELINE_WEBSERVER_URL", ""))
-    parser.add_argument("--baseline-cmd", default=os.getenv("BASELINE_WEBSERVER_CMD", ""))
     parser.add_argument("--probe", action="store_true")
     return parser.parse_args()
 
@@ -51,7 +48,7 @@ def parse_args() -> argparse.Namespace:
 def tool_status() -> dict[str, str]:
     return {
         name: shutil.which(name) or "missing"
-        for name in ("nginx", "wrk", "hey", "ab", "curl", "python3")
+        for name in ("nginx", "docker", "wrk", "hey", "ab", "curl", "python3")
     }
 
 
@@ -147,7 +144,6 @@ def main() -> int:
 
     targets = [
         Target("simple", args.simple_url, args.simple_cmd or None),
-        Target(args.baseline_name or "baseline", args.baseline_url, args.baseline_cmd or None),
         Target("nginx", args.nginx_url, args.nginx_cmd or None),
     ]
 
@@ -158,8 +154,6 @@ def main() -> int:
         for target in targets:
             if target.name == "nginx" and tools["nginx"] == "missing" and not target.url:
                 print("SKIP,nginx_missing,no_nginx_binary_or_url")
-                continue
-            if target.name == "baseline" and not target.url:
                 continue
             if not target.url:
                 print(f"SKIP,{target.name}_missing,no_url")

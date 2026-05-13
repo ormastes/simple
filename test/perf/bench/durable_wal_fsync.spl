@@ -7,7 +7,9 @@
 # Run: bin/simple run test/perf/bench/durable_wal_fsync.spl
 
 use test.perf.bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_header, bench_now_ns}
-use std.nogc_sync_mut.io.file_ops.{file_delete, file_write_text_at, file_fsync}
+use std.ffi.cli.{cli_get_args}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_read, file_write_text_at, file_fsync, file_fsync_cached, file_lock, file_unlock, file_size}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_wait}
 
 fn _payload_256() -> text:
     var payload = ""
@@ -110,6 +112,158 @@ fn bench_group_fsync(path: text) -> BenchResult:
         g = g + 1
     _result("durable_simple_group_10x256B_fsync_x16", groups, samples)
 
+fn bench_group_fsync_cached(path: text) -> BenchResult:
+    val groups: i64 = 16
+    val group_size: i64 = 10
+    val payload = _payload_256()
+    file_delete(path)
+    var samples: [i64] = []
+    var offset: i64 = 0
+    var g: i64 = 0
+    while g < groups:
+        val t0 = bench_now_ns()
+        var j: i64 = 0
+        while j < group_size:
+            val wrote = file_write_text_at(path, offset, payload)
+            if wrote < 0:
+                print "ERROR: cached group write failed"
+                return _result("durable_simple_group_10x256B_fsync_cached_x16_error", 0, [])
+            offset = offset + 256
+            j = j + 1
+        val synced = file_fsync_cached(path)
+        val t1 = bench_now_ns()
+        if not synced:
+            print "ERROR: cached group fsync failed"
+            return _result("durable_simple_group_10x256B_fsync_cached_x16_error", 0, [])
+        samples.push(t1 - t0)
+        g = g + 1
+    _result("durable_simple_group_10x256B_fsync_cached_x16", groups, samples)
+
+fn _wal_record() -> text:
+    "SIMPLE-WAL-REC:" + _payload_256() + "\n"
+
+fn _repeat_text(value: text, count: i64) -> text:
+    var out = ""
+    var i: i64 = 0
+    while i < count:
+        out = out + value
+        i = i + 1
+    out
+
+fn _recover_fixed_records(content: text, record: text) -> i64:
+    val record_len: i64 = record.len() as i64
+    val content_len: i64 = content.len() as i64
+    if record_len <= 0:
+        return 0
+    var count: i64 = 0
+    var offset: i64 = 0
+    while offset + record_len <= content_len:
+        val chunk = content.slice(offset, offset + record_len)
+        if chunk != record:
+            return count
+        count = count + 1
+        offset = offset + record_len
+    count
+
+fn _write_and_fsync(path: text, content: text) -> bool:
+    val _deleted = file_delete(path)
+    val wrote = file_write_text_at(path, 0, content)
+    if wrote < 0:
+        return false
+    file_fsync(path)
+
+fn verify_recovery_case(path: text, name: text, valid_records: i64, tail: text) -> bool:
+    val record = _wal_record()
+    val valid_prefix = _repeat_text(record, valid_records)
+    if not _write_and_fsync(path, valid_prefix + tail):
+        print "recovery_case,{name},write_failed"
+        return false
+    val before = _recover_fixed_records(file_read(path), record)
+    if not _write_and_fsync(path, valid_prefix):
+        print "recovery_case,{name},truncate_failed"
+        return false
+    val after = _recover_fixed_records(file_read(path), record)
+    val ok = before == valid_records and after == valid_records
+    val valid_bytes: i64 = valid_prefix.len() as i64
+    print "recovery_case,{name},ok={ok},records_before={before},records_after={after},valid_bytes={valid_bytes}"
+    ok
+
+fn verify_recovery_matrix(path: text) -> bool:
+    val record = _wal_record()
+    val partial_header = "SIMPLE"
+    val partial_payload = record.slice(0, 80)
+    val bad_record = "BROKEN-WAL-REC:" + _payload_256() + "\n"
+    val garbage_tail = "garbage-after-valid-records"
+    val valid_records: i64 = 16
+    var ok = true
+    ok = verify_recovery_case(path + ".clean", "clean", valid_records, "") and ok
+    ok = verify_recovery_case(path + ".partial_header", "partial_header", valid_records, partial_header) and ok
+    ok = verify_recovery_case(path + ".partial_payload", "partial_payload", valid_records, partial_payload) and ok
+    ok = verify_recovery_case(path + ".bad_record", "bad_record", valid_records, bad_record) and ok
+    ok = verify_recovery_case(path + ".garbage_tail", "garbage_tail", valid_records, garbage_tail) and ok
+    ok
+
+fn _append_locked_record(path: text, lock_path: text, record: text) -> bool:
+    val handle = file_lock(lock_path, 10)
+    if handle < 0:
+        return false
+    val raw_offset = file_size(path)
+    val offset = if raw_offset > 0: raw_offset else: 0
+    val wrote = file_write_text_at(path, offset, record)
+    val synced = file_fsync_cached(path)
+    val unlocked = file_unlock(handle)
+    wrote >= 0 and synced and unlocked
+
+fn run_concurrent_worker(args: [text]):
+    if args.len() < 9:
+        exit(2)
+    val worker_id = int(args[5])
+    val data_path = args[6]
+    val lock_path = args[7]
+    val records = int(args[8])
+    val record = _wal_record()
+    var i: i64 = 0
+    while i < records:
+        if not _append_locked_record(data_path, lock_path, record):
+            print "concurrent_worker_failed,worker={worker_id},record={i}"
+            exit(3)
+        i = i + 1
+    exit(0)
+
+fn verify_concurrent_locked_append(simple_bin: text, script_path: text, path: text) -> bool:
+    val workers: i64 = 4
+    val records_per_worker: i64 = 8
+    val data_path = path + ".concurrent"
+    val lock_path = path + ".concurrent.lock"
+    val _delete_data = file_delete(data_path)
+    val _delete_lock = file_delete(lock_path)
+    var pids: [i64] = []
+    var w: i64 = 0
+    while w < workers:
+        val pid = process_spawn_async(simple_bin, ["run", script_path, "--", "worker", "{w}", data_path, lock_path, "{records_per_worker}"])
+        if pid < 0:
+            print "concurrent_locked_append,spawn_failed,worker={w}"
+            return false
+        pids.push(pid)
+        w = w + 1
+    var ok = true
+    var i: i64 = 0
+    while i < (pids.len() as i64):
+        val code = process_wait(pids[i as i32], 60000)
+        if code != 0:
+            ok = false
+        i = i + 1
+    val expected_records = workers * records_per_worker
+    val record = _wal_record()
+    val recovered = _recover_fixed_records(file_read(data_path), record)
+    val file_bytes = file_size(data_path)
+    val expected_bytes: i64 = expected_records * (record.len() as i64)
+    ok = ok and recovered == expected_records and file_bytes == expected_bytes
+    print "concurrent_locked_append,ok={ok},workers={workers},records_per_worker={records_per_worker},records={recovered},bytes={file_bytes},expected_bytes={expected_bytes}"
+    val _cleanup_data = file_delete(data_path)
+    val _cleanup_lock = file_delete(lock_path)
+    ok
+
 fn print_durable_result(r: BenchResult):
     bench_print(r)
     val ops_per_s = if r.total_ns > 0: (r.iters * 1000000000) / r.total_ns else: 0
@@ -117,6 +271,11 @@ fn print_durable_result(r: BenchResult):
     print "  avg_us={avg_us}  ops/s={ops_per_s}"
 
 fn main():
+    val args = cli_get_args()
+    if args.len() >= 9 and args[4] == "worker":
+        run_concurrent_worker(args)
+        return
+
     val path = "/tmp/simple_durable_wal_fsync_bench.spl.log"
     print "=== Simple durable WAL fsync benchmark ==="
     print "DISCLAIMER: host filesystem write-at+fsync probe, not raw NVMe/FUA or crash-recovery proof."
@@ -125,16 +284,35 @@ fn main():
 
     val r1 = bench_fsync_each(path)
     val r2 = bench_group_fsync(path)
+    val r3 = bench_group_fsync_cached(path)
+    val recovery_ok = verify_recovery_matrix(path + ".recovery")
+    val concurrent_ok = if args.len() >= 3:
+        verify_concurrent_locked_append(args[0], args[2], path)
+    else:
+        false
 
     print_durable_result(r1)
     print ""
     print_durable_result(r2)
+    print ""
+    print_durable_result(r3)
 
     print ""
     print "=== CSV ==="
     print bench_csv_header()
     print bench_csv(r1)
     print bench_csv(r2)
+    print bench_csv(r3)
+    print ""
+    print "recovery_matrix_ok={recovery_ok}"
+    print "concurrent_locked_append_ok={concurrent_ok}"
 
     val _cleanup = file_delete(path)
+    val _cleanup_clean = file_delete(path + ".recovery.clean")
+    val _cleanup_partial_header = file_delete(path + ".recovery.partial_header")
+    val _cleanup_partial_payload = file_delete(path + ".recovery.partial_payload")
+    val _cleanup_bad_record = file_delete(path + ".recovery.bad_record")
+    val _cleanup_garbage_tail = file_delete(path + ".recovery.garbage_tail")
     print ""
+    if not recovery_ok or not concurrent_ok:
+        exit(1)

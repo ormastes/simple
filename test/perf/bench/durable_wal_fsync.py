@@ -20,6 +20,7 @@ from pathlib import Path
 OUT = Path(os.environ.get("SIMPLE_DURABLE_WAL_BENCH_PATH", "/tmp/simple_durable_wal_fsync_bench.log"))
 PAYLOAD = b"x" * 256
 RECOVERY_OUT = OUT.with_suffix(".recovery.log")
+RECOVERY_MATRIX_OUT = OUT.with_suffix(".recovery_matrix.log")
 
 
 def now_ns() -> int:
@@ -93,6 +94,11 @@ def encode_record(payload: bytes) -> bytes:
     return struct.pack("<II", len(payload), crc) + payload
 
 
+def encode_bad_crc_record(payload: bytes) -> bytes:
+    crc = (zlib.crc32(payload) ^ 0xFFFF_FFFF) & 0xFFFFFFFF
+    return struct.pack("<II", len(payload), crc) + payload
+
+
 def recover_framed_wal(path: Path) -> tuple[int, int]:
     data = path.read_bytes()
     offset = 0
@@ -142,6 +148,74 @@ def verify_torn_tail_recovery(records: int = 16) -> dict[str, int | str]:
     }
 
 
+def write_valid_records(fd: int, records: int) -> int:
+    valid_bytes = 0
+    for i in range(records):
+        payload = f"record-{i:04d}:".encode("ascii") + PAYLOAD
+        encoded = encode_record(payload)
+        os.write(fd, encoded)
+        valid_bytes += len(encoded)
+    os.fsync(fd)
+    return valid_bytes
+
+
+def verify_recovery_case(name: str, tail: bytes, records: int = 16) -> dict[str, int | str]:
+    path = RECOVERY_MATRIX_OUT.with_name(f"{RECOVERY_MATRIX_OUT.stem}.{name}.log")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        expected_valid_bytes = write_valid_records(fd, records)
+        if tail:
+            os.write(fd, tail)
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+    recovered, valid_bytes = recover_framed_wal(path)
+    with path.open("r+b") as f:
+        f.truncate(valid_bytes)
+        f.flush()
+        os.fsync(f.fileno())
+    recovered_after_truncate, valid_bytes_after_truncate = recover_framed_wal(path)
+    if (
+        recovered != records
+        or recovered_after_truncate != records
+        or valid_bytes != expected_valid_bytes
+        or valid_bytes_after_truncate != expected_valid_bytes
+    ):
+        raise SystemExit(
+            "recovery matrix failed for {name}: before={before} after={after} "
+            "valid={valid} expected_valid={expected_valid}".format(
+                name=name,
+                before=recovered,
+                after=recovered_after_truncate,
+                valid=valid_bytes,
+                expected_valid=expected_valid_bytes,
+            )
+        )
+    return {
+        "case": name,
+        "records": records,
+        "valid_bytes": valid_bytes,
+        "file_bytes_after_truncate": path.stat().st_size,
+    }
+
+
+def verify_recovery_matrix(records: int = 16) -> list[dict[str, int | str]]:
+    valid_tail_payload = b"tail-record"
+    valid_tail = encode_record(valid_tail_payload)
+    oversized_tail = struct.pack("<II", 16 * 1024 * 1024 + 1, 0)
+    cases = [
+        ("clean", b""),
+        ("partial_header", valid_tail[:3]),
+        ("partial_payload", valid_tail[: 8 + len(valid_tail_payload) // 2]),
+        ("bad_crc", encode_bad_crc_record(valid_tail_payload)),
+        ("oversized_length", oversized_tail),
+        ("garbage_tail", b"\xffgarbage-after-valid-records"),
+    ]
+    return [verify_recovery_case(name, tail, records) for name, tail in cases]
+
+
 def main() -> None:
     OUT.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(OUT, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
@@ -150,6 +224,7 @@ def main() -> None:
     finally:
         os.close(fd)
     recovery = verify_torn_tail_recovery()
+    recovery_matrix = verify_recovery_matrix()
 
     print("=== Durable WAL fsync benchmark ===")
     print("DISCLAIMER: host filesystem write+fsync probe, not raw NVMe/FUA or crash-recovery proof.")
@@ -159,6 +234,7 @@ def main() -> None:
         print_result(row)
         print("")
     print("recovery:", recovery)
+    print("recovery_matrix:", recovery_matrix)
     print("")
     print("=== CSV ===")
     print("label,iters,avg_us,ops_per_s,p50_ns,p99_ns,p99_9_ns,min_ns,max_ns,total_ns,kops_per_s")

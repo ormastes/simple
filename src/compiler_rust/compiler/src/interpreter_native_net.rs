@@ -567,24 +567,40 @@ pub fn rt_io_tcp_read_exact_len_interp(args: &[Value]) -> Result<Value, CompileE
     }
 }
 
+fn read_line_chunked_interp(stream: &mut TcpStream, mut out: Option<&mut Vec<u8>>) -> std::io::Result<i64> {
+    let mut total = 0i64;
+    let mut chunk = [0u8; 1024];
+    loop {
+        match stream.peek(&mut chunk) {
+            Ok(0) => return Ok(total),
+            Ok(n) => {
+                let read = &chunk[..n];
+                let newline_at = read.iter().position(|&byte| byte == b'\n');
+                let take_len = match newline_at {
+                    Some(newline) => newline + 1,
+                    None => n,
+                };
+                stream.read_exact(&mut chunk[..take_len])?;
+                if let Some(buf) = out.as_deref_mut() {
+                    buf.extend_from_slice(&chunk[..take_len]);
+                }
+                total += take_len as i64;
+                if newline_at.is_some() || total >= 8192 {
+                    return Ok(total);
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(total),
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 pub fn rt_io_tcp_read_line_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     let mut out: Vec<u8> = Vec::new();
-    let mut byte = [0u8; 1];
-    let result = with_tcp_stream_mut(handle, |stream| loop {
-        match stream.read(&mut byte) {
-            Ok(0) => return Ok(()),
-            Ok(_) => {
-                out.push(byte[0]);
-                if byte[0] == b'\n' {
-                    return Ok(());
-                }
-            }
-            Err(err) => return Err(err),
-        }
-    });
+    let result = with_tcp_stream_mut(handle, |stream| read_line_chunked_interp(stream, Some(&mut out)));
     match result {
-        Ok(()) => {
+        Ok(_) => {
             if out.is_empty() {
                 Ok(Value::Nil)
             } else {
@@ -592,6 +608,15 @@ pub fn rt_io_tcp_read_line_interp(args: &[Value]) -> Result<Value, CompileError>
             }
         }
         Err(_) => Ok(Value::Nil),
+    }
+}
+
+pub fn rt_io_tcp_drain_line_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    match with_tcp_stream_mut(handle, |stream| read_line_chunked_interp(stream, None)) {
+        Ok(0) => Ok(Value::Int(-1)),
+        Ok(n) => Ok(Value::Int(n)),
+        Err(_) => Ok(Value::Int(-1)),
     }
 }
 

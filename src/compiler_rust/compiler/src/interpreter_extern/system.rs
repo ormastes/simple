@@ -80,9 +80,10 @@ lazy_static::lazy_static! {
 }
 use simple_runtime::value::{
     rt_env_all as ffi_env_all, rt_env_cwd as ffi_env_cwd, rt_env_exists as ffi_env_exists, rt_env_get as ffi_env_get,
-    rt_env_get_i64 as ffi_env_get_i64, rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
-    rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode, rt_set_macro_trace as ffi_set_macro_trace,
-    rt_platform_name as ffi_platform_name, rt_term_enable_ansi as ffi_term_enable_ansi,
+    rt_env_get_i64 as ffi_env_get_i64, rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove,
+    rt_env_set as ffi_env_set, rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode,
+    rt_set_macro_trace as ffi_set_macro_trace, rt_platform_name as ffi_platform_name,
+    rt_term_enable_ansi as ffi_term_enable_ansi,
 };
 use simple_runtime::value::ffi::config::{
     rt_is_debug_mode_enabled as ffi_is_debug_mode_enabled, rt_is_macro_trace_enabled as ffi_is_macro_trace_enabled,
@@ -182,7 +183,9 @@ pub fn rt_env_get(args: &[Value]) -> Result<Value, CompileError> {
 /// Get an environment variable parsed as i64.
 pub fn rt_env_get_i64(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Err(CompileError::runtime("rt_env_get_i64 requires 2 arguments (key, default)"));
+        return Err(CompileError::runtime(
+            "rt_env_get_i64 requires 2 arguments (key, default)",
+        ));
     }
 
     let key = match &args[0] {

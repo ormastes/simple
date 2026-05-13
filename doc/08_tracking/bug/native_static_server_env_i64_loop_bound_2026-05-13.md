@@ -4,16 +4,19 @@ Date: 2026-05-13
 
 ## Status
 
-Open. The perf target uses a fixed request limit until this native-codegen
-interaction is fixed.
+Mitigated for the perf target. `static_file_server.spl` now reads the request
+limit through the native runtime bridge `rt_env_get_i64`, avoiding the fragile
+`rt_env_get` text value plus Simple-side integer parsing path that triggered
+the full-server native crash.
 
 ## Symptom
 
-`test/perf/webserver/static_file_server.spl` crashes in a rust-hosted native
-build before printing readiness when its accept-loop bound comes from:
+`test/perf/webserver/static_file_server.spl` crashed in a rust-hosted native
+build before printing readiness when its accept-loop bound came from a
+Simple-side text environment parse:
 
 ```simple
-val request_limit = env_i64("SIMPLE_STATIC_SERVER_REQUESTS", 512)
+val request_limit = parse_env_i64_via_text("SIMPLE_STATIC_SERVER_REQUESTS", 512)
 while served < request_limit:
     ...
 ```
@@ -35,7 +38,7 @@ src/compiler_rust/target/debug/simple native-build --runtime-bundle rust-hosted 
   --threads 1 --timeout 20 --output /tmp/simple_static_server_native_hosted_current
 ```
 
-Run with the env-derived bound variant:
+Run an old env-text-parse bound variant:
 
 ```bash
 SIMPLE_STATIC_SERVER_ADDR=127.0.0.1:18082 \
@@ -54,18 +57,22 @@ The following rust-hosted native smokes pass:
 - `test/perf/webserver/native_static_bind_prelude_smoke.spl`
 - `test/perf/webserver/native_tcp_bind_variable_smoke.spl`
 
-That means the bug is not simply `rt_env_get`, `rt_file_exists`,
-`rt_file_read_text`, `parse_int() ?? default`, variable TCP bind, or a simple
-parse-int loop bound in isolation. It appears only when the full static-server
-accept loop uses the env-derived bound.
+That means the bug was not simply `rt_env_get`, `rt_file_exists`,
+`rt_file_read_text`, variable TCP bind, or a simple parse-int loop bound in
+isolation. It appeared only when the full static-server accept loop used the
+text-parsed env-derived bound.
 
-## Current Workaround
+## Current Mitigation
 
-`static_file_server.spl` keeps:
+`static_file_server.spl` now keeps the runtime-configurable bound but gets the
+integer directly from the runtime:
 
 ```simple
-val request_limit: i64 = 512
+extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
+
+val request_limit = rt_env_get_i64("SIMPLE_STATIC_SERVER_REQUESTS", 512)
 ```
 
-This keeps the live native webserver benchmark running while preserving the bug
-as a focused follow-up.
+This keeps the live native webserver benchmark configurable without exercising
+the crashy Simple-side parse path. A separate follow-up should still improve
+native Simple text/byte parsing ergonomics for environment values.

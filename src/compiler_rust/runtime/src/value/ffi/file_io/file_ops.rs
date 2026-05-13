@@ -346,6 +346,29 @@ pub unsafe extern "C" fn rt_file_fsync(path_ptr: *const u8, path_len: u64) -> bo
     }
 }
 
+/// Synchronize the cached write-at handle when it matches `path`.
+///
+/// Falls back to `rt_file_fsync` when the current thread has no matching
+/// write-at cache. This keeps the public path-based API durable while avoiding
+/// an open-per-fence cycle on WAL-style sequential append loops.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_fsync_cached(path_ptr: *const u8, path_len: u64) -> bool {
+    let Some(path_str) = path_from_raw_or_tagged(path_ptr, path_len) else {
+        return false;
+    };
+    let synced_cached = WRITE_AT_CACHE.with(|cache| {
+        let guard = cache.borrow();
+        match guard.as_ref() {
+            Some(cached) if cached.path == path_str => Some(cached.file.sync_all().is_ok()),
+            _ => None,
+        }
+    });
+    match synced_cached {
+        Some(ok) => ok,
+        None => rt_file_fsync(path_ptr, path_len),
+    }
+}
+
 /// Copy file from src to dest
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_copy(src_ptr: *const u8, src_len: u64, dest_ptr: *const u8, dest_len: u64) -> bool {
@@ -1034,6 +1057,22 @@ mod tests {
         unsafe {
             assert!(!rt_file_fsync(path_ptr, path_len));
         }
+    }
+
+    #[test]
+    fn test_file_fsync_cached_uses_write_at_cache() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("cached_sync.txt");
+        let path_str = file_path.to_str().unwrap();
+        let path = string_to_tagged_text(path_str);
+        let payload = string_to_tagged_text("durable");
+        let (path_ptr, path_len) = str_to_ptr(path_str);
+
+        assert_eq!(rt_file_write_text_at(path, 0, payload), 7);
+        unsafe {
+            assert!(rt_file_fsync_cached(path_ptr, path_len));
+        }
+        assert_eq!(fs::read_to_string(file_path).unwrap(), "durable");
     }
 
     #[test]
