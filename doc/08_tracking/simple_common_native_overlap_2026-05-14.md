@@ -181,14 +181,23 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   The same ignored-result codegen path also applies to typed byte pushes, so
   `[u8]` push statements avoid unused bool-result plumbing on both packed and
   slot-backed fast branches.
+- HIR lowering now carries a narrow loop proof for `while index < length` when
+  `length` is a cached `array.len()` local and `index` is unsigned. Matching
+  typed `[u8]`, `[u32]`, and `[u64]` reads inside the loop lower to unchecked
+  typed-read intrinsics; the Cranelift typed-word unchecked inliner emits only
+  the data-pointer load, indexed slot load, and tag shift. Disassembly of
+  `bench_list_traverse` and `set_contains` shows no per-element typed-word
+  bounds branch and no runtime equality call in the hot scan. A one-sample
+  benchmark kept checksum parity and measured list traversal at `1,259,325`
+  Simple ops/ms (`0.22x` C, `0.20x` Rust), list push at `144,183` Simple
+  ops/ms (`0.05x` C, `0.10x` Rust), and set-like membership at `2,000` Simple
+  ops/ms (`0.31x` C, `0.15x` Rust).
 
 ## Next Concrete Plugin Work
 
-1. Extend `simple.opt.collection.loop_access` from duplicate length
-   canonicalization and typed dispatch selection to full `len`-guarded
-   array/list loops so indexed traversal over `[u8]`, `[u32]`, `[u64]`, and
-   fixed arrays emits one bounds proof per loop and lowers element access to an
-   unchecked/direct load instead of a per-element helper call.
+1. Extend the loop proof beyond direct `while index < cached_len` conditions to
+   optimizer-level propagation across aliases, counted `for` loops, nested
+   helper calls, and fixed arrays.
 2. Add duplicate map/set probe-loop specialization for primitive-key
    `contains`, `contains_key`, and `get` calls after MIR exposes the hash/probe
    internals rather than only opaque runtime calls.

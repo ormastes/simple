@@ -149,8 +149,8 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                         .unwrap_or(target.name());
                     let ty = match base {
                         "rt_typed_bytes_u8_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
-                        "rt_typed_words_u32_at" => Some(TypeId::U32),
-                        "rt_typed_words_u64_at" => Some(TypeId::U64),
+                        "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" => Some(TypeId::U32),
+                        "rt_typed_words_u64_at" | "rt_typed_words_u64_unchecked" => Some(TypeId::U64),
                         _ => None,
                     };
                     if let Some(ty) = ty {
@@ -956,7 +956,7 @@ mod tests {
         entry.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
         entry.instructions.push(MirInst::Call {
             dest: Some(word),
-            target: CallTarget::from_name("rt_typed_words_u64_at"),
+            target: CallTarget::from_name("rt_typed_words_u64_unchecked"),
             args: vec![array, index],
         });
         entry.terminator = Terminator::Return(Some(word));

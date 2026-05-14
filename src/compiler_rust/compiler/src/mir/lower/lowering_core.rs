@@ -10,7 +10,7 @@ use super::super::{
     instructions::BlockId,
 };
 use crate::di::DiConfig;
-use crate::hir::{HirContract, HirExpr, HirFunction, HirModule, HirStmt, TypeId};
+use crate::hir::{BinOp, HirContract, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId};
 use crate::mir::instructions::VReg;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -87,6 +87,12 @@ pub struct LoopContext {
     pub continue_target: BlockId,
     /// Block to jump to on `break`
     pub break_target: BlockId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ArrayLenBoundProof {
+    pub array_local_index: usize,
+    pub index_local_index: usize,
 }
 
 /// Context for contract lowering
@@ -270,6 +276,10 @@ pub struct MirLowerer<'a> {
     pub(super) tagged_vregs: std::collections::HashSet<super::super::instructions::VReg>,
     /// Local indices known to hold tagged RuntimeValues
     pub(super) tagged_locals: std::collections::HashSet<usize>,
+    /// Locals known to hold the current length of an array local.
+    pub(super) len_local_sources: HashMap<usize, usize>,
+    /// Active loop-body proofs of `index < array.len()`.
+    pub(super) active_array_len_bounds: Vec<ArrayLenBoundProof>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -293,6 +303,8 @@ impl<'a> MirLowerer<'a> {
             last_expr_value: None,
             tagged_vregs: std::collections::HashSet::new(),
             tagged_locals: std::collections::HashSet::new(),
+            len_local_sources: HashMap::new(),
+            active_array_len_bounds: Vec::new(),
         }
     }
 
@@ -312,6 +324,8 @@ impl<'a> MirLowerer<'a> {
             coverage_enabled: false,
             tagged_vregs: std::collections::HashSet::new(),
             tagged_locals: std::collections::HashSet::new(),
+            len_local_sources: HashMap::new(),
+            active_array_len_bounds: Vec::new(),
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,
@@ -329,6 +343,67 @@ impl<'a> MirLowerer<'a> {
     pub fn with_coverage(mut self, enabled: bool) -> Self {
         self.coverage_enabled = enabled;
         self
+    }
+
+    pub(super) fn local_index_for_expr(expr: &HirExpr) -> Option<usize> {
+        match &expr.kind {
+            HirExprKind::Local(idx) => Some(*idx),
+            _ => None,
+        }
+    }
+
+    pub(super) fn array_local_for_len_expr(expr: &HirExpr) -> Option<usize> {
+        match &expr.kind {
+            HirExprKind::MethodCall {
+                receiver, method, args, ..
+            } if args.is_empty() && method == "len" => Self::local_index_for_expr(receiver),
+            HirExprKind::MethodCall {
+                receiver, method, args, ..
+            } if args.is_empty() && matches!(method.as_str(), "to_u64" | "to_i64" | "to_usize") => {
+                Self::array_local_for_len_expr(receiver)
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn record_len_local_source(&mut self, local_index: usize, value: Option<&HirExpr>) {
+        self.len_local_sources.remove(&local_index);
+        self.len_local_sources.retain(|_, array_idx| *array_idx != local_index);
+        if let Some(array_local_index) = value.and_then(Self::array_local_for_len_expr) {
+            self.len_local_sources.insert(local_index, array_local_index);
+        }
+    }
+
+    pub(super) fn loop_len_bound_proof(&self, condition: &HirExpr) -> Option<ArrayLenBoundProof> {
+        let HirExprKind::Binary { op, left, right } = &condition.kind else {
+            return None;
+        };
+        if *op != BinOp::Lt || !Self::is_unsigned_int_type(left.ty) {
+            return None;
+        }
+        let index_local_index = Self::local_index_for_expr(left)?;
+        let len_local_index = Self::local_index_for_expr(right)?;
+        let array_local_index = *self.len_local_sources.get(&len_local_index)?;
+        Some(ArrayLenBoundProof {
+            array_local_index,
+            index_local_index,
+        })
+    }
+
+    pub(super) fn index_has_active_len_bound(&self, receiver: &HirExpr, index: &HirExpr) -> bool {
+        let Some(array_local_index) = Self::local_index_for_expr(receiver) else {
+            return false;
+        };
+        let Some(index_local_index) = Self::local_index_for_expr(index) else {
+            return false;
+        };
+        self.active_array_len_bounds
+            .iter()
+            .any(|proof| proof.array_local_index == array_local_index && proof.index_local_index == index_local_index)
+    }
+
+    fn is_unsigned_int_type(ty: TypeId) -> bool {
+        matches!(ty, TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64)
     }
 
     /// Set the current file for coverage source locations

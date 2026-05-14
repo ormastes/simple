@@ -10,7 +10,8 @@ use simple_runtime::value::RuntimeValue;
 use simple_runtime::value::{
     rt_array_clear, rt_array_extend_i64, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push,
     rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set, rt_typed_bytes_u8_push,
-    rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set,
+    rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set, rt_typed_words_u32_unchecked,
+    rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
 };
 
 fn interpreter_byte_at(value: &Value) -> i64 {
@@ -187,6 +188,89 @@ pub fn rt_typed_words_u32_at_fn(args: &[Value]) -> Result<Value, CompileError> {
         ))),
         _ => Ok(Value::Int(0)),
     }
+}
+
+/// Get a u32 element from a typed word array after caller-side bounds proof.
+pub fn rt_typed_words_u32_unchecked_fn(args: &[Value]) -> Result<Value, CompileError> {
+    rt_typed_words_u32_at_fn(args).or_else(|_| {
+        let raw = args.first().ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_typed_words_u32_unchecked expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?;
+        let index = args
+            .get(1)
+            .ok_or_else(|| {
+                CompileError::semantic_with_context(
+                    "rt_typed_words_u32_unchecked expects 2 arguments".to_string(),
+                    ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+                )
+            })?
+            .as_int()?;
+        Ok(Value::Int(rt_typed_words_u32_unchecked(
+            RuntimeValue::from_raw(raw.as_int()? as u64),
+            index,
+        )))
+    })
+}
+
+/// Get a u64 element from a typed word array.
+pub fn rt_typed_words_u64_at_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let arr = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_typed_words_u64_at expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
+    let index = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_typed_words_u64_at expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    match arr {
+        Value::Array(vec) => {
+            let Some(idx) = normalized_byte_index(index, vec.len()) else {
+                return Ok(Value::Int(0));
+            };
+            Ok(Value::Int(vec[idx].as_int()?))
+        }
+        Value::Int(raw) => Ok(Value::Int(rt_typed_words_u64_at(
+            RuntimeValue::from_raw(*raw as u64),
+            index,
+        ))),
+        _ => Ok(Value::Int(0)),
+    }
+}
+
+/// Get a u64 element from a typed word array after caller-side bounds proof.
+pub fn rt_typed_words_u64_unchecked_fn(args: &[Value]) -> Result<Value, CompileError> {
+    rt_typed_words_u64_at_fn(args).or_else(|_| {
+        let raw = args.first().ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_typed_words_u64_unchecked expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?;
+        let index = args
+            .get(1)
+            .ok_or_else(|| {
+                CompileError::semantic_with_context(
+                    "rt_typed_words_u64_unchecked expects 2 arguments".to_string(),
+                    ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+                )
+            })?
+            .as_int()?;
+        Ok(Value::Int(rt_typed_words_u64_unchecked(
+            RuntimeValue::from_raw(raw.as_int()? as u64),
+            index,
+        )))
+    })
 }
 
 /// Set byte at index for heap-backed byte arrays.

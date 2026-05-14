@@ -389,6 +389,38 @@ fn compile_inline_typed_words_at<M: Module>(
     Ok(true)
 }
 
+fn compile_inline_typed_words_unchecked<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+    width: i64,
+) -> InstrResult<bool> {
+    if args.len() != 2 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+    let int_payload = builder.ins().sshr_imm(raw, 3);
+    let word = if width == 4 {
+        builder.ins().band_imm(int_payload, 0xFFFF_FFFF)
+    } else {
+        int_payload
+    };
+    ctx.vreg_values.insert(*dest, word);
+    Ok(true)
+}
+
 fn compile_inline_typed_words_u32_set<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -1216,6 +1248,14 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
     if ffi_name == "rt_typed_words_u64_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 8)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u32_unchecked" && compile_inline_typed_words_unchecked(ctx, builder, dest, args, 4)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u64_unchecked" && compile_inline_typed_words_unchecked(ctx, builder, dest, args, 8)?
+    {
         return Ok(());
     }
     if ffi_name == "rt_typed_words_u32_set" && compile_inline_typed_words_u32_set(ctx, builder, dest, args)? {

@@ -84,11 +84,17 @@ impl<'a> MirLowerer<'a> {
                             ty: *declared_ty,
                         });
                     })?;
+                    self.record_len_local_source(*local_index, Some(val));
+                } else {
+                    self.record_len_local_source(*local_index, None);
                 }
                 Ok(())
             }
 
             HirStmt::Assign { target, value } => {
+                if let HirExprKind::Local(local_index) = &target.kind {
+                    self.record_len_local_source(*local_index, None);
+                }
                 let val_reg = self.lower_expr(value)?;
                 let ty = value.ty;
 
@@ -807,8 +813,15 @@ impl<'a> MirLowerer<'a> {
 
                 // Lower body
                 self.set_current_block(body_id)?;
+                let bound_proof = self.loop_len_bound_proof(condition);
+                if let Some(proof) = bound_proof {
+                    self.active_array_len_bounds.push(proof);
+                }
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
+                }
+                if bound_proof.is_some() {
+                    self.active_array_len_bounds.pop();
                 }
                 self.finalize_block_jump(cond_id)?;
 

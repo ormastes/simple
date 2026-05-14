@@ -1592,7 +1592,10 @@ pub(crate) fn call_extern_function(
         "rt_typed_bytes_u8_unchecked" => ffi_array::rt_bytes_u8_at_fn(&evaluated),
         "rt_bytes_u8_set" => ffi_array::rt_bytes_u8_set_fn(&evaluated),
         "rt_typed_words_u32_at" => ffi_array::rt_typed_words_u32_at_fn(&evaluated),
+        "rt_typed_words_u32_unchecked" => ffi_array::rt_typed_words_u32_unchecked_fn(&evaluated),
         "rt_typed_words_u32_set" => ffi_array::rt_typed_words_u32_set_fn(&evaluated),
+        "rt_typed_words_u64_at" => ffi_array::rt_typed_words_u64_at_fn(&evaluated),
+        "rt_typed_words_u64_unchecked" => ffi_array::rt_typed_words_u64_unchecked_fn(&evaluated),
         "rt_bytes_u32_le_at" | "rt_typed_bytes_u32_le_at" => ffi_array::rt_bytes_u32_le_at_fn(&evaluated),
         "rt_bytes_u64_le_at" | "rt_typed_bytes_u64_le_at" | "rt_typed_bytes_u64_le_unchecked" => {
             ffi_array::rt_bytes_u64_le_at_fn(&evaluated)

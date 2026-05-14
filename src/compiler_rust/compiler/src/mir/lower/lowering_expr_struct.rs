@@ -274,6 +274,7 @@ impl<'a> MirLowerer<'a> {
         let receiver_reg = self.lower_expr(receiver)?;
         let index_reg = self.lower_expr(index)?;
         let receiver_ty = receiver.ty;
+        let has_loop_len_bound = self.index_has_active_len_bound(receiver, index);
         let receiver_is_u8_array = self
             .type_registry
             .and_then(|tr| tr.get(receiver_ty))
@@ -330,7 +331,11 @@ impl<'a> MirLowerer<'a> {
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(raw_byte),
-                    target: CallTarget::from_name("rt_typed_bytes_u8_at"),
+                    target: CallTarget::from_name(if has_loop_len_bound {
+                        "rt_typed_bytes_u8_unchecked"
+                    } else {
+                        "rt_typed_bytes_u8_at"
+                    }),
                     args: vec![receiver_reg, index_reg],
                 });
                 block.instructions.push(MirInst::UnitNarrow {
@@ -355,7 +360,11 @@ impl<'a> MirLowerer<'a> {
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(raw_word),
-                    target: CallTarget::from_name("rt_typed_words_u32_at"),
+                    target: CallTarget::from_name(if has_loop_len_bound {
+                        "rt_typed_words_u32_unchecked"
+                    } else {
+                        "rt_typed_words_u32_at"
+                    }),
                     args: vec![receiver_reg, index_reg],
                 });
                 block.instructions.push(MirInst::UnitNarrow {
@@ -379,7 +388,11 @@ impl<'a> MirLowerer<'a> {
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(raw_word),
-                    target: CallTarget::from_name("rt_typed_words_u64_at"),
+                    target: CallTarget::from_name(if has_loop_len_bound {
+                        "rt_typed_words_u64_unchecked"
+                    } else {
+                        "rt_typed_words_u64_at"
+                    }),
                     args: vec![receiver_reg, index_reg],
                 });
                 raw_word
