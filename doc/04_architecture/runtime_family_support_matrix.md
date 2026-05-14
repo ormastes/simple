@@ -137,11 +137,11 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
   - command: `src/compiler_rust/target/bootstrap/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server`
   - result: `Build complete: 18 compiled, 104 cached, 0 failed`; linked `build/bootstrap/mcp-package/simple_mcp_server`.
   - remaining caveat: unresolved native/runtime symbols still generate link stubs. Internal Simple stub debt is reduced to one runtime hook: `rt_is_debug_mode_enabled`.
-- `src/app/simple_lsp_mcp/main.spl` native-build still fails before link:
+- `src/app/simple_lsp_mcp/main.spl` native-build now completes with the rebuilt Rust bootstrap compiler:
   - command: `src/compiler_rust/target/bootstrap/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server`
-  - latest result after shell status values were normalized to plain `i64` and direct `MirBlock.label` checks replaced `has_label`: 5 HIR field-resolution failures remain.
-  - remaining failures: `ANY.local`, `ANY.kind`, and `wildcard.length` across C/LLVM translate, native AArch64/RISC-V encoding, and SPIR-V builder files.
-  - implication: MCP native smoke is no longer blocked by `SliceIter.slice`, the enum/static-member bridge reduces LSP failures, and backend shell/label compatibility removes the prior `ANY.value`/`MirBlock.has_label` class. LSP/package release-readiness still requires broader import/type-loading and struct field recovery cleanup.
+  - result: `Build complete: 192 compiled, 178 cached, 0 failed`; linked `build/bootstrap/mcp-package/simple_lsp_mcp_server`.
+  - remaining caveat: unresolved native/runtime symbols still generate link stubs. Latest run generated 1163 unresolved-symbol stubs, including 215 internal Simple symbols.
+  - implication: MCP and LSP native smoke are no longer blocked by `SliceIter.slice`, enum/static-member resolution, shell status wrappers, stale `MirBlock.has_label` reads, or the last C/LLVM/native/Vulkan field-recovery failures. Package release-readiness still requires reducing native/runtime stubs and broader import/type-loading cleanup.
 
 ### Gap 1: Partial attribute-based family enforcement (Agent 2 -- Compiler)
 - **Problem**: Public runtime-family root `__init__.spl` files now carry `@no_gc` or `@gc`, and the Rust parser accepts module-level `@gc` before export-only roots, but family GcMode is still only partially enforced.
