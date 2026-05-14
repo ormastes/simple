@@ -55,6 +55,10 @@ optimization providers rather than delegating common algorithms back to Rust/C.
 - The OS and common Adler-32 paths were then narrowed to 4-byte typed loads
   after native benchmarking showed that the smaller chunk reduces generated
   code overhead while preserving the same deferred-reduction algorithm.
+- The crypto pattern provider now recognizes `os.crypto.crc32.update_byte`,
+  `update_u32`, and `update_u64` as the same CRC32 idiom family as
+  `std.common.crypto.crc32.*`, so OS pure Simple CRC wrappers can reach the
+  existing target-gated CRC intrinsic rewrite path.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/compiler/mir_opt/strength_reduction_spec.spl
   --mode=interpreter --clean` passing 14 examples.
@@ -74,6 +78,10 @@ optimization providers rather than delegating common algorithms back to Rust/C.
 - Latest three-sample median after the 4-byte Adler change kept checksum parity:
   CRC32 remains below parity (`0.78x` C, `0.79x` Rust); Adler32 improved but
   still narrowly misses parity (`0.94x` C, `0.99x` Rust).
+- Provider coverage for OS CRC aliases is verified in the cipher pattern engine
+  and parity specs, but the port benchmark still needs a CRC loop shape that
+  exposes `update_u64`/`update_u32` calls to the pattern pass before this can
+  close the measured CRC32 throughput gap.
 
 ## Next Concrete Plugin Work
 
