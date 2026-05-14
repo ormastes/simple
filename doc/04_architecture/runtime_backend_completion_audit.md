@@ -41,6 +41,7 @@ Executed on 2026-05-14:
 - Focused runtime-path specs:
   - `test/unit/lib/nogc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
   - `test/unit/lib/gc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
+  - `test/unit/lib/gc_async_mut/tcp/tcp_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `1` passed, `0` failed
   - `test/unit/lib/nogc_async_mut/actor_dispatch_spec.spl --mode=interpreter --clean --force-rebuild`: `11` passed, `0` failed
   - `test/unit/lib/gc_async_mut/websocket/websocket_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `1` passed, `0` failed
   - `test/unit/lib/gpu/engine2d/ffi_dispatch_spec.spl --mode=interpreter --clean --force-rebuild`: `7` passed, `0` failed
