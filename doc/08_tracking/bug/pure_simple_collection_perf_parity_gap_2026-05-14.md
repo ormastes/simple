@@ -229,10 +229,34 @@ set_contains      1.02x C / 0.51x Rust
 hashset_contains  0.52x C / 0.88x Rust
 ```
 
-Only `list_traverse` remains below the 0.50x Rust floor. Disassembly of
-`rt_numeric_xor_sum_u64` now shows direct scalar unrolled loads over the raw
-data pointer with no per-element runtime helper calls. A two-accumulator
-variant, text-hash cursor variant, and cached HashSet mask variant all
-regressed benchmark results and were reverted. The remaining gap needs backend
-loop/vector codegen for typed reductions, or an equivalent Simple optimization
-plug transform, rather than another collection data-structure rewrite.
+Only `list_traverse` remains below the 0.50x Rust floor in that pushed baseline.
+Disassembly of `rt_numeric_xor_sum_u64` shows direct scalar unrolled loads over
+the raw data pointer with no per-element runtime helper calls. A
+two-accumulator variant, text-hash cursor variant, and cached HashSet mask
+variant all regressed benchmark results and were reverted.
+
+## 2026-05-14 Vector Reduction Update
+
+A Cranelift callsite inline path for `rt_numeric_xor_sum_u64` now emits a
+two-lane vector accumulator over raw u64 array data, with scalar tail handling
+and the same array validity checks as the pure Simple runtime helper. Focused
+u64 xor-sum lowering tests and the compiler driver build pass.
+
+Clean five-sample source-closure benchmark evidence with `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, clean runtime archive rebuild, and checksum parity:
+
+```text
+list_traverse     1.35x C / 0.71x Rust
+list_push         1.34x C / 2.58x Rust
+set_contains      0.79x C / 0.41x Rust
+hashset_contains  0.48x C / 0.82x Rust
+```
+
+This closes the old `list_traverse` floor, but the overall parity issue is not
+closed. `set_contains` is still below the 0.50x Rust floor, and
+`hashset_contains` was just below the 0.50x C floor in this noisy run.
+Unchecked contains lowering, callsite contains inlining, vector contains
+probing, and broader loop-function inlining were tried locally and reverted
+because they either did not close the set floor or regressed it. The remaining
+work is now a typed contiguous contains/probe optimization problem rather than
+a typed reduction problem.
