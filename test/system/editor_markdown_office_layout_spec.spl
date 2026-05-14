@@ -1,0 +1,76 @@
+# editor_markdown_office_layout_spec
+#
+# Verifies office-style Markdown document models without requiring the full
+# editor GUI stack.
+
+use std.spec
+use std.editor.services.md_document_decor.*
+
+describe "markdown office-style layout":
+
+    it "parses layout mode for paper documents":
+        val decor = md_document_decor_parse("---\nlayout: paper\npage_view: true\nheader: Memo\n---\n# Title")
+        expect(decor.layout).to_equal("paper")
+        expect(decor.page_view).to_equal(true)
+        expect(decor.header).to_equal("Memo")
+
+    it "splits ppt pages at level-two headings and preserves slide css labels":
+        val slides = md_document_split_ppt_pages("---\nlayout: ppt\n---\n# Deck\n\n## Intro @title\nWelcome\n\n## Data\nNumbers")
+        expect(slides.len()).to_equal(2)
+        expect(slides[0].index).to_equal(1)
+        expect(slides[0].title).to_equal("Intro @title")
+        expect(slides[0].content).to_equal("Welcome")
+        expect(slides[0].css).to_equal("title")
+        expect(slides[1].title).to_equal("Data")
+        expect(slides[1].content).to_equal("Numbers")
+
+    it "renders ppt pages as a css-aware deck":
+        val html = md_document_render_ppt_html("---\nlayout: ppt\ncss_file: ./deck.css\n---\n\n```css\n.md-ppt-slide { color: red; }\n```\n\n## Intro @title\nWelcome")
+        expect(html).to_contain("class=\"md-ppt-deck\"")
+        expect(html).to_contain("href=\"./deck.css\"")
+        expect(html).to_contain("class=\"md-inline-css\"")
+        expect(html).to_contain("class=\"md-ppt-slide md-css-title\"")
+        expect(html).to_contain("<h2>Intro @title</h2>")
+        expect(html).to_contain("<p>Welcome</p>")
+
+    it "maps markdown tables to spreadsheet cells and evaluates simple formulas":
+        val cells = md_document_sheet_cells("| Name | Q1 | Q2 | Total |\n|---|---:|---:|---:|\n| Sales | 2 | 3 | =B2+C2 |")
+        expect(cells.len()).to_equal(8)
+        expect(cells[0].address).to_equal("A1")
+        expect(cells[4].address).to_equal("A2")
+        expect(cells[7].address).to_equal("D2")
+        expect(cells[7].raw).to_equal("=B2+C2")
+        expect(cells[7].value).to_equal("5")
+
+    it "renders spreadsheet tables with calculated values and raw formula metadata":
+        val html = md_document_render_sheet_html("| Name | Q1 | Q2 | Total |\n|---|---:|---:|---:|\n| Sales | 2 | 3 | =B2+C2 |")
+        expect(html).to_contain("class=\"md-sheet\"")
+        expect(html).to_contain("data-cell=\"D2\"")
+        expect(html).to_contain("data-raw=\"=B2+C2\"")
+        expect(html).to_contain(">5</td>")
+
+    it "extracts and safely renders simple script embeds":
+        val embeds = md_document_script_embeds("# Note\n\n```simple\nprint \"hi\"\n```\n\n```script\nx = 1\n```")
+        expect(embeds.len()).to_equal(2)
+        expect(embeds[0].language).to_equal("simple")
+        expect(embeds[0].code).to_equal("print \"hi\"")
+        expect(embeds[1].language).to_equal("script")
+        val html = md_document_render_script_embeds_html("# Note\n\n```simple\nprint \"hi\"\n```")
+        expect(html).to_contain("class=\"md-script-embed\"")
+        expect(html).to_contain("data-language=\"simple\"")
+        expect(html).to_contain("print &quot;hi&quot;")
+
+    it "dispatches office HTML rendering by document layout":
+        val paper = md_document_render_office_html("---\nlayout: paper\nheader: Memo\nfooter: End\n---\n# Title\n\nBody")
+        expect(paper).to_contain("class=\"md-paper-layout\"")
+        expect(paper).to_contain("class=\"md-page-header\"")
+        expect(paper).to_contain("<p># Title</p>")
+
+        val deck = md_document_render_office_html("---\nlayout: ppt\n---\n## Slide\nBody")
+        expect(deck).to_contain("class=\"md-ppt-deck\"")
+        expect(deck).to_contain("class=\"md-ppt-slide\"")
+
+        val sheet = md_document_render_office_html("---\nlayout: excel\n---\n| A | B |\n|---|---:|\n| 2 | =A2+3 |")
+        expect(sheet).to_contain("class=\"md-sheet-layout\"")
+        expect(sheet).to_contain("data-cell=\"B2\"")
+        expect(sheet).to_contain(">5</td>")
