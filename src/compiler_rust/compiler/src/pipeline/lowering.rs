@@ -694,33 +694,13 @@ impl CompilerPipeline {
         }
 
         for function in &mut hir_module.functions {
-            let mut local_aliases = std::collections::HashMap::new();
-            self.rewrite_hir_simd_stmts(&hir_module.types, &mut function.body, &mut local_aliases);
+            self.rewrite_hir_simd_stmts(&hir_module.types, &mut function.body);
         }
     }
 
-    fn rewrite_hir_simd_stmts(
-        &self,
-        types: &hir::TypeRegistry,
-        stmts: &mut [HirStmt],
-        local_aliases: &mut std::collections::HashMap<usize, HirExpr>,
-    ) {
+    fn rewrite_hir_simd_stmts(&self, types: &hir::TypeRegistry, stmts: &mut [HirStmt]) {
         for stmt in stmts.iter_mut() {
             match stmt {
-                HirStmt::Let {
-                    local_index, value, ..
-                } => {
-                    if let Some(value) = value {
-                        local_aliases.insert(*local_index, value.clone());
-                    } else {
-                        local_aliases.remove(local_index);
-                    }
-                }
-                HirStmt::Assign { target, value } => {
-                    if let HirExprKind::Local(local_index) = &target.kind {
-                        local_aliases.insert(*local_index, value.clone());
-                    }
-                }
                 HirStmt::For {
                     pattern,
                     iterable,
@@ -728,8 +708,7 @@ impl CompilerPipeline {
                     simd_requested,
                     invariants,
                 } => {
-                    let mut nested_aliases = local_aliases.clone();
-                    self.rewrite_hir_simd_stmts(types, body, &mut nested_aliases);
+                    self.rewrite_hir_simd_stmts(types, body);
                     let fallback = HirStmt::For {
                         pattern: pattern.clone(),
                         iterable: iterable.clone(),
@@ -744,11 +723,9 @@ impl CompilerPipeline {
                 HirStmt::If {
                     then_block, else_block, ..
                 } => {
-                    let mut then_aliases = local_aliases.clone();
-                    self.rewrite_hir_simd_stmts(types, then_block, &mut then_aliases);
+                    self.rewrite_hir_simd_stmts(types, then_block);
                     if let Some(else_block) = else_block {
-                        let mut else_aliases = local_aliases.clone();
-                        self.rewrite_hir_simd_stmts(types, else_block, &mut else_aliases);
+                        self.rewrite_hir_simd_stmts(types, else_block);
                     }
                 }
                 HirStmt::While {
@@ -757,25 +734,21 @@ impl CompilerPipeline {
                     simd_requested,
                     invariants,
                 } => {
-                    let mut body_aliases = local_aliases.clone();
-                    self.rewrite_hir_simd_stmts(types, body, &mut body_aliases);
+                    self.rewrite_hir_simd_stmts(types, body);
                     let fallback = HirStmt::While {
                         condition: condition.clone(),
                         body: body.clone(),
                         simd_requested: *simd_requested,
                         invariants: invariants.clone(),
                     };
-                    if let Some(candidate) =
-                        self.classify_hir_u64_contains_while_loop(types, condition, body, local_aliases)
-                    {
+                    if let Some(candidate) = self.classify_hir_u64_contains_while_loop(types, condition, body) {
                         *stmt = self.lower_hir_u64_contains_candidate(candidate, fallback);
                     } else if let Some(candidate) = self.classify_hir_simd_while_loop(types, condition, body) {
                         *stmt = self.lower_hir_simd_candidate(candidate, fallback);
                     }
                 }
                 HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
-                    let mut nested_aliases = local_aliases.clone();
-                    self.rewrite_hir_simd_stmts(types, body, &mut nested_aliases);
+                    self.rewrite_hir_simd_stmts(types, body);
                 }
                 _ => {}
             }
@@ -1096,10 +1069,8 @@ impl CompilerPipeline {
         types: &hir::TypeRegistry,
         condition: &HirExpr,
         body: &[HirStmt],
-        local_aliases: &std::collections::HashMap<usize, HirExpr>,
     ) -> Option<HIRU64ContainsLoopCandidate> {
         let (index_local, range_end) = self.canonical_while_range(condition)?;
-        let resolved_range_end = self.resolve_local_alias(range_end, local_aliases);
         if body.len() != 2 || !self.is_unit_index_increment(&body[1], index_local) {
             return None;
         }
@@ -1121,21 +1092,8 @@ impl CompilerPipeline {
             return None;
         }
         let (input, key) = self.hir_u64_contains_operands(types, probe, index_local)?;
-        let guard = self.build_simd_bound_guard_for_u64(types, &resolved_range_end, [&input])?;
+        let guard = self.build_simd_bound_guard_for_u64(types, range_end, [&input])?;
         Some(HIRU64ContainsLoopCandidate { input, key, guard })
-    }
-
-    fn resolve_local_alias(
-        &self,
-        expr: &HirExpr,
-        local_aliases: &std::collections::HashMap<usize, HirExpr>,
-    ) -> HirExpr {
-        if let HirExprKind::Local(local_index) = expr.kind {
-            if let Some(alias) = local_aliases.get(&local_index) {
-                return alias.clone();
-            }
-        }
-        expr.clone()
     }
 
     fn lower_hir_u64_contains_candidate(&self, candidate: HIRU64ContainsLoopCandidate, fallback: HirStmt) -> HirStmt {
@@ -1535,17 +1493,6 @@ impl CompilerPipeline {
                 },
                 _,
             ) if method == "len" && args.is_empty() && end_receiver.as_ref() == receiver => Some(false),
-            (
-                HirExprKind::MethodCall {
-                    receiver: end_receiver,
-                    method,
-                    args,
-                    ..
-                },
-                _,
-            ) if method == "to_u64" && args.is_empty() => {
-                self.receiver_bound_requires_guard(end_receiver.as_ref(), receiver, size)
-            }
             (HirExprKind::Integer(_), None) => None,
             (HirExprKind::Local(_), _) => Some(true),
             (HirExprKind::BuiltinCall { name, args }, _)
