@@ -286,6 +286,12 @@ Additional local experiments were rejected:
   around `0.31x` Rust in the combined benchmark.
 - Replacing the text HashSet contains mask expression with `hash.to_u64() &
   mask` did not lift the borderline C floor.
+- A Cranelift callsite inline for `rt_numeric_contains_u64` using `I64X2`
+  compare masks, little-endian `I128` bitcasts, and `bmask(I64, ...)` compiled
+  successfully but failed the benchmark gate. A one-sample warning-mode run
+  preserved checksum parity, but measured `set_contains` at only `0.59x` C /
+  `0.24x` Rust and severely regressed text `hashset_contains`. The experiment
+  was reverted.
 - Cranelift 0.116 exposes no simple frontend `any lane true` / vector bitmask
   operation for integer compare masks, so the prior lane-extract vector contains
   experiment remains the wrong path.
