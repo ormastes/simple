@@ -97,6 +97,8 @@ Executed on 2026-05-14:
   - `remaining=40` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the serial FFI, SIMD profile, daemon lock, and SMF debug agent facades.
 - No-GC async env/coverage/FFI wildcard facade review scan:
   - `remaining=36` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the env types, coverage_simple, FFI error, and LLVM loader facades.
+- No-GC async font/protocol/launcher wildcard facade review scan:
+  - `remaining=33` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the font FFI, daemon protocol, and Play launcher facades. The pipe facade remains wildcard because explicit `out`/`err` export currently hits parser tokenization for `out`.
 - Focused runtime-path specs:
   - `test/unit/lib/nogc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
   - `test/unit/lib/gc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
