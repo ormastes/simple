@@ -1,0 +1,98 @@
+# Adler-32 & Fletcher-32 Checksums
+#
+# Adler-32: RFC 1950 section 9 — used in zlib/gzip.
+# Fletcher-32: lightweight checksum over 16-bit words.
+#
+# Both are NON-cryptographic; suitable for integrity checks only.
+
+extern fn rt_typed_bytes_u8_unchecked(arr: [u8], idx: u64) -> u64
+extern fn rt_typed_bytes_u64_le_unchecked(arr: [u8], idx: u64) -> u64
+
+fn _adler_reduce(value: u64) -> u64:
+    var reduced = (value & 0xFFFFu64) + ((value >> 16u64) * 15u64)
+    reduced = (reduced & 0xFFFFu64) + ((reduced >> 16u64) * 15u64)
+    if reduced >= 65521u64:
+        reduced = reduced - 65521u64
+    reduced
+
+# ============================================================================
+# Adler-32 (RFC 1950 section 9)
+# ============================================================================
+
+fn adler32(data: [u8]) -> i64:
+    """Compute Adler-32 checksum per RFC 1950.
+
+    A = 1 + sum of all bytes (mod 65521)
+    B = sum of running A values (mod 65521)
+    Result = (B << 16) | A
+
+    Example:
+        adler32([])          # 1
+        adler32([97])        # 0x00620062
+        adler32([97,98,99])  # 0x024D0127
+    """
+    var nmax: u64 = 355328u64
+    var a: u64 = 1u64
+    var b: u64 = 0u64
+    var length = data.len().to_u64()
+    var i: u64 = 0u64
+    while i < length:
+        var end = i + nmax
+        if end > length:
+            end = length
+        while (i + 8u64) <= end:
+            var word: u64 = rt_typed_bytes_u64_le_unchecked(data, i)
+            var b0: u64 = word & 0xFFu64
+            var b1: u64 = (word >> 8u64) & 0xFFu64
+            var b2: u64 = (word >> 16u64) & 0xFFu64
+            var b3: u64 = (word >> 24u64) & 0xFFu64
+            var b4: u64 = (word >> 32u64) & 0xFFu64
+            var b5: u64 = (word >> 40u64) & 0xFFu64
+            var b6: u64 = (word >> 48u64) & 0xFFu64
+            var b7: u64 = (word >> 56u64) & 0xFFu64
+            b = b + (a * 8u64) + (b0 * 8u64) + (b1 * 7u64) + (b2 * 6u64) + (b3 * 5u64) + (b4 * 4u64) + (b5 * 3u64) + (b6 * 2u64) + b7
+            a = a + b0 + b1 + b2 + b3 + b4 + b5 + b6 + b7
+            i = i + 8u64
+        while i < end:
+            var byte_val: u64 = rt_typed_bytes_u8_unchecked(data, i)
+            a = a + byte_val
+            b = b + a
+            i = i + 1u64
+        a = _adler_reduce(a)
+        b = _adler_reduce(b)
+    ((b << 16u64) | a).to_i64()
+
+
+# ============================================================================
+# Fletcher-32
+# ============================================================================
+
+fn fletcher32(data: [u8]) -> i64:
+    """Compute Fletcher-32 checksum over 16-bit little-endian words.
+
+    If data has odd length, the final byte is padded with a zero high byte.
+
+    sum1 = sum2 = 0
+    For each 16-bit word w (LE pairs):
+        sum1 = (sum1 + w) % 65535
+        sum2 = (sum2 + sum1) % 65535
+    Result = (sum2 << 16) | sum1
+
+    Example:
+        fletcher32([97, 98, 99, 100])  # pairs: 0x6261, 0x6463
+    """
+    var sum1: i64 = 0
+    var sum2: i64 = 0
+    var mod_val: i64 = 65535
+    var length: i64 = data.len()
+    var i: i64 = 0
+    while i < length:
+        var lo: i64 = data[i].to_i64()
+        var hi: i64 = 0
+        if i + 1 < length:
+            hi = data[i + 1].to_i64()
+        var word: i64 = lo | (hi << 8)
+        sum1 = (sum1 + word) % mod_val
+        sum2 = (sum2 + sum1) % mod_val
+        i = i + 2
+    (sum2 << 16) | sum1

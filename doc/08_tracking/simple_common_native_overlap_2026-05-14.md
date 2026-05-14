@@ -33,6 +33,11 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   block are canonicalized when the duplicate result is used only by the
   adjacent bounds check. The bounds checks stay explicit, but the redundant
   helper dispatch is removed from hot indexed traversal blocks.
+- `src/lib/common/hash/adler32.spl` now uses the same pure Simple chunked
+  Adler-32 path as the OS crypto module: 8-byte typed loads, deferred modular
+  reduction, and strength-reduced `_adler_reduce` instead of per-byte `%`
+  reduction. This keeps the common `std.hash.adler32` surface aligned with the
+  optimized pure Simple implementation.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/compiler/mir_opt/strength_reduction_spec.spl
   --mode=interpreter --clean` passing 14 examples.
@@ -42,6 +47,9 @@ optimization providers rather than delegating common algorithms back to Rust/C.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/compiler/mir_opt/collection_opt_spec.spl
   --mode=interpreter --clean` passing 1 example.
+- Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
+  test test/unit/lib/common/hash/adler32_spec.spl
+  --mode=interpreter --clean` passing 11 examples.
 
 ## Next Concrete Plugin Work
 
