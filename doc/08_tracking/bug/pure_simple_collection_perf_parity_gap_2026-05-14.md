@@ -260,3 +260,37 @@ probing, and broader loop-function inlining were tried locally and reverted
 because they either did not close the set floor or regressed it. The remaining
 work is now a typed contiguous contains/probe optimization problem rather than
 a typed reduction problem.
+
+## 2026-05-14 Lookup Follow-up
+
+After reverting the unproven alias-lowering branch, a fresh clean-worktree
+warning-mode benchmark on pushed `main` preserved checksum parity and measured:
+
+```text
+list_traverse     1.03x C / 0.63x Rust
+list_push         1.28x C / 2.51x Rust
+set_contains      0.81x C / 0.33x Rust
+hashset_contains  0.50x C / 0.83x Rust
+```
+
+The durable miss is now scalar `set_contains` against Rust. Disassembly of the
+native benchmark shows `bench_set_contains` already calls
+`rt_numeric_contains_u64` directly from the hot loop; the local Simple
+`set_contains` wrapper is reduced to a small runtime-kernel call. The remaining
+cost is therefore inside the generated/runtime contains scan shape, not a missed
+local helper call.
+
+Additional local experiments were rejected:
+
+- Alias-proof lowering plus non-tail MIR inlining still left `set_contains`
+  around `0.31x` Rust in the combined benchmark.
+- Replacing the text HashSet contains mask expression with `hash.to_u64() &
+  mask` did not lift the borderline C floor.
+- Cranelift 0.116 exposes no simple frontend `any lane true` / vector bitmask
+  operation for integer compare masks, so the prior lane-extract vector contains
+  experiment remains the wrong path.
+
+Next useful work should focus on the `rt_numeric_contains_u64` native code
+shape itself: a target-aware x64 lowering, a Cranelift-compatible compare-mask
+strategy that avoids lane extraction, or a scalar layout that reduces branch
+pressure while preserving early exit.
