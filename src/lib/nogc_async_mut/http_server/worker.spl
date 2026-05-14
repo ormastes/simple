@@ -33,10 +33,14 @@ while not shutdown:
 use std.io.driver.{IoDriver}
 use std.io.net_backend.{NetBackendCapabilities, net_backend_summary, net_backend_static_file_route}
 use std.io.event_loop.{EventLoop, Waker}
-use std.net.ffi.{
-    rt_io_tcp_bind, rt_io_tcp_close, rt_io_tcp_local_addr,
-    rt_io_tcp_set_nodelay, rt_socket_set_nonblocking,
-    rt_socket_set_reuseport, rt_socket_set_reuseaddr
+use std.nogc_sync_mut.io.tcp.{
+    tcp_backend_bind,
+    tcp_backend_close,
+    tcp_backend_local_addr,
+    tcp_backend_set_nodelay,
+    tcp_backend_set_nonblocking,
+    tcp_backend_set_reuseaddr,
+    tcp_backend_set_reuseport
 }
 use std.concurrent.channel.{Channel}
 use std.thread_sffi.{spl_thread_sleep}
@@ -127,15 +131,15 @@ class Worker:
         val caps = driver.net_capabilities()
         val backend_summary = net_backend_summary(caps)
 
-        val listen_fd = rt_io_tcp_bind(config.listen_addr)
+        val listen_fd = tcp_backend_bind(config.listen_addr)
         if listen_fd < 0:
             return Err(HttpServerError.BindFailed(
                 "Worker {worker_id}: failed to bind {config.listen_addr}"
             ))
 
-        rt_socket_set_reuseport(listen_fd, true)
-        rt_socket_set_reuseaddr(listen_fd, true)
-        rt_socket_set_nonblocking(listen_fd, true)
+        tcp_backend_set_reuseport(listen_fd, true)
+        tcp_backend_set_reuseaddr(listen_fd, true)
+        tcp_backend_set_nonblocking(listen_fd, true)
 
         Ok(Worker(
             worker_id: worker_id,
@@ -192,7 +196,7 @@ class Worker:
                 if op_id == self.accept_op_id:
                     if self.draining:
                         if result >= 0:
-                            rt_io_tcp_close(result)
+                            tcp_backend_close(result)
                     else:
                         self.handle_accept(result, now)
                 else:
@@ -206,7 +210,7 @@ class Worker:
                 self.shutdown_requested = true
 
         self.close_all_connections()
-        rt_io_tcp_close(self.listener_fd)
+        tcp_backend_close(self.listener_fd)
         self.driver.close()
 
     # ========================================================================
@@ -221,13 +225,13 @@ class Worker:
             return
 
         if self.active_count >= self.config.max_connections:
-            rt_io_tcp_close(client_fd)
+            tcp_backend_close(client_fd)
             return
 
-        rt_socket_set_nonblocking(client_fd, true)
-        rt_io_tcp_set_nodelay(client_fd, true)
+        tcp_backend_set_nonblocking(client_fd, true)
+        tcp_backend_set_nodelay(client_fd, true)
 
-        val peer = rt_io_tcp_local_addr(client_fd) ?? "unknown"
+        val peer = tcp_backend_local_addr(client_fd) ?? "unknown"
         val conn = Connection.new(client_fd, peer, now)
 
         self.connections[client_fd] = conn
@@ -498,7 +502,7 @@ class Worker:
 
     me close_connection(fd: i64):
         """Close a connection and remove from tracking."""
-        rt_io_tcp_close(fd)
+        tcp_backend_close(fd)
         self.connections.remove(fd)
         self.active_count = self.active_count - 1
 
@@ -506,7 +510,7 @@ class Worker:
         """Close all active connections during shutdown."""
         val fds = self.connections.keys()
         for fd in fds:
-            rt_io_tcp_close(fd)
+            tcp_backend_close(fd)
         self.connections = {}
         self.active_count = 0
 
