@@ -171,6 +171,28 @@ fn filter_single_file_runtime_bundle(
     source_path: Option<&Path>,
     mut options: crate::linker::NativeBinaryOptions,
 ) -> crate::linker::NativeBinaryOptions {
+    fn push_front_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
+        if let Some(index) = paths.iter().position(|existing| existing == &path) {
+            paths.remove(index);
+        }
+        paths.insert(0, path);
+    }
+
+    fn prefer_abi_complete_core_runtime(options: &mut crate::linker::NativeBinaryOptions) {
+        if options.target != Target::host() || !options.libraries.iter().any(|lib| lib == "simple_runtime") {
+            return;
+        }
+
+        let archive = crate::pipeline::native_project::find_abi_complete_simple_core_runtime_library().or_else(|| {
+            let built = crate::pipeline::native_project::build_core_c_runtime_library(Path::new("build/simple-core"))?;
+            crate::pipeline::native_project::runtime_archive_has_core_required_symbols(&built).then_some(built)
+        });
+
+        if let Some(runtime_dir) = archive.and_then(|path| path.parent().map(Path::to_path_buf)) {
+            push_front_unique(&mut options.library_paths, runtime_dir);
+        }
+    }
+
     fn ensure_runtime_root(options: &mut crate::linker::NativeBinaryOptions, selected: &str, removed: &str) {
         options.libraries.retain(|lib| lib != removed);
         if !options.libraries.iter().any(|lib| lib == selected) {
@@ -183,6 +205,7 @@ fn filter_single_file_runtime_bundle(
     } else if single_file_prefers_runtime_only(source_path, &options) {
         ensure_runtime_root(&mut options, "simple_runtime", "simple_native_all");
     }
+    prefer_abi_complete_core_runtime(&mut options);
     options
 }
 

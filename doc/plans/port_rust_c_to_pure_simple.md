@@ -1165,6 +1165,25 @@ rewrites. Source changes may expose facts to the compiler, but the reusable spee
 win must live in the Simple compiler/interpreter optimization layer or the
 documented Simple Optimization Plugin interface.
 
+### 2026-05-14 Core-C Runtime Link and CRC Cache Follow-Up
+
+- Single-file native leaf builds with `SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c`
+  now prepend an ABI-complete core runtime archive before stale release/target
+  `libsimple_runtime.a` paths. This fixes the prior native benchmark compile
+  failure on `rt_typed_bytes_u8_push`.
+- CRC32 native execution exposed a mutable global `[u8]` cache hazard: the ready
+  guard could be true while the cached table argument was null. The current
+  safe path rebuilds the pure Simple table per call until static table
+  materialization lands in the optimizer/plugin layer.
+- Evidence: `cargo test -p simple-compiler single_file_runtime_bundle`, CRC32
+  KAT interpreter tests, direct core-C native compile/run of
+  `test/perf/port_algorithms/port_algorithms_simple.spl`, and one-sample
+  benchmark checksum parity for XXHash64, CRC32, Adler32, and ChaCha20.
+- Latest one-sample ratios with core-C runtime: XXHash64 `0.59x` C / `1.08x`
+  Rust, CRC32 `0.72x` C / `0.77x` Rust, Adler32 `0.88x` C / `0.94x` Rust,
+  ChaCha20 `1.24x` C / `1.08x` Rust. The acceptance gate remains open for
+  XXHash64-vs-C, CRC32, and Adler32.
+
 ---
 
 ## Critical Files (hardening and regression guard)
