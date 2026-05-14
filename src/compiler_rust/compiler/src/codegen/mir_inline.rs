@@ -29,9 +29,29 @@ fn is_inline_candidate(func: &MirFunction) -> bool {
     let inst_count: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
     func.blocks.len() <= 8
         && inst_count <= 48
+        && !has_back_edge(func)
         && func.blocks.iter().all(|b| {
             b.instructions.iter().all(is_supported_inline_inst) && is_supported_inline_terminator(&b.terminator)
         })
+}
+
+fn has_back_edge(func: &MirFunction) -> bool {
+    let block_order: HashMap<BlockId, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(idx, block)| (block.id, idx))
+        .collect();
+    func.blocks.iter().any(|block| {
+        let Some(from) = block_order.get(&block.id).copied() else {
+            return false;
+        };
+        block
+            .terminator
+            .successors()
+            .into_iter()
+            .any(|successor| block_order.get(&successor).is_some_and(|to| *to <= from))
+    })
 }
 
 fn is_supported_inline_inst(inst: &MirInst) -> bool {
@@ -137,9 +157,14 @@ fn inline_tail_call(
                 });
             }
         }
-        for inst in &block.instructions {
-            instructions.push(remap_inst(caller, inst, &mut vreg_map, &local_map));
-        }
+        remap_instructions(
+            caller,
+            &block.instructions,
+            &mut instructions,
+            &mut vreg_map,
+            &local_map,
+            &call_args,
+        );
         let terminator = remap_terminator(
             caller,
             &mut instructions,
@@ -158,6 +183,58 @@ fn inline_tail_call(
     let block = &mut caller.blocks[block_index];
     block.instructions.truncate(call_pos);
     block.terminator = Terminator::Jump(entry);
+}
+
+fn remap_instructions(
+    caller: &mut MirFunction,
+    source: &[MirInst],
+    out: &mut Vec<MirInst>,
+    vreg_map: &mut HashMap<VReg, VReg>,
+    local_map: &HashMap<usize, usize>,
+    call_args: &[VReg],
+) {
+    let mut index = 0;
+    while index < source.len() {
+        if let Some(inst) = remap_param_load(caller, source, index, vreg_map, call_args) {
+            out.push(inst);
+            index += 2;
+            continue;
+        }
+        out.push(remap_inst(caller, &source[index], vreg_map, local_map));
+        index += 1;
+    }
+}
+
+fn remap_param_load(
+    caller: &mut MirFunction,
+    source: &[MirInst],
+    index: usize,
+    vreg_map: &mut HashMap<VReg, VReg>,
+    call_args: &[VReg],
+) -> Option<MirInst> {
+    let MirInst::LocalAddr {
+        dest: addr,
+        local_index,
+    } = source.get(index)?
+    else {
+        return None;
+    };
+    let Some(arg) = call_args.get(*local_index).copied() else {
+        return None;
+    };
+    let MirInst::Load {
+        dest, addr: load_addr, ..
+    } = source.get(index + 1)?
+    else {
+        return None;
+    };
+    if load_addr != addr {
+        return None;
+    }
+    Some(MirInst::Copy {
+        dest: remap_vreg(caller, *dest, vreg_map),
+        src: arg,
+    })
 }
 
 fn remap_inst(
@@ -318,5 +395,59 @@ mod tests {
                 .all(|inst| !matches!(inst, MirInst::Call { target, .. } if target.name() == "tiny"))
         }));
         assert!(inlined.blocks.len() > 1);
+        assert!(inlined
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .all(|inst| !matches!(inst, MirInst::Load { .. })));
+    }
+
+    #[test]
+    fn does_not_inline_loop_callees_without_licm() {
+        let mut callee = MirFunction::new("looping".to_string(), TypeId::I64, Visibility::Private);
+        let counter = callee.new_vreg();
+        let one = callee.new_vreg();
+        let next = callee.new_vreg();
+        let loop_block = callee.new_block();
+        callee.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: counter,
+            value: 0,
+        });
+        callee.blocks[0].terminator = Terminator::Jump(loop_block);
+        callee
+            .block_mut(loop_block)
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: one, value: 1 });
+        callee.block_mut(loop_block).unwrap().instructions.push(MirInst::BinOp {
+            dest: next,
+            op: crate::hir::BinOp::Add,
+            left: counter,
+            right: one,
+        });
+        callee.block_mut(loop_block).unwrap().terminator = Terminator::Jump(loop_block);
+
+        let mut caller = MirFunction::new("caller".to_string(), TypeId::I64, Visibility::Private);
+        let result = caller.new_vreg();
+        caller.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(result),
+            target: CallTarget::from_name("looping"),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(result));
+
+        let mut module = MirModule::new();
+        module.functions.push(callee);
+        module.functions.push(caller);
+
+        let functions = inline_small_pure_functions(&module, module.functions.clone());
+        let inlined = functions.iter().find(|f| f.name == "caller").unwrap();
+
+        assert!(inlined.blocks.iter().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, MirInst::Call { target, .. } if target.name() == "looping"))
+        }));
     }
 }
