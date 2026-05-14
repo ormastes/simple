@@ -142,6 +142,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
   - result: `Build complete: 370 compiled, 0 cached, 0 failed`; linked `build/bootstrap/mcp-package/simple_lsp_mcp_server`.
   - remaining caveat: unresolved native/runtime symbols still generate link stubs. Latest uncached run generated 992 unresolved-symbol stubs, including 202 internal Simple symbols.
   - async backend update: `nogc_async_mut` TCP/UDP async socket APIs no longer depend on missing `rt_async_tcp_*` / `rt_async_udp_*` runtime hooks; they wrap existing no-GC socket primitives in ready futures while the true evented runtime ABI is completed.
+  - simple-core async ABI update: `src/runtime/simple_core/core_async.spl` now defines the `rt_future_*` and compiler-lowered `rt_async_*` state-machine symbols in pure Simple. A traced LSP build with `SIMPLE_NATIVE_RUNTIME_BUNDLE=rust-hosted SIMPLE_RUNTIME_PATH=src/compiler_rust/target/bootstrap` generated 500 stubs and no `rt_async_*`/`rt_future_*` runtime ABI stubs; the remaining async stubs are the higher-level `future_alloc_*` opaque-state API.
   - implication: MCP and LSP native smoke are no longer blocked by `SliceIter.slice`, enum/static-member resolution, shell status wrappers, stale `MirBlock.has_label` reads, or the last C/LLVM/native/Vulkan field-recovery failures. Package release-readiness still requires reducing native/runtime stubs and broader import/type-loading cleanup.
 
 ### Gap 1: Partial attribute-based family enforcement (Agent 2 -- Compiler)
