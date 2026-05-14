@@ -148,6 +148,8 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                         .map(|(_, tail)| tail)
                         .unwrap_or(target.name());
                     let ty = match base {
+                        "spl_load_i64" => Some(TypeId::I64),
+                        "spl_load_u8" => Some(TypeId::U8),
                         "rt_typed_bytes_u8_at" | "rt_typed_bytes_u8_data_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
                         "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" | "rt_typed_words_u32_data_at" => {
                             Some(TypeId::U32)
