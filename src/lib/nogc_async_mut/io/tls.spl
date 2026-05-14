@@ -19,8 +19,8 @@ one-line change once rt_ecdh_agree lands.
 
 ## Crypto Domain
 
-AES-GCM encrypt/decrypt uses hex-encoded strings via rt_aes_gcm_encrypt_hex
-and rt_aes_gcm_decrypt_hex. Keys, IVs, nonces, AAD, and ciphertext are
+AES-GCM encrypt/decrypt uses TLS common hex-domain wrappers. Keys, IVs,
+nonces, AAD, and ciphertext are
 converted to hex before crypto operations and back to wire after. This avoids
 NUL-byte truncation inherent in strlen-based C string externs.
 
@@ -50,7 +50,11 @@ use std.nogc_async_mut.io.tls_common.{
     TlsHandshakeState,
     wire_to_bytes,
     encode_u8,
-    encode_u16_be
+    encode_u16_be,
+    tls_aes_gcm_encrypt_hex,
+    tls_aes_gcm_decrypt_hex,
+    tls_wire_to_hex,
+    tls_hex_to_wire
 }
 use std.nogc_async_mut.io.tls_io.{
     read_tls_record,
@@ -62,13 +66,6 @@ use std.nogc_async_mut.io.tls_io.{
 }
 use std.nogc_async_mut.io.tls_handshake.{perform_server_handshake}
 use std.tls.utilities.{byte_at}
-
-# Hex-domain crypto externs — binary-safe, no NUL truncation.
-# All arguments and return values are hex-encoded strings.
-extern fn rt_aes_gcm_encrypt_hex(key_hex: text, iv_hex: text, plaintext_hex: text, aad_hex: text) -> text
-extern fn rt_aes_gcm_decrypt_hex(key_hex: text, iv_hex: text, ciphertext_hex: text, aad_hex: text) -> text
-extern fn rt_wire_to_hex(wire: text, wire_len: i64) -> text
-extern fn rt_hex_to_wire(hex_str: text) -> text
 
 # ============================================================================
 # Hex Helpers
@@ -147,18 +144,18 @@ class AsyncTlsStream:
             return Err(IoError(kind: IoErrorKind.InvalidData, message: "expected application data record"))
 
         # Convert wire data to hex for binary-safe crypto
-        val key_hex = rt_wire_to_hex(self.session_keys.client_write_key, 16)
-        val iv_hex = rt_wire_to_hex(self.session_keys.client_write_iv, 4)
-        val payload_hex = rt_wire_to_hex(payload_wire, record_len)
+        val key_hex = tls_wire_to_hex(self.session_keys.client_write_key, 16)
+        val iv_hex = tls_wire_to_hex(self.session_keys.client_write_iv, 4)
+        val payload_hex = tls_wire_to_hex(payload_wire, record_len)
         val nonce_hex = build_gcm_nonce_hex(iv_hex, self.client_seq)
         val aad_hex = build_aead_aad_hex(self.client_seq, content_type, TLS_VERSION_1_2, record_len)
-        val pt_hex = rt_aes_gcm_decrypt_hex(key_hex, nonce_hex, payload_hex, aad_hex)
+        val pt_hex = tls_aes_gcm_decrypt_hex(key_hex, nonce_hex, payload_hex, aad_hex)
         self.client_seq = self.client_seq + 1
 
         if pt_hex == nil:
             return Err(IoError(kind: IoErrorKind.InvalidData, message: "AES-GCM decryption failed"))
 
-        Ok(rt_hex_to_wire(pt_hex))
+        Ok(tls_hex_to_wire(pt_hex))
 
     fn write(data: text) -> Result<i64, IoError>:
         """Encrypt and send application data over the TLS stream.
@@ -172,17 +169,17 @@ class AsyncTlsStream:
         val data_len = len(wire_to_bytes(data))
 
         # Convert key/IV/plaintext to hex for binary-safe crypto
-        val key_hex = rt_wire_to_hex(self.session_keys.server_write_key, 16)
-        val iv_hex = rt_wire_to_hex(self.session_keys.server_write_iv, 4)
-        val data_hex = rt_wire_to_hex(data, data_len)
+        val key_hex = tls_wire_to_hex(self.session_keys.server_write_key, 16)
+        val iv_hex = tls_wire_to_hex(self.session_keys.server_write_iv, 4)
+        val data_hex = tls_wire_to_hex(data, data_len)
         val nonce_hex = build_gcm_nonce_hex(iv_hex, self.server_seq)
         val aad_hex = build_aead_aad_hex(self.server_seq, CONTENT_TYPE_APPLICATION_DATA, TLS_VERSION_1_2, data_len)
-        val ct_hex = rt_aes_gcm_encrypt_hex(key_hex, nonce_hex, data_hex, aad_hex)
+        val ct_hex = tls_aes_gcm_encrypt_hex(key_hex, nonce_hex, data_hex, aad_hex)
         self.server_seq = self.server_seq + 1
 
         # ct_hex is ASCII hex — len(ct_hex)/2 gives the wire byte count
         val ct_len = len(ct_hex) / 2
-        val ct_wire = rt_hex_to_wire(ct_hex)
+        val ct_wire = tls_hex_to_wire(ct_hex)
         val record_header = encode_u8(CONTENT_TYPE_APPLICATION_DATA) + encode_u16_be(TLS_VERSION_1_2) + encode_u16_be(ct_len)
         val record_wire = record_header + ct_wire
 
