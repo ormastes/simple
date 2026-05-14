@@ -88,18 +88,23 @@ impl CollectionOptimization:
             if len_dest_id >= 0:
                 val dest = LocalId(id: len_dest_id)
                 val key = self.collection_len_call_key(insts[i])
-                if seen_lens.has(key) and i + 1 < insts.len():
-                    val use_count = uses[dest.id] ?? 0
-                    if use_count == 1:
-                        val rewritten = self.rewrite_bounds_check_len(insts[i + 1], dest, LocalId(id: seen_lens[key]))
-                        if rewritten.?:
-                            new_insts.push(rewritten.unwrap())
+                if not seen_lens.has(key):
+                    seen_lens[key] = dest.id
+                else:
+                    if i + 1 < insts.len():
+                        val use_count = uses[dest.id] ?? 0
+                        if use_count == 1:
+                            val canonical = LocalId(id: seen_lens[key])
+                            val rewritten = self.rewrite_single_use_len_consumer(insts[i + 1], dest, canonical)
+                            if rewritten.?:
+                                new_insts.push(rewritten.unwrap())
+                            else:
+                                new_insts.push(MirInst(kind: MirInstKind.Copy(dest, canonical), span: insts[i].span))
+                                new_insts.push(insts[i + 1])
                             self.len_queries_reused = self.len_queries_reused + 1
                             changed = true
                             i = i + 2
                             continue
-                else:
-                    seen_lens[key] = dest.id
 
             new_insts.push(insts[i])
             i = i + 1
@@ -135,8 +140,22 @@ impl CollectionOptimization:
     fn is_collection_len_runtime(name: text) -> bool:
         name == "rt_array_len" or name == "rt_string_len" or name == "rt_dict_len"
 
-    fn rewrite_bounds_check_len(inst: MirInst, duplicate_len: LocalId, canonical_len: LocalId) -> MirInst?:
+    fn rewrite_single_use_len_consumer(inst: MirInst, duplicate_len: LocalId, canonical_len: LocalId) -> MirInst?:
         match inst.kind:
+            case BinOp(dest, op, left, right):
+                val rewritten_left = self.replace_operand_local_value(left, duplicate_len, canonical_len)
+                val rewritten_right = self.replace_operand_local_value(right, duplicate_len, canonical_len)
+                if rewritten_left.1 or rewritten_right.1:
+                    Some(MirInst(kind: MirInstKind.BinOp(dest, op, rewritten_left.0, rewritten_right.0), span: inst.span))
+                else:
+                    nil
+            case CheckedBinOp(dest, op, left, right):
+                val rewritten_left = self.replace_operand_local_value(left, duplicate_len, canonical_len)
+                val rewritten_right = self.replace_operand_local_value(right, duplicate_len, canonical_len)
+                if rewritten_left.1 or rewritten_right.1:
+                    Some(MirInst(kind: MirInstKind.CheckedBinOp(dest, op, rewritten_left.0, rewritten_right.0), span: inst.span))
+                else:
+                    nil
             case Intrinsic(dest, name, args):
                 if name != "bounds_check" or args.len() < 2:
                     return nil
@@ -156,25 +175,29 @@ impl CollectionOptimization:
                     nil
             case _: nil
 
+    fn replace_operand_local_value(arg: MirOperand, from: LocalId, to: LocalId) -> (MirOperand, bool):
+        match arg.kind:
+            case Copy(local):
+                if local.id == from.id:
+                    (mir_operand_copy(to), true)
+                else:
+                    (arg, false)
+            case Move(local):
+                if local.id == from.id:
+                    (mir_operand_move(to), true)
+                else:
+                    (arg, false)
+            case _:
+                (arg, false)
+
     fn replace_operand_local(args: [MirOperand], from: LocalId, to: LocalId) -> ([MirOperand], bool):
         var out: [MirOperand] = []
         var changed = false
         for arg in args:
-            match arg.kind:
-                case Copy(local):
-                    if local.id == from.id:
-                        out.push(mir_operand_copy(to))
-                        changed = true
-                    else:
-                        out.push(arg)
-                case Move(local):
-                    if local.id == from.id:
-                        out.push(mir_operand_move(to))
-                        changed = true
-                    else:
-                        out.push(arg)
-                case _:
-                    out.push(arg)
+            val rewritten = self.replace_operand_local_value(arg, from, to)
+            out.push(rewritten.0)
+            if rewritten.1:
+                changed = true
         (out, changed)
 
     fn local_use_counts(block: MirBlock) -> Dict<i64, i64>:

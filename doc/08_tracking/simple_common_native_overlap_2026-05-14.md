@@ -33,6 +33,12 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   block are canonicalized when the duplicate result is used only by the
   adjacent bounds check. The bounds checks stay explicit, but the redundant
   helper dispatch is removed from hot indexed traversal blocks.
+- The same provider now also handles traversal-compare shapes: when a duplicate
+  typed collection length query has one immediate consumer that is not a
+  recognized bounds check, the pass replaces the duplicate runtime call with a
+  local copy from the canonical length. This keeps list/set/map traversal loops
+  from redispatching `rt_array_len`/`rt_string_len`/`rt_dict_len` in adjacent
+  compare or guard instructions.
 - `src/lib/common/hash/adler32.spl` now uses the same pure Simple chunked
   Adler-32 path as the OS crypto module: 8-byte typed loads, deferred modular
   reduction, and strength-reduced `_adler_reduce` instead of per-byte `%`
@@ -46,7 +52,7 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   --mode=interpreter --clean` passing 7 examples.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/compiler/mir_opt/collection_opt_spec.spl
-  --mode=interpreter --clean` passing 1 example.
+  --mode=interpreter --clean` passing 2 examples.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/lib/common/hash/adler32_spec.spl
   --mode=interpreter --clean` passing 11 examples.
