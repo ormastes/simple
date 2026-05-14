@@ -40,13 +40,20 @@ Checksum parity passed for all three benchmarks.
   benchmark did not improve the set benchmark; it was slower in the local run.
 - LLVM backend vectorization is not available in the current compiler build:
   `--backend=llvm` reports that the native LLVM backend is unavailable.
+- Rewriting the zero-based inner `while i < length` xor traversal to the
+  existing `rt_numeric_xor_sum_u64` runtime kernel is not a viable shortcut for
+  the current `core-c` native bundle. A local probe preserved checksum parity
+  but regressed `list_traverse` from roughly 1.48M ops/ms to roughly 0.18M
+  ops/ms, so the probe was reverted instead of committed.
 
 ## Likely Gap
 
 The current native path is Cranelift scalar codegen. The hot loops are direct
 raw loads, but they are not vectorized or unrolled like the C/Rust `-O3`
 reference builds. Matching C/Rust speed likely needs a real loop transform in
-the Simple optimization plug or backend, not just a runtime-call substitution.
+the Simple optimization plug or backend that emits efficient native loop code
+over raw typed array data, not a boxed `RuntimeValue` runtime-call
+substitution.
 
 ## Next Step
 
