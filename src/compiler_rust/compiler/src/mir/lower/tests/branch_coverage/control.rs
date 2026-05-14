@@ -138,6 +138,19 @@ fn u64_array_push_uses_word_fast_path() {
 }
 
 #[test]
+fn unused_u64_array_push_result_is_discarded() {
+    let mir =
+        compile_to_mir("fn test():\n    var arr: [u64] = []\n    var word: u64 = 42u64\n    arr.push(word)\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(
+            i,
+            MirInst::Call { dest: None, target, .. }
+                if target == &CallTarget::from_name("rt_typed_words_u64_push")
+        )
+    }));
+}
+
+#[test]
 fn index_set_float_boxing() {
     let mir = compile_to_mir("fn test():\n    var arr = [0.0, 0.0]\n    arr[0] = 3.14\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxFloat { .. })));

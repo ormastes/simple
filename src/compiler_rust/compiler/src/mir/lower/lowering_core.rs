@@ -5,9 +5,9 @@
 
 use super::super::{
     blocks::Terminator,
-    effects::LocalKind,
+    effects::{CallTarget, LocalKind},
     function::{MirFunction, MirLocal, MirModule},
-    instructions::BlockId,
+    instructions::{BlockId, MirInst},
 };
 use crate::di::DiConfig;
 use crate::hir::{BinOp, HirContract, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId};
@@ -1306,8 +1306,55 @@ impl<'a> MirLowerer<'a> {
             }
         })?;
 
+        self.drop_unused_collection_write_results()?;
+
         // Explicit state transition: Lowering -> Idle
         self.end_function()
+    }
+
+    fn drop_unused_collection_write_results(&mut self) -> MirLowerResult<()> {
+        self.with_func(|mir_func, _| {
+            let mut used = HashSet::new();
+            for block in &mir_func.blocks {
+                for inst in &block.instructions {
+                    for reg in inst.uses() {
+                        used.insert(reg);
+                    }
+                }
+                for reg in block.terminator.uses() {
+                    used.insert(reg);
+                }
+            }
+
+            for block in &mut mir_func.blocks {
+                for inst in &mut block.instructions {
+                    if let MirInst::Call { dest, target, .. } = inst {
+                        if dest.is_some_and(|reg| !used.contains(&reg))
+                            && Self::is_collection_write_result_discardable(target)
+                        {
+                            *dest = None;
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn is_collection_write_result_discardable(target: &CallTarget) -> bool {
+        matches!(
+            target.name(),
+            "rt_typed_bytes_u8_push"
+                | "rt_typed_words_u32_push"
+                | "rt_typed_words_u64_push"
+                | "rt_typed_words_u32_push_known_at"
+                | "rt_typed_words_u64_push_known_at"
+                | "rt_typed_words_u32_push_known_data_at"
+                | "rt_typed_words_u64_push_known_data_at"
+                | "rt_typed_words_u32_store_known_data_at"
+                | "rt_typed_words_u64_store_known_data_at"
+                | "rt_typed_words_u32_set"
+                | "rt_typed_words_u64_set"
+        )
     }
 }
 
