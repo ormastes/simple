@@ -1,7 +1,8 @@
 use std::sync::{Mutex, OnceLock};
 
-use super::collections::{rt_array_get, rt_array_len, rt_array_new, rt_array_push};
+use super::collections::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, RuntimeArray};
 use super::core::RuntimeValue;
+use super::heap::{get_typed_ptr, HeapObjectType};
 use simple_simd::{active_simd_tier, SimdTier};
 
 #[cfg(target_arch = "x86_64")]
@@ -187,6 +188,14 @@ fn runtime_array_from_f64(values: &[f64]) -> RuntimeValue {
     let array = rt_array_new(values.len() as u64);
     for value in values {
         rt_array_push(array, RuntimeValue::from_float(*value));
+    }
+    array
+}
+
+fn runtime_array_from_u64(values: &[u64]) -> RuntimeValue {
+    let array = rt_array_new(values.len() as u64);
+    for value in values {
+        rt_array_push(array, RuntimeValue::from_int(*value as i64));
     }
     array
 }
@@ -1078,6 +1087,30 @@ fn packed_dot_f64(lhs: RuntimeValue, rhs: RuntimeValue) -> RuntimeValue {
     RuntimeValue::from_float((numeric_kernel_provider().dot_f64)(&lhs_vec, &rhs_vec))
 }
 
+fn packed_xor_sum_u64(value: RuntimeValue, xor_value: i64) -> RuntimeValue {
+    let Some(arr) = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array) else {
+        return RuntimeValue::NIL;
+    };
+    let xor_value = xor_value as u64;
+    let mut acc = 0u64;
+    unsafe {
+        if (*arr).is_u64_packed() {
+            let values = std::slice::from_raw_parts((*arr).data as *const u64, (*arr).len as usize);
+            for item in values {
+                acc = acc.wrapping_add(*item ^ xor_value);
+            }
+        } else {
+            for item in (*arr).as_slice() {
+                if !item.is_int() {
+                    return RuntimeValue::NIL;
+                }
+                acc = acc.wrapping_add((item.as_int() as u64) ^ xor_value);
+            }
+        }
+    }
+    RuntimeValue::from_int(acc as i64)
+}
+
 #[no_mangle]
 pub extern "C" fn rt_numeric_active_simd_tier() -> i64 {
     active_numeric_kernel_tier().rank() as i64
@@ -1141,6 +1174,11 @@ pub extern "C" fn rt_numeric_sum_f64(value: RuntimeValue) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_numeric_dot_f64(lhs: RuntimeValue, rhs: RuntimeValue) -> RuntimeValue {
     packed_dot_f64(lhs, rhs)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_numeric_xor_sum_u64(value: RuntimeValue, xor_value: i64) -> RuntimeValue {
+    packed_xor_sum_u64(value, xor_value)
 }
 
 #[cfg(test)]
@@ -1242,6 +1280,17 @@ mod tests {
         let rhs: Vec<f64> = (0..48).map(|i| (i as f64) + 1.0).collect();
         let result = rt_numeric_dot_f64(runtime_array_from_f64(&lhs), runtime_array_from_f64(&rhs));
         assert!((result.as_float() - scalar_dot_f64(&lhs, &rhs)).abs() < 0.0001);
+    }
+
+    #[test]
+    fn u64_xor_sum_matches_scalar() {
+        let values: Vec<u64> = (0..96).map(|index| (index as u64).wrapping_mul(131) + 17).collect();
+        let salt = 0x5a5au64;
+        let expected = values.iter().fold(0u64, |sum, value| sum.wrapping_add(*value ^ salt));
+
+        let result = rt_numeric_xor_sum_u64(runtime_array_from_u64(&values), salt as i64);
+
+        assert_eq!(result.as_int() as u64, expected);
     }
 
     #[test]

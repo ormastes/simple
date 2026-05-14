@@ -80,6 +80,8 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_println_value"
             | "rt_array_new"
             | "rt_array_len"
+            | "rt_native_eq"
+            | "rt_native_neq"
     )
 }
 

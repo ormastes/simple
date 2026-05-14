@@ -981,6 +981,42 @@ main = 0
     }
 
     #[test]
+    fn simd_typed_report_detects_dynamic_len_bounded_u64_xor_sum_kernel_candidate() {
+        let source =
+            "fn main(vals: [u64], salt: u64) -> u64:\n    var sum = 0u64\n    for i in 0..vals.len():\n        sum = sum + (vals[i] ^ salt)\n    return sum\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+        let hir_module = hir::lower_lenient(&ast_module).expect("hir lower");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("vectorized via runtime kernel rt_numeric_xor_sum_u64")));
+    }
+
+    #[test]
+    fn simd_auto_lowers_dynamic_len_bounded_u64_xor_sum_to_guarded_runtime_kernel() {
+        let source =
+            "fn main(vals: [u64], salt: u64) -> u64:\n    var sum = 0u64\n    for i in 0..vals.len():\n        sum = sum + (vals[i] ^ salt)\n    return sum\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_xor_sum_u64"))
+            }),
+            "expected guarded rt_numeric_xor_sum_u64 call in MIR"
+        );
+    }
+
+    #[test]
     fn simd_typed_report_detects_dynamic_len_bounded_dot_kernel_candidate() {
         let source =
             "fn main(a: [f64], b: [f64]) -> f64:\n    var sum = 0.0\n    for i in 0..a.len():\n        sum = sum + a[i] * b[i]\n    return sum\n";
