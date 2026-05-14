@@ -168,6 +168,16 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   and measured list traversal at `1,171,843` Simple ops/ms (`0.25x` C, `0.12x`
   Rust), list push at `129,398` Simple ops/ms (`0.04x` C, `0.09x` Rust), and
   set-like membership at `2,448` Simple ops/ms (`0.35x` C, `0.18x` Rust).
+- Pure Simple collection benchmarks now use the existing capacity constructor
+  for list construction, matching the C `malloc(size)` and Rust
+  `Vec::with_capacity` reference setup, and hot loop bounds are cached in local
+  values instead of repeatedly calling tiny size helpers. Typed array
+  `.push(...)` expression statements now lower to MIR calls with `dest: None`,
+  and the Cranelift typed-word push inliner skips bool-result block plumbing
+  when that result is ignored. A one-sample benchmark with checksum parity
+  measured list traversal at `1,237,072` Simple ops/ms (`0.34x` C, `0.19x`
+  Rust), list push at `144,527` Simple ops/ms (`0.05x` C, `0.10x` Rust), and
+  set-like membership at `1,721` Simple ops/ms (`0.26x` C, `0.13x` Rust).
 
 ## Next Concrete Plugin Work
 

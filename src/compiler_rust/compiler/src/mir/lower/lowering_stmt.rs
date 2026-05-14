@@ -587,6 +587,49 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirStmt::Expr(expr) => {
+                if let HirExprKind::MethodCall {
+                    receiver, method, args, ..
+                } = &expr.kind
+                {
+                    if method == "push" && args.len() == 1 {
+                        let typed_push_target = if args[0].ty == TypeId::U8
+                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                                |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8),
+                            ) {
+                            Some("rt_typed_bytes_u8_push")
+                        } else if args[0].ty == TypeId::U32
+                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                                |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U32),
+                            )
+                        {
+                            Some("rt_typed_words_u32_push")
+                        } else if args[0].ty == TypeId::U64
+                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                                |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U64),
+                            )
+                        {
+                            Some("rt_typed_words_u64_push")
+                        } else {
+                            None
+                        };
+
+                        if let Some(target) = typed_push_target {
+                            let receiver_reg = self.lower_expr(receiver)?;
+                            let value_reg = self.lower_expr(&args[0])?;
+                            self.with_func(|func, current_block| {
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: None,
+                                    target: CallTarget::from_name(target),
+                                    args: vec![receiver_reg, value_reg],
+                                });
+                            })?;
+                            self.last_expr_value = None;
+                            return Ok(());
+                        }
+                    }
+                }
+
                 let vreg = self.lower_expr(expr)?;
                 // Track the last expression value for implicit returns
                 self.last_expr_value = Some(vreg);

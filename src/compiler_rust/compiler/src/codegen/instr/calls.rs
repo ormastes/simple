@@ -472,16 +472,23 @@ fn compile_inline_typed_words_push<M: Module>(
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
     let value = coerce_vreg_to_i64(ctx, builder, args[1]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
-    let true_value = builder.ins().iconst(types::I8, 1);
     let ptr_bits = builder.ins().band(array, ptr_mask);
     let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
     let capacity = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 16);
     let has_capacity = builder.ins().icmp(IntCC::UnsignedLessThan, len, capacity);
+    let returns_value = dest.is_some();
+    let true_value = if returns_value {
+        Some(builder.ins().iconst(types::I8, 1))
+    } else {
+        None
+    };
 
     let store_block = builder.create_block();
     let grow_block = builder.create_block();
     let done_block = builder.create_block();
-    builder.append_block_param(done_block, types::I8);
+    if returns_value {
+        builder.append_block_param(done_block, types::I8);
+    }
     builder.ins().brif(has_capacity, store_block, &[], grow_block, &[]);
 
     builder.switch_to_block(store_block);
@@ -497,21 +504,33 @@ fn compile_inline_typed_words_push<M: Module>(
     builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(len, 1);
     builder.ins().store(MemFlags::new(), next_len, ptr_bits, 8);
-    builder.ins().jump(done_block, &[true_value]);
+    if let Some(true_value) = true_value {
+        builder.ins().jump(done_block, &[true_value]);
+    } else {
+        builder.ins().jump(done_block, &[]);
+    }
     builder.seal_block(store_block);
 
     builder.switch_to_block(grow_block);
     let runtime_ref = ctx.module.declare_func_in_func(runtime_id, builder.func);
     let adapted = adapt_args_to_signature(builder, runtime_ref, vec![array, value]);
     let call = adapted_call(builder, runtime_ref, &adapted);
-    let result = builder.inst_results(call).first().copied().unwrap_or(true_value);
-    builder.ins().jump(done_block, &[result]);
+    if returns_value {
+        let result = builder
+            .inst_results(call)
+            .first()
+            .copied()
+            .unwrap_or_else(|| true_value.expect("typed word push result constant"));
+        builder.ins().jump(done_block, &[result]);
+    } else {
+        builder.ins().jump(done_block, &[]);
+    }
     builder.seal_block(grow_block);
 
     builder.switch_to_block(done_block);
-    let result = builder.block_params(done_block)[0];
+    let result = dest.map(|_| builder.block_params(done_block)[0]);
     builder.seal_block(done_block);
-    if let Some(dest) = dest {
+    if let (Some(dest), Some(result)) = (dest, result) {
         ctx.vreg_values.insert(*dest, result);
     }
     Ok(true)
