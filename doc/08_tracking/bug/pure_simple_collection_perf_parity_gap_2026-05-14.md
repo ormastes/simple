@@ -38,6 +38,12 @@ Checksum parity passed for all three benchmarks.
     `rt_typed_words_u64_raw_data_at`.
 - Manually inlining the `set_contains` helper into a scratch copy of the
   benchmark did not improve the set benchmark; it was slower in the local run.
+- Rewriting the Simple benchmark source to combine a four-wide
+  `bench_list_traverse` body with an inline `bench_set_contains` probe loop
+  preserved checksum parity but regressed all ratios in a 3-sample local run:
+  `list_traverse` 0.21x vs C / 0.14x vs Rust, `list_push` 0.39x vs C / 0.82x
+  vs Rust, and `set_contains` 0.15x vs C / 0.08x vs Rust. The source rewrite
+  was reverted.
 - LLVM backend vectorization is not available in the current compiler build:
   `--backend=llvm` reports that the native LLVM backend is unavailable.
 - Rewriting the zero-based inner `while i < length` xor traversal to the
