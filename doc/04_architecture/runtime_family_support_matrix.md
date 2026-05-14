@@ -92,7 +92,9 @@ compatibility families, not independent backend owners.
 - `gc_sync_immut` mirrors `gc_async_immut`, preserving the same GC immutable API
   shape for sync configurations.
 - Backend ownership remains in the existing no-GC async/no-GC sync or pure
-  immutable modules. The facade families do not declare runtime hooks.
+  immutable modules. The facade families do not declare runtime hooks;
+  `scripts/audit/runtime_backend_boundaries.py` enforces this with
+  `sync_compat_direct_runtime_hook_count=0`.
 
 These families are advanced-scoped until runtime coverage and enforcement prove
 the remaining promotion gaps, including manifest-backed capability checks and
@@ -116,8 +118,9 @@ The production ownership rule is behavioral, not name-only:
   that do not have an async-visible contract, and runtime-hook-owner wildcard
   exports are blocked by the same audit.
 - `gc_sync_mut` is a compatibility facade over `gc_async_mut`, not a separate
-  sync backend. It stays advanced-scoped until selected APIs prove whether they
-  need real blocking wrappers.
+  sync backend. The boundary audit blocks local runtime-hook ownership in this
+  family. It stays advanced-scoped until selected APIs prove whether they need
+  real blocking wrappers.
 
 ### 2.7 `nogc_async_mut_noalloc` (128 files -- baremetal)
 

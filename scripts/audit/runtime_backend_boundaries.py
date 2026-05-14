@@ -4,6 +4,7 @@
 The checks are intentionally narrow and evidence-oriented:
 
 * GC/no-GC async compatibility families must not own direct `rt_*` hooks.
+* Sync/immutable compatibility families must not own direct `rt_*` hooks.
 * GC async compatibility facades must not wildcard-export no-GC sync backend
   owners that declare runtime hooks; route them through no-GC async facades
   first when an API-preserving async/no-GC facade exists.
@@ -30,6 +31,13 @@ ROOT = Path(__file__).resolve().parents[2]
 ASYNC_COMPAT_ROOTS = (
     "src/lib/gc_async_mut",
     "src/lib/nogc_async_mut",
+)
+
+SYNC_COMPAT_ROOTS = (
+    "src/lib/gc_sync_mut",
+    "src/lib/gc_async_immut",
+    "src/lib/gc_sync_immut",
+    "src/lib/nogc_sync_immut",
 )
 
 SIMPLEOS_NATIVE_ROOTS = (
@@ -117,6 +125,15 @@ def direct_runtime_hooks() -> list[str]:
     return hits
 
 
+def sync_compat_direct_runtime_hooks() -> list[str]:
+    hits: list[str] = []
+    for path in tracked_spl_under(SYNC_COMPAT_ROOTS):
+        for line_no, stripped in code_lines(path):
+            if RUNTIME_HOOK_RE.search(stripped):
+                hits.append(f"{rel(path)}:{line_no}: {stripped}")
+    return hits
+
+
 def no_gc_async_runtime_owner_wildcards() -> list[str]:
     hits: list[str] = []
     for path in tracked_spl_under(("src/lib/nogc_async_mut",)):
@@ -176,6 +193,7 @@ def portable_lib_imports() -> list[str]:
 
 def main() -> int:
     runtime_hooks = direct_runtime_hooks()
+    sync_runtime_hooks = sync_compat_direct_runtime_hooks()
     gc_wildcard_facades = gc_async_runtime_owner_wildcards()
     wildcard_facades = no_gc_async_runtime_owner_wildcards()
     simpleos_imports = simpleos_lower_layer_imports()
@@ -185,6 +203,8 @@ def main() -> int:
         "generated_by": "scripts/audit/runtime_backend_boundaries.py",
         "async_compat_direct_runtime_hook_count": len(runtime_hooks),
         "async_compat_direct_runtime_hook_samples": runtime_hooks[:20],
+        "sync_compat_direct_runtime_hook_count": len(sync_runtime_hooks),
+        "sync_compat_direct_runtime_hook_samples": sync_runtime_hooks[:20],
         "gc_async_runtime_owner_wildcard_facade_count": len(gc_wildcard_facades),
         "gc_async_runtime_owner_wildcard_facade_samples": gc_wildcard_facades[:20],
         "nogc_async_runtime_owner_wildcard_facade_count": len(wildcard_facades),
@@ -194,6 +214,7 @@ def main() -> int:
         "portable_lib_forbidden_posix_linux_import_count": len(portable_imports),
         "portable_lib_forbidden_posix_linux_import_samples": portable_imports[:20],
         "pass": not runtime_hooks
+        and not sync_runtime_hooks
         and not gc_wildcard_facades
         and not wildcard_facades
         and not simpleos_imports
