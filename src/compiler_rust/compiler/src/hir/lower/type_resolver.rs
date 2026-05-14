@@ -707,33 +707,30 @@ impl Lowerer {
     }
 
     fn try_resolve_global_field_for_struct(&mut self, struct_name: &str, field_name: &str) -> Option<(usize, TypeId)> {
-        let (field_index, field_type_spec) = self
-            .global_struct_defs
-            .as_ref()
-            .and_then(|defs| defs.get(struct_name))
-            .and_then(|fields| {
-                fields
-                    .iter()
-                    .enumerate()
-                    .find_map(|(idx, (fname, ftype))| (fname == field_name).then_some((idx, ftype.clone())))
-            })
-            .or_else(|| {
-                self.duplicate_global_struct_defs
-                    .as_ref()
-                    .and_then(|defs| defs.get(struct_name))
-                    .and_then(|variants| {
-                        let mut matches = variants.iter().filter_map(|fields| {
-                            fields
-                                .iter()
-                                .enumerate()
-                                .find_map(|(idx, (fname, ftype))| {
+        let (field_index, field_type_spec) =
+            self.global_struct_defs
+                .as_ref()
+                .and_then(|defs| defs.get(struct_name))
+                .and_then(|fields| {
+                    fields
+                        .iter()
+                        .enumerate()
+                        .find_map(|(idx, (fname, ftype))| (fname == field_name).then_some((idx, ftype.clone())))
+                })
+                .or_else(|| {
+                    self.duplicate_global_struct_defs
+                        .as_ref()
+                        .and_then(|defs| defs.get(struct_name))
+                        .and_then(|variants| {
+                            let mut matches = variants.iter().filter_map(|fields| {
+                                fields.iter().enumerate().find_map(|(idx, (fname, ftype))| {
                                     (fname == field_name).then_some((idx, ftype.clone()))
                                 })
-                        });
-                        let first = matches.next()?;
-                        matches.next().is_none().then_some(first)
-                    })
-            })?;
+                            });
+                            let first = matches.next()?;
+                            matches.next().is_none().then_some(first)
+                        })
+                })?;
 
         self.resolve_global_type_spec(&field_type_spec)
             .map(|field_ty| (field_index, field_ty))

@@ -213,10 +213,7 @@ fn test_lenient_unresolved_uppercase_field_access_becomes_static_variant_global(
     let HirStmt::Return(Some(expr)) = &func.body[0] else {
         panic!("Expected return statement");
     };
-    assert_eq!(
-        expr.kind,
-        HirExprKind::Global("MissingEnum::NotFound".to_string())
-    );
+    assert_eq!(expr.kind, HirExprKind::Global("MissingEnum::NotFound".to_string()));
     assert_eq!(expr.ty, TypeId::ANY);
 }
 

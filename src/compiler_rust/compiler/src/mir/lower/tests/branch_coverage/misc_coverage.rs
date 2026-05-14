@@ -56,16 +56,20 @@ fn coverage_unknown_enum_variant_with_any_type_lowers_as_runtime_enum() {
     lowerer.lower_expr(&expr).unwrap();
     let finished = lowerer.end_function().unwrap();
 
-    assert!(finished.blocks.iter().flat_map(|block| &block.instructions).any(|inst| {
-        matches!(
-            inst,
-            MirInst::EnumUnit {
-                enum_name,
-                variant_name,
-                ..
-            } if enum_name == "MissingEnum" && variant_name == "NotFound"
-        )
-    }));
+    assert!(finished
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|inst| {
+            matches!(
+                inst,
+                MirInst::EnumUnit {
+                    enum_name,
+                    variant_name,
+                    ..
+                } if enum_name == "MissingEnum" && variant_name == "NotFound"
+            )
+        }));
 }
 
 // =============================================================================

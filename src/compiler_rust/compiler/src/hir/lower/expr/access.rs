@@ -314,11 +314,7 @@ impl Lowerer {
     }
 
     fn looks_like_type_static_member(field: &str) -> bool {
-        field
-            .chars()
-            .next()
-            .map(|ch| ch.is_ascii_uppercase())
-            .unwrap_or(false)
+        field.chars().next().map(|ch| ch.is_ascii_uppercase()).unwrap_or(false)
     }
 
     /// Resolve the TypeId of a named field on a named struct type.
