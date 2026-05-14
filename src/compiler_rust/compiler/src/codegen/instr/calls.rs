@@ -476,17 +476,13 @@ fn compile_inline_typed_words_push<M: Module>(
     let ptr_bits = builder.ins().band(array, ptr_mask);
     let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
     let capacity = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 16);
-    let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
-    let byte_packed = builder.ins().band_imm(gc_flags, 8);
-    let is_slot_array = builder.ins().icmp_imm(IntCC::Equal, byte_packed, 0);
     let has_capacity = builder.ins().icmp(IntCC::UnsignedLessThan, len, capacity);
-    let can_store = builder.ins().band(has_capacity, is_slot_array);
 
     let store_block = builder.create_block();
     let grow_block = builder.create_block();
     let done_block = builder.create_block();
     builder.append_block_param(done_block, types::I8);
-    builder.ins().brif(can_store, store_block, &[], grow_block, &[]);
+    builder.ins().brif(has_capacity, store_block, &[], grow_block, &[]);
 
     builder.switch_to_block(store_block);
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);

@@ -160,6 +160,14 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   measured list traversal at `932,410` Simple ops/ms (`0.23x` C, `0.10x`
   Rust), list push at `121,840` Simple ops/ms (`0.04x` C, `0.08x` Rust), and
   set-like membership at `1,882` Simple ops/ms (`0.27x` C, `0.15x` Rust).
+- Compiler-generated typed word pushes now also trust the slot-backed typed
+  array lane: the fast branch checks only `len < capacity`, stores the tagged
+  word, and bumps `len`; capacity misses still fall back to the runtime helper.
+  Disassembly of `bench_list_push` shows the byte-packed flag load/test is gone
+  from the typed word append loop. A one-sample benchmark kept checksum parity
+  and measured list traversal at `1,171,843` Simple ops/ms (`0.25x` C, `0.12x`
+  Rust), list push at `129,398` Simple ops/ms (`0.04x` C, `0.09x` Rust), and
+  set-like membership at `2,448` Simple ops/ms (`0.35x` C, `0.18x` Rust).
 
 ## Next Concrete Plugin Work
 
