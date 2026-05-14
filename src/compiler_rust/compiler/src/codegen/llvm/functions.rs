@@ -1953,7 +1953,7 @@ impl LlvmBackend {
                 if let Some(rt_name) = runtime_func {
                     if rt_name == "rt_len" {
                         let len_args = [*receiver];
-                        if self.compile_inline_len(*dest, &len_args, vreg_map, builder)? {
+                        if self.compile_inline_len(*dest, &len_args, vreg_map, builder, false)? {
                             return Ok(());
                         }
                     }

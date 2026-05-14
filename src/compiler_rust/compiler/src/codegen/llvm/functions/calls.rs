@@ -169,6 +169,7 @@ impl LlvmBackend {
         args: &[crate::mir::VReg],
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,
+        trusted_array: bool,
     ) -> Result<bool, CompileError> {
         if args.len() != 1 {
             return Ok(false);
@@ -192,6 +193,24 @@ impl LlvmBackend {
         let value = self
             .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
             .into_int_value();
+        if trusted_array {
+            let ptr_bits = builder
+                .build_and(value, i64_type.const_int(!7u64, false), "array_len_ptr_bits")
+                .map_err(|e| crate::error::factory::llvm_build_failed("array len ptr bits", &e))?;
+            let object_ptr = builder
+                .build_int_to_ptr(ptr_bits, ptr_type, "array_len_object_ptr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("array len int_to_ptr", &e))?;
+            let len_ptr = unsafe {
+                builder
+                    .build_gep(i8_type, object_ptr, &[i64_type.const_int(8, false)], "array_len_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("array len gep", &e))?
+            };
+            let len = builder
+                .build_load(i64_type, len_ptr, "array_len_value")
+                .map_err(|e| crate::error::factory::llvm_build_failed("array len load", &e))?;
+            vreg_map.insert(dest, len);
+            return Ok(true);
+        }
         let tag = builder
             .build_and(value, i64_type.const_int(7, false), "len_tag")
             .map_err(|e| crate::error::factory::llvm_build_failed("len tag", &e))?;
@@ -1763,7 +1782,9 @@ impl LlvmBackend {
             return Ok(());
         }
 
-        if matches!(ffi_name, "rt_len" | "rt_array_len") && self.compile_inline_len(dest, args, vreg_map, builder)? {
+        if matches!(ffi_name, "rt_len" | "rt_array_len")
+            && self.compile_inline_len(dest, args, vreg_map, builder, ffi_name == "rt_array_len")?
+        {
             return Ok(());
         }
 
@@ -1915,7 +1936,7 @@ impl LlvmBackend {
                 ));
             }
             if matches!(rt_fn_name, "rt_len" | "rt_array_len")
-                && self.compile_inline_len(dest, args, vreg_map, builder)?
+                && self.compile_inline_len(dest, args, vreg_map, builder, rt_fn_name == "rt_array_len")?
             {
                 return Ok(());
             }
@@ -2041,7 +2062,7 @@ impl LlvmBackend {
                 let expected_arity = qualified_runtime_arity(method, rt_fn_name);
                 if expected_arity == Some(args.len()) {
                     if matches!(rt_fn_name, "rt_len" | "rt_array_len")
-                        && self.compile_inline_len(dest, args, vreg_map, builder)?
+                        && self.compile_inline_len(dest, args, vreg_map, builder, rt_fn_name == "rt_array_len")?
                     {
                         return Ok(());
                     }
