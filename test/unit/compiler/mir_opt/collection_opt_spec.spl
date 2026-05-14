@@ -79,6 +79,17 @@ fn _co_count_bounds_checks(block: MirBlock) -> i64:
                 ()
     count
 
+fn _co_count_copy_from(block: MirBlock, src_id: i64) -> i64:
+    var count = 0
+    for inst in block.instructions:
+        match inst.kind:
+            case Copy(_, src):
+                if src.id == src_id:
+                    count = count + 1
+            case _:
+                ()
+    count
+
 describe "MIR Collection Optimization":
     it "treats set membership tests as pure hoistable collection queries":
         var opt = create_collection_opt_pass()
@@ -141,3 +152,31 @@ describe "MIR Collection Optimization":
 
         expect(_co_count_rt_array_len(block)).to_equal(1)
         expect(opt.len_queries_reused).to_equal(1)
+
+    it "replaces duplicate typed array length calls even when the duplicate has multiple consumers":
+        val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val len2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Lt, _co_copy(2), _co_copy(11)), span: nil)
+        val check = MirInst(kind: MirInstKind.Intrinsic(nil, "bounds_check", [_co_copy(2), _co_copy(11)]), span: nil)
+        val func = _co_function([_co_block([len1, len2, cmp, check])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_rt_array_len(block)).to_equal(1)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)
+        expect(opt.len_queries_reused).to_equal(1)
+
+    it "does not reuse typed array length queries across mutating collection calls":
+        val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val push = MirInst(kind: MirInstKind.Call(nil, _co_func("push"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val len2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val func = _co_function([_co_block([len1, push, len2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_rt_array_len(block)).to_equal(2)
+        expect(opt.len_queries_reused).to_equal(0)

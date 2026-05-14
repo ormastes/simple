@@ -47,6 +47,12 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `contains_key`, `get`, `first`, `last`, `len`, and `is_empty` dispatches over
   the same operands reuse the first result; mutating calls such as `insert`
   clear the reuse window.
+- Typed collection length canonicalization now also removes duplicate
+  `rt_array_len`/`rt_string_len`/`rt_dict_len` calls when the duplicate result
+  has multiple consumers, by replacing the duplicate runtime dispatch with a
+  local copy from the canonical length. Mutating collection calls fence the
+  reuse window so traversal guards do not keep stale lengths after `push`,
+  `insert`, or other state-changing operations.
 - `src/lib/common/hash/adler32.spl` now uses the same pure Simple chunked
   Adler-32 path as the OS crypto module: 8-byte typed loads, deferred modular
   reduction, and strength-reduced `_adler_reduce` instead of per-byte `%`
@@ -67,7 +73,7 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   --mode=interpreter --clean` passing 7 examples.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/compiler/mir_opt/collection_opt_spec.spl
-  --mode=interpreter --clean` passing 5 examples.
+  --mode=interpreter --clean` passing 7 examples.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/lib/common/hash/adler32_spec.spl
   --mode=interpreter --clean` passing 11 examples.
