@@ -157,11 +157,11 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 3. **`gc_off` flag** in `CompileOptions`: Boolean flag passed through the compilation pipeline. Affects compile options hash for caching and target presets.
 
-4. **Family-prefix semantic warnings** in `src/compiler/35.semantics/gc_boundary_check.spl`: warn when no-GC code imports GC families and when noalloc code imports allocating families.
+4. **Runtime family manifest checks** in `src/compiler/35.semantics/gc_boundary_check.spl`: `RUNTIME_FAMILY_MANIFEST` records each stdlib family rank, GC mode, allocation behavior, and noalloc status. `check_gc_boundary_imports()` preserves warning output for compatibility, while `check_runtime_family_import_violations()` returns hard violations from the same manifest-backed model.
 
 5. **Target family filtering** in `src/compiler/99.loader/module_resolver/resolution.spl`: `allowed_families` restricts stdlib family search for target presets.
 
-**Remaining gap**: family membership is warning/filter based rather than a single manifest-backed hard error model.
+**Remaining gap**: the manifest-backed hard violation API exists, but the default CLI/interpreter diagnostic path still reports compatibility warnings until target-restricted runs are wired to consume hard violations.
 
 ### Interpreter parity detail
 
@@ -210,14 +210,14 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
   - implication: MCP and LSP native smoke are no longer blocked by `SliceIter.slice`, enum/static-member resolution, shell status wrappers, stale `MirBlock.has_label` reads, or the last C/LLVM/native/Vulkan field-recovery failures. Package release-readiness still requires reducing native/runtime stubs and broader import/type-loading cleanup.
 
 ### Gap 1: Partial attribute-based family enforcement (Agent 2 -- Compiler)
-- **Problem**: Public runtime-family root `__init__.spl` files now carry `@no_gc` or `@gc`, and the Rust parser accepts module-level `@gc` before export-only roots, but family GcMode is still only partially enforced.
-- **Impact**: A file in `nogc_sync_mut/` can still use GC-managed references without a hard error.
-- **Fix**: Wire manifest GcConfig into compiler and interpreter boundary checks as a manifest-backed hard error model.
+- **Problem**: Public runtime-family root `__init__.spl` files now carry `@no_gc` or `@gc`, and the semantic checker now has a manifest-backed hard violation API, but default CLI/interpreter diagnostics still use compatibility warning output.
+- **Impact**: A target-restricted run can query hard violations, but ordinary warning-only runs can still continue after a runtime-family boundary violation.
+- **Fix**: Wire `check_runtime_family_import_violations()` into target-restricted compiler/interpreter diagnostics as hard errors while preserving warnings for unrestricted lint mode.
 
 ### Gap 2: Interpreter family warnings are warning-only (Agent 3 -- Interpreter)
-- **Problem**: The interpreter emits family-boundary warnings but does not reject incompatible imports.
-- **Impact**: Code that crosses GC/noalloc boundaries can still execute after warning.
-- **Fix**: Decide whether target-preset-restricted runs should promote family-boundary warnings to errors.
+- **Problem**: The interpreter emits family-boundary warnings but does not yet consume the manifest-backed hard violation API.
+- **Impact**: Code that crosses GC/noalloc boundaries can still execute after warning in unrestricted interpreter runs.
+- **Fix**: Promote manifest-backed violations to errors for target-preset-restricted interpreter runs.
 
 ### Gap 3: `nogc_async_immut` runtime coverage (Agent 3/4) -- **RESOLVED**
 - **Status**: Fixed. Persistent-structure facade coverage is broad, and `test/unit/lib/nogc_async_immut/coordination_native_spec.spl` now covers direct no-GC async `Atom`, `Ref`, `VersionedSnapshot`, and exported CAS helper behavior in interpreter and native modes.
@@ -228,9 +228,9 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 - **Remaining work**: Direct imports from allocating runtime families, direct `app.*` imports, explicit noalloc `@alloc` markers, and host allocation API calls are blocked by `dependency_boundary_spec` and the baremetal verifier; deeper allocation capability enforcement is still partial.
 
 ### Gap 5: Compiler-owned allocation capability scanning is still partial (Agent 2 -- Compiler)
-- **Problem**: target family filtering, direct-import tests, marker tests, reachable-import closure audit, and the baremetal verifier block noalloc imports from allocating runtime families, direct `app.*` imports, explicit noalloc `@alloc` opt-ins, direct host allocation APIs, and unsafe reachable helper imports. This is still enforced by tests/scripts rather than a manifest-backed compiler capability model.
-- **Impact**: Baremetal builds are protected against direct and reachable family-boundary mistakes, and the noalloc family is checker-clean under rebuilt `simple check`, but allocation safety is not yet represented as first-class module metadata in the compiler.
-- **Fix**: Add manifest-level allocation/capability metadata and make noalloc builds reject unreachable capability violations in compiler/module resolution, with the current reachable-import audit retained as regression evidence.
+- **Problem**: target family filtering, direct-import tests, marker tests, reachable-import closure audit, the baremetal verifier, and the runtime-family manifest block or report noalloc imports from allocating runtime families, direct `app.*` imports, explicit noalloc `@alloc` opt-ins, direct host allocation APIs, and unsafe reachable helper imports. Reachable closure enforcement is still partly script/verifier-owned rather than fully compiler-owned.
+- **Impact**: Baremetal builds are protected against direct and reachable family-boundary mistakes, and the noalloc family is checker-clean under rebuilt `simple check`, but deeper reachable allocation safety is not yet represented as first-class module metadata throughout compiler/module resolution.
+- **Fix**: Feed the runtime-family manifest into compiler/module resolution for target-restricted runs and retain the reachable-import audit as regression evidence until the compiler owns the full closure.
 
 ### Gap 6: `gc_sync_mut` had tests but no source (Agent 4 -- Stdlib) -- **RESOLVED**
 - **Status**: Fixed. `src/lib/gc_sync_mut/` now exists as a facade-only compatibility family over tracked `gc_async_mut` modules.

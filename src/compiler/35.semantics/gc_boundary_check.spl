@@ -23,6 +23,35 @@ struct FamilyImportWarning:
     imported_module: text
     message: text
 
+struct RuntimeFamilyManifestEntry:
+    """Canonical runtime-family capability manifest entry."""
+    family: text
+    gc_mode: text
+    rank: i64
+    allocates: bool
+    noalloc: bool
+
+struct FamilyImportViolation:
+    """Hard runtime-family import violation backed by the manifest table."""
+    source_module: text
+    imported_module: text
+    reason: text
+    message: text
+
+val RUNTIME_FAMILY_MANIFEST: [RuntimeFamilyManifestEntry] = [
+    RuntimeFamilyManifestEntry(family: "common", gc_mode: "neutral", rank: 0, allocates: false, noalloc: false),
+    RuntimeFamilyManifestEntry(family: "nogc_async_mut_noalloc", gc_mode: "nogc", rank: 1, allocates: false, noalloc: true),
+    RuntimeFamilyManifestEntry(family: "nogc_async_mut", gc_mode: "nogc", rank: 2, allocates: true, noalloc: false),
+    RuntimeFamilyManifestEntry(family: "nogc_async_immut", gc_mode: "nogc", rank: 2, allocates: true, noalloc: false),
+    RuntimeFamilyManifestEntry(family: "nogc_sync_immut", gc_mode: "nogc", rank: 2, allocates: true, noalloc: false),
+    RuntimeFamilyManifestEntry(family: "async", gc_mode: "nogc", rank: 3, allocates: true, noalloc: false),
+    RuntimeFamilyManifestEntry(family: "nogc_sync_mut", gc_mode: "nogc", rank: 3, allocates: true, noalloc: false),
+    RuntimeFamilyManifestEntry(family: "gc_async_mut", gc_mode: "gc", rank: 4, allocates: true, noalloc: false),
+    RuntimeFamilyManifestEntry(family: "gc_async_immut", gc_mode: "gc", rank: 4, allocates: true, noalloc: false),
+    RuntimeFamilyManifestEntry(family: "gc_sync_mut", gc_mode: "gc", rank: 4, allocates: true, noalloc: false),
+    RuntimeFamilyManifestEntry(family: "gc_sync_immut", gc_mode: "gc", rank: 4, allocates: true, noalloc: false)
+]
+
 fn is_common_family_path(module_path: text) -> bool:
     """Return true for the neutral common runtime family.
 
@@ -46,33 +75,70 @@ fn normalized_family_path(module_path: text) -> text:
         path = path[4:path.len()]
     path
 
+fn runtime_family_manifest_entry(module_path: text) -> RuntimeFamilyManifestEntry:
+    """Return the manifest entry for a runtime family path.
+
+    Unknown paths return an entry with rank `-1` and `gc_mode == "unknown"`.
+    The manifest is ordered from most-specific to least-specific names so
+    `nogc_async_mut_noalloc` is classified before `nogc_async_mut`.
+    """
+    val path = normalized_family_path(module_path)
+    for entry in RUNTIME_FAMILY_MANIFEST:
+        if path.starts_with(entry.family):
+            return entry
+    RuntimeFamilyManifestEntry(family: "", gc_mode: "unknown", rank: -1, allocates: false, noalloc: false)
+
 fn runtime_family_rank(module_path: text) -> i64:
     """Return dependency rank for stdlib runtime families.
 
     Lower ranks are allowed backend dependencies. Higher ranks are adapter or
     hosted layers and must not be imported by lower layers.
     """
-    val path = normalized_family_path(module_path)
-    if path.starts_with("common"):
-        return 0
-    if path.starts_with("nogc_async_mut_noalloc"):
-        return 1
-    if path.starts_with("nogc_async_mut"):
-        return 2
-    if path.starts_with("nogc_async_immut"):
-        return 2
-    if path.starts_with("nogc_sync_immut"):
-        return 2
-    if path.starts_with("async"):
-        return 3
-    if path.starts_with("nogc_sync_mut"):
-        return 3
-    if path.starts_with("gc_"):
-        return 4
-    -1
+    runtime_family_manifest_entry(module_path).rank
 
 fn is_known_runtime_family_path(module_path: text) -> bool:
     runtime_family_rank(module_path) >= 0
+
+fn import_violation_reason(source_module: text, imported_module: text) -> text:
+    """Return a hard violation reason for a runtime-family import, or empty text."""
+    val source = runtime_family_manifest_entry(source_module)
+    val imported = runtime_family_manifest_entry(imported_module)
+    if source.rank < 0 or imported.rank < 0:
+        return ""
+    if imported.gc_mode == "neutral":
+        return ""
+
+    if source.noalloc and imported.gc_mode == "gc":
+        return "noalloc_imports_gc_family"
+
+    if source.noalloc and imported.allocates:
+        return "noalloc_imports_allocating_family"
+
+    if source.gc_mode == "nogc" and imported.gc_mode == "gc":
+        return "nogc_imports_gc_family"
+
+    if imported.rank > source.rank:
+        return "higher_layer_runtime_family"
+
+    ""
+
+fn check_runtime_family_import_violations(source_module: text, imported_modules: [text]) -> [FamilyImportViolation]:
+    """Return manifest-backed hard runtime-family import violations.
+
+    This is the hard-error model used by compiler/target integrations. The
+    legacy warning API remains available for lints and compatibility output.
+    """
+    var violations: [FamilyImportViolation] = []
+    for imported in imported_modules:
+        val reason = import_violation_reason(source_module, imported)
+        if reason != "":
+            violations.push(FamilyImportViolation(
+                source_module: source_module,
+                imported_module: imported,
+                reason: reason,
+                message: "error[{GC_BOUNDARY_LINT_NAME}]: runtime family '{source_module}' cannot import '{imported}' ({reason})"
+            ))
+    violations
 
 
 # ============================================================================
@@ -95,10 +161,8 @@ fn check_gc_boundary_imports(source_module: text, imported_modules: [text]) -> [
     """
     var warnings: [FamilyImportWarning] = []
 
-    val source_gc = gc_mode_from_family_prefix(source_module)
-    val source_is_noalloc = is_noalloc_family(source_module)
     val source_rank = runtime_family_rank(source_module)
-    val source_is_common = is_common_family_path(source_module)
+    val source_gc = gc_mode_from_family_prefix(source_module)
 
     # Only check if source module is in a nogc family
     if source_gc.is_gc():
@@ -106,48 +170,41 @@ fn check_gc_boundary_imports(source_module: text, imported_modules: [text]) -> [
             return warnings  # Unknown family, skip check
 
     for imported in imported_modules:
-        val imported_rank = runtime_family_rank(imported)
         if is_common_family_path(imported):
             continue
 
-        val imported_gc = gc_mode_from_family_prefix(imported)
+        val violation_reason = import_violation_reason(source_module, imported)
 
         # Rule 0: runtime-family dependency direction must flow from hosted
         # adapters down toward async/no-GC backends and common contracts.
-        if source_rank >= 0 and imported_rank >= 0:
-            if imported_rank > source_rank:
-                if source_is_common or not source_is_noalloc and not (source_gc.is_nogc() and imported_gc.explicit and imported_gc.is_gc()):
-                    warnings.push(FamilyImportWarning(
-                        source_module: source_module,
-                        imported_module: imported,
-                        message: "warning[{GC_BOUNDARY_LINT_NAME}]: runtime family '{source_module}' imports higher-layer family '{imported}'"
-                    ))
+        if violation_reason == "higher_layer_runtime_family":
+            warnings.push(FamilyImportWarning(
+                source_module: source_module,
+                imported_module: imported,
+                message: "warning[{GC_BOUNDARY_LINT_NAME}]: runtime family '{source_module}' imports higher-layer family '{imported}'"
+            ))
 
         # Rule 1: nogc_*_noalloc must not import from any allocating family
-        if source_is_noalloc:
-            if imported_gc.explicit:
-                if imported_gc.is_gc():
-                    warnings.push(FamilyImportWarning(
-                        source_module: source_module,
-                        imported_module: imported,
-                        message: "warning[{GC_BOUNDARY_LINT_NAME}]: no-alloc module '{source_module}' imports GC family '{imported}'"
-                    ))
-                elif not is_noalloc_family(imported):
-                    # nogc but not noalloc — still allocates via unique ptrs
-                    warnings.push(FamilyImportWarning(
-                        source_module: source_module,
-                        imported_module: imported,
-                        message: "warning[{GC_BOUNDARY_LINT_NAME}]: no-alloc module '{source_module}' imports allocating family '{imported}'"
-                    ))
+        if violation_reason == "noalloc_imports_gc_family":
+            warnings.push(FamilyImportWarning(
+                source_module: source_module,
+                imported_module: imported,
+                message: "warning[{GC_BOUNDARY_LINT_NAME}]: no-alloc module '{source_module}' imports GC family '{imported}'"
+            ))
+        elif violation_reason == "noalloc_imports_allocating_family":
+            warnings.push(FamilyImportWarning(
+                source_module: source_module,
+                imported_module: imported,
+                message: "warning[{GC_BOUNDARY_LINT_NAME}]: no-alloc module '{source_module}' imports allocating family '{imported}'"
+            ))
 
         # Rule 2: nogc_* must not import from gc_* families
-        elif source_gc.is_nogc():
-            if imported_gc.explicit and imported_gc.is_gc():
-                warnings.push(FamilyImportWarning(
-                    source_module: source_module,
-                    imported_module: imported,
-                    message: "warning[{GC_BOUNDARY_LINT_NAME}]: no-gc module '{source_module}' imports GC family '{imported}'"
-                ))
+        elif violation_reason == "nogc_imports_gc_family":
+            warnings.push(FamilyImportWarning(
+                source_module: source_module,
+                imported_module: imported,
+                message: "warning[{GC_BOUNDARY_LINT_NAME}]: no-gc module '{source_module}' imports GC family '{imported}'"
+            ))
 
     warnings
 

@@ -1,5 +1,10 @@
 use std.spec.*
-use compiler.semantics.gc_boundary_check.{check_gc_boundary_imports, format_family_warnings}
+use compiler.semantics.gc_boundary_check.{
+    runtime_family_manifest_entry,
+    check_runtime_family_import_violations,
+    check_gc_boundary_imports,
+    format_family_warnings
+}
 
 describe "gc boundary semantic checker":
     it "warns when no-gc imports gc async":
@@ -50,3 +55,30 @@ describe "gc boundary semantic checker":
         val messages = format_family_warnings(warnings)
         expect(messages.len()).to_equal(1)
         expect(messages[0]).to_contain("gc-boundary")
+
+    it "classifies runtime families through the manifest":
+        val noalloc = runtime_family_manifest_entry("std.nogc_async_mut_noalloc.memory")
+        expect(noalloc.family).to_equal("nogc_async_mut_noalloc")
+        expect(noalloc.noalloc).to_equal(true)
+        expect(noalloc.allocates).to_equal(false)
+
+        val gc = runtime_family_manifest_entry("std.gc_sync_immut.map")
+        expect(gc.gc_mode).to_equal("gc")
+        expect(gc.rank).to_equal(4)
+
+    it "returns hard violations from the manifest-backed model":
+        val violations = check_runtime_family_import_violations(
+            "std.nogc_async_mut_noalloc.memory",
+            ["std.nogc_async_mut.actor", "std.gc_async_mut.gpu", "std.common.text"]
+        )
+        expect(violations.len()).to_equal(2)
+        expect(violations[0].reason).to_equal("noalloc_imports_allocating_family")
+        expect(violations[1].reason).to_equal("noalloc_imports_gc_family")
+
+    it "rejects lower runtime layers importing hosted adapters":
+        val violations = check_runtime_family_import_violations(
+            "std.nogc_async_mut.actor",
+            ["std.nogc_sync_mut.io"]
+        )
+        expect(violations.len()).to_equal(1)
+        expect(violations[0].reason).to_equal("higher_layer_runtime_family")
