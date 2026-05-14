@@ -138,6 +138,17 @@ fn dead_capacity_array_push_is_elided_but_value_is_lowered() {
     }));
 }
 
+#[test]
+fn u64_capacity_array_call_lowers_to_packed_constructor() {
+    let mir = compile_to_mir(
+        "extern fn rt_array_new_with_cap(cap: u64) -> [u64]\n\nfn test() -> [u64]:\n    return rt_array_new_with_cap(4u64)\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_new_with_cap_u64"))
+    }));
+}
+
 // =============================================================================
 // Index result unboxing (lowering_expr.rs lines 938, 945)
 // =============================================================================

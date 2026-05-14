@@ -152,9 +152,11 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                         "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" | "rt_typed_words_u32_data_at" => {
                             Some(TypeId::U32)
                         }
-                        "rt_typed_words_u64_at" | "rt_typed_words_u64_unchecked" | "rt_typed_words_u64_data_at" => {
-                            Some(TypeId::U64)
-                        }
+                        "rt_typed_words_u64_at"
+                        | "rt_typed_words_u64_unchecked"
+                        | "rt_typed_words_u64_data_at"
+                        | "rt_typed_words_u64_data_at_checked"
+                        | "rt_typed_words_u64_raw_data_at" => Some(TypeId::U64),
                         _ => None,
                     };
                     if let Some(ty) = ty {

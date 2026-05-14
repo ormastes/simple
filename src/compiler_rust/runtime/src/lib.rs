@@ -270,10 +270,12 @@ pub use value::{
     rt_typed_words_u32_store_known_data_at,
     rt_typed_words_u32_unchecked,
     rt_typed_words_u64_at,
+    rt_typed_words_u64_data_at_checked,
     rt_typed_words_u64_data_at,
     rt_typed_words_u64_push,
     rt_typed_words_u64_push_known_data_at,
     rt_typed_words_u64_push_known_at,
+    rt_typed_words_u64_raw_data_at,
     rt_typed_words_u64_store_known_data_at,
     rt_typed_words_u64_unchecked,
     // Channel operations
@@ -324,6 +326,7 @@ pub use value::{
     rt_generator_set_state,
     rt_generator_store_slot,
     // Generic collection operations
+    rt_array_new_with_cap_u64,
     rt_byte_array_new,
     rt_bytes_u32_le_at,
     rt_bytes_u64_le_at,

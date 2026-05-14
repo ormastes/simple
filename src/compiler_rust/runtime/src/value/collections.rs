@@ -221,6 +221,11 @@ impl RuntimeArray {
         self.header.gc_flags & gc_flags::BYTE_PACKED != 0
     }
 
+    #[inline]
+    pub fn is_u64_packed(&self) -> bool {
+        self.header.gc_flags & gc_flags::U64_PACKED != 0
+    }
+
     /// Get the elements as a slice
     ///
     /// # Safety
@@ -356,6 +361,18 @@ fn rt_array_new_uninit(capacity: u64) -> RuntimeValue {
     }
 }
 
+fn rt_array_new_uninit_u64(capacity: u64) -> RuntimeValue {
+    let array = rt_array_new_uninit(capacity);
+    if array.is_nil() {
+        return array;
+    }
+    let ptr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    unsafe {
+        (*ptr).header.gc_flags |= gc_flags::U64_PACKED;
+    }
+    array
+}
+
 #[no_mangle]
 pub extern "C" fn rt_byte_array_new(capacity: u64) -> RuntimeValue {
     let capacity = capacity.max(4);
@@ -405,6 +422,9 @@ pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue 
         if (*arr).is_byte_packed() {
             return RuntimeValue::from_int(*((*arr).data as *const u8).add(idx as usize) as i64);
         }
+        if (*arr).is_u64_packed() {
+            return RuntimeValue::from_int(*((*arr).data as *const u64).add(idx as usize) as i64);
+        }
         (*arr).as_slice()[idx as usize]
     }
 }
@@ -421,6 +441,10 @@ pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeVa
         }
         if (*arr).is_byte_packed() {
             *((*arr).data as *mut u8).add(idx as usize) = (value.as_int() & 0xff) as u8;
+            return true;
+        }
+        if (*arr).is_u64_packed() {
+            *((*arr).data as *mut u64).add(idx as usize) = value.as_int() as u64;
             return true;
         }
         (*arr).as_mut_slice()[idx as usize] = value;
@@ -535,6 +559,9 @@ pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 
         if idx < 0 || idx >= len {
             return 0;
         }
+        if (*arr).is_u64_packed() {
+            return *((*arr).data as *const u64).add(idx as usize) as i64;
+        }
         let raw = (*arr).as_slice()[idx as usize];
         if raw.is_int() {
             return raw.as_int();
@@ -548,6 +575,9 @@ pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 
 pub extern "C" fn rt_typed_words_u64_unchecked(array: RuntimeValue, index: i64) -> i64 {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe {
+        if (*arr).is_u64_packed() {
+            return *((*arr).data as *const u64).add(index as usize) as i64;
+        }
         let raw = (*arr).as_slice()[index as usize];
         if raw.is_int() {
             return raw.as_int();
@@ -565,6 +595,28 @@ pub extern "C" fn rt_typed_words_u64_data_at(data_ptr: i64, index: i64) -> i64 {
         }
         raw.to_raw() as i64
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u64_data_at_checked(header_ptr: i64, data_ptr: i64, index: i64) -> i64 {
+    if header_ptr == 0 || data_ptr == 0 || index < 0 {
+        return 0;
+    }
+    unsafe {
+        let arr = (header_ptr & !7) as *const RuntimeArray;
+        if (*arr).is_u64_packed() {
+            return *((data_ptr as *const u64).add(index as usize)) as i64;
+        }
+        rt_typed_words_u64_data_at(data_ptr, index)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u64_raw_data_at(data_ptr: i64, index: i64) -> i64 {
+    if data_ptr == 0 || index < 0 {
+        return 0;
+    }
+    unsafe { *((data_ptr as *const u64).add(index as usize)) as i64 }
 }
 
 #[no_mangle]
@@ -674,7 +726,11 @@ pub extern "C" fn rt_typed_words_u64_set(array: RuntimeValue, index: i64, value:
         if idx < 0 || idx >= len {
             return false;
         }
-        (*arr).as_mut_slice()[idx as usize] = RuntimeValue::from_int(value);
+        if (*arr).is_u64_packed() {
+            *((*arr).data as *mut u64).add(idx as usize) = value as u64;
+        } else {
+            (*arr).as_mut_slice()[idx as usize] = RuntimeValue::from_int(value);
+        }
         true
     }
 }
@@ -798,7 +854,11 @@ pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bo
             (*arr).capacity = new_cap;
         }
 
-        *(*arr).data.add((*arr).len as usize) = RuntimeValue::from_int(value);
+        if (*arr).is_u64_packed() {
+            *((*arr).data as *mut u64).add((*arr).len as usize) = value as u64;
+        } else {
+            *(*arr).data.add((*arr).len as usize) = RuntimeValue::from_int(value);
+        }
         (*arr).len += 1;
         true
     }
@@ -826,7 +886,11 @@ pub extern "C" fn rt_typed_words_u64_push_known_at(array: RuntimeValue, index: i
         if (*arr).is_byte_packed() || index < 0 || index as u64 >= (*arr).capacity {
             return false;
         }
-        *(*arr).data.add(index as usize) = RuntimeValue::from_int(value);
+        if (*arr).is_u64_packed() {
+            *((*arr).data as *mut u64).add(index as usize) = value as u64;
+        } else {
+            *(*arr).data.add(index as usize) = RuntimeValue::from_int(value);
+        }
         (*arr).len = (index as u64 + 1).max((*arr).len);
         true
     }
@@ -870,7 +934,11 @@ pub extern "C" fn rt_typed_words_u64_push_known_data_at(
         if index as u64 >= (*arr).capacity {
             return false;
         }
-        *((data_ptr as *mut RuntimeValue).add(index as usize)) = RuntimeValue::from_int(value);
+        if (*arr).is_u64_packed() {
+            *((data_ptr as *mut u64).add(index as usize)) = value as u64;
+        } else {
+            *((data_ptr as *mut RuntimeValue).add(index as usize)) = RuntimeValue::from_int(value);
+        }
         (*arr).len = (index as u64 + 1).max((*arr).len);
         true
     }
@@ -905,7 +973,12 @@ pub extern "C" fn rt_typed_words_u64_store_known_data_at(
         return false;
     }
     unsafe {
-        *((data_ptr as *mut RuntimeValue).add(index as usize)) = RuntimeValue::from_int(value);
+        let arr = _header_ptr as *const RuntimeArray;
+        if _header_ptr != 0 && (*arr).is_u64_packed() {
+            *((data_ptr as *mut u64).add(index as usize)) = value as u64;
+        } else {
+            *((data_ptr as *mut RuntimeValue).add(index as usize)) = RuntimeValue::from_int(value);
+        }
         true
     }
 }
@@ -942,6 +1015,32 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
                 (*arr).capacity = new_cap;
             }
             *((*arr).data as *mut u8).add((*arr).len as usize) = (value.as_int() & 0xff) as u8;
+            (*arr).len += 1;
+            return true;
+        }
+
+        if (*arr).is_u64_packed() {
+            if (*arr).len >= (*arr).capacity {
+                let old_cap = (*arr).capacity;
+                let new_cap = (old_cap * 2).max(4);
+                let old_layout = array_data_layout(old_cap);
+                let new_size = array_data_layout(new_cap).size();
+                let new_data = if (*arr).data.is_null() {
+                    std::alloc::alloc_zeroed(array_data_layout(new_cap)) as *mut RuntimeValue
+                } else {
+                    std::alloc::realloc((*arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+                };
+                if new_data.is_null() {
+                    return false;
+                }
+                let old_len_bytes = old_cap as usize * std::mem::size_of::<RuntimeValue>();
+                if new_size > old_len_bytes {
+                    std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_size - old_len_bytes);
+                }
+                (*arr).data = new_data;
+                (*arr).capacity = new_cap;
+            }
+            *((*arr).data as *mut u64).add((*arr).len as usize) = value.as_int() as u64;
             (*arr).len += 1;
             return true;
         }
@@ -1076,6 +1175,11 @@ pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue
             (*arr).len += 1;
             return true;
         }
+        if (*arr).is_u64_packed() {
+            *((*arr).data as *mut u64).add((*arr).len as usize) = value.as_int() as u64;
+            (*arr).len += 1;
+            return true;
+        }
         *(*arr).data.add((*arr).len as usize) = value;
         (*arr).len += 1;
         true
@@ -1090,6 +1194,11 @@ pub extern "C" fn rt_array_new_with_cap_i64(cap: i64) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_array_new_with_cap(cap: i64) -> RuntimeValue {
     rt_array_new_uninit(cap as u64)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_array_new_with_cap_u64(cap: i64) -> RuntimeValue {
+    rt_array_new_uninit_u64(cap as u64)
 }
 
 #[no_mangle]
@@ -1118,6 +1227,9 @@ pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
         (*arr).len -= 1;
         if (*arr).is_byte_packed() {
             return RuntimeValue::from_int(*((*arr).data as *const u8).add((*arr).len as usize) as i64);
+        }
+        if (*arr).is_u64_packed() {
+            return RuntimeValue::from_int(*((*arr).data as *const u64).add((*arr).len as usize) as i64);
         }
         *(*arr).data.add((*arr).len as usize)
     }

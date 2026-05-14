@@ -405,7 +405,8 @@ impl<'a> MirLowerer<'a> {
     pub(super) fn capacity_local_for_new_array_expr(expr: &HirExpr) -> Option<usize> {
         match &expr.kind {
             HirExprKind::Call { func, args } if args.len() == 1 => {
-                if matches!(&func.kind, HirExprKind::Global(name) if name == "rt_array_new_with_cap") {
+                if matches!(&func.kind, HirExprKind::Global(name) if matches!(name.as_str(), "rt_array_new_with_cap" | "rt_array_new_with_cap_u64"))
+                {
                     Self::local_index_for_expr(&args[0])
                 } else {
                     None

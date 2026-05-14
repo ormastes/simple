@@ -18,10 +18,13 @@ use super::{
     rt_typed_words_u32_push,
     rt_typed_words_u32_set,
     rt_typed_words_u64_at,
+    rt_typed_words_u64_data_at_checked,
     rt_typed_words_u64_push,
+    rt_typed_words_u64_raw_data_at,
     rt_typed_words_u64_set,
     // Array functions
     rt_array_new,
+    rt_array_new_with_cap_u64,
     rt_array_pop,
     rt_array_push,
     rt_array_set,
@@ -231,6 +234,25 @@ fn test_typed_words_u64_push_fast_path() {
     assert_eq!(rt_array_len(array), 2);
     assert_eq!(rt_typed_words_u64_at(array, 0), -1);
     assert_eq!(rt_typed_words_u64_at(array, 1), 123_456_789);
+}
+
+#[test]
+fn test_typed_words_u64_packed_storage_fast_path() {
+    let array = rt_array_new_with_cap_u64(1);
+    assert!(rt_typed_words_u64_push(array, -1));
+    assert!(rt_typed_words_u64_push(array, 123_456_789));
+    assert_eq!(rt_array_len(array), 2);
+    assert_eq!(rt_typed_words_u64_at(array, 0), -1);
+    assert_eq!(rt_array_get(array, 1).as_int(), 123_456_789);
+    assert!(rt_typed_words_u64_set(array, -1, 42));
+    assert_eq!(rt_array_pop(array).as_int(), 42);
+
+    assert!(rt_typed_words_u64_push(array, 77));
+    let raw_array = array.to_raw() & !7;
+    let data_ptr = unsafe { (*(raw_array as *const super::RuntimeArray)).data as i64 };
+    assert_eq!(rt_typed_words_u64_data_at_checked(raw_array as i64, data_ptr, 0), -1);
+    assert_eq!(rt_typed_words_u64_data_at_checked(raw_array as i64, data_ptr, 1), 77);
+    assert_eq!(rt_typed_words_u64_raw_data_at(data_ptr, 1), 77);
 }
 
 #[test]

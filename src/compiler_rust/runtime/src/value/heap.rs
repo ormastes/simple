@@ -67,6 +67,8 @@ pub mod gc_flags {
     pub const PINNED: u8 = 0b100;
     /// RuntimeArray stores raw u8 bytes in data instead of RuntimeValue slots.
     pub const BYTE_PACKED: u8 = 0b1000;
+    /// RuntimeArray stores raw u64 words in data instead of tagged RuntimeValue slots.
+    pub const U64_PACKED: u8 = 0b1_0000;
 }
 
 impl HeapHeader {

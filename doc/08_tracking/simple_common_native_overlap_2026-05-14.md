@@ -340,6 +340,18 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `1,378,190` Simple ops/ms (`0.28x` C, `0.20x` Rust), list push measured
   `1,173,779` Simple ops/ms (`0.40x` C, `0.80x` Rust), and set-like
   membership measured `3,472` Simple ops/ms (`0.52x` C, `0.26x` Rust).
+- Rust-hosted native codegen now has a packed `[u64]` runtime lane:
+  `rt_array_new_with_cap` calls returning `[u64]` lower to
+  `rt_array_new_with_cap_u64`, `[u64]` literals use the packed constructor,
+  generic array get/set/pop still re-box raw words, and hoisted `[u64]` scans
+  use raw data-pointer reads. Stub fallback was disabled for the verification
+  benchmark. Checksum parity passed, but parity is still not closed:
+  list traversal measured `1,788,564` Simple ops/ms (`0.30x` C, `0.33x`
+  Rust), list push measured `1,270,487` Simple ops/ms (`0.39x` C, `1.52x`
+  Rust), and set-like membership measured `2,459` Simple ops/ms (`0.35x` C,
+  `0.24x` Rust). Current disassembly shows tight raw-word load loops, so the
+  next limiting gap is call/loop codegen quality, especially lack of inlining
+  for the tiny `set_contains` helper.
 
 ## Next Concrete Plugin Work
 

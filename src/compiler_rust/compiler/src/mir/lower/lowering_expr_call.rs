@@ -34,6 +34,19 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    fn call_returns_array_of(&self, callee: &HirExpr, element_type: TypeId) -> bool {
+        let Some(registry) = self.type_registry else {
+            return false;
+        };
+        if matches!(registry.get(callee.ty), Some(HirType::Array { element, .. }) if *element == element_type) {
+            return true;
+        }
+        let Some(HirType::Function { ret, .. }) = registry.get(callee.ty) else {
+            return false;
+        };
+        matches!(registry.get(*ret), Some(HirType::Array { element, .. }) if *element == element_type)
+    }
+
     pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr]) -> MirLowerResult<VReg> {
         let mut arg_regs = Vec::new();
         for arg in args {
@@ -266,7 +279,13 @@ impl<'a> MirLowerer<'a> {
             // NOTE: DI injection at MIR level was causing signature mismatches
             // because functions were registered with all params but calls tried to inject again
 
-            let call_target = CallTarget::from_name(name);
+            let call_target_name = if name == "rt_array_new_with_cap" && self.call_returns_array_of(callee, TypeId::U64)
+            {
+                "rt_array_new_with_cap_u64"
+            } else {
+                name
+            };
+            let call_target = CallTarget::from_name(call_target_name);
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();

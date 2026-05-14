@@ -395,17 +395,23 @@ impl<'a> MirLowerer<'a> {
             return self.with_func(|func, current_block| {
                 let raw_word = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
-                block.instructions.push(MirInst::Call {
-                    dest: Some(raw_word),
-                    target: CallTarget::from_name(if hoisted_data_ptr.is_some() {
-                        "rt_typed_words_u64_data_at"
-                    } else if has_loop_len_bound {
-                        "rt_typed_words_u64_unchecked"
-                    } else {
-                        "rt_typed_words_u64_at"
-                    }),
-                    args: vec![hoisted_data_ptr.unwrap_or(receiver_reg), index_reg],
-                });
+                if let Some(data_ptr) = hoisted_data_ptr {
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(raw_word),
+                        target: CallTarget::from_name("rt_typed_words_u64_raw_data_at"),
+                        args: vec![data_ptr, index_reg],
+                    });
+                } else {
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(raw_word),
+                        target: CallTarget::from_name(if has_loop_len_bound {
+                            "rt_typed_words_u64_unchecked"
+                        } else {
+                            "rt_typed_words_u64_at"
+                        }),
+                        args: vec![receiver_reg, index_reg],
+                    });
+                }
                 raw_word
             });
         } else {

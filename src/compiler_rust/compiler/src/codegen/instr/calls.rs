@@ -3,7 +3,7 @@
 //! Handles all forms of function calls: user-defined, runtime FFI, and built-in functions.
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -454,12 +454,7 @@ fn compile_inline_typed_words_at<M: Module>(
     // in that lane are stored by the typed push/set paths as tagged integers, so
     // the generated hot path can untag directly instead of rediscovering the slot
     // representation on every read. Generic/mixed arrays still use `rt_index_get`.
-    let int_payload = builder.ins().sshr_imm(raw, 3);
-    let word = if width == 4 {
-        builder.ins().band_imm(int_payload, 0xFFFF_FFFF)
-    } else {
-        int_payload
-    };
+    let word = maybe_packed_u64_load_word(builder, ptr_bits, raw, width);
     builder.ins().jump(done_block, &[word]);
     builder.seal_block(load_block);
 
@@ -468,6 +463,38 @@ fn compile_inline_typed_words_at<M: Module>(
     builder.seal_block(done_block);
     ctx.vreg_values.insert(*dest, result);
     Ok(true)
+}
+
+fn u64_packed_condition(builder: &mut FunctionBuilder, header_ptr: Value) -> Value {
+    let flags = builder.ins().load(types::I8, MemFlags::new(), header_ptr, 1);
+    let flags64 = builder.ins().uextend(types::I64, flags);
+    let packed = builder.ins().band_imm(flags64, 0b1_0000);
+    builder.ins().icmp_imm(IntCC::NotEqual, packed, 0)
+}
+
+fn maybe_packed_u64_load_word(builder: &mut FunctionBuilder, header_ptr: Value, raw: Value, width: i64) -> Value {
+    let int_payload = builder.ins().sshr_imm(raw, 3);
+    if width == 4 {
+        builder.ins().band_imm(int_payload, 0xFFFF_FFFF)
+    } else {
+        let is_packed = u64_packed_condition(builder, header_ptr);
+        builder.ins().select(is_packed, raw, int_payload)
+    }
+}
+
+fn maybe_packed_u64_store_word(builder: &mut FunctionBuilder, header_ptr: Value, value: Value, width: i64) -> Value {
+    let word = if width == 4 {
+        builder.ins().band_imm(value, 0xFFFF_FFFF)
+    } else {
+        value
+    };
+    let tagged = builder.ins().ishl_imm(word, 3);
+    if width == 8 {
+        let is_packed = u64_packed_condition(builder, header_ptr);
+        builder.ins().select(is_packed, word, tagged)
+    } else {
+        tagged
+    }
 }
 
 fn compile_inline_typed_words_unchecked<M: Module>(
@@ -492,12 +519,7 @@ fn compile_inline_typed_words_unchecked<M: Module>(
     let slot_offset = builder.ins().imul_imm(index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
-    let int_payload = builder.ins().sshr_imm(raw, 3);
-    let word = if width == 4 {
-        builder.ins().band_imm(int_payload, 0xFFFF_FFFF)
-    } else {
-        int_payload
-    };
+    let word = maybe_packed_u64_load_word(builder, ptr_bits, raw, width);
     ctx.vreg_values.insert(*dest, word);
     Ok(true)
 }
@@ -528,6 +550,54 @@ fn compile_inline_typed_words_data_at<M: Module>(
         int_payload
     };
     ctx.vreg_values.insert(*dest, word);
+    Ok(true)
+}
+
+fn compile_inline_typed_words_data_at_checked<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 3 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let header_or_array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let header_ptr = builder.ins().band(header_or_array, ptr_mask);
+    let data_ptr = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+    let word = maybe_packed_u64_load_word(builder, header_ptr, raw, 8);
+    ctx.vreg_values.insert(*dest, word);
+    Ok(true)
+}
+
+fn compile_inline_typed_words_raw_data_at<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 2 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+    ctx.vreg_values.insert(*dest, raw);
     Ok(true)
 }
 
@@ -637,13 +707,8 @@ fn compile_inline_typed_words_push<M: Module>(
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let slot_offset = builder.ins().imul_imm(len, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-    let word = if width == 4 {
-        builder.ins().band_imm(value, 0xFFFF_FFFF)
-    } else {
-        value
-    };
-    let tagged = builder.ins().ishl_imm(word, 3);
-    builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
+    let stored = maybe_packed_u64_store_word(builder, ptr_bits, value, width);
+    builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(len, 1);
     builder.ins().store(MemFlags::new(), next_len, ptr_bits, 8);
     if let Some(true_value) = true_value {
@@ -697,13 +762,8 @@ fn compile_inline_typed_words_push_known_at<M: Module>(
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let slot_offset = builder.ins().imul_imm(index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-    let word = if width == 4 {
-        builder.ins().band_imm(value, 0xFFFF_FFFF)
-    } else {
-        value
-    };
-    let tagged = builder.ins().ishl_imm(word, 3);
-    builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
+    let stored = maybe_packed_u64_store_word(builder, ptr_bits, value, width);
+    builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(index, 1);
     builder.ins().store(MemFlags::new(), next_len, ptr_bits, 8);
     if let Some(dest) = dest {
@@ -730,13 +790,8 @@ fn compile_inline_typed_words_push_known_data_at<M: Module>(
     let value = coerce_vreg_to_i64(ctx, builder, args[3]);
     let slot_offset = builder.ins().imul_imm(index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-    let word = if width == 4 {
-        builder.ins().band_imm(value, 0xFFFF_FFFF)
-    } else {
-        value
-    };
-    let tagged = builder.ins().ishl_imm(word, 3);
-    builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
+    let stored = maybe_packed_u64_store_word(builder, header_ptr, value, width);
+    builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(index, 1);
     builder.ins().store(MemFlags::new(), next_len, header_ptr, 8);
     if let Some(dest) = dest {
@@ -762,13 +817,9 @@ fn compile_inline_typed_words_store_known_data_at<M: Module>(
     let value = coerce_vreg_to_i64(ctx, builder, args[3]);
     let slot_offset = builder.ins().imul_imm(index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-    let word = if width == 4 {
-        builder.ins().band_imm(value, 0xFFFF_FFFF)
-    } else {
-        value
-    };
-    let tagged = builder.ins().ishl_imm(word, 3);
-    builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
+    let header_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let stored = maybe_packed_u64_store_word(builder, header_ptr, value, width);
+    builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     if let Some(dest) = dest {
         let true_value = builder.ins().iconst(types::I8, 1);
         ctx.vreg_values.insert(*dest, true_value);
@@ -1501,6 +1552,15 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
     if ffi_name == "rt_typed_words_u64_data_at" && compile_inline_typed_words_data_at(ctx, builder, dest, args, 8)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u64_data_at_checked"
+        && compile_inline_typed_words_data_at_checked(ctx, builder, dest, args)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u64_raw_data_at" && compile_inline_typed_words_raw_data_at(ctx, builder, dest, args)?
+    {
         return Ok(());
     }
     if ffi_name == "rt_typed_words_u32_set" && compile_inline_typed_words_u32_set(ctx, builder, dest, args)? {
