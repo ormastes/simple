@@ -252,6 +252,10 @@ optimization providers rather than delegating common algorithms back to Rust/C.
 - Runtime array first/last and dict get/contains helpers are now included in
   the same mutation-fenced pure-query lane, covering repeated list endpoint
   reads and map/set lookups in already-lowered MIR.
+- The collection optimizer provider contract now advertises
+  `runtime_collection_read_cse` as a produced fact, so planner/tooling surfaces
+  can distinguish this read-dispatch reuse from loop canonicalization and append
+  fusion.
 - A fresh one-sample collection benchmark after the pure optimizer CSE commits
   kept checksum parity, but the native benchmark path still misses C/Rust
   throughput parity: list traversal measured `1,651,751` Simple ops/ms
