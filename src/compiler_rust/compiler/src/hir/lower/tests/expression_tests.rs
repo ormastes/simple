@@ -345,6 +345,15 @@ fn test_lower_expression_statement() {
 }
 
 #[test]
+fn test_lower_erases_standalone_string_statement() {
+    let module = parse_and_lower("fn test() -> i64:\n    \"\"\"doc only\"\"\"\n    return 0\n").unwrap();
+
+    let func = &module.functions[0];
+    assert_eq!(func.body.len(), 1);
+    assert!(matches!(func.body[0], HirStmt::Return(_)));
+}
+
+#[test]
 fn test_infer_type_from_binary_arithmetic() {
     let module = parse_and_lower("fn test() -> i64:\n    let x = 1 + 2\n    return x\n").unwrap();
 

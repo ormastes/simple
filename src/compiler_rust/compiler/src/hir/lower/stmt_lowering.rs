@@ -538,6 +538,9 @@ impl Lowerer {
             }
 
             Node::Expression(expr) => {
+                if matches!(expr, Expr::String(_) | Expr::TypedString(_, _)) {
+                    return Ok(vec![]);
+                }
                 // Intercept BDD/SPipe calls at statement level so we can emit
                 // start/body/end sequences (describe, it, expect, etc.)
                 if let Some(stmts) = self.try_lower_bdd_statement(expr, ctx)? {

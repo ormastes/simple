@@ -412,6 +412,28 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   keeps checksum parity. The one-sample timing remained dominated by the wider
   text `HashSet` design cost (`194` ops/ms in this noisy run), so this is an
   enabling correctness fix rather than the final parity change.
+- HIR lowering now erases standalone string and typed-string expression
+  statements before MIR, so triple-quoted doc comments in hot pure Simple
+  methods no longer allocate strings at function entry. The source-closure
+  `HashMap` text path also stores each entry hash, computes text hashes through
+  `rt_hash_text` directly, reuses stored hashes on resize/probe, and compares
+  text keys through the core-C `rt_string_eq` helper. A clean
+  `native-build --entry-closure --runtime-bundle core-c-bootstrap` linked with
+  no generated-stub warning and kept checksum parity while measuring
+  `hashset_contains` at `17,328` Simple ops/ms. This is a large improvement
+  over the earlier `190`-`194` ops/ms source-closure path, but it is still below
+  the C/Rust parity target.
+- The collection benchmark harness now accepts
+  `SIMPLE_COLLECTION_BENCH_CLEAN=1` for source-closure runs, forcing
+  `native-build --clean` so perf evidence is not accidentally taken from stale
+  cached objects.
+- A full one-sample clean source-closure harness run with
+  `SIMPLE_COLLECTION_BENCH_SOURCE_CLOSURE=1 SIMPLE_COLLECTION_BENCH_CLEAN=1`
+  kept checksum parity and measured Simple at `0.28x` C / `0.16x` Rust for
+  list traversal, `0.65x` C / `1.28x` Rust for list push, `0.52x` C / `0.26x`
+  Rust for scalar set membership, and `0.26x` C / `0.43x` Rust for text
+  `HashSet.contains`. Pure Simple is therefore improved, but still not
+  properly updated to Rust/C performance parity.
 
 ## Next Concrete Plugin Work
 

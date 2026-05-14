@@ -312,6 +312,7 @@ int64_t  rt_enum_payload(int64_t value);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
+int64_t  rt_string_eq(int64_t left, int64_t right);
 int64_t  rt_native_eq(int64_t left, int64_t right);
 int64_t  rt_native_neq(int64_t left, int64_t right);
 int64_t  rt_slice(int64_t value, int64_t start, int64_t end, int64_t step);

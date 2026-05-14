@@ -6,7 +6,8 @@ Date: 2026-05-14
 
 Pure Simple collection benchmark performance still does not match the C and
 Rust references for traversal and set lookup. `list_push` is currently faster
-than Rust, but `list_traverse` and `set_contains` remain below parity.
+than Rust, but `list_traverse`, `set_contains`, and source-closure text
+`HashSet.contains` remain below parity.
 
 ## Evidence
 
@@ -25,6 +26,28 @@ set_contains  simple_vs_c 0.38x simple_vs_rust 0.20x
 ```
 
 Checksum parity passed for all three benchmarks.
+
+Updated source-closure text `HashSet.contains` evidence:
+
+```sh
+timeout 80s ./src/compiler_rust/target/debug/simple native-build --clean --runtime-bundle core-c-bootstrap --source src/lib --entry test/perf/collections/collection_simple.spl --entry-closure --backend cranelift --opt-level aggressive -o build/perf/collections/collection_simple_clean && build/perf/collections/collection_simple_clean
+```
+
+Observed result after erasing standalone docstring statements and routing the
+pure Simple `HashMap` text path through stored hashes plus core-C
+`rt_string_eq`: `hashset_contains` measured `17,328` ops/ms with checksum
+`13724364800` and no generated-stub warning. This is much faster than the prior
+source-closure `190`-`194` ops/ms range, but it still misses C/Rust parity.
+
+The full one-sample clean source-closure harness run also passed checksum
+parity, but still emitted speed warnings:
+
+```text
+list_traverse    0.28x C  0.16x Rust
+list_push        0.65x C  1.28x Rust
+set_contains     0.52x C  0.26x Rust
+hashset_contains 0.26x C  0.43x Rust
+```
 
 ## Ruled Out
 
@@ -69,6 +92,11 @@ Checksum parity passed for all three benchmarks.
   The 3-sample benchmark still remained below parity:
   `list_traverse` 0.28x vs C / 0.18x vs Rust, `list_push` 0.63x vs C / 1.34x
   vs Rust, and `set_contains` 0.38x vs C / 0.18x vs Rust.
+- A flat source-closure text hash path now avoids per-call docstring string
+  allocation, stores hash values in `HashMap.Entry`, reuses stored hashes during
+  resize, and uses `rt_hash_text`/`rt_string_eq` for text probe checks. This
+  closed the accidental receiver-hash mismatch in the prior helper method path,
+  but did not close native parity for text `HashSet.contains`.
 
 ## Likely Gap
 
@@ -84,3 +112,6 @@ substitution.
 Add a focused loop optimization pass for typed contiguous array scans, then
 verify with this benchmark. The pass should preserve checksum parity and should
 target `list_traverse` and `set_contains` before broader collection rewrites.
+For text `HashSet.contains`, inspect the remaining source-closure probe loop
+for generic array indexing and method-call overhead before retrying another data
+structure rewrite.
