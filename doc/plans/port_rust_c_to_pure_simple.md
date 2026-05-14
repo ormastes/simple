@@ -1184,6 +1184,24 @@ documented Simple Optimization Plugin interface.
   ChaCha20 `1.24x` C / `1.08x` Rust. The acceptance gate remains open for
   XXHash64-vs-C, CRC32, and Adler32.
 
+### 2026-05-14 Pure Simple Typed-Word Runtime Follow-Up
+
+- Ported the typed word-array helper surface from the C/native runtime into
+  `src/runtime/simple_core/core_array.spl`: checked `rt_typed_words_u32/u64_at`,
+  `push`, `set`, unchecked reads, data-pointer reads, and known-capacity
+  append/data-pointer append helpers now have pure Simple implementations.
+- Fixed the pure Simple `rt_array_drop` parser blocker by avoiding the reserved
+  `skip` binding name in that runtime source file.
+- Evidence: focused native archive build for `src/runtime/simple_core/core_array.spl`
+  passes (`1 compiled, 0 failed`), and the full `simple-core` archive build no
+  longer reports `core_array.spl`; it is still blocked by unrelated ABI
+  declaration mismatches in `core_env.spl` (`rt_env_get`) and `core_fs.spl`
+  (`rt_file_exists`).
+- Latest 3-sample collection benchmark remains below parity:
+  `list_traverse 0.36x C / 0.25x Rust`, `list_push 0.39x C / 0.85x Rust`,
+  `set_contains 0.50x C / 0.26x Rust`. The collection optimization/plugin gate
+  remains open.
+
 ---
 
 ## Critical Files (hardening and regression guard)
