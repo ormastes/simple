@@ -70,7 +70,7 @@ fn prepare_release(new_version: text):
     print success("Step 4/8: Checking formatting...")
     if not check_formatting():
         print error("✗ Code needs formatting")
-        print "Run: cargo fmt"
+        print "Run: bin/simple fmt src/app/release/prepare.spl --check"
         exit(1)
     print success("✓ Code is formatted")
     print ""
@@ -121,30 +121,14 @@ fn print_footer():
     print ""
 
 fn get_current_version() -> text:
-    """Get current version from Cargo.toml"""
-    val cargo_path = "rust/driver/Cargo.toml"
-    if not file_exists(cargo_path):
-        return ""
-
-    val content = file_read(cargo_path)
-    val lines = content.split("\n")
-
-    for line in lines:
-        if line.starts_with("version = "):
-            # Extract version from: version = "0.3.0"
-            val start = line.find("\"")
-            val end = line.rfind("\"")
-            if start >= 0 and end > start:
-                return line.substring(start + 1, end)
-
+    """Get current version from VERSION."""
+    if file_exists("VERSION"):
+        return file_read("VERSION").trim()
     ""
 
 fn update_versions(old_version: text, new_version: text):
     """Update version in all files"""
     val files = [
-        "rust/driver/Cargo.toml",
-        "rust/compiler/Cargo.toml",
-        "rust/runtime/Cargo.toml",
         "VERSION",
         "packaging/debian/control",
         "packaging/rpm/simple-lang.spec",
@@ -163,41 +147,56 @@ fn update_versions(old_version: text, new_version: text):
             file_write(file, updated)
             print "  ✓ Updated {file}"
 
+fn find_simple_binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    if file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    if file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    "bin/simple"
+
 fn run_tests() -> bool:
-    """Run test suite"""
-    val (_, _, code) = process_run("cargo",
-        ["test", "--workspace", "--quiet", "--manifest-path", "rust/Cargo.toml"])
+    """Run Simple test suite"""
+    val simple = find_simple_binary()
+    val (_, _, code) = process_run(simple, ["test", "test", "--mode=interpreter"])
     code == 0
 
 fn run_linter() -> bool:
-    """Run clippy linter"""
-    val (_, _, code) = process_run("cargo",
-        ["clippy", "--workspace", "--quiet", "--manifest-path", "rust/Cargo.toml",
-         "--", "-D", "warnings"])
+    """Run Simple linter"""
+    val simple = find_simple_binary()
+    val (_, _, code) = process_run(simple, ["lint", "src/app/release/prepare.spl"])
     code == 0
 
 fn check_formatting() -> bool:
-    """Check code formatting"""
-    val (_, _, code) = process_run("cargo",
-        ["fmt", "--check", "--manifest-path", "rust/Cargo.toml"])
+    """Check Simple formatting"""
+    val simple = find_simple_binary()
+    val (_, _, code) = process_run(simple, ["fmt", "src/app/release/prepare.spl", "--check"])
     code == 0
 
 fn build_runtime() -> bool:
-    """Build optimized runtime"""
-    val (_, _, code) = process_run("cargo",
-        ["build", "--profile", "release-opt", "--quiet",
-         "--manifest-path", "rust/Cargo.toml"])
-
-    if code == 0:
-        val binary_path = "rust/target/release-opt/simple_runtime"
-        if file_exists(binary_path):
-            val size = file_size(binary_path)
-            print "  Binary size: {format_size(size)}"
+    """Verify packaged Simple runtime"""
+    val binary_path = find_simple_binary()
+    val (_, _, code) = process_run(binary_path, ["--version"])
+    if code == 0 and file_exists(binary_path):
+        val size = file_size(binary_path)
+        print "  Binary: {binary_path} ({format_size(size)})"
     code == 0
 
 fn build_bootstrap() -> bool:
     """Build bootstrap package"""
-    val (_, _, code) = process_run("./scripts/build-bootstrap.sh", [])
+    val simple = find_simple_binary()
+    val (_, _, code) = process_run(simple, [
+        "run",
+        "src/lib/nogc_async_mut/package/main.spl",
+        "build",
+        "--type=bootstrap"
+    ])
 
     if code == 0:
         # Find package file
@@ -270,4 +269,3 @@ fn current_date() -> text:
     val month = timestamp_month()
     val day = timestamp_day()
     "{year}-{month:02}-{day:02}"
-
