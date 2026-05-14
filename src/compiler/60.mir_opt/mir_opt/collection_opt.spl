@@ -11,9 +11,11 @@
 #   BinOp(tmp, Add, str_var, suffix) -> (removed)  [where str_var is Ptr(I8)]
 #   Copy(str_var, tmp)               -> Call(str_var, "spl_str_append", [str_var, suffix])
 #
-# Pattern 4 — Loop-invariant pure method call hoisting:
+# Pattern 4 — Duplicate pure collection query reuse and loop-invariant pure
+# method call hoisting:
 #   Hoists calls to known-pure methods (len, is_empty, first, last,
 #   get, contains_key) out of loop bodies when all args are loop-invariant.
+#   Reuses same-block runtime read helpers until a mutating operation appears.
 #
 # Pattern 5 — Typed array index dispatch specialization:
 #   Call(dst, "rt_index_get", [array, idx]) -> Call(dst, "rt_array_get", [array, idx])
@@ -220,7 +222,7 @@ impl CollectionOptimization:
                 if not dest.?:
                     return ""
                 val fname = self.get_func_name(func)
-                if not self.is_pure_method(fname):
+                if not self.is_pure_method(fname) and not self.is_collection_runtime_read(fname):
                     return ""
                 var key = fname
                 for arg in args:
@@ -232,7 +234,8 @@ impl CollectionOptimization:
     fn inst_may_mutate_collection_state(inst: MirInst) -> bool:
         match inst.kind:
             case Call(_, func, _):
-                not self.is_pure_method(self.get_func_name(func))
+                val fname = self.get_func_name(func)
+                not self.is_pure_method(fname) and not self.is_collection_runtime_read(fname)
             case CallIndirect(_, _, _, _): true
             case Store(_, _): true
             case SetField(_, _, _): true
@@ -980,6 +983,15 @@ impl CollectionOptimization:
             if m == name:
                 return true
         false
+
+    fn is_collection_runtime_read(name: text) -> bool:
+        name == "rt_array_get" or
+        name == "rt_typed_words_u32_at" or
+        name == "rt_typed_words_u64_at" or
+        name == "rt_typed_words_u32_unchecked" or
+        name == "rt_typed_words_u64_unchecked" or
+        name == "rt_typed_words_u32_data_at" or
+        name == "rt_typed_words_u64_data_at"
 
     fn operand_invariant(op: MirOperand, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>) -> bool:
         match op.kind:

@@ -240,6 +240,11 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `rt_array_new_with_cap*` result is removed when its only uses are ignored
   append calls, and observed append results keep the array live. This narrows
   the Rust-hosted vs pure Simple optimizer gap for synthetic list-push loops.
+- The same pure Simple provider now also treats runtime collection read helpers
+  (`rt_array_get` and typed word read helpers) as same-block pure queries for
+  CSE until a possible collection mutation appears. This removes duplicated
+  list/set read dispatches in already-lowered MIR without changing runtime
+  representation or hoisting reads across append/write calls.
 
 ## Next Concrete Plugin Work
 
