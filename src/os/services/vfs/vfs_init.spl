@@ -10,7 +10,7 @@
 #
 # This file provides:
 #   - Path/text helpers used by read fns (private)
-#   - NvfsPosix read helpers (private)
+#   - Hosted NVFS read helpers (private)
 #   - Exec read path helpers (g_vfs_read_executable_bytes, g_vfs_read_fat32_path_bytes)
 #   - FAT32 root read helpers (private)
 #   - Public read API: g_vfs_read_file_text, g_vfs_read_file_bytes, g_vfs_file_size
@@ -20,7 +20,7 @@ use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.services.fat32.fat32.{Fat32Driver as Fat32Core}
 use os.services.block_device.{BlockDevice}
 use os.services.vfs.vfs_boot_init.{
-    g_root_fat32, g_root_nvfs_posix, g_vfs_initialized, g_mount_table, g_vfs,
+    g_root_fat32, g_root_nvfs_hosted, g_vfs_initialized, g_mount_table, g_vfs,
     g_c_adapter,
     VfsFileSize,
     vfs_boot_init, vfs_service_start, vfs_service_init_port, vfs_service_poll,
@@ -43,7 +43,7 @@ use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
 use common.string_core.{str_char_at}
-use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.loader.app_registry.{
     app_registry_load, app_registry_load_hardcoded_fallback,
@@ -104,7 +104,7 @@ fn _clone_bytes(buf: [u8]) -> [u8]:
 pub fn _clear_vfs_rootfs_for_test():
     """Reset rootfs-related globals so hosted driver tests start clean."""
     g_root_fat32 = nil
-    g_root_nvfs_posix = nil
+    g_root_nvfs_hosted = nil
     g_mount_table = MountTable.new()
 
 pub fn _mount_hosted_rootfs_for_test(driver: DriverInstance) -> bool:
@@ -112,7 +112,7 @@ pub fn _mount_hosted_rootfs_for_test(driver: DriverInstance) -> bool:
     _clear_vfs_rootfs_for_test()
     match driver:
         case NvfsPosix(d):
-            g_root_nvfs_posix = Some(d)
+            g_root_nvfs_hosted = Some(d)
         case _:
             val mount_r = g_mount_table.mount("/", driver, MountOptions.default())
             if mount_r.is_err():
@@ -121,25 +121,25 @@ pub fn _mount_hosted_rootfs_for_test(driver: DriverInstance) -> bool:
     true
 
 # ============================================================================
-# NvfsPosix read helpers
+# Hosted NVFS read helpers
 # ============================================================================
 
-fn _g_vfs_root_nvfs_posix_read_file_bytes(path: text) -> [u8]:
-    if g_root_nvfs_posix == nil:
+fn _g_vfs_root_nvfs_hosted_read_file_bytes(path: text) -> [u8]:
+    if g_root_nvfs_hosted == nil:
         return []
-    var driver = g_root_nvfs_posix.unwrap()
+    var driver = g_root_nvfs_hosted.unwrap()
     val relpath = Path(raw: path)
     val stat_r = driver.stat(relpath)
     if stat_r.is_err():
-        g_root_nvfs_posix = Some(driver)
+        g_root_nvfs_hosted = Some(driver)
         return []
     val size = stat_r.unwrap().size.to_i64()
     if size <= 0:
-        g_root_nvfs_posix = Some(driver)
+        g_root_nvfs_hosted = Some(driver)
         return []
     val open_r = driver.open(relpath, OpenFlags.read_only())
     if open_r.is_err():
-        g_root_nvfs_posix = Some(driver)
+        g_root_nvfs_hosted = Some(driver)
         return []
     val handle = open_r.unwrap()
     var buf: [u8] = []
@@ -149,7 +149,7 @@ fn _g_vfs_root_nvfs_posix_read_file_bytes(path: text) -> [u8]:
         i = i + 1
     val read_r = driver.read(handle, 0, buf)
     driver.close(handle)
-    g_root_nvfs_posix = Some(driver)
+    g_root_nvfs_hosted = Some(driver)
     if read_r.is_err():
         return []
     val n = read_r.unwrap()
@@ -162,18 +162,18 @@ fn _g_vfs_root_nvfs_posix_read_file_bytes(path: text) -> [u8]:
         j = j + 1
     out
 
-fn _g_vfs_root_nvfs_posix_read_file_text(path: text) -> text:
-    val bytes = _g_vfs_root_nvfs_posix_read_file_bytes(path)
+fn _g_vfs_root_nvfs_hosted_read_file_text(path: text) -> text:
+    val bytes = _g_vfs_root_nvfs_hosted_read_file_bytes(path)
     if bytes.len() <= 0:
         return ""
     _vfs_bytes_to_text(bytes, bytes.len())
 
-fn _g_vfs_root_nvfs_posix_file_size(path: text) -> i64:
-    if g_root_nvfs_posix == nil:
+fn _g_vfs_root_nvfs_hosted_file_size(path: text) -> i64:
+    if g_root_nvfs_hosted == nil:
         return -1
-    val driver = g_root_nvfs_posix.unwrap()
+    val driver = g_root_nvfs_hosted.unwrap()
     val stat_r = driver.stat(Path(raw: path))
-    g_root_nvfs_posix = Some(driver)
+    g_root_nvfs_hosted = Some(driver)
     if stat_r.is_err():
         return -1
     stat_r.unwrap().size.to_i64()
@@ -423,8 +423,8 @@ pub fn g_vfs_read_file_text(name: text) -> text:
     """
     if g_root_fat32 != nil:
         return g_vfs_root_read_file_text(g_root_fat32.unwrap(), g_vfs_root_path(name))
-    if g_root_nvfs_posix != nil:
-        return _g_vfs_root_nvfs_posix_read_file_text(g_vfs_root_path(name))
+    if g_root_nvfs_hosted != nil:
+        return _g_vfs_root_nvfs_hosted_read_file_text(g_vfs_root_path(name))
     # Hosted RV64 still relies on the transitional C FAT32 path bridge for
     # metadata files like /SYS/APPS/SIMPLECLI.CAT and /SYS/TOOLSET.SDN.
     val bridged_bytes = g_vfs_read_file_bytes(name)
@@ -473,8 +473,8 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
             val root_alias_path_bytes = g_vfs_root_read_file_bytes(g_root_fat32.unwrap(), root_alias_first)
             if root_alias_path_bytes.len() > 0:
                 return _clone_bytes(root_alias_path_bytes)
-    if g_root_nvfs_posix != nil:
-        return _g_vfs_root_nvfs_posix_read_file_bytes(g_vfs_root_path(name))
+    if g_root_nvfs_hosted != nil:
+        return _g_vfs_root_nvfs_hosted_read_file_bytes(g_vfs_root_path(name))
     val abs_first = g_vfs_abs_path(name)
     val entry_first_opt = g_mount_table.lookup(abs_first)
     if entry_first_opt.?:
@@ -552,8 +552,8 @@ pub fn g_vfs_file_size(name: text) -> Option<VfsFileSize>:
             val root_alias_path_size = g_vfs_root_file_size(g_root_fat32.unwrap(), root_alias_first)
             if root_alias_path_size >= 0:
                 return Some(VfsFileSize(bytes: root_alias_path_size))
-    if g_root_nvfs_posix != nil:
-        val hosted_size = _g_vfs_root_nvfs_posix_file_size(g_vfs_root_path(name))
+    if g_root_nvfs_hosted != nil:
+        val hosted_size = _g_vfs_root_nvfs_hosted_file_size(g_vfs_root_path(name))
         if hosted_size >= 0:
             return Some(VfsFileSize(bytes: hosted_size))
         return nil

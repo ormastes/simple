@@ -8,7 +8,7 @@
 
 use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.services.vfs.vfs_boot_init.{
-    g_root_fat32, g_root_nvfs_posix, g_vfs_initialized, g_mount_table, g_vfs
+    g_root_fat32, g_root_nvfs_hosted, g_vfs_initialized, g_mount_table, g_vfs
 }
 use os.services.vfs.vfs_dispatch.{
     g_vfs_dispatch_write_file_text, g_vfs_dispatch_write_file_bytes,
@@ -22,7 +22,7 @@ use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
-use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
 use common.string_core.{str_char_at}
 use os.kernel.loader.app_registry.{app_registry_fat32_alias}
 use os.kernel.log.klog_api.{log_raw_println}
@@ -65,44 +65,44 @@ fn g_vfs_root_write_file_text(driver: Fat32Core, path: text, content: text) -> b
     driver.close(handle)
     write_r.is_ok()
 
-fn _g_vfs_root_nvfs_posix_write_file_text(path: text, content: text) -> bool:
-    if g_root_nvfs_posix == nil:
+fn _g_vfs_root_nvfs_hosted_write_file_text(path: text, content: text) -> bool:
+    if g_root_nvfs_hosted == nil:
         return false
-    var driver = g_root_nvfs_posix.unwrap()
+    var driver = g_root_nvfs_hosted.unwrap()
     val relpath = Path(raw: path)
     val open_r = driver.open(relpath, OpenFlags.write_only().with_append().with_create())
     if open_r.is_err():
-        g_root_nvfs_posix = Some(driver)
+        g_root_nvfs_hosted = Some(driver)
         return false
     val handle = open_r.unwrap()
     val trunc_r = driver.ftruncate(handle, 0)
     if trunc_r.is_err():
         driver.close(handle)
-        g_root_nvfs_posix = Some(driver)
+        g_root_nvfs_hosted = Some(driver)
         return false
     val write_r = driver.write(handle, 0, _vfs_text_to_bytes(content))
     driver.close(handle)
-    g_root_nvfs_posix = Some(driver)
+    g_root_nvfs_hosted = Some(driver)
     write_r.is_ok()
 
-fn _g_vfs_root_nvfs_posix_write_file_bytes(path: text, data: [u8]) -> bool:
-    if g_root_nvfs_posix == nil:
+fn _g_vfs_root_nvfs_hosted_write_file_bytes(path: text, data: [u8]) -> bool:
+    if g_root_nvfs_hosted == nil:
         return false
-    var driver = g_root_nvfs_posix.unwrap()
+    var driver = g_root_nvfs_hosted.unwrap()
     val relpath = Path(raw: path)
     val open_r = driver.open(relpath, OpenFlags.write_only().with_append().with_create())
     if open_r.is_err():
-        g_root_nvfs_posix = Some(driver)
+        g_root_nvfs_hosted = Some(driver)
         return false
     val handle = open_r.unwrap()
     val trunc_r = driver.ftruncate(handle, 0)
     if trunc_r.is_err():
         driver.close(handle)
-        g_root_nvfs_posix = Some(driver)
+        g_root_nvfs_hosted = Some(driver)
         return false
     val write_r = driver.write(handle, 0, data)
     driver.close(handle)
-    g_root_nvfs_posix = Some(driver)
+    g_root_nvfs_hosted = Some(driver)
     write_r.is_ok()
 
 fn g_vfs_root_write_file_bytes(driver: Fat32Core, path: text, data: [u8]) -> bool:
@@ -156,8 +156,8 @@ pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
     """
     if g_root_fat32 != nil:
         return g_vfs_root_write_file_text(g_root_fat32.unwrap(), g_vfs_root_path(name), content)
-    if g_root_nvfs_posix != nil:
-        return _g_vfs_root_nvfs_posix_write_file_text(g_vfs_root_path(name), content)
+    if g_root_nvfs_hosted != nil:
+        return _g_vfs_root_nvfs_hosted_write_file_text(g_vfs_root_path(name), content)
     val abs = g_vfs_abs_path(name)
     val entry_opt = g_mount_table.lookup(abs)
     if not entry_opt.?:
@@ -185,8 +185,8 @@ pub fn g_vfs_write_file_bytes(name: text, data: [u8]) -> bool:
     """
     if g_root_fat32 != nil:
         return g_vfs_root_write_file_bytes(g_root_fat32.unwrap(), g_vfs_root_path(name), data)
-    if g_root_nvfs_posix != nil:
-        return _g_vfs_root_nvfs_posix_write_file_bytes(g_vfs_root_path(name), data)
+    if g_root_nvfs_hosted != nil:
+        return _g_vfs_root_nvfs_hosted_write_file_bytes(g_vfs_root_path(name), data)
     val abs = g_vfs_abs_path(name)
     val entry_opt = g_mount_table.lookup(abs)
     if not entry_opt.?:
@@ -217,11 +217,11 @@ pub fn g_vfs_delete_file(name: text) -> bool:
         val p = Path(raw: g_vfs_root_path(name))
         val r = d.unlink(p)
         return r.is_ok()
-    if g_root_nvfs_posix != nil:
-        var d = g_root_nvfs_posix.unwrap()
+    if g_root_nvfs_hosted != nil:
+        var d = g_root_nvfs_hosted.unwrap()
         val p = Path(raw: g_vfs_root_path(name))
         val r = d.unlink(p)
-        g_root_nvfs_posix = Some(d)
+        g_root_nvfs_hosted = Some(d)
         return r.is_ok()
     val abs = g_vfs_abs_path(name)
     val entry_opt = g_mount_table.lookup(abs)
@@ -266,8 +266,8 @@ pub fn g_vfs_file_exists(name: text) -> bool:
         val root_alias_first = _vfs_exec_disk_alias(root_name_first)
         if root_alias_first != root_name_first and g_vfs_root_file_exists(g_root_fat32.unwrap(), root_alias_first):
             return true
-    if g_root_nvfs_posix != nil:
-        return _g_vfs_root_nvfs_posix_file_exists(g_vfs_root_path(name))
+    if g_root_nvfs_hosted != nil:
+        return _g_vfs_root_nvfs_hosted_file_exists(g_vfs_root_path(name))
     val abs_first = g_vfs_abs_path(name)
     val entry_first_opt = g_mount_table.lookup(abs_first)
     if entry_first_opt.?:
@@ -360,15 +360,15 @@ pub fn vfs_unmount_removable(mount_path: text) -> bool:
 fn g_vfs_root_file_exists(driver: Fat32Core, path: text) -> bool:
     driver.stat(path).is_ok()
 
-fn _g_vfs_root_nvfs_posix_file_exists(path: text) -> bool:
-    _g_vfs_root_nvfs_posix_file_size(path) >= 0
+fn _g_vfs_root_nvfs_hosted_file_exists(path: text) -> bool:
+    _g_vfs_root_nvfs_hosted_file_size(path) >= 0
 
-fn _g_vfs_root_nvfs_posix_file_size(path: text) -> i64:
-    if g_root_nvfs_posix == nil:
+fn _g_vfs_root_nvfs_hosted_file_size(path: text) -> i64:
+    if g_root_nvfs_hosted == nil:
         return -1
-    val driver = g_root_nvfs_posix.unwrap()
+    val driver = g_root_nvfs_hosted.unwrap()
     val stat_r = driver.stat(Path(raw: path))
-    g_root_nvfs_posix = Some(driver)
+    g_root_nvfs_hosted = Some(driver)
     if stat_r.is_err():
         return -1
     stat_r.unwrap().size.to_i64()
