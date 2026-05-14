@@ -292,6 +292,16 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   therefore does not yet show a material throughput move from this pure-MIR
   coverage, but the optimizer contract now covers the already-lowered scalar
   tag/mask shape directly.
+- The pure collection optimizer now generalizes dead fresh-capacity array
+  removal from append-only writes to ignored-result write-only calls
+  (`rt_array_set` and typed word `set` helpers included). Focused coverage
+  keeps observed write results live. A one-sample collection benchmark after
+  this pure-MIR widening kept checksum parity and measured `1,533,683`
+  Simple ops/ms for list traversal (`0.35x` C, `0.16x` Rust), `1,177,293`
+  Simple ops/ms for list push (`0.38x` C, `0.80x` Rust), and `3,053`
+  Simple ops/ms for set-like membership (`0.48x` C, `0.24x` Rust). This is
+  additional already-lowered MIR coverage, not proof that the native benchmark
+  path has reached C/Rust parity.
 
 ## Next Concrete Plugin Work
 
