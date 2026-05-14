@@ -128,9 +128,10 @@ The production ownership rule is behavioral, not name-only:
   exports are blocked by the same audit.
 - `gc_sync_mut` is a compatibility facade over `gc_async_mut`, not a separate
   sync backend. The boundary audit blocks local runtime-hook ownership in this
-  family and requires each tracked facade to export a matching `gc_async_mut`
-  backing module. It stays advanced-scoped until selected APIs prove whether
-  they need real blocking wrappers.
+  family, requires each tracked facade to export a matching `gc_async_mut`
+  backing module, and requires each tracked non-root `gc_async_mut` module to
+  have a corresponding `gc_sync_mut` facade. It stays advanced-scoped until
+  selected APIs prove whether they need real blocking wrappers.
 
 ### 2.7 `nogc_async_mut_noalloc` (128 files -- baremetal)
 

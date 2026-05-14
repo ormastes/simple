@@ -9,6 +9,9 @@ The checks are intentionally narrow and evidence-oriented:
 * Sync/immutable compatibility families must not own direct `rt_*` hooks.
 * Sync/GC and immutable compatibility families must have matching backing
   modules and facade exports into their documented backend family.
+* Every tracked backing module for those compatibility families must have the
+  corresponding facade module, unless the facade family intentionally has no
+  root package manifest yet.
 * GC async compatibility modules must not be one-line self-facades back into
   `gc_async_mut`; route to a no-GC backend or own real implementation instead.
 * GC async compatibility facades must not wildcard-export no-GC sync backend
@@ -225,6 +228,18 @@ def facade_mirror_violations() -> list[str]:
             text = source_path.read_text(encoding="utf-8", errors="ignore")
             if f"export use {expected}" not in text:
                 hits.append(f"{rel(source_path)}: missing facade export to {expected}")
+        source_files = {
+            path.relative_to(ROOT / source_root).as_posix()
+            for path in tracked_spl_under((source_root,))
+        }
+        for target_path in tracked_spl_under((target_root,)):
+            rel_path = target_path.relative_to(ROOT / target_root).as_posix()
+            if rel_path == "__init__.spl" and not (ROOT / source_root / rel_path).exists():
+                continue
+            if rel_path not in source_files:
+                hits.append(
+                    f"{source_root}/{rel_path}: missing facade for backing module {rel(target_path)}"
+                )
     return hits
 
 
