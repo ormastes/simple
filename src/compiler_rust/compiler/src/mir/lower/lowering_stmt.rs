@@ -776,16 +776,46 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirStmt::While { condition, body, .. } => {
+                let bound_proof = self
+                    .loop_len_bound_proof(condition)
+                    .filter(|proof| !Self::body_may_mutate_or_escape_array(body, proof.array_local_index));
                 // Create blocks and set initial jump
                 let (cond_id, body_id, exit_id) = self.with_func(|func, current_block| {
                     let cond_id = func.new_block();
                     let body_id = func.new_block();
                     let exit_id = func.new_block();
+                    (cond_id, body_id, exit_id)
+                })?;
 
-                    // Jump to condition check
+                let hoisted_data_ptr = if let Some(proof) = bound_proof {
+                    Some(self.with_func(|func, current_block| {
+                        let addr = func.new_vreg();
+                        let array = func.new_vreg();
+                        let data_ptr = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::LocalAddr {
+                            dest: addr,
+                            local_index: proof.array_local_index,
+                        });
+                        block.instructions.push(MirInst::Load {
+                            dest: array,
+                            addr,
+                            ty: TypeId::ANY,
+                        });
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(data_ptr),
+                            target: CallTarget::from_name("rt_array_data_ptr"),
+                            args: vec![array],
+                        });
+                        data_ptr
+                    })?)
+                } else {
+                    None
+                };
+
+                self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.terminator = Terminator::Jump(cond_id);
-                    (cond_id, body_id, exit_id)
                 })?;
 
                 // Push loop context for break/continue
@@ -813,15 +843,20 @@ impl<'a> MirLowerer<'a> {
 
                 // Lower body
                 self.set_current_block(body_id)?;
-                let bound_proof = self.loop_len_bound_proof(condition);
                 if let Some(proof) = bound_proof {
                     self.active_array_len_bounds.push(proof);
+                    if let Some(data_ptr) = hoisted_data_ptr {
+                        self.active_array_data_ptrs.push((proof.array_local_index, data_ptr));
+                    }
                 }
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
                 if bound_proof.is_some() {
                     self.active_array_len_bounds.pop();
+                    if hoisted_data_ptr.is_some() {
+                        self.active_array_data_ptrs.pop();
+                    }
                 }
                 self.finalize_block_jump(cond_id)?;
 

@@ -251,6 +251,7 @@ pub use value::{
     // Raw memory allocation (zero-cost struct support)
     rt_alloc,
     // Array operations
+    rt_array_data_ptr,
     rt_array_get,
     rt_array_len,
     rt_array_new,
@@ -258,10 +259,13 @@ pub use value::{
     rt_array_push,
     rt_array_set,
     rt_typed_bytes_u8_push,
+    rt_typed_bytes_u8_data_at,
     rt_typed_words_u32_at,
+    rt_typed_words_u32_data_at,
     rt_typed_words_u32_push,
     rt_typed_words_u32_unchecked,
     rt_typed_words_u64_at,
+    rt_typed_words_u64_data_at,
     rt_typed_words_u64_push,
     rt_typed_words_u64_unchecked,
     // Channel operations

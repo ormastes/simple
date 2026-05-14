@@ -271,10 +271,15 @@ impl<'a> MirLowerer<'a> {
         index: &HirExpr,
         expr_ty: TypeId,
     ) -> MirLowerResult<VReg> {
-        let receiver_reg = self.lower_expr(receiver)?;
+        let has_loop_len_bound = self.index_has_active_len_bound(receiver, index);
+        let hoisted_data_ptr = self.active_array_data_ptr(receiver, index);
+        let receiver_reg = if hoisted_data_ptr.is_some() {
+            hoisted_data_ptr.unwrap()
+        } else {
+            self.lower_expr(receiver)?
+        };
         let index_reg = self.lower_expr(index)?;
         let receiver_ty = receiver.ty;
-        let has_loop_len_bound = self.index_has_active_len_bound(receiver, index);
         let receiver_is_u8_array = self
             .type_registry
             .and_then(|tr| tr.get(receiver_ty))
@@ -331,7 +336,9 @@ impl<'a> MirLowerer<'a> {
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(raw_byte),
-                    target: CallTarget::from_name(if has_loop_len_bound {
+                    target: CallTarget::from_name(if hoisted_data_ptr.is_some() {
+                        "rt_typed_bytes_u8_data_at"
+                    } else if has_loop_len_bound {
                         "rt_typed_bytes_u8_unchecked"
                     } else {
                         "rt_typed_bytes_u8_at"
@@ -360,12 +367,14 @@ impl<'a> MirLowerer<'a> {
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(raw_word),
-                    target: CallTarget::from_name(if has_loop_len_bound {
+                    target: CallTarget::from_name(if hoisted_data_ptr.is_some() {
+                        "rt_typed_words_u32_data_at"
+                    } else if has_loop_len_bound {
                         "rt_typed_words_u32_unchecked"
                     } else {
                         "rt_typed_words_u32_at"
                     }),
-                    args: vec![receiver_reg, index_reg],
+                    args: vec![hoisted_data_ptr.unwrap_or(receiver_reg), index_reg],
                 });
                 block.instructions.push(MirInst::UnitNarrow {
                     dest: narrowed,
@@ -388,12 +397,14 @@ impl<'a> MirLowerer<'a> {
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(raw_word),
-                    target: CallTarget::from_name(if has_loop_len_bound {
+                    target: CallTarget::from_name(if hoisted_data_ptr.is_some() {
+                        "rt_typed_words_u64_data_at"
+                    } else if has_loop_len_bound {
                         "rt_typed_words_u64_unchecked"
                     } else {
                         "rt_typed_words_u64_at"
                     }),
-                    args: vec![receiver_reg, index_reg],
+                    args: vec![hoisted_data_ptr.unwrap_or(receiver_reg), index_reg],
                 });
                 raw_word
             });

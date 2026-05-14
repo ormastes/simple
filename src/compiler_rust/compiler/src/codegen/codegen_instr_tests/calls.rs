@@ -1006,6 +1006,47 @@ fn codegen_inline_typed_words_u64_unchecked_does_not_emit_runtime_symbol() {
 }
 
 #[test]
+fn codegen_inline_typed_words_u64_data_at_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_typed_words_u64_data_at", |f| {
+        let data_ptr = f.new_vreg();
+        let index = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt {
+            dest: data_ptr,
+            value: 0,
+        });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_typed_words_u64_data_at"),
+            args: vec![data_ptr, index],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_typed_words_u64_data_at"));
+}
+
+#[test]
+fn codegen_inline_array_data_ptr_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_array_data_ptr", |f| {
+        let array = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_array_data_ptr"),
+            args: vec![array],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_array_data_ptr"));
+}
+
+#[test]
 fn codegen_typed_words_u64_eq_uses_native_compare() {
     let object = aot_object("typed_words_u64_eq", |f| {
         let array = f.new_vreg();

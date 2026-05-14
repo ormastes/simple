@@ -192,6 +192,16 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   Simple ops/ms (`0.22x` C, `0.20x` Rust), list push at `144,183` Simple
   ops/ms (`0.05x` C, `0.10x` Rust), and set-like membership at `2,000` Simple
   ops/ms (`0.31x` C, `0.15x` Rust).
+- The same loop proof now hoists typed-array data pointers for read-only
+  guarded loops. The lowering rejects loop bodies that assign, index-mutate, or
+  pass the array to escaping calls, then emits `rt_array_data_ptr` once before
+  the loop body and uses `*_data_at` typed-read intrinsics inside the hot scan.
+  Disassembly of `set_contains` shows the `0x18` data-pointer load before the
+  scan loop, and `bench_list_traverse` performs that load once per traversal
+  pass instead of once per element. A one-sample benchmark kept checksum parity
+  and measured list traversal at `1,236,787` Simple ops/ms (`0.29x` C, `0.21x`
+  Rust), list push at `136,519` Simple ops/ms (`0.04x` C, `0.09x` Rust), and
+  set-like membership at `2,321` Simple ops/ms (`0.36x` C, `0.18x` Rust).
 
 ## Next Concrete Plugin Work
 

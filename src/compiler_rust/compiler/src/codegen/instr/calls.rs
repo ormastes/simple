@@ -315,6 +315,47 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
     Ok(true)
 }
 
+fn compile_inline_array_data_ptr<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 1 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    ctx.vreg_values.insert(*dest, data_ptr);
+    Ok(true)
+}
+
+fn compile_inline_typed_bytes_data_at<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 2 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+    let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let byte_ptr = builder.ins().iadd(data_ptr, index);
+    let loaded = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+    let widened = builder.ins().uextend(types::I64, loaded);
+    ctx.vreg_values.insert(*dest, widened);
+    Ok(true)
+}
+
 fn compile_inline_typed_words_at<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -408,6 +449,35 @@ fn compile_inline_typed_words_unchecked<M: Module>(
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+    let int_payload = builder.ins().sshr_imm(raw, 3);
+    let word = if width == 4 {
+        builder.ins().band_imm(int_payload, 0xFFFF_FFFF)
+    } else {
+        int_payload
+    };
+    ctx.vreg_values.insert(*dest, word);
+    Ok(true)
+}
+
+fn compile_inline_typed_words_data_at<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+    width: i64,
+) -> InstrResult<bool> {
+    if args.len() != 2 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let slot_offset = builder.ins().imul_imm(index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
@@ -1214,6 +1284,9 @@ pub fn compile_call<M: Module>(
     if compile_simple_runtime_memory_intrinsic(ctx, builder, dest, func_name_for_ffi, args)? {
         return Ok(());
     }
+    if ffi_name == "rt_array_data_ptr" && compile_inline_array_data_ptr(ctx, builder, dest, args)? {
+        return Ok(());
+    }
     if matches!(ffi_name, "rt_len" | "rt_array_len") && compile_inline_len(ctx, builder, dest, args)? {
         return Ok(());
     }
@@ -1244,6 +1317,9 @@ pub fn compile_call<M: Module>(
     {
         return Ok(());
     }
+    if ffi_name == "rt_typed_bytes_u8_data_at" && compile_inline_typed_bytes_data_at(ctx, builder, dest, args)? {
+        return Ok(());
+    }
     if ffi_name == "rt_typed_words_u32_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 4)? {
         return Ok(());
     }
@@ -1256,6 +1332,12 @@ pub fn compile_call<M: Module>(
     }
     if ffi_name == "rt_typed_words_u64_unchecked" && compile_inline_typed_words_unchecked(ctx, builder, dest, args, 8)?
     {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u32_data_at" && compile_inline_typed_words_data_at(ctx, builder, dest, args, 4)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u64_data_at" && compile_inline_typed_words_data_at(ctx, builder, dest, args, 8)? {
         return Ok(());
     }
     if ffi_name == "rt_typed_words_u32_set" && compile_inline_typed_words_u32_set(ctx, builder, dest, args)? {

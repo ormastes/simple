@@ -148,9 +148,13 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                         .map(|(_, tail)| tail)
                         .unwrap_or(target.name());
                     let ty = match base {
-                        "rt_typed_bytes_u8_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
-                        "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" => Some(TypeId::U32),
-                        "rt_typed_words_u64_at" | "rt_typed_words_u64_unchecked" => Some(TypeId::U64),
+                        "rt_typed_bytes_u8_at" | "rt_typed_bytes_u8_data_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
+                        "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" | "rt_typed_words_u32_data_at" => {
+                            Some(TypeId::U32)
+                        }
+                        "rt_typed_words_u64_at" | "rt_typed_words_u64_unchecked" | "rt_typed_words_u64_data_at" => {
+                            Some(TypeId::U64)
+                        }
                         _ => None,
                     };
                     if let Some(ty) = ty {
@@ -950,6 +954,7 @@ mod tests {
         let array = func.new_vreg();
         let index = func.new_vreg();
         let word = func.new_vreg();
+        let hoisted_word = func.new_vreg();
 
         let entry = func.block_mut(BlockId(0)).unwrap();
         entry.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
@@ -959,11 +964,17 @@ mod tests {
             target: CallTarget::from_name("rt_typed_words_u64_unchecked"),
             args: vec![array, index],
         });
-        entry.terminator = Terminator::Return(Some(word));
+        entry.instructions.push(MirInst::Call {
+            dest: Some(hoisted_word),
+            target: CallTarget::from_name("rt_typed_words_u64_data_at"),
+            args: vec![array, index],
+        });
+        entry.terminator = Terminator::Return(Some(hoisted_word));
 
         let map = build_vreg_types(&func);
 
         assert_eq!(map.get(&word).copied(), Some(TypeId::U64));
+        assert_eq!(map.get(&hoisted_word).copied(), Some(TypeId::U64));
     }
 
     /// Signedness classification derived from `build_vreg_types` output —

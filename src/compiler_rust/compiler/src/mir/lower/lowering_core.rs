@@ -280,6 +280,8 @@ pub struct MirLowerer<'a> {
     pub(super) len_local_sources: HashMap<usize, usize>,
     /// Active loop-body proofs of `index < array.len()`.
     pub(super) active_array_len_bounds: Vec<ArrayLenBoundProof>,
+    /// Hoisted array data pointers for read-only loops with active length proofs.
+    pub(super) active_array_data_ptrs: Vec<(usize, VReg)>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -305,6 +307,7 @@ impl<'a> MirLowerer<'a> {
             tagged_locals: std::collections::HashSet::new(),
             len_local_sources: HashMap::new(),
             active_array_len_bounds: Vec::new(),
+            active_array_data_ptrs: Vec::new(),
         }
     }
 
@@ -326,6 +329,7 @@ impl<'a> MirLowerer<'a> {
             tagged_locals: std::collections::HashSet::new(),
             len_local_sources: HashMap::new(),
             active_array_len_bounds: Vec::new(),
+            active_array_data_ptrs: Vec::new(),
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,
@@ -400,6 +404,108 @@ impl<'a> MirLowerer<'a> {
         self.active_array_len_bounds
             .iter()
             .any(|proof| proof.array_local_index == array_local_index && proof.index_local_index == index_local_index)
+    }
+
+    pub(super) fn active_array_data_ptr(&self, receiver: &HirExpr, index: &HirExpr) -> Option<VReg> {
+        if !self.index_has_active_len_bound(receiver, index) {
+            return None;
+        }
+        let array_local_index = Self::local_index_for_expr(receiver)?;
+        self.active_array_data_ptrs
+            .iter()
+            .rev()
+            .find_map(|(idx, ptr)| (*idx == array_local_index).then_some(*ptr))
+    }
+
+    pub(super) fn body_may_mutate_or_escape_array(body: &[HirStmt], array_local_index: usize) -> bool {
+        body.iter()
+            .any(|stmt| Self::stmt_may_mutate_or_escape_array(stmt, array_local_index))
+    }
+
+    fn stmt_may_mutate_or_escape_array(stmt: &HirStmt, array_local_index: usize) -> bool {
+        match stmt {
+            HirStmt::Assign { target, value } => {
+                Self::expr_assigns_array(target, array_local_index)
+                    || Self::expr_may_escape_array(value, array_local_index)
+            }
+            HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) => Self::expr_may_escape_array(expr, array_local_index),
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                Self::expr_may_escape_array(condition, array_local_index)
+                    || Self::body_may_mutate_or_escape_array(then_block, array_local_index)
+                    || else_block
+                        .as_ref()
+                        .is_some_and(|body| Self::body_may_mutate_or_escape_array(body, array_local_index))
+            }
+            HirStmt::While { condition, body, .. } => {
+                Self::expr_may_escape_array(condition, array_local_index)
+                    || Self::body_may_mutate_or_escape_array(body, array_local_index)
+            }
+            HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
+                Self::body_may_mutate_or_escape_array(body, array_local_index)
+            }
+            HirStmt::For { iterable, body, .. } => {
+                Self::expr_may_escape_array(iterable, array_local_index)
+                    || Self::body_may_mutate_or_escape_array(body, array_local_index)
+            }
+            HirStmt::Return(None)
+            | HirStmt::Break
+            | HirStmt::Continue
+            | HirStmt::ProofHint { .. }
+            | HirStmt::Calc { .. }
+            | HirStmt::InlineAsm { .. } => false,
+            HirStmt::Let { value, .. } => value
+                .as_ref()
+                .is_some_and(|expr| Self::expr_may_escape_array(expr, array_local_index)),
+            HirStmt::Assert { condition, .. }
+            | HirStmt::Assume { condition, .. }
+            | HirStmt::Admit { condition, .. } => Self::expr_may_escape_array(condition, array_local_index),
+        }
+    }
+
+    fn expr_assigns_array(expr: &HirExpr, array_local_index: usize) -> bool {
+        match &expr.kind {
+            HirExprKind::Local(idx) => *idx == array_local_index,
+            HirExprKind::Index { receiver, .. } => Self::local_index_for_expr(receiver) == Some(array_local_index),
+            _ => false,
+        }
+    }
+
+    fn expr_may_escape_array(expr: &HirExpr, array_local_index: usize) -> bool {
+        match &expr.kind {
+            HirExprKind::Local(idx) => *idx == array_local_index,
+            HirExprKind::MethodCall {
+                receiver, method, args, ..
+            } => {
+                (Self::local_index_for_expr(receiver) == Some(array_local_index) && method != "len")
+                    || args
+                        .iter()
+                        .any(|arg| Self::expr_may_escape_array(arg, array_local_index))
+            }
+            HirExprKind::Call { func, args } => {
+                Self::expr_may_escape_array(func, array_local_index)
+                    || args
+                        .iter()
+                        .any(|arg| Self::expr_may_escape_array(arg, array_local_index))
+            }
+            HirExprKind::Binary { left, right, .. } => {
+                Self::expr_may_escape_array(left, array_local_index)
+                    || Self::expr_may_escape_array(right, array_local_index)
+            }
+            HirExprKind::Unary { operand, .. } => Self::expr_may_escape_array(operand, array_local_index),
+            HirExprKind::Index { receiver, index } => {
+                Self::expr_may_escape_array(index, array_local_index)
+                    || (Self::local_index_for_expr(receiver) != Some(array_local_index)
+                        && Self::expr_may_escape_array(receiver, array_local_index))
+            }
+            HirExprKind::Tuple(items) | HirExprKind::Array(items) | HirExprKind::VecLiteral(items) => items
+                .iter()
+                .any(|item| Self::expr_may_escape_array(item, array_local_index)),
+            _ => false,
+        }
     }
 
     fn is_unsigned_int_type(ty: TypeId) -> bool {
