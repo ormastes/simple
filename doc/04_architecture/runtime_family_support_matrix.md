@@ -142,7 +142,7 @@ The production ownership rule is behavioral, not name-only:
 | `nogc_async_immut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (2nd priority in search, boundary warnings) | Yes (persistent structures, Atom/Ref, combinators) | Yes (2nd priority) | Minimal | Resolution and root exports fixed; broader runtime coverage still limited |
 | `nogc_async_mut_noalloc` | `@no_gc` on root `__init__.spl`; direct and reachable unsafe imports plus explicit `@alloc` markers blocked by regression | Yes (10th priority in search, boundary warnings) | Yes (baremetal/noalloc exports) | Yes (10th priority) | Partial (QEMU); check-clean under full-family `simple check` | Root export surface exists; compiler-owned capability enforcement remains partial |
 | `gc_sync_mut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (8th priority) | Yes (facade root) | Yes (8th priority) | Minimal | Facade over `gc_async_mut`; no independent sync runtime semantics yet |
-| `gc_async_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (7th priority) | Yes | Yes (7th priority) | Minimal | Native pure-combinator facade coverage passes; Atom behavior currently times out with atomic stubs |
+| `gc_async_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (7th priority) | Yes | Yes (7th priority) | Minimal | Native pure-combinator facade coverage passes; Atom/VersionedSnapshot behavior still fails or times out even with hosted runtime atomics |
 | `gc_sync_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (9th priority) | Yes | Yes (9th priority) | Minimal | Native pure-combinator facade coverage passes; Atom behavior depends on GC async immutable blocker |
 | `nogc_sync_immut` | `@no_gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (3rd priority) | Yes | Yes (3rd priority) | Minimal | Native pure-combinator facade coverage passes; Atom behavior depends on no-GC async immutable blocker |
 
@@ -336,7 +336,7 @@ The `gc_off` flag in `CompileOptions` remains a global no-GC switch; `allowed_fa
 - [x] Add interpreter fallback search and family extraction
 - [x] Add focused import and interpreter behavior tests
 - [x] Add native pure-combinator facade coverage
-- [ ] Fix native Atom/atomic runtime behavior across the facade families
+- [ ] Fix native Atom/VersionedSnapshot runtime behavior across the facade families
 
 ---
 
