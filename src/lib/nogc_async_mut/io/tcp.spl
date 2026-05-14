@@ -51,6 +51,14 @@ use std.common.io.types.{IoError, IoErrorKind, Interest, Shutdown}
 use std.nogc_async_mut.io.event_loop.{EventLoop, Waker}
 use std.async.future.{Future}
 
+fn tcp_sub_bytes(data: [u8], start: i64, end: i64) -> [u8]:
+    var result: [u8] = []
+    var i = start
+    while i < end and i < data.len():
+        result.push(data[i])
+        i = i + 1
+    result
+
 # ============================================================================
 # Shared Event Loop
 # ============================================================================
@@ -105,9 +113,7 @@ class AsyncTcpListener with AsyncClose:
         """
         if not self.open:
             return Future.from_value(Err(IoError(kind: IoErrorKind.Other, message: "listener is closed", source: nil)))
-        val fd = self.fd
-        val loop = self.loop
-        rt_async_tcp_accept(fd, loop)
+        Future.from_value(do_accept(self.fd, self.loop))
 
     fn local_addr() -> Result<text, IoError>:
         """Get local bound address (sync — cached).
@@ -167,7 +173,7 @@ class AsyncTcpStream with AsyncRead, AsyncWrite, AsyncClose:
             Future with Result containing connected stream
         """
         val loop = get_loop()
-        rt_async_tcp_connect(addr, loop)
+        Future.from_value(do_connect(addr, loop))
 
     static fn connect_timeout(addr: text, ms: i64) -> Future<Result<AsyncTcpStream, IoError>>:
         """Connect with timeout.
@@ -180,7 +186,7 @@ class AsyncTcpStream with AsyncRead, AsyncWrite, AsyncClose:
             Future with Result or TimedOut error
         """
         val loop = get_loop()
-        rt_async_tcp_connect_timeout(addr, ms, loop)
+        Future.from_value(do_connect_timeout(addr, ms, loop))
 
     # --- AsyncRead (epoll-driven) ---
 
@@ -188,31 +194,31 @@ class AsyncTcpStream with AsyncRead, AsyncWrite, AsyncClose:
         """Read up to size bytes (non-blocking)."""
         if not self.open:
             return Future.from_value(Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil)))
-        rt_async_tcp_read(self.fd, size, self.loop)
+        Future.from_value(do_read(self.fd, size))
 
     fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
         """Read exactly size bytes (non-blocking)."""
         if not self.open:
             return Future.from_value(Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil)))
-        rt_async_tcp_read_exact(self.fd, size, self.loop)
+        Future.from_value(do_read_exact(self.fd, size))
 
     fn read_all() -> Future<Result<[u8], IoError>>:
         """Read all bytes until EOF (non-blocking)."""
         if not self.open:
             return Future.from_value(Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil)))
-        rt_async_tcp_read_all(self.fd, self.loop)
+        Future.from_value(do_read_all(self.fd))
 
     fn read_text() -> Future<Result<text, IoError>>:
         """Read all content as text (non-blocking)."""
         if not self.open:
             return Future.from_value(Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil)))
-        rt_async_tcp_read_text(self.fd, self.loop)
+        Future.from_value(do_read_text(self.fd))
 
     fn read_line() -> Future<Result<text, IoError>>:
         """Read a single line (non-blocking)."""
         if not self.open:
             return Future.from_value(Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil)))
-        rt_async_tcp_read_line(self.fd, self.loop)
+        Future.from_value(do_read_line(self.fd))
 
     # --- AsyncWrite (epoll-driven) ---
 
@@ -220,25 +226,25 @@ class AsyncTcpStream with AsyncRead, AsyncWrite, AsyncClose:
         """Write bytes (non-blocking)."""
         if not self.open:
             return Future.from_value(Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil)))
-        rt_async_tcp_write(self.fd, data, self.loop)
+        Future.from_value(do_write(self.fd, data))
 
     fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
         """Write all bytes (non-blocking)."""
         if not self.open:
             return Future.from_value(Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil)))
-        rt_async_tcp_write_all(self.fd, data, self.loop)
+        Future.from_value(do_write_all(self.fd, data))
 
     fn write_text(s: text) -> Future<Result<(), IoError>>:
         """Write text (non-blocking)."""
         if not self.open:
             return Future.from_value(Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil)))
-        rt_async_tcp_write_text(self.fd, s, self.loop)
+        Future.from_value(do_write_text(self.fd, s))
 
     fn flush() -> Future<Result<(), IoError>>:
         """Flush write buffer (non-blocking)."""
         if not self.open:
             return Future.from_value(Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil)))
-        rt_async_tcp_flush(self.fd, self.loop)
+        Future.from_value(do_flush(self.fd))
 
     # --- AsyncClose trait ---
 
@@ -306,34 +312,120 @@ fn do_bind(addr: text, loop: EventLoop) -> Result<AsyncTcpListener, IoError>:
         return Err(IoError(kind: IoErrorKind.Other, message: "set_nonblocking failed", source: nil))
     Ok(AsyncTcpListener(fd: fd, loop: loop, open: true))
 
+fn do_accept(fd: i64, loop: EventLoop) -> Result<AsyncTcpStream, IoError>:
+    val client_fd = rt_io_tcp_accept(fd)
+    if client_fd < 0:
+        return Err(IoError(kind: IoErrorKind.Other, message: "accept failed", source: nil))
+    val ok = rt_socket_set_nonblocking(client_fd, true)
+    if not ok:
+        rt_io_tcp_close(client_fd)
+        return Err(IoError(kind: IoErrorKind.Other, message: "set_nonblocking failed", source: nil))
+    Ok(AsyncTcpStream(fd: client_fd, loop: loop, open: true))
+
+fn do_connect(addr: text, loop: EventLoop) -> Result<AsyncTcpStream, IoError>:
+    val fd = rt_io_tcp_connect(addr)
+    if fd < 0:
+        return Err(IoError(kind: IoErrorKind.ConnectionRefused, message: "connect failed: {addr}", source: nil))
+    val ok = rt_socket_set_nonblocking(fd, true)
+    if not ok:
+        rt_io_tcp_close(fd)
+        return Err(IoError(kind: IoErrorKind.Other, message: "set_nonblocking failed", source: nil))
+    Ok(AsyncTcpStream(fd: fd, loop: loop, open: true))
+
+fn do_connect_timeout(addr: text, ms: i64, loop: EventLoop) -> Result<AsyncTcpStream, IoError>:
+    val fd = rt_io_tcp_connect_timeout(addr, ms)
+    if fd < 0:
+        return Err(IoError(kind: IoErrorKind.TimedOut, message: "connect timed out: {addr}", source: nil))
+    val ok = rt_socket_set_nonblocking(fd, true)
+    if not ok:
+        rt_io_tcp_close(fd)
+        return Err(IoError(kind: IoErrorKind.Other, message: "set_nonblocking failed", source: nil))
+    Ok(AsyncTcpStream(fd: fd, loop: loop, open: true))
+
+fn do_read(fd: i64, size: i64) -> Result<[u8], IoError>:
+    val data = rt_io_tcp_read(fd, size)
+    Ok(data)
+
+fn do_read_exact(fd: i64, size: i64) -> Result<[u8], IoError>:
+    var buf: [u8] = []
+    var remaining = size
+    while remaining > 0:
+        val chunk = rt_io_tcp_read(fd, remaining)
+        if chunk.len() == 0:
+            return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "read_exact: got {buf.len()} of {size} bytes", source: nil))
+        buf = buf + chunk
+        remaining = remaining - chunk.len()
+    Ok(buf)
+
+fn do_read_all(fd: i64) -> Result<[u8], IoError>:
+    var buf: [u8] = []
+    while true:
+        val chunk = rt_io_tcp_read(fd, 8192)
+        if chunk.len() == 0:
+            break
+        buf = buf + chunk
+    Ok(buf)
+
+fn do_read_text(fd: i64) -> Result<text, IoError>:
+    val bytes = do_read_all(fd)?
+    Ok(rt_bytes_to_text(bytes))
+
+fn do_read_line(fd: i64) -> Result<text, IoError>:
+    val line = rt_io_tcp_read_line(fd)
+    if line == nil:
+        return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "end of stream", source: nil))
+    Ok(line)
+
+fn do_write(fd: i64, data: [u8]) -> Result<i64, IoError>:
+    val written = rt_io_tcp_write(fd, data)
+    if written < 0:
+        return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write failed", source: nil))
+    Ok(written)
+
+fn do_write_all(fd: i64, data: [u8]) -> Result<(), IoError>:
+    var offset = 0
+    while offset < data.len():
+        val remaining = tcp_sub_bytes(data, offset, data.len())
+        val written = rt_io_tcp_write(fd, remaining)
+        if written <= 0:
+            return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write_all failed", source: nil))
+        offset = offset + written
+    Ok(())
+
+fn do_write_text(fd: i64, s: text) -> Result<(), IoError>:
+    val written = rt_io_tcp_write_text(fd, s)
+    if written <= 0:
+        return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write_text failed", source: nil))
+    Ok(())
+
+fn do_flush(fd: i64) -> Result<(), IoError>:
+    val ok = rt_io_tcp_flush(fd)
+    if not ok:
+        return Err(IoError(kind: IoErrorKind.Other, message: "flush failed", source: nil))
+    Ok(())
+
 # ============================================================================
 # FFI Functions
 # ============================================================================
 
 # Sync helpers used during setup
 extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_accept(fd: i64) -> i64
+extern fn rt_io_tcp_connect(addr: text) -> i64
+extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_read_line(fd: i64) -> text?
+extern fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_flush(fd: i64) -> bool
 extern fn rt_io_tcp_close(fd: i64) -> bool
 extern fn rt_io_tcp_local_addr(fd: i64) -> text?
 extern fn rt_io_tcp_peer_addr(fd: i64) -> text?
 extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
 extern fn rt_io_tcp_shutdown(fd: i64, how: i64) -> bool
 extern fn rt_socket_set_nonblocking(fd: i64, enabled: bool) -> bool
-
-# Async operations (return Future via runtime)
-extern fn rt_async_tcp_accept(fd: i64, loop: EventLoop) -> Future<Result<AsyncTcpStream, IoError>>
-extern fn rt_async_tcp_connect(addr: text, loop: EventLoop) -> Future<Result<AsyncTcpStream, IoError>>
-extern fn rt_async_tcp_connect_timeout(addr: text, ms: i64, loop: EventLoop) -> Future<Result<AsyncTcpStream, IoError>>
-extern fn rt_async_tcp_read(fd: i64, size: i64, loop: EventLoop) -> Future<Result<[u8], IoError>>
-extern fn rt_async_tcp_read_exact(fd: i64, size: i64, loop: EventLoop) -> Future<Result<[u8], IoError>>
-extern fn rt_async_tcp_read_all(fd: i64, loop: EventLoop) -> Future<Result<[u8], IoError>>
-extern fn rt_async_tcp_read_text(fd: i64, loop: EventLoop) -> Future<Result<text, IoError>>
-extern fn rt_async_tcp_read_line(fd: i64, loop: EventLoop) -> Future<Result<text, IoError>>
-extern fn rt_async_tcp_write(fd: i64, data: [u8], loop: EventLoop) -> Future<Result<i64, IoError>>
-extern fn rt_async_tcp_write_all(fd: i64, data: [u8], loop: EventLoop) -> Future<Result<(), IoError>>
-extern fn rt_async_tcp_write_text(fd: i64, s: text, loop: EventLoop) -> Future<Result<(), IoError>>
-extern fn rt_async_tcp_flush(fd: i64, loop: EventLoop) -> Future<Result<(), IoError>>
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 # ============================================================================
 # Exports
 # ============================================================================
-
