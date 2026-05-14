@@ -115,10 +115,35 @@ pub fn declare_functions<M: Module>(
 pub fn build_mir_signature(func: &MirFunction) -> Signature {
     let call_conv = platform_call_conv();
     let mut sig = Signature::new(call_conv);
+    let runtime_param_types = crate::codegen::runtime_ffi::RUNTIME_FUNCS
+        .iter()
+        .find(|spec| spec.name == func.name)
+        .and_then(|spec| {
+            if spec.params.len() == func.params.len()
+                && spec
+                    .params
+                    .iter()
+                    .zip(func.params.iter())
+                    .all(|(runtime_ty, param)| *runtime_ty == type_to_cranelift(param.ty))
+            {
+                Some(spec.params)
+            } else {
+                None
+            }
+        });
 
-    // Uniform I64 for all parameters — matches cross-module import assumption
-    for _param in &func.params {
-        sig.params.push(AbiParam::new(types::I64));
+    // User functions use uniform I64 parameters for cross-module imports.
+    // Pure-Simple runtime helpers may opt into exact runtime ABI parameters
+    // when their declared Simple parameter types already match the runtime
+    // table. This lets simple-core provide narrow ABI symbols like rt_enum_new.
+    if let Some(params) = runtime_param_types {
+        for param_ty in params {
+            sig.params.push(AbiParam::new(*param_ty));
+        }
+    } else {
+        for _param in &func.params {
+            sig.params.push(AbiParam::new(types::I64));
+        }
     }
 
     // Return type: main() must return I32 for process exit code
@@ -133,6 +158,50 @@ pub fn build_mir_signature(func: &MirFunction) -> Signature {
     }
 
     sig
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn param(name: &str, ty: TypeId) -> MirLocal {
+        MirLocal {
+            name: name.to_string(),
+            ty,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        }
+    }
+
+    #[test]
+    fn runtime_helper_uses_exact_params_when_simple_decl_matches_runtime_abi() {
+        let mut func = MirFunction::new("rt_enum_new".to_string(), TypeId::I64, Visibility::Public);
+        func.params.push(param("enum_id", TypeId::I32));
+        func.params.push(param("discriminant", TypeId::I32));
+        func.params.push(param("payload", TypeId::I64));
+
+        let sig = build_mir_signature(&func);
+
+        assert_eq!(sig.params[0].value_type, types::I32);
+        assert_eq!(sig.params[1].value_type, types::I32);
+        assert_eq!(sig.params[2].value_type, types::I64);
+        assert_eq!(sig.returns[0].value_type, types::I64);
+    }
+
+    #[test]
+    fn runtime_helper_keeps_uniform_params_when_simple_decl_does_not_match_runtime_abi() {
+        let mut func = MirFunction::new("rt_enum_new".to_string(), TypeId::I64, Visibility::Public);
+        func.params.push(param("enum_id", TypeId::I64));
+        func.params.push(param("discriminant", TypeId::I64));
+        func.params.push(param("payload", TypeId::I64));
+
+        let sig = build_mir_signature(&func);
+
+        assert_eq!(sig.params[0].value_type, types::I64);
+        assert_eq!(sig.params[1].value_type, types::I64);
+        assert_eq!(sig.params[2].value_type, types::I64);
+        assert_eq!(sig.returns[0].value_type, types::I64);
+    }
 }
 
 /// Return a function address for an outlined MIR block.

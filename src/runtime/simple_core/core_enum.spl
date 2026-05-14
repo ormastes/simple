@@ -1,44 +1,51 @@
-# Pure-Simple enum heap-object ABI.
+# Pure-Simple enum ABI helpers.
 
-extern fn malloc(size: i64) -> i64
+extern fn calloc(count: i64, size: i64) -> i64
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+
+fn store_u32_le(ptr: i64, offset: i64, value: i64):
+    spl_store_u8(ptr, offset, value & 255)
+    spl_store_u8(ptr, offset + 1, (value >> 8) & 255)
+    spl_store_u8(ptr, offset + 2, (value >> 16) & 255)
+    spl_store_u8(ptr, offset + 3, (value >> 24) & 255)
+
+fn load_u32_le(ptr: i64, offset: i64) -> i64:
+    return spl_load_u8(ptr, offset) |
+        (spl_load_u8(ptr, offset + 1) << 8) |
+        (spl_load_u8(ptr, offset + 2) << 16) |
+        (spl_load_u8(ptr, offset + 3) << 24)
 
 fn enum_ptr(value: i64) -> i64:
-    if (value & 7) < 1 or (value & 7) > 1:
+    if value < 4096:
+        return 0
+    if (value & 7) != 1:
         return 0
     val ptr = value & -8
-    if ptr < 1:
-        return 0
-    val header = spl_load_i64(ptr, 0)
-    if (header & 255) < 7 or (header & 255) > 7:
+    if spl_load_u8(ptr, 0) != 4:
         return 0
     return ptr
 
-pub fn rt_simple_enum_new(enum_id: i64, discriminant: i64, payload: i64) -> i64:
-    val ptr = malloc(24)
-    if ptr < 1:
+pub fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64:
+    val value = calloc(1, 24)
+    if value < 1:
         return 3
-    spl_store_i64(ptr, 0, 103079215111)
-    spl_store_i64(ptr, 8, (enum_id & 4294967295) | ((discriminant & 4294967295) << 32))
-    spl_store_i64(ptr, 16, payload)
-    return ptr | 1
+    spl_store_u8(value, 0, 4)
+    store_u32_le(value, 4, enum_id)
+    store_u32_le(value, 8, discriminant)
+    spl_store_i64(value, 16, payload)
+    return value | 1
 
 pub fn rt_enum_discriminant(value: i64) -> i64:
     val ptr = enum_ptr(value)
     if ptr < 1:
         return -1
-    return (spl_load_i64(ptr, 8) >> 32) & 4294967295
+    return load_u32_le(ptr, 8)
 
 pub fn rt_enum_payload(value: i64) -> i64:
     val ptr = enum_ptr(value)
     if ptr < 1:
         return 3
     return spl_load_i64(ptr, 16)
-
-pub fn rt_enum_check_discriminant(value: i64, discriminant: i64) -> i8:
-    val actual = rt_enum_discriminant(value)
-    val expected = discriminant & 4294967295
-    if actual >= expected and actual <= expected:
-        return 1
-    return 0

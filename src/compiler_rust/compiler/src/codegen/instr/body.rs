@@ -327,13 +327,16 @@ pub fn compile_function_body<M: Module>(
     builder.switch_to_block(entry_block);
 
     // Initialize parameter variables.
-    // Function signature uses uniform I64 for all params, but variables may be
-    // declared with narrower types. Convert block params to match variable types.
+    // Function signatures normally use uniform I64 params; exact-ABI runtime
+    // helpers can use narrower params. Convert block params to variable types.
     for (i, param) in func.params.iter().enumerate() {
-        let val = builder.block_params(entry_block)[i]; // Always I64 from signature
+        let val = builder.block_params(entry_block)[i];
         let var = variables[&i];
         let expected_ty = type_to_cranelift(param.ty);
-        let converted = if expected_ty == types::I64 {
+        let actual_ty = builder.func.dfg.value_type(val);
+        let converted = if actual_ty == expected_ty {
+            val
+        } else if expected_ty == types::I64 {
             val
         } else if expected_ty.is_int() {
             builder.ins().ireduce(expected_ty, val)
