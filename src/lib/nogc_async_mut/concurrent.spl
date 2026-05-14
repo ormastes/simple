@@ -1,12 +1,12 @@
 # Concurrent Data Structures
 #
 # Thread-safe data structures for concurrent programming.
-# Built on working SFFI primitives: channels, atomic ints, atomic bools, and hashmaps.
+# Built on working SFFI primitives for channels and atomics; maps are pure Simple.
 #
 # Components:
 # - MpscQueue: Multi-producer single-consumer queue (channel-based)
 # - MpmcQueue: Multi-producer multi-consumer queue (channel-based, bounded)
-# - ConcurrentMap: Thread-safe hash map (__rt_hashmap-based)
+# - ConcurrentMap: Compatibility hash map backed by pure Simple storage
 # - AtomicFlag: Simple atomic boolean flag
 # - Once: Run initialization exactly once
 # - Barrier: Synchronize multiple threads
@@ -14,18 +14,6 @@
 use std.nogc_async_mut.concurrent.channel.{Channel, channel_new}
 use std.nogc_async_mut.concurrent.thread.{thread_yield}
 use std.nogc_sync_mut.atomic.{AtomicI64, AtomicBool, MemoryOrdering, atomic_i64_new, atomic_bool_new}
-
-# ============================================================================
-# FFI Declarations (all known-working SFFI)
-# ============================================================================
-
-# HashMap operations
-extern fn __rt_hashmap_new() -> i64
-extern fn __rt_hashmap_insert(handle: i64, key: text, value: Any) -> bool
-extern fn __rt_hashmap_get(handle: i64, key: text) -> Any
-extern fn __rt_hashmap_contains_key(handle: i64, key: text) -> bool
-extern fn __rt_hashmap_remove(handle: i64, key: text) -> Any
-extern fn __rt_hashmap_len(handle: i64) -> i64
 
 # ============================================================================
 # MpscQueue - Multi-Producer Single-Consumer Queue
@@ -111,36 +99,66 @@ fn mpmc_queue_with_capacity(capacity: i64) -> MpmcQueue:
     )
 
 # ============================================================================
-# ConcurrentMap - Thread-Safe Hash Map
+# ConcurrentMap - Pure Simple Compatibility Map
 # ============================================================================
 
-class ConcurrentMap:
-    _handle: i64
+struct ConcurrentMapEntry:
+    key: text
+    value: Any
 
-    fn insert(key: text, value: Any) -> bool:
-        __rt_hashmap_insert(self._handle, key, value)
+class ConcurrentMap:
+    entries_: [ConcurrentMapEntry]
+
+    me insert(key: text, value: Any) -> bool:
+        for i in 0..self.entries_.len():
+            if self.entries_[i].key == key:
+                self.entries_[i] = ConcurrentMapEntry(key: key, value: value)
+                return false
+        self.entries_.append(ConcurrentMapEntry(key: key, value: value))
+        true
 
     fn get(key: text) -> Any:
-        __rt_hashmap_get(self._handle, key)
+        for entry in self.entries_:
+            if entry.key == key:
+                return entry.value
+        nil
 
-    fn remove(key: text) -> Any:
-        __rt_hashmap_remove(self._handle, key)
+    me remove(key: text) -> Any:
+        for i in 0..self.entries_.len():
+            if self.entries_[i].key == key:
+                val value = self.entries_[i].value
+                self.entries_ = _concurrent_map_entries_remove(self.entries_, i)
+                return value
+        nil
 
     fn contains_key(key: text) -> bool:
-        __rt_hashmap_contains_key(self._handle, key)
+        for entry in self.entries_:
+            if entry.key == key:
+                return true
+        false
+
+    fn has(key: text) -> bool:
+        self.contains_key(key)
 
     fn len() -> i64:
-        __rt_hashmap_len(self._handle)
+        self.entries_.len() as i64
 
     fn is_empty() -> bool:
-        __rt_hashmap_len(self._handle) == 0
+        self.entries_.len() == 0
+
+fn _concurrent_map_entries_remove(items: [ConcurrentMapEntry], idx: i64) -> [ConcurrentMapEntry]:
+    var result: [ConcurrentMapEntry] = []
+    for i in 0..items.len():
+        if i != idx:
+            result.append(items[i])
+    result
 
 fn concurrent_map_new() -> ConcurrentMap:
-    ConcurrentMap(_handle: __rt_hashmap_new())
+    ConcurrentMap(entries_: [])
 
-# Provided for API compat - sharding not needed (runtime HashMap is thread-safe)
+# Provided for API compat; sharding is not used by the pure Simple storage.
 fn concurrent_map_with_shards(num_shards: i64) -> ConcurrentMap:
-    ConcurrentMap(_handle: __rt_hashmap_new())
+    ConcurrentMap(entries_: [])
 
 # ============================================================================
 # AtomicFlag - Simple Atomic Boolean Flag
