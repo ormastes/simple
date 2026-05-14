@@ -12,7 +12,7 @@ use super::super::{
 use crate::di::DiConfig;
 use crate::hir::{BinOp, HirContract, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId};
 use crate::mir::instructions::VReg;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 //==============================================================================
@@ -304,6 +304,8 @@ pub struct MirLowerer<'a> {
     pub(super) active_array_append_ptrs: Vec<ArrayAppendPtrs>,
     /// Hoisted array data pointers for read-only loops with active length proofs.
     pub(super) active_array_data_ptrs: Vec<(usize, VReg)>,
+    /// Array locals allocated only to receive ignored appends.
+    pub(super) dead_append_array_locals: HashSet<usize>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -333,6 +335,7 @@ impl<'a> MirLowerer<'a> {
             active_array_append_bounds: Vec::new(),
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
+            dead_append_array_locals: HashSet::new(),
         }
     }
 
@@ -358,6 +361,7 @@ impl<'a> MirLowerer<'a> {
             active_array_append_bounds: Vec::new(),
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
+            dead_append_array_locals: HashSet::new(),
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,
@@ -513,6 +517,10 @@ impl<'a> MirLowerer<'a> {
             .find_map(|ptrs| (ptrs.array_local_index == array_local_index).then_some(*ptrs))
     }
 
+    pub(super) fn is_dead_append_array_local(&self, receiver: &HirExpr) -> bool {
+        Self::local_index_for_expr(receiver).is_some_and(|idx| self.dead_append_array_locals.contains(&idx))
+    }
+
     pub(super) fn body_may_mutate_or_escape_array(body: &[HirStmt], array_local_index: usize) -> bool {
         body.iter()
             .any(|stmt| Self::stmt_may_mutate_or_escape_array(stmt, array_local_index))
@@ -655,6 +663,152 @@ impl<'a> MirLowerer<'a> {
             }
         }
         append_count == 1
+    }
+
+    fn dead_append_array_locals_for_body(body: &[HirStmt]) -> HashSet<usize> {
+        let mut candidates = Vec::new();
+        Self::collect_dead_append_candidates(body, &mut candidates);
+        candidates
+            .into_iter()
+            .filter(|local_index| {
+                let mut push_count = 0usize;
+                Self::body_uses_array_only_for_ignored_appends(body, *local_index, &mut push_count) && push_count > 0
+            })
+            .collect()
+    }
+
+    fn collect_dead_append_candidates(body: &[HirStmt], candidates: &mut Vec<usize>) {
+        for stmt in body {
+            match stmt {
+                HirStmt::Let {
+                    local_index,
+                    value: Some(value),
+                    ..
+                } if Self::capacity_local_for_new_array_expr(value).is_some() => {
+                    candidates.push(*local_index);
+                }
+                HirStmt::If {
+                    then_block, else_block, ..
+                } => {
+                    Self::collect_dead_append_candidates(then_block, candidates);
+                    if let Some(else_block) = else_block {
+                        Self::collect_dead_append_candidates(else_block, candidates);
+                    }
+                }
+                HirStmt::While { body, .. }
+                | HirStmt::Loop { body, .. }
+                | HirStmt::For { body, .. }
+                | HirStmt::Defer { body } => {
+                    Self::collect_dead_append_candidates(body, candidates);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn body_uses_array_only_for_ignored_appends(
+        body: &[HirStmt],
+        array_local_index: usize,
+        push_count: &mut usize,
+    ) -> bool {
+        body.iter()
+            .all(|stmt| Self::stmt_uses_array_only_for_ignored_appends(stmt, array_local_index, push_count))
+    }
+
+    fn stmt_uses_array_only_for_ignored_appends(
+        stmt: &HirStmt,
+        array_local_index: usize,
+        push_count: &mut usize,
+    ) -> bool {
+        match stmt {
+            HirStmt::Let {
+                local_index,
+                value: Some(value),
+                ..
+            } if *local_index == array_local_index && Self::capacity_local_for_new_array_expr(value).is_some() => true,
+            HirStmt::Expr(expr) => {
+                if let HirExprKind::MethodCall {
+                    receiver, method, args, ..
+                } = &expr.kind
+                {
+                    if method == "push"
+                        && args.len() == 1
+                        && Self::local_index_for_expr(receiver) == Some(array_local_index)
+                        && !Self::expr_mentions_array(&args[0], array_local_index)
+                    {
+                        *push_count += 1;
+                        return true;
+                    }
+                }
+                !Self::expr_mentions_array(expr, array_local_index)
+            }
+            HirStmt::Let { value, .. } => value
+                .as_ref()
+                .is_none_or(|expr| !Self::expr_mentions_array(expr, array_local_index)),
+            HirStmt::Assign { target, value } => {
+                !Self::expr_mentions_array(target, array_local_index)
+                    && !Self::expr_mentions_array(value, array_local_index)
+            }
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                !Self::expr_mentions_array(condition, array_local_index)
+                    && Self::body_uses_array_only_for_ignored_appends(then_block, array_local_index, push_count)
+                    && else_block.as_ref().is_none_or(|body| {
+                        Self::body_uses_array_only_for_ignored_appends(body, array_local_index, push_count)
+                    })
+            }
+            HirStmt::While { condition, body, .. } => {
+                !Self::expr_mentions_array(condition, array_local_index)
+                    && Self::body_uses_array_only_for_ignored_appends(body, array_local_index, push_count)
+            }
+            HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
+                Self::body_uses_array_only_for_ignored_appends(body, array_local_index, push_count)
+            }
+            HirStmt::For { iterable, body, .. } => {
+                !Self::expr_mentions_array(iterable, array_local_index)
+                    && Self::body_uses_array_only_for_ignored_appends(body, array_local_index, push_count)
+            }
+            HirStmt::Return(Some(expr))
+            | HirStmt::Assert { condition: expr, .. }
+            | HirStmt::Assume { condition: expr, .. }
+            | HirStmt::Admit { condition: expr, .. } => !Self::expr_mentions_array(expr, array_local_index),
+            HirStmt::Return(None)
+            | HirStmt::Break
+            | HirStmt::Continue
+            | HirStmt::ProofHint { .. }
+            | HirStmt::Calc { .. }
+            | HirStmt::InlineAsm { .. } => true,
+        }
+    }
+
+    fn expr_mentions_array(expr: &HirExpr, array_local_index: usize) -> bool {
+        match &expr.kind {
+            HirExprKind::Local(idx) => *idx == array_local_index,
+            HirExprKind::MethodCall { receiver, args, .. } => {
+                Self::expr_mentions_array(receiver, array_local_index)
+                    || args.iter().any(|arg| Self::expr_mentions_array(arg, array_local_index))
+            }
+            HirExprKind::Call { func, args } => {
+                Self::expr_mentions_array(func, array_local_index)
+                    || args.iter().any(|arg| Self::expr_mentions_array(arg, array_local_index))
+            }
+            HirExprKind::Binary { left, right, .. } => {
+                Self::expr_mentions_array(left, array_local_index)
+                    || Self::expr_mentions_array(right, array_local_index)
+            }
+            HirExprKind::Unary { operand, .. } => Self::expr_mentions_array(operand, array_local_index),
+            HirExprKind::Index { receiver, index } => {
+                Self::expr_mentions_array(receiver, array_local_index)
+                    || Self::expr_mentions_array(index, array_local_index)
+            }
+            HirExprKind::Tuple(items) | HirExprKind::Array(items) | HirExprKind::VecLiteral(items) => items
+                .iter()
+                .any(|item| Self::expr_mentions_array(item, array_local_index)),
+            _ => false,
+        }
     }
 
     fn is_unsigned_int_type(ty: TypeId) -> bool {
@@ -1113,6 +1267,7 @@ impl<'a> MirLowerer<'a> {
 
         // Reset last expression value for this function
         self.last_expr_value = None;
+        self.dead_append_array_locals = Self::dead_append_array_locals_for_body(&func.body);
 
         // Emit function entry path probe for coverage (#674)
         self.emit_function_entry_probe()?;

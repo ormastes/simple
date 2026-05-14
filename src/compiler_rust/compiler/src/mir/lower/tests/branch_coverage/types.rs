@@ -121,6 +121,23 @@ fn u64_array_index_uses_word_fast_path() {
     }));
 }
 
+#[test]
+fn dead_capacity_array_push_is_elided_but_value_is_lowered() {
+    let mir = compile_to_mir(
+        "extern fn rt_array_new_with_cap(cap: u64) -> [u64]\n\nfn value() -> u64:\n    return 7u64\n\nfn test():\n    val length: u64 = 4u64\n    var index: u64 = 0u64\n    while index < length:\n        var arr: [u64] = rt_array_new_with_cap(length)\n        arr.push(value())\n        index = index + 1u64\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("value"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_new_with_cap"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_words_u64_push"))
+    }));
+}
+
 // =============================================================================
 // Index result unboxing (lowering_expr.rs lines 938, 945)
 // =============================================================================

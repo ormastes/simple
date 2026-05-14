@@ -225,6 +225,16 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   measured list traversal at `1,627,370` Simple ops/ms (`0.37x` C, `0.26x`
   Rust), list push at `148,731` Simple ops/ms (`0.06x` C, `0.10x` Rust), and
   set-like membership at `2,002` Simple ops/ms (`0.30x` C, `0.15x` Rust).
+- MIR lowering now eliminates arrays whose only observable use is an ignored
+  `push` into a capacity-allocated local. Push arguments are still lowered for
+  side effects, but the dead array allocation and stores are removed. This
+  matches the native compilers' ability to remove dead append-only storage in
+  the synthetic push benchmark without changing checksum behavior. Disassembly
+  of `bench_list_push` shows no capacity allocation call in the timed loop and
+  no slot store in the inner loop. A one-sample benchmark kept checksum parity
+  and measured list traversal at `1,917,783` Simple ops/ms (`0.44x` C, `0.20x`
+  Rust), list push at `1,292,198` Simple ops/ms (`0.41x` C, `0.87x` Rust), and
+  set-like membership at `3,534` Simple ops/ms (`0.51x` C, `0.28x` Rust).
 
 ## Next Concrete Plugin Work
 

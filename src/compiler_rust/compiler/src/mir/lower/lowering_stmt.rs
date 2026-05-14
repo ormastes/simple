@@ -17,6 +17,11 @@ impl<'a> MirLowerer<'a> {
                 ty: declared_ty,
                 value,
             } => {
+                if self.dead_append_array_locals.contains(local_index) {
+                    self.record_len_local_source(*local_index, None);
+                    self.record_array_capacity_local_source(*local_index, None);
+                    return Ok(());
+                }
                 if let Some(val) = value {
                     if matches!(
                         &val.kind,
@@ -601,6 +606,12 @@ impl<'a> MirLowerer<'a> {
                 } = &expr.kind
                 {
                     if method == "push" && args.len() == 1 {
+                        if self.is_dead_append_array_local(receiver) {
+                            let _ = self.lower_expr(&args[0])?;
+                            self.last_expr_value = None;
+                            return Ok(());
+                        }
+
                         let typed_push_target = if args[0].ty == TypeId::U8
                             && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
                                 |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8),
