@@ -935,7 +935,7 @@ pub use simd::{
 pub use numeric_kernels::{
     rt_numeric_active_simd_tier, rt_numeric_add_f32, rt_numeric_add_f64, rt_numeric_dot_f32, rt_numeric_dot_f64,
     rt_numeric_fma_f32, rt_numeric_fma_f64, rt_numeric_max_f32, rt_numeric_min_f32, rt_numeric_mul_f32,
-    rt_numeric_mul_f64, rt_numeric_sum_f32, rt_numeric_sum_f64,
+    rt_numeric_mul_f64, rt_numeric_sum_f32, rt_numeric_sum_f64, rt_numeric_xor_sum_u64,
 };
 
 // Re-export Phase 1 SIMD int bitwise / shift / arithmetic FFI symbols.
