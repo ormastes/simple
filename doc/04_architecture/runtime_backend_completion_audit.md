@@ -117,6 +117,8 @@ Executed on 2026-05-14:
   - `remaining=9` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the FFI runtime, FFI I/O, TLS FFI, and HTTP FFI facades.
 - No-GC async CLI/system/debug wildcard facade review scan:
   - `remaining=6` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the CLI, system, and debug FFI facades.
+- No-GC async graphics/window/codegen/Torch wildcard facade review scan:
+  - `remaining=1` wildcard facade still points at a no-GC sync owner with runtime hooks after narrowing the graphics2d, Rapier2D, window, codegen, and Torch FFI facades. The remaining item is `io/pipe`, documented as blocked by parser ambiguity around explicit `out`/`err` exports.
 - Focused runtime-path specs:
   - `test/unit/lib/nogc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
   - `test/unit/lib/gc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
