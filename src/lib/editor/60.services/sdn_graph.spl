@@ -1,0 +1,429 @@
+# Editor SDN Graph
+#
+# Parses compact graph blocks used by Markdown preview and graph plugins.
+# Source syntax attaches visual names with @foo, while the normalized model keeps
+# the field name `css` for node and edge style labels.
+
+struct SdnGraphNode:
+    id: text
+    label: text
+    css: text
+    role: text
+    shape: text
+
+struct SdnGraphEdge:
+    from_id: text
+    to_id: text
+    label: text
+    css: text
+    kind: text
+
+struct SdnGraphCss:
+    name: text
+    parent_css: text
+    target: text
+
+struct SdnGraphStyle:
+    css: text
+    key: text
+    value: text
+
+struct SdnGraphWeave:
+    target: text
+    field: text
+    value: text
+    add_css: text
+    shape: text
+
+struct SdnGraph:
+    name: text
+    direction: text
+    theme: text
+    css_file: text
+    nodes: [SdnGraphNode]
+    edges: [SdnGraphEdge]
+    css_defs: [SdnGraphCss]
+    styles: [SdnGraphStyle]
+    weaves: [SdnGraphWeave]
+
+fn sdn_graph_empty() -> SdnGraph:
+    SdnGraph(
+        name: "",
+        direction: "",
+        theme: "",
+        css_file: "",
+        nodes: [],
+        edges: [],
+        css_defs: [],
+        styles: [],
+        weaves: []
+    )
+
+fn sdn_graph_parse(content: text) -> SdnGraph:
+    var graph = sdn_graph_empty()
+    val lines = _sg_split_lines(content)
+    var current_css = ""
+    var current_weave_target = ""
+    var current_weave_field = ""
+    var current_weave_value = ""
+    var current_weave_add = ""
+    var current_weave_shape = ""
+    var in_weave = false
+    var i = 0
+    while i < lines.len():
+        val raw = lines[i]
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            i = i + 1
+            continue
+        if line.starts_with("graph:"):
+            graph.name = line.slice(6, line.len()).trim()
+            current_css = ""
+            in_weave = false
+        elif line.starts_with("direction:"):
+            graph.direction = line.slice(10, line.len()).trim()
+            current_css = ""
+        elif line.starts_with("theme:"):
+            graph.theme = line.slice(6, line.len()).trim()
+            current_css = ""
+        elif line.starts_with("css_file:"):
+            graph.css_file = _sg_unquote(line.slice(9, line.len()).trim())
+            current_css = ""
+        elif line.starts_with("css ") and line.ends_with(":"):
+            current_css = line.slice(4, line.len() - 1).trim()
+            in_weave = false
+            graph.css_defs.push(SdnGraphCss(name: current_css, parent_css: "none", target: "node"))
+        elif line == "weave @:" or line == "weave css:":
+            current_css = ""
+            in_weave = true
+        elif in_weave and (line.starts_with("node where ") or line.starts_with("edge where ")):
+            if current_weave_target != "":
+                graph.weaves.push(SdnGraphWeave(target: current_weave_target, field: current_weave_field, value: current_weave_value, add_css: current_weave_add, shape: current_weave_shape))
+            val selector = _sg_parse_weave_selector(line)
+            current_weave_target = selector.0
+            current_weave_field = selector.1
+            current_weave_value = selector.2
+            current_weave_add = ""
+            current_weave_shape = ""
+        elif in_weave and line.starts_with("add:"):
+            current_weave_add = line.slice(4, line.len()).trim()
+        elif in_weave and line.starts_with("shape:"):
+            current_weave_shape = line.slice(6, line.len()).trim()
+        elif current_css != "" and line.contains(":"):
+            val sep = line.index_of(":")
+            val key = line.slice(0, sep).trim()
+            val value = line.slice(sep + 1, line.len()).trim()
+            if key == "extends":
+                graph = _sg_set_css_extends(graph, current_css, value)
+            elif key == "target":
+                graph = _sg_set_css_target(graph, current_css, value)
+            elif key == "shape":
+                graph.styles.push(SdnGraphStyle(css: current_css, key: key, value: value))
+                graph = _sg_set_css_target(graph, current_css, "node")
+            else:
+                graph.styles.push(SdnGraphStyle(css: current_css, key: key, value: value))
+        elif _sg_is_table_header(line, "nodes"):
+            val parsed = _sg_parse_nodes_table(lines, i)
+            for node in parsed.0:
+                graph.nodes.push(node)
+            i = parsed.1
+            continue
+        elif _sg_is_table_header(line, "edges"):
+            val parsed_edges = _sg_parse_edges_table(lines, i)
+            for edge in parsed_edges.0:
+                graph.edges.push(edge)
+            i = parsed_edges.1
+            continue
+        elif _sg_has_edge_operator(line):
+            graph.edges.push(_sg_parse_dense_edge(line))
+            current_css = ""
+        elif line.contains(":"):
+            graph.nodes.push(_sg_parse_dense_node(line))
+            current_css = ""
+        i = i + 1
+    if current_weave_target != "":
+        graph.weaves.push(SdnGraphWeave(target: current_weave_target, field: current_weave_field, value: current_weave_value, add_css: current_weave_add, shape: current_weave_shape))
+    sdn_graph_apply_weave(graph)
+
+fn sdn_graph_apply_weave(graph: SdnGraph) -> SdnGraph:
+    var out = graph
+    var wi = 0
+    while wi < graph.weaves.len():
+        val rule = graph.weaves[wi]
+        if rule.target == "node":
+            var ni = 0
+            while ni < out.nodes.len():
+                var node = out.nodes[ni]
+                if _sg_node_matches(node, rule.field, rule.value):
+                    node.css = _sg_merge_css(node.css, rule.add_css)
+                    if rule.shape != "":
+                        node.shape = rule.shape
+                    out.nodes[ni] = node
+                ni = ni + 1
+        elif rule.target == "edge":
+            var ei = 0
+            while ei < out.edges.len():
+                var edge = out.edges[ei]
+                if _sg_edge_matches(edge, rule.field, rule.value):
+                    edge.css = _sg_merge_css(edge.css, rule.add_css)
+                    out.edges[ei] = edge
+                ei = ei + 1
+        wi = wi + 1
+    out
+
+fn sdn_graph_to_canonical_sdn(graph: SdnGraph) -> text:
+    var out = "graph: " + graph.name + "\n"
+    if graph.direction != "":
+        out = out + "direction: " + graph.direction + "\n"
+    if graph.theme != "":
+        out = out + "theme: " + graph.theme + "\n"
+    if graph.css_file != "":
+        out = out + "css_file: \"" + graph.css_file + "\"\n"
+    out = out + "\nnodes |id, label, css, role, shape|\n"
+    for node in graph.nodes:
+        out = out + "    " + node.id + ", " + node.label + ", " + _sg_quote_if_space(node.css) + ", " + node.role + ", " + node.shape + "\n"
+    out = out + "\nedges |from, to, label, css, kind|\n"
+    for edge in graph.edges:
+        out = out + "    " + edge.from_id + ", " + edge.to_id + ", " + edge.label + ", " + _sg_quote_if_space(edge.css) + ", " + edge.kind + "\n"
+    out = out + "\ncss |name, extends, target|\n"
+    for css in graph.css_defs:
+        out = out + "    " + css.name + ", " + css.parent_css + ", " + css.target + "\n"
+    out = out + "\nstyles |css, key, value|\n"
+    for style in graph.styles:
+        out = out + "    " + style.css + ", " + style.key + ", " + style.value + "\n"
+    out
+
+fn sdn_graph_render_html(graph: SdnGraph) -> text:
+    var html = "<div class=\"sdn-graph\" data-graph=\"" + _sg_escape_html(graph.name) + "\" data-direction=\"" + _sg_escape_html(graph.direction) + "\" data-theme=\"" + _sg_escape_html(graph.theme) + "\" data-css-file=\"" + _sg_escape_html(graph.css_file) + "\">"
+    var i = 0
+    while i < graph.nodes.len():
+        val node = graph.nodes[i]
+        val x = 8 + (i % 4) * 23
+        val y = 12 + (i / 4) * 22
+        html = html + "<button type=\"button\" class=\"sdn-graph-node " + _sg_css_classes(node.css) + "\" data-node=\"" + _sg_escape_html(node.id) + "\" data-role=\"" + _sg_escape_html(node.role) + "\" data-shape=\"" + _sg_escape_html(node.shape) + "\" style=\"left:" + x.to_text() + "%;top:" + y.to_text() + "%\">" + _sg_escape_html(node.label) + "</button>"
+        i = i + 1
+    for edge in graph.edges:
+        html = html + "<div class=\"sdn-graph-edge " + _sg_css_classes(edge.css) + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-kind=\"" + _sg_escape_html(edge.kind) + "\">" + _sg_escape_html(edge.label) + "</div>"
+    html + "</div>"
+
+fn _sg_parse_dense_node(line: text) -> SdnGraphNode:
+    val sep = line.index_of(":")
+    val id = line.slice(0, sep).trim()
+    val rest = line.slice(sep + 1, line.len()).trim()
+    val label = _sg_label_before_meta(rest)
+    SdnGraphNode(id: id, label: label, css: _sg_collect_at(rest), role: _sg_meta_value(rest, "role"), shape: _sg_meta_value(rest, "shape"))
+
+fn _sg_parse_dense_edge(line: text) -> SdnGraphEdge:
+    val op = _sg_edge_operator(line)
+    val op_pos = line.index_of(op)
+    val from_id = line.slice(0, op_pos).trim()
+    val rest = line.slice(op_pos + op.len(), line.len()).trim()
+    var to_id = rest
+    var label = ""
+    val colon = rest.index_of(":")
+    if colon >= 0:
+        to_id = rest.slice(0, colon).trim()
+        val after = rest.slice(colon + 1, rest.len()).trim()
+        label = _sg_label_before_meta(after)
+        return SdnGraphEdge(from_id: from_id, to_id: to_id, label: label, css: _sg_collect_at(after), kind: _sg_edge_kind(op, _sg_meta_value(after, "kind")))
+    SdnGraphEdge(from_id: from_id, to_id: to_id, label: "", css: "", kind: _sg_edge_kind(op, ""))
+
+fn _sg_parse_weave_selector(line: text) -> tuple:
+    val target = if line.starts_with("node where ") then "node" else: "edge"
+    val prefix_len = if target == "node" then 11 else: 11
+    val body = line.slice(prefix_len, line.len() - 1).trim()
+    val eq = body.index_of("=")
+    if eq < 0:
+        return (target, "", "")
+    (target, body.slice(0, eq).trim(), _sg_unquote(body.slice(eq + 1, body.len()).trim()))
+
+fn _sg_parse_nodes_table(lines: [text], start: i64) -> ([SdnGraphNode], i64):
+    var nodes: [SdnGraphNode] = []
+    var i = start + 1
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "" or line.contains("|") or line.ends_with(":"):
+            return (nodes, i)
+        val cols = _sg_split_csv(line)
+        if cols.len() >= 4:
+            val shape = if cols.len() >= 5 then cols[4].trim() else: ""
+            nodes.push(SdnGraphNode(id: cols[0].trim(), label: _sg_unquote(cols[1].trim()), css: _sg_unquote(cols[2].trim()), role: cols[3].trim(), shape: shape))
+        i = i + 1
+    (nodes, i)
+
+fn _sg_parse_edges_table(lines: [text], start: i64) -> ([SdnGraphEdge], i64):
+    var edges: [SdnGraphEdge] = []
+    var i = start + 1
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "" or line.contains("|") or line.ends_with(":"):
+            return (edges, i)
+        val cols = _sg_split_csv(line)
+        if cols.len() >= 5:
+            edges.push(SdnGraphEdge(from_id: cols[0].trim(), to_id: cols[1].trim(), label: _sg_unquote(cols[2].trim()), css: _sg_unquote(cols[3].trim()), kind: cols[4].trim()))
+        i = i + 1
+    (edges, i)
+
+fn _sg_is_table_header(line: text, name: text) -> bool:
+    line.starts_with(name + " |")
+
+fn _sg_has_edge_operator(line: text) -> bool:
+    line.contains("->") or line.contains("~>") or line.contains("-x")
+
+fn _sg_edge_operator(line: text) -> text:
+    if line.contains("-x"):
+        return "-x"
+    if line.contains("~>"):
+        return "~>"
+    "->"
+
+fn _sg_edge_kind(op: text, explicit_kind: text) -> text:
+    if explicit_kind != "":
+        return explicit_kind
+    if op == "~>":
+        return "async"
+    if op == "-x":
+        return "forbidden"
+    "normal"
+
+fn _sg_label_before_meta(rest: text) -> text:
+    val parts = rest.split(" ")
+    var label: [text] = []
+    for part in parts:
+        if part.starts_with("@") or part.ends_with(":"):
+            break
+        label.push(part)
+    label.join(" ")
+
+fn _sg_collect_at(rest: text) -> text:
+    val parts = rest.split(" ")
+    var css: [text] = []
+    for part in parts:
+        val token = part.trim()
+        if token.starts_with("@") and token.len() > 1:
+            css.push(token.slice(1, token.len()))
+    css.join(" ")
+
+fn _sg_meta_value(rest: text, key: text) -> text:
+    val parts = rest.split(" ")
+    var i = 0
+    while i < parts.len():
+        if parts[i].trim() == key + ":" and i + 1 < parts.len():
+            return _sg_unquote(parts[i + 1].trim())
+        i = i + 1
+    ""
+
+fn _sg_node_matches(node: SdnGraphNode, field: text, value: text) -> bool:
+    if field == "role":
+        return node.role == value
+    if field == "shape":
+        return node.shape == value
+    if field == "id":
+        return node.id == value
+    false
+
+fn _sg_edge_matches(edge: SdnGraphEdge, field: text, value: text) -> bool:
+    if field == "kind":
+        return edge.kind == value
+    if field == "from":
+        return edge.from_id == value
+    if field == "to":
+        return edge.to_id == value
+    false
+
+fn _sg_merge_css(existing: text, added: text) -> text:
+    if existing == "":
+        return added
+    if added == "":
+        return existing
+    existing + " " + added
+
+fn _sg_set_css_extends(graph: SdnGraph, name: text, parent_css: text) -> SdnGraph:
+    var out = graph
+    var i = 0
+    while i < out.css_defs.len():
+        if out.css_defs[i].name == name:
+            out.css_defs[i] = SdnGraphCss(name: name, parent_css: parent_css, target: out.css_defs[i].target)
+        i = i + 1
+    out
+
+fn _sg_set_css_target(graph: SdnGraph, name: text, target: text) -> SdnGraph:
+    var out = graph
+    var i = 0
+    while i < out.css_defs.len():
+        if out.css_defs[i].name == name:
+            out.css_defs[i] = SdnGraphCss(name: name, parent_css: out.css_defs[i].parent_css, target: target)
+        i = i + 1
+    out
+
+fn _sg_split_lines(content: text) -> [text]:
+    content.split("\n")
+
+fn _sg_split_csv(line: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    var in_quote = false
+    var i = 0
+    while i < line.len():
+        val ch = line.char_at(i)
+        if ch == "\"":
+            in_quote = not in_quote
+            current = current + ch
+        elif ch == "," and not in_quote:
+            parts.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current != "" or parts.len() > 0:
+        parts.push(current.trim())
+    parts
+
+fn _sg_quote_if_space(value: text) -> text:
+    if value.contains(" "):
+        return "\"" + value + "\""
+    value
+
+fn _sg_unquote(value: text) -> text:
+    if value.len() >= 2 and value.starts_with("\"") and value.ends_with("\""):
+        return value.slice(1, value.len() - 1)
+    value
+
+fn _sg_css_classes(css: text) -> text:
+    val parts = css.split(" ")
+    var out: [text] = []
+    for part in parts:
+        val token = part.trim()
+        if token != "":
+            out.push("sdn-css-" + _sg_escape_attr_token(token))
+    out.join(" ")
+
+fn _sg_escape_html(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "<":
+            result = result + "&lt;"
+        elif ch == ">":
+            result = result + "&gt;"
+        elif ch == "&":
+            result = result + "&amp;"
+        elif ch == "\"":
+            result = result + "&quot;"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn _sg_escape_attr_token(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "-" or ch == "_":
+            result = result + ch
+        else:
+            result = result + "-"
+        i = i + 1
+    result
