@@ -143,6 +143,15 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   list push to `135,428` Simple ops/ms (`0.04x` C, `0.09x` Rust); traversal was
   `576,292` Simple ops/ms (`0.10x` C, `0.06x` Rust), and set-like membership
   was `1,194` Simple ops/ms (`0.19x` C, `0.12x` Rust).
+- Typed word reads now use the vreg signedness map for their index operand:
+  unsigned indices skip negative-index normalization and lower bounds to a
+  single unsigned `index < len` check, while signed or unknown indices keep the
+  existing negative-index semantics. Disassembly of `bench_list_traverse`
+  removed the prior `cmovl`/signed-normalization sequence from the element
+  loop. A one-sample benchmark kept checksum parity and measured list traversal
+  at `907,554` Simple ops/ms (`0.28x` C, `0.15x` Rust), list push at `133,212`
+  Simple ops/ms (`0.06x` C, `0.09x` Rust), and set-like membership at `1,858`
+  Simple ops/ms (`0.27x` C, `0.14x` Rust).
 
 ## Next Concrete Plugin Work
 

@@ -11,7 +11,7 @@ use crate::codegen::runtime_ffi::RUNTIME_FUNCS;
 use crate::hir::TypeId;
 use crate::mir::{CallTarget, VReg};
 
-use super::core::compile_builtin_io_call;
+use super::core::{compile_builtin_io_call, vreg_is_signed};
 use super::helpers::{adapted_call, call_runtime_3, create_cstring_constant, get_vreg_or_default, inline_runtime_len_value};
 use super::{InstrContext, InstrResult};
 
@@ -334,6 +334,7 @@ fn compile_inline_typed_words_at<M: Module>(
     let zero = builder.ins().iconst(types::I64, 0);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let tag_mask = builder.ins().iconst(types::I64, 7);
+    let index_is_unsigned = vreg_is_signed(ctx, args[1]) == Some(false);
 
     let bounds_block = builder.create_block();
     let load_block = builder.create_block();
@@ -342,17 +343,25 @@ fn compile_inline_typed_words_at<M: Module>(
 
     let ptr_bits = builder.ins().band(array, ptr_mask);
     let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
-    let negative_index = builder.ins().iadd(len, index);
-    let normalized_index = builder.ins().select(index_is_negative, negative_index, index);
+    let normalized_index = if index_is_unsigned {
+        index
+    } else {
+        let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
+        let negative_index = builder.ins().iadd(len, index);
+        builder.ins().select(index_is_negative, negative_index, index)
+    };
     builder.ins().jump(bounds_block, &[]);
 
     builder.switch_to_block(bounds_block);
-    let ge_zero = builder
-        .ins()
-        .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
-    let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
-    let in_bounds = builder.ins().band(ge_zero, lt_len);
+    let in_bounds = if index_is_unsigned {
+        builder.ins().icmp(IntCC::UnsignedLessThan, normalized_index, len)
+    } else {
+        let ge_zero = builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
+        let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
+        builder.ins().band(ge_zero, lt_len)
+    };
     builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
     builder.seal_block(bounds_block);
 
