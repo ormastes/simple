@@ -36,6 +36,7 @@ class CollectionOptimization:
     concat_replaced: i64
     str_append_replaced: i64
     calls_hoisted: i64
+    len_queries_reused: i64
 
 impl CollectionOptimization:
     static fn new() -> CollectionOptimization:
@@ -43,7 +44,8 @@ impl CollectionOptimization:
             detector: LoopDetector.new(),
             concat_replaced: 0,
             str_append_replaced: 0,
-            calls_hoisted: 0
+            calls_hoisted: 0,
+            len_queries_reused: 0
         )
 
     me optimize_function(func: MirFunction) -> MirFunction:
@@ -58,8 +60,226 @@ impl CollectionOptimization:
 
         # Also sweep non-loop blocks for the same concat patterns
         optimized_blocks = self.optimize_concat_all_blocks(optimized_blocks, func)
+        optimized_blocks = self.canonicalize_collection_len_queries(optimized_blocks)
 
-        MirFunction(..func, blocks: optimized_blocks)
+        var result = func
+        result.blocks = optimized_blocks
+        result
+
+    me canonicalize_collection_len_queries(blocks: [MirBlock]) -> [MirBlock]:
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            new_blocks.push(self.canonicalize_collection_len_queries_block(block))
+        new_blocks
+
+    me canonicalize_collection_len_queries_block(block: MirBlock) -> MirBlock:
+        val insts = block.instructions
+        if insts.len() < 2:
+            return block
+
+        val uses = self.local_use_counts(block)
+        var seen_lens: Dict<text, i64> = {}
+        var new_insts: [MirInst] = []
+        var changed = false
+        var i = 0
+
+        while i < insts.len():
+            val len_dest_id = self.collection_len_call_dest_id(insts[i])
+            if len_dest_id >= 0:
+                val dest = LocalId(id: len_dest_id)
+                val key = self.collection_len_call_key(insts[i])
+                if seen_lens.has(key) and i + 1 < insts.len():
+                    val use_count = uses[dest.id] ?? 0
+                    if use_count == 1:
+                        val rewritten = self.rewrite_bounds_check_len(insts[i + 1], dest, LocalId(id: seen_lens[key]))
+                        if rewritten.?:
+                            new_insts.push(rewritten.unwrap())
+                            self.len_queries_reused = self.len_queries_reused + 1
+                            changed = true
+                            i = i + 2
+                            continue
+                else:
+                    seen_lens[key] = dest.id
+
+            new_insts.push(insts[i])
+            i = i + 1
+
+        if changed:
+            MirBlock(
+                id: block.id,
+                label: block.label,
+                instructions: new_insts,
+                terminator: block.terminator
+            )
+        else:
+            block
+
+    fn collection_len_call_dest_id(inst: MirInst) -> i64:
+        match inst.kind:
+            case Call(dest, func, args):
+                if not dest.? or args.len() != 1:
+                    return -1
+                val fname = self.get_func_name(func)
+                if not self.is_collection_len_runtime(fname):
+                    return -1
+                return dest.id
+            case _: -1
+
+    fn collection_len_call_key(inst: MirInst) -> text:
+        match inst.kind:
+            case Call(_, func, args):
+                "{self.get_func_name(func)}:{self.collection_operand_key(args[0])}"
+            case _:
+                ""
+
+    fn is_collection_len_runtime(name: text) -> bool:
+        name == "rt_array_len" or name == "rt_string_len" or name == "rt_dict_len"
+
+    fn rewrite_bounds_check_len(inst: MirInst, duplicate_len: LocalId, canonical_len: LocalId) -> MirInst?:
+        match inst.kind:
+            case Intrinsic(dest, name, args):
+                if name != "bounds_check" or args.len() < 2:
+                    return nil
+                val rewritten_args = self.replace_operand_local(args, duplicate_len, canonical_len)
+                if rewritten_args.1:
+                    Some(MirInst(kind: MirInstKind.Intrinsic(dest, name, rewritten_args.0), span: inst.span))
+                else:
+                    nil
+            case Call(dest, func, args):
+                val fname = self.get_func_name(func)
+                if fname != "bounds_check" and fname != "array_bounds_check" and fname != "rt_bounds_check" and fname != "__simple_bounds_check":
+                    return nil
+                val rewritten_args = self.replace_operand_local(args, duplicate_len, canonical_len)
+                if rewritten_args.1:
+                    Some(MirInst(kind: MirInstKind.Call(dest, func, rewritten_args.0), span: inst.span))
+                else:
+                    nil
+            case _: nil
+
+    fn replace_operand_local(args: [MirOperand], from: LocalId, to: LocalId) -> ([MirOperand], bool):
+        var out: [MirOperand] = []
+        var changed = false
+        for arg in args:
+            match arg.kind:
+                case Copy(local):
+                    if local.id == from.id:
+                        out.push(mir_operand_copy(to))
+                        changed = true
+                    else:
+                        out.push(arg)
+                case Move(local):
+                    if local.id == from.id:
+                        out.push(mir_operand_move(to))
+                        changed = true
+                    else:
+                        out.push(arg)
+                case _:
+                    out.push(arg)
+        (out, changed)
+
+    fn local_use_counts(block: MirBlock) -> Dict<i64, i64>:
+        var counts: Dict<i64, i64> = {}
+        for inst in block.instructions:
+            self.count_inst_uses(inst, counts)
+        self.count_terminator_uses(block.terminator, counts)
+        counts
+
+    fn count_inst_uses(inst: MirInst, counts: Dict<i64, i64>):
+        match inst.kind:
+            case Copy(_, src):
+                self.count_local_use(src, counts)
+            case Move(_, src):
+                self.count_local_use(src, counts)
+            case BinOp(_, _, left, right):
+                self.count_operand_use(left, counts)
+                self.count_operand_use(right, counts)
+            case UnaryOp(_, _, operand):
+                self.count_operand_use(operand, counts)
+            case CheckedBinOp(_, _, left, right):
+                self.count_operand_use(left, counts)
+                self.count_operand_use(right, counts)
+            case Load(_, ptr):
+                self.count_operand_use(ptr, counts)
+            case Store(ptr, value):
+                self.count_operand_use(ptr, counts)
+                self.count_operand_use(value, counts)
+            case GetElementPtr(_, base, indices):
+                self.count_operand_use(base, counts)
+                for idx in indices:
+                    self.count_operand_use(idx, counts)
+            case Aggregate(_, _, operands):
+                for operand in operands:
+                    self.count_operand_use(operand, counts)
+            case GetField(_, base, _):
+                self.count_operand_use(base, counts)
+            case SetField(base, _, value):
+                self.count_operand_use(base, counts)
+                self.count_operand_use(value, counts)
+            case Cast(_, operand, _):
+                self.count_operand_use(operand, counts)
+            case Bitcast(_, operand, _):
+                self.count_operand_use(operand, counts)
+            case Call(_, func, args):
+                self.count_operand_use(func, counts)
+                for arg in args:
+                    self.count_operand_use(arg, counts)
+            case CallIndirect(_, ptr, args, _):
+                self.count_operand_use(ptr, counts)
+                for arg in args:
+                    self.count_operand_use(arg, counts)
+            case Intrinsic(_, _, args):
+                for arg in args:
+                    self.count_operand_use(arg, counts)
+            case _:
+                ()
+
+    fn count_terminator_uses(term: MirTerminator, counts: Dict<i64, i64>):
+        match term:
+            case Return(value):
+                if value.?:
+                    self.count_operand_use(value.unwrap(), counts)
+            case If(cond, _, _):
+                self.count_operand_use(cond, counts)
+            case Switch(value, _, _):
+                self.count_operand_use(value, counts)
+            case CallTerminator(_, func, args, _, _):
+                self.count_operand_use(func, counts)
+                for arg in args:
+                    self.count_operand_use(arg, counts)
+            case _:
+                ()
+
+    fn count_operand_use(op: MirOperand, counts: Dict<i64, i64>):
+        match op.kind:
+            case Copy(local):
+                self.count_local_use(local, counts)
+            case Move(local):
+                self.count_local_use(local, counts)
+            case _:
+                ()
+
+    fn count_local_use(local: LocalId, counts: Dict<i64, i64>):
+        counts[local.id] = (counts[local.id] ?? 0) + 1
+
+    fn collection_operand_key(op: MirOperand) -> text:
+        match op.kind:
+            case Copy(local):
+                "copy:{local.id}"
+            case Move(local):
+                "move:{local.id}"
+            case Const(value, _):
+                "const:{self.collection_const_key(value)}"
+
+    fn collection_const_key(value: MirConstValue) -> text:
+        match value:
+            case Int(v): "int:{v}"
+            case Float(v): "float:{v}"
+            case Bool(v): "bool:{v}"
+            case Str(v): "str:{v}"
+            case Zero: "zero"
+            case Array(_): "array"
+            case Tuple(_): "tuple"
+            case Struct(_): "struct"
 
     # ========================================================================
     # Non-loop concat sweep (applies same patterns to all blocks)
@@ -426,7 +646,7 @@ impl CollectionOptimization:
         false
 
     fn stats_summary() -> text:
-        "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted"
+        "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted, {self.len_queries_reused} len queries reused"
 
 # ============================================================================
 # Factory Functions

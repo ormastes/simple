@@ -28,18 +28,26 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   provider metadata. Its contract requires `typed_mir`, `loop_bounds`, and
   `collection_layout`, and advertises `canonical_collection_loops`,
   `hoisted_collection_queries`, and `append_fusion`.
+- The first `simple.opt.collection.loop_access` rewrite is implemented:
+  repeated typed collection length calls such as `rt_array_len` in one MIR
+  block are canonicalized when the duplicate result is used only by the
+  adjacent bounds check. The bounds checks stay explicit, but the redundant
+  helper dispatch is removed from hot indexed traversal blocks.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/compiler/mir_opt/strength_reduction_spec.spl
   --mode=interpreter --clean` passing 14 examples.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/compiler/mir_opt/pass_descriptor_spec.spl
   --mode=interpreter --clean` passing 7 examples.
+- Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
+  test test/unit/compiler/mir_opt/collection_opt_spec.spl
+  --mode=interpreter --clean` passing 1 example.
 
 ## Next Concrete Plugin Work
 
-1. Implement the `simple.opt.collection.loop_access` rules for `len`-guarded
-   array/list loops so indexed traversal over `[u8]`, `[u32]`, and fixed arrays
-   emits one bounds proof per loop instead of repeated helper dispatch.
+1. Extend `simple.opt.collection.loop_access` from same-block typed length
+   canonicalization to full `len`-guarded array/list loops so indexed traversal
+   over `[u8]`, `[u32]`, and fixed arrays emits one bounds proof per loop.
 2. Add static-table materialization for pure Simple `[u8]` and `[u32]` literals
    after resolving `native_u8_array_literal_not_packed_2026-05-13.md`.
 3. Add map/set probe-loop specialization for pure Simple `contains`, `insert`,
