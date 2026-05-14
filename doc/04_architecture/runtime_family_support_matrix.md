@@ -161,7 +161,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 5. **Target family filtering** in `src/compiler/99.loader/module_resolver/resolution.spl`: `allowed_families` restricts stdlib family search for target presets.
 
-**Remaining gap**: the manifest-backed hard violation API, Rust lint parity, Rust `simple check` strict mode, and Rust interpreter strict mode exist. Target preset entrypoints still need to thread strict runtime-family mode automatically instead of relying on explicit checker flags or `SIMPLE_STRICT_RUNTIME_FAMILY=1`. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
+**Remaining gap**: the manifest-backed hard violation API, Rust lint parity, Rust `simple check` target strict mode, and Rust interpreter strict mode exist. `simple check --target <baremetal/simpleos>` promotes runtime-family violations automatically, while hosted targets keep warnings by default. Interpreter launch paths still need to thread strict runtime-family mode automatically instead of relying on `SIMPLE_STRICT_RUNTIME_FAMILY=1`. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
 
 ### Interpreter parity detail
 
@@ -212,11 +212,11 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 ### Gap 1: Target-restricted family hard errors are partially wired (Agent 2 -- Compiler)
 - **Problem**: Public runtime-family root `__init__.spl` files carry `@no_gc` or `@gc`, the Simple semantic checker exposes manifest-backed hard violations, and the Rust `simple check` lint path mirrors the manifest family set/ranks/reason strings. The Rust check path now promotes those diagnostics to errors when invoked with `--deny-gc-boundary` / `--strict-runtime-family`, while unrestricted checks keep warnings.
-- **Impact**: Target-restricted checker/CI runs can fail on runtime-family boundary violations; compiler pipelines that do not pass a strict target-family option still remain warning-compatible.
-- **Fix**: Thread target presets into every compiler entrypoint that needs strict family enforcement instead of relying on callers to pass the explicit checker flag.
+- **Impact**: Target-restricted checker/CI runs can fail on runtime-family boundary violations; hosted checker runs and compiler pipelines that do not pass a restricted target still remain warning-compatible.
+- **Fix**: Thread target presets into every compiler entrypoint that needs strict family enforcement instead of relying on callers to pass explicit strict flags.
 
 ### Gap 2: Interpreter strict family errors require explicit opt-in (Agent 3 -- Interpreter)
-- **Problem**: The Rust interpreter can now promote family-boundary diagnostics to errors with `SIMPLE_STRICT_RUNTIME_FAMILY=1`, but target presets do not yet set that mode automatically.
+- **Problem**: The Rust interpreter can now promote family-boundary diagnostics to errors with `SIMPLE_STRICT_RUNTIME_FAMILY=1`, but interpreter target presets do not yet set that mode automatically.
 - **Impact**: Target-restricted interpreter gates can fail on runtime-family boundary violations when strict mode is enabled; unrestricted interpreter runs still intentionally continue after warning.
 - **Fix**: Thread target presets into interpreter launch/configuration so baremetal/noalloc and other restricted target runs enable strict runtime-family mode without manual environment setup.
 

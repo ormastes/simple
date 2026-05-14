@@ -65,6 +65,7 @@
 
 use std::path::PathBuf;
 
+use simple_common::target::Target;
 use simple_driver::cli::analysis::{run_info, run_query};
 use simple_driver::cli::audit::{run_replay, run_spec_coverage};
 use simple_driver::cli::basic::{create_runner, run_code, run_file_with_args, watch_file};
@@ -1086,6 +1087,7 @@ fn handle_check_impl(args: &[String]) -> i32 {
         eprintln!("Options:");
         eprintln!("  --json     Output JSON format for tooling");
         eprintln!("  --source   Add a source root for module resolution (repeatable)");
+        eprintln!("  --target   Target triple/preset; baremetal targets imply --strict-runtime-family");
         eprintln!("  --deny-gc-boundary  Treat runtime-family boundary crossings as errors");
         eprintln!("  --verbose  Show additional details");
         eprintln!("  --quiet    Only show errors, no progress");
@@ -1102,6 +1104,7 @@ fn handle_check_impl(args: &[String]) -> i32 {
     let mut verbose = false;
     let mut quiet = false;
     let mut deny_gc_boundary_crossings = false;
+    let mut target = None;
     let mut source_roots = Vec::new();
     let mut files = Vec::new();
     let mut i = 1;
@@ -1111,6 +1114,30 @@ fn handle_check_impl(args: &[String]) -> i32 {
             "--verbose" | "-v" => verbose = true,
             "--quiet" | "-q" => quiet = true,
             "--deny-gc-boundary" | "--strict-runtime-family" => deny_gc_boundary_crossings = true,
+            "--target" => {
+                if i + 1 >= args.len() {
+                    eprintln!("error: --target requires a target triple");
+                    return 1;
+                }
+                match Target::parse(&args[i + 1]) {
+                    Ok(parsed) => target = Some(parsed),
+                    Err(error) => {
+                        eprintln!("error: invalid target '{}': {}", args[i + 1], error);
+                        return 1;
+                    }
+                }
+                i += 1;
+            }
+            arg if arg.starts_with("--target=") => {
+                let value = arg.strip_prefix("--target=").unwrap_or("");
+                match Target::parse(value) {
+                    Ok(parsed) => target = Some(parsed),
+                    Err(error) => {
+                        eprintln!("error: invalid target '{}': {}", value, error);
+                        return 1;
+                    }
+                }
+            }
             "--source" => {
                 if i + 1 >= args.len() {
                     eprintln!("error: --source requires a directory path");
@@ -1131,6 +1158,7 @@ fn handle_check_impl(args: &[String]) -> i32 {
         quiet,
         source_roots,
         deny_gc_boundary_crossings,
+        target,
     };
 
     if files.is_empty() {

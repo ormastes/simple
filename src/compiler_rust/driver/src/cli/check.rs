@@ -8,6 +8,7 @@
 //! - Providing human-readable or JSON output
 
 use serde::{Deserialize, Serialize};
+use simple_common::target::Target;
 use simple_compiler::module_resolver::ModuleResolver;
 use simple_compiler::{LintChecker, LintConfig, LintLevel, LintName};
 use simple_parser::ast::{Block, Expr, ImportTarget, Node, Pattern, Type};
@@ -28,6 +29,8 @@ pub struct CheckOptions {
     pub source_roots: Vec<PathBuf>,
     /// Promote runtime-family boundary crossings to hard errors.
     pub deny_gc_boundary_crossings: bool,
+    /// Optional target preset for target-restricted checks.
+    pub target: Option<Target>,
 }
 
 /// Check result for a single file
@@ -88,13 +91,14 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
     let files = expand_check_inputs(files);
     let mut all_results = Vec::new();
     let mut has_errors = false;
+    let deny_gc_boundary_crossings = should_deny_gc_boundary_crossings(&options);
 
     for file in &files {
         if !options.quiet && options.verbose {
             println!("Checking {}...", file.display());
         }
 
-        let result = check_file(file, &options.source_roots, options.deny_gc_boundary_crossings);
+        let result = check_file(file, &options.source_roots, deny_gc_boundary_crossings);
 
         match &result.status {
             CheckStatus::Success => {
@@ -152,6 +156,10 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
     } else {
         0
     }
+}
+
+fn should_deny_gc_boundary_crossings(options: &CheckOptions) -> bool {
+    options.deny_gc_boundary_crossings || options.target.is_some_and(|target| target.is_baremetal())
 }
 
 fn expand_check_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
@@ -1090,6 +1098,26 @@ mod tests {
         assert!(result.errors.iter().any(|error| {
             error.code.as_deref() == Some("gc_boundary_crossing") && error.severity == ErrorSeverity::Error
         }));
+    }
+
+    #[test]
+    fn test_baremetal_target_enables_gc_boundary_errors() {
+        let options = CheckOptions {
+            target: Some(Target::parse("riscv64gc-unknown-none-elf").unwrap()),
+            ..CheckOptions::default()
+        };
+
+        assert!(should_deny_gc_boundary_crossings(&options));
+    }
+
+    #[test]
+    fn test_hosted_target_keeps_gc_boundary_warnings_by_default() {
+        let options = CheckOptions {
+            target: Some(Target::parse("x86_64-unknown-linux-gnu").unwrap()),
+            ..CheckOptions::default()
+        };
+
+        assert!(!should_deny_gc_boundary_crossings(&options));
     }
 
     #[test]
