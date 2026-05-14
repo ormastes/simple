@@ -161,6 +161,22 @@ impl<'a> MirLowerer<'a> {
             arg_regs.push(self.lower_expr(arg)?);
         }
 
+        if method == "char_code_at"
+            && args.len() == 1
+            && (receiver.ty == TypeId::STRING || receiver_local_ty == Some(TypeId::STRING))
+        {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_string_char_code_at"),
+                    args: vec![receiver_reg, arg_regs[0]],
+                });
+                dest
+            });
+        }
+
         if method == "len" && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();

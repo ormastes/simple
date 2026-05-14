@@ -261,6 +261,7 @@ void     rt_panic(const char* msg);
 int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
+int64_t  rt_string_char_code_at(int64_t string, int64_t index);
 int64_t  rt_string_concat(int64_t left, int64_t right);
 int64_t  rt_len(int64_t value);
 int64_t  rt_to_string(int64_t value);

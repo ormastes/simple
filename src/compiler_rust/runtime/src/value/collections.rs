@@ -1629,6 +1629,26 @@ pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> Runtime
     }
 }
 
+/// Return the Unicode code point at the given character index, or 0 if missing.
+#[no_mangle]
+pub extern "C" fn rt_string_char_code_at(string: RuntimeValue, index: i64) -> i64 {
+    let len = rt_string_len(string);
+    if len < 0 || index < 0 || index >= len {
+        return 0;
+    }
+
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return 0;
+    }
+
+    unsafe {
+        let bytes = std::slice::from_raw_parts(data, len as usize);
+        let s = std::str::from_utf8_unchecked(bytes);
+        s.chars().nth(index as usize).map_or(0, |c| c as i64)
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, start: i64) -> i64 {
     if start < 0 {

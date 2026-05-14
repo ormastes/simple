@@ -404,6 +404,14 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `0.18x` Rust), `1,221,167` for list push (`0.42x` C, `0.84x` Rust),
   `3,233` for scalar set membership (`0.50x` C, `0.25x` Rust), and `187` for
   pure text `HashSet.contains` (`0.00x` C/Rust).
+- `text.char_code_at(index)` now has a native source-closure lowering through
+  `rt_string_char_code_at` instead of falling through to
+  `rt_function_not_found("str.char_code_at")`. This fixes the pure Simple hash
+  loop route used by `HashMap._hash` and `HashSet.contains`; a direct
+  source-closure probe resolves the helper, and the collection benchmark still
+  keeps checksum parity. The one-sample timing remained dominated by the wider
+  text `HashSet` design cost (`194` ops/ms in this noisy run), so this is an
+  enabling correctness fix rather than the final parity change.
 
 ## Next Concrete Plugin Work
 

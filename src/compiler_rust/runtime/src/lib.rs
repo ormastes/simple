@@ -358,6 +358,7 @@ pub use value::{
     rt_slice,
     // String operations
     rt_cstring_to_text,
+    rt_string_char_code_at,
     rt_string_concat,
     rt_string_data,
     rt_string_len,

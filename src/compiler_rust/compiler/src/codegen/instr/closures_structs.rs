@@ -193,6 +193,14 @@ pub(crate) fn compile_method_call_static<M: Module>(
         None
     };
     let lookup_name = lookup_name_storage.as_deref().unwrap_or(func_name);
+    if lookup_name.ends_with(".char_code_at") {
+        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, "char_code_at", args)? {
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result);
+            }
+            return Ok(());
+        }
+    }
     let receiver_ty = ctx.vreg_types.get(&receiver).copied();
     let allow_qualified_builtin = matches!(
         receiver_ty,
@@ -747,6 +755,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "concat" => "rt_string_concat",
         "contains" => "rt_contains",
         "char_at" | "at" => "rt_string_char_at",
+        "char_code_at" => "rt_string_char_code_at",
         "hash" => "rt_hash_text",
         // Array methods
         "push" | "append" => "rt_array_push",

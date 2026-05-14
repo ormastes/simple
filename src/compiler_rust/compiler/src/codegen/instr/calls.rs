@@ -1787,6 +1787,7 @@ pub fn compile_call<M: Module>(
                 "ends_with" => Some("rt_string_ends_with"),
                 "concat" => Some("rt_string_concat"),
                 "char_at" | "at" => Some("rt_string_char_at"),
+                "char_code_at" => Some("rt_string_char_code_at"),
                 "push" => Some("rt_array_push"),
                 "pop" => Some("rt_array_pop"),
                 "clear" => Some("rt_array_clear"),

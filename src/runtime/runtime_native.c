@@ -317,6 +317,12 @@ const uint8_t* rt_string_data(int64_t string) {
     return s ? (const uint8_t*)s->data : NULL;
 }
 
+int64_t rt_string_char_code_at(int64_t string, int64_t index) {
+    RtCoreString* s = rt_core_as_string(string);
+    if (!s || index < 0 || (uint64_t)index >= s->len) return 0;
+    return (int64_t)(uint8_t)s->data[index];
+}
+
 int64_t rt_string_concat(int64_t left, int64_t right) {
     RtCoreString* a = rt_core_as_string(left);
     RtCoreString* b = rt_core_as_string(right);
