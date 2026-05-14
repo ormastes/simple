@@ -262,6 +262,48 @@ fn test_strict_noalloc_check_rejects_reachable_allocating_family_import() {
 }
 
 #[test]
+fn test_strict_noalloc_check_rejects_reachable_alloc_marker() {
+    let temp_root = tempfile::tempdir().unwrap();
+    let lib_root = temp_root.path().join("src/lib");
+    let noalloc_root = lib_root.join("nogc_async_mut_noalloc");
+    std::fs::create_dir_all(&noalloc_root).unwrap();
+    let entry = noalloc_root.join("entry.spl");
+    let helper = noalloc_root.join("helper.spl");
+    std::fs::write(&entry, "use std.nogc_async_mut_noalloc.helper\n").unwrap();
+    std::fs::write(&helper, "@alloc\nfn allocate() -> i64:\n    return 1\n").unwrap();
+
+    let result = check_file(&entry, &[lib_root], true);
+
+    assert_eq!(result.status, CheckStatus::Error);
+    assert!(result.errors.iter().any(|error| {
+        error.code.as_deref() == Some("E0413")
+            && error.message.contains("allocation annotation")
+            && error.file.ends_with("helper.spl")
+    }));
+}
+
+#[test]
+fn test_strict_noalloc_check_rejects_reachable_host_allocation_api() {
+    let temp_root = tempfile::tempdir().unwrap();
+    let lib_root = temp_root.path().join("src/lib");
+    let noalloc_root = lib_root.join("nogc_async_mut_noalloc");
+    std::fs::create_dir_all(&noalloc_root).unwrap();
+    let entry = noalloc_root.join("entry.spl");
+    let helper = noalloc_root.join("helper.spl");
+    std::fs::write(&entry, "use std.nogc_async_mut_noalloc.helper\n").unwrap();
+    std::fs::write(&helper, "extern fn malloc(size: i64) -> i64\n").unwrap();
+
+    let result = check_file(&entry, &[lib_root], true);
+
+    assert_eq!(result.status, CheckStatus::Error);
+    assert!(result.errors.iter().any(|error| {
+        error.code.as_deref() == Some("E0413")
+            && error.message.contains("host allocation API")
+            && error.file.ends_with("helper.spl")
+    }));
+}
+
+#[test]
 fn test_hosted_noalloc_check_does_not_follow_reachable_import_closure() {
     let temp_root = tempfile::tempdir().unwrap();
     let lib_root = temp_root.path().join("src/lib");
