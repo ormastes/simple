@@ -8,6 +8,10 @@ Pure Simple generic `Set<T>` methods that take another `Set<T>` can observe an
 empty receiver when enumerating `self.to_list()` inside the method, even though
 the same set enumerates correctly outside the method.
 
+Status: resolved for the pure Simple `Set<T>` library by keeping a top-level
+`items: [T]` index and using it for Set-to-Set operations instead of traversing
+the nested `Map` bucket arrays during binary methods.
+
 ## Repro
 
 Add the following case to
@@ -67,6 +71,8 @@ passing baseline for:
 
 ## Next Step
 
-Investigate interpreter or lowering semantics for generic struct receiver
-methods with another value of the same generic struct type. Restore the failing
-set-operation assertions once the receiver enumeration is fixed.
+The failing set-operation assertions have been restored in
+`test/unit/lib/nogc_async_mut/src/set_api_parity_spec.spl`. Keep this document as
+evidence of the interpreter/lowering shape that motivated the library-level
+workaround: nested `Map.keys()` returned an empty list inside Set-to-Set methods
+while the top-level Set size remained correct.
