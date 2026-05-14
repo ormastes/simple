@@ -449,6 +449,31 @@ impl<'a> MirLowerer<'a> {
                 }
                 raw_word
             });
+        } else if receiver_is_array
+            && matches!(
+                index_ty,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+            )
+        {
+            // HIR already proved this receiver is an array, so avoid the
+            // generic collection dispatcher and boxed-index path.
+            self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name("rt_array_get"),
+                    args: vec![receiver_reg, index_reg],
+                });
+                dest
+            })?
         } else {
             // Box the index as RuntimeValue if it's a native type
             let boxed_index = {

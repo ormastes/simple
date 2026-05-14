@@ -81,6 +81,9 @@ fn labeled_tuple_numeric_access_dispatches_to_tuple_get() {
 fn array_index_dispatch() {
     let mir = compile_to_mir("fn test():\n    val arr = [10, 20]\n    val x = arr[0]\n").unwrap();
     assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_get"))
+    }));
+    assert!(!has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_index_get"))
     }));
 }

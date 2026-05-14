@@ -466,6 +466,16 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `HashSet.contains` `0.39x` C / `0.65x` Rust. The pure path is functionally
   updated and materially faster for text set lookup, but still not at C/Rust
   parity.
+- Generic array indexing now lowers to `rt_array_get` when HIR already proves
+  the receiver is an array, avoiding the generic `rt_index_get` dispatcher and
+  boxed-index path. Cranelift inlines `rt_array_get` for native builds, and the
+  pure `HashMap`/`HashSet` bucket-index helpers return `u64` so bucket probes
+  use the existing unsigned-index fast path. A clean source-closure harness
+  with native CPU kept checksum parity and measured list traversal `0.52x` C /
+  `0.19x` Rust, list push `0.89x` C / `1.11x` Rust, scalar set membership
+  `0.45x` C / `0.24x` Rust, and text `HashSet.contains` `0.44x` C / `0.72x`
+  Rust. This closes the C floor for list traversal and list push in this
+  sample, but set lookup and Rust traversal parity remain open.
 
 ## Next Concrete Plugin Work
 

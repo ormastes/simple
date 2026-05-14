@@ -68,6 +68,20 @@ set_contains     0.36x C  0.18x Rust
 hashset_contains 0.39x C  0.65x Rust
 ```
 
+Generic array indexing was then narrowed from `rt_index_get` to `rt_array_get`
+when HIR proves the receiver is an array, with a Cranelift inline path for
+native builds. Pure `HashMap` and `HashSet` bucket-index helpers now return
+`u64`, removing signed negative-index normalization from bucket probes. The
+full clean source-closure harness with native CPU kept checksum parity and
+measured:
+
+```text
+list_traverse    0.52x C  0.19x Rust
+list_push        0.89x C  1.11x Rust
+set_contains     0.45x C  0.24x Rust
+hashset_contains 0.44x C  0.72x Rust
+```
+
 The harness now applies `SIMPLE_NATIVE_CPU=native` to Simple source-closure
 native builds so the CPU target matches the C/Rust reference settings. A clean
 one-sample run with that setting still missed speed floors:
@@ -153,6 +167,10 @@ hashset_contains 0.39x C  0.65x Rust
   map value storage and preserved clean facade behavior, but the text lookup
   path is still below C and the broader collection benchmark still depends on
   backend loop-shape improvements.
+- Direct `rt_array_get` lowering plus native inlining removes generic
+  collection dispatch from known-array indexing, and unsigned bucket indices
+  remove signed normalization from text-set probes. These changes improve the
+  benchmark but do not close scalar set lookup or Rust traversal parity.
 
 ## Likely Gap
 
