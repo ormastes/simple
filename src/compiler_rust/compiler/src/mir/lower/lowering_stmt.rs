@@ -3,7 +3,7 @@
 //! This module contains methods for lowering HIR statements to MIR instructions,
 //! including control flow (if, while, loop, break, continue) and assignments.
 
-use super::lowering_core::{LoopContext, MirLowerResult, MirLowerer};
+use super::lowering_core::{ArrayAppendPtrs, LoopContext, MirLowerResult, MirLowerer};
 use crate::hir::{BinOp, HirContract, HirExpr, HirExprKind, HirStmt, HirType, TypeId};
 use crate::mir::blocks::Terminator;
 use crate::mir::effects::CallTarget;
@@ -85,8 +85,10 @@ impl<'a> MirLowerer<'a> {
                         });
                     })?;
                     self.record_len_local_source(*local_index, Some(val));
+                    self.record_array_capacity_local_source(*local_index, Some(val));
                 } else {
                     self.record_len_local_source(*local_index, None);
+                    self.record_array_capacity_local_source(*local_index, None);
                 }
                 Ok(())
             }
@@ -94,6 +96,7 @@ impl<'a> MirLowerer<'a> {
             HirStmt::Assign { target, value } => {
                 if let HirExprKind::Local(local_index) = &target.kind {
                     self.record_len_local_source(*local_index, None);
+                    self.record_array_capacity_local_source(*local_index, None);
                 }
                 let val_reg = self.lower_expr(value)?;
                 let ty = value.ty;
@@ -622,12 +625,52 @@ impl<'a> MirLowerer<'a> {
                         if let Some(target) = typed_push_target {
                             let receiver_reg = self.lower_expr(receiver)?;
                             let value_reg = self.lower_expr(&args[0])?;
+                            let append_ptrs = self.active_array_append_ptrs(receiver);
+                            let append_index = append_ptrs
+                                .map(|ptrs| ptrs.index_local_index)
+                                .or_else(|| self.active_array_append_index(receiver));
+                            let index_reg = if let Some(index_local_index) = append_index {
+                                Some(self.with_func(|func, current_block| {
+                                    let addr = func.new_vreg();
+                                    let index = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::LocalAddr {
+                                        dest: addr,
+                                        local_index: index_local_index,
+                                    });
+                                    block.instructions.push(MirInst::Load {
+                                        dest: index,
+                                        addr,
+                                        ty: TypeId::U64,
+                                    });
+                                    index
+                                })?)
+                            } else {
+                                None
+                            };
+                            let target = match (target, append_index) {
+                                ("rt_typed_words_u32_push", Some(_)) if append_ptrs.is_some() => {
+                                    "rt_typed_words_u32_push_known_data_at"
+                                }
+                                ("rt_typed_words_u64_push", Some(_)) if append_ptrs.is_some() => {
+                                    "rt_typed_words_u64_push_known_data_at"
+                                }
+                                ("rt_typed_words_u32_push", Some(_)) => "rt_typed_words_u32_push_known_at",
+                                ("rt_typed_words_u64_push", Some(_)) => "rt_typed_words_u64_push_known_at",
+                                _ => target,
+                            };
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
                                 block.instructions.push(MirInst::Call {
                                     dest: None,
                                     target: CallTarget::from_name(target),
-                                    args: vec![receiver_reg, value_reg],
+                                    args: if let (Some(ptrs), Some(index_reg)) = (append_ptrs, index_reg) {
+                                        vec![ptrs.header_ptr, ptrs.data_ptr, index_reg, value_reg]
+                                    } else if let Some(index_reg) = index_reg {
+                                        vec![receiver_reg, index_reg, value_reg]
+                                    } else {
+                                        vec![receiver_reg, value_reg]
+                                    },
                                 });
                             })?;
                             self.last_expr_value = None;
@@ -779,6 +822,7 @@ impl<'a> MirLowerer<'a> {
                 let bound_proof = self
                     .loop_len_bound_proof(condition)
                     .filter(|proof| !Self::body_may_mutate_or_escape_array(body, proof.array_local_index));
+                let append_bound_proof = self.loop_append_bound_proof(condition, body);
                 // Create blocks and set initial jump
                 let (cond_id, body_id, exit_id) = self.with_func(|func, current_block| {
                     let cond_id = func.new_block();
@@ -808,6 +852,42 @@ impl<'a> MirLowerer<'a> {
                             args: vec![array],
                         });
                         data_ptr
+                    })?)
+                } else {
+                    None
+                };
+                let hoisted_append_ptrs = if let Some(proof) = append_bound_proof {
+                    Some(self.with_func(|func, current_block| {
+                        let addr = func.new_vreg();
+                        let array = func.new_vreg();
+                        let header_ptr = func.new_vreg();
+                        let data_ptr = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::LocalAddr {
+                            dest: addr,
+                            local_index: proof.array_local_index,
+                        });
+                        block.instructions.push(MirInst::Load {
+                            dest: array,
+                            addr,
+                            ty: TypeId::ANY,
+                        });
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(header_ptr),
+                            target: CallTarget::from_name("rt_array_header_ptr"),
+                            args: vec![array],
+                        });
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(data_ptr),
+                            target: CallTarget::from_name("rt_array_data_ptr"),
+                            args: vec![array],
+                        });
+                        ArrayAppendPtrs {
+                            array_local_index: proof.array_local_index,
+                            index_local_index: proof.index_local_index,
+                            header_ptr,
+                            data_ptr,
+                        }
                     })?)
                 } else {
                     None
@@ -849,8 +929,20 @@ impl<'a> MirLowerer<'a> {
                         self.active_array_data_ptrs.push((proof.array_local_index, data_ptr));
                     }
                 }
+                if let Some(proof) = append_bound_proof {
+                    self.active_array_append_bounds.push(proof);
+                }
+                if let Some(ptrs) = hoisted_append_ptrs {
+                    self.active_array_append_ptrs.push(ptrs);
+                }
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
+                }
+                if hoisted_append_ptrs.is_some() {
+                    self.active_array_append_ptrs.pop();
+                }
+                if append_bound_proof.is_some() {
+                    self.active_array_append_bounds.pop();
                 }
                 if bound_proof.is_some() {
                     self.active_array_len_bounds.pop();

@@ -252,6 +252,7 @@ pub use value::{
     rt_alloc,
     // Array operations
     rt_array_data_ptr,
+    rt_array_header_ptr,
     rt_array_get,
     rt_array_len,
     rt_array_new,
@@ -263,10 +264,14 @@ pub use value::{
     rt_typed_words_u32_at,
     rt_typed_words_u32_data_at,
     rt_typed_words_u32_push,
+    rt_typed_words_u32_push_known_data_at,
+    rt_typed_words_u32_push_known_at,
     rt_typed_words_u32_unchecked,
     rt_typed_words_u64_at,
     rt_typed_words_u64_data_at,
     rt_typed_words_u64_push,
+    rt_typed_words_u64_push_known_data_at,
+    rt_typed_words_u64_push_known_at,
     rt_typed_words_u64_unchecked,
     // Channel operations
     rt_channel_close,

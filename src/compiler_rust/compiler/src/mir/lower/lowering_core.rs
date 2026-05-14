@@ -95,6 +95,20 @@ pub(super) struct ArrayLenBoundProof {
     pub index_local_index: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ArrayAppendBoundProof {
+    pub array_local_index: usize,
+    pub index_local_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ArrayAppendPtrs {
+    pub array_local_index: usize,
+    pub index_local_index: usize,
+    pub header_ptr: VReg,
+    pub data_ptr: VReg,
+}
+
 /// Context for contract lowering
 #[derive(Debug, Clone, Default)]
 pub struct ContractContext {
@@ -278,8 +292,14 @@ pub struct MirLowerer<'a> {
     pub(super) tagged_locals: std::collections::HashSet<usize>,
     /// Locals known to hold the current length of an array local.
     pub(super) len_local_sources: HashMap<usize, usize>,
+    /// Array locals known to have been created with a capacity local.
+    pub(super) array_capacity_local_sources: HashMap<usize, usize>,
     /// Active loop-body proofs of `index < array.len()`.
     pub(super) active_array_len_bounds: Vec<ArrayLenBoundProof>,
+    /// Active loop-body proofs that `array.push(x)` targets slot `index`.
+    pub(super) active_array_append_bounds: Vec<ArrayAppendBoundProof>,
+    /// Hoisted array header/data pointers for proven append loops.
+    pub(super) active_array_append_ptrs: Vec<ArrayAppendPtrs>,
     /// Hoisted array data pointers for read-only loops with active length proofs.
     pub(super) active_array_data_ptrs: Vec<(usize, VReg)>,
 }
@@ -306,7 +326,10 @@ impl<'a> MirLowerer<'a> {
             tagged_vregs: std::collections::HashSet::new(),
             tagged_locals: std::collections::HashSet::new(),
             len_local_sources: HashMap::new(),
+            array_capacity_local_sources: HashMap::new(),
             active_array_len_bounds: Vec::new(),
+            active_array_append_bounds: Vec::new(),
+            active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
         }
     }
@@ -328,7 +351,10 @@ impl<'a> MirLowerer<'a> {
             tagged_vregs: std::collections::HashSet::new(),
             tagged_locals: std::collections::HashSet::new(),
             len_local_sources: HashMap::new(),
+            array_capacity_local_sources: HashMap::new(),
             active_array_len_bounds: Vec::new(),
+            active_array_append_bounds: Vec::new(),
+            active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
             decision_counter: 0,
             condition_counters: HashMap::new(),
@@ -370,11 +396,37 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    pub(super) fn capacity_local_for_new_array_expr(expr: &HirExpr) -> Option<usize> {
+        match &expr.kind {
+            HirExprKind::Call { func, args } if args.len() == 1 => {
+                if matches!(&func.kind, HirExprKind::Global(name) if name == "rt_array_new_with_cap") {
+                    Self::local_index_for_expr(&args[0])
+                } else {
+                    None
+                }
+            }
+            HirExprKind::MethodCall {
+                receiver, method, args, ..
+            } if args.is_empty() && matches!(method.as_str(), "to_u64" | "to_i64" | "to_usize") => {
+                Self::capacity_local_for_new_array_expr(receiver)
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn record_len_local_source(&mut self, local_index: usize, value: Option<&HirExpr>) {
         self.len_local_sources.remove(&local_index);
         self.len_local_sources.retain(|_, array_idx| *array_idx != local_index);
         if let Some(array_local_index) = value.and_then(Self::array_local_for_len_expr) {
             self.len_local_sources.insert(local_index, array_local_index);
+        }
+    }
+
+    pub(super) fn record_array_capacity_local_source(&mut self, local_index: usize, value: Option<&HirExpr>) {
+        self.array_capacity_local_sources.remove(&local_index);
+        if let Some(capacity_local_index) = value.and_then(Self::capacity_local_for_new_array_expr) {
+            self.array_capacity_local_sources
+                .insert(local_index, capacity_local_index);
         }
     }
 
@@ -392,6 +444,31 @@ impl<'a> MirLowerer<'a> {
             array_local_index,
             index_local_index,
         })
+    }
+
+    pub(super) fn loop_append_bound_proof(
+        &self,
+        condition: &HirExpr,
+        body: &[HirStmt],
+    ) -> Option<ArrayAppendBoundProof> {
+        let HirExprKind::Binary { op, left, right } = &condition.kind else {
+            return None;
+        };
+        if *op != BinOp::Lt || !Self::is_unsigned_int_type(left.ty) {
+            return None;
+        }
+        let index_local_index = Self::local_index_for_expr(left)?;
+        let capacity_local_index = Self::local_index_for_expr(right)?;
+        self.array_capacity_local_sources
+            .iter()
+            .find_map(|(array_local_index, cap_idx)| {
+                (*cap_idx == capacity_local_index
+                    && Self::body_is_single_append_loop(body, *array_local_index, index_local_index))
+                .then_some(ArrayAppendBoundProof {
+                    array_local_index: *array_local_index,
+                    index_local_index,
+                })
+            })
     }
 
     pub(super) fn index_has_active_len_bound(&self, receiver: &HirExpr, index: &HirExpr) -> bool {
@@ -415,6 +492,22 @@ impl<'a> MirLowerer<'a> {
             .iter()
             .rev()
             .find_map(|(idx, ptr)| (*idx == array_local_index).then_some(*ptr))
+    }
+
+    pub(super) fn active_array_append_index(&self, receiver: &HirExpr) -> Option<usize> {
+        let array_local_index = Self::local_index_for_expr(receiver)?;
+        self.active_array_append_bounds
+            .iter()
+            .rev()
+            .find_map(|proof| (proof.array_local_index == array_local_index).then_some(proof.index_local_index))
+    }
+
+    pub(super) fn active_array_append_ptrs(&self, receiver: &HirExpr) -> Option<ArrayAppendPtrs> {
+        let array_local_index = Self::local_index_for_expr(receiver)?;
+        self.active_array_append_ptrs
+            .iter()
+            .rev()
+            .find_map(|ptrs| (ptrs.array_local_index == array_local_index).then_some(*ptrs))
     }
 
     pub(super) fn body_may_mutate_or_escape_array(body: &[HirStmt], array_local_index: usize) -> bool {
@@ -506,6 +599,59 @@ impl<'a> MirLowerer<'a> {
                 .any(|item| Self::expr_may_escape_array(item, array_local_index)),
             _ => false,
         }
+    }
+
+    fn body_is_single_append_loop(body: &[HirStmt], array_local_index: usize, _index_local_index: usize) -> bool {
+        let mut append_count = 0usize;
+        for stmt in body {
+            match stmt {
+                HirStmt::Expr(expr) => match &expr.kind {
+                    HirExprKind::MethodCall {
+                        receiver, method, args, ..
+                    } if method == "push"
+                        && args.len() == 1
+                        && Self::local_index_for_expr(receiver) == Some(array_local_index)
+                        && !Self::expr_may_escape_array(&args[0], array_local_index) =>
+                    {
+                        append_count += 1;
+                    }
+                    _ if Self::expr_may_escape_array(expr, array_local_index) => return false,
+                    _ => {}
+                },
+                HirStmt::Let { value, .. } => {
+                    if value
+                        .as_ref()
+                        .is_some_and(|expr| Self::expr_may_escape_array(expr, array_local_index))
+                    {
+                        return false;
+                    }
+                }
+                HirStmt::Assign { target, value } => {
+                    if Self::expr_assigns_array(target, array_local_index)
+                        || Self::expr_may_escape_array(value, array_local_index)
+                    {
+                        return false;
+                    }
+                }
+                HirStmt::Assert { condition, .. }
+                | HirStmt::Assume { condition, .. }
+                | HirStmt::Admit { condition, .. } => {
+                    if Self::expr_may_escape_array(condition, array_local_index) {
+                        return false;
+                    }
+                }
+                HirStmt::Break
+                | HirStmt::Continue
+                | HirStmt::Return(_)
+                | HirStmt::If { .. }
+                | HirStmt::While { .. }
+                | HirStmt::Loop { .. }
+                | HirStmt::For { .. }
+                | HirStmt::Defer { .. } => return false,
+                HirStmt::ProofHint { .. } | HirStmt::Calc { .. } | HirStmt::InlineAsm { .. } => {}
+            }
+        }
+        append_count == 1
     }
 
     fn is_unsigned_int_type(ty: TypeId) -> bool {

@@ -335,6 +335,25 @@ fn compile_inline_array_data_ptr<M: Module>(
     Ok(true)
 }
 
+fn compile_inline_array_header_ptr<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 1 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    ctx.vreg_values.insert(*dest, ptr_bits);
+    Ok(true)
+}
+
 fn compile_inline_typed_bytes_data_at<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -634,6 +653,74 @@ fn compile_inline_typed_words_push<M: Module>(
     builder.seal_block(done_block);
     if let (Some(dest), Some(result)) = (dest, result) {
         ctx.vreg_values.insert(*dest, result);
+    }
+    Ok(true)
+}
+
+fn compile_inline_typed_words_push_known_at<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+    width: i64,
+) -> InstrResult<bool> {
+    if args.len() != 3 {
+        return Ok(false);
+    }
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let value = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let word = if width == 4 {
+        builder.ins().band_imm(value, 0xFFFF_FFFF)
+    } else {
+        value
+    };
+    let tagged = builder.ins().ishl_imm(word, 3);
+    builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
+    let next_len = builder.ins().iadd_imm(index, 1);
+    builder.ins().store(MemFlags::new(), next_len, ptr_bits, 8);
+    if let Some(dest) = dest {
+        let true_value = builder.ins().iconst(types::I8, 1);
+        ctx.vreg_values.insert(*dest, true_value);
+    }
+    Ok(true)
+}
+
+fn compile_inline_typed_words_push_known_data_at<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+    width: i64,
+) -> InstrResult<bool> {
+    if args.len() != 4 {
+        return Ok(false);
+    }
+
+    let header_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let data_ptr = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let value = coerce_vreg_to_i64(ctx, builder, args[3]);
+    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let word = if width == 4 {
+        builder.ins().band_imm(value, 0xFFFF_FFFF)
+    } else {
+        value
+    };
+    let tagged = builder.ins().ishl_imm(word, 3);
+    builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
+    let next_len = builder.ins().iadd_imm(index, 1);
+    builder.ins().store(MemFlags::new(), next_len, header_ptr, 8);
+    if let Some(dest) = dest {
+        let true_value = builder.ins().iconst(types::I8, 1);
+        ctx.vreg_values.insert(*dest, true_value);
     }
     Ok(true)
 }
@@ -1287,6 +1374,9 @@ pub fn compile_call<M: Module>(
     if ffi_name == "rt_array_data_ptr" && compile_inline_array_data_ptr(ctx, builder, dest, args)? {
         return Ok(());
     }
+    if ffi_name == "rt_array_header_ptr" && compile_inline_array_header_ptr(ctx, builder, dest, args)? {
+        return Ok(());
+    }
     if matches!(ffi_name, "rt_len" | "rt_array_len") && compile_inline_len(ctx, builder, dest, args)? {
         return Ok(());
     }
@@ -1347,6 +1437,26 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
     if ffi_name == "rt_typed_words_u64_push" && compile_inline_typed_words_push(ctx, builder, dest, args, 8)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u32_push_known_at"
+        && compile_inline_typed_words_push_known_at(ctx, builder, dest, args, 4)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u64_push_known_at"
+        && compile_inline_typed_words_push_known_at(ctx, builder, dest, args, 8)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u32_push_known_data_at"
+        && compile_inline_typed_words_push_known_data_at(ctx, builder, dest, args, 4)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u64_push_known_data_at"
+        && compile_inline_typed_words_push_known_data_at(ctx, builder, dest, args, 8)?
+    {
         return Ok(());
     }
     if ffi_name == "rt_typed_bytes_u8_push" && compile_inline_typed_bytes_u8_push(ctx, builder, dest, args)? {

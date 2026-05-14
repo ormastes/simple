@@ -866,6 +866,59 @@ fn codegen_inline_typed_words_u64_push_compiles_with_grow_fallback() {
 }
 
 #[test]
+fn codegen_inline_typed_words_u64_push_known_at_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_typed_words_u64_push_known_at", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let value = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: value,
+            value: 0x1001,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: None,
+            target: crate::mir::CallTarget::from_name("rt_typed_words_u64_push_known_at"),
+            args: vec![array, index, value],
+        });
+        value
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_typed_words_u64_push_known_at"));
+}
+
+#[test]
+fn codegen_inline_typed_words_u64_push_known_data_at_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_typed_words_u64_push_known_data_at", |f| {
+        let header = f.new_vreg();
+        let data = f.new_vreg();
+        let index = f.new_vreg();
+        let value = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: header, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: data, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: value,
+            value: 0x1001,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: None,
+            target: crate::mir::CallTarget::from_name("rt_typed_words_u64_push_known_data_at"),
+            args: vec![header, data, index, value],
+        });
+        value
+    });
+
+    assert!(!object_relocates_to_symbol(
+        &object,
+        "rt_typed_words_u64_push_known_data_at"
+    ));
+}
+
+#[test]
 fn codegen_inline_bytes_u64_le_at_does_not_emit_runtime_symbol() {
     let object = aot_object("inline_bytes_u64_le_at", |f| {
         let array = f.new_vreg();

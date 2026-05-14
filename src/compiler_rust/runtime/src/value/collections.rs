@@ -455,6 +455,13 @@ pub extern "C" fn rt_array_data_ptr(array: RuntimeValue) -> i64 {
     unsafe { (*arr).data as i64 }
 }
 
+/// Return the stable array header pointer for proven native fast paths.
+#[no_mangle]
+pub extern "C" fn rt_array_header_ptr(array: RuntimeValue) -> i64 {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    arr as i64
+}
+
 #[no_mangle]
 pub extern "C" fn rt_typed_bytes_u8_data_at(data_ptr: i64, index: i64) -> i64 {
     unsafe { *((data_ptr as *const u8).add(index as usize)) as i64 }
@@ -746,6 +753,78 @@ pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bo
 
         *(*arr).data.add((*arr).len as usize) = RuntimeValue::from_int(value);
         (*arr).len += 1;
+        true
+    }
+}
+
+/// Store a typed u32 at a caller-proven append slot and update length.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u32_push_known_at(array: RuntimeValue, index: i64, value: i64) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        if (*arr).is_byte_packed() || index < 0 || index as u64 >= (*arr).capacity {
+            return false;
+        }
+        *(*arr).data.add(index as usize) = RuntimeValue::from_int(value & 0xFFFF_FFFF);
+        (*arr).len = (index as u64 + 1).max((*arr).len);
+        true
+    }
+}
+
+/// Store a typed u64 at a caller-proven append slot and update length.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u64_push_known_at(array: RuntimeValue, index: i64, value: i64) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        if (*arr).is_byte_packed() || index < 0 || index as u64 >= (*arr).capacity {
+            return false;
+        }
+        *(*arr).data.add(index as usize) = RuntimeValue::from_int(value);
+        (*arr).len = (index as u64 + 1).max((*arr).len);
+        true
+    }
+}
+
+/// Store a typed u32 through hoisted array pointers and update length.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u32_push_known_data_at(
+    header_ptr: i64,
+    data_ptr: i64,
+    index: i64,
+    value: i64,
+) -> bool {
+    if header_ptr == 0 || data_ptr == 0 || index < 0 {
+        return false;
+    }
+    unsafe {
+        let arr = header_ptr as *mut RuntimeArray;
+        if index as u64 >= (*arr).capacity {
+            return false;
+        }
+        *((data_ptr as *mut RuntimeValue).add(index as usize)) = RuntimeValue::from_int(value & 0xFFFF_FFFF);
+        (*arr).len = (index as u64 + 1).max((*arr).len);
+        true
+    }
+}
+
+/// Store a typed u64 through hoisted array pointers and update length.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u64_push_known_data_at(
+    header_ptr: i64,
+    data_ptr: i64,
+    index: i64,
+    value: i64,
+) -> bool {
+    if header_ptr == 0 || data_ptr == 0 || index < 0 {
+        return false;
+    }
+    unsafe {
+        let arr = header_ptr as *mut RuntimeArray;
+        if index as u64 >= (*arr).capacity {
+            return false;
+        }
+        *((data_ptr as *mut RuntimeValue).add(index as usize)) = RuntimeValue::from_int(value);
+        (*arr).len = (index as u64 + 1).max((*arr).len);
         true
     }
 }
