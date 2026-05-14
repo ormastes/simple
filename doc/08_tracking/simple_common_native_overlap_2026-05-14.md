@@ -235,6 +235,11 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   and measured list traversal at `1,917,783` Simple ops/ms (`0.44x` C, `0.20x`
   Rust), list push at `1,292,198` Simple ops/ms (`0.41x` C, `0.87x` Rust), and
   set-like membership at `3,534` Simple ops/ms (`0.51x` C, `0.28x` Rust).
+- The pure Simple `collection_opt` provider now mirrors that MIR-level dead
+  append-only capacity-array rule for already-lowered MIR: a
+  `rt_array_new_with_cap*` result is removed when its only uses are ignored
+  append calls, and observed append results keep the array live. This narrows
+  the Rust-hosted vs pure Simple optimizer gap for synthetic list-push loops.
 
 ## Next Concrete Plugin Work
 

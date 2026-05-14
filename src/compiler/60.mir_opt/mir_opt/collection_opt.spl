@@ -18,6 +18,11 @@
 # Pattern 5 — Typed array index dispatch specialization:
 #   Call(dst, "rt_index_get", [array, idx]) -> Call(dst, "rt_array_get", [array, idx])
 #   when MIR local type metadata proves the receiver is an Array.
+#
+# Pattern 6 — Dead append-only capacity array elimination:
+#   Call(array, "rt_array_new_with_cap", [cap]) -> (removed)
+#   Call(_, typed_push, [array, value])         -> (removed)
+#   when the capacity-created array has no observable uses except ignored pushes.
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir.*
@@ -43,6 +48,7 @@ class CollectionOptimization:
     len_queries_reused: i64
     pure_queries_reused: i64
     array_index_gets_specialized: i64
+    dead_append_arrays_elided: i64
 
 impl CollectionOptimization:
     static fn new() -> CollectionOptimization:
@@ -53,7 +59,8 @@ impl CollectionOptimization:
             calls_hoisted: 0,
             len_queries_reused: 0,
             pure_queries_reused: 0,
-            array_index_gets_specialized: 0
+            array_index_gets_specialized: 0,
+            dead_append_arrays_elided: 0
         )
 
     me optimize_function(func: MirFunction) -> MirFunction:
@@ -71,10 +78,97 @@ impl CollectionOptimization:
         optimized_blocks = self.canonicalize_collection_len_queries(optimized_blocks)
         optimized_blocks = self.canonicalize_collection_pure_queries(optimized_blocks)
         optimized_blocks = self.specialize_typed_array_index_gets(optimized_blocks, func)
+        optimized_blocks = self.elide_dead_append_only_capacity_arrays(optimized_blocks)
 
         var result = func
         result.blocks = optimized_blocks
         result
+
+    me elide_dead_append_only_capacity_arrays(blocks: [MirBlock]) -> [MirBlock]:
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            var new_insts: [MirInst] = []
+            var changed = false
+            for inst in block.instructions:
+                val dest_id = self.capacity_array_alloc_dest_id(inst)
+                if dest_id >= 0 and self.array_local_has_only_ignored_appends(blocks, dest_id):
+                    self.dead_append_arrays_elided = self.dead_append_arrays_elided + 1
+                    changed = true
+                    continue
+                val append_array_id = self.ignored_append_array_local_id(inst)
+                if append_array_id >= 0 and self.array_local_has_only_ignored_appends(blocks, append_array_id):
+                    changed = true
+                    continue
+                new_insts.push(inst)
+            if changed:
+                new_blocks.push(MirBlock(
+                    id: block.id,
+                    label: block.label,
+                    instructions: new_insts,
+                    terminator: block.terminator
+                ))
+            else:
+                new_blocks.push(block)
+        new_blocks
+
+    fn array_local_has_only_ignored_appends(blocks: [MirBlock], array_id: i64) -> bool:
+        var append_count = 0
+        for block in blocks:
+            for inst in block.instructions:
+                if self.capacity_array_alloc_dest_id(inst) == array_id:
+                    continue
+
+                if self.ignored_append_array_local_id(inst) == array_id:
+                    append_count = append_count + 1
+                    if self.inst_uses_local_outside_ignored_append(inst, array_id):
+                        return false
+                    continue
+
+                if self.inst_uses_local_id(inst, array_id):
+                    return false
+
+            if self.terminator_uses_local_id(block.terminator, array_id):
+                return false
+        append_count > 0
+
+    fn capacity_array_alloc_dest_id(inst: MirInst) -> i64:
+        match inst.kind:
+            case Call(dest, func, args):
+                if not dest.? or args.len() != 1:
+                    return -1
+                if self.is_capacity_array_alloc(self.get_func_name(func)):
+                    return dest.id
+                -1
+            case _: -1
+
+    fn is_capacity_array_alloc(name: text) -> bool:
+        name == "rt_array_new_with_cap" or
+        name == "rt_array_new_with_cap_i64" or
+        name == "rt_array_new_with_cap_text" or
+        name == "rt_array_new_with_cap_js_value" or
+        name == "rt_array_new_with_cap_bool"
+
+    fn ignored_append_array_local_id(inst: MirInst) -> i64:
+        match inst.kind:
+            case Call(dest, func, args):
+                if dest.? or args.len() < 2:
+                    return -1
+                if not self.is_append_call_name(self.get_func_name(func)):
+                    return -1
+                match args[0].kind:
+                    case Copy(local): local.id
+                    case Move(local): local.id
+                    case _: -1
+            case _: -1
+
+    fn is_append_call_name(name: text) -> bool:
+        name == "push" or
+        name == "rt_typed_words_u32_push" or
+        name == "rt_typed_words_u64_push" or
+        name == "rt_typed_words_u32_push_known_at" or
+        name == "rt_typed_words_u64_push_known_at" or
+        name == "rt_typed_words_u32_push_known_data_at" or
+        name == "rt_typed_words_u64_push_known_data_at"
 
     me canonicalize_collection_pure_queries(blocks: [MirBlock]) -> [MirBlock]:
         var new_blocks: [MirBlock] = []
@@ -420,6 +514,113 @@ impl CollectionOptimization:
 
     fn count_local_use(local: LocalId, counts: Dict<i64, i64>):
         counts[local.id] = (counts[local.id] ?? 0) + 1
+
+    fn inst_uses_local_id(inst: MirInst, local_id: i64) -> bool:
+        match inst.kind:
+            case Copy(dest, src):
+                dest.id == local_id or src.id == local_id
+            case Move(dest, src):
+                dest.id == local_id or src.id == local_id
+            case BinOp(dest, _, left, right):
+                dest.id == local_id or self.operand_uses_local_id(left, local_id) or self.operand_uses_local_id(right, local_id)
+            case UnaryOp(dest, _, operand):
+                dest.id == local_id or self.operand_uses_local_id(operand, local_id)
+            case CheckedBinOp(dest, _, left, right):
+                dest.id == local_id or self.operand_uses_local_id(left, local_id) or self.operand_uses_local_id(right, local_id)
+            case Load(dest, ptr):
+                dest.id == local_id or self.operand_uses_local_id(ptr, local_id)
+            case Store(ptr, value):
+                self.operand_uses_local_id(ptr, local_id) or self.operand_uses_local_id(value, local_id)
+            case GetElementPtr(dest, base, indices):
+                if dest.id == local_id or self.operand_uses_local_id(base, local_id):
+                    return true
+                for idx in indices:
+                    if self.operand_uses_local_id(idx, local_id):
+                        return true
+                false
+            case Aggregate(dest, _, operands):
+                if dest.id == local_id:
+                    return true
+                for operand in operands:
+                    if self.operand_uses_local_id(operand, local_id):
+                        return true
+                false
+            case GetField(dest, base, _):
+                dest.id == local_id or self.operand_uses_local_id(base, local_id)
+            case SetField(base, _, value):
+                self.operand_uses_local_id(base, local_id) or self.operand_uses_local_id(value, local_id)
+            case Cast(dest, operand, _):
+                dest.id == local_id or self.operand_uses_local_id(operand, local_id)
+            case Bitcast(dest, operand, _):
+                dest.id == local_id or self.operand_uses_local_id(operand, local_id)
+            case Call(dest, func, args):
+                if dest.? and dest.id == local_id:
+                    return true
+                if self.operand_uses_local_id(func, local_id):
+                    return true
+                for arg in args:
+                    if self.operand_uses_local_id(arg, local_id):
+                        return true
+                false
+            case CallIndirect(dest, ptr, args, _):
+                if dest.? and dest.id == local_id:
+                    return true
+                if self.operand_uses_local_id(ptr, local_id):
+                    return true
+                for arg in args:
+                    if self.operand_uses_local_id(arg, local_id):
+                        return true
+                false
+            case Intrinsic(dest, _, args):
+                if dest.? and dest.id == local_id:
+                    return true
+                for arg in args:
+                    if self.operand_uses_local_id(arg, local_id):
+                        return true
+                false
+            case Const(dest, _, _):
+                dest.id == local_id
+            case DebugValue(local, _):
+                local.id == local_id
+            case _: false
+
+    fn inst_uses_local_outside_ignored_append(inst: MirInst, local_id: i64) -> bool:
+        match inst.kind:
+            case Call(_, _, args):
+                if args.len() == 0:
+                    return false
+                for i in 1..args.len():
+                    if self.operand_uses_local_id(args[i], local_id):
+                        return true
+                false
+            case _: self.inst_uses_local_id(inst, local_id)
+
+    fn terminator_uses_local_id(term: MirTerminator, local_id: i64) -> bool:
+        match term:
+            case Return(value):
+                value.? and self.operand_uses_local_id(value.unwrap(), local_id)
+            case If(cond, _, _):
+                self.operand_uses_local_id(cond, local_id)
+            case Switch(value, _, _):
+                self.operand_uses_local_id(value, local_id)
+            case CallTerminator(dest, func, args, _, _):
+                if dest.? and dest.id == local_id:
+                    return true
+                if self.operand_uses_local_id(func, local_id):
+                    return true
+                for arg in args:
+                    if self.operand_uses_local_id(arg, local_id):
+                        return true
+                false
+            case _: false
+
+    fn operand_uses_local_id(op: MirOperand, local_id: i64) -> bool:
+        match op.kind:
+            case Copy(local):
+                local.id == local_id
+            case Move(local):
+                local.id == local_id
+            case _: false
 
     fn collection_operand_key(op: MirOperand) -> text:
         match op.kind:
@@ -814,7 +1015,7 @@ impl CollectionOptimization:
         false
 
     fn stats_summary() -> text:
-        "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted, {self.len_queries_reused} len queries reused, {self.pure_queries_reused} pure queries reused"
+        "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted, {self.len_queries_reused} len queries reused, {self.pure_queries_reused} pure queries reused, {self.dead_append_arrays_elided} dead append arrays elided"
 
 # ============================================================================
 # Factory Functions
