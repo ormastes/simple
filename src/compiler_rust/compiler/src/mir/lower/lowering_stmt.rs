@@ -7,6 +7,8 @@ use super::lowering_core::{ArrayAppendPtrs, LoopContext, MirLowerResult, MirLowe
 use crate::hir::{BinOp, HirContract, HirExpr, HirExprKind, HirStmt, HirType, TypeId};
 use crate::mir::blocks::Terminator;
 use crate::mir::effects::CallTarget;
+use crate::mir::effects::LocalKind;
+use crate::mir::function::MirLocal;
 use crate::mir::instructions::{MirInst, UnitOverflowBehavior};
 
 impl<'a> MirLowerer<'a> {
@@ -17,6 +19,29 @@ impl<'a> MirLowerer<'a> {
                 ty: declared_ty,
                 value,
             } => {
+                self.with_func(|func, _| {
+                    let param_count = func.params.len();
+                    if *local_index >= param_count {
+                        let local_slot = *local_index - param_count;
+                        while func.locals.len() <= local_slot {
+                            let index = param_count + func.locals.len();
+                            let ty = if index == *local_index {
+                                *declared_ty
+                            } else {
+                                TypeId::ANY
+                            };
+                            func.locals.push(MirLocal {
+                                name: format!("$block_local_{}", index),
+                                ty,
+                                kind: LocalKind::Local,
+                                is_ghost: false,
+                            });
+                        }
+                        if let Some(local) = func.locals.get_mut(local_slot) {
+                            local.ty = *declared_ty;
+                        }
+                    }
+                })?;
                 if self.dead_append_array_locals.contains(local_index) {
                     self.record_len_local_source(*local_index, None);
                     self.record_array_capacity_local_source(*local_index, None);
