@@ -38,6 +38,23 @@ At boot, VFS init attempts to read `/SYS/APPS/APPIDX.TXT` from the FAT32 volume.
 
 Each line: `canonical_path|fat32_leaf|boot_seed` (lines starting with `#` are comments).
 
+### Default Installed Programs
+
+The launcher seeds the desktop apps directly from the built-in catalog:
+
+| Program | Launch paths | Notes |
+|---------|--------------|-------|
+| Terminal / shell | `/sys/apps/shell.smf`, `/sys/apps/shell` | Interactive command shell. |
+| System Monitor | `/sys/apps/sysmon` | htop-like process and system view from the desktop manifest. |
+| Smux | `/sys/apps/smux.smf`, `/sys/apps/smux` | tmux-like multiplexer staged on the disk image. |
+| Simple | `/sys/apps/simple.smf`, `/sys/apps/simple`, `/usr/bin/simple` | Static Simple executable; supports both desktop `.smf` launch and Linux/macOS/Windows-style command lookup. |
+| Simple Compiler | `/sys/apps/simple_compiler.smf`, `/sys/apps/simple_compiler` | Compiler frontend. |
+| Simple Interpreter | `/sys/apps/simple_interpreter.smf`, `/sys/apps/simple_interpreter` | Interpreter frontend. |
+| Simple Loader | `/sys/apps/simple_loader.smf`, `/sys/apps/simple_loader` | Loader frontend. |
+| LLVM / Clang / Rust | `/sys/apps/llvm`, `/sys/apps/clang`, `/sys/apps/rust` plus `.smf` variants | Native toolchain demos and launch probes. |
+
+SSH server support is scenario-driven rather than a normal launcher tile: the QEMU `x64-ssh` lane boots with the SSH app path and port-forwarded host access.
+
 ### Public API
 
 | Function | Purpose |
