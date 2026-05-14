@@ -23,15 +23,23 @@ optimization providers rather than delegating common algorithms back to Rust/C.
 - This directly supports overlap hot paths such as bit packing (`* 11`),
   packed-field sizing (`* 13`), nibble/color expansion (`* 17`), and byte
   mixing (`* 31`) without requiring Rust/C helpers.
+- `collection_opt` now exposes a dedicated hot-path provider,
+  `simple.opt.collection.loop_access`, instead of inheriting generic MIR
+  provider metadata. Its contract requires `typed_mir`, `loop_bounds`, and
+  `collection_layout`, and advertises `canonical_collection_loops`,
+  `hoisted_collection_queries`, and `append_fusion`.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/compiler/mir_opt/strength_reduction_spec.spl
   --mode=interpreter --clean` passing 14 examples.
+- Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
+  test test/unit/compiler/mir_opt/pass_descriptor_spec.spl
+  --mode=interpreter --clean` passing 7 examples.
 
 ## Next Concrete Plugin Work
 
-1. Add a collection-loop MIR pattern provider for `len`-guarded array/list loops
-   so indexed traversal over `[u8]`, `[u32]`, and fixed arrays emits one bounds
-   proof per loop instead of repeated helper dispatch.
+1. Implement the `simple.opt.collection.loop_access` rules for `len`-guarded
+   array/list loops so indexed traversal over `[u8]`, `[u32]`, and fixed arrays
+   emits one bounds proof per loop instead of repeated helper dispatch.
 2. Add static-table materialization for pure Simple `[u8]` and `[u32]` literals
    after resolving `native_u8_array_literal_not_packed_2026-05-13.md`.
 3. Add map/set probe-loop specialization for pure Simple `contains`, `insert`,
