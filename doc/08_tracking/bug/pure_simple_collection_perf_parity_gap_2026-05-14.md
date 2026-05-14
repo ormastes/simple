@@ -49,6 +49,16 @@ set_contains     0.52x C  0.26x Rust
 hashset_contains 0.26x C  0.43x Rust
 ```
 
+After direct `rt_string_eq` branching and power-of-two bucket masking, a later
+full clean source-closure harness run still passed checksum parity and measured:
+
+```text
+list_traverse    0.21x C  0.20x Rust
+list_push        0.43x C  0.84x Rust
+set_contains     0.51x C  0.26x Rust
+hashset_contains 0.37x C  0.63x Rust
+```
+
 ## Ruled Out
 
 - The Simple benchmark is not doing a different asymptotic algorithm for
@@ -97,6 +107,11 @@ hashset_contains 0.26x C  0.43x Rust
   resize, and uses `rt_hash_text`/`rt_string_eq` for text probe checks. This
   closed the accidental receiver-hash mismatch in the prior helper method path,
   but did not close native parity for text `HashSet.contains`.
+- Replacing `rt_string_eq(...) != 0` with direct truth branches removed the
+  post-compare `rt_native_neq` call in the text probe loop. Adding a
+  power-of-two bucket mask removed the signed divide for capacities such as the
+  benchmark's 2048 buckets. These changes improved text `HashSet.contains`, but
+  C parity is still not closed.
 
 ## Likely Gap
 

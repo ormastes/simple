@@ -434,6 +434,13 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   Rust for scalar set membership, and `0.26x` C / `0.43x` Rust for text
   `HashSet.contains`. Pure Simple is therefore improved, but still not
   properly updated to Rust/C performance parity.
+- The source-closure text `HashMap` probe now branches directly on
+  `rt_string_eq` results instead of emitting an extra `rt_native_neq` call, and
+  uses a power-of-two bucket mask when capacity allows it. A clean direct run
+  measured text `hashset_contains` at `24,128` ops/ms. The full clean harness
+  kept checksum parity and measured text `HashSet.contains` at `0.37x` C /
+  `0.63x` Rust. This crosses the warn floor against Rust but still misses C,
+  and list traversal plus scalar set lookup remain below the parity goal.
 
 ## Next Concrete Plugin Work
 
