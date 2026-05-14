@@ -36,23 +36,12 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_image_transform,
     emu_draw_rect_blend_mode
 }
-
-# ============================================================================
-# WebGPU FFI Declarations (SFFI placeholders - M7 landing)
-# ============================================================================
-#
-# These symbols are placeholders. Round 11 lands the architecture hook so
-# downstream code can reference a WebGPU backend; a real `wgpu` binding
-# is wired via `rt_webgpu_*` externs below.
-
-extern fn rt_webgpu_is_available() -> bool
-extern fn rt_webgpu_init() -> bool
-extern fn rt_webgpu_shutdown() -> bool
-extern fn rt_webgpu_create_surface(width: i32, height: i32) -> i64
-extern fn rt_webgpu_destroy_surface(handle: i64) -> bool
-extern fn rt_webgpu_upload_pixels(handle: i64, pixels: [u32], w: i32, h: i32) -> bool
-extern fn rt_webgpu_present(handle: i64) -> bool
-extern fn rt_webgpu_compute_draw(handle: i64, op_kind: i32, x: i32, y: i32, w: i32, h: i32, color: u32) -> bool
+use std.nogc_sync_mut.gpu.engine2d.webgpu_ffi.{
+    webgpu_ffi_is_available, webgpu_ffi_init, webgpu_ffi_shutdown,
+    webgpu_ffi_create_surface, webgpu_ffi_destroy_surface,
+    webgpu_ffi_upload_pixels, webgpu_ffi_present,
+    webgpu_ffi_compute_draw
+}
 
 # ============================================================================
 # Availability Check
@@ -65,7 +54,7 @@ fn webgpu_available() -> bool:
     (the default outside a real browser host). Engine2D auto-detection
     should skip this backend when the return value is false.
     """
-    rt_webgpu_is_available()
+    webgpu_ffi_is_available()
 
 # ============================================================================
 # WebGPU Backend
@@ -152,9 +141,9 @@ impl RenderBackend for WebGpuBackend:
         # a real adapter, `gpu_ready` stays false and present() becomes
         # a no-op, but the CPU draw path continues to function.
         self.gpu_ready = false
-        if rt_webgpu_is_available():
-            if rt_webgpu_init():
-                val h = rt_webgpu_create_surface(width, height)
+        if webgpu_ffi_is_available():
+            if webgpu_ffi_init():
+                val h = webgpu_ffi_create_surface(width, height)
                 if h != 0:
                     self.surface = h
                     self.gpu_ready = true
@@ -164,9 +153,9 @@ impl RenderBackend for WebGpuBackend:
     me shutdown():
         if self.gpu_ready:
             if self.surface != 0:
-                rt_webgpu_destroy_surface(self.surface)
+                webgpu_ffi_destroy_surface(self.surface)
                 self.surface = 0
-            rt_webgpu_shutdown()
+            webgpu_ffi_shutdown()
             self.gpu_ready = false
         self.buf = []
         self.mask_buf = []
@@ -191,7 +180,7 @@ impl RenderBackend for WebGpuBackend:
     # -- Clear --
 
     me clear(color: u32):
-        if self.gpu_ready and rt_webgpu_compute_draw(self.surface, 0, 0, 0, self.w, self.h, color):
+        if self.gpu_ready and webgpu_ffi_compute_draw(self.surface, 0, 0, 0, self.w, self.h, color):
             return
         var i = 0
         val total = self.w * self.h
@@ -218,7 +207,7 @@ impl RenderBackend for WebGpuBackend:
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         if w <= 0 or h <= 0:
             return
-        if self.gpu_ready and rt_webgpu_compute_draw(self.surface, 1, x, y, w, h, color):
+        if self.gpu_ready and webgpu_ffi_compute_draw(self.surface, 1, x, y, w, h, color):
             return
         var yy = 0
         while yy < h:
@@ -418,8 +407,8 @@ impl RenderBackend for WebGpuBackend:
         # an adapter this is a no-op - `read_pixels()` still returns
         # the drawn frame for compositor consumers.
         if self.gpu_ready and self.surface != 0:
-            rt_webgpu_upload_pixels(self.surface, self.buf, self.w, self.h)
-            rt_webgpu_present(self.surface)
+            webgpu_ffi_upload_pixels(self.surface, self.buf, self.w, self.h)
+            webgpu_ffi_present(self.surface)
 
     # -- Readback --
 
