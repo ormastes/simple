@@ -38,6 +38,36 @@ fn coverage_const_string() {
     assert!(has_inst(&mir, |i| matches!(i, MirInst::ConstString { .. })));
 }
 
+#[test]
+fn coverage_unknown_enum_variant_with_any_type_lowers_as_runtime_enum() {
+    let mut lowerer = MirLowerer::new();
+    let mut func = MirFunction::new(
+        "test".to_string(),
+        hir::TypeId::ANY,
+        simple_parser::ast::Visibility::Private,
+    );
+    func.new_block();
+    lowerer.begin_function(func, "test", false).unwrap();
+
+    let expr = hir::HirExpr {
+        kind: hir::HirExprKind::Global("MissingEnum::NotFound".to_string()),
+        ty: hir::TypeId::ANY,
+    };
+    lowerer.lower_expr(&expr).unwrap();
+    let finished = lowerer.end_function().unwrap();
+
+    assert!(finished.blocks.iter().flat_map(|block| &block.instructions).any(|inst| {
+        matches!(
+            inst,
+            MirInst::EnumUnit {
+                enum_name,
+                variant_name,
+                ..
+            } if enum_name == "MissingEnum" && variant_name == "NotFound"
+        )
+    }));
+}
+
 // =============================================================================
 // Additional branch coverage: UnaryOp
 // =============================================================================

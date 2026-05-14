@@ -47,7 +47,7 @@ impl<'a> MirLowerer<'a> {
                 false
             };
 
-            if variant_exists {
+            if variant_exists || expr_ty == TypeId::ANY {
                 // Emit EnumUnit instruction for proper RuntimeEnum creation
                 return self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
