@@ -26,6 +26,8 @@ pub struct CheckOptions {
     pub quiet: bool,
     /// Additional source roots for module resolution
     pub source_roots: Vec<PathBuf>,
+    /// Promote runtime-family boundary crossings to hard errors.
+    pub deny_gc_boundary_crossings: bool,
 }
 
 /// Check result for a single file
@@ -92,7 +94,7 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
             println!("Checking {}...", file.display());
         }
 
-        let result = check_file(file, &options.source_roots);
+        let result = check_file(file, &options.source_roots, options.deny_gc_boundary_crossings);
 
         match &result.status {
             CheckStatus::Success => {
@@ -183,7 +185,7 @@ fn expand_check_input(path: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Check a single file
-fn check_file(path: &Path, source_roots: &[PathBuf]) -> FileCheckResult {
+fn check_file(path: &Path, source_roots: &[PathBuf], deny_gc_boundary_crossings: bool) -> FileCheckResult {
     // Read file
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -215,7 +217,7 @@ fn check_file(path: &Path, source_roots: &[PathBuf]) -> FileCheckResult {
         Ok(module) => {
             // Parsing succeeded, validate imports
             validate_imports(path, &module.items, &mut errors, source_roots);
-            validate_gc_boundary_lints(path, &module.items, &mut errors);
+            validate_gc_boundary_lints(path, &module.items, &mut errors, deny_gc_boundary_crossings);
             validate_basic_type_annotations(path, &module.items, &mut errors);
         }
         Err(e) => {
@@ -240,12 +242,22 @@ fn check_file(path: &Path, source_roots: &[PathBuf]) -> FileCheckResult {
     }
 }
 
-fn validate_gc_boundary_lints(file_path: &Path, items: &[Node], errors: &mut Vec<CheckError>) {
+fn validate_gc_boundary_lints(
+    file_path: &Path,
+    items: &[Node],
+    errors: &mut Vec<CheckError>,
+    deny_gc_boundary_crossings: bool,
+) {
     let mut config = LintConfig::new();
     for lint in LintName::all_lints() {
         config.set_level(lint, LintLevel::Allow);
     }
-    config.set_level(LintName::GcBoundaryCrossing, LintLevel::Warn);
+    let gc_boundary_level = if deny_gc_boundary_crossings {
+        LintLevel::Deny
+    } else {
+        LintLevel::Warn
+    };
+    config.set_level(LintName::GcBoundaryCrossing, gc_boundary_level);
 
     let mut checker = LintChecker::with_config(config).with_source_file(Some(file_path.to_path_buf()));
     checker.check_module(items);
@@ -256,15 +268,19 @@ fn validate_gc_boundary_lints(file_path: &Path, items: &[Node], errors: &mut Vec
         }
 
         let mut help = Vec::new();
-        if let Some(suggestion) = diagnostic.suggestion {
-            help.push(suggestion);
+        if let Some(suggestion) = &diagnostic.suggestion {
+            help.push(suggestion.clone());
         }
 
         errors.push(CheckError {
             file: file_path.display().to_string(),
             line: diagnostic.span.line,
             column: diagnostic.span.column,
-            severity: ErrorSeverity::Warning,
+            severity: if diagnostic.is_error() {
+                ErrorSeverity::Error
+            } else {
+                ErrorSeverity::Warning
+            },
             code: Some(diagnostic.lint.as_str().to_string()),
             message: diagnostic.message,
             expected: None,
@@ -883,7 +899,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "fn main():\n    val x = 42\n    print(x)").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Success);
         assert!(result.errors.is_empty());
     }
@@ -893,7 +909,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "fn main():\n    val x =").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Error);
         assert!(!result.errors.is_empty());
         assert_eq!(result.errors[0].code.as_deref(), Some("E0002"));
@@ -905,7 +921,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "fn main():\n    val x: i64 = \"text\"").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Error);
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.errors[0].severity, ErrorSeverity::Error);
@@ -920,7 +936,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "fn main():\n    val x: i64 = 42").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Success);
         assert!(result.errors.is_empty());
     }
@@ -930,7 +946,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "fn main():\n    val x: i32 = 42\n    val y: u32 = 7").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Success);
         assert!(result.errors.is_empty());
     }
@@ -940,7 +956,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "fn main():\n    val x: f32 = 1.5").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Success);
         assert!(result.errors.is_empty());
     }
@@ -950,7 +966,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "fn value() -> bool:\n    return 1").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Error);
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.errors[0].code.as_deref(), Some("E1003"));
@@ -967,7 +983,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Success);
         assert!(result.errors.is_empty());
     }
@@ -977,7 +993,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "use definitely.missing.module\nfn main():\n    val x = 1").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Warning);
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.errors[0].severity, ErrorSeverity::Warning);
@@ -990,7 +1006,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "export Foo, Bar\nfn Foo() -> i64:\n    return 1").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert!(result.errors.iter().all(|error| error.code.as_deref() != Some("W0412")));
     }
 
@@ -999,7 +1015,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "import \"types\" as Types\nfn main():\n    val x = 1").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert!(result.errors.iter().all(|error| error.code.as_deref() != Some("W0410")));
     }
 
@@ -1013,7 +1029,7 @@ mod tests {
         let cipher = aes.join("cipher.spl");
         std::fs::write(&cipher, "import aes/utilities\nfn main():\n    val x = 1\n").unwrap();
 
-        let result = check_file(&cipher, &[lib_root]);
+        let result = check_file(&cipher, &[lib_root], false);
         assert!(result.errors.iter().all(|error| error.code.as_deref() != Some("W0410")));
     }
 
@@ -1030,7 +1046,7 @@ mod tests {
         let mut file = tempfile::Builder::new().suffix(".spl").tempfile_in(temp_root).unwrap();
         writeln!(file, "use std.spec\nfn main():\n    val x = 1").unwrap();
 
-        let result = check_file(file.path(), &[]);
+        let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Success);
         assert!(result.errors.is_empty());
     }
@@ -1048,12 +1064,32 @@ mod tests {
         let path = temp_dir.join("gc_boundary_crossing.spl");
         std::fs::write(&path, "use std.gc_async_mut.task\n").unwrap();
 
-        let result = check_file(&path, &[]);
+        let result = check_file(&path, &[], false);
         assert_eq!(result.status, CheckStatus::Warning);
         assert!(result
             .errors
             .iter()
             .any(|error| error.code.as_deref() == Some("gc_boundary_crossing")));
+    }
+
+    #[test]
+    fn test_check_can_promote_gc_boundary_crossing_to_error() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("driver crate should live under repo/src/compiler_rust")
+            .to_path_buf();
+        let temp_dir = repo_root.join("target/gc-boundary-check-tests/src/lib/nogc_sync_mut");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let path = temp_dir.join("gc_boundary_crossing_strict.spl");
+        std::fs::write(&path, "use std.gc_async_mut.task\n").unwrap();
+
+        let result = check_file(&path, &[], true);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert!(result.errors.iter().any(|error| {
+            error.code.as_deref() == Some("gc_boundary_crossing") && error.severity == ErrorSeverity::Error
+        }));
     }
 
     #[test]
@@ -1069,7 +1105,7 @@ mod tests {
         let path = temp_dir.join("common_import.spl");
         std::fs::write(&path, "use std.common.text\n").unwrap();
 
-        let result = check_file(&path, &[]);
+        let result = check_file(&path, &[], false);
         assert!(result
             .errors
             .iter()
@@ -1080,7 +1116,7 @@ mod tests {
     #[test]
     fn test_check_nonexistent_file() {
         let path = PathBuf::from("/nonexistent/file.spl");
-        let result = check_file(&path, &[]);
+        let result = check_file(&path, &[], false);
         assert_eq!(result.status, CheckStatus::Error);
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.errors[0].code.as_deref(), Some("E0001"));

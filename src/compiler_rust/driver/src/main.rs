@@ -1086,6 +1086,7 @@ fn handle_check_impl(args: &[String]) -> i32 {
         eprintln!("Options:");
         eprintln!("  --json     Output JSON format for tooling");
         eprintln!("  --source   Add a source root for module resolution (repeatable)");
+        eprintln!("  --deny-gc-boundary  Treat runtime-family boundary crossings as errors");
         eprintln!("  --verbose  Show additional details");
         eprintln!("  --quiet    Only show errors, no progress");
         eprintln!();
@@ -1100,6 +1101,7 @@ fn handle_check_impl(args: &[String]) -> i32 {
     let mut json = false;
     let mut verbose = false;
     let mut quiet = false;
+    let mut deny_gc_boundary_crossings = false;
     let mut source_roots = Vec::new();
     let mut files = Vec::new();
     let mut i = 1;
@@ -1108,6 +1110,7 @@ fn handle_check_impl(args: &[String]) -> i32 {
             "--json" => json = true,
             "--verbose" | "-v" => verbose = true,
             "--quiet" | "-q" => quiet = true,
+            "--deny-gc-boundary" | "--strict-runtime-family" => deny_gc_boundary_crossings = true,
             "--source" => {
                 if i + 1 >= args.len() {
                     eprintln!("error: --source requires a directory path");
@@ -1127,6 +1130,7 @@ fn handle_check_impl(args: &[String]) -> i32 {
         verbose,
         quiet,
         source_roots,
+        deny_gc_boundary_crossings,
     };
 
     if files.is_empty() {

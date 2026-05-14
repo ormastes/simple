@@ -157,11 +157,11 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 3. **`gc_off` flag** in `CompileOptions`: Boolean flag passed through the compilation pipeline. Affects compile options hash for caching and target presets.
 
-4. **Runtime family manifest checks** in `src/compiler/35.semantics/gc_boundary_check.spl`: `RUNTIME_FAMILY_MANIFEST` records each stdlib family rank, GC mode, allocation behavior, and noalloc status. `check_gc_boundary_imports()` preserves warning output for compatibility, while `check_runtime_family_import_violations()` returns hard violations from the same manifest-backed model. The Rust `simple check` lint path mirrors the same family set, ranks, GC/noalloc rules, and reason strings so the production checker reports manifest-equivalent diagnostics.
+4. **Runtime family manifest checks** in `src/compiler/35.semantics/gc_boundary_check.spl`: `RUNTIME_FAMILY_MANIFEST` records each stdlib family rank, GC mode, allocation behavior, and noalloc status. `check_gc_boundary_imports()` preserves warning output for compatibility, while `check_runtime_family_import_violations()` returns hard violations from the same manifest-backed model. The Rust `simple check` lint path mirrors the same family set, ranks, GC/noalloc rules, and reason strings so the production checker reports manifest-equivalent diagnostics. Target-restricted or CI gates can pass `--deny-gc-boundary` / `--strict-runtime-family` to promote the same diagnostics to hard errors.
 
 5. **Target family filtering** in `src/compiler/99.loader/module_resolver/resolution.spl`: `allowed_families` restricts stdlib family search for target presets.
 
-**Remaining gap**: the manifest-backed hard violation API and Rust lint parity exist, but target-restricted compiler/interpreter diagnostic paths still need to promote those violations to hard errors. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
+**Remaining gap**: the manifest-backed hard violation API and Rust lint parity exist, and the Rust `simple check` path can now promote runtime-family violations to hard errors for target-restricted runs. The remaining promotion gap is interpreter-side wiring. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
 
 ### Interpreter parity detail
 
@@ -209,10 +209,10 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
   - SimpleOS POSIX boundary update: shared ABI errno values, FD table/I/O, async read/write adapters, pipe/socket compatibility, and process async/compatibility wrappers are now owned under `src/os/kernel/`. The matching `src/os/posix/` modules are POSIX compatibility facades. Hosted NVFS root access now imports `std.fs_driver.nvfs_hosted_driver.NvfsHostedDriver`, a neutral facade over the existing POSIX-compatible hosted adapter, so SimpleOS boot/VFS layers do not import the POSIX-named stdlib driver directly. A targeted scan finds no `os.posix` imports or POSIX-named NVFS driver imports under `src/os/kernel`, `src/os/services`, or `src/os/sosix`; those lower layers now depend on `os.kernel` and hosted-neutral ownership instead.
   - implication: MCP and LSP native smoke are no longer blocked by `SliceIter.slice`, enum/static-member resolution, shell status wrappers, stale `MirBlock.has_label` reads, or the last C/LLVM/native/Vulkan field-recovery failures. Package release-readiness still requires reducing native/runtime stubs and broader import/type-loading cleanup.
 
-### Gap 1: Target-restricted family hard errors are not wired yet (Agent 2 -- Compiler)
-- **Problem**: Public runtime-family root `__init__.spl` files carry `@no_gc` or `@gc`, the Simple semantic checker exposes manifest-backed hard violations, and the Rust `simple check` lint path mirrors the manifest family set/ranks/reason strings. Target-restricted compiler diagnostics still report these as lint-compatible warnings instead of policy errors.
-- **Impact**: A target-restricted run can compute the hard violation set, but the active compiler diagnostic path can still continue after a runtime-family boundary violation.
-- **Fix**: Wire `check_runtime_family_import_violations()` or its generated manifest equivalent into target-restricted compiler diagnostics as hard errors while preserving warnings for unrestricted lint mode.
+### Gap 1: Target-restricted family hard errors are partially wired (Agent 2 -- Compiler)
+- **Problem**: Public runtime-family root `__init__.spl` files carry `@no_gc` or `@gc`, the Simple semantic checker exposes manifest-backed hard violations, and the Rust `simple check` lint path mirrors the manifest family set/ranks/reason strings. The Rust check path now promotes those diagnostics to errors when invoked with `--deny-gc-boundary` / `--strict-runtime-family`, while unrestricted checks keep warnings.
+- **Impact**: Target-restricted checker/CI runs can fail on runtime-family boundary violations; compiler pipelines that do not pass a strict target-family option still remain warning-compatible.
+- **Fix**: Thread target presets into every compiler entrypoint that needs strict family enforcement instead of relying on callers to pass the explicit checker flag.
 
 ### Gap 2: Interpreter family warnings are warning-only (Agent 3 -- Interpreter)
 - **Problem**: The interpreter emits family-boundary warnings but does not yet consume the manifest-backed hard violation API.
