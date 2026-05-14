@@ -10,12 +10,13 @@
 | `common` | **public** | Yes | 1166 | heap (default) | immutable preferred | no | n/a (pure) | no | no |
 | `nogc_sync_mut` | **public** | Yes | 1398 | heap+arena+pool+slab | mutable (`me`) | no | no | no | heavy (SFFI) |
 | `nogc_async_mut` | **public** | Yes | 1665 | heap | mutable (`me`) | yes | no | no | thread SFFI |
-| `gc_async_mut` | **public** | Yes | 1625 | GC-managed heap | mutable (`me`) | yes | yes | no | GPU SFFI |
+| `gc_async_mut` | **public** | Yes | 914 | GC-managed heap | mutable (`me`) | yes | yes | no | GPU SFFI |
 | `nogc_async_immut` | **advanced-scoped** | Yes | 22 | structural sharing | immutable (no `me` on data) | yes (CAS atoms) | no | no | minimal |
 | `nogc_async_mut_noalloc` | **public** | Yes | 128 | stack only (no heap) | mutable (`me`) | yes (embedded) | no | **yes** | bare SFFI |
-| `gc_sync_immut` | **internal-only** | No | 0 | not implemented | n/a | n/a | n/a | n/a | n/a |
-| `gc_sync_mut` | **internal-only** | No | 0 | not implemented | n/a | n/a | n/a | n/a | n/a |
-| `nogc_sync_immut` | **internal-only** | No | 0 | not implemented | n/a | n/a | n/a | n/a | n/a |
+| `gc_sync_mut` | **advanced-scoped** | Yes | 812 | GC-managed heap | mutable (`me`) | sync facade | yes | no | via `gc_async_mut` |
+| `gc_async_immut` | **advanced-scoped** | Yes | 22 | GC-managed heap facade over structural sharing | immutable | async facade | yes | no | via `nogc_async_immut` |
+| `gc_sync_immut` | **advanced-scoped** | Yes | 22 | GC-managed heap facade over structural sharing | immutable | sync facade | yes | no | via `gc_async_immut` |
+| `nogc_sync_immut` | **advanced-scoped** | Yes | 22 | structural sharing | immutable | sync facade | no | no | via `nogc_async_immut` |
 
 ### Classification criteria
 
@@ -78,7 +79,25 @@
 - **Key modules**: `PersistentMap`, `PersistentVec`, `PersistentList`, `PersistentSortedMap`, `PersistentTrie`, `Atom`, `Ref`, `VersionedSnapshot`, `ActorSnapshot`.
 - **NOTE**: In interpreter module loader search order, but still advanced-scoped because compiled/runtime coverage is limited.
 
-### 2.6 `nogc_async_mut_noalloc` (128 files -- baremetal)
+### 2.6 Compatibility facade families
+
+`gc_sync_mut`, `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut` are
+compatibility families, not independent backend owners.
+
+- `gc_sync_mut` mirrors tracked `gc_async_mut` modules and exports those modules
+  as the synchronous GC compatibility surface.
+- `gc_async_immut` and `nogc_sync_immut` mirror `nogc_async_immut` so immutable
+  collection APIs exist in GC-async and no-GC-sync configurations without
+  duplicating persistent-data-structure logic.
+- `gc_sync_immut` mirrors `gc_async_immut`, preserving the same GC immutable API
+  shape for sync configurations.
+- Backend ownership remains in the existing no-GC async/no-GC sync or pure
+  immutable modules. The facade families do not declare runtime hooks.
+
+These families are advanced-scoped until broader execution coverage proves
+runtime behavior beyond import/type resolution and facade checks.
+
+### 2.7 `nogc_async_mut_noalloc` (128 files -- baremetal)
 
 - **Allocation model**: Stack-only. No heap allocation. Baremetal target presets restrict `allowed_families` to `nogc_async_mut_noalloc` plus `common`.
 - **Mutation rules**: Mutable via `me` methods. All data must be stack-allocated or statically allocated.
@@ -101,9 +120,10 @@
 | `gc_async_mut` | `@gc` on root `__init__.spl`; parser accepts module-level GC attributes before export-only roots | Yes (4th priority in search) | Yes (GPU exports) | Yes (4th priority) | Partial (GPU-specific) | Root attribute and direct-import boundary checks present; full manifest-to-GcMode enforcement remains partial |
 | `nogc_async_immut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (2nd priority in search, boundary warnings) | Yes (persistent structures, Atom/Ref, combinators) | Yes (2nd priority) | Minimal | Resolution and root exports fixed; broader runtime coverage still limited |
 | `nogc_async_mut_noalloc` | `@no_gc` on root `__init__.spl`; direct and reachable unsafe imports plus explicit `@alloc` markers blocked by regression | Yes (6th priority in search, boundary warnings) | Yes (baremetal/noalloc exports) | Yes (6th priority) | Partial (QEMU); check-clean under full-family `simple check` | Root export surface exists; compiler-owned capability enforcement remains partial |
-| `gc_sync_immut` | Not implemented | Not implemented | Does not exist | No | None | Aspirational only |
-| `gc_sync_mut` | Not implemented | Not implemented | Does not exist | No | Orphaned unit specs removed; sync GC-adjacent contracts covered by `test/unit/lib/nogc_sync_mut/gc_runtime_contract_spec.spl` | Do not create without a new design |
-| `nogc_sync_immut` | Not implemented | Not implemented | Does not exist | No | None | Aspirational only |
+| `gc_sync_mut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction | Yes (facade root) | Yes (explicit family path, fallback search added) | Minimal | Facade over `gc_async_mut`; no independent sync runtime semantics yet |
+| `gc_async_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction | Yes | Yes (explicit family path, fallback search added) | Minimal | Facade over `nogc_async_immut`; GC immutable runtime coverage still light |
+| `gc_sync_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction | Yes | Yes (explicit family path, fallback search added) | Minimal | Facade over `gc_async_immut`; sync immutable runtime coverage still light |
+| `nogc_sync_immut` | `@no_gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction | Yes | Yes (explicit family path, fallback search added) | Minimal | Facade over `nogc_async_immut`; sync immutable runtime coverage still light |
 
 ### Compiler enforcement detail
 
@@ -123,7 +143,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 ### Interpreter parity detail
 
-- The interpreter module loader in `src/compiler/10.frontend/core/interpreter/module_loader.spl` has a **hardcoded search order**: `nogc_async_mut` > `nogc_async_immut` > `nogc_sync_mut` > `common` > `gc_async_mut` > `nogc_async_mut_noalloc`.
+- The interpreter module loader in `src/compiler/10.frontend/core/interpreter/module_loader.spl` has a **hardcoded search order**: `nogc_async_mut` > `nogc_async_immut` > `nogc_sync_immut` > `nogc_sync_mut` > `common` > `gc_async_mut` > `gc_async_immut` > `gc_sync_mut` > `gc_sync_immut` > `nogc_async_mut_noalloc`.
 - `check_gc_family_boundary` emits interpreter warnings for no-GC→GC and noalloc→allocating-family imports.
 - `test/unit/compiler/interpreter/gc_parity_spec.spl` covers family extraction and warning rules.
 
@@ -228,10 +248,10 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 - **Impact**: Baremetal builds are protected against direct and reachable family-boundary mistakes, and the noalloc family is checker-clean under rebuilt `simple check`, but allocation safety is not yet represented as first-class module metadata in the compiler.
 - **Fix**: Add manifest-level allocation/capability metadata and make noalloc builds reject unreachable capability violations in compiler/module resolution, with the current reachable-import audit retained as regression evidence.
 
-### Gap 6: `gc_sync_mut` had tests but no source (Agent 4 -- Stdlib)
-- **Status**: Fixed. The orphaned `test/unit/lib/gc_sync_mut/` spec files were removed and replaced with `test/unit/lib/nogc_sync_mut/gc_runtime_contract_spec.spl`.
-- **Decision**: `gc_sync_mut` remains not implemented. Do not create a stub family. Existing sync GC metadata and pointer-helper contracts are covered through the no-GC-first `nogc_sync_mut` backend.
-- **Remaining work**: If a true sync+GC family is needed later, create a new requirements/design artifact before adding `src/lib/gc_sync_mut/`.
+### Gap 6: `gc_sync_mut` had tests but no source (Agent 4 -- Stdlib) -- **RESOLVED**
+- **Status**: Fixed. `src/lib/gc_sync_mut/` now exists as a facade-only compatibility family over tracked `gc_async_mut` modules.
+- **Decision**: `gc_sync_mut` is advanced-scoped, not an independent backend owner. Runtime hooks and behavior stay in the existing async/no-GC-backed implementation chain.
+- **Remaining work**: Add focused import/type-resolution tests and decide whether any API requires real blocking wrappers instead of facade exports.
 
 ### Gap 7: Two conflicting `GcMode` enums (Agent 2 -- Compiler) -- **RESOLVED**
 - **Status**: Fixed. `gc_config.spl` owns the only `GcMode {Gc, NoGc}` enum, and `barriers.spl` uses `GcStrategy {StopTheWorld, Incremental, Generational, Concurrent}` for GC algorithm strategy.
@@ -265,12 +285,10 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 | `common` | 1166 files, in interpreter search path, rich exports |
 | `nogc_sync_mut` | 1398 files, in interpreter search path, primary systems family |
 | `nogc_async_mut` | 1665 files, default interpreter search priority, actor/async system |
-| `gc_async_mut` | 1625 files, in interpreter search path, GC-capable async family with GPU/ML-specific extras |
+| `gc_async_mut` | 914 files, in interpreter search path, GC-capable async family with GPU/ML-specific extras |
 | `nogc_async_mut_noalloc` | 128 files, in interpreter search path, baremetal with QEMU tests |
 
-One family is **advanced-scoped** (exists but not fully integrated): `nogc_async_immut` (22 files, in interpreter search path with a populated root `__init__.spl`, but still missing interpreter GcMode enforcement and broader compiled coverage).
-
-Three families are **not implemented**: `gc_sync_immut`, `gc_sync_mut`, `nogc_sync_immut`. These exist only as aspirational names. The old `gc_sync_mut` orphan specs were removed in favor of no-GC-first `nogc_sync_mut` contract coverage.
+Five families are **advanced-scoped** (exist but need broader runtime coverage): `nogc_async_immut`, `gc_sync_mut`, `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut`. The sync/GC and sync/immutable variants are facade-only compatibility surfaces backed by existing async/no-GC families.
 
 ### Decision 2: Is interpreter parity mandatory for all public families?
 
@@ -291,7 +309,7 @@ Three families are **not implemented**: `gc_sync_immut`, `gc_sync_mut`, `nogc_sy
 
 **Accidental differences** (bugs to fix):
 - Interpreter GcMode enforcement is still missing for `nogc_async_immut` and the other public families.
-- `gc_sync_mut` remains not implemented by design; sync GC-adjacent coverage now targets `nogc_sync_mut`.
+- `gc_sync_mut`, `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut` are facade-only and still need focused resolution/runtime coverage.
 - Duplicate module exports across families (e.g., `io_runtime`, `platform`, `spec`, `log` appear in both `nogc_sync_mut` and root `lib/__init__.spl`).
 
 ### Decision 4: Which target presets are authoritative for no-GC?
@@ -322,13 +340,19 @@ The `gc_off` flag in `CompileOptions` remains a global no-GC switch; `allowed_fa
 - [ ] Add at least 5 unit tests covering core data structures
 - [ ] Verify CAS atom operations work in compiled mode
 
-**For `gc_sync_mut`** (not implemented, orphaned tests resolved):
-- **Decision**: Do not create the family directory. Relocated coverage now lives in `test/unit/lib/nogc_sync_mut/gc_runtime_contract_spec.spl` and `test/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`.
-- **Directive**: Keep `gc_sync_mut` out of the public family set until a new design justifies sync+GC+mutable semantics distinct from `nogc_sync_mut`.
+**For `gc_sync_mut`** (advanced-scoped facade):
+- [x] Add `src/lib/gc_sync_mut/` facade tree backed by `gc_async_mut`
+- [x] Add `@gc` root
+- [x] Add interpreter fallback search and family extraction
+- [x] Add focused import/type-resolution tests
+- [ ] Decide whether selected APIs need true blocking wrappers
 
-**For `gc_sync_immut` and `nogc_sync_immut`** (not implemented, no tests):
-- **Decision**: Mark as "deferred" and do not create directories. No code or tests reference them.
-- **Rationale**: The existing 6 families cover all current use cases. Adding sync+immutable variants provides marginal value since `common` already serves as the pure/immutable foundation.
+**For `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut`** (advanced-scoped facades):
+- [x] Add facade trees backed by `nogc_async_immut` / `gc_async_immut`
+- [x] Add root GC/no-GC attributes
+- [x] Add interpreter fallback search and family extraction
+- [x] Add focused import/type-resolution tests
+- [ ] Broaden persistent-collection runtime coverage across the facade families
 
 ---
 
@@ -366,7 +390,7 @@ nogc_async_mut_noalloc → nogc_sync_mut → nogc_async_mut → common → (reje
 
 **Hosted** (no restriction, uses default search order):
 ```
-nogc_async_mut → nogc_async_immut → nogc_sync_mut → common → gc_async_mut → nogc_async_mut_noalloc
+nogc_async_mut → nogc_async_immut → nogc_sync_immut → nogc_sync_mut → common → gc_async_mut → gc_async_immut → gc_sync_mut → gc_sync_immut → nogc_async_mut_noalloc
 ```
 
 ### 6.4 How Family Restriction Works
