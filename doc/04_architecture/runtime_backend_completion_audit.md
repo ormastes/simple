@@ -107,6 +107,8 @@ Executed on 2026-05-14:
   - `remaining=25` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the regex FFI, signature FFI, and I/O runtime facades.
 - No-GC async crypto wildcard facade review scan:
   - `remaining=24` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the crypto FFI facade.
+- No-GC async render/package/GPU-driver wildcard facade review scan:
+  - `remaining=20` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the 3D Vulkan/WebGPU render backend, FFI package, and GPU driver facades.
 - Focused runtime-path specs:
   - `test/unit/lib/nogc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
   - `test/unit/lib/gc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
