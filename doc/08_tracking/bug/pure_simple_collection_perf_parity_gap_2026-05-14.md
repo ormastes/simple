@@ -334,3 +334,7 @@ The change improves the scalar contains shape only modestly; `set_contains`
 still misses Rust parity and remains the open blocker. A variant that loaded
 all eight chunk values first and used one compound `or` condition regressed
 `set_contains` to `0.17x` Rust in a one-sample clean run and was reverted.
+Rust's reference binary uses AVX `vpcmpeqq` plus a vector test for this scan.
+A direct Cranelift `I64X4` compare plus `bmask(I64, mask)` experiment was also
+rejected: Cranelift 0.116 verifies `bmask` only for scalar integer inputs, so
+the benchmark compile failed before producing a valid binary.
