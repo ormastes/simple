@@ -131,6 +131,17 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 ## Section 4: Known Gaps
 
+### Native MCP/LSP smoke status (updated 2026-05-14)
+
+- `src/app/mcp/main.spl` native-build now completes with the rebuilt Rust bootstrap compiler:
+  - command: `src/compiler_rust/target/bootstrap/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server`
+  - result: `Build complete: 18 compiled, 104 cached, 0 failed`; linked `build/bootstrap/mcp-package/simple_mcp_server`.
+  - remaining caveat: unresolved native/runtime symbols still generate link stubs. Internal Simple stub debt is reduced to one runtime hook: `rt_is_debug_mode_enabled`.
+- `src/app/simple_lsp_mcp/main.spl` native-build still fails before link:
+  - command: `src/compiler_rust/target/bootstrap/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server`
+  - result: 15 HIR field-resolution failures, including `ANY.local`, `ANY.value`, `MirBlock.has_label`, enum-like fields such as `NotFound`, `Other`, `AddrInUse`, `X86_64`, and `Little`.
+  - implication: MCP native smoke is no longer blocked by `SliceIter.slice`, but LSP/package release-readiness still requires broader import/type-loading and enum/static-member resolution cleanup.
+
 ### Gap 1: Partial attribute-based family enforcement (Agent 2 -- Compiler)
 - **Problem**: Public runtime-family root `__init__.spl` files now carry `@no_gc` or `@gc`, and the Rust parser accepts module-level `@gc` before export-only roots, but family GcMode is still only partially enforced.
 - **Impact**: A file in `nogc_sync_mut/` can still use GC-managed references without a hard error.

@@ -90,6 +90,12 @@ impl Lowerer {
                 // The enum name acts as a namespace for variant constructors
                 self.globals.insert(e.name.clone(), enum_type_id);
                 self.local_globals.insert(e.name.clone());
+                for method in &e.methods {
+                    let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                    let qualified = format!("{}.{}", e.name, method.name);
+                    self.globals.insert(qualified.clone(), ret_ty);
+                    self.local_globals.insert(qualified);
+                }
             }
             Node::Mixin(m) => {
                 self.register_mixin(m)?;
@@ -631,6 +637,12 @@ impl Lowerer {
                         self.module.functions.push(hir_func);
                     }
                 }
+                Node::Enum(e) => {
+                    for method in &e.methods {
+                        let hir_func = self.lower_function(method, Some(&e.name))?;
+                        self.module.functions.push(hir_func);
+                    }
+                }
                 Node::Impl(impl_block) => {
                     // Lower impl block methods
                     // Extract the type name from the impl block's target
@@ -872,6 +884,12 @@ impl Lowerer {
                 Node::Struct(s) => {
                     for method in &s.methods {
                         let hir_func = self.lower_function(method, Some(&s.name))?;
+                        self.module.functions.push(hir_func);
+                    }
+                }
+                Node::Enum(e) => {
+                    for method in &e.methods {
+                        let hir_func = self.lower_function(method, Some(&e.name))?;
                         self.module.functions.push(hir_func);
                     }
                 }

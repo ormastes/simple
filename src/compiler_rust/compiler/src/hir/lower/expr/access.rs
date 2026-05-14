@@ -159,6 +159,14 @@ impl Lowerer {
         }
 
         let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
+        if self.should_treat_unresolved_field_as_static_variant(receiver, &recv_hir, field) {
+            if let Expr::Identifier(recv_name) = receiver {
+                return Ok(HirExpr {
+                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                    ty: TypeId::ANY,
+                });
+            }
+        }
 
         // Check for SIMD neighbor access
         if field == "left_neighbor" || field == "right_neighbor" {
@@ -291,6 +299,26 @@ impl Lowerer {
             }
             Err(e) => Err(e),
         }
+    }
+
+    fn should_treat_unresolved_field_as_static_variant(
+        &self,
+        receiver: &Expr,
+        recv_hir: &HirExpr,
+        field: &str,
+    ) -> bool {
+        self.lenient_types
+            && recv_hir.ty == TypeId::ANY
+            && matches!(receiver, Expr::Identifier(_))
+            && Self::looks_like_type_static_member(field)
+    }
+
+    fn looks_like_type_static_member(field: &str) -> bool {
+        field
+            .chars()
+            .next()
+            .map(|ch| ch.is_ascii_uppercase())
+            .unwrap_or(false)
     }
 
     /// Resolve the TypeId of a named field on a named struct type.

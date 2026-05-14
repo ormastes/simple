@@ -556,7 +556,21 @@ impl Lowerer {
                 HirType::Struct { name, fields, .. } => {
                     for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
                         if field_name == field {
+                            if *field_ty == TypeId::ANY {
+                                if let Some((_global_idx, global_field_ty)) =
+                                    self.try_resolve_global_field_for_struct(&name, field)
+                                {
+                                    return Ok((idx, global_field_ty));
+                                }
+                            }
                             return Ok((idx, *field_ty));
+                        }
+                    }
+                    if fields.is_empty() {
+                        if let Some((global_idx, global_field_ty)) =
+                            self.try_resolve_global_field_for_struct(&name, field)
+                        {
+                            return Ok((global_idx, global_field_ty));
                         }
                     }
                     // Collect available field names for suggestions
@@ -690,6 +704,39 @@ impl Lowerer {
                 available_fields: vec![],
             })
         }
+    }
+
+    fn try_resolve_global_field_for_struct(&mut self, struct_name: &str, field_name: &str) -> Option<(usize, TypeId)> {
+        let (field_index, field_type_spec) = self
+            .global_struct_defs
+            .as_ref()
+            .and_then(|defs| defs.get(struct_name))
+            .and_then(|fields| {
+                fields
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, (fname, ftype))| (fname == field_name).then_some((idx, ftype.clone())))
+            })
+            .or_else(|| {
+                self.duplicate_global_struct_defs
+                    .as_ref()
+                    .and_then(|defs| defs.get(struct_name))
+                    .and_then(|variants| {
+                        let mut matches = variants.iter().filter_map(|fields| {
+                            fields
+                                .iter()
+                                .enumerate()
+                                .find_map(|(idx, (fname, ftype))| {
+                                    (fname == field_name).then_some((idx, ftype.clone()))
+                                })
+                        });
+                        let first = matches.next()?;
+                        matches.next().is_none().then_some(first)
+                    })
+            })?;
+
+        self.resolve_global_type_spec(&field_type_spec)
+            .map(|field_ty| (field_index, field_ty))
     }
 
     pub(super) fn get_index_element_type(&self, arr_ty: TypeId) -> LowerResult<TypeId> {

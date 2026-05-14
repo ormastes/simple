@@ -200,6 +200,27 @@ fn test_lower_field_access() {
 }
 
 #[test]
+fn test_lenient_unresolved_uppercase_field_access_becomes_static_variant_global() {
+    let source = "fn test():\n    return MissingEnum.NotFound\n";
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&module).unwrap();
+
+    let func = &lowered.functions[0];
+    let HirStmt::Return(Some(expr)) = &func.body[0] else {
+        panic!("Expected return statement");
+    };
+    assert_eq!(
+        expr.kind,
+        HirExprKind::Global("MissingEnum::NotFound".to_string())
+    );
+    assert_eq!(expr.ty, TypeId::ANY);
+}
+
+#[test]
 fn test_lower_ambiguous_global_field_chain_as_field_access() {
     let source = "fn test(s: Holder) -> text:\n    return s.suggestion.new_text\n";
     let mut parser = Parser::new(source);
