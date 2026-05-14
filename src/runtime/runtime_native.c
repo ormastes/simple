@@ -40,6 +40,7 @@
 #define RT_VALUE_HEAP_ARRAY 0x02U
 #define RT_VALUE_HEAP_ENUM 0x04U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
+#define RT_CORE_ARRAY_FLAG_U64_PACKED 0x10U
 
 typedef struct RtCoreString {
     uint32_t kind;
@@ -749,7 +750,7 @@ SplArray* rt_array_new(int64_t cap) {
 }
 
 SplArray* rt_array_new_with_cap_u64(int64_t cap) {
-    return rt_core_array_new(cap, 0);
+    return rt_core_array_new(cap, RT_CORE_ARRAY_FLAG_U64_PACKED);
 }
 
 SplArray* rt_byte_array_new(uint64_t cap) {

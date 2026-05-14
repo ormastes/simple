@@ -392,6 +392,18 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `export hashset_with_capacity`. A fresh core-C source-closure rebuild linked
   without generated stubs or import-type warnings, and the binary kept checksum
   parity while measuring pure text `HashSet.contains` at `190` ops/ms.
+- The collection benchmark harness now has an opt-in source-closure mode:
+  `SIMPLE_COLLECTION_BENCH_SOURCE_CLOSURE=1` switches the Simple leg to
+  `native-build --source src/lib --entry-closure`. This exposed a core-C typed
+  `[u64]` parity bug: `rt_array_new_with_cap_u64` needed to mark arrays with
+  the same packed flag that Cranelift's typed-word inliners test before
+  choosing raw-word stores and loads. After adding that flag, the source-closure
+  benchmark passes checksum parity across list traversal, list push, scalar set
+  membership, and text `HashSet.contains`. A one-sample run measured source-
+  closure Simple at `1,086,082` ops/ms for list traversal (`0.27x` C,
+  `0.18x` Rust), `1,221,167` for list push (`0.42x` C, `0.84x` Rust),
+  `3,233` for scalar set membership (`0.50x` C, `0.25x` Rust), and `187` for
+  pure text `HashSet.contains` (`0.00x` C/Rust).
 
 ## Next Concrete Plugin Work
 
