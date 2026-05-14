@@ -155,7 +155,26 @@ describe "MIR Collection Optimization":
         expect(opt.is_pure_method("has")).to_equal(true)
         expect(opt.is_pure_method("size")).to_equal(true)
         expect(opt.is_pure_method("contains_key")).to_equal(true)
+        expect(opt.is_pure_method("is_subset")).to_equal(true)
+        expect(opt.is_pure_method("is_superset")).to_equal(true)
+        expect(opt.is_pure_method("is_disjoint")).to_equal(true)
         expect(opt.is_pure_method("insert")).to_equal(false)
+
+    it "reuses repeated pure set relationship query results in a block":
+        val subset1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("is_subset"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val subset2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("is_subset"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val disjoint1 = MirInst(kind: MirInstKind.Call(_co_lid(12), _co_func("is_disjoint"), [_co_copy(1), _co_copy(4)]), span: nil)
+        val disjoint2 = MirInst(kind: MirInstKind.Call(_co_lid(13), _co_func("is_disjoint"), [_co_copy(1), _co_copy(4)]), span: nil)
+        val func = _co_function([_co_block([subset1, cmp, subset2, disjoint1, disjoint2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "is_subset")).to_equal(1)
+        expect(_co_count_named_call(block, "is_disjoint")).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(2)
 
     it "reuses repeated pure has membership query results in a block":
         val has1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("has"), [_co_copy(1), _co_copy(2)]), span: nil)
