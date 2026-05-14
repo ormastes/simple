@@ -97,13 +97,30 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `0.01x` C / `0.02x` Rust, and set-like linear membership was still `0.00x`
   C/Rust. This benchmark is intentionally a gate for future collection
   optimizer work rather than proof of parity.
+- The Simple `collection_opt` pass now has a conservative typed-array index
+  specialization rule: `rt_index_get(array, idx)` is rewritten to
+  `rt_array_get(array, idx)` only when MIR local metadata proves the receiver is
+  an `Array`. This locks the intended pure Simple optimizer behavior even
+  though the current benchmark path still uses the Rust-hosted lowering.
+- The Rust-hosted lowering/runtime path used by native benchmarks now has
+  `[u64]` typed word helpers matching the prior `[u32]` lane:
+  `rt_typed_words_u64_at`, `rt_typed_words_u64_push`, and
+  `rt_typed_words_u64_set`. Rebuilt native output for
+  `collection_simple.spl` removed the previous hot-loop `rt_index_get` calls.
+  A one-sample rerun kept checksum parity and improved Simple throughput, but
+  parity remains far away: list traversal rose to `20,282` ops/ms, list push to
+  `24,157` ops/ms, and set-like linear membership to `34` ops/ms versus C/Rust
+  results in the millions for traversal/push and thousands for membership.
+  The remaining cost is typed helper call/check overhead inside the element
+  loop, not generic index dispatch.
 
 ## Next Concrete Plugin Work
 
 1. Extend `simple.opt.collection.loop_access` from duplicate length
-   canonicalization to full `len`-guarded array/list loops so indexed traversal
-   over `[u8]`, `[u32]`, and fixed arrays emits one bounds proof per loop and
-   the collection parity benchmark closes the current `list_traverse` gap.
+   canonicalization and typed dispatch selection to full `len`-guarded
+   array/list loops so indexed traversal over `[u8]`, `[u32]`, `[u64]`, and
+   fixed arrays emits one bounds proof per loop and lowers element access to an
+   unchecked/direct load instead of a per-element helper call.
 2. Add duplicate map/set probe-loop specialization for primitive-key
    `contains`, `contains_key`, and `get` calls after MIR exposes the hash/probe
    internals rather than only opaque runtime calls.

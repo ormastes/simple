@@ -282,6 +282,10 @@ impl<'a> MirLowerer<'a> {
             .type_registry
             .and_then(|tr| tr.get(receiver_ty))
             .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U32));
+        let receiver_is_u64_array = self
+            .type_registry
+            .and_then(|tr| tr.get(receiver_ty))
+            .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U64));
         let element_expr_ty = if expr_ty == TypeId::ANY {
             self.type_registry
                 .and_then(|tr| tr.get(receiver_ty))
@@ -363,6 +367,22 @@ impl<'a> MirLowerer<'a> {
                     overflow: UnitOverflowBehavior::Wrap,
                 });
                 narrowed
+            });
+        } else if receiver_is_u64_array
+            && matches!(
+                index.ty,
+                TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+            )
+        {
+            return self.with_func(|func, current_block| {
+                let raw_word = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(raw_word),
+                    target: CallTarget::from_name("rt_typed_words_u64_at"),
+                    args: vec![receiver_reg, index_reg],
+                });
+                raw_word
             });
         } else {
             // Box the index as RuntimeValue if it's a native type

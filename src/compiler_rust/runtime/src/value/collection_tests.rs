@@ -17,6 +17,9 @@ use super::{
     rt_typed_words_u32_at,
     rt_typed_words_u32_push,
     rt_typed_words_u32_set,
+    rt_typed_words_u64_at,
+    rt_typed_words_u64_push,
+    rt_typed_words_u64_set,
     // Array functions
     rt_array_new,
     rt_array_pop,
@@ -184,6 +187,23 @@ fn test_typed_words_u32_fast_path() {
 }
 
 #[test]
+fn test_typed_words_u64_fast_path() {
+    let array = rt_array_new(3);
+
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(3));
+
+    assert_eq!(rt_typed_words_u64_at(array, 1), 2);
+    assert!(rt_typed_words_u64_set(array, 1, -1));
+    assert_eq!(rt_typed_words_u64_at(array, 1), -1);
+    assert!(rt_typed_words_u64_set(array, -1, 123_456_789));
+    assert_eq!(rt_typed_words_u64_at(array, 2), 123_456_789);
+    assert_eq!(rt_typed_words_u64_at(array, 3), 0);
+    assert!(!rt_typed_words_u64_set(array, 3, 9));
+}
+
+#[test]
 fn test_typed_bytes_u8_push_fast_path() {
     let array = rt_byte_array_new(1);
     assert!(rt_typed_bytes_u8_push(array, 0x101));
@@ -201,6 +221,16 @@ fn test_typed_words_u32_push_fast_path() {
     assert_eq!(rt_array_len(array), 2);
     assert_eq!(rt_typed_words_u32_at(array, 0), 1);
     assert_eq!(rt_typed_words_u32_at(array, 1), 0x8000_0000);
+}
+
+#[test]
+fn test_typed_words_u64_push_fast_path() {
+    let array = rt_array_new(1);
+    assert!(rt_typed_words_u64_push(array, -1));
+    assert!(rt_typed_words_u64_push(array, 123_456_789));
+    assert_eq!(rt_array_len(array), 2);
+    assert_eq!(rt_typed_words_u64_at(array, 0), -1);
+    assert_eq!(rt_typed_words_u64_at(array, 1), 123_456_789);
 }
 
 #[test]

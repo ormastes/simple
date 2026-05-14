@@ -14,6 +14,10 @@
 # Pattern 4 — Loop-invariant pure method call hoisting:
 #   Hoists calls to known-pure methods (len, is_empty, first, last,
 #   get, contains_key) out of loop bodies when all args are loop-invariant.
+#
+# Pattern 5 — Typed array index dispatch specialization:
+#   Call(dst, "rt_index_get", [array, idx]) -> Call(dst, "rt_array_get", [array, idx])
+#   when MIR local type metadata proves the receiver is an Array.
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir.*
@@ -38,6 +42,7 @@ class CollectionOptimization:
     calls_hoisted: i64
     len_queries_reused: i64
     pure_queries_reused: i64
+    array_index_gets_specialized: i64
 
 impl CollectionOptimization:
     static fn new() -> CollectionOptimization:
@@ -47,7 +52,8 @@ impl CollectionOptimization:
             str_append_replaced: 0,
             calls_hoisted: 0,
             len_queries_reused: 0,
-            pure_queries_reused: 0
+            pure_queries_reused: 0,
+            array_index_gets_specialized: 0
         )
 
     me optimize_function(func: MirFunction) -> MirFunction:
@@ -64,6 +70,7 @@ impl CollectionOptimization:
         optimized_blocks = self.optimize_concat_all_blocks(optimized_blocks, func)
         optimized_blocks = self.canonicalize_collection_len_queries(optimized_blocks)
         optimized_blocks = self.canonicalize_collection_pure_queries(optimized_blocks)
+        optimized_blocks = self.specialize_typed_array_index_gets(optimized_blocks, func)
 
         var result = func
         result.blocks = optimized_blocks
@@ -222,6 +229,53 @@ impl CollectionOptimization:
 
     fn is_collection_len_runtime(name: text) -> bool:
         name == "rt_array_len" or name == "rt_string_len" or name == "rt_dict_len"
+
+    me specialize_typed_array_index_gets(blocks: [MirBlock], func: MirFunction) -> [MirBlock]:
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            new_blocks.push(self.specialize_typed_array_index_gets_block(block, func))
+        new_blocks
+
+    me specialize_typed_array_index_gets_block(block: MirBlock, func: MirFunction) -> MirBlock:
+        var new_insts: [MirInst] = []
+        var changed = false
+
+        for inst in block.instructions:
+            val rewritten = self.specialize_typed_array_index_get(inst, func)
+            if rewritten.?:
+                new_insts.push(rewritten)
+                self.array_index_gets_specialized = self.array_index_gets_specialized + 1
+                changed = true
+            else:
+                new_insts.push(inst)
+
+        if changed:
+            MirBlock(
+                id: block.id,
+                label: block.label,
+                instructions: new_insts,
+                terminator: block.terminator
+            )
+        else:
+            block
+
+    fn specialize_typed_array_index_get(inst: MirInst, func: MirFunction) -> MirInst?:
+        match inst.kind:
+            case Call(dest, callee, args):
+                if self.get_func_name(callee) != "rt_index_get" or args.len() != 2:
+                    return nil
+                val array_local = self.operand_local_id(args[0])
+                if not array_local.?:
+                    return nil
+                if not self.local_is_array(array_local, func):
+                    return nil
+                val array_get_func = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_array_get"),
+                    MirType.unit()
+                ))
+                MirInst(kind: MirInstKind.Call(dest, array_get_func, args), span: inst.span)
+            case _:
+                nil
 
     fn rewrite_single_use_len_consumer(inst: MirInst, duplicate_len: LocalId, canonical_len: LocalId) -> MirInst?:
         match inst.kind:
@@ -625,6 +679,14 @@ impl CollectionOptimization:
                         match pointee.kind:
                             case I8: return true
                             case _: return false
+                    case _: return false
+        false
+
+    fn local_is_array(local_id: LocalId, func: MirFunction) -> bool:
+        for loc in func.locals:
+            if loc.id.id == local_id.id:
+                match loc.type_.kind:
+                    case Array(_, _): return true
                     case _: return false
         false
 

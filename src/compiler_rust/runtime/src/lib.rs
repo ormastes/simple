@@ -259,6 +259,7 @@ pub use value::{
     rt_array_set,
     rt_typed_bytes_u8_push,
     rt_typed_words_u32_push,
+    rt_typed_words_u64_push,
     // Channel operations
     rt_channel_close,
     rt_channel_free,
@@ -314,6 +315,8 @@ pub use value::{
     rt_bytes_u8_set,
     rt_typed_words_u32_at,
     rt_typed_words_u32_set,
+    rt_typed_words_u64_at,
+    rt_typed_words_u64_set,
     rt_index_get,
     rt_index_set,
     // Object operations

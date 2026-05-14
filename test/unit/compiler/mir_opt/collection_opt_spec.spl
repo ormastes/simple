@@ -10,6 +10,15 @@ fn _co_lid(id: i64) -> LocalId:
 fn _co_copy(id: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Copy(_co_lid(id)))
 
+fn _co_local(id: i64, type_: MirType) -> MirLocal:
+    MirLocal(
+        id: _co_lid(id),
+        name: nil,
+        type_: type_,
+        kind: LocalKind.Temp,
+        is_ghost: false
+    )
+
 fn _co_func(name: text) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(
         MirConstValue.Str(name),
@@ -35,9 +44,12 @@ fn _co_driver_manifest_attr_default() -> DriverManifestAttr:
     )
 
 fn _co_function(blocks: [MirBlock]) -> MirFunction:
+    _co_function_with_locals(blocks, [])
+
+fn _co_function_with_locals(blocks: [MirBlock], locals: [MirLocal]) -> MirFunction:
     val sig = MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)
     MirFunction(
-        SymbolId(id: 1), "test_fn", sig, [], blocks,
+        SymbolId(id: 1), "test_fn", sig, locals, blocks,
         BlockId(id: 0),
         Span(0, 0, 1, 1),
         [], false, nil, {}, nil, false, false, "",
@@ -180,3 +192,28 @@ describe "MIR Collection Optimization":
 
         expect(_co_count_rt_array_len(block)).to_equal(2)
         expect(opt.len_queries_reused).to_equal(0)
+
+    it "specializes proven array index dispatch to direct array get":
+        val index_get = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_index_get"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
+        val func = _co_function_with_locals([_co_block([index_get])], [_co_local(1, array_type)])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_index_get")).to_equal(0)
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)
+        expect(opt.array_index_gets_specialized).to_equal(1)
+
+    it "keeps generic index dispatch when receiver type is not array":
+        val index_get = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_index_get"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function_with_locals([_co_block([index_get])], [_co_local(1, MirType.i64())])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_index_get")).to_equal(1)
+        expect(_co_count_named_call(block, "rt_array_get")).to_equal(0)
+        expect(opt.array_index_gets_specialized).to_equal(0)

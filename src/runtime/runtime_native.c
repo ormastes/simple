@@ -916,6 +916,29 @@ int8_t rt_typed_words_u32_set(SplArray* a, int64_t idx, int64_t val) {
     return 1;
 }
 
+int64_t rt_typed_words_u64_at(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 0;
+    return ((int64_t*)array->data)[idx];
+}
+
+int8_t rt_typed_words_u64_push(SplArray* a, int64_t val) {
+    return rt_array_push(a, val);
+}
+
+int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 0;
+    ((int64_t*)array->data)[idx] = val;
+    return 1;
+}
+
 SplValue* rt_array_pop(SplArray* a) {
     static SplValue tmp;
     tmp = spl_array_pop(a);

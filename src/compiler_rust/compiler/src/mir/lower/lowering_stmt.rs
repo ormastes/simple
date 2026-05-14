@@ -260,6 +260,20 @@ impl<'a> MirLowerer<'a> {
                             && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
                                 |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U32),
                             );
+                        let is_u64_array_set = value.ty == TypeId::U64
+                            && matches!(
+                                index.ty,
+                                TypeId::I16
+                                    | TypeId::I32
+                                    | TypeId::I64
+                                    | TypeId::U8
+                                    | TypeId::U16
+                                    | TypeId::U32
+                                    | TypeId::U64
+                            )
+                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                                |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U64),
+                            );
                         if is_u8_array_set {
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
@@ -275,6 +289,15 @@ impl<'a> MirLowerer<'a> {
                                 block.instructions.push(MirInst::Call {
                                     dest: None,
                                     target: crate::mir::CallTarget::from_name("rt_typed_words_u32_set"),
+                                    args: vec![receiver_reg, index_reg, val_reg],
+                                });
+                            })?;
+                        } else if is_u64_array_set {
+                            self.with_func(|func, current_block| {
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: None,
+                                    target: crate::mir::CallTarget::from_name("rt_typed_words_u64_set"),
                                     args: vec![receiver_reg, index_reg, val_reg],
                                 });
                             })?;

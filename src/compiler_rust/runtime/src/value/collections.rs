@@ -436,6 +436,24 @@ pub extern "C" fn rt_typed_words_u32_at(array: RuntimeValue, index: i64) -> i64 
     }
 }
 
+/// Read a u64 element from a `[u64]`-style runtime array without generic index dispatch.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    unsafe {
+        let len = (*arr).len as i64;
+        let idx = normalize_index(index, len);
+        if idx < 0 || idx >= len {
+            return 0;
+        }
+        let raw = (*arr).as_slice()[idx as usize];
+        if raw.is_int() {
+            return raw.as_int();
+        }
+        raw.to_raw() as i64
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_bytes_u32_le_at(array: RuntimeValue, index: i64) -> i64 {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
@@ -533,6 +551,21 @@ pub extern "C" fn rt_typed_words_u32_set(array: RuntimeValue, index: i64, value:
     }
 }
 
+/// Write a u64 element into a `[u64]`-style runtime array without generic index dispatch.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u64_set(array: RuntimeValue, index: i64, value: i64) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let len = (*arr).len as i64;
+        let idx = normalize_index(index, len);
+        if idx < 0 || idx >= len {
+            return false;
+        }
+        (*arr).as_mut_slice()[idx as usize] = RuntimeValue::from_int(value);
+        true
+    }
+}
+
 /// Push an element to an array (no grow, returns false if full)
 #[no_mangle]
 pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> bool {
@@ -618,6 +651,41 @@ pub extern "C" fn rt_typed_words_u32_push(array: RuntimeValue, value: i64) -> bo
         }
 
         *(*arr).data.add((*arr).len as usize) = RuntimeValue::from_int(value & 0xFFFF_FFFF);
+        (*arr).len += 1;
+        true
+    }
+}
+
+/// Push a raw u64 into a `[u64]`-style runtime array without RuntimeValue boxing.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        if (*arr).is_byte_packed() {
+            return false;
+        }
+        if (*arr).len >= (*arr).capacity {
+            let old_cap = (*arr).capacity;
+            let new_cap = (old_cap * 2).max(4);
+            let old_layout = array_data_layout(old_cap);
+            let new_size = array_data_layout(new_cap).size();
+            let new_data = if (*arr).data.is_null() {
+                std::alloc::alloc_zeroed(array_data_layout(new_cap)) as *mut RuntimeValue
+            } else {
+                std::alloc::realloc((*arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+            };
+            if new_data.is_null() {
+                return false;
+            }
+            let old_len_bytes = old_cap as usize * std::mem::size_of::<RuntimeValue>();
+            if new_size > old_len_bytes {
+                std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_size - old_len_bytes);
+            }
+            (*arr).data = new_data;
+            (*arr).capacity = new_cap;
+        }
+
+        *(*arr).data.add((*arr).len as usize) = RuntimeValue::from_int(value);
         (*arr).len += 1;
         true
     }
