@@ -190,6 +190,22 @@ fn for_range_inclusive() {
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BinOp { op: BinOp::LtEq, .. })));
 }
 
+#[test]
+fn for_range_preserves_u64_counter_type() {
+    let mir = compile_to_mir(
+        "fn test() -> u64:\n    var sum = 0u64\n    val length = 5u64\n    for i in 0..length:\n        sum = sum + i\n    return sum\n",
+    )
+    .unwrap();
+    let func = &mir.functions[0];
+    assert!(func
+        .locals
+        .iter()
+        .any(|local| local.name == "i" && local.ty == crate::hir::TypeId::U64));
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Load { ty, .. } if *ty == crate::hir::TypeId::U64)
+    }));
+}
+
 // =============================================================================
 // Collection for loop (lowering_stmt.rs lines 556, 562)
 // =============================================================================

@@ -1631,6 +1631,8 @@ impl<'a> MirLowerer<'a> {
         use crate::hir::BinOp;
         use crate::mir::MirInst;
 
+        let loop_ty = range_counter_type(start_expr.ty, end_expr.ty);
+
         // Lower start and end expressions
         let start_reg = self.lower_expr(start_expr)?;
         let end_reg = self.lower_expr(end_expr)?;
@@ -1645,13 +1647,16 @@ impl<'a> MirLowerer<'a> {
             }
             for (i, local) in func.locals.iter().enumerate() {
                 if local.name == pattern {
+                    if let Some(local) = func.locals.get_mut(i) {
+                        local.ty = loop_ty;
+                    }
                     return num_params + i;
                 }
             }
             let index = num_params + func.locals.len();
             func.locals.push(crate::mir::function::MirLocal {
                 name: pattern.to_string(),
-                ty: crate::hir::TypeId::I64,
+                ty: loop_ty,
                 kind: crate::mir::effects::LocalKind::Local,
                 is_ghost: false,
             });
@@ -1669,7 +1674,7 @@ impl<'a> MirLowerer<'a> {
             block.instructions.push(MirInst::Store {
                 addr,
                 value: start_reg,
-                ty: crate::hir::TypeId::I64,
+                ty: loop_ty,
             });
         })?;
 
@@ -1703,7 +1708,7 @@ impl<'a> MirLowerer<'a> {
             block.instructions.push(MirInst::Load {
                 dest: current_val,
                 addr,
-                ty: crate::hir::TypeId::I64,
+                ty: loop_ty,
             });
 
             // For exclusive range: i < end; for inclusive: i <= end
@@ -1749,7 +1754,7 @@ impl<'a> MirLowerer<'a> {
             block.instructions.push(MirInst::Load {
                 dest: current_val,
                 addr,
-                ty: crate::hir::TypeId::I64,
+                ty: loop_ty,
             });
             block.instructions.push(MirInst::ConstInt { dest: one, value: 1 });
             block.instructions.push(MirInst::BinOp {
@@ -1761,7 +1766,7 @@ impl<'a> MirLowerer<'a> {
             block.instructions.push(MirInst::Store {
                 addr,
                 value: new_val,
-                ty: crate::hir::TypeId::I64,
+                ty: loop_ty,
             });
         })?;
 
@@ -1770,5 +1775,17 @@ impl<'a> MirLowerer<'a> {
         self.pop_loop()?;
         self.set_current_block(exit_id)?;
         Ok(())
+    }
+}
+
+fn range_counter_type(start_ty: TypeId, end_ty: TypeId) -> TypeId {
+    match end_ty {
+        TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64 => end_ty,
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 => end_ty,
+        _ => match start_ty {
+            TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64 => start_ty,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 => start_ty,
+            _ => TypeId::I64,
+        },
     }
 }

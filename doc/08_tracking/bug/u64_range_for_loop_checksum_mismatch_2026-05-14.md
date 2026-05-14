@@ -2,7 +2,7 @@
 
 ## Status
 
-Open.
+Resolved for checksum correctness. Performance parity remains open.
 
 ## Context
 
@@ -27,22 +27,33 @@ Command:
 timeout 150s env SIMPLE_COLLECTION_BENCH_SOURCE_CLOSURE=1 SIMPLE_COLLECTION_BENCH_CLEAN=1 SIMPLE_COLLECTION_BENCH_CPU=native test/perf/collections/run_collection_benchmarks.shs
 ```
 
-Observed checksum mismatch:
+Original observed checksum mismatch before the compiler fix:
 
 - C/Rust `list_traverse`: `3865411584000`
 - Simple `list_traverse` after the `for 0..length` rewrite: `483124838400`
 - Simple `set_contains` after the analogous range rewrite: `0`
 
-The probe was reverted. Keep the collection benchmark on the verified `while`
-form until range lowering over unsigned bounds is fixed and covered by a
-regression test.
+The compiler now preserves unsigned counter typing for `for 0..u64_bound`
+lowering, and the same benchmark probe preserves checksum parity after
+rebuilding `src/compiler_rust/target/debug/simple`.
+
+Resolved evidence:
+
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler for_range_preserves_u64_counter_type -- --nocapture`
+- rebuilt driver with `cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --bin simple`
+- reran the collection benchmark probe with `for 0..length`; all four
+  benchmark checksums matched C/Rust
+
+The probe was still reverted. Keep the collection benchmark on the faster
+verified `while` form until range-for optimization performance catches up.
 
 ## Impact
 
 The existing SIMD/reduction optimizer only analyzes canonical range `for`
-loops, but the current collection benchmark cannot be safely converted to that
-shape. Closing the list traversal and scalar membership gaps should either:
+loops, but the current collection benchmark still should not be converted to
+that shape because it regressed speed sharply even after checksum correctness
+was fixed. Closing the list traversal and scalar membership gaps should either:
 
-- fix unsigned range-loop lowering first, or
+- speed up unsigned range-loop lowering/codegen first, or
 - add equivalent optimizer support for the existing `while unsigned_index <
   cached_len` shape.
