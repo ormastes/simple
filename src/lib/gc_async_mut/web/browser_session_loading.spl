@@ -33,7 +33,9 @@ fn _append_unique_warning(warnings: [text], warning: text) -> [text]:
     for existing in warnings:
         if existing == warning:
             return warnings
-    warnings + [warning]
+    var out = warnings
+    out.push(warning)
+    out
 
 fn _url_search_params_query(url: text) -> text:
     val q = url.index_of("?")
@@ -118,7 +120,7 @@ impl BrowserSession:
     me _commit_script_response(response: BrowserResponse) -> Result<bool, text>:
         if val Some(load) = self.active_load:
             if response.error != "":
-                load.warnings = load.warnings + ["external script error: {response.error}"]
+                load.warnings.push("external script error: {response.error}")
             else if val Some(state) = self.runtime_state:
                 self._apply_response_headers(response.headers)
                 val eval_result = state.runtime.eval(response.body)
@@ -127,14 +129,14 @@ impl BrowserSession:
                         self._flush_runtime_side_effects()
                         pass_dn
                     Err(e):
-                        load.warnings = load.warnings + ["external script error: {e.message}"]
+                        load.warnings.push("external script error: {e.message}")
             return self._advance_script_loading()
         Err("no active script load")
 
     me _commit_module_response(response: BrowserResponse) -> Result<bool, text>:
         if val Some(load) = self.active_load:
             if response.error != "":
-                load.warnings = load.warnings + ["module load error: {response.error}"]
+                load.warnings.push("module load error: {response.error}")
                 load.pending_module = nil
                 return self._advance_script_loading()
             self._apply_response_headers(response.headers)
@@ -168,11 +170,11 @@ impl BrowserSession:
                         if expanded.sources.len() > 0:
                             load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
                         continue
-                    self.pending_requests = self.pending_requests + [self._build_request("style", resolved, "GET", "", "", "")]
+                    self.pending_requests.push(self._build_request("style", resolved, "GET", "", "", ""))
                     return Ok(true)
             if not self.runtime_enabled:
                 if load.script_blocks.len() > 0:
-                    load.warnings = load.warnings + ["scripts are ignored when BrowserSession runtime is disabled"]
+                    load.warnings.push("scripts are ignored when BrowserSession runtime is disabled")
                 self._finalize_active_load(load)
                 self.active_load = nil
                 return Ok(true)
@@ -188,7 +190,7 @@ impl BrowserSession:
                 self._trace_guest("script block kind={block.kind} type={block.script_type}")
                 load.warnings = _append_script_compat_warnings(load.warnings, block)
                 if block.kind == "external" and block.script_type != "module" and (block.is_async or block.is_defer):
-                    load.script_blocks = load.script_blocks + [block.as_ordered_classic()]
+                    load.script_blocks.push(block.as_ordered_classic())
                     continue
                 if block.kind == "inline":
                     if block.script_type == "module":
@@ -198,7 +200,7 @@ impl BrowserSession:
                                 if not done:
                                     return Ok(true)
                             Err(e):
-                                load.warnings = load.warnings + ["inline module error: {e}"]
+                                load.warnings.push("inline module error: {e}")
                     else if val Some(state) = self.runtime_state:
                         self._trace_guest("eval inline script start")
                         val script_source = block.content
@@ -227,7 +229,7 @@ impl BrowserSession:
                                 self._flush_runtime_side_effects()
                                 pass_dn
                             Err(e):
-                                load.warnings = load.warnings + ["inline script error: {e.message}"]
+                                load.warnings.push("inline script error: {e.message}")
                     continue
                 if block.kind == "external":
                     val resolved = resolve_relative_url(load.document_url, block.src)
@@ -238,7 +240,7 @@ impl BrowserSession:
                                 if not done:
                                     return Ok(true)
                             Err(e):
-                                load.warnings = load.warnings + ["module load error: {e}"]
+                                load.warnings.push("module load error: {e}")
                         continue
                     if val Some(override_body) = pair_value(self.resource_overrides, resolved):
                         if val Some(state) = self.runtime_state:
@@ -251,9 +253,9 @@ impl BrowserSession:
                                     self._flush_runtime_side_effects()
                                     pass_dn
                                 Err(e):
-                                    load.warnings = load.warnings + ["external script error: {e.message}"]
+                                    load.warnings.push("external script error: {e.message}")
                         continue
-                    self.pending_requests = self.pending_requests + [self._build_request("script", resolved, "GET", "", "", "")]
+                    self.pending_requests.push(self._build_request("script", resolved, "GET", "", "", ""))
                     return Ok(true)
             self._finalize_active_load(load)
             self.active_load = nil
@@ -292,7 +294,7 @@ impl BrowserSession:
         if val Some(source) = self._module_source_for_url(module_url):
             return self._execute_module_source(module_url, source, load)
         load.pending_module = Some(BrowserPendingModuleEval.create(module_url, ""))
-        self.pending_requests = self.pending_requests + [self._build_request("module", module_url, "GET", "", "", "")]
+        self.pending_requests.push(self._build_request("module", module_url, "GET", "", "", ""))
         Ok(false)
 
     me _execute_module_source(module_url: text, source: text, load: BrowserLoadState) -> Result<bool, text>:
@@ -304,7 +306,7 @@ impl BrowserSession:
             load.warnings = _append_unique_warning(load.warnings, "module cycle handling is limited for '{module_url}'")
             return Ok(true)
         val dependencies = extract_module_dependency_urls(module_url, source)
-        self.module_eval_stack = self.module_eval_stack + [module_url]
+        self.module_eval_stack.push(module_url)
         for dep_url in dependencies:
             if self._module_is_loaded(dep_url):
                 continue
@@ -322,7 +324,7 @@ impl BrowserSession:
             else:
                 self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
                 load.pending_module = Some(BrowserPendingModuleEval.create(module_url, source))
-                self.pending_requests = self.pending_requests + [self._build_request("module", dep_url, "GET", "", "", "")]
+                self.pending_requests.push(self._build_request("module", dep_url, "GET", "", "", ""))
                 return Ok(false)
         self.module_source_cache = upsert_pair(self.module_source_cache, module_url, source)
         if val Some(state) = self.runtime_state:
@@ -400,10 +402,10 @@ impl BrowserSession:
                 var i = 0
                 while i <= self.current_index:
                     if i >= 0 and i < self.history.len():
-                        trimmed = trimmed + [self.history[i]]
+                        trimmed.push(self.history[i])
                     i = i + 1
                 self.history = trimmed
-            self.history = self.history + [entry]
+            self.history.push(entry)
             self.current_index = self.history.len() - 1
 
     me _refresh_current_history():
