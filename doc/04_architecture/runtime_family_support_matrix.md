@@ -128,7 +128,7 @@ The production ownership rule is behavioral, not name-only:
 - **FFI expectations**: Bare SFFI for hardware access (MMIO, interrupts). Architecture-specific: ARM, ARM64, RISC-V, RISC-V32, x86, x86_64.
 - **Target suitability**: Baremetal only. Target triples: `armv7m-none-eabi`, `x86_64-unknown-none`, `riscv64gc-unknown-none-elf`. QEMU-validated.
 - **Key modules**: `baremetal/` (arm, arm64, riscv, riscv32, x86, x86_64), `execution/`, `memory/`, `async/`, `collections/`, `qemu/`, `io/`, `log/`, `math/`, `string/`, `hash/`, `sort/`.
-- **Alloc checking**: target family filtering plus `dependency_boundary_spec` prevent direct noalloc imports from allocating runtime families, explicit noalloc `@alloc` markers, host allocation APIs, and unsafe reachable imports through helper modules; compiler-owned manifest/capability scanning remains partial.
+- **Alloc checking**: target family filtering, `dependency_boundary_spec`, and target-strict `simple check` prevent direct and reachable noalloc imports from allocating runtime families, explicit noalloc `@alloc` markers, host allocation APIs, and unsafe helper-module imports; first-class compiler allocation-capability metadata remains partial.
 
 ---
 
@@ -141,7 +141,7 @@ The production ownership rule is behavioral, not name-only:
 | `nogc_async_mut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (1st priority in search, boundary warnings) | Yes (rich exports) | Yes (1st priority, default) | Good | Root attribute and direct-import boundary checks present; full manifest-to-GcMode enforcement remains partial |
 | `gc_async_mut` | `@gc` on root `__init__.spl`; parser accepts module-level GC attributes before export-only roots | Yes (6th priority in search) | Yes (GPU exports) | Yes (6th priority) | Partial (GPU-specific) | Root attribute and direct-import boundary checks present; full manifest-to-GcMode enforcement remains partial |
 | `nogc_async_immut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (2nd priority in search, boundary warnings) | Yes (persistent structures, Atom/Ref, combinators) | Yes (2nd priority) | Direct native | Resolution and root exports fixed; persistent-structure facade coverage is broad and direct coordination/CAS native coverage passes, but manifest-backed enforcement remains a promotion gap |
-| `nogc_async_mut_noalloc` | `@no_gc` on root `__init__.spl`; direct and reachable unsafe imports plus explicit `@alloc` markers blocked by regression | Yes (10th priority in search, boundary warnings) | Yes (baremetal/noalloc exports) | Yes (10th priority) | Partial (QEMU); check-clean under full-family `simple check` | Root export surface exists; compiler-owned capability enforcement remains partial |
+| `nogc_async_mut_noalloc` | `@no_gc` on root `__init__.spl`; direct and reachable unsafe imports plus explicit `@alloc` markers blocked by target-strict checker and regression audits | Yes (10th priority in search, boundary warnings) | Yes (baremetal/noalloc exports) | Yes (10th priority) | Partial (QEMU); check-clean under full-family `simple check` | Root export surface exists; first-class allocation-capability metadata remains partial |
 | `gc_sync_mut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (8th priority) | Yes (facade root) | Yes (8th priority) | Minimal | Facade over `gc_async_mut`; no independent sync runtime semantics yet |
 | `gc_async_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (7th priority) | Yes | Yes (7th priority) | Broad facade | Native facade resolution passes; the 31-spec native immutable facade batch covers root `Atom`, `VersionedSnapshot`, pmap traversal, pure combinators, root `PersistentList`, partial `PersistentVec`, committed-path `PersistentMap`, `PersistentSet`, package-level `PersistentTrie`, and typed plus untyped chained root-facade `PersistentTrie` behavior without warning/stub output |
 | `gc_sync_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (9th priority) | Yes | Yes (9th priority) | Broad facade | Native facade resolution plus the 31-spec native immutable facade batch pass through the GC async immutable facade without warning/stub output |
@@ -161,7 +161,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 5. **Target family filtering** in `src/compiler/99.loader/module_resolver/resolution.spl`: `allowed_families` restricts stdlib family search for target presets.
 
-**Remaining gap**: the manifest-backed hard violation API, Rust lint parity, Rust `simple check` target strict mode, and Rust interpreter strict mode exist. `simple check --target <baremetal/simpleos>` promotes runtime-family violations automatically, and the Rust test runner plus direct file interpreter launch path now enable strict runtime-family imports for baremetal/SimpleOS targets while hosted targets keep warnings by default. Broader compiler entrypoints still need to adopt the same target-derived strict policy where they run interpreter/module-loading checks. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
+**Remaining gap**: the manifest-backed hard violation API, Rust lint parity, Rust `simple check` target strict mode, target-strict noalloc reachable-import closure check, and Rust interpreter strict mode exist. `simple check --target <baremetal/simpleos>` promotes runtime-family violations automatically, and the Rust test runner plus direct file interpreter launch path now enable strict runtime-family imports for baremetal/SimpleOS targets while hosted targets keep warnings by default. Broader compiler entrypoints still need to adopt the same target-derived strict policy where they run interpreter/module-loading checks. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
 
 ### Interpreter parity detail
 
@@ -226,12 +226,12 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 ### Gap 4: `nogc_async_mut_noalloc` root `__init__.spl` (Agent 4 -- Stdlib) -- **RESOLVED**
 - **Status**: Fixed. The root `__init__.spl` now declares `@no_gc`, sub-modules, and the baremetal/noalloc export surface.
-- **Remaining work**: Direct imports from allocating runtime families, direct `app.*` imports, explicit noalloc `@alloc` markers, and host allocation API calls are blocked by `dependency_boundary_spec` and the baremetal verifier; deeper allocation capability enforcement is still partial.
+- **Remaining work**: Direct imports from allocating runtime families, direct `app.*` imports, unsafe reachable helper imports, explicit noalloc `@alloc` markers, and host allocation API calls are blocked by `dependency_boundary_spec`, target-strict `simple check`, and the baremetal verifier; deeper allocation capability metadata is still partial.
 
 ### Gap 5: Compiler-owned allocation capability scanning is still partial (Agent 2 -- Compiler)
-- **Problem**: target family filtering, direct-import tests, marker tests, reachable-import closure audit, the baremetal verifier, and the runtime-family manifest block or report noalloc imports from allocating runtime families, direct `app.*` imports, explicit noalloc `@alloc` opt-ins, direct host allocation APIs, and unsafe reachable helper imports. Reachable closure enforcement is still partly script/verifier-owned rather than fully compiler-owned.
+- **Problem**: target family filtering, direct-import tests, marker tests, target-strict noalloc reachable-import closure checking, the baremetal verifier, and the runtime-family manifest block or report noalloc imports from allocating runtime families, direct `app.*` imports, explicit noalloc `@alloc` opt-ins, direct host allocation APIs, and unsafe reachable helper imports. Allocation capability is still not first-class module metadata throughout compiler/module resolution.
 - **Impact**: Baremetal builds are protected against direct and reachable family-boundary mistakes, and the noalloc family is checker-clean under rebuilt `simple check`, but deeper reachable allocation safety is not yet represented as first-class module metadata throughout compiler/module resolution.
-- **Fix**: Feed the runtime-family manifest into compiler/module resolution for target-restricted runs and retain the reachable-import audit as regression evidence until the compiler owns the full closure.
+- **Fix**: Feed allocation capability metadata into compiler/module resolution for target-restricted runs and retain the reachable-import audit as regression evidence until the compiler owns the full allocation-capability model.
 
 ### Gap 6: `gc_sync_mut` had tests but no source (Agent 4 -- Stdlib) -- **RESOLVED**
 - **Status**: Fixed. `src/lib/gc_sync_mut/` now exists as a facade-only compatibility family over tracked `gc_async_mut` modules.
@@ -294,7 +294,7 @@ Five families are **advanced-scoped** (exist but still have promotion gaps): `no
 - `gc_async_mut` requires GC runtime (GPU memory management model).
 
 **Accidental differences** (bugs to fix):
-- Compiler-owned reachable allocation capability enforcement is still partial; the verifier/audit scripts cover more of the closure than module metadata does.
+- Compiler-owned reachable import closure enforcement now exists in target-strict `simple check`; allocation capability metadata remains partial beyond source/manifest scans.
 - `gc_sync_mut` is facade-only and still needs per-API decisions on whether any surface requires real blocking wrappers instead of facade exports.
 - Duplicate module exports across families (e.g., `io_runtime`, `platform`, `spec`, `log` appear in both `nogc_sync_mut` and root `lib/__init__.spl`).
 
@@ -441,7 +441,7 @@ val resolver = ModuleResolver.new(project_root, source_root)
 | `src/compiler/99.loader/module_resolver/manifest.spl` | L99 | Parses `@no_gc`/`@gc` from `__init__.spl` attributes, propagates to `ChildModule.gc_config` | **Partial**: runtime-family roots now use attributes, but manifest-to-hard-error enforcement remains partial |
 | `src/compiler/55.borrow/gc_analysis/barriers.spl` | L55 | Write barrier analysis (`GcStrategy {StopTheWorld, Incremental, Generational, Concurrent}`) | No (MIR-level analysis, separate GC strategy enum) |
 | `src/compiler/55.borrow/gc_analysis/mod.spl` | L55 | `GcSafetyAnalyzer`, root tracking, escape analysis | No (operates on MIR, not module families) |
-| `test/unit/lib/dependency_boundary_spec.spl` | Test | Blocks direct noalloc imports from allocating runtime families, direct `app.*` imports, noalloc `@alloc` markers, host allocation APIs, and unsafe reachable helper imports | Yes for direct imports/markers/API calls/reachable helper imports; compiler-owned capability metadata remains future work |
+| `test/unit/lib/dependency_boundary_spec.spl` | Test | Blocks direct noalloc imports from allocating runtime families, direct `app.*` imports, noalloc `@alloc` markers, host allocation APIs, and unsafe reachable helper imports | Yes for direct imports/markers/API calls/reachable helper imports; compiler-owned allocation-capability metadata remains future work |
 | `src/compiler/90.tools/verify/baremetal.spl` | L90 | Baremetal verification surface | Enforces current direct and reachable noalloc source constraints; should consume future manifest-level allocation metadata |
 | `src/compiler/00.common/driver_core_types.spl` | L00 | `CompileOptions.gc_off` flag | No (global toggle, not per-family) |
 | `src/compiler/10.frontend/core/interpreter/module_loader.spl` | L10 | Hardcoded family search order for `use std.*` resolution | **Yes** (only place families are explicitly listed) |
