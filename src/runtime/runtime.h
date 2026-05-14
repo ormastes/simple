@@ -267,11 +267,15 @@ int64_t  rt_to_string(int64_t value);
 int64_t  rt_raw_u64_to_string(int64_t raw);
 int64_t  rt_value_to_string(int64_t value);
 SplArray* rt_array_new(int64_t cap);
+SplArray* rt_array_new_with_cap_u64(int64_t cap);
 SplArray* rt_byte_array_new(uint64_t cap);
 int64_t  rt_array_len(SplArray* array);
 int64_t  rt_array_get(SplArray* array, int64_t idx);
 void     rt_array_set(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_push(SplArray* array, int64_t value);
+int64_t  rt_array_data_ptr(SplArray* array);
+int64_t  rt_array_header_ptr(SplArray* array);
+int8_t   rt_array_set_len_known(int64_t header_ptr, int64_t len);
 int64_t  rt_bytes_u8_at(SplArray* array, int64_t idx);
 int64_t  rt_bytes_u32_le_at(SplArray* array, int64_t idx);
 int64_t  rt_bytes_u64_le_at(SplArray* array, int64_t idx);
@@ -289,6 +293,12 @@ int8_t   rt_typed_words_u32_set(SplArray* array, int64_t idx, int64_t value);
 int64_t  rt_typed_words_u64_at(SplArray* array, int64_t idx);
 int8_t   rt_typed_words_u64_push(SplArray* array, int64_t value);
 int8_t   rt_typed_words_u64_set(SplArray* array, int64_t idx, int64_t value);
+int64_t  rt_typed_words_u64_raw_data_at(int64_t data_ptr, int64_t idx);
+int8_t   rt_typed_words_u64_store_known_data_at(
+    int64_t header_ptr,
+    int64_t data_ptr,
+    int64_t idx,
+    int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
 int64_t  rt_native_eq(int64_t left, int64_t right);

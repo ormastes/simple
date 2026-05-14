@@ -715,6 +715,10 @@ SplArray* rt_array_new(int64_t cap) {
     return rt_core_array_new(cap, 0);
 }
 
+SplArray* rt_array_new_with_cap_u64(int64_t cap) {
+    return rt_core_array_new(cap, 0);
+}
+
 SplArray* rt_byte_array_new(uint64_t cap) {
     if (cap > (uint64_t)INT64_MAX) {
         return NULL;
@@ -761,6 +765,23 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
     } else {
         ((int64_t*)array->data)[array->len++] = val;
     }
+    return 1;
+}
+
+int64_t rt_array_data_ptr(SplArray* a) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    return array ? (int64_t)(uintptr_t)array->data : 0;
+}
+
+int64_t rt_array_header_ptr(SplArray* a) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    return array ? (int64_t)(uintptr_t)array : 0;
+}
+
+int8_t rt_array_set_len_known(int64_t header_ptr, int64_t len) {
+    RtCoreArray* array = rt_core_as_array(header_ptr);
+    if (!array || len < 0 || len > array->cap) return 0;
+    array->len = len;
     return 1;
 }
 
@@ -936,6 +957,22 @@ int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
     ((int64_t*)array->data)[idx] = val;
+    return 1;
+}
+
+int64_t rt_typed_words_u64_raw_data_at(int64_t data_ptr, int64_t idx) {
+    if (data_ptr == 0 || idx < 0) return 0;
+    return ((int64_t*)(uintptr_t)data_ptr)[idx];
+}
+
+int8_t rt_typed_words_u64_store_known_data_at(
+    int64_t header_ptr,
+    int64_t data_ptr,
+    int64_t idx,
+    int64_t val) {
+    RtCoreArray* array = rt_core_as_array(header_ptr);
+    if (!array || data_ptr == 0 || idx < 0 || idx >= array->cap) return 0;
+    ((int64_t*)(uintptr_t)data_ptr)[idx] = val;
     return 1;
 }
 

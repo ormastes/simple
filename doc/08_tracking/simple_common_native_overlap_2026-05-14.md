@@ -373,6 +373,18 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   Rust). The harness now emits `[collectionbench-warn]` rows for these misses
   and can be promoted to failure with `SIMPLE_COLLECTION_BENCH_ENFORCE=1` once
   the parity target is expected to hold.
+- The core-C bootstrap runtime now exports the generated source-closure typed
+  array helpers used by optimized pure Simple collection code:
+  `rt_array_new_with_cap_u64`, `rt_array_data_ptr`,
+  `rt_array_header_ptr`, `rt_array_set_len_known`,
+  `rt_typed_words_u64_raw_data_at`, and
+  `rt_typed_words_u64_store_known_data_at`. Rebuilding
+  `collection_simple.spl` with `--runtime-bundle core-c-bootstrap --source
+  src/lib --entry-closure` reduced unresolved generated stubs from 12 to 6 and
+  the resulting binary ran checksum-compatible collection benches instead of
+  crashing. The source-closure binary measured pure text `HashSet.contains` at
+  `206` ops/ms, up from the interpreted harness result of `9` ops/ms, but still
+  far below C/Rust parity.
 
 ## Next Concrete Plugin Work
 
