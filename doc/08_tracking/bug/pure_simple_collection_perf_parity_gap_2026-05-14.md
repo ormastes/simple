@@ -56,6 +56,12 @@ Checksum parity passed for all three benchmarks.
   `xor (%r10,%r11,8), %rax`. The generated loop is scalar and not unrolled;
   this makes the remaining gap a backend loop-shape issue rather than an
   avoidable runtime helper call in the hot load path.
+- A native codegen MIR inliner now removes supported small local tail calls.
+  No-strip disassembly of `bench_set_contains` confirmed the hot
+  `call set_contains` instruction was removed while checksum parity still
+  passed. The 3-sample benchmark remained below parity:
+  `list_traverse` 0.34x vs C / 0.20x vs Rust, `list_push` 0.59x vs C / 1.33x
+  vs Rust, and `set_contains` 0.37x vs C / 0.19x vs Rust.
 
 ## Likely Gap
 

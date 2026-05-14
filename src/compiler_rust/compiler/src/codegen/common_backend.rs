@@ -20,6 +20,7 @@ use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirInst, MirModule};
 
 use super::instr::compile_function_body;
+use super::mir_inline::inline_small_pure_functions;
 use super::runtime_ffi::runtime_funcs_for_target;
 use super::shared::{build_mir_signature, create_body_stub, expand_with_outlined};
 
@@ -1025,7 +1026,7 @@ impl<M: Module> CodegenBackend<M> {
                 unique_functions.push(func);
             }
         }
-        let functions = unique_functions;
+        let functions = inline_small_pure_functions(mir, unique_functions);
         let referenced_names = referenced_call_names(&functions);
         if !Self::can_omit_runtime_imports(mir, &functions) {
             self.ensure_runtime_functions_declared(&referenced_names)?;
