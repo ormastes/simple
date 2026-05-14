@@ -173,10 +173,10 @@ Current command:
 
 Next active gaps:
 - Pure Simple now runs on the C/core runtime for this benchmark, but it is not yet performance-complete against C/Rust on the current core-lane smoke. Continue optimizer work on bounds/index removal, helper inlining, and fixed-size byte-buffer lowering.
-- XXHash64, CRC32, and Adler-32 are not faster than both C and Rust in the latest source-built hosted-native median sample. XXHash64 still beats Rust at median but not C. These remain compiler/plugin optimization work, not permission to delegate to C/Rust libraries. ChaCha20 is the current measured faster-than-both proof point.
+- In the latest core-runtime smoke, CRC32 is faster than both C and Rust after the native-safe table cache. Adler-32 and ChaCha20 remain below both baselines, while XXHash64 is noisy across single-sample runs and needs median evidence before being counted complete. These remain compiler/plugin optimization work, not permission to delegate to C/Rust libraries.
 - The first compiler-side Adler generalization is now the recognized reducer lowering for the `65521 = 2^16 - 15` modulus pattern. Broader `simple.opt.math.strength_reduce` work should generalize small-multiply decomposition beyond this Adler-specific call shape without editing algorithm source.
 - Benchmark evidence is currently too noisy for single-run completion decisions. `test/perf/port_algorithms/run_port_algorithm_benchmarks.shs` now has `SIMPLE_BENCH_SAMPLES=N` and reports median MB/s. The benchmark rows also use longer timing windows: XXHash64 `1600`, CRC32 `160`, Adler-32 `800`, and ChaCha20 `120` iterations. The latest 3-sample median kept checksum parity but still failed faster-than-both: XXHash64 `0.57x` C / `0.97x` Rust, CRC32 `0.88x` C / `0.88x` Rust, Adler-32 `0.94x` C / `0.93x` Rust, and ChaCha20 `1.17x` C / `1.04x` Rust.
-- Attempted CRC32 lazy table caching passed interpreter KATs but segfaulted in the native benchmark, so it was reverted and recorded as `doc/08_tracking/bug/crc32_native_global_table_cache_segfault_2026-05-13.md`.
+- The earlier CRC32 lazy table cache segfault is now resolved by avoiding module-level bool readiness globals in native code. Keep `doc/08_tracking/bug/crc32_native_global_table_cache_segfault_2026-05-13.md` as historical context for the tagged-bool global trap.
 - Attempted CRC32 direct `[u8]` literal table materialization passed interpreter KATs but failed native checksum parity, so it was reverted and recorded as `doc/08_tracking/bug/native_u8_array_literal_not_packed_2026-05-13.md`.
 - XXHash64 one-shot now evaluates repeated `* p2` terms once before rotate expressions in the stripe, merge, and 8-byte tail paths. Checksum parity still passes; one follow-up 3-sample run measured Simple XXHash64 at `13242 MB/s`, but the row was still below C in that run (`0.91x` C / `1.67x` Rust).
 
@@ -329,6 +329,20 @@ Interpretation:
 - The compiler/backend layer now has regression tests proving `rt_typed_bytes_u8_unchecked`, `rt_typed_bytes_u64_le_unchecked`, `rt_array_len`, `.len()`, and `_adler_reduce` lower without runtime/function relocations in the covered Cranelift call shapes. The `rt_array_len`/`.len()` fix improved Adler-32 from the prior `904 MB/s` source-built sample to `1221 MB/s`; the pure Simple 8-byte loop unroll moved the sample to `1336 MB/s`; replacing eight byte loads with one unchecked u64 little-endian load moved the sample to `1536 MB/s`; closed-form weighted `b` update for each 8-byte word moved the latest sample to `1896 MB/s`.
 - Remaining Adler-32 work is cleanup/generalization: make this unroll plus closed-form reduction compiler-driven in MIR for recognized byte reductions, then resample with a non-stripped symbol build for tighter ASM evidence.
 - Rejected follow-up: a pure Simple 16-byte Adler loop unroll checked and passed unit tests, but regressed the benchmark sample to `1103 MB/s`, so the implementation was returned to the verified 8-byte unroll.
+- Rejected follow-up: retesting the C-shaped `u32` byte loop with the classic 5552-byte reduction window on the 2026-05-14 core-runtime smoke preserved all 13 Adler/Fletcher unit examples but regressed Adler-32 to `0.47x` C / `0.52x` Rust. Keep the weighted 8-byte `u64` implementation and pursue backend/codegen optimization instead.
+
+### 2026-05-14 pure Simple core-runtime completion audit
+
+Commands:
+- `jj git fetch --remote origin`
+- `jj log -r 'main@origin::main'`
+- `SIMPLE_RUNTIME_PATH=<temp-core-c-runtime-with-runtime_simd_utf8.c> SIMPLE_BIN=bin/release/x86_64-unknown-linux-gnu/simple SIMPLE_LLVM_PROBE=0 SIMPLE_DISASM_PROBE=1 SIMPLE_BENCH_SAMPLES=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+Evidence:
+- Fetch reported no remote changes, and local `main` is a direct descendant of `main@origin`.
+- Push remains blocked by GitHub HTTPS authentication, not by local rebase state.
+- Disassembly probe shows default native `chacha20_encrypt_checksum_local` still calls `chacha20_xor_block_checksum_local` once per 64-byte block. The block helper has no runtime byte-index relocation calls in the default binary, so the next ChaCha gap is large-helper inlining/codegen, not generic byte indexing.
+- The default binary still exposes runtime symbols such as `rt_len`, `rt_index_get`, and `rt_index_set` for other code paths, but the current summary does not show them in the default ChaCha hot functions.
 
 ### 2026-05-13 pure Simple CRC32 hot-loop update
 
