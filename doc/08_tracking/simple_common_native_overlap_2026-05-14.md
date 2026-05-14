@@ -386,6 +386,12 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   checksum-compatible collection benches instead of crashing. The source-closure
   binary measured pure text `HashSet.contains` at `193` ops/ms, up from the
   interpreted harness result of `9` ops/ms, but still far below C/Rust parity.
+- The HIR imported-type loader now skips local export declarations when walking
+  re-exported import chains, so source-closure native builds no longer emit the
+  prior `empty module path` warning for `HashSet`'s local
+  `export hashset_with_capacity`. A fresh core-C source-closure rebuild linked
+  without generated stubs or import-type warnings, and the binary kept checksum
+  parity while measuring pure text `HashSet.contains` at `190` ops/ms.
 
 ## Next Concrete Plugin Work
 

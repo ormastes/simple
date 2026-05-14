@@ -82,6 +82,9 @@ impl Lowerer {
                     }
                 }
                 Node::ExportUseStmt(export_use) => {
+                    if export_use.path.segments.is_empty() {
+                        continue;
+                    }
                     if Self::import_target_intersects(target, &export_use.target) {
                         self.load_imported_types(&export_use.path, &export_use.target)?;
                         imported_count += 1;
