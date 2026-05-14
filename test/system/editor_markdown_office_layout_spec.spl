@@ -86,3 +86,72 @@ describe "markdown office-style layout":
         expect(updated).to_contain("| Sales | 7 | 3 | =B2+C2 |")
         val cells = md_document_sheet_cells(updated)
         expect(cells[7].value).to_equal("10")
+
+describe "markdown sgrid embedding":
+
+    it "scans hidden and fenced sgrid carriers without parsing full markdown":
+        val md = "| item:Str | qty:i64 | price:i64 | total:i64 |\n| :--- | --: | --: | --: |\n| Bread | 2 | 5 | 10 |\n\n<!-- sgrid\nid: invoice\ntable: previous\nf:\n    D2 = B2+C2\n-->\n\n```sgrid\nid: visible\ntable: 1\nfmt:\n    C:D = money(USD)\n```"
+        val blocks = md_sgrid_scan(md)
+        expect(blocks.len()).to_equal(2)
+        expect(blocks[0].carrier).to_equal("html")
+        expect(blocks[0].line).to_be_greater_than(0)
+        expect(blocks[0].id).to_equal("invoice")
+        expect(blocks[0].table_ref).to_equal("previous")
+        expect(blocks[0].formulas[0].target).to_equal("D2")
+        expect(blocks[1].carrier).to_equal("fence")
+        expect(blocks[1].formats[0].expr).to_equal("money(USD)")
+
+    it "binds sgrid metadata to the target markdown table":
+        val md = "# Sheet\n\n| A | B |\n|---|---:|\n| 1 | 2 |\n\n<!-- sgrid\nid: invoice\ntable: previous\n-->"
+        val bindings = md_sgrid_bind_tables(md)
+        expect(bindings.len()).to_equal(1)
+        expect(bindings[0].id).to_equal("invoice")
+        expect(bindings[0].table_start).to_equal(2)
+        expect(bindings[0].table_end).to_equal(4)
+
+    it "binds sgrid metadata to next and named tables":
+        val md = "<!-- sgrid\nid: next_sheet\ntable: next\n-->\n\n## invoice\n| A | B |\n|---|---:|\n| 1 | 2 |\n\n```sgrid\nid: named\ntable: #invoice\n```"
+        val bindings = md_sgrid_bind_tables(md)
+        expect(bindings.len()).to_equal(2)
+        expect(bindings[0].table_start).to_equal(6)
+        expect(bindings[1].table_start).to_equal(6)
+
+    it "applies canonical sgrid formulas to markdown table cells":
+        val md = "| item:Str | qty:i64 | price:i64 | total:i64 |\n| :--- | --: | --: | --: |\n| Bread | 2 | 5 | 0 |\n| Wine | 1 | 15 | 0 |\n| Sum | | | 0 |\n\n<!-- sgrid\nid: invoice\ntable: previous\nf:\n    D2:D3 = B * C\n    D4 = sum(D2:D3)\n-->"
+        val cells = md_sgrid_apply(md)
+        expect(cells[7].address).to_equal("D2")
+        expect(cells[7].value).to_equal("10")
+        expect(cells[11].value).to_equal("15")
+        expect(cells[15].value).to_equal("25")
+
+    it "supports inline formula and header type sugar for small sheets":
+        val md = "| item:Str | qty:i64 | price:i64 | total:i64 |\n| :--- | --: | --: | --: |\n| Bread | 2 | 5 | 10 `=B2*C2` |"
+        val formulas = md_sgrid_inline_annotations(md)
+        val types = md_sgrid_header_types(md)
+        expect(formulas.len()).to_equal(1)
+        expect(formulas[0].target).to_equal("D2")
+        expect(formulas[0].expr).to_equal("B2*C2")
+        expect(types.len()).to_equal(4)
+        expect(types[1].expr).to_equal("type(i64)")
+
+    it "provides selection sum and copy helpers":
+        val md = "| A | B |\n|---|---:|\n| 2 | 3 |\n| 4 | 5 |"
+        expect(md_sgrid_selection_sum(md, "A2:B3")).to_equal("14")
+        expect(md_sgrid_copy_selection(md, "A2:B3")).to_equal("2\t3\n4\t5")
+
+    it "provides pivot sum and common library names":
+        val md = "| item | qty |\n|---|---:|\n| Bread | 2 |\n| Wine | 1 |\n| Bread | 3 |"
+        val pivot = md_sgrid_pivot_sum(md, "A", "B")
+        expect(pivot.len()).to_equal(2)
+        expect(pivot[0].key).to_equal("Bread")
+        expect(pivot[0].value).to_equal("5")
+        expect(md_sgrid_common_libraries().join(",")).to_contain("pivot_sum")
+
+    it "evaluates common sgrid range libraries":
+        val md = "| value | out |\n|---:|---:|\n| 2 | 0 |\n| 4 | 0 |\n| 6 | 0 |\n| 0 | 0 |\n| 0 | 0 |\n\n<!-- sgrid\nf:\n    B2 = sum(A2:A4)\n    B3 = avg(A2:A4)\n    B4 = min(A2:A4)\n    B5 = max(A2:A4)\n    B6 = count(A2:A4)\n-->"
+        val cells = md_sgrid_apply(md)
+        expect(cells[3].value).to_equal("12")
+        expect(cells[5].value).to_equal("4")
+        expect(cells[7].value).to_equal("2")
+        expect(cells[9].value).to_equal("6")
+        expect(cells[11].value).to_equal("3")

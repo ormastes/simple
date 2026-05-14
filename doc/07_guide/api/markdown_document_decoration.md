@@ -129,6 +129,87 @@ For editing, `md_document_replace_sheet_cell_value(content, address, value)`
 rewrites one Markdown table cell. Re-reading the sheet model recalculates formula
 cells such as `=B2+C2`.
 
+## Sgrid Markdown Embedding
+
+For human-readable Excel-like files, store visible data as Markdown tables and
+store formulas, formats, and app metadata in `sgrid` carriers. The parser uses a
+two-pass scan: first it finds `sgrid` carriers line by line, then it binds each
+carrier only to the target nearby table.
+
+Hidden metadata:
+
+```markdown
+| item:Str | qty:i64 | price:i64 | total:i64 |
+| :------- | -----: | --------: | --------: |
+| Bread    | 2      | 5         | 10        |
+| Wine     | 1      | 15        | 15        |
+| Sum      |        |           | 25        |
+
+<!-- sgrid
+id: invoice
+table: previous
+
+f:
+    D2:D3 = B * C
+    D4 = sum(D2:D3)
+
+fmt:
+    C:D = money(USD)
+-->
+```
+
+Visible/editable metadata:
+
+````markdown
+```sgrid
+id: invoice
+table: previous
+f:
+    D2:D3 = B * C
+    D4 = sum(D2:D3)
+```
+````
+
+Supported carriers:
+
+- `<!-- sgrid ... -->` for hidden app metadata.
+- ```` ```sgrid ... ``` ```` for visible/editable metadata.
+- `~~~sgrid ... ~~~` as an alternate fenced form.
+
+Supported table references:
+
+- `table: previous`
+- `table: next`
+- `table: #invoice`
+- `table: 2`
+
+Inline annotations are supported only as optional sugar for very small sheets:
+
+```markdown
+| item:Str | qty:i64 | price:i64 | total:i64 |
+| :------- | -----: | --------: | --------: |
+| Bread    | 2      | 5         | 10 `=B2*C2` |
+```
+
+Header type sugar such as `qty:i64` is normalized separately from formulas.
+Avoid JSON/YAML braces and raw triple-double-quote blocks for spreadsheet
+metadata.
+
+Sgrid helpers:
+
+- `md_sgrid_scan(content)` finds carriers without full Markdown AST parsing.
+- `md_sgrid_bind_tables(content)` binds carriers to nearby Markdown tables.
+- `md_sgrid_apply(content)` applies canonical formulas to table cells.
+- `md_sgrid_selection_sum(content, range)` sums a selection.
+- `md_sgrid_copy_selection(content, range)` returns tab-separated copied text.
+- `md_sgrid_pivot_sum(content, key_col, value_col)` produces pivot-style sums.
+- `md_sgrid_common_libraries()` lists common spreadsheet helpers such as
+  `sum`, `avg`, `min`, `max`, `count`, `money`, `copy`, and `pivot_sum`.
+
+Formula libraries currently evaluated by `md_sgrid_apply(content)` are
+`sum(range)`, `avg(range)`, `min(range)`, `max(range)`, and `count(range)`.
+Formatting helpers such as `money(USD)` are parsed as metadata for renderers.
+
 ## Script Embeds
 
 Fenced `simple`, `spl`, and `script` blocks are script embeds. They are extracted
