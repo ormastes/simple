@@ -78,9 +78,11 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_println_str"
             | "rt_print_value"
             | "rt_println_value"
+            | "rt_alloc"
             | "rt_array_new"
             | "rt_array_len"
             | "rt_array_push"
+            | "rt_interp_call"
             | "rt_native_eq"
             | "rt_native_neq"
     )
@@ -1396,5 +1398,34 @@ mod tests {
         backend.compile_all_functions(&module).expect("compile");
 
         assert!(backend.runtime_funcs.contains_key("rt_array_push"));
+    }
+
+    #[test]
+    fn backend_generated_interp_bridge_helpers_are_declared_without_source_reference() {
+        let mut main = MirFunction::new("main".to_string(), TypeId::I64, Visibility::Public);
+        let arg = main.new_vreg();
+        let dest = main.new_vreg();
+        main.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: arg, value: 42 });
+        main.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::InterpCall {
+                dest: Some(dest),
+                func_name: "fallback_function".to_string(),
+                args: vec![arg],
+            });
+        main.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(dest));
+
+        let mut module = MirModule::new();
+        module.functions.push(main);
+
+        let mut backend = test_backend();
+        backend.compile_all_functions(&module).expect("compile");
+
+        assert!(backend.runtime_funcs.contains_key("rt_alloc"));
+        assert!(backend.runtime_funcs.contains_key("rt_interp_call"));
     }
 }
