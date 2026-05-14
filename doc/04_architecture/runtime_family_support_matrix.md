@@ -118,6 +118,10 @@ The production ownership rule is behavioral, not name-only:
   synchronous FFI boundaries. Those facades must not wildcard-export
   runtime-hook owners; `scripts/audit/runtime_backend_boundaries.py` keeps the
   wildcard-owner scan at zero.
+- Async compatibility families must not use `pass_todo` as intrinsic or facade
+  placeholders. Compiler-lowered declarations need deterministic interpreter
+  fallback behavior or a no-GC backend facade; the audit keeps
+  `async_compat_pass_todo_count=0`.
 - `gc_async_mut` facades prefer matching `nogc_async_mut` surfaces first. A
   direct `nogc_sync_mut` export is allowed only for pure or synchronous APIs
   that do not have an async-visible contract, and runtime-hook-owner wildcard

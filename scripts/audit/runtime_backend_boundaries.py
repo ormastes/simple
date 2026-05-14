@@ -17,6 +17,9 @@ The checks are intentionally narrow and evidence-oriented:
 * No-GC async compatibility facades must not wildcard-export no-GC sync
   backend owners that declare runtime hooks.
 * No-GC runtime families must not import GC compatibility families.
+* Async compatibility families must not contain `pass_todo` bodies; compiler-
+  lowered intrinsic declarations need deterministic fallback behavior or a
+  backend facade.
 * SimpleOS native lower layers must not import POSIX/libc compatibility layers.
 * Portable stdlib/library files must not import POSIX/Linux modules; platform
   and compatibility directories are allowed to do so explicitly.
@@ -126,6 +129,7 @@ GC_ASYNC_SELF_FACADE_RE = re.compile(
 FORBIDDEN_SIMPLEOS_IMPORT_RE = re.compile(r"\b(?:os\.posix|os\.libc|posix\.|libc\.)\b")
 FORBIDDEN_PORTABLE_IMPORT_RE = re.compile(r"\b(?:std\.posix|std\.linux|os\.posix|os\.libc|posix\.|linux\.)\b")
 FORBIDDEN_NOGC_IMPORT_RE = re.compile(r"\b(?:std\.)?gc_(?:async|sync)_(?:mut|immut)\b")
+PASS_TODO_RE = re.compile(r"\bpass_todo\b")
 
 
 def git_files(patterns: tuple[str, ...]) -> list[Path]:
@@ -311,6 +315,15 @@ def nogc_family_gc_imports() -> list[str]:
     return hits
 
 
+def async_compat_pass_todos() -> list[str]:
+    hits: list[str] = []
+    for path in tracked_spl_under(ASYNC_COMPAT_ROOTS):
+        for line_no, stripped in code_lines(path):
+            if PASS_TODO_RE.search(stripped):
+                hits.append(f"{rel(path)}:{line_no}: {stripped}")
+    return hits
+
+
 def documented_root_manifest_mismatches() -> list[str]:
     hits: list[str] = []
     try:
@@ -358,6 +371,7 @@ def main() -> int:
     simpleos_imports = simpleos_lower_layer_imports()
     portable_imports = portable_lib_imports()
     nogc_gc_imports = nogc_family_gc_imports()
+    async_todos = async_compat_pass_todos()
     root_manifest_doc_mismatches = documented_root_manifest_mismatches()
 
     report = {
@@ -382,6 +396,8 @@ def main() -> int:
         "portable_lib_forbidden_posix_linux_import_samples": portable_imports[:20],
         "nogc_family_forbidden_gc_import_count": len(nogc_gc_imports),
         "nogc_family_forbidden_gc_import_samples": nogc_gc_imports[:20],
+        "async_compat_pass_todo_count": len(async_todos),
+        "async_compat_pass_todo_samples": async_todos[:20],
         "documented_root_manifest_mismatch_count": len(root_manifest_doc_mismatches),
         "documented_root_manifest_mismatch_samples": root_manifest_doc_mismatches[:20],
         "pass": not runtime_hooks
@@ -394,6 +410,7 @@ def main() -> int:
         and not simpleos_imports
         and not portable_imports
         and not nogc_gc_imports
+        and not async_todos
         and not root_manifest_doc_mismatches,
     }
     print(json.dumps(report, indent=2, sort_keys=True))
