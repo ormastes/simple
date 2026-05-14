@@ -13,11 +13,8 @@
 #   - visibility: text? — Filter: "public", "friend", "package", "all"
 
 use lib.common.text.{is_empty}
-
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_dir_exists(path: text) -> bool
-extern fn rt_dir_list(path: text) -> [text]
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_list}
 
 fn replace_text_once_all(value: text, from: text, to: text) -> text:
     if from == "":
@@ -167,7 +164,7 @@ fn handle_simple_api(id: text, body: text) -> text:
         return make_error_response(id, -32602, "Cannot resolve path: " + path)
 
     # Read the file
-    val source = rt_file_read_text(file_path)
+    val source = file_read_text(file_path)
     if source.is_empty:
         return make_error_response(id, -32602, "Cannot read file: " + file_path)
 
@@ -351,19 +348,19 @@ fn resolve_api_path(path: text) -> text:
     """Resolve a module path or file path to a filesystem path."""
     val type_path = normalize_type_api_path(path)
     if type_path != "":
-        if rt_file_exists(type_path):
+        if file_exists(type_path):
             return type_path
         val src_type_path = "src/" + type_path
-        if rt_file_exists(src_type_path):
+        if file_exists(src_type_path):
             return src_type_path
 
     # If it looks like a file path (contains / or ends with .spl)
     if path.contains("/") or path.ends_with(".spl"):
-        if rt_file_exists(path):
+        if file_exists(path):
             return path
         # Try relative to src/
         val src_path = "src/" + path
-        if rt_file_exists(src_path):
+        if file_exists(src_path):
             return src_path
         return ""
 
@@ -377,7 +374,7 @@ fn resolve_api_path(path: text) -> text:
         if i < last_idx:
             # Try direct directory
             val direct = dir_path + "/" + part
-            if rt_dir_exists(direct):
+            if is_dir(direct):
                 dir_path = direct
             else:
                 # Try numbered directory
@@ -389,26 +386,26 @@ fn resolve_api_path(path: text) -> text:
         else:
             # Last segment: try as .spl file
             val file = dir_path + "/" + part + ".spl"
-            if rt_file_exists(file):
+            if file_exists(file):
                 return file
             # Try as directory with __init__.spl
             val init = dir_path + "/" + part + "/__init__.spl"
-            if rt_file_exists(init):
+            if file_exists(init):
                 return init
             # Try numbered directory
             val numbered = find_numbered_dir_api(dir_path, part)
             if numbered != "":
                 val numbered_init = numbered + "/__init__.spl"
-                if rt_file_exists(numbered_init):
+                if file_exists(numbered_init):
                     return numbered_init
         i = i + 1
     ""
 
 fn find_numbered_dir_api(parent: text, segment: text) -> text:
     """Find NN.segment directory in parent."""
-    if not rt_dir_exists(parent):
+    if not is_dir(parent):
         return ""
-    val entries = rt_dir_list(parent)
+    val entries = dir_list(parent)
     for entry in entries:
         var dot_pos: i64 = -1
         var ci: i64 = 0
@@ -426,7 +423,7 @@ fn find_numbered_dir_api(parent: text, segment: text) -> text:
                 val name = entry.substring(dot_pos + 1)
                 if name == segment:
                     val full = parent + "/" + entry
-                    if rt_dir_exists(full):
+                    if is_dir(full):
                         return full
     ""
 
