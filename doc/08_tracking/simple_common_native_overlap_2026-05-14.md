@@ -52,6 +52,9 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   reduction, and strength-reduced `_adler_reduce` instead of per-byte `%`
   reduction. This keeps the common `std.hash.adler32` surface aligned with the
   optimized pure Simple implementation.
+- The OS and common Adler-32 paths were then narrowed to 4-byte typed loads
+  after native benchmarking showed that the smaller chunk reduces generated
+  code overhead while preserving the same deferred-reduction algorithm.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/compiler/mir_opt/strength_reduction_spec.spl
   --mode=interpreter --clean` passing 14 examples.
@@ -68,6 +71,9 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   kept checksum parity. Pure Simple beat C/Rust for XXHash64 (`1.73x` C,
   `1.57x` Rust) and ChaCha20 (`1.22x` C, `1.06x` Rust), but still missed parity
   for CRC32 (`0.78x` C, `0.88x` Rust) and Adler32 (`0.91x` C, `0.94x` Rust).
+- Latest three-sample median after the 4-byte Adler change kept checksum parity:
+  CRC32 remains below parity (`0.78x` C, `0.79x` Rust); Adler32 improved but
+  still narrowly misses parity (`0.94x` C, `0.99x` Rust).
 
 ## Next Concrete Plugin Work
 
