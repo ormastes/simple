@@ -80,6 +80,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_println_value"
             | "rt_array_new"
             | "rt_array_len"
+            | "rt_array_push"
             | "rt_native_eq"
             | "rt_native_neq"
     )
@@ -1384,5 +1385,16 @@ mod tests {
         backend.compile_all_functions(&module).expect("compile");
 
         assert!(backend.func_ids.contains_key("external_used"));
+    }
+
+    #[test]
+    fn backend_generated_array_push_is_declared_without_source_reference() {
+        let mut module = MirModule::new();
+        module.functions.push(main_returning_zero());
+
+        let mut backend = test_backend();
+        backend.compile_all_functions(&module).expect("compile");
+
+        assert!(backend.runtime_funcs.contains_key("rt_array_push"));
     }
 }
