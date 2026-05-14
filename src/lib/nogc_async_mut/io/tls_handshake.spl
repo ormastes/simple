@@ -44,7 +44,10 @@ use std.nogc_async_mut.io.tls_common.{
     wire_to_bytes,
     encode_u8,
     encode_u16_be,
-    encode_u24_be
+    encode_u24_be,
+    tls_rsa_decrypt,
+    tls_aes_gcm_encrypt,
+    tls_aes_gcm_decrypt
 }
 use std.nogc_async_mut.io.tls_io.{
     read_tls_record,
@@ -55,10 +58,6 @@ use std.nogc_async_mut.io.tls_io.{
     build_gcm_nonce,
     build_aead_aad
 }
-
-extern fn rt_rsa_decrypt(ciphertext: text, private_key: text) -> text
-extern fn rt_aes_gcm_encrypt(key: text, iv: text, plaintext: text, aad: text) -> text
-extern fn rt_aes_gcm_decrypt(key: text, iv: text, ciphertext: text, aad: text) -> text
 
 # ============================================================================
 # TLS 1.2 Server Handshake
@@ -173,7 +172,7 @@ fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Res
 
     # RSA key exchange: decrypt the pre-master secret
     val encrypted_pms_wire = extract_encrypted_pms(cke_data)
-    val pms_wire = rt_rsa_decrypt(encrypted_pms_wire, config.private_key.raw_der)
+    val pms_wire = tls_rsa_decrypt(encrypted_pms_wire, config.private_key.raw_der)
     if pms_wire == nil:
         send_fatal_alert(driver, fd, ALERT_DESC_HANDSHAKE_FAILURE)
         return Err(IoError(kind: IoErrorKind.Other, message: "RSA decryption of pre-master secret failed"))
@@ -226,7 +225,7 @@ fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Res
     val fin_payload_wire = bytes_to_wire(fin_ct)
     val fin_record_len = len(fin_ct)
     val fin_aad = build_aead_aad(0, CONTENT_TYPE_HANDSHAKE, TLS_VERSION_1_2, fin_record_len)
-    val fin_plaintext = rt_aes_gcm_decrypt(
+    val fin_plaintext = tls_aes_gcm_decrypt(
         session_keys.client_write_key,
         client_fin_nonce,
         fin_payload_wire,
@@ -269,7 +268,7 @@ fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Res
     val server_fin_nonce = build_gcm_nonce(session_keys.server_write_iv, 0)
     val server_fin_pt_bytes = wire_to_bytes(server_fin_plaintext)
     val server_fin_aad = build_aead_aad(0, CONTENT_TYPE_HANDSHAKE, TLS_VERSION_1_2, len(server_fin_pt_bytes))
-    val server_fin_ciphertext = rt_aes_gcm_encrypt(
+    val server_fin_ciphertext = tls_aes_gcm_encrypt(
         session_keys.server_write_key,
         server_fin_nonce,
         server_fin_plaintext,
