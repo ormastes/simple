@@ -690,8 +690,11 @@ impl LlvmBackend {
         let high = builder
             .build_right_shift(value, i64_type.const_int(16, false), false, "adler_reduce_high")
             .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce high", &e))?;
+        let high_times_16 = builder
+            .build_left_shift(high, i64_type.const_int(4, false), "adler_reduce_high16")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce high16", &e))?;
         let high_times_15 = builder
-            .build_int_mul(high, i64_type.const_int(15, false), "adler_reduce_high15")
+            .build_int_sub(high_times_16, high, "adler_reduce_high15")
             .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce high15", &e))?;
         let reduced = builder
             .build_int_add(low, high_times_15, "adler_reduce_sum")
@@ -702,8 +705,11 @@ impl LlvmBackend {
         let high = builder
             .build_right_shift(reduced, i64_type.const_int(16, false), false, "adler_reduce_high2")
             .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce high2", &e))?;
+        let high_times_16 = builder
+            .build_left_shift(high, i64_type.const_int(4, false), "adler_reduce_high16_2")
+            .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce high16 2", &e))?;
         let high_times_15 = builder
-            .build_int_mul(high, i64_type.const_int(15, false), "adler_reduce_high15_2")
+            .build_int_sub(high_times_16, high, "adler_reduce_high15_2")
             .map_err(|e| crate::error::factory::llvm_build_failed("adler reduce high15 2", &e))?;
         let reduced = builder
             .build_int_add(low, high_times_15, "adler_reduce_sum2")
