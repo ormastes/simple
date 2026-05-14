@@ -339,7 +339,7 @@ The `gc_off` flag in `CompileOptions` remains a global no-GC switch; `allowed_fa
 - [x] Fix native Atom/VersionedSnapshot runtime behavior across the facade families
 - [x] Add focused native root `PersistentList` facade coverage
 - [x] Add partial native root `PersistentVec` empty/repeated-push/tail-set/from_array smoke coverage across GC async, GC sync immutable, and no-GC sync immutable facades
-- [ ] Add broader compiled behavior suites for map/set/trie, and clear remaining native type-loader/minimal-runtime-stub warnings
+- [ ] Fix committed-path native `PersistentMap`/`PersistentSet` facade probe blocker, add broader compiled behavior suites for map/set/trie, and clear remaining native type-loader/minimal-runtime-stub warnings
 
 ---
 
