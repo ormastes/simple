@@ -19,6 +19,7 @@ Refactor the Simple runtime libraries so compatibility families depend on a no-G
 | Portable stdlib/library roots do not import POSIX/Linux modules except explicit platform/compatibility paths | `scripts/audit/runtime_backend_boundaries.py` reports `portable_lib_forbidden_posix_linux_import_count=0`, excluding paths named as POSIX/Linux/platform compatibility owners. | Closed for static import gate |
 | Production architecture is documented | `runtime_family_support_matrix.md` records current facade closures, SimpleOS POSIX boundary, and remaining runtime-hook review items. | Partially closed |
 | GC async one-line facades do not self-reexport when no-GC async owners exist | A precise scan for tracked one-line `export use (std.)?gc_async_mut.*` files, including top-level `src/lib/gc_async_mut/*.spl`, now reports `0` remaining after TLS, TCP, WebSocket, web-framework, hooks/detectors, HTTP/3, MCP SDK server/transport, play/CDP, sanitizer, security, storage, replay, `src` compatibility, terminal, web UI, TUI, STOMP, text layout, UI test, SPostgre IF, unsafe, test, testing, UI, tmux, test-runner, timing, and UDP utility closures. | Closed for tracked one-line self-facade class |
+| GC async runtime-owner wildcard facades route through no-GC async where possible | `scripts/audit/runtime_backend_boundaries.py` now reports `gc_async_runtime_owner_wildcard_facade_count=0`. GC async compatibility facades with matching no-GC async surfaces now export those no-GC async facades first; the remaining GPU and device FFI API-shape gaps were closed by adding no-GC async facades over the no-GC sync backend owners. | Closed for tracked runtime-owner wildcard facade class |
 
 ## Latest Boundary Verification
 
@@ -26,9 +27,13 @@ Executed on 2026-05-14:
 
 - `python3 scripts/audit/runtime_backend_boundaries.py`
   - `async_compat_direct_runtime_hook_count=0`
+  - `gc_async_runtime_owner_wildcard_facade_count=0`
   - `nogc_async_runtime_owner_wildcard_facade_count=0`
   - `simpleos_lower_layer_posix_libc_import_count=0`
   - `portable_lib_forbidden_posix_linux_import_count=0`
+- `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check $(cat /tmp/simple_backend_slice_spl_files.txt)`
+  - exit code `0`
+  - `122` changed Simple facade files checked, `0` errors
 - `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/os/kernel src/os/drivers src/os/services src/os/sosix src/os/userlib src/os/async`
   - exit code `0`
   - `61 warning(s) found in 443 file(s)`, all observed warnings were unresolved `common`/`lib.common` imports from running this check over the OS roots without the full source-root closure.
