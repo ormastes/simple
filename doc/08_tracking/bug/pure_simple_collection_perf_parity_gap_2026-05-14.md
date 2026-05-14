@@ -45,6 +45,11 @@ Checksum parity passed for all three benchmarks.
   the current `core-c` native bundle. A local probe preserved checksum parity
   but regressed `list_traverse` from roughly 1.48M ops/ms to roughly 0.18M
   ops/ms, so the probe was reverted instead of committed.
+- No-strip disassembly of the native benchmark confirms the current
+  `bench_list_traverse` inner loop is already a direct raw load and xor:
+  `xor (%r10,%r11,8), %rax`. The generated loop is scalar and not unrolled;
+  this makes the remaining gap a backend loop-shape issue rather than an
+  avoidable runtime helper call in the hot load path.
 
 ## Likely Gap
 
