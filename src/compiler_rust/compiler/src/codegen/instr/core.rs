@@ -2,7 +2,7 @@
 
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
-    types, InstBuilder,
+    types, InstBuilder, MemFlags,
 };
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
@@ -12,7 +12,7 @@ use crate::mir::VReg;
 
 use super::helpers::{
     adapted_call, call_runtime_1, call_runtime_1_void, call_runtime_2, call_runtime_2_void, call_runtime_3,
-    create_string_constant, declare_named_bytes,
+    call_runtime_4, create_string_constant, declare_named_bytes,
 };
 use super::{InstrContext, InstrResult};
 
@@ -695,27 +695,25 @@ pub(crate) fn compile_interp_call<M: Module>(
     func_name: &str,
     args: &[VReg],
 ) -> InstrResult<()> {
-    let capacity = builder.ins().iconst(types::I64, args.len() as i64);
-    let args_array = call_runtime_1(ctx, builder, "rt_array_new", capacity);
+    let argc = builder.ins().iconst(types::I64, args.len() as i64);
+    let argv = if args.is_empty() {
+        builder.ins().iconst(types::I64, 0)
+    } else {
+        let byte_len = builder.ins().iconst(types::I64, (args.len() * 8) as i64);
+        call_runtime_1(ctx, builder, "rt_alloc", byte_len)
+    };
 
-    // Reuse push FuncRef across the loop for efficiency
-    let array_push_id = *ctx
-        .runtime_funcs
-        .get("rt_array_push")
-        .unwrap_or_else(|| panic!("missing runtime fn 'rt_array_push' in {}", ctx.func.name));
-    let array_push_ref = ctx.module.declare_func_in_func(array_push_id, builder.func);
-
-    for arg in args {
+    for (index, arg) in args.iter().enumerate() {
         let arg_val = match ctx.vreg_values.get(arg) {
             Some(&v) => v,
             None => return Err(format!("interp_call: arg vreg {:?} not found", arg)),
         };
-        adapted_call(builder, array_push_ref, &[args_array, arg_val]);
+        builder.ins().store(MemFlags::new(), arg_val, argv, (index * 8) as i32);
     }
 
     let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
 
-    let result = call_runtime_3(ctx, builder, "rt_interp_call", name_ptr, name_len, args_array);
+    let result = call_runtime_4(ctx, builder, "rt_interp_call", name_ptr, name_len, argc, argv);
 
     if let Some(d) = dest {
         ctx.vreg_values.insert(*d, result);
