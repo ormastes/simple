@@ -1017,6 +1017,44 @@ main = 0
     }
 
     #[test]
+    fn simd_auto_lowers_canonical_while_u64_xor_sum_to_guarded_runtime_kernel() {
+        let source =
+            "fn main(vals: [u64], salt: u64) -> u64:\n    var sum = 0u64\n    var i = 0u64\n    val length = vals.len().to_u64()\n    while i < length:\n        sum = sum + (vals[i] ^ salt)\n        i = i + 1u64\n    return sum\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_xor_sum_u64"))
+            }),
+            "expected guarded rt_numeric_xor_sum_u64 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_auto_lowers_canonical_while_u64_contains_to_runtime_kernel() {
+        let source =
+            "fn main(vals: [u64], needle: u64) -> bool:\n    var i = 0u64\n    val length = vals.len().to_u64()\n    while i < length:\n        if vals[i] == needle:\n            return true\n        i = i + 1u64\n    false\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_contains_u64"))
+            }),
+            "expected guarded rt_numeric_contains_u64 call in MIR"
+        );
+    }
+
+    #[test]
     fn simd_typed_report_detects_dynamic_len_bounded_dot_kernel_candidate() {
         let source =
             "fn main(a: [f64], b: [f64]) -> f64:\n    var sum = 0.0\n    for i in 0..a.len():\n        sum = sum + a[i] * b[i]\n    return sum\n";

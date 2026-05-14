@@ -1181,6 +1181,26 @@ pub extern "C" fn rt_numeric_xor_sum_u64(value: RuntimeValue, xor_value: i64) ->
     packed_xor_sum_u64(value, xor_value)
 }
 
+#[no_mangle]
+pub extern "C" fn rt_numeric_contains_u64(value: RuntimeValue, needle: i64) -> i8 {
+    let Some(arr) = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array) else {
+        return 0;
+    };
+    let needle = needle as u64;
+    unsafe {
+        if (*arr).is_u64_packed() {
+            let values = std::slice::from_raw_parts((*arr).data as *const u64, (*arr).len as usize);
+            return values.iter().any(|item| *item == needle) as i8;
+        }
+        for item in (*arr).as_slice() {
+            if item.is_int() && item.as_int() as u64 == needle {
+                return 1;
+            }
+        }
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -72,6 +72,13 @@ enum HIRSimdLoopCandidate {
     },
 }
 
+#[derive(Clone)]
+struct HIRU64ContainsLoopCandidate {
+    input: HirExpr,
+    key: HirExpr,
+    guard: Option<HirExpr>,
+}
+
 /// Convert LowerError to CompileError with rich error context
 fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
     match e {
@@ -681,7 +688,7 @@ impl CompilerPipeline {
         }
     }
 
-    fn rewrite_hir_simd_loops(&self, hir_module: &mut hir::HirModule) {
+    pub(crate) fn rewrite_hir_simd_loops(&self, hir_module: &mut hir::HirModule) {
         if self.simd_mode != SimdMode::Auto {
             return;
         }
@@ -721,7 +728,26 @@ impl CompilerPipeline {
                         self.rewrite_hir_simd_stmts(types, else_block);
                     }
                 }
-                HirStmt::While { body, .. } | HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
+                HirStmt::While {
+                    condition,
+                    body,
+                    simd_requested,
+                    invariants,
+                } => {
+                    self.rewrite_hir_simd_stmts(types, body);
+                    let fallback = HirStmt::While {
+                        condition: condition.clone(),
+                        body: body.clone(),
+                        simd_requested: *simd_requested,
+                        invariants: invariants.clone(),
+                    };
+                    if let Some(candidate) = self.classify_hir_u64_contains_while_loop(types, condition, body) {
+                        *stmt = self.lower_hir_u64_contains_candidate(candidate, fallback);
+                    } else if let Some(candidate) = self.classify_hir_simd_while_loop(types, condition, body) {
+                        *stmt = self.lower_hir_simd_candidate(candidate, fallback);
+                    }
+                }
+                HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
                     self.rewrite_hir_simd_stmts(types, body);
                 }
                 _ => {}
@@ -1019,6 +1045,149 @@ impl CompilerPipeline {
         }
     }
 
+    fn classify_hir_simd_while_loop(
+        &self,
+        types: &hir::TypeRegistry,
+        condition: &HirExpr,
+        body: &[HirStmt],
+    ) -> Option<HIRSimdLoopCandidate> {
+        let (index_local, range_end) = self.canonical_while_range(condition)?;
+        if body.len() != 2 {
+            return None;
+        }
+        if !self.is_unit_index_increment(&body[1], index_local) {
+            return None;
+        }
+        let HirStmt::Assign { target, value } = &body[0] else {
+            return None;
+        };
+        self.classify_hir_simd_reduction(types, range_end, target, value)
+    }
+
+    fn classify_hir_u64_contains_while_loop(
+        &self,
+        types: &hir::TypeRegistry,
+        condition: &HirExpr,
+        body: &[HirStmt],
+    ) -> Option<HIRU64ContainsLoopCandidate> {
+        let (index_local, range_end) = self.canonical_while_range(condition)?;
+        if body.len() != 2 || !self.is_unit_index_increment(&body[1], index_local) {
+            return None;
+        }
+        let HirStmt::If {
+            condition: probe,
+            then_block,
+            else_block: None,
+        } = &body[0]
+        else {
+            return None;
+        };
+        if !matches!(
+            then_block.as_slice(),
+            [HirStmt::Return(Some(HirExpr {
+                kind: HirExprKind::Bool(true),
+                ..
+            }))]
+        ) {
+            return None;
+        }
+        let (input, key) = self.hir_u64_contains_operands(types, probe, index_local)?;
+        let guard = self.build_simd_bound_guard_for_u64(types, range_end, [&input])?;
+        Some(HIRU64ContainsLoopCandidate { input, key, guard })
+    }
+
+    fn lower_hir_u64_contains_candidate(&self, candidate: HIRU64ContainsLoopCandidate, fallback: HirStmt) -> HirStmt {
+        let contains = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_numeric_contains_u64".to_string(),
+                args: vec![candidate.input, candidate.key],
+            },
+            ty: TypeId::BOOL,
+        };
+        let lowered = HirStmt::If {
+            condition: contains,
+            then_block: vec![HirStmt::Return(Some(HirExpr {
+                kind: HirExprKind::Bool(true),
+                ty: TypeId::BOOL,
+            }))],
+            else_block: None,
+        };
+        if let Some(condition) = candidate.guard {
+            HirStmt::If {
+                condition,
+                then_block: vec![lowered],
+                else_block: Some(vec![fallback]),
+            }
+        } else {
+            lowered
+        }
+    }
+
+    fn hir_u64_contains_operands(
+        &self,
+        types: &hir::TypeRegistry,
+        probe: &HirExpr,
+        index_local: usize,
+    ) -> Option<(HirExpr, HirExpr)> {
+        let HirExprKind::Binary {
+            op: HirBinOp::Eq,
+            left,
+            right,
+        } = &probe.kind
+        else {
+            return None;
+        };
+        if let Some(input) = self.hir_indexed_array_receiver_for_index(left, index_local) {
+            let (element_ty, _) = self.u64_array_layout(types, input)?;
+            if element_ty == TypeId::U64 && right.ty == TypeId::U64 {
+                return Some((input.clone(), right.as_ref().clone()));
+            }
+        }
+        let input = self.hir_indexed_array_receiver_for_index(right, index_local)?;
+        let (element_ty, _) = self.u64_array_layout(types, input)?;
+        if element_ty == TypeId::U64 && left.ty == TypeId::U64 {
+            return Some((input.clone(), left.as_ref().clone()));
+        }
+        None
+    }
+
+    fn canonical_while_range<'a>(&self, condition: &'a HirExpr) -> Option<(usize, &'a HirExpr)> {
+        let HirExprKind::Binary {
+            op: HirBinOp::Lt,
+            left,
+            right,
+        } = &condition.kind
+        else {
+            return None;
+        };
+        let HirExprKind::Local(index_local) = left.kind else {
+            return None;
+        };
+        Some((index_local, right.as_ref()))
+    }
+
+    fn is_unit_index_increment(&self, stmt: &HirStmt, index_local: usize) -> bool {
+        let HirStmt::Assign { target, value } = stmt else {
+            return false;
+        };
+        if !matches!(target.kind, HirExprKind::Local(idx) if idx == index_local) {
+            return false;
+        }
+        let HirExprKind::Binary {
+            op: HirBinOp::Add,
+            left,
+            right,
+        } = &value.kind
+        else {
+            return false;
+        };
+        let left_is_index = matches!(left.kind, HirExprKind::Local(idx) if idx == index_local);
+        let right_is_one = matches!(right.kind, HirExprKind::Integer(1));
+        let right_is_index = matches!(right.kind, HirExprKind::Local(idx) if idx == index_local);
+        let left_is_one = matches!(left.kind, HirExprKind::Integer(1));
+        (left_is_index && right_is_one) || (left_is_one && right_is_index)
+    }
+
     fn classify_hir_simd_reduction(
         &self,
         types: &hir::TypeRegistry,
@@ -1292,6 +1461,16 @@ impl CompilerPipeline {
             return None;
         };
         if !matches!(index.kind, HirExprKind::Local(_) | HirExprKind::Integer(_)) {
+            return None;
+        }
+        Some(receiver.as_ref())
+    }
+
+    fn hir_indexed_array_receiver_for_index<'a>(&self, expr: &'a HirExpr, index_local: usize) -> Option<&'a HirExpr> {
+        let HirExprKind::Index { receiver, index } = &expr.kind else {
+            return None;
+        };
+        if !matches!(index.kind, HirExprKind::Local(idx) if idx == index_local) {
             return None;
         }
         Some(receiver.as_ref())

@@ -352,9 +352,12 @@ pub(crate) fn compile_file_to_object(
         lowerer.set_global_enum_defs(std::sync::Arc::new((*imports.enum_defs).clone()));
         lowerer.register_global_enums();
     }
-    let hir = lowerer
+    let mut hir = lowerer
         .lower_module(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;
+    let pipeline =
+        crate::pipeline::CompilerPipeline::new().map_err(|e| format!("{}: pipeline: {e}", file_path.display()))?;
+    pipeline.rewrite_hir_simd_loops(&mut hir);
 
     // MIR
     let mir = crate::mir::lower_to_mir(&hir).map_err(|e| format!("{}: mir: {e}", file_path.display()))?;

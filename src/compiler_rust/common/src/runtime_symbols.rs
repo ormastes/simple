@@ -628,6 +628,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_numeric_sum_f64",
     "rt_numeric_dot_f64",
     "rt_numeric_xor_sum_u64",
+    "rt_numeric_contains_u64",
     "rt_aes_encrypt_block_with_expanded",
     "rt_aes_decrypt_block_with_expanded",
     "rt_aes_sbox",
