@@ -113,6 +113,18 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   results in the millions for traversal/push and thousands for membership.
   The remaining cost is typed helper call/check overhead inside the element
   loop, not generic index dispatch.
+- The active Cranelift native path now inlines `rt_typed_words_u64_at` using
+  the same slot representation rules as the runtime helper: bounds are still
+  checked, integer slots are untagged, and non-int raw values are preserved.
+  The existing `[u32]` typed-word read inliner was generalized to the same
+  helper, and LLVM received the matching inactive-backend fix. Disassembly of
+  `collection_simple.spl` now shows direct slot loads in the list traversal
+  loop instead of per-element typed-word calls. A one-sample benchmark with the
+  isolated rebuilt driver kept checksum parity and measured list traversal at
+  `585,796` Simple ops/ms (`0.10x` C, `0.09x` Rust), list push at `21,375`
+  Simple ops/ms, and set-like linear membership at `340` Simple ops/ms. The
+  next measured gap is push growth/append lowering and primitive equality in
+  membership scans.
 
 ## Next Concrete Plugin Work
 

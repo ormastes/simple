@@ -665,6 +665,147 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
+    fn compile_inline_typed_words_at(
+        &self,
+        dest: Option<crate::mir::VReg>,
+        args: &[crate::mir::VReg],
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        width: u32,
+    ) -> Result<bool, CompileError> {
+        if args.len() != 2 {
+            return Ok(false);
+        }
+        let Some(dest) = dest else {
+            return Ok(false);
+        };
+
+        let current_block = builder.get_insert_block().ok_or_else(|| {
+            CompileError::semantic("LLVM builder has no insert block for rt_typed_words_at".to_string())
+        })?;
+        let function = current_block
+            .get_parent()
+            .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
+
+        let i64_type = self.runtime_int_type();
+        let i8_type = self.context.i8_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let zero = i64_type.const_zero();
+
+        let array = self
+            .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let index = self
+            .coerce_value_to_type(self.get_vreg(&args[1], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+
+        let ptr_bits = builder
+            .build_and(array, i64_type.const_int(!7u64, false), "typed_words_ptr_bits")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words ptr bits", &e))?;
+        let array_ptr = builder
+            .build_int_to_ptr(ptr_bits, ptr_type, "typed_words_array_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words int_to_ptr", &e))?;
+        let len_field_ptr = unsafe {
+            builder
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(8, false)],
+                    "typed_words_len_field",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed words len gep", &e))?
+        };
+        let len = builder
+            .build_load(i64_type, len_field_ptr, "typed_words_len")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words len load", &e))?
+            .into_int_value();
+        let is_negative = builder
+            .build_int_compare(IntPredicate::SLT, index, zero, "typed_words_neg")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words neg compare", &e))?;
+        let adjusted = builder
+            .build_int_add(len, index, "typed_words_adjusted")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words adjusted", &e))?;
+        let normalized = builder
+            .build_select(is_negative, adjusted, index, "typed_words_index")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words select", &e))?
+            .into_int_value();
+        let lower_ok = builder
+            .build_int_compare(IntPredicate::SGE, normalized, zero, "typed_words_lower_ok")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words lower compare", &e))?;
+        let upper_ok = builder
+            .build_int_compare(IntPredicate::SLT, normalized, len, "typed_words_upper_ok")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words upper compare", &e))?;
+        let in_bounds = builder
+            .build_and(lower_ok, upper_ok, "typed_words_in_bounds")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words bounds and", &e))?;
+
+        let load_block = self.context.append_basic_block(function, "typed_words_load");
+        let done_block = self.context.append_basic_block(function, "typed_words_done");
+        builder
+            .build_conditional_branch(in_bounds, load_block, done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words bounds branch", &e))?;
+
+        builder.position_at_end(load_block);
+        let data_field_ptr = unsafe {
+            builder
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(24, false)],
+                    "typed_words_data_field",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed words data gep", &e))?
+        };
+        let data_ptr = builder
+            .build_load(ptr_type, data_field_ptr, "typed_words_data")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words data load", &e))?
+            .into_pointer_value();
+        let elem_ptr = unsafe {
+            builder
+                .build_gep(i64_type, data_ptr, &[normalized], "typed_words_elem")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed words elem gep", &e))?
+        };
+        let loaded = builder
+            .build_load(i64_type, elem_ptr, "typed_words_value")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words value load", &e))?
+            .into_int_value();
+        let raw_tag = builder
+            .build_and(loaded, i64_type.const_int(7, false), "typed_words_raw_tag")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words raw tag", &e))?;
+        let raw_is_int = builder
+            .build_int_compare(IntPredicate::EQ, raw_tag, zero, "typed_words_raw_is_int")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words raw int compare", &e))?;
+        let int_payload = builder
+            .build_right_shift(loaded, i64_type.const_int(3, false), true, "typed_words_int_payload")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words int payload", &e))?;
+        let value = builder
+            .build_select(raw_is_int, int_payload, loaded, "typed_words_runtime_value")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words raw select", &e))?
+            .into_int_value();
+        let value = if width == 32 {
+            builder
+                .build_and(value, i64_type.const_int(0xffff_ffff, false), "typed_words_u32_mask")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed words u32 mask", &e))?
+        } else {
+            value
+        };
+        let loaded_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM typed words load block missing".to_string()))?;
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words done branch", &e))?;
+
+        builder.position_at_end(done_block);
+        let phi = builder
+            .build_phi(i64_type, "typed_words_result")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed words phi", &e))?;
+        phi.add_incoming(&[(&zero, current_block), (&value, loaded_block)]);
+        vreg_map.insert(dest, phi.as_basic_value());
+        Ok(true)
+    }
+
+    #[cfg(feature = "llvm")]
     fn compile_inline_adler_reduce(
         &self,
         dest: Option<crate::mir::VReg>,
@@ -1566,6 +1707,16 @@ impl LlvmBackend {
         }
         if ffi_name == "rt_typed_bytes_u8_unchecked"
             && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 1)?
+        {
+            return Ok(());
+        }
+        if ffi_name == "rt_typed_words_u32_at"
+            && self.compile_inline_typed_words_at(dest, args, vreg_map, builder, 32)?
+        {
+            return Ok(());
+        }
+        if ffi_name == "rt_typed_words_u64_at"
+            && self.compile_inline_typed_words_at(dest, args, vreg_map, builder, 64)?
         {
             return Ok(());
         }

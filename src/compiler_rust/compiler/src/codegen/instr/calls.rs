@@ -315,11 +315,12 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
     Ok(true)
 }
 
-fn compile_inline_typed_words_u32_at<M: Module>(
+fn compile_inline_typed_words_at<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
     args: &[VReg],
+    width: i64,
 ) -> InstrResult<bool> {
     if args.len() != 2 {
         return Ok(false);
@@ -332,7 +333,7 @@ fn compile_inline_typed_words_u32_at<M: Module>(
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let zero = builder.ins().iconst(types::I64, 0);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
-    let word_mask = builder.ins().iconst(types::I64, 0xFFFF_FFFF);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
 
     let bounds_block = builder.create_block();
     let load_block = builder.create_block();
@@ -360,8 +361,15 @@ fn compile_inline_typed_words_u32_at<M: Module>(
     let slot_offset = builder.ins().imul_imm(normalized_index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
-    let payload = builder.ins().sshr_imm(raw, 3);
-    let word = builder.ins().band(payload, word_mask);
+    let raw_tag = builder.ins().band(raw, tag_mask);
+    let raw_is_int = builder.ins().icmp(IntCC::Equal, raw_tag, zero);
+    let int_payload = builder.ins().sshr_imm(raw, 3);
+    let value = builder.ins().select(raw_is_int, int_payload, raw);
+    let word = if width == 4 {
+        builder.ins().band_imm(value, 0xFFFF_FFFF)
+    } else {
+        value
+    };
     builder.ins().jump(done_block, &[word]);
     builder.seal_block(load_block);
 
@@ -1086,7 +1094,10 @@ pub fn compile_call<M: Module>(
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u32_at" && compile_inline_typed_words_u32_at(ctx, builder, dest, args)? {
+    if ffi_name == "rt_typed_words_u32_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 4)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_words_u64_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 8)? {
         return Ok(());
     }
     if ffi_name == "rt_typed_words_u32_set" && compile_inline_typed_words_u32_set(ctx, builder, dest, args)? {
