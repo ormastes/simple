@@ -11,6 +11,9 @@ fn _co_lid(id: i64) -> LocalId:
 fn _co_copy(id: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Copy(_co_lid(id)))
 
+fn _co_int(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
+
 fn _co_local(id: i64, type_: MirType) -> MirLocal:
     MirLocal(
         id: _co_lid(id),
@@ -118,6 +121,17 @@ fn _co_count_copy_from(block: MirBlock, src_id: i64) -> i64:
         match inst.kind:
             case Copy(_, src):
                 if src.id == src_id:
+                    count = count + 1
+            case _:
+                ()
+    count
+
+fn _co_count_binop(block: MirBlock, expected: MirBinOp) -> i64:
+    var count = 0
+    for inst in block.instructions:
+        match inst.kind:
+            case BinOp(_, op, _, _):
+                if op == expected:
                     count = count + 1
             case _:
                 ()
@@ -322,6 +336,34 @@ describe "MIR Collection Optimization":
         expect(_co_count_rt_array_len(optimized[0])).to_equal(0)
         expect(_co_count_rt_array_len(optimized[1])).to_equal(1)
         expect(opt.calls_hoisted).to_equal(0)
+
+    it "hoists invariant scalar tag operations used by collection loops":
+        val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
+        val tag = MirInst(kind: MirInstKind.BinOp(_co_lid(10), MirBinOp.Shl, _co_copy(2), _co_int(3)), span: nil)
+        val mask = MirInst(kind: MirInstKind.BinOp(_co_lid(11), MirBinOp.BitOr, _co_copy(10), _co_int(1)), span: nil)
+        val body = _co_block_with(1, [tag, mask], MirTerminator.Goto(BlockId(id: 0)))
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
+
+        expect(_co_count_binop(optimized[0], MirBinOp.Shl)).to_equal(1)
+        expect(_co_count_binop(optimized[0], MirBinOp.BitOr)).to_equal(1)
+        expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(0)
+        expect(_co_count_binop(optimized[1], MirBinOp.BitOr)).to_equal(0)
+        expect(opt.scalar_ops_hoisted).to_equal(2)
+
+    it "keeps scalar operations inside loops when they use loop-defined values":
+        val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
+        val next_slot = MirInst(kind: MirInstKind.BinOp(_co_lid(2), MirBinOp.BitXor, _co_copy(2), _co_int(1)), span: nil)
+        val tag = MirInst(kind: MirInstKind.BinOp(_co_lid(10), MirBinOp.Shl, _co_copy(2), _co_int(3)), span: nil)
+        val body = _co_block_with(1, [next_slot, tag], MirTerminator.Goto(BlockId(id: 0)))
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
+
+        expect(_co_count_binop(optimized[0], MirBinOp.Shl)).to_equal(0)
+        expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(1)
+        expect(opt.scalar_ops_hoisted).to_equal(0)
 
     it "specializes proven array index dispatch to direct array get":
         val index_get = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_index_get"), [_co_copy(1), _co_copy(2)]), span: nil)

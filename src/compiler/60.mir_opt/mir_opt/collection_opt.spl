@@ -47,6 +47,7 @@ class CollectionOptimization:
     concat_replaced: i64
     str_append_replaced: i64
     calls_hoisted: i64
+    scalar_ops_hoisted: i64
     len_queries_reused: i64
     pure_queries_reused: i64
     array_index_gets_specialized: i64
@@ -59,6 +60,7 @@ impl CollectionOptimization:
             concat_replaced: 0,
             str_append_replaced: 0,
             calls_hoisted: 0,
+            scalar_ops_hoisted: 0,
             len_queries_reused: 0,
             pure_queries_reused: 0,
             array_index_gets_specialized: 0,
@@ -922,7 +924,7 @@ impl CollectionOptimization:
         for block in blocks:
             if loop_set.has(block.id.id):
                 for inst in block.instructions:
-                    if self.is_hoistable_pure_call(inst, loop_defs, hoisted_ids, loop_has_collection_mutation):
+                    if self.is_hoistable_loop_invariant_inst(inst, loop_defs, hoisted_ids, loop_has_collection_mutation):
                         to_hoist.push(inst)
                         val dest = self.inst_dest(inst)
                         if dest.?:
@@ -974,6 +976,14 @@ impl CollectionOptimization:
                         return true
         false
 
+    me is_hoistable_loop_invariant_inst(inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>, loop_has_collection_mutation: bool) -> bool:
+        if self.is_hoistable_pure_call(inst, loop_defs, hoisted, loop_has_collection_mutation):
+            return true
+        if self.is_hoistable_scalar_inst(inst, loop_defs, hoisted):
+            self.scalar_ops_hoisted = self.scalar_ops_hoisted + 1
+            return true
+        false
+
     fn is_hoistable_pure_call(inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>, loop_has_collection_mutation: bool) -> bool:
         match inst.kind:
             case Call(dest, func, args):
@@ -988,6 +998,35 @@ impl CollectionOptimization:
                     if not self.operand_invariant(arg, loop_defs, hoisted):
                         return false
                 true
+            case _: false
+
+    fn is_hoistable_scalar_inst(inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>) -> bool:
+        match inst.kind:
+            case BinOp(_, op, left, right):
+                if not self.is_safe_loop_invariant_binop(op):
+                    return false
+                self.operand_invariant(left, loop_defs, hoisted) and self.operand_invariant(right, loop_defs, hoisted)
+            case UnaryOp(_, _, operand):
+                self.operand_invariant(operand, loop_defs, hoisted)
+            case Cast(_, operand, _):
+                self.operand_invariant(operand, loop_defs, hoisted)
+            case Bitcast(_, operand, _):
+                self.operand_invariant(operand, loop_defs, hoisted)
+            case _: false
+
+    fn is_safe_loop_invariant_binop(op: MirBinOp) -> bool:
+        match op:
+            case BitAnd: true
+            case BitOr: true
+            case BitXor: true
+            case Shl: true
+            case Shr: true
+            case Eq: true
+            case Ne: true
+            case Lt: true
+            case Le: true
+            case Gt: true
+            case Ge: true
             case _: false
 
     fn is_hoistable_runtime_metadata_read(name: text) -> bool:
@@ -1055,7 +1094,7 @@ impl CollectionOptimization:
         false
 
     fn stats_summary() -> text:
-        "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted, {self.len_queries_reused} len queries reused, {self.pure_queries_reused} pure queries reused, {self.dead_append_arrays_elided} dead append arrays elided"
+        "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted, {self.scalar_ops_hoisted} scalar ops hoisted, {self.len_queries_reused} len queries reused, {self.pure_queries_reused} pure queries reused, {self.dead_append_arrays_elided} dead append arrays elided"
 
 # ============================================================================
 # Factory Functions
@@ -1072,7 +1111,7 @@ fn collection_optimization_provider() -> OptimizationRuleProvider:
         OptimizerRuleLookupKind.PipelinePass,
         true,
         ["typed_mir", "loop_bounds", "collection_layout"],
-        ["canonical_collection_loops", "hoisted_collection_queries", "append_fusion", "runtime_collection_read_cse"],
+        ["canonical_collection_loops", "hoisted_collection_queries", "append_fusion", "runtime_collection_read_cse", "loop_invariant_scalar_ops"],
         "pure"
     )
 

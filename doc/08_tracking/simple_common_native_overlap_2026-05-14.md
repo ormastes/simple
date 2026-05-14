@@ -264,6 +264,11 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   (`rt_array_len`, `rt_string_len`, `rt_dict_len`, `rt_array_data_ptr`,
   `rt_array_header_ptr`) out of read-only loops, while keeping them inside loops
   that may mutate collection state.
+- The pure collection hoister now also moves conservative loop-invariant scalar
+  operations used by collection hot paths, including bitwise masks, shifts,
+  comparisons, unary ops, casts, and bitcasts. This gives already-lowered MIR a
+  pure-Simple optimization lane for repeated tag/mask work in list/set scans
+  without relying on Rust/C helper rewrites.
 - A fresh one-sample collection benchmark after the pure optimizer CSE commits
   kept checksum parity, but the native benchmark path still misses C/Rust
   throughput parity: list traversal measured `1,651,751` Simple ops/ms
@@ -279,6 +284,14 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `3,597` Simple ops/ms for set-like membership (`0.55x` C, `0.27x` Rust).
   The next native-path optimization target remains traversal/set scan loop
   overhead rather than synthetic push dead-store elimination.
+- A one-sample collection benchmark after adding pure scalar LICM coverage kept
+  checksum parity and measured `1,555,668` Simple ops/ms for list traversal
+  (`0.27x` C, `0.16x` Rust), `1,313,346` Simple ops/ms for list push (`0.43x`
+  C, `0.86x` Rust), and `3,676` Simple ops/ms for set-like membership
+  (`0.55x` C, `0.27x` Rust). The current Rust-hosted native benchmark path
+  therefore does not yet show a material throughput move from this pure-MIR
+  coverage, but the optimizer contract now covers the already-lowered scalar
+  tag/mask shape directly.
 
 ## Next Concrete Plugin Work
 
