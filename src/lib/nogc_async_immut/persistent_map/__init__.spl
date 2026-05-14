@@ -35,7 +35,7 @@ extern fn rt_hash_text(s: text) -> i64
 # Non-text keys are converted to text via string interpolation, then hashed.
 fn persistent_map_hash(key) -> i64:
     val key_text = "{key}"
-    rt_hash_text(key_text)
+    rt_hash_text(key_text) & 9223372036854775807
 
 # ============================================================================
 # PersistentMap
@@ -86,11 +86,20 @@ class PersistentMap:
     # Remove `key` from the map. Returns a NEW map.
     # If the key is not present, returns this map unchanged.
     fn remove(key) -> PersistentMap:
-        val hash = persistent_map_hash(key)
-        val new_root = hamt_remove(self.root, key, hash, 0)
-        if new_root == self.root:
+        if self.get(key) == nil:
             return self
-        PersistentMap(root: new_root, size: self.size - 1)
+        # Rebuild through the public set path so native facades avoid low-level
+        # HAMT branch-collapse paths that still need direct backend coverage.
+        var result = PersistentMap.empty()
+        val all_entries = self.entries()
+        var i = 0
+        val n = len(all_entries)
+        while i < n:
+            val pair = all_entries[i]
+            if pair[0] != key:
+                result = result.set(pair[0], pair[1])
+            i = i + 1
+        result
 
     # ------------------------------------------------------------------
     # Size queries

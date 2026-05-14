@@ -444,6 +444,10 @@ int64_t rt_string_eq(int64_t left, int64_t right) {
     return a->len == 0 || memcmp(a->data, b->data, (size_t)a->len) == 0;
 }
 
+int64_t rt_text_eq_fast(int64_t left, int64_t right) {
+    return rt_string_eq(left, right);
+}
+
 int64_t rt_native_neq(int64_t left, int64_t right) {
     return !rt_native_eq(left, right);
 }

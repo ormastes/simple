@@ -94,8 +94,9 @@ compatibility families, not independent backend owners.
 - Backend ownership remains in the existing no-GC async/no-GC sync or pure
   immutable modules. The facade families do not declare runtime hooks.
 
-These families are advanced-scoped until broader execution coverage proves
-runtime behavior beyond import/type resolution and facade checks.
+These families are advanced-scoped until runtime coverage and enforcement prove
+the non-collection promotion gaps, including compiled-mode CAS behavior and
+manifest-backed capability checks.
 
 ### 2.6.1 Backend Routing Policy
 
@@ -139,12 +140,12 @@ The production ownership rule is behavioral, not name-only:
 | `nogc_sync_mut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (4th priority in search, boundary warnings) | Yes (rich exports) | Yes (4th priority) | Good | Root attribute and direct-import boundary checks present; full manifest-to-GcMode enforcement remains partial |
 | `nogc_async_mut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (1st priority in search, boundary warnings) | Yes (rich exports) | Yes (1st priority, default) | Good | Root attribute and direct-import boundary checks present; full manifest-to-GcMode enforcement remains partial |
 | `gc_async_mut` | `@gc` on root `__init__.spl`; parser accepts module-level GC attributes before export-only roots | Yes (6th priority in search) | Yes (GPU exports) | Yes (6th priority) | Partial (GPU-specific) | Root attribute and direct-import boundary checks present; full manifest-to-GcMode enforcement remains partial |
-| `nogc_async_immut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (2nd priority in search, boundary warnings) | Yes (persistent structures, Atom/Ref, combinators) | Yes (2nd priority) | Minimal | Resolution and root exports fixed; broader runtime coverage still limited |
+| `nogc_async_immut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (2nd priority in search, boundary warnings) | Yes (persistent structures, Atom/Ref, combinators) | Yes (2nd priority) | Focused | Resolution and root exports fixed; persistent-structure facade coverage is broad, but compiled-mode CAS behavior and manifest-backed enforcement remain promotion gaps |
 | `nogc_async_mut_noalloc` | `@no_gc` on root `__init__.spl`; direct and reachable unsafe imports plus explicit `@alloc` markers blocked by regression | Yes (10th priority in search, boundary warnings) | Yes (baremetal/noalloc exports) | Yes (10th priority) | Partial (QEMU); check-clean under full-family `simple check` | Root export surface exists; compiler-owned capability enforcement remains partial |
 | `gc_sync_mut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (8th priority) | Yes (facade root) | Yes (8th priority) | Minimal | Facade over `gc_async_mut`; no independent sync runtime semantics yet |
-| `gc_async_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (7th priority) | Yes | Yes (7th priority) | Focused | Native facade resolution passes; focused native probes cover root `Atom`, `VersionedSnapshot`, pmap traversal, pure combinators, root `PersistentList` structural sharing, partial `PersistentVec` empty/repeated-push/tail-set/from_array smoke, committed-path `PersistentMap` one-entry, two-entry, branch-shaped insert, branch-shaped overwrite, and branch-shaped removal smoke plus `PersistentSet` add/contains one-entry, two-entry, branch-shaped insert, dedupe, and branch-shaped removal smoke, package-level `PersistentTrie` shared-prefix/overwrite smoke, and typed plus untyped chained root-facade `PersistentTrie` shared-prefix smoke |
-| `gc_sync_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (9th priority) | Yes | Yes (9th priority) | Focused | Native facade resolution plus root `PersistentList`, partial `PersistentVec` empty/repeated-push/tail-set/from_array, committed-path `PersistentMap` one-entry, two-entry, branch-shaped insert, branch-shaped overwrite, and branch-shaped removal smoke, committed-path `PersistentSet` one-entry, two-entry, branch-shaped insert, dedupe, and branch-shaped removal smoke, package-level `PersistentTrie` shared-prefix/overwrite smoke, and typed plus untyped chained root-facade `PersistentTrie` shared-prefix smoke pass through the GC async immutable facade |
-| `nogc_sync_immut` | `@no_gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (3rd priority) | Yes | Yes (3rd priority) | Focused | Native facade resolution plus root `PersistentList`, partial `PersistentVec` empty/repeated-push/tail-set/from_array, committed-path `PersistentMap` one-entry, two-entry, branch-shaped insert, branch-shaped overwrite, and branch-shaped removal smoke, committed-path `PersistentSet` one-entry, two-entry, branch-shaped insert, dedupe, and branch-shaped removal smoke, package-level `PersistentTrie` shared-prefix/overwrite smoke, and typed plus untyped chained root-facade `PersistentTrie` shared-prefix smoke pass through the no-GC async immutable backend |
+| `gc_async_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (7th priority) | Yes | Yes (7th priority) | Broad facade | Native facade resolution passes; the 31-spec native immutable facade batch covers root `Atom`, `VersionedSnapshot`, pmap traversal, pure combinators, root `PersistentList`, partial `PersistentVec`, committed-path `PersistentMap`, `PersistentSet`, package-level `PersistentTrie`, and typed plus untyped chained root-facade `PersistentTrie` behavior without warning/stub output |
+| `gc_sync_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (9th priority) | Yes | Yes (9th priority) | Broad facade | Native facade resolution plus the 31-spec native immutable facade batch pass through the GC async immutable facade without warning/stub output |
+| `nogc_sync_immut` | `@no_gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (3rd priority) | Yes | Yes (3rd priority) | Broad facade | Native facade resolution plus the 31-spec native immutable facade batch pass through the no-GC async immutable backend without warning/stub output |
 
 ### Compiler enforcement detail
 
@@ -219,9 +220,9 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 - **Fix**: Decide whether target-preset-restricted runs should promote family-boundary warnings to errors.
 
 ### Gap 3: `nogc_async_immut` runtime coverage (Agent 3/4)
-- **Problem**: The interpreter module loader includes `nogc_async_immut` and boundary warnings cover it, but runtime/compiler coverage remains light.
-- **Impact**: The family is resolvable, but persistent/CAS behavior still needs broader execution coverage before public-family promotion.
-- **Fix**: Add runtime tests for persistent collections and compiled-mode CAS behavior.
+- **Problem**: The interpreter module loader includes `nogc_async_immut` and boundary warnings cover it, and persistent-structure facade coverage is now broad, but compiled-mode CAS behavior remains lightly covered.
+- **Impact**: The family is resolvable and persistent collections pass through the native immutable facade batch, but coordination primitives still need compiled-mode evidence before public-family promotion.
+- **Fix**: Add compiled-mode CAS behavior tests for `Atom`, `Ref`, and `VersionedSnapshot`.
 
 ### Gap 4: `nogc_async_mut_noalloc` root `__init__.spl` (Agent 4 -- Stdlib) -- **RESOLVED**
 - **Status**: Fixed. The root `__init__.spl` now declares `@no_gc`, sub-modules, and the baremetal/noalloc export surface.
@@ -249,7 +250,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 ### Gap 9: `nogc_async_immut` root exports (Agent 4 -- Stdlib) -- **RESOLVED**
 - **Status**: Fixed. The root `__init__.spl` now declares `@no_gc`, sub-modules, and exports the persistent collections, `Atom`, `Ref`, `VersionedSnapshot`, and combinators.
-- **Remaining work**: Add broader runtime coverage for persistent structures and compiled-mode CAS behavior.
+- **Remaining work**: Add compiled-mode CAS behavior coverage.
 
 ### Gap 10: Interpreter GC boundary execution coverage (Agent 6 -- Tests) -- **RESOLVED**
 - **Status**: Fixed. `test/unit/compiler/semantics/gc_boundary_check_spec.spl` directly covers the production `check_gc_boundary_imports()` rules, `src/app/cli/query_lint.spl` surfaces those warnings through query diagnostics, `simple check` emits `gc_boundary_crossing` warnings through the Rust driver check path, and the Rust interpreter module loader now emits `[gc-warning]` for real no-GC->GC and noalloc->allocating import paths, including `src/std/<family>` imports.
@@ -272,7 +273,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 | `gc_async_mut` | 914 files, in interpreter search path, GC-capable async family with GPU/ML-specific extras |
 | `nogc_async_mut_noalloc` | 128 files, in interpreter search path, baremetal with QEMU tests |
 
-Five families are **advanced-scoped** (exist but need broader runtime coverage): `nogc_async_immut`, `gc_sync_mut`, `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut`. The sync/GC and sync/immutable variants are facade-only compatibility surfaces backed by existing async/no-GC families.
+Five families are **advanced-scoped** (exist but still have promotion gaps): `nogc_async_immut`, `gc_sync_mut`, `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut`. The sync/GC and sync/immutable variants are facade-only compatibility surfaces backed by existing async/no-GC families.
 
 ### Decision 2: Is interpreter parity mandatory for all public families?
 
@@ -321,7 +322,7 @@ The `gc_off` flag in `CompileOptions` remains a global no-GC switch; `allowed_fa
 - [x] Add to interpreter module loader search order
 - [x] Export core types from `__init__.spl`
 - [x] Add `@no_gc` attribute to `__init__.spl`
-- [ ] Add at least 5 unit tests covering core data structures
+- [x] Add broad native persistent-structure facade coverage
 - [ ] Verify CAS atom operations work in compiled mode
 
 **For `gc_sync_mut`** (advanced-scoped facade):
@@ -337,6 +338,7 @@ The `gc_off` flag in `CompileOptions` remains a global no-GC switch; `allowed_fa
 - [x] Add interpreter fallback search and family extraction
 - [x] Add focused import and interpreter behavior tests
 - [x] Add native pure-combinator facade coverage
+- [x] Run the broad 31-spec native immutable facade batch without warning/stub output
 - [x] Fix native Atom/VersionedSnapshot runtime behavior across the facade families
 - [x] Add focused native root `PersistentList` facade coverage
 - [x] Add partial native root `PersistentVec` empty/repeated-push/tail-set/from_array smoke coverage across GC async, GC sync immutable, and no-GC sync immutable facades
