@@ -28,15 +28,8 @@ use std.http_server.response.{
 use std.http_server.error.{HttpServerError}
 use std.http_server.compression.{compress_response_body, supported_encodings}
 use std.nogc_sync_mut.http.accept_encoding.{negotiate_encoding}
-
-# File system FFI
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_is_dir(path: text) -> bool
-extern fn rt_file_size(path: text) -> i64
-extern fn rt_file_read_text(path: text) -> text
-
-# text -> [u8] bridge for the compression dispatcher.
-extern fn rt_text_to_bytes(s: text) -> [u8]
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_size, file_read_text}
+use std.nogc_sync_mut.io.dir_ops.{is_dir}
 
 # ============================================================================
 # Static Compression Cache
@@ -321,21 +314,21 @@ class StaticFileHandler:
 
         # Check if directory → serve index file
         var actual_path = file_path
-        if rt_file_is_dir(file_path):
+        if is_dir(file_path):
             actual_path = file_path + "/" + self.index_file
 
         # Check file exists
-        if not rt_file_exists(actual_path):
+        if not file_exists(actual_path):
             return build_not_found()
 
         # Get file size and MIME type
-        val size = rt_file_size(actual_path)
+        val size = file_size(actual_path)
         val mime = mime_from_extension(actual_path)
 
         # For small files, read into memory and try compression cache.
         # For large files, use sendfile (body_file) — cannot be cached.
         if size <= 65536:
-            val content = rt_file_read_text(actual_path)
+            val content = file_read_text(actual_path)
             val accept = _get_header_ci(request.headers, "accept-encoding")
             serve_compressed_or_plain(content, mime, actual_path, accept, self.cache)
         else:
@@ -487,10 +480,18 @@ fn serve_compressed_or_plain(
         val cached = hit ?? []
         return build_compressed_response(cached, mime, chosen)
     # Miss: compress, cache on success, fall back to plain on Err.
-    val raw = rt_text_to_bytes(content)
+    val raw = _static_text_to_bytes(content)
     val res = compress_response_body(raw, chosen)
     if res.is_err():
         return build_html_or_typed(content, mime)
     val compressed = res.unwrap()
     cache.put(actual_path, chosen, compressed)
     build_compressed_response(compressed, mime, chosen)
+
+fn _static_text_to_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < s.len():
+        out.push(s.byte_at(i))
+        i = i + 1
+    out
