@@ -178,6 +178,9 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   measured list traversal at `1,237,072` Simple ops/ms (`0.34x` C, `0.19x`
   Rust), list push at `144,527` Simple ops/ms (`0.05x` C, `0.10x` Rust), and
   set-like membership at `1,721` Simple ops/ms (`0.26x` C, `0.13x` Rust).
+  The same ignored-result codegen path also applies to typed byte pushes, so
+  `[u8]` push statements avoid unused bool-result plumbing on both packed and
+  slot-backed fast branches.
 
 ## Next Concrete Plugin Work
 
