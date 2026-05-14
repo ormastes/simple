@@ -7,8 +7,8 @@
 #   - Per-subsystem level overrides + EnvFilter parser
 #     ("net=debug,vfs=warn,*=info").
 #   - 4-slot backend table with kind-tagged ops (no traits, no dyn).
-#   - SPSC lite ring (40-byte LogRecord) for ISR-safe enqueue, built on
-#     K-1 raw-pointer atomic externs (rt_atomic_*_u64/u32/u8).
+#   - SPSC lite ring (40-byte LogRecord) for ISR-safe enqueue, built on the
+#     no-GC raw-pointer ABI. Hosted/platform runtimes may swap in true atomics.
 #   - Panic-mode flush.
 #   - Back-compat shim: legacy info/warn/error/debug/fatal(scope, msg).
 #
@@ -18,18 +18,13 @@
 @allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
 
 # ---------------------------------------------------------------------------
-# Externs - K-1 atomics + raw-pointer memory + stderr fallback
+# Externs - raw-pointer memory + stderr fallback
 # ---------------------------------------------------------------------------
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
 extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i64)
-extern fn rt_atomic_fetch_add_u64(addr: i64, delta: i64) -> i64
-extern fn rt_atomic_load_u64(addr: i64) -> i64
-extern fn rt_atomic_store_u64(addr: i64, value: i64)
-extern fn rt_atomic_load_u32(addr: i64) -> i64
-extern fn rt_atomic_store_u32(addr: i64, value: i64)
-extern fn rt_atomic_store_u8(addr: i64, value: i64)
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
 extern fn rt_stderr_write(s: text)
 extern fn rt_stderr_flush()
 extern fn rt_time_now_ns() -> i64
@@ -319,6 +314,23 @@ fn record_offset_subsys() -> i64:     36
 fn record_offset_level() -> i64:      38
 fn record_offset_flags() -> i64:      39
 
+fn _ring_load_u64(addr: i64) -> i64:
+    rt_ptr_read_i64(addr, 0)
+
+fn _ring_store_u64(addr: i64, value: i64):
+    rt_ptr_write_i64(addr, 0, value)
+
+fn _ring_fetch_add_u64(addr: i64, delta: i64) -> i64:
+    val old = _ring_load_u64(addr)
+    _ring_store_u64(addr, old + delta)
+    old
+
+fn _ring_store_u32(addr: i64, value: i64):
+    rt_ptr_write_i32(addr, 0, value)
+
+fn _ring_store_u8(addr: i64, value: i64):
+    rt_ptr_write_u8(addr, 0, value)
+
 var _g_ring_buf:         i64 = 0
 var _g_ring_capacity:    i64 = 0
 var _g_ring_mask:        i64 = 0
@@ -328,7 +340,7 @@ var _g_ring_dropped_addr: i64 = 0
 
 fn _ring_alloc_cell() -> i64:
     val a = rt_alloc(8)
-    rt_atomic_store_u64(a, 0)
+    _ring_store_u64(a, 0)
     a
 
 fn log_ring_init(cap_log2: i64):
@@ -343,30 +355,30 @@ fn log_ring_init(cap_log2: i64):
             _g_ring_tail_addr = _ring_alloc_cell()
         if _g_ring_dropped_addr == 0:
             _g_ring_dropped_addr = _ring_alloc_cell()
-    rt_atomic_store_u64(_g_ring_head_addr, 0)
-    rt_atomic_store_u64(_g_ring_tail_addr, 0)
-    rt_atomic_store_u64(_g_ring_dropped_addr, 0)
+    _ring_store_u64(_g_ring_head_addr, 0)
+    _ring_store_u64(_g_ring_tail_addr, 0)
+    _ring_store_u64(_g_ring_dropped_addr, 0)
 
 fn log_ring_capacity() -> i64:
     _g_ring_capacity
 
 fn log_ring_pending() -> i64:
-    val h = rt_atomic_load_u64(_g_ring_head_addr)
-    val t = rt_atomic_load_u64(_g_ring_tail_addr)
+    val h = _ring_load_u64(_g_ring_head_addr)
+    val t = _ring_load_u64(_g_ring_tail_addr)
     h - t
 
 fn log_ring_dropped() -> i64:
-    rt_atomic_load_u64(_g_ring_dropped_addr)
+    _ring_load_u64(_g_ring_dropped_addr)
 
 fn log_ring_push(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i64, flags: i64) -> bool:
     if _g_ring_buf == 0:
         return false
-    val h = rt_atomic_load_u64(_g_ring_head_addr)
-    val t = rt_atomic_load_u64(_g_ring_tail_addr)
+    val h = _ring_load_u64(_g_ring_head_addr)
+    val t = _ring_load_u64(_g_ring_tail_addr)
     if (h - t) >= _g_ring_capacity:
-        rt_atomic_fetch_add_u64(_g_ring_dropped_addr, 1)
+        _ring_fetch_add_u64(_g_ring_dropped_addr, 1)
         return false
-    val seq  = rt_atomic_fetch_add_u64(_g_ring_head_addr, 1)
+    val seq  = _ring_fetch_add_u64(_g_ring_head_addr, 1)
     val slot = seq & _g_ring_mask
     val cell = _g_ring_buf + slot * LOG_RECORD_SIZE
     rt_ptr_write_i64(cell, 0,  seq)
@@ -374,29 +386,29 @@ fn log_ring_push(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i64, fla
     rt_ptr_write_i64(cell, 16, p0)
     rt_ptr_write_i64(cell, 24, p1)
     rt_ptr_write_i32(cell, 32, fmt_handle)
-    rt_atomic_store_u32(cell + 36, subsys)
-    rt_atomic_store_u8(cell + 38, level)
-    rt_atomic_store_u8(cell + 39, flags)
+    _ring_store_u32(cell + 36, subsys)
+    _ring_store_u8(cell + 38, level)
+    _ring_store_u8(cell + 39, flags)
     true
 
 fn log_ring_drain(max: i64) -> i64:
     if _g_ring_buf == 0:
         return 0
-    val h = rt_atomic_load_u64(_g_ring_head_addr)
-    var t = rt_atomic_load_u64(_g_ring_tail_addr)
+    val h = _ring_load_u64(_g_ring_head_addr)
+    var t = _ring_load_u64(_g_ring_tail_addr)
     var drained: i64 = 0
     while t < h and drained < max:
         t = t + 1
         drained = drained + 1
-    rt_atomic_store_u64(_g_ring_tail_addr, t)
+    _ring_store_u64(_g_ring_tail_addr, t)
     drained
 
 fn drain_to_list(max: i64) -> [_RingBackendRecord]:
     var records_out: [_RingBackendRecord] = []
     if _g_ring_buf == 0:
         return records_out
-    val h = rt_atomic_load_u64(_g_ring_head_addr)
-    var t = rt_atomic_load_u64(_g_ring_tail_addr)
+    val h = _ring_load_u64(_g_ring_head_addr)
+    var t = _ring_load_u64(_g_ring_tail_addr)
     var drained: i64 = 0
     while t < h and drained < max:
         val slot = t & _g_ring_mask
@@ -407,7 +419,7 @@ fn drain_to_list(max: i64) -> [_RingBackendRecord]:
         records_out.push(_RingBackendRecord.new(sub, lvl, p0))
         t = t + 1
         drained = drained + 1
-    rt_atomic_store_u64(_g_ring_tail_addr, t)
+    _ring_store_u64(_g_ring_tail_addr, t)
     records_out
 
 # ---------------------------------------------------------------------------
@@ -418,7 +430,7 @@ var _g_panic_mode: bool = false
 fn log_panic_flush():
     _g_panic_mode = true
     if _g_ring_buf != 0:
-        rt_atomic_store_u64(_g_ring_tail_addr, rt_atomic_load_u64(_g_ring_head_addr))
+        _ring_store_u64(_g_ring_tail_addr, _ring_load_u64(_g_ring_head_addr))
 
 fn panic_mode_active() -> bool:
     _g_panic_mode
