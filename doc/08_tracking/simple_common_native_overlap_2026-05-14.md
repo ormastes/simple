@@ -319,8 +319,15 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `rt_typed_words_u64_data_at` lowering with direct slot loads in the scan
   loop. The remaining measured gap is therefore loop/codegen quality and typed
   slot representation overhead, not generic `rt_index_get` dispatch or
-  per-element bounds checking. The pure runtime `rt_string_to_float` path also
-  remains incomplete until Simple has a verified f64-to-i64 bitcast primitive.
+  per-element bounds checking.
+- The pure runtime `rt_string_to_float` stub is removed. `core_string.spl`
+  now parses NUL-terminated Simple string storage with libc `strtod`, validates
+  that only trailing whitespace remains, and tags the result through the
+  `spl_f64_to_bits` primitive. Cranelift and LLVM both inline
+  `spl_f64_to_bits` as an f64-to-i64 bitcast, so `simple-core` binaries do not
+  need a Rust/C helper symbol for this conversion. A direct `simple-core` smoke
+  compiled and ran `rt_string_to_float(" 3.5 ")` plus invalid trailing input,
+  printing `float-ok`.
 
 ## Next Concrete Plugin Work
 

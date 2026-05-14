@@ -1,9 +1,12 @@
 # Pure-Simple `simple-core` string and string-backed stdio ABI.
 
 extern fn malloc(size: i64) -> i64
+extern fn free(ptr: i64)
 extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
 extern fn memcmp(left: i64, right: i64, n: i64) -> i64
 extern fn strtoll(ptr: i64, endptr: i64, base: i64) -> i64
+extern fn strtod(ptr: i64, endptr: i64) -> f64
+extern fn spl_f64_to_bits(value: f64) -> i64
 extern fn write(fd: i64, ptr: i64, count: i64) -> i64
 extern fn read(fd: i64, ptr: i64, count: i64) -> i64
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
@@ -620,9 +623,26 @@ pub fn rt_string_to_lower(value: i64) -> i64:
 
 # rt_string_to_float — parse a decimal float string and return a tagged float
 # value (tag 2).  Returns nil (3) on failure.
-# TODO: Requires spl_f64_to_bits or spl_store_f64 compiler intrinsic to
-# bit-cast strtod's f64 result (returned in xmm0) into the i64 tagged-value
-# representation.  Stubbed until that intrinsic is available.
 pub fn rt_string_to_float(value: i64) -> i64:
-    pass_todo  # Needs spl_f64_to_bits intrinsic for f64-to-i64 bit-cast
-    return 3
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return 3
+    val len = string_len_ptr(ptr)
+    if len < 1:
+        return 3
+    val data = string_data_ptr_value(ptr)
+    val end_slot = malloc(8)
+    if end_slot < 1:
+        return 3
+    val parsed = strtod(data, end_slot)
+    val end_ptr = spl_load_i64(end_slot, 0)
+    free(end_slot)
+    if end_ptr <= data:
+        return 3
+    val finish = data + len
+    var cursor = end_ptr
+    while cursor < finish:
+        if is_space_byte(spl_load_u8(cursor, 0)) < 1:
+            return 3
+        cursor = cursor + 1
+    return rt_value_float(spl_f64_to_bits(parsed))

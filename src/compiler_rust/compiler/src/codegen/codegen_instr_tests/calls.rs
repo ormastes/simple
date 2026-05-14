@@ -687,6 +687,27 @@ fn object_relocates_to_symbol(object: &[u8], symbol: &str) -> bool {
 }
 
 #[test]
+fn codegen_inline_spl_f64_to_bits_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_spl_f64_to_bits", |f| {
+        let value = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstFloat {
+            dest: value,
+            value: 3.5,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("spl_f64_to_bits"),
+            args: vec![value],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "spl_f64_to_bits"));
+}
+
+#[test]
 fn codegen_inline_rt_len_does_not_emit_runtime_symbol() {
     let object = aot_object("inline_rt_len", |f| {
         let array = f.new_vreg();

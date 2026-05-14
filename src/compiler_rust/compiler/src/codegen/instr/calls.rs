@@ -61,9 +61,30 @@ fn compile_simple_runtime_memory_intrinsic<M: Module>(
 ) -> InstrResult<bool> {
     if !matches!(
         intrinsic,
-        "spl_load_i64" | "spl_store_i64" | "spl_load_u8" | "spl_store_u8"
+        "spl_load_i64" | "spl_store_i64" | "spl_load_u8" | "spl_store_u8" | "spl_f64_to_bits"
     ) {
         return Ok(false);
+    }
+
+    if intrinsic == "spl_f64_to_bits" {
+        if args.len() != 1 {
+            return Err(format!("{intrinsic} expects 1 args, got {}", args.len()));
+        }
+        let Some(d) = dest else {
+            return Ok(true);
+        };
+        let value = get_vreg_or_default(ctx, builder, &args[0]);
+        let value_ty = builder.func.dfg.value_type(value);
+        let bits = if value_ty == types::F64 {
+            builder.ins().bitcast(types::I64, MemFlags::new(), value)
+        } else if value_ty == types::F32 {
+            let promoted = builder.ins().fpromote(types::F64, value);
+            builder.ins().bitcast(types::I64, MemFlags::new(), promoted)
+        } else {
+            value
+        };
+        ctx.vreg_values.insert(*d, bits);
+        return Ok(true);
     }
 
     let expected_args = if intrinsic.starts_with("spl_load_") { 2 } else { 3 };

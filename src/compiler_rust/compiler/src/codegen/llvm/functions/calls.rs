@@ -1585,9 +1585,25 @@ impl LlvmBackend {
         let intrinsic = name.rsplit_once("__").map(|(_, tail)| tail).unwrap_or(name);
         if !matches!(
             intrinsic,
-            "spl_load_i64" | "spl_store_i64" | "spl_load_u8" | "spl_store_u8"
+            "spl_load_i64" | "spl_store_i64" | "spl_load_u8" | "spl_store_u8" | "spl_f64_to_bits"
         ) {
             return Ok(false);
+        }
+
+        let i64_type = self.runtime_int_type();
+        if intrinsic == "spl_f64_to_bits" {
+            if args.len() != 1 {
+                return Err(crate::error::factory::llvm_build_failed(
+                    "simple runtime f64 bitcast intrinsic",
+                    &format!("{intrinsic} expects 1 args, got {}", args.len()),
+                ));
+            }
+            if let Some(d) = dest {
+                let value = self.get_vreg(&args[0], vreg_map)?;
+                let bits = self.coerce_value_to_type(value, Some(i64_type.into()), builder)?;
+                vreg_map.insert(d, bits);
+            }
+            return Ok(true);
         }
 
         let expected_args = if intrinsic.starts_with("spl_load_") { 2 } else { 3 };
@@ -1598,7 +1614,6 @@ impl LlvmBackend {
             ));
         }
 
-        let i64_type = self.runtime_int_type();
         let i8_type = self.context.i8_type();
         let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
         let base = self.get_vreg(&args[0], vreg_map)?;
