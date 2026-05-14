@@ -268,6 +268,13 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   Simple ops/ms (`0.50x` C, `0.26x` Rust). The pure optimizer updates are
   therefore correctness/parity coverage for already-lowered MIR, not proof that
   the Rust-hosted native benchmark path has reached performance parity.
+- A refreshed one-sample collection benchmark after adding length helpers to
+  the pure runtime-read CSE window kept checksum parity and measured
+  `1,550,332` Simple ops/ms for list traversal (`0.27x` C, `0.16x` Rust),
+  `1,272,955` Simple ops/ms for list push (`0.44x` C, `0.85x` Rust), and
+  `3,597` Simple ops/ms for set-like membership (`0.55x` C, `0.27x` Rust).
+  The next native-path optimization target remains traversal/set scan loop
+  overhead rather than synthetic push dead-store elimination.
 
 ## Next Concrete Plugin Work
 
