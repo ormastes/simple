@@ -551,6 +551,11 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         "core-c runtime archive is missing one or more core-required ABI symbols: {}",
         core_c.display()
     );
+    let core_c_symbols = archive_defined_symbols(&core_c).expect("core-c runtime symbols should be readable");
+    assert!(
+        core_c_symbols.contains("simd_text_init"),
+        "core-c runtime archive must include runtime_simd_utf8.c because runtime_native.c calls simd_text_init"
+    );
 
     if let Some(simple_core) = find_simple_core_runtime_library() {
         assert!(

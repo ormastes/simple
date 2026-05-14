@@ -124,6 +124,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
     for source in [
         "runtime.c",
         "runtime_native.c",
+        "runtime_simd_utf8.c",
         "runtime_thread.c",
         "runtime_fork.c",
         "runtime_process.c",
@@ -213,7 +214,7 @@ pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
     None
 }
 
-fn archive_defined_symbols(path: &Path) -> Option<HashSet<String>> {
+pub(super) fn archive_defined_symbols(path: &Path) -> Option<HashSet<String>> {
     for tool in ["llvm-nm", "nm"] {
         let output = std::process::Command::new(tool)
             .arg("-g")
