@@ -12,6 +12,18 @@ fn has_nonempty_archive_payload(path: &Path) -> bool {
     path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
 }
 
+fn archive_is_fresh_for_runtime_inputs(archive: &Path, runtime_root: &Path, inputs: &[&str]) -> bool {
+    let archive_modified = match archive.metadata().and_then(|meta| meta.modified()) {
+        Ok(modified) => modified,
+        Err(_) => return false,
+    };
+
+    inputs.iter().all(|input| {
+        let input_modified = runtime_root.join(input).metadata().and_then(|meta| meta.modified());
+        matches!(input_modified, Ok(modified) if modified <= archive_modified)
+    })
+}
+
 fn archive_from_dir(dir: &Path, stem: &str) -> Option<PathBuf> {
     let deps_lib = dir.join("deps").join(format!("{stem}.a"));
     if has_nonempty_archive_payload(&deps_lib) {
@@ -108,11 +120,28 @@ fn find_core_c_runtime_source_root() -> Option<PathBuf> {
 
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
-    if has_nonempty_archive_payload(&archive) {
+    let runtime_root = find_core_c_runtime_source_root()?;
+    let runtime_inputs = [
+        "runtime.c",
+        "runtime_native.c",
+        "runtime_simd_utf8.c",
+        "runtime_thread.c",
+        "runtime_fork.c",
+        "runtime_process.c",
+        "runtime_memtrack.c",
+        "runtime.h",
+        "runtime_fork.h",
+        "runtime_memtrack.h",
+        "runtime_simd_dispatch.h",
+        "runtime_thread.h",
+        "platform/platform.h",
+    ];
+
+    if has_nonempty_archive_payload(&archive)
+        && archive_is_fresh_for_runtime_inputs(&archive, &runtime_root, &runtime_inputs)
+    {
         return Some(archive);
     }
-
-    let runtime_root = find_core_c_runtime_source_root()?;
 
     std::fs::create_dir_all(build_dir).ok()?;
 
@@ -121,15 +150,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
     let obj_ext = host_object_extension();
     let mut objects = Vec::new();
 
-    for source in [
-        "runtime.c",
-        "runtime_native.c",
-        "runtime_simd_utf8.c",
-        "runtime_thread.c",
-        "runtime_fork.c",
-        "runtime_process.c",
-        "runtime_memtrack.c",
-    ] {
+    for source in runtime_inputs.iter().copied().filter(|input| input.ends_with(".c")) {
         let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
         let status = std::process::Command::new(&cc)
             .arg("-c")
@@ -248,8 +269,15 @@ pub(crate) fn runtime_archive_has_core_required_symbols(path: &Path) -> bool {
         .all(|symbol| symbols.contains(symbol.trim_start_matches('_')))
 }
 
+fn is_core_c_bootstrap_cache_archive(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized.contains("/build/simple-core/") || normalized.contains("/build/simple_core/")
+}
+
 pub(crate) fn find_abi_complete_simple_core_runtime_library() -> Option<PathBuf> {
-    find_simple_core_runtime_library().filter(|path| runtime_archive_has_core_required_symbols(path))
+    find_simple_core_runtime_library()
+        .filter(|path| !is_core_c_bootstrap_cache_archive(path))
+        .filter(|path| runtime_archive_has_core_required_symbols(path))
 }
 
 /// Find the combined native_all library (runtime + compiler with Cranelift FFI).

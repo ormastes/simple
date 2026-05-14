@@ -38,6 +38,29 @@
 #endif
 
 /* ================================================================
+ * Runtime Configuration
+ * ================================================================ */
+
+static bool spl_macro_trace_enabled = false;
+static bool spl_debug_mode_enabled = false;
+
+void rt_set_macro_trace(bool enabled) {
+    spl_macro_trace_enabled = enabled;
+}
+
+bool rt_is_macro_trace_enabled(void) {
+    return spl_macro_trace_enabled;
+}
+
+void rt_set_debug_mode(bool enabled) {
+    spl_debug_mode_enabled = enabled;
+}
+
+bool rt_is_debug_mode_enabled(void) {
+    return spl_debug_mode_enabled;
+}
+
+/* ================================================================
  * Value Constructors
  * ================================================================ */
 

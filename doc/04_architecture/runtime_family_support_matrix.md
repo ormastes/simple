@@ -135,12 +135,12 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 - `src/app/mcp/main.spl` native-build now completes with the rebuilt Rust bootstrap compiler:
   - command: `src/compiler_rust/target/bootstrap/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server`
-  - result: `Build complete: 18 compiled, 104 cached, 0 failed`; linked `build/bootstrap/mcp-package/simple_mcp_server`.
-  - remaining caveat: unresolved native/runtime symbols still generate link stubs. Internal Simple stub debt is reduced to one runtime hook: `rt_is_debug_mode_enabled`.
+  - result: `Build complete: 122 compiled, 0 cached, 0 failed`; linked `build/bootstrap/mcp-package/simple_mcp_server`.
+  - remaining caveat: unresolved native/runtime symbols still generate link stubs. Latest uncached run generated 714 unresolved-symbol stubs and no internal Simple stub warning.
 - `src/app/simple_lsp_mcp/main.spl` native-build now completes with the rebuilt Rust bootstrap compiler:
   - command: `src/compiler_rust/target/bootstrap/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server`
-  - result: `Build complete: 192 compiled, 178 cached, 0 failed`; linked `build/bootstrap/mcp-package/simple_lsp_mcp_server`.
-  - remaining caveat: unresolved native/runtime symbols still generate link stubs. Latest run generated 1163 unresolved-symbol stubs, including 215 internal Simple symbols.
+  - result: `Build complete: 370 compiled, 0 cached, 0 failed`; linked `build/bootstrap/mcp-package/simple_lsp_mcp_server`.
+  - remaining caveat: unresolved native/runtime symbols still generate link stubs. Latest uncached run generated 1008 unresolved-symbol stubs, including 218 internal Simple symbols.
   - implication: MCP and LSP native smoke are no longer blocked by `SliceIter.slice`, enum/static-member resolution, shell status wrappers, stale `MirBlock.has_label` reads, or the last C/LLVM/native/Vulkan field-recovery failures. Package release-readiness still requires reducing native/runtime stubs and broader import/type-loading cleanup.
 
 ### Gap 1: Partial attribute-based family enforcement (Agent 2 -- Compiler)

@@ -33,6 +33,13 @@ extern "C" {
 /* Include fork-without-exec support */
 #include "runtime_fork.h"
 
+/* ===== Runtime Configuration ===== */
+
+void rt_set_macro_trace(bool enabled);
+bool rt_is_macro_trace_enabled(void);
+void rt_set_debug_mode(bool enabled);
+bool rt_is_debug_mode_enabled(void);
+
 /* ===== Tagged Value System ===== */
 
 typedef enum {
