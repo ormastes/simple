@@ -152,8 +152,23 @@ describe "MIR Collection Optimization":
         var opt = create_collection_opt_pass()
 
         expect(opt.is_pure_method("contains")).to_equal(true)
+        expect(opt.is_pure_method("has")).to_equal(true)
+        expect(opt.is_pure_method("size")).to_equal(true)
         expect(opt.is_pure_method("contains_key")).to_equal(true)
         expect(opt.is_pure_method("insert")).to_equal(false)
+
+    it "reuses repeated pure has membership query results in a block":
+        val has1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("has"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val has2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("has"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([has1, cmp, has2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "has")).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
 
     it "reuses repeated pure set membership query results in a block":
         val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
@@ -264,6 +279,22 @@ describe "MIR Collection Optimization":
         expect(_co_count_named_call(block, "rt_dict_get")).to_equal(1)
         expect(_co_count_copy_from(block, 10)).to_equal(1)
         expect(opt.pure_queries_reused).to_equal(1)
+
+    it "reuses repeated runtime contains queries in a block":
+        val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val contains2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_array_contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val dict_contains1 = MirInst(kind: MirInstKind.Call(_co_lid(12), _co_func("rt_dict_contains_key"), [_co_copy(4), _co_copy(5)]), span: nil)
+        val dict_contains2 = MirInst(kind: MirInstKind.Call(_co_lid(13), _co_func("rt_dict_contains_key"), [_co_copy(4), _co_copy(5)]), span: nil)
+        val func = _co_function([_co_block([contains1, cmp, contains2, dict_contains1, dict_contains2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_contains")).to_equal(1)
+        expect(_co_count_named_call(block, "rt_dict_contains_key")).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(2)
 
     it "reuses repeated runtime array first reads in a block":
         val first1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_first"), [_co_copy(1)]), span: nil)
