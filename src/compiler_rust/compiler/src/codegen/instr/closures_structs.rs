@@ -747,8 +747,9 @@ fn try_compile_builtin_method_call<M: Module>(
         "concat" => "rt_string_concat",
         "contains" => "rt_contains",
         "char_at" | "at" => "rt_string_char_at",
+        "hash" => "rt_hash_text",
         // Array methods
-        "push" => "rt_array_push",
+        "push" | "append" => "rt_array_push",
         "pop" => "rt_array_pop",
         "clear" => "rt_array_clear",
         // Generic collection methods (work on String, Array, Tuple, Dict)
