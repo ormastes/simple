@@ -206,3 +206,33 @@ step. A clean source-closure benchmark preserved checksum parity and measured
 list push at `1.32x` C / `2.53x` Rust. This does not close the bug: list
 traversal remains `0.32x` C / `0.29x` Rust, scalar set membership remains
 `0.26x` Rust, and text `HashSet.contains` remains `0.42x` C in the same run.
+
+## 2026-05-14 Late Update
+
+Two pure-Simple runtime commits were pushed as ancestors of remote `main`:
+
+- `613c7e961605` — `Reduce address math in pure Simple numeric kernels`
+- `6a483d70be04` — `Close pure Simple contains parity gaps`
+
+The first commit changes the u64 xor-sum and contains kernels to walk a moving
+data pointer instead of recomputing `idx * 8` for every load. The second commit
+uses byte occupancy flags for the pure Simple `HashSet` probe table and
+strength-reduces the reduction return path.
+
+Latest 5-sample source-closure benchmark, with `simple-core`, native CPU, clean
+runtime archive rebuild, and checksum parity:
+
+```text
+list_traverse     0.71x C / 0.43x Rust
+list_push         1.31x C / 2.54x Rust
+set_contains      1.02x C / 0.51x Rust
+hashset_contains  0.52x C / 0.88x Rust
+```
+
+Only `list_traverse` remains below the 0.50x Rust floor. Disassembly of
+`rt_numeric_xor_sum_u64` now shows direct scalar unrolled loads over the raw
+data pointer with no per-element runtime helper calls. A two-accumulator
+variant, text-hash cursor variant, and cached HashSet mask variant all
+regressed benchmark results and were reverted. The remaining gap needs backend
+loop/vector codegen for typed reductions, or an equivalent Simple optimization
+plug transform, rather than another collection data-structure rewrite.
