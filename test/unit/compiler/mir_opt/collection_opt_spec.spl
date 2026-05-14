@@ -47,6 +47,9 @@ fn _co_function(blocks: [MirBlock]) -> MirFunction:
     )
 
 fn _co_count_rt_array_len(block: MirBlock) -> i64:
+    _co_count_named_call(block, "rt_array_len")
+
+fn _co_count_named_call(block: MirBlock, expected: text) -> i64:
     var count = 0
     for inst in block.instructions:
         match inst.kind:
@@ -55,7 +58,7 @@ fn _co_count_rt_array_len(block: MirBlock) -> i64:
                     case Const(value, _):
                         match value:
                             case Str(name):
-                                if name == "rt_array_len":
+                                if name == expected:
                                     count = count + 1
                             case _:
                                 ()
@@ -83,6 +86,32 @@ describe "MIR Collection Optimization":
         expect(opt.is_pure_method("contains")).to_equal(true)
         expect(opt.is_pure_method("contains_key")).to_equal(true)
         expect(opt.is_pure_method("insert")).to_equal(false)
+
+    it "reuses repeated pure set membership query results in a block":
+        val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val contains2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([contains1, cmp, contains2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "contains")).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "does not reuse pure set membership across mutating collection calls":
+        val contains1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val insert = MirInst(kind: MirInstKind.Call(nil, _co_func("insert"), [_co_copy(1), _co_copy(3)]), span: nil)
+        val contains2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([contains1, insert, contains2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "contains")).to_equal(2)
+        expect(opt.pure_queries_reused).to_equal(0)
 
     it "reuses repeated typed array length queries for adjacent bounds checks":
         val len1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)

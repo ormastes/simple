@@ -42,6 +42,11 @@ optimization providers rather than delegating common algorithms back to Rust/C.
 - Set membership queries now participate in the same pure-query hoisting lane:
   `contains` is treated like `contains_key` for loop-invariant collection
   calls, while mutating operations such as `insert` remain non-hoistable.
+- Same-block duplicate pure collection queries are now canonicalized until a
+  possible collection mutation appears. Repeated read-only `contains`,
+  `contains_key`, `get`, `first`, `last`, `len`, and `is_empty` dispatches over
+  the same operands reuse the first result; mutating calls such as `insert`
+  clear the reuse window.
 - `src/lib/common/hash/adler32.spl` now uses the same pure Simple chunked
   Adler-32 path as the OS crypto module: 8-byte typed loads, deferred modular
   reduction, and strength-reduced `_adler_reduce` instead of per-byte `%`
@@ -55,7 +60,7 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   --mode=interpreter --clean` passing 7 examples.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/compiler/mir_opt/collection_opt_spec.spl
-  --mode=interpreter --clean` passing 3 examples.
+  --mode=interpreter --clean` passing 5 examples.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/lib/common/hash/adler32_spec.spl
   --mode=interpreter --clean` passing 11 examples.
@@ -65,8 +70,10 @@ optimization providers rather than delegating common algorithms back to Rust/C.
 1. Extend `simple.opt.collection.loop_access` from same-block typed length
    canonicalization to full `len`-guarded array/list loops so indexed traversal
    over `[u8]`, `[u32]`, and fixed arrays emits one bounds proof per loop.
-2. Add static-table materialization for pure Simple `[u8]` and `[u32]` literals
+2. Add duplicate map/set probe-loop specialization for primitive-key
+   `contains`, `contains_key`, and `get` calls after MIR exposes the hash/probe
+   internals rather than only opaque runtime calls.
+3. Add static-table materialization for pure Simple `[u8]` and `[u32]` literals
    after resolving `native_u8_array_literal_not_packed_2026-05-13.md`.
-3. Add map/set probe-loop specialization for pure Simple `contains`, `insert`,
-   and `get` on primitive keys, then benchmark against the Rust hpcollection
+4. Benchmark primitive list/set/map traversal against the Rust hpcollection
    extern surfaces before removing native shortcuts.

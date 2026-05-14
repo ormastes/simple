@@ -37,6 +37,7 @@ class CollectionOptimization:
     str_append_replaced: i64
     calls_hoisted: i64
     len_queries_reused: i64
+    pure_queries_reused: i64
 
 impl CollectionOptimization:
     static fn new() -> CollectionOptimization:
@@ -45,7 +46,8 @@ impl CollectionOptimization:
             concat_replaced: 0,
             str_append_replaced: 0,
             calls_hoisted: 0,
-            len_queries_reused: 0
+            len_queries_reused: 0,
+            pure_queries_reused: 0
         )
 
     me optimize_function(func: MirFunction) -> MirFunction:
@@ -61,10 +63,79 @@ impl CollectionOptimization:
         # Also sweep non-loop blocks for the same concat patterns
         optimized_blocks = self.optimize_concat_all_blocks(optimized_blocks, func)
         optimized_blocks = self.canonicalize_collection_len_queries(optimized_blocks)
+        optimized_blocks = self.canonicalize_collection_pure_queries(optimized_blocks)
 
         var result = func
         result.blocks = optimized_blocks
         result
+
+    me canonicalize_collection_pure_queries(blocks: [MirBlock]) -> [MirBlock]:
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            new_blocks.push(self.canonicalize_collection_pure_queries_block(block))
+        new_blocks
+
+    me canonicalize_collection_pure_queries_block(block: MirBlock) -> MirBlock:
+        val insts = block.instructions
+        if insts.len() < 2:
+            return block
+
+        var seen: Dict<text, i64> = {}
+        var new_insts: [MirInst] = []
+        var changed = false
+
+        for inst in insts:
+            val query = self.collection_pure_call_key(inst)
+            if query != "":
+                val dest = self.inst_dest(inst)
+                if dest.?:
+                    if seen.has(query):
+                        new_insts.push(MirInst(kind: MirInstKind.Copy(dest, LocalId(id: seen[query])), span: inst.span))
+                        self.pure_queries_reused = self.pure_queries_reused + 1
+                        changed = true
+                    else:
+                        seen[query] = dest.id
+                        new_insts.push(inst)
+                else:
+                    new_insts.push(inst)
+            else:
+                if self.inst_may_mutate_collection_state(inst):
+                    seen = {}
+                new_insts.push(inst)
+
+        if changed:
+            MirBlock(
+                id: block.id,
+                label: block.label,
+                instructions: new_insts,
+                terminator: block.terminator
+            )
+        else:
+            block
+
+    fn collection_pure_call_key(inst: MirInst) -> text:
+        match inst.kind:
+            case Call(dest, func, args):
+                if not dest.?:
+                    return ""
+                val fname = self.get_func_name(func)
+                if not self.is_pure_method(fname):
+                    return ""
+                var key = fname
+                for arg in args:
+                    key = key + ":" + self.collection_operand_key(arg)
+                key
+            case _:
+                ""
+
+    fn inst_may_mutate_collection_state(inst: MirInst) -> bool:
+        match inst.kind:
+            case Call(_, func, _):
+                not self.is_pure_method(self.get_func_name(func))
+            case CallIndirect(_, _, _, _): true
+            case Store(_, _): true
+            case SetField(_, _, _): true
+            case _: false
 
     me canonicalize_collection_len_queries(blocks: [MirBlock]) -> [MirBlock]:
         var new_blocks: [MirBlock] = []
@@ -669,7 +740,7 @@ impl CollectionOptimization:
         false
 
     fn stats_summary() -> text:
-        "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted, {self.len_queries_reused} len queries reused"
+        "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted, {self.len_queries_reused} len queries reused, {self.pure_queries_reused} pure queries reused"
 
 # ============================================================================
 # Factory Functions
