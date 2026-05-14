@@ -95,8 +95,8 @@ compatibility families, not independent backend owners.
   immutable modules. The facade families do not declare runtime hooks.
 
 These families are advanced-scoped until runtime coverage and enforcement prove
-the non-collection promotion gaps, including compiled-mode CAS behavior and
-manifest-backed capability checks.
+the remaining promotion gaps, including manifest-backed capability checks and
+sync-wrapper decisions.
 
 ### 2.6.1 Backend Routing Policy
 
@@ -140,7 +140,7 @@ The production ownership rule is behavioral, not name-only:
 | `nogc_sync_mut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (4th priority in search, boundary warnings) | Yes (rich exports) | Yes (4th priority) | Good | Root attribute and direct-import boundary checks present; full manifest-to-GcMode enforcement remains partial |
 | `nogc_async_mut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (1st priority in search, boundary warnings) | Yes (rich exports) | Yes (1st priority, default) | Good | Root attribute and direct-import boundary checks present; full manifest-to-GcMode enforcement remains partial |
 | `gc_async_mut` | `@gc` on root `__init__.spl`; parser accepts module-level GC attributes before export-only roots | Yes (6th priority in search) | Yes (GPU exports) | Yes (6th priority) | Partial (GPU-specific) | Root attribute and direct-import boundary checks present; full manifest-to-GcMode enforcement remains partial |
-| `nogc_async_immut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (2nd priority in search, boundary warnings) | Yes (persistent structures, Atom/Ref, combinators) | Yes (2nd priority) | Focused | Resolution and root exports fixed; persistent-structure facade coverage is broad, but compiled-mode CAS behavior and manifest-backed enforcement remain promotion gaps |
+| `nogc_async_immut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (2nd priority in search, boundary warnings) | Yes (persistent structures, Atom/Ref, combinators) | Yes (2nd priority) | Direct native | Resolution and root exports fixed; persistent-structure facade coverage is broad and direct coordination/CAS native coverage passes, but manifest-backed enforcement remains a promotion gap |
 | `nogc_async_mut_noalloc` | `@no_gc` on root `__init__.spl`; direct and reachable unsafe imports plus explicit `@alloc` markers blocked by regression | Yes (10th priority in search, boundary warnings) | Yes (baremetal/noalloc exports) | Yes (10th priority) | Partial (QEMU); check-clean under full-family `simple check` | Root export surface exists; compiler-owned capability enforcement remains partial |
 | `gc_sync_mut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (8th priority) | Yes (facade root) | Yes (8th priority) | Minimal | Facade over `gc_async_mut`; no independent sync runtime semantics yet |
 | `gc_async_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (7th priority) | Yes | Yes (7th priority) | Broad facade | Native facade resolution passes; the 31-spec native immutable facade batch covers root `Atom`, `VersionedSnapshot`, pmap traversal, pure combinators, root `PersistentList`, partial `PersistentVec`, committed-path `PersistentMap`, `PersistentSet`, package-level `PersistentTrie`, and typed plus untyped chained root-facade `PersistentTrie` behavior without warning/stub output |
@@ -219,10 +219,9 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 - **Impact**: Code that crosses GC/noalloc boundaries can still execute after warning.
 - **Fix**: Decide whether target-preset-restricted runs should promote family-boundary warnings to errors.
 
-### Gap 3: `nogc_async_immut` runtime coverage (Agent 3/4)
-- **Problem**: The interpreter module loader includes `nogc_async_immut` and boundary warnings cover it, and persistent-structure facade coverage is now broad, but compiled-mode CAS behavior remains lightly covered.
-- **Impact**: The family is resolvable and persistent collections pass through the native immutable facade batch, but coordination primitives still need compiled-mode evidence before public-family promotion.
-- **Fix**: Add compiled-mode CAS behavior tests for `Atom`, `Ref`, and `VersionedSnapshot`.
+### Gap 3: `nogc_async_immut` runtime coverage (Agent 3/4) -- **RESOLVED**
+- **Status**: Fixed. Persistent-structure facade coverage is broad, and `test/unit/lib/nogc_async_immut/coordination_native_spec.spl` now covers direct no-GC async `Atom`, `Ref`, `VersionedSnapshot`, and exported CAS helper behavior in interpreter and native modes.
+- **Remaining work**: Keep this spec in native smoke; broader public promotion still depends on manifest-backed capability enforcement.
 
 ### Gap 4: `nogc_async_mut_noalloc` root `__init__.spl` (Agent 4 -- Stdlib) -- **RESOLVED**
 - **Status**: Fixed. The root `__init__.spl` now declares `@no_gc`, sub-modules, and the baremetal/noalloc export surface.
@@ -250,7 +249,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 ### Gap 9: `nogc_async_immut` root exports (Agent 4 -- Stdlib) -- **RESOLVED**
 - **Status**: Fixed. The root `__init__.spl` now declares `@no_gc`, sub-modules, and exports the persistent collections, `Atom`, `Ref`, `VersionedSnapshot`, and combinators.
-- **Remaining work**: Add compiled-mode CAS behavior coverage.
+- **Evidence**: Direct coordination/CAS native coverage now passes through `test/unit/lib/nogc_async_immut/coordination_native_spec.spl`.
 
 ### Gap 10: Interpreter GC boundary execution coverage (Agent 6 -- Tests) -- **RESOLVED**
 - **Status**: Fixed. `test/unit/compiler/semantics/gc_boundary_check_spec.spl` directly covers the production `check_gc_boundary_imports()` rules, `src/app/cli/query_lint.spl` surfaces those warnings through query diagnostics, `simple check` emits `gc_boundary_crossing` warnings through the Rust driver check path, and the Rust interpreter module loader now emits `[gc-warning]` for real no-GC->GC and noalloc->allocating import paths, including `src/std/<family>` imports.
@@ -323,7 +322,7 @@ The `gc_off` flag in `CompileOptions` remains a global no-GC switch; `allowed_fa
 - [x] Export core types from `__init__.spl`
 - [x] Add `@no_gc` attribute to `__init__.spl`
 - [x] Add broad native persistent-structure facade coverage
-- [ ] Verify CAS atom operations work in compiled mode
+- [x] Verify CAS atom operations work in compiled mode
 
 **For `gc_sync_mut`** (advanced-scoped facade):
 - [x] Add `src/lib/gc_sync_mut/` facade tree backed by `gc_async_mut`
