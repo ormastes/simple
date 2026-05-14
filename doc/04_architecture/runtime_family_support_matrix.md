@@ -161,12 +161,13 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 5. **Target family filtering** in `src/compiler/99.loader/module_resolver/resolution.spl`: `allowed_families` restricts stdlib family search for target presets.
 
-**Remaining gap**: the manifest-backed hard violation API and Rust lint parity exist, and the Rust `simple check` path can now promote runtime-family violations to hard errors for target-restricted runs. The remaining promotion gap is interpreter-side wiring. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
+**Remaining gap**: the manifest-backed hard violation API, Rust lint parity, Rust `simple check` strict mode, and Rust interpreter strict mode exist. Target preset entrypoints still need to thread strict runtime-family mode automatically instead of relying on explicit checker flags or `SIMPLE_STRICT_RUNTIME_FAMILY=1`. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
 
 ### Interpreter parity detail
 
 - The interpreter module loader in `src/compiler/10.frontend/core/interpreter/module_loader.spl` has a **hardcoded search order**: `nogc_async_mut` > `nogc_async_immut` > `nogc_sync_immut` > `nogc_sync_mut` > `common` > `gc_async_mut` > `gc_async_immut` > `gc_sync_mut` > `gc_sync_immut` > `nogc_async_mut_noalloc`.
-- `check_gc_family_boundary` emits interpreter warnings for no-GC→GC and noalloc→allocating-family imports.
+- `check_gc_family_boundary` emits interpreter warnings for no-GC→GC, noalloc→allocating-family, and higher-layer runtime-family imports.
+- The Rust interpreter module loader uses the same family set, ranks, and reason strings as Rust `simple check`, and `SIMPLE_STRICT_RUNTIME_FAMILY=1` promotes loader family-boundary diagnostics to `[gc-error]` runtime errors.
 - `test/unit/compiler/interpreter/gc_parity_spec.spl` covers family extraction and warning rules.
 
 ---
@@ -214,10 +215,10 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 - **Impact**: Target-restricted checker/CI runs can fail on runtime-family boundary violations; compiler pipelines that do not pass a strict target-family option still remain warning-compatible.
 - **Fix**: Thread target presets into every compiler entrypoint that needs strict family enforcement instead of relying on callers to pass the explicit checker flag.
 
-### Gap 2: Interpreter family warnings are warning-only (Agent 3 -- Interpreter)
-- **Problem**: The interpreter emits family-boundary warnings but does not yet consume the manifest-backed hard violation API.
-- **Impact**: Code that crosses GC/noalloc boundaries can still execute after warning in unrestricted interpreter runs.
-- **Fix**: Promote manifest-backed violations to errors for target-preset-restricted interpreter runs.
+### Gap 2: Interpreter strict family errors require explicit opt-in (Agent 3 -- Interpreter)
+- **Problem**: The Rust interpreter can now promote family-boundary diagnostics to errors with `SIMPLE_STRICT_RUNTIME_FAMILY=1`, but target presets do not yet set that mode automatically.
+- **Impact**: Target-restricted interpreter gates can fail on runtime-family boundary violations when strict mode is enabled; unrestricted interpreter runs still intentionally continue after warning.
+- **Fix**: Thread target presets into interpreter launch/configuration so baremetal/noalloc and other restricted target runs enable strict runtime-family mode without manual environment setup.
 
 ### Gap 3: `nogc_async_immut` runtime coverage (Agent 3/4) -- **RESOLVED**
 - **Status**: Fixed. Persistent-structure facade coverage is broad, and `test/unit/lib/nogc_async_immut/coordination_native_spec.spl` now covers direct no-GC async `Atom`, `Ref`, `VersionedSnapshot`, and exported CAS helper behavior in interpreter and native modes.
@@ -252,9 +253,9 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 - **Evidence**: Direct coordination/CAS native coverage now passes through `test/unit/lib/nogc_async_immut/coordination_native_spec.spl`.
 
 ### Gap 10: Interpreter GC boundary execution coverage (Agent 6 -- Tests) -- **RESOLVED**
-- **Status**: Fixed. `test/unit/compiler/semantics/gc_boundary_check_spec.spl` directly covers the production `check_gc_boundary_imports()` rules, `src/app/cli/query_lint.spl` surfaces those warnings through query diagnostics, `simple check` emits `gc_boundary_crossing` warnings through the Rust driver check path with manifest-equivalent reason strings, and the Rust interpreter module loader now emits `[gc-warning]` for real no-GC->GC and noalloc->allocating import paths, including `src/std/<family>` imports.
+- **Status**: Fixed. `test/unit/compiler/semantics/gc_boundary_check_spec.spl` directly covers the production `check_gc_boundary_imports()` rules, `src/app/cli/query_lint.spl` surfaces those warnings through query diagnostics, `simple check` emits `gc_boundary_crossing` warnings through the Rust driver check path with manifest-equivalent reason strings, and the Rust interpreter module loader now emits `[gc-warning]` for real no-GC->GC, noalloc->allocating, and higher-layer runtime-family import paths, including `src/std/<family>` imports. With `SIMPLE_STRICT_RUNTIME_FAMILY=1`, the Rust interpreter promotes the same loader diagnostics to `[gc-error]` runtime errors.
 - **Evidence**: A rebuilt bootstrap `simple run` on a no-GC file importing `std.gc_async_mut.{gpu_device_count}` emits one no-GC context warning before normal execution.
-- **Remaining work**: Decide whether target-preset-restricted interpreter runs should promote family-boundary warnings to errors.
+- **Remaining work**: Thread target presets into interpreter launch/configuration so restricted targets enable strict runtime-family errors automatically.
 
 ---
 
@@ -278,9 +279,10 @@ Five families are **advanced-scoped** (exist but still have promotion gaps): `no
 
 **Answer**: Yes for the 5 public families, with caveats:
 - The interpreter currently achieves module-resolution parity via the hardcoded search order.
-- The interpreter emits family-boundary warnings for no-GC→GC and noalloc→allocating-family imports.
+- The interpreter emits family-boundary warnings for no-GC→GC, noalloc→allocating-family, and higher-layer runtime-family imports.
+- `SIMPLE_STRICT_RUNTIME_FAMILY=1` promotes those interpreter diagnostics to errors for target-restricted gates.
 - **Minimum bar**: Interpreter must resolve modules from all 5 public families and emit warnings on cross-family GcMode mismatches (currently true).
-- **Stretch goal**: target-preset-restricted interpreter runs may promote family-boundary warnings to errors.
+- **Stretch goal**: target-preset-restricted interpreter runs should enable strict runtime-family errors automatically.
 - `nogc_async_immut` is already in the search order; the remaining promotion gates are broader compiled/runtime coverage.
 
 ### Decision 3: Which stdlib differences are intentional vs accidental?

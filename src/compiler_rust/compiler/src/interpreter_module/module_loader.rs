@@ -59,22 +59,32 @@ type Enums = HashMap<String, Arc<EnumDef>>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeFamily {
     Common,
-    NogcSyncMut,
+    NogcAsyncMutNoalloc,
     NogcAsyncMut,
     NogcAsyncImmut,
-    NogcAsyncMutNoalloc,
+    NogcSyncImmut,
+    Async,
+    NogcSyncMut,
     GcAsyncMut,
+    GcAsyncImmut,
+    GcSyncMut,
+    GcSyncImmut,
 }
 
 impl RuntimeFamily {
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "common" => Some(Self::Common),
-            "nogc_sync_mut" => Some(Self::NogcSyncMut),
+            "nogc_async_mut_noalloc" => Some(Self::NogcAsyncMutNoalloc),
             "nogc_async_mut" => Some(Self::NogcAsyncMut),
             "nogc_async_immut" => Some(Self::NogcAsyncImmut),
-            "nogc_async_mut_noalloc" => Some(Self::NogcAsyncMutNoalloc),
+            "nogc_sync_immut" => Some(Self::NogcSyncImmut),
+            "async" => Some(Self::Async),
+            "nogc_sync_mut" => Some(Self::NogcSyncMut),
             "gc_async_mut" => Some(Self::GcAsyncMut),
+            "gc_async_immut" => Some(Self::GcAsyncImmut),
+            "gc_sync_mut" => Some(Self::GcSyncMut),
+            "gc_sync_immut" => Some(Self::GcSyncImmut),
             _ => None,
         }
     }
@@ -82,16 +92,24 @@ impl RuntimeFamily {
     fn name(self) -> &'static str {
         match self {
             Self::Common => "common",
-            Self::NogcSyncMut => "nogc_sync_mut",
+            Self::NogcAsyncMutNoalloc => "nogc_async_mut_noalloc",
             Self::NogcAsyncMut => "nogc_async_mut",
             Self::NogcAsyncImmut => "nogc_async_immut",
-            Self::NogcAsyncMutNoalloc => "nogc_async_mut_noalloc",
+            Self::NogcSyncImmut => "nogc_sync_immut",
+            Self::Async => "async",
+            Self::NogcSyncMut => "nogc_sync_mut",
             Self::GcAsyncMut => "gc_async_mut",
+            Self::GcAsyncImmut => "gc_async_immut",
+            Self::GcSyncMut => "gc_sync_mut",
+            Self::GcSyncImmut => "gc_sync_immut",
         }
     }
 
     fn is_gc(self) -> bool {
-        matches!(self, Self::GcAsyncMut)
+        matches!(
+            self,
+            Self::GcAsyncMut | Self::GcAsyncImmut | Self::GcSyncMut | Self::GcSyncImmut
+        )
     }
 
     fn is_noalloc(self) -> bool {
@@ -100,6 +118,16 @@ impl RuntimeFamily {
 
     fn is_allocating(self) -> bool {
         !matches!(self, Self::Common | Self::NogcAsyncMutNoalloc)
+    }
+
+    fn rank(self) -> i8 {
+        match self {
+            Self::Common => 0,
+            Self::NogcAsyncMutNoalloc => 1,
+            Self::NogcAsyncMut | Self::NogcAsyncImmut | Self::NogcSyncImmut => 2,
+            Self::Async | Self::NogcSyncMut => 3,
+            Self::GcAsyncMut | Self::GcAsyncImmut | Self::GcSyncMut | Self::GcSyncImmut => 4,
+        }
     }
 }
 
@@ -118,6 +146,33 @@ fn runtime_family_from_path(path: &Path) -> Option<RuntimeFamily> {
     None
 }
 
+fn runtime_family_import_violation_reason(
+    importer_family: RuntimeFamily,
+    imported_family: RuntimeFamily,
+) -> Option<&'static str> {
+    if imported_family == RuntimeFamily::Common {
+        return None;
+    }
+
+    if importer_family.is_noalloc() && imported_family.is_gc() {
+        return Some("noalloc_imports_gc_family");
+    }
+
+    if importer_family.is_noalloc() && imported_family.is_allocating() {
+        return Some("noalloc_imports_allocating_family");
+    }
+
+    if !importer_family.is_gc() && imported_family.is_gc() {
+        return Some("nogc_imports_gc_family");
+    }
+
+    if imported_family.rank() > importer_family.rank() {
+        return Some("higher_layer_runtime_family");
+    }
+
+    None
+}
+
 fn gc_boundary_warning_message(importer_path: &Path, imported_path: &Path, module_name: &str) -> Option<String> {
     let importer_family = runtime_family_from_path(importer_path)?;
     let imported_family = runtime_family_from_path(imported_path)?;
@@ -129,32 +184,57 @@ fn gc_boundary_warning_message(importer_path: &Path, imported_path: &Path, modul
         return None;
     }
 
-    if !importer_family.is_gc() && imported_family.is_gc() {
-        return Some(format!(
-            "[gc-warning] GC module '{module_name}' (family: {}) imported in no-GC context (family: {})",
-            imported_family.name(),
-            importer_family.name()
-        ));
-    }
+    let reason = runtime_family_import_violation_reason(importer_family, imported_family)?;
+    let label = if importer_family.is_noalloc() && imported_family.is_allocating() {
+        "Allocating"
+    } else if imported_family.is_gc() {
+        "GC"
+    } else {
+        "Higher-layer"
+    };
 
-    if importer_family.is_noalloc() && imported_family.is_allocating() {
-        return Some(format!(
-            "[gc-warning] Allocating module '{module_name}' (family: {}) imported in no-alloc context (family: {})",
-            imported_family.name(),
-            importer_family.name()
-        ));
-    }
-
-    None
+    Some(format!(
+        "[gc-warning] {label} module '{module_name}' (family: {}) imported in restricted context (family: {}) ({reason})",
+        imported_family.name(),
+        importer_family.name()
+    ))
 }
 
-fn emit_gc_boundary_warning(importer_path: Option<&Path>, imported_path: &Path, module_name: &str) {
+fn strict_runtime_family_imports_enabled() -> bool {
+    std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn enforce_gc_boundary_policy(
+    importer_path: Option<&Path>,
+    imported_path: &Path,
+    module_name: &str,
+    strict: bool,
+) -> Result<(), CompileError> {
     let Some(importer_path) = importer_path else {
-        return;
+        return Ok(());
     };
     if let Some(message) = gc_boundary_warning_message(importer_path, imported_path, module_name) {
+        if strict {
+            return Err(CompileError::Runtime(message.replace("[gc-warning]", "[gc-error]")));
+        }
         eprintln!("{message}");
     }
+    Ok(())
+}
+
+fn emit_gc_boundary_warning(
+    importer_path: Option<&Path>,
+    imported_path: &Path,
+    module_name: &str,
+) -> Result<(), CompileError> {
+    enforce_gc_boundary_policy(
+        importer_path,
+        imported_path,
+        module_name,
+        strict_runtime_family_imports_enabled(),
+    )
 }
 
 fn requested_group_import_names(use_stmt: &UseStmt) -> Option<Vec<String>> {
@@ -553,7 +633,10 @@ pub fn load_and_merge_module(
     }
     loader_trace!("resolve", "{} -> {}", parts.join("."), module_path.display());
     debug!(module = %parts.join("."), path = ?module_path, "Resolved module path");
-    emit_gc_boundary_warning(current_file, &module_path, &parts.join("."));
+    if let Err(error) = emit_gc_boundary_warning(current_file, &module_path, &parts.join(".")) {
+        decrement_load_depth();
+        return Err(error);
+    }
     record_module_visit(&module_path, depth);
 
     // Check cache first - if we've already loaded this module, return cached exports
@@ -914,15 +997,15 @@ pub fn load_and_merge_module(
 #[cfg(test)]
 mod tests {
     use super::{
-        gc_boundary_warning_message, load_and_merge_module, loader_trace_enabled,
+        enforce_gc_boundary_policy, gc_boundary_warning_message, load_and_merge_module, loader_trace_enabled,
         prefer_package_init_for_member_import, should_keep_selective_export,
     };
     use crate::value::Value;
     use simple_parser::ast::{ImportTarget, ModulePath, Node, UseStmt};
     use simple_parser::token::Span;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
-    use std::collections::HashMap;
 
     #[test]
     fn gc_boundary_warning_message_flags_nogc_to_gc_imports() {
@@ -951,6 +1034,48 @@ mod tests {
         assert!(msg.contains("Allocating module 'std.nogc_async_mut.task'"));
         assert!(msg.contains("family: nogc_async_mut"));
         assert!(msg.contains("family: nogc_async_mut_noalloc"));
+    }
+
+    #[test]
+    fn gc_boundary_warning_message_flags_lower_layer_imports() {
+        let msg = gc_boundary_warning_message(
+            Path::new("/repo/src/lib/nogc_async_immut/app.spl"),
+            Path::new("/repo/src/lib/nogc_sync_mut/io.spl"),
+            "std.nogc_sync_mut.io",
+        )
+        .expect("lower-ranked family importing hosted mutable family should warn");
+
+        assert!(msg.contains("Higher-layer module 'std.nogc_sync_mut.io'"));
+        assert!(msg.contains("higher_layer_runtime_family"));
+        assert!(msg.contains("family: nogc_sync_mut"));
+        assert!(msg.contains("family: nogc_async_immut"));
+    }
+
+    #[test]
+    fn strict_gc_boundary_policy_returns_error() {
+        let err = enforce_gc_boundary_policy(
+            Some(Path::new("/repo/src/lib/nogc_sync_mut/app.spl")),
+            Path::new("/repo/src/std/gc_async_mut/__init__.spl"),
+            "std.gc_async_mut",
+            true,
+        )
+        .expect_err("strict runtime-family mode should reject no-GC to GC imports");
+
+        let message = err.to_string();
+        assert!(message.contains("[gc-error]"));
+        assert!(message.contains("nogc_imports_gc_family"));
+    }
+
+    #[test]
+    fn warning_gc_boundary_policy_allows_import() {
+        let result = enforce_gc_boundary_policy(
+            Some(Path::new("/repo/src/lib/nogc_sync_mut/app.spl")),
+            Path::new("/repo/src/std/gc_async_mut/__init__.spl"),
+            "std.gc_async_mut",
+            false,
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]
