@@ -100,6 +100,20 @@ fn empty_u8_array_uses_codec_table_capacity() {
 }
 
 #[test]
+fn nonempty_u8_array_literal_uses_byte_storage() {
+    let mir = compile_to_mir("fn test():\n    val a: u8 = 1\n    val b: u8 = 2\n    val arr: [u8] = [a, b]\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_byte_array_new"))
+    }));
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_bytes_u8_push"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_push"))
+    }));
+}
+
+#[test]
 fn u32_array_push_uses_word_fast_path() {
     let mir =
         compile_to_mir("fn test():\n    var arr: [u32] = []\n    var word: u32 = 42\n    arr.push(word)\n").unwrap();

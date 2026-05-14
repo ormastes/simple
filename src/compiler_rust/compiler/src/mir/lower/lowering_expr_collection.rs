@@ -67,6 +67,43 @@ impl<'a> MirLowerer<'a> {
     }
 
     pub(super) fn lower_array_expr(&mut self, elements: &[HirExpr]) -> MirLowerResult<VReg> {
+        if !elements.is_empty() && elements.iter().all(|elem| elem.ty == TypeId::U8) {
+            let capacity = elements.len() as i64;
+            let capacity_reg = self.with_func(|func, current_block| {
+                let reg = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ConstInt {
+                    dest: reg,
+                    value: capacity,
+                });
+                reg
+            })?;
+            let array_reg = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name("rt_byte_array_new"),
+                    args: vec![capacity_reg],
+                });
+                dest
+            })?;
+            for elem in elements {
+                let value_reg = self.lower_expr(elem)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: CallTarget::from_name("rt_typed_bytes_u8_push"),
+                        args: vec![array_reg, value_reg],
+                    });
+                    dest
+                })?;
+            }
+            return Ok(array_reg);
+        }
+
         let mut elem_regs = Vec::new();
         for elem in elements {
             let reg = self.lower_expr(elem)?;
