@@ -79,6 +79,20 @@ set_contains     0.34x C  0.18x Rust
 hashset_contains 0.34x C  0.64x Rust
 ```
 
+The pure Simple `HashSet` was then split from the value-carrying `HashMap`
+wrapper into standalone `SetEntry` buckets, and `HashMap.Entry` was renamed to
+`HashMapEntry` to avoid facade import collisions. A direct clean source-closure
+native run linked a 39 KB binary and measured text `hashset_contains` at
+`25,312` ops/ms with checksum parity. The full clean source-closure harness
+with native CPU still reported remaining gaps:
+
+```text
+list_traverse    0.20x C  0.12x Rust
+list_push        0.43x C  2.66x Rust
+set_contains     0.52x C  0.27x Rust
+hashset_contains 0.39x C  0.65x Rust
+```
+
 ## Ruled Out
 
 - The Simple benchmark is not doing a different asymptotic algorithm for
@@ -135,6 +149,10 @@ hashset_contains 0.34x C  0.64x Rust
 - Moving the text probe into `HashSet.contains` removed the wrapper call to
   `HashMap.contains_key`, but the remaining bucket/entry indexing and string
   equality calls still leave the text set below C.
+- Splitting `HashSet` into standalone pure Simple buckets removed the unused
+  map value storage and preserved clean facade behavior, but the text lookup
+  path is still below C and the broader collection benchmark still depends on
+  backend loop-shape improvements.
 
 ## Likely Gap
 

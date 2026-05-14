@@ -455,6 +455,17 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   list traversal `0.26x` C / `0.25x` Rust, list push `0.44x` C / `0.90x` Rust,
   scalar set membership `0.34x` C / `0.18x` Rust, and text `HashSet.contains`
   `0.34x` C / `0.64x` Rust.
+- Pure Simple `HashSet` now uses standalone `SetEntry` buckets instead of
+  storing membership through a value-carrying `HashMap`, while the `HashMap`
+  bucket entry type is named `HashMapEntry` to avoid clean facade collisions
+  with ordered-map `Entry`. A direct clean source-closure native build linked a
+  39 KB binary and measured text `hashset_contains` at `25,312` ops/ms. The
+  full clean source-closure harness with native CPU still kept checksum parity
+  but warned: list traversal `0.20x` C / `0.12x` Rust, list push `0.43x` C /
+  `2.66x` Rust, scalar set membership `0.52x` C / `0.27x` Rust, and text
+  `HashSet.contains` `0.39x` C / `0.65x` Rust. The pure path is functionally
+  updated and materially faster for text set lookup, but still not at C/Rust
+  parity.
 
 ## Next Concrete Plugin Work
 
