@@ -11,31 +11,13 @@
 # - Once: Run initialization exactly once
 # - Barrier: Synchronize multiple threads
 
+use std.nogc_async_mut.concurrent.channel.{Channel, channel_new}
+use std.nogc_async_mut.concurrent.thread.{thread_yield}
+use std.nogc_sync_mut.atomic.{AtomicI64, AtomicBool, MemoryOrdering, atomic_i64_new, atomic_bool_new}
+
 # ============================================================================
 # FFI Declarations (all known-working SFFI)
 # ============================================================================
-
-# Channel operations
-extern fn rt_channel_new() -> i64
-extern fn rt_channel_send(channel_id: i64, value: Any)
-extern fn rt_channel_try_recv(channel_id: i64) -> Any
-extern fn rt_channel_close(channel_id: i64)
-
-# Atomic integer operations
-extern fn rt_atomic_int_new(initial: i64) -> i64
-extern fn rt_atomic_int_load(handle: i64) -> i64
-extern fn rt_atomic_int_store(handle: i64, value: i64)
-extern fn rt_atomic_int_fetch_add(handle: i64, value: i64) -> i64
-extern fn rt_atomic_int_fetch_sub(handle: i64, value: i64) -> i64
-extern fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new_value: i64) -> bool
-extern fn rt_atomic_int_free(handle: i64)
-
-# Atomic boolean operations
-extern fn rt_atomic_bool_new(initial: bool) -> i64
-extern fn rt_atomic_bool_load(handle: i64) -> bool
-extern fn rt_atomic_bool_store(handle: i64, value: bool)
-extern fn rt_atomic_bool_swap(handle: i64, value: bool) -> bool
-extern fn rt_atomic_bool_free(handle: i64)
 
 # HashMap operations
 extern fn __rt_hashmap_new() -> i64
@@ -45,44 +27,41 @@ extern fn __rt_hashmap_contains_key(handle: i64, key: text) -> bool
 extern fn __rt_hashmap_remove(handle: i64, key: text) -> Any
 extern fn __rt_hashmap_len(handle: i64) -> i64
 
-# Thread operations
-extern fn rt_thread_yield()
-
 # ============================================================================
 # MpscQueue - Multi-Producer Single-Consumer Queue
 # ============================================================================
 
 class MpscQueue:
-    _channel_id: i64
-    _size_handle: i64
+    _channel: Channel
+    _size: AtomicI64
 
     fn push(value: Any):
-        rt_channel_send(self._channel_id, value)
-        rt_atomic_int_fetch_add(self._size_handle, 1)
+        self._channel.send(value)
+        self._size.fetch_add(1, MemoryOrdering.SeqCst)
 
     fn pop() -> Any:
-        val result = rt_channel_try_recv(self._channel_id)
+        val result = self._channel.try_recv()
         if result != nil:
-            rt_atomic_int_fetch_sub(self._size_handle, 1)
+            self._size.fetch_sub(1, MemoryOrdering.SeqCst)
         result
 
     fn is_empty() -> bool:
-        rt_atomic_int_load(self._size_handle) <= 0
+        self._size.load(MemoryOrdering.SeqCst) <= 0
 
     fn len() -> i64:
-        val size = rt_atomic_int_load(self._size_handle)
+        val size = self._size.load(MemoryOrdering.SeqCst)
         if size < 0:
             return 0
         size
 
     fn close():
-        rt_channel_close(self._channel_id)
-        rt_atomic_int_free(self._size_handle)
+        self._channel.close()
+        self._size.free()
 
 fn mpsc_queue_new() -> MpscQueue:
     MpscQueue(
-        _channel_id: rt_channel_new(),
-        _size_handle: rt_atomic_int_new(0)
+        _channel: channel_new(),
+        _size: atomic_i64_new(0)
     )
 
 # ============================================================================
@@ -90,45 +69,45 @@ fn mpsc_queue_new() -> MpscQueue:
 # ============================================================================
 
 class MpmcQueue:
-    _channel_id: i64
+    _channel: Channel
     _capacity: i64
-    _size_handle: i64
+    _size: AtomicI64
 
     fn push(value: Any) -> bool:
-        val current = rt_atomic_int_load(self._size_handle)
+        val current = self._size.load(MemoryOrdering.SeqCst)
         if current >= self._capacity:
             return false
-        rt_channel_send(self._channel_id, value)
-        rt_atomic_int_fetch_add(self._size_handle, 1)
+        self._channel.send(value)
+        self._size.fetch_add(1, MemoryOrdering.SeqCst)
         true
 
     fn pop() -> Any:
-        val result = rt_channel_try_recv(self._channel_id)
+        val result = self._channel.try_recv()
         if result != nil:
-            rt_atomic_int_fetch_sub(self._size_handle, 1)
+            self._size.fetch_sub(1, MemoryOrdering.SeqCst)
         result
 
     fn len() -> i64:
-        val size = rt_atomic_int_load(self._size_handle)
+        val size = self._size.load(MemoryOrdering.SeqCst)
         if size < 0:
             return 0
         size
 
     fn is_empty() -> bool:
-        rt_atomic_int_load(self._size_handle) <= 0
+        self._size.load(MemoryOrdering.SeqCst) <= 0
 
     fn is_full() -> bool:
-        rt_atomic_int_load(self._size_handle) >= self._capacity
+        self._size.load(MemoryOrdering.SeqCst) >= self._capacity
 
     fn close():
-        rt_channel_close(self._channel_id)
-        rt_atomic_int_free(self._size_handle)
+        self._channel.close()
+        self._size.free()
 
 fn mpmc_queue_with_capacity(capacity: i64) -> MpmcQueue:
     MpmcQueue(
-        _channel_id: rt_channel_new(),
+        _channel: channel_new(),
         _capacity: capacity,
-        _size_handle: rt_atomic_int_new(0)
+        _size: atomic_i64_new(0)
     )
 
 # ============================================================================
@@ -168,58 +147,58 @@ fn concurrent_map_with_shards(num_shards: i64) -> ConcurrentMap:
 # ============================================================================
 
 class AtomicFlag:
-    _handle: i64
+    _atomic: AtomicBool
 
     fn set():
-        rt_atomic_bool_store(self._handle, true)
+        self._atomic.store(true, MemoryOrdering.SeqCst)
 
     fn clear():
-        rt_atomic_bool_store(self._handle, false)
+        self._atomic.store(false, MemoryOrdering.SeqCst)
 
     fn is_set() -> bool:
-        rt_atomic_bool_load(self._handle)
+        self._atomic.load(MemoryOrdering.SeqCst)
 
     fn test_and_set() -> bool:
-        rt_atomic_bool_swap(self._handle, true)
+        self._atomic.swap(true, MemoryOrdering.SeqCst)
 
     fn free():
-        rt_atomic_bool_free(self._handle)
+        self._atomic.free()
 
 fn atomic_flag_new() -> AtomicFlag:
-    AtomicFlag(_handle: rt_atomic_bool_new(false))
+    AtomicFlag(_atomic: atomic_bool_new(false))
 
 fn atomic_flag_new_set() -> AtomicFlag:
-    AtomicFlag(_handle: rt_atomic_bool_new(true))
+    AtomicFlag(_atomic: atomic_bool_new(true))
 
 # ============================================================================
 # Once - Run Initialization Exactly Once
 # ============================================================================
 
 class Once:
-    _state: i64  # AtomicInt handle: 0=not run, 1=running, 2=done
+    _state: AtomicI64  # 0=not run, 1=running, 2=done
 
     fn call_once(f: fn()):
         # Fast path: already done
-        if rt_atomic_int_load(self._state) == 2:
+        if self._state.load(MemoryOrdering.SeqCst) == 2:
             return
         # Try to claim execution
-        val ok = rt_atomic_int_compare_exchange(self._state, 0, 1)
+        val ok = self._state.compare_exchange(0, 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst)
         if ok:
             f()
-            rt_atomic_int_store(self._state, 2)
+            self._state.store(2, MemoryOrdering.SeqCst)
         else:
             # Spin-wait for completion
-            while rt_atomic_int_load(self._state) != 2:
-                rt_thread_yield()
+            while self._state.load(MemoryOrdering.SeqCst) != 2:
+                thread_yield()
 
     fn is_completed() -> bool:
-        rt_atomic_int_load(self._state) == 2
+        self._state.load(MemoryOrdering.SeqCst) == 2
 
     fn free():
-        rt_atomic_int_free(self._state)
+        self._state.free()
 
 fn once_new() -> Once:
-    Once(_state: rt_atomic_int_new(0))
+    Once(_state: atomic_i64_new(0))
 
 # ============================================================================
 # Barrier - Synchronize Multiple Threads
@@ -227,33 +206,32 @@ fn once_new() -> Once:
 
 class Barrier:
     _count: i64
-    _arrived: i64    # AtomicInt handle
-    _generation: i64 # AtomicInt handle
+    _arrived: AtomicI64
+    _generation: AtomicI64
 
     fn wait():
-        val current_gen = rt_atomic_int_load(self._generation)
-        val arrived = rt_atomic_int_fetch_add(self._arrived, 1)
+        val current_gen = self._generation.load(MemoryOrdering.SeqCst)
+        val arrived = self._arrived.fetch_add(1, MemoryOrdering.SeqCst)
         if arrived + 1 == self._count:
             # Last thread - reset and advance generation
-            rt_atomic_int_store(self._arrived, 0)
-            rt_atomic_int_fetch_add(self._generation, 1)
+            self._arrived.store(0, MemoryOrdering.SeqCst)
+            self._generation.fetch_add(1, MemoryOrdering.SeqCst)
         else:
             # Wait for generation to advance
-            while rt_atomic_int_load(self._generation) == current_gen:
-                rt_thread_yield()
+            while self._generation.load(MemoryOrdering.SeqCst) == current_gen:
+                thread_yield()
 
     fn free():
-        rt_atomic_int_free(self._arrived)
-        rt_atomic_int_free(self._generation)
+        self._arrived.free()
+        self._generation.free()
 
 fn barrier_new(count: i64) -> Barrier:
     Barrier(
         _count: count,
-        _arrived: rt_atomic_int_new(0),
-        _generation: rt_atomic_int_new(0)
+        _arrived: atomic_i64_new(0),
+        _generation: atomic_i64_new(0)
     )
 
 # ============================================================================
 # Exports
 # ============================================================================
-
