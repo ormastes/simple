@@ -21,10 +21,10 @@
 #   Call(dst, "rt_index_get", [array, idx]) -> Call(dst, "rt_array_get", [array, idx])
 #   when MIR local type metadata proves the receiver is an Array.
 #
-# Pattern 6 — Dead append-only capacity array elimination:
+# Pattern 6 — Dead write-only capacity array elimination:
 #   Call(array, "rt_array_new_with_cap", [cap]) -> (removed)
-#   Call(_, typed_push, [array, value])         -> (removed)
-#   when the capacity-created array has no observable uses except ignored pushes.
+#   Call(_, typed_write, [array, ...])          -> (removed)
+#   when the capacity-created array has no observable uses except ignored writes.
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir.*
@@ -95,12 +95,12 @@ impl CollectionOptimization:
             var changed = false
             for inst in block.instructions:
                 val dest_id = self.capacity_array_alloc_dest_id(inst)
-                if dest_id >= 0 and self.array_local_has_only_ignored_appends(blocks, dest_id):
+                if dest_id >= 0 and self.array_local_has_only_ignored_writes(blocks, dest_id):
                     self.dead_append_arrays_elided = self.dead_append_arrays_elided + 1
                     changed = true
                     continue
-                val append_array_id = self.ignored_append_array_local_id(inst)
-                if append_array_id >= 0 and self.array_local_has_only_ignored_appends(blocks, append_array_id):
+                val write_array_id = self.ignored_array_write_local_id(inst)
+                if write_array_id >= 0 and self.array_local_has_only_ignored_writes(blocks, write_array_id):
                     changed = true
                     continue
                 new_insts.push(inst)
@@ -115,16 +115,16 @@ impl CollectionOptimization:
                 new_blocks.push(block)
         new_blocks
 
-    fn array_local_has_only_ignored_appends(blocks: [MirBlock], array_id: i64) -> bool:
-        var append_count = 0
+    fn array_local_has_only_ignored_writes(blocks: [MirBlock], array_id: i64) -> bool:
+        var write_count = 0
         for block in blocks:
             for inst in block.instructions:
                 if self.capacity_array_alloc_dest_id(inst) == array_id:
                     continue
 
-                if self.ignored_append_array_local_id(inst) == array_id:
-                    append_count = append_count + 1
-                    if self.inst_uses_local_outside_ignored_append(inst, array_id):
+                if self.ignored_array_write_local_id(inst) == array_id:
+                    write_count = write_count + 1
+                    if self.inst_uses_local_outside_ignored_write(inst, array_id):
                         return false
                     continue
 
@@ -133,7 +133,7 @@ impl CollectionOptimization:
 
             if self.terminator_uses_local_id(block.terminator, array_id):
                 return false
-        append_count > 0
+        write_count > 0
 
     fn capacity_array_alloc_dest_id(inst: MirInst) -> i64:
         match inst.kind:
@@ -152,12 +152,12 @@ impl CollectionOptimization:
         name == "rt_array_new_with_cap_js_value" or
         name == "rt_array_new_with_cap_bool"
 
-    fn ignored_append_array_local_id(inst: MirInst) -> i64:
+    fn ignored_array_write_local_id(inst: MirInst) -> i64:
         match inst.kind:
             case Call(dest, func, args):
                 if dest.? or args.len() < 2:
                     return -1
-                if not self.is_append_call_name(self.get_func_name(func)):
+                if not self.is_dead_array_write_call_name(self.get_func_name(func)):
                     return -1
                 match args[0].kind:
                     case Copy(local): local.id
@@ -165,14 +165,17 @@ impl CollectionOptimization:
                     case _: -1
             case _: -1
 
-    fn is_append_call_name(name: text) -> bool:
+    fn is_dead_array_write_call_name(name: text) -> bool:
         name == "push" or
+        name == "rt_array_set" or
         name == "rt_typed_words_u32_push" or
         name == "rt_typed_words_u64_push" or
         name == "rt_typed_words_u32_push_known_at" or
         name == "rt_typed_words_u64_push_known_at" or
         name == "rt_typed_words_u32_push_known_data_at" or
         name == "rt_typed_words_u64_push_known_data_at" or
+        name == "rt_typed_words_u32_set" or
+        name == "rt_typed_words_u64_set" or
         name == "rt_typed_words_u32_store_known_data_at" or
         name == "rt_typed_words_u64_store_known_data_at"
 
@@ -591,7 +594,7 @@ impl CollectionOptimization:
                 local.id == local_id
             case _: false
 
-    fn inst_uses_local_outside_ignored_append(inst: MirInst, local_id: i64) -> bool:
+    fn inst_uses_local_outside_ignored_write(inst: MirInst, local_id: i64) -> bool:
         match inst.kind:
             case Call(_, _, args):
                 if args.len() == 0:
