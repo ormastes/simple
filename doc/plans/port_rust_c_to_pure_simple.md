@@ -9,7 +9,8 @@ Scope: keep the algorithm implementations in pure Simple, keep the MDSOC compile
 Current evidence:
 - Correctness parity is passing for the dependency-free C/Rust/Simple XXHash64, CRC32, Adler-32, and ChaCha20 benchmark harness.
 - The latest 2026-05-13 source-built 3-sample median shows ChaCha20 faster than both C and Rust at `1.17x` C / `1.04x` Rust, while XXHash64 is `0.57x` C / `0.97x` Rust, CRC32 is `0.88x` C / `0.88x` Rust, and Adler-32 is `0.94x` C / `0.93x` Rust. Phase 6D remains open until every measured row is faster than both baselines.
-- This local build now has an LLVM-enabled active `bin/simple`; the benchmark harness records both default native output and a `--backend=llvm` probe with checksum parity.
+- A 2026-05-14 single-sample smoke using `SIMPLE_BIN=bin/release/x86_64-unknown-linux-gnu/simple SIMPLE_BENCH_SAMPLES=1 SIMPLE_LLVM_PROBE=0 SIMPLE_DISASM_PROBE=0 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs` kept checksum parity but did not meet equal-or-better speed: XXHash64 `0.50x` C / `0.49x` Rust, CRC32 `0.89x` C / `1.29x` Rust, Adler-32 `0.78x` C / `0.74x` Rust, and ChaCha20 `0.70x` C / `0.56x` Rust. This confirms Phase 6D is still open in the current active release artifact.
+- The benchmark harness records both default native output and a `--backend=llvm` probe with checksum parity when the selected `SIMPLE_BIN` exposes LLVM. In the 2026-05-14 workspace, `bin/simple` is absent and the active checked artifact is `bin/release/x86_64-unknown-linux-gnu/simple`.
 - Rust reference builds use `rustc -C opt-level=3 -C target-cpu=native`; Simple uses `simple compile --native --cpu native --opt-level aggressive`.
 - Recent Rust compiler work added typed `[u8]` load/store helpers (`rt_bytes_u8_at`, `rt_bytes_u8_set`), packed `[u8]` runtime storage for typed empty byte arrays, little-endian byte-array load and store markers that lower inline in Cranelift and LLVM, inline `rt_len` lowering for Cranelift and LLVM call sites, release-shim archive lookup, LLVM target datalayout emission, LLVM backend CLI availability, and native extern hygiene for unused broad SIMD declarations.
 - The active `bin/release/x86_64-unknown-linux-gnu/simple` artifact was refreshed from the LLVM-enabled release build on 2026-05-12; current SHA256 is `e1af8431a4bc05cad74bfd29d4aebb8436adb7fd852a035e5e9546319a35295d`.
@@ -87,6 +88,11 @@ Current completed optimization items:
 - `test/unit/os/crypto/adler32_spec.spl` adds a 6000-byte KAT so the larger reduction window is covered across the previous boundary.
 - Rejected follow-up: returning Adler to a 5552-byte window with `u32` accumulators preserved the 13 interpreter KAT examples but regressed the benchmark smoke to `0.89x` C / `0.89x` Rust, so the 355328-byte `u64` window remains the better measured source form.
    - Stop condition met for correctness only: targeted Adler check/test pass and the strict cipher/compression gate reports `passed=13 skipped=0 failed=0`. Performance remains below C in representative samples.
+
+10. **General small-constant MIR multiply decomposition**
+   - `simple.opt.math.strength_reduce` now lowers additional common constants without editing algorithm source: `x * 11`, `x * 13`, `x * 17`, and `x * 31`.
+   - The new `11` and `13` cases cover two shifted terms plus the source, which appears in bit packing, dictionary coding, and weighted byte-reduction shapes. The `17` and `31` cases cover common nibble/color expansion and byte-mixing arithmetic.
+   - Stop condition met for this optimizer slice: `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple check src/compiler/60.mir_opt/mir_opt/loop_strength.spl` passes, and `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple test test/unit/compiler/mir_opt/strength_reduction_spec.spl --mode=interpreter --clean` passes 14 examples with 0 failures.
 
 Follow-up hardening work, in order:
 
