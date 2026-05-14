@@ -7,6 +7,9 @@ BUILD_DIR="$ROOT/build/perf/collections"
 SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
 SIMPLE_NATIVE_RUNTIME_BUNDLE="${SIMPLE_NATIVE_RUNTIME_BUNDLE:-core-c}"
 SIMPLE_COLLECTION_BENCH_SAMPLES="${SIMPLE_COLLECTION_BENCH_SAMPLES:-1}"
+SIMPLE_COLLECTION_BENCH_MIN_C_RATIO="${SIMPLE_COLLECTION_BENCH_MIN_C_RATIO:-0.50}"
+SIMPLE_COLLECTION_BENCH_MIN_RUST_RATIO="${SIMPLE_COLLECTION_BENCH_MIN_RUST_RATIO:-0.50}"
+SIMPLE_COLLECTION_BENCH_ENFORCE="${SIMPLE_COLLECTION_BENCH_ENFORCE:-0}"
 
 mkdir -p "$BUILD_DIR"
 
@@ -21,6 +24,7 @@ echo "Simple: $SIMPLE_BIN"
 echo "Runtime bundle: $SIMPLE_NATIVE_RUNTIME_BUNDLE"
 echo "Build:  $BUILD_DIR"
 echo "Samples: $SIMPLE_COLLECTION_BENCH_SAMPLES"
+echo "Warn below: C ${SIMPLE_COLLECTION_BENCH_MIN_C_RATIO}x, Rust ${SIMPLE_COLLECTION_BENCH_MIN_RUST_RATIO}x"
 echo ""
 
 gcc -O3 -march=native -std=c11 "$BENCH_DIR/collection_ref.c" -o "$BUILD_DIR/collection_c"
@@ -71,6 +75,10 @@ ratio() {
     awk -v n="$1" -v d="$2" 'BEGIN { if (d == 0) printf "n/a"; else printf "%.2fx", n / d }'
 }
 
+ratio_below() {
+    awk -v n="$1" -v d="$2" -v min="$3" 'BEGIN { if (d == 0) exit 1; exit ((n / d) < min ? 0 : 1) }'
+}
+
 echo "--- C reference ---"
 run_samples c "$BUILD_DIR/c.out" "$BUILD_DIR/collection_c"
 
@@ -88,6 +96,10 @@ else
     exit 1
 fi
 
+warnings="$BUILD_DIR/perf_warnings.txt"
+rm -f "$warnings"
+touch "$warnings"
+
 echo "benchmark	c_ops_per_ms	rust_ops_per_ms	simple_ops_per_ms	simple_vs_c	simple_vs_rust"
 for bench in list_traverse list_push set_contains hashset_contains; do
     c_sum="$(checksum_value "$BUILD_DIR/c.out" "$bench")"
@@ -103,6 +115,20 @@ for bench in list_traverse list_push set_contains hashset_contains; do
     printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
         "$bench" "$c_ops" "$rust_ops" "$simple_ops" \
         "$(ratio "$simple_ops" "$c_ops")" "$(ratio "$simple_ops" "$rust_ops")"
+    if ratio_below "$simple_ops" "$c_ops" "$SIMPLE_COLLECTION_BENCH_MIN_C_RATIO"; then
+        echo "[collectionbench-warn] bench=$bench simple_vs_c=$(ratio "$simple_ops" "$c_ops") below=${SIMPLE_COLLECTION_BENCH_MIN_C_RATIO}x" >> "$warnings"
+    fi
+    if ratio_below "$simple_ops" "$rust_ops" "$SIMPLE_COLLECTION_BENCH_MIN_RUST_RATIO"; then
+        echo "[collectionbench-warn] bench=$bench simple_vs_rust=$(ratio "$simple_ops" "$rust_ops") below=${SIMPLE_COLLECTION_BENCH_MIN_RUST_RATIO}x" >> "$warnings"
+    fi
 done | tee "$BUILD_DIR/speed_ratios.tsv"
+
+if [[ -s "$warnings" ]]; then
+    cat "$warnings"
+    if [[ "$SIMPLE_COLLECTION_BENCH_ENFORCE" == "1" ]]; then
+        echo "[collectionbench-error] speed ratio floor failed; set SIMPLE_COLLECTION_BENCH_ENFORCE=0 to warn only" >&2
+        exit 1
+    fi
+fi
 
 echo "[collectionbench-ok] checksum parity passed for list_traverse, list_push, set_contains, and hashset_contains"
