@@ -260,6 +260,10 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   read window as element/data/dict helpers, so `rt_array_len`/`rt_string_len`/
   `rt_dict_len` no longer fence repeated runtime read reuse in already-lowered
   MIR.
+- The pure collection hoister now also moves invariant runtime metadata reads
+  (`rt_array_len`, `rt_string_len`, `rt_dict_len`, `rt_array_data_ptr`,
+  `rt_array_header_ptr`) out of read-only loops, while keeping them inside loops
+  that may mutate collection state.
 - A fresh one-sample collection benchmark after the pure optimizer CSE commits
   kept checksum parity, but the native benchmark path still misses C/Rust
   throughput parity: list traversal measured `1,651,751` Simple ops/ms

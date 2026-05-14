@@ -912,7 +912,8 @@ impl CollectionOptimization:
                 for inst in block.instructions:
                     val dest = self.inst_dest(inst)
                     if dest.?:
-                        loop_defs[dest.unwrap().id] = true
+                        loop_defs[dest.id] = true
+        val loop_has_collection_mutation = self.loop_has_collection_state_mutation(blocks, loop_set)
 
         # Find hoistable pure calls
         var to_hoist: [MirInst] = []
@@ -921,11 +922,11 @@ impl CollectionOptimization:
         for block in blocks:
             if loop_set.has(block.id.id):
                 for inst in block.instructions:
-                    if self.is_hoistable_pure_call(inst, loop_defs, hoisted_ids):
+                    if self.is_hoistable_pure_call(inst, loop_defs, hoisted_ids, loop_has_collection_mutation):
                         to_hoist.push(inst)
                         val dest = self.inst_dest(inst)
                         if dest.?:
-                            hoisted_ids[dest.unwrap().id] = true
+                            hoisted_ids[dest.id] = true
 
         if to_hoist.len() == 0:
             return blocks
@@ -965,11 +966,22 @@ impl CollectionOptimization:
 
         new_blocks
 
-    fn is_hoistable_pure_call(inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>) -> bool:
+    fn loop_has_collection_state_mutation(blocks: [MirBlock], loop_set: Dict<i64, bool>) -> bool:
+        for block in blocks:
+            if loop_set.has(block.id.id):
+                for inst in block.instructions:
+                    if self.inst_may_mutate_collection_state(inst):
+                        return true
+        false
+
+    fn is_hoistable_pure_call(inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>, loop_has_collection_mutation: bool) -> bool:
         match inst.kind:
             case Call(dest, func, args):
                 val fname = self.get_func_name(func)
                 if not self.is_pure_method(fname):
+                    if loop_has_collection_mutation or not self.is_hoistable_runtime_metadata_read(fname):
+                        return false
+                if not dest.?:
                     return false
                 # All args must be loop-invariant
                 for arg in args:
@@ -977,6 +989,13 @@ impl CollectionOptimization:
                         return false
                 true
             case _: false
+
+    fn is_hoistable_runtime_metadata_read(name: text) -> bool:
+        name == "rt_array_len" or
+        name == "rt_string_len" or
+        name == "rt_dict_len" or
+        name == "rt_array_data_ptr" or
+        name == "rt_array_header_ptr"
 
     fn is_pure_method(name: text) -> bool:
         for m in PURE_METHODS:
@@ -1028,10 +1047,10 @@ impl CollectionOptimization:
         val d1 = self.inst_dest(inst)
         if not d1.?:
             return false
-        val d1_id = d1.unwrap().id
+        val d1_id = d1.id
         for other in list:
             val d2 = self.inst_dest(other)
-            if d2.? and d2.unwrap().id == d1_id:
+            if d2.? and d2.id == d1_id:
                 return true
         false
 

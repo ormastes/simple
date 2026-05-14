@@ -1,6 +1,7 @@
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirBlock}
 use compiler.mir_opt.mir_opt.collection_opt.{create_collection_opt_pass}
+use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 
@@ -31,6 +32,26 @@ fn _co_block(instructions: [MirInst]) -> MirBlock:
         label: Some("entry"),
         instructions: instructions,
         terminator: MirTerminator.Return(nil)
+    )
+
+fn _co_block_with(id: i64, instructions: [MirInst], terminator: MirTerminator) -> MirBlock:
+    MirBlock(
+        id: BlockId(id: id),
+        label: Some("b{id}"),
+        instructions: instructions,
+        terminator: terminator
+    )
+
+fn _co_loop(header: i64, body: [i64]) -> LoopInfo:
+    var body_blocks: [BlockId] = []
+    for id in body:
+        body_blocks.push(BlockId(id: id))
+    LoopInfo(
+        header: BlockId(id: header),
+        body: body_blocks,
+        backedges: body_blocks,
+        exit_edges: [],
+        trip_count: nil
     )
 
 fn _co_driver_manifest_attr_default() -> DriverManifestAttr:
@@ -276,6 +297,31 @@ describe "MIR Collection Optimization":
 
         expect(_co_count_rt_array_len(block)).to_equal(2)
         expect(opt.len_queries_reused).to_equal(0)
+
+    it "hoists invariant runtime collection metadata reads out of read-only loops":
+        val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
+        val len = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val body = _co_block_with(1, [len], MirTerminator.Goto(BlockId(id: 0)))
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
+
+        expect(_co_count_rt_array_len(optimized[0])).to_equal(1)
+        expect(_co_count_rt_array_len(optimized[1])).to_equal(0)
+        expect(opt.calls_hoisted).to_equal(1)
+
+    it "keeps runtime collection metadata reads inside mutating loops":
+        val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
+        val len = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
+        val push = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_push"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val body = _co_block_with(1, [len, push], MirTerminator.Goto(BlockId(id: 0)))
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
+
+        expect(_co_count_rt_array_len(optimized[0])).to_equal(0)
+        expect(_co_count_rt_array_len(optimized[1])).to_equal(1)
+        expect(opt.calls_hoisted).to_equal(0)
 
     it "specializes proven array index dispatch to direct array get":
         val index_get = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_index_get"), [_co_copy(1), _co_copy(2)]), span: nil)
