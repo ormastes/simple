@@ -64,6 +64,25 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
     names
 }
 
+pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
+    matches!(
+        name,
+        "__simple_runtime_init"
+            | "__simple_runtime_shutdown"
+            | "rt_set_args"
+            | "rt_function_not_found"
+            | "rt_string_new"
+            | "rt_string_data"
+            | "rt_string_len"
+            | "rt_print_str"
+            | "rt_println_str"
+            | "rt_print_value"
+            | "rt_println_value"
+            | "rt_array_new"
+            | "rt_array_len"
+    )
+}
+
 /// Common codegen backend that works with any Cranelift Module type.
 ///
 /// This struct contains all shared state and logic between AOT and JIT backends.
@@ -486,11 +505,15 @@ impl<M: Module> CodegenBackend<M> {
     pub fn declare_runtime_functions(
         module: &mut M,
         target: &Target,
+        referenced_names: &HashSet<String>,
     ) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
         let mut funcs = HashMap::new();
         let call_conv = super::shared::platform_call_conv();
 
         for spec in runtime_funcs_for_target(target) {
+            if !referenced_names.contains(spec.name) && !runtime_symbol_is_codegen_root(spec.name) {
+                continue;
+            }
             let sig = spec.build_signature(call_conv);
             let id = module
                 .declare_function(spec.name, Linkage::Import, &sig)
@@ -501,9 +524,9 @@ impl<M: Module> CodegenBackend<M> {
         Ok(funcs)
     }
 
-    fn ensure_runtime_functions_declared(&mut self) -> BackendResult<()> {
+    fn ensure_runtime_functions_declared(&mut self, referenced_names: &HashSet<String>) -> BackendResult<()> {
         if self.runtime_funcs.is_empty() {
-            self.runtime_funcs = Self::declare_runtime_functions(&mut self.module, &self.target)?;
+            self.runtime_funcs = Self::declare_runtime_functions(&mut self.module, &self.target, referenced_names)?;
         }
         Ok(())
     }
@@ -1000,7 +1023,7 @@ impl<M: Module> CodegenBackend<M> {
         let functions = unique_functions;
         let referenced_names = referenced_call_names(&functions);
         if !Self::can_omit_runtime_imports(mir, &functions) {
-            self.ensure_runtime_functions_declared()?;
+            self.ensure_runtime_functions_declared(&referenced_names)?;
         }
 
         // First pass: declare functions, then globals.

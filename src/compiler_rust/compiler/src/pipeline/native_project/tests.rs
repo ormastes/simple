@@ -1093,10 +1093,12 @@ void app_call(void) { rt_used(); }
         .unwrap()
         .success());
 
+    let mut all_mangled = std::collections::HashMap::new();
+    all_mangled.insert("unused".to_string(), vec!["rt_unused".to_string()]);
     let imports = ModuleImports {
         import_map: std::sync::Arc::new(std::collections::HashMap::new()),
         ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
-        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        all_mangled: std::sync::Arc::new(all_mangled),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),

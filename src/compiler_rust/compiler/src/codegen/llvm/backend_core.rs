@@ -707,6 +707,7 @@ impl NativeBackend for LlvmBackend {
         //
         // Skip functions that the LLVM backend declares manually with ptr types
         // (Cranelift uses i64 for everything, but LLVM distinguishes ptr from i64).
+        let referenced_function_names = crate::codegen::common_backend::referenced_call_names(&module.functions);
         #[cfg(feature = "llvm")]
         {
             let m = self.module.borrow();
@@ -720,6 +721,11 @@ impl NativeBackend for LlvmBackend {
                     .collect();
 
                 for spec in crate::codegen::runtime_ffi::RUNTIME_FUNCS {
+                    if !referenced_function_names.contains(spec.name)
+                        && !crate::codegen::common_backend::runtime_symbol_is_codegen_root(spec.name)
+                    {
+                        continue;
+                    }
                     if defined_function_names.contains(spec.name) {
                         continue;
                     }
@@ -763,7 +769,6 @@ impl NativeBackend for LlvmBackend {
 
         // First pass: forward-declare all function signatures
         // This is necessary so that functions can call each other regardless of compilation order
-        let referenced_function_names = crate::codegen::common_backend::referenced_call_names(&module.functions);
         for func in &module.functions {
             let has_body = !func.blocks.is_empty();
             if !has_body && !referenced_function_names.contains(func.name.as_str()) {

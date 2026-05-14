@@ -164,7 +164,7 @@ impl NativeProjectBuilder {
         main_o: &Path,
         init_o: Option<&PathBuf>,
         runtime_lib: &Path,
-        imports: &ModuleImports,
+        _imports: &ModuleImports,
     ) -> Result<Vec<String>, String> {
         let runtime_defined = Self::read_defined_symbol_set(runtime_lib)?;
         let mut required = BTreeSet::new();
@@ -206,13 +206,6 @@ impl NativeProjectBuilder {
             }
         }
 
-        for variants in imports.all_mangled.values() {
-            for sym in variants {
-                if runtime_defined.contains(sym) {
-                    required.insert(sym.clone());
-                }
-            }
-        }
         Ok(required.into_iter().collect())
     }
 
