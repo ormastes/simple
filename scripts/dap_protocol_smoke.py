@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-SIMPLE_BIN = os.environ.get("SIMPLE_BIN", "src/compiler_rust/target/bootstrap/simple")
+SIMPLE_BIN = os.environ.get("SIMPLE_BIN", "bin/simple")
 
 
 def frame(payload):
