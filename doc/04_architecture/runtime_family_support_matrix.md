@@ -97,6 +97,27 @@ compatibility families, not independent backend owners.
 These families are advanced-scoped until broader execution coverage proves
 runtime behavior beyond import/type resolution and facade checks.
 
+### 2.6.1 Backend Routing Policy
+
+The production ownership rule is behavioral, not name-only:
+
+- Async-visible compatibility APIs route through `nogc_async_mut` when the
+  no-GC async family has an API-preserving surface.
+- Sync-only or blocking runtime ownership remains in `nogc_sync_mut` when
+  wrapping it in `nogc_async_mut` would only add a scheduler dependency without
+  changing observable behavior.
+- `nogc_async_mut` may expose facade modules over `nogc_sync_mut` for
+  synchronous FFI boundaries. Those facades must not wildcard-export
+  runtime-hook owners; `scripts/audit/runtime_backend_boundaries.py` keeps the
+  wildcard-owner scan at zero.
+- `gc_async_mut` facades prefer matching `nogc_async_mut` surfaces first. A
+  direct `nogc_sync_mut` export is allowed only for pure or synchronous APIs
+  that do not have an async-visible contract, and runtime-hook-owner wildcard
+  exports are blocked by the same audit.
+- `gc_sync_mut` is a compatibility facade over `gc_async_mut`, not a separate
+  sync backend. It stays advanced-scoped until selected APIs prove whether they
+  need real blocking wrappers.
+
 ### 2.7 `nogc_async_mut_noalloc` (128 files -- baremetal)
 
 - **Allocation model**: Stack-only. No heap allocation. Baremetal target presets restrict `allowed_families` to `nogc_async_mut_noalloc` plus `common`.
