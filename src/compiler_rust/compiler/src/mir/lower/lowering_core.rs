@@ -99,12 +99,14 @@ pub(super) struct ArrayLenBoundProof {
 pub(super) struct ArrayAppendBoundProof {
     pub array_local_index: usize,
     pub index_local_index: usize,
+    pub capacity_local_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ArrayAppendPtrs {
     pub array_local_index: usize,
     pub index_local_index: usize,
+    pub capacity_local_index: usize,
     pub header_ptr: VReg,
     pub data_ptr: VReg,
 }
@@ -467,6 +469,7 @@ impl<'a> MirLowerer<'a> {
                 .then_some(ArrayAppendBoundProof {
                     array_local_index: *array_local_index,
                     index_local_index,
+                    capacity_local_index,
                 })
             })
     }

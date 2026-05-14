@@ -207,14 +207,15 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `while unsigned_index < length` with exactly one non-escaping typed push in
   the loop body. Those pushes lower to `*_push_known_data_at`, hoisting the
   array data pointer and avoiding the generic append capacity/grow branch.
-  Disassembly of `bench_list_push` shows the hot loop storing directly through
-  the hoisted data pointer and updating `len = index + 1`; Cranelift still
-  rematerializes the header mask for the length store. A one-sample benchmark
-  kept checksum parity and measured list traversal at `1,787,562` Simple
-  ops/ms (`0.42x` C, `0.29x` Rust), list push at `144,873` Simple ops/ms
-  (`0.05x` C, `0.10x` Rust), and set-like membership at `2,011` Simple ops/ms
-  (`0.31x` C, `0.15x` Rust). The remaining push gap is now loop/header update
-  overhead rather than capacity or grow dispatch in the hot append body.
+  The length update is deferred to loop exit for this strict shape, so
+  disassembly of `bench_list_push` shows the hot loop storing directly through
+  the hoisted data pointer without a per-element header write. A one-sample
+  benchmark kept checksum parity and measured list traversal at `1,550,495`
+  Simple ops/ms (`0.45x` C, `0.16x` Rust), list push at `144,868` Simple
+  ops/ms (`0.04x` C, `0.10x` Rust), and set-like membership at `2,007` Simple
+  ops/ms (`0.28x` C, `0.15x` Rust). The remaining push gap is now dominated by
+  loop/allocation/codegen overhead rather than capacity, grow dispatch, or
+  per-element length updates in the hot append body.
 
 ## Next Concrete Plugin Work
 

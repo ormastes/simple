@@ -650,10 +650,10 @@ impl<'a> MirLowerer<'a> {
                             };
                             let target = match (target, append_index) {
                                 ("rt_typed_words_u32_push", Some(_)) if append_ptrs.is_some() => {
-                                    "rt_typed_words_u32_push_known_data_at"
+                                    "rt_typed_words_u32_store_known_data_at"
                                 }
                                 ("rt_typed_words_u64_push", Some(_)) if append_ptrs.is_some() => {
-                                    "rt_typed_words_u64_push_known_data_at"
+                                    "rt_typed_words_u64_store_known_data_at"
                                 }
                                 ("rt_typed_words_u32_push", Some(_)) => "rt_typed_words_u32_push_known_at",
                                 ("rt_typed_words_u64_push", Some(_)) => "rt_typed_words_u64_push_known_at",
@@ -885,6 +885,7 @@ impl<'a> MirLowerer<'a> {
                         ArrayAppendPtrs {
                             array_local_index: proof.array_local_index,
                             index_local_index: proof.index_local_index,
+                            capacity_local_index: proof.capacity_local_index,
                             header_ptr,
                             data_ptr,
                         }
@@ -956,6 +957,31 @@ impl<'a> MirLowerer<'a> {
                 self.pop_loop()?;
 
                 self.set_current_block(exit_id)?;
+                if let Some(ptrs) = hoisted_append_ptrs {
+                    let capacity_reg = self.with_func(|func, current_block| {
+                        let addr = func.new_vreg();
+                        let capacity = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::LocalAddr {
+                            dest: addr,
+                            local_index: ptrs.capacity_local_index,
+                        });
+                        block.instructions.push(MirInst::Load {
+                            dest: capacity,
+                            addr,
+                            ty: TypeId::U64,
+                        });
+                        capacity
+                    })?;
+                    self.with_func(|func, current_block| {
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: None,
+                            target: CallTarget::from_name("rt_array_set_len_known"),
+                            args: vec![ptrs.header_ptr, capacity_reg],
+                        });
+                    })?;
+                }
                 Ok(())
             }
 
