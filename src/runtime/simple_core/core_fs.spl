@@ -2,7 +2,8 @@
 #
 # Provides file I/O primitives (read, write, append, exists, delete, size)
 # and directory creation (mkdir -p) by delegating to libc/POSIX.
-# All parameters and return values use the runtime tagged-value ABI (i64).
+# Public rt_* entrypoints follow the compiler runtime FFI ABI: text inputs
+# arrive as pointer/length pairs and text outputs return runtime tagged values.
 
 extern fn malloc(size: i64) -> i64
 extern fn free(ptr: i64)
@@ -18,6 +19,19 @@ extern fn rt_string_data(value: i64) -> i64
 extern fn rt_string_new(bytes: i64, len: i64) -> i64
 extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+
+fn fs_copy_cstr(ptr: i64, len: i64) -> i64:
+    if ptr < 1 or len < 0:
+        return 0
+    val out = malloc(len + 1)
+    if out < 1:
+        return 0
+    var i = 0
+    while i < len:
+        spl_store_u8(out, i, spl_load_u8(ptr, i))
+        i = i + 1
+    spl_store_u8(out, len, 0)
+    return out
 
 # --- Helpers for NUL-terminated C string literals ---
 
@@ -48,14 +62,16 @@ fn make_mode_a() -> i64:
 
 # --- File Existence ---
 
-pub fn rt_file_exists(path: i64) -> i64:
-    val path_ptr = rt_string_data(path)
+pub fn rt_file_exists(path_ptr_raw: i64, path_len: i64) -> i8:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
     if path_ptr < 1:
         return 0
     val mode = make_mode_r()
     if mode < 1:
+        free(path_ptr)
         return 0
     val f = fopen(path_ptr, mode)
+    free(path_ptr)
     free(mode)
     if f < 1:
         return 0
@@ -64,14 +80,16 @@ pub fn rt_file_exists(path: i64) -> i64:
 
 # --- File Read ---
 
-pub fn rt_file_read_text(path: i64) -> i64:
-    val path_ptr = rt_string_data(path)
+pub fn rt_file_read_text(path_ptr_raw: i64, path_len: i64) -> i64:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
     if path_ptr < 1:
         return rt_string_new(0, 0)
     val mode = make_mode_r()
     if mode < 1:
+        free(path_ptr)
         return rt_string_new(0, 0)
     val f = fopen(path_ptr, mode)
+    free(path_ptr)
     free(mode)
     if f < 1:
         return rt_string_new(0, 0)
@@ -97,34 +115,32 @@ pub fn rt_file_read_text(path: i64) -> i64:
 
 # --- File Write ---
 
-fn file_write_with_mode(path: i64, content: i64, mode_str: i64) -> i64:
-    val path_ptr = rt_string_data(path)
+fn file_write_with_mode(path_ptr_raw: i64, path_len: i64, content_ptr: i64, content_len: i64, mode_str: i64) -> i8:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
     if path_ptr < 1:
         free(mode_str)
         return 0
     val f = fopen(path_ptr, mode_str)
+    free(path_ptr)
     free(mode_str)
     if f < 1:
         return 0
-    val content_ptr = rt_string_data(content)
-    if content_ptr > 0:
-        val content_len = strlen(content_ptr)
-        if content_len > 0:
-            fwrite(content_ptr, 1, content_len, f)
+    if content_ptr > 0 and content_len > 0:
+        fwrite(content_ptr, 1, content_len, f)
     fclose(f)
     return 1
 
-pub fn rt_file_write_text(path: i64, content: i64) -> i64:
+pub fn rt_file_write_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> i8:
     val mode = make_mode_w()
     if mode < 1:
         return 0
-    return file_write_with_mode(path, content, mode)
+    return file_write_with_mode(path_ptr, path_len, content_ptr, content_len, mode)
 
-pub fn rt_file_append_text(path: i64, content: i64) -> i64:
+pub fn rt_file_append_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> i8:
     val mode = make_mode_a()
     if mode < 1:
         return 0
-    return file_write_with_mode(path, content, mode)
+    return file_write_with_mode(path_ptr, path_len, content_ptr, content_len, mode)
 
 # --- File Delete ---
 
@@ -141,14 +157,16 @@ pub fn rt_file_delete(path: i64) -> i64:
 
 # --- File Size ---
 
-pub fn rt_file_size(path: i64) -> i64:
-    val path_ptr = rt_string_data(path)
+pub fn rt_file_size(path_ptr_raw: i64, path_len: i64) -> i64:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
     if path_ptr < 1:
         return 0
     val mode = make_mode_r()
     if mode < 1:
+        free(path_ptr)
         return 0
     val f = fopen(path_ptr, mode)
+    free(path_ptr)
     free(mode)
     if f < 1:
         return 0
@@ -176,16 +194,17 @@ fn mkdir_one(path_ptr: i64) -> i64:
         return 1
     return 1
 
-pub fn rt_dir_create_all(path: i64) -> i64:
-    val path_ptr = rt_string_data(path)
+pub fn rt_dir_create_all(path_ptr_raw: i64, path_len: i64) -> i8:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
     if path_ptr < 1:
         return 0
-    val path_len = strlen(path_ptr)
     if path_len < 1:
+        free(path_ptr)
         return 0
     # Copy path string so we can modify it in-place
     val copy = malloc(path_len + 1)
     if copy < 1:
+        free(path_ptr)
         return 0
     var i = 0
     while i < path_len:
@@ -207,6 +226,7 @@ pub fn rt_dir_create_all(path: i64) -> i64:
         pos = pos + 1
     # mkdir the final component
     mkdir(copy, 511)
+    free(path_ptr)
     free(copy)
     return 1
 
