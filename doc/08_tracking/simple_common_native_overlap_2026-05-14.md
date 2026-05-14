@@ -352,6 +352,17 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `0.24x` Rust). Current disassembly shows tight raw-word load loops, so the
   next limiting gap is call/loop codegen quality, especially lack of inlining
   for the tiny `set_contains` helper.
+- Rust-hosted Cranelift codegen now treats `rt_array_len` as a statically
+  trusted array length read while keeping generic `rt_len` checked for dynamic
+  values. This removes array tag/object-type prologue work from typed
+  `Array.len()` hot helpers such as the pure Simple `set_contains` benchmark.
+  Focused inline codegen tests passed, and a one-sample benchmark with
+  `SIMPLE_NO_STUB_FALLBACK=1` kept checksum parity while measuring
+  `1,827,381` Simple ops/ms for list traversal (`0.42x` C, `0.20x` Rust),
+  `1,224,971` Simple ops/ms for list push (`0.42x` C, `0.86x` Rust), and
+  `3,371` Simple ops/ms for set-like membership (`0.53x` C, `0.26x` Rust).
+  This narrows the set-scan gap but still leaves pure Simple below C/Rust
+  parity overall.
 
 ## Next Concrete Plugin Work
 

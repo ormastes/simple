@@ -81,6 +81,15 @@ pub(crate) fn inline_runtime_len_value(
     result
 }
 
+pub(crate) fn inline_runtime_array_len_value(
+    builder: &mut FunctionBuilder,
+    value: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let ptr_bits = builder.ins().band(value, ptr_mask);
+    builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8)
+}
+
 /// Helper to create a string constant in module data and return (ptr, len) values.
 /// Uses content-based naming for deterministic output and deduplication.
 pub(crate) fn create_string_constant<M: Module>(

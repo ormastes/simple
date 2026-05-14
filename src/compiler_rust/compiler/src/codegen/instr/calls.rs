@@ -12,7 +12,10 @@ use crate::hir::TypeId;
 use crate::mir::{CallTarget, VReg};
 
 use super::core::{compile_builtin_io_call, vreg_is_signed};
-use super::helpers::{adapted_call, call_runtime_3, create_cstring_constant, get_vreg_or_default, inline_runtime_len_value};
+use super::helpers::{
+    adapted_call, call_runtime_3, create_cstring_constant, get_vreg_or_default, inline_runtime_array_len_value,
+    inline_runtime_len_value,
+};
 use super::{InstrContext, InstrResult};
 
 /// Check if a function name is a profiler function (to avoid recursive instrumentation)
@@ -134,6 +137,7 @@ fn compile_inline_len<M: Module>(
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
     args: &[VReg],
+    trusted_array: bool,
 ) -> InstrResult<bool> {
     if args.len() != 1 {
         return Ok(false);
@@ -143,7 +147,11 @@ fn compile_inline_len<M: Module>(
     };
 
     let value = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let result = inline_runtime_len_value(builder, value);
+    let result = if trusted_array {
+        inline_runtime_array_len_value(builder, value)
+    } else {
+        inline_runtime_len_value(builder, value)
+    };
     ctx.vreg_values.insert(*dest, result);
     Ok(true)
 }
@@ -1501,7 +1509,9 @@ pub fn compile_call<M: Module>(
     if ffi_name == "rt_array_set_len_known" && compile_inline_array_set_len_known(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if matches!(ffi_name, "rt_len" | "rt_array_len") && compile_inline_len(ctx, builder, dest, args)? {
+    if matches!(ffi_name, "rt_len" | "rt_array_len")
+        && compile_inline_len(ctx, builder, dest, args, ffi_name == "rt_array_len")?
+    {
         return Ok(());
     }
     if ffi_name == "rt_typed_bytes_u8_at" && compile_inline_bytes_u8_at(ctx, builder, dest, args, true)? {
@@ -1805,7 +1815,7 @@ pub fn compile_call<M: Module>(
                 _ => None,
             };
             if let Some(rt_name) = runtime_func {
-                if rt_name == "rt_len" && compile_inline_len(ctx, builder, dest, args)? {
+                if rt_name == "rt_len" && compile_inline_len(ctx, builder, dest, args, false)? {
                     return Ok(());
                 }
                 if let Some(&func_id) = ctx.runtime_funcs.get(rt_name) {
