@@ -245,6 +245,14 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   CSE until a possible collection mutation appears. This removes duplicated
   list/set read dispatches in already-lowered MIR without changing runtime
   representation or hoisting reads across append/write calls.
+- A fresh one-sample collection benchmark after the pure optimizer CSE commits
+  kept checksum parity, but the native benchmark path still misses C/Rust
+  throughput parity: list traversal measured `1,651,751` Simple ops/ms
+  (`0.28x` C, `0.17x` Rust), list push measured `1,190,841` Simple ops/ms
+  (`0.36x` C, `0.79x` Rust), and set-like linear membership measured `3,360`
+  Simple ops/ms (`0.50x` C, `0.26x` Rust). The pure optimizer updates are
+  therefore correctness/parity coverage for already-lowered MIR, not proof that
+  the Rust-hosted native benchmark path has reached performance parity.
 
 ## Next Concrete Plugin Work
 
