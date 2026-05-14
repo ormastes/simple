@@ -1,0 +1,138 @@
+# Markdown Document Decoration
+#
+# Extracts document-level rendering hints from Markdown frontmatter and CSS
+# fences so GUI preview can render page view, header/footer, and custom CSS.
+
+struct MdDocumentDecor:
+    page_view: bool
+    header: text
+    footer: text
+    css_file: text
+    inline_css: text
+
+fn md_document_decor_empty() -> MdDocumentDecor:
+    MdDocumentDecor(page_view: false, header: "", footer: "", css_file: "", inline_css: "")
+
+fn md_document_decor_parse(content: text) -> MdDocumentDecor:
+    var decor = md_document_decor_empty()
+    val lines = _mdd_split_lines(content)
+    var body_start = 0
+    if lines.len() > 0 and lines[0].trim() == "---":
+        var i = 1
+        while i < lines.len():
+            val line = lines[i].trim()
+            if line == "---":
+                body_start = i + 1
+                break
+            val sep = line.index_of(":")
+            if sep >= 0:
+                val key = line.slice(0, sep).trim()
+                val value = _mdd_unquote(line.slice(sep + 1, line.len()).trim())
+                if key == "page_view":
+                    decor.page_view = _mdd_truthy(value)
+                elif key == "header":
+                    decor.header = value
+                elif key == "footer":
+                    decor.footer = value
+                elif key == "css_file":
+                    decor.css_file = value
+            i = i + 1
+    decor.inline_css = _mdd_collect_css_fences(lines, body_start)
+    decor
+
+fn md_document_body_without_decor(content: text) -> text:
+    val lines = _mdd_split_lines(content)
+    var result: [text] = []
+    var i = 0
+    if lines.len() > 0 and lines[0].trim() == "---":
+        i = 1
+        while i < lines.len() and lines[i].trim() != "---":
+            i = i + 1
+        if i < lines.len() and lines[i].trim() == "---":
+            i = i + 1
+    var in_css = false
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if not in_css and _mdd_is_css_fence(trimmed):
+            in_css = true
+            i = i + 1
+            continue
+        if in_css:
+            if trimmed.starts_with("```"):
+                in_css = false
+            i = i + 1
+            continue
+        result.push(lines[i])
+        i = i + 1
+    _mdd_compact_blank_runs(_mdd_trim_outer_blank_lines(result)).join("\n")
+
+fn _mdd_collect_css_fences(lines: [text], start: i64) -> text:
+    var blocks: [text] = []
+    var current: [text] = []
+    var in_css = false
+    var i = start
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if not in_css and _mdd_is_css_fence(trimmed):
+            in_css = true
+            current = []
+        elif in_css and trimmed.starts_with("```"):
+            blocks.push(current.join("\n"))
+            in_css = false
+        elif in_css:
+            current.push(lines[i])
+        i = i + 1
+    blocks.join("\n")
+
+fn _mdd_is_css_fence(line: text) -> bool:
+    line == "```css" or line == "```style"
+
+fn _mdd_truthy(value: text) -> bool:
+    val lower = value.lower()
+    lower == "true" or lower == "yes" or lower == "on" or lower == "1"
+
+fn _mdd_unquote(value: text) -> text:
+    if value.len() >= 2:
+        val first = value.char_at(0)
+        val last = value.char_at(value.len() - 1)
+        if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+            return value.slice(1, value.len() - 1)
+    value
+
+fn _mdd_trim_outer_blank_lines(lines: [text]) -> [text]:
+    var start = 0
+    var end = lines.len()
+    while start < end and lines[start].trim() == "":
+        start = start + 1
+    while end > start and lines[end - 1].trim() == "":
+        end = end - 1
+    var result: [text] = []
+    var i = start
+    while i < end:
+        result.push(lines[i])
+        i = i + 1
+    result
+
+fn _mdd_compact_blank_runs(lines: [text]) -> [text]:
+    var result: [text] = []
+    var previous_blank = false
+    for line in lines:
+        val blank = line.trim() == ""
+        if blank and previous_blank:
+            continue
+        result.push(line)
+        previous_blank = blank
+    result
+
+fn _mdd_split_lines(content: text) -> [text]:
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            lines.push(content.slice(start, i))
+            start = i + 1
+        i = i + 1
+    if start <= content.len():
+        lines.push(content.slice(start, content.len()))
+    lines

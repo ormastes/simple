@@ -64,6 +64,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [api/gpu_api.md](api/gpu_api.md) | GPU API reference |
 | [api/note_sdn_api.md](api/note_sdn_api.md) | SDN API notes |
 | [api/sdn_graph.md](api/sdn_graph.md) | SDN graph syntax, CSS labels, weaving, and Markdown embedding |
+| [api/markdown_document_decoration.md](api/markdown_document_decoration.md) | Markdown CSS, page view, header, and footer document rendering |
 | [api/pure_dl_api_reference.md](api/pure_dl_api_reference.md) | Pure DL API reference |
 | [api/webgpu_guide.md](api/webgpu_guide.md) | WebGPU usage guide |
 
