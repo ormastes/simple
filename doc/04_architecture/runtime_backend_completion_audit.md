@@ -103,6 +103,8 @@ Executed on 2026-05-14:
   - `remaining=30` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the process operations, math wrappers, and package FFI facades.
 - No-GC async debug backend wildcard facade review scan:
   - `remaining=28` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the native debug agent and interpreter debug backend facades.
+- No-GC async regex/signature/runtime wildcard facade review scan:
+  - `remaining=25` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the regex FFI, signature FFI, and I/O runtime facades.
 - Focused runtime-path specs:
   - `test/unit/lib/nogc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
   - `test/unit/lib/gc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
