@@ -64,6 +64,10 @@ optimization providers rather than delegating common algorithms back to Rust/C.
 - Verified with `SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple
   test test/unit/lib/common/hash/adler32_spec.spl
   --mode=interpreter --clean` passing 11 examples.
+- Latest one-sample port benchmark with `SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c`
+  kept checksum parity. Pure Simple beat C/Rust for XXHash64 (`1.73x` C,
+  `1.57x` Rust) and ChaCha20 (`1.22x` C, `1.06x` Rust), but still missed parity
+  for CRC32 (`0.78x` C, `0.88x` Rust) and Adler32 (`0.91x` C, `0.94x` Rust).
 
 ## Next Concrete Plugin Work
 
