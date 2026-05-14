@@ -524,7 +524,7 @@ fn compile_inline_typed_words_unchecked<M: Module>(
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
     let word = maybe_packed_u64_load_word(builder, ptr_bits, raw, width);
@@ -548,7 +548,7 @@ fn compile_inline_typed_words_data_at<M: Module>(
 
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
     let int_payload = builder.ins().sshr_imm(raw, 3);
@@ -579,7 +579,7 @@ fn compile_inline_typed_words_data_at_checked<M: Module>(
     let header_ptr = builder.ins().band(header_or_array, ptr_mask);
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[1]);
     let index = coerce_vreg_to_i64(ctx, builder, args[2]);
-    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
     let word = maybe_packed_u64_load_word(builder, header_ptr, raw, 8);
@@ -602,7 +602,7 @@ fn compile_inline_typed_words_raw_data_at<M: Module>(
 
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
     ctx.vreg_values.insert(*dest, raw);
@@ -768,7 +768,7 @@ fn compile_inline_typed_words_push_known_at<M: Module>(
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let stored = maybe_packed_u64_store_word(builder, ptr_bits, value, width);
     builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
@@ -796,7 +796,7 @@ fn compile_inline_typed_words_push_known_data_at<M: Module>(
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[1]);
     let index = coerce_vreg_to_i64(ctx, builder, args[2]);
     let value = coerce_vreg_to_i64(ctx, builder, args[3]);
-    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let stored = maybe_packed_u64_store_word(builder, header_ptr, value, width);
     builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
@@ -823,7 +823,7 @@ fn compile_inline_typed_words_store_known_data_at<M: Module>(
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[1]);
     let index = coerce_vreg_to_i64(ctx, builder, args[2]);
     let value = coerce_vreg_to_i64(ctx, builder, args[3]);
-    let slot_offset = builder.ins().imul_imm(index, 8);
+    let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let header_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let stored = maybe_packed_u64_store_word(builder, header_ptr, value, width);
