@@ -67,6 +67,29 @@ typedef struct RtCoreEnum {
     int64_t payload;
 } RtCoreEnum;
 
+static RtCoreString** rt_core_string_registry = NULL;
+static size_t rt_core_string_registry_len = 0;
+static size_t rt_core_string_registry_cap = 0;
+
+static void rt_core_register_string(RtCoreString* s) {
+    if (!s) return;
+    if (rt_core_string_registry_len == rt_core_string_registry_cap) {
+        size_t next_cap = rt_core_string_registry_cap == 0 ? 64 : rt_core_string_registry_cap * 2;
+        RtCoreString** next = (RtCoreString**)realloc(rt_core_string_registry, next_cap * sizeof(RtCoreString*));
+        if (!next) return;
+        rt_core_string_registry = next;
+        rt_core_string_registry_cap = next_cap;
+    }
+    rt_core_string_registry[rt_core_string_registry_len++] = s;
+}
+
+static int rt_core_is_registered_string(RtCoreString* s) {
+    for (size_t i = 0; i < rt_core_string_registry_len; i++) {
+        if (rt_core_string_registry[i] == s) return 1;
+    }
+    return 0;
+}
+
 static inline int64_t rt_core_from_special(uint64_t payload) {
     return (int64_t)((payload << 3) | RT_VALUE_TAG_SPECIAL);
 }
@@ -108,8 +131,11 @@ static inline int64_t rt_core_numeric_arg(int64_t value) {
 }
 
 static inline RtCoreString* rt_core_as_string(int64_t value) {
-    if (!rt_core_is_heap(value)) return NULL;
-    RtCoreString* s = (RtCoreString*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    uintptr_t raw = (uintptr_t)value;
+    if (raw < 4096) return NULL;
+    if ((raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
+    RtCoreString* s = (RtCoreString*)(raw & ~RT_VALUE_TAG_MASK);
+    if (!rt_core_is_registered_string(s)) return NULL;
     if (!s || s->kind != RT_VALUE_HEAP_STRING) return NULL;
     return s;
 }
@@ -304,6 +330,7 @@ int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
         memcpy(s->data, bytes, (size_t)len);
     }
     s->data[len] = '\0';
+    rt_core_register_string(s);
     return (int64_t)(((uint64_t)(uintptr_t)s) | RT_VALUE_TAG_HEAP);
 }
 
@@ -347,6 +374,7 @@ int64_t rt_string_concat(int64_t left, int64_t right) {
     if (a->len > 0) memcpy(out->data, a->data, (size_t)a->len);
     if (b->len > 0) memcpy(out->data + a->len, b->data, (size_t)b->len);
     out->data[len] = '\0';
+    rt_core_register_string(out);
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
@@ -445,6 +473,7 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
         uint64_t out_i = 0;
         for (int64_t i = begin; i < finish; i += stride) out->data[out_i++] = s->data[i];
         out->data[out_len] = '\0';
+        rt_core_register_string(out);
         return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
     }
     return rt_string_new((const uint8_t*)s->data + begin, (uint64_t)(finish - begin));
@@ -504,6 +533,7 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
         }
     }
     out->data[out_len] = '\0';
+    rt_core_register_string(out);
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
