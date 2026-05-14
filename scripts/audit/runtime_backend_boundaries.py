@@ -4,6 +4,8 @@
 The checks are intentionally narrow and evidence-oriented:
 
 * GC/no-GC async compatibility families must not own direct `rt_*` hooks.
+* Async compatibility families must not contain byte-identical copies of
+  no-GC sync backend files that declare direct `rt_*` hooks.
 * Sync/immutable compatibility families must not own direct `rt_*` hooks.
 * Sync/GC and immutable compatibility families must have matching backing
   modules and facade exports into their documented backend family.
@@ -139,6 +141,25 @@ def direct_runtime_hooks() -> list[str]:
     return hits
 
 
+def exact_duplicate_runtime_hooks() -> list[str]:
+    hits: list[str] = []
+    for source_root in ASYNC_COMPAT_ROOTS:
+        for source_path in tracked_spl_under((source_root,)):
+            rel_path = source_path.relative_to(ROOT / source_root)
+            sync_path = ROOT / "src/lib/nogc_sync_mut" / rel_path
+            if not sync_path.exists():
+                continue
+
+            source_text = source_path.read_text(encoding="utf-8", errors="ignore")
+            if not RUNTIME_HOOK_RE.search(source_text):
+                continue
+
+            sync_text = sync_path.read_text(encoding="utf-8", errors="ignore")
+            if source_text == sync_text:
+                hits.append(f"{rel(source_path)} duplicates backend hook owner {rel(sync_path)}")
+    return hits
+
+
 def sync_compat_direct_runtime_hooks() -> list[str]:
     hits: list[str] = []
     for path in tracked_spl_under(SYNC_COMPAT_ROOTS):
@@ -255,6 +276,7 @@ def portable_lib_imports() -> list[str]:
 
 def main() -> int:
     runtime_hooks = direct_runtime_hooks()
+    duplicate_runtime_hooks = exact_duplicate_runtime_hooks()
     sync_runtime_hooks = sync_compat_direct_runtime_hooks()
     facade_violations = facade_mirror_violations()
     gc_self_facades = gc_async_one_line_self_facades()
@@ -267,6 +289,8 @@ def main() -> int:
         "generated_by": "scripts/audit/runtime_backend_boundaries.py",
         "async_compat_direct_runtime_hook_count": len(runtime_hooks),
         "async_compat_direct_runtime_hook_samples": runtime_hooks[:20],
+        "exact_duplicate_runtime_hook_count": len(duplicate_runtime_hooks),
+        "exact_duplicate_runtime_hook_samples": duplicate_runtime_hooks[:20],
         "sync_compat_direct_runtime_hook_count": len(sync_runtime_hooks),
         "sync_compat_direct_runtime_hook_samples": sync_runtime_hooks[:20],
         "sync_compat_facade_mirror_violation_count": len(facade_violations),
@@ -282,6 +306,7 @@ def main() -> int:
         "portable_lib_forbidden_posix_linux_import_count": len(portable_imports),
         "portable_lib_forbidden_posix_linux_import_samples": portable_imports[:20],
         "pass": not runtime_hooks
+        and not duplicate_runtime_hooks
         and not sync_runtime_hooks
         and not facade_violations
         and not gc_self_facades
