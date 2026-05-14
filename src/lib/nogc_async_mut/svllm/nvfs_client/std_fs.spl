@@ -1,7 +1,7 @@
 # @gc — module uses GC runtime
 #
-# std_fs — bring-up NvfsClient adapter backed by the C runtime's `rt_file_*`
-# externs. Honors the happy-path R1 append-only + R3 atomic-publish contract
+# std_fs — bring-up NvfsClient adapter backed by the no-GC sync FFI file
+# backend. Honors the happy-path R1 append-only + R3 atomic-publish contract
 # on ext4/xfs. FAT32 rename non-atomicity is filed as FS-REQ-002
 # (see doc/05_design/svllm/fs_requests/).
 #
@@ -17,11 +17,7 @@
 # see FS-REQ-001).
 
 use std.nogc_async_mut.svllm.nvfs_client.{ObjHandle, ObjClass, CreateFlags, NvfsError, SyncScope, OpenMode, BufHandle, NvfsCaps}
-
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
-extern fn rt_file_read_bytes(path: text) -> [u8]
-extern fn rt_file_move(src: text, dst: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
+use std.nogc_sync_mut.ffi.io.{file_exists, file_move, file_write_bytes}
 
 # Monotonic handle-id counter. Handles are integers; the real path is carried
 # in the handle itself (advisory field). Native nvfs adapters ignore it.
@@ -40,7 +36,7 @@ struct StdFsNvfsClient:
         StdFsNvfsClient(marker: 0)
 
     fn open(self, path: text, mode: OpenMode) -> Result<ObjHandle, NvfsError>:
-        if not rt_file_exists(path):
+        if not file_exists(path):
             return Err(NvfsError.NotFound)
         Ok(ObjHandle(id: _alloc_id(), path: path, is_open: true))
 
@@ -48,7 +44,7 @@ struct StdFsNvfsClient:
         # Touch the file so the path is materialised; the first write()
         # overwrites it. Empty-payload creates are valid per CreateFlags.
         var empty: [u8] = []
-        if not rt_file_write_bytes(path, empty):
+        if not file_write_bytes(path, empty):
             return Err(NvfsError.IoError)
         Ok(ObjHandle(id: _alloc_id(), path: path, is_open: true))
 
@@ -68,7 +64,7 @@ struct StdFsNvfsClient:
     fn write(self, obj: ObjHandle, bytes: [u8]) -> Result<i64, NvfsError>:
         if obj.path == "":
             return Err(NvfsError.InvalidArgument)
-        if not rt_file_write_bytes(obj.path, bytes):
+        if not file_write_bytes(obj.path, bytes):
             return Err(NvfsError.IoError)
         Ok(bytes.len() as i64)
 
@@ -78,16 +74,16 @@ struct StdFsNvfsClient:
     fn publish_atomic(self, temp_obj: ObjHandle, final_path: text) -> Result<(), NvfsError>:
         if temp_obj.path == "":
             return Err(NvfsError.InvalidArgument)
-        if not rt_file_exists(temp_obj.path):
+        if not file_exists(temp_obj.path):
             return Err(NvfsError.NotFound)
-        if not rt_file_move(temp_obj.path, final_path):
+        if not file_move(temp_obj.path, final_path):
             return Err(NvfsError.IoError)
         Ok(())
 
     fn sync(self, obj: ObjHandle, scope: SyncScope) -> Result<(), NvfsError>:
         if obj.path == "":
             return Err(NvfsError.InvalidArgument)
-        if not rt_file_exists(obj.path):
+        if not file_exists(obj.path):
             return Err(NvfsError.IoError)
         Ok(())
 
