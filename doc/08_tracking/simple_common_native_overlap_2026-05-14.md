@@ -441,6 +441,13 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   kept checksum parity and measured text `HashSet.contains` at `0.37x` C /
   `0.63x` Rust. This crosses the warn floor against Rust but still misses C,
   and list traversal plus scalar set lookup remain below the parity goal.
+- `HashSet.contains` now probes its backing `HashMap` fields directly instead
+  of paying an extra wrapper call to `HashMap.contains_key`. A clean direct run
+  measured text `hashset_contains` at `25,128` ops/ms, and the full clean
+  harness measured `0.39x` C / `0.65x` Rust for text `HashSet.contains` with
+  checksum parity. The next text-set gap is bucket/entry indexing and string
+  equality call overhead; list traversal and scalar set lookup still need
+  compiler/backend loop work.
 
 ## Next Concrete Plugin Work
 

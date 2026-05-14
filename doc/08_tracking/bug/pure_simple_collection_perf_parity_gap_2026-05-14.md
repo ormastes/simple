@@ -59,6 +59,15 @@ set_contains     0.51x C  0.26x Rust
 hashset_contains 0.37x C  0.63x Rust
 ```
 
+Inlining the map probe into `HashSet.contains` then measured:
+
+```text
+list_traverse    0.45x C  0.18x Rust
+list_push        0.64x C  0.85x Rust
+set_contains     0.36x C  0.18x Rust
+hashset_contains 0.39x C  0.65x Rust
+```
+
 ## Ruled Out
 
 - The Simple benchmark is not doing a different asymptotic algorithm for
@@ -112,6 +121,9 @@ hashset_contains 0.37x C  0.63x Rust
   power-of-two bucket mask removed the signed divide for capacities such as the
   benchmark's 2048 buckets. These changes improved text `HashSet.contains`, but
   C parity is still not closed.
+- Moving the text probe into `HashSet.contains` removed the wrapper call to
+  `HashMap.contains_key`, but the remaining bucket/entry indexing and string
+  equality calls still leave the text set below C.
 
 ## Likely Gap
 
