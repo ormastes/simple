@@ -1460,6 +1460,7 @@ pub fn compile_call<M: Module>(
         "rt_file_delete" => "rt_file_remove",
         "rt_println" => "rt_println_value",
         "rt_print" => "rt_print_value",
+        "len" => "rt_len",
         other => other,
     };
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
