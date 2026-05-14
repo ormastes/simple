@@ -89,6 +89,8 @@ Executed on 2026-05-14:
   - `remaining=56` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the log, LSP handlers, Play Xvfb, and test manifest scanner facades.
 - No-GC async env/VHDL/LSP/package wildcard facade review scan:
   - `remaining=52` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the env_ops, VHDL FFI, LSP main, and package distribution facades.
+- No-GC async QMP/src/test-manifest wildcard facade review scan:
+  - `remaining=48` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the QMP client, src config, src DB, and test manifest facades.
 - Focused runtime-path specs:
   - `test/unit/lib/nogc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
   - `test/unit/lib/gc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
