@@ -20,7 +20,6 @@ use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirInst, MirModule};
 
 use super::instr::compile_function_body;
-use super::mir_inline::inline_small_pure_functions;
 use super::runtime_ffi::runtime_funcs_for_target;
 use super::shared::{build_mir_signature, create_body_stub, expand_with_outlined};
 
@@ -79,19 +78,8 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_println_str"
             | "rt_print_value"
             | "rt_println_value"
-            | "rt_alloc"
             | "rt_array_new"
             | "rt_array_len"
-            | "rt_array_get"
-            | "rt_array_push"
-            | "rt_tuple_new"
-            | "rt_tuple_set"
-            | "rt_enum_new"
-            | "rt_hash_text"
-            | "rt_value_bool"
-            | "rt_interp_call"
-            | "rt_native_eq"
-            | "rt_native_neq"
     )
 }
 
@@ -1032,7 +1020,7 @@ impl<M: Module> CodegenBackend<M> {
                 unique_functions.push(func);
             }
         }
-        let functions = inline_small_pure_functions(mir, unique_functions);
+        let functions = unique_functions;
         let referenced_names = referenced_call_names(&functions);
         if !Self::can_omit_runtime_imports(mir, &functions) {
             self.ensure_runtime_functions_declared(&referenced_names)?;
@@ -1394,45 +1382,5 @@ mod tests {
         backend.compile_all_functions(&module).expect("compile");
 
         assert!(backend.func_ids.contains_key("external_used"));
-    }
-
-    #[test]
-    fn backend_generated_array_push_is_declared_without_source_reference() {
-        let mut module = MirModule::new();
-        module.functions.push(main_returning_zero());
-
-        let mut backend = test_backend();
-        backend.compile_all_functions(&module).expect("compile");
-
-        assert!(backend.runtime_funcs.contains_key("rt_array_push"));
-    }
-
-    #[test]
-    fn backend_generated_interp_bridge_helpers_are_declared_without_source_reference() {
-        let mut main = MirFunction::new("main".to_string(), TypeId::I64, Visibility::Public);
-        let arg = main.new_vreg();
-        let dest = main.new_vreg();
-        main.block_mut(BlockId(0))
-            .unwrap()
-            .instructions
-            .push(MirInst::ConstInt { dest: arg, value: 42 });
-        main.block_mut(BlockId(0))
-            .unwrap()
-            .instructions
-            .push(MirInst::InterpCall {
-                dest: Some(dest),
-                func_name: "fallback_function".to_string(),
-                args: vec![arg],
-            });
-        main.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(dest));
-
-        let mut module = MirModule::new();
-        module.functions.push(main);
-
-        let mut backend = test_backend();
-        backend.compile_all_functions(&module).expect("compile");
-
-        assert!(backend.runtime_funcs.contains_key("rt_alloc"));
-        assert!(backend.runtime_funcs.contains_key("rt_interp_call"));
     }
 }

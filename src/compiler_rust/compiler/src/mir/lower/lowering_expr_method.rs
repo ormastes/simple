@@ -174,9 +174,7 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
-        let is_array_append_method = method == "push" || method == "append";
-
-        if is_array_append_method
+        if method == "push"
             && args.len() == 1
             && args[0].ty == TypeId::U8
             && self
@@ -195,7 +193,7 @@ impl<'a> MirLowerer<'a> {
                 dest
             });
         }
-        if is_array_append_method
+        if method == "push"
             && args.len() == 1
             && args[0].ty == TypeId::U32
             && self
@@ -214,7 +212,7 @@ impl<'a> MirLowerer<'a> {
                 dest
             });
         }
-        if is_array_append_method
+        if method == "push"
             && args.len() == 1
             && args[0].ty == TypeId::U64
             && self
@@ -237,7 +235,7 @@ impl<'a> MirLowerer<'a> {
         // Box integer arguments for array .push() — matches IndexGet unbox at line 1236.
         // Without this, wrap_value (no-op) passes raw integers to rt_array_push,
         // but IndexGet + MIR UnboxInt expects tagged (val << 3) values.
-        if is_array_append_method && !args.is_empty() {
+        if method == "push" && !args.is_empty() {
             let push_arg_ty = args[0].ty;
             let needs_push_boxing = matches!(
                 push_arg_ty,
@@ -264,19 +262,6 @@ impl<'a> MirLowerer<'a> {
                 })?;
                 arg_regs[0] = boxed_arg;
             }
-        }
-
-        if is_array_append_method && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
-            return self.with_func(|func, current_block| {
-                let dest = func.new_vreg();
-                let block = func.block_mut(current_block).unwrap();
-                block.instructions.push(MirInst::Call {
-                    dest: Some(dest),
-                    target: crate::mir::effects::CallTarget::from_name("rt_array_push"),
-                    args: vec![receiver_reg, arg_regs[0]],
-                });
-                dest
-            });
         }
 
         // Builtin primitive .to_string()/.to_text()/.str() routes to

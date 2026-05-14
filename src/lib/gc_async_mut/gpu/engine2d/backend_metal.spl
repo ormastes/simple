@@ -36,15 +36,34 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_image_transform,
     emu_draw_rect_blend_mode
 }
-use std.nogc_sync_mut.io.metal_ffi.{
-    metal_ffi_init, metal_ffi_is_available, metal_ffi_device_count,
-    metal_ffi_create_device, metal_ffi_destroy_device,
-    metal_ffi_alloc_buffer, metal_ffi_free_buffer,
-    metal_ffi_buffer_upload, metal_ffi_compile_shader,
-    metal_ffi_destroy_shader, metal_ffi_create_compute_pipeline,
-    metal_ffi_destroy_pipeline, metal_ffi_create_command_queue,
-    metal_ffi_destroy_command_queue
-}
+
+# ============================================================================
+# Additional Metal FFI declarations for compute encoder management
+# ============================================================================
+
+extern fn rt_metal_init() -> bool
+extern fn rt_metal_is_available() -> bool
+extern fn rt_metal_device_count() -> i64
+extern fn rt_metal_create_device(device_id: i64) -> i64
+extern fn rt_metal_destroy_device(device: i64) -> bool
+extern fn rt_metal_alloc_buffer(device: i64, size: i64) -> i64
+extern fn rt_metal_free_buffer(buffer: i64) -> bool
+extern fn rt_metal_buffer_upload(buffer: i64, data: [u8], size: i64) -> bool
+extern fn rt_metal_buffer_download(data: [u8], buffer: i64, size: i64) -> bool
+extern fn rt_metal_compile_shader(device: i64, source: text) -> i64
+extern fn rt_metal_destroy_shader(shader: i64) -> bool
+extern fn rt_metal_create_compute_pipeline(device: i64, shader: i64, entry: text) -> i64
+extern fn rt_metal_destroy_pipeline(pipeline: i64) -> bool
+extern fn rt_metal_create_command_queue(device: i64) -> i64
+extern fn rt_metal_destroy_command_queue(queue: i64) -> bool
+extern fn rt_metal_create_command_buffer(queue: i64) -> i64
+extern fn rt_metal_commit_command_buffer(cmd_buffer: i64) -> bool
+extern fn rt_metal_wait_completed(cmd_buffer: i64) -> bool
+extern fn rt_metal_dispatch_compute(encoder: i64, pipeline: i64, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64) -> bool
+extern fn rt_metal_create_compute_encoder(cmd_buffer: i64) -> i64
+extern fn rt_metal_end_compute_encoder(encoder: i64) -> bool
+extern fn rt_metal_set_buffer(encoder: i64, buffer: i64, offset: i64, index: i64) -> bool
+extern fn rt_metal_set_bytes(encoder: i64, data: [u8], length: i64, index: i64) -> bool
 
 # ============================================================================
 # Metal Backend
@@ -132,37 +151,37 @@ impl RenderBackend for MetalBackend:
 
     me init(width: i32, height: i32) -> bool:
         # Check Metal availability
-        if not metal_ffi_is_available():
+        if not rt_metal_is_available():
             return false
 
-        val init_ok = metal_ffi_init()
+        val init_ok = rt_metal_init()
         if not init_ok:
             return false
 
-        if metal_ffi_device_count() < 1:
+        if rt_metal_device_count() < 1:
             return false
 
         self.w = width
         self.h = height
 
         # Create Metal device (device 0 = default GPU)
-        self.device = metal_ffi_create_device(0)
+        self.device = rt_metal_create_device(0)
         if self.device == 0:
             return false
 
         # Create persistent command queue
-        self.command_queue = metal_ffi_create_command_queue(self.device)
+        self.command_queue = rt_metal_create_command_queue(self.device)
         if self.command_queue == 0:
-            metal_ffi_destroy_device(self.device)
+            rt_metal_destroy_device(self.device)
             self.device = 0
             return false
 
         # Allocate device framebuffer (4 bytes per pixel = u32 ARGB)
         val fb_size = _i64(width) * _i64(height) * 4
-        self.d_framebuffer = metal_ffi_alloc_buffer(self.device, fb_size)
+        self.d_framebuffer = rt_metal_alloc_buffer(self.device, fb_size)
         if self.d_framebuffer == 0:
-            metal_ffi_destroy_command_queue(self.command_queue)
-            metal_ffi_destroy_device(self.device)
+            rt_metal_destroy_command_queue(self.command_queue)
+            rt_metal_destroy_device(self.device)
             self.command_queue = 0
             self.device = 0
             return false
@@ -172,27 +191,27 @@ impl RenderBackend for MetalBackend:
         self.host_buf = [0u32; total]
 
         # Compile MSL shader library
-        self.shader_lib = metal_ffi_compile_shader(self.device, _engine2d_msl())
+        self.shader_lib = rt_metal_compile_shader(self.device, _engine2d_msl())
         if self.shader_lib == 0:
-            metal_ffi_free_buffer(self.d_framebuffer)
-            metal_ffi_destroy_command_queue(self.command_queue)
-            metal_ffi_destroy_device(self.device)
+            rt_metal_free_buffer(self.d_framebuffer)
+            rt_metal_destroy_command_queue(self.command_queue)
+            rt_metal_destroy_device(self.device)
             self.d_framebuffer = 0
             self.command_queue = 0
             self.device = 0
             return false
 
         # Create compute pipelines for each kernel
-        self.pipe_clear = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_clear")
-        self.pipe_rect_filled = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_filled")
-        self.pipe_rect_outline = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_outline")
-        self.pipe_line = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_line")
-        self.pipe_circle = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle")
-        self.pipe_circle_filled = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle_filled")
-        self.pipe_rounded_rect = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rounded_rect")
-        self.pipe_triangle = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_triangle_filled")
-        self.pipe_gradient = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect")
-        self.pipe_blit = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_blit_image")
+        self.pipe_clear = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_clear")
+        self.pipe_rect_filled = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_filled")
+        self.pipe_rect_outline = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_outline")
+        self.pipe_line = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_line")
+        self.pipe_circle = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle")
+        self.pipe_circle_filled = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle_filled")
+        self.pipe_rounded_rect = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rounded_rect")
+        self.pipe_triangle = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_triangle_filled")
+        self.pipe_gradient = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect")
+        self.pipe_blit = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_blit_image")
 
         self.clip_x = 0
         self.clip_y = 0
@@ -206,52 +225,52 @@ impl RenderBackend for MetalBackend:
     me shutdown():
         # Destroy pipelines
         if self.pipe_clear != 0:
-            metal_ffi_destroy_pipeline(self.pipe_clear)
+            rt_metal_destroy_pipeline(self.pipe_clear)
             self.pipe_clear = 0
         if self.pipe_rect_filled != 0:
-            metal_ffi_destroy_pipeline(self.pipe_rect_filled)
+            rt_metal_destroy_pipeline(self.pipe_rect_filled)
             self.pipe_rect_filled = 0
         if self.pipe_rect_outline != 0:
-            metal_ffi_destroy_pipeline(self.pipe_rect_outline)
+            rt_metal_destroy_pipeline(self.pipe_rect_outline)
             self.pipe_rect_outline = 0
         if self.pipe_line != 0:
-            metal_ffi_destroy_pipeline(self.pipe_line)
+            rt_metal_destroy_pipeline(self.pipe_line)
             self.pipe_line = 0
         if self.pipe_circle != 0:
-            metal_ffi_destroy_pipeline(self.pipe_circle)
+            rt_metal_destroy_pipeline(self.pipe_circle)
             self.pipe_circle = 0
         if self.pipe_circle_filled != 0:
-            metal_ffi_destroy_pipeline(self.pipe_circle_filled)
+            rt_metal_destroy_pipeline(self.pipe_circle_filled)
             self.pipe_circle_filled = 0
         if self.pipe_rounded_rect != 0:
-            metal_ffi_destroy_pipeline(self.pipe_rounded_rect)
+            rt_metal_destroy_pipeline(self.pipe_rounded_rect)
             self.pipe_rounded_rect = 0
         if self.pipe_triangle != 0:
-            metal_ffi_destroy_pipeline(self.pipe_triangle)
+            rt_metal_destroy_pipeline(self.pipe_triangle)
             self.pipe_triangle = 0
         if self.pipe_gradient != 0:
-            metal_ffi_destroy_pipeline(self.pipe_gradient)
+            rt_metal_destroy_pipeline(self.pipe_gradient)
             self.pipe_gradient = 0
         if self.pipe_blit != 0:
-            metal_ffi_destroy_pipeline(self.pipe_blit)
+            rt_metal_destroy_pipeline(self.pipe_blit)
             self.pipe_blit = 0
 
         # Destroy shader library
         if self.shader_lib != 0:
-            metal_ffi_destroy_shader(self.shader_lib)
+            rt_metal_destroy_shader(self.shader_lib)
             self.shader_lib = 0
 
         # Free framebuffer
         if self.d_framebuffer != 0:
-            metal_ffi_free_buffer(self.d_framebuffer)
+            rt_metal_free_buffer(self.d_framebuffer)
             self.d_framebuffer = 0
 
         # Destroy command queue and device
         if self.command_queue != 0:
-            metal_ffi_destroy_command_queue(self.command_queue)
+            rt_metal_destroy_command_queue(self.command_queue)
             self.command_queue = 0
         if self.device != 0:
-            metal_ffi_destroy_device(self.device)
+            rt_metal_destroy_device(self.device)
             self.device = 0
 
         self.host_buf = []
@@ -369,17 +388,17 @@ impl RenderBackend for MetalBackend:
         # a blit kernel to copy it into the framebuffer
         val pixel_count = _i64(w) * _i64(h)
         val byte_size = pixel_count * 4
-        val d_src = metal_ffi_alloc_buffer(self.device, byte_size)
+        val d_src = rt_metal_alloc_buffer(self.device, byte_size)
         if d_src != 0:
             # Upload source pixels to device
             val upload_data = _pixels_to_bytes(pixels, pixel_count)
-            metal_ffi_buffer_upload(d_src, upload_data, byte_size)
+            rt_metal_buffer_upload(d_src, upload_data, byte_size)
             # Launch blit kernel
             val params = _pack_blit_params(x, y, w, h, self.w, self.h)
             val grid_dim = _grid_for_rect(w, h)
             val block = _block_for_rect()
             self._dispatch_blit(self.pipe_blit, grid_dim, block, params, d_src)
-            metal_ffi_free_buffer(d_src)
+            rt_metal_free_buffer(d_src)
         self.dirty = true
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
@@ -526,3 +545,4 @@ impl Engine2DExtended for MetalBackend:
             _i = _i + 1
         render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, fg, font_size)
         self.draw_image(x, y, text_w, text_h, buf)
+

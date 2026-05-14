@@ -1,7 +1,7 @@
 //! Control flow expression lowering: If, LetIn.
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
-use crate::hir::{BinOp, HirExpr, HirExprKind, HirStmt, TypeId};
+use crate::hir::{BinOp, HirExpr, HirExprKind, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
 /// B5 (compiler_bugs_for_crypto_2026-04-25.md): minimum dense int-match arm
@@ -51,21 +51,6 @@ fn try_collect_int_match<'a>(body: &'a HirExpr, local_idx: usize) -> Option<(Vec
 }
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_block_expr(&mut self, stmts: &[HirStmt]) -> MirLowerResult<VReg> {
-        let saved_last_expr = self.last_expr_value;
-        self.last_expr_value = None;
-        for stmt in stmts {
-            self.lower_stmt(stmt, None)?;
-        }
-        let result = if let Some(result) = self.last_expr_value {
-            result
-        } else {
-            self.lower_nil_expr()?
-        };
-        self.last_expr_value = saved_last_expr;
-        Ok(result)
-    }
-
     pub(super) fn lower_if_expr(
         &mut self,
         condition: &HirExpr,

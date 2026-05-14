@@ -916,13 +916,6 @@ pub(crate) fn call_extern_function(
         // ====================================================================
         // WebGPU Functions (stub — interpreter always returns false)
         // ====================================================================
-        "rt_webgpu_is_available" => gpu::rt_webgpu_is_available_fn(&evaluated),
-        "rt_webgpu_init" => gpu::rt_webgpu_init_fn(&evaluated),
-        "rt_webgpu_shutdown" => gpu::rt_webgpu_shutdown_fn(&evaluated),
-        "rt_webgpu_create_surface" => gpu::rt_webgpu_create_surface_fn(&evaluated),
-        "rt_webgpu_destroy_surface" => gpu::rt_webgpu_destroy_surface_fn(&evaluated),
-        "rt_webgpu_upload_pixels" => gpu::rt_webgpu_upload_pixels_fn(&evaluated),
-        "rt_webgpu_present" => gpu::rt_webgpu_present_fn(&evaluated),
         "rt_webgpu_compute_draw" => gpu::rt_webgpu_compute_draw_fn(&evaluated),
 
         // ====================================================================

@@ -42,19 +42,6 @@ fn test_cranelift_jit_with_args() {
 }
 
 #[test]
-fn test_cranelift_jit_unsigned_compare_uses_unsigned_ordering() {
-    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
-    let mir = source_to_mir(
-        "fn unsigned_high_bit_gt_one() -> i64:\n    val high = 1u64 << 63u64\n    if high > 1u64:\n        return 1\n    return 0\n",
-    );
-
-    em.compile_module(&mir).expect("compile");
-
-    let result = em.execute("unsigned_high_bit_gt_one", &[]).expect("execute");
-    assert_eq!(result, 1);
-}
-
-#[test]
 fn test_cranelift_jit_has_function() {
     let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
     let mir = source_to_mir("fn hello() -> i64:\n    return 1\n");

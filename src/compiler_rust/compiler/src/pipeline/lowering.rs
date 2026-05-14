@@ -63,13 +63,6 @@ enum HIRSimdLoopCandidate {
         rhs: HirExpr,
         guard: Option<HirExpr>,
     },
-    ReductionXorSumU64 {
-        kernel: &'static str,
-        target: HirExpr,
-        input: HirExpr,
-        xor_value: HirExpr,
-        guard: Option<HirExpr>,
-    },
 }
 
 /// Convert LowerError to CompileError with rich error context
@@ -677,7 +670,6 @@ impl CompilerPipeline {
             HIRSimdLoopCandidate::ReductionMin { kernel, .. } => kernel,
             HIRSimdLoopCandidate::ReductionMax { kernel, .. } => kernel,
             HIRSimdLoopCandidate::ReductionDot { kernel, .. } => kernel,
-            HIRSimdLoopCandidate::ReductionXorSumU64 { kernel, .. } => kernel,
         }
     }
 
@@ -862,35 +854,6 @@ impl CompilerPipeline {
                     },
                 },
             ),
-            HIRSimdLoopCandidate::ReductionXorSumU64 {
-                kernel,
-                target,
-                input,
-                xor_value,
-                guard,
-            } => {
-                let kernel_call = HirExpr {
-                    kind: HirExprKind::BuiltinCall {
-                        name: kernel.to_string(),
-                        args: vec![input, xor_value],
-                    },
-                    ty: target.ty,
-                };
-                (
-                    guard,
-                    HirStmt::Assign {
-                        target: target.clone(),
-                        value: HirExpr {
-                            kind: HirExprKind::Binary {
-                                op: HirBinOp::Add,
-                                left: Box::new(target.clone()),
-                                right: Box::new(kernel_call),
-                            },
-                            ty: target.ty,
-                        },
-                    },
-                )
-            }
         };
 
         if let Some(condition) = guard {
@@ -1058,23 +1021,6 @@ impl CompilerPipeline {
                     });
                 }
 
-                if let Some((input, xor_value)) = self.hir_xor_sum_reduction_operands(target_idx, left, right) {
-                    let input = input.clone();
-                    let xor_value = xor_value.clone();
-                    let (element_ty, _) = self.u64_array_layout(types, &input)?;
-                    if target.ty != TypeId::U64 || element_ty != TypeId::U64 || xor_value.ty != TypeId::U64 {
-                        return None;
-                    }
-                    let guard = self.build_simd_bound_guard_for_u64(types, range_end, [&input])?;
-                    return Some(HIRSimdLoopCandidate::ReductionXorSumU64 {
-                        kernel: "rt_numeric_xor_sum_u64",
-                        target: target.clone(),
-                        input,
-                        xor_value,
-                        guard,
-                    });
-                }
-
                 let input = if matches!(left.kind, HirExprKind::Local(idx) if idx == target_idx) {
                     self.hir_indexed_array_receiver(right)?
                 } else if matches!(right.kind, HirExprKind::Local(idx) if idx == target_idx) {
@@ -1151,37 +1097,6 @@ impl CompilerPipeline {
         None
     }
 
-    fn hir_xor_sum_reduction_operands<'a>(
-        &self,
-        target_idx: usize,
-        left: &'a HirExpr,
-        right: &'a HirExpr,
-    ) -> Option<(&'a HirExpr, &'a HirExpr)> {
-        if matches!(left.kind, HirExprKind::Local(idx) if idx == target_idx) {
-            return self.hir_xor_indexed_array_operands(right);
-        }
-        if matches!(right.kind, HirExprKind::Local(idx) if idx == target_idx) {
-            return self.hir_xor_indexed_array_operands(left);
-        }
-        None
-    }
-
-    fn hir_xor_indexed_array_operands<'a>(&self, expr: &'a HirExpr) -> Option<(&'a HirExpr, &'a HirExpr)> {
-        let HirExprKind::Binary {
-            op: HirBinOp::BitXor,
-            left,
-            right,
-        } = &expr.kind
-        else {
-            return None;
-        };
-        if let Some(input) = self.hir_indexed_array_receiver(left) {
-            return Some((input, right));
-        }
-        let input = self.hir_indexed_array_receiver(right)?;
-        Some((input, left))
-    }
-
     fn hir_mul_indexed_array_operands<'a>(&self, expr: &'a HirExpr) -> Option<(&'a HirExpr, &'a HirExpr)> {
         let HirExprKind::Binary {
             op: HirBinOp::Mul,
@@ -1208,34 +1123,6 @@ impl CompilerPipeline {
 
         for receiver in receivers {
             let (_, size) = self.float_array_layout(types, receiver)?;
-            let requires_guard = self.receiver_bound_requires_guard(end, receiver, size)?;
-            if requires_guard && !seen.iter().any(|existing: &HirExpr| existing == receiver) {
-                seen.push(receiver.clone());
-                guard_terms.push(self.make_eq_expr(self.make_len_expr(receiver.clone()), end.clone()));
-            }
-        }
-
-        let mut guard = None;
-        for term in guard_terms {
-            guard = Some(match guard {
-                Some(existing) => self.make_bool_and(existing, term),
-                None => term,
-            });
-        }
-        Some(guard)
-    }
-
-    fn build_simd_bound_guard_for_u64<const N: usize>(
-        &self,
-        types: &hir::TypeRegistry,
-        end: &HirExpr,
-        receivers: [&HirExpr; N],
-    ) -> Option<Option<HirExpr>> {
-        let mut guard_terms = Vec::new();
-        let mut seen = Vec::new();
-
-        for receiver in receivers {
-            let (_, size) = self.u64_array_layout(types, receiver)?;
             let requires_guard = self.receiver_bound_requires_guard(end, receiver, size)?;
             if requires_guard && !seen.iter().any(|existing: &HirExpr| existing == receiver) {
                 seen.push(receiver.clone());
@@ -1368,16 +1255,6 @@ impl CompilerPipeline {
                 element: TypeId::F64,
                 size,
             } => Some((TypeId::F64, *size)),
-            _ => None,
-        }
-    }
-
-    fn u64_array_layout(&self, types: &hir::TypeRegistry, expr: &HirExpr) -> Option<(TypeId, Option<usize>)> {
-        match types.get(expr.ty)? {
-            HirType::Array {
-                element: TypeId::U64,
-                size,
-            } => Some((TypeId::U64, *size)),
             _ => None,
         }
     }

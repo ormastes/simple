@@ -345,27 +345,6 @@ pub fn call_runtime_3<M: Module>(
     builder.inst_results(call)[0]
 }
 
-/// Call a runtime function with four arguments and return its result.
-/// The function must be pre-declared in `ctx.runtime_funcs`.
-#[inline]
-pub fn call_runtime_4<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    func_name: &str,
-    arg1: cranelift_codegen::ir::Value,
-    arg2: cranelift_codegen::ir::Value,
-    arg3: cranelift_codegen::ir::Value,
-    arg4: cranelift_codegen::ir::Value,
-) -> cranelift_codegen::ir::Value {
-    let func_id = ctx
-        .runtime_funcs
-        .get(func_name)
-        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
-    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = adapted_call(builder, func_ref, &[arg1, arg2, arg3, arg4]);
-    builder.inst_results(call)[0]
-}
-
 /// Call a runtime function with three arguments, discarding the return value.
 /// Use this for void runtime fns like rt_condition_probe.
 /// The function must be pre-declared in `ctx.runtime_funcs`.

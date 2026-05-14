@@ -627,7 +627,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_numeric_fma_f64",
     "rt_numeric_sum_f64",
     "rt_numeric_dot_f64",
-    "rt_numeric_xor_sum_u64",
     "rt_aes_encrypt_block_with_expanded",
     "rt_aes_decrypt_block_with_expanded",
     "rt_aes_sbox",
@@ -893,14 +892,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_atexit_check",
     // CUDA availability check
     "rt_cuda_available",
-    "rt_webgpu_is_available",
-    "rt_webgpu_init",
-    "rt_webgpu_shutdown",
-    "rt_webgpu_create_surface",
-    "rt_webgpu_destroy_surface",
-    "rt_webgpu_upload_pixels",
-    "rt_webgpu_present",
-    "rt_webgpu_compute_draw",
 ];
 
 #[cfg(test)]

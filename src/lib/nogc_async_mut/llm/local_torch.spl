@@ -3,9 +3,11 @@
 # Runs local HuggingFace transformers model via Python subprocess.
 # Uses temp files for prompt/output to avoid shell quoting issues.
 
-use std.nogc_sync_mut.io.process_ops.{process_run}
-use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text, file_delete}
-use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
 
 # ============================================================================
 # Response struct
@@ -57,27 +59,27 @@ fn local_torch_send(python_path: text, model_path: text, prompt: text, max_token
             is_error: true
         )
     # Create temp files
-    val ts = time_now_unix_micros()
+    val ts = rt_time_now_unix_micros()
     val prompt_file = "/tmp/llm_caret_prompt_" + ts.to_text() + ".txt"
     val output_file = "/tmp/llm_caret_output_" + ts.to_text() + ".txt"
     val script_file = "/tmp/llm_caret_script_" + ts.to_text() + ".py"
     # Write prompt
-    file_write(prompt_file, prompt)
+    rt_file_write_text(prompt_file, prompt)
     # Write script
     val script = build_torch_script(model_path: model_path, prompt_file: prompt_file, output_file: output_file, max_tokens: max_tokens)
-    file_write(script_file, script)
+    rt_file_write_text(script_file, script)
     # Run Python
     var py = python_path
     if py == "":
         py = "python3"
-    val result = process_run(py, [script_file])
+    val result = rt_process_run(py, [script_file])
     val stderr = result.1 ?? ""
     val exit_code = result.2
     # Cleanup
-    file_delete(prompt_file)
-    file_delete(script_file)
+    rt_file_delete(prompt_file)
+    rt_file_delete(script_file)
     if exit_code != 0:
-        file_delete(output_file)
+        rt_file_delete(output_file)
         return LocalResponse(
             content: "",
             model: model_path,
@@ -85,8 +87,8 @@ fn local_torch_send(python_path: text, model_path: text, prompt: text, max_token
             is_error: true
         )
     # Read output
-    val output = file_read_text(output_file) ?? ""
-    file_delete(output_file)
+    val output = rt_file_read_text(output_file) ?? ""
+    rt_file_delete(output_file)
     LocalResponse(
         content: output,
         model: model_path,

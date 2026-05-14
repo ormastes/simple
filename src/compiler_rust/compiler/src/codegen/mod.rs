@@ -17,7 +17,6 @@ pub mod local_execution;
 #[cfg(all(not(doctest), feature = "llvm"))]
 pub mod llvm_jit;
 pub mod mir_interpreter;
-mod mir_inline;
 #[cfg(not(doctest))]
 mod jit;
 pub mod lean;

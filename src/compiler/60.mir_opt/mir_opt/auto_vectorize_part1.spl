@@ -476,8 +476,6 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
     var data_binop_count = 0
     var call_count = 0
     var last_binop_op = ""
-    var saw_xor_data_op = false
-    var saw_add_data_op = false
     var induction_local: LocalId? = nil
     # Track the BinOp dest that looks like the accumulator update (non-index BinOp)
     var accumulator_dest: LocalId? = nil
@@ -494,16 +492,9 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
                 else:
                     data_binop_count = data_binop_count + 1
                     last_binop_op = _binop_name(op)
-                    if last_binop_op == "xor":
-                        saw_xor_data_op = true
-                    if last_binop_op == "add":
-                        saw_add_data_op = true
                     # Record the result of the accumulator BinOp; the rewriter
                     # needs this to know which local carries the running sum.
-                    if last_binop_op == "add" or last_binop_op == "mul":
-                        accumulator_dest = Some(dest)
-                    elif data_binop_count == 1:
-                        accumulator_dest = Some(dest)
+                    accumulator_dest = Some(dest)
             case Call(dest, func, args):
                 call_count = call_count + 1
             case CallIndirect(dest, ptr, args, sig):
@@ -519,10 +510,8 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
     if store_count > 0:
         return nil
 
-    # A simple reduction has exactly one data BinOp. Also recognise the common
-    # integer traversal checksum shape: acc = acc + (load ^ invariant).
-    val is_xor_sum_reduction = data_binop_count == 2 and saw_xor_data_op and saw_add_data_op
-    if data_binop_count != 1 and not is_xor_sum_reduction:
+    # Exactly one data BinOp (the accumulate step)
+    if data_binop_count != 1:
         return nil
 
     # Must have at least one load (the array read)
@@ -538,7 +527,7 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
     # §8 failure mode F3: FP reductions require fast-math permission.
     # K3 hardcodes element_type = "f32" (Wave K3 limitation — see docstring).
     # Refuse the recipe unless the caller's function has has_fast_math set.
-    val red_has_int_op = is_xor_sum_reduction or last_binop_op == "xor" or last_binop_op == "and" or last_binop_op == "or" or last_binop_op == "shl" or last_binop_op == "shr"
+    val red_has_int_op = last_binop_op == "xor" or last_binop_op == "and" or last_binop_op == "or" or last_binop_op == "shl" or last_binop_op == "shr"
     val is_fp_type = not red_has_int_op
     if is_fp_type and not has_fast_math:
         return nil
@@ -551,7 +540,6 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
 
     val red_elem_type = if red_has_int_op: "i32" else: "f32"
     val red_width = get_simd_width(red_elem_type)
-    val red_op_name = if is_xor_sum_reduction: "xor_add_reduction" else: "{last_binop_op}_reduction"
 
     Some(VectorRecipe(
         kind:             VectorRecipeKind.Reduction,
@@ -560,7 +548,7 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
         trip_count:       -1,
         element_type:     red_elem_type,
         vector_width:     red_width,
-        op_name:          red_op_name,
+        op_name:          "{last_binop_op}_reduction",
         note:             "K3 structural match: {load_count} loads, accumulator op={last_binop_op}",
         input_bases:      input_bases,
         output_base:      nil,

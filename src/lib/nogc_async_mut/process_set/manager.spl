@@ -1,11 +1,14 @@
 use nogc_async_mut.process_set.types.*
 use nogc_async_mut.process_set.ipc.{FileQueueTransport, IpcMessage, IpcReply, ipc_new_message, ipc_new_request}
 use nogc_async_mut.supervisor.{Supervisor, ChildSpec, child_spec_with_restart}
-use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_kill}
-use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn _mgr_timestamp() -> i64:
-    current_time_ms()
+    val result = rt_process_run("date", ["+%s%3N"])
+    val ts_text = result.0.trim()
+    ts_text.to_int() ?? 0
 
 struct WorkerProcess:
     name: text
@@ -69,7 +72,7 @@ class ProcessManager:
         self.supervisor.start()
         val ts = _mgr_timestamp()
         for w in self.config.workers:
-            val pid = process_spawn_async("bin/simple", ["--worker", w.name, "--config", "config/process.sdn"])
+            val pid = rt_process_spawn_async("bin/simple", ["--worker", w.name, "--config", "config/process.sdn"])
             if pid < 0:
                 return Err(ProcessSetError.SpawnError(message: "failed to spawn worker {w.name}"))
             val spec = child_spec_with_restart(w.name, w.restart)
@@ -91,7 +94,7 @@ class ProcessManager:
             for w in self.config.workers:
                 val wp = self.workers.get(w.name)
                 if wp != nil and wp.pid > 0:
-                    process_kill(wp.pid)
+                    rt_process_run("kill", ["{wp.pid}"])
 
     me restart_worker(name: text) -> Result<(), ProcessSetError>:
         val existing = self.workers.get(name)
@@ -100,8 +103,8 @@ class ProcessManager:
 
         if self.config.mode == ProcessMode.Separated:
             if existing.pid > 0:
-                process_kill(existing.pid)
-            val pid = process_spawn_async("bin/simple", ["--worker", name, "--config", "config/process.sdn"])
+                rt_process_run("kill", ["{existing.pid}"])
+            val pid = rt_process_spawn_async("bin/simple", ["--worker", name, "--config", "config/process.sdn"])
             if pid < 0:
                 return Err(ProcessSetError.SpawnError(message: "failed to respawn worker {name}"))
             val ts = _mgr_timestamp()

@@ -356,8 +356,7 @@ impl Lowerer {
             Type::Generic { name, args } => {
                 let family_name = self.resolve_type_alias(name).unwrap_or(name).to_string();
                 if let Some(family_ty) = self.module.types.lookup(&family_name) {
-                    let family_type = self.module.types.get(family_ty).cloned();
-                    let family_name = match &family_type {
+                    let family_name = match self.module.types.get(family_ty) {
                         Some(HirType::Enum { name, .. }) => Some(name.clone()),
                         _ => None,
                     };
@@ -365,28 +364,6 @@ impl Lowerer {
                         if let Some(instantiated) = self.instantiate_builtin_generic_enum(&family, args) {
                             return instantiated;
                         }
-                    }
-                    if let Some(HirType::Struct {
-                        name,
-                        fields,
-                        has_snapshot,
-                        generic_params,
-                        is_generic_template: _,
-                        ..
-                    }) = family_type
-                    {
-                        let mut type_bindings = std::collections::HashMap::new();
-                        for (param, arg) in generic_params.iter().zip(args.iter()) {
-                            type_bindings.insert(param.clone(), self.resolve_type(arg)?);
-                        }
-                        return Ok(self.module.types.register(HirType::Struct {
-                            name,
-                            fields,
-                            has_snapshot,
-                            generic_params,
-                            is_generic_template: false,
-                            type_bindings,
-                        }));
                     }
                 }
                 // Handle common generic types used in stdlib
@@ -411,10 +388,7 @@ impl Lowerer {
                             size: None,
                         }))
                     }
-                    // Set<T> without a registered Set struct falls back to
-                    // Any. Registered generic structs preserve their named
-                    // receiver above so native method dispatch can qualify
-                    // Set.insert vs Map.insert.
+                    // Set<T> - represented as Any at native level
                     "Set" => Ok(TypeId::ANY),
                     // Other generic types - treat as Any (dynamically typed)
                     _ => Ok(TypeId::ANY),

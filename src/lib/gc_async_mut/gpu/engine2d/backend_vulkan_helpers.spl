@@ -8,19 +8,24 @@
 
 use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
-use std.nogc_sync_mut.gpu.engine2d.ffi_vulkan.{
-    vulkan_ffi_create_descriptor_set, vulkan_ffi_bind_buffer,
-    vulkan_ffi_destroy_descriptor_set, vulkan_ffi_begin_compute,
-    vulkan_ffi_bind_pipeline, vulkan_ffi_bind_descriptors,
-    vulkan_ffi_push_constants, vulkan_ffi_dispatch,
-    vulkan_ffi_end_compute, vulkan_ffi_submit_and_wait,
-    vulkan_ffi_copy_from_buffer, vulkan_ffi_copy_to_buffer,
-    vulkan_ffi_wait_idle
-}
 
 # ============================================================================
 # Vulkan FFI (re-declared for use in this module)
 # ============================================================================
+
+extern fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64
+extern fn rt_vulkan_bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool
+extern fn rt_vulkan_destroy_descriptor_set(descriptor_set: i64) -> bool
+extern fn rt_vulkan_begin_compute() -> i64
+extern fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> bool
+extern fn rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool
+extern fn rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool
+extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
+extern fn rt_vulkan_end_compute(cmd: i64) -> bool
+extern fn rt_vulkan_submit_and_wait(cmd: i64) -> bool
+extern fn rt_vulkan_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool
+extern fn rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool
+extern fn rt_vulkan_wait_idle() -> bool
 
 # ============================================================================
 # Push Constant Size (must match backend_vulkan.spl)
@@ -36,30 +41,30 @@ impl VulkanBackend:
 
     me _dispatch_compute(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64):
         """Dispatch a compute shader with the framebuffer bound at binding 0."""
-        val desc = vulkan_ffi_create_descriptor_set(pipe)
-        vulkan_ffi_bind_buffer(desc, 0, self.d_framebuffer)
-        val cmd = vulkan_ffi_begin_compute()
-        vulkan_ffi_bind_pipeline(cmd, pipe)
-        vulkan_ffi_bind_descriptors(cmd, desc)
-        vulkan_ffi_push_constants(cmd, pipe, push_data)
-        vulkan_ffi_dispatch(cmd, gx, gy, gz)
-        vulkan_ffi_end_compute(cmd)
-        vulkan_ffi_submit_and_wait(cmd)
-        vulkan_ffi_destroy_descriptor_set(desc)
+        val desc = rt_vulkan_create_descriptor_set(pipe)
+        rt_vulkan_bind_buffer(desc, 0, self.d_framebuffer)
+        val cmd = rt_vulkan_begin_compute()
+        rt_vulkan_bind_pipeline(cmd, pipe)
+        rt_vulkan_bind_descriptors(cmd, desc)
+        rt_vulkan_push_constants(cmd, pipe, push_data)
+        rt_vulkan_dispatch(cmd, gx, gy, gz)
+        rt_vulkan_end_compute(cmd)
+        rt_vulkan_submit_and_wait(cmd)
+        rt_vulkan_destroy_descriptor_set(desc)
 
     me _dispatch_blit_compute(pipe: i64, d_src: i64, push_data: [u8], gx: i64, gy: i64, gz: i64):
         """Dispatch blit compute shader with framebuffer at binding 0 and source at binding 1."""
-        val desc = vulkan_ffi_create_descriptor_set(pipe)
-        vulkan_ffi_bind_buffer(desc, 0, self.d_framebuffer)
-        vulkan_ffi_bind_buffer(desc, 1, d_src)
-        val cmd = vulkan_ffi_begin_compute()
-        vulkan_ffi_bind_pipeline(cmd, pipe)
-        vulkan_ffi_bind_descriptors(cmd, desc)
-        vulkan_ffi_push_constants(cmd, pipe, push_data)
-        vulkan_ffi_dispatch(cmd, gx, gy, gz)
-        vulkan_ffi_end_compute(cmd)
-        vulkan_ffi_submit_and_wait(cmd)
-        vulkan_ffi_destroy_descriptor_set(desc)
+        val desc = rt_vulkan_create_descriptor_set(pipe)
+        rt_vulkan_bind_buffer(desc, 0, self.d_framebuffer)
+        rt_vulkan_bind_buffer(desc, 1, d_src)
+        val cmd = rt_vulkan_begin_compute()
+        rt_vulkan_bind_pipeline(cmd, pipe)
+        rt_vulkan_bind_descriptors(cmd, desc)
+        rt_vulkan_push_constants(cmd, pipe, push_data)
+        rt_vulkan_dispatch(cmd, gx, gy, gz)
+        rt_vulkan_end_compute(cmd)
+        rt_vulkan_submit_and_wait(cmd)
+        rt_vulkan_destroy_descriptor_set(desc)
 
     me _gpu_draw_text_fallback(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         """Render text on CPU and upload affected region to GPU.
@@ -72,8 +77,8 @@ impl VulkanBackend:
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             val fb_bytes: [u8] = [0u8; fb_size]
-            vulkan_ffi_copy_from_buffer(fb_bytes, self.d_framebuffer, 0)
-            vulkan_ffi_wait_idle()
+            rt_vulkan_copy_from_buffer(fb_bytes, self.d_framebuffer, 0)
+            rt_vulkan_wait_idle()
             _bytes_to_pixels(fb_bytes, self.host_buf, self.w * self.h)
 
         # Render glyphs into host buffer using shared glyph module
@@ -82,7 +87,7 @@ impl VulkanBackend:
         # Upload entire host buffer back to GPU
         val fb_size = _i64(self.w) * _i64(self.h) * 4
         val upload_bytes = _pixels_to_bytes(self.host_buf, _i64(self.w) * _i64(self.h))
-        vulkan_ffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
+        rt_vulkan_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
 
 # ============================================================================
 # Type Conversion Helpers

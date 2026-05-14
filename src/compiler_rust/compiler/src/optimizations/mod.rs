@@ -128,13 +128,6 @@ const INVENTORY: &[OptimizationInventoryEntry] = &[
     },
     OptimizationInventoryEntry {
         stage: "native",
-        name: "small MIR tail-call inlining",
-        level: NativeOptimizationLevel::Basic,
-        enabled_by_default_for_native_executable: true,
-        description: "Native codegen expands supported straight-line small local tail calls before Cranelift lowering to remove hot helper-call overhead without duplicating loop invariants.",
-    },
-    OptimizationInventoryEntry {
-        stage: "native",
         name: "release build mode",
         level: NativeOptimizationLevel::Basic,
         enabled_by_default_for_native_executable: true,

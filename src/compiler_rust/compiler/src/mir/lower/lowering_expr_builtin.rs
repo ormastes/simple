@@ -204,7 +204,6 @@ impl<'a> MirLowerer<'a> {
                 | "rt_numeric_max_f32"
                 | "rt_numeric_sum_f64"
                 | "rt_numeric_dot_f64"
-                | "rt_numeric_xor_sum_u64"
         ) && matches!(expr_ty, TypeId::F32 | TypeId::F64)
         {
             let mut arg_regs = Vec::new();
@@ -222,29 +221,6 @@ impl<'a> MirLowerer<'a> {
                     args: arg_regs,
                 });
                 block.instructions.push(MirInst::UnboxFloat {
-                    dest: unboxed,
-                    value: raw_result,
-                });
-                unboxed
-            });
-        }
-
-        if name == "rt_numeric_xor_sum_u64" && matches!(expr_ty, TypeId::U64) {
-            let mut arg_regs = Vec::new();
-            for arg in args {
-                arg_regs.push(self.lower_expr(arg)?);
-            }
-
-            return self.with_func(|func, current_block| {
-                let raw_result = func.new_vreg();
-                let unboxed = func.new_vreg();
-                let block = func.block_mut(current_block).unwrap();
-                block.instructions.push(MirInst::Call {
-                    dest: Some(raw_result),
-                    target: CallTarget::from_name(name),
-                    args: arg_regs,
-                });
-                block.instructions.push(MirInst::UnboxInt {
                     dest: unboxed,
                     value: raw_result,
                 });

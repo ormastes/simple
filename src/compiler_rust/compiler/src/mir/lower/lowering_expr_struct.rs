@@ -279,21 +279,7 @@ impl<'a> MirLowerer<'a> {
             self.lower_expr(receiver)?
         };
         let index_reg = self.lower_expr(index)?;
-        let index_ty = if index.ty == TypeId::ANY || index.ty.0 == u32::MAX {
-            self.recover_receiver_type(index).unwrap_or(index.ty)
-        } else {
-            index.ty
-        };
         let receiver_ty = receiver.ty;
-        let recovered_receiver_ty = if receiver_ty == TypeId::ANY || receiver_ty.0 == u32::MAX {
-            self.recover_receiver_type(receiver)
-        } else {
-            Some(receiver_ty)
-        };
-        let receiver_is_array = self
-            .type_registry
-            .and_then(|tr| recovered_receiver_ty.and_then(|ty| tr.get(ty)))
-            .is_some_and(|ty| matches!(ty, HirType::Array { .. }));
         let receiver_is_u8_array = self
             .type_registry
             .and_then(|tr| tr.get(receiver_ty))
@@ -340,15 +326,8 @@ impl<'a> MirLowerer<'a> {
             })?
         } else if receiver_is_u8_array
             && matches!(
-                index_ty,
-                TypeId::I8
-                    | TypeId::I16
-                    | TypeId::I32
-                    | TypeId::I64
-                    | TypeId::U8
-                    | TypeId::U16
-                    | TypeId::U32
-                    | TypeId::U64
+                index.ty,
+                TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
             )
         {
             return self.with_func(|func, current_block| {
@@ -378,15 +357,8 @@ impl<'a> MirLowerer<'a> {
             });
         } else if receiver_is_u32_array
             && matches!(
-                index_ty,
-                TypeId::I8
-                    | TypeId::I16
-                    | TypeId::I32
-                    | TypeId::I64
-                    | TypeId::U8
-                    | TypeId::U16
-                    | TypeId::U32
-                    | TypeId::U64
+                index.ty,
+                TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
             )
         {
             return self.with_func(|func, current_block| {
@@ -416,15 +388,8 @@ impl<'a> MirLowerer<'a> {
             });
         } else if receiver_is_u64_array
             && matches!(
-                index_ty,
-                TypeId::I8
-                    | TypeId::I16
-                    | TypeId::I32
-                    | TypeId::I64
-                    | TypeId::U8
-                    | TypeId::U16
-                    | TypeId::U32
-                    | TypeId::U64
+                index.ty,
+                TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
             )
         {
             return self.with_func(|func, current_block| {
@@ -452,19 +417,11 @@ impl<'a> MirLowerer<'a> {
         } else {
             // Box the index as RuntimeValue if it's a native type
             let boxed_index = {
-                let needs_int_boxing = receiver_is_array
-                    || matches!(
-                        index_ty,
-                        TypeId::I8
-                            | TypeId::I16
-                            | TypeId::I32
-                            | TypeId::I64
-                            | TypeId::U8
-                            | TypeId::U16
-                            | TypeId::U32
-                            | TypeId::U64
-                    );
-                let needs_bool_boxing = index_ty == TypeId::BOOL;
+                let needs_int_boxing = matches!(
+                    index.ty,
+                    TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                );
+                let needs_bool_boxing = index.ty == TypeId::BOOL || index.ty == TypeId::I8;
                 if needs_int_boxing {
                     self.with_func(|func, current_block| {
                         let boxed = func.new_vreg();

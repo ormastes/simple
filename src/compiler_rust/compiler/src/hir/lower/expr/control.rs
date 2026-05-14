@@ -111,9 +111,8 @@ impl Lowerer {
             })
             .collect();
 
-        let saved_locals_len = ctx.locals.len();
-        let saved_local_map = ctx.local_map.clone();
         // Add lambda parameters to context as locals for body lowering
+        let saved_locals_len = ctx.locals.len();
         for (name, ty) in &param_info {
             ctx.add_local(name.clone(), *ty, simple_parser::ast::Mutability::Immutable);
         }
@@ -122,9 +121,12 @@ impl Lowerer {
         let body_hir = Box::new(self.lower_expr(body, ctx)?);
         let body_ty = body_hir.ty;
 
-        // Restore context; lambda-local variables must not leak to the outer function.
+        // Restore context (remove lambda parameters)
         ctx.locals.truncate(saved_locals_len);
-        ctx.local_map = saved_local_map;
+        // Also need to remove from local_map
+        for (name, _) in &param_info {
+            ctx.local_map.remove(name);
+        }
 
         Ok(HirExpr {
             kind: HirExprKind::Lambda {
@@ -756,37 +758,35 @@ impl Lowerer {
             }
         }
 
-        let mut block_stmts = Vec::new();
-        let mut result_ty = TypeId::NIL;
+        // For multiple statements, evaluate each expression and return the last result
+        // TODO: Full statement support would require exposing lower_node or creating a block HIR node
+        let mut last_expr = HirExpr {
+            kind: HirExprKind::Nil,
+            ty: TypeId::NIL,
+        };
 
         for stmt in statements {
             match stmt {
                 simple_parser::ast::Node::Expression(expr) => {
-                    let expr = self.lower_expr(expr, ctx)?;
-                    result_ty = expr.ty;
-                    block_stmts.push(crate::hir::HirStmt::Expr(expr));
+                    last_expr = self.lower_expr(expr, ctx)?;
                 }
                 simple_parser::ast::Node::Return(ret_stmt) => {
                     if let Some(expr) = &ret_stmt.value {
-                        let expr = self.lower_expr(expr, ctx)?;
-                        result_ty = expr.ty;
-                        block_stmts.push(crate::hir::HirStmt::Expr(expr));
+                        last_expr = self.lower_expr(expr, ctx)?;
                     } else {
-                        block_stmts.push(crate::hir::HirStmt::Expr(HirExpr {
+                        last_expr = HirExpr {
                             kind: HirExprKind::Nil,
                             ty: TypeId::NIL,
-                        }));
-                        result_ty = TypeId::NIL;
+                        };
                     }
                 }
-                _ => block_stmts.extend(self.lower_node(stmt, ctx)?),
+                _ => {
+                    // Other statement types are not yet supported in do blocks
+                }
             }
         }
 
-        Ok(HirExpr {
-            kind: HirExprKind::Block(block_stmts),
-            ty: result_ty,
-        })
+        Ok(last_expr)
     }
 
     /// Lower a null coalescing expression (expr ?? default) to HIR

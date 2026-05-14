@@ -1,4 +1,4 @@
-"""SPIR-V shader cache with real filesystem persistence via no-GC sync I/O.
+"""SPIR-V shader cache with real filesystem persistence via rt_file_write_text/rt_file_read_text.
 
 Cache compiled shader bytecode keyed by a hash string.  Entries are stored
 both in an in-memory parallel array (fast path) and on disk under the
@@ -6,8 +6,10 @@ configured cache directory (persistent path).  On lookup miss in memory,
 the cache falls back to the filesystem.
 """
 
-use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text, file_exists}
-use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
 
 # ============================================================================
 # Types
@@ -50,16 +52,16 @@ fn _sc_file_path(hash: text) -> text:
     _sc_cache_dir + "/" + hash + ".spv"
 
 fn _sc_write_to_disk(hash: text, size: i64):
-    dir_create_all(_sc_cache_dir)
+    rt_dir_create_all(_sc_cache_dir)
     val path = _sc_file_path(hash)
     val content = "SPIRV:" + hash + ":" + size.to_text()
-    file_write(path, content)
+    rt_file_write_text(path, content)
 
 fn _sc_read_from_disk(hash: text) -> ShaderLookupResult:
     val path = _sc_file_path(hash)
-    if not file_exists(path):
+    if not rt_file_exists(path):
         return ShaderLookupResult(found: false, hash: hash, size: 0)
-    val content = file_read_text(path)
+    val content = rt_file_read_text(path)
     val parts = content.split(":")
     if parts.len() < 3:
         return ShaderLookupResult(found: false, hash: hash, size: 0)
@@ -183,6 +185,6 @@ pub fn shader_cache_is_persistent() -> bool:
     """Return true because real filesystem I/O is available.
 
     Returns:
-        Always true; this build uses no-GC sync file and directory backends.
+        Always true — this build uses rt_file_write_text/rt_file_read_text.
     """
     true

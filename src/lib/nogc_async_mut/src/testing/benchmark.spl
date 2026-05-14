@@ -1,8 +1,9 @@
 # Performance Benchmarking Library
 # Statistical benchmarking with warmup, outlier detection, and comparison
 
-use std.nogc_sync_mut.src.time.{now_nanos}
-use std.nogc_async_mut.src.map.{Map}
+import time
+import math
+import map
 
 # ============================================================================
 # Configuration
@@ -155,23 +156,23 @@ pub fn benchmark(
     for _ in 0..config.sample_size:
         var sample_times = []
 
-        val sample_start = now_nanos()
+        val sample_start = time.now_nanos()
         var elapsed_ns = 0.0
 
         # Collect measurements until time limit or iteration limit
         while sample_times.len() < config.measurement_iterations and
               elapsed_ns < config.measurement_time_secs * 1_000_000_000.0:
 
-            val start = now_nanos()
+            val start = time.now_nanos()
             func()
-            val end = now_nanos()
+            val end = time.now_nanos()
 
             val duration = end - start
             sample_times.append(duration)
             elapsed_ns = end - sample_start
 
         # Calculate median for this sample
-        sort_f64_in_place(sample_times)
+        sample_times.sort()
         val median_idx = sample_times.len() / 2
         val median = sample_times[median_idx]
         samples.append(median)
@@ -224,7 +225,7 @@ pub fn compare(
         for (name, stats) in results.entries():
             print "{name}: {stats.summary()}"
     """
-    var results: Map<text, BenchmarkStats> = Map.new()
+    var results = Map.new()
     for (name, func) in benchmarks.entries():
         results.insert(name, benchmark(name, func, config))
     results
@@ -278,7 +279,7 @@ fn calculate_stats(samples: [f64], outlier_threshold: f64) -> BenchmarkStats:
         val diff = sample - mean
         variance_sum = variance_sum + (diff * diff)
     val variance = variance_sum / n
-    val std_dev = sqrt_f64(variance)
+    val std_dev = math.sqrt(variance)
 
     # Detect outliers
     var outliers_low = 0
@@ -293,8 +294,8 @@ fn calculate_stats(samples: [f64], outlier_threshold: f64) -> BenchmarkStats:
             outliers_high = outliers_high + 1
 
     # Median
-    var sorted = copy_f64_array(samples)
-    sort_f64_in_place(sorted)
+    var sorted = samples.clone()
+    sorted.sort()
     val median_idx = sorted.len() / 2
     val median = sorted[median_idx]
 
@@ -313,33 +314,7 @@ fn calculate_stats(samples: [f64], outlier_threshold: f64) -> BenchmarkStats:
         samples: samples
     )
 
-fn copy_f64_array(values: [f64]) -> [f64]:
-    var result: [f64] = []
-    for value in values:
-        result.append(value)
-    result
-
-fn sort_f64_in_place(values: [f64]):
-    var i = 1
-    while i < values.len():
-        val key = values[i]
-        var j = i - 1
-        while j >= 0 and values[j] > key:
-            values[j + 1] = values[j]
-            j = j - 1
-        values[j + 1] = key
-        i = i + 1
-
-fn sqrt_f64(value: f64) -> f64:
-    if value <= 0.0:
-        return 0.0
-    var guess = value
-    if guess < 1.0:
-        guess = 1.0
-    for _ in 0..12:
-        guess = (guess + value / guess) / 2.0
-    guess
-
 # ============================================================================
 # Export
 # ============================================================================
+

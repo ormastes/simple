@@ -9,7 +9,7 @@
 # Architecture:
 #   - Framebuffer is a Vulkan storage buffer (usage 0x80)
 #   - One GLSL compute shader per kernel type (clear, rect, circle, etc.)
-#   - Shaders compiled at init() via vulkan_ffi_compile_glsl()
+#   - Shaders compiled at init() via rt_vulkan_compile_glsl()
 #   - Push constants carry per-primitive parameters
 #   - Each draw call: begin_compute -> bind_pipeline -> bind_descriptors ->
 #     push_constants -> dispatch -> end_compute -> submit_and_wait
@@ -44,15 +44,35 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_image_transform,
     emu_draw_rect_blend_mode
 }
-use std.nogc_sync_mut.gpu.engine2d.ffi_vulkan.{
-    vulkan_ffi_init, vulkan_ffi_shutdown, vulkan_ffi_is_available,
-    vulkan_ffi_device_count, vulkan_ffi_select_device,
-    vulkan_ffi_alloc_buffer, vulkan_ffi_free_buffer,
-    vulkan_ffi_copy_to_buffer, vulkan_ffi_copy_from_buffer,
-    vulkan_ffi_compile_glsl, vulkan_ffi_destroy_shader,
-    vulkan_ffi_create_compute_pipeline, vulkan_ffi_destroy_pipeline,
-    vulkan_ffi_wait_idle
-}
+
+# ============================================================================
+# Vulkan FFI Declarations
+# ============================================================================
+
+extern fn rt_vulkan_init() -> bool
+extern fn rt_vulkan_shutdown() -> bool
+extern fn rt_vulkan_is_available() -> bool
+extern fn rt_vulkan_device_count() -> i64
+extern fn rt_vulkan_select_device(id: i64) -> bool
+extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
+extern fn rt_vulkan_free_buffer(handle: i64) -> bool
+extern fn rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool
+extern fn rt_vulkan_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool
+extern fn rt_vulkan_compile_glsl(glsl_source: text) -> i64
+extern fn rt_vulkan_destroy_shader(module: i64) -> bool
+extern fn rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64
+extern fn rt_vulkan_destroy_pipeline(pipe: i64) -> bool
+extern fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64
+extern fn rt_vulkan_bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool
+extern fn rt_vulkan_destroy_descriptor_set(descriptor_set: i64) -> bool
+extern fn rt_vulkan_begin_compute() -> i64
+extern fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> bool
+extern fn rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool
+extern fn rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool
+extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
+extern fn rt_vulkan_end_compute(cmd: i64) -> bool
+extern fn rt_vulkan_submit_and_wait(cmd: i64) -> bool
+extern fn rt_vulkan_wait_idle() -> bool
 
 # ============================================================================
 # Vulkan Availability Check
@@ -60,7 +80,7 @@ use std.nogc_sync_mut.gpu.engine2d.ffi_vulkan.{
 
 fn vulkan_available() -> bool:
     """Check if Vulkan runtime is available on this system."""
-    vulkan_ffi_is_available()
+    rt_vulkan_is_available()
 
 # ============================================================================
 # Push Constant Size (in bytes)
@@ -177,14 +197,14 @@ impl RenderBackend for VulkanBackend:
         if not vulkan_available():
             return false
 
-        if not vulkan_ffi_init():
+        if not rt_vulkan_init():
             return false
 
-        if vulkan_ffi_device_count() < 1:
+        if rt_vulkan_device_count() < 1:
             return false
 
         # Select first device
-        if not vulkan_ffi_select_device(0):
+        if not rt_vulkan_select_device(0):
             return false
 
         self.w = width
@@ -193,7 +213,7 @@ impl RenderBackend for VulkanBackend:
         # Allocate device framebuffer storage buffer (4 bytes per pixel = u32)
         # Usage 0x80 = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
         val fb_size = _i64(width) * _i64(height) * 4
-        self.d_framebuffer = vulkan_ffi_alloc_buffer(fb_size, 0x80)
+        self.d_framebuffer = rt_vulkan_alloc_buffer(fb_size, 0x80)
         if self.d_framebuffer == 0:
             return false
 
@@ -202,28 +222,28 @@ impl RenderBackend for VulkanBackend:
         self.host_buf = [0u32; total]
 
         # Compile all GLSL compute shaders
-        self.shader_clear = vulkan_ffi_compile_glsl(_glsl_clear())
-        self.shader_rect_filled = vulkan_ffi_compile_glsl(_glsl_rect_filled())
-        self.shader_rect_outline = vulkan_ffi_compile_glsl(_glsl_rect_outline())
-        self.shader_circle_filled = vulkan_ffi_compile_glsl(_glsl_circle_filled())
-        self.shader_circle_outline = vulkan_ffi_compile_glsl(_glsl_circle_outline())
-        self.shader_line = vulkan_ffi_compile_glsl(_glsl_line())
-        self.shader_rounded_rect = vulkan_ffi_compile_glsl(_glsl_rounded_rect())
-        self.shader_triangle = vulkan_ffi_compile_glsl(_glsl_triangle_filled())
-        self.shader_gradient = vulkan_ffi_compile_glsl(_glsl_gradient_rect())
-        self.shader_blit = vulkan_ffi_compile_glsl(_glsl_blit())
+        self.shader_clear = rt_vulkan_compile_glsl(_glsl_clear())
+        self.shader_rect_filled = rt_vulkan_compile_glsl(_glsl_rect_filled())
+        self.shader_rect_outline = rt_vulkan_compile_glsl(_glsl_rect_outline())
+        self.shader_circle_filled = rt_vulkan_compile_glsl(_glsl_circle_filled())
+        self.shader_circle_outline = rt_vulkan_compile_glsl(_glsl_circle_outline())
+        self.shader_line = rt_vulkan_compile_glsl(_glsl_line())
+        self.shader_rounded_rect = rt_vulkan_compile_glsl(_glsl_rounded_rect())
+        self.shader_triangle = rt_vulkan_compile_glsl(_glsl_triangle_filled())
+        self.shader_gradient = rt_vulkan_compile_glsl(_glsl_gradient_rect())
+        self.shader_blit = rt_vulkan_compile_glsl(_glsl_blit())
 
         # Create compute pipelines (all use push constants)
-        self.pipe_clear = vulkan_ffi_create_compute_pipeline(self.shader_clear, "main", VK_PUSH_CONSTANT_SIZE)
-        self.pipe_rect_filled = vulkan_ffi_create_compute_pipeline(self.shader_rect_filled, "main", VK_PUSH_CONSTANT_SIZE)
-        self.pipe_rect_outline = vulkan_ffi_create_compute_pipeline(self.shader_rect_outline, "main", VK_PUSH_CONSTANT_SIZE)
-        self.pipe_circle_filled = vulkan_ffi_create_compute_pipeline(self.shader_circle_filled, "main", VK_PUSH_CONSTANT_SIZE)
-        self.pipe_circle_outline = vulkan_ffi_create_compute_pipeline(self.shader_circle_outline, "main", VK_PUSH_CONSTANT_SIZE)
-        self.pipe_line = vulkan_ffi_create_compute_pipeline(self.shader_line, "main", VK_PUSH_CONSTANT_SIZE)
-        self.pipe_rounded_rect = vulkan_ffi_create_compute_pipeline(self.shader_rounded_rect, "main", VK_PUSH_CONSTANT_SIZE)
-        self.pipe_triangle = vulkan_ffi_create_compute_pipeline(self.shader_triangle, "main", VK_PUSH_CONSTANT_SIZE)
-        self.pipe_gradient = vulkan_ffi_create_compute_pipeline(self.shader_gradient, "main", VK_PUSH_CONSTANT_SIZE)
-        self.pipe_blit = vulkan_ffi_create_compute_pipeline(self.shader_blit, "main", VK_PUSH_CONSTANT_SIZE)
+        self.pipe_clear = rt_vulkan_create_compute_pipeline(self.shader_clear, "main", VK_PUSH_CONSTANT_SIZE)
+        self.pipe_rect_filled = rt_vulkan_create_compute_pipeline(self.shader_rect_filled, "main", VK_PUSH_CONSTANT_SIZE)
+        self.pipe_rect_outline = rt_vulkan_create_compute_pipeline(self.shader_rect_outline, "main", VK_PUSH_CONSTANT_SIZE)
+        self.pipe_circle_filled = rt_vulkan_create_compute_pipeline(self.shader_circle_filled, "main", VK_PUSH_CONSTANT_SIZE)
+        self.pipe_circle_outline = rt_vulkan_create_compute_pipeline(self.shader_circle_outline, "main", VK_PUSH_CONSTANT_SIZE)
+        self.pipe_line = rt_vulkan_create_compute_pipeline(self.shader_line, "main", VK_PUSH_CONSTANT_SIZE)
+        self.pipe_rounded_rect = rt_vulkan_create_compute_pipeline(self.shader_rounded_rect, "main", VK_PUSH_CONSTANT_SIZE)
+        self.pipe_triangle = rt_vulkan_create_compute_pipeline(self.shader_triangle, "main", VK_PUSH_CONSTANT_SIZE)
+        self.pipe_gradient = rt_vulkan_create_compute_pipeline(self.shader_gradient, "main", VK_PUSH_CONSTANT_SIZE)
+        self.pipe_blit = rt_vulkan_create_compute_pipeline(self.shader_blit, "main", VK_PUSH_CONSTANT_SIZE)
 
         # Verify all pipelines were created
         if (self.pipe_clear == 0 or self.pipe_rect_filled == 0 or
@@ -245,30 +265,30 @@ impl RenderBackend for VulkanBackend:
 
     me shutdown():
         # Destroy pipelines
-        if self.pipe_clear != 0: vulkan_ffi_destroy_pipeline(self.pipe_clear)
-        if self.pipe_rect_filled != 0: vulkan_ffi_destroy_pipeline(self.pipe_rect_filled)
-        if self.pipe_rect_outline != 0: vulkan_ffi_destroy_pipeline(self.pipe_rect_outline)
-        if self.pipe_circle_filled != 0: vulkan_ffi_destroy_pipeline(self.pipe_circle_filled)
-        if self.pipe_circle_outline != 0: vulkan_ffi_destroy_pipeline(self.pipe_circle_outline)
-        if self.pipe_line != 0: vulkan_ffi_destroy_pipeline(self.pipe_line)
-        if self.pipe_rounded_rect != 0: vulkan_ffi_destroy_pipeline(self.pipe_rounded_rect)
-        if self.pipe_triangle != 0: vulkan_ffi_destroy_pipeline(self.pipe_triangle)
-        if self.pipe_gradient != 0: vulkan_ffi_destroy_pipeline(self.pipe_gradient)
-        if self.pipe_blit != 0: vulkan_ffi_destroy_pipeline(self.pipe_blit)
+        if self.pipe_clear != 0: rt_vulkan_destroy_pipeline(self.pipe_clear)
+        if self.pipe_rect_filled != 0: rt_vulkan_destroy_pipeline(self.pipe_rect_filled)
+        if self.pipe_rect_outline != 0: rt_vulkan_destroy_pipeline(self.pipe_rect_outline)
+        if self.pipe_circle_filled != 0: rt_vulkan_destroy_pipeline(self.pipe_circle_filled)
+        if self.pipe_circle_outline != 0: rt_vulkan_destroy_pipeline(self.pipe_circle_outline)
+        if self.pipe_line != 0: rt_vulkan_destroy_pipeline(self.pipe_line)
+        if self.pipe_rounded_rect != 0: rt_vulkan_destroy_pipeline(self.pipe_rounded_rect)
+        if self.pipe_triangle != 0: rt_vulkan_destroy_pipeline(self.pipe_triangle)
+        if self.pipe_gradient != 0: rt_vulkan_destroy_pipeline(self.pipe_gradient)
+        if self.pipe_blit != 0: rt_vulkan_destroy_pipeline(self.pipe_blit)
         # Destroy shader modules
-        if self.shader_clear != 0: vulkan_ffi_destroy_shader(self.shader_clear)
-        if self.shader_rect_filled != 0: vulkan_ffi_destroy_shader(self.shader_rect_filled)
-        if self.shader_rect_outline != 0: vulkan_ffi_destroy_shader(self.shader_rect_outline)
-        if self.shader_circle_filled != 0: vulkan_ffi_destroy_shader(self.shader_circle_filled)
-        if self.shader_circle_outline != 0: vulkan_ffi_destroy_shader(self.shader_circle_outline)
-        if self.shader_line != 0: vulkan_ffi_destroy_shader(self.shader_line)
-        if self.shader_rounded_rect != 0: vulkan_ffi_destroy_shader(self.shader_rounded_rect)
-        if self.shader_triangle != 0: vulkan_ffi_destroy_shader(self.shader_triangle)
-        if self.shader_gradient != 0: vulkan_ffi_destroy_shader(self.shader_gradient)
-        if self.shader_blit != 0: vulkan_ffi_destroy_shader(self.shader_blit)
+        if self.shader_clear != 0: rt_vulkan_destroy_shader(self.shader_clear)
+        if self.shader_rect_filled != 0: rt_vulkan_destroy_shader(self.shader_rect_filled)
+        if self.shader_rect_outline != 0: rt_vulkan_destroy_shader(self.shader_rect_outline)
+        if self.shader_circle_filled != 0: rt_vulkan_destroy_shader(self.shader_circle_filled)
+        if self.shader_circle_outline != 0: rt_vulkan_destroy_shader(self.shader_circle_outline)
+        if self.shader_line != 0: rt_vulkan_destroy_shader(self.shader_line)
+        if self.shader_rounded_rect != 0: rt_vulkan_destroy_shader(self.shader_rounded_rect)
+        if self.shader_triangle != 0: rt_vulkan_destroy_shader(self.shader_triangle)
+        if self.shader_gradient != 0: rt_vulkan_destroy_shader(self.shader_gradient)
+        if self.shader_blit != 0: rt_vulkan_destroy_shader(self.shader_blit)
         # Free framebuffer
         if self.d_framebuffer != 0:
-            vulkan_ffi_free_buffer(self.d_framebuffer)
+            rt_vulkan_free_buffer(self.d_framebuffer)
             self.d_framebuffer = 0
         self.host_buf = []
         self.w = 0
@@ -383,17 +403,17 @@ impl RenderBackend for VulkanBackend:
         # dispatch a blit compute shader to copy it into the framebuffer
         val pixel_count = _i64(w) * _i64(h)
         val byte_size = pixel_count * 4
-        val d_src = vulkan_ffi_alloc_buffer(byte_size, 0x80)
+        val d_src = rt_vulkan_alloc_buffer(byte_size, 0x80)
         if d_src != 0:
             # Upload source pixels to device buffer
             val src_bytes = _pixels_to_bytes(pixels, pixel_count)
-            vulkan_ffi_copy_to_buffer(d_src, src_bytes, 0)
+            rt_vulkan_copy_to_buffer(d_src, src_bytes, 0)
             # Dispatch blit kernel
             val gx = (_i64(w) + 15) / 16
             val gy = (_i64(h) + 15) / 16
             val pc = _pack_blit_pc(x, y, w, h, self.w, self.h)
             self._dispatch_blit_compute(self.pipe_blit, d_src, pc, gx, gy, 1)
-            vulkan_ffi_free_buffer(d_src)
+            rt_vulkan_free_buffer(d_src)
         self.dirty = true
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
@@ -425,8 +445,8 @@ impl RenderBackend for VulkanBackend:
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             val fb_bytes: [u8] = [0u8; fb_size]
-            vulkan_ffi_copy_from_buffer(fb_bytes, self.d_framebuffer, 0)
-            vulkan_ffi_wait_idle()
+            rt_vulkan_copy_from_buffer(fb_bytes, self.d_framebuffer, 0)
+            rt_vulkan_wait_idle()
             _bytes_to_pixels(fb_bytes, self.host_buf, self.w * self.h)
             self.dirty = false
 
@@ -435,8 +455,8 @@ impl RenderBackend for VulkanBackend:
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             val fb_bytes: [u8] = [0u8; fb_size]
-            vulkan_ffi_copy_from_buffer(fb_bytes, self.d_framebuffer, 0)
-            vulkan_ffi_wait_idle()
+            rt_vulkan_copy_from_buffer(fb_bytes, self.d_framebuffer, 0)
+            rt_vulkan_wait_idle()
             _bytes_to_pixels(fb_bytes, self.host_buf, self.w * self.h)
         var copy: [u32] = [0u32; self.w * self.h]
         var i = 0
@@ -528,3 +548,4 @@ impl Engine2DExtended for VulkanBackend:
             _i = _i + 1
         render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, fg, font_size)
         self.draw_image(x, y, text_w, text_h, buf)
+
