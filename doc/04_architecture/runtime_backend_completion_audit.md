@@ -93,6 +93,10 @@ Executed on 2026-05-14:
   - `remaining=48` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the QMP client, src config, src DB, and test manifest facades.
 - No-GC async image/play/storage/fork wildcard facade review scan:
   - `remaining=44` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the image FFI, Play trace, experiment storage, and test-runner fork facades.
+- No-GC async serial/SIMD/daemon/debug wildcard facade review scan:
+  - `remaining=40` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the serial FFI, SIMD profile, daemon lock, and SMF debug agent facades.
+- No-GC async env/coverage/FFI wildcard facade review scan:
+  - `remaining=36` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the env types, coverage_simple, FFI error, and LLVM loader facades.
 - Focused runtime-path specs:
   - `test/unit/lib/nogc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
   - `test/unit/lib/gc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
