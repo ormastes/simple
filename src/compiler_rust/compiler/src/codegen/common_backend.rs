@@ -57,6 +57,19 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     MirInst::InterpCall { func_name, .. } => {
                         names.insert(func_name.clone());
                     }
+                    MirInst::DictLit { .. } => {
+                        names.insert("rt_dict_new".to_string());
+                        names.insert("rt_dict_set".to_string());
+                    }
+                    MirInst::IndexGet { .. } => {
+                        names.insert("rt_index_get".to_string());
+                    }
+                    MirInst::IndexSet { .. } => {
+                        names.insert("rt_index_set".to_string());
+                    }
+                    MirInst::SliceOp { .. } => {
+                        names.insert("rt_slice".to_string());
+                    }
                     _ => {}
                 }
             }
@@ -1434,5 +1447,68 @@ mod tests {
 
         assert!(backend.runtime_funcs.contains_key("rt_alloc"));
         assert!(backend.runtime_funcs.contains_key("rt_interp_call"));
+    }
+
+    #[test]
+    fn collection_mir_instructions_declare_generated_runtime_calls() {
+        let mut main = MirFunction::new("main".to_string(), TypeId::I64, Visibility::Public);
+        let collection = main.new_vreg();
+        let index = main.new_vreg();
+        let value = main.new_vreg();
+        let get_dest = main.new_vreg();
+        let slice_dest = main.new_vreg();
+        let dict_dest = main.new_vreg();
+        main.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt {
+                dest: collection,
+                value: 0,
+            });
+        main.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: index, value: 0 });
+        main.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: value, value: 1 });
+        main.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::IndexGet {
+                dest: get_dest,
+                collection,
+                index,
+            });
+        main.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::IndexSet {
+                collection,
+                index,
+                value,
+            });
+        main.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::SliceOp {
+            dest: slice_dest,
+            collection,
+            start: Some(index),
+            end: Some(value),
+            step: None,
+        });
+        main.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::DictLit {
+            dest: dict_dest,
+            keys: vec![index],
+            values: vec![value],
+        });
+        main.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(get_dest));
+
+        let names = referenced_call_names(&[main]);
+
+        assert!(names.contains("rt_index_get"));
+        assert!(names.contains("rt_index_set"));
+        assert!(names.contains("rt_slice"));
+        assert!(names.contains("rt_dict_new"));
+        assert!(names.contains("rt_dict_set"));
     }
 }

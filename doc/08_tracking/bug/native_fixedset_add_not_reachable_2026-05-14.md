@@ -33,9 +33,14 @@ Validation observed:
   produces a binary.
 - Running that binary emits repeated `Runtime error: Function 'add' not found`
   and exits with a segmentation fault.
-- `native-build --source src/lib --entry test/perf/collections/collection_simple.spl --entry-closure ...`
-  currently panics in native codegen before it can provide a source-closure
-  workaround.
+- Before the runtime symbol declaration fix in `common_backend.rs`,
+  `native-build --source src/lib --entry test/perf/collections/collection_simple.spl --entry-closure ...`
+  panicked in native codegen while compiling generated collection runtime calls
+  such as `rt_index_get`.
+- After that fix, the same source-closure build completes, but it still emits
+  stubs for required collection/runtime symbols such as
+  `rt_array_new_with_cap_u64`, `rt_array_data_ptr`, and
+  `rt_typed_words_u64_raw_data_at`; running the binary still dumps core.
 
 ## Impact
 
@@ -46,5 +51,6 @@ high-speed collection parity path in `test/perf/collections`.
 
 Imported noalloc collection methods such as `FixedSet.add` and `FixedMap.put`
 should be reachable in native builds that compile an entry importing those
-modules, or the compiler should fail during compile/check with a precise
-missing-method diagnostic instead of producing a crashing binary.
+modules, and source-closure builds should either link the required collection
+runtime symbols or fail during build with a precise unresolved-runtime
+diagnostic instead of producing a crashing binary.
