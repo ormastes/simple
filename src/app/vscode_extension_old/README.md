@@ -166,12 +166,11 @@ bin/simple vscode build /tmp/simple_vscode_smoke.spl -o /tmp/simple-vscode-out -
 ### Installing Simple LSP Server
 
 ```bash
-# Build Simple compiler
+# Provide a packaged Simple compiler
 cd simple
-cargo build --release
 
 # Add to PATH (Linux/macOS)
-export PATH="$PATH:$(pwd)/target/release"
+export PATH="$PATH:$(pwd)/bin"
 
 # Or specify path in VSCode settings
 ```
@@ -185,7 +184,7 @@ Access settings via: Preferences → Settings → Extensions → Simple
 Path to the `simple-lsp` executable.
 
 - **Default:** `"simple-lsp"` (assumes it's in PATH)
-- **Example:** `"/home/user/simple/target/release/simple-lsp"`
+- **Example:** `"/home/user/simple/bin/simple-lsp"`
 
 ```json
 {
