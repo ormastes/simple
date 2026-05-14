@@ -157,11 +157,11 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 3. **`gc_off` flag** in `CompileOptions`: Boolean flag passed through the compilation pipeline. Affects compile options hash for caching and target presets.
 
-4. **Runtime family manifest checks** in `src/compiler/35.semantics/gc_boundary_check.spl`: `RUNTIME_FAMILY_MANIFEST` records each stdlib family rank, GC mode, allocation behavior, and noalloc status. `check_gc_boundary_imports()` preserves warning output for compatibility, while `check_runtime_family_import_violations()` returns hard violations from the same manifest-backed model.
+4. **Runtime family manifest checks** in `src/compiler/35.semantics/gc_boundary_check.spl`: `RUNTIME_FAMILY_MANIFEST` records each stdlib family rank, GC mode, allocation behavior, and noalloc status. `check_gc_boundary_imports()` preserves warning output for compatibility, while `check_runtime_family_import_violations()` returns hard violations from the same manifest-backed model. The Rust `simple check` lint path mirrors the same family set, ranks, GC/noalloc rules, and reason strings so the production checker reports manifest-equivalent diagnostics.
 
 5. **Target family filtering** in `src/compiler/99.loader/module_resolver/resolution.spl`: `allowed_families` restricts stdlib family search for target presets.
 
-**Remaining gap**: the manifest-backed hard violation API exists, but the default CLI/interpreter diagnostic path still reports compatibility warnings until target-restricted runs are wired to consume hard violations.
+**Remaining gap**: the manifest-backed hard violation API and Rust lint parity exist, but target-restricted compiler/interpreter diagnostic paths still need to promote those violations to hard errors. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
 
 ### Interpreter parity detail
 
@@ -209,10 +209,10 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
   - SimpleOS POSIX boundary update: shared ABI errno values, FD table/I/O, async read/write adapters, pipe/socket compatibility, and process async/compatibility wrappers are now owned under `src/os/kernel/`. The matching `src/os/posix/` modules are POSIX compatibility facades. Hosted NVFS root access now imports `std.fs_driver.nvfs_hosted_driver.NvfsHostedDriver`, a neutral facade over the existing POSIX-compatible hosted adapter, so SimpleOS boot/VFS layers do not import the POSIX-named stdlib driver directly. A targeted scan finds no `os.posix` imports or POSIX-named NVFS driver imports under `src/os/kernel`, `src/os/services`, or `src/os/sosix`; those lower layers now depend on `os.kernel` and hosted-neutral ownership instead.
   - implication: MCP and LSP native smoke are no longer blocked by `SliceIter.slice`, enum/static-member resolution, shell status wrappers, stale `MirBlock.has_label` reads, or the last C/LLVM/native/Vulkan field-recovery failures. Package release-readiness still requires reducing native/runtime stubs and broader import/type-loading cleanup.
 
-### Gap 1: Partial attribute-based family enforcement (Agent 2 -- Compiler)
-- **Problem**: Public runtime-family root `__init__.spl` files now carry `@no_gc` or `@gc`, and the semantic checker now has a manifest-backed hard violation API, but default CLI/interpreter diagnostics still use compatibility warning output.
-- **Impact**: A target-restricted run can query hard violations, but ordinary warning-only runs can still continue after a runtime-family boundary violation.
-- **Fix**: Wire `check_runtime_family_import_violations()` into target-restricted compiler/interpreter diagnostics as hard errors while preserving warnings for unrestricted lint mode.
+### Gap 1: Target-restricted family hard errors are not wired yet (Agent 2 -- Compiler)
+- **Problem**: Public runtime-family root `__init__.spl` files carry `@no_gc` or `@gc`, the Simple semantic checker exposes manifest-backed hard violations, and the Rust `simple check` lint path mirrors the manifest family set/ranks/reason strings. Target-restricted compiler diagnostics still report these as lint-compatible warnings instead of policy errors.
+- **Impact**: A target-restricted run can compute the hard violation set, but the active compiler diagnostic path can still continue after a runtime-family boundary violation.
+- **Fix**: Wire `check_runtime_family_import_violations()` or its generated manifest equivalent into target-restricted compiler diagnostics as hard errors while preserving warnings for unrestricted lint mode.
 
 ### Gap 2: Interpreter family warnings are warning-only (Agent 3 -- Interpreter)
 - **Problem**: The interpreter emits family-boundary warnings but does not yet consume the manifest-backed hard violation API.
@@ -252,7 +252,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 - **Evidence**: Direct coordination/CAS native coverage now passes through `test/unit/lib/nogc_async_immut/coordination_native_spec.spl`.
 
 ### Gap 10: Interpreter GC boundary execution coverage (Agent 6 -- Tests) -- **RESOLVED**
-- **Status**: Fixed. `test/unit/compiler/semantics/gc_boundary_check_spec.spl` directly covers the production `check_gc_boundary_imports()` rules, `src/app/cli/query_lint.spl` surfaces those warnings through query diagnostics, `simple check` emits `gc_boundary_crossing` warnings through the Rust driver check path, and the Rust interpreter module loader now emits `[gc-warning]` for real no-GC->GC and noalloc->allocating import paths, including `src/std/<family>` imports.
+- **Status**: Fixed. `test/unit/compiler/semantics/gc_boundary_check_spec.spl` directly covers the production `check_gc_boundary_imports()` rules, `src/app/cli/query_lint.spl` surfaces those warnings through query diagnostics, `simple check` emits `gc_boundary_crossing` warnings through the Rust driver check path with manifest-equivalent reason strings, and the Rust interpreter module loader now emits `[gc-warning]` for real no-GC->GC and noalloc->allocating import paths, including `src/std/<family>` imports.
 - **Evidence**: A rebuilt bootstrap `simple run` on a no-GC file importing `std.gc_async_mut.{gpu_device_count}` emits one no-GC context warning before normal execution.
 - **Remaining work**: Decide whether target-preset-restricted interpreter runs should promote family-boundary warnings to errors.
 

@@ -12,22 +12,32 @@ use super::LintChecker;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeFamily {
     Common,
-    NogcSyncMut,
+    NogcAsyncMutNoalloc,
     NogcAsyncMut,
     NogcAsyncImmut,
-    NogcAsyncMutNoalloc,
+    NogcSyncImmut,
+    Async,
+    NogcSyncMut,
     GcAsyncMut,
+    GcAsyncImmut,
+    GcSyncMut,
+    GcSyncImmut,
 }
 
 impl RuntimeFamily {
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "common" => Some(Self::Common),
-            "nogc_sync_mut" => Some(Self::NogcSyncMut),
+            "nogc_async_mut_noalloc" => Some(Self::NogcAsyncMutNoalloc),
             "nogc_async_mut" => Some(Self::NogcAsyncMut),
             "nogc_async_immut" => Some(Self::NogcAsyncImmut),
-            "nogc_async_mut_noalloc" => Some(Self::NogcAsyncMutNoalloc),
+            "nogc_sync_immut" => Some(Self::NogcSyncImmut),
+            "async" => Some(Self::Async),
+            "nogc_sync_mut" => Some(Self::NogcSyncMut),
             "gc_async_mut" => Some(Self::GcAsyncMut),
+            "gc_async_immut" => Some(Self::GcAsyncImmut),
+            "gc_sync_mut" => Some(Self::GcSyncMut),
+            "gc_sync_immut" => Some(Self::GcSyncImmut),
             _ => None,
         }
     }
@@ -35,16 +45,24 @@ impl RuntimeFamily {
     fn name(self) -> &'static str {
         match self {
             Self::Common => "common",
-            Self::NogcSyncMut => "nogc_sync_mut",
+            Self::NogcAsyncMutNoalloc => "nogc_async_mut_noalloc",
             Self::NogcAsyncMut => "nogc_async_mut",
             Self::NogcAsyncImmut => "nogc_async_immut",
-            Self::NogcAsyncMutNoalloc => "nogc_async_mut_noalloc",
+            Self::NogcSyncImmut => "nogc_sync_immut",
+            Self::Async => "async",
+            Self::NogcSyncMut => "nogc_sync_mut",
             Self::GcAsyncMut => "gc_async_mut",
+            Self::GcAsyncImmut => "gc_async_immut",
+            Self::GcSyncMut => "gc_sync_mut",
+            Self::GcSyncImmut => "gc_sync_immut",
         }
     }
 
     fn is_gc(self) -> bool {
-        matches!(self, Self::GcAsyncMut)
+        matches!(
+            self,
+            Self::GcAsyncMut | Self::GcAsyncImmut | Self::GcSyncMut | Self::GcSyncImmut
+        )
     }
 
     fn is_noalloc(self) -> bool {
@@ -53,6 +71,16 @@ impl RuntimeFamily {
 
     fn is_allocating(self) -> bool {
         !matches!(self, Self::Common | Self::NogcAsyncMutNoalloc)
+    }
+
+    fn rank(self) -> i8 {
+        match self {
+            Self::Common => 0,
+            Self::NogcAsyncMutNoalloc => 1,
+            Self::NogcAsyncMut | Self::NogcAsyncImmut | Self::NogcSyncImmut => 2,
+            Self::Async | Self::NogcSyncMut => 3,
+            Self::GcAsyncMut | Self::GcAsyncImmut | Self::GcSyncMut | Self::GcSyncImmut => 4,
+        }
     }
 }
 
@@ -523,14 +551,15 @@ impl LintChecker {
                         }
 
                         let module_path = segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
-                        if !runtime_family_import_allowed(source_family, import_family) {
+                        if let Some(reason) = runtime_family_import_violation_reason(source_family, import_family) {
                             checker.emit(
                                 LintName::GcBoundaryCrossing,
                                 use_stmt.span,
                                 format!(
-                                    "runtime family `{}` must not import `{}`",
+                                    "runtime family `{}` must not import `{}` ({})",
                                     source_family.name(),
-                                    module_path
+                                    module_path,
+                                    reason
                                 ),
                                 Some(
                                     "route shared code through std.common or move the dependency to the backend family"
@@ -758,20 +787,31 @@ fn runtime_family_from_import_segments(segments: &[String]) -> Option<RuntimeFam
         .and_then(|segment| RuntimeFamily::from_name(segment))
 }
 
-fn runtime_family_import_allowed(source_family: RuntimeFamily, import_family: RuntimeFamily) -> bool {
+fn runtime_family_import_violation_reason(
+    source_family: RuntimeFamily,
+    import_family: RuntimeFamily,
+) -> Option<&'static str> {
     if import_family == RuntimeFamily::Common {
-        return true;
+        return None;
+    }
+
+    if source_family.is_noalloc() && import_family.is_gc() {
+        return Some("noalloc_imports_gc_family");
     }
 
     if source_family.is_noalloc() && import_family.is_allocating() {
-        return false;
+        return Some("noalloc_imports_allocating_family");
     }
 
     if !source_family.is_gc() && import_family.is_gc() {
-        return false;
+        return Some("nogc_imports_gc_family");
     }
 
-    true
+    if import_family.rank() > source_family.rank() {
+        return Some("higher_layer_runtime_family");
+    }
+
+    None
 }
 
 impl Default for LintChecker {

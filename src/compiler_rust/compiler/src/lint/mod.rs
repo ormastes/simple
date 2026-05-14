@@ -1124,6 +1124,7 @@ pub use DiContainer
         let diagnostics = check_code_at_path("src/lib/nogc_sync_mut/example.spl", "use std.gc_async_mut.task\n");
 
         assert!(diagnostics.iter().any(|d| d.lint == LintName::GcBoundaryCrossing));
+        assert!(diagnostics.iter().any(|d| d.message.contains("nogc_imports_gc_family")));
     }
 
     #[test]
@@ -1134,6 +1135,30 @@ pub use DiContainer
         );
 
         assert!(diagnostics.iter().any(|d| d.lint == LintName::GcBoundaryCrossing));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.message.contains("noalloc_imports_allocating_family")));
+    }
+
+    #[test]
+    fn test_gc_boundary_warns_for_noalloc_importing_gc_family() {
+        let diagnostics = check_code_at_path(
+            "src/lib/nogc_async_mut_noalloc/example.spl",
+            "use std.gc_sync_immut.map\n",
+        );
+
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.lint == LintName::GcBoundaryCrossing && d.message.contains("noalloc_imports_gc_family")));
+    }
+
+    #[test]
+    fn test_gc_boundary_warns_for_lower_layer_importing_hosted_family() {
+        let diagnostics = check_code_at_path("src/lib/nogc_async_mut/example.spl", "use std.nogc_sync_mut.io\n");
+
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.lint == LintName::GcBoundaryCrossing && d.message.contains("higher_layer_runtime_family")));
     }
 
     #[test]
