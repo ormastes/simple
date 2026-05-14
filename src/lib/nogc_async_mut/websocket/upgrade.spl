@@ -22,6 +22,7 @@ use std.websocket.handshake.{sha1, base64_encode, bytes_to_text, text_to_bytes}
 use std.websocket.frame.{create_text_frame, create_binary_frame, create_frame, parse_frame_header, extract_mask_key, extract_payload, generate_masking_key}
 use std.websocket.connection.{create_close_frame}
 use std.nogc_sync_mut.io.tcp.{tcp_backend_close}
+use std.nogc_sync_mut.websocket.async_wire_hooks.{async_ws_read_raw, async_ws_write_raw}
 use std.common.io.types.{IoError, IoErrorKind}
 
 # ============================================================================
@@ -146,7 +147,7 @@ class AsyncWsConnection:
 
         var buf: List<i64> = []
         while true:
-            val chunk = rt_async_ws_read_raw(self.fd, 65536)
+            val chunk = async_ws_read_raw(self.fd, 65536)
             if chunk.len() == 0:
                 if buf.length() == 0:
                     return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "peer closed", source: nil))
@@ -186,7 +187,7 @@ class AsyncWsConnection:
         val payload_bytes = text_to_bytes(frame.payload)
         val is_fin = if frame.is_final: 1 else: 0
         val raw = create_frame(is_final: is_fin, opcode: frame.opcode, is_masked: 0, payload: payload_bytes, mask_key: [])
-        val written = rt_async_ws_write_raw(self.fd, raw)
+        val written = async_ws_write_raw(self.fd, raw)
         if written <= 0:
             return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write failed", source: nil))
         Ok(())
@@ -205,7 +206,7 @@ class AsyncWsConnection:
             return Err(IoError(kind: IoErrorKind.Other, message: "connection is closed", source: nil))
 
         val raw = create_binary_frame(data: data, is_final: 1, is_masked: 0)
-        val written = rt_async_ws_write_raw(self.fd, raw)
+        val written = async_ws_write_raw(self.fd, raw)
         if written <= 0:
             return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write failed", source: nil))
         Ok(())
@@ -216,7 +217,7 @@ class AsyncWsConnection:
             return Ok(())
 
         val close_bytes = create_close_frame(status_code: 1000, reason: "", is_masked: 0)
-        rt_async_ws_write_raw(self.fd, close_bytes)
+        async_ws_write_raw(self.fd, close_bytes)
         self.is_open = false
         val ok = tcp_backend_close(self.fd)
         if not ok:
@@ -271,6 +272,3 @@ fn compute_accept_value(key: text) -> text:
 # ============================================================================
 # FFI
 # ============================================================================
-
-extern fn rt_async_ws_read_raw(fd: i64, max_size: i64) -> List<i64>
-extern fn rt_async_ws_write_raw(fd: i64, data: List<i64>) -> i64
