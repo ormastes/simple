@@ -16,6 +16,7 @@ The checks are intentionally narrow and evidence-oriented:
   first when an API-preserving async/no-GC facade exists.
 * No-GC async compatibility facades must not wildcard-export no-GC sync
   backend owners that declare runtime hooks.
+* No-GC runtime families must not import GC compatibility families.
 * SimpleOS native lower layers must not import POSIX/libc compatibility layers.
 * Portable stdlib/library files must not import POSIX/Linux modules; platform
   and compatibility directories are allowed to do so explicitly.
@@ -76,6 +77,15 @@ PORTABLE_LIB_ROOTS = (
     "src/lib/nogc_sync_immut",
 )
 
+NOGC_RUNTIME_ROOTS = (
+    "src/lib/common",
+    "src/lib/nogc_async_mut",
+    "src/lib/nogc_sync_mut",
+    "src/lib/nogc_async_immut",
+    "src/lib/nogc_sync_immut",
+    "src/lib/nogc_async_mut_noalloc",
+)
+
 RUNTIME_FAMILIES = (
     "common",
     "nogc_sync_mut",
@@ -115,6 +125,7 @@ GC_ASYNC_SELF_FACADE_RE = re.compile(
 )
 FORBIDDEN_SIMPLEOS_IMPORT_RE = re.compile(r"\b(?:os\.posix|os\.libc|posix\.|libc\.)\b")
 FORBIDDEN_PORTABLE_IMPORT_RE = re.compile(r"\b(?:std\.posix|std\.linux|os\.posix|os\.libc|posix\.|linux\.)\b")
+FORBIDDEN_NOGC_IMPORT_RE = re.compile(r"\b(?:std\.)?gc_(?:async|sync)_(?:mut|immut)\b")
 
 
 def git_files(patterns: tuple[str, ...]) -> list[Path]:
@@ -291,6 +302,15 @@ def portable_lib_imports() -> list[str]:
     return hits
 
 
+def nogc_family_gc_imports() -> list[str]:
+    hits: list[str] = []
+    for path in tracked_spl_under(NOGC_RUNTIME_ROOTS):
+        for line_no, stripped in code_lines(path):
+            if IMPORT_RE.match(stripped) and FORBIDDEN_NOGC_IMPORT_RE.search(stripped):
+                hits.append(f"{rel(path)}:{line_no}: {stripped}")
+    return hits
+
+
 def documented_root_manifest_mismatches() -> list[str]:
     hits: list[str] = []
     try:
@@ -337,6 +357,7 @@ def main() -> int:
     wildcard_facades = no_gc_async_runtime_owner_wildcards()
     simpleos_imports = simpleos_lower_layer_imports()
     portable_imports = portable_lib_imports()
+    nogc_gc_imports = nogc_family_gc_imports()
     root_manifest_doc_mismatches = documented_root_manifest_mismatches()
 
     report = {
@@ -359,6 +380,8 @@ def main() -> int:
         "simpleos_lower_layer_posix_libc_import_samples": simpleos_imports[:20],
         "portable_lib_forbidden_posix_linux_import_count": len(portable_imports),
         "portable_lib_forbidden_posix_linux_import_samples": portable_imports[:20],
+        "nogc_family_forbidden_gc_import_count": len(nogc_gc_imports),
+        "nogc_family_forbidden_gc_import_samples": nogc_gc_imports[:20],
         "documented_root_manifest_mismatch_count": len(root_manifest_doc_mismatches),
         "documented_root_manifest_mismatch_samples": root_manifest_doc_mismatches[:20],
         "pass": not runtime_hooks
@@ -370,6 +393,7 @@ def main() -> int:
         and not wildcard_facades
         and not simpleos_imports
         and not portable_imports
+        and not nogc_gc_imports
         and not root_manifest_doc_mismatches,
     }
     print(json.dumps(report, indent=2, sort_keys=True))

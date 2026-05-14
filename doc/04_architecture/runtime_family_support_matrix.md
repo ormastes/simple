@@ -107,6 +107,10 @@ The production ownership rule is behavioral, not name-only:
 
 - Async-visible compatibility APIs route through `nogc_async_mut` when the
   no-GC async family has an API-preserving surface.
+- No-GC runtime families (`common`, `nogc_async_mut`, `nogc_sync_mut`,
+  `nogc_async_immut`, `nogc_sync_immut`, and `nogc_async_mut_noalloc`) must not
+  import GC compatibility families. `runtime_backend_boundaries.py` enforces
+  this with `nogc_family_forbidden_gc_import_count=0`.
 - Sync-only or blocking runtime ownership remains in `nogc_sync_mut` when
   wrapping it in `nogc_async_mut` would only add a scheduler dependency without
   changing observable behavior.
