@@ -143,17 +143,18 @@ fn setup_jenkins():
     print "   - GitHub hook trigger (recommended)"
     print "   - OR Poll SCM: H/15 * * * *"
     print ""
-    print "4. Verify Rust on agents:"
+    print "4. Verify Simple on agents:"
 
-    # Check local Rust installation
-    val (rustc_out, _, rustc_code) = process_run("rustc", ["--version"])
-    if rustc_code == 0:
-        val rust_version = rustc_out.trim()
-        print success("   {rust_version}")
+    # Check local Simple installation
+    val simple_bin = find_simple_binary()
+    val (simple_out, _, simple_code) = process_run(simple_bin, ["--version"])
+    if simple_code == 0:
+        val simple_version = simple_out.trim()
+        print success("   {simple_version}")
     else:
-        print warning("   Rust not found on this system")
+        print warning("   Simple not found on this system")
         print "   Install on Jenkins agents with:"
-        print "   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        print "   provide bin/simple or set SIMPLE_BINARY"
 
     print ""
     print "5. Optional: Configure Notifications"
@@ -162,6 +163,20 @@ fn setup_jenkins():
     print ""
 
     print success("Jenkins setup instructions complete!")
+
+fn find_simple_binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    if file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    if file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    "bin/simple"
 
 fn setup_environment() -> bool:
     """Verify build environment"""
@@ -173,23 +188,15 @@ fn setup_environment() -> bool:
 
     var all_ok = true
 
-    # Check Rust
-    val (rustc_out, _, rustc_code) = process_run("rustc", ["--version"])
-    if rustc_code == 0:
-        val rust_version = rustc_out.trim()
-        print success("{rust_version}")
+    # Check Simple
+    val simple_bin = find_simple_binary()
+    val (simple_out, _, simple_code) = process_run(simple_bin, ["--version"])
+    if simple_code == 0:
+        val simple_version = simple_out.trim()
+        print success("{simple_version}")
     else:
-        print error("Rust not installed")
-        print "  Install: https://rustup.rs/"
-        all_ok = false
-
-    # Check Cargo
-    val (cargo_out, _, cargo_code) = process_run("cargo", ["--version"])
-    if cargo_code == 0:
-        val cargo_version = cargo_out.trim()
-        print success("{cargo_version}")
-    else:
-        print error("Cargo not installed")
+        print error("Simple not installed")
+        print "  Provide bin/simple or set SIMPLE_BINARY"
         all_ok = false
 
     # Check Git
@@ -231,18 +238,14 @@ fn test_build() -> bool:
     print ""
     print info("Building dashboard...")
 
-    # Check if simple compiler exists
-    if not file_exists("target/debug/simple"):
-        print warning("Simple compiler not found, building...")
-        val (build_out, _, _) = process_run("cargo", ["build"])
-        val lines = build_out.split("\n")
-        val total = lines.len()
-        val start = if total > 5: total - 5 else: 0
-        for i in start..total:
-            print lines[i]
+    val simple_bin = find_simple_binary()
+    if simple_bin == "" or not file_exists(simple_bin):
+        print error("Simple compiler not found")
+        print "Provide bin/simple or set SIMPLE_BINARY"
+        return false
 
     # Compile dashboard
-    val (_, stderr, compile_code) = process_run("./target/debug/simple",
+    val (_, stderr, compile_code) = process_run(simple_bin,
         ["compile", "src/app/dashboard/main.spl"])
 
     if compile_code != 0:
@@ -261,8 +264,8 @@ fn test_build() -> bool:
     # Run dashboard
     print ""
     print info("Running dashboard...")
-    val (run_out, _, run_code) = process_run("./target/debug/simple",
-        ["src/app/dashboard/main.spl"])
+    val (run_out, _, run_code) = process_run(simple_bin,
+        ["run", "src/app/dashboard/main.spl"])
 
     if run_code == 0:
         # Print first 20 lines
@@ -292,4 +295,3 @@ fn show_usage():
     print "  test     - Test dashboard build locally"
     print "  help     - Show this help message"
     print ""
-
