@@ -255,7 +255,7 @@ pub fn hamt_remove(node, key, hash, shift):
                 return nil
             val new_children = hamt_array_remove(children, idx)
             # If only one child remains and it is a leaf, collapse
-            if new_children.len() == 1:
+            if hamt_array_len(new_children) == 1:
                 val sole = new_children[0]
                 if sole != nil:
                     val sole_tag = hamt_node_tag(sole)
@@ -273,9 +273,9 @@ pub fn hamt_remove(node, key, hash, shift):
         val col_hash = node[1]
         val entries = node[2]
         val new_entries = collision_remove(entries, key)
-        val new_len = new_entries.len()
+        val new_len = collision_len(new_entries)
 
-        if new_len == entries.len():
+        if new_len == collision_len(entries):
             # Key was not in collision list
             return node
         if new_len == 0:
@@ -328,41 +328,47 @@ fn hamt_promote_collision(collision_node, shift) -> []:
     val bit = hamt_bit_pos(hash: col_hash, shift: shift)
     hamt_branch(bit, [collision_node])
 
+# Count array entries without using facade-sensitive `.len()` dispatch.
+fn hamt_array_len(arr) -> i64:
+    var count = 0
+    for item in arr:
+        count = count + 1
+    count
+
 # Insert a value into an array at the given index, returning a new array.
 fn hamt_array_insert(arr, idx: i64, value) -> []:
     var result = []
-    val n = arr.len()
     var i = 0
-    while i < idx:
-        result.push(arr[i])
+    var inserted = false
+    for item in arr:
+        if i == idx:
+            result.push(value)
+            inserted = true
+        result.push(item)
         i = i + 1
-    result.push(value)
-    while i < n:
-        result.push(arr[i])
-        i = i + 1
+    if not inserted:
+        result.push(value)
     result
 
 # Replace a value in an array at the given index, returning a new array.
 fn hamt_array_replace(arr, idx: i64, value) -> []:
     var result = []
-    val n = arr.len()
     var i = 0
-    while i < n:
+    for item in arr:
         if i == idx:
             result.push(value)
         else:
-            result.push(arr[i])
+            result.push(item)
         i = i + 1
     result
 
 # Remove an element from an array at the given index, returning a new array.
 fn hamt_array_remove(arr, idx: i64) -> []:
     var result = []
-    val n = arr.len()
     var i = 0
-    while i < n:
+    for item in arr:
         if i != idx:
-            result.push(arr[i])
+            result.push(item)
         i = i + 1
     result
 
@@ -388,26 +394,17 @@ fn hamt_collect_entries(node) -> []:
     if tag == HAMT_BRANCH:
         val children = node[2]
         var result = []
-        var i = 0
-        val n = children.len()
-        while i < n:
-            val child_entries = hamt_collect_entries(children[i])
-            var j = 0
-            val cn = child_entries.len()
-            while j < cn:
-                result.push(child_entries[j])
-                j = j + 1
-            i = i + 1
+        for child in children:
+            val child_entries = hamt_collect_entries(child)
+            for entry in child_entries:
+                result.push(entry)
         return result
 
     if tag == HAMT_COLLISION:
         val entries = node[2]
         var result = []
-        var i = 0
-        val n = entries.len()
-        while i < n:
-            result.push(entries[i])
-            i = i + 1
+        for entry in entries:
+            result.push(entry)
         return result
 
     []
@@ -425,14 +422,11 @@ pub fn hamt_node_count(node) -> i64:
     if tag == HAMT_BRANCH:
         val children = node[2]
         var total = 0
-        var i = 0
-        val n = children.len()
-        while i < n:
-            total = total + hamt_node_count(children[i])
-            i = i + 1
+        for child in children:
+            total = total + hamt_node_count(child)
         return total
 
     if tag == HAMT_COLLISION:
-        return node[2].len()
+        return collision_len(node[2])
 
     0
