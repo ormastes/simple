@@ -13,10 +13,9 @@
 #   simple_edit/multi_edit/run       (3)  - Diagnostic edit tools
 #   simple_diff/log/squash/new      (4)  - Diagnostic VCS tools
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> text
-extern fn rt_env_get(name: text) -> text
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.env.variables.{env_get}
 
 # JSON and response helpers
 use std.nogc_async_mut.mcp.helpers.{LB, RB, jp, js, jo1, escape_json, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, make_result_response, make_error_response, emit_diagnostic_notification}
@@ -59,12 +58,12 @@ init_di()
 start_server()
 
 fn init_di():
-    val lib_root = rt_env_get("SIMPLE_LIB") ?? ""
+    val lib_root = env_get("SIMPLE_LIB") ?? ""
     var config_path = "config/di.sdn"
     if lib_root != "":
         config_path = lib_root + "/../config/di.sdn"
-    val config_content = rt_file_read_text(config_path) ?? ""
-    val profile = rt_env_get("SIMPLE_PROFILE") ?? ""
+    val config_content = file_read_text(config_path) ?? ""
+    val profile = env_get("SIMPLE_PROFILE") ?? ""
     di_setup_from_config(config_content, profile)
     # Override placeholders with real factories
     di_register("debug_handler", fn(): create_debug_handler(), true)
@@ -334,7 +333,7 @@ fn handle_resources_read(id: text, uri: text) -> text:
 fn handle_resource_project_info(id: text, uri: text) -> text:
     var info = "Simple Language Compiler" + NL
     info = info + "Working Dir: " + get_cwd() + NL
-    val test_file = rt_file_read_text("doc/08_tracking/test/test_result.md") ?? ""
+    val test_file = file_read_text("doc/08_tracking/test/test_result.md") ?? ""
     if test_file != "":
         # Show first 500 chars of test results
         var limit = test_file.len()
@@ -345,10 +344,10 @@ fn handle_resource_project_info(id: text, uri: text) -> text:
     make_resource_content_response(id: id, uri: uri, content: info, mime: "text/plain")
 
 fn handle_resource_file(id: text, uri: text, path: text) -> text:
-    val file_found = rt_file_exists(path)
+    val file_found = file_exists(path)
     if not file_found:
         return make_error_response(id, -32002, "File not found: " + path)
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_text(path) ?? ""
     var mime = "text/plain"
     if path.ends_with(".json"):
         mime = "application/json"
@@ -557,8 +556,8 @@ fn handle_completion_req(id: text, body: text) -> text:
 
 fn get_cwd() -> text:
     var args: [text] = ["-c", "pwd"]
-    val result = rt_process_run("/bin/sh", args)
-    var out = result[0]
+    val (out_raw, err, code) = process_run("/bin/sh", args)
+    var out = out_raw
     if out.ends_with("\n"):
         out = out.substring(0, out.len() - 1)
     out
