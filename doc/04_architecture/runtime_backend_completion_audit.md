@@ -70,6 +70,13 @@ Executed on 2026-05-14:
   - exit code `0` for all three focused native runs
   - `3` native spec files passed
   - validates repeated tail pushes, tail `set()`, and `PersistentVec.from_array(...)` through the GC async, GC sync immutable, and no-GC sync immutable facades
+  - latest rerun uses explicit array receiver length in the no-GC async RRB backend so root facade imports cannot redirect RRB child/tail array length through `PersistentList.len`
+- `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/unit/lib/immut/persistent_trie_spec.spl --mode=interpreter --clean --force-rebuild --format json`
+  - `82` interpreter examples passed, `0` failures
+  - validates the pair-array no-GC async trie backend through the legacy immutable facade, including shared-prefix keys, removal, traversal, `from_entries`, `from_dict`, and `to_dict`
+- `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/unit/lib/nogc_async_immut/trie_node_native_spec.spl --mode=native --clean --force-rebuild --format json`
+  - `1` native backend spec passed
+  - validates direct no-GC async trie-node shared-prefix set/get; root `PersistentTrie` native facade mutation/lookup remains blocked below
 - `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/unit/lib/{gc_async_immut,gc_sync_immut,nogc_sync_immut}/{map_facade_native_spec.spl,set_facade_native_spec.spl} --mode=native --clean --force-rebuild --format json` (run as six focused commands)
   - exit code `0` for all six focused native runs
   - `6` native spec files passed

@@ -6,9 +6,9 @@
 #
 # Node representation (tag-based arrays):
 #   EMPTY = nil
-#   NODE  = [value_or_nil, children_dict]
+#   NODE  = [value_or_nil, children]
 #     - value_or_nil: nil if no value stored at this prefix, otherwise the value
-#     - children_dict: a dict {} mapping single-character keys to child nodes
+#     - children: array of [single_character_text, child_node] pairs
 #
 # The trie walks one character at a time. For a key of length L, lookup and
 # insertion are O(L). Structural sharing means only O(L) nodes are copied on
@@ -20,20 +20,60 @@
 
 # Create a new empty trie node (no value, no children).
 pub fn trie_empty_node():
-    [nil, {}]
+    [nil, []]
 
 # ============================================================================
-# Dict Copy Helper
+# Children Helpers
 # ============================================================================
 
-# Copy a dict for path-copy persistence.
-# Simple dicts are mutable, so we must copy before mutating to avoid
-# modifying the original trie.
-pub fn trie_copy_dict(d):
-    var result = {}
-    for k in d:
-        result[k] = d[k]
+# Copy children for path-copy persistence.
+pub fn trie_copy_dict(children: []) -> []:
+    var result = []
+    var i = 0
+    val n = children.len()
+    while i < n:
+        val pair = children[i]
+        result.push([pair[0], pair[1]])
+        i = i + 1
     result
+
+fn trie_child_get(children: [], ch):
+    var i = 0
+    val n = children.len()
+    while i < n:
+        val pair = children[i]
+        if pair[0] == ch:
+            return pair[1]
+        i = i + 1
+    nil
+
+fn trie_child_set(children: [], ch, child) -> []:
+    var result = []
+    var replaced = false
+    var i = 0
+    val n = children.len()
+    while i < n:
+        val pair = children[i]
+        if pair[0] == ch:
+            result.push([ch, child])
+            replaced = true
+        else:
+            result.push([pair[0], pair[1]])
+        i = i + 1
+    if not replaced:
+        result.push([ch, child])
+    result
+
+# Convert a text key once before recursive trie walks. Compiled native BDD
+# currently miscompiles recursive calls that carry text parameters.
+fn trie_key_chars(key: text) -> []:
+    var chars: [text] = []
+    var i = 0
+    val n = key.len()
+    while i < n:
+        chars.push(key[i])
+        i = i + 1
+    chars
 
 # ============================================================================
 # Core Operations
@@ -47,17 +87,21 @@ pub fn trie_copy_dict(d):
 #   key   — the text key to search for
 #   depth — current character index (0 at root)
 pub fn trie_get(node, key: text, depth: i64):
+    val chars = trie_key_chars(key)
+    trie_get_chars(node, chars, depth)
+
+fn trie_get_chars(node, chars, depth: i64):
     if node == nil:
         return nil
-    val key_len = key.len()
+    val key_len = chars.len()
     if depth == key_len:
         return node[0]
-    val ch = key[depth]
+    val ch = chars[depth]
     val children = node[1]
-    val child = children[ch]
+    val child = trie_child_get(children, ch)
     if child == nil:
         return nil
-    trie_get(child, key, depth + 1)
+    trie_get_chars(child, chars, depth + 1)
 
 # Insert or update a key-value pair in the trie.
 # Returns a NEW node tree (structural sharing with the original).
@@ -68,26 +112,29 @@ pub fn trie_get(node, key: text, depth: i64):
 #   value — the value to associate
 #   depth — current character index (0 at root)
 pub fn trie_set(node, key: text, value, depth: i64):
-    val key_len = key.len()
+    val chars = trie_key_chars(key)
+    trie_set_chars(node, chars, value, depth)
+
+fn trie_set_chars(node, chars, value, depth: i64):
+    val key_len = chars.len()
     if node == nil:
         # Build new path from here to the end of the key
         if depth == key_len:
-            return [value, {}]
-        val ch = key[depth]
-        val child = trie_set(nil, key, value, depth + 1)
-        var children = {}
-        children[ch] = child
+            return [value, []]
+        val ch = chars[depth]
+        val child = trie_set_chars(nil, chars, value, depth + 1)
+        var children = []
+        children.push([ch, child])
         return [nil, children]
     if depth == key_len:
         # Set value at this node, preserve children
         return [value, node[1]]
-    val ch = key[depth]
+    val ch = chars[depth]
     val children = node[1]
-    val existing = children[ch]
-    val new_child = trie_set(existing, key, value, depth + 1)
-    # Path-copy: copy the children dict and update the one child
-    var new_children = trie_copy_dict(children)
-    new_children[ch] = new_child
+    val existing = trie_child_get(children, ch)
+    val new_child = trie_set_chars(existing, chars, value, depth + 1)
+    # Path-copy: copy the children and update the one child.
+    val new_children = trie_child_set(children, ch, new_child)
     [node[0], new_children]
 
 # Remove a key from the trie.
@@ -100,9 +147,13 @@ pub fn trie_set(node, key: text, value, depth: i64):
 #   key   — the text key to remove
 #   depth — current character index (0 at root)
 pub fn trie_remove(node, key: text, depth: i64):
+    val chars = trie_key_chars(key)
+    trie_remove_chars(node, chars, depth)
+
+fn trie_remove_chars(node, chars, depth: i64):
     if node == nil:
         return nil
-    val key_len = key.len()
+    val key_len = chars.len()
     if depth == key_len:
         # Remove value at this node
         val children = node[1]
@@ -113,22 +164,22 @@ pub fn trie_remove(node, key: text, depth: i64):
             return nil
         # Keep node alive for children, just remove value
         return [nil, children]
-    val ch = key[depth]
+    val ch = chars[depth]
     val children = node[1]
-    val child = children[ch]
+    val child = trie_child_get(children, ch)
     if child == nil:
         # Key not in trie — return unchanged
         return node
-    val new_child = trie_remove(child, key, depth + 1)
+    val new_child = trie_remove_chars(child, chars, depth + 1)
     if new_child == child:
         # Nothing changed
         return node
     var new_children = trie_copy_dict(children)
     if new_child == nil:
-        # Child was pruned — remove it from dict
+        # Child was pruned — remove it from children
         new_children = trie_dict_without(children, ch)
     else:
-        new_children[ch] = new_child
+        new_children = trie_child_set(children, ch, new_child)
     # Check if this node is now empty (no value, no children)
     val has_remaining = trie_dict_has_keys(new_children)
     if node[0] == nil:
@@ -143,17 +194,21 @@ pub fn trie_remove(node, key: text, depth: i64):
 #   key   — the text key to check
 #   depth — current character index (0 at root)
 pub fn trie_contains(node, key: text, depth: i64) -> bool:
+    val chars = trie_key_chars(key)
+    trie_contains_chars(node, chars, depth)
+
+fn trie_contains_chars(node, chars, depth: i64) -> bool:
     if node == nil:
         return false
-    val key_len = key.len()
+    val key_len = chars.len()
     if depth == key_len:
         return node[0] != nil
-    val ch = key[depth]
+    val ch = chars[depth]
     val children = node[1]
-    val child = children[ch]
+    val child = trie_child_get(children, ch)
     if child == nil:
         return false
-    trie_contains(child, key, depth + 1)
+    trie_contains_chars(child, chars, depth + 1)
 
 # Count all stored values in the trie (DFS traversal).
 pub fn trie_count(node) -> i64:
@@ -163,8 +218,11 @@ pub fn trie_count(node) -> i64:
     if node[0] != nil:
         total = 1
     val children = node[1]
-    for ch in children:
-        total = total + trie_count(children[ch])
+    var i = 0
+    val n = children.len()
+    while i < n:
+        total = total + trie_count(children[i][1])
+        i = i + 1
     total
 
 # ============================================================================
@@ -184,13 +242,17 @@ pub fn trie_collect_entries(node, prefix: text):
     if node[0] != nil:
         result.push([prefix, node[0]])
     val children = node[1]
-    for ch in children:
-        val child_entries = trie_collect_entries(children[ch], prefix + ch)
+    var child_index = 0
+    val child_count = children.len()
+    while child_index < child_count:
+        val pair = children[child_index]
+        val child_entries = trie_collect_entries(pair[1], prefix + pair[0])
         var i = 0
         val n = child_entries.len()
         while i < n:
             result.push(child_entries[i])
             i = i + 1
+        child_index = child_index + 1
     result
 
 # Find all keys that start with the given prefix.
@@ -203,18 +265,22 @@ pub fn trie_collect_entries(node, prefix: text):
 #   prefix_depth — current character index into the prefix
 #   full_prefix  — the original full prefix string (for building result keys)
 pub fn trie_keys_with_prefix(node, prefix: text, prefix_depth: i64, full_prefix: text):
+    val chars = trie_key_chars(prefix)
+    trie_keys_with_prefix_chars(node, chars, prefix_depth, full_prefix)
+
+fn trie_keys_with_prefix_chars(node, chars, prefix_depth: i64, full_prefix: text):
     if node == nil:
         return []
-    val prefix_len = prefix.len()
+    val prefix_len = chars.len()
     if prefix_depth == prefix_len:
         # Reached the prefix node — collect all keys below
         return trie_collect_keys(node, full_prefix)
-    val ch = prefix[prefix_depth]
+    val ch = chars[prefix_depth]
     val children = node[1]
-    val child = children[ch]
+    val child = trie_child_get(children, ch)
     if child == nil:
         return []
-    trie_keys_with_prefix(child, prefix: prefix, prefix_depth: prefix_depth + 1, full_prefix: full_prefix)
+    trie_keys_with_prefix_chars(child, chars, prefix_depth + 1, full_prefix)
 
 # Collect all keys from a subtree. Used after navigating to a prefix node.
 # Returns an array of keys.
@@ -225,13 +291,17 @@ pub fn trie_collect_keys(node, prefix: text):
     if node[0] != nil:
         result.push(prefix)
     val children = node[1]
-    for ch in children:
-        val child_keys = trie_collect_keys(children[ch], prefix + ch)
+    var child_index = 0
+    val child_count = children.len()
+    while child_index < child_count:
+        val pair = children[child_index]
+        val child_keys = trie_collect_keys(pair[1], prefix + pair[0])
         var i = 0
         val n = child_keys.len()
         while i < n:
             result.push(child_keys[i])
             i = i + 1
+        child_index = child_index + 1
     result
 
 # Find the longest key in the trie that is a prefix of the given query string.
@@ -243,6 +313,10 @@ pub fn trie_collect_keys(node, prefix: text):
 #   depth — current character index (0 at root)
 #   last_match — the longest prefix found so far (nil or text)
 pub fn trie_longest_prefix(node, query: text, depth: i64, last_match):
+    val chars = trie_key_chars(query)
+    trie_longest_prefix_chars(node, chars, depth, last_match)
+
+fn trie_longest_prefix_chars(node, chars, depth: i64, last_match):
     if node == nil:
         return last_match
     var current_match = last_match
@@ -252,35 +326,37 @@ pub fn trie_longest_prefix(node, query: text, depth: i64, last_match):
         var prefix_chars: [text] = []
         var j = 0
         while j < prefix_len:
-            prefix_chars.push(query[j])
+            prefix_chars.push(chars[j])
             j = j + 1
         current_match = prefix_chars.join("")
-    val query_len = query.len()
+    val query_len = chars.len()
     if depth == query_len:
         return current_match
-    val ch = query[depth]
+    val ch = chars[depth]
     val children = node[1]
-    val child = children[ch]
+    val child = trie_child_get(children, ch)
     if child == nil:
         return current_match
-    trie_longest_prefix(child, query, depth + 1, current_match)
+    trie_longest_prefix_chars(child, chars, depth + 1, current_match)
 
 # ============================================================================
 # Dict Helpers
 # ============================================================================
 
-# Check if a dict has any keys.
-fn trie_dict_has_keys(d) -> bool:
-    for k in d:
-        return true
-    false
+# Check if a children array has any entries.
+fn trie_dict_has_keys(children: []) -> bool:
+    children.len() > 0
 
-# Return a copy of dict `d` with key `skip_key` removed.
-fn trie_dict_without(d, skip_key):
-    var result = {}
-    for k in d:
-        if k != skip_key:
-            result[k] = d[k]
+# Return a copy of children with key `skip_key` removed.
+fn trie_dict_without(children: [], skip_key) -> []:
+    var result = []
+    var i = 0
+    val n = children.len()
+    while i < n:
+        val pair = children[i]
+        if pair[0] != skip_key:
+            result.push([pair[0], pair[1]])
+        i = i + 1
     result
 
 # ============================================================================
