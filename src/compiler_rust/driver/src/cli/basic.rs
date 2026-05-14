@@ -5,6 +5,7 @@ use crate::cli::examples_safety::{
 };
 use crate::runner::Runner;
 use crate::watcher::watch;
+use simple_common::target::Target;
 use std::path::Path;
 
 /// Create a runner with appropriate GC configuration
@@ -16,6 +17,43 @@ pub fn create_runner(gc_log: bool, gc_off: bool) -> Runner {
     } else {
         Runner::new()
     }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// Run a closure with strict runtime-family import errors when target policy requires it.
+pub fn with_strict_runtime_family_imports<T>(enabled: bool, run: impl FnOnce() -> T) -> T {
+    if enabled {
+        let _guard = EnvVarGuard::set("SIMPLE_STRICT_RUNTIME_FAMILY", "1");
+        run()
+    } else {
+        run()
+    }
+}
+
+/// Run a closure with strict runtime-family imports for baremetal/SimpleOS targets.
+pub fn with_strict_runtime_family_for_target<T>(target: Option<&Target>, run: impl FnOnce() -> T) -> T {
+    with_strict_runtime_family_imports(target.is_some_and(|target| target.is_baremetal()), run)
 }
 
 /// Run a source file (.spl) or compiled binary (.smf)
@@ -240,5 +278,29 @@ mod tests {
         assert_eq!(diagnostic.code, None);
         assert_eq!(diagnostic.message, "codegen: backend unavailable");
         assert!(diagnostic.help.is_empty());
+    }
+
+    #[test]
+    fn strict_runtime_family_guard_restores_previous_env() {
+        std::env::set_var("SIMPLE_STRICT_RUNTIME_FAMILY", "previous");
+        let observed = with_strict_runtime_family_imports(true, || {
+            std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").expect("strict env")
+        });
+
+        assert_eq!(observed, "1");
+        assert_eq!(
+            std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").expect("restored env"),
+            "previous"
+        );
+        std::env::remove_var("SIMPLE_STRICT_RUNTIME_FAMILY");
+    }
+
+    #[test]
+    fn strict_runtime_family_guard_leaves_env_unset_when_disabled() {
+        std::env::remove_var("SIMPLE_STRICT_RUNTIME_FAMILY");
+        let observed = with_strict_runtime_family_imports(false, || std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").ok());
+
+        assert_eq!(observed, None);
+        assert!(std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").is_err());
     }
 }

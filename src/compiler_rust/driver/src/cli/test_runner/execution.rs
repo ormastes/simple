@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::runner::Runner;
+use crate::cli::basic::with_strict_runtime_family_imports;
 use super::types::{IndividualTestResult, TestFileResult, TestExecutionMode};
 use super::build_cache::BuildCache;
 use super::artifact::{ExecutionArtifacts, write_test_artifacts};
@@ -517,8 +518,9 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
         }
         Err(_) => path,
     };
+    let strict_runtime_family = options.strict_runtime_family_imports();
     let run_result: Result<i32, String> = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runner.run_file_interpreted(exec_path_ref)
+        with_strict_runtime_family_imports(strict_runtime_family, || runner.run_file_interpreted(exec_path_ref))
     })) {
         Ok(inner) => inner,
         Err(panic_info) => {
@@ -759,6 +761,9 @@ fn build_safe_mode_child_args(path: &Path, options: &super::types::TestOptions) 
 
     if let Some(mode) = options.execution_mode.cli_value() {
         args.push(format!("--mode={}", mode));
+    }
+    if let Some(target) = &options.target {
+        args.push(format!("--target={}", target));
     }
 
     if options.gc_log {
@@ -2029,6 +2034,18 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "--mode=interpreter(remote(baremetal(riscv32)))"));
+    }
+
+    #[test]
+    fn test_build_safe_mode_child_args_forwards_target() {
+        let options = super::super::types::TestOptions {
+            target: Some(simple_common::target::Target::parse("x86_64-simpleos").expect("target")),
+            ..Default::default()
+        };
+
+        let args = build_safe_mode_child_args(Path::new("test/example_spec.spl"), &options);
+
+        assert!(args.iter().any(|arg| arg == "--target=x86_64-simpleos"));
     }
 
     #[test]

@@ -4,6 +4,8 @@
 
 use std::path::PathBuf;
 
+use simple_common::target::Target;
+
 use super::types::{TestLevel, TestExecutionMode, OutputFormat, TestOptions};
 
 /// Parse test command arguments
@@ -163,6 +165,32 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                     }
                 } else {
                     eprintln!("Warning: Unknown execution mode '{}', using interpreter", mode_str);
+                }
+            }
+            "--target" => {
+                i += 1;
+                if i < args.len() {
+                    match Target::parse(&args[i]) {
+                        Ok(target) => {
+                            if target.is_baremetal() {
+                                options.safe_mode = true;
+                            }
+                            options.target = Some(target);
+                        }
+                        Err(error) => eprintln!("Warning: invalid target '{}': {}", args[i], error),
+                    }
+                }
+            }
+            arg if arg.starts_with("--target=") => {
+                let value = arg.trim_start_matches("--target=");
+                match Target::parse(value) {
+                    Ok(target) => {
+                        if target.is_baremetal() {
+                            options.safe_mode = true;
+                        }
+                        options.target = Some(target);
+                    }
+                    Err(error) => eprintln!("Warning: invalid target '{}': {}", value, error),
                 }
             }
             // --compile: user-friendly alias for --mode=native (SMF is opt-in via --compile=smf)
@@ -483,6 +511,24 @@ mod tests {
             TestExecutionMode::Composite("interpreter(remote(baremetal(riscv32)))".to_string())
         );
         assert!(opts.safe_mode);
+    }
+
+    #[test]
+    fn test_parse_baremetal_target_enables_safe_strict_mode() {
+        let args = vec!["--target".to_string(), "x86_64-simpleos".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.target.as_ref().is_some_and(|target| target.is_baremetal()));
+        assert!(opts.strict_runtime_family_imports());
+        assert!(opts.safe_mode);
+    }
+
+    #[test]
+    fn test_parse_hosted_target_keeps_warning_mode() {
+        let args = vec!["--target=x86_64-unknown-linux-gnu".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.target.as_ref().is_some_and(|target| !target.is_baremetal()));
+        assert!(!opts.strict_runtime_family_imports());
+        assert!(!opts.safe_mode);
     }
 
     #[test]

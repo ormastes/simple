@@ -68,7 +68,9 @@ use std::path::PathBuf;
 use simple_common::target::Target;
 use simple_driver::cli::analysis::{run_info, run_query};
 use simple_driver::cli::audit::{run_replay, run_spec_coverage};
-use simple_driver::cli::basic::{create_runner, run_code, run_file_with_args, watch_file};
+use simple_driver::cli::basic::{
+    create_runner, run_code, run_file_with_args, watch_file, with_strict_runtime_family_for_target,
+};
 use simple_driver::cli::check::{CheckOptions, run_check};
 use simple_driver::cli::code_quality::{run_fmt, run_lint};
 use simple_driver::cli::gen_lean::run_gen_lean;
@@ -1184,17 +1186,13 @@ fn handle_file_execution(
     // Assume it's a file to run
     let path = PathBuf::from(first);
     if path.exists() {
-        // Collect remaining arguments to pass to the Simple program
-        // Filter out:
-        // - GC flags (internal to runtime)
-        // - Leading "--" separator (convention for separating runtime args from script args)
-        let program_args: Vec<String> = args
-            .iter()
-            .skip(1) // Skip the file path
-            .filter(|a| !a.starts_with("--gc")) // Skip GC flags
-            .skip_while(|a| *a == "--") // Skip leading "--" separator
-            .cloned()
-            .collect();
+        let (target, program_args) = match parse_file_execution_options(args) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                eprintln!("error: {}", error);
+                return 1;
+            }
+        };
 
         // Prepend the file path as argv[0]
         let mut full_args = vec![path.to_string_lossy().to_string()];
@@ -1202,7 +1200,9 @@ fn handle_file_execution(
 
         // Record file execution phase
         let exec_start = std::time::Instant::now();
-        let exit_code = run_file_with_args(&path, gc_log, gc_off, full_args);
+        let exit_code = with_strict_runtime_family_for_target(target.as_ref(), || {
+            run_file_with_args(&path, gc_log, gc_off, full_args)
+        });
         metrics.record(simple_driver::StartupPhase::FileExecution, exec_start.elapsed());
         exit_code
     } else {
@@ -1211,6 +1211,49 @@ fn handle_file_execution(
         print_help();
         1
     }
+}
+
+fn parse_file_execution_options(args: &[String]) -> Result<(Option<Target>, Vec<String>), String> {
+    let mut target = None;
+    let mut program_args = Vec::new();
+    let mut pass_through = false;
+    let mut i = 1;
+
+    while i < args.len() {
+        let arg = &args[i];
+        if !pass_through {
+            if arg.starts_with("--gc") {
+                i += 1;
+                continue;
+            }
+            if arg == "--" {
+                pass_through = true;
+                i += 1;
+                continue;
+            }
+            if arg == "--target" {
+                if i + 1 >= args.len() {
+                    return Err("--target requires a target triple".to_string());
+                }
+                target = Some(
+                    Target::parse(&args[i + 1])
+                        .map_err(|error| format!("invalid target '{}': {}", args[i + 1], error))?,
+                );
+                i += 2;
+                continue;
+            }
+            if let Some(value) = arg.strip_prefix("--target=") {
+                target = Some(Target::parse(value).map_err(|error| format!("invalid target '{}': {}", value, error))?);
+                i += 1;
+                continue;
+            }
+        }
+
+        program_args.push(arg.clone());
+        i += 1;
+    }
+
+    Ok((target, program_args))
 }
 
 /// Current Rust spipe-docgen implementation.
@@ -1267,5 +1310,41 @@ fn run_spipe_docgen_rust(args: &[String]) -> i32 {
             eprintln!("✗ Failed to generate documentation: {}", e);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_execution_options_extract_target_and_strip_runtime_flags() {
+        let args = vec![
+            "script.spl".to_string(),
+            "--target".to_string(),
+            "x86_64-simpleos".to_string(),
+            "--gc-log".to_string(),
+            "program-arg".to_string(),
+        ];
+
+        let (target, program_args) = parse_file_execution_options(&args).expect("options");
+
+        assert!(target.as_ref().is_some_and(Target::is_baremetal));
+        assert_eq!(program_args, vec!["program-arg"]);
+    }
+
+    #[test]
+    fn file_execution_options_leave_target_after_separator_as_program_arg() {
+        let args = vec![
+            "script.spl".to_string(),
+            "--".to_string(),
+            "--target".to_string(),
+            "x86_64-simpleos".to_string(),
+        ];
+
+        let (target, program_args) = parse_file_execution_options(&args).expect("options");
+
+        assert!(target.is_none());
+        assert_eq!(program_args, vec!["--target", "x86_64-simpleos"]);
     }
 }

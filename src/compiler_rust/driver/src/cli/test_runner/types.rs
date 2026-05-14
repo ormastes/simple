@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
+use simple_common::target::Target;
 
 /// Debug logging level for test runner
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -197,6 +198,8 @@ pub struct TestOptions {
     pub show_tags: bool,
     /// Test execution mode (interpreter, smf, native)
     pub execution_mode: TestExecutionMode,
+    /// Optional target triple/preset for target-restricted interpreter checks.
+    pub target: Option<Target>,
     /// Force rebuild of cached test artifacts
     pub force_rebuild: bool,
     /// Bypass result cache reads/writes for this test run
@@ -285,6 +288,7 @@ impl Default for TestOptions {
             skip_features_planned_only: false,
             show_tags: false,
             execution_mode: TestExecutionMode::Interpreter,
+            target: None,
             force_rebuild: false,
             clean: false,
             no_cache: false,
@@ -314,6 +318,13 @@ impl Default for TestOptions {
             prune_runs: None,
             runs_status_filter: None,
         }
+    }
+}
+
+impl TestOptions {
+    pub fn strict_runtime_family_imports(&self) -> bool {
+        self.target.as_ref().is_some_and(Target::is_baremetal)
+            || matches!(&self.execution_mode, TestExecutionMode::Composite(mode) if mode.contains("baremetal") || mode.contains("simpleos"))
     }
 }
 
