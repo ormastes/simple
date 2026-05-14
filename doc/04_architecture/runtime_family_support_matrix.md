@@ -139,9 +139,9 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
   - remaining caveat: unresolved native/runtime symbols still generate link stubs. Internal Simple stub debt is reduced to one runtime hook: `rt_is_debug_mode_enabled`.
 - `src/app/simple_lsp_mcp/main.spl` native-build still fails before link:
   - command: `src/compiler_rust/target/bootstrap/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server`
-  - latest result after lenient enum-global MIR lowering: 10 HIR field-resolution failures remain. Enum-like fields such as `NotFound`, `Other`, `AddrInUse`, `X86_64`, and `Little` no longer appear in the failure set.
-  - remaining failures: `ANY.local`, `ANY.value`, `ANY.kind`, `MirBlock.has_label`, and `wildcard.length` across backend/interpreter compiler support files.
-  - implication: MCP native smoke is no longer blocked by `SliceIter.slice`, and the enum/static-member bridge reduces LSP failures, but LSP/package release-readiness still requires broader import/type-loading and struct field recovery cleanup.
+  - latest result after shell status values were normalized to plain `i64` and direct `MirBlock.label` checks replaced `has_label`: 5 HIR field-resolution failures remain.
+  - remaining failures: `ANY.local`, `ANY.kind`, and `wildcard.length` across C/LLVM translate, native AArch64/RISC-V encoding, and SPIR-V builder files.
+  - implication: MCP native smoke is no longer blocked by `SliceIter.slice`, the enum/static-member bridge reduces LSP failures, and backend shell/label compatibility removes the prior `ANY.value`/`MirBlock.has_label` class. LSP/package release-readiness still requires broader import/type-loading and struct field recovery cleanup.
 
 ### Gap 1: Partial attribute-based family enforcement (Agent 2 -- Compiler)
 - **Problem**: Public runtime-family root `__init__.spl` files now carry `@no_gc` or `@gc`, and the Rust parser accepts module-level `@gc` before export-only roots, but family GcMode is still only partially enforced.
