@@ -46,11 +46,11 @@ fn analyze_code(file_path: text) -> List<OptSuggestion>:
                 ))
 
         # Pattern 2: String concatenation in loops
-        if line.contains("for ") and line.contains(" in "):
+        if is_loop_line(line):
             var check_line = line_num
             while check_line < lines.len():
                 val current_line = lines[check_line]
-                if current_line.starts_with("for "):
+                if is_loop_line(current_line):
                     break
                 if current_line.contains(" + ") and current_line.contains("\""):
                     suggestions.push(OptSuggestion(
@@ -64,11 +64,11 @@ fn analyze_code(file_path: text) -> List<OptSuggestion>:
                 check_line = check_line + 1
 
         # Pattern 2b: List copy append in loops
-        if line.contains("for ") and line.contains(" in "):
+        if is_loop_line(line):
             var check_line = line_num
             while check_line < lines.len():
                 val current_line = lines[check_line]
-                if current_line.starts_with("for "):
+                if is_loop_line(current_line):
                     break
                 if is_list_copy_append(current_line):
                     suggestions.push(OptSuggestion(
@@ -77,6 +77,24 @@ fn analyze_code(file_path: text) -> List<OptSuggestion>:
                         line: check_line + 1,
                         message: "List copy append in loop",
                         suggestion: "Use items.push(value) instead of items = items + [value]"
+                    ))
+                    break
+                check_line = check_line + 1
+
+        # Pattern 2d: Membership checks in hot loops
+        if is_loop_line(line):
+            var check_line = line_num
+            while check_line < lines.len() and check_line < line_num + 30:
+                val current_line = lines[check_line]
+                if check_line > line_num and is_loop_line(current_line) and count_indent(current_line) <= count_indent(line):
+                    break
+                if is_membership_contains(current_line):
+                    suggestions.push(OptSuggestion(
+                        severity: "warning",
+                        file: file_path,
+                        line: check_line + 1,
+                        message: "Membership contains in hot loop",
+                        suggestion: "Hoist repeated lookups, use indexed keys, or benchmark HashSet.contains before relying on C/Rust parity"
                     ))
                     break
                 check_line = check_line + 1
@@ -183,6 +201,18 @@ fn is_list_copy_append(line: text) -> bool:
     if trimmed.contains(" = ") and trimmed.contains(" + ["):
         return true
     false
+
+fn is_loop_line(line: text) -> bool:
+    val trimmed = line.trim()
+    if trimmed.starts_with("#"):
+        return false
+    trimmed.starts_with("for ") or trimmed.starts_with("while ")
+
+fn is_membership_contains(line: text) -> bool:
+    val trimmed = line.trim()
+    if trimmed.starts_with("#"):
+        return false
+    trimmed.contains(".contains(")
 
 fn is_in_loop_or_function(lines: List<text>, line_num: i64) -> bool:
     var indent = 0
