@@ -30,6 +30,7 @@ fn analyze_code(file_path: text) -> List<OptSuggestion>:
 
     val content = io.read_file(file_path)
     val lines = content.split("\n")
+    val uses_pure_text_hashset = imports_pure_text_hashset(lines)
 
     for (line_num, line) in lines.enumerate():
         val line_num = line_num + 1
@@ -89,12 +90,18 @@ fn analyze_code(file_path: text) -> List<OptSuggestion>:
                 if check_line > line_num and is_loop_line(current_line) and count_indent(current_line) <= count_indent(line):
                     break
                 if is_membership_contains(current_line):
+                    val membership_severity = if uses_pure_text_hashset then "critical" else "warning"
+                    val membership_message = if uses_pure_text_hashset then "Pure HashSet.contains in hot loop" else "Membership contains in hot loop"
+                    val membership_suggestion = if uses_pure_text_hashset:
+                        "Measured pure text HashSet.contains is not C/Rust parity; precompute indexed keys, use an OS/runtime-backed set when allowed, or fix/verify a pure noalloc fixed set before using this hot path"
+                    else:
+                        "Hoist repeated lookups, use indexed keys, or benchmark HashSet.contains before relying on C/Rust parity"
                     suggestions.push(OptSuggestion(
-                        severity: "warning",
+                        severity: membership_severity,
                         file: file_path,
                         line: check_line + 1,
-                        message: "Membership contains in hot loop",
-                        suggestion: "Hoist repeated lookups, use indexed keys, or benchmark HashSet.contains before relying on C/Rust parity"
+                        message: membership_message,
+                        suggestion: membership_suggestion
                     ))
                     break
                 check_line = check_line + 1
@@ -213,6 +220,17 @@ fn is_membership_contains(line: text) -> bool:
     if trimmed.starts_with("#"):
         return false
     trimmed.contains(".contains(")
+
+fn imports_pure_text_hashset(lines: List<text>) -> bool:
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.contains("nogc_sync_mut") and trimmed.contains("collections.hashset"):
+            return true
+        if trimmed.contains("gc_async_mut") and trimmed.contains("collections.hashset"):
+            return true
+    false
 
 fn is_in_loop_or_function(lines: List<text>, line_num: i64) -> bool:
     var indent = 0
