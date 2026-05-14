@@ -266,6 +266,8 @@ int64_t  rt_len(int64_t value);
 int64_t  rt_to_string(int64_t value);
 int64_t  rt_raw_u64_to_string(int64_t raw);
 int64_t  rt_value_to_string(int64_t value);
+int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
+int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
 SplArray* rt_array_new(int64_t cap);
 SplArray* rt_array_new_with_cap_u64(int64_t cap);
 SplArray* rt_byte_array_new(uint64_t cap);
@@ -299,6 +301,14 @@ int8_t   rt_typed_words_u64_store_known_data_at(
     int64_t data_ptr,
     int64_t idx,
     int64_t value);
+int64_t  rt_tuple_new(int64_t len);
+int8_t   rt_tuple_set(int64_t tuple, int64_t idx, int64_t value);
+int64_t  rt_tuple_get(int64_t tuple, int64_t idx);
+int64_t  rt_tuple_len(int64_t tuple);
+int64_t  rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
+int64_t  rt_enum_discriminant(int64_t value);
+int64_t  rt_enum_payload(int64_t value);
+int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
 int64_t  rt_native_eq(int64_t left, int64_t right);

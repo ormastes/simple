@@ -38,6 +38,7 @@
 #define RT_VALUE_SPECIAL_FALSE 0x2ULL
 #define RT_VALUE_HEAP_STRING 0x53545231U
 #define RT_VALUE_HEAP_ARRAY 0x02U
+#define RT_VALUE_HEAP_ENUM 0x04U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 
 typedef struct RtCoreString {
@@ -55,6 +56,15 @@ typedef struct RtCoreArray {
     int64_t cap;
     void* data;
 } RtCoreArray;
+
+typedef struct RtCoreEnum {
+    uint8_t kind;
+    uint8_t reserved[3];
+    uint32_t enum_id;
+    uint32_t discriminant;
+    uint32_t reserved2;
+    int64_t payload;
+} RtCoreEnum;
 
 static inline int64_t rt_core_from_special(uint64_t payload) {
     return (int64_t)((payload << 3) | RT_VALUE_TAG_SPECIAL);
@@ -115,6 +125,13 @@ static inline RtCoreArray* rt_core_as_array(int64_t value) {
     if (a->kind != RT_VALUE_HEAP_ARRAY) return NULL;
     if (a->len < 0 || a->cap < 0 || a->len > a->cap || a->cap > 100000000) return NULL;
     return a;
+}
+
+static inline RtCoreEnum* rt_core_as_enum(int64_t value) {
+    if (!rt_core_is_heap(value)) return NULL;
+    RtCoreEnum* e = (RtCoreEnum*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!e || e->kind != RT_VALUE_HEAP_ENUM) return NULL;
+    return e;
 }
 
 static inline RtCoreArray* rt_core_array_ptr(SplArray* value) {
@@ -256,6 +273,22 @@ int64_t rt_value_bool(int64_t value) {
 
 int64_t rt_value_nil(void) {
     return rt_core_nil();
+}
+
+int64_t rt_function_not_found(const uint8_t* name, uint64_t len) {
+    fputs("Simple runtime error: function not found", stderr);
+    if (name && len > 0) {
+        fputs(": ", stderr);
+        fwrite(name, 1, (size_t)len, stderr);
+    }
+    fputc('\n', stderr);
+    return rt_core_nil();
+}
+
+int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv) {
+    (void)argc;
+    (void)argv;
+    return rt_function_not_found(name, len);
 }
 
 int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
@@ -974,6 +1007,68 @@ int8_t rt_typed_words_u64_store_known_data_at(
     if (!array || data_ptr == 0 || idx < 0 || idx >= array->cap) return 0;
     ((int64_t*)(uintptr_t)data_ptr)[idx] = val;
     return 1;
+}
+
+int64_t rt_tuple_new(int64_t len) {
+    SplArray* tuple = rt_array_new(len);
+    if (!tuple) return rt_core_nil();
+    RtCoreArray* array = rt_core_array_ptr(tuple);
+    if (!array) return rt_core_nil();
+    array->len = len < 0 ? 0 : len;
+    return (int64_t)(uintptr_t)tuple;
+}
+
+int8_t rt_tuple_set(int64_t tuple, int64_t idx, int64_t value) {
+    RtCoreArray* array = rt_core_as_array(tuple);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0 || idx >= array->len) return 0;
+    ((int64_t*)array->data)[idx] = value;
+    return 1;
+}
+
+int64_t rt_tuple_get(int64_t tuple, int64_t idx) {
+    RtCoreArray* array = rt_core_as_array(tuple);
+    if (!array) return rt_core_nil();
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0 || idx >= array->len) return rt_core_nil();
+    return ((int64_t*)array->data)[idx];
+}
+
+int64_t rt_tuple_len(int64_t tuple) {
+    RtCoreArray* array = rt_core_as_array(tuple);
+    return array ? array->len : -1;
+}
+
+int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    RtCoreEnum* value = (RtCoreEnum*)calloc(1, sizeof(RtCoreEnum));
+    if (!value) return rt_core_nil();
+    value->kind = RT_VALUE_HEAP_ENUM;
+    value->enum_id = (uint32_t)enum_id;
+    value->discriminant = (uint32_t)discriminant;
+    value->payload = payload;
+    return (int64_t)(((uint64_t)(uintptr_t)value) | RT_VALUE_TAG_HEAP);
+}
+
+int64_t rt_enum_discriminant(int64_t value) {
+    RtCoreEnum* e = rt_core_as_enum(value);
+    return e ? (int64_t)e->discriminant : -1;
+}
+
+int64_t rt_enum_payload(int64_t value) {
+    RtCoreEnum* e = rt_core_as_enum(value);
+    return e ? e->payload : rt_core_nil();
+}
+
+int64_t rt_hash_text(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return 0;
+    uint64_t hash = 1469598103934665603ULL;
+    for (uint64_t i = 0; i < s->len; i++) {
+        hash ^= (uint8_t)s->data[i];
+        hash *= 1099511628211ULL;
+    }
+    return (int64_t)hash;
 }
 
 SplValue* rt_array_pop(SplArray* a) {
