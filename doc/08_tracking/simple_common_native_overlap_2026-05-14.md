@@ -302,6 +302,25 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   Simple ops/ms for set-like membership (`0.48x` C, `0.24x` Rust). This is
   additional already-lowered MIR coverage, not proof that the native benchmark
   path has reached C/Rust parity.
+- Rust-hosted MIR lowering now drops unused destinations from ignored-result
+  typed collection writes before native codegen. Focused coverage verifies that
+  a `[u64]` `arr.push(word)` expression statement lowers to
+  `rt_typed_words_u64_push` with `dest: None`, letting the existing Cranelift
+  inliner skip bool-result plumbing for that path. A one-sample collection
+  benchmark after rebuilding the driver kept checksum parity and measured
+  `1,832,889` Simple ops/ms for list traversal (`0.32x` C, `0.25x` Rust),
+  `1,254,677` Simple ops/ms for list push (`0.40x` C, `0.82x` Rust), and
+  `3,519` Simple ops/ms for set-like membership (`0.52x` C, `0.25x` Rust).
+  Fresh emitted MIR for `bench_list_push` no longer contains an observed
+  `rt_typed_words_u64_push` result, but traversal and set membership remain
+  below native parity.
+- Disassembly of the latest unstripped Simple benchmark shows
+  `bench_list_traverse` and `set_contains` already use hoisted
+  `rt_typed_words_u64_data_at` lowering with direct slot loads in the scan
+  loop. The remaining measured gap is therefore loop/codegen quality and typed
+  slot representation overhead, not generic `rt_index_get` dispatch or
+  per-element bounds checking. The pure runtime `rt_string_to_float` path also
+  remains incomplete until Simple has a verified f64-to-i64 bitcast primitive.
 
 ## Next Concrete Plugin Work
 
