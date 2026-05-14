@@ -111,6 +111,8 @@ Executed on 2026-05-14:
   - `remaining=20` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the 3D Vulkan/WebGPU render backend, FFI package, and GPU driver facades.
 - No-GC async I/O device/archive wildcard facade review scan:
   - `remaining=16` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the gamepad, compression, FTP, and audio FFI facades.
+- No-GC async CUDA/AST/SSH wildcard facade review scan:
+  - `remaining=13` wildcard facades still point at no-GC sync owners with runtime hooks after narrowing the CUDA FFI, AST FFI, and SSH FFI facades.
 - Focused runtime-path specs:
   - `test/unit/lib/nogc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
   - `test/unit/lib/gc_async_mut/tls/tls_facade_spec.spl --mode=interpreter --clean --force-rebuild`: `5` passed, `0` failed
