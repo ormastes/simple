@@ -271,7 +271,10 @@ pub(crate) fn runtime_archive_has_core_required_symbols(path: &Path) -> bool {
 
 fn is_core_c_bootstrap_cache_archive(path: &Path) -> bool {
     let normalized = path.to_string_lossy().replace('\\', "/");
-    normalized.contains("/build/simple-core/") || normalized.contains("/build/simple_core/")
+    normalized.starts_with("build/simple-core/")
+        || normalized.starts_with("build/simple_core/")
+        || normalized.contains("/build/simple-core/")
+        || normalized.contains("/build/simple_core/")
 }
 
 pub(crate) fn find_abi_complete_simple_core_runtime_library() -> Option<PathBuf> {
