@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 
 #define DATA_SIZE 65536ULL
@@ -74,11 +75,53 @@ static void bench_set_contains(void) {
     report("set_contains", SET_SIZE * SET_ITERS, now_us() - start, checksum);
 }
 
+static uint64_t hash_text(const char *s) {
+    uint64_t hash = 5381ULL;
+    while (*s) {
+        hash = hash * 33ULL + (unsigned char)(*s);
+        s++;
+    }
+    return hash;
+}
+
+static void bench_hashset_contains(void) {
+    enum { TABLE_SIZE = 2048 };
+    char keys[SET_SIZE][32];
+    const char *table[TABLE_SIZE] = {0};
+
+    for (uint64_t i = 0; i < SET_SIZE; i++) {
+        uint64_t key_num = (i * 131ULL + 7ULL) | 1ULL;
+        snprintf(keys[i], sizeof(keys[i]), "key_%llu", (unsigned long long)key_num);
+        uint64_t slot = hash_text(keys[i]) & (TABLE_SIZE - 1);
+        while (table[slot] != NULL) slot = (slot + 1ULL) & (TABLE_SIZE - 1);
+        table[slot] = keys[i];
+    }
+
+    uint64_t checksum = 0;
+    uint64_t start = now_us();
+    for (uint64_t iter = 0; iter < SET_ITERS; iter++) {
+        for (uint64_t i = 0; i < SET_SIZE; i++) {
+            uint64_t key_num = (i * 131ULL + 7ULL) | 1ULL;
+            const char *probe = keys[i];
+            uint64_t slot = hash_text(probe) & (TABLE_SIZE - 1);
+            while (table[slot] != NULL) {
+                if (strcmp(table[slot], probe) == 0) {
+                    checksum += key_num ^ iter;
+                    break;
+                }
+                slot = (slot + 1ULL) & (TABLE_SIZE - 1);
+            }
+        }
+    }
+    report("hashset_contains", SET_SIZE * SET_ITERS, now_us() - start, checksum);
+}
+
 int main(void) {
     uint64_t *data = make_data();
     bench_list_traverse(data);
     bench_list_push();
     bench_set_contains();
+    bench_hashset_contains();
     free(data);
     return 0;
 }

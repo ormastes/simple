@@ -1,13 +1,13 @@
 # HashSet - Pure Simple Implementation
 #
 # No FFI, no Rust - 100% Pure Simple
-# Uses HashMap internally
+# Uses HashMap for insert deduplication and a flat item list for fast traversal.
 
 
-use collections.hashmap.HashMap
+use collections.hashmap.{HashMap, hashmap_with_capacity}
 
 class HashSet:
-    """Pure Simple HashSet using HashMap internally.
+    """Pure Simple HashSet using text keys.
 
     Example:
         var set = HashSet.new()
@@ -16,14 +16,15 @@ class HashSet:
         val has_apple = set.contains("apple")  # true
     """
     map: HashMap
+    items: [text]
 
     static fn new() -> HashSet:
         """Create new empty HashSet."""
-        HashSet(map: HashMap.new())
+        HashSet(map: HashMap.new(), items: [])
 
     static fn with_capacity(capacity: i64) -> HashSet:
         """Create new empty HashSet with preallocated map buckets."""
-        HashSet(map: HashMap.with_capacity(capacity))
+        HashSet(map: HashMap.with_capacity(capacity), items: [])
 
     me insert(value: text) -> bool:
         """Insert value into set.
@@ -31,11 +32,20 @@ class HashSet:
         Returns:
             true if newly inserted, false if already present
         """
-        self.map.insert_if_absent(value, "")  # Use empty string as value
+        if self.map.insert_if_absent(value, ""):
+            self.items.push(value)
+            return true
+        false
 
     fn contains(value: text) -> bool:
         """Check if value exists."""
-        self.map.has(value)
+        val length = self.items.len()
+        var i = 0
+        while i < length:
+            if self.items[i] == value:
+                return true
+            i = i + 1
+        false
 
     me remove(value: text) -> bool:
         """Remove value from set.
@@ -44,23 +54,31 @@ class HashSet:
             true if value was present
         """
         val result = self.map.remove(value)
-        result.?
+        if not result.?:
+            return false
+        var next_items: [text] = []
+        for item in self.items:
+            if item != value:
+                next_items.push(item)
+        self.items = next_items
+        true
 
     me clear():
         """Remove all values."""
         self.map.clear()
+        self.items = []
 
     fn len() -> i64:
         """Get number of values."""
-        self.map.len()
+        self.items.len()
 
     fn is_empty() -> bool:
         """Check if empty."""
-        self.map.is_empty()
+        self.items.len() == 0
 
     fn to_vec() -> [text]:
         """Convert to vector."""
-        self.map.keys()
+        self.items
 
     fn to_array() -> [text]:
         """Compatibility alias matching the std HashSet API."""
@@ -69,51 +87,44 @@ class HashSet:
     fn union(other: HashSet) -> HashSet:
         """Return a new set with values from both sets."""
         var result = HashSet.new()
-        for bucket in self.map.buckets:
-            for entry in bucket:
-                result.insert(entry.key)
-        for bucket in other.map.buckets:
-            for entry in bucket:
-                result.insert(entry.key)
+        for item in self.items:
+            result.insert(item)
+        for item in other.items:
+            result.insert(item)
         result
 
     fn intersection(other: HashSet) -> HashSet:
         """Return a new set containing values present in both sets."""
         var result = HashSet.new()
-        for bucket in self.map.buckets:
-            for entry in bucket:
-                if other.contains(entry.key):
-                    result.insert(entry.key)
+        for item in self.items:
+            if other.contains(item):
+                result.insert(item)
         result
 
     fn difference(other: HashSet) -> HashSet:
         """Return a new set containing values present only in this set."""
         var result = HashSet.new()
-        for bucket in self.map.buckets:
-            for entry in bucket:
-                if not other.contains(entry.key):
-                    result.insert(entry.key)
+        for item in self.items:
+            if not other.contains(item):
+                result.insert(item)
         result
 
     fn symmetric_difference(other: HashSet) -> HashSet:
         """Return a new set containing values present in either set but not both."""
         var result = HashSet.new()
-        for bucket in self.map.buckets:
-            for entry in bucket:
-                if not other.contains(entry.key):
-                    result.insert(entry.key)
-        for bucket in other.map.buckets:
-            for entry in bucket:
-                if not self.contains(entry.key):
-                    result.insert(entry.key)
+        for item in self.items:
+            if not other.contains(item):
+                result.insert(item)
+        for item in other.items:
+            if not self.contains(item):
+                result.insert(item)
         result
 
     fn is_subset(other: HashSet) -> bool:
         """Check whether every value in this set is present in other."""
-        for bucket in self.map.buckets:
-            for entry in bucket:
-                if not other.contains(entry.key):
-                    return false
+        for item in self.items:
+            if not other.contains(item):
+                return false
         true
 
     fn is_superset(other: HashSet) -> bool:
@@ -122,23 +133,26 @@ class HashSet:
 
     fn each(f: fn(text) -> void):
         """Call f for every set value."""
-        for bucket in self.map.buckets:
-            for entry in bucket:
-                f(entry.key)
+        for item in self.items:
+            f(item)
 
     fn map(f: fn(text) -> text) -> HashSet:
         """Map values into a new set."""
         var result = HashSet.new()
-        for bucket in self.map.buckets:
-            for entry in bucket:
-                result.insert(f(entry.key))
+        for item in self.items:
+            result.insert(f(item))
         result
 
     fn filter(predicate: fn(text) -> bool) -> HashSet:
         """Filter values into a new set."""
         var result = HashSet.new()
-        for bucket in self.map.buckets:
-            for entry in bucket:
-                if predicate(entry.key):
-                    result.insert(entry.key)
+        for item in self.items:
+            if predicate(item):
+                result.insert(item)
         result
+
+fn hashset_with_capacity(capacity: i64) -> HashSet:
+    """Create a HashSet with preallocated buckets."""
+    HashSet(map: hashmap_with_capacity(capacity), items: [])
+
+export hashset_with_capacity

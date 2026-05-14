@@ -1,4 +1,5 @@
 use std::time::Instant;
+use std::collections::HashSet;
 
 const DATA_SIZE: usize = 65_536;
 const TRAVERSE_ITERS: u64 = 1800;
@@ -62,9 +63,31 @@ fn bench_set_contains() {
     report("set_contains", SET_SIZE as u64 * SET_ITERS, start.elapsed().as_micros(), checksum);
 }
 
+fn bench_hashset_contains() {
+    let set: HashSet<String> = (0..SET_SIZE)
+        .map(|i| format!("key_{}", (i as u64 * 131 + 7) | 1))
+        .collect();
+    let keys: Vec<String> = (0..SET_SIZE)
+        .map(|i| format!("key_{}", (i as u64 * 131 + 7) | 1))
+        .collect();
+
+    let mut checksum = 0u64;
+    let start = Instant::now();
+    for iter in 0..SET_ITERS {
+        for i in 0..SET_SIZE {
+            let key_num = (i as u64 * 131 + 7) | 1;
+            if set.contains(&keys[i]) {
+                checksum = checksum.wrapping_add(key_num ^ iter);
+            }
+        }
+    }
+    report("hashset_contains", SET_SIZE as u64 * SET_ITERS, start.elapsed().as_micros(), checksum);
+}
+
 fn main() {
     let data = make_data();
     bench_list_traverse(&data);
     bench_list_push();
     bench_set_contains();
+    bench_hashset_contains();
 }
