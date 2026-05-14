@@ -448,6 +448,13 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   checksum parity. The next text-set gap is bucket/entry indexing and string
   equality call overhead; list traversal and scalar set lookup still need
   compiler/backend loop work.
+- The collection benchmark harness now sets `SIMPLE_NATIVE_CPU=native` for the
+  Simple compile by default through `SIMPLE_COLLECTION_BENCH_CPU`, matching the
+  C `-march=native` and Rust `target-cpu=native` reference settings. A clean
+  source-closure run with this setting kept checksum parity but still warned:
+  list traversal `0.26x` C / `0.25x` Rust, list push `0.44x` C / `0.90x` Rust,
+  scalar set membership `0.34x` C / `0.18x` Rust, and text `HashSet.contains`
+  `0.34x` C / `0.64x` Rust.
 
 ## Next Concrete Plugin Work
 

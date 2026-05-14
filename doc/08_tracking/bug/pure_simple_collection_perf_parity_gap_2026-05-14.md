@@ -68,6 +68,17 @@ set_contains     0.36x C  0.18x Rust
 hashset_contains 0.39x C  0.65x Rust
 ```
 
+The harness now applies `SIMPLE_NATIVE_CPU=native` to Simple source-closure
+native builds so the CPU target matches the C/Rust reference settings. A clean
+one-sample run with that setting still missed speed floors:
+
+```text
+list_traverse    0.26x C  0.25x Rust
+list_push        0.44x C  0.90x Rust
+set_contains     0.34x C  0.18x Rust
+hashset_contains 0.34x C  0.64x Rust
+```
+
 ## Ruled Out
 
 - The Simple benchmark is not doing a different asymptotic algorithm for
