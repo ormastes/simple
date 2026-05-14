@@ -325,6 +325,37 @@ pub extern "C" fn rt_array_new(capacity: u64) -> RuntimeValue {
     }
 }
 
+/// Allocate an array with uninitialized element capacity and length 0.
+///
+/// This matches `Vec::with_capacity`/`malloc` benchmark semantics: callers must
+/// write elements before publishing length or reading slots.
+fn rt_array_new_uninit(capacity: u64) -> RuntimeValue {
+    let capacity = capacity.max(4);
+    let header_size = std::mem::size_of::<RuntimeArray>();
+    let header_layout = std::alloc::Layout::from_size_align(header_size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc(header_layout) as *mut RuntimeArray;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        let data_layout = array_data_layout(capacity);
+        let data = std::alloc::alloc(data_layout) as *mut RuntimeValue;
+        if data.is_null() {
+            std::alloc::dealloc(ptr as *mut u8, header_layout);
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Array, header_size as u32);
+        (*ptr).len = 0;
+        (*ptr).capacity = capacity;
+        (*ptr).data = data;
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_byte_array_new(capacity: u64) -> RuntimeValue {
     let capacity = capacity.max(4);
@@ -1053,27 +1084,27 @@ pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue
 
 #[no_mangle]
 pub extern "C" fn rt_array_new_with_cap_i64(cap: i64) -> RuntimeValue {
-    rt_array_new(cap as u64)
+    rt_array_new_uninit(cap as u64)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_array_new_with_cap(cap: i64) -> RuntimeValue {
-    rt_array_new(cap as u64)
+    rt_array_new_uninit(cap as u64)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_array_new_with_cap_text(cap: i64) -> RuntimeValue {
-    rt_array_new(cap as u64)
+    rt_array_new_uninit(cap as u64)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_array_new_with_cap_js_value(cap: i64) -> RuntimeValue {
-    rt_array_new(cap as u64)
+    rt_array_new_uninit(cap as u64)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_array_new_with_cap_bool(cap: i64) -> RuntimeValue {
-    rt_array_new(cap as u64)
+    rt_array_new_uninit(cap as u64)
 }
 
 /// Pop an element from an array

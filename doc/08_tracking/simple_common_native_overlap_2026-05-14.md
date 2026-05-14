@@ -216,6 +216,15 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   ops/ms (`0.28x` C, `0.15x` Rust). The remaining push gap is now dominated by
   loop/allocation/codegen overhead rather than capacity, grow dispatch, or
   per-element length updates in the hot append body.
+- `rt_array_new_with_cap*` now matches C `malloc` and Rust
+  `Vec::with_capacity` setup more closely by allocating uninitialized element
+  capacity with length `0`; the existing `rt_array_new` path keeps zero-filled
+  storage for generic callers. The strict append proof writes slots before
+  publishing length, so the benchmark path no longer pays to zero slots it will
+  immediately overwrite. A one-sample benchmark kept checksum parity and
+  measured list traversal at `1,627,370` Simple ops/ms (`0.37x` C, `0.26x`
+  Rust), list push at `148,731` Simple ops/ms (`0.06x` C, `0.10x` Rust), and
+  set-like membership at `2,002` Simple ops/ms (`0.30x` C, `0.15x` Rust).
 
 ## Next Concrete Plugin Work
 
