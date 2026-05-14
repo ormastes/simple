@@ -304,6 +304,30 @@ fn test_strict_noalloc_check_rejects_reachable_host_allocation_api() {
 }
 
 #[test]
+fn test_run_check_baremetal_target_rejects_reachable_noalloc_allocation() {
+    let temp_root = tempfile::tempdir().unwrap();
+    let lib_root = temp_root.path().join("src/lib");
+    let noalloc_root = lib_root.join("nogc_async_mut_noalloc");
+    std::fs::create_dir_all(&noalloc_root).unwrap();
+    let entry = noalloc_root.join("entry.spl");
+    let helper = noalloc_root.join("helper.spl");
+    std::fs::write(&entry, "use std.nogc_async_mut_noalloc.helper\n").unwrap();
+    std::fs::write(&helper, "@alloc\nfn allocate() -> i64:\n    return 1\n").unwrap();
+
+    let status = run_check(
+        &[entry],
+        CheckOptions {
+            quiet: true,
+            source_roots: vec![lib_root],
+            target: Some(Target::parse("riscv64gc-unknown-none-elf").unwrap()),
+            ..CheckOptions::default()
+        },
+    );
+
+    assert_eq!(status, 1);
+}
+
+#[test]
 fn test_hosted_noalloc_check_does_not_follow_reachable_import_closure() {
     let temp_root = tempfile::tempdir().unwrap();
     let lib_root = temp_root.path().join("src/lib");
