@@ -88,12 +88,22 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   and parity specs, but the port benchmark still needs a CRC loop shape that
   exposes `update_u64`/`update_u32` calls to the pattern pass before this can
   close the measured CRC32 throughput gap.
+- A dedicated collection parity benchmark now exists at
+  `test/perf/collections/run_collection_benchmarks.shs`. Its first
+  one-sample run with `SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c` kept checksum
+  parity for `list_traverse`, `list_push`, and `set_contains`, but showed the
+  remaining optimizer gap clearly: list traversal was `0.00x` C/Rust
+  (`16,492` Simple ops/ms vs `4,773,197` C and `6,904,987` Rust), list push was
+  `0.01x` C / `0.02x` Rust, and set-like linear membership was still `0.00x`
+  C/Rust. This benchmark is intentionally a gate for future collection
+  optimizer work rather than proof of parity.
 
 ## Next Concrete Plugin Work
 
-1. Extend `simple.opt.collection.loop_access` from same-block typed length
+1. Extend `simple.opt.collection.loop_access` from duplicate length
    canonicalization to full `len`-guarded array/list loops so indexed traversal
-   over `[u8]`, `[u32]`, and fixed arrays emits one bounds proof per loop.
+   over `[u8]`, `[u32]`, and fixed arrays emits one bounds proof per loop and
+   the collection parity benchmark closes the current `list_traverse` gap.
 2. Add duplicate map/set probe-loop specialization for primitive-key
    `contains`, `contains_key`, and `get` calls after MIR exposes the hash/probe
    internals rather than only opaque runtime calls.
