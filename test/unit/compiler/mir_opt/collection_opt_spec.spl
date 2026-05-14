@@ -137,6 +137,16 @@ fn _co_count_binop(block: MirBlock, expected: MirBinOp) -> i64:
                 ()
     count
 
+fn _co_count_bitcast(block: MirBlock) -> i64:
+    var count = 0
+    for inst in block.instructions:
+        match inst.kind:
+            case Bitcast(_, _, _):
+                count = count + 1
+            case _:
+                ()
+    count
+
 describe "MIR Collection Optimization":
     it "treats set membership tests as pure hoistable collection queries":
         var opt = create_collection_opt_pass()
@@ -197,6 +207,20 @@ describe "MIR Collection Optimization":
 
         expect(_co_count_named_call(block, "rt_array_get")).to_equal(1)
         expect(_co_count_rt_array_len(block)).to_equal(1)
+        expect(_co_count_copy_from(block, 10)).to_equal(1)
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "reuses repeated typed byte reads in a block":
+        val get1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_typed_bytes_u8_data_at"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val cmp = MirInst(kind: MirInstKind.BinOp(_co_lid(20), MirBinOp.Eq, _co_copy(10), _co_copy(3)), span: nil)
+        val get2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("rt_typed_bytes_u8_data_at"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([get1, cmp, get2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_typed_bytes_u8_data_at")).to_equal(1)
         expect(_co_count_copy_from(block, 10)).to_equal(1)
         expect(opt.pure_queries_reused).to_equal(1)
 
@@ -350,6 +374,21 @@ describe "MIR Collection Optimization":
         expect(_co_count_binop(optimized[0], MirBinOp.BitOr)).to_equal(1)
         expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(0)
         expect(_co_count_binop(optimized[1], MirBinOp.BitOr)).to_equal(0)
+        expect(opt.scalar_ops_hoisted).to_equal(2)
+
+    it "hoists invariant scalar chains through bitcasts":
+        val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
+        val casted = MirInst(kind: MirInstKind.Bitcast(_co_lid(10), _co_copy(2), MirType.i64()), span: nil)
+        val mask = MirInst(kind: MirInstKind.BinOp(_co_lid(11), MirBinOp.BitAnd, _co_copy(10), _co_int(255)), span: nil)
+        val body = _co_block_with(1, [casted, mask], MirTerminator.Goto(BlockId(id: 0)))
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
+
+        expect(_co_count_bitcast(optimized[0])).to_equal(1)
+        expect(_co_count_binop(optimized[0], MirBinOp.BitAnd)).to_equal(1)
+        expect(_co_count_bitcast(optimized[1])).to_equal(0)
+        expect(_co_count_binop(optimized[1], MirBinOp.BitAnd)).to_equal(0)
         expect(opt.scalar_ops_hoisted).to_equal(2)
 
     it "keeps scalar operations inside loops when they use loop-defined values":

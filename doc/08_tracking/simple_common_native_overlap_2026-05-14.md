@@ -328,6 +328,13 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   need a Rust/C helper symbol for this conversion. A direct `simple-core` smoke
   compiled and ran `rt_string_to_float(" 3.5 ")` plus invalid trailing input,
   printing `float-ok`.
+- The pure collection optimizer now treats typed byte reads
+  (`rt_typed_bytes_u8_*` and little-endian typed-byte word reads) as collection
+  runtime reads for same-block CSE, matching the existing typed-word coverage
+  used by list/set scans. Its scalar LICM destination tracker also records
+  `Bitcast`, so invariant tag/mask chains that pass through bitcasts can be
+  hoisted as a unit. Verified with `collection_opt_spec.spl` passing 26
+  examples and `pass_descriptor_spec.spl` passing 7 examples.
 
 ## Next Concrete Plugin Work
 
