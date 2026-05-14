@@ -363,6 +363,16 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `3,371` Simple ops/ms for set-like membership (`0.53x` C, `0.26x` Rust).
   This narrows the set-scan gap but still leaves pure Simple below C/Rust
   parity overall.
+- The collection benchmark now has explicit speed-floor warnings in addition
+  to checksum parity. A one-sample warn-only run with
+  `SIMPLE_BIN=./src/compiler_rust/target/debug/simple` kept checksum parity and
+  measured list traversal at `1,607,544` Simple ops/ms (`0.28x` C, `0.26x`
+  Rust), list push at `1,825,515` Simple ops/ms (`0.66x` C, `1.27x` Rust),
+  scalar set membership at `3,206` Simple ops/ms (`0.49x` C, `0.24x` Rust),
+  and pure text `HashSet.contains` at `9` Simple ops/ms (`0.00x` C, `0.00x`
+  Rust). The harness now emits `[collectionbench-warn]` rows for these misses
+  and can be promoted to failure with `SIMPLE_COLLECTION_BENCH_ENFORCE=1` once
+  the parity target is expected to hold.
 
 ## Next Concrete Plugin Work
 
@@ -374,5 +384,8 @@ optimization providers rather than delegating common algorithms back to Rust/C.
    internals rather than only opaque runtime calls.
 3. Add static-table materialization for pure Simple `[u8]` and `[u32]` literals
    after resolving `native_u8_array_literal_not_packed_2026-05-13.md`.
-4. Benchmark primitive list/set/map traversal against the Rust hpcollection
+4. Fix native reachability for imported noalloc collection methods such as
+   `FixedSet.add`, then retry primitive-key fixed-set benchmarking as the pure
+   Simple candidate for hot membership parity.
+5. Benchmark primitive list/set/map traversal against the Rust hpcollection
    extern surfaces before removing native shortcuts.
