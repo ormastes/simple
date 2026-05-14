@@ -213,7 +213,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 ### Gap 6: `gc_sync_mut` had tests but no source (Agent 4 -- Stdlib) -- **RESOLVED**
 - **Status**: Fixed. `src/lib/gc_sync_mut/` now exists as a facade-only compatibility family over tracked `gc_async_mut` modules.
 - **Decision**: `gc_sync_mut` is advanced-scoped, not an independent backend owner. Runtime hooks and behavior stay in the existing async/no-GC-backed implementation chain.
-- **Remaining work**: Add focused import/type-resolution tests and decide whether any API requires real blocking wrappers instead of facade exports.
+- **Remaining work**: Focused import and interpreter behavior tests exist; decide whether any API requires real blocking wrappers instead of facade exports.
 
 ### Gap 7: Two conflicting `GcMode` enums (Agent 2 -- Compiler) -- **RESOLVED**
 - **Status**: Fixed. `gc_config.spl` owns the only `GcMode {Gc, NoGc}` enum, and `barriers.spl` uses `GcStrategy {StopTheWorld, Incremental, Generational, Concurrent}` for GC algorithm strategy.
@@ -306,15 +306,15 @@ The `gc_off` flag in `CompileOptions` remains a global no-GC switch; `allowed_fa
 - [x] Add `src/lib/gc_sync_mut/` facade tree backed by `gc_async_mut`
 - [x] Add `@gc` root
 - [x] Add interpreter fallback search and family extraction
-- [x] Add focused import/type-resolution tests
+- [x] Add focused import and interpreter behavior tests
 - [ ] Decide whether selected APIs need true blocking wrappers
 
 **For `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut`** (advanced-scoped facades):
 - [x] Add facade trees backed by `nogc_async_immut` / `gc_async_immut`
 - [x] Add root GC/no-GC attributes
 - [x] Add interpreter fallback search and family extraction
-- [x] Add focused import/type-resolution tests
-- [ ] Broaden persistent-collection runtime coverage across the facade families
+- [x] Add focused import and interpreter behavior tests
+- [ ] Broaden persistent-collection compiled/runtime coverage across the facade families
 
 ---
 
