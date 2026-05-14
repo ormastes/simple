@@ -839,6 +839,37 @@ pub fn rt_vk_kernel_launch_1d_fn(args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Int(result as i64))
 }
 
+/// WebGPU availability stub — always returns false (0) in interpreter mode.
+pub fn rt_webgpu_is_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// WebGPU init/shutdown stubs — always return false (0) in interpreter mode.
+pub fn rt_webgpu_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+pub fn rt_webgpu_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// WebGPU surface stubs — no surface is available in interpreter mode.
+pub fn rt_webgpu_create_surface_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+pub fn rt_webgpu_destroy_surface_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+pub fn rt_webgpu_upload_pixels_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+pub fn rt_webgpu_present_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
 /// WebGPU compute-draw stub — always returns false (0) in interpreter mode.
 ///
 /// Signature: rt_webgpu_compute_draw(handle: i64, op_kind: i32, x: i32, y: i32, w: i32, h: i32, color: u32) -> bool
