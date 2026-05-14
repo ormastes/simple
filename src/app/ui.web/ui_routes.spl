@@ -142,15 +142,15 @@ fn _flush_out(stream: ConnStream, ch: BoundedChannel<text>):
             break
         send_ws_text(stream, item as text)
 
-fn _handle_input_event(frame: text, session: UISession, session_id: text, out: BoundedChannel<text>):
+fn _handle_input_event(frame: text, session: UISession, session_id: text, out_ch: BoundedChannel<text>):
     val surface_id = extract_field(frame, "surface_id")
     val widget_id = extract_field(frame, "widget_id")
     if surface_id == "":
-        _send_error(out, session_id, "UNKNOWN_SURFACE", "surface_id required")
+        _send_error(out_ch, session_id, "UNKNOWN_SURFACE", "surface_id required")
         return
     val binding = session.window_surfaces.for_surface(surface_id)
     if binding == nil:
-        _send_error(out, session_id, "UNKNOWN_SURFACE", "surface not registered")
+        _send_error(out_ch, session_id, "UNKNOWN_SURFACE", "surface not registered")
         return
     val bridge = WmBridge.new(session)
     # Build a minimal WmInputEvent from the JSON event sub-object
@@ -159,27 +159,27 @@ fn _handle_input_event(frame: text, session: UISession, session_id: text, out: B
     val result = bridge.handle_input(surface_id, widget_id, event_json, wm_event)
     match result:
         Err(_):
-            _send_error(out, session_id, "CAP_DENIED", "InputInject capability denied")
+            _send_error(out_ch, session_id, "CAP_DENIED", "InputInject capability denied")
         Ok(_):
             pass_do_nothing
 
-fn _handle_window_cmd(frame: text, session: UISession, session_id: text, out: BoundedChannel<text>):
+fn _handle_window_cmd(frame: text, session: UISession, session_id: text, out_ch: BoundedChannel<text>):
     var cmd_kind = extract_field(frame, "cmd_type")
     if cmd_kind == "":
         cmd_kind = extract_field(frame, "kind")
     if cmd_kind == "":
-        _send_error(out, session_id, "BAD_REQUEST", "cmd_type required")
+        _send_error(out_ch, session_id, "BAD_REQUEST", "cmd_type required")
         return
     val payload = _extract_object(frame, "payload")
     val bridge = WmBridge.new(session)
     val result = bridge.handle_window_cmd(cmd_kind, payload)
     match result:
         Err(_):
-            _send_error(out, session_id, "CAP_DENIED", "window command capability denied")
+            _send_error(out_ch, session_id, "CAP_DENIED", "window command capability denied")
         Ok(_):
             if host_taskbar_runtime_is_enabled():
                 for client_frame in host_taskbar_runtime_take_client_frames(session_id):
-                    out.send(client_frame)
+                    out_ch.send(client_frame)
 
 # =========================================================================
 # /ui/resume — HTTP POST resume
@@ -286,10 +286,10 @@ fn _read_ws_frame_conn(stream: ConnStream) -> text?:
                         pi = pi + 1
                     return decoded.to_text()
 
-fn _send_error(out: BoundedChannel<text>, session_id: text, code: text, message: text):
+fn _send_error(out_ch: BoundedChannel<text>, session_id: text, code: text, message: text):
     val payload = "{\"code\": \"{code}\", \"message\": \"{message}\", \"retry_after_ms\": 0}"
     val frame = make_wire_frame("error", session_id, "null", payload)
-    out.send(frame)
+    out_ch.send(frame)
 
 fn _extract_bearer(headers: text, path: text) -> text:
     for line in headers.split("\n"):
