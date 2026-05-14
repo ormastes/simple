@@ -309,6 +309,7 @@ int64_t  rt_tuple_len(int64_t tuple);
 int64_t  rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
 int64_t  rt_enum_discriminant(int64_t value);
 int64_t  rt_enum_payload(int64_t value);
+bool     rt_enum_check_discriminant(int64_t value, int64_t expected);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
@@ -400,6 +401,30 @@ int64_t  rt_time_now_unix_micros(void);
 void*    spl_malloc(int64_t size);
 void     spl_free(void* ptr);
 char*    spl_strdup(const char* s);
+
+/* ===== Atomic Handles ===== */
+
+int64_t  rt_atomic_int_new(int64_t initial);
+int64_t  rt_atomic_int_load(int64_t handle);
+void     rt_atomic_int_store(int64_t handle, int64_t value);
+int64_t  rt_atomic_int_swap(int64_t handle, int64_t value);
+bool     rt_atomic_int_compare_exchange(int64_t handle, int64_t current, int64_t new_value);
+int64_t  rt_atomic_int_fetch_add(int64_t handle, int64_t value);
+int64_t  rt_atomic_int_fetch_sub(int64_t handle, int64_t value);
+int64_t  rt_atomic_int_fetch_and(int64_t handle, int64_t value);
+int64_t  rt_atomic_int_fetch_or(int64_t handle, int64_t value);
+int64_t  rt_atomic_int_fetch_xor(int64_t handle, int64_t value);
+void     rt_atomic_int_free(int64_t handle);
+int64_t  rt_atomic_bool_new(bool initial);
+bool     rt_atomic_bool_load(int64_t handle);
+void     rt_atomic_bool_store(int64_t handle, bool value);
+bool     rt_atomic_bool_swap(int64_t handle, bool value);
+void     rt_atomic_bool_free(int64_t handle);
+void     rt_bdd_describe_start_rv(int64_t name_rv);
+void     rt_bdd_describe_end(void);
+void     rt_bdd_it_start_rv(int64_t name_rv);
+void     rt_bdd_it_end(int64_t passed);
+void     rt_bdd_expect_eq_rv(int64_t actual, int64_t expected);
 
 /* ===== Command-Line Arguments ===== */
 

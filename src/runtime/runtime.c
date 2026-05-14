@@ -32,6 +32,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <sys/stat.h>
 #ifndef _WIN32
 #include <dirent.h>
@@ -1019,6 +1020,188 @@ void spl_free(void* ptr) {
 
 char* spl_strdup(const char* s) {
     return SPL_STRDUP(s ? s : "", "user");
+}
+
+/* ================================================================
+ * Atomic handles
+ * ================================================================ */
+
+typedef struct SplAtomicInt {
+    atomic_int_fast64_t value;
+} SplAtomicInt;
+
+typedef struct SplAtomicBool {
+    atomic_bool value;
+} SplAtomicBool;
+
+static SplAtomicInt* spl_atomic_int_from_handle(int64_t handle) {
+    return (SplAtomicInt*)(intptr_t)handle;
+}
+
+static SplAtomicBool* spl_atomic_bool_from_handle(int64_t handle) {
+    return (SplAtomicBool*)(intptr_t)handle;
+}
+
+int64_t rt_atomic_int_new(int64_t initial) {
+    SplAtomicInt* atomic = (SplAtomicInt*)SPL_MALLOC(sizeof(SplAtomicInt), "atomic");
+    if (!atomic) return 0;
+    atomic_init(&atomic->value, initial);
+    return (int64_t)(intptr_t)atomic;
+}
+
+int64_t rt_atomic_int_load(int64_t handle) {
+    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
+    if (!atomic) return 0;
+    return atomic_load_explicit(&atomic->value, memory_order_seq_cst);
+}
+
+void rt_atomic_int_store(int64_t handle, int64_t value) {
+    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
+    if (!atomic) return;
+    atomic_store_explicit(&atomic->value, value, memory_order_seq_cst);
+}
+
+int64_t rt_atomic_int_swap(int64_t handle, int64_t value) {
+    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
+    if (!atomic) return 0;
+    return atomic_exchange_explicit(&atomic->value, value, memory_order_seq_cst);
+}
+
+bool rt_atomic_int_compare_exchange(int64_t handle, int64_t current, int64_t new_value) {
+    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
+    if (!atomic) return false;
+    return atomic_compare_exchange_strong_explicit(
+        &atomic->value,
+        &current,
+        new_value,
+        memory_order_seq_cst,
+        memory_order_seq_cst
+    );
+}
+
+int64_t rt_atomic_int_fetch_add(int64_t handle, int64_t value) {
+    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
+    if (!atomic) return 0;
+    return atomic_fetch_add_explicit(&atomic->value, value, memory_order_seq_cst);
+}
+
+int64_t rt_atomic_int_fetch_sub(int64_t handle, int64_t value) {
+    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
+    if (!atomic) return 0;
+    return atomic_fetch_sub_explicit(&atomic->value, value, memory_order_seq_cst);
+}
+
+int64_t rt_atomic_int_fetch_and(int64_t handle, int64_t value) {
+    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
+    if (!atomic) return 0;
+    return atomic_fetch_and_explicit(&atomic->value, value, memory_order_seq_cst);
+}
+
+int64_t rt_atomic_int_fetch_or(int64_t handle, int64_t value) {
+    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
+    if (!atomic) return 0;
+    return atomic_fetch_or_explicit(&atomic->value, value, memory_order_seq_cst);
+}
+
+int64_t rt_atomic_int_fetch_xor(int64_t handle, int64_t value) {
+    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
+    if (!atomic) return 0;
+    return atomic_fetch_xor_explicit(&atomic->value, value, memory_order_seq_cst);
+}
+
+void rt_atomic_int_free(int64_t handle) {
+    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
+    if (!atomic) return;
+    SPL_FREE(atomic);
+}
+
+int64_t rt_atomic_bool_new(bool initial) {
+    SplAtomicBool* atomic = (SplAtomicBool*)SPL_MALLOC(sizeof(SplAtomicBool), "atomic");
+    if (!atomic) return 0;
+    atomic_init(&atomic->value, initial);
+    return (int64_t)(intptr_t)atomic;
+}
+
+bool rt_atomic_bool_load(int64_t handle) {
+    SplAtomicBool* atomic = spl_atomic_bool_from_handle(handle);
+    if (!atomic) return false;
+    return atomic_load_explicit(&atomic->value, memory_order_seq_cst);
+}
+
+void rt_atomic_bool_store(int64_t handle, bool value) {
+    SplAtomicBool* atomic = spl_atomic_bool_from_handle(handle);
+    if (!atomic) return;
+    atomic_store_explicit(&atomic->value, value, memory_order_seq_cst);
+}
+
+bool rt_atomic_bool_swap(int64_t handle, bool value) {
+    SplAtomicBool* atomic = spl_atomic_bool_from_handle(handle);
+    if (!atomic) return false;
+    return atomic_exchange_explicit(&atomic->value, value, memory_order_seq_cst);
+}
+
+void rt_atomic_bool_free(int64_t handle) {
+    SplAtomicBool* atomic = spl_atomic_bool_from_handle(handle);
+    if (!atomic) return;
+    SPL_FREE(atomic);
+}
+
+/* ================================================================
+ * Enum and BDD test helpers
+ * ================================================================ */
+
+typedef struct SplRuntimeEnum {
+    int32_t enum_id;
+    int32_t discriminant;
+    int64_t payload;
+} SplRuntimeEnum;
+
+static SplRuntimeEnum* spl_enum_from_handle(int64_t handle) {
+    return (SplRuntimeEnum*)(intptr_t)handle;
+}
+
+int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    SplRuntimeEnum* value = (SplRuntimeEnum*)SPL_MALLOC(sizeof(SplRuntimeEnum), "enum");
+    if (!value) return 0;
+    value->enum_id = enum_id;
+    value->discriminant = discriminant;
+    value->payload = payload;
+    return (int64_t)(intptr_t)value;
+}
+
+int64_t rt_enum_discriminant(int64_t value) {
+    SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
+    return enum_value ? enum_value->discriminant : -1;
+}
+
+int64_t rt_enum_payload(int64_t value) {
+    SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
+    return enum_value ? enum_value->payload : 0;
+}
+
+bool rt_enum_check_discriminant(int64_t value, int64_t expected) {
+    SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
+    return enum_value && enum_value->discriminant == (int32_t)expected;
+}
+
+void rt_bdd_describe_start_rv(int64_t name_rv) {
+    (void)name_rv;
+}
+
+void rt_bdd_describe_end(void) {
+}
+
+void rt_bdd_it_start_rv(int64_t name_rv) {
+    (void)name_rv;
+}
+
+void rt_bdd_it_end(int64_t passed) {
+    (void)passed;
+}
+
+void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
+    (void)actual;
+    (void)expected;
 }
 
 /* ================================================================

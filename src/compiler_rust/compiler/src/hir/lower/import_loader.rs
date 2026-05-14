@@ -44,6 +44,10 @@ impl Lowerer {
         }
     }
 
+    fn is_non_addressable_root_import(module_path: &ModulePath, target: &ImportTarget) -> bool {
+        module_path.segments.is_empty() && matches!(target, ImportTarget::Group(_) | ImportTarget::Glob)
+    }
+
     fn resolve_imported_module_path(
         &self,
         resolver: &crate::module_resolver::ModuleResolver,
@@ -666,6 +670,10 @@ impl Lowerer {
         module_path: &ModulePath,
         target: &ImportTarget,
     ) -> LowerResult<()> {
+        if Self::is_non_addressable_root_import(module_path, target) {
+            return Ok(());
+        }
+
         // Only proceed if we have a module resolver
         let (resolver, current_file) = match (&self.module_resolver, &self.current_file) {
             (Some(r), Some(f)) => (r, f),
@@ -779,6 +787,10 @@ impl Lowerer {
     /// # Returns
     /// Ok(()) if successful, Err if module can't be loaded or parsed
     pub(super) fn load_imported_types(&mut self, module_path: &ModulePath, target: &ImportTarget) -> LowerResult<()> {
+        if Self::is_non_addressable_root_import(module_path, target) {
+            return Ok(());
+        }
+
         // Only proceed if we have a module resolver
         let (resolver, current_file) = match (&self.module_resolver, &self.current_file) {
             (Some(r), Some(f)) => (r, f),
@@ -923,5 +935,21 @@ fn test() -> i64:
             ImportTarget::Single("shell".to_string()),
         ]);
         assert!(Lowerer::import_target_intersects(&requested, &available));
+    }
+
+    #[test]
+    fn empty_group_or_glob_imports_are_non_addressable_roots() {
+        let module_path = ModulePath::new(vec![]);
+        let group_target = ImportTarget::Group(vec![ImportTarget::Single("PersistentTrie".to_string())]);
+
+        assert!(Lowerer::is_non_addressable_root_import(&module_path, &group_target));
+        assert!(Lowerer::is_non_addressable_root_import(
+            &module_path,
+            &ImportTarget::Glob
+        ));
+        assert!(!Lowerer::is_non_addressable_root_import(
+            &module_path,
+            &ImportTarget::Single("persistent_trie".to_string())
+        ));
     }
 }

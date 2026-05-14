@@ -5,7 +5,7 @@ Date: 2026-05-14
 
 ## Impact
 
-The `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut` facade families have native BDD coverage for root immutable map one-entry, two-entry, branch-shaped insert, branch-shaped overwrite, and branch-shaped removal committed paths; root immutable set one-entry, two-entry, branch-shaped insert, dedupe, and branch-shaped removal committed paths; package-level `persistent_trie` shared-prefix/overwrite paths; and typed plus untyped chained root-facade `PersistentTrie` shared-prefix paths. The tracked collection facade blockers in this report are closed; broader public promotion still depends on clearing native type-loader/minimal-runtime-stub warnings and any additional full-suite coverage gaps tracked in the runtime family support matrix.
+The `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut` facade families have native BDD coverage for root immutable map one-entry, two-entry, branch-shaped insert, branch-shaped overwrite, and branch-shaped removal committed paths; root immutable set one-entry, two-entry, branch-shaped insert, dedupe, and branch-shaped removal committed paths; package-level `persistent_trie` shared-prefix/overwrite paths; and typed plus untyped chained root-facade `PersistentTrie` shared-prefix paths. The tracked collection facade blockers in this report are closed; focused root-facade trie native smoke now also runs without type-loader warnings, internal Simple symbol warnings, or generated runtime stubs. Broader public promotion still depends on any additional full-suite coverage gaps tracked in the runtime family support matrix.
 
 ## Evidence
 
@@ -17,8 +17,9 @@ The `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut` facade families hav
 - Untyped chained root-facade native BDD specs now pass for `PersistentTrie.empty().set("app", 1).set("apple", 2)` through `std.{gc_async_immut,gc_sync_immut,nogc_sync_immut}.{PersistentTrie}` via `test/unit/lib/{gc_async_immut,gc_sync_immut,nogc_sync_immut}/trie_root_facade_native_spec.spl`.
 - Native BDD specs now pass for branch-shaped `PersistentMap.empty().set("app", 1).set("apple", 2)`, branch-shaped map overwrite, branch-shaped map removal, `PersistentSet.empty().add("app").add("apple")`, set dedupe, and branch-shaped set removal through the GC async, GC sync immutable, and no-GC sync immutable facades. The map overwrite/removal closure required replacing internal HAMT/collision length-driven array scans with iterator scans so broad root facades cannot route array length calls through `PersistentList.len` in native dispatch; set dedupe/removal then passes because `PersistentSet` is backed by `PersistentMap`.
 - Direct small-hash HAMT branch overwrite BDD probes pass; the root-facade trie chain now also passes after the committed HAMT/collision dispatch closure.
+- Rebuilt-driver native root-facade trie smoke passes across `gc_async_immut`, `gc_sync_immut`, and `nogc_sync_immut` with no `Failed to load imported types`, `empty module path`, `internal Simple symbol`, or generated runtime-stub output after the HIR import-loader and core C runtime ABI closures.
 
 ## Next Steps
 
 1. Keep the tracked map/set/trie facade specs in the native smoke set when changing immutable facades.
-2. Clear remaining native type-loader/minimal-runtime-stub warnings before promoting the immutable facade families from advanced-scoped to public.
+2. Add broader full-suite coverage before promoting the immutable facade families from advanced-scoped to public.
