@@ -245,6 +245,10 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   CSE until a possible collection mutation appears. This removes duplicated
   list/set read dispatches in already-lowered MIR without changing runtime
   representation or hoisting reads across append/write calls.
+- Runtime array data/header pointer helpers now share the same pure-query lane,
+  so repeated `rt_array_data_ptr`/`rt_array_header_ptr` reads in one mutation-free
+  MIR block reuse the first pointer result. This supports pure Simple scan
+  lowering patterns that materialize data pointers before indexed reads.
 - A fresh one-sample collection benchmark after the pure optimizer CSE commits
   kept checksum parity, but the native benchmark path still misses C/Rust
   throughput parity: list traversal measured `1,651,751` Simple ops/ms
