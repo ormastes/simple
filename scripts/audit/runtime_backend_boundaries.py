@@ -5,6 +5,8 @@ The checks are intentionally narrow and evidence-oriented:
 
 * GC/no-GC async compatibility families must not own direct `rt_*` hooks.
 * Sync/immutable compatibility families must not own direct `rt_*` hooks.
+* Sync/GC and immutable compatibility families must have matching backing
+  modules and facade exports into their documented backend family.
 * GC async compatibility facades must not wildcard-export no-GC sync backend
   owners that declare runtime hooks; route them through no-GC async facades
   first when an API-preserving async/no-GC facade exists.
@@ -38,6 +40,13 @@ SYNC_COMPAT_ROOTS = (
     "src/lib/gc_async_immut",
     "src/lib/gc_sync_immut",
     "src/lib/nogc_sync_immut",
+)
+
+FACADE_MIRRORS = (
+    ("src/lib/gc_sync_mut", "src/lib/gc_async_mut", "std.gc_async_mut"),
+    ("src/lib/gc_async_immut", "src/lib/nogc_async_immut", "std.nogc_async_immut"),
+    ("src/lib/gc_sync_immut", "src/lib/gc_async_immut", "std.gc_async_immut"),
+    ("src/lib/nogc_sync_immut", "src/lib/nogc_async_immut", "std.nogc_async_immut"),
 )
 
 SIMPLEOS_NATIVE_ROOTS = (
@@ -134,6 +143,33 @@ def sync_compat_direct_runtime_hooks() -> list[str]:
     return hits
 
 
+def facade_target_module(target_prefix: str, rel_path: str) -> str:
+    if rel_path == "__init__.spl":
+        return target_prefix
+    if rel_path.endswith("/__init__.spl"):
+        module_path = rel_path[: -len("/__init__.spl")].replace("/", ".")
+    else:
+        module_path = rel_path[:-len(".spl")].replace("/", ".")
+    return f"{target_prefix}.{module_path}"
+
+
+def facade_mirror_violations() -> list[str]:
+    hits: list[str] = []
+    for source_root, target_root, target_prefix in FACADE_MIRRORS:
+        for source_path in tracked_spl_under((source_root,)):
+            rel_path = source_path.relative_to(ROOT / source_root).as_posix()
+            target_path = ROOT / target_root / rel_path
+            if not target_path.exists():
+                hits.append(f"{rel(source_path)}: missing backing module {target_path.relative_to(ROOT).as_posix()}")
+                continue
+
+            expected = facade_target_module(target_prefix, rel_path)
+            text = source_path.read_text(encoding="utf-8", errors="ignore")
+            if f"export use {expected}" not in text:
+                hits.append(f"{rel(source_path)}: missing facade export to {expected}")
+    return hits
+
+
 def no_gc_async_runtime_owner_wildcards() -> list[str]:
     hits: list[str] = []
     for path in tracked_spl_under(("src/lib/nogc_async_mut",)):
@@ -194,6 +230,7 @@ def portable_lib_imports() -> list[str]:
 def main() -> int:
     runtime_hooks = direct_runtime_hooks()
     sync_runtime_hooks = sync_compat_direct_runtime_hooks()
+    facade_violations = facade_mirror_violations()
     gc_wildcard_facades = gc_async_runtime_owner_wildcards()
     wildcard_facades = no_gc_async_runtime_owner_wildcards()
     simpleos_imports = simpleos_lower_layer_imports()
@@ -205,6 +242,8 @@ def main() -> int:
         "async_compat_direct_runtime_hook_samples": runtime_hooks[:20],
         "sync_compat_direct_runtime_hook_count": len(sync_runtime_hooks),
         "sync_compat_direct_runtime_hook_samples": sync_runtime_hooks[:20],
+        "sync_compat_facade_mirror_violation_count": len(facade_violations),
+        "sync_compat_facade_mirror_violation_samples": facade_violations[:20],
         "gc_async_runtime_owner_wildcard_facade_count": len(gc_wildcard_facades),
         "gc_async_runtime_owner_wildcard_facade_samples": gc_wildcard_facades[:20],
         "nogc_async_runtime_owner_wildcard_facade_count": len(wildcard_facades),
@@ -215,6 +254,7 @@ def main() -> int:
         "portable_lib_forbidden_posix_linux_import_samples": portable_imports[:20],
         "pass": not runtime_hooks
         and not sync_runtime_hooks
+        and not facade_violations
         and not gc_wildcard_facades
         and not wildcard_facades
         and not simpleos_imports
