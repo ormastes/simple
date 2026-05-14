@@ -10,12 +10,26 @@ Refactor the Simple runtime libraries so compatibility families depend on a no-G
 
 | Requirement | Current evidence | Status |
 | --- | --- | --- |
+| Repeatable backend-boundary audit exists | `scripts/audit/runtime_backend_boundaries.py` checks tracked async compatibility families for direct `extern fn rt_*` ownership, SimpleOS native lower layers for POSIX/libc imports, and portable library roots for forbidden POSIX/Linux imports outside explicit platform/compatibility paths. | Closed for static boundary gate |
 | Async/GC exact-copy runtime hooks are not duplicated across families | Scan over `src/lib/gc_async_mut` and `src/lib/nogc_async_mut` reports `exact_duplicate_runtime_hook_count=0` for files that match `nogc_sync_mut` byte-for-byte and declare `extern fn rt_*`. | Closed for exact-copy class |
 | GC compatibility surfaces use no-GC async when async behavior must be preserved | `gc_async_mut/io/buffer.spl`, `gc_async_mut/torch/ffi.spl`, and `gc_async_mut/svllm/nvfs_client/*` are facades over `nogc_async_mut` backends. The no-GC async Torch FFI now delegates to the no-GC sync Torch FFI because that FFI surface is synchronous backend ownership, not async behavior. | Partially closed |
 | Async compatibility surfaces use shared no-GC backends when behavior is identical or import-drift only | Reviewed facade closures are recorded in `runtime_family_support_matrix.md`; targeted `simple check` passed for each changed facade slice. `gc_async_mut` and `nogc_async_mut` package FFI, platform helper roots, and SIMD roots now export the no-GC sync backend instead of redeclaring synchronous runtime hooks; family-specific mimalloc TLS adapters import thread-local hooks from a no-GC sync runtime owner while preserving each family's `MiHeap` types; browser session file reads now use the no-GC sync file-ops wrapper. | Partially closed |
 | No-GC async files with no-GC sync counterparts do not redeclare backend hooks after review | The reviewed behavior-diff set (`torch/ffi`, `cuda/ffi`, `cuda/mod`, `gpu/memory`, `http_server/response`, `io/buffer`, `io/file`, `package_ffi`, `platform`, `simd`, `mimalloc_tls`, `coverage`, `atomic`, `conf`, `fuzz`) now has no local `extern fn rt_*` declarations. Remaining runtime hooks were moved to no-GC sync backend owners such as `cuda/ffi.spl`, `ptr/raw.spl`, `io/dir_entry_ops.spl`, and `runtime/thread_local.spl`, replaced with pure Simple conversion helpers, represented as facades over no-GC sync roots, or routed through no-GC sync file/dir wrappers for MCP and HTTP file helpers; HTTP server time helpers now use `nogc_sync_mut.io.time_ops.current_time_ms`, access logging uses `nogc_sync_mut.io.file_ops.file_append`, and HTTP compression text conversion is pure Simple. A tracked scan now finds no `nogc_async_mut` runtime-hook file with a same-path `nogc_sync_mut` counterpart. | Closed for same-path counterpart class |
-| SimpleOS kernel/services/SOSIX do not depend on POSIX compatibility modules | `rg -n 'use os\.posix|std\.os\.posix|os\.posix\.' src/os/kernel src/os/services src/os/sosix -g '*.spl'` returns no matches. Shared FD/process/pipe/socket ownership lives under `src/os/kernel/`; `src/os/posix/` modules are facades. | Closed for scanned lower layers |
+| SimpleOS kernel/drivers/services/SOSIX/userlib/async do not depend on POSIX compatibility modules | `scripts/audit/runtime_backend_boundaries.py` reports `simpleos_lower_layer_posix_libc_import_count=0`. Shared FD/process/pipe/socket ownership lives under `src/os/kernel/`; `src/os/posix/` modules are facades. | Closed for scanned lower layers |
+| Portable stdlib/library roots do not import POSIX/Linux modules except explicit platform/compatibility paths | `scripts/audit/runtime_backend_boundaries.py` reports `portable_lib_forbidden_posix_linux_import_count=0`, excluding paths named as POSIX/Linux/platform compatibility owners. | Closed for static import gate |
 | Production architecture is documented | `runtime_family_support_matrix.md` records current facade closures, SimpleOS POSIX boundary, and remaining runtime-hook review items. | Partially closed |
+
+## Latest Boundary Verification
+
+Executed on 2026-05-14:
+
+- `python3 scripts/audit/runtime_backend_boundaries.py`
+  - `async_compat_direct_runtime_hook_count=0`
+  - `simpleos_lower_layer_posix_libc_import_count=0`
+  - `portable_lib_forbidden_posix_linux_import_count=0`
+- `SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple check src/os/kernel src/os/drivers src/os/services src/os/sosix src/os/userlib src/os/async`
+  - exit code `0`
+  - `61 warning(s) found in 443 file(s)`, all observed warnings were unresolved `common`/`lib.common` imports from running this check over the OS roots without the full source-root closure.
 
 ## Remaining Gaps
 
