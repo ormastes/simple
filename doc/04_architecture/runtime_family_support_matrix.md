@@ -142,7 +142,7 @@ The production ownership rule is behavioral, not name-only:
 | `nogc_async_immut` | `@no_gc` on root `__init__.spl`; family-prefix semantic warnings | Yes (2nd priority in search, boundary warnings) | Yes (persistent structures, Atom/Ref, combinators) | Yes (2nd priority) | Minimal | Resolution and root exports fixed; broader runtime coverage still limited |
 | `nogc_async_mut_noalloc` | `@no_gc` on root `__init__.spl`; direct and reachable unsafe imports plus explicit `@alloc` markers blocked by regression | Yes (10th priority in search, boundary warnings) | Yes (baremetal/noalloc exports) | Yes (10th priority) | Partial (QEMU); check-clean under full-family `simple check` | Root export surface exists; compiler-owned capability enforcement remains partial |
 | `gc_sync_mut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (8th priority) | Yes (facade root) | Yes (8th priority) | Minimal | Facade over `gc_async_mut`; no independent sync runtime semantics yet |
-| `gc_async_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (7th priority) | Yes | Yes (7th priority) | Focused | Native facade resolution passes; focused native probes cover root `Atom`, `VersionedSnapshot`, pmap traversal, pure combinators, and root `PersistentList` structural sharing |
+| `gc_async_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (7th priority) | Yes | Yes (7th priority) | Focused | Native facade resolution passes; focused native probes cover root `Atom`, `VersionedSnapshot`, pmap traversal, pure combinators, root `PersistentList` structural sharing, and partial `PersistentVec` empty/single-push smoke |
 | `gc_sync_immut` | `@gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (9th priority) | Yes | Yes (9th priority) | Focused | Native facade resolution and root `PersistentList` coverage pass through the GC async immutable facade |
 | `nogc_sync_immut` | `@no_gc` on root `__init__.spl`; facade-only | Recognized by interpreter family extraction (3rd priority) | Yes | Yes (3rd priority) | Focused | Native facade resolution and root `PersistentList` coverage pass through the no-GC async immutable backend |
 
@@ -338,7 +338,8 @@ The `gc_off` flag in `CompileOptions` remains a global no-GC switch; `allowed_fa
 - [x] Add native pure-combinator facade coverage
 - [x] Fix native Atom/VersionedSnapshot runtime behavior across the facade families
 - [x] Add focused native root `PersistentList` facade coverage
-- [ ] Add broader compiled behavior suites for remaining persistent structures and clear remaining native type-loader/minimal-runtime-stub warnings
+- [x] Add partial native root `PersistentVec` empty/single-push smoke coverage
+- [ ] Fix native `PersistentVec` multi-push/from-array behavior, add broader compiled behavior suites for map/set/trie, and clear remaining native type-loader/minimal-runtime-stub warnings
 
 ---
 
