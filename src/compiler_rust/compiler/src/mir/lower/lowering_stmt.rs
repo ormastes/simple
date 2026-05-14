@@ -605,7 +605,7 @@ impl<'a> MirLowerer<'a> {
                     receiver, method, args, ..
                 } = &expr.kind
                 {
-                    if method == "push" && args.len() == 1 {
+                    if (method == "push" || method == "append") && args.len() == 1 {
                         if self.is_dead_append_array_local(receiver) {
                             let _ = self.lower_expr(&args[0])?;
                             self.last_expr_value = None;
