@@ -335,6 +335,11 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `Bitcast`, so invariant tag/mask chains that pass through bitcasts can be
   hoisted as a unit. Verified with `collection_opt_spec.spl` passing 26
   examples and `pass_descriptor_spec.spl` passing 7 examples.
+- Current-head collection benchmark after the provider coverage change kept
+  checksum parity, but still misses the speed target: list traversal measured
+  `1,378,190` Simple ops/ms (`0.28x` C, `0.20x` Rust), list push measured
+  `1,173,779` Simple ops/ms (`0.40x` C, `0.80x` Rust), and set-like
+  membership measured `3,472` Simple ops/ms (`0.52x` C, `0.26x` Rust).
 
 ## Next Concrete Plugin Work
 
