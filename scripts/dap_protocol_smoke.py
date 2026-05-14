@@ -2,9 +2,12 @@
 """Live stdio smoke test for the Simple editor DAP adapter."""
 
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
+
+SIMPLE_BIN = os.environ.get("SIMPLE_BIN", "src/compiler_rust/target/bootstrap/simple")
 
 
 def frame(payload):
@@ -59,7 +62,7 @@ def collect_for(proc, command, count):
 
 def assert_missing_program_fails():
     proc = subprocess.Popen(
-        ["bin/simple", "run", "src/app/dap/simple_dap_main.spl"],
+        [SIMPLE_BIN, "run", "src/app/dap/simple_dap_main.spl"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -86,11 +89,12 @@ def main():
             "fn main() -> i64:\n"
             "    val answer = 42\n"
             "    var status = \"ready\"\n"
-            "    answer\n",
+            "    answer\n"
+            "    panic(\"boom\")\n",
             encoding="utf-8",
         )
         proc = subprocess.Popen(
-            ["bin/simple", "run", "src/app/dap/simple_dap_main.spl"],
+            [SIMPLE_BIN, "run", "src/app/dap/simple_dap_main.spl"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -107,10 +111,11 @@ def main():
             _, launch_messages = collect_for(proc, "launch", 2)
             assert any(m.get("event") == "stopped" for m in launch_messages)
 
-            send(proc, 3, "setBreakpoints", {"source": {"path": str(program)}, "breakpoints": [{"line": 2}]})
+            send(proc, 3, "setBreakpoints", {"source": {"path": str(program)}, "breakpoints": [{"line": 2, "condition": "answer == 42"}]})
             bp, _ = collect_for(proc, "setBreakpoints", 1)
             assert bp["body"]["breakpoints"][0]["verified"] is True
             assert bp["body"]["breakpoints"][0]["line"] == 2
+            assert "condition" in bp["body"]["breakpoints"][0]["message"]
 
             send(proc, 12, "setExceptionBreakpoints", {"filters": ["caught", "uncaught"]})
             expect_response([read_message(proc)], "setExceptionBreakpoints")
@@ -131,27 +136,42 @@ def main():
             assert frame0["source"]["path"] == str(program)
             assert frame0["line"] == 1
 
-            send(proc, 13, "next", {"threadId": 1})
+            send(proc, 13, "continue", {"threadId": 1})
+            _, conditional_messages = collect_for(proc, "continue", 3)
+            assert any(m.get("event") == "stopped" and m.get("body", {}).get("reason") == "breakpoint" for m in conditional_messages)
+            send(proc, 14, "stackTrace", {"threadId": 1})
+            conditional_stack, _ = collect_for(proc, "stackTrace", 1)
+            assert conditional_stack["body"]["stackFrames"][0]["line"] == 2
+
+            send(proc, 15, "next", {"threadId": 1})
             _, next_messages = collect_for(proc, "next", 2)
             assert any(m.get("event") == "stopped" for m in next_messages)
-            send(proc, 14, "stackTrace", {"threadId": 1})
+            send(proc, 16, "stackTrace", {"threadId": 1})
             stepped_stack, _ = collect_for(proc, "stackTrace", 1)
-            assert stepped_stack["body"]["stackFrames"][0]["line"] == 2
+            assert stepped_stack["body"]["stackFrames"][0]["line"] == 3
 
-            send(proc, 15, "setBreakpoints", {"source": {"path": str(program)}, "breakpoints": [{"line": 3}]})
+            send(proc, 17, "setBreakpoints", {"source": {"path": str(program)}, "breakpoints": [{"line": 4, "hitCondition": "1"}]})
             bp2, _ = collect_for(proc, "setBreakpoints", 1)
             assert bp2["body"]["breakpoints"][0]["verified"] is True
-            assert bp2["body"]["breakpoints"][0]["line"] == 3
+            assert bp2["body"]["breakpoints"][0]["line"] == 4
+            assert "hit" in bp2["body"]["breakpoints"][0]["message"]
 
-            send(proc, 16, "continue", {"threadId": 1})
+            send(proc, 18, "continue", {"threadId": 1})
             _, continue_messages = collect_for(proc, "continue", 3)
             assert any(m.get("event") == "continued" for m in continue_messages)
             assert any(m.get("event") == "stopped" and m.get("body", {}).get("reason") == "breakpoint" for m in continue_messages)
-            send(proc, 17, "stackTrace", {"threadId": 1})
+            send(proc, 19, "stackTrace", {"threadId": 1})
             breakpoint_stack, _ = collect_for(proc, "stackTrace", 1)
-            assert breakpoint_stack["body"]["stackFrames"][0]["line"] == 3
+            assert breakpoint_stack["body"]["stackFrames"][0]["line"] == 4
 
-            send(proc, 18, "continue", {"threadId": 1})
+            send(proc, 20, "continue", {"threadId": 1})
+            _, exception_messages = collect_for(proc, "continue", 3)
+            assert any(m.get("event") == "stopped" and m.get("body", {}).get("reason") == "exception" for m in exception_messages)
+            send(proc, 21, "stackTrace", {"threadId": 1})
+            exception_stack, _ = collect_for(proc, "stackTrace", 1)
+            assert exception_stack["body"]["stackFrames"][0]["line"] == 5
+
+            send(proc, 22, "continue", {"threadId": 1})
             _, terminated_messages = collect_for(proc, "continue", 3)
             assert any(m.get("event") == "terminated" for m in terminated_messages)
 
@@ -173,8 +193,20 @@ def main():
             missing_eval, _ = collect_for(proc, "evaluate", 1)
             assert missing_eval["body"]["result"] == "<unavailable>"
 
+            send(proc, 23, "restart")
+            _, restart_messages = collect_for(proc, "restart", 2)
+            assert any(m.get("event") == "stopped" and m.get("body", {}).get("reason") == "entry" for m in restart_messages)
+            send(proc, 24, "stackTrace", {"threadId": 1})
+            restarted_stack, _ = collect_for(proc, "stackTrace", 1)
+            assert restarted_stack["body"]["stackFrames"][0]["line"] == 1
+
+            send(proc, 25, "terminate")
+            _, terminate_messages = collect_for(proc, "terminate", 2)
+            assert any(m.get("event") == "terminated" for m in terminate_messages)
+
             send(proc, 9, "disconnect")
-            expect_response([read_message(proc)], "disconnect")
+            _, disconnect_messages = collect_for(proc, "disconnect", 2)
+            assert any(m.get("event") == "terminated" for m in disconnect_messages)
             proc.stdin.close()
             rc = proc.wait(timeout=5)
             if rc != 0:

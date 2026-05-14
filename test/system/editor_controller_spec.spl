@@ -181,6 +181,7 @@ describe "editor controller — IDE commands":
         expect(commands.contains("command_name: \"selection-ranges\"")).to_equal(true)
         expect(commands.contains("command_name: \"selection-expand\"")).to_equal(true)
         expect(commands.contains("command_name: \"selection-shrink\"")).to_equal(true)
+        expect(commands.contains("command_name: \"selection-apply-all\"")).to_equal(true)
         expect(commands.contains("command_name: \"rename\"")).to_equal(true)
         expect(commands.contains("command_name: \"rename-preview\"")).to_equal(true)
         expect(commands.contains("command_name: \"rename-confirm\"")).to_equal(true)
@@ -198,6 +199,7 @@ describe "editor controller — IDE commands":
         expect(commands.contains("command_name: \"daily-note-picker\"")).to_equal(true)
         expect(commands.contains("command_name: \"template-insert\"")).to_equal(true)
         expect(commands.contains("command_name: \"template-picker\"")).to_equal(true)
+        expect(commands.contains("command_name: \"wiki-embed-insert\"")).to_equal(true)
         expect(commands.contains("command_name: \"attachment-insert\"")).to_equal(true)
         expect(commands.contains("command_name: \"wiki-backlinks\"")).to_equal(true)
         expect(commands.contains("command_name: \"wiki-tasks\"")).to_equal(true)
@@ -205,6 +207,7 @@ describe "editor controller — IDE commands":
         expect(commands.contains("command_name: \"wiki-vault-task-batch\"")).to_equal(true)
         expect(commands.contains("command_name: \"wiki-property-set\"")).to_equal(true)
         expect(commands.contains("command_name: \"wiki-vault-property-set\"")).to_equal(true)
+        expect(commands.contains("command_name: \"wiki-vault-property-review\"")).to_equal(true)
         expect(commands.contains("command_name: \"wiki-property-diagnostics\"")).to_equal(true)
         expect(commands.contains("command_name: \"wiki-tags\"")).to_equal(true)
         expect(commands.contains("command_name: \"wiki-graph\"")).to_equal(true)
@@ -234,6 +237,7 @@ describe "editor controller — IDE commands":
         expect(src.contains("command_name == \"selection-ranges\"")).to_equal(true)
         expect(src.contains("command_name == \"selection-expand\"")).to_equal(true)
         expect(src.contains("command_name == \"selection-shrink\"")).to_equal(true)
+        expect(src.contains("command_name == \"selection-apply-all\"")).to_equal(true)
         expect(src.contains("command_name == \"rename\"")).to_equal(true)
         expect(src.contains("command_name == \"rename-preview\"")).to_equal(true)
         expect(src.contains("command_name == \"rename-confirm\"")).to_equal(true)
@@ -260,6 +264,7 @@ describe "editor controller — IDE commands":
         expect(src.contains("command_name == \"wiki-vault-task-batch\"")).to_equal(true)
         expect(src.contains("command_name == \"wiki-property-set\"")).to_equal(true)
         expect(src.contains("command_name == \"wiki-vault-property-set\"")).to_equal(true)
+        expect(src.contains("command_name == \"wiki-vault-property-review\"")).to_equal(true)
         expect(src.contains("command_name == \"wiki-property-diagnostics\"")).to_equal(true)
         expect(src.contains("command_name == \"wiki-tags\"")).to_equal(true)
         expect(src.contains("command_name == \"wiki-graph\"")).to_equal(true)
@@ -271,6 +276,7 @@ describe "editor controller — IDE commands":
         expect(src.contains("command_name == \"markdown-table-cell-prev\"")).to_equal(true)
         expect(src.contains("command_name == \"callout-fold-toggle\"")).to_equal(true)
         expect(src.contains("command_name == \"attachment-picker\"")).to_equal(true)
+        expect(src.contains("command_name == \"wiki-embed-insert\"")).to_equal(true)
         expect(src.contains("command_name == \"lsp-jump\"")).to_equal(true)
         expect(src.contains("command_name == \"lsp-back\"")).to_equal(true)
         expect(src.contains("self.extension_host.find_debug_adapter(adapter_id)")).to_equal(true)
@@ -325,6 +331,19 @@ describe "editor controller — IDE commands":
         expect(filtered_templates.status_msg).to_equal("templates: 1")
         expect(ctrl.wiki_template_query).to_equal("meeting")
         expect(ctrl.wiki_panel.rows[0].label).to_equal("Meeting.md")
+
+        val embed_target = "/tmp/simple_editor_controller_embed_target.md"
+        val embed_note = "/tmp/simple_editor_controller_embed_note.md"
+        expect(rt_file_write_text(embed_target, "# Embed Target\n\n")).to_equal(true)
+        expect(rt_file_write_text(embed_note, "# Embed Note\n")).to_equal(true)
+        session.open_file(embed_target)
+        var embed_buffer = session.active_buffer()
+        embed_buffer.move_cursor(1, 0)
+        session.update_active_buffer(embed_buffer)
+        ctrl.session = session
+        val embedded = ctrl._execute_palette_command("wiki-embed-insert", embed_target + "|" + embed_note + "|Embedded")
+        expect(embedded.status_msg).to_equal("inserted embed: simple_editor_controller_embed_note")
+        expect(ctrl.session.active_buffer().to_text()).to_equal("# Embed Target\n![[simple_editor_controller_embed_note|Embedded]]\n\n")
 
         val attachment_target = "/tmp/simple_editor_controller_attachment.md"
         expect(rt_file_write_text(attachment_target, "# Attach\n")).to_equal(true)
@@ -399,6 +418,19 @@ describe "editor controller — IDE commands":
         expect(prev.status_msg).to_equal("table cell previous")
         expect(ctrl.session.active_buffer().cursor_row).to_equal(0)
         expect(ctrl.session.active_buffer().cursor_col).to_equal(6)
+        val focused_line = tui_render_editor_line_at_theme(ctrl.session.active_buffer(), 0, ctrl.session.active_buffer().line_at(0), 0, "dark", table_path)
+        expect(focused_line.contains("\x1b[7mB\x1b[0m")).to_equal(true)
+
+        var edit_buffer = ctrl.session.active_buffer()
+        edit_buffer.move_cursor(2, 2)
+        ctrl.session.update_active_buffer(edit_buffer)
+        val inserted_row = ctrl._execute_palette_command("markdown-table-row-insert", "")
+        expect(inserted_row.status_msg).to_equal("table row inserted")
+        expect(ctrl.session.active_buffer().to_text().contains("|  |  |")).to_equal(true)
+        val inserted_col = ctrl._execute_palette_command("markdown-table-column-insert", "")
+        expect(inserted_col.status_msg).to_equal("table column inserted")
+        expect(ctrl.session.active_buffer().line_at(0)).to_equal("| A |  | B |")
+        expect(ctrl.session.active_buffer().line_at(1)).to_equal("| --- | --- | --- |")
 
     it "opens renderable wiki panels from loaded markdown notes":
         val home_path = "/tmp/simple_editor_controller_wiki_home.md"
@@ -469,6 +501,7 @@ describe "editor controller — IDE commands":
 
         val prop_diags = ctrl._execute_palette_command("wiki-property-diagnostics", "status|required|active,draft")
         expect(prop_diags.status_msg).to_equal("property diagnostics: 1")
+        expect(ctrl.wiki_property_schema_payload).to_equal("status|required|active,draft")
         expect(ctrl.session.dock_layout.active_right).to_equal("problems")
         expect(ctrl.diagnostics_panel.rows.len()).to_equal(1)
         expect(ctrl.diagnostics_panel.rows[0].label).to_equal("Invalid frontmatter value for status: review")
@@ -480,6 +513,10 @@ describe "editor controller — IDE commands":
         expect(rt_file_write_text(prop_home, "---\nstatus: draft\n---\n# Home\n")).to_equal(true)
         expect(rt_file_write_text(prop_alpha, "# Alpha\n")).to_equal(true)
         ctrl.session.open_file(prop_home)
+        val reviewed_prop = ctrl._execute_palette_command("wiki-vault-property-review", prop_root + "|status|active")
+        expect(reviewed_prop.status_msg).to_equal("vault property review: 2")
+        expect(ctrl.wiki_panel.title).to_equal("Property Review")
+        expect(ctrl.wiki_panel.rows[0].icon).to_equal("review")
         val vault_prop = ctrl._execute_palette_command("wiki-vault-property-set", prop_root + "|status|active")
         expect(vault_prop.status_msg).to_equal("vault property set: 2")
         expect(rt_file_read_text(prop_home).contains("status: active")).to_equal(true)
@@ -487,6 +524,10 @@ describe "editor controller — IDE commands":
         expect(ctrl.session.active_buffer().to_text().contains("status: active")).to_equal(true)
         expect(ctrl.wiki_panel.title).to_equal("Properties")
         expect(ctrl.wiki_panel.rows.len()).to_equal(2)
+        val selective_prop = ctrl._execute_palette_command("wiki-vault-property-set", prop_root + "|owner|team|Home.md")
+        expect(selective_prop.status_msg).to_equal("vault property set: 1")
+        expect(rt_file_read_text(prop_home).contains("owner: team")).to_equal(true)
+        expect(rt_file_read_text(prop_alpha).contains("owner: team")).to_equal(false)
 
         ctrl.session.open_file(home_path)
         val tags = ctrl._execute_palette_command("wiki-tags", "project")
@@ -770,6 +811,37 @@ describe "editor controller — IDE commands":
         expect(applied.status_msg).to_equal("applied: Second fix")
         expect(ctrl.session.active_buffer().line_at(0).trim()).to_equal("Rename second now")
 
+    it "filters and groups LSP code action rows while preserving apply indices":
+        val path = "/tmp/simple_editor_code_action_filter.spl"
+        expect(rt_file_write_text(path, "Rename old now\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(path)
+        var ctrl = EditorController.new(session)
+        ctrl.code_actions = [
+            EditorCodeAction(title: "Quick one", kind: "quickfix", edit_json: "{\"line\":0,\"newText\":\"Rename quick now\"}", command: ""),
+            EditorCodeAction(title: "Organize imports", kind: "source.organizeImports", edit_json: "{\"line\":0,\"newText\":\"Rename source now\"}", command: ""),
+            EditorCodeAction(title: "Quick two", kind: "quickfix", edit_json: "{\"line\":0,\"newText\":\"Rename second quick now\"}", command: "")
+        ]
+
+        val filtered = ctrl._filter_code_actions("source")
+
+        expect(filtered.status_msg).to_equal("code actions filtered: source")
+        expect(ctrl.lsp_result_panel.rows.len()).to_equal(1)
+        expect(ctrl.lsp_result_panel.rows[0].label).to_equal("Organize imports")
+        expect(ctrl.lsp_result_panel.rows[0].command_payload).to_equal("1")
+
+        val grouped = ctrl._group_code_actions_by_kind()
+
+        expect(grouped.status_msg).to_equal("code actions grouped: kind")
+        expect(ctrl.lsp_result_panel.rows[0].icon).to_equal("group")
+        expect(ctrl.lsp_result_panel.rows[0].label).to_equal("source.organizeImports")
+        expect(ctrl.lsp_result_panel.rows[1].depth).to_equal(1)
+        ctrl.lsp_result_panel = lsp_result_panel_select(ctrl.lsp_result_panel, 1)
+        val applied = ctrl._dispatch_lsp_result_key("\r")
+
+        expect(applied.status_msg).to_equal("applied: Organize imports")
+        expect(ctrl.session.active_buffer().line_at(0).trim()).to_equal("Rename source now")
+
     it "starts Markdown LSP and sends didOpen for markdown documents":
         val path = "/tmp/simple_editor_lsp_lifecycle.md"
         expect(rt_file_write_text(path, "# Title\n")).to_equal(true)
@@ -926,6 +998,31 @@ describe "editor controller — IDE commands":
         val workspace_symbol_request = ctrl.simple_lsp_state.client.transport.send_buffer[ctrl.simple_lsp_state.client.transport.send_buffer.len() - 1]
         expect(workspace_symbol_request.contains("\"query\": \"answer\"")).to_equal(true)
 
+    it "hydrates workspace symbols from the indexed workspace scope":
+        val root = "/tmp/simple_editor_workspace_symbol_index"
+        val active_path = root + "/active.spl"
+        val sibling_path = root + "/sibling.spl"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        expect(rt_file_write_text(active_path, "fn active_entry():\n    return\n")).to_equal(true)
+        expect(rt_file_write_text(sibling_path, "fn indexed_target():\n    return\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(active_path)
+        var ctrl = EditorController.new(session)
+        val indexed = ctrl._rebuild_workspace_symbol_index(root)
+        expect(indexed.status_msg).to_equal("workspace symbols indexed: 2")
+
+        val requested = ctrl._execute_palette_command("workspace-symbols", "indexed")
+
+        expect(requested.status_msg).to_equal("workspace-symbols results")
+        expect(ctrl.lsp_result_panel.title).to_equal("Workspace Symbols")
+        expect(ctrl.lsp_result_panel.pending).to_equal(false)
+        expect(ctrl.lsp_result_panel.rows.len()).to_equal(1)
+        expect(ctrl.lsp_result_panel.rows[0].label).to_equal("indexed_target")
+        expect(ctrl.lsp_result_panel.rows[0].path).to_equal(sibling_path)
+        expect(ctrl.lsp_result_panel.rows[0].detail).to_equal(sibling_path + ":1")
+        val workspace_symbol_request = ctrl.simple_lsp_state.client.transport.send_buffer[ctrl.simple_lsp_state.client.transport.send_buffer.len() - 1]
+        expect(workspace_symbol_request.contains("\"query\": \"indexed\"")).to_equal(true)
+
     it "hydrates pending LSP result panels from async server responses":
         val path = "/tmp/simple_editor_lsp_hydrate.spl"
         val target_path = "/tmp/simple_editor_lsp_hydrate_target.spl"
@@ -976,6 +1073,34 @@ describe "editor controller — IDE commands":
         expect(ctrl.session.active_document().md_state.outline.entries.len()).to_equal(1)
         expect(ctrl.session.active_document().md_state.outline.entries[0].title).to_equal("Server Heading")
         expect(ctrl.session.active_document().md_state.outline.entries[0].line).to_equal(3)
+
+    it "applies LSP document symbols to non-Markdown outline UI":
+        val path = "/tmp/simple_editor_lsp_simple_outline.spl"
+        expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(path)
+        var ctrl = EditorController.new(session)
+        ctrl.lsp_result_panel = LspResultPanel(
+            title: "Document Symbols",
+            rows: [
+                LspResultRow(icon: "symbol", label: "main", detail: path + ":1", path: path, line: 0, col: 3, command_name: "", command_payload: "", depth: 0, expanded: false),
+                LspResultRow(icon: "symbol", label: "helper", detail: path + ":3", path: path, line: 2, col: 3, command_name: "", command_payload: "", depth: 1, expanded: false)
+            ],
+            selected: 0,
+            scroll_offset: 0,
+            pending: false,
+            request_id: 45
+        )
+        expect(ctrl.session.active_document().has_markdown_state()).to_equal(false)
+
+        ctrl._apply_lsp_document_symbols_outline()
+
+        expect(ctrl.session.dock_layout.active_right).to_equal("md-outline")
+        expect(ctrl.session.active_document().has_markdown_state()).to_equal(true)
+        expect(ctrl.session.active_document().md_state.outline_visible).to_equal(true)
+        expect(ctrl.session.active_document().md_state.outline.entries.len()).to_equal(2)
+        expect(ctrl.session.active_document().md_state.outline.entries[0].title).to_equal("main")
+        expect(ctrl.session.active_document().md_state.outline.entries[1].level).to_equal(2)
 
     it "parses LSP locations and symbols into renderable rows":
         val loc_json = "[{\"uri\":\"file:///tmp/simple_lsp_target.spl\",\"range\":{\"start\":{\"line\":2,\"character\":4},\"end\":{\"line\":2,\"character\":10}}}]"
@@ -1213,6 +1338,8 @@ describe "editor controller — IDE commands":
         expect(gui_src.contains("state.ctrl._refresh_lsp_results()")).to_equal(true)
         expect(tui_src.contains("ctrl._poll_file_watcher()")).to_equal(true)
         expect(gui_src.contains("state.ctrl._poll_file_watcher()")).to_equal(true)
+        expect(tui_src.contains("ctrl._poll_inlay_hint_refresh_after(100)")).to_equal(true)
+        expect(gui_src.contains("state.ctrl._poll_inlay_hint_refresh_after(100)")).to_equal(true)
         expect(tui_src.contains("ctrl._poll_debug_dap_client()")).to_equal(true)
         expect(gui_src.contains("state.ctrl._poll_debug_dap_client()")).to_equal(true)
 
@@ -1234,17 +1361,20 @@ describe "editor controller — IDE commands":
         expect(ctrl.wiki_panel.title).to_equal("Debug Session")
         expect(ctrl.wiki_panel.rows[2].label).to_equal("answer")
         expect(ctrl.wiki_panel.rows[2].detail).to_equal("pending")
+        expect(ctrl.debug_pending_watch_expressions.len()).to_equal(1)
+        expect(ctrl.debug_dap_client.send_buffer[3].contains("\"command\":\"evaluate\"")).to_equal(true)
+        val watch_eval_json = "{\"seq\":1001,\"type\":\"response\",\"request_seq\":4,\"success\":true,\"command\":\"evaluate\",\"body\":{\"result\":\"42\",\"variablesReference\":0}}"
+        val watch_eval = ctrl._debug_hydrate_dap_response(watch_eval_json)
+        expect(watch_eval.status_msg).to_equal("watch refreshed: answer")
+        expect(ctrl.debug_pending_watch_expressions.len()).to_equal(0)
+        expect(ctrl.wiki_panel.rows[2].detail).to_equal("42")
         val evaluated = ctrl._execute_palette_command("debug-evaluate", "answer + 1")
         expect(evaluated.status_msg).to_equal("debug evaluate: answer + 1")
-        expect(ctrl.wiki_panel.rows[3].label).to_equal("evaluate")
-        expect(ctrl.wiki_panel.rows[3].detail).to_equal("answer + 1")
         val watch_result = ctrl._debug_update_watch_result("answer", "1", "ok")
         expect(watch_result.status_msg).to_equal("watch: answer")
         expect(ctrl.wiki_panel.rows[2].detail).to_equal("1")
         val evaluate_result = ctrl._debug_record_evaluate_result("answer + 1", "2", "ok")
         expect(evaluate_result.status_msg).to_equal("debug result: answer + 1")
-        expect(ctrl.wiki_panel.rows[5].label).to_equal("evaluate-result")
-        expect(ctrl.wiki_panel.rows[5].detail).to_equal("answer + 1 = 2")
         val stack = ctrl._debug_update_stack_frames([
             EditorDebugStackFrame(id: 1, name: "main", path: path, line: 2, col: 4)
         ])
@@ -1284,9 +1414,7 @@ describe "editor controller — IDE commands":
         expect(debug_session.watches[0].last_value).to_equal("1")
         expect(debug_session.stack_frames[0].name).to_equal("main")
         expect(debug_session.scopes[0].variables[0].value).to_equal("1")
-        expect(debug_session.console.len()).to_equal(3)
-        expect(debug_session.console[0].text_content).to_equal("answer + 1")
-        expect(debug_session.console[2].text_content).to_equal("answer + 1 = 2")
+        expect(debug_session.console.len()).to_equal(4)
         expect(debug_session.exception_filters.len()).to_equal(2)
         expect(debug_session.exception_filters[0]).to_equal("caught")
 
@@ -1301,10 +1429,16 @@ describe "editor controller — IDE commands":
         expect(terminated.status_msg).to_equal("debug terminated")
         expect(ctrl.debug_status).to_equal("terminated")
         expect(editor_debug_first_session(ctrl.debug_registry).status).to_equal("terminated")
+        var last_dap_index = ctrl.debug_dap_client.send_buffer.len() - 1
+        expect(ctrl.debug_dap_client.send_buffer[last_dap_index].contains("\"command\":\"disconnect\"")).to_equal(true)
         val restarted = ctrl._debug_restart_first()
         expect(restarted.status_msg).to_equal("debug restart")
         expect(ctrl.debug_status).to_equal("restarting")
         expect(editor_debug_first_session(ctrl.debug_registry).status).to_equal("restarting")
+        last_dap_index = ctrl.debug_dap_client.send_buffer.len() - 3
+        expect(ctrl.debug_dap_client.send_buffer[last_dap_index].contains("\"command\":\"restart\"")).to_equal(true)
+        expect(ctrl.debug_dap_client.send_buffer[last_dap_index + 1].contains("\"command\":\"initialize\"")).to_equal(true)
+        expect(ctrl.debug_dap_client.send_buffer[last_dap_index + 2].contains("\"command\":\"launch\"")).to_equal(true)
         expect(ctrl._execute_palette_command("debug-restart", "").status_msg).to_equal("debug restart")
         expect(ctrl._execute_palette_command("debug-continue", "").status_msg).to_equal("debug continue")
         expect(ctrl.debug_status).to_equal("running")
@@ -1353,6 +1487,7 @@ describe "editor controller — IDE commands":
         ctrl.session.open_file(second_path)
         ctrl._start_debug_adapter("simple")
         expect(editor_debug_session_count(ctrl.debug_registry)).to_equal(2)
+        expect(ctrl.debug_dap_clients.len()).to_equal(2)
         expect(editor_debug_first_session(ctrl.debug_registry).config.program).to_equal(first_path)
 
         val listed = ctrl._execute_palette_command("debug-sessions", "")
@@ -1367,11 +1502,13 @@ describe "editor controller — IDE commands":
         expect(selected.status_msg).to_equal("debug session: 2")
         expect(editor_debug_first_session(ctrl.debug_registry).id).to_equal(2)
         expect(editor_debug_first_session(ctrl.debug_registry).config.program).to_equal(second_path)
+        expect(ctrl.debug_dap_client.send_buffer[1].contains("\"program\":\"" + second_path + "\"")).to_equal(true)
 
         val switched = ctrl._execute_palette_command("debug-switch", "1")
         expect(switched.status_msg).to_equal("debug session: 1")
         expect(editor_debug_first_session(ctrl.debug_registry).id).to_equal(1)
         expect(editor_debug_first_session(ctrl.debug_registry).config.program).to_equal(first_path)
+        expect(ctrl.debug_dap_client.send_buffer[1].contains("\"program\":\"" + first_path + "\"")).to_equal(true)
 
     it "hydrates DAP stack scope and variable responses into the debug panel":
         val path = "/tmp/simple_editor_debug_dap_response.spl"
@@ -1446,6 +1583,11 @@ describe "editor controller — IDE commands":
         expect(ctrl.debug_dap_client.send_buffer[9].contains("\"command\":\"setExceptionBreakpoints\"")).to_equal(true)
         ctrl._execute_palette_command("debug-evaluate", "answer")
         expect(ctrl.debug_dap_client.send_buffer[10].contains("\"command\":\"evaluate\"")).to_equal(true)
+        ctrl._execute_palette_command("debug-watch", "answer")
+        expect(ctrl.debug_dap_client.send_buffer[11].contains("\"command\":\"evaluate\"")).to_equal(true)
+        expect(ctrl.debug_pending_watch_expressions.len()).to_equal(1)
+        ctrl._debug_hydrate_dap_response("{\"seq\":1008,\"type\":\"response\",\"request_seq\":11,\"success\":true,\"command\":\"evaluate\",\"body\":{\"result\":\"42\",\"variablesReference\":0}}")
+        expect(ctrl.debug_pending_watch_expressions.len()).to_equal(0)
 
         var dap = ctrl.debug_dap_client
         dap = editor_debug_dap_client_inject_message(dap, "{\"seq\":1007,\"type\":\"response\",\"request_seq\":7,\"success\":true,\"command\":\"stackTrace\",\"body\":{\"stackFrames\":[{\"id\":1,\"name\":\"main\",\"line\":2,\"column\":4,\"source\":{\"name\":\"main.spl\",\"path\":\"" + path + "\"}}],\"totalFrames\":1}}")
@@ -1453,6 +1595,8 @@ describe "editor controller — IDE commands":
         ctrl.debug_dap_client = dap
         val polled = ctrl._execute_palette_command("debug-poll", "")
         expect(polled.status_msg).to_equal("debug stopped: breakpoint")
+        expect(ctrl.debug_pending_watch_expressions.len()).to_equal(1)
+        expect(ctrl.debug_dap_client.send_buffer[12].contains("\"command\":\"evaluate\"")).to_equal(true)
         expect(ctrl.debug_status).to_equal("paused")
         expect(editor_debug_first_session(ctrl.debug_registry).stack_frames[0].path).to_equal(path)
 
@@ -1503,6 +1647,9 @@ describe "editor controller — IDE commands":
         expect(debug_session.config.pre_launch_task).to_equal("build main.spl")
         expect(debug_session.config.env[0].key).to_equal("SIMPLE_LIB")
         expect(debug_session.config.env[0].value).to_equal(root + "/src")
+        expect(ctrl.debug_dap_client.send_buffer[1].contains("\"args\":[\"" + root + "/src\",\"main.spl\"]")).to_equal(true)
+        expect(ctrl.debug_dap_client.send_buffer[1].contains("\"preLaunchTask\":\"build main.spl\"")).to_equal(true)
+        expect(ctrl.debug_dap_client.send_buffer[1].contains("\"env\":{\"SIMPLE_LIB\":\"" + root + "/src\"}")).to_equal(true)
 
     it "opens a selectable VSCode launch configuration picker":
         val root = "/tmp/simple_editor_debug_launch_picker"
@@ -1532,6 +1679,38 @@ describe "editor controller — IDE commands":
         expect(picked.status_msg).to_equal("debug adapter: Alt")
         expect(debug_session.config.name).to_equal("Alt")
         expect(debug_session.config.program).to_equal(alt_path)
+
+    it "starts VSCode compound launch configurations from the picker":
+        val root = "/tmp/simple_editor_debug_launch_compound"
+        expect(rt_dir_create_all(root + "/.vscode")).to_equal(true)
+        expect(rt_dir_create_all(root + "/src")).to_equal(true)
+        val api_path = root + "/src/api.spl"
+        val worker_path = root + "/src/worker.spl"
+        expect(rt_file_write_text(api_path, "fn main():\n    print(\"api\")\n")).to_equal(true)
+        expect(rt_file_write_text(worker_path, "fn main():\n    print(\"worker\")\n")).to_equal(true)
+        val launch_json = "{\"version\":\"0.2.0\",\"configurations\":[{\"name\":\"API\",\"type\":\"simple\",\"request\":\"launch\",\"program\":\"" + api_path + "\",\"cwd\":\"" + root + "\"},{\"name\":\"Worker\",\"type\":\"simple\",\"request\":\"launch\",\"program\":\"" + worker_path + "\",\"cwd\":\"" + root + "\"}],\"compounds\":[{\"name\":\"All\",\"configurations\":[\"API\",\"Worker\"],\"preLaunchTask\":\"build all\"}]}"
+        expect(rt_file_write_text(root + "/.vscode/launch.json", launch_json)).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(api_path)
+        var ctrl = EditorController.new(session)
+
+        val shown = ctrl._execute_palette_command("debug-configs", "simple")
+        expect(shown.status_msg).to_equal("debug launch configs: 3")
+        expect(ctrl.wiki_panel.rows[2].label).to_equal("All")
+        expect(ctrl.wiki_panel.rows[2].detail).to_equal("compound compound API|Worker task:build all")
+
+        ctrl.wiki_panel = wiki_panel_select(ctrl.wiki_panel, 2)
+        val picked = ctrl._dispatch_wiki_panel_key("\n")
+        expect(picked.status_msg).to_equal("debug compound: All (2 sessions)")
+        expect(editor_debug_session_count(ctrl.debug_registry)).to_equal(2)
+        expect(editor_debug_session_at(ctrl.debug_registry, 0).config.name).to_equal("API")
+        expect(editor_debug_session_at(ctrl.debug_registry, 1).config.name).to_equal("Worker")
+        expect(ctrl.debug_dap_clients.len()).to_equal(2)
+        expect(ctrl.debug_dap_clients[0].send_buffer[1].contains("\"program\":\"" + api_path + "\"")).to_equal(true)
+        expect(ctrl.debug_dap_clients[1].send_buffer[1].contains("\"program\":\"" + worker_path + "\"")).to_equal(true)
+        expect(ctrl.debug_dap_client.send_buffer.len()).to_equal(4)
+        expect(ctrl.debug_dap_client.send_buffer[1].contains("\"program\":\"" + api_path + "\"")).to_equal(true)
+        expect(ctrl.debug_dap_client.send_buffer[3].contains("\"program\":\"" + worker_path + "\"")).to_equal(true)
 
     it "routes extended LSP parity requests through the active Simple server":
         val path = "/tmp/simple_editor_lsp_extended.spl"
@@ -1599,6 +1778,24 @@ describe "editor controller — IDE commands":
         val ignored = ctrl._poll_file_watcher()
         expect(ignored.status_msg).to_equal("file changes notified: 1")
         expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(8)
+
+        val policy = ctrl._configure_file_watcher_policy(500, ["*.tmp", "ignored_dir"])
+        expect(policy.status_msg).to_equal("file watcher policy updated")
+        expect(ctrl.file_watcher.poll_interval_ms).to_equal(500)
+        expect(rt_file_write_text(root + "/ignored.tmp", "ignored")).to_equal(true)
+        expect(rt_dir_create_all(root + "/ignored_dir")).to_equal(true)
+        expect(rt_file_write_text(root + "/ignored_dir/ignored.spl", "fn ignored_dir():\n    return\n")).to_equal(true)
+        val ignored_custom = ctrl._poll_file_watcher()
+        expect(ignored_custom.redraw).to_equal(false)
+        expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(8)
+
+        expect(rt_file_write_text(path, "fn main():\n    val debounced = true\n")).to_equal(true)
+        val debounced = ctrl._poll_file_watcher_after(100)
+        expect(debounced.redraw).to_equal(false)
+        expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(8)
+        val flushed = ctrl._poll_file_watcher_after(400)
+        expect(flushed.status_msg).to_equal("file changes notified: 1")
+        expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(9)
 
     it "requests rename from command UI and applies async WorkspaceEdit responses":
         val path = "/tmp/simple_editor_rename_ui.spl"
@@ -1669,6 +1866,24 @@ describe "editor controller — IDE commands":
         expect(confirmed.status_msg).to_equal("applied: rename")
         expect(ctrl.session.active_buffer().line_at(1)).to_equal("    val preview_answer = 1")
         expect(ctrl.pending_workspace_edit_json).to_equal("")
+
+    it "marks rename preview edits targeting missing files as conflicts":
+        val path = "/tmp/simple_editor_rename_conflict_ui.spl"
+        val missing_path = "/tmp/simple_editor_rename_conflict_missing/target.spl"
+        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n")).to_equal(true)
+        var session = EditSession.new()
+        session.open_file(path)
+        var ctrl = EditorController.new(session)
+        val edit_json = "{\"changes\":{\"file://" + missing_path + "\":[{\"range\":{\"start\":{\"line\":1,\"character\":8},\"end\":{\"line\":1,\"character\":14}},\"newText\":\"conflict_answer\"}]}}"
+
+        ctrl._show_workspace_edit_preview(edit_json, "rename")
+
+        expect(ctrl.lsp_result_panel.title).to_equal("Rename Preview")
+        expect(ctrl.lsp_result_panel.rows.len()).to_equal(1)
+        expect(ctrl.lsp_result_panel.rows[0].icon).to_equal("conflict")
+        expect(ctrl.lsp_result_panel.rows[0].detail.contains("conflict: missing file")).to_equal(true)
+        expect(ctrl.lsp_result_panel.rows[0].command_payload).to_equal("conflict_answer")
+        expect(ctrl.pending_workspace_edit_json.contains("conflict_answer")).to_equal(true)
 
     it "cancels pending WorkspaceEdit previews without mutating the buffer":
         val path = "/tmp/simple_editor_workspace_edit_cancel.spl"
@@ -1772,6 +1987,8 @@ describe "editor controller — IDE commands":
         expect(ctrl.lsp_result_panel.pending).to_equal(false)
         expect(ctrl.lsp_result_panel.title).to_equal("Formatting Preview")
         expect(ctrl.lsp_result_panel.rows[0].detail.contains("return")).to_equal(true)
+        expect(ctrl.lsp_result_panel.rows[0].detail.contains("line 2:1-2:9")).to_equal(true)
+        expect(ctrl.lsp_result_panel.rows[0].command_payload).to_equal("    return")
         expect(ctrl.pending_workspace_edit_title).to_equal("formatting")
 
         val confirmed = ctrl._execute_palette_command("rename-confirm", "")
@@ -1864,7 +2081,7 @@ describe "editor controller — IDE commands":
 
         var client = ctrl.simple_lsp_state.client
         var transport = client.transport
-        val result_json = "{\"signatures\":[{\"label\":\"add(value: i64) -> i64\",\"documentation\":\"Returns the value\"}],\"activeSignature\":0,\"activeParameter\":0}"
+        val result_json = "{\"signatures\":[{\"label\":\"add(value: i64) -> i64\",\"documentation\":\"Returns the value\"},{\"label\":\"add(value: text, fallback: text) -> text\",\"documentation\":\"Returns text\"}],\"activeSignature\":1,\"activeParameter\":1}"
         val response_json = "{\"jsonrpc\": \"2.0\", \"id\": " + request_id.to_text() + ", \"result\": " + result_json + "}"
         transport.recv_buffer.push(response_json)
         client.transport = transport
@@ -1876,22 +2093,38 @@ describe "editor controller — IDE commands":
 
         expect(ctrl.lsp_result_panel.pending).to_equal(false)
         expect(ctrl.lsp_result_panel.title).to_equal("Signature Help")
+        expect(ctrl.lsp_result_panel.rows.len()).to_equal(2)
+        expect(ctrl.lsp_result_panel.selected).to_equal(1)
         expect(ctrl.lsp_result_panel.rows[0].icon).to_equal("signature")
         expect(ctrl.lsp_result_panel.rows[0].label).to_equal("add(value: i64) -> i64")
         expect(ctrl.lsp_result_panel.rows[0].detail).to_equal("Returns the value")
         expect(ctrl.lsp_result_panel.rows[0].command_payload).to_equal("value: i64")
+        expect(ctrl.lsp_result_panel.rows[1].label).to_equal("add(value: text, fallback: text) -> text")
+        expect(ctrl.lsp_result_panel.rows[1].detail).to_equal("Returns text")
+        expect(ctrl.lsp_result_panel.rows[1].command_payload).to_equal("fallback: text")
         expect(ctrl.lsp_signature_popup.visible).to_equal(true)
-        expect(ctrl.lsp_signature_popup.label).to_equal("add(value: i64) -> i64")
-        expect(ctrl.lsp_signature_popup.detail).to_equal("Returns the value")
-        expect(ctrl.lsp_signature_popup.active_parameter).to_equal("value: i64")
+        expect(ctrl.lsp_signature_popup.label).to_equal("add(value: text, fallback: text) -> text")
+        expect(ctrl.lsp_signature_popup.detail).to_equal("Returns text")
+        expect(ctrl.lsp_signature_popup.active_parameter).to_equal("fallback: text")
         val signature_tui = tui_render_lsp_signature_popup_lines(ctrl.lsp_signature_popup, 42)
         expect(signature_tui.len()).to_equal(3)
         expect(signature_tui[0].contains("Signature")).to_equal(true)
         expect(signature_tui[1].contains("add(")).to_equal(true)
-        expect(signature_tui[1].contains(") -> i64")).to_equal(true)
-        expect(signature_tui[1].contains("\x1b[1;38;5;81mvalue: i64")).to_equal(true)
+        expect(signature_tui[1].contains("\x1b[1;38;5;81mfallback: text")).to_equal(true)
         expect(signature_tui[1].contains("\x1b[48;5;236m")).to_equal(true)
+        expect(signature_tui[2].contains("Returns text")).to_equal(true)
         expect(tui_render_lsp_signature_popup_lines(lsp_signature_popup_hidden(), 42).len()).to_equal(0)
+
+        val previous_signature = ctrl._execute_palette_command("signature-prev", "")
+        expect(previous_signature.status_msg).to_equal("signature overload 1/2")
+        expect(ctrl.lsp_result_panel.selected).to_equal(0)
+        expect(ctrl.lsp_signature_popup.label).to_equal("add(value: i64) -> i64")
+        expect(ctrl.lsp_signature_popup.active_parameter).to_equal("value: i64")
+
+        val next_signature = ctrl._execute_palette_command("signature-next", "")
+        expect(next_signature.status_msg).to_equal("signature overload 2/2")
+        expect(ctrl.lsp_result_panel.selected).to_equal(1)
+        expect(ctrl.lsp_signature_popup.label).to_equal("add(value: text, fallback: text) -> text")
 
         val dismissed = ctrl._execute_palette_command("signature-dismiss", "")
         expect(dismissed.status_msg).to_equal("signature dismissed")
@@ -1981,6 +2214,28 @@ describe "editor controller — IDE commands":
         expect(shrunk_buffer.selection_range.start_col).to_equal(4)
         expect(shrunk_buffer.selection_range.end_col).to_equal(10)
         expect(ctrl.lsp_result_panel.selected).to_equal(0)
+
+        shrunk_buffer.add_selection_range(1, 4, 1, 7)
+        ctrl.session.update_active_buffer(shrunk_buffer)
+        val reapplied = ctrl._dispatch_lsp_result_key("\r")
+        val multi_buffer = ctrl.session.active_buffer()
+        expect(reapplied.status_msg).to_equal("selection range: 3:5-3:11")
+        expect(multi_buffer.selection_range_count()).to_equal(2)
+        expect(multi_buffer.position_selected(2, 5)).to_equal(true)
+        expect(multi_buffer.position_selected(1, 5)).to_equal(true)
+        val preserved_html = gui_render_editor_area(multi_buffer, "simple", multi_buffer.viewport)
+        expect(preserved_html.contains("data-start=\"4\" data-end=\"10\"")).to_equal(true)
+        expect(preserved_html.contains("data-start=\"4\" data-end=\"7\"")).to_equal(true)
+
+        val all_applied = ctrl._execute_palette_command("selection-apply-all", "")
+        val all_buffer = ctrl.session.active_buffer()
+        expect(all_applied.status_msg).to_equal("selection ranges applied: 2")
+        expect(all_buffer.selection_range_count()).to_equal(2)
+        expect(all_buffer.line_has_selection(2)).to_equal(true)
+        val multi_html = gui_render_editor_area(all_buffer, "simple", all_buffer.viewport)
+        expect(multi_html.contains("data-start=\"0\" data-end=\"10\"")).to_equal(true)
+        val multi_tui = tui_render_line_with_semantic_tokens(all_buffer, 2, all_buffer.line_at(2))
+        expect(multi_tui.contains("\x1b[7m")).to_equal(true)
 
     it "hydrates async LSP folding ranges into the result panel":
         val path = "/tmp/simple_editor_folding_ranges_ui.spl"
@@ -2083,10 +2338,10 @@ describe "editor controller — IDE commands":
 
         val folded = ctrl._execute_palette_command("callout-fold-toggle", "")
         expect(folded.status_msg).to_equal("callout folded")
-        expect(ctrl.session.active_buffer().to_text().contains("> [!TIP]- Tip")).to_equal(true)
+        expect(ctrl.session.active_buffer().to_text()).to_equal("> [!TIP]- Tip\n> Body\n")
         val unfolded = ctrl._execute_palette_command("callout-fold-toggle", "")
         expect(unfolded.status_msg).to_equal("callout unfolded")
-        expect(ctrl.session.active_buffer().to_text().contains("> [!TIP]+ Tip")).to_equal(true)
+        expect(ctrl.session.active_buffer().to_text()).to_equal("> [!TIP]+ Tip\n> Body\n")
 
     it "opens Markdown links and wiki links under the cursor":
         val home_path = "/tmp/simple_editor_open_link_home.md"
@@ -2295,6 +2550,30 @@ describe "editor controller — IDE commands":
         expect(ctrl.lsp_result_panel.rows[1].depth).to_equal(1)
         expect(ctrl.lsp_result_panel.rows[1].expanded).to_equal(true)
         expect(lsp_result_panel_render(ctrl.lsp_result_panel, 2)[1].contains("  call caller")).to_equal(true)
+        ctrl.lsp_result_panel = lsp_result_panel_select(ctrl.lsp_result_panel, 1)
+        val mixed_outgoing = ctrl._dispatch_lsp_result_key("o")
+        val mixed_outgoing_id = ctrl.simple_lsp_state.client.next_id - 1
+        expect(mixed_outgoing.status_msg).to_equal("call-hierarchy-outgoing results")
+        expect(ctrl.lsp_result_panel.pending).to_equal(true)
+        client = ctrl.simple_lsp_state.client
+        transport = client.transport
+        val mixed_outgoing_result = "[{\"to\":{\"name\":\"nested_callee\",\"kind\":12,\"uri\":\"file://" + path + "\",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":1,\"character\":10}},\"selectionRange\":{\"start\":{\"line\":0,\"character\":3},\"end\":{\"line\":0,\"character\":16}}},\"fromRanges\":[]}]"
+        response_json = "{\"jsonrpc\": \"2.0\", \"id\": " + mixed_outgoing_id.to_text() + ", \"result\": " + mixed_outgoing_result + "}"
+        transport.recv_buffer.push(response_json)
+        client.transport = transport
+        simple_state = ctrl.simple_lsp_state
+        simple_state.client = client
+        ctrl.simple_lsp_state = simple_state
+        ctrl._refresh_lsp_results()
+        expect(ctrl.lsp_result_panel.rows[0].label).to_equal("target")
+        expect(ctrl.lsp_result_panel.rows[0].depth).to_equal(0)
+        expect(ctrl.lsp_result_panel.rows[1].label).to_equal("caller")
+        expect(ctrl.lsp_result_panel.rows[1].depth).to_equal(1)
+        expect(ctrl.lsp_result_panel.rows[2].label).to_equal("nested_callee")
+        expect(ctrl.lsp_result_panel.rows[2].detail).to_equal("outgoing to " + path + ":1")
+        expect(ctrl.lsp_result_panel.rows[2].depth).to_equal(2)
+        expect(lsp_result_panel_render(ctrl.lsp_result_panel, 3)[2].contains("    call nested_callee")).to_equal(true)
+        ctrl.lsp_result_panel = lsp_result_panel_select(ctrl.lsp_result_panel, 0)
         val collapsed = ctrl._dispatch_lsp_result_key(" ")
         expect(collapsed.status_msg).to_equal("lsp result collapsed")
         expect(ctrl.lsp_result_panel.rows[0].expanded).to_equal(false)
@@ -2383,7 +2662,7 @@ describe "editor controller — IDE commands":
 
         var client = ctrl.simple_lsp_state.client
         var transport = client.transport
-        val result_json = "{\"data\":[0,3,4,1,0,1,4,6,2,0]}"
+        val result_json = "{\"legend\":{\"tokenTypes\":[\"namespace\",\"function\",\"keyword\"],\"tokenModifiers\":[\"declaration\",\"readonly\"]},\"data\":[0,3,4,1,1,1,4,6,2,2]}"
         val response_json = "{\"jsonrpc\": \"2.0\", \"id\": " + request_id.to_text() + ", \"result\": " + result_json + "}"
         transport.recv_buffer.push(response_json)
         client.transport = transport
@@ -2397,8 +2676,8 @@ describe "editor controller — IDE commands":
         expect(ctrl.lsp_result_panel.title).to_equal("Semantic Tokens")
         expect(ctrl.lsp_result_panel.rows[0].icon).to_equal("semantic")
         expect(ctrl.lsp_result_panel.rows[0].label).to_equal("Token 1")
-        expect(ctrl.lsp_result_panel.rows[0].detail).to_equal("line 1:4 len 4 type 1")
-        expect(ctrl.lsp_result_panel.rows[1].detail).to_equal("line 2:5 len 6 type 2")
+        expect(ctrl.lsp_result_panel.rows[0].detail).to_equal("line 1:4 len 4 type function mods declaration")
+        expect(ctrl.lsp_result_panel.rows[1].detail).to_equal("line 2:5 len 6 type keyword mods readonly")
         val semantic_buffer = ctrl.session.active_buffer()
         expect(semantic_buffer.semantic_tokens.len()).to_equal(2)
         expect(semantic_buffer.semantic_token_type_at(0, 3)).to_equal(1)
@@ -2458,6 +2737,17 @@ describe "editor controller — IDE commands":
         expect(ctrl.session.active_buffer().inlay_hints.len()).to_equal(0)
         expect(ctrl.lsp_result_panel.title).to_equal("Inlay Hints")
         expect(ctrl.lsp_result_panel.pending).to_equal(true)
+        expect(ctrl.pending_inlay_hint_refresh).to_equal(true)
+        val pending_request_id = ctrl.simple_lsp_state.client.next_id
+        val debounce_wait = ctrl._poll_inlay_hint_refresh_after(100)
+        expect(debounce_wait.redraw).to_equal(false)
+        expect(ctrl.simple_lsp_state.client.next_id).to_equal(pending_request_id)
+        ctrl._notify_active_lsp_changed()
+        expect(ctrl.inlay_hint_refresh_elapsed_ms).to_equal(0)
+        val debounce_flush = ctrl._poll_inlay_hint_refresh_after(300)
+        expect(debounce_flush.status_msg).to_equal("inlay hints refreshed")
+        expect(ctrl.pending_inlay_hint_refresh).to_equal(false)
+        expect(ctrl.simple_lsp_state.client.next_id).to_equal(pending_request_id + 1)
 
     it "hydrates async LSP code lens entries into the result panel":
         val path = "/tmp/simple_editor_code_lens_ui.spl"

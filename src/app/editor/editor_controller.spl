@@ -54,6 +54,12 @@ struct EditorPropertyPayload:
     key: text
     value: text
 
+struct EditorVaultPropertyPayload:
+    root: text
+    key: text
+    value: text
+    selected_paths: [text]
+
 struct EditorLocation:
     path: text
     line: i64
@@ -78,11 +84,16 @@ class EditorController:
     diagnostics_view_payload: text
     file_watcher: FileWatcher
     code_actions: [EditorCodeAction]
+    code_action_filter: text
+    code_action_group_by_kind: bool
     debug_status: text
     debug_registry: EditorDebugRegistry
     debug_dap_client: EditorDebugDapClient
+    debug_dap_clients: [EditorDebugDapClient]
     debug_process_pid: i64
+    debug_pending_watch_expressions: [text]
     debug_launch_configs: [EditorDebugLaunchConfig]
+    debug_launch_source_path: text
     lsp_result_panel: LspResultPanel
     lsp_call_hierarchy_state: text
     lsp_call_hierarchy_state_title: text
@@ -91,6 +102,8 @@ class EditorController:
     lsp_hover_popup: LspHoverPopup
     lsp_signature_popup: LspSignaturePopup
     lsp_location_stack: [EditorLocation]
+    workspace_symbol_index: [LspResultRow]
+    workspace_symbol_index_root: text
     pending_workspace_edit_json: text
     pending_workspace_edit_title: text
     format_save_request_id: i64
@@ -108,6 +121,10 @@ class EditorController:
     wiki_task_filter: text
     wiki_task_query: text
     wiki_property_vault_root: text
+    wiki_property_schema_payload: text
+    pending_inlay_hint_refresh: bool
+    inlay_hint_refresh_elapsed_ms: i64
+    inlay_hint_refresh_delay_ms: i64
     md_lsp_state: MdLspState
     simple_lsp_state: SimpleLspState
 
@@ -135,11 +152,16 @@ impl EditorController:
             diagnostics_view_payload: "",
             file_watcher: FileWatcher.new(),
             code_actions: [],
+            code_action_filter: "all",
+            code_action_group_by_kind: false,
             debug_status: "stopped",
             debug_registry: editor_debug_registry_new(),
             debug_dap_client: EditorDebugDapClient.new(),
+            debug_dap_clients: [],
             debug_process_pid: 0,
+            debug_pending_watch_expressions: [],
             debug_launch_configs: [],
+            debug_launch_source_path: "",
             lsp_result_panel: lsp_result_panel_new("LSP Results"),
             lsp_call_hierarchy_state: "",
             lsp_call_hierarchy_state_title: "",
@@ -148,6 +170,8 @@ impl EditorController:
             lsp_hover_popup: lsp_hover_popup_hidden(),
             lsp_signature_popup: lsp_signature_popup_hidden(),
             lsp_location_stack: [],
+            workspace_symbol_index: [],
+            workspace_symbol_index_root: "",
             pending_workspace_edit_json: "",
             pending_workspace_edit_title: "",
             format_save_request_id: 0,
@@ -165,6 +189,10 @@ impl EditorController:
             wiki_task_filter: "open",
             wiki_task_query: "",
             wiki_property_vault_root: "",
+            wiki_property_schema_payload: "",
+            pending_inlay_hint_refresh: false,
+            inlay_hint_refresh_elapsed_ms: 0,
+            inlay_hint_refresh_delay_ms: 300,
             md_lsp_state: md_lsp_state_new("."),
             simple_lsp_state: simple_lsp_state_new(".")
         )
@@ -336,6 +364,10 @@ impl EditorController:
                 self.session.mode = editor_mode_normal()
                 self.commandline = ""
                 return self._shrink_lsp_selection_range()
+            if parsed.name == "selection-apply-all":
+                self.session.mode = editor_mode_normal()
+                self.commandline = ""
+                return self._apply_all_lsp_selection_ranges()
             if parsed.name == "document-symbols":
                 self.session.mode = editor_mode_normal()
                 self.commandline = ""
@@ -388,6 +420,14 @@ impl EditorController:
                 self.session.mode = editor_mode_normal()
                 self.commandline = ""
                 return self._request_active_lsp_action("signature-help")
+            if parsed.name == "signature-next":
+                self.session.mode = editor_mode_normal()
+                self.commandline = ""
+                return self._select_signature_overload(1)
+            if parsed.name == "signature-prev":
+                self.session.mode = editor_mode_normal()
+                self.commandline = ""
+                return self._select_signature_overload(0 - 1)
             if parsed.name == "signature-dismiss":
                 self.session.mode = editor_mode_normal()
                 self.commandline = ""
@@ -427,6 +467,7 @@ impl EditorController:
             if parsed.name == "inlay-hints":
                 self.session.mode = editor_mode_normal()
                 self.commandline = ""
+                self._cancel_pending_inlay_hint_refresh()
                 return self._request_active_lsp_action("inlay-hints")
             if parsed.name == "code-lens":
                 self.session.mode = editor_mode_normal()
@@ -484,6 +525,10 @@ impl EditorController:
                 self.session.mode = editor_mode_normal()
                 self.commandline = ""
                 return self._wiki_template_picker(parsed.payload)
+            if parsed.name == "wiki-embed-insert":
+                self.session.mode = editor_mode_normal()
+                self.commandline = ""
+                return self._wiki_embed_insert(parsed.payload)
             if parsed.name == "attachment-insert":
                 self.session.mode = editor_mode_normal()
                 self.commandline = ""
@@ -520,6 +565,10 @@ impl EditorController:
                 self.session.mode = editor_mode_normal()
                 self.commandline = ""
                 return self._wiki_vault_set_property(parsed.payload)
+            if parsed.name == "wiki-vault-property-review":
+                self.session.mode = editor_mode_normal()
+                self.commandline = ""
+                return self._wiki_vault_property_review(parsed.payload)
             if parsed.name == "wiki-property-diagnostics":
                 self.session.mode = editor_mode_normal()
                 self.commandline = ""
@@ -863,6 +912,8 @@ impl EditorController:
             return self._expand_lsp_selection_range()
         if command_name == "selection-shrink":
             return self._shrink_lsp_selection_range()
+        if command_name == "selection-apply-all":
+            return self._apply_all_lsp_selection_ranges()
         if command_name == "document-symbols":
             return self._request_active_lsp_action("document-symbols")
         if command_name == "prepare-rename":
@@ -889,6 +940,10 @@ impl EditorController:
             return self._request_active_formatting_save("range-formatting")
         if command_name == "signature-help":
             return self._request_active_lsp_action("signature-help")
+        if command_name == "signature-next":
+            return self._select_signature_overload(1)
+        if command_name == "signature-prev":
+            return self._select_signature_overload(0 - 1)
         if command_name == "signature-dismiss":
             return self._dismiss_lsp_signature_popup()
         if command_name == "document-links":
@@ -910,6 +965,7 @@ impl EditorController:
         if command_name == "semantic-tokens":
             return self._request_active_lsp_action("semantic-tokens")
         if command_name == "inlay-hints":
+            self._cancel_pending_inlay_hint_refresh()
             return self._request_active_lsp_action("inlay-hints")
         if command_name == "code-lens":
             return self._request_active_lsp_action("code-lens")
@@ -969,6 +1025,8 @@ impl EditorController:
             return self._wiki_template_insert(command_payload)
         if command_name == "template-picker":
             return self._wiki_template_picker(command_payload)
+        if command_name == "wiki-embed-insert":
+            return self._wiki_embed_insert(command_payload)
         if command_name == "attachment-insert":
             return self._wiki_attachment_insert(command_payload)
         if command_name == "attachment-picker":
@@ -987,6 +1045,8 @@ impl EditorController:
             return self._wiki_set_property(command_payload)
         if command_name == "wiki-vault-property-set":
             return self._wiki_vault_set_property(command_payload)
+        if command_name == "wiki-vault-property-review":
+            return self._wiki_vault_property_review(command_payload)
         if command_name == "wiki-property-diagnostics":
             return self._wiki_property_diagnostics(command_payload)
         if command_name == "wiki-tags":
@@ -1174,6 +1234,7 @@ impl EditorController:
         val launched = editor_debug_dap_client_launch(dap, launch_config)
         dap = launched.0
         self.debug_dap_client = dap
+        self.debug_dap_clients.push(dap)
         self.debug_status = "starting"
         self.status_msg = "debug adapter: " + editor_debug_launch_config_name(launch_config)
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
@@ -1201,10 +1262,11 @@ impl EditorController:
             editor_debug_process_start_simple_adapter(process_pid)
         else:
             val init_json = "{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\",\"arguments\":{\"adapterID\":\"simple\"}}"
-            val launch_json = "{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":{\"program\":\"" + program + "\",\"cwd\":\".\"}}"
+            val launch_json = "{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":" + editor_debug_launch_config_dap_arguments(launch_config) + "}"
             editor_debug_process_write_frame(process_pid, init_json)
             editor_debug_process_write_frame(process_pid, launch_json)
         self.debug_dap_client = dap
+        self.debug_dap_clients.push(dap)
         self.debug_process_pid = process_pid
         self.debug_status = "starting"
         self.status_msg = "debug process adapter: " + editor_debug_launch_config_name(launch_config)
@@ -1219,6 +1281,7 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
         val doc = self.session.active_document()
         val program = if doc == nil or doc.path() == "" then extension_debug_adapter_program(adapter) else: doc.path()
+        self.debug_launch_source_path = _editor_find_launch_json(program)
         self.debug_launch_configs = _editor_debug_launch_configs_for_doc(program, adapter_id)
         self.wiki_panel = _editor_debug_launch_config_panel(self.debug_launch_configs)
         self._show_wiki_panel("debug launch configs: " + self.debug_launch_configs.len().to_text())
@@ -1234,6 +1297,8 @@ impl EditorController:
         if index >= self.debug_launch_configs.len():
             index = self.debug_launch_configs.len() - 1
         val config = self.debug_launch_configs[index]
+        if editor_debug_launch_config_is_compound(config):
+            return self._debug_start_compound_launch_config(config)
         val config_debug_type = editor_debug_launch_config_debug_type(config)
         self.extension_host.activate_language(config_debug_type)
         val adapter = self.extension_host.find_debug_adapter(config_debug_type)
@@ -1248,8 +1313,53 @@ impl EditorController:
         val launched = editor_debug_dap_client_launch(dap, config)
         dap = launched.0
         self.debug_dap_client = dap
+        self.debug_dap_clients.push(dap)
         self.debug_status = "starting"
         self.status_msg = "debug adapter: " + editor_debug_launch_config_name(config)
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _debug_start_compound_launch_config(compound_config: EditorDebugLaunchConfig) -> EditorAction:
+        val launch_path = self.debug_launch_source_path
+        if launch_path == "":
+            self.status_msg = "debug compound source not found: " + editor_debug_launch_config_name(compound_config)
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        val content = rt_file_read_text(launch_path) ?? ""
+        val workspace = _editor_workspace_dir_from_launch_json(launch_path)
+        val doc = self.session.active_document()
+        val program = if doc == nil then "" else: doc.path()
+        val member_names = editor_debug_launch_config_program(compound_config).split("|")
+        val all_configs = editor_debug_launch_configs_from_json(content)
+        var member_configs: [EditorDebugLaunchConfig] = []
+        for member_name in member_names:
+            for candidate in all_configs:
+                if editor_debug_launch_config_name(candidate) == member_name.trim():
+                    var selected = editor_debug_launch_config_with_program(candidate, program)
+                    member_configs.push(editor_debug_resolve_launch_config(selected, workspace, program))
+        if member_configs.len() == 0:
+            self.status_msg = "debug compound empty: " + editor_debug_launch_config_name(compound_config)
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        var aggregate = self.debug_dap_client
+        aggregate.start()
+        for config in member_configs:
+            val config_debug_type = editor_debug_launch_config_debug_type(config)
+            self.extension_host.activate_language(config_debug_type)
+            val adapter = self.extension_host.find_debug_adapter(config_debug_type)
+            if extension_debug_adapter_id(adapter) == "":
+                self.status_msg = "debug adapter not found: " + config_debug_type
+                return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+            self.debug_registry = editor_debug_registry_start(self.debug_registry, config)
+            var dap = EditorDebugDapClient.new()
+            dap.start()
+            val initialized = editor_debug_dap_client_initialize(dap)
+            dap = initialized.0
+            val launched = editor_debug_dap_client_launch(dap, config)
+            dap = launched.0
+            self.debug_dap_clients.push(dap)
+            for frame in dap.send_buffer:
+                aggregate.send_buffer.push(frame)
+        self.debug_dap_client = aggregate
+        self.debug_status = "starting"
+        self.status_msg = "debug compound: " + editor_debug_launch_config_name(compound_config) + " (" + member_configs.len().to_text() + " sessions)"
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _debug_show_session() -> EditorAction:
@@ -1285,9 +1395,15 @@ impl EditorController:
         if editor_debug_session_id(session) != session_id:
             self.status_msg = "debug session not found: " + session_id.to_text()
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        self._debug_activate_client_for_session(session_id)
         self.debug_status = editor_debug_session_status(session)
         self._show_debug_session_panel("debug session: " + editor_debug_session_id(session).to_text())
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _debug_activate_client_for_session(session_id: i64):
+        val index = session_id - 1
+        if index >= 0 and index < self.debug_dap_clients.len():
+            self.debug_dap_client = self.debug_dap_clients[index]
 
     me _show_keyboard_shortcuts() -> EditorAction:
         self.wiki_panel = _editor_keyboard_shortcuts_panel(default_keybindings())
@@ -1322,6 +1438,7 @@ impl EditorController:
             self.status_msg = "no debug session"
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
         self.debug_registry = editor_debug_add_watch(self.debug_registry, editor_debug_session_id(session), expression)
+        self._debug_queue_watch_evaluate(expression)
         self._show_debug_session_panel("watch added: " + expression)
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
@@ -1338,6 +1455,27 @@ impl EditorController:
             self.debug_dap_client = dap
         self._show_debug_session_panel("debug evaluate: " + expression)
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _debug_queue_watch_evaluate(expression: text):
+        var dap = self.debug_dap_client
+        if not dap.running:
+            return
+        val requested = editor_debug_dap_client_evaluate(dap, expression, _editor_debug_active_frame_id(editor_debug_first_session(self.debug_registry)))
+        dap = requested.0
+        self.debug_dap_client = dap
+        self.debug_pending_watch_expressions.push(expression)
+
+    me _debug_refresh_watches() -> EditorAction:
+        val session = editor_debug_first_session(self.debug_registry)
+        if editor_debug_session_id(session) == 0:
+            self.status_msg = "no debug session"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        var refreshed = 0
+        for watch in session.watches:
+            self._debug_queue_watch_evaluate(watch.expression)
+            refreshed = refreshed + 1
+        self.status_msg = "debug watches refreshed: " + refreshed.to_text()
+        EditorAction(redraw: refreshed > 0, quit: false, status_msg: self.status_msg)
 
     me _debug_update_watch_result(expression: text, value: text, status: text) -> EditorAction:
         val session = editor_debug_first_session(self.debug_registry)
@@ -1406,7 +1544,14 @@ impl EditorController:
             self._show_debug_session_panel("debug variables: Locals")
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
         if command == "evaluate":
-            self.debug_registry = editor_debug_console_append(self.debug_registry, editor_debug_session_id(session), "evaluate-result", editor_debug_evaluate_result_from_dap_response(response_json))
+            val value = editor_debug_evaluate_result_from_dap_response(response_json)
+            if self.debug_pending_watch_expressions.len() > 0:
+                val expression = self.debug_pending_watch_expressions[0]
+                self.debug_pending_watch_expressions = _editor_text_list_without_first(self.debug_pending_watch_expressions)
+                self.debug_registry = editor_debug_update_watch(self.debug_registry, editor_debug_session_id(session), expression, value, "ok")
+                self._show_debug_session_panel("watch refreshed: " + expression)
+                return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+            self.debug_registry = editor_debug_console_append(self.debug_registry, editor_debug_session_id(session), "evaluate-result", value)
             self._show_debug_session_panel("debug evaluate result")
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
         self.status_msg = "debug response ignored: " + command
@@ -1428,6 +1573,10 @@ impl EditorController:
         self.debug_registry = editor_debug_set_status(self.debug_registry, editor_debug_session_id(session), status)
         self.debug_status = status
         self._show_debug_session_panel(editor_debug_dap_event_summary(event_json))
+        if status == "paused":
+            val event_status = self.status_msg
+            self._debug_refresh_watches()
+            self.status_msg = event_status
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _debug_set_exception_filters(filters: [text]) -> EditorAction:
@@ -1597,8 +1746,17 @@ impl EditorController:
         if editor_debug_session_id(session) == 0:
             self.status_msg = "no debug session"
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        var dap = self.debug_dap_client
+        if dap.running:
+            val requested = editor_debug_dap_client_disconnect(dap)
+            dap = requested.0
         self.debug_registry = editor_debug_registry_terminate(self.debug_registry, editor_debug_session_id(session))
-        self.debug_dap_client = editor_debug_dap_stop_process_pid(self.debug_process_pid)
+        if self.debug_process_pid > 0:
+            self.debug_dap_client = editor_debug_dap_stop_process_pid(self.debug_process_pid)
+        else:
+            dap.running = false
+            self.debug_dap_client = dap
+        self._debug_store_client_for_session(editor_debug_session_id(session), self.debug_dap_client)
         self.debug_process_pid = 0
         self.debug_status = "terminated"
         self.status_msg = "debug terminated"
@@ -1612,14 +1770,25 @@ impl EditorController:
         self.debug_registry = editor_debug_registry_restart(self.debug_registry, editor_debug_session_id(session))
         var dap = self.debug_dap_client
         dap.start()
+        val restarted = editor_debug_dap_client_restart(dap)
+        dap = restarted.0
         val initialized = editor_debug_dap_client_initialize(dap)
         dap = initialized.0
         val launched = editor_debug_dap_client_launch(dap, editor_debug_session_config(session))
         dap = launched.0
         self.debug_dap_client = dap
+        self._debug_store_client_for_session(editor_debug_session_id(session), dap)
         self.debug_status = "restarting"
         self.status_msg = "debug restart"
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _debug_store_client_for_session(session_id: i64, dap: EditorDebugDapClient):
+        val index = session_id - 1
+        if index < 0:
+            return
+        while self.debug_dap_clients.len() <= index:
+            self.debug_dap_clients.push(EditorDebugDapClient.new())
+        self.debug_dap_clients[index] = dap
 
     me _show_debug_session_panel(message: text):
         self.wiki_panel = _editor_debug_session_panel(editor_debug_first_session(self.debug_registry))
@@ -1693,6 +1862,33 @@ impl EditorController:
         self.wiki_template_query = query
         self.wiki_panel = wiki_panel_with_rows("Templates", _editor_template_picker_rows(folder, target_path, title, date, query))
         self._show_wiki_panel("templates: " + self.wiki_panel.rows.len().to_text())
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _wiki_embed_insert(payload: text) -> EditorAction:
+        var target_path = _editor_payload_part(payload, 0)
+        val embed_source = _editor_payload_part(payload, 1)
+        val alias = _editor_payload_part(payload, 2)
+        val active_doc = self.session.active_document()
+        if target_path == "" and active_doc != nil:
+            target_path = active_doc.path()
+        if target_path == "" or embed_source == "":
+            self.status_msg = "missing target or embed path"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        val embed_target = _editor_note_embed_target(embed_source)
+        val embed = _editor_wiki_note_embed(embed_target, alias)
+        val buffer = self.session.active_buffer()
+        if active_doc != nil and buffer != nil and active_doc.path() == target_path:
+            buffer.insert_at_cursor(embed + "\n")
+            self.session.update_active_buffer(buffer)
+            self.status_msg = "inserted embed: " + embed_target
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        val existing = rt_file_read_text(target_path) ?? ""
+        val sep = if existing == "" or existing.ends_with("\n") then "" else: "\n"
+        val ok = rt_file_write_text(target_path, existing + sep + embed + "\n")
+        if not ok:
+            self.status_msg = "failed to insert embed"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        self.status_msg = "inserted embed: " + embed_target
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _wiki_attachment_insert(payload: text) -> EditorAction:
@@ -1957,27 +2153,48 @@ impl EditorController:
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _wiki_vault_set_property(payload: text) -> EditorAction:
-        val root = _editor_payload_part(payload, 0)
-        val key = _editor_payload_part(payload, 1).trim()
-        val value = _editor_payload_part(payload, 2).trim()
-        if root == "" or key == "":
+        val parsed = _editor_parse_vault_property_payload(payload)
+        if parsed.root == "" or parsed.key == "":
             self.status_msg = "missing vault root or property key"
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
-        self.wiki_property_vault_root = root
+        self.wiki_property_vault_root = parsed.root
         var changed_count = 0
-        val files = rt_dir_walk(root)
+        val files = rt_dir_walk(parsed.root)
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
+            if not _editor_vault_property_path_selected(file, parsed.selected_paths):
+                continue
             val existing = rt_file_read_text(file) ?? ""
-            val next = _editor_markdown_property_content(existing, key, value)
+            val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
             if next != existing:
                 if rt_file_write_text(file, next):
                     changed_count = changed_count + 1
                     self._refresh_open_document_from_disk_batch(file, next)
-        val index = md_wiki_index_documents(_editor_markdown_vault_documents(root))
-        self.wiki_panel = wiki_panel_from_properties(_editor_wiki_properties_for_key(index, key))
+        val index = md_wiki_index_documents(_editor_markdown_vault_documents(parsed.root))
+        self.wiki_panel = wiki_panel_from_properties(_editor_wiki_properties_for_key(index, parsed.key))
         self._show_wiki_panel("vault property set: " + changed_count.to_text())
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _wiki_vault_property_review(payload: text) -> EditorAction:
+        val parsed = _editor_parse_vault_property_payload(payload)
+        if parsed.root == "" or parsed.key == "":
+            self.status_msg = "missing vault root or property key"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        self.wiki_property_vault_root = parsed.root
+        var rows: [WikiPanelRow] = []
+        val files = rt_dir_walk(parsed.root)
+        for file in files:
+            if not _editor_is_markdown_path(file):
+                continue
+            if not _editor_vault_property_path_selected(file, parsed.selected_paths):
+                continue
+            val existing = rt_file_read_text(file) ?? ""
+            val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
+            if next != existing:
+                rows.push(WikiPanelRow(icon: "review", label: _editor_path_basename(file), detail: parsed.key + " -> " + parsed.value, path: file, line: 0))
+        self.wiki_panel = wiki_panel_with_rows("Property Review", rows)
+        self._show_wiki_panel("vault property review: " + rows.len().to_text())
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _wiki_property_diagnostics(payload: text) -> EditorAction:
@@ -1990,6 +2207,7 @@ impl EditorController:
         if rule.key == "":
             self.status_msg = "missing property schema"
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        self.wiki_property_schema_payload = payload
         val diags = md_check_frontmatter_property_schema(buffer.to_text(), doc.path(), [rule])
         self.diagnostic_store.set_diagnostics(doc.path(), diags)
         self.diagnostics_panel = diagnostics_panel_from_store(self.diagnostic_store)
@@ -2112,9 +2330,37 @@ impl EditorController:
             self.status_msg = response.error_text
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
         self.lsp_result_panel = lsp_result_panel_from_response("workspace-symbols", response)
+        val indexed_rows = self._workspace_symbol_index_rows(query)
+        if indexed_rows.len() > 0:
+            self.lsp_result_panel = LspResultPanel(
+                title: "Workspace Symbols",
+                rows: indexed_rows,
+                selected: 0,
+                scroll_offset: 0,
+                pending: false,
+                request_id: response.id
+            )
         self._refresh_lsp_hover_popup("workspace-symbols")
         self._show_lsp_result_panel("workspace-symbols results")
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _rebuild_workspace_symbol_index(root: text) -> EditorAction:
+        self.workspace_symbol_index_root = root
+        self.workspace_symbol_index = _editor_workspace_symbol_index(root)
+        self.status_msg = "workspace symbols indexed: " + self.workspace_symbol_index.len().to_text()
+        EditorAction(redraw: false, quit: false, status_msg: self.status_msg)
+
+    fn _workspace_symbol_index_rows(query: text) -> [LspResultRow]:
+        var rows: [LspResultRow] = []
+        val clean_query = query.trim().lower()
+        if clean_query == "":
+            return rows
+        for row in self.workspace_symbol_index:
+            if row.label.lower().contains(clean_query):
+                rows.push(row)
+                if rows.len() >= 100:
+                    return rows
+        rows
 
     me _dismiss_lsp_hover_popup() -> EditorAction:
         self.lsp_hover_popup = lsp_hover_popup_hidden()
@@ -2124,6 +2370,20 @@ impl EditorController:
     me _dismiss_lsp_signature_popup() -> EditorAction:
         self.lsp_signature_popup = lsp_signature_popup_hidden()
         self.status_msg = "signature dismissed"
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _select_signature_overload(delta: i64) -> EditorAction:
+        if self.lsp_result_panel.title != "Signature Help" or self.lsp_result_panel.rows.len() == 0:
+            self.status_msg = "no signature overload"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        var selected = self.lsp_result_panel.selected + delta
+        if selected < 0:
+            selected = self.lsp_result_panel.rows.len() - 1
+        if selected >= self.lsp_result_panel.rows.len():
+            selected = 0
+        self.lsp_result_panel = lsp_result_panel_select(self.lsp_result_panel, selected)
+        self._refresh_lsp_hover_popup("signature-help")
+        self.status_msg = "signature overload " + (self.lsp_result_panel.selected + 1).to_text() + "/" + self.lsp_result_panel.rows.len().to_text()
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _request_active_formatting_preview(kind: text) -> EditorAction:
@@ -2202,8 +2462,36 @@ impl EditorController:
         self.pending_workspace_edit_json = edit_json
         self.pending_workspace_edit_title = title
         self.lsp_result_panel = lsp_result_panel_workspace_edit_preview(title, edit_json, 0)
+        self._mark_workspace_edit_preview_conflicts()
         self._refresh_lsp_hover_popup("workspace-edit-preview")
         self._show_lsp_result_panel(title + " preview: " + self.lsp_result_panel.rows.len().to_text() + " edits")
+
+    me _mark_workspace_edit_preview_conflicts():
+        var rows: [LspResultRow] = []
+        for row in self.lsp_result_panel.rows:
+            if row.path != "" and not rt_file_exists(row.path):
+                rows.push(LspResultRow(
+                    icon: "conflict",
+                    label: row.label,
+                    detail: row.detail + " [conflict: missing file]",
+                    path: row.path,
+                    line: row.line,
+                    col: row.col,
+                    command_name: row.command_name,
+                    command_payload: row.command_payload,
+                    depth: row.depth,
+                    expanded: row.expanded
+                ))
+            else:
+                rows.push(row)
+        self.lsp_result_panel = LspResultPanel(
+            title: self.lsp_result_panel.title,
+            rows: rows,
+            selected: self.lsp_result_panel.selected,
+            scroll_offset: self.lsp_result_panel.scroll_offset,
+            pending: self.lsp_result_panel.pending,
+            request_id: self.lsp_result_panel.request_id
+        )
 
     me _confirm_pending_workspace_edit() -> EditorAction:
         if self.pending_workspace_edit_json == "":
@@ -2290,19 +2578,38 @@ impl EditorController:
 
     me _code_action_result_panel(request_id: i64) -> LspResultPanel:
         var rows: [LspResultRow] = []
+        var last_group = ""
         var i = 0
         while i < self.code_actions.len():
             val action = self.code_actions[i]
-            var detail = action.kind
-            if action.edit_json != "":
-                detail = if detail == "" then "edit" else: detail + " edit"
-            if action.command != "":
-                detail = if detail == "" then "command" else: detail + " command"
-            rows.push(LspResultRow(icon: "action", label: action.title, detail: detail, path: "", line: 0, col: 0, command_name: "quickfix-apply", command_payload: i.to_text(), depth: 0, expanded: false))
+            if _editor_code_action_matches_filter(action, self.code_action_filter):
+                if self.code_action_group_by_kind and action.kind != last_group:
+                    last_group = action.kind
+                    val group_label = if last_group == "" then "Other" else: last_group
+                    rows.push(LspResultRow(icon: "group", label: group_label, detail: _editor_code_action_group_count(self.code_actions, self.code_action_filter, action.kind).to_text() + " actions", path: "", line: 0, col: 0, command_name: "", command_payload: "", depth: 0, expanded: true))
+                var detail = action.kind
+                if action.edit_json != "":
+                    detail = if detail == "" then "edit" else: detail + " edit"
+                if action.command != "":
+                    detail = if detail == "" then "command" else: detail + " command"
+                val depth = if self.code_action_group_by_kind then 1 else: 0
+                rows.push(LspResultRow(icon: "action", label: action.title, detail: detail, path: "", line: 0, col: 0, command_name: "quickfix-apply", command_payload: i.to_text(), depth: depth, expanded: false))
             i = i + 1
         if rows.len() == 0:
             rows.push(LspResultRow(icon: "empty", label: "No code actions", detail: "", path: "", line: 0, col: 0, command_name: "", command_payload: "", depth: 0, expanded: false))
         LspResultPanel(title: "Code Actions", rows: rows, selected: 0, scroll_offset: 0, pending: false, request_id: request_id)
+
+    me _filter_code_actions(filter: text) -> EditorAction:
+        self.code_action_filter = if filter == "" then "all" else: filter
+        self.lsp_result_panel = self._code_action_result_panel(self.lsp_result_panel.request_id)
+        self.status_msg = "code actions filtered: " + self.code_action_filter
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _group_code_actions_by_kind() -> EditorAction:
+        self.code_action_group_by_kind = true
+        self.lsp_result_panel = self._code_action_result_panel(self.lsp_result_panel.request_id)
+        self.status_msg = "code actions grouped: kind"
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _refresh_lsp_hover_popup(kind: text):
         val buffer = self.session.active_buffer()
@@ -2351,10 +2658,33 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
         val end_line = _editor_parse_i64(_editor_payload_part(row.command_payload, 0), row.line)
         val end_col = _editor_parse_i64(_editor_payload_part(row.command_payload, 1), row.col)
-        buffer.set_selection_range(row.line, row.col, end_line, end_col)
+        buffer.set_primary_selection_range(row.line, row.col, end_line, end_col)
         buffer.move_cursor(row.line, row.col)
         self.session.update_active_buffer(buffer)
         self.status_msg = "selection range: " + (row.line + 1).to_text() + ":" + (row.col + 1).to_text() + "-" + (end_line + 1).to_text() + ":" + (end_col + 1).to_text()
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _apply_all_lsp_selection_ranges() -> EditorAction:
+        if self.lsp_result_panel.title != "Selection Ranges" or self.lsp_result_panel.rows.len() == 0:
+            self.status_msg = "no selection range"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        val buffer = self.session.active_buffer()
+        if buffer == nil:
+            self.status_msg = "no file open"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        buffer.clear_selection_range()
+        var applied = 0
+        var i = 0
+        while i < self.lsp_result_panel.rows.len():
+            val row = self.lsp_result_panel.rows[i]
+            if row.icon == "selection":
+                val end_line = _editor_parse_i64(_editor_payload_part(row.command_payload, 0), row.line)
+                val end_col = _editor_parse_i64(_editor_payload_part(row.command_payload, 1), row.col)
+                buffer.add_selection_range(row.line, row.col, end_line, end_col)
+                applied = applied + 1
+            i = i + 1
+        self.session.update_active_buffer(buffer)
+        self.status_msg = "selection ranges applied: " + applied.to_text()
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _expand_lsp_selection_range() -> EditorAction:
@@ -2463,10 +2793,14 @@ impl EditorController:
     me _dispatch_lsp_result_key(key: text) -> EditorAction:
         if key == "j":
             self.lsp_result_panel = lsp_result_panel_select(self.lsp_result_panel, self.lsp_result_panel.selected + 1)
+            if self.lsp_result_panel.title == "Signature Help":
+                self._refresh_lsp_hover_popup("signature-help")
             self.status_msg = "lsp result selected"
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
         if key == "k":
             self.lsp_result_panel = lsp_result_panel_select(self.lsp_result_panel, self.lsp_result_panel.selected - 1)
+            if self.lsp_result_panel.title == "Signature Help":
+                self._refresh_lsp_hover_popup("signature-help")
             self.status_msg = "lsp result selected"
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
         if key == "i":
@@ -2489,7 +2823,11 @@ impl EditorController:
             if self.lsp_result_panel.title == "Selection Ranges":
                 return self._apply_selected_lsp_selection_range()
             if self.lsp_result_panel.title == "Code Actions":
-                return self._apply_code_action_at(self.lsp_result_panel.selected)
+                val row = self.lsp_result_panel.rows[self.lsp_result_panel.selected]
+                if row.command_name == "quickfix-apply":
+                    return self._apply_code_action_at(row.command_payload.to_i64())
+                self.status_msg = "no quick fix selected"
+                return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
             return self._lsp_jump_selected()
         EditorAction(redraw: false, quit: false, status_msg: self.status_msg)
 
@@ -2653,6 +2991,8 @@ impl EditorController:
         if self.simple_lsp_state.running:
             self.simple_lsp_state = simple_lsp_notify_workspace_folder(self.simple_lsp_state, path, name, added)
             notified = true
+        if added:
+            self._rebuild_workspace_symbol_index(path)
         if notified:
             self.status_msg = "lsp workspace folder notified"
         else:
@@ -2847,8 +3187,20 @@ impl EditorController:
         self.file_watcher.watch_parent_directory(doc.path())
         self._poll_lsp_diagnostics()
 
+    me _configure_file_watcher_policy(poll_interval_ms: i64, ignore_globs: [text]) -> EditorAction:
+        self.file_watcher.configure_policy(poll_interval_ms, ignore_globs)
+        self.status_msg = "file watcher policy updated"
+        EditorAction(redraw: false, quit: false, status_msg: self.status_msg)
+
     me _poll_file_watcher() -> EditorAction:
         val events = self.file_watcher.check_events()
+        self._apply_file_watch_events(events)
+
+    me _poll_file_watcher_after(elapsed_ms: i64) -> EditorAction:
+        val events = self.file_watcher.check_events_debounced(elapsed_ms)
+        self._apply_file_watch_events(events)
+
+    me _apply_file_watch_events(events: [FileWatchEvent]) -> EditorAction:
         if events.len() == 0:
             return EditorAction(redraw: false, quit: false, status_msg: self.status_msg)
         var i = 0
@@ -2882,8 +3234,28 @@ impl EditorController:
         elif (doc.language_id == "simple" or doc.language_id == "shell") and self.simple_lsp_state.running:
             self.simple_lsp_state = simple_lsp_change_active(self.simple_lsp_state, doc.path(), content)
         if should_refresh_inlay_hints:
-            self._refresh_active_inlay_hints_after_change()
+            self._schedule_inlay_hint_refresh()
         self._poll_lsp_diagnostics()
+
+    me _schedule_inlay_hint_refresh():
+        self.pending_inlay_hint_refresh = true
+        self.inlay_hint_refresh_elapsed_ms = 0
+        self.lsp_result_panel = lsp_result_panel_pending("inlay-hints", 0)
+
+    me _cancel_pending_inlay_hint_refresh():
+        self.pending_inlay_hint_refresh = false
+        self.inlay_hint_refresh_elapsed_ms = 0
+
+    me _poll_inlay_hint_refresh_after(elapsed_ms: i64) -> EditorAction:
+        if not self.pending_inlay_hint_refresh:
+            return EditorAction(redraw: false, quit: false, status_msg: self.status_msg)
+        self.inlay_hint_refresh_elapsed_ms = self.inlay_hint_refresh_elapsed_ms + elapsed_ms
+        if self.inlay_hint_refresh_elapsed_ms < self.inlay_hint_refresh_delay_ms:
+            return EditorAction(redraw: false, quit: false, status_msg: self.status_msg)
+        self._cancel_pending_inlay_hint_refresh()
+        self._refresh_active_inlay_hints_after_change()
+        self.status_msg = "inlay hints refreshed"
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _refresh_active_inlay_hints_after_change():
         val response = self._request_active_lsp("inlay-hints")
@@ -3039,7 +3411,7 @@ impl EditorController:
         var i = 0
         while i < self.session.documents.len():
             var doc = self.session.documents[i]
-            if doc.doc_id().int_value() == active_id.int_value() and doc.has_markdown_state():
+            if doc.doc_id().int_value() == active_id.int_value():
                 var entries: [OutlineEntry] = []
                 for row in self.lsp_result_panel.rows:
                     if row.icon == "symbol":
@@ -3047,6 +3419,9 @@ impl EditorController:
                         entries.push(OutlineEntry(level: level, title: row.label, line: row.line))
                 if entries.len() > 0:
                     doc.set_markdown_outline_entries(entries)
+                    var layout = self.session.dock_layout
+                    layout.show_right("md-outline")
+                    self.session.dock_layout = layout
                     changed = true
             docs.push(doc)
             i = i + 1
@@ -3569,6 +3944,9 @@ fn _editor_debug_launch_configs_for_doc(program: text, debug_type: text) -> [Edi
         if editor_debug_launch_config_matches_type(config, debug_type):
             var selected = editor_debug_launch_config_with_program(config, program)
             resolved.push(editor_debug_resolve_launch_config(selected, workspace, program))
+    val compounds = editor_debug_compound_configs_from_json(content)
+    for compound in compounds:
+        resolved.push(editor_debug_compound_as_launch_config(compound))
     if resolved.len() == 0:
         val selected = editor_debug_select_launch_config(content, debug_type, program)
         resolved.push(editor_debug_resolve_launch_config(selected, workspace, program))
@@ -3601,6 +3979,19 @@ fn _editor_debug_sessions_panel(registry: EditorDebugRegistry) -> WikiPanel:
 
 fn _editor_debug_session_panel(session: EditorDebugSession) -> WikiPanel:
     editor_debug_session_wiki_panel(session)
+
+fn _editor_debug_active_frame_id(session: EditorDebugSession) -> i64:
+    if session.stack_frames.len() > 0:
+        return session.stack_frames[0].id
+    1
+
+fn _editor_text_list_without_first(values: [text]) -> [text]:
+    var out: [text] = []
+    var i = 1
+    while i < values.len():
+        out.push(values[i])
+        i = i + 1
+    out
 
 fn _editor_keyboard_shortcuts_panel(config: KeybindingConfig) -> WikiPanel:
     var rows: [WikiPanelRow] = []
@@ -3783,6 +4174,26 @@ fn _editor_parse_property_payload(payload: text) -> EditorPropertyPayload:
         )
     EditorPropertyPayload(key: payload.trim(), value: "")
 
+fn _editor_parse_vault_property_payload(payload: text) -> EditorVaultPropertyPayload:
+    EditorVaultPropertyPayload(
+        root: _editor_payload_part(payload, 0).trim(),
+        key: _editor_payload_part(payload, 1).trim(),
+        value: _editor_payload_part(payload, 2).trim(),
+        selected_paths: _editor_payload_csv(_editor_payload_part(payload, 3))
+    )
+
+fn _editor_vault_property_path_selected(path: text, selected_paths: [text]) -> bool:
+    if selected_paths.len() == 0:
+        return true
+    val basename = _editor_path_basename(path)
+    var i = 0
+    while i < selected_paths.len():
+        val selected = selected_paths[i]
+        if selected == path or selected == basename or path.ends_with("/" + selected):
+            return true
+        i = i + 1
+    false
+
 fn _editor_property_schema_rule_from_payload(payload: text) -> MdPropertySchemaRule:
     val key = _editor_payload_part(payload, 0).trim()
     val required_text = _editor_payload_part(payload, 1).trim()
@@ -3858,6 +4269,19 @@ fn _editor_attachment_embed(attachment_path: text, label: text) -> text:
     if label != "":
         return "![" + label + "](" + attachment_path + ")"
     "![[{attachment_path}]]"
+
+fn _editor_wiki_note_embed(target: text, alias: text) -> text:
+    if alias != "" and alias != target:
+        return "![[" + target + "|" + alias + "]]"
+    "![[" + target + "]]"
+
+fn _editor_note_embed_target(path: text) -> text:
+    var name = _editor_path_basename(path)
+    if name.ends_with(".markdown"):
+        name = name.slice(0, name.len() - 9)
+    elif name.ends_with(".md"):
+        name = name.slice(0, name.len() - 3)
+    name
 
 fn _editor_store_attachment_for_note(target_path: text, source_path: text, storage_dir: text) -> text:
     val data = rt_file_read_bytes(source_path) ?? []
@@ -4146,6 +4570,60 @@ fn _editor_markdown_vault_documents(root: text) -> [MdWikiDocument]:
             docs.push(md_wiki_document(file, rt_file_read_text(file) ?? ""))
     docs
 
+fn _editor_workspace_symbol_index(root: text) -> [LspResultRow]:
+    var rows: [LspResultRow] = []
+    val files = rt_dir_walk(root)
+    for file in files:
+        if not file.ends_with(".spl"):
+            continue
+        val content = rt_file_read_text(file) ?? ""
+        val lines = content.split("\n")
+        var line_idx = 0
+        for line in lines:
+            val name = _editor_workspace_symbol_name(line)
+            if name != "":
+                rows.push(LspResultRow(icon: "symbol", label: name, detail: file + ":" + (line_idx + 1).to_text(), path: file, line: line_idx, col: _editor_workspace_symbol_col(line, name), command_name: "", command_payload: "", depth: 0, expanded: false))
+                if rows.len() >= 500:
+                    return rows
+            line_idx = line_idx + 1
+    rows
+
+fn _editor_workspace_symbol_name(line: text) -> text:
+    var trimmed = line.trim()
+    if trimmed.starts_with("pub "):
+        trimmed = trimmed.slice(4, trimmed.len()).trim()
+    elif trimmed.starts_with("pri "):
+        trimmed = trimmed.slice(4, trimmed.len()).trim()
+    elif trimmed.starts_with("pub("):
+        val close_idx = _editor_find_text(trimmed, ")")
+        if close_idx >= 0 and close_idx + 1 < trimmed.len():
+            trimmed = trimmed.slice(close_idx + 1, trimmed.len()).trim()
+    val kinds = ["fn", "me", "class", "struct", "enum", "trait", "val", "var"]
+    for kind in kinds:
+        val prefix = kind + " "
+        if trimmed.starts_with(prefix):
+            return _editor_workspace_symbol_name_after(trimmed.slice(prefix.len(), trimmed.len()).trim())
+    ""
+
+fn _editor_workspace_symbol_name_after(rest: text) -> text:
+    var name = ""
+    var i = 0
+    while i < rest.len():
+        val ch = rest.char_at(i)
+        if ch == "(" or ch == ":" or ch == " " or ch == "\t" or ch == "=":
+            return name
+        name = name + ch
+        i = i + 1
+    name
+
+fn _editor_workspace_symbol_col(line: text, name: text) -> i64:
+    if name == "":
+        return 0
+    val idx = _editor_find_text(line, name)
+    if idx < 0:
+        return 0
+    idx
+
 fn _editor_vault_search_cache_path(root: text) -> text:
     if root.ends_with("/"):
         return root + ".simple-vault-search.cache"
@@ -4206,6 +4684,22 @@ fn ctrl_handle_insert_key(buffer: EditorBuffer, key: text) -> InsertKeyResult:
             buffer.insert_at_cursor(key)
         return InsertKeyResult(message: "-- INSERT --", exit_insert: false)
     InsertKeyResult(message: "-- INSERT --", exit_insert: false)
+
+fn _editor_code_action_matches_filter(action: EditorCodeAction, filter: text) -> bool:
+    if filter == "" or filter == "all":
+        return true
+    if filter == "quickfix":
+        return action.kind == "quickfix" or action.kind.starts_with("quickfix")
+    if filter == "source":
+        return action.kind.starts_with("source")
+    action.kind.contains(filter)
+
+fn _editor_code_action_group_count(actions: [EditorCodeAction], filter: text, kind: text) -> i64:
+    var count = 0
+    for action in actions:
+        if action.kind == kind and _editor_code_action_matches_filter(action, filter):
+            count = count + 1
+    count
 
 fn ctrl_handle_command_key(key: text, commandline: text) -> CommandKeyResult:
     if key == "\x1b":

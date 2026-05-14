@@ -60,6 +60,7 @@ fn gui_shell_run(session: EditSession):
     while state.ctrl.is_running():
         state.ctrl._refresh_lsp_results()
         state.ctrl._poll_file_watcher()
+        state.ctrl._poll_inlay_hint_refresh_after(100)
         state.ctrl._poll_debug_dap_client()
         val frame = gui_shell_render_frame(state)
         gui_shell_present_frame(frame)
@@ -82,6 +83,7 @@ fn gui_shell_run_sdl(session: EditSession):
     while state.ctrl.is_running():
         state.ctrl._refresh_lsp_results()
         state.ctrl._poll_file_watcher()
+        state.ctrl._poll_inlay_hint_refresh_after(100)
         state.ctrl._poll_debug_dap_client()
         val frame = gui_shell_render_frame(state)
         gui_shell_present_frame_sdl(window, frame)
@@ -146,6 +148,9 @@ fn gui_shell_handle_event(state: GuiShellState, event_kind: text, event_data: te
     elif event_kind == "wiki-vault-property-submit":
         val vault_prop_state = _gui_wiki_vault_property_submit_state(state, event_data)
         state = vault_prop_state
+    elif event_kind == "wiki-vault-property-review":
+        val vault_prop_review_state = _gui_wiki_vault_property_review_state(state, event_data)
+        state = vault_prop_review_state
     elif event_kind == "task-toggle":
         val task_state = _gui_task_toggle_state(state, event_data)
         state = task_state
@@ -167,6 +172,9 @@ fn gui_shell_handle_event(state: GuiShellState, event_kind: text, event_data: te
     elif event_kind == "quick-switch-filter":
         val quick_switch_state = _gui_quick_switch_filter_state(state, event_data)
         state = quick_switch_state
+    elif event_kind == "quick-switch-insert":
+        val quick_switch_insert_state = _gui_quick_switch_insert_state(state, event_data)
+        state = quick_switch_insert_state
     elif event_kind == "daily-note-create":
         val daily_state = _gui_daily_note_create_state(state, event_data)
         state = daily_state
@@ -216,6 +224,16 @@ fn gui_shell_handle_event(state: GuiShellState, event_kind: text, event_data: te
         val action_sig = ctrl_sig._dismiss_lsp_signature_popup()
         ctrl_sig.status_msg = action_sig.status_msg
         state.ctrl = ctrl_sig
+    elif event_kind == "lsp-signature-next":
+        var ctrl_sig_next = state.ctrl
+        val action_sig_next = ctrl_sig_next._select_signature_overload(1)
+        ctrl_sig_next.status_msg = action_sig_next.status_msg
+        state.ctrl = ctrl_sig_next
+    elif event_kind == "lsp-signature-prev":
+        var ctrl_sig_prev = state.ctrl
+        val action_sig_prev = ctrl_sig_prev._select_signature_overload(0 - 1)
+        ctrl_sig_prev.status_msg = action_sig_prev.status_msg
+        state.ctrl = ctrl_sig_prev
     elif event_kind == "workspace-edit-confirm":
         val workspace_confirm_state = _gui_workspace_edit_action_state(state, "rename-confirm")
         state = workspace_confirm_state
@@ -234,6 +252,12 @@ fn gui_shell_handle_event(state: GuiShellState, event_kind: text, event_data: te
     elif event_kind == "inlay-hint-click":
         val hint_state = _gui_inlay_hint_click_state(state, event_data)
         state = hint_state
+    elif event_kind == "code-actions-filter":
+        val code_action_filter_state = _gui_code_actions_filter_state(state, event_data)
+        state = code_action_filter_state
+    elif event_kind == "code-actions-group":
+        val code_action_group_state = _gui_code_actions_group_state(state)
+        state = code_action_group_state
     state
 
 fn _gui_callout_fold_toggle_state(state: GuiShellState) -> GuiShellState:
@@ -294,6 +318,20 @@ fn _gui_code_lens_run_state(state: GuiShellState, data: text) -> GuiShellState:
     state.ctrl = ctrl
     state
 
+fn _gui_code_actions_filter_state(state: GuiShellState, filter: text) -> GuiShellState:
+    var ctrl = state.ctrl
+    val action = ctrl._filter_code_actions(filter)
+    ctrl.status_msg = action.status_msg
+    state.ctrl = ctrl
+    state
+
+fn _gui_code_actions_group_state(state: GuiShellState) -> GuiShellState:
+    var ctrl = state.ctrl
+    val action = ctrl._group_code_actions_by_kind()
+    ctrl.status_msg = action.status_msg
+    state.ctrl = ctrl
+    state
+
 fn _gui_inlay_hint_click_state(state: GuiShellState, data: text) -> GuiShellState:
     var ctrl = state.ctrl
     val comma = data.index_of(",")
@@ -324,9 +362,16 @@ fn _gui_editor_hover_state(state: GuiShellState, data: text) -> GuiShellState:
         state.ctrl = ctrl
         return state
     val line_text = data.slice(0, comma)
-    val col_text = data.slice(comma + 1, data.len())
+    val rest = data.slice(comma + 1, data.len())
+    val second_comma = rest.index_of(",")
+    val col_text = if second_comma >= 0 then rest.slice(0, second_comma) else: rest
+    val elapsed_text = if second_comma >= 0 then rest.slice(second_comma + 1, rest.len()) else: ""
     val line = line_text.to_i64()
     val col = col_text.to_i64()
+    if elapsed_text != "" and elapsed_text.to_i64() < ctrl.config.hover_delay_ms:
+        ctrl.status_msg = "hover delayed"
+        state.ctrl = ctrl
+        return state
     if ctrl.lsp_hover_popup.visible and ctrl.lsp_hover_popup.line == line and ctrl.lsp_hover_popup.col == col:
         ctrl.status_msg = "hover unchanged"
         state.ctrl = ctrl
@@ -436,6 +481,15 @@ fn _gui_quick_switch_filter_state(state: GuiShellState, query: text) -> GuiShell
     state.ctrl = ctrl
     state
 
+fn _gui_quick_switch_insert_state(state: GuiShellState, note_path: text) -> GuiShellState:
+    var ctrl = state.ctrl
+    val doc = ctrl.session.active_document()
+    val target_path = if doc == nil then "" else: doc.path()
+    val action = ctrl._execute_palette_command("wiki-embed-insert", target_path + "|" + note_path + "|" + _gui_shell_basename_without_markdown_ext(note_path))
+    ctrl.status_msg = action.status_msg
+    state.ctrl = ctrl
+    state
+
 fn _gui_daily_note_create_state(state: GuiShellState, payload: text) -> GuiShellState:
     var ctrl = state.ctrl
     val action = ctrl._execute_palette_command("daily-note-create", payload)
@@ -509,6 +563,13 @@ fn _gui_wiki_property_submit_state(state: GuiShellState, data: text) -> GuiShell
 fn _gui_wiki_vault_property_submit_state(state: GuiShellState, data: text) -> GuiShellState:
     var ctrl = state.ctrl
     val action = ctrl._execute_palette_command("wiki-vault-property-set", data)
+    ctrl.status_msg = action.status_msg
+    state.ctrl = ctrl
+    state
+
+fn _gui_wiki_vault_property_review_state(state: GuiShellState, data: text) -> GuiShellState:
+    var ctrl = state.ctrl
+    val action = ctrl._execute_palette_command("wiki-vault-property-review", data)
     ctrl.status_msg = action.status_msg
     state.ctrl = ctrl
     state
@@ -811,7 +872,7 @@ fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
             lang = doc.language_id
             path = doc.path()
             diagnostics = state.ctrl.diagnostic_store.diagnostics_for(path)
-        editor_html = gui_render_editor_area_with_diagnostics(buffer, lang, buffer.viewport, path, diagnostics)
+        editor_html = gui_render_editor_area_with_diagnostics_and_hover_delay(buffer, lang, buffer.viewport, path, diagnostics, state.ctrl.config.hover_delay_ms)
     else:
         editor_html = "<div class=\"empty\">No file open</div>"
     var right_panel_html = ""
@@ -819,7 +880,7 @@ fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
     if state.ctrl.session.dock_layout.active_right == "wiki-panel":
         var wiki_content = ""
         if state.ctrl.wiki_panel.title == "Properties":
-            wiki_content = gui_render_wiki_property_form_html_with_root(state.ctrl.wiki_panel, state.ctrl.wiki_property_vault_root)
+            wiki_content = gui_render_wiki_property_form_html_with_root_and_schema(state.ctrl.wiki_panel, state.ctrl.wiki_property_vault_root, state.ctrl.wiki_property_schema_payload)
         else:
             if state.ctrl.wiki_panel.title == "Tasks":
                 wiki_content = "<div class=\"task-tools\"><input class=\"task-query\" data-event=\"task-query\" value=\"" + _gui_shell_escape_html(state.ctrl.wiki_task_query) + "\"><button type=\"button\" data-event=\"task-filter\" data-filter=\"open\">Open</button><button type=\"button\" data-event=\"task-filter\" data-filter=\"done\">Done</button><button type=\"button\" data-event=\"task-filter\" data-filter=\"all\">All</button><button type=\"button\" data-event=\"task-batch\" data-value=\"done\">Mark done</button><button type=\"button\" data-event=\"task-batch\" data-value=\"open\">Mark open</button><span class=\"task-count\">" + state.ctrl.wiki_panel.rows.len().to_text() + " tasks</span></div>"
@@ -870,6 +931,8 @@ fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
                 var row_controls = ""
                 if state.ctrl.wiki_panel.title == "Templates":
                     row_controls = "<button type=\"button\" data-event=\"template-insert\" data-value=\"" + _gui_shell_escape_html(row.detail) + "\">Insert</button>"
+                elif state.ctrl.wiki_panel.title == "Quick Switch":
+                    row_controls = "<button type=\"button\" data-event=\"quick-switch-insert\" data-value=\"" + _gui_shell_escape_html(row.detail) + "\">Embed</button>"
                 elif state.ctrl.wiki_panel.title == "Attachment Picker" and row.detail != "":
                     row_controls = "<button type=\"button\" data-event=\"attachment-insert\" data-value=\"" + _gui_shell_escape_html(row.detail) + "\">Insert</button>"
                 wiki_content = wiki_content + "<div class=\"wiki-row" + selected_class + "\" data-row=\"" + wpi.to_text() + "\" data-path=\"" + _gui_escape_html(row.path) + "\" data-line=\"" + row.line.to_text() + "\">" + _gui_escape_html(line) + row_controls + "</div>"
@@ -884,7 +947,7 @@ fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
         right_panel_html = "<div class=\"problems-pane\">" + problem_content + "</div>"
     elif doc_frame != nil and doc_frame.md_state != nil:
         if doc_frame.md_state.preview_visible:
-            val preview_lines = preview_pane_render(doc_frame.md_state.preview, 50)
+            val preview_lines = preview_pane_render_for_editor(doc_frame.md_state.preview, state.ctrl.session.active_buffer(), 50)
             var preview_content = ""
             var pli = 0
             while pli < preview_lines.len():
@@ -921,7 +984,7 @@ fn gui_render_lsp_hover_popup_html(popup: LspHoverPopup) -> text:
 fn gui_render_lsp_signature_popup_html(popup: LspSignaturePopup) -> text:
     if not popup.visible:
         return ""
-    "<div class=\"lsp-signature-popup\" data-line=\"" + popup.line.to_text() + "\" data-col=\"" + popup.col.to_text() + "\" data-active-parameter=\"" + _gui_shell_escape_html(popup.active_parameter) + "\"><button type=\"button\" class=\"lsp-signature-close\" data-event=\"lsp-signature-dismiss\">x</button><div class=\"lsp-signature-label\">" + _gui_render_signature_label_html(popup.label, popup.active_parameter) + "</div><div class=\"lsp-signature-detail\">" + _gui_shell_escape_html(popup.detail) + "</div></div>"
+    "<div class=\"lsp-signature-popup\" data-line=\"" + popup.line.to_text() + "\" data-col=\"" + popup.col.to_text() + "\" data-active-parameter=\"" + _gui_shell_escape_html(popup.active_parameter) + "\"><div class=\"lsp-signature-controls\"><button type=\"button\" class=\"lsp-signature-prev\" data-event=\"lsp-signature-prev\">Prev</button><button type=\"button\" class=\"lsp-signature-next\" data-event=\"lsp-signature-next\">Next</button><button type=\"button\" class=\"lsp-signature-close\" data-event=\"lsp-signature-dismiss\">x</button></div><div class=\"lsp-signature-label\">" + _gui_render_signature_label_html(popup.label, popup.active_parameter) + "</div><div class=\"lsp-signature-detail\">" + _gui_shell_escape_html(popup.detail) + "</div></div>"
 
 fn _gui_render_signature_label_html(label: text, active_parameter: text) -> text:
     if active_parameter == "":
@@ -979,6 +1042,14 @@ fn _gui_shell_basename(path: text) -> text:
     if last >= 0 and last + 1 < path.len():
         return path.slice(last + 1, path.len())
     path
+
+fn _gui_shell_basename_without_markdown_ext(path: text) -> text:
+    var name = _gui_shell_basename(path)
+    if name.ends_with(".markdown"):
+        name = name.slice(0, name.len() - 9)
+    elif name.ends_with(".md"):
+        name = name.slice(0, name.len() - 3)
+    name
 
 fn _gui_payload_part(payload: text, index: i64) -> text:
     var current = 0
@@ -1049,6 +1120,8 @@ fn gui_render_lsp_navigation_tools_html(ctrl: EditorController) -> text:
 fn gui_render_lsp_result_rows_html(panel: LspResultPanel) -> text:
     val lsp_lines = lsp_result_panel_render(panel, 50)
     var html = ""
+    if panel.title == "Code Actions":
+        html = html + "<div class=\"code-action-tools\"><button type=\"button\" data-event=\"code-actions-filter\" data-filter=\"all\">All</button><button type=\"button\" data-event=\"code-actions-filter\" data-filter=\"quickfix\">Quick fixes</button><button type=\"button\" data-event=\"code-actions-filter\" data-filter=\"source\">Source actions</button><button type=\"button\" data-event=\"code-actions-group\" data-group=\"kind\">Group kind</button></div>"
     var lpi = 0
     while lpi < lsp_lines.len():
         val row = panel.rows[lpi]
@@ -1056,9 +1129,19 @@ fn gui_render_lsp_result_rows_html(panel: LspResultPanel) -> text:
         var row_controls = ""
         if row.command_name != "":
             row_controls = "<div class=\"lsp-command-form\"><input class=\"lsp-command-name\" value=\"" + _gui_shell_escape_html(row.command_name) + "\"><input class=\"lsp-command-args\" value=\"" + _gui_shell_escape_html(row.command_payload) + "\"><button type=\"button\" data-event=\"code-lens-run\" data-value=\"" + _gui_shell_escape_html(row.command_name + "|" + row.command_payload) + "\">Run</button></div>"
-        html = html + "<div class=\"lsp-result-row" + selected_class + "\" data-event=\"lsp-result-click\" data-row=\"" + lpi.to_text() + "\">" + _gui_shell_escape_html(lsp_lines[lpi]) + row_controls + "</div>"
+        elif (row.icon == "edit" or row.icon == "conflict") and (panel.title == "Formatting Preview" or panel.title == "Range Formatting Preview" or panel.title == "Rename Preview" or panel.title == "Workspace Edit Preview"):
+            val conflict_badge = if row.icon == "conflict" then "<span class=\"workspace-edit-conflict\">Conflict</span>" else: ""
+            row_controls = "<div class=\"workspace-edit-diff\"><span class=\"diff-before\">" + _gui_shell_escape_html(_gui_workspace_edit_selection_label(row.detail)) + "</span><span class=\"diff-after\">" + _gui_shell_escape_html(row.command_payload) + "</span>" + conflict_badge + "</div>"
+        val conflict_class = if row.icon == "conflict" then " conflict" else: ""
+        html = html + "<div class=\"lsp-result-row" + selected_class + conflict_class + "\" data-event=\"lsp-result-click\" data-row=\"" + lpi.to_text() + "\">" + _gui_shell_escape_html(lsp_lines[lpi]) + row_controls + "</div>"
         lpi = lpi + 1
     html
+
+fn _gui_workspace_edit_selection_label(detail: text) -> text:
+    val idx = detail.index_of(" -> ") ?? -1
+    if idx < 0:
+        return detail
+    detail.slice(0, idx)
 
 # SDL-backed presentation path.
 # Delegates to gui_sdl_present_frame from gui_sdl_bridge.spl.

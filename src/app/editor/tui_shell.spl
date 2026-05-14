@@ -6,6 +6,7 @@
 use std.tui.terminal.*
 use std.tui.style.*
 use std.editor.services.diagnostics.*
+use std.editor.extensions.builtin.md_edit_assist.*
 use std.editor.view.diagnostics_panel.*
 use std.editor.view.lsp_result_panel.*
 use std.editor.view.wiki_panel.*
@@ -30,6 +31,7 @@ fn editor_tui_run(session: EditSession):
 
         ctrl._refresh_lsp_results()
         ctrl._poll_file_watcher()
+        ctrl._poll_inlay_hint_refresh_after(100)
         ctrl._poll_debug_dap_client()
         _tui_render_frame(ctrl, zones, size)
         terminal_flush()
@@ -100,7 +102,7 @@ fn _tui_render_frame(ctrl: EditorController, zones: LayoutZones, size: TerminalS
             _tui_render_diagnostics_panel(ctrl.diagnostics_panel, rz.x, zones.editor_y, rz.w, zones.editor_h)
         elif doc_rz != nil and doc_rz.md_state != nil:
             if ctrl.session.dock_layout.active_right == "md-preview":
-                _tui_render_preview_pane(doc_rz.md_state.preview, rz.x, zones.editor_y, rz.w, zones.editor_h)
+                _tui_render_preview_pane(doc_rz.md_state.preview, ctrl.session.active_buffer(), rz.x, zones.editor_y, rz.w, zones.editor_h)
             elif ctrl.session.dock_layout.active_right == "md-outline":
                 _tui_render_outline_pane(doc_rz.md_state.outline, rz.x, zones.editor_y, rz.w, zones.editor_h)
 
@@ -135,7 +137,7 @@ fn _tui_render_single_pane(buffer: EditorBuffer, x: i64, y: i64, w: i64, h: i64,
                 if visible_start < line.len():
                     val end_idx = if visible_end < line.len() then visible_end else: line.len()
                     val visible_line = line.slice(visible_start, end_idx)
-                    terminal_write(tui_render_line_with_semantic_tokens_at_theme(buffer, file_row, visible_line, visible_start, theme))
+                    terminal_write(tui_render_editor_line_at_theme(buffer, file_row, visible_line, visible_start, theme, path))
             else:
                 terminal_write("~")
         else:
@@ -192,7 +194,7 @@ fn tui_render_line_with_semantic_tokens_theme(buffer: EditorBuffer, row: i64, li
 
 
 fn tui_render_line_with_semantic_tokens_at_theme(buffer: EditorBuffer, row: i64, line: text, source_col_offset: i64, theme: text) -> text:
-    if buffer != nil and buffer.selection_range.active and row >= buffer.selection_range.start_row and row <= buffer.selection_range.end_row:
+    if buffer != nil and buffer.line_has_selection(row):
         return tui_render_line_with_selection(buffer, row, line, source_col_offset)
     if buffer == nil or buffer.semantic_tokens.len() == 0:
         return line
@@ -216,19 +218,53 @@ fn tui_render_line_with_semantic_tokens_at_theme(buffer: EditorBuffer, row: i64,
         out = out + "\x1b[0m"
     out
 
+fn tui_render_editor_line_at_theme(buffer: EditorBuffer, row: i64, line: text, source_col_offset: i64, theme: text, path: text) -> text:
+    if _tui_is_markdown_path(path) and buffer != nil and row == buffer.cursor_row:
+        val table_line = buffer.line_at(row)
+        if md_table_is_row(table_line) and not md_table_is_separator_row(table_line):
+            return tui_render_markdown_table_focus_line(buffer, row, line, source_col_offset)
+    tui_render_line_with_semantic_tokens_at_theme(buffer, row, line, source_col_offset, theme)
+
+fn tui_render_markdown_table_focus_line(buffer: EditorBuffer, row: i64, line: text, source_col_offset: i64) -> text:
+    val table_line = buffer.line_at(row)
+    val active_col = md_table_column_at(table_line, buffer.cursor_col)
+    val starts = md_table_cell_start_columns(table_line)
+    if active_col < 0 or active_col >= starts.len():
+        return line
+    val cell_start = starts[active_col]
+    var cell_end = cell_start
+    while cell_end < table_line.len() and table_line.char_at(cell_end) != "|":
+        cell_end = cell_end + 1
+    while cell_end > cell_start and table_line.char_at(cell_end - 1) == " ":
+        cell_end = cell_end - 1
+    var out = ""
+    var highlighted = false
+    var i = 0
+    while i < line.len():
+        val source_col = source_col_offset + i
+        val in_cell = source_col >= cell_start and source_col < cell_end
+        if in_cell and not highlighted:
+            out = out + "\x1b[7m"
+            highlighted = true
+        elif highlighted and not in_cell:
+            out = out + "\x1b[0m"
+            highlighted = false
+        out = out + line.char_at(i)
+        i = i + 1
+    if highlighted:
+        out = out + "\x1b[0m"
+    out
+
+fn _tui_is_markdown_path(path: text) -> bool:
+    path.ends_with(".md") or path.ends_with(".markdown")
+
 fn tui_render_line_with_selection(buffer: EditorBuffer, row: i64, line: text, source_col_offset: i64) -> text:
-    var start_col = 0
-    var end_col = 999999
-    if row == buffer.selection_range.start_row:
-        start_col = buffer.selection_range.start_col
-    if row == buffer.selection_range.end_row:
-        end_col = buffer.selection_range.end_col
     var out = ""
     var col = 0
     var selected = false
     while col < line.len():
         val source_col = source_col_offset + col
-        val is_selected = source_col >= start_col and source_col < end_col
+        val is_selected = buffer.position_selected(row, source_col)
         if is_selected != selected:
             if selected:
                 out = out + "\x1b[0m"
@@ -563,7 +599,7 @@ fn _tui_render_pane_content(buffer: EditorBuffer, x: i64, y: i64, w: i64, h: i64
                 if vis_start < line.len():
                     val end_idx = if vis_end < line.len() then vis_end else: line.len()
                     val visible_line = line.slice(vis_start, end_idx)
-                    terminal_write(tui_render_line_with_semantic_tokens_at_theme(buffer, file_row, visible_line, vis_start, theme))
+                    terminal_write(tui_render_editor_line_at_theme(buffer, file_row, visible_line, vis_start, theme, path))
             else:
                 terminal_write("~")
         else:
@@ -681,7 +717,7 @@ fn _group_active_path(session: EditSession, group_idx: i64) -> text:
     session.documents[doc_idx].path()
 
 
-fn _tui_render_preview_pane(preview: PreviewPane, x: i64, y: i64, w: i64, h: i64):
+fn _tui_render_preview_pane(preview: PreviewPane, buffer: EditorBuffer, x: i64, y: i64, w: i64, h: i64):
     var sep_row = 0
     while sep_row < h:
         terminal_move_cursor(y + sep_row, x)
@@ -697,7 +733,7 @@ fn _tui_render_preview_pane(preview: PreviewPane, x: i64, y: i64, w: i64, h: i64
         hpad = hpad + "-"
         hp = hp + 1
     terminal_write("\x1b[1;36m" + header + hpad + "\x1b[0m")
-    val lines = preview_pane_render(preview, h - 1)
+    val lines = preview_pane_render_for_editor(preview, buffer, h - 1)
     var row = 0
     while row < h - 1:
         terminal_move_cursor(y + 1 + row, content_x)

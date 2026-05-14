@@ -39,6 +39,18 @@ describe "editor debug session model":
         expect(selected.program).to_equal("src/main.spl")
         expect(selected.args[0]).to_equal("--debug")
 
+    it "parses VSCode compound launch configurations":
+        val json = "{\"version\":\"0.2.0\",\"configurations\":[{\"name\":\"API\",\"type\":\"simple\",\"request\":\"launch\",\"program\":\"api.spl\"},{\"name\":\"Worker\",\"type\":\"simple\",\"request\":\"launch\",\"program\":\"worker.spl\"}],\"compounds\":[{\"name\":\"All\",\"configurations\":[\"API\",\"Worker\"],\"preLaunchTask\":\"build all\"}]}"
+        val compounds = editor_debug_compound_configs_from_json(json)
+        expect(compounds.len()).to_equal(1)
+        expect(editor_debug_compound_config_name(compounds[0])).to_equal("All")
+        expect(editor_debug_compound_config_member_names(compounds[0])[0]).to_equal("API")
+        expect(editor_debug_compound_config_member_names(compounds[0])[1]).to_equal("Worker")
+        val launch_config = editor_debug_compound_as_launch_config(compounds[0])
+        expect(editor_debug_launch_config_is_compound(launch_config)).to_equal(true)
+        expect(launch_config.program).to_equal("API|Worker")
+        expect(launch_config.pre_launch_task).to_equal("build all")
+
     it "resolves VSCode launch variables against workspace and active file":
         val config = EditorDebugLaunchConfig(
             name: "Vars",
@@ -59,6 +71,10 @@ describe "editor debug session model":
         expect(resolved.args[2]).to_equal("/repo/build")
         expect(resolved.pre_launch_task).to_equal("build main.spl")
         expect(resolved.env[0].value).to_equal("/repo/src")
+        val dap_args = editor_debug_launch_config_dap_arguments(resolved)
+        expect(dap_args.contains("\"args\":[\"/repo/src\",\"main.spl\",\"/repo/build\"]")).to_equal(true)
+        expect(dap_args.contains("\"preLaunchTask\":\"build main.spl\"")).to_equal(true)
+        expect(dap_args.contains("\"env\":{\"SIMPLE_LIB\":\"/repo/src\"}")).to_equal(true)
 
     it "tracks sessions breakpoints conditions hit counts and watches":
         var registry = editor_debug_registry_new()
@@ -214,23 +230,39 @@ describe "editor debug session model":
 
     it "buffers DAP client requests and polls inbound messages":
         var client = EditorDebugDapClient.new()
-        expect(client.stack_trace(1)).to_equal(0)
-        client.start()
-        expect(client.initialize()).to_equal(1)
-        expect(client.launch(editor_debug_launch_config_default("/tmp/main.spl"))).to_equal(2)
-        expect(client.continue_thread(1)).to_equal(3)
-        expect(client.pause_thread(1)).to_equal(4)
-        expect(client.step_thread("stepIn", 1)).to_equal(5)
-        expect(client.set_exception_breakpoints(["caught", "uncaught"])).to_equal(6)
+        val cold_stack = editor_debug_dap_client_stack_trace(client, 1)
+        expect(cold_stack.1).to_equal(0)
+        client = editor_debug_dap_client_start(client)
+        val initialized = editor_debug_dap_client_initialize(client)
+        client = initialized.0
+        expect(initialized.1).to_equal(1)
+        val launched = editor_debug_dap_client_launch(client, editor_debug_launch_config_default("/tmp/main.spl"))
+        client = launched.0
+        expect(launched.1).to_equal(2)
+        val continued = editor_debug_dap_client_continue_thread(client, 1)
+        client = continued.0
+        expect(continued.1).to_equal(3)
+        val paused = editor_debug_dap_client_pause_thread(client, 1)
+        client = paused.0
+        expect(paused.1).to_equal(4)
+        val stepped = editor_debug_dap_client_step_thread(client, "stepIn", 1)
+        client = stepped.0
+        expect(stepped.1).to_equal(5)
+        val exception_filters = editor_debug_dap_client_set_exception_breakpoints(client, ["caught", "uncaught"])
+        client = exception_filters.0
+        expect(exception_filters.1).to_equal(6)
         expect(client.send_buffer.len()).to_equal(6)
         expect(client.send_buffer[0].contains("Content-Length:")).to_equal(true)
         expect(client.send_buffer[0].contains("\"command\":\"initialize\"")).to_equal(true)
+        expect(client.send_buffer[1].contains("\"program\":\"/tmp/main.spl\"")).to_equal(true)
         expect(client.send_buffer[4].contains("\"command\":\"stepIn\"")).to_equal(true)
         expect(client.pending_requests.len()).to_equal(6)
 
-        client.inject_message("{\"seq\":1003,\"type\":\"response\",\"request_seq\":3,\"success\":true,\"command\":\"continue\"}")
-        client.inject_message("{\"seq\":2002,\"type\":\"event\",\"event\":\"stopped\",\"body\":{\"reason\":\"step\",\"threadId\":1}}")
-        val messages = client.poll_messages()
+        client = editor_debug_dap_client_inject_message(client, "{\"seq\":1003,\"type\":\"response\",\"request_seq\":3,\"success\":true,\"command\":\"continue\"}")
+        client = editor_debug_dap_client_inject_message(client, "{\"seq\":2002,\"type\":\"event\",\"event\":\"stopped\",\"body\":{\"reason\":\"step\",\"threadId\":1}}")
+        val polled = editor_debug_dap_client_poll_messages(client)
+        client = polled.0
+        val messages = polled.1
         expect(messages.len()).to_equal(2)
         expect(messages[0].message_type).to_equal("response")
         expect(messages[0].command).to_equal("continue")

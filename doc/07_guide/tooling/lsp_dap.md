@@ -389,19 +389,56 @@ vim.keymap.set('n', '<leader>dt', dapui.toggle)
 
 ### DAP Features
 
-- **Breakpoints** -- Line, conditional, function breakpoints
+- **Breakpoints** -- Line, conditional, and hit-count breakpoints
 - **Step Execution** -- Step over (F10), step into (F11), step out (Shift+F11/F12)
 - **Stack Traces** -- View call stack with file/line information
 - **Variable Inspection** -- Inspect local and global variables
 - **Pause/Continue** -- Pause and resume execution at any time
+- **Exception Stops** -- Stop on Simple `panic` or `raise` lines when exception filters are enabled
+- **Debug Console** -- Evaluate in-scope names at the current stopped line
+- **Launch Configurations** -- Use `.vscode/launch.json` entries, args, env, pre-launch task metadata, and compounds
 
 ### Debugging Workflow
 
-1. Set breakpoints in your `.spl` file
-2. Start debugger (F5)
-3. Use step controls to walk through code
-4. Inspect variables in the Variables pane
-5. Use the debug console/REPL to evaluate expressions
+1. Set breakpoints in your `.spl` file.
+2. Start debugger with F5 or choose a launch entry from `.vscode/launch.json`.
+3. Use continue, pause, restart, terminate, and step controls to walk through code.
+4. Inspect stack frames, scopes, and variables in the Debug Session panel.
+5. Use the debug console/REPL to evaluate expressions at the current stopped line.
+
+### Launch Configuration
+
+Simple accepts VS Code-style launch entries for the Simple DAP adapter:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run current file",
+      "type": "simple",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "args": ["--mode=interpreter"],
+      "env": {
+        "SIMPLE_LIB": "src"
+      },
+      "preLaunchTask": "simple check"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Run app and worker",
+      "configurations": ["Run current file", "Run worker"]
+    }
+  ]
+}
+```
+
+Supported substitutions are `${workspaceFolder}`, `${file}`, `${fileDirname}`,
+and `${fileBasename}`. Compound launch entries start one debug session per
+referenced configuration.
 
 ### Common Debugging Scenarios
 
