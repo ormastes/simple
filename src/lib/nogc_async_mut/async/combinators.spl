@@ -3,8 +3,8 @@
 # Helper functions for working with futures and tasks.
 
 use std.async.future.{Future}
+use std.async.poll.{Poll}
 use std.async.task.{Task}
-use std.async.ffi.{async_join, async_select}
 
 fn spawn<T>(f: fn() -> Future<T>) -> Task:
     """Convenience function to spawn task.
@@ -26,8 +26,14 @@ fn join<T>(futures: [Future<T>]) -> Future<[T]>:
     Returns:
         Future with all results
     """
-    val state = async_join(futures.map(\f: f.state))
-    Future(state: state)
+    var results: [T] = []
+    for future in futures:
+        match future.poll():
+            case Poll.Ready(value):
+                results.push(value)
+            case Poll.Pending:
+                return Future.pending<[T]>()
+    Future.from_value(results)
 
 fn select<T>(futures: [Future<T>]) -> Future<T>:
     """Wait for first future to complete.
@@ -38,6 +44,10 @@ fn select<T>(futures: [Future<T>]) -> Future<T>:
     Returns:
         Future with first result
     """
-    val state = async_select(futures.map(\f: f.state))
-    Future(state: state)
-
+    for future in futures:
+        match future.poll():
+            case Poll.Ready(value):
+                return Future.from_value(value)
+            case Poll.Pending:
+                pass
+    Future.pending<T>()

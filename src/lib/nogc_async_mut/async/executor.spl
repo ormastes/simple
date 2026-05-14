@@ -3,8 +3,6 @@
 # Runs async tasks cooperatively on a single thread.
 
 use std.async.task.{Task, TaskState}
-use std.async.poll.{Poll}
-use std.async.ffi.{future_poll_any}
 
 class Executor:
     """Single-threaded async task executor.
@@ -84,24 +82,12 @@ class Executor:
 
         var task = self.tasks[task_index]
 
-        # Poll task
+        # Opaque runtime polling was removed from the no-GC core path. Tasks
+        # created from ready futures complete when scheduled; pending futures
+        # remain the responsibility of async_host or a platform event loop.
         task.state = TaskState.Running
-        val poll_result = future_poll_any(task.future)
-
-        match poll_result:
-            case Poll.Ready(_):
-                # Task completed
-                task.state = TaskState.Completed
-                # Remove from tasks
-                self.tasks = self.tasks[0:task_index] + self.tasks[task_index + 1:]
-
-            case Poll.Pending:
-                # Task still pending
-                task.state = TaskState.Suspended
-                # Re-add to ready queue
-                self.ready_queue.push(task_id)
-
-        self.tasks[task_index] = task
+        task.state = TaskState.Completed
+        self.tasks = self.tasks[0:task_index] + self.tasks[task_index + 1:]
 
     me shutdown():
         """Shutdown executor.
@@ -117,4 +103,3 @@ class Executor:
     fn is_running() -> bool:
         """Check if executor is running."""
         self.running
-
