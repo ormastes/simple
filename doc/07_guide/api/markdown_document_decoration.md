@@ -102,6 +102,9 @@ Numbers.
 `@name` labels on the slide heading become CSS classes such as `md-css-title`
 in `md_document_render_ppt_html(content)`.
 
+For editing, `md_document_replace_ppt_page(content, index, new_content)` rewrites
+one slide body while preserving the surrounding `##` page boundaries.
+
 ## Spreadsheet Layout
 
 Use `layout: sheet`, `layout: excel`, or `layout: spreadsheet` for Excel-like
@@ -121,6 +124,10 @@ layout: excel
 `md_document_sheet_cells(content)` maps table cells to addresses like `A1` and
 `D2`. `md_document_render_sheet_html(content)` preserves raw formula metadata
 and renders calculated values.
+
+For editing, `md_document_replace_sheet_cell_value(content, address, value)`
+rewrites one Markdown table cell. Re-reading the sheet model recalculates formula
+cells such as `=B2+C2`.
 
 ## Script Embeds
 

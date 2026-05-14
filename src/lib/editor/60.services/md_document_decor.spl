@@ -126,6 +126,25 @@ fn md_document_render_ppt_html(content: text) -> text:
     html.push("</section>")
     html.join("")
 
+fn md_document_replace_ppt_page(content: text, slide_index: i64, new_content: text) -> text:
+    val lines = _mdd_split_lines(content)
+    val replacement = _mdd_trim_outer_blank_lines(_mdd_split_lines(new_content))
+    var result: [text] = []
+    var current_slide = 0
+    var skipping_target = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("## "):
+            current_slide = current_slide + 1
+            skipping_target = current_slide == slide_index
+            result.push(line)
+            if skipping_target:
+                for replacement_line in replacement:
+                    result.push(replacement_line)
+        elif not skipping_target:
+            result.push(line)
+    result.join("\n")
+
 fn md_document_render_paper_html(content: text) -> text:
     val decor = md_document_decor_parse(content)
     val body = _mdd_body_without_script_fences(md_document_body_without_decor(content))
@@ -196,6 +215,34 @@ fn md_document_render_sheet_html(content: text) -> text:
         html.push("</tr>")
     html.push("</table>")
     html.join("")
+
+fn md_document_replace_sheet_cell_value(content: text, address: text, value: text) -> text:
+    val target_row = _mdd_address_row(address)
+    val target_col = _mdd_address_col(address)
+    val lines = _mdd_split_lines(content)
+    var result: [text] = []
+    var table_row = 0
+    var in_table = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("|") and trimmed.ends_with("|"):
+            in_table = true
+            if _mdd_is_table_separator(trimmed):
+                result.push(line)
+            else:
+                table_row = table_row + 1
+                if table_row == target_row:
+                    var cells = _mdd_split_table_row(trimmed)
+                    if target_col > 0 and target_col <= cells.len():
+                        cells[target_col - 1] = value
+                    result.push(_mdd_join_table_row(cells))
+                else:
+                    result.push(line)
+        else:
+            if in_table:
+                in_table = false
+            result.push(line)
+    result.join("\n")
 
 fn md_document_script_embeds(content: text) -> [MdScriptEmbed]:
     val lines = _mdd_split_lines(md_document_body_without_decor(content))
@@ -286,6 +333,12 @@ fn _mdd_split_table_row(line: text) -> [text]:
         cells.push(tail)
     cells
 
+fn _mdd_join_table_row(cells: [text]) -> text:
+    var out = "|"
+    for cell in cells:
+        out = out + " " + cell.trim() + " |"
+    out
+
 fn _mdd_is_table_separator(line: text) -> bool:
     var non_marker = false
     var i = 0
@@ -332,6 +385,27 @@ fn _mdd_cell_raw(address: text, cells: [MdSheetCell]) -> text:
 
 fn _mdd_cell_address(row: i64, col: i64) -> text:
     _mdd_col_name(col) + row.to_text()
+
+fn _mdd_address_col(address: text) -> i64:
+    if address.len() == 0:
+        return 0
+    val col = address.char_at(0)
+    if col == "A":
+        return 1
+    if col == "B":
+        return 2
+    if col == "C":
+        return 3
+    if col == "D":
+        return 4
+    if col == "E":
+        return 5
+    0
+
+fn _mdd_address_row(address: text) -> i64:
+    if address.len() <= 1:
+        return 0
+    address.slice(1, address.len()).to_i64() ?? 0
 
 fn _mdd_col_name(col: i64) -> text:
     if col == 1:
