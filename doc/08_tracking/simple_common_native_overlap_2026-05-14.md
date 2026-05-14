@@ -134,6 +134,15 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   gap is still substantial: list traversal measured `532,769` Simple ops/ms
   (`0.09x` C, `0.06x` Rust), and list push remains dominated by append/growth
   overhead at `21,542` Simple ops/ms.
+- Typed word pushes now have the same conservative inline fast path as typed
+  byte pushes: when the array is slot-backed and has spare capacity, Cranelift
+  stores the tagged word and bumps `len` directly; capacity misses and
+  byte-packed arrays still fall back to the runtime grow helper. Disassembly of
+  `bench_list_push` shows the fast store in the loop with the helper call only
+  on the fallback branch. A one-sample rerun kept checksum parity and improved
+  list push to `135,428` Simple ops/ms (`0.04x` C, `0.09x` Rust); traversal was
+  `576,292` Simple ops/ms (`0.10x` C, `0.06x` Rust), and set-like membership
+  was `1,194` Simple ops/ms (`0.19x` C, `0.12x` Rust).
 
 ## Next Concrete Plugin Work
 

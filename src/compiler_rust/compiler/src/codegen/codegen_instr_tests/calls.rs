@@ -820,6 +820,52 @@ fn codegen_inline_typed_bytes_u8_push_compiles_with_grow_fallback() {
 }
 
 #[test]
+fn codegen_inline_typed_words_u32_push_compiles_with_grow_fallback() {
+    assert!(aot_compiles("inline_typed_words_u32_push", |f| {
+        let array = f.new_vreg();
+        let value = f.new_vreg();
+        let dest = f.new_vreg();
+        let ret = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: value,
+            value: 0x1_0000_0001,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_typed_words_u32_push"),
+            args: vec![array, value],
+        });
+        block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        ret
+    }));
+}
+
+#[test]
+fn codegen_inline_typed_words_u64_push_compiles_with_grow_fallback() {
+    assert!(aot_compiles("inline_typed_words_u64_push", |f| {
+        let array = f.new_vreg();
+        let value = f.new_vreg();
+        let dest = f.new_vreg();
+        let ret = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: value,
+            value: 0x1001,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_typed_words_u64_push"),
+            args: vec![array, value],
+        });
+        block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        ret
+    }));
+}
+
+#[test]
 fn codegen_inline_bytes_u64_le_at_does_not_emit_runtime_symbol() {
     let object = aot_object("inline_bytes_u64_le_at", |f| {
         let array = f.new_vreg();
