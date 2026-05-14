@@ -1,0 +1,331 @@
+# SCV three-way tree merge with conflicts as data.
+
+use app.io.mod (file_exists, file_read, file_delete, dir_walk)
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.scv.core.{scv_object_path, scv_chunk_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe}
+use std.scv.store.{scv_hash_text, scv_write_text, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op, scv_commit_tree}
+
+fn scv_tree_content(root: text, commit: text) -> text:
+    val tree = scv_commit_tree(root, commit)
+    if tree == "":
+        return ""
+    val path = scv_object_path(root, "trees", tree)
+    if file_exists(path):
+        file_read(path)
+    else:
+        ""
+
+fn scv_tree_line_for_path(tree_content: text, rel: text) -> text:
+    for line in tree_content.split("\n"):
+        if line.starts_with("{rel}|"):
+            return line
+    ""
+
+fn scv_tree_line_path(line: text) -> text:
+    val parts = line.split("|")
+    if parts.len() > 0:
+        parts[0]
+    else:
+        ""
+
+fn scv_tree_line_chunk_id(line: text) -> text:
+    val parts = line.split("|")
+    if parts.len() >= 3:
+        parts[2]
+    else:
+        ""
+
+fn scv_tree_line_size(line: text) -> text:
+    val parts = line.split("|")
+    if parts.len() >= 4:
+        parts[3]
+    else:
+        "0"
+
+fn scv_tree_line_with_path(line: text, rel: text) -> text:
+    val parts = line.split("|")
+    if parts.len() >= 5:
+        "{rel}|{parts[1]}|{parts[2]}|{parts[3]}|{parts[4]}"
+    else:
+        line
+
+fn scv_merge_tree_content_error(tree_content: text, label: text) -> text:
+    var seen_paths = ""
+    for line in tree_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() != 5:
+            return "ERROR bad {label} merge tree entry\n"
+        if not scv_worktree_path_safe(parts[0]):
+            return "ERROR unsafe {label} merge tree path: {parts[0]}\n"
+        if scv_line_set_contains(seen_paths, parts[0]):
+            return "ERROR duplicate {label} merge tree path: {parts[0]}\n"
+        seen_paths = seen_paths + parts[0] + "\n"
+    ""
+
+fn scv_tree_find_new_line_by_chunk(side_tree: text, base_tree: text, chunk: text) -> text:
+    if chunk == "":
+        return ""
+    for line in side_tree.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val rel = scv_tree_line_path(trimmed)
+        if scv_tree_line_chunk_id(trimmed) == chunk and scv_tree_line_for_path(base_tree, rel) == "":
+            return trimmed
+    ""
+
+fn scv_tree_find_old_line_by_chunk(base_tree: text, side_tree: text, chunk: text) -> text:
+    if chunk == "":
+        return ""
+    for line in base_tree.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val rel = scv_tree_line_path(trimmed)
+        if scv_tree_line_chunk_id(trimmed) == chunk and scv_tree_line_for_path(side_tree, rel) == "":
+            return trimmed
+    ""
+
+fn scv_add_paths_from_tree(tree_content: text, paths: text) -> text:
+    var out = paths
+    for line in tree_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val rel = scv_tree_line_path(trimmed)
+        if rel != "" and not scv_line_set_contains(out, rel):
+            out = out + rel + "\n"
+    out
+
+fn scv_write_conflict(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
+    val payload = "path: {rel}\nbase: {base_line}\nleft: {left_line}\nright: {right_line}\ntime_ms: {current_time_ms()}\n"
+    val id = scv_hash_text("conflict", payload)
+    scv_write_text(scv_object_path(root, "conflicts", id), payload)
+    id
+
+fn scv_lines_changed_positions(base_text: text, side_text: text) -> text:
+    val base_lines = base_text.split("\n")
+    val side_lines = side_text.split("\n")
+    if base_lines.len() != side_lines.len():
+        return "shape-mismatch\n"
+    var out = ""
+    var i = 0
+    while i < base_lines.len():
+        if base_lines[i] != side_lines[i]:
+            out = out + "{i}\n"
+        i = i + 1
+    out
+
+fn scv_syntax_line_node_hash(line_no: i64, line: text) -> text:
+    val payload = "grammar: fallback-line\nversion: builtin\nkind: line\nfield:\nchildren:\nline: {line_no}\nraw: {scv_hash_text(\"raw\", line)}\nsyntax: {scv_hash_text(\"syntax\", \"line:{line_no}:{line}\")}\nparse_status: ok\n"
+    scv_hash_text("syntax_node", payload)
+
+fn scv_syntax_node_changed_positions(base_text: text, side_text: text) -> text:
+    val base_lines = base_text.split("\n")
+    val side_lines = side_text.split("\n")
+    if base_lines.len() != side_lines.len():
+        return "shape-mismatch\n"
+    var out = ""
+    var i = 0
+    while i < base_lines.len():
+        val line_no = i + 1
+        if scv_syntax_line_node_hash(line_no, base_lines[i]) != scv_syntax_line_node_hash(line_no, side_lines[i]):
+            out = out + "{i}\n"
+        i = i + 1
+    out
+
+fn scv_line_changes_overlap(left_changes: text, right_changes: text) -> bool:
+    if left_changes == "shape-mismatch\n" or right_changes == "shape-mismatch\n":
+        return true
+    for line in left_changes.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "" and right_changes.contains("{trimmed}\n"):
+            return true
+    false
+
+fn scv_apply_line_side(base_text: text, side_text: text, side_changes: text) -> text:
+    val base_lines = base_text.split("\n")
+    val side_lines = side_text.split("\n")
+    var out = ""
+    var i = 0
+    while i < base_lines.len():
+        if i > 0:
+            out = out + "\n"
+        if side_changes.contains("{i}\n"):
+            out = out + side_lines[i]
+        else:
+            out = out + base_lines[i]
+        i = i + 1
+    out
+
+fn scv_write_merged_line_file(root: text, rel: text, content: text) -> text:
+    if not scv_worktree_path_safe(rel):
+        return ""
+    val chunk = scv_hash_text("sha256", content)
+    scv_write_text(scv_chunk_path(root, chunk), content)
+    val payload = "path: {rel}\nchunk: {chunk}\nsize: {content.len()}\nmtime: 0\n"
+    val file_id = scv_hash_text("file", payload)
+    scv_write_text(scv_object_path(root, "files", file_id), payload)
+    "{rel}|{file_id}|{chunk}|{content.len()}|0"
+
+fn scv_try_syntax_node_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
+    if base_line == "" or left_line == "" or right_line == "":
+        return ""
+    val base_chunk = scv_tree_line_chunk_id(base_line)
+    val left_chunk = scv_tree_line_chunk_id(left_line)
+    val right_chunk = scv_tree_line_chunk_id(right_line)
+    val base_path = scv_chunk_path(root, base_chunk)
+    val left_path = scv_chunk_path(root, left_chunk)
+    val right_path = scv_chunk_path(root, right_chunk)
+    if not file_exists(base_path) or not file_exists(left_path) or not file_exists(right_path):
+        return ""
+    val base_text = file_read(base_path)
+    val left_text = file_read(left_path)
+    val right_text = file_read(right_path)
+    if base_text.contains("\u0000") or left_text.contains("\u0000") or right_text.contains("\u0000"):
+        return ""
+    val left_changes = scv_syntax_node_changed_positions(base_text, left_text)
+    val right_changes = scv_syntax_node_changed_positions(base_text, right_text)
+    if scv_line_changes_overlap(left_changes, right_changes):
+        return ""
+    val left_applied = scv_apply_line_side(base_text, left_text, left_changes)
+    val merged_text = scv_apply_line_side(left_applied, right_text, right_changes)
+    scv_write_merged_line_file(root, rel, merged_text)
+
+fn scv_try_line_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
+    if base_line == "" or left_line == "" or right_line == "":
+        return ""
+    val base_chunk = scv_tree_line_chunk_id(base_line)
+    val left_chunk = scv_tree_line_chunk_id(left_line)
+    val right_chunk = scv_tree_line_chunk_id(right_line)
+    val base_path = scv_chunk_path(root, base_chunk)
+    val left_path = scv_chunk_path(root, left_chunk)
+    val right_path = scv_chunk_path(root, right_chunk)
+    if not file_exists(base_path) or not file_exists(left_path) or not file_exists(right_path):
+        return ""
+    val base_text = file_read(base_path)
+    val left_text = file_read(left_path)
+    val right_text = file_read(right_path)
+    if base_text.contains("\u0000") or left_text.contains("\u0000") or right_text.contains("\u0000"):
+        return ""
+    val left_changes = scv_lines_changed_positions(base_text, left_text)
+    val right_changes = scv_lines_changed_positions(base_text, right_text)
+    if scv_line_changes_overlap(left_changes, right_changes):
+        return ""
+    val left_applied = scv_apply_line_side(base_text, left_text, left_changes)
+    val merged_text = scv_apply_line_side(left_applied, right_text, right_changes)
+    scv_write_merged_line_file(root, rel, merged_text)
+
+fn scv_pick_merge_line(root: text, rel: text, base_tree: text, left_tree: text, right_tree: text, base_line: text, left_line: text, right_line: text) -> (text, text, text):
+    val base_chunk = scv_tree_line_chunk_id(base_line)
+    val left_chunk = scv_tree_line_chunk_id(left_line)
+    val right_chunk = scv_tree_line_chunk_id(right_line)
+    if base_line != "" and left_line == "" and right_line != "":
+        val moved_left = scv_tree_find_new_line_by_chunk(left_tree, base_tree, base_chunk)
+        if moved_left != "" and right_chunk != base_chunk:
+            return ("", "", "left-rename-source")
+    if base_line != "" and right_line == "" and left_line != "":
+        val moved_right = scv_tree_find_new_line_by_chunk(right_tree, base_tree, base_chunk)
+        if moved_right != "" and left_chunk != base_chunk:
+            return ("", "", "right-rename-source")
+    if base_line == "" and left_line != "" and right_line == "":
+        val old_left = scv_tree_find_old_line_by_chunk(base_tree, left_tree, left_chunk)
+        val old_right_line = scv_tree_line_for_path(right_tree, scv_tree_line_path(old_left))
+        if old_left != "" and old_right_line != "" and scv_tree_line_chunk_id(old_right_line) != left_chunk:
+            return (scv_tree_line_with_path(old_right_line, rel), "", "left-rename-right-edit")
+    if base_line == "" and right_line != "" and left_line == "":
+        val old_right = scv_tree_find_old_line_by_chunk(base_tree, right_tree, right_chunk)
+        val old_left_line = scv_tree_line_for_path(left_tree, scv_tree_line_path(old_right))
+        if old_right != "" and old_left_line != "" and scv_tree_line_chunk_id(old_left_line) != right_chunk:
+            return (scv_tree_line_with_path(old_left_line, rel), "", "right-rename-left-edit")
+    if left_chunk == right_chunk:
+        return (left_line, "", "same-content")
+    if left_chunk == base_chunk:
+        return (right_line, "", "right-only")
+    if right_chunk == base_chunk:
+        return (left_line, "", "left-only")
+    val syntax_merged_line = scv_try_syntax_node_merge(root, rel, base_line, left_line, right_line)
+    if syntax_merged_line != "":
+        return (syntax_merged_line, "", "syntax-node-fallback")
+    val merged_line = scv_try_line_merge(root, rel, base_line, left_line, right_line)
+    if merged_line != "":
+        return (merged_line, "", "line-fallback")
+    val conflict_id = scv_write_conflict(root, rel, base_line, left_line, right_line)
+    (left_line, conflict_id, "conflict-data")
+
+fn scv_merge_commits(root: text, base_commit: text, left_commit: text, right_commit: text) -> text:
+    val base_tree = scv_tree_content(root, base_commit)
+    val left_tree = scv_tree_content(root, left_commit)
+    val right_tree = scv_tree_content(root, right_commit)
+    if left_tree == "" or right_tree == "":
+        return "ERROR missing merge input\n"
+    val base_error = scv_merge_tree_content_error(base_tree, "base")
+    if base_error != "":
+        return base_error
+    val left_error = scv_merge_tree_content_error(left_tree, "left")
+    if left_error != "":
+        return left_error
+    val right_error = scv_merge_tree_content_error(right_tree, "right")
+    if right_error != "":
+        return right_error
+    var paths = ""
+    paths = scv_add_paths_from_tree(base_tree, paths)
+    paths = scv_add_paths_from_tree(left_tree, paths)
+    paths = scv_add_paths_from_tree(right_tree, paths)
+    var merged_lines: [text] = []
+    var conflict_count = 0
+    var conflict_ids = ""
+    var strategies = ""
+    for rel in paths.split("\n"):
+        val path = rel.trim()
+        if path == "":
+            continue
+        val base_line = scv_tree_line_for_path(base_tree, path)
+        val left_line = scv_tree_line_for_path(left_tree, path)
+        val right_line = scv_tree_line_for_path(right_tree, path)
+        val (picked, conflict_id, strategy) = scv_pick_merge_line(root, path, base_tree, left_tree, right_tree, base_line, left_line, right_line)
+        if picked != "":
+            merged_lines.push(picked)
+        if strategy != "":
+            strategies = strategies + path + ": " + strategy + "\n"
+        if conflict_id != "":
+            conflict_count = conflict_count + 1
+            conflict_ids = conflict_ids + conflict_id + "\n"
+    val tree = scv_write_tree_object(root, merged_lines)
+    val commit = scv_write_commit(root, "{left_commit},{right_commit}", tree, scv_state_private())
+    val op = scv_write_operation(root, scv_current_op(root), commit, "merge-commits {base_commit} {left_commit} {right_commit}")
+    if op.starts_with("ERROR"):
+        return op
+    "merge {commit} {op} conflicts={conflict_count}\nstrategies:\n{strategies}{conflict_ids}"
+
+fn scv_conflicts(root: text) -> text:
+    val dir = "{root}/.scv/objects/conflicts"
+    if not file_exists(dir):
+        return "no conflicts\n"
+    var out = ""
+    for path in dir_walk(dir):
+        val content = file_read(path)
+        val id_parts = path.split("/")
+        val file_name = id_parts[id_parts.len() - 1]
+        out = out + "{file_name}: {content}"
+    if out == "":
+        "no conflicts\n"
+    else:
+        out
+
+fn scv_conflict_id_valid(id: text) -> bool:
+    id.starts_with("conflict_") and not id.contains("/") and not id.contains("\\") and not id.contains("\n") and not id.contains("\r")
+
+fn scv_resolve_conflict(root: text, id: text) -> text:
+    if not scv_conflict_id_valid(id):
+        return "ERROR invalid conflict id\n"
+    val path = scv_object_path(root, "conflicts", id)
+    if not file_exists(path):
+        return "ERROR missing conflict\n"
+    if file_delete(path):
+        "resolved {id}\n"
+    else:
+        "ERROR could not resolve conflict\n"

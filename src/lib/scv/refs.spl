@@ -1,0 +1,69 @@
+# SCV bookmark refs.
+
+use app.io.mod (file_exists, file_read)
+use std.scv.core.{scv_bookmarks_path}
+use std.scv.store.{scv_repo_exists, scv_current_op, scv_read_workspace_commit, scv_write_operation, scv_write_text, scv_object_path}
+
+fn scv_bookmark_name_valid(name: text) -> bool:
+    name != "" and not name.contains("|") and not name.contains("\n") and not name.contains("\r") and not name.contains(" ")
+
+fn scv_bookmark_commit_valid(root: text, commit: text) -> bool:
+    commit.starts_with("commit_") and not commit.contains("|") and not commit.contains("/") and not commit.contains("\\") and file_exists(scv_object_path(root, "commits", commit))
+
+fn scv_bookmark_row_error(root: text, row: text) -> text:
+    val parts = row.split("|")
+    if parts.len() != 2:
+        return "ERROR bad bookmark row\n"
+    if not scv_bookmark_name_valid(parts[0]):
+        return "ERROR invalid bookmark name\n"
+    if not scv_bookmark_commit_valid(root, parts[1]):
+        return "ERROR invalid bookmark commit\n"
+    ""
+
+fn scv_bookmarks(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val path = scv_bookmarks_path(root)
+    if not file_exists(path):
+        return "empty\n"
+    val content = file_read(path)
+    if content == "":
+        "empty\n"
+    else:
+        content
+
+fn scv_bookmark_set(root: text, name: text, commit: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    if not scv_bookmark_name_valid(name):
+        return "ERROR invalid bookmark name\n"
+    val target = if commit == "": scv_read_workspace_commit(root) else: commit
+    if target == "":
+        return "ERROR no commit for bookmark\n"
+    if not scv_bookmark_commit_valid(root, target):
+        return "ERROR invalid bookmark commit\n"
+    val path = scv_bookmarks_path(root)
+    val current = if file_exists(path): file_read(path) else: ""
+    var next = ""
+    var replaced = false
+    for line in current.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val row_error = scv_bookmark_row_error(root, trimmed)
+        if row_error != "":
+            return row_error
+        val parts = trimmed.split("|")
+        if parts.len() > 0 and parts[0] == name:
+            next = next + "{name}|{target}\n"
+            replaced = true
+        else:
+            next = next + trimmed + "\n"
+    if not replaced:
+        next = next + "{name}|{target}\n"
+    scv_write_text(path, next)
+    val op = scv_write_operation(root, scv_current_op(root), target, "bookmark-set {name}")
+    if op.starts_with("ERROR"):
+        scv_write_text(path, current)
+        return op
+    "bookmark {name} {target} {op}\n"

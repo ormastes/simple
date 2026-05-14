@@ -1,0 +1,342 @@
+# SCV bounded Git fast-import interchange.
+
+use app.io.mod (file_exists, file_read)
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.scv.core.{scv_object_path, scv_chunk_path}
+use std.scv.integrity.{scv_current_tree_content}
+use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_workspace_parent_error, scv_commit_tree, scv_object_field, scv_create_parent_dir, scv_i64_bytes_to_u8, scv_write_text, scv_write_file_object_from_bytes, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op}
+use std.scv.core.{scv_state_private}
+use std.scv.fast_import_format.{scv_git_ref_safe, scv_fast_import_path_safe, scv_fast_import_quote_path, scv_fast_import_split_command, scv_fast_import_bytes_line, scv_fast_import_next_line_pos, scv_fast_import_skip_data_payload, scv_fast_import_mark_seen, scv_fast_import_mark_ref_safe, scv_fast_import_commit_branch_error, scv_fast_import_parent_ref_error}
+
+fn scv_fast_append_bytes(target: [u8], source: [u8]) -> [u8]:
+    var out = target
+    for b in source:
+        out.push(b)
+    out
+
+fn scv_fast_append_text_bytes(target: [u8], value: text) -> [u8]:
+    scv_fast_append_bytes(target, value.bytes())
+
+fn scv_fast_import_file_primary_bytes(root: text, file_id: text) -> [u8]:
+    val file_path = scv_object_path(root, "files", file_id)
+    if not file_exists(file_path):
+        return []
+    val chunk = scv_object_field(file_read(file_path), "chunk")
+    if chunk == "":
+        return []
+    scv_i64_bytes_to_u8(file_read_bytes(scv_chunk_path(root, chunk)) ?? [])
+
+fn scv_fast_import_commit_first_parent(root: text, commit: text) -> text:
+    val path = scv_object_path(root, "commits", commit)
+    if not file_exists(path):
+        return ""
+    val parents = scv_object_field(file_read(path), "parents")
+    for parent in parents.split(","):
+        val trimmed = parent.trim()
+        if trimmed != "":
+            return trimmed
+    ""
+
+fn scv_fast_import_tree_content_by_commit(root: text, commit: text) -> text:
+    val tree = scv_commit_tree(root, commit)
+    if tree == "":
+        return ""
+    val tree_path = scv_object_path(root, "trees", tree)
+    if file_exists(tree_path):
+        file_read(tree_path)
+    else:
+        ""
+
+fn scv_fast_import_tree_content_has_path(tree_content: text, rel: text) -> bool:
+    for line in tree_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() > 0 and parts[0] == rel:
+            return true
+    false
+
+fn scv_export_git_fast_import(root: text, stream_path: text, branch: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    if not scv_git_ref_safe(branch):
+        return "ERROR unsafe git branch\n"
+    val commit = scv_read_workspace_commit(root)
+    val tree = scv_commit_tree(root, commit)
+    val tree_content = scv_current_tree_content(root)
+    if commit == "" or tree == "" or tree_content == "":
+        return "ERROR missing current tree\n"
+    var stream: [u8] = []
+    var marks: [text] = []
+    var paths: [text] = []
+    var mark = 1
+    var deletes: [text] = []
+    val parent = scv_fast_import_commit_first_parent(root, commit)
+    val parent_tree_content = if parent == "": "" else: scv_fast_import_tree_content_by_commit(root, parent)
+    if parent_tree_content != "":
+        for parent_line in parent_tree_content.split("\n"):
+            val parent_trimmed = parent_line.trim()
+            if parent_trimmed == "":
+                continue
+            val parent_parts = parent_trimmed.split("|")
+            if parent_parts.len() < 1:
+                continue
+            val parent_rel = parent_parts[0]
+            if not scv_fast_import_path_safe(parent_rel):
+                return "ERROR unsafe git path: {parent_rel}\n"
+            if not scv_fast_import_tree_content_has_path(tree_content, parent_rel):
+                deletes.push(parent_rel)
+    for line in tree_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() < 2:
+            continue
+        val rel = parts[0]
+        val file_id = parts[1]
+        if not scv_fast_import_path_safe(rel):
+            return "ERROR unsafe git path: {rel}\n"
+        val bytes = scv_fast_import_file_primary_bytes(root, file_id)
+        stream = scv_fast_append_text_bytes(stream, "blob\nmark :{mark}\ndata {bytes.len()}\n")
+        stream = scv_fast_append_bytes(stream, bytes)
+        stream = scv_fast_append_text_bytes(stream, "\n")
+        marks.push("{mark}")
+        paths.push(rel)
+        mark = mark + 1
+    if marks.len() == 0:
+        return "ERROR current tree has no files\n"
+    val message = "SCV export {commit}\n"
+    stream = scv_fast_append_text_bytes(stream, "commit refs/heads/{branch}\n")
+    stream = scv_fast_append_text_bytes(stream, "committer scv <scv@example.invalid> 0 +0000\n")
+    stream = scv_fast_append_text_bytes(stream, "data {message.bytes().len()}\n{message}")
+    var i = 0
+    while i < marks.len():
+        stream = scv_fast_append_text_bytes(stream, "M 100644 :{marks[i]} {scv_fast_import_quote_path(paths[i])}\n")
+        i = i + 1
+    for rel in deletes:
+        stream = scv_fast_append_text_bytes(stream, "D {scv_fast_import_quote_path(rel)}\n")
+    stream = scv_fast_append_text_bytes(stream, "\n")
+    scv_create_parent_dir(stream_path)
+    file_write_bytes(stream_path, stream)
+    "export-git-fast-import {stream_path} branch={branch} blobs={marks.len()} deletes={deletes.len()} bytes={stream.len()}\n"
+
+fn scv_fast_import_blob_for_mark(marks: [text], payloads: [[u8]], mark: text) -> ([u8], bool):
+    var i = 0
+    while i < marks.len():
+        if marks[i] == mark:
+            return (payloads[i], true)
+        i = i + 1
+    ([], false)
+
+fn scv_fast_import_tree_without_path(tree_lines: [text], rel: text) -> [text]:
+    var out: [text] = []
+    for entry in tree_lines:
+        val trimmed = entry.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() > 0 and parts[0] == rel:
+            continue
+        out.push(trimmed)
+    out
+
+fn scv_fast_import_tree_has_path(tree_lines: [text], rel: text) -> bool:
+    for entry in tree_lines:
+        val trimmed = entry.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() > 0 and parts[0] == rel:
+            return true
+    false
+
+fn scv_fast_import_tree_file_id_for_path(tree_lines: [text], rel: text) -> text:
+    for entry in tree_lines:
+        val trimmed = entry.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() >= 2 and parts[0] == rel:
+            return parts[1]
+    ""
+
+fn scv_fast_import_current_tree_lines(root: text) -> [text]:
+    var out: [text] = []
+    for line in scv_current_tree_content(root).split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "":
+            out.push(trimmed)
+    out
+
+fn scv_import_git_fast_import(root: text, stream_path: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val parent_error = scv_workspace_parent_error(root)
+    if parent_error != "":
+        return parent_error
+    if not file_exists(stream_path):
+        return "ERROR missing fast-import stream\n"
+    var marks: [text] = []
+    var payloads: [[u8]] = []
+    var tree_lines = scv_fast_import_current_tree_lines(root)
+    var imported = 0
+    var deleted = 0
+    var renamed = 0
+    var copied = 0
+    var in_commit = false
+    val stream = scv_i64_bytes_to_u8(file_read_bytes(stream_path) ?? [])
+    var pos = 0
+    while pos < stream.len():
+        val (raw_line, line_end) = scv_fast_import_bytes_line(stream, pos)
+        val line = raw_line.trim()
+        val next_pos = scv_fast_import_next_line_pos(stream, line_end)
+        if line == "":
+            pos = next_pos
+            continue
+        if line == "blob":
+            if next_pos >= stream.len():
+                return "ERROR truncated blob record\n"
+            val (raw_mark_line, mark_end) = scv_fast_import_bytes_line(stream, next_pos)
+            val mark_line = raw_mark_line.trim()
+            val data_pos = scv_fast_import_next_line_pos(stream, mark_end)
+            if data_pos >= stream.len():
+                return "ERROR truncated blob record\n"
+            val (raw_data_line, data_end_line) = scv_fast_import_bytes_line(stream, data_pos)
+            val data_line = raw_data_line.trim()
+            if not mark_line.starts_with("mark :") or not data_line.starts_with("data "):
+                return "ERROR unsupported blob record\n"
+            val mark = mark_line[6:].trim()
+            val size = data_line[5:].trim().to_i64() ?? -1
+            if size < 0:
+                return "ERROR bad blob size\n"
+            if mark == "" or not scv_fast_import_mark_ref_safe(":{mark}"):
+                return "ERROR unsupported blob record\n"
+            if scv_fast_import_mark_seen(marks, mark):
+                return "ERROR duplicate blob mark: {mark}\n"
+            val data_start = scv_fast_import_next_line_pos(stream, data_end_line)
+            val data_end = data_start + size
+            if data_end > stream.len():
+                return "ERROR truncated blob payload\n"
+            marks.push(mark)
+            payloads.push(stream[data_start:data_end])
+            pos = data_end
+            continue
+        if line.starts_with("data "):
+            val size = line[5:].trim().to_i64() ?? -1
+            if size < 0:
+                return "ERROR bad data size\n"
+            val data_start = next_pos
+            val data_end = data_start + size
+            if data_end > stream.len():
+                return "ERROR truncated data payload\n"
+            pos = data_end
+            continue
+        if line.starts_with("M "):
+            if not in_commit:
+                return "ERROR file command outside commit\n"
+            val parts = scv_fast_import_split_command(line)
+            if parts.len() != 4:
+                return "ERROR unsupported file command\n"
+            val mode = parts[1]
+            if mode != "100644" and mode != "100755":
+                return "ERROR unsupported file mode: {mode}\n"
+            if not scv_fast_import_mark_ref_safe(parts[2]):
+                return "ERROR unsupported file command\n"
+            val mark = parts[2][1:]
+            val rel = parts[3]
+            if not scv_fast_import_path_safe(rel):
+                return "ERROR unsafe git path: {rel}\n"
+            val (payload, found) = scv_fast_import_blob_for_mark(marks, payloads, mark)
+            if not found:
+                return "ERROR missing blob mark: {mark}\n"
+            val (file_id, chunk) = scv_write_file_object_from_bytes(root, rel, payload, 0)
+            tree_lines = scv_fast_import_tree_without_path(tree_lines, rel)
+            tree_lines.push("{rel}|{file_id}|{chunk}|{payload.len()}|0")
+            imported = imported + 1
+        elif line.starts_with("D "):
+            if not in_commit:
+                return "ERROR file command outside commit\n"
+            val parts = scv_fast_import_split_command(line)
+            if parts.len() != 2:
+                return "ERROR unsupported delete command\n"
+            val rel = parts[1]
+            if not scv_fast_import_path_safe(rel):
+                return "ERROR unsafe git path: {rel}\n"
+            if scv_fast_import_tree_has_path(tree_lines, rel):
+                tree_lines = scv_fast_import_tree_without_path(tree_lines, rel)
+                deleted = deleted + 1
+        elif line == "deleteall":
+            if not in_commit:
+                return "ERROR file command outside commit\n"
+            deleted = deleted + tree_lines.len()
+            tree_lines = []
+        elif line.starts_with("R "):
+            if not in_commit:
+                return "ERROR file command outside commit\n"
+            val parts = scv_fast_import_split_command(line)
+            if parts.len() != 3:
+                return "ERROR unsupported rename command\n"
+            val source = parts[1]
+            val target = parts[2]
+            if not scv_fast_import_path_safe(source):
+                return "ERROR unsafe git path: {source}\n"
+            if not scv_fast_import_path_safe(target):
+                return "ERROR unsafe git path: {target}\n"
+            val old_file_id = scv_fast_import_tree_file_id_for_path(tree_lines, source)
+            if old_file_id == "":
+                return "ERROR missing rename source: {source}\n"
+            val bytes = scv_fast_import_file_primary_bytes(root, old_file_id)
+            val (file_id, chunk) = scv_write_file_object_from_bytes(root, target, bytes, 0)
+            tree_lines = scv_fast_import_tree_without_path(tree_lines, source)
+            tree_lines = scv_fast_import_tree_without_path(tree_lines, target)
+            tree_lines.push("{target}|{file_id}|{chunk}|{bytes.len()}|0")
+            renamed = renamed + 1
+        elif line.starts_with("C "):
+            if not in_commit:
+                return "ERROR file command outside commit\n"
+            val parts = scv_fast_import_split_command(line)
+            if parts.len() != 3:
+                return "ERROR unsupported copy command\n"
+            val source = parts[1]
+            val target = parts[2]
+            if not scv_fast_import_path_safe(source):
+                return "ERROR unsafe git path: {source}\n"
+            if not scv_fast_import_path_safe(target):
+                return "ERROR unsafe git path: {target}\n"
+            val old_file_id = scv_fast_import_tree_file_id_for_path(tree_lines, source)
+            if old_file_id == "":
+                return "ERROR missing copy source: {source}\n"
+            val bytes = scv_fast_import_file_primary_bytes(root, old_file_id)
+            val (file_id, chunk) = scv_write_file_object_from_bytes(root, target, bytes, 0)
+            tree_lines = scv_fast_import_tree_without_path(tree_lines, target)
+            tree_lines.push("{target}|{file_id}|{chunk}|{bytes.len()}|0")
+            copied = copied + 1
+        else:
+            val commit_error = scv_fast_import_commit_branch_error(line, "")
+            if commit_error != "":
+                return commit_error
+            val parent_error = scv_fast_import_parent_ref_error(line, "")
+            if parent_error != "":
+                return parent_error
+            if line.starts_with("commit "):
+                in_commit = true
+        pos = next_pos
+    if imported == 0 and deleted == 0:
+        if renamed > 0 or copied > 0:
+            val tree = scv_write_tree_object(root, tree_lines)
+            val commit = scv_write_commit(root, scv_read_workspace_commit(root), tree, scv_state_private())
+            val op = scv_write_operation(root, scv_current_op(root), commit, "import-git-fast-import")
+            if op.starts_with("ERROR"):
+                return op
+            scv_write_text("{root}/.scv/meta/status_index.sdn", file_read(scv_object_path(root, "trees", tree)))
+            return "import-git-fast-import files={imported} deleted={deleted} renamed={renamed} copied={copied} commit={commit} op={op}\n"
+        return "ERROR fast-import stream has no file commands\n"
+    val tree = scv_write_tree_object(root, tree_lines)
+    val commit = scv_write_commit(root, scv_read_workspace_commit(root), tree, scv_state_private())
+    val op = scv_write_operation(root, scv_current_op(root), commit, "import-git-fast-import")
+    if op.starts_with("ERROR"):
+        return op
+    scv_write_text("{root}/.scv/meta/status_index.sdn", file_read(scv_object_path(root, "trees", tree)))
+    "import-git-fast-import files={imported} deleted={deleted} renamed={renamed} copied={copied} commit={commit} op={op}\n"
