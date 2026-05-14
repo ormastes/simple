@@ -37,6 +37,8 @@
 #define RT_VALUE_SPECIAL_TRUE 0x1ULL
 #define RT_VALUE_SPECIAL_FALSE 0x2ULL
 #define RT_VALUE_HEAP_STRING 0x53545231U
+#define RT_VALUE_HEAP_ARRAY 0x02U
+#define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 
 typedef struct RtCoreString {
     uint32_t kind;
@@ -44,6 +46,15 @@ typedef struct RtCoreString {
     uint64_t len;
     char data[];
 } RtCoreString;
+
+typedef struct RtCoreArray {
+    uint8_t kind;
+    uint8_t flags;
+    uint8_t reserved[6];
+    int64_t len;
+    int64_t cap;
+    void* data;
+} RtCoreArray;
 
 static inline int64_t rt_core_from_special(uint64_t payload) {
     return (int64_t)((payload << 3) | RT_VALUE_TAG_SPECIAL);
@@ -92,13 +103,25 @@ static inline RtCoreString* rt_core_as_string(int64_t value) {
     return s;
 }
 
-static inline SplArray* rt_core_as_array(int64_t value) {
+static inline RtCoreArray* rt_core_as_array(int64_t value) {
     uintptr_t raw = (uintptr_t)value;
-    if (raw < 4096 || (raw & RT_VALUE_TAG_MASK) != 0) return NULL;
-    SplArray* a = (SplArray*)raw;
+    if (raw < 4096) return NULL;
+    if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
+        raw &= ~RT_VALUE_TAG_MASK;
+    } else if ((raw & RT_VALUE_TAG_MASK) != 0) {
+        return NULL;
+    }
+    RtCoreArray* a = (RtCoreArray*)raw;
+    if (a->kind != RT_VALUE_HEAP_ARRAY) return NULL;
     if (a->len < 0 || a->cap < 0 || a->len > a->cap || a->cap > 100000000) return NULL;
     return a;
 }
+
+static inline RtCoreArray* rt_core_array_ptr(SplArray* value) {
+    return rt_core_as_array((int64_t)(uintptr_t)value);
+}
+
+static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap);
 
 static void rt_core_write_bytes(FILE* stream, const uint8_t* ptr, uint64_t len) {
     if (!ptr || len == 0) return;
@@ -290,7 +313,7 @@ int64_t rt_string_concat(int64_t left, int64_t right) {
 int64_t rt_len(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (s) return (int64_t)s->len;
-    SplArray* a = rt_core_as_array(value);
+    RtCoreArray* a = rt_core_as_array(value);
     return a ? a->len : 0;
 }
 
@@ -324,6 +347,16 @@ int64_t rt_to_string(int64_t value) {
     }
     int len = snprintf(buf, sizeof(buf), "<value:0x%llx>", (unsigned long long)(uint64_t)value);
     return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+}
+
+int64_t rt_raw_u64_to_string(int64_t raw) {
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%llu", (unsigned long long)(uint64_t)raw);
+    return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+}
+
+int64_t rt_value_to_string(int64_t value) {
+    return rt_to_string(value);
 }
 
 int64_t rt_native_eq(int64_t left, int64_t right) {
@@ -659,46 +692,227 @@ int64_t rt_strcmp(const char* a, const char* b) {
  * Array Operations
  * ================================================================ */
 
-SplArray* rt_array_new(int64_t cap) {
-    if (cap > 0) {
-        return spl_array_new_cap(cap);
+static SplArray* rt_core_array_new(int64_t cap, uint8_t flags) {
+    int64_t actual_cap = cap > 4 ? cap : 4;
+    if (actual_cap < 0 || actual_cap > INT64_MAX / (int64_t)sizeof(int64_t)) {
+        return NULL;
     }
-    return spl_array_new();
+    RtCoreArray* a = (RtCoreArray*)calloc(1, sizeof(RtCoreArray));
+    if (!a) return NULL;
+    a->kind = RT_VALUE_HEAP_ARRAY;
+    a->flags = flags;
+    a->cap = actual_cap;
+    size_t elem_size = (flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
+    a->data = calloc((size_t)actual_cap, elem_size);
+    if (!a->data) {
+        free(a);
+        return NULL;
+    }
+    return (SplArray*)(((uintptr_t)a) | RT_VALUE_TAG_HEAP);
+}
+
+SplArray* rt_array_new(int64_t cap) {
+    return rt_core_array_new(cap, 0);
+}
+
+SplArray* rt_byte_array_new(uint64_t cap) {
+    if (cap > (uint64_t)INT64_MAX) {
+        return NULL;
+    }
+    return rt_core_array_new((int64_t)cap, RT_CORE_ARRAY_FLAG_BYTES);
 }
 
 int64_t rt_array_len(SplArray* a) {
-    return spl_array_len(a);
+    RtCoreArray* array = rt_core_array_ptr(a);
+    return array ? array->len : 0;
 }
 
 int64_t rt_array_get(SplArray* a, int64_t idx) {
-    if (!a) return 3;
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 3;
     idx = rt_core_numeric_arg(idx);
-    if (idx < 0) idx = a->len + idx;
-    if (idx < 0 || idx >= a->len) return 3;
-    return ((int64_t*)a->items)[idx];
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 3;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return (int64_t)((uint8_t*)array->data)[idx];
+    }
+    return ((int64_t*)array->data)[idx];
 }
 
 void rt_array_set(SplArray* a, int64_t idx, int64_t val) {
-    if (!a) return;
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return;
     idx = rt_core_numeric_arg(idx);
-    if (idx < 0) idx = a->len + idx;
-    if (idx < 0 || idx >= a->len) return;
-    ((int64_t*)a->items)[idx] = val;
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        ((uint8_t*)array->data)[idx] = (uint8_t)(val & 0xff);
+    } else {
+        ((int64_t*)array->data)[idx] = val;
+    }
 }
 
 int8_t rt_array_push(SplArray* a, int64_t val) {
-    if (!a) return 0;
-    if (a->len >= a->cap) {
-        int64_t new_cap = a->cap > 0 ? a->cap * 2 : 4;
-        a->items = (SplValue*)realloc(a->items, (size_t)new_cap * sizeof(SplValue));
-        if (!a->items) {
-            a->len = 0;
-            a->cap = 0;
-            return 0;
-        }
-        a->cap = new_cap;
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        ((uint8_t*)array->data)[array->len++] = (uint8_t)(val & 0xff);
+    } else {
+        ((int64_t*)array->data)[array->len++] = val;
     }
-    ((int64_t*)a->items)[a->len++] = val;
+    return 1;
+}
+
+static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (array->cap >= min_cap) return 1;
+    int64_t new_cap = array->cap > 0 ? array->cap : 4;
+    while (new_cap < min_cap) {
+        if (new_cap > INT64_MAX / 2) return 0;
+        new_cap *= 2;
+    }
+    size_t elem_size = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
+    void* data = realloc(array->data, (size_t)new_cap * elem_size);
+    if (!data) {
+        array->len = 0;
+        array->cap = 0;
+        return 0;
+    }
+    array->data = data;
+    array->cap = new_cap;
+    return 1;
+}
+
+int64_t rt_bytes_u8_at(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 0;
+    return (int64_t)((uint8_t*)array->data)[idx];
+}
+
+int64_t rt_bytes_u32_le_at(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx + 4 > array->len) return 0;
+    uint8_t* bytes = (uint8_t*)array->data;
+    uint64_t v = (uint64_t)bytes[idx]
+        | ((uint64_t)bytes[idx + 1] << 8)
+        | ((uint64_t)bytes[idx + 2] << 16)
+        | ((uint64_t)bytes[idx + 3] << 24);
+    return (int64_t)v;
+}
+
+int64_t rt_bytes_u64_le_at(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx + 8 > array->len) return 0;
+    uint8_t* bytes = (uint8_t*)array->data;
+    uint64_t v = 0;
+    for (int shift = 0; shift < 8; shift++) {
+        v |= ((uint64_t)bytes[idx + shift]) << (shift * 8);
+    }
+    return (int64_t)v;
+}
+
+int8_t rt_bytes_u8_set(SplArray* a, int64_t idx, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 0;
+    ((uint8_t*)array->data)[idx] = (uint8_t)(val & 0xff);
+    return 1;
+}
+
+int8_t rt_typed_bytes_u8_push(SplArray* a, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
+    ((uint8_t*)array->data)[array->len++] = (uint8_t)(val & 0xff);
+    return 1;
+}
+
+int64_t rt_typed_bytes_u8_unchecked(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    return (int64_t)((uint8_t*)array->data)[rt_core_numeric_arg(idx)];
+}
+
+int64_t rt_typed_bytes_u32_le_at(SplArray* a, int64_t idx) {
+    return rt_bytes_u32_le_at(a, idx);
+}
+
+int64_t rt_typed_bytes_u64_le_at(SplArray* a, int64_t idx) {
+    return rt_bytes_u64_le_at(a, idx);
+}
+
+int64_t rt_typed_bytes_u64_le_unchecked(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    uint8_t* bytes = (uint8_t*)array->data;
+    uint64_t v = 0;
+    for (int shift = 0; shift < 8; shift++) {
+        v |= ((uint64_t)bytes[idx + shift]) << (shift * 8);
+    }
+    return (int64_t)v;
+}
+
+int8_t rt_typed_bytes_u32_le_set(SplArray* a, int64_t idx, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0 || idx + 4 > array->len) return 0;
+    uint8_t* bytes = (uint8_t*)array->data;
+    uint32_t v = (uint32_t)val;
+    bytes[idx] = (uint8_t)(v & 0xff);
+    bytes[idx + 1] = (uint8_t)((v >> 8) & 0xff);
+    bytes[idx + 2] = (uint8_t)((v >> 16) & 0xff);
+    bytes[idx + 3] = (uint8_t)((v >> 24) & 0xff);
+    return 1;
+}
+
+int8_t rt_typed_bytes_u64_le_set(SplArray* a, int64_t idx, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0 || idx + 8 > array->len) return 0;
+    uint8_t* bytes = (uint8_t*)array->data;
+    uint64_t v = (uint64_t)val;
+    for (int shift = 0; shift < 8; shift++) {
+        bytes[idx + shift] = (uint8_t)((v >> (shift * 8)) & 0xff);
+    }
+    return 1;
+}
+
+int64_t rt_typed_words_u32_at(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 0;
+    return ((int64_t*)array->data)[idx] & 0xffffffffLL;
+}
+
+int8_t rt_typed_words_u32_push(SplArray* a, int64_t val) {
+    return rt_array_push(a, val & 0xffffffffLL);
+}
+
+int8_t rt_typed_words_u32_set(SplArray* a, int64_t idx, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return 0;
+    ((int64_t*)array->data)[idx] = val & 0xffffffffLL;
     return 1;
 }
 
@@ -709,15 +923,15 @@ SplValue* rt_array_pop(SplArray* a) {
 }
 
 int64_t rt_index_get(int64_t collection, int64_t idx) {
-    SplArray* a = rt_core_as_array(collection);
-    if (a) return rt_array_get(a, idx);
+    RtCoreArray* a = rt_core_as_array(collection);
+    if (a) return rt_array_get((SplArray*)a, idx);
     return 3;
 }
 
 int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
-    SplArray* a = rt_core_as_array(collection);
+    RtCoreArray* a = rt_core_as_array(collection);
     if (!a) return 0;
-    rt_array_set(a, idx, val);
+    rt_array_set((SplArray*)a, idx, val);
     return 1;
 }
 
@@ -1029,6 +1243,10 @@ void rt_exit(int64_t code) {
 
 int64_t rt_time_now_unix(void) {
     return (int64_t)time(NULL);
+}
+
+int64_t rt_entropy_hardware_ready(void) {
+    return 0;
 }
 
 int64_t rt_time_now_ns(void) {
