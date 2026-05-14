@@ -88,6 +88,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_tuple_set"
             | "rt_enum_new"
             | "rt_hash_text"
+            | "rt_value_bool"
             | "rt_interp_call"
             | "rt_native_eq"
             | "rt_native_neq"
