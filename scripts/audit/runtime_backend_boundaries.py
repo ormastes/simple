@@ -26,6 +26,8 @@ The checks are intentionally narrow and evidence-oriented:
 * SimpleOS native lower layers must not import POSIX/libc compatibility layers.
 * Portable stdlib/library files must not import POSIX/Linux modules; platform
   and compatibility directories are allowed to do so explicitly.
+* Portable stdlib/library files must not import SimpleOS/kernel/driver/service
+  layers directly.
 * The architecture support matrix must not claim runtime-family root
   `__init__.spl` coverage that does not match the tracked stdlib tree.
 
@@ -131,6 +133,7 @@ GC_ASYNC_SELF_FACADE_RE = re.compile(
 )
 FORBIDDEN_SIMPLEOS_IMPORT_RE = re.compile(r"\b(?:os\.posix|os\.libc|posix\.|libc\.)\b")
 FORBIDDEN_PORTABLE_IMPORT_RE = re.compile(r"\b(?:std\.posix|std\.linux|os\.posix|os\.libc|posix\.|linux\.)\b")
+FORBIDDEN_PORTABLE_OS_ROOTS = frozenset(("os", "simple_os", "sosix", "kernel", "drivers", "services"))
 FORBIDDEN_NOGC_IMPORT_RE = re.compile(r"\b(?:std\.)?gc_(?:async|sync)_(?:mut|immut)\b")
 PASS_TODO_RE = re.compile(r"\bpass_todo\b")
 
@@ -321,6 +324,24 @@ def portable_lib_imports() -> list[str]:
     return hits
 
 
+def portable_lib_os_imports() -> list[str]:
+    hits: list[str] = []
+    for path in tracked_spl_under(PORTABLE_LIB_ROOTS):
+        if is_platform_or_compat_path(path):
+            continue
+        for line_no, stripped in code_lines(path):
+            match = IMPORT_RE.match(stripped)
+            if not match:
+                continue
+            module = match.group(1)
+            parts = module.split(".")
+            if parts and parts[0] == "std":
+                parts = parts[1:]
+            if parts and parts[0] in FORBIDDEN_PORTABLE_OS_ROOTS:
+                hits.append(f"{rel(path)}:{line_no}: {stripped}")
+    return hits
+
+
 def nogc_family_gc_imports() -> list[str]:
     hits: list[str] = []
     for path in tracked_spl_under(NOGC_RUNTIME_ROOTS):
@@ -385,6 +406,7 @@ def main() -> int:
     wildcard_facades = no_gc_async_runtime_owner_wildcards()
     simpleos_imports = simpleos_lower_layer_imports()
     portable_imports = portable_lib_imports()
+    portable_os_imports = portable_lib_os_imports()
     nogc_gc_imports = nogc_family_gc_imports()
     async_todos = async_compat_pass_todos()
     root_manifest_doc_mismatches = documented_root_manifest_mismatches()
@@ -409,6 +431,8 @@ def main() -> int:
         "simpleos_lower_layer_posix_libc_import_samples": simpleos_imports[:20],
         "portable_lib_forbidden_posix_linux_import_count": len(portable_imports),
         "portable_lib_forbidden_posix_linux_import_samples": portable_imports[:20],
+        "portable_lib_forbidden_os_import_count": len(portable_os_imports),
+        "portable_lib_forbidden_os_import_samples": portable_os_imports[:20],
         "nogc_family_forbidden_gc_import_count": len(nogc_gc_imports),
         "nogc_family_forbidden_gc_import_samples": nogc_gc_imports[:20],
         "async_compat_pass_todo_count": len(async_todos),
@@ -424,6 +448,7 @@ def main() -> int:
         and not wildcard_facades
         and not simpleos_imports
         and not portable_imports
+        and not portable_os_imports
         and not nogc_gc_imports
         and not async_todos
         and not root_manifest_doc_mismatches,

@@ -111,6 +111,10 @@ The production ownership rule is behavioral, not name-only:
   `nogc_async_immut`, `nogc_sync_immut`, and `nogc_async_mut_noalloc`) must not
   import GC compatibility families. `runtime_backend_boundaries.py` enforces
   this with `nogc_family_forbidden_gc_import_count=0`.
+- Portable library roots must not import SimpleOS lower layers directly.
+  `runtime_backend_boundaries.py` enforces this with
+  `portable_lib_forbidden_os_import_count=0`; platform/POSIX compatibility
+  paths are the explicit escape hatch for host- or OS-specific bindings.
 - Sync-only or blocking runtime ownership remains in `nogc_sync_mut` when
   wrapping it in `nogc_async_mut` would only add a scheduler dependency without
   changing observable behavior.
