@@ -82,6 +82,8 @@ use super::{
     rt_slice,
     rt_len,
     rt_contains,
+    rt_hash_text,
+    rt_str_hash,
     // Tuple functions
     rt_tuple_get,
     rt_tuple_len,
@@ -1767,6 +1769,18 @@ fn test_rt_len_tuple() {
 fn test_rt_len_string() {
     let s = rt_string_new("Hello".as_ptr(), 5);
     assert_eq!(rt_len(s), 5);
+}
+
+#[test]
+fn test_rt_hash_text_uses_stable_byte_hash() {
+    let empty = rt_string_new("".as_ptr(), 0);
+    let abc = rt_string_new("abc".as_ptr(), 3);
+    let key = rt_string_new("key_7".as_ptr(), 5);
+
+    assert_eq!(rt_hash_text(empty), 5381);
+    assert_eq!(rt_hash_text(abc), 193485963);
+    assert_eq!(rt_hash_text(key), 210718207876);
+    assert_eq!(rt_str_hash(key), rt_hash_text(key));
 }
 
 #[test]

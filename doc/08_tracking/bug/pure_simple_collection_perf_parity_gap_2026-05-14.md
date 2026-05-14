@@ -189,3 +189,14 @@ target `list_traverse` and `set_contains` before broader collection rewrites.
 For text `HashSet.contains`, inspect the remaining source-closure probe loop
 for generic array indexing and method-call overhead before retrying another data
 structure rewrite.
+
+## 2026-05-14 Update
+
+The pure runtime and interpreter `rt_hash_text` paths now match the C reference
+byte hash (`5381`, then `hash * 33 + byte`) instead of Rust `DefaultHasher`.
+Focused hash tests, driver build, and both clean collection facade specs pass.
+The clean source-closure benchmark still fails the parity floor: list traversal
+`0.26x` C / `0.12x` Rust, list push `0.43x` C / `2.64x` Rust, scalar set
+membership `0.34x` C / `0.17x` Rust, and text `HashSet.contains` `0.41x` C /
+`0.69x` Rust, with checksum parity preserved. The remaining work is still a
+native loop/backend optimization problem, not just collection-library behavior.

@@ -476,6 +476,16 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `0.45x` C / `0.24x` Rust, and text `HashSet.contains` `0.44x` C / `0.72x`
   Rust. This closes the C floor for list traversal and list push in this
   sample, but set lookup and Rust traversal parity remain open.
+- Text hashing in the runtime and interpreter now uses the same compact
+  byte-hash sequence as the C collection reference (`5381`, then
+  `hash * 33 + byte`) instead of Rust `DefaultHasher`, so the pure text set
+  path no longer depends on Rust's hash implementation. Focused runtime and
+  interpreter hash tests pass, as do both clean collection facade specs. The
+  clean source-closure harness still warns, however: list traversal `0.26x` C /
+  `0.12x` Rust, list push `0.43x` C / `2.64x` Rust, scalar set membership
+  `0.34x` C / `0.17x` Rust, and text `HashSet.contains` `0.41x` C / `0.69x`
+  Rust. Pure Simple is functionally closer to the C reference but still not
+  properly updated to C/Rust parity.
 
 ## Next Concrete Plugin Work
 

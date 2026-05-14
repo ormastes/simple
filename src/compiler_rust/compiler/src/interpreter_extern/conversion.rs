@@ -88,14 +88,12 @@ pub fn rt_hash_text(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    let mut hash = 5381u64;
+    for byte in text.as_bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(*byte as u64);
+    }
 
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    let hash = hasher.finish() as i64;
-
-    Ok(Value::Int(hash))
+    Ok(Value::Int(hash as i64))
 }
 
 /// Convert text to a byte array
@@ -395,6 +393,19 @@ mod tests {
     fn test_to_int_from_bool() {
         assert_eq!(to_int(&[Value::Bool(true)]).unwrap(), Value::Int(1));
         assert_eq!(to_int(&[Value::Bool(false)]).unwrap(), Value::Int(0));
+    }
+
+    #[test]
+    fn test_rt_hash_text_uses_stable_byte_hash() {
+        assert_eq!(rt_hash_text(&[Value::Str("".to_string())]).unwrap(), Value::Int(5381));
+        assert_eq!(
+            rt_hash_text(&[Value::Str("abc".to_string())]).unwrap(),
+            Value::Int(193485963)
+        );
+        assert_eq!(
+            rt_hash_text(&[Value::Str("key_7".to_string())]).unwrap(),
+            Value::Int(210718207876)
+        );
     }
 
     #[test]
