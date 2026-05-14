@@ -112,12 +112,16 @@ function buildSimpleMathCoreWasmArtifact() {
 
 function resolveSimpleBinary() {
     const explicitBinary = process.env.SIMPLE_VSCODE_SIMPLE_BIN?.trim();
-    const repoDebugBinary = path.join(repoRoot, 'src', 'compiler_rust', 'target', 'debug', 'simple');
-    const repoReleaseBinary = path.join(repoRoot, 'src', 'compiler_rust', 'target', 'release', 'simple');
+    const repoBinBinary = path.join(repoRoot, 'bin', 'simple');
+    const repoLinuxBinary = path.join(repoRoot, 'bin', 'release', 'linux-x86_64', 'simple');
+    const repoMacArmBinary = path.join(repoRoot, 'bin', 'release', 'macos-arm64', 'simple');
+    const repoMacX64Binary = path.join(repoRoot, 'bin', 'release', 'macos-x86_64', 'simple');
     const candidates = [
         explicitBinary ? { command: explicitBinary, prefixArgs: [] } : null,
-        existsSync(repoDebugBinary) ? { command: repoDebugBinary, prefixArgs: [] } : null,
-        existsSync(repoReleaseBinary) ? { command: repoReleaseBinary, prefixArgs: [] } : null,
+        existsSync(repoBinBinary) ? { command: repoBinBinary, prefixArgs: [] } : null,
+        existsSync(repoLinuxBinary) ? { command: repoLinuxBinary, prefixArgs: [] } : null,
+        existsSync(repoMacArmBinary) ? { command: repoMacArmBinary, prefixArgs: [] } : null,
+        existsSync(repoMacX64Binary) ? { command: repoMacX64Binary, prefixArgs: [] } : null,
         { command: 'simple', prefixArgs: [] },
     ].filter(Boolean);
 
@@ -134,6 +138,6 @@ function resolveSimpleBinary() {
 
     throw new Error(
         '[stage:wasm] could not find a working `simple` compiler. ' +
-        'Set SIMPLE_VSCODE_SIMPLE_BIN or build src/compiler_rust/target/debug/simple first.'
+        'Set SIMPLE_VSCODE_SIMPLE_BIN or provide bin/simple first.'
     );
 }

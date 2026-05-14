@@ -126,8 +126,8 @@ This uses `simple compile src/app/vscode_extension/math_core/main.spl --target=w
 from the repo root. The script looks for `simple` in this order:
 
 - `SIMPLE_VSCODE_SIMPLE_BIN`
-- `src/compiler_rust/target/debug/simple`
-- `src/compiler_rust/target/release/simple`
+- `bin/simple`
+- `bin/release/<platform>/simple`
 - `simple` from your `PATH`
 
 `npm run compile` now rebuilds the pure-Simple `math-core.wasm` first, then
@@ -147,21 +147,20 @@ export LIBRARY_PATH=/opt/homebrew/lib:/opt/homebrew/opt/zstd/lib:$LIBRARY_PATH
 export DYLD_LIBRARY_PATH=/opt/homebrew/lib:/opt/homebrew/opt/zstd/lib:$DYLD_LIBRARY_PATH
 ```
 
-Then build the driver with LLVM enabled:
+Then build or provide a Simple compiler with LLVM/WASM support:
 
 ```bash
-cd src/compiler_rust
-cargo build -p simple-driver --bin simple --features llvm
+bin/simple --help
 ```
 
 Example artifact generation:
 
 ```bash
 # Generic target compile
-src/compiler_rust/target/debug/simple compile /tmp/simple_vscode_smoke.spl --target=wasm32-wasi -o /tmp/simple_vscode_smoke.smf
+bin/simple compile /tmp/simple_vscode_smoke.spl --target=wasm32-wasi -o /tmp/simple_vscode_smoke.smf
 
 # VSCode scaffold build
-src/compiler_rust/target/debug/simple vscode build /tmp/simple_vscode_smoke.spl -o /tmp/simple-vscode-out --name math-core-test --display-name "Math Core Test" --publisher ormastes --version 0.0.1 --release
+bin/simple vscode build /tmp/simple_vscode_smoke.spl -o /tmp/simple-vscode-out --name math-core-test --display-name "Math Core Test" --publisher ormastes --version 0.0.1 --release
 ```
 
 ### Installing Simple LSP Server
