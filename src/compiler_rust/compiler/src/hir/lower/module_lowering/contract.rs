@@ -3,7 +3,7 @@ use simple_parser as ast;
 use crate::hir::lower::context::{ContractLoweringContext, FunctionContext};
 use crate::hir::lower::error::LowerResult;
 use crate::hir::lower::lowerer::Lowerer;
-use crate::hir::types::{HirContract, HirContractClause, HirExpr, HirExprKind};
+use crate::hir::types::{HirContract, HirContractClause, HirExpr, HirExprKind, HirStmt};
 
 /// Collect all old() expressions from an HIR expression tree.
 /// Returns a vector of the inner expressions (what's inside old()).
@@ -55,6 +55,11 @@ fn collect_old_expressions(expr: &HirExpr, results: &mut Vec<HirExpr>) {
             collect_old_expressions(then_branch, results);
             if let Some(else_expr) = else_branch {
                 collect_old_expressions(else_expr, results);
+            }
+        }
+        HirExprKind::Block(stmts) => {
+            for stmt in stmts {
+                collect_old_expressions_from_stmt(stmt, results);
             }
         }
         // Tuple/Array literals
@@ -134,6 +139,61 @@ fn collect_old_expressions(expr: &HirExpr, results: &mut Vec<HirExpr>) {
             collect_old_expressions(value, results);
             collect_old_expressions(body, results);
         }
+    }
+}
+
+fn collect_old_expressions_from_stmt(stmt: &HirStmt, results: &mut Vec<HirExpr>) {
+    match stmt {
+        HirStmt::Let { value: Some(expr), .. }
+        | HirStmt::Assign { value: expr, .. }
+        | HirStmt::Return(Some(expr))
+        | HirStmt::Expr(expr)
+        | HirStmt::Assert { condition: expr, .. }
+        | HirStmt::Assume { condition: expr, .. }
+        | HirStmt::Admit { condition: expr, .. } => collect_old_expressions(expr, results),
+        HirStmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_old_expressions(condition, results);
+            for stmt in then_block {
+                collect_old_expressions_from_stmt(stmt, results);
+            }
+            if let Some(else_block) = else_block {
+                for stmt in else_block {
+                    collect_old_expressions_from_stmt(stmt, results);
+                }
+            }
+        }
+        HirStmt::While { condition, body, .. } => {
+            collect_old_expressions(condition, results);
+            for stmt in body {
+                collect_old_expressions_from_stmt(stmt, results);
+            }
+        }
+        HirStmt::For { iterable, body, .. } => {
+            collect_old_expressions(iterable, results);
+            for stmt in body {
+                collect_old_expressions_from_stmt(stmt, results);
+            }
+        }
+        HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
+            for stmt in body {
+                collect_old_expressions_from_stmt(stmt, results);
+            }
+        }
+        HirStmt::Calc { steps } => {
+            for step in steps {
+                collect_old_expressions(&step.expr, results);
+            }
+        }
+        HirStmt::Let { value: None, .. }
+        | HirStmt::Return(None)
+        | HirStmt::Break
+        | HirStmt::Continue
+        | HirStmt::ProofHint { .. }
+        | HirStmt::InlineAsm { .. } => {}
     }
 }
 

@@ -58,7 +58,7 @@ impl Lowerer {
         Ok(stmts)
     }
 
-    fn lower_node(&mut self, node: &Node, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
+    pub(super) fn lower_node(&mut self, node: &Node, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
         match node {
             Node::Let(let_stmt) => {
                 // Check for tuple pattern destructuring: val (a, b) = expr

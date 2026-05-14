@@ -107,6 +107,8 @@ pub enum HirExprKind {
         then_branch: Box<HirExpr>,
         else_branch: Option<Box<HirExpr>>,
     },
+    /// Multi-statement block expression, used by colon lambdas and do blocks.
+    Block(Vec<HirStmt>),
 
     // Memory operations
     Ref(Box<HirExpr>),

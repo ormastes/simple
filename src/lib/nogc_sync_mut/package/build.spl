@@ -41,6 +41,31 @@ class PackageBuild:
 fn detect_platform() -> text:
     "linux-x86_64"
 
+fn find_runtime_binary(platform: text) -> text:
+    val runtime_platform = normalize_runtime_platform(platform)
+    val candidates = [
+        "build/bootstrap/full/{runtime_platform}/simple",
+        "build/bootstrap/stage3/{runtime_platform}/simple",
+        "build/bootstrap/stage2/{runtime_platform}/simple",
+        "bin/release/{runtime_platform}/simple",
+        "bin/release/{platform}/simple",
+        "bin/release/simple",
+        "bin/simple"
+    ]
+
+    for candidate in candidates:
+        if file_exists(candidate):
+            return candidate
+
+    ""
+
+fn normalize_runtime_platform(platform: text) -> text:
+    if platform == "linux-x86_64":
+        return "x86_64-unknown-linux-gnu"
+    if platform == "freebsd-x86_64":
+        return "x86_64-unknown-freebsd-elf"
+    platform
+
 fn build_bootstrap(output_path: text, platform: text):
     # Get version
     val version = get_version()
@@ -56,13 +81,17 @@ fn build_bootstrap(output_path: text, platform: text):
     dir_create_all(tmp_dir + "/lib/simple/stdlib")
     dir_create_all(tmp_dir + "/lib/simple/app")
 
-    # Copy runtime binary
-    val runtime_src = "rust/target/release-opt/simple"
+    # Copy runtime binary from the pure Simple bootstrap/release outputs.
+    val runtime_src = find_runtime_binary(platform)
     val runtime_dst = tmp_dir + "/bin/simple"
 
-    if not file_exists(runtime_src):
-        print "Error: Runtime binary not found at {runtime_src}"
-        print "Please build with: cd rust && cargo build --profile release-opt"
+    if runtime_src == "":
+        print "Error: Runtime binary not found in pure Simple build outputs"
+        print "Please build with: scripts/bootstrap/build.sh or use bin/simple after setup"
+        return
+
+    if not file_copy(runtime_src, runtime_dst):
+        print "Error: Failed to copy runtime binary from {runtime_src}"
         return
 
     # Copy stdlib files (essential subset)

@@ -49,7 +49,7 @@ struct Set<T>:
             val set = Set.from([1, 2, 3, 2, 1])
             # set contains: {1, 2, 3}
         """
-        val result = Set.with_capacity(items.len())
+        val result = Set.with_capacity(items.len() * 2 + 1)
         for item in items:
             result.insert(item)
         result
@@ -120,7 +120,7 @@ struct Set<T>:
             if set.has("Alice"):
                 print "Found!"
         """
-        set_items_contains(self.items, value)
+        self.map.has(value)
 
     fn contains(self, value: T) -> bool:
         """Compatibility alias matching the core Set API."""
@@ -139,15 +139,15 @@ struct Set<T>:
             if set.remove("Alice"):
                 print "Removed"
         """
-        if not set_items_contains(self.items, value):
-            return false
-        self.map.remove(value)
-        var i = 0
-        while i < self.items.len():
-            if self.items[i] == value:
-                self.items.remove(i)
-                return true
-            i = i + 1
+        match self.map.remove(value):
+            Some(_): pass_do_nothing
+            nil: return false
+
+        var retained: [T] = []
+        for item in self.items:
+            if item != value:
+                retained.append(item)
+        self.items = retained
         true
 
     me clear(self):
@@ -202,7 +202,7 @@ struct Set<T>:
         Example:
             val combined = set1.union(set2)
         """
-        val result: Set<T> = Set.new()
+        val result: Set<T> = Set.with_capacity((self.items.len() + other.items.len()) * 2 + 1)
         for item in self.items:
             result.insert(item)
         for item in other.items:
@@ -221,19 +221,15 @@ struct Set<T>:
         Example:
             val common = set1.intersect(set2)
         """
-        val result: Set<T> = Set.new()
+        val result: Set<T> = Set.with_capacity(self.items.len() * 2 + 1)
         for item in self.items:
-            if set_items_contains(other.items, item):
+            if other.has(item):
                 result.insert(item)
         result
 
     fn intersection(self, other: Set<T>) -> Set<T>:
         """Compatibility alias matching the core Set API."""
-        val result: Set<T> = Set.new()
-        for item in self.items:
-            if set_items_contains(other.items, item):
-                result.insert(item)
-        result
+        self.intersect(other)
 
     fn diff(self, other: Set<T>) -> Set<T>:
         """Create new set with elements in this set but not other.
@@ -247,19 +243,15 @@ struct Set<T>:
         Example:
             val unique = set1.diff(set2)
         """
-        val result: Set<T> = Set.new()
+        val result: Set<T> = Set.with_capacity(self.items.len() * 2 + 1)
         for item in self.items:
-            if not set_items_contains(other.items, item):
+            if not other.has(item):
                 result.insert(item)
         result
 
     fn difference(self, other: Set<T>) -> Set<T>:
         """Compatibility alias matching the core Set API."""
-        val result: Set<T> = Set.new()
-        for item in self.items:
-            if not set_items_contains(other.items, item):
-                result.insert(item)
-        result
+        self.diff(other)
 
     fn sym_diff(self, other: Set<T>) -> Set<T>:
         """Create new set with elements in either set but not both.
@@ -273,25 +265,18 @@ struct Set<T>:
         Example:
             val diff = set1.sym_diff(set2)
         """
-        val result: Set<T> = Set.new()
+        val result: Set<T> = Set.with_capacity((self.items.len() + other.items.len()) * 2 + 1)
         for item in self.items:
-            if not set_items_contains(other.items, item):
+            if not other.has(item):
                 result.insert(item)
         for item in other.items:
-            if not set_items_contains(self.items, item):
+            if not self.has(item):
                 result.insert(item)
         result
 
     fn symmetric_difference(self, other: Set<T>) -> Set<T>:
         """Compatibility alias matching the core Set API."""
-        val result: Set<T> = Set.new()
-        for item in self.items:
-            if not set_items_contains(other.items, item):
-                result.insert(item)
-        for item in other.items:
-            if not set_items_contains(self.items, item):
-                result.insert(item)
-        result
+        self.sym_diff(other)
 
     fn is_subset(self, other: Set<T>) -> bool:
         """Check if this set is subset of other.
@@ -304,7 +289,7 @@ struct Set<T>:
                 print "set1 ⊆ set2"
         """
         for item in self.items:
-            if not set_items_contains(other.items, item):
+            if not other.has(item):
                 return false
         true
 
@@ -331,7 +316,7 @@ struct Set<T>:
                 print "No overlap"
         """
         for item in self.items:
-            if set_items_contains(other.items, item):
+            if other.has(item):
                 return false
         true
 
@@ -347,7 +332,7 @@ struct Set<T>:
         Example:
             val filtered = set.filter(\x: x > 10)
         """
-        val result: Set<T> = Set.new()
+        val result: Set<T> = Set.with_capacity(self.items.len() * 2 + 1)
         for item in self.items:
             if predicate(item):
                 result.insert(item)
@@ -365,7 +350,7 @@ struct Set<T>:
         Example:
             val doubled = set.map(\x: x * 2)
         """
-        val result: Set<U> = Set.new()
+        val result: Set<U> = Set.with_capacity(self.items.len() * 2 + 1)
         for item in self.items:
             result.insert(mapper(item))
         result
@@ -415,8 +400,10 @@ struct Set<T>:
         Example:
             val copy = set.clone()
         """
-        # Rebuild the map so the item index and de-duplication state stay aligned.
-        Set.from(self.items)
+        val result: Set<T> = Set.with_capacity(self.items.len() * 2 + 1)
+        for item in self.items:
+            result.insert(item)
+        result
 
     me extend(self, items: [T]):
         """Add all items from list to set.
@@ -447,7 +434,7 @@ pub fn set_from_list<T>(items: [T]) -> Set<T>:
         val set = set_from_list([1, 2, 2, 3, 3, 3])
         # set contains: {1, 2, 3}
     """
-    val set = Set.with_capacity(items.len())
+    val set = Set.with_capacity(items.len() * 2 + 1)
     for item in items:
         set.insert(item)
     set
@@ -491,7 +478,10 @@ pub fn union_all<T>(sets: [Set<T>]) -> Set<T>:
     Example:
         val combined = union_all([set1, set2, set3])
     """
-    val result: Set<T> = Set.new()
+    var capacity = 1
+    for set in sets:
+        capacity = capacity + set.len()
+    val result: Set<T> = Set.with_capacity(capacity * 2 + 1)
     for set in sets:
         for item in set.to_list():
             result.insert(item)
