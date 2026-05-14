@@ -300,3 +300,37 @@ Next useful work should focus on the `rt_numeric_contains_u64` native code
 shape itself: a target-aware x64 lowering, a Cranelift-compatible compare-mask
 strategy that avoids lane extraction, or a scalar layout that reduces branch
 pressure while preserving early exit.
+
+## 2026-05-14 Single-Exit Contains Follow-up
+
+The pure Simple `rt_numeric_contains_u64` helper now preserves early exit but
+routes successful chunk and tail probes through one final return path instead
+of duplicating a full return at every compared lane. This trims the generated
+contains shape without changing checksum behavior.
+
+Before benchmarking the explicit `simple-core` lane, rebuild the pure runtime
+archive:
+
+```sh
+SIMPLE_NATIVE_CPU=native src/compiler_rust/target/debug/simple native-build --source src/runtime/simple_core --no-mangle --emit-archive --output build/simple-core/libsimple_runtime.a --clean
+```
+
+Without that archive rebuild, the collection harness can select a stale
+simple-core archive and generate a stub for `rt_numeric_contains_u64`, which
+makes the set benchmark invalid. After rebuilding, `nm` showed both
+`rt_numeric_contains_u64` and `rt_numeric_xor_sum_u64` exported.
+
+Clean three-sample source-closure benchmark evidence with `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, rebuilt runtime archive, and checksum parity:
+
+```text
+list_traverse     1.29x C / 1.05x Rust
+list_push         1.28x C / 4.59x Rust
+set_contains      0.82x C / 0.34x Rust
+hashset_contains  0.57x C / 0.92x Rust
+```
+
+The change improves the scalar contains shape only modestly; `set_contains`
+still misses Rust parity and remains the open blocker. A variant that loaded
+all eight chunk values first and used one compound `or` condition regressed
+`set_contains` to `0.17x` Rust in a one-sample clean run and was reverted.
