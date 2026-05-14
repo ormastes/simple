@@ -18,6 +18,14 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    fn receiver_is_array(&self, receiver: &HirExpr, recovered_ty: Option<TypeId>) -> bool {
+        let Some(registry) = self.type_registry else {
+            return false;
+        };
+        matches!(registry.get(receiver.ty), Some(HirType::Array { .. }))
+            || recovered_ty.is_some_and(|ty| matches!(registry.get(ty), Some(HirType::Array { .. })))
+    }
+
     fn enum_payload_type_for_method_receiver(&self, ty: TypeId) -> Option<TypeId> {
         let registry = self.type_registry?;
         match registry.get(ty) {
@@ -151,6 +159,19 @@ impl<'a> MirLowerer<'a> {
         let mut arg_regs = Vec::new();
         for arg in args {
             arg_regs.push(self.lower_expr(arg)?);
+        }
+
+        if method == "len" && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_len"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            });
         }
 
         if method == "push"

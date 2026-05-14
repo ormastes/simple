@@ -205,6 +205,20 @@ fn for_collection() {
     }));
 }
 
+#[test]
+fn static_array_len_method_lowers_to_array_len() {
+    let mir = compile_to_mir(
+        "extern fn rt_array_new_with_cap(cap: u64) -> [u64]\n\nfn test() -> u64:\n    val data: [u64] = rt_array_new_with_cap(4u64)\n    return data.len().to_u64()\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_len"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name == "len" || func_name == "Array.len")
+    }));
+}
+
 // =============================================================================
 // Nested if/else (more blocks)
 // =============================================================================
