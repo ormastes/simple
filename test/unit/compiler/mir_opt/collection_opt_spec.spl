@@ -422,3 +422,26 @@ describe "MIR Collection Optimization":
         expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(1)
         expect(_co_count_named_call(block, "rt_typed_words_u64_push")).to_equal(1)
         expect(opt.dead_append_arrays_elided).to_equal(0)
+
+    it "elides dead append-only arrays after known data pointer lowering":
+        val alloc = MirInst(kind: MirInstKind.Call(_co_lid(1), _co_func("rt_array_new_with_cap"), [_co_copy(2)]), span: nil)
+        val data_ptr_store = MirInst(kind: MirInstKind.Call(nil, _co_func("rt_typed_words_u64_store_known_data_at"), [_co_copy(1), _co_copy(5), _co_copy(6), _co_copy(3)]), span: nil)
+        val array_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U64), 0))
+        val func = _co_function_with_locals(
+            [_co_block([alloc, data_ptr_store])],
+            [
+                _co_local(1, array_type),
+                _co_local(2, MirType(kind: MirTypeKind.U64)),
+                _co_local(3, MirType(kind: MirTypeKind.U64)),
+                _co_local(5, MirType.i64()),
+                _co_local(6, MirType(kind: MirTypeKind.U64))
+            ]
+        )
+
+        var opt = create_collection_opt_pass()
+        val optimized = opt.optimize_function(func)
+        val block = optimized.blocks[0]
+
+        expect(_co_count_named_call(block, "rt_array_new_with_cap")).to_equal(0)
+        expect(_co_count_named_call(block, "rt_typed_words_u64_store_known_data_at")).to_equal(0)
+        expect(opt.dead_append_arrays_elided).to_equal(1)
