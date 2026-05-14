@@ -125,6 +125,15 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   Simple ops/ms, and set-like linear membership at `340` Simple ops/ms. The
   next measured gap is push growth/append lowering and primitive equality in
   membership scans.
+- Typed word runtime reads now stamp primitive vreg result types, and equality
+  over proven primitive scalars lowers to native integer compare instead of
+  redispatching through `rt_native_eq`/`rt_native_neq`. Disassembly of
+  `collection_simple.spl` shows no `rt_native_eq` call in `set_contains`, and a
+  one-sample rerun kept checksum parity while improving set-like membership to
+  `1,126` Simple ops/ms (`0.17x` C, `0.09x` Rust). The remaining collection
+  gap is still substantial: list traversal measured `532,769` Simple ops/ms
+  (`0.09x` C, `0.06x` Rust), and list push remains dominated by append/growth
+  overhead at `21,542` Simple ops/ms.
 
 ## Next Concrete Plugin Work
 

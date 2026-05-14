@@ -1,5 +1,5 @@
 use super::{aot_compiles, aot_compiles_module, aot_object};
-use crate::hir::TypeId;
+use crate::hir::{BinOp, TypeId};
 use crate::mir::{
     BlockId, LocalKind, MirFunction, MirInst, MirLiteral, MirLocal, MirModule, MirPattern, PatternBinding, Terminator,
     UnitOverflowBehavior,
@@ -937,6 +937,41 @@ fn codegen_inline_typed_words_u64_at_does_not_emit_runtime_symbol() {
     });
 
     assert!(!object_relocates_to_symbol(&object, "rt_typed_words_u64_at"));
+}
+
+#[test]
+fn codegen_typed_words_u64_eq_uses_native_compare() {
+    let object = aot_object("typed_words_u64_eq", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let loaded = f.new_vreg();
+        let key = f.new_vreg();
+        let eq = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(loaded),
+            target: crate::mir::CallTarget::from_name("rt_typed_words_u64_at"),
+            args: vec![array, index],
+        });
+        block.instructions.push(MirInst::Cast {
+            dest: key,
+            source: index,
+            from_ty: TypeId::I64,
+            to_ty: TypeId::U64,
+        });
+        block.instructions.push(MirInst::BinOp {
+            dest: eq,
+            op: BinOp::Eq,
+            left: loaded,
+            right: key,
+        });
+        eq
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_typed_words_u64_at"));
+    assert!(!object_relocates_to_symbol(&object, "rt_native_eq"));
 }
 
 #[test]

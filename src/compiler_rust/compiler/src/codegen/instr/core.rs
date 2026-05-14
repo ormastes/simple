@@ -36,6 +36,23 @@ pub fn vreg_is_signed<M: Module>(ctx: &InstrContext<'_, M>, v: VReg) -> Option<b
     }
 }
 
+fn vreg_is_native_equality_scalar<M: Module>(ctx: &InstrContext<'_, M>, v: VReg) -> bool {
+    matches!(
+        ctx.vreg_types.get(&v).copied(),
+        Some(
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::BOOL
+        )
+    )
+}
+
 /// Ensure a value is i64, extending smaller integer types and bitcasting floats if needed.
 /// This is necessary because some values (e.g., from FFI functions returning i32 or
 /// float constants) may not be i64 even though runtime functions expect i64.
@@ -146,7 +163,7 @@ pub(crate) fn compile_binop<M: Module>(
     lhs: cranelift_codegen::ir::Value,
     rhs: cranelift_codegen::ir::Value,
     left_vreg: VReg,
-    _right_vreg: VReg,
+    right_vreg: VReg,
 ) -> InstrResult<cranelift_codegen::ir::Value> {
     // FR-DRIVER-0002b: capture signedness from the LHS VReg *before* coercion
     // may widen/promote the value. Only the LHS signedness matters for picking
@@ -310,6 +327,10 @@ pub(crate) fn compile_binop<M: Module>(
                 // Use native float equality
                 let cmp_i8 = builder.ins().fcmp(FloatCC::Equal, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
+            } else if vreg_is_native_equality_scalar(ctx, left_vreg) && vreg_is_native_equality_scalar(ctx, right_vreg)
+            {
+                let cmp_i8 = builder.ins().icmp(IntCC::Equal, lhs, rhs);
+                ensure_i64(builder, cmp_i8)
             } else {
                 // Use rt_native_eq for safe equality of native codegen values.
                 // Handles both raw untagged integers (icmp fast path) and
@@ -321,6 +342,10 @@ pub(crate) fn compile_binop<M: Module>(
             if is_float {
                 // Use native float inequality
                 let cmp_i8 = builder.ins().fcmp(FloatCC::NotEqual, lhs, rhs);
+                ensure_i64(builder, cmp_i8)
+            } else if vreg_is_native_equality_scalar(ctx, left_vreg) && vreg_is_native_equality_scalar(ctx, right_vreg)
+            {
+                let cmp_i8 = builder.ins().icmp(IntCC::NotEqual, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
             } else {
                 // Use rt_native_neq for safe inequality of native codegen values.

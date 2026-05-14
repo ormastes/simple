@@ -6,7 +6,7 @@ use cranelift_module::Module;
 use std::collections::{HashMap, HashSet};
 
 use crate::hir::{BinOp, TypeId, UnaryOp};
-use crate::mir::{BlockId, MirFunction, MirInst, Terminator, VReg};
+use crate::mir::{BlockId, CallTarget, MirFunction, MirInst, Terminator, VReg};
 
 use super::super::types_util::type_to_cranelift;
 use super::async_ops::compile_yield;
@@ -139,6 +139,25 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                     types_map.insert(*d, *return_type);
                 }
                 MirInst::MethodCallVirtual { dest: None, .. } => {}
+                MirInst::Call {
+                    dest: Some(d), target, ..
+                } => {
+                    let base = target
+                        .name()
+                        .rsplit_once("__")
+                        .map(|(_, tail)| tail)
+                        .unwrap_or(target.name());
+                    let ty = match base {
+                        "rt_typed_bytes_u8_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
+                        "rt_typed_words_u32_at" => Some(TypeId::U32),
+                        "rt_typed_words_u64_at" => Some(TypeId::U64),
+                        _ => None,
+                    };
+                    if let Some(ty) = ty {
+                        types_map.insert(*d, ty);
+                    }
+                }
+                MirInst::Call { dest: None, .. } => {}
                 MirInst::UnitWiden {
                     dest, to_bits, signed, ..
                 }
@@ -923,6 +942,28 @@ mod tests {
         assert_eq!(map.get(&r5).copied(), Some(TypeId::U32), "Copy propagates src type");
         assert_eq!(map.get(&r6).copied(), Some(TypeId::F64), "Load carries ty");
         assert_eq!(map.get(&r7).copied(), Some(TypeId::BOOL), "ConstBool -> BOOL");
+    }
+
+    #[test]
+    fn build_vreg_types_stamps_typed_word_runtime_reads() {
+        let mut func = MirFunction::new("test".to_string(), TypeId::U64, Visibility::Private);
+        let array = func.new_vreg();
+        let index = func.new_vreg();
+        let word = func.new_vreg();
+
+        let entry = func.block_mut(BlockId(0)).unwrap();
+        entry.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        entry.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        entry.instructions.push(MirInst::Call {
+            dest: Some(word),
+            target: CallTarget::from_name("rt_typed_words_u64_at"),
+            args: vec![array, index],
+        });
+        entry.terminator = Terminator::Return(Some(word));
+
+        let map = build_vreg_types(&func);
+
+        assert_eq!(map.get(&word).copied(), Some(TypeId::U64));
     }
 
     /// Signedness classification derived from `build_vreg_types` output —
