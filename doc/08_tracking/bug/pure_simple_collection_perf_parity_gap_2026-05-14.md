@@ -200,3 +200,9 @@ The clean source-closure benchmark still fails the parity floor: list traversal
 membership `0.34x` C / `0.17x` Rust, and text `HashSet.contains` `0.41x` C /
 `0.69x` Rust, with checksum parity preserved. The remaining work is still a
 native loop/backend optimization problem, not just collection-library behavior.
+
+The pure Simple push loop now appends four preallocated values per inner-loop
+step. A clean source-closure benchmark preserved checksum parity and measured
+list push at `1.32x` C / `2.53x` Rust. This does not close the bug: list
+traversal remains `0.32x` C / `0.29x` Rust, scalar set membership remains
+`0.26x` Rust, and text `HashSet.contains` remains `0.42x` C in the same run.

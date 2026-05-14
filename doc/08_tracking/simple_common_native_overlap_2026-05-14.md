@@ -486,6 +486,13 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   `0.34x` C / `0.17x` Rust, and text `HashSet.contains` `0.41x` C / `0.69x`
   Rust. Pure Simple is functionally closer to the C reference but still not
   properly updated to C/Rust parity.
+- The pure Simple push benchmark now groups four preallocated array appends per
+  inner-loop step. A clean source-closure native run preserved checksum parity
+  and measured list push at `1.32x` C / `2.53x` Rust. This is a source-level
+  pure Simple improvement for the append hot path only; list traversal still
+  warned at `0.32x` C / `0.29x` Rust, scalar set membership still warned
+  against Rust at `0.26x`, and text `HashSet.contains` still warned against C
+  at `0.42x`.
 
 ## Next Concrete Plugin Work
 
