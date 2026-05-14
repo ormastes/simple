@@ -19,6 +19,8 @@ The checks are intentionally narrow and evidence-oriented:
 * SimpleOS native lower layers must not import POSIX/libc compatibility layers.
 * Portable stdlib/library files must not import POSIX/Linux modules; platform
   and compatibility directories are allowed to do so explicitly.
+* The architecture support matrix must not claim runtime-family root
+  `__init__.spl` coverage that does not match the tracked stdlib tree.
 
 This script is a guardrail, not a full behavioral test suite.
 """
@@ -73,6 +75,21 @@ PORTABLE_LIB_ROOTS = (
     "src/lib/nogc_async_immut",
     "src/lib/nogc_sync_immut",
 )
+
+RUNTIME_FAMILIES = (
+    "common",
+    "nogc_sync_mut",
+    "nogc_async_mut",
+    "gc_async_mut",
+    "nogc_async_immut",
+    "nogc_async_mut_noalloc",
+    "gc_sync_mut",
+    "gc_async_immut",
+    "gc_sync_immut",
+    "nogc_sync_immut",
+)
+
+SUPPORT_MATRIX = ROOT / "doc/04_architecture/runtime_family_support_matrix.md"
 
 PORTABLE_PLATFORM_ALLOW_PARTS = (
     "/posix/",
@@ -274,6 +291,42 @@ def portable_lib_imports() -> list[str]:
     return hits
 
 
+def documented_root_manifest_mismatches() -> list[str]:
+    hits: list[str] = []
+    try:
+        matrix = SUPPORT_MATRIX.read_text(encoding="utf-8", errors="ignore")
+    except OSError as err:
+        return [f"{rel(SUPPORT_MATRIX)}: cannot read support matrix: {err}"]
+
+    table_start = matrix.find("| Family | Compiler GcMode Enforcement |")
+    table_end = matrix.find("### Compiler enforcement detail", table_start)
+    if table_start < 0 or table_end < 0:
+        return [f"{rel(SUPPORT_MATRIX)}: cannot locate current proof status table"]
+    proof_table = matrix[table_start:table_end]
+
+    for family in RUNTIME_FAMILIES:
+        row_prefix = f"| `{family}` |"
+        rows = [line for line in proof_table.splitlines() if line.startswith(row_prefix)]
+        if not rows:
+            hits.append(f"{rel(SUPPORT_MATRIX)}: missing current proof status row for {family}")
+            continue
+        row = rows[-1]
+        columns = [column.strip() for column in row.strip().strip("|").split("|")]
+        if len(columns) < 4:
+            hits.append(f"{rel(SUPPORT_MATRIX)}: malformed current proof status row for {family}")
+            continue
+        documented = columns[3]
+        has_manifest = (ROOT / "src/lib" / family / "__init__.spl").exists()
+        documents_present = not documented.lower().startswith("no ")
+        if documents_present != has_manifest:
+            expected = "present" if has_manifest else "absent"
+            hits.append(
+                f"{rel(SUPPORT_MATRIX)}: {family} documents root manifest as "
+                f"`{documented}`, but tracked src/lib/{family}/__init__.spl is {expected}"
+            )
+    return hits
+
+
 def main() -> int:
     runtime_hooks = direct_runtime_hooks()
     duplicate_runtime_hooks = exact_duplicate_runtime_hooks()
@@ -284,6 +337,7 @@ def main() -> int:
     wildcard_facades = no_gc_async_runtime_owner_wildcards()
     simpleos_imports = simpleos_lower_layer_imports()
     portable_imports = portable_lib_imports()
+    root_manifest_doc_mismatches = documented_root_manifest_mismatches()
 
     report = {
         "generated_by": "scripts/audit/runtime_backend_boundaries.py",
@@ -305,6 +359,8 @@ def main() -> int:
         "simpleos_lower_layer_posix_libc_import_samples": simpleos_imports[:20],
         "portable_lib_forbidden_posix_linux_import_count": len(portable_imports),
         "portable_lib_forbidden_posix_linux_import_samples": portable_imports[:20],
+        "documented_root_manifest_mismatch_count": len(root_manifest_doc_mismatches),
+        "documented_root_manifest_mismatch_samples": root_manifest_doc_mismatches[:20],
         "pass": not runtime_hooks
         and not duplicate_runtime_hooks
         and not sync_runtime_hooks
@@ -313,7 +369,8 @@ def main() -> int:
         and not gc_wildcard_facades
         and not wildcard_facades
         and not simpleos_imports
-        and not portable_imports,
+        and not portable_imports
+        and not root_manifest_doc_mismatches,
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["pass"] else 1
