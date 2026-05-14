@@ -152,6 +152,14 @@ optimization providers rather than delegating common algorithms back to Rust/C.
   at `907,554` Simple ops/ms (`0.28x` C, `0.15x` Rust), list push at `133,212`
   Simple ops/ms (`0.06x` C, `0.09x` Rust), and set-like membership at `1,858`
   Simple ops/ms (`0.27x` C, `0.14x` Rust).
+- Compiler-generated typed word reads now also trust the typed array lane for
+  slot representation: `[u32]`/`[u64]` reads untag the stored integer directly,
+  while generic or mixed arrays still route through `rt_index_get`. The
+  traversal hot loop now shows only an unsigned bound check, slot load, and
+  shift for element access. A one-sample benchmark kept checksum parity and
+  measured list traversal at `932,410` Simple ops/ms (`0.23x` C, `0.10x`
+  Rust), list push at `121,840` Simple ops/ms (`0.04x` C, `0.08x` Rust), and
+  set-like membership at `1,882` Simple ops/ms (`0.27x` C, `0.15x` Rust).
 
 ## Next Concrete Plugin Work
 
