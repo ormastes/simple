@@ -62,6 +62,13 @@ Checksum parity passed for all three benchmarks.
   passed. The 3-sample benchmark remained below parity:
   `list_traverse` 0.34x vs C / 0.20x vs Rust, `list_push` 0.59x vs C / 1.33x
   vs Rust, and `set_contains` 0.37x vs C / 0.19x vs Rust.
+- Native integer comparison lowering now uses unsigned Cranelift compare
+  conditions when either operand carries an unsigned integer type. A high-bit
+  `u64` JIT regression test passes, and no-strip `bench_list_traverse`
+  disassembly changed the loop branches from signed `jl` to unsigned `jb`.
+  The 3-sample benchmark still remained below parity:
+  `list_traverse` 0.28x vs C / 0.18x vs Rust, `list_push` 0.63x vs C / 1.34x
+  vs Rust, and `set_contains` 0.38x vs C / 0.18x vs Rust.
 
 ## Likely Gap
 

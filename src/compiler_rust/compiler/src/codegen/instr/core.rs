@@ -311,11 +311,18 @@ pub(crate) fn compile_binop<M: Module>(
                 // Native integer comparison. Works correctly for raw untagged
                 // integers (which is what native codegen uses). String ordering
                 // via < > operators is handled by explicit runtime calls in source.
-                let cc = match op {
-                    BinOp::Lt => IntCC::SignedLessThan,
-                    BinOp::Gt => IntCC::SignedGreaterThan,
-                    BinOp::LtEq => IntCC::SignedLessThanOrEqual,
-                    BinOp::GtEq => IntCC::SignedGreaterThanOrEqual,
+                let use_unsigned = lhs_signed == Some(false) || vreg_is_signed(ctx, right_vreg) == Some(false);
+                let lhs = ensure_i64_typed(builder, pre_lhs, Some(!use_unsigned));
+                let rhs = ensure_i64_typed(builder, pre_rhs, Some(!use_unsigned));
+                let cc = match (op, use_unsigned) {
+                    (BinOp::Lt, true) => IntCC::UnsignedLessThan,
+                    (BinOp::Gt, true) => IntCC::UnsignedGreaterThan,
+                    (BinOp::LtEq, true) => IntCC::UnsignedLessThanOrEqual,
+                    (BinOp::GtEq, true) => IntCC::UnsignedGreaterThanOrEqual,
+                    (BinOp::Lt, false) => IntCC::SignedLessThan,
+                    (BinOp::Gt, false) => IntCC::SignedGreaterThan,
+                    (BinOp::LtEq, false) => IntCC::SignedLessThanOrEqual,
+                    (BinOp::GtEq, false) => IntCC::SignedGreaterThanOrEqual,
                     _ => unreachable!(),
                 };
                 let cmp_i8 = builder.ins().icmp(cc, lhs, rhs);
