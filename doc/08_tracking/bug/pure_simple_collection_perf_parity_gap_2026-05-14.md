@@ -705,3 +705,46 @@ Rejected broader benchmark probes:
 - Adding `hashmap_contains_get` crashed the native benchmark binary during the
   Simple run, so HashMap parity remains an explicit follow-up instead of a
   committed benchmark lane.
+
+## 2026-05-15 HashSet Slot-Owned Traversal Update
+
+Pure Simple `HashSet` now owns membership and traversal from the same
+open-addressed slot table. The legacy `items` side array was removed, so
+`to_vec`, set algebra, `each`, `map`, and `filter` materialize by scanning
+occupied slots. `remove` now clears the matched slot, decrements size, and
+rehashes the remaining slot table, which restores interpreter correctness for
+probe-chain deletion.
+
+The implementation keeps the fast native slot initialization helpers
+(`rt_array_repeat`, `rt_byte_array_new`, and `rt_array_set_len_known`) and mirrors
+them in interpreter extern dispatch. This avoids falling back to a push-built
+pure Simple initialization path that passed interpreter tests but regressed
+native insert performance.
+
+Clean five-sample source-closure benchmark with rebuilt `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, and checksum parity:
+
+```text
+list_traverse     1.47x C / 0.91x Rust
+list_push         1.30x C / 4.48x Rust
+set_contains      1.86x C / 0.74x Rust
+hashset_contains  0.50x C / 0.79x Rust
+hashset_insert    0.16x C / 1.10x Rust
+```
+
+This closes the pure Simple `hashset_insert` gap against the Rust reference in
+the retained run, but strict C parity remains open because the C fixed-table
+insert reference is still much faster.
+
+Rejected follow-up:
+
+- Fully pure Simple slot initialization using repeated `push` operations passed
+  the focused interpreter checks but regressed `hashset_insert` to about `0.27x`
+  Rust in the native collection benchmark, so the runtime helpers were retained.
+- Unrolling the pure runtime `rt_array_repeat` store loop by eight regressed a
+  three-sample collection run (`hashset_insert` about `0.72x` Rust and
+  `hashset_contains` about `0.47x` C), so the runtime change was reverted.
+- Local array aliases in `HashSet.insert` were not retained because interpreter
+  mutation through the alias did not persist to the object field. Direct
+  `self.slot_keys[slot]` and `self.slot_used[slot]` writes are required for the
+  interpreter facade specs.

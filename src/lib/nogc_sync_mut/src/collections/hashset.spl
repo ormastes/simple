@@ -1,7 +1,7 @@
 # HashSet - Pure Simple Implementation
 #
 # No FFI, no Rust - 100% Pure Simple
-# Uses standalone hash buckets for membership and a flat item list for traversal.
+# Uses standalone hash buckets for membership; traversal materializes from occupied slots.
 
 
 extern fn rt_hash_text(s: text) -> i64
@@ -19,7 +19,6 @@ class HashSet:
         set.insert("banana")
         val has_apple = set.contains("apple")  # true
     """
-    items: [text]
     slot_keys: [text]
     slot_used: [u8]
     size: i64
@@ -32,11 +31,10 @@ class HashSet:
     static fn with_capacity(capacity: i64) -> HashSet:
         """Create new empty HashSet with preallocated probe storage."""
         var actual_capacity = HashSet._normalize_capacity(capacity)
-        var items = rt_array_new_with_cap_text(capacity)
         var slot_keys = rt_array_repeat("", actual_capacity)
         var slot_used = rt_byte_array_new(actual_capacity)
         rt_array_set_len_known(slot_used, actual_capacity)
-        HashSet(items: items, slot_keys: slot_keys, slot_used: slot_used, size: 0, capacity: actual_capacity)
+        HashSet(slot_keys: slot_keys, slot_used: slot_used, size: 0, capacity: actual_capacity)
 
     static fn _normalize_capacity(capacity: i64) -> i64:
         var actual_capacity = 1
@@ -54,32 +52,29 @@ class HashSet:
             self._resize()
 
         val hash = rt_hash_text(value)
-        val mask = (self.capacity - 1).to_u64()
-        val keys = self.slot_keys
-        val used = self.slot_used
-        var slot = (hash & (self.capacity - 1)).to_u64()
-        while used[slot] != 0u8:
-            if keys[slot] == value:
+        val mask = self.capacity - 1
+        var slot = hash & mask
+        while self.slot_used[slot] != 0u8:
+            if self.slot_keys[slot] == value:
                 return false
-            slot = (slot + 1u64) & mask
+            slot = (slot + 1) & mask
 
-        keys[slot] = value
-        used[slot] = 1u8
-        self.items.push(value)
+        self.slot_keys[slot] = value
+        self.slot_used[slot] = 1u8
         self.size = self.size + 1
         true
 
     fn contains(value: text) -> bool:
         """Check if value exists."""
         val hash = rt_hash_text(value)
-        val mask = (self.capacity - 1).to_u64()
+        val mask = self.capacity - 1
         val keys = self.slot_keys
         val used = self.slot_used
-        var slot = (hash & (self.capacity - 1)).to_u64()
+        var slot = hash & mask
         while used[slot] != 0u8:
             if keys[slot] == value:
                 return true
-            slot = (slot + 1u64) & mask
+            slot = (slot + 1) & mask
         false
 
     me remove(value: text) -> bool:
@@ -88,19 +83,20 @@ class HashSet:
         Returns:
             true if value was present
         """
-        var found = false
-        var next_items = rt_array_new_with_cap_text(self.size)
-        for item in self.items:
-            if item == value:
+        val hash = rt_hash_text(value)
+        val mask = self.capacity - 1
+        var slot = hash & mask
+        while self.slot_used[slot] != 0u8:
+            if self.slot_keys[slot] == value:
+                self.slot_used[slot] = 0u8
+                self.slot_keys[slot] = ""
                 self.size = self.size - 1
-                found = true
-            else:
-                next_items.push(item)
-        if not found:
+                self._rebuild_storage(self.capacity)
+                return true
+            slot = (slot + 1) & mask
+        if self.slot_used[slot] == 0u8:
             return false
-        self.items = next_items
-        self._rebuild_storage(self.capacity)
-        true
+        false
 
     me clear():
         """Remove all values."""
@@ -109,8 +105,6 @@ class HashSet:
             self.slot_keys[i] = ""
             self.slot_used[i] = 0u8
             i = i + 1
-        var items = rt_array_new_with_cap_text(self.capacity)
-        self.items = items
         self.size = 0
 
     fn len() -> i64:
@@ -123,7 +117,16 @@ class HashSet:
 
     fn to_vec() -> [text]:
         """Convert to vector."""
-        self.items
+        var out = rt_array_new_with_cap_text(self.size)
+        val keys = self.slot_keys
+        val used = self.slot_used
+        var i = 0
+        val cap = self.capacity
+        while i < cap:
+            if used[i] != 0u8:
+                out.push(keys[i])
+            i = i + 1
+        out
 
     fn to_array() -> [text]:
         """Compatibility alias matching the std HashSet API."""
@@ -132,44 +135,76 @@ class HashSet:
     fn union(other: HashSet) -> HashSet:
         """Return a new set with values from both sets."""
         var result = HashSet.new()
-        for item in self.items:
-            result.insert(item)
-        for item in other.items:
-            result.insert(item)
+        var i = 0
+        val self_cap = self.capacity
+        while i < self_cap:
+            if self.slot_used[i] != 0u8:
+                result.insert(self.slot_keys[i])
+            i = i + 1
+        i = 0
+        val other_cap = other.capacity
+        while i < other_cap:
+            if other.slot_used[i] != 0u8:
+                result.insert(other.slot_keys[i])
+            i = i + 1
         result
 
     fn intersection(other: HashSet) -> HashSet:
         """Return a new set containing values present in both sets."""
         var result = HashSet.new()
-        for item in self.items:
-            if other.contains(item):
-                result.insert(item)
+        var i = 0
+        val cap = self.capacity
+        while i < cap:
+            if self.slot_used[i] != 0u8:
+                val item = self.slot_keys[i]
+                if other.contains(item):
+                    result.insert(item)
+            i = i + 1
         result
 
     fn difference(other: HashSet) -> HashSet:
         """Return a new set containing values present only in this set."""
         var result = HashSet.new()
-        for item in self.items:
-            if not other.contains(item):
-                result.insert(item)
+        var i = 0
+        val cap = self.capacity
+        while i < cap:
+            if self.slot_used[i] != 0u8:
+                val item = self.slot_keys[i]
+                if not other.contains(item):
+                    result.insert(item)
+            i = i + 1
         result
 
     fn symmetric_difference(other: HashSet) -> HashSet:
         """Return a new set containing values present in either set but not both."""
         var result = HashSet.new()
-        for item in self.items:
-            if not other.contains(item):
-                result.insert(item)
-        for item in other.items:
-            if not self.contains(item):
-                result.insert(item)
+        var i = 0
+        val self_cap = self.capacity
+        while i < self_cap:
+            if self.slot_used[i] != 0u8:
+                val item = self.slot_keys[i]
+                if not other.contains(item):
+                    result.insert(item)
+            i = i + 1
+        i = 0
+        val other_cap = other.capacity
+        while i < other_cap:
+            if other.slot_used[i] != 0u8:
+                val item = other.slot_keys[i]
+                if not self.contains(item):
+                    result.insert(item)
+            i = i + 1
         result
 
     fn is_subset(other: HashSet) -> bool:
         """Check whether every value in this set is present in other."""
-        for item in self.items:
-            if not other.contains(item):
-                return false
+        var i = 0
+        val cap = self.capacity
+        while i < cap:
+            if self.slot_used[i] != 0u8:
+                if not other.contains(self.slot_keys[i]):
+                    return false
+            i = i + 1
         true
 
     fn is_superset(other: HashSet) -> bool:
@@ -178,22 +213,35 @@ class HashSet:
 
     fn each(f: fn(text) -> void):
         """Call f for every set value."""
-        for item in self.items:
-            f(item)
+        var i = 0
+        val cap = self.capacity
+        while i < cap:
+            if self.slot_used[i] != 0u8:
+                f(self.slot_keys[i])
+            i = i + 1
 
     fn map(f: fn(text) -> text) -> HashSet:
         """Map values into a new set."""
         var result = HashSet.new()
-        for item in self.items:
-            result.insert(f(item))
+        var i = 0
+        val cap = self.capacity
+        while i < cap:
+            if self.slot_used[i] != 0u8:
+                result.insert(f(self.slot_keys[i]))
+            i = i + 1
         result
 
     fn filter(predicate: fn(text) -> bool) -> HashSet:
         """Filter values into a new set."""
         var result = HashSet.new()
-        for item in self.items:
-            if predicate(item):
-                result.insert(item)
+        var i = 0
+        val cap = self.capacity
+        while i < cap:
+            if self.slot_used[i] != 0u8:
+                val item = self.slot_keys[i]
+                if predicate(item):
+                    result.insert(item)
+            i = i + 1
         result
 
     fn _bucket_index_hash(hash: i64) -> u64:
@@ -214,14 +262,23 @@ class HashSet:
         var new_slot_used = rt_byte_array_new(new_capacity)
         rt_array_set_len_known(new_slot_used, new_capacity)
 
-        for item in self.items:
+        val old_keys = self.slot_keys
+        val old_used = self.slot_used
+        var i = 0
+        val old_capacity = self.capacity
+        while i < old_capacity:
+            if old_used[i] == 0u8:
+                i = i + 1
+                continue
+            val item = old_keys[i]
             val hash = rt_hash_text(item)
             val idx = hash & (new_capacity - 1)
-            var slot = idx.to_u64()
+            var slot = idx
             while new_slot_used[slot] != 0u8:
-                slot = (slot + 1u64) & (new_capacity - 1).to_u64()
+                slot = (slot + 1) & (new_capacity - 1)
             new_slot_keys[slot] = item
             new_slot_used[slot] = 1u8
+            i = i + 1
 
         self.slot_keys = new_slot_keys
         self.slot_used = new_slot_used

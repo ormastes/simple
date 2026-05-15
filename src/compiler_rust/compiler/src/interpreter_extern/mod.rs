@@ -1583,7 +1583,10 @@ pub(crate) fn call_extern_function(
         // `rt_array_new_with_cap(cap)` — returns Value::Array so Simple-land method
         // dispatch (.len(), .push(), etc.) works on the result.
         // See doc/08_tracking/bug/interpreter_class_field_method_dispatch_2026-04-28.md
-        "rt_array_new_with_cap" => ffi_array::rt_array_new_with_cap_fn(&evaluated),
+        "rt_array_new_with_cap" | "rt_array_new_with_cap_text" => ffi_array::rt_array_new_with_cap_fn(&evaluated),
+        "rt_byte_array_new" => ffi_array::rt_byte_array_new_fn(&evaluated),
+        "rt_array_set_len_known" => ffi_array::rt_array_set_len_known_fn(&evaluated),
+        "rt_array_repeat" => ffi_array::rt_array_repeat_fn(&evaluated),
         "rt_array_push" => ffi_array::rt_array_push_fn(&evaluated),
         "rt_typed_bytes_u8_push" => ffi_array::rt_typed_bytes_u8_push_fn(&evaluated),
         "rt_typed_words_u32_push" => ffi_array::rt_typed_words_u32_push_fn(&evaluated),

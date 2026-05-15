@@ -53,6 +53,49 @@ pub fn rt_array_new_with_cap_fn(_args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::array(vec![]))
 }
 
+/// Create a typed byte array for interpreter mode.
+///
+/// The interpreter stores typed arrays as regular `Value::Array` values while
+/// preserving byte values with `Value::UInt { width: 8 }`.
+pub fn rt_byte_array_new_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let capacity = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_byte_array_new expects 1 argument".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+    let len = capacity.max(0) as usize;
+    Ok(Value::array(vec![Value::UInt { value: 0, width: 8 }; len]))
+}
+
+/// Set array length when the interpreter already materialized the requested size.
+pub fn rt_array_set_len_known_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(1))
+}
+
+/// Create an interpreter array filled with a cloned value.
+pub fn rt_array_repeat_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let value = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_array_repeat expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
+    let count = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_repeat expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+    Ok(Value::array(vec![value.clone(); count.max(0) as usize]))
+}
+
 /// Get byte at index from a `Value::Array` — interpreter-native variant.
 ///
 /// Handles arrays created by `rt_array_new_with_cap_fn` which are stored as
