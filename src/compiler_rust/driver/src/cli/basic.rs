@@ -252,6 +252,12 @@ pub fn watch_file(path: &Path) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn strict_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn classify_undefined_function_error() {
@@ -282,6 +288,7 @@ mod tests {
 
     #[test]
     fn strict_runtime_family_guard_restores_previous_env() {
+        let _lock = strict_env_lock().lock().expect("strict env lock");
         std::env::set_var("SIMPLE_STRICT_RUNTIME_FAMILY", "previous");
         let observed = with_strict_runtime_family_imports(true, || {
             std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").expect("strict env")
@@ -297,10 +304,29 @@ mod tests {
 
     #[test]
     fn strict_runtime_family_guard_leaves_env_unset_when_disabled() {
+        let _lock = strict_env_lock().lock().expect("strict env lock");
         std::env::remove_var("SIMPLE_STRICT_RUNTIME_FAMILY");
         let observed = with_strict_runtime_family_imports(false, || std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").ok());
 
         assert_eq!(observed, None);
+        assert!(std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").is_err());
+    }
+
+    #[test]
+    fn strict_runtime_family_target_guard_enables_only_for_restricted_targets() {
+        let _lock = strict_env_lock().lock().expect("strict env lock");
+        std::env::remove_var("SIMPLE_STRICT_RUNTIME_FAMILY");
+        let simpleos = Target::parse("x86_64-simpleos").expect("simpleos target");
+        let linux = Target::parse("x86_64-linux").expect("linux target");
+
+        let restricted = with_strict_runtime_family_for_target(Some(&simpleos), || {
+            std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").ok()
+        });
+        let hosted =
+            with_strict_runtime_family_for_target(Some(&linux), || std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").ok());
+
+        assert_eq!(restricted.as_deref(), Some("1"));
+        assert_eq!(hosted, None);
         assert!(std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").is_err());
     }
 }
