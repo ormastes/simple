@@ -407,3 +407,7 @@ Additional `HashSet.contains` raw-probe experiments rejected:
   parity but regressed `hashset_contains` to `0.44x` C / `0.73x` Rust.
 - Raw-loading `slot_keys` and comparing with `rt_native_eq` preserved checksum
   parity but regressed further to `0.42x` C / `0.71x` Rust.
+- Replacing `keys[slot] == value` with explicit
+  `rt_native_eq(keys[slot], value) != 0` preserved checksum parity but
+  regressed `hashset_contains` to `0.40x` C / `0.66x` Rust. The source-level
+  equality rewrite was reverted.
