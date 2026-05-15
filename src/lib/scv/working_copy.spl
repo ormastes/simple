@@ -3,7 +3,8 @@
 use app.io.mod (file_exists, file_read, file_size, file_modified_time, dir_walk)
 use std.nogc_sync_mut.io.thread.{thread_sleep_ms}
 use std.scv.core.{scv_rel_path, scv_is_repo_path, scv_status_index_path, scv_object_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe}
-use std.scv.store.{scv_repo_exists, scv_current_op, scv_read_workspace_commit, scv_workspace_parent_error, scv_write_chunk_from_file, scv_write_file_object, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_write_text, scv_content_id_for_file, scv_commit_tree, scv_commit_state, scv_commit_change}
+use std.scv.core.{scv_bookmarks_path}
+use std.scv.store.{scv_repo_exists, scv_current_op, scv_read_workspace_commit, scv_workspace_parent_error, scv_write_chunk_from_file, scv_write_file_object, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_write_text, scv_content_id_for_file, scv_commit_tree, scv_commit_state, scv_commit_change, scv_object_field}
 
 fn scv_should_skip(root: text, path: text) -> bool:
     val rel = scv_rel_path(root, path)
@@ -147,6 +148,51 @@ fn scv_log(root: text) -> text:
     val state = scv_commit_state(root, commit)
     val change = scv_commit_change(root, commit)
     "commit {commit} change={change} tree={tree} state={state}\n"
+
+fn scv_bookmark_commit(root: text, name: text) -> text:
+    val path = scv_bookmarks_path(root)
+    if not file_exists(path):
+        return ""
+    for line in file_read(path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() >= 2 and parts[0] == name:
+            return parts[1]
+    ""
+
+fn scv_log_branch(root: text, branch: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val head = if branch == "": scv_read_workspace_commit(root) else: scv_bookmark_commit(root, branch)
+    if head == "":
+        return "no commits\n"
+    var out = ""
+    var current = head
+    var seen = ""
+    while current != "" and not scv_line_set_contains(seen, current):
+        seen = seen + current + "\n"
+        val path = scv_object_path(root, "commits", current)
+        if not file_exists(path):
+            out = out + "commit_id {current} missing\n"
+            current = ""
+            continue
+        val content = file_read(path)
+        val tree = scv_object_field(content, "tree")
+        val state = scv_object_field(content, "state")
+        val change = scv_object_field(content, "change")
+        val parents_field = scv_object_field(content, "parents")
+        out = out + "commit_id {current} change={change} tree={tree} state={state}\n"
+        val first_parent = if parents_field == "": "" else:
+            var fp = ""
+            for part in parents_field.split(" "):
+                val trimmed = part.trim()
+                if trimmed != "" and fp == "":
+                    fp = trimmed
+            fp
+        current = first_parent
+    out
 
 fn scv_op_log(root: text) -> text:
     val op = scv_current_op(root)
