@@ -81,6 +81,7 @@ extern RuntimeValue rt_value_to_string(RuntimeValue val);
 extern RuntimeValue rt_array_new(RuntimeValue cap);
 extern int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
 extern RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx);
+extern int8_t rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val);
 extern RuntimeValue rt_array_len(RuntimeValue arr);
 extern RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
 extern RuntimeValue rt_enum_new(RuntimeValue eid, RuntimeValue disc, RuntimeValue payload);
@@ -3969,6 +3970,12 @@ RuntimeValue rt_typed_words_u32_push(RuntimeValue array, RuntimeValue value) {
     return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFFFFFFFFULL)) ? TRUE_VALUE : FALSE_VALUE;
 }
 RuntimeValue rt_typed_words_u32_set(void) { return TRUE_VALUE; }
+int8_t rt_typed_words_u64_push(RuntimeValue array, RuntimeValue value) {
+    return rt_array_push(array, value);
+}
+int8_t rt_typed_words_u64_set(RuntimeValue array, RuntimeValue idx, RuntimeValue value) {
+    return rt_array_set(array, idx, value);
+}
 RuntimeValue rt_utf8_count_codepoints(RuntimeValue value) { return rt_string_len(value); }
 RuntimeValue rt_utf8_find_invalid(void) { return ENCODE_INT(-1); }
 RuntimeValue rt_utf8_validate(void) { return TRUE_VALUE; }

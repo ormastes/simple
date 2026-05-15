@@ -149,6 +149,9 @@ src/compiler_rust/target/debug/simple test test/feature/scilib/cuda_device_buffe
 src/compiler_rust/target/debug/simple os test --help
 => Not a help-only path; attempted the default x86_64 Cranelift OS build and failed before QEMU because Ring's vendored curve25519.c requires missing third_party/fiat/curve25519_64.h and the link still had unresolved rt_typed_words_u64_push / rt_typed_words_u64_set
 
+env SIMPLE_OS_BUILD_BACKEND=cranelift src/compiler_rust/target/debug/simple os test --arch=x86_64
+=> QEMU boot passed after restoring the vendored Ring fiat headers and adding freestanding rt_typed_words_u64_push / rt_typed_words_u64_set wrappers; serial output included [stage1] PASS: Kernel boot + PCI scan and TEST PASSED
+
 bin/simple test test/unit/compiler/driver/compile_options_normalization_spec.spl --mode=interpreter
 => Passed: 10, Failed: 0
 
