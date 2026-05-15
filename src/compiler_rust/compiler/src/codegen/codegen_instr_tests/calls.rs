@@ -1252,6 +1252,57 @@ fn codegen_typed_words_u64_eq_uses_native_compare() {
 }
 
 #[test]
+fn codegen_text_eq_uses_string_eq_not_native_eq() {
+    let object = aot_object("text_eq", |f| {
+        let object = f.new_vreg();
+        let left_value = f.new_vreg();
+        let right_value = f.new_vreg();
+        let left = f.new_vreg();
+        let right = f.new_vreg();
+        let eq = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstString {
+            dest: left_value,
+            value: "left".to_string(),
+        });
+        block.instructions.push(MirInst::ConstString {
+            dest: right_value,
+            value: "right".to_string(),
+        });
+        block.instructions.push(MirInst::StructInit {
+            dest: object,
+            type_id: TypeId::I64,
+            struct_size: 16,
+            field_offsets: vec![0, 8],
+            field_types: vec![TypeId::STRING, TypeId::STRING],
+            field_values: vec![left_value, right_value],
+        });
+        block.instructions.push(MirInst::FieldGet {
+            dest: left,
+            object,
+            byte_offset: 0,
+            field_type: TypeId::STRING,
+        });
+        block.instructions.push(MirInst::FieldGet {
+            dest: right,
+            object,
+            byte_offset: 8,
+            field_type: TypeId::STRING,
+        });
+        block.instructions.push(MirInst::BinOp {
+            dest: eq,
+            op: BinOp::Eq,
+            left,
+            right,
+        });
+        eq
+    });
+
+    assert!(object_relocates_to_symbol(&object, "rt_string_eq"));
+    assert!(!object_relocates_to_symbol(&object, "rt_native_eq"));
+}
+
+#[test]
 fn codegen_inline_typed_bytes_u64_le_at_does_not_emit_runtime_symbol() {
     let object = aot_object("inline_typed_bytes_u64_le_at", |f| {
         let array = f.new_vreg();

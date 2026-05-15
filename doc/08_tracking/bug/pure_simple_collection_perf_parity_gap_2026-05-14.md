@@ -773,3 +773,29 @@ This improves retained `hashset_insert` from `0.16x C / 1.10x Rust` to `0.22x
 C / 1.59x Rust`. Strict parity remains open because `hashset_insert` is still
 below the C fixed-table reference, while `list_traverse`, `set_contains`, and
 `hashset_contains` still trail the fastest C/Rust reference in this run.
+
+## 2026-05-15 Text Array Load Type And Equality Update
+
+MIR lowering now preserves the `text` element type after `Array<text>` indexing
+with a no-op text cast, so Cranelift equality lowering can route `text == text`
+to `rt_string_eq` instead of the generic `rt_native_eq` dispatcher. Disassembly
+of `build/perf/collections/collection_simple` confirms both `HashSet.insert`
+and `HashSet.contains` now call `rt_string_eq` on occupied-slot comparisons.
+
+Clean five-sample source-closure benchmark with rebuilt `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, checksum parity, and no unresolved Rust runtime
+symbols in `build/perf/collections/collection_simple`:
+
+```text
+list_traverse     0.77x C / 0.69x Rust
+list_push         1.28x C / 2.56x Rust
+set_contains      1.91x C / 0.77x Rust
+hashset_contains  0.52x C / 0.81x Rust
+hashset_insert    0.24x C / 1.68x Rust
+```
+
+This improves retained `hashset_insert` from `0.22x C / 1.59x Rust` to `0.24x
+C / 1.68x Rust` and keeps `hashset_contains` above the C warning floor in the
+retained run. Strict parity remains open because `hashset_insert` is still well
+below the C fixed-table reference, while `list_traverse`, `set_contains`, and
+`hashset_contains` still trail the fastest C/Rust reference.

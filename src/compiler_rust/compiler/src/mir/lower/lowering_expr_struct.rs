@@ -596,6 +596,18 @@ impl<'a> MirLowerer<'a> {
                 });
                 unboxed
             })
+        } else if element_expr_ty == TypeId::STRING {
+            self.with_func(|func, current_block| {
+                let typed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Cast {
+                    dest: typed,
+                    source: raw_result,
+                    from_ty: TypeId::STRING,
+                    to_ty: TypeId::STRING,
+                });
+                typed
+            })
         } else {
             // Strings, arrays, objects are already usable as pointers
             Ok(raw_result)

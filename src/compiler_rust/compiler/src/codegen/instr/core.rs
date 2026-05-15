@@ -53,6 +53,10 @@ fn vreg_is_native_equality_scalar<M: Module>(ctx: &InstrContext<'_, M>, v: VReg)
     )
 }
 
+fn vreg_is_text<M: Module>(ctx: &InstrContext<'_, M>, v: VReg) -> bool {
+    matches!(ctx.vreg_types.get(&v).copied(), Some(TypeId::STRING))
+}
+
 /// Ensure a value is i64, extending smaller integer types and bitcasting floats if needed.
 /// This is necessary because some values (e.g., from FFI functions returning i32 or
 /// float constants) may not be i64 even though runtime functions expect i64.
@@ -334,6 +338,8 @@ pub(crate) fn compile_binop<M: Module>(
                 // Use native float equality
                 let cmp_i8 = builder.ins().fcmp(FloatCC::Equal, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
+            } else if vreg_is_text(ctx, left_vreg) && vreg_is_text(ctx, right_vreg) {
+                call_runtime_2(ctx, builder, "rt_string_eq", lhs, rhs)
             } else if vreg_is_native_equality_scalar(ctx, left_vreg) && vreg_is_native_equality_scalar(ctx, right_vreg)
             {
                 let cmp_i8 = builder.ins().icmp(IntCC::Equal, lhs, rhs);
@@ -350,6 +356,11 @@ pub(crate) fn compile_binop<M: Module>(
                 // Use native float inequality
                 let cmp_i8 = builder.ins().fcmp(FloatCC::NotEqual, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
+            } else if vreg_is_text(ctx, left_vreg) && vreg_is_text(ctx, right_vreg) {
+                let eq = call_runtime_2(ctx, builder, "rt_string_eq", lhs, rhs);
+                let zero = builder.ins().iconst(types::I64, 0);
+                let neq = builder.ins().icmp(IntCC::Equal, eq, zero);
+                ensure_i64(builder, neq)
             } else if vreg_is_native_equality_scalar(ctx, left_vreg) && vreg_is_native_equality_scalar(ctx, right_vreg)
             {
                 let cmp_i8 = builder.ins().icmp(IntCC::NotEqual, lhs, rhs);
