@@ -510,3 +510,36 @@ Rejected follow-up:
   collection run still measured `hashset_contains` at only `0.59x C / 0.98x
   Rust` and dipped `list_push` to `0.87x C`. The inline hash lowering was
   reverted.
+
+## 2026-05-15 HashSet Sparse Probe Update
+
+Pure Simple `HashSet.with_capacity` now normalizes `capacity * 8` for its
+standalone open-addressed probe table. The public contract still guarantees at
+least the requested capacity, and the extra sparsity reduces collision-chain
+work in the hot `contains` path without adding new runtime symbols.
+
+Rejected local variant:
+
+- `capacity * 16` preserved checksum parity but did not improve the
+  `hashset_contains` median over `capacity * 8` in a clean three-sample run, so
+  it was reverted to avoid extra memory use without measured benefit.
+
+Focused validation:
+
+- `simple test test/unit/lib/nogc_sync_mut/hashset_probe_spec.spl --mode=interpreter`
+- `simple test test/unit/lib/nogc_async_mut/src/collections/src_collections_facade_spec.spl --mode=interpreter --no-cache`
+- `simple test test/unit/lib/gc_async_mut/src/collections/src_collections_facade_spec.spl --mode=interpreter --no-cache`
+
+Clean five-sample source-closure benchmark evidence with rebuilt `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, and checksum parity:
+
+```text
+list_traverse     1.04x C / 0.84x Rust
+list_push         1.31x C / 2.56x Rust
+set_contains      1.86x C / 0.74x Rust
+hashset_contains  0.65x C / 1.08x Rust
+```
+
+This lifts `hashset_contains` over the Rust reference in this run, but strict
+parity remains open because it is still below the C fixed-table reference and
+`list_traverse` / `set_contains` remain below Rust in the median-selected run.
