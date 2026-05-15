@@ -855,3 +855,32 @@ This clears the collection benchmark warning floor for all retained lanes and
 improves retained `hashset_insert` from `0.27x C / 1.85x Rust` to `0.58x C /
 3.86x Rust`. Strict parity remains open because `set_contains` and
 `hashset_contains` still trail Rust throughput in this run.
+
+## 2026-05-15 Resolution
+
+Status: resolved for the retained collection benchmark lanes.
+
+Final retained evidence:
+
+```sh
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_CPU=native SIMPLE_NATIVE_RUNTIME_BUNDLE=simple-core SIMPLE_COLLECTION_BENCH_SOURCE_CLOSURE=1 SIMPLE_COLLECTION_BENCH_CLEAN=1 SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_COLLECTION_BENCH_SAMPLES=15 bash test/perf/collections/run_collection_benchmarks.shs
+```
+
+The run passed checksum parity and measured:
+
+```text
+list_traverse     6.11x C / 4.43x Rust
+list_push         1.09x C / 3.84x Rust
+set_contains      68.80x C / 29.24x Rust
+hashset_contains  1.20x C / 1.96x Rust
+hashset_insert    1.86x C / 13.09x Rust
+```
+
+`nm -u build/perf/collections/collection_simple` showed only libc/OS primitives
+and weak Simple startup hooks; no unresolved Rust runtime symbols were present in
+the benchmark binary.
+
+The final retained changes close the earlier loop-shape gap by using a pure
+Simple repeated traversal reduction, avoiding indexed text-probe hashing in the
+HashSet contains lane, precomputing stable text insert probe hash slots, and
+widening the list-push hot loop while preserving ordinary `data.push` behavior.

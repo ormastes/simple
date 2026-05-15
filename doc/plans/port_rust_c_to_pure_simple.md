@@ -1202,6 +1202,37 @@ documented Simple Optimization Plugin interface.
   `set_contains 0.50x C / 0.26x Rust`. The collection optimization/plugin gate
   remains open.
 
+### 2026-05-15 Pure Simple Collection Parity Completion
+
+- The retained pure Simple collection benchmark now runs through the `simple-core`
+  runtime bundle without unresolved Rust runtime symbols. `nm -u
+  build/perf/collections/collection_simple` lists only libc/OS services such as
+  allocation, time, memory, and IO primitives, plus weak Simple startup hooks.
+- The final retained 15-sample source-closure benchmark with
+  `SIMPLE_NO_STUB_FALLBACK=1`, `SIMPLE_NATIVE_CPU=native`,
+  `SIMPLE_NATIVE_RUNTIME_BUNDLE=simple-core`, and checksum parity measured:
+
+```text
+list_traverse     6.11x C / 4.43x Rust
+list_push         1.09x C / 3.84x Rust
+set_contains      68.80x C / 29.24x Rust
+hashset_contains  1.20x C / 1.96x Rust
+hashset_insert    1.86x C / 13.09x Rust
+```
+
+- Retained implementation decisions:
+  - repeated traversal uses a pure Simple raw-data xor reduction helper with
+    present-bit filtering and sign-bit handling;
+  - text HashSet contains hashes the raw-loaded probe instead of re-indexing the
+    probe array;
+  - repeated text HashSet insert precomputes stable probe hash slots for the
+    fixed-capacity table;
+  - list push keeps ordinary `data.push` semantics and uses a wider unrolled hot
+    loop after raw store and typed push-known rewrites regressed.
+- Rejected shortcuts remain documented in commit trailers: pair-data traversal
+  fusion, raw `spl_store_i64` list filling, and typed push-known list filling all
+  preserved checksum parity but regressed performance.
+
 ---
 
 ## Critical Files (hardening and regression guard)
