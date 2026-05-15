@@ -362,3 +362,15 @@ Disassembly of `set_contains` confirms the hot chunk path uses four
 eight-element chunk. This closes the scalar `set_contains` Rust floor in the
 sample above. The remaining parity risk is now the noisy `list_traverse` Rust
 floor and text `hashset_contains` C floor.
+
+Follow-up experiments rejected:
+
+- Splitting the `rt_numeric_xor_sum_u64` callsite inline into two `I64X2`
+  accumulators passed the existing xor-sum and contains lowering tests, but a
+  clean five-sample benchmark still left `list_traverse` at `0.71x` Rust and
+  pushed `hashset_contains` below the C warning floor (`0.49x` C). The change
+  was reverted.
+- Moving `HashSet.contains` to a pure Simple runtime helper
+  `rt_hashset_text_contains` avoided generic library indexing at the callsite
+  but regressed the text membership benchmark to `0.27x` C / `0.43x` Rust in a
+  clean five-sample source-closure run. The helper was reverted.
