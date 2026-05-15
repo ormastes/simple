@@ -562,3 +562,9 @@ Rejected follow-up:
   parity but did not improve `hashset_contains` (`0.62x C / 1.02x Rust`) and
   pushed `list_push` below C (`0.90x`) in a clean three-sample run. The runtime
   source change was reverted.
+- Allowing the existing MIR small-function inliner to inline callees with
+  back-edges broke the explicit `does_not_inline_loop_callees_without_licm`
+  test and did not remove the hot `set_contains` call from the generated
+  collection benchmark binary. The benchmark still preserved checksum parity,
+  but the intended call-boundary optimization did not happen, so the inliner
+  change was reverted.
