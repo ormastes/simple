@@ -574,3 +574,8 @@ Rejected follow-up:
   benchmark regressed `list_traverse` below C (`0.90x C / 0.73x Rust`) while
   only nudging `set_contains` to `0.76x Rust`. The bounded loop-inliner change
   was reverted.
+- Folding non-float `x == x` / `x != x` in native codegen passed a focused
+  object relocation test, but it did not remove the `rt_native_eq(length,
+  length)` guard from the generated `set_contains` function and regressed the
+  retained five-sample `hashset_contains` median to `0.59x C`. The fold was
+  reverted.
