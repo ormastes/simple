@@ -434,3 +434,30 @@ Focused tests:
 - `simple test test/unit/lib/nogc_sync_mut/hashset_probe_spec.spl --mode=interpreter`
 - `simple test test/unit/lib/nogc_async_mut/src/collections/src_collections_facade_spec.spl --mode=interpreter`
 - `simple test test/unit/lib/gc_async_mut/src/collections/src_collections_facade_spec.spl --mode=interpreter`
+
+## 2026-05-15 Contains Scan Second-Chunk Update
+
+The native codegen callsite inline for `rt_numeric_contains_u64` now tests two
+eight-element `I64X2` vector chunks before looping when a second chunk is
+available. The first chunk still branches to the scalar tail for short arrays,
+so the transform keeps the previous small-tail behavior while reducing loop
+branch overhead for the benchmark's 1024-element scan.
+
+Focused compiler validation:
+
+- `cargo build -p simple-driver --bin simple`
+- `cargo test -p simple-compiler simd_auto_lowers_canonical_while_u64_contains_to_runtime_kernel -- --nocapture`
+
+Clean five-sample source-closure benchmark evidence with rebuilt `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, and checksum parity:
+
+```text
+list_traverse     1.33x C / 0.85x Rust
+list_push         1.29x C / 4.46x Rust
+set_contains      1.66x C / 0.66x Rust
+hashset_contains  0.61x C / 0.96x Rust
+```
+
+This improves the scalar set scan and clears the current benchmark warning
+floor, but strict parity is still open because `list_traverse` remains below
+Rust and `hashset_contains` remains below C.

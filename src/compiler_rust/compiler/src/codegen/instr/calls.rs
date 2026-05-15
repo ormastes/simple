@@ -606,12 +606,15 @@ fn compile_inline_numeric_contains_u64<M: Module>(
     let len_block = builder.create_block();
     let loop_block = builder.create_block();
     let chunk_block = builder.create_block();
+    let chunk_second_block = builder.create_block();
     let tail_block = builder.create_block();
     let tail_body_block = builder.create_block();
     let found_block = builder.create_block();
     let done_block = builder.create_block();
     builder.append_block_param(loop_block, types::I64);
     builder.append_block_param(loop_block, types::I64);
+    builder.append_block_param(chunk_second_block, types::I64);
+    builder.append_block_param(chunk_second_block, types::I64);
     builder.append_block_param(tail_block, types::I64);
     builder.append_block_param(tail_block, types::I64);
     builder.append_block_param(tail_body_block, types::I64);
@@ -632,7 +635,9 @@ fn compile_inline_numeric_contains_u64<M: Module>(
     let length = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
     let negative_len = builder.ins().icmp(IntCC::SignedLessThan, length, zero);
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    builder.ins().brif(negative_len, done_block, &[zero], loop_block, &[zero, data_ptr]);
+    builder
+        .ins()
+        .brif(negative_len, done_block, &[zero], loop_block, &[zero, data_ptr]);
     builder.seal_block(len_block);
 
     builder.switch_to_block(loop_block);
@@ -640,7 +645,9 @@ fn compile_inline_numeric_contains_u64<M: Module>(
     let cursor = builder.block_params(loop_block)[1];
     let idx_plus_seven = builder.ins().iadd_imm(idx, 7);
     let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_seven, length);
-    builder.ins().brif(has_chunk, chunk_block, &[], tail_block, &[idx, cursor]);
+    builder
+        .ins()
+        .brif(has_chunk, chunk_block, &[], tail_block, &[idx, cursor]);
 
     builder.switch_to_block(chunk_block);
     let needle_vec = builder.ins().splat(types::I64X2, needle);
@@ -655,15 +662,51 @@ fn compile_inline_numeric_contains_u64<M: Module>(
     let chunk_hit = builder.ins().icmp_imm(IntCC::NotEqual, any_hit, 0);
     let next_idx = builder.ins().iadd_imm(idx, 8);
     let next_cursor = builder.ins().iadd_imm(cursor, 64);
-    builder.ins().brif(chunk_hit, found_block, &[], loop_block, &[next_idx, next_cursor]);
+    builder.ins().brif(
+        chunk_hit,
+        found_block,
+        &[],
+        chunk_second_block,
+        &[next_idx, next_cursor],
+    );
     builder.seal_block(chunk_block);
+
+    builder.switch_to_block(chunk_second_block);
+    let idx = builder.block_params(chunk_second_block)[0];
+    let cursor = builder.block_params(chunk_second_block)[1];
+    let idx_plus_seven = builder.ins().iadd_imm(idx, 7);
+    let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_seven, length);
+    let second_test_block = builder.create_block();
+    builder
+        .ins()
+        .brif(has_chunk, second_test_block, &[], tail_block, &[idx, cursor]);
+    builder.seal_block(chunk_second_block);
+
+    builder.switch_to_block(second_test_block);
+    let first_values = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 0);
+    let mut hit_mask = vector_compare_mask_i64x2(builder, first_values, needle_vec);
+    for offset in [16, 32, 48] {
+        let values = builder.ins().load(types::I64X2, MemFlags::new(), cursor, offset);
+        let mask = vector_compare_mask_i64x2(builder, values, needle_vec);
+        hit_mask = builder.ins().bor(hit_mask, mask);
+    }
+    let any_hit = builder.ins().vany_true(hit_mask);
+    let chunk_hit = builder.ins().icmp_imm(IntCC::NotEqual, any_hit, 0);
+    let next_idx = builder.ins().iadd_imm(idx, 8);
+    let next_cursor = builder.ins().iadd_imm(cursor, 64);
+    builder
+        .ins()
+        .brif(chunk_hit, found_block, &[], loop_block, &[next_idx, next_cursor]);
+    builder.seal_block(second_test_block);
     builder.seal_block(loop_block);
 
     builder.switch_to_block(tail_block);
     let tail_idx = builder.block_params(tail_block)[0];
     let tail_cursor = builder.block_params(tail_block)[1];
     let has_tail = builder.ins().icmp(IntCC::SignedLessThan, tail_idx, length);
-    builder.ins().brif(has_tail, tail_body_block, &[tail_idx, tail_cursor], done_block, &[zero]);
+    builder
+        .ins()
+        .brif(has_tail, tail_body_block, &[tail_idx, tail_cursor], done_block, &[zero]);
 
     builder.switch_to_block(tail_body_block);
     let tail_idx = builder.block_params(tail_body_block)[0];
@@ -672,7 +715,9 @@ fn compile_inline_numeric_contains_u64<M: Module>(
     let hit = builder.ins().icmp(IntCC::Equal, value, needle);
     let next_tail_idx = builder.ins().iadd_imm(tail_idx, 1);
     let next_tail_cursor = builder.ins().iadd_imm(tail_cursor, 8);
-    builder.ins().brif(hit, found_block, &[], tail_block, &[next_tail_idx, next_tail_cursor]);
+    builder
+        .ins()
+        .brif(hit, found_block, &[], tail_block, &[next_tail_idx, next_tail_cursor]);
     builder.seal_block(tail_body_block);
     builder.seal_block(tail_block);
 
