@@ -84,10 +84,32 @@ fn bench_hashset_contains() {
     report("hashset_contains", SET_SIZE as u64 * SET_ITERS, start.elapsed().as_micros(), checksum);
 }
 
+fn make_text_keys() -> Vec<String> {
+    (0..SET_SIZE)
+        .map(|i| format!("key_{}", (i as u64 * 131 + 7) | 1))
+        .collect()
+}
+
+fn bench_hashset_insert() {
+    let keys = make_text_keys();
+    let mut checksum = 0u64;
+    let start = Instant::now();
+    for iter in 0..SET_ITERS {
+        let mut set = HashSet::with_capacity(SET_SIZE * 2);
+        for i in 0..SET_SIZE {
+            if set.insert(keys[i].clone()) {
+                checksum = checksum.wrapping_add(((i as u64 * 131 + 7) | 1) ^ iter);
+            }
+        }
+    }
+    report("hashset_insert", SET_SIZE as u64 * SET_ITERS, start.elapsed().as_micros(), checksum);
+}
+
 fn main() {
     let data = make_data();
     bench_list_traverse(&data);
     bench_list_push();
     bench_set_contains();
     bench_hashset_contains();
+    bench_hashset_insert();
 }

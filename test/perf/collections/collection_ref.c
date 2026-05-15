@@ -116,12 +116,40 @@ static void bench_hashset_contains(void) {
     report("hashset_contains", SET_SIZE * SET_ITERS, now_us() - start, checksum);
 }
 
+static void make_text_keys(char keys[SET_SIZE][32]) {
+    for (uint64_t i = 0; i < SET_SIZE; i++) {
+        uint64_t key_num = (i * 131ULL + 7ULL) | 1ULL;
+        snprintf(keys[i], 32, "key_%llu", (unsigned long long)key_num);
+    }
+}
+
+static void bench_hashset_insert(void) {
+    enum { TABLE_SIZE = 2048 };
+    char keys[SET_SIZE][32];
+    make_text_keys(keys);
+
+    uint64_t checksum = 0;
+    uint64_t start = now_us();
+    for (uint64_t iter = 0; iter < SET_ITERS; iter++) {
+        const char *table[TABLE_SIZE] = {0};
+        for (uint64_t i = 0; i < SET_SIZE; i++) {
+            uint64_t key_num = (i * 131ULL + 7ULL) | 1ULL;
+            uint64_t slot = hash_text(keys[i]) & (TABLE_SIZE - 1);
+            while (table[slot] != NULL) slot = (slot + 1ULL) & (TABLE_SIZE - 1);
+            table[slot] = keys[i];
+            checksum += key_num ^ iter;
+        }
+    }
+    report("hashset_insert", SET_SIZE * SET_ITERS, now_us() - start, checksum);
+}
+
 int main(void) {
     uint64_t *data = make_data();
     bench_list_traverse(data);
     bench_list_push();
     bench_set_contains();
     bench_hashset_contains();
+    bench_hashset_insert();
     free(data);
     return 0;
 }

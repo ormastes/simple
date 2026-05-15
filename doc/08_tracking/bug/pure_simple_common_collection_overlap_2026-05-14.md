@@ -77,6 +77,16 @@ hashset_contains  0.61x C / 1.04x Rust
   lowerings, and removing redundant length-alias guards. This is not full C/Rust
   parity: `hashset_contains` remains below C throughput, and `set_contains`
   remains below Rust throughput in the retained five-sample run.
+- The benchmark now also covers `hashset_insert` across C, Rust, and pure
+  Simple with checksum parity. Removing unused chained-bucket maintenance from
+  the pure Simple `HashSet` insert path improved insertion, but the retained
+  five-sample source-closure run still showed only `0.01x C / 0.06x Rust`, so
+  insert parity is a newly measured open gap.
+- Broader probes for `hashset_remove`, `hashset_intersection`, and
+  `hashmap_contains_get` were not retained: the first two did not provide
+  checksum-equivalent evidence in the probe harness, and the HashMap probe
+  crashed the native Simple run. These APIs need focused correctness/smoke
+  coverage before they can become benchmark lanes.
 
 ## Prompt-to-artifact checklist
 
@@ -85,8 +95,8 @@ hashset_contains  0.61x C / 1.04x Rust
 | Commit, pull/rebase, push | Latest pushed baseline before this retained optimization was `c027c6bd40`; VCS sync for this increment is verified after the commit/rebase/push step. | Done for prior increments; verify after current sync |
 | Remove Rust from pure Simple path/runtime unless OS-provided | `nm -u build/perf/collections/collection_simple` lists libc/OS symbols and weak startup hooks only; no unresolved Rust runtime symbols. | Verified for collection benchmark binary |
 | Port runtime support to pure Simple unless OS-provided | `build/simple-core/libsimple_runtime.a` provides the runtime helpers used by the collection benchmark; OS primitives remain `malloc`, `free`, `memcmp`, clocks, IO, and similar host services. | Verified for benchmark scope |
-| Check common libraries that overlap C/Rust/native surfaces | This audit enumerates array, typed-array, generic indexing, list/set/hash/map, persistent, noalloc, and checksum/hash overlap surfaces. | In progress |
-| Match or beat existing C/Rust performance for list/set/traverse and similar APIs | Latest retained benchmark beats C for `list_traverse`, `list_push`, and `set_contains`, beats Rust for `list_traverse`, `list_push`, and `hashset_contains`, but trails Rust for `set_contains` and trails C for `hashset_contains`. | Not complete |
+| Check common libraries that overlap C/Rust/native surfaces | This audit enumerates array, typed-array, generic indexing, list/set/hash/map, persistent, noalloc, and checksum/hash overlap surfaces. The active C/Rust/Simple benchmark now covers list traversal, list push, numeric set contains, text HashSet contains, and text HashSet insert. | In progress |
+| Match or beat existing C/Rust performance for list/set/traverse and similar APIs | Latest retained benchmark beats C for `list_traverse`, `list_push`, and `set_contains`, beats Rust for `list_traverse`, `list_push`, and `hashset_contains`, but trails Rust for `set_contains`, trails C for `hashset_contains`, and newly measured `hashset_insert` is far below both references. | Not complete |
 
 ## Next optimization targets
 
@@ -94,9 +104,11 @@ hashset_contains  0.61x C / 1.04x Rust
    `set_contains` throughput, because both still trail the fastest reference.
 2. Keep typed scan work limited to verified regressions; current
    `list_traverse`, `list_push`, and numeric `set_contains` clear the C floor.
-3. Benchmark `src/lib/*/examples/benchmarks/set_operations.spl`
-   and representative `hashset`/`hashmap` Simple APIs against runtime/native
-   equivalents after `hashset_contains` clears the C floor.
-4. Keep rejected shortcuts documented; do not repeat raw-probe, short-string
+3. Add focused correctness coverage for `HashSet.remove`, HashSet set algebra,
+   and text `HashMap` native execution before adding them to the parity runner.
+4. Repair or replace `src/lib/*/examples/benchmarks/set_operations.spl`;
+   the current sync-mut example is stale and fails semantic analysis because
+   its benchmark registry uses `Map` with string keys.
+5. Keep rejected shortcuts documented; do not repeat raw-probe, short-string
    equality, split-vector contains, source-level unroll, or stale runtime-helper
    experiments without a new codegen reason.

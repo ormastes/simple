@@ -6,10 +6,6 @@
 
 extern fn rt_hash_text(s: text) -> i64
 
-struct SetEntry:
-    key: text
-    hash: i64
-
 class HashSet:
     """Pure Simple HashSet using text keys.
 
@@ -19,7 +15,6 @@ class HashSet:
         set.insert("banana")
         val has_apple = set.contains("apple")  # true
     """
-    buckets: [[SetEntry]]
     items: [text]
     slot_keys: [text]
     slot_used: [u8]
@@ -31,23 +26,17 @@ class HashSet:
         HashSet.with_capacity(16)
 
     static fn with_capacity(capacity: i64) -> HashSet:
-        """Create new empty HashSet with preallocated buckets."""
+        """Create new empty HashSet with preallocated probe storage."""
         var actual_capacity = HashSet._normalize_capacity(capacity * 8)
-        var buckets: [[SetEntry]] = []
-        var i = 0
-        while i < actual_capacity:
-            var bucket: [SetEntry] = []
-            buckets.push(bucket)
-            i = i + 1
         var items: [text] = []
         var slot_keys: [text] = []
         var slot_used: [u8] = []
-        i = 0
+        var i = 0
         while i < actual_capacity:
             slot_keys.push("")
             slot_used.push(0u8)
             i = i + 1
-        HashSet(buckets: buckets, items: items, slot_keys: slot_keys, slot_used: slot_used, size: 0, capacity: actual_capacity)
+        HashSet(items: items, slot_keys: slot_keys, slot_used: slot_used, size: 0, capacity: actual_capacity)
 
     static fn _normalize_capacity(capacity: i64) -> i64:
         var actual_capacity = 1
@@ -71,10 +60,6 @@ class HashSet:
                 return false
             slot = (slot + 1u64) & (self.capacity - 1).to_u64()
 
-        val idx = self._bucket_index_hash(hash)
-        var bucket = self.buckets[idx]
-        bucket.push(SetEntry(key: value, hash: hash))
-        self.buckets[idx] = bucket
         self.slot_keys[slot] = value
         self.slot_used[slot] = 1u8
         self.items.push(value)
@@ -100,27 +85,16 @@ class HashSet:
         Returns:
             true if value was present
         """
-        val hash = rt_hash_text(value)
-        val idx = self._bucket_index_hash(hash)
-        var bucket = self.buckets[idx]
         var found = false
-        for i in 0..bucket.len():
-            if bucket[i].hash == hash and bucket[i].key == value:
-                val last_idx = bucket.len() - 1
-                if i != last_idx:
-                    bucket[i] = bucket[last_idx]
-                bucket.pop()
-                self.buckets[idx] = bucket
-                self.size = self.size - 1
-                found = true
-                break
-        if not found:
-            return false
-
         var next_items: [text] = []
         for item in self.items:
-            if item != value:
+            if item == value:
+                self.size = self.size - 1
+                found = true
+            else:
                 next_items.push(item)
+        if not found:
+            return false
         self.items = next_items
         self._rebuild_storage(self.capacity)
         true
@@ -129,8 +103,6 @@ class HashSet:
         """Remove all values."""
         var i = 0
         while i < self.capacity:
-            var bucket: [SetEntry] = []
-            self.buckets[i] = bucket
             self.slot_keys[i] = ""
             self.slot_used[i] = 0u8
             i = i + 1
@@ -235,13 +207,10 @@ class HashSet:
         self._rebuild_storage(new_capacity)
 
     me _rebuild_storage(new_capacity: i64):
-        var new_buckets: [[SetEntry]] = []
         var new_slot_keys: [text] = []
         var new_slot_used: [u8] = []
         var i = 0
         while i < new_capacity:
-            var bucket: [SetEntry] = []
-            new_buckets.push(bucket)
             new_slot_keys.push("")
             new_slot_used.push(0u8)
             i = i + 1
@@ -249,23 +218,18 @@ class HashSet:
         for item in self.items:
             val hash = rt_hash_text(item)
             val idx = hash & (new_capacity - 1)
-            var target_bucket = new_buckets[idx]
-            target_bucket.push(SetEntry(key: item, hash: hash))
-            new_buckets[idx] = target_bucket
-
             var slot = idx.to_u64()
             while new_slot_used[slot] != 0u8:
                 slot = (slot + 1u64) & (new_capacity - 1).to_u64()
             new_slot_keys[slot] = item
             new_slot_used[slot] = 1u8
 
-        self.buckets = new_buckets
         self.slot_keys = new_slot_keys
         self.slot_used = new_slot_used
         self.capacity = new_capacity
 
 fn hashset_with_capacity(capacity: i64) -> HashSet:
-    """Create a HashSet with preallocated buckets."""
+    """Create a HashSet with preallocated probe storage."""
     HashSet.with_capacity(capacity)
 
 export hashset_with_capacity

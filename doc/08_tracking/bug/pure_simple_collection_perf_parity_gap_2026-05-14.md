@@ -622,3 +622,36 @@ hashset_contains  0.61x C / 1.04x Rust
 This removes a real compiler-generated guard and improves the retained
 `list_traverse` and `set_contains` Rust ratios, but strict parity remains open:
 `set_contains` still trails Rust and `hashset_contains` still trails C.
+
+## 2026-05-15 HashSet Insert Coverage Update
+
+The collection benchmark now includes `hashset_insert` across C, Rust, and pure
+Simple with checksum parity. The pure Simple `HashSet` insert path no longer
+maintains the unused legacy chained bucket arrays; membership is owned by the
+flat probe table and traversal/set algebra by `items`.
+
+Clean five-sample source-closure benchmark after this cleanup:
+
+```text
+list_traverse     1.14x C / 0.81x Rust
+list_push         1.31x C / 2.57x Rust
+set_contains      1.95x C / 0.77x Rust
+hashset_contains  0.67x C / 1.04x Rust
+hashset_insert    0.01x C / 0.06x Rust
+```
+
+`hashset_insert` is now covered and checksum-equivalent, but it exposes a larger
+pure Simple construction/insert gap. Removing the dead bucket maintenance
+improved the probe insert ratio from about `0.02x Rust` to about `0.06x Rust`;
+it is still far from parity.
+
+Rejected broader benchmark probes:
+
+- Adding `hashset_remove` showed checksum mismatch against C/Rust before the
+  retained bucket cleanup. The operation needs a dedicated correctness test
+  before it becomes benchmark evidence.
+- Adding `hashset_intersection` showed checksum mismatch against the reference
+  probe and was not retained as parity evidence.
+- Adding `hashmap_contains_get` crashed the native benchmark binary during the
+  Simple run, so HashMap parity remains an explicit follow-up instead of a
+  committed benchmark lane.
