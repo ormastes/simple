@@ -523,6 +523,12 @@ Rejected local variant:
 - `capacity * 16` preserved checksum parity but did not improve the
   `hashset_contains` median over `capacity * 8` in a clean three-sample run, so
   it was reverted to avoid extra memory use without measured benefit.
+- Reducing the retained probe-table allocation to `capacity * 2` preserved
+  checksum parity but measured `hashset_contains` at only `0.60x C / 1.05x
+  Rust` in a clean three-sample run. Reducing further to the C-sized
+  `capacity` table regressed to `0.50x C / 0.83x Rust` and triggered the
+  benchmark warning threshold. Both locality variants were reverted; the
+  retained `capacity * 8` table still provides the best observed C ratio.
 
 Focused validation:
 
