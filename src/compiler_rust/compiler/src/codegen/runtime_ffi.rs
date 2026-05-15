@@ -505,6 +505,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_typed_words_u64_data_at_checked", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_typed_words_u64_raw_data_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_numeric_xor_sum_u64_data", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_numeric_xor_sum_u64_repeated_data", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_typed_words_u64_push", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_typed_words_u64_push_known_at", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_typed_words_u64_push_known_data_at", &[I64, I64, I64, I64], &[I8]),
