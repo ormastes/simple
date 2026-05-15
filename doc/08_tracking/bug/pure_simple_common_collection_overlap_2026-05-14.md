@@ -63,22 +63,21 @@ Representative Simple collection files exist under these families:
   `SIMPLE_NATIVE_CPU=native`:
 
 ```text
-list_traverse     1.23x C / 0.71x Rust
-list_push         1.23x C / 2.74x Rust
-set_contains      1.41x C / 0.64x Rust
-hashset_contains  0.48x C / 0.82x Rust
+list_traverse     1.08x C / 0.90x Rust
+list_push         1.28x C / 2.63x Rust
+set_contains      1.28x C / 0.53x Rust
+hashset_contains  0.58x C / 0.98x Rust
 ```
 
-- The remaining warning-floor blocker is source-closure text
-  `HashSet.contains` versus the C reference. Multiple raw-probe and text
-  equality shortcuts have been rejected in
-  `pure_simple_collection_perf_parity_gap_2026-05-14.md`.
+- The benchmark now clears the current warning floor with checksum parity after
+  reducing pure Simple `HashSet` probe density. This is not full C/Rust parity:
+  `hashset_contains` remains below C throughput and `set_contains` remains
+  below Rust throughput.
 
 ## Next optimization targets
 
-1. Focus next on the generated native code shape for text `HashSet.contains`
-   and `rt_native_eq`, not on raw `slot_keys`/`slot_used` bypasses already
-   rejected.
+1. Focus next on either matching C `hashset_contains` throughput or Rust
+   `set_contains` throughput, because both still trail the fastest reference.
 2. Keep typed scan work limited to verified regressions; current
    `list_traverse`, `list_push`, and numeric `set_contains` clear the C floor.
 3. Benchmark `src/lib/*/examples/benchmarks/set_operations.spl`

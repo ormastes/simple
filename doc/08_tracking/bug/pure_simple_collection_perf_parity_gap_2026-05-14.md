@@ -411,3 +411,26 @@ Additional `HashSet.contains` raw-probe experiments rejected:
   `rt_native_eq(keys[slot], value) != 0` preserved checksum parity but
   regressed `hashset_contains` to `0.40x` C / `0.66x` Rust. The source-level
   equality rewrite was reverted.
+
+## 2026-05-15 HashSet Probe Density Update
+
+Pure Simple `HashSet.with_capacity` now normalizes twice the requested capacity.
+The public contract remains "at least this capacity", while the lower load
+density reduces successful text-probe chains without adding raw pointer
+shortcuts.
+
+Clean five-sample source-closure benchmark evidence with rebuilt `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, and checksum parity:
+
+```text
+list_traverse     1.08x C / 0.90x Rust
+list_push         1.28x C / 2.63x Rust
+set_contains      1.28x C / 0.53x Rust
+hashset_contains  0.58x C / 0.98x Rust
+```
+
+Focused tests:
+
+- `simple test test/unit/lib/nogc_sync_mut/hashset_probe_spec.spl --mode=interpreter`
+- `simple test test/unit/lib/nogc_async_mut/src/collections/src_collections_facade_spec.spl --mode=interpreter`
+- `simple test test/unit/lib/gc_async_mut/src/collections/src_collections_facade_spec.spl --mode=interpreter`
