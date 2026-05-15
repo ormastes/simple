@@ -66,3 +66,4 @@ The original research hypothesis (OOM-kill under concurrent load) was correct as
 cause was a parse error in `public_remote.spl` (invalid `struct { }` syntax) that
 blocked all child process compilations. The memory env vars are belt-and-suspenders
 for concurrent test environments and are correct to add regardless.
+++++++ Contents of side #2
