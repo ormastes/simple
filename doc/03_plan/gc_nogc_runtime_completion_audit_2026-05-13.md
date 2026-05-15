@@ -155,6 +155,12 @@ env SIMPLE_OS_BUILD_BACKEND=cranelift src/compiler_rust/target/debug/simple os t
 env SIMPLE_OS_BUILD_BACKEND=cranelift src/compiler_rust/target/debug/simple os test --scenario=arm64-virtio-fat32-smf
 => QEMU boot passed: ARM64 now links with the freestanding runtime helpers, boots VirtIO-BLK FAT32 media, preserves raw fixture lengths that can look like tagged integers, accepts the one-byte padded LLVM/Rust SMF fixture reads, reads ELF-backed SMF bytes for hello/simple_compiler/simple_interpreter/simple_loader/llvm/clang/rust, registers process pids for those apps, emits the required simple_compiler/simple_loader/clang/rust process-backed and VFS read markers, and reaches guest TEST PASSED
 
+env SIMPLE_OS_BUILD_BACKEND=llvm LLVM_SYS_180_PREFIX=/usr src/compiler_rust/target/debug/simple os test --scenario=arm32-virtio-fat32-smf
+=> QEMU boot passed after rebuilding the Rust driver with the LLVM feature and removing freestanding VFS/FAT32 dependence on common.string_core.str_char_at; serial output included process-backed and VFS read markers for hello_world/simple_compiler/simple_interpreter/simple_loader/llvm/clang/rust and TEST PASSED
+
+env SIMPLE_OS_BUILD_BACKEND=llvm LLVM_SYS_180_PREFIX=/usr src/compiler_rust/target/debug/simple os test --scenario=riscv32-virtio-fat32-smf
+=> QEMU boot passed after rebuilding the Rust driver with the LLVM feature; serial output included FS_MOUNT_OK, SMF_DISCOVERY_OK, ELF_LOAD_OK arch=riscv32, SMF_CLI_LAUNCH_OK, SMF_WM_GUI_LAUNCH_OK, NATIVE_GUI_PROCESS_RENDER_OK, SIMPLEOS_RISCV_SMF_FS_PASS, and TEST PASSED
+
 bin/simple test test/unit/compiler/driver/compile_options_normalization_spec.spl --mode=interpreter
 => Passed: 10, Failed: 0
 
