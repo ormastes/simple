@@ -22,10 +22,14 @@ The runtime symbol and FFI registries expose these collection families:
 - Typed arrays: `rt_typed_bytes_*`, `rt_typed_words_u32_*`,
   `rt_typed_words_u64_*`, including unchecked/data-pointer/known-at push and
   store helpers.
-- Native map/set families remain in runtime symbol space:
-  `rt_hashmap_*`, `rt_hashset_*`, `rt_btreemap_*`, `rt_btreeset_*`.
-- Numeric helper space includes `rt_numeric_*`; `rt_numeric_xor_sum_u64` was
-  already tested as a traversal shortcut and rejected for this benchmark.
+- The clean `simple-core` archive now defines the array, typed-array, numeric,
+  string, enum, async, file, process, memory, and atomic runtime symbols used by
+  the collection benchmark. `nm -u build/perf/collections/collection_simple`
+  shows only libc/OS primitives such as `malloc`, `free`, `memcmp`,
+  `gettimeofday`, `clock_gettime`, `read`, and `write`, plus weak optional
+  startup hooks. No Rust runtime symbols are unresolved in the benchmark binary.
+- Numeric helper space includes `rt_numeric_*`; `rt_numeric_xor_sum_u64` and
+  `rt_numeric_contains_u64` are both present in `build/simple-core/libsimple_runtime.a`.
 
 ## Simple library overlap
 
@@ -50,23 +54,36 @@ Representative Simple collection files exist under these families:
 
 ## Current parity status
 
-- Pure Simple native codegen now inlines typed array hot helpers and removes
-  supported small local tail calls, including the benchmark's hot
-  `set_contains` call.
+- Pure Simple native codegen now inlines typed array hot helpers and the
+  benchmark's hot `set_contains` call. The contains scan lowers to vector
+  compares and vector tests on x64.
 - Native integer comparison lowering now honors unsigned ordering for unsigned
   operands, which is required for `u64` collection counters and keys.
-- The collection benchmark still remains below C/Rust parity because
-  `list_traverse` and `set_contains` are still scalar, non-unrolled scans.
+- Clean pushed-state benchmark evidence after rebuilding `simple-core` with
+  `SIMPLE_NATIVE_CPU=native`:
+
+```text
+list_traverse     1.23x C / 0.71x Rust
+list_push         1.23x C / 2.74x Rust
+set_contains      1.41x C / 0.64x Rust
+hashset_contains  0.48x C / 0.82x Rust
+```
+
+- The remaining warning-floor blocker is source-closure text
+  `HashSet.contains` versus the C reference. Multiple raw-probe and text
+  equality shortcuts have been rejected in
+  `pure_simple_collection_perf_parity_gap_2026-05-14.md`.
 
 ## Next optimization targets
 
-1. Add a real typed contiguous array scan loop transform for `u64` loops over
-   `rt_array_data_ptr` plus `rt_typed_words_u64_raw_data_at`.
-2. Reuse that transform for Simple library array/list traversal paths before
-   adding runtime helper shortcuts.
-3. After typed scans improve, benchmark `src/lib/*/examples/benchmarks/set_operations.spl`
+1. Focus next on the generated native code shape for text `HashSet.contains`
+   and `rt_native_eq`, not on raw `slot_keys`/`slot_used` bypasses already
+   rejected.
+2. Keep typed scan work limited to verified regressions; current
+   `list_traverse`, `list_push`, and numeric `set_contains` clear the C floor.
+3. Benchmark `src/lib/*/examples/benchmarks/set_operations.spl`
    and representative `hashset`/`hashmap` Simple APIs against runtime/native
-   equivalents.
-4. Keep rejected shortcuts documented: source-level unroll rewrites and
-   `rt_numeric_xor_sum_u64` substitution both preserved checksums but regressed
-   speed in local probes.
+   equivalents after `hashset_contains` clears the C floor.
+4. Keep rejected shortcuts documented; do not repeat raw-probe, short-string
+   equality, split-vector contains, source-level unroll, or stale runtime-helper
+   experiments without a new codegen reason.
