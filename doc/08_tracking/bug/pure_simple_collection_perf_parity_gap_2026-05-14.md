@@ -378,3 +378,8 @@ Follow-up experiments rejected:
   avoided libc `memcmp` for the benchmark's small keys, but still measured
   `hashset_contains` at `0.49x` C / `0.81x` Rust in a clean five-sample run.
   The fast path was reverted.
+- Splitting the vector `rt_numeric_contains_u64` callsite inline into two
+  four-element tests preserved the targeted contains lowering test, but a clean
+  five-sample benchmark still left `set_contains` at only `0.60x` Rust while
+  warning on `list_traverse` (`0.45x` Rust) and `hashset_contains` (`0.48x`
+  C). The split-chunk shape was reverted.
