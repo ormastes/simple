@@ -383,3 +383,16 @@ Follow-up experiments rejected:
   five-sample benchmark still left `set_contains` at only `0.60x` Rust while
   warning on `list_traverse` (`0.45x` Rust) and `hashset_contains` (`0.48x`
   C). The split-chunk shape was reverted.
+
+Current clean pushed-state baseline after reverting those experiments and
+rebuilding `simple-core`:
+
+```text
+list_traverse     1.23x C / 0.71x Rust
+list_push         1.23x C / 2.74x Rust
+set_contains      1.41x C / 0.64x Rust
+hashset_contains  0.48x C / 0.82x Rust
+```
+
+Checksum parity passed. `hashset_contains` remains below the current C warning
+floor, so the parity objective is still open.
