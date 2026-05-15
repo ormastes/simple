@@ -396,3 +396,14 @@ hashset_contains  0.48x C / 0.82x Rust
 
 Checksum parity passed. `hashset_contains` remains below the current C warning
 floor, so the parity objective is still open.
+
+Additional `HashSet.contains` raw-probe experiments rejected:
+
+- Raw-loading both `slot_used` and `slot_keys` through `rt_array_data_ptr` and
+  `spl_load_*` failed checksum parity; `hashset_contains` returned zero hits.
+- Raw-loading only `slot_used` preserved checksum parity but still measured
+  `hashset_contains` at `0.49x` C in a clean three-sample run.
+- Raw-loading `slot_keys` and comparing with `rt_string_eq` preserved checksum
+  parity but regressed `hashset_contains` to `0.44x` C / `0.73x` Rust.
+- Raw-loading `slot_keys` and comparing with `rt_native_eq` preserved checksum
+  parity but regressed further to `0.42x` C / `0.71x` Rust.
