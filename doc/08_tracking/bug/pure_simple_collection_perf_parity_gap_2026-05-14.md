@@ -649,33 +649,43 @@ it is still far from parity.
 
 ## 2026-05-15 HashSet Insert Density Update
 
-Pure Simple `HashSet.with_capacity` now uses a `capacity * 2` probe table and
-capacity-aware array construction for `items`, `slot_keys`, `slot_used`, clear,
-remove, and storage rebuild. This intentionally gives back some contains-only
-sparsity to reduce construction and insert allocation work now that
-`hashset_insert` is part of the measured surface.
+Pure Simple `HashSet.with_capacity` now uses a `capacity`-sized probe table,
+capacity-aware construction for `items`, `rt_array_repeat("", capacity)` for
+text slots, and `rt_array_set_len_known` on the zeroed byte `slot_used` table.
+This intentionally gives back contains-only sparsity to reduce construction and
+insert initialization work now that `hashset_insert` is part of the measured
+surface.
 
 Clean five-sample source-closure benchmark with rebuilt `simple-core`,
 `SIMPLE_NATIVE_CPU=native`, and checksum parity:
 
 ```text
-list_traverse     1.26x C / 0.82x Rust
-list_push         1.05x C / 2.05x Rust
-set_contains      1.93x C / 0.78x Rust
-hashset_contains  0.66x C / 1.02x Rust
-hashset_insert    0.03x C / 0.21x Rust
+list_traverse     1.18x C / 0.92x Rust
+list_push         1.29x C / 3.23x Rust
+set_contains      1.90x C / 0.77x Rust
+hashset_contains  0.55x C / 0.83x Rust
+hashset_insert    0.11x C / 0.73x Rust
 ```
 
-This keeps `hashset_contains` above Rust and improves the retained
-`hashset_insert` ratio from `0.06x Rust` to `0.21x Rust`, but insert remains
-well below both references and is still the largest measured pure Simple gap.
+This improves the retained `hashset_insert` ratio from `0.06x Rust` to `0.73x
+Rust`, but insert remains well below the C fixed-table reference and is still
+the largest measured pure Simple gap.
 
 Rejected insert follow-up:
 
+- A `capacity * 2` table with the same repeat/zero-length initialization kept
+  checksum parity and measured `hashset_insert` at `0.10x C / 0.71x Rust` in a
+  three-sample probe, but the `capacity` table gave a slightly better insert
+  ratio while staying above the warning floor for `hashset_contains`.
 - Directly setting the text and byte array lengths after capacity allocation
   made `hashset_insert` much faster in a probe run, but broke
   `hashset_contains` checksum parity by leaving lookup storage semantically
   invalid. The unsafe length-set shortcut was reverted.
+- Replacing `slot_used` with an empty-string sentinel and a special empty-key
+  flag preserved checksum parity, but `hashset_contains` regressed to `0.11x C
+  / 0.18x Rust` and `hashset_insert` to `0.05x C / 0.35x Rust` because each
+  probe paid text equality against the sentinel. The separate byte occupancy
+  table was retained.
 
 Rejected broader benchmark probes:
 
