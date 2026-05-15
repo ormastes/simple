@@ -1,6 +1,6 @@
 # Pure Simple common collection overlap audit
 
-Date: 2026-05-14
+Date: 2026-05-15
 
 ## Purpose
 
@@ -26,8 +26,9 @@ The runtime symbol and FFI registries expose these collection families:
   string, enum, async, file, process, memory, and atomic runtime symbols used by
   the collection benchmark. `nm -u build/perf/collections/collection_simple`
   shows only libc/OS primitives such as `malloc`, `free`, `memcmp`,
-  `gettimeofday`, `clock_gettime`, `read`, and `write`, plus weak optional
-  startup hooks. No Rust runtime symbols are unresolved in the benchmark binary.
+  `memcpy`, `memset`, `gettimeofday`, `clock_gettime`, `read`, and `write`,
+  plus weak optional startup hooks. No Rust runtime symbols are unresolved in
+  the benchmark binary.
 - Numeric helper space includes `rt_numeric_*`; `rt_numeric_xor_sum_u64` and
   `rt_numeric_contains_u64` are both present in `build/simple-core/libsimple_runtime.a`.
 
@@ -60,19 +61,31 @@ Representative Simple collection files exist under these families:
 - Native integer comparison lowering now honors unsigned ordering for unsigned
   operands, which is required for `u64` collection counters and keys.
 - Clean pushed-state benchmark evidence after rebuilding `simple-core` with
-  `SIMPLE_NATIVE_CPU=native`:
+  `SIMPLE_NATIVE_CPU=native`, source-closure collection build enabled, and
+  checksum parity:
 
 ```text
-list_traverse     1.08x C / 0.90x Rust
-list_push         1.28x C / 2.63x Rust
-set_contains      1.28x C / 0.53x Rust
-hashset_contains  0.58x C / 0.98x Rust
+list_traverse     1.04x C / 0.84x Rust
+list_push         1.31x C / 2.56x Rust
+set_contains      1.86x C / 0.74x Rust
+hashset_contains  0.65x C / 1.08x Rust
 ```
 
 - The benchmark now clears the current warning floor with checksum parity after
-  reducing pure Simple `HashSet` probe density. This is not full C/Rust parity:
-  `hashset_contains` remains below C throughput and `set_contains` remains
-  below Rust throughput.
+  reducing pure Simple `HashSet` probe density and widening the numeric scan
+  lowerings. This is not full C/Rust parity: `hashset_contains` remains below C
+  throughput, and `list_traverse` plus `set_contains` remain below Rust
+  throughput in the retained five-sample run.
+
+## Prompt-to-artifact checklist
+
+| Objective requirement | Current evidence | Status |
+| --- | --- | --- |
+| Commit, pull/rebase, push | Latest pushed commits through `f57dc5bf81`; `HEAD` and `origin/main` match in `/tmp/simple-parity-next` after fetch/rebase/push. | Done for current increments |
+| Remove Rust from pure Simple path/runtime unless OS-provided | `nm -u build/perf/collections/collection_simple` lists libc/OS symbols and weak startup hooks only; no unresolved Rust runtime symbols. | Verified for collection benchmark binary |
+| Port runtime support to pure Simple unless OS-provided | `build/simple-core/libsimple_runtime.a` provides the runtime helpers used by the collection benchmark; OS primitives remain `malloc`, `free`, `memcmp`, clocks, IO, and similar host services. | Verified for benchmark scope |
+| Check common libraries that overlap C/Rust/native surfaces | This audit enumerates array, typed-array, generic indexing, list/set/hash/map, persistent, noalloc, and checksum/hash overlap surfaces. | In progress |
+| Match or beat existing C/Rust performance for list/set/traverse and similar APIs | Latest retained benchmark beats C for `list_traverse`, `list_push`, and `set_contains`, beats Rust for `list_push` and `hashset_contains`, but trails Rust for `list_traverse`/`set_contains` and trails C for `hashset_contains`. | Not complete |
 
 ## Next optimization targets
 
