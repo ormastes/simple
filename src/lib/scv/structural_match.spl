@@ -1,0 +1,443 @@
+# SCV GumTree-grade structural matching: anchor extraction, top-down/bottom-up
+# matching, edit script generation.
+#
+# Thresholds from Falleri et al. "Fine-grained and accurate source code
+# differencing" (ASE 2014).  Do NOT change without re-reading the paper.
+# TODO(prod-003): empirical calibration pass once WS-A tree-sitter lands.
+
+use app.io.mod (file_exists, file_read)
+use std.scv.core.{scv_object_path, scv_parser_index_path}
+use std.scv.store.{scv_hash_text}
+use std.scv.anchor.{Anchor, NamedAnchor, OrdinalAnchor, scv_named_anchor, scv_ordinal_anchor, scv_build_qpath, scv_anchor_id}
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+struct StructuralMatchConfig {
+    min_dice: i64,    # ×1000 fixed-point; paper suggests 500
+    min_height: i64,  # minimum subtree height for top-down anchoring; paper: 2
+    max_size: i64     # skip subtrees larger than this (performance guard)
+}
+
+fn scv_default_match_config() -> StructuralMatchConfig:
+    StructuralMatchConfig(min_dice: 500, min_height: 2, max_size: 1000)
+
+# ---------------------------------------------------------------------------
+# Low-level node field readers
+# Syntax node SDN format (see parser.spl scv_write_syntax_node):
+#   grammar: ...
+#   version: ...
+#   kind: <kind>
+#   field: <field>
+#   children: <comma-sep ids>
+#   name: <name>   (tree-sitter nodes; may be absent for fallback)
+#   raw: <hash>
+#   syntax: <hash>
+#   ...
+# ---------------------------------------------------------------------------
+
+fn scv_load_node_fields(root: text, node_id: text) -> text:
+    if node_id == "":
+        return ""
+    val path = scv_object_path(root, "syntax", node_id)
+    if not file_exists(path):
+        return ""
+    file_read(path)
+
+fn scv_node_kind(node_fields: text) -> text:
+    for line in node_fields.split("\n"):
+        if line.starts_with("kind:"):
+            return line[5:].trim()
+    ""
+
+fn scv_node_name(node_fields: text) -> text:
+    for line in node_fields.split("\n"):
+        if line.starts_with("name:"):
+            return line[5:].trim()
+    ""
+
+fn scv_node_syntax_hash(node_fields: text) -> text:
+    for line in node_fields.split("\n"):
+        if line.starts_with("syntax:"):
+            return line[7:].trim()
+    ""
+
+fn scv_node_children_ids(node_fields: text) -> [text]:
+    for line in node_fields.split("\n"):
+        if line.starts_with("children:"):
+            val children = line[9:].trim()
+            if children == "":
+                return []
+            return children.split(",")
+    []
+
+# ---------------------------------------------------------------------------
+# Anchor extraction
+# Walk the syntax subtree rooted at node_id; emit Named anchors for nodes
+# that have a name field (function_def, class_def, module etc.), and Ordinal
+# anchors for unnamed statement/expr children of named parents.
+# Returns [] for kind==line (graceful degradation path).
+# ---------------------------------------------------------------------------
+
+fn scv_extract_anchors_rec(root: text, node_id: text, parent_qpath: text, out: [Anchor]) -> [Anchor]:
+    val fields = scv_load_node_fields(root, node_id)
+    if fields == "":
+        return out
+    val kind = scv_node_kind(fields)
+    if kind == "line" or kind == "":
+        return out
+    val name = scv_node_name(fields)
+    var qpath = parent_qpath
+    var result = out
+    if name != "":
+        qpath = scv_build_qpath(parent_qpath, name)
+        result.push(scv_named_anchor(qpath))
+    val children = scv_node_children_ids(fields)
+    var ordinal_index = 0
+    for child_id in children:
+        val child_fields = scv_load_node_fields(root, child_id)
+        val child_kind = scv_node_kind(child_fields)
+        if child_kind == "line" or child_kind == "":
+            ordinal_index = ordinal_index + 1
+            continue
+        val child_name = scv_node_name(child_fields)
+        if child_name == "" and qpath != "":
+            result.push(scv_ordinal_anchor(qpath, ordinal_index))
+        result = scv_extract_anchors_rec(root, child_id, qpath, result)
+        ordinal_index = ordinal_index + 1
+    result
+
+fn scv_extract_anchors(root: text, node_id: text, parent_qpath: text) -> [Anchor]:
+    if node_id == "":
+        return []
+    val fields = scv_load_node_fields(root, node_id)
+    if fields == "":
+        return []
+    val kind = scv_node_kind(fields)
+    if kind == "line" or kind == "":
+        return []
+    scv_extract_anchors_rec(root, node_id, parent_qpath, [])
+
+# ---------------------------------------------------------------------------
+# Parser index helpers
+# The parser_index.sdn line format:
+#   rel|language|raw|syntax_hash|semantic_hash|kind|parse_status|metric|node=<id>
+# ---------------------------------------------------------------------------
+
+fn scv_parser_index_root_node(root: text, rel: text) -> text:
+    val index_path = scv_parser_index_path(root)
+    if not file_exists(index_path):
+        return ""
+    for line in file_read(index_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() < 9:
+            continue
+        if parts[0] != rel:
+            continue
+        val marker = "node="
+        if parts[8].starts_with(marker):
+            return parts[8][marker.len():]
+    ""
+
+# ---------------------------------------------------------------------------
+# Subtree hash + Dice similarity
+# ---------------------------------------------------------------------------
+
+fn scv_subtree_hash_rec(root: text, node_id: text, depth: i64) -> text:
+    if depth > 100:
+        return scv_hash_text("subtree", node_id)
+    val fields = scv_load_node_fields(root, node_id)
+    if fields == "":
+        return scv_hash_text("subtree", node_id)
+    val own_hash = scv_node_syntax_hash(fields)
+    val children = scv_node_children_ids(fields)
+    if children.len() == 0:
+        return own_hash
+    var combined = own_hash
+    for child_id in children:
+        combined = combined + "," + scv_subtree_hash_rec(root, child_id, depth + 1)
+    scv_hash_text("subtree", combined)
+
+fn scv_subtree_hash(root: text, node_id: text) -> text:
+    scv_subtree_hash_rec(root, node_id, 0)
+
+fn scv_subtree_height_rec(root: text, node_id: text, depth: i64) -> i64:
+    if depth > 200:
+        return 200
+    val fields = scv_load_node_fields(root, node_id)
+    if fields == "":
+        return 0
+    val children = scv_node_children_ids(fields)
+    if children.len() == 0:
+        return 1
+    var max_child = 0
+    for child_id in children:
+        val h = scv_subtree_height_rec(root, child_id, depth + 1)
+        if h > max_child:
+            max_child = h
+    max_child + 1
+
+fn scv_subtree_height(root: text, node_id: text) -> i64:
+    scv_subtree_height_rec(root, node_id, 0)
+
+fn scv_descendant_labels_rec(root: text, node_id: text, depth: i64, out: [text]) -> [text]:
+    if depth > 100:
+        return out
+    val fields = scv_load_node_fields(root, node_id)
+    if fields == "":
+        return out
+    val kind = scv_node_kind(fields)
+    val name = scv_node_name(fields)
+    var result = out
+    if name != "":
+        result.push(name)
+    elif kind != "" and kind != "line":
+        result.push(kind)
+    val children = scv_node_children_ids(fields)
+    for child_id in children:
+        result = scv_descendant_labels_rec(root, child_id, depth + 1, result)
+    result
+
+fn scv_descendant_labels(root: text, node_id: text) -> [text]:
+    scv_descendant_labels_rec(root, node_id, 0, [])
+
+# Dice(A,B) = 2|A∩B| / (|A|+|B|)  returned ×1000 fixed-point
+fn scv_dice_similarity(a: [text], b: [text]) -> i64:
+    if a.len() == 0 and b.len() == 0:
+        return 1000
+    if a.len() == 0 or b.len() == 0:
+        return 0
+    var common = 0
+    for la in a:
+        for lb in b:
+            if la == lb:
+                common = common + 1
+                break
+    (2 * common * 1000) / (a.len() + b.len())
+
+# ---------------------------------------------------------------------------
+# Pair-set helpers
+# Pairs are encoded as "base_id:head_id\n" text for simplicity
+# ---------------------------------------------------------------------------
+
+fn scv_pair_contains_base(pairs: text, base_id: text) -> bool:
+    for line in pairs.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split(":")
+        if parts.len() >= 2 and parts[0] == base_id:
+            return true
+    false
+
+fn scv_pair_contains_head(pairs: text, head_id: text) -> bool:
+    for line in pairs.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split(":")
+        if parts.len() >= 2 and parts[1] == head_id:
+            return true
+    false
+
+fn scv_pairs_to_list(pairs: text) -> [(text, text)]:
+    var out: [(text, text)] = []
+    for line in pairs.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split(":")
+        if parts.len() >= 2:
+            out.push((parts[0], parts[1]))
+    out
+
+# ---------------------------------------------------------------------------
+# Top-down matching: identical subtree hash → high-confidence anchor pair
+# ---------------------------------------------------------------------------
+
+fn scv_collect_node_ids_rec(root: text, node_id: text, depth: i64, out: [text]) -> [text]:
+    if depth > 200 or node_id == "":
+        return out
+    var result = out
+    result.push(node_id)
+    val fields = scv_load_node_fields(root, node_id)
+    if fields == "":
+        return result
+    val children = scv_node_children_ids(fields)
+    for child_id in children:
+        result = scv_collect_node_ids_rec(root, child_id, depth + 1, result)
+    result
+
+fn scv_collect_node_ids(root: text, node_id: text) -> [text]:
+    scv_collect_node_ids_rec(root, node_id, 0, [])
+
+fn scv_match_top_down(root: text, base_root: text, head_root: text, cfg: StructuralMatchConfig) -> [(text, text)]:
+    if base_root == "" or head_root == "":
+        return []
+    val base_height = scv_subtree_height(root, base_root)
+    val head_height = scv_subtree_height(root, head_root)
+    if base_height < cfg.min_height or head_height < cfg.min_height:
+        return []
+    val base_nodes = scv_collect_node_ids(root, base_root)
+    val head_nodes = scv_collect_node_ids(root, head_root)
+    var pairs = ""
+    for base_id in base_nodes:
+        if scv_pair_contains_base(pairs, base_id):
+            continue
+        val base_hash = scv_subtree_hash(root, base_id)
+        for head_id in head_nodes:
+            if scv_pair_contains_head(pairs, head_id):
+                continue
+            val head_hash = scv_subtree_hash(root, head_id)
+            if base_hash == head_hash:
+                pairs = pairs + "{base_id}:{head_id}\n"
+                break
+    scv_pairs_to_list(pairs)
+
+# ---------------------------------------------------------------------------
+# Bottom-up matching: Dice similarity on descendant labels
+# ---------------------------------------------------------------------------
+
+fn scv_match_bottom_up(root: text, base_root: text, head_root: text, existing: [(text, text)], cfg: StructuralMatchConfig) -> [(text, text)]:
+    if base_root == "" or head_root == "":
+        return existing
+    val base_nodes = scv_collect_node_ids(root, base_root)
+    val head_nodes = scv_collect_node_ids(root, head_root)
+    var pairs = ""
+    for pair in existing:
+        val (b, h) = pair
+        pairs = pairs + "{b}:{h}\n"
+    for base_id in base_nodes:
+        if scv_pair_contains_base(pairs, base_id):
+            continue
+        val base_labels = scv_descendant_labels(root, base_id)
+        var best_head = ""
+        var best_dice: i64 = cfg.min_dice
+        for head_id in head_nodes:
+            if scv_pair_contains_head(pairs, head_id):
+                continue
+            val head_labels = scv_descendant_labels(root, head_id)
+            val dice = scv_dice_similarity(base_labels, head_labels)
+            if dice > best_dice:
+                best_dice = dice
+                best_head = head_id
+        if best_head != "":
+            pairs = pairs + "{base_id}:{best_head}\n"
+    scv_pairs_to_list(pairs)
+
+# ---------------------------------------------------------------------------
+# Edit script
+# ---------------------------------------------------------------------------
+
+struct EditOp { kind: text, base_node: text, head_node: text, anchor: Anchor }
+
+fn scv_make_edit_op(kind: text, base_node: text, head_node: text, anchor: Anchor) -> EditOp:
+    EditOp(kind: kind, base_node: base_node, head_node: head_node, anchor: anchor)
+
+fn scv_pair_find_head(pairs: [(text, text)], base_id: text) -> text:
+    for pair in pairs:
+        val (b, h) = pair
+        if b == base_id:
+            return h
+    ""
+
+fn scv_pair_find_base(pairs: [(text, text)], head_id: text) -> text:
+    for pair in pairs:
+        val (b, h) = pair
+        if h == head_id:
+            return b
+    ""
+
+fn scv_pair_has_base(pairs: [(text, text)], base_id: text) -> bool:
+    for pair in pairs:
+        val (b, h) = pair
+        if b == base_id:
+            return true
+    false
+
+fn scv_pair_has_head(pairs: [(text, text)], head_id: text) -> bool:
+    for pair in pairs:
+        val (b, h) = pair
+        if h == head_id:
+            return true
+    false
+
+fn scv_node_parent_in_pairs(pairs: [(text, text)], node_id: text) -> text:
+    # Approximate: return the matched counterpart of the parent
+    # Real GumTree tracks parent explicitly; here we return empty for simple case
+    ""
+
+fn scv_classify_edit_op(op: EditOp, base_matches: [(text, text)]) -> text:
+    if op.kind == "move":
+        return "move"
+    if op.kind == "update":
+        return "update"
+    if op.kind == "insert":
+        return "insert"
+    if op.kind == "delete":
+        return "delete"
+    "conflict"
+
+fn scv_compute_edit_script(root: text, base_root: text, head_root: text, cfg: StructuralMatchConfig) -> [EditOp]:
+    val top_pairs = scv_match_top_down(root, base_root, head_root, cfg)
+    val all_pairs = scv_match_bottom_up(root, base_root, head_root, top_pairs, cfg)
+    if all_pairs.len() == 0:
+        return []
+    val base_nodes = scv_collect_node_ids(root, base_root)
+    val head_nodes = scv_collect_node_ids(root, head_root)
+    var ops: [EditOp] = []
+    # Deletes: base nodes with no match in head
+    for base_id in base_nodes:
+        if not scv_pair_has_base(all_pairs, base_id):
+            val fields = scv_load_node_fields(root, base_id)
+            val name = scv_node_name(fields)
+            var anchor = scv_ordinal_anchor("", 0)
+            if name != "":
+                anchor = scv_named_anchor(name)
+            ops.push(scv_make_edit_op("delete", base_id, "", anchor))
+    # Inserts: head nodes with no match in base
+    for head_id in head_nodes:
+        if not scv_pair_has_head(all_pairs, head_id):
+            val fields = scv_load_node_fields(root, head_id)
+            val name = scv_node_name(fields)
+            var anchor = scv_ordinal_anchor("", 0)
+            if name != "":
+                anchor = scv_named_anchor(name)
+            ops.push(scv_make_edit_op("insert", "", head_id, anchor))
+    # Updates/Moves: matched pairs
+    for pair in all_pairs:
+        val (base_id, head_id) = pair
+        val base_fields = scv_load_node_fields(root, base_id)
+        val head_fields = scv_load_node_fields(root, head_id)
+        val base_hash = scv_node_syntax_hash(base_fields)
+        val head_hash = scv_node_syntax_hash(head_fields)
+        val name = scv_node_name(base_fields)
+        var anchor = scv_ordinal_anchor("", 0)
+        if name != "":
+            anchor = scv_named_anchor(name)
+        if base_hash != head_hash:
+            ops.push(scv_make_edit_op("update", base_id, head_id, anchor))
+        else:
+            # Same hash but matched via bottom-up: potentially a move
+            ops.push(scv_make_edit_op("move", base_id, head_id, anchor))
+    ops
+
+# ---------------------------------------------------------------------------
+# Diff display helper — used by diff.spl for --structural mode
+# ---------------------------------------------------------------------------
+
+fn scv_structural_diff_ops_for_file(root: text, rel: text, cfg: StructuralMatchConfig) -> [EditOp]:
+    val base_node = scv_parser_index_root_node(root, rel)
+    if base_node == "":
+        return []
+    val fields = scv_load_node_fields(root, base_node)
+    val kind = scv_node_kind(fields)
+    if kind == "line" or kind == "":
+        return []
+    # For working-copy diff: we don't have a second parse root yet (WS-A not delivered)
+    # Return empty to keep diff graceful for now
+    []
