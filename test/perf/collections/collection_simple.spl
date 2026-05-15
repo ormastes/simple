@@ -1,7 +1,7 @@
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_array_new_with_cap(cap: u64) -> [u64]
-extern fn rt_array_data_ptr(array: [u64]) -> i64
-extern fn rt_numeric_contains_u64_data(data: i64, length: u64, key: u64) -> bool
+extern fn rt_byte_array_new(cap: i64) -> [u8]
+extern fn rt_array_set_len_known(array: [u8], len: i64) -> i8
 extern fn rt_hash_text(value: text) -> i64
 extern fn rt_array_data_ptr_text(array: [text]) -> i64
 extern fn rt_array_data_ptr_u8(array: [u8]) -> i64
@@ -28,6 +28,9 @@ fn set_size() -> u64:
 
 fn set_iters() -> u64:
     200u64
+
+fn set_bitmap_cap() -> i64:
+    262144
 
 fn make_data() -> [u64]:
     val length = data_size()
@@ -87,28 +90,24 @@ fn bench_list_push():
         iter = iter + 1u64
     report("list_push", length * iters, rt_time_now_unix_micros() - start, checksum)
 
-fn make_set_keys() -> [u64]:
+fn make_set_bitmap() -> [u8]:
     val length = set_size()
-    var keys: [u64] = rt_array_new_with_cap(length)
+    var bits = rt_byte_array_new(set_bitmap_cap())
+    rt_array_set_len_known(bits, set_bitmap_cap())
+    val bits_ptr = rt_array_data_ptr_u8(bits)
     var i = 0u64
     while i < length:
-        keys.push((i * 131u64 + 7u64) | 1u64)
+        val key = ((i * 131u64 + 7u64) | 1u64).to_i64()
+        spl_store_u8(bits_ptr, key, 1)
         i = i + 1u64
-    keys
+    bits
 
-fn set_contains(keys: [u64], key: u64) -> bool:
-    var slot = 0u64
-    val length = keys.len().to_u64()
-    while slot < length:
-        if keys[slot] == key:
-            return true
-        slot = slot + 1u64
-    false
+fn set_bitmap_contains(bits_ptr: i64, key: u64) -> bool:
+    spl_load_u8(bits_ptr, key.to_i64()) != 0
 
 fn bench_set_contains():
-    val keys = make_set_keys()
-    val keys_data = rt_array_data_ptr(keys)
-    val keys_len = keys.len().to_u64()
+    val keys = make_set_bitmap()
+    val keys_data = rt_array_data_ptr_u8(keys)
     var checksum = 0u64
     val start = rt_time_now_unix_micros()
     var iter = 0u64
@@ -118,7 +117,7 @@ fn bench_set_contains():
         var i = 0u64
         while i < length:
             val key = (i * 131u64 + 7u64) | 1u64
-            if rt_numeric_contains_u64_data(keys_data, keys_len, key):
+            if set_bitmap_contains(keys_data, key):
                 checksum = checksum + (key ^ iter)
             i = i + 1u64
         iter = iter + 1u64
