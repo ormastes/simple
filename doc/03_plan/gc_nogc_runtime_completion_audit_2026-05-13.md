@@ -153,7 +153,7 @@ env SIMPLE_OS_BUILD_BACKEND=cranelift src/compiler_rust/target/debug/simple os t
 => QEMU boot passed after restoring the vendored Ring fiat headers and adding freestanding rt_typed_words_u64_push / rt_typed_words_u64_set wrappers; serial output included [stage1] PASS: Kernel boot + PCI scan and TEST PASSED
 
 env SIMPLE_OS_BUILD_BACKEND=cranelift src/compiler_rust/target/debug/simple os test --scenario=arm64-virtio-fat32-smf
-=> QEMU boot advanced: ARM64 now links with the freestanding runtime helpers, boots VirtIO-BLK FAT32 media, reads ELF-backed SMF bytes for hello/simple_compiler/simple_interpreter/simple_loader/clang, registers process pids for those apps, and reaches guest TEST PASSED; catalog status remains failed because /sys/apps/rust reads only 34 bytes from the ARM64 known-path path and never normalizes to a valid SMF/ELF image, so the required rust process-backed marker is missing
+=> QEMU boot passed: ARM64 now links with the freestanding runtime helpers, boots VirtIO-BLK FAT32 media, preserves raw fixture lengths that can look like tagged integers, accepts the one-byte padded LLVM/Rust SMF fixture reads, reads ELF-backed SMF bytes for hello/simple_compiler/simple_interpreter/simple_loader/llvm/clang/rust, registers process pids for those apps, emits the required simple_compiler/simple_loader/clang/rust process-backed and VFS read markers, and reaches guest TEST PASSED
 
 bin/simple test test/unit/compiler/driver/compile_options_normalization_spec.spl --mode=interpreter
 => Passed: 10, Failed: 0

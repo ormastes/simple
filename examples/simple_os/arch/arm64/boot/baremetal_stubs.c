@@ -218,6 +218,7 @@ RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue end);
 static uint64_t arm64_array_byte_at_raw_index(RuntimeValue arr, uint64_t idx);
 static uint64_t arm64_u64_arg(RuntimeValue val);
+RuntimeValue rt_arm_array_len_u32(RuntimeValue arr);
 void rt_print_value(RuntimeValue val);
 
 /* ===================================================================
@@ -2704,9 +2705,20 @@ static uint64_t arm64_u64_arg(RuntimeValue val)
     return IS_INT(val) ? (uint64_t)DECODE_INT(val) : (uint64_t)val;
 }
 
+static uint64_t arm64_bounded_u64_arg(RuntimeValue val, uint64_t inclusive_limit)
+{
+    uint64_t raw = (uint64_t)val;
+    if (raw <= inclusive_limit) return raw;
+    if (IS_INT(val)) {
+        uint64_t decoded = (uint64_t)DECODE_INT(val);
+        if (decoded <= inclusive_limit) return decoded;
+    }
+    return raw;
+}
+
 RuntimeValue rt_array_get_byte_raw(RuntimeValue arr, RuntimeValue idx_val)
 {
-    uint64_t idx = arm64_u64_arg(idx_val);
+    uint64_t idx = arm64_bounded_u64_arg(idx_val, (uint64_t)rt_arm_array_len_u32(arr));
     return (RuntimeValue)arm64_array_byte_at_raw_index(arr, idx);
 }
 
@@ -2733,7 +2745,7 @@ static uint64_t arm64_array_byte_at_raw_index(RuntimeValue arr, uint64_t idx)
 
 RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val)
 {
-    uint64_t idx = arm64_u64_arg(idx_val);
+    uint64_t idx = arm64_bounded_u64_arg(idx_val, (uint64_t)rt_arm_array_len_u32(arr));
     return (RuntimeValue)arm64_array_byte_at_raw_index(arr, idx);
 }
 
@@ -2752,7 +2764,8 @@ RuntimeValue rt_arm_array_len_u32(RuntimeValue arr)
 
 RuntimeValue rt_arm_array_get_u16_le(RuntimeValue arr, RuntimeValue idx_val)
 {
-    uint64_t idx = arm64_u64_arg(idx_val);
+    uint64_t src_len = (uint64_t)rt_arm_array_len_u32(arr);
+    uint64_t idx = arm64_bounded_u64_arg(idx_val, src_len);
     uint64_t lo = arm64_array_byte_at_raw_index(arr, idx);
     uint64_t hi = arm64_array_byte_at_raw_index(arr, idx + 1ULL);
     return (RuntimeValue)(lo | (hi << 8));
@@ -2760,7 +2773,8 @@ RuntimeValue rt_arm_array_get_u16_le(RuntimeValue arr, RuntimeValue idx_val)
 
 RuntimeValue rt_arm_array_get_u32_le(RuntimeValue arr, RuntimeValue idx_val)
 {
-    uint64_t idx = arm64_u64_arg(idx_val);
+    uint64_t src_len = (uint64_t)rt_arm_array_len_u32(arr);
+    uint64_t idx = arm64_bounded_u64_arg(idx_val, src_len);
     uint64_t b0 = arm64_array_byte_at_raw_index(arr, idx);
     uint64_t b1 = arm64_array_byte_at_raw_index(arr, idx + 1ULL);
     uint64_t b2 = arm64_array_byte_at_raw_index(arr, idx + 2ULL);
@@ -2772,8 +2786,8 @@ RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_va
 {
     RuntimeArray *dst = (RuntimeArray *)(IS_HEAP(dst_val) ? DECODE_PTR(dst_val) : (void *)(uintptr_t)(uint64_t)dst_val);
     if (!dst || dst->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
-    uint64_t max_count = arm64_u64_arg(max_count_val);
     uint64_t src_len = (uint64_t)rt_arm_array_len_u32(src_val);
+    uint64_t max_count = arm64_bounded_u64_arg(max_count_val, src_len);
     uint64_t appended = 0;
     while (appended < max_count && appended < src_len) {
         if (dst->len >= dst->cap) break;
@@ -2798,8 +2812,8 @@ RuntimeValue rt_arm_array_clone_bytes(RuntimeValue src_val)
 RuntimeValue rt_arm_array_slice_bytes(RuntimeValue src_val, RuntimeValue offset_val, RuntimeValue size_val)
 {
     uint64_t src_len = (uint64_t)rt_arm_array_len_u32(src_val);
-    uint64_t offset = arm64_u64_arg(offset_val);
-    uint64_t size = arm64_u64_arg(size_val);
+    uint64_t offset = arm64_bounded_u64_arg(offset_val, src_len);
+    uint64_t size = arm64_bounded_u64_arg(size_val, src_len);
     if (offset > src_len) offset = src_len;
     if (size > src_len - offset) size = src_len - offset;
     RuntimeValue dst_val = rt_array_new_with_cap((RuntimeValue)size);
@@ -2873,10 +2887,19 @@ uint64_t rt_arm_smf_elf_stub_size(RuntimeValue bytes)
     if (arm64_array_byte_at_raw_index(bytes, 2) != 0x4CULL) return 0;
     if (arm64_array_byte_at_raw_index(bytes, 3) != 0x46ULL) return 0;
     uint64_t trailer = len - 128ULL;
-    if (arm64_array_byte_at_raw_index(bytes, trailer) != 0x53ULL) return 0;
-    if (arm64_array_byte_at_raw_index(bytes, trailer + 1ULL) != 0x4DULL) return 0;
-    if (arm64_array_byte_at_raw_index(bytes, trailer + 2ULL) != 0x46ULL) return 0;
-    if (arm64_array_byte_at_raw_index(bytes, trailer + 3ULL) != 0x00ULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, trailer) != 0x53ULL ||
+        arm64_array_byte_at_raw_index(bytes, trailer + 1ULL) != 0x4DULL ||
+        arm64_array_byte_at_raw_index(bytes, trailer + 2ULL) != 0x46ULL ||
+        arm64_array_byte_at_raw_index(bytes, trailer + 3ULL) != 0x00ULL) {
+        if (trailer == 0ULL ||
+            arm64_array_byte_at_raw_index(bytes, trailer - 1ULL) != 0x53ULL ||
+            arm64_array_byte_at_raw_index(bytes, trailer) != 0x4DULL ||
+            arm64_array_byte_at_raw_index(bytes, trailer + 1ULL) != 0x46ULL ||
+            arm64_array_byte_at_raw_index(bytes, trailer + 2ULL) != 0x00ULL) return 0;
+        trailer = trailer - 1ULL;
+        uint64_t padded_stub_size = arm64_elf_u32(bytes, trailer + 52ULL);
+        if (padded_stub_size > 0ULL && padded_stub_size <= trailer) return padded_stub_size + 1ULL;
+    }
     uint64_t stub_size = arm64_elf_u32(bytes, trailer + 52ULL);
     if (stub_size > 0ULL && stub_size <= trailer) return stub_size;
     return trailer;
