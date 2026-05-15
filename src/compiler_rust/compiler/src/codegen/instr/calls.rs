@@ -876,6 +876,135 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     Ok(true)
 }
 
+fn compile_inline_hash_text<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 1 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let value = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let hash_seed = builder.ins().iconst(types::I64, 5381);
+    let tag = builder.ins().band_imm(value, 7);
+    let is_text = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+    let ptr = builder.ins().band_imm(value, !7i64);
+
+    let ptr_block = builder.create_block();
+    let kind_block = builder.create_block();
+    let len_block = builder.create_block();
+    let loop_block = builder.create_block();
+    let word_block = builder.create_block();
+    let tail_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(loop_block, types::I64);
+    builder.append_block_param(loop_block, types::I64);
+    builder.append_block_param(word_block, types::I64);
+    builder.append_block_param(word_block, types::I64);
+    builder.append_block_param(tail_block, types::I64);
+    builder.append_block_param(tail_block, types::I64);
+    builder.append_block_param(done_block, types::I64);
+
+    builder.ins().brif(is_text, ptr_block, &[], done_block, &[zero]);
+
+    builder.switch_to_block(ptr_block);
+    let ptr_valid = builder.ins().icmp_imm(IntCC::SignedGreaterThan, ptr, 0);
+    builder.ins().brif(ptr_valid, kind_block, &[], done_block, &[zero]);
+    builder.seal_block(ptr_block);
+
+    builder.switch_to_block(kind_block);
+    let kind = builder.ins().load(types::I64, MemFlags::new(), ptr, 0);
+    let masked_kind = builder.ins().band_imm(kind, 0xFFFF_FFFF);
+    let is_string = builder.ins().icmp_imm(IntCC::Equal, masked_kind, 1398034993);
+    builder.ins().brif(is_string, len_block, &[], done_block, &[zero]);
+    builder.seal_block(kind_block);
+
+    builder.switch_to_block(len_block);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr, 8);
+    let data = builder.ins().iadd_imm(ptr, 16);
+    builder.ins().jump(loop_block, &[hash_seed, zero]);
+    builder.seal_block(len_block);
+
+    builder.switch_to_block(loop_block);
+    let hash = builder.block_params(loop_block)[0];
+    let index = builder.block_params(loop_block)[1];
+    let index_plus_three = builder.ins().iadd_imm(index, 3);
+    let has_word = builder.ins().icmp(IntCC::SignedLessThan, index_plus_three, len);
+    builder
+        .ins()
+        .brif(has_word, word_block, &[hash, index], tail_block, &[hash, index]);
+
+    builder.switch_to_block(word_block);
+    let hash = builder.block_params(word_block)[0];
+    let index = builder.block_params(word_block)[1];
+    let byte0_ptr = builder.ins().iadd(data, index);
+    let index1 = builder.ins().iadd_imm(index, 1);
+    let index2 = builder.ins().iadd_imm(index, 2);
+    let index3 = builder.ins().iadd_imm(index, 3);
+    let byte1_ptr = builder.ins().iadd(data, index1);
+    let byte2_ptr = builder.ins().iadd(data, index2);
+    let byte3_ptr = builder.ins().iadd(data, index3);
+    let byte0 = builder.ins().load(types::I8, MemFlags::new(), byte0_ptr, 0);
+    let byte1 = builder.ins().load(types::I8, MemFlags::new(), byte1_ptr, 0);
+    let byte2 = builder.ins().load(types::I8, MemFlags::new(), byte2_ptr, 0);
+    let byte3 = builder.ins().load(types::I8, MemFlags::new(), byte3_ptr, 0);
+    let byte0_64 = builder.ins().uextend(types::I64, byte0);
+    let byte1_64 = builder.ins().uextend(types::I64, byte1);
+    let byte2_64 = builder.ins().uextend(types::I64, byte2);
+    let byte3_64 = builder.ins().uextend(types::I64, byte3);
+    let hash_scaled = builder.ins().imul_imm(hash, 1185921);
+    let term0 = builder.ins().imul_imm(byte0_64, 35937);
+    let term1 = builder.ins().imul_imm(byte1_64, 1089);
+    let term2 = builder.ins().imul_imm(byte2_64, 33);
+    let partial0 = builder.ins().iadd(hash_scaled, term0);
+    let partial1 = builder.ins().iadd(partial0, term1);
+    let partial2 = builder.ins().iadd(partial1, term2);
+    let next_hash = builder.ins().iadd(partial2, byte3_64);
+    let next_index = builder.ins().iadd_imm(index, 4);
+    let next_index_plus_three = builder.ins().iadd_imm(next_index, 3);
+    let has_next_word = builder.ins().icmp(IntCC::SignedLessThan, next_index_plus_three, len);
+    builder.ins().brif(
+        has_next_word,
+        loop_block,
+        &[next_hash, next_index],
+        tail_block,
+        &[next_hash, next_index],
+    );
+    builder.seal_block(word_block);
+    builder.seal_block(loop_block);
+
+    builder.switch_to_block(tail_block);
+    let hash = builder.block_params(tail_block)[0];
+    let index = builder.block_params(tail_block)[1];
+    let has_tail = builder.ins().icmp(IntCC::SignedLessThan, index, len);
+    let tail_body_block = builder.create_block();
+    builder.ins().brif(has_tail, tail_body_block, &[], done_block, &[hash]);
+
+    builder.switch_to_block(tail_body_block);
+    let byte_ptr = builder.ins().iadd(data, index);
+    let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+    let byte_64 = builder.ins().uextend(types::I64, byte);
+    let shifted = builder.ins().ishl_imm(hash, 5);
+    let hash_times_33 = builder.ins().iadd(shifted, hash);
+    let next_hash = builder.ins().iadd(hash_times_33, byte_64);
+    let next_index = builder.ins().iadd_imm(index, 1);
+    builder.ins().jump(tail_block, &[next_hash, next_index]);
+    builder.seal_block(tail_body_block);
+    builder.seal_block(tail_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    ctx.vreg_values.insert(*dest, result);
+    Ok(true)
+}
+
 fn vector_compare_mask_i64x2(builder: &mut FunctionBuilder, lhs: Value, rhs: Value) -> Value {
     builder.ins().icmp(IntCC::Equal, lhs, rhs)
 }
@@ -2213,6 +2342,9 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
     if ffi_name == "rt_numeric_contains_u64" && compile_inline_numeric_contains_u64(ctx, builder, dest, args, false)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_hash_text" && compile_inline_hash_text(ctx, builder, dest, args)? {
         return Ok(());
     }
     if matches!(ffi_name, "rt_array_set_len_known" | "rt_array_set_len_known_text")

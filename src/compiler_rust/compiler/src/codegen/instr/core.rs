@@ -57,6 +57,32 @@ fn vreg_is_text<M: Module>(ctx: &InstrContext<'_, M>, v: VReg) -> bool {
     matches!(ctx.vreg_types.get(&v).copied(), Some(TypeId::STRING))
 }
 
+fn compile_text_eq_with_identity_fast_path<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    lhs: cranelift_codegen::ir::Value,
+    rhs: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let one = builder.ins().iconst(types::I64, 1);
+    let same_object = builder.ins().icmp(IntCC::Equal, lhs, rhs);
+    let string_eq_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+    builder
+        .ins()
+        .brif(same_object, done_block, &[one], string_eq_block, &[]);
+
+    builder.switch_to_block(string_eq_block);
+    let eq = call_runtime_2(ctx, builder, "rt_string_eq", lhs, rhs);
+    builder.ins().jump(done_block, &[eq]);
+    builder.seal_block(string_eq_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    result
+}
+
 /// Ensure a value is i64, extending smaller integer types and bitcasting floats if needed.
 /// This is necessary because some values (e.g., from FFI functions returning i32 or
 /// float constants) may not be i64 even though runtime functions expect i64.
@@ -339,7 +365,7 @@ pub(crate) fn compile_binop<M: Module>(
                 let cmp_i8 = builder.ins().fcmp(FloatCC::Equal, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
             } else if vreg_is_text(ctx, left_vreg) && vreg_is_text(ctx, right_vreg) {
-                call_runtime_2(ctx, builder, "rt_string_eq", lhs, rhs)
+                compile_text_eq_with_identity_fast_path(ctx, builder, lhs, rhs)
             } else if vreg_is_native_equality_scalar(ctx, left_vreg) && vreg_is_native_equality_scalar(ctx, right_vreg)
             {
                 let cmp_i8 = builder.ins().icmp(IntCC::Equal, lhs, rhs);
@@ -357,7 +383,7 @@ pub(crate) fn compile_binop<M: Module>(
                 let cmp_i8 = builder.ins().fcmp(FloatCC::NotEqual, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
             } else if vreg_is_text(ctx, left_vreg) && vreg_is_text(ctx, right_vreg) {
-                let eq = call_runtime_2(ctx, builder, "rt_string_eq", lhs, rhs);
+                let eq = compile_text_eq_with_identity_fast_path(ctx, builder, lhs, rhs);
                 let zero = builder.ins().iconst(types::I64, 0);
                 let neq = builder.ins().icmp(IntCC::Equal, eq, zero);
                 ensure_i64(builder, neq)
