@@ -137,6 +137,12 @@ cargo test -p simple-parser packed_struct
 src/compiler_rust/target/bootstrap/simple check src/lib/gc_async_mut/__init__.spl
 => passed
 
+env SIMPLE_OS_BUILD_BACKEND=cranelift src/compiler_rust/target/debug/simple os test --scenario=riscv64-virtio-fat32-smf
+=> QEMU boot passed; serial output included FS_MOUNT_OK, SMF_DISCOVERY_OK, SMF_CLI_LAUNCH_OK, SMF_WM_GUI_LAUNCH_OK, SIMPLEOS_RISCV_SMF_FS_PASS, TEST PASSED
+
+src/compiler_rust/target/debug/simple test test/feature/usage/cuda_spec.spl --mode=interpreter --clean --force-rebuild
+=> Passed: 5, Failed: 0 on a host with NVIDIA RTX A6000 and TITAN RTX visible via nvidia-smi
+
 bin/simple test test/unit/compiler/driver/compile_options_normalization_spec.spl --mode=interpreter
 => Passed: 10, Failed: 0
 
