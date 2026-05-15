@@ -577,6 +577,31 @@ fn scv_import_git_fast_import(root: text, stream_path: text) -> text:
             tree_lines.push("{target}|{file_id}|{chunk}|{bytes.len()}|0")
             copied = copied + 1
         elif line.starts_with("reset "):
+            # Flush pending commit before processing reset
+            if in_commit:
+                var parent_commits: [text] = []
+                if current_from_mark != "":
+                    val from_commit = scv_fast_import_resolve_commit_ref(current_from_mark, commit_marks, commit_ids)
+                    if from_commit != "":
+                        parent_commits.push(from_commit)
+                for merge_mark in current_merge_marks:
+                    val merge_commit = scv_fast_import_resolve_commit_ref(merge_mark, commit_marks, commit_ids)
+                    if merge_commit != "":
+                        parent_commits.push(merge_commit)
+                val flush_tree = scv_write_tree_object(root, tree_lines)
+                val flush_commit = scv_write_commit_multi(root, parent_commits, flush_tree, scv_state_private(), current_author, current_committer)
+                if commit_marks.len() > commit_ids.len():
+                    commit_ids.push(flush_commit)
+                val flush_op = scv_write_operation(root, scv_current_op(root), flush_commit, "import-git-fast-import")
+                if flush_op.starts_with("ERROR"):
+                    return flush_op
+                scv_write_text("{root}/.scv/meta/status_index.sdn", file_read(scv_object_path(root, "trees", flush_tree)))
+                in_commit = false
+                current_author = ""
+                current_committer = ""
+                current_from_mark = ""
+                current_merge_marks = []
+                inline_file_seq = 0
             # reset refs/heads/<branch> or reset refs/tags/<name>
             val reset_error = scv_fast_import_reset_ref_error(line)
             if reset_error != "":
@@ -606,6 +631,31 @@ fn scv_import_git_fast_import(root: text, stream_path: text) -> text:
             pos = scv_fast_import_next_line_pos(stream, from_end)
             continue
         elif line.starts_with("tag "):
+            # Flush pending commit before processing annotated tag
+            if in_commit:
+                var parent_commits: [text] = []
+                if current_from_mark != "":
+                    val from_commit = scv_fast_import_resolve_commit_ref(current_from_mark, commit_marks, commit_ids)
+                    if from_commit != "":
+                        parent_commits.push(from_commit)
+                for merge_mark in current_merge_marks:
+                    val merge_commit = scv_fast_import_resolve_commit_ref(merge_mark, commit_marks, commit_ids)
+                    if merge_commit != "":
+                        parent_commits.push(merge_commit)
+                val flush_tree = scv_write_tree_object(root, tree_lines)
+                val flush_commit = scv_write_commit_multi(root, parent_commits, flush_tree, scv_state_private(), current_author, current_committer)
+                if commit_marks.len() > commit_ids.len():
+                    commit_ids.push(flush_commit)
+                val flush_op = scv_write_operation(root, scv_current_op(root), flush_commit, "import-git-fast-import")
+                if flush_op.starts_with("ERROR"):
+                    return flush_op
+                scv_write_text("{root}/.scv/meta/status_index.sdn", file_read(scv_object_path(root, "trees", flush_tree)))
+                in_commit = false
+                current_author = ""
+                current_committer = ""
+                current_from_mark = ""
+                current_merge_marks = []
+                inline_file_seq = 0
             # Annotated tag record: tag <name>\nfrom <ref>\ntagger ...\ndata N\n<msg>
             val tag_error = scv_fast_import_tag_record_error(line)
             if tag_error != "":
