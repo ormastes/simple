@@ -557,3 +557,8 @@ Rejected follow-up:
   compiler tests, but a rebuilt three-sample source-closure collection run
   preserved checksum parity while regressing `list_traverse` to `0.98x C /
   0.51x Rust`. The codegen change was reverted.
+- Simplifying pure Simple `rt_native_eq` comparisons from `< or >` tests to
+  `!=` for string kind, `memcmp`, and raw value equality preserved checksum
+  parity but did not improve `hashset_contains` (`0.62x C / 1.02x Rust`) and
+  pushed `list_push` below C (`0.90x`) in a clean three-sample run. The runtime
+  source change was reverted.
