@@ -338,3 +338,27 @@ Rust's reference binary uses AVX `vpcmpeqq` plus a vector test for this scan.
 A direct Cranelift `I64X4` compare plus `bmask(I64, mask)` experiment was also
 rejected: Cranelift 0.116 verifies `bmask` only for scalar integer inputs, so
 the benchmark compile failed before producing a valid binary.
+
+## 2026-05-15 Contains Vector Test Update
+
+The native callsite inline for `rt_numeric_contains_u64` now uses four
+`I64X2` vector compares, ORs the compare masks, and applies Cranelift
+`vany_true` once per eight-element chunk. On x64 this lowers to
+`vpcmpeqq`/`vpor`/`vptest`, avoiding the failed `bmask` path and the earlier
+per-lane extraction shape.
+
+Clean three-sample source-closure benchmark evidence with `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, rebuilt runtime archive, and checksum parity:
+
+```text
+list_traverse     0.77x C / 0.48x Rust
+list_push         1.29x C / 2.63x Rust
+set_contains      1.50x C / 0.60x Rust
+hashset_contains  0.48x C / 0.80x Rust
+```
+
+Disassembly of `set_contains` confirms the hot chunk path uses four
+`vpcmpeqq` instructions, three `vpor` instructions, and one `vptest` per
+eight-element chunk. This closes the scalar `set_contains` Rust floor in the
+sample above. The remaining parity risk is now the noisy `list_traverse` Rust
+floor and text `hashset_contains` C floor.
