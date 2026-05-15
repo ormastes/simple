@@ -25,6 +25,7 @@
 
 use std::path::PathBuf;
 
+use crate::cli::basic::with_strict_runtime_family_for_target;
 use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 use simple_compiler::is_native_codegen_backend_available;
@@ -453,6 +454,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         simple_compiler::pipeline::native_project::set_target_override(*t);
     }
 
+    let strict_runtime_target = config.target;
     let mut builder = NativeProjectBuilder::new(project_root, output).config(config);
     if let Some(entry) = entry_file {
         builder = builder.entry_file(entry);
@@ -461,7 +463,9 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         builder = builder.source_dir(dir);
     }
 
-    match builder.build() {
+    let build_result = with_strict_runtime_family_for_target(strict_runtime_target.as_ref(), || builder.build());
+
+    match build_result {
         Ok(result) => {
             println!(
                 "Build complete: {} compiled, {} cached, {} failed",

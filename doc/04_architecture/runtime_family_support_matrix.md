@@ -185,7 +185,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 5. **Target family filtering** in `src/compiler/99.loader/module_resolver/resolution.spl`: `allowed_families` restricts stdlib family search for target presets.
 
-**Remaining gap**: the manifest-backed hard violation API, Rust lint parity, Rust `simple check` target strict mode, target-strict noalloc reachable-import closure check, and Rust interpreter strict mode exist. `simple check --target <baremetal/simpleos>` promotes runtime-family violations automatically, and the Rust test runner plus direct file interpreter launch path now enable strict runtime-family imports for baremetal/SimpleOS targets while hosted targets keep warnings by default. Broader compiler entrypoints still need to adopt the same target-derived strict policy where they run interpreter/module-loading checks. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
+**Remaining gap**: the manifest-backed hard violation API, Rust lint parity, Rust `simple check` target strict mode, target-strict noalloc reachable-import closure check, and Rust interpreter strict mode exist. `simple check --target <baremetal/simpleos>` promotes runtime-family violations automatically, and the Rust test runner, direct file interpreter launch path, and Rust/native_all native-build paths now enable strict runtime-family imports for baremetal/SimpleOS targets while hosted targets keep warnings by default. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
 
 ### Interpreter parity detail
 
@@ -240,9 +240,9 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 - **Fix**: Thread target presets into every compiler entrypoint that needs strict family enforcement instead of relying on callers to pass explicit strict flags.
 
 ### Gap 2: Interpreter strict family errors are target-aware in common launch paths (Agent 3 -- Interpreter)
-- **Status**: Partially fixed. The Rust interpreter can promote family-boundary diagnostics to errors with `SIMPLE_STRICT_RUNTIME_FAMILY=1`; `simple test ... --target <baremetal/simpleos>` and direct `simple file.spl --target <baremetal/simpleos>` now set that mode automatically for the duration of interpreter execution. Hosted targets keep warning-compatible behavior.
+- **Status**: Partially fixed. The Rust interpreter can promote family-boundary diagnostics to errors with `SIMPLE_STRICT_RUNTIME_FAMILY=1`; `simple test ... --target <baremetal/simpleos>`, direct `simple file.spl --target <baremetal/simpleos>`, and Rust/native_all native-build paths now set that mode automatically for the duration of target-restricted execution. Hosted targets keep warning-compatible behavior.
 - **Impact**: Target-restricted interpreter test and direct-run gates can fail on runtime-family boundary violations without manual environment setup; unrestricted interpreter runs still intentionally continue after warning.
-- **Remaining work**: Thread the same target-derived strict policy into any remaining compiler/native-build entrypoints that perform interpreter/module-loading checks.
+- **Remaining work**: Audit any remaining nonstandard compiler entrypoints that perform interpreter/module-loading checks outside the Rust driver and native_all native-build paths.
 
 ### Gap 3: `nogc_async_immut` runtime coverage (Agent 3/4) -- **RESOLVED**
 - **Status**: Fixed. Persistent-structure facade coverage is broad, and `test/unit/lib/nogc_async_immut/coordination_native_spec.spl` now covers direct no-GC async `Atom`, `Ref`, `VersionedSnapshot`, and exported CAS helper behavior in interpreter and native modes.
@@ -462,7 +462,7 @@ val resolver = ModuleResolver.new(project_root, source_root)
 |------|-------|---------|----------------------|
 | `src/compiler/00.common/gc_config.spl` | L00 | `GcMode {Gc, NoGc}`, `GcConfig`, provenance tracking | No (attribute-based, not directory-based) |
 | `src/compiler/00.common/gc_boundary.spl` | L00 | `GcBoundaryChecker`, cross-mode call/return/conversion warnings | No (checks attribute GcMode, not family) |
-| `src/compiler/99.loader/module_resolver/manifest.spl` | L99 | Parses `@no_gc`/`@gc` from `__init__.spl` attributes, propagates to `ChildModule.gc_config` | **Partial**: runtime-family roots now use attributes, but manifest-to-hard-error enforcement remains partial |
+| `src/compiler/99.loader/module_resolver/manifest.spl` | L99 | Parses `@no_gc`/`@gc` from `__init__.spl` attributes, propagates to `ChildModule.gc_config` | **Partial**: runtime-family roots now use attributes, Rust check/test/file/native-build paths can promote restricted-target violations, but full manifest-to-hard-error enforcement remains partial |
 | `src/compiler/55.borrow/gc_analysis/barriers.spl` | L55 | Write barrier analysis (`GcStrategy {StopTheWorld, Incremental, Generational, Concurrent}`) | No (MIR-level analysis, separate GC strategy enum) |
 | `src/compiler/55.borrow/gc_analysis/mod.spl` | L55 | `GcSafetyAnalyzer`, root tracking, escape analysis | No (operates on MIR, not module families) |
 | `test/unit/lib/dependency_boundary_spec.spl` | Test | Blocks direct noalloc imports from allocating runtime families, direct `app.*` imports, noalloc `@alloc` markers, host allocation APIs, and unsafe reachable helper imports | Yes for direct imports/markers/API calls/reachable helper imports; compiler-owned allocation-capability metadata remains future work |

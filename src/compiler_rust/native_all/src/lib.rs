@@ -32,6 +32,39 @@ use simple_runtime::value::{
     rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_new, rt_tuple_set, RuntimeValue,
 };
 
+struct StrictRuntimeFamilyGuard {
+    previous: Option<String>,
+    enabled: bool,
+}
+
+impl StrictRuntimeFamilyGuard {
+    fn for_target(target: Option<&simple_common::target::Target>) -> Self {
+        let enabled = target.is_some_and(|target| target.is_baremetal());
+        if enabled {
+            let previous = std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").ok();
+            std::env::set_var("SIMPLE_STRICT_RUNTIME_FAMILY", "1");
+            Self { previous, enabled }
+        } else {
+            Self {
+                previous: None,
+                enabled,
+            }
+        }
+    }
+}
+
+impl Drop for StrictRuntimeFamilyGuard {
+    fn drop(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        match &self.previous {
+            Some(value) => std::env::set_var("SIMPLE_STRICT_RUNTIME_FAMILY", value),
+            None => std::env::remove_var("SIMPLE_STRICT_RUNTIME_FAMILY"),
+        }
+    }
+}
+
 // Helper: extract a Rust String from a Simple runtime string value.
 fn extract_rt_string(val: RuntimeValue) -> Option<String> {
     let len = rt_string_len(val);
@@ -502,6 +535,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     }
     std::env::set_var("SIMPLE_OS_LOG_MODE", &log_mode);
 
+    let strict_runtime_target = config.target;
     let mut builder = NativeProjectBuilder::new(project_root, output).config(config);
     if let Some(entry) = entry_file {
         builder = builder.entry_file(entry);
@@ -510,7 +544,12 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         builder = builder.source_dir(dir);
     }
 
-    match builder.build() {
+    let build_result = {
+        let _strict_guard = StrictRuntimeFamilyGuard::for_target(strict_runtime_target.as_ref());
+        builder.build()
+    };
+
+    match build_result {
         Ok(result) => {
             println!(
                 "Build complete: {} compiled, {} cached, {} failed",
