@@ -143,6 +143,9 @@ env SIMPLE_OS_BUILD_BACKEND=cranelift src/compiler_rust/target/debug/simple os t
 src/compiler_rust/target/debug/simple test test/feature/usage/cuda_spec.spl --mode=interpreter --clean --force-rebuild
 => Passed: 5, Failed: 0 on a host with NVIDIA RTX A6000 and TITAN RTX visible via nvidia-smi
 
+src/compiler_rust/target/debug/simple test test/feature/scilib/cuda_device_buffer_spec.spl --mode=interpreter --clean --force-rebuild
+=> Passed: 20, Failed: 0; covers explicit CUDA buffers, CUDA-owned NDArray storage, device-side arithmetic, shape/combine operations, reductions, and slicing on the same CUDA host
+
 bin/simple test test/unit/compiler/driver/compile_options_normalization_spec.spl --mode=interpreter
 => Passed: 10, Failed: 0
 
