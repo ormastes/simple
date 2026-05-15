@@ -750,8 +750,8 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let sum3 = builder.block_params(loop_block)[3];
     let idx = builder.block_params(loop_block)[4];
     let cursor = builder.block_params(loop_block)[5];
-    let idx_plus_seven = builder.ins().iadd_imm(idx, 7);
-    let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_seven, length);
+    let idx_plus_fifteen = builder.ins().iadd_imm(idx, 15);
+    let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_fifteen, length);
     builder.ins().brif(
         has_chunk,
         chunk_block,
@@ -789,19 +789,6 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let sum3 = builder.block_params(chunk_second_block)[3];
     let idx = builder.block_params(chunk_second_block)[4];
     let cursor = builder.block_params(chunk_second_block)[5];
-    let idx_plus_seven = builder.ins().iadd_imm(idx, 7);
-    let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_seven, length);
-    let second_test_block = builder.create_block();
-    builder.ins().brif(
-        has_chunk,
-        second_test_block,
-        &[],
-        tail_block,
-        &[sum0, sum1, sum2, sum3, idx, cursor],
-    );
-    builder.seal_block(chunk_second_block);
-
-    builder.switch_to_block(second_test_block);
     let value0 = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 0);
     let value1 = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 16);
     let value2 = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 32);
@@ -820,7 +807,7 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
         loop_block,
         &[next_sum0, next_sum1, next_sum2, next_sum3, next_idx, next_cursor],
     );
-    builder.seal_block(second_test_block);
+    builder.seal_block(chunk_second_block);
     builder.seal_block(loop_block);
 
     builder.switch_to_block(tail_block);
