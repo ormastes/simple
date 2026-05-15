@@ -1031,7 +1031,13 @@ main = 0
             mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
                 matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_xor_sum_u64"))
             }),
-            "expected guarded rt_numeric_xor_sum_u64 call in MIR"
+            "expected rt_numeric_xor_sum_u64 call in MIR"
+        );
+        assert!(
+            !mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_native_eq"))
+            }),
+            "expected length-local alias to avoid redundant rt_native_eq guard"
         );
     }
 
@@ -1050,7 +1056,13 @@ main = 0
             mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
                 matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_contains_u64"))
             }),
-            "expected guarded rt_numeric_contains_u64 call in MIR"
+            "expected rt_numeric_contains_u64 call in MIR"
+        );
+        assert!(
+            !mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_native_eq"))
+            }),
+            "expected length-local alias to avoid redundant rt_native_eq guard"
         );
     }
 

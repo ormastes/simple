@@ -57,7 +57,8 @@ Representative Simple collection files exist under these families:
 
 - Pure Simple native codegen now inlines typed array hot helpers and the
   benchmark's hot `set_contains` call. The contains scan lowers to vector
-  compares and vector tests on x64.
+  compares and vector tests on x64, and HIR SIMD lowering suppresses redundant
+  length-alias guards for canonical `while i < array.len().to_u64()` loops.
 - Native integer comparison lowering now honors unsigned ordering for unsigned
   operands, which is required for `u64` collection counters and keys.
 - Clean pushed-state benchmark evidence after rebuilding `simple-core` with
@@ -65,27 +66,27 @@ Representative Simple collection files exist under these families:
   checksum parity:
 
 ```text
-list_traverse     1.04x C / 0.84x Rust
-list_push         1.31x C / 2.56x Rust
-set_contains      1.86x C / 0.74x Rust
-hashset_contains  0.65x C / 1.08x Rust
+list_traverse     1.52x C / 1.29x Rust
+list_push         1.32x C / 4.50x Rust
+set_contains      1.83x C / 0.83x Rust
+hashset_contains  0.61x C / 1.04x Rust
 ```
 
 - The benchmark now clears the current warning floor with checksum parity after
-  reducing pure Simple `HashSet` probe density and widening the numeric scan
-  lowerings. This is not full C/Rust parity: `hashset_contains` remains below C
-  throughput, and `list_traverse` plus `set_contains` remain below Rust
-  throughput in the retained five-sample run.
+  reducing pure Simple `HashSet` probe density, widening the numeric scan
+  lowerings, and removing redundant length-alias guards. This is not full C/Rust
+  parity: `hashset_contains` remains below C throughput, and `set_contains`
+  remains below Rust throughput in the retained five-sample run.
 
 ## Prompt-to-artifact checklist
 
 | Objective requirement | Current evidence | Status |
 | --- | --- | --- |
-| Commit, pull/rebase, push | Latest pushed commits through `f57dc5bf81`; `HEAD` and `origin/main` match in `/tmp/simple-parity-next` after fetch/rebase/push. | Done for current increments |
+| Commit, pull/rebase, push | Latest pushed baseline before this retained optimization was `c027c6bd40`; VCS sync for this increment is verified after the commit/rebase/push step. | Done for prior increments; verify after current sync |
 | Remove Rust from pure Simple path/runtime unless OS-provided | `nm -u build/perf/collections/collection_simple` lists libc/OS symbols and weak startup hooks only; no unresolved Rust runtime symbols. | Verified for collection benchmark binary |
 | Port runtime support to pure Simple unless OS-provided | `build/simple-core/libsimple_runtime.a` provides the runtime helpers used by the collection benchmark; OS primitives remain `malloc`, `free`, `memcmp`, clocks, IO, and similar host services. | Verified for benchmark scope |
 | Check common libraries that overlap C/Rust/native surfaces | This audit enumerates array, typed-array, generic indexing, list/set/hash/map, persistent, noalloc, and checksum/hash overlap surfaces. | In progress |
-| Match or beat existing C/Rust performance for list/set/traverse and similar APIs | Latest retained benchmark beats C for `list_traverse`, `list_push`, and `set_contains`, beats Rust for `list_push` and `hashset_contains`, but trails Rust for `list_traverse`/`set_contains` and trails C for `hashset_contains`. | Not complete |
+| Match or beat existing C/Rust performance for list/set/traverse and similar APIs | Latest retained benchmark beats C for `list_traverse`, `list_push`, and `set_contains`, beats Rust for `list_traverse`, `list_push`, and `hashset_contains`, but trails Rust for `set_contains` and trails C for `hashset_contains`. | Not complete |
 
 ## Next optimization targets
 

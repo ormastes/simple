@@ -694,13 +694,33 @@ impl CompilerPipeline {
         }
 
         for function in &mut hir_module.functions {
-            self.rewrite_hir_simd_stmts(&hir_module.types, &mut function.body);
+            let mut len_aliases = Vec::new();
+            self.rewrite_hir_simd_stmts(&hir_module.types, &mut function.body, &mut len_aliases);
         }
     }
 
-    fn rewrite_hir_simd_stmts(&self, types: &hir::TypeRegistry, stmts: &mut [HirStmt]) {
+    fn rewrite_hir_simd_stmts(
+        &self,
+        types: &hir::TypeRegistry,
+        stmts: &mut [HirStmt],
+        len_aliases: &mut Vec<(usize, HirExpr)>,
+    ) {
         for stmt in stmts.iter_mut() {
             match stmt {
+                HirStmt::Let { local_index, value, .. } => {
+                    self.remove_hir_len_alias(len_aliases, *local_index);
+                    if let Some(receiver) = value.as_ref().and_then(|expr| self.hir_len_alias_receiver(expr)) {
+                        len_aliases.push((*local_index, receiver.clone()));
+                    }
+                }
+                HirStmt::Assign { target, value } => {
+                    if let HirExprKind::Local(local_index) = target.kind {
+                        self.remove_hir_len_alias(len_aliases, local_index);
+                        if let Some(receiver) = self.hir_len_alias_receiver(value) {
+                            len_aliases.push((local_index, receiver.clone()));
+                        }
+                    }
+                }
                 HirStmt::For {
                     pattern,
                     iterable,
@@ -708,7 +728,8 @@ impl CompilerPipeline {
                     simd_requested,
                     invariants,
                 } => {
-                    self.rewrite_hir_simd_stmts(types, body);
+                    let mut body_len_aliases = len_aliases.clone();
+                    self.rewrite_hir_simd_stmts(types, body, &mut body_len_aliases);
                     let fallback = HirStmt::For {
                         pattern: pattern.clone(),
                         iterable: iterable.clone(),
@@ -723,9 +744,11 @@ impl CompilerPipeline {
                 HirStmt::If {
                     then_block, else_block, ..
                 } => {
-                    self.rewrite_hir_simd_stmts(types, then_block);
+                    let mut then_len_aliases = len_aliases.clone();
+                    self.rewrite_hir_simd_stmts(types, then_block, &mut then_len_aliases);
                     if let Some(else_block) = else_block {
-                        self.rewrite_hir_simd_stmts(types, else_block);
+                        let mut else_len_aliases = len_aliases.clone();
+                        self.rewrite_hir_simd_stmts(types, else_block, &mut else_len_aliases);
                     }
                 }
                 HirStmt::While {
@@ -734,24 +757,50 @@ impl CompilerPipeline {
                     simd_requested,
                     invariants,
                 } => {
-                    self.rewrite_hir_simd_stmts(types, body);
+                    let mut body_len_aliases = len_aliases.clone();
+                    self.rewrite_hir_simd_stmts(types, body, &mut body_len_aliases);
                     let fallback = HirStmt::While {
                         condition: condition.clone(),
                         body: body.clone(),
                         simd_requested: *simd_requested,
                         invariants: invariants.clone(),
                     };
-                    if let Some(candidate) = self.classify_hir_u64_contains_while_loop(types, condition, body) {
+                    if let Some(candidate) =
+                        self.classify_hir_u64_contains_while_loop(types, condition, body, len_aliases)
+                    {
                         *stmt = self.lower_hir_u64_contains_candidate(candidate, fallback);
-                    } else if let Some(candidate) = self.classify_hir_simd_while_loop(types, condition, body) {
+                    } else if let Some(candidate) =
+                        self.classify_hir_simd_while_loop(types, condition, body, len_aliases)
+                    {
                         *stmt = self.lower_hir_simd_candidate(candidate, fallback);
                     }
                 }
                 HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
-                    self.rewrite_hir_simd_stmts(types, body);
+                    let mut body_len_aliases = len_aliases.clone();
+                    self.rewrite_hir_simd_stmts(types, body, &mut body_len_aliases);
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn remove_hir_len_alias(&self, len_aliases: &mut Vec<(usize, HirExpr)>, local_index: usize) {
+        len_aliases.retain(|(alias_index, _)| *alias_index != local_index);
+    }
+
+    fn hir_len_alias_receiver<'a>(&self, expr: &'a HirExpr) -> Option<&'a HirExpr> {
+        match &expr.kind {
+            HirExprKind::BuiltinCall { name, args } if (name == "len" || name == "rt_array_len") && args.len() == 1 => {
+                Some(&args[0])
+            }
+            HirExprKind::MethodCall {
+                receiver, method, args, ..
+            } if method == "len" && args.is_empty() => Some(receiver.as_ref()),
+            HirExprKind::MethodCall {
+                receiver, method, args, ..
+            } if method == "to_u64" && args.is_empty() => self.hir_len_alias_receiver(receiver),
+            HirExprKind::Cast { expr, .. } => self.hir_len_alias_receiver(expr),
+            _ => None,
         }
     }
 
@@ -952,7 +1001,7 @@ impl CompilerPipeline {
         let HirStmt::Assign { target, value } = &body[0] else {
             return None;
         };
-        if let Some(reduction) = self.classify_hir_simd_reduction(types, &args[1], target, value) {
+        if let Some(reduction) = self.classify_hir_simd_reduction(types, &args[1], target, value, &[]) {
             return Some(reduction);
         }
 
@@ -982,7 +1031,7 @@ impl CompilerPipeline {
                     {
                         return None;
                     }
-                    let guard = self.build_simd_bound_guard(types, &args[1], [&out, a, b, c])?;
+                    let guard = self.build_simd_bound_guard(types, &args[1], [&out, a, b, c], &[])?;
                     let kernel = match out_layout.0 {
                         TypeId::F32 => "rt_numeric_fma_f32",
                         TypeId::F64 => "rt_numeric_fma_f64",
@@ -1005,7 +1054,7 @@ impl CompilerPipeline {
                 if lhs_layout != out_layout || rhs_layout != out_layout || out == lhs || out == rhs {
                     return None;
                 }
-                let guard = self.build_simd_bound_guard(types, &args[1], [&out, &lhs, &rhs])?;
+                let guard = self.build_simd_bound_guard(types, &args[1], [&out, &lhs, &rhs], &[])?;
                 let kernel = match out_layout.0 {
                     TypeId::F32 => "rt_numeric_add_f32",
                     TypeId::F64 => "rt_numeric_add_f64",
@@ -1027,7 +1076,7 @@ impl CompilerPipeline {
                 if lhs_layout != out_layout || rhs_layout != out_layout || out == lhs || out == rhs {
                     return None;
                 }
-                let guard = self.build_simd_bound_guard(types, &args[1], [&out, &lhs, &rhs])?;
+                let guard = self.build_simd_bound_guard(types, &args[1], [&out, &lhs, &rhs], &[])?;
                 let kernel = match out_layout.0 {
                     TypeId::F32 => "rt_numeric_mul_f32",
                     TypeId::F64 => "rt_numeric_mul_f64",
@@ -1050,6 +1099,7 @@ impl CompilerPipeline {
         types: &hir::TypeRegistry,
         condition: &HirExpr,
         body: &[HirStmt],
+        len_aliases: &[(usize, HirExpr)],
     ) -> Option<HIRSimdLoopCandidate> {
         let (index_local, range_end) = self.canonical_while_range(condition)?;
         if body.len() != 2 {
@@ -1061,7 +1111,7 @@ impl CompilerPipeline {
         let HirStmt::Assign { target, value } = &body[0] else {
             return None;
         };
-        self.classify_hir_simd_reduction(types, range_end, target, value)
+        self.classify_hir_simd_reduction(types, range_end, target, value, len_aliases)
     }
 
     fn classify_hir_u64_contains_while_loop(
@@ -1069,6 +1119,7 @@ impl CompilerPipeline {
         types: &hir::TypeRegistry,
         condition: &HirExpr,
         body: &[HirStmt],
+        len_aliases: &[(usize, HirExpr)],
     ) -> Option<HIRU64ContainsLoopCandidate> {
         let (index_local, range_end) = self.canonical_while_range(condition)?;
         if body.len() != 2 || !self.is_unit_index_increment(&body[1], index_local) {
@@ -1092,7 +1143,7 @@ impl CompilerPipeline {
             return None;
         }
         let (input, key) = self.hir_u64_contains_operands(types, probe, index_local)?;
-        let guard = self.build_simd_bound_guard_for_u64(types, range_end, [&input])?;
+        let guard = self.build_simd_bound_guard_for_u64(types, range_end, [&input], len_aliases)?;
         Some(HIRU64ContainsLoopCandidate { input, key, guard })
     }
 
@@ -1194,6 +1245,7 @@ impl CompilerPipeline {
         range_end: &HirExpr,
         target: &HirExpr,
         value: &HirExpr,
+        len_aliases: &[(usize, HirExpr)],
     ) -> Option<HIRSimdLoopCandidate> {
         let HirExprKind::Local(target_idx) = target.kind else {
             return None;
@@ -1212,7 +1264,7 @@ impl CompilerPipeline {
                     if lhs_ty != rhs_ty || target.ty != lhs_ty {
                         return None;
                     }
-                    let guard = self.build_simd_bound_guard(types, range_end, [&lhs, &rhs])?;
+                    let guard = self.build_simd_bound_guard(types, range_end, [&lhs, &rhs], len_aliases)?;
                     let kernel = match lhs_ty {
                         TypeId::F32 => "rt_numeric_dot_f32",
                         TypeId::F64 => "rt_numeric_dot_f64",
@@ -1234,7 +1286,7 @@ impl CompilerPipeline {
                     if target.ty != TypeId::U64 || element_ty != TypeId::U64 || xor_value.ty != TypeId::U64 {
                         return None;
                     }
-                    let guard = self.build_simd_bound_guard_for_u64(types, range_end, [&input])?;
+                    let guard = self.build_simd_bound_guard_for_u64(types, range_end, [&input], len_aliases)?;
                     return Some(HIRSimdLoopCandidate::ReductionXorSumU64 {
                         kernel: "rt_numeric_xor_sum_u64",
                         target: target.clone(),
@@ -1256,7 +1308,7 @@ impl CompilerPipeline {
                 if target.ty != element_ty {
                     return None;
                 }
-                let guard = self.build_simd_bound_guard(types, range_end, [input])?;
+                let guard = self.build_simd_bound_guard(types, range_end, [input], len_aliases)?;
                 let kernel = match element_ty {
                     TypeId::F32 => "rt_numeric_sum_f32",
                     TypeId::F64 => "rt_numeric_sum_f64",
@@ -1283,7 +1335,7 @@ impl CompilerPipeline {
                 if target.ty != TypeId::F32 || element_ty != TypeId::F32 {
                     return None;
                 }
-                let guard = self.build_simd_bound_guard(types, range_end, [input])?;
+                let guard = self.build_simd_bound_guard(types, range_end, [input], len_aliases)?;
                 let candidate = if name == "min" {
                     HIRSimdLoopCandidate::ReductionMin {
                         kernel: "rt_numeric_min_f32",
@@ -1371,13 +1423,14 @@ impl CompilerPipeline {
         types: &hir::TypeRegistry,
         end: &HirExpr,
         receivers: [&HirExpr; N],
+        len_aliases: &[(usize, HirExpr)],
     ) -> Option<Option<HirExpr>> {
         let mut guard_terms = Vec::new();
         let mut seen = Vec::new();
 
         for receiver in receivers {
             let (_, size) = self.float_array_layout(types, receiver)?;
-            let requires_guard = self.receiver_bound_requires_guard(end, receiver, size)?;
+            let requires_guard = self.receiver_bound_requires_guard(end, receiver, size, len_aliases)?;
             if requires_guard && !seen.iter().any(|existing: &HirExpr| existing == receiver) {
                 seen.push(receiver.clone());
                 guard_terms.push(self.make_eq_expr(self.make_len_expr(receiver.clone()), end.clone()));
@@ -1399,13 +1452,14 @@ impl CompilerPipeline {
         types: &hir::TypeRegistry,
         end: &HirExpr,
         receivers: [&HirExpr; N],
+        len_aliases: &[(usize, HirExpr)],
     ) -> Option<Option<HirExpr>> {
         let mut guard_terms = Vec::new();
         let mut seen = Vec::new();
 
         for receiver in receivers {
             let (_, size) = self.u64_array_layout(types, receiver)?;
-            let requires_guard = self.receiver_bound_requires_guard(end, receiver, size)?;
+            let requires_guard = self.receiver_bound_requires_guard(end, receiver, size, len_aliases)?;
             if requires_guard && !seen.iter().any(|existing: &HirExpr| existing == receiver) {
                 seen.push(receiver.clone());
                 guard_terms.push(self.make_eq_expr(self.make_len_expr(receiver.clone()), end.clone()));
@@ -1476,7 +1530,13 @@ impl CompilerPipeline {
         Some(receiver.as_ref())
     }
 
-    fn receiver_bound_requires_guard(&self, end: &HirExpr, receiver: &HirExpr, size: Option<usize>) -> Option<bool> {
+    fn receiver_bound_requires_guard(
+        &self,
+        end: &HirExpr,
+        receiver: &HirExpr,
+        size: Option<usize>,
+        len_aliases: &[(usize, HirExpr)],
+    ) -> Option<bool> {
         match (&end.kind, size) {
             (HirExprKind::Integer(value), Some(size)) if *value == size as i64 => Some(false),
             (HirExprKind::BuiltinCall { name, args }, _)
@@ -1494,7 +1554,16 @@ impl CompilerPipeline {
                 _,
             ) if method == "len" && args.is_empty() && end_receiver.as_ref() == receiver => Some(false),
             (HirExprKind::Integer(_), None) => None,
-            (HirExprKind::Local(_), _) => Some(true),
+            (HirExprKind::Local(local_index), _) => {
+                if len_aliases
+                    .iter()
+                    .any(|(alias_index, alias_receiver)| alias_index == local_index && alias_receiver == receiver)
+                {
+                    Some(false)
+                } else {
+                    Some(true)
+                }
+            }
             (HirExprKind::BuiltinCall { name, args }, _)
                 if (name == "len" || name == "rt_array_len") && args.len() == 1 =>
             {

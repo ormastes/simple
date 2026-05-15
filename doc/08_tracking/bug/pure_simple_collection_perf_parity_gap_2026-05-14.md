@@ -579,3 +579,40 @@ Rejected follow-up:
   length)` guard from the generated `set_contains` function and regressed the
   retained five-sample `hashset_contains` median to `0.59x C`. The fold was
   reverted.
+
+## 2026-05-15 HIR Length-Alias SIMD Guard Update
+
+HIR SIMD lowering now tracks local aliases created from `array.len().to_u64()`
+while rewriting statement blocks. When a canonical `while i < length` loop uses
+that local alias and indexes the same array, the lowered numeric runtime kernel
+no longer emits the redundant `rt_native_eq(length, length)` bound guard.
+
+Focused validation:
+
+- `rustfmt --check compiler/src/pipeline/lowering.rs compiler/src/pipeline/mod.rs`
+- `cargo test -p simple-compiler simd_auto_lowers_canonical_while_u64 -- --nocapture`
+- `cargo build -p simple-driver --bin simple`
+- `simple check src/compiler` (completed with existing warnings)
+- `simple check src/lib` (completed with existing warnings)
+
+Generated-code evidence:
+
+- `objdump` of `collection_simple` shows `set_contains` starts directly with
+  array tag/length validation and vector scan setup; the previous
+  `rt_native_eq(length, length)` call is gone.
+- `nm -u build/perf/collections/collection_simple` still lists only libc/OS
+  primitives and weak optional startup hooks; no unresolved Rust runtime symbols.
+
+Clean five-sample source-closure benchmark evidence with rebuilt `simple-core`,
+rebuilt driver, `SIMPLE_NATIVE_CPU=native`, and checksum parity:
+
+```text
+list_traverse     1.52x C / 1.29x Rust
+list_push         1.32x C / 4.50x Rust
+set_contains      1.83x C / 0.83x Rust
+hashset_contains  0.61x C / 1.04x Rust
+```
+
+This removes a real compiler-generated guard and improves the retained
+`list_traverse` and `set_contains` Rust ratios, but strict parity remains open:
+`set_contains` still trails Rust and `hashset_contains` still trails C.
