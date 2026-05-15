@@ -552,3 +552,8 @@ Rejected follow-up:
   direct string equality object. A rebuilt three-sample source-closure
   collection run preserved checksum parity but regressed `hashset_contains` to
   `0.55x C / 0.99x Rust`, so the codegen change was reverted.
+- Expanding the `rt_numeric_xor_sum_u64` callsite lowering from two
+  eight-element chunks per loop to four compiled and passed focused `u64_`
+  compiler tests, but a rebuilt three-sample source-closure collection run
+  preserved checksum parity while regressing `list_traverse` to `0.98x C /
+  0.51x Rust`. The codegen change was reverted.
