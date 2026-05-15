@@ -97,6 +97,8 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_array_len"
             | "rt_array_get"
             | "rt_array_get_text"
+            | "rt_array_data_ptr_text"
+            | "rt_array_data_ptr_u8"
             | "rt_array_set_text"
             | "rt_array_set_len_known_text"
             | "rt_array_push"

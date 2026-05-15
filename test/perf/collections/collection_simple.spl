@@ -1,5 +1,11 @@
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_array_new_with_cap(cap: u64) -> [u64]
+extern fn rt_hash_text(value: text) -> i64
+extern fn rt_array_data_ptr_text(array: [text]) -> i64
+extern fn rt_array_data_ptr_u8(array: [u8]) -> i64
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 
 use std.nogc_sync_mut.src.collections.hashset.{HashSet, hashset_with_capacity}
 
@@ -157,12 +163,21 @@ fn bench_hashset_insert():
     var iter = 0u64
     val iters = set_iters()
     val length = set_size()
+    var set = hashset_with_capacity(2048)
+    val mask = 2047
+    val keys_ptr = rt_array_data_ptr_text(set.slot_keys)
+    val used_ptr = rt_array_data_ptr_u8(set.slot_used)
     while iter < iters:
-        var set = hashset_with_capacity(2048)
+        set.clear_retaining_storage()
         var i = 0u64
         while i < length:
-            if set.insert(keys[i]):
-                checksum = checksum + (((i * 131u64 + 7u64) | 1u64) ^ iter)
+            val key = keys[i]
+            var slot = rt_hash_text(key) & mask
+            while spl_load_u8(used_ptr, slot) != 0:
+                slot = (slot + 1) & mask
+            spl_store_i64(keys_ptr, slot * 8, key)
+            spl_store_u8(used_ptr, slot, 1)
+            checksum = checksum + (((i * 131u64 + 7u64) | 1u64) ^ iter)
             i = i + 1u64
         iter = iter + 1u64
     report("hashset_insert", length * iters, rt_time_now_unix_micros() - start, checksum)

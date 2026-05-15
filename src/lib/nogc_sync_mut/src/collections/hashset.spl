@@ -8,8 +8,13 @@ extern fn rt_hash_text(s: text) -> i64
 extern fn rt_array_new_with_cap_text(cap: i64) -> [text]
 extern fn rt_byte_array_new(cap: i64) -> [u8]
 extern fn rt_array_repeat(value: text, count: i64) -> [text]
+extern fn rt_array_data_ptr_text(array: [text]) -> i64
+extern fn rt_array_data_ptr_u8(array: [u8]) -> i64
 extern fn rt_array_set_len_known(array: [u8], len: i64) -> i8
 extern fn rt_array_set_len_known_text(array: [text], len: i64) -> i8
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 
 class HashSet:
     """Pure Simple HashSet using text keys.
@@ -66,6 +71,43 @@ class HashSet:
         self.size = self.size + 1
         true
 
+    me insert_known_new(value: text) -> bool:
+        """Insert a value when the caller already knows it is not present.
+
+        This preserves the table representation used by insert() but skips the
+        duplicate string comparison on occupied probe slots.
+        """
+        if self.size * 4 > self.capacity * 3:
+            self._resize()
+
+        val hash = rt_hash_text(value)
+        val mask = self.capacity - 1
+        val keys_ptr = rt_array_data_ptr_text(self.slot_keys)
+        val used_ptr = rt_array_data_ptr_u8(self.slot_used)
+        var slot = hash & mask
+        while spl_load_u8(used_ptr, slot) != 0:
+            slot = (slot + 1) & mask
+
+        spl_store_i64(keys_ptr, slot * 8, value)
+        spl_store_u8(used_ptr, slot, 1)
+        self.size = self.size + 1
+        true
+
+    me insert_known_new_no_resize(value: text) -> bool:
+        """Insert a known-new value into a table with sufficient capacity."""
+        val hash = rt_hash_text(value)
+        val mask = self.capacity - 1
+        val keys_ptr = rt_array_data_ptr_text(self.slot_keys)
+        val used_ptr = rt_array_data_ptr_u8(self.slot_used)
+        var slot = hash & mask
+        while spl_load_u8(used_ptr, slot) != 0:
+            slot = (slot + 1) & mask
+
+        spl_store_i64(keys_ptr, slot * 8, value)
+        spl_store_u8(used_ptr, slot, 1)
+        self.size = self.size + 1
+        true
+
     fn contains(value: text) -> bool:
         """Check if value exists."""
         val hash = rt_hash_text(value)
@@ -106,6 +148,16 @@ class HashSet:
         while i < self.capacity:
             self.slot_keys[i] = ""
             self.slot_used[i] = 0u8
+            i = i + 1
+        self.size = 0
+
+    me clear_retaining_storage():
+        """Remove all values without clearing retained key slots."""
+        var i = 0
+        val cap = self.capacity
+        val used_ptr = rt_array_data_ptr_u8(self.slot_used)
+        while i < cap:
+            spl_store_u8(used_ptr, i, 0)
             i = i + 1
         self.size = 0
 

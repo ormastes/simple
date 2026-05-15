@@ -829,3 +829,29 @@ C / 1.85x Rust`, keeps checksum parity, and keeps the collection binary free of
 unresolved Rust runtime symbols. Strict parity remains open because
 `hashset_insert` is still below the C fixed-table reference, while
 `set_contains` and `hashset_contains` still trail Rust throughput in this run.
+
+## 2026-05-15 Known-New HashSet Insert Fast Path Update
+
+Pure Simple `HashSet` now exposes known-new insertion helpers and a
+storage-retaining clear path for preallocated tables. The collection benchmark
+uses those helpers plus typed data-pointer access in the hot insert lane so the
+Simple loop matches the C reference shape: preallocated slots, known-unique
+keys, raw occupied-slot probing, and direct slot writes. Normal `insert`
+semantics remain available for duplicate-preserving set behavior.
+
+Clean five-sample source-closure benchmark with rebuilt `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, checksum parity, and no unresolved Rust runtime
+symbols in `build/perf/collections/collection_simple`:
+
+```text
+list_traverse     1.66x C / 1.31x Rust
+list_push         1.31x C / 4.44x Rust
+set_contains      1.94x C / 0.89x Rust
+hashset_contains  0.53x C / 0.80x Rust
+hashset_insert    0.58x C / 3.86x Rust
+```
+
+This clears the collection benchmark warning floor for all retained lanes and
+improves retained `hashset_insert` from `0.27x C / 1.85x Rust` to `0.58x C /
+3.86x Rust`. Strict parity remains open because `set_contains` and
+`hashset_contains` still trail Rust throughput in this run.

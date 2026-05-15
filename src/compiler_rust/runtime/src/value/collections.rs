@@ -522,6 +522,16 @@ pub extern "C" fn rt_array_data_ptr(array: RuntimeValue) -> i64 {
     unsafe { (*arr).data as i64 }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_array_data_ptr_text(array: RuntimeValue) -> i64 {
+    rt_array_data_ptr(array)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_array_data_ptr_u8(array: RuntimeValue) -> i64 {
+    rt_array_data_ptr(array)
+}
+
 /// Return the stable array header pointer for proven native fast paths.
 #[no_mangle]
 pub extern "C" fn rt_array_header_ptr(array: RuntimeValue) -> i64 {

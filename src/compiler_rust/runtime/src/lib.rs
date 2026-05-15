@@ -252,6 +252,8 @@ pub use value::{
     rt_alloc,
     // Array operations
     rt_array_data_ptr,
+    rt_array_data_ptr_text,
+    rt_array_data_ptr_u8,
     rt_array_header_ptr,
     rt_array_get,
     rt_array_get_text,
