@@ -140,6 +140,9 @@ src/compiler_rust/target/bootstrap/simple check src/lib/gc_async_mut/__init__.sp
 env SIMPLE_OS_BUILD_BACKEND=cranelift src/compiler_rust/target/debug/simple os test --scenario=riscv64-virtio-fat32-smf
 => QEMU boot passed; serial output included FS_MOUNT_OK, SMF_DISCOVERY_OK, SMF_CLI_LAUNCH_OK, SMF_WM_GUI_LAUNCH_OK, SIMPLEOS_RISCV_SMF_FS_PASS, TEST PASSED
 
+env LLVM_SYS_180_PREFIX=/usr src/compiler_rust/target/debug/simple os test --arch=riscv64
+=> QEMU boot passed on the default riscv64 arch path after rebuilding the Rust driver with the LLVM feature; serial output included FS_MOUNT_OK, SMF_DISCOVERY_OK, ELF_LOAD_OK arch=riscv64, SMF_CLI_LAUNCH_OK, SMF_WM_GUI_LAUNCH_OK, NATIVE_GUI_PROCESS_RENDER_OK, SIMPLEOS_RISCV_SMF_FS_PASS, and TEST PASSED
+
 src/compiler_rust/target/debug/simple test test/feature/usage/cuda_spec.spl --mode=interpreter --clean --force-rebuild
 => Passed: 5, Failed: 0 on a host with NVIDIA RTX A6000 and TITAN RTX visible via nvidia-smi
 
