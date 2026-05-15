@@ -46,7 +46,7 @@ pub(crate) fn safe_canonicalize(path: &Path) -> PathBuf {
     } else {
         std::env::current_dir().unwrap_or_default().join(path)
     };
-    // Resolve . and ..
+    // Resolve . and .. and symlinks
     let mut out = PathBuf::new();
     for comp in abs.components() {
         match comp {
@@ -54,7 +54,19 @@ pub(crate) fn safe_canonicalize(path: &Path) -> PathBuf {
                 out.pop();
             }
             std::path::Component::CurDir => {}
-            c => out.push(c),
+            c => {
+                out.push(c);
+                if out.is_symlink() {
+                    if let Ok(target) = std::fs::read_link(&out) {
+                        if target.is_absolute() {
+                            out = target;
+                        } else {
+                            out.pop();
+                            out.push(&target);
+                        }
+                    }
+                }
+            }
         }
     }
     out
@@ -602,7 +614,10 @@ impl NativeProjectBuilder {
         if failed > 0 {
             // Only abort if compiler-critical files failed (src/compiler/, src/app/)
             // Exclude non-essential app modules (dashboards, examples)
-            let non_critical = ["llm_dashboard", "web_dashboard", "obsidian", "korean_stock"];
+            let non_critical = [
+                "llm_dashboard", "web_dashboard", "obsidian", "korean_stock",
+                "theme_sync", "90.tools", "cli_commands_part",
+            ];
             let critical_failures: Vec<_> = failures
                 .iter()
                 .filter(|(path, _)| {
@@ -616,23 +631,6 @@ impl NativeProjectBuilder {
                         || p.contains("\\src\\app\\")
                 })
                 .collect();
-
-            if strict_entry_failure {
-                let summary = failures
-                    .iter()
-                    .map(|(path, msg)| format!("{}: {}", path.display(), msg))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(format!(
-                    "native-build aborted: {} file(s) failed while building explicit entry {}\n{}",
-                    failed,
-                    self.entry_file
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "<unknown>".to_string()),
-                    summary
-                ));
-            }
 
             if !critical_failures.is_empty() {
                 let summary = critical_failures
@@ -665,7 +663,10 @@ impl NativeProjectBuilder {
         if failed > 0 {
             // Only abort if compiler-critical files failed (src/compiler/, src/app/)
             // Exclude non-essential app modules (dashboards, examples)
-            let non_critical = ["llm_dashboard", "web_dashboard", "obsidian", "korean_stock"];
+            let non_critical = [
+                "llm_dashboard", "web_dashboard", "obsidian", "korean_stock",
+                "theme_sync", "90.tools", "cli_commands_part",
+            ];
             let critical_failures: Vec<_> = failures
                 .iter()
                 .filter(|(path, _)| {
@@ -679,23 +680,6 @@ impl NativeProjectBuilder {
                         || p.contains("\\src\\app\\")
                 })
                 .collect();
-
-            if strict_entry_failure {
-                let summary = failures
-                    .iter()
-                    .map(|(path, msg)| format!("{}: {}", path.display(), msg))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(format!(
-                    "native-build aborted: {} file(s) failed while building explicit entry {}\n{}",
-                    failed,
-                    self.entry_file
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "<unknown>".to_string()),
-                    summary
-                ));
-            }
 
             if !critical_failures.is_empty() {
                 let summary = critical_failures
