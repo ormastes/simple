@@ -130,10 +130,11 @@ The production ownership rule is behavioral, not name-only:
   direct `nogc_sync_mut` export is allowed only for pure or synchronous APIs
   that do not have an async-visible contract, and runtime-hook-owner wildcard
   exports are blocked by the same audit.
-  Redis, service, file-operation, hosted I/O stub, `net.udp`, and browser
-  file-read facades have been moved to the no-GC async surface first; remaining
-  direct sync imports require per-API review before rerouting because they
-  include sync socket exports, GPU/FFI, or blocking boundaries.
+  Redis, service, file-operation, hosted I/O stub, `net.udp`, browser
+  file-read, and CUDA GPU FFI facades have been moved to the no-GC async
+  surface first; remaining direct sync imports require per-API review before
+  rerouting because they include sync socket exports, GPU backend hooks, or
+  blocking runtime TLS boundaries.
 - `gc_sync_mut` is a compatibility facade over `gc_async_mut`, not a separate
   sync backend. The boundary audit blocks local runtime-hook ownership in this
   family, requires each tracked facade to export a matching `gc_async_mut`
