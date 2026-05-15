@@ -185,7 +185,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 
 5. **Target family filtering** in `src/compiler/99.loader/module_resolver/resolution.spl`: `allowed_families` restricts stdlib family search for target presets.
 
-**Remaining gap**: the manifest-backed hard violation API, Rust lint parity, Rust `simple check` target strict mode, target-strict noalloc reachable-import closure check, and Rust interpreter strict mode exist. `simple check --target <baremetal/simpleos>` promotes runtime-family violations automatically, and the Rust test runner, direct file interpreter launch path, and Rust/native_all native-build paths now enable strict runtime-family imports for baremetal/SimpleOS targets while hosted targets keep warnings by default. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
+**Remaining gap**: the manifest-backed hard violation API, Rust lint parity, Rust `simple check` target strict mode, target-strict noalloc reachable-import closure check, and Rust interpreter strict mode exist. `simple check --target <baremetal/simpleos>` promotes runtime-family violations automatically, and the Rust test runner interpreted/native-cache paths, direct file interpreter launch path, and Rust/native_all native-build paths now enable strict runtime-family imports for baremetal/SimpleOS targets while hosted targets keep warnings by default. Default unrestricted CLI/interpreter runs intentionally keep compatibility warning output.
 
 ### Interpreter parity detail
 
@@ -240,9 +240,9 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 - **Fix**: Thread target presets into every compiler entrypoint that needs strict family enforcement instead of relying on callers to pass explicit strict flags.
 
 ### Gap 2: Interpreter strict family errors are target-aware in common launch paths (Agent 3 -- Interpreter)
-- **Status**: Partially fixed. The Rust interpreter can promote family-boundary diagnostics to errors with `SIMPLE_STRICT_RUNTIME_FAMILY=1`; `simple test ... --target <baremetal/simpleos>`, direct `simple file.spl --target <baremetal/simpleos>`, and Rust/native_all native-build paths now set that mode automatically for the duration of target-restricted execution. Hosted targets keep warning-compatible behavior.
+- **Status**: Partially fixed. The Rust interpreter can promote family-boundary diagnostics to errors with `SIMPLE_STRICT_RUNTIME_FAMILY=1`; `simple test ... --target <baremetal/simpleos>` interpreted execution and native-cache compilation, direct `simple file.spl --target <baremetal/simpleos>`, and Rust/native_all native-build paths now set that mode automatically for the duration of target-restricted execution. Hosted targets keep warning-compatible behavior.
 - **Impact**: Target-restricted interpreter test and direct-run gates can fail on runtime-family boundary violations without manual environment setup; unrestricted interpreter runs still intentionally continue after warning.
-- **Remaining work**: Audit any remaining nonstandard compiler entrypoints that perform interpreter/module-loading checks outside the Rust driver and native_all native-build paths.
+- **Remaining work**: Audit any remaining nonstandard compiler entrypoints that perform interpreter/module-loading checks outside the Rust driver test/check/file/native-build paths and native_all native-build path.
 
 ### Gap 3: `nogc_async_immut` runtime coverage (Agent 3/4) -- **RESOLVED**
 - **Status**: Fixed. Persistent-structure facade coverage is broad, and `test/unit/lib/nogc_async_immut/coordination_native_spec.spl` now covers direct no-GC async `Atom`, `Ref`, `VersionedSnapshot`, and exported CAS helper behavior in interpreter and native modes.

@@ -219,7 +219,10 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         options.execution_mode,
         TestExecutionMode::Native | TestExecutionMode::Smf
     ) {
-        Some(BuildCache::new(options.force_rebuild))
+        Some(BuildCache::new(
+            options.force_rebuild,
+            options.strict_runtime_family_imports(),
+        ))
     } else {
         None
     };

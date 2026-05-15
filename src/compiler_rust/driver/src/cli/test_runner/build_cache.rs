@@ -10,6 +10,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
+use crate::cli::basic::with_strict_runtime_family_imports;
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 use simple_compiler::{CompilerPipeline, ProjectContext};
 use simple_simd::{active_simd_tier, host_cpu_config, HostCpuConfig, SimdTier};
@@ -25,6 +26,7 @@ const CACHE_DIR: &str = "tmp/test_cache";
 pub struct BuildCache {
     cache_dir: PathBuf,
     force_rebuild: bool,
+    strict_runtime_family_imports: bool,
     /// Per-path+tier hash cache — avoids re-reading + re-hashing the same
     /// file while still invalidating when the active SIMD tier changes.
     hash_cache: RefCell<HashMap<(PathBuf, String), u64>>,
@@ -35,7 +37,7 @@ pub struct BuildCache {
 
 impl BuildCache {
     /// Create a new build cache.
-    pub fn new(force_rebuild: bool) -> Self {
+    pub fn new(force_rebuild: bool, strict_runtime_family_imports: bool) -> Self {
         let cache_dir = PathBuf::from(CACHE_DIR);
         if !cache_dir.exists() {
             let _ = fs::create_dir_all(&cache_dir);
@@ -43,6 +45,7 @@ impl BuildCache {
         Self {
             cache_dir,
             force_rebuild,
+            strict_runtime_family_imports,
             hash_cache: RefCell::new(HashMap::new()),
             content_cache: RefCell::new(HashMap::new()),
         }
@@ -162,8 +165,7 @@ impl BuildCache {
         let project = ProjectContext::new(project_root)
             .map_err(|e| format!("Failed to detect project for {}: {}", source.display(), e))?;
 
-        let runtime_bundle =
-            std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").unwrap_or_else(|_| "runtime".to_string());
+        let runtime_bundle = std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").unwrap_or_else(|_| "runtime".to_string());
 
         let mut config = NativeBuildConfig {
             entry_closure: true,
@@ -192,8 +194,7 @@ impl BuildCache {
             builder = builder.source_dir(dir);
         }
 
-        builder
-            .build()
+        with_strict_runtime_family_imports(self.strict_runtime_family_imports, || builder.build())
             .map(|_| ())
             .map_err(|e| format!("Failed to compile {} to native binary: {}", source.display(), e))
     }
@@ -372,7 +373,7 @@ mod tests {
     fn test_source_hash_deterministic() {
         // Two calls with same path should produce same hash
         let path = Path::new("test/fixtures/sample.spl");
-        let cache = BuildCache::new(false);
+        let cache = BuildCache::new(false, false);
         let h1 = cache.source_hash(path);
         let h2 = cache.source_hash(path);
         // Both None if file doesn't exist, but they should match
@@ -381,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_needs_rebuild_force() {
-        let cache = BuildCache::new(true);
+        let cache = BuildCache::new(true, false);
         assert!(cache.needs_rebuild(Path::new("nonexistent.spl"), "smf"));
     }
 
@@ -475,7 +476,7 @@ mod tests {
 
         fs::write(&config_path, render_cpu_config(&base, configured_tier)).expect("cpu_config.sdn");
 
-        let cache = BuildCache::new(false);
+        let cache = BuildCache::new(false, false);
         let configured_hash = cache.source_hash(&source).expect("configured hash");
         let resolved_tier = active_simd_tier();
 
@@ -528,7 +529,7 @@ mod tests {
         let previous_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
         std::env::remove_var("SIMPLE_CPU_CONFIG_PATH");
 
-        let cache = BuildCache::new(false);
+        let cache = BuildCache::new(false, false);
 
         std::env::set_var("SIMPLE_SIMD_TIER", initial_tier.as_str());
         let initial_hash = cache.source_hash(&source).expect("initial hash");
