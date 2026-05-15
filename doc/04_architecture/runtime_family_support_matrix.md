@@ -260,7 +260,7 @@ The compiler has one family-level `GcMode` plus a separate barrier-analysis `GcS
 ### Gap 6: `gc_sync_mut` had tests but no source (Agent 4 -- Stdlib) -- **RESOLVED**
 - **Status**: Fixed. `src/lib/gc_sync_mut/` now exists as a facade-only compatibility family over tracked `gc_async_mut` modules.
 - **Decision**: `gc_sync_mut` is advanced-scoped, not an independent backend owner. Runtime hooks and behavior stay in the existing async/no-GC-backed implementation chain.
-- **Remaining work**: Focused import and interpreter behavior tests exist; decide whether any API requires real blocking wrappers instead of facade exports.
+- **Maintenance rule**: Focused import and interpreter behavior tests exist; add real blocking wrappers only when an API-specific behavior test proves facade export is insufficient.
 
 ### Gap 7: Two conflicting `GcMode` enums (Agent 2 -- Compiler) -- **RESOLVED**
 - **Status**: Fixed. `gc_config.spl` owns the only `GcMode {Gc, NoGc}` enum, and `barriers.spl` uses `GcStrategy {StopTheWorld, Incremental, Generational, Concurrent}` for GC algorithm strategy.
