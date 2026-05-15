@@ -223,6 +223,20 @@ fn compile_inline_bytes_u8_at<M: Module>(
 
     builder.switch_to_block(load_block);
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    if trusted_array {
+        let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
+        let packed_byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+        let packed_value = builder.ins().uextend(types::I64, packed_byte);
+        builder.ins().jump(done_block, &[packed_value]);
+        builder.seal_block(load_block);
+
+        builder.switch_to_block(done_block);
+        let result = builder.block_params(done_block)[0];
+        builder.seal_block(done_block);
+        ctx.vreg_values.insert(*dest, result);
+        return Ok(true);
+    }
+
     let packed_block = builder.create_block();
     let slot_block = builder.create_block();
     let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
@@ -483,6 +497,7 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let len_block = builder.create_block();
     let loop_block = builder.create_block();
     let chunk_block = builder.create_block();
+    let chunk_second_block = builder.create_block();
     let tail_block = builder.create_block();
     let tail_scalar_block = builder.create_block();
     let tail_body_block = builder.create_block();
@@ -490,6 +505,9 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     builder.append_block_param(loop_block, types::I64X2);
     builder.append_block_param(loop_block, types::I64);
     builder.append_block_param(loop_block, types::I64);
+    builder.append_block_param(chunk_second_block, types::I64X2);
+    builder.append_block_param(chunk_second_block, types::I64);
+    builder.append_block_param(chunk_second_block, types::I64);
     builder.append_block_param(tail_block, types::I64X2);
     builder.append_block_param(tail_block, types::I64);
     builder.append_block_param(tail_block, types::I64);
@@ -513,7 +531,13 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let negative_len = builder.ins().icmp(IntCC::SignedLessThan, length, zero);
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let zero_vec = builder.ins().splat(types::I64X2, zero);
-    builder.ins().brif(negative_len, done_block, &[zero], loop_block, &[zero_vec, zero, data_ptr]);
+    builder.ins().brif(
+        negative_len,
+        done_block,
+        &[zero],
+        loop_block,
+        &[zero_vec, zero, data_ptr],
+    );
     builder.seal_block(len_block);
 
     builder.switch_to_block(loop_block);
@@ -522,7 +546,9 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let cursor = builder.block_params(loop_block)[2];
     let idx_plus_seven = builder.ins().iadd_imm(idx, 7);
     let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_seven, length);
-    builder.ins().brif(has_chunk, chunk_block, &[], tail_block, &[sum, idx, cursor]);
+    builder
+        .ins()
+        .brif(has_chunk, chunk_block, &[], tail_block, &[sum, idx, cursor]);
 
     builder.switch_to_block(chunk_block);
     let xor_vec = builder.ins().splat(types::I64X2, xor_value);
@@ -534,8 +560,34 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     }
     let next_idx = builder.ins().iadd_imm(idx, 8);
     let next_cursor = builder.ins().iadd_imm(cursor, 64);
-    builder.ins().jump(loop_block, &[next_sum, next_idx, next_cursor]);
+    builder
+        .ins()
+        .jump(chunk_second_block, &[next_sum, next_idx, next_cursor]);
     builder.seal_block(chunk_block);
+
+    builder.switch_to_block(chunk_second_block);
+    let sum = builder.block_params(chunk_second_block)[0];
+    let idx = builder.block_params(chunk_second_block)[1];
+    let cursor = builder.block_params(chunk_second_block)[2];
+    let idx_plus_seven = builder.ins().iadd_imm(idx, 7);
+    let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_seven, length);
+    let second_test_block = builder.create_block();
+    builder
+        .ins()
+        .brif(has_chunk, second_test_block, &[], tail_block, &[sum, idx, cursor]);
+    builder.seal_block(chunk_second_block);
+
+    builder.switch_to_block(second_test_block);
+    let mut next_sum = sum;
+    for offset in [0, 16, 32, 48] {
+        let value = builder.ins().load(types::I64X2, MemFlags::new(), cursor, offset);
+        let xored = builder.ins().bxor(value, xor_vec);
+        next_sum = builder.ins().iadd(next_sum, xored);
+    }
+    let next_idx = builder.ins().iadd_imm(idx, 8);
+    let next_cursor = builder.ins().iadd_imm(cursor, 64);
+    builder.ins().jump(loop_block, &[next_sum, next_idx, next_cursor]);
+    builder.seal_block(second_test_block);
     builder.seal_block(loop_block);
 
     builder.switch_to_block(tail_block);
@@ -547,9 +599,13 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let tail_sum_hi = builder.ins().extractlane(tail_sum_vec, 1);
     let tail_sum = builder.ins().iadd(tail_sum_lo, tail_sum_hi);
     let shifted = builder.ins().ishl_imm(tail_sum, 3);
-    builder.ins().brif(has_tail, tail_scalar_block, &[tail_sum, tail_idx, tail_cursor], done_block, &[
-        shifted,
-    ]);
+    builder.ins().brif(
+        has_tail,
+        tail_scalar_block,
+        &[tail_sum, tail_idx, tail_cursor],
+        done_block,
+        &[shifted],
+    );
 
     builder.switch_to_block(tail_scalar_block);
     let tail_sum = builder.block_params(tail_scalar_block)[0];
@@ -557,7 +613,9 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let tail_cursor = builder.block_params(tail_scalar_block)[2];
     let has_tail = builder.ins().icmp(IntCC::SignedLessThan, tail_idx, length);
     let shifted = builder.ins().ishl_imm(tail_sum, 3);
-    builder.ins().brif(has_tail, tail_body_block, &[], done_block, &[shifted]);
+    builder
+        .ins()
+        .brif(has_tail, tail_body_block, &[], done_block, &[shifted]);
 
     builder.switch_to_block(tail_body_block);
     let value = builder.ins().load(types::I64, MemFlags::new(), tail_cursor, 0);
@@ -565,7 +623,9 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let next_tail_sum = builder.ins().iadd(tail_sum, xored);
     let next_tail_idx = builder.ins().iadd_imm(tail_idx, 1);
     let next_tail_cursor = builder.ins().iadd_imm(tail_cursor, 8);
-    builder.ins().jump(tail_scalar_block, &[next_tail_sum, next_tail_idx, next_tail_cursor]);
+    builder
+        .ins()
+        .jump(tail_scalar_block, &[next_tail_sum, next_tail_idx, next_tail_cursor]);
     builder.seal_block(tail_body_block);
     builder.seal_block(tail_scalar_block);
     builder.seal_block(tail_block);

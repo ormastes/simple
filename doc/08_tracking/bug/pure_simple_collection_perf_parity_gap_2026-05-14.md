@@ -461,3 +461,33 @@ hashset_contains  0.61x C / 0.96x Rust
 This improves the scalar set scan and clears the current benchmark warning
 floor, but strict parity is still open because `list_traverse` remains below
 Rust and `hashset_contains` remains below C.
+
+## 2026-05-15 Xor Scan And Trusted Byte Index Update
+
+The native codegen callsite inline for `rt_numeric_xor_sum_u64` now mirrors the
+contains lowering by accumulating a second eight-element `I64X2` chunk before
+looping when the second chunk is available. Trusted `rt_typed_bytes_u8_at`
+lowering now also loads the packed byte directly after bounds validation; this
+removes the per-probe packed-layout branch from pure Simple `HashSet.slot_used`
+lookups.
+
+Focused compiler validation:
+
+- `cargo build -p simple-driver --bin simple`
+- `cargo test -p simple-compiler typed_bytes_u8 -- --nocapture`
+- `cargo test -p simple-compiler u64_ -- --nocapture`
+
+Clean five-sample source-closure benchmark evidence with rebuilt `simple-core`,
+rebuilt driver, `SIMPLE_NATIVE_CPU=native`, and checksum parity:
+
+```text
+list_traverse     1.27x C / 0.67x Rust
+list_push         0.90x C / 1.69x Rust
+set_contains      1.81x C / 0.72x Rust
+hashset_contains  0.61x C / 0.99x Rust
+```
+
+This improves `set_contains` again and removes byte occupancy dispatch from the
+hashset probe, but strict parity remains open. `hashset_contains` is still below
+the C fixed-table reference, and the median-selected `list_traverse` Rust ratio
+remains noisy across five-sample runs.
