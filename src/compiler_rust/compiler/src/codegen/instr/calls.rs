@@ -840,24 +840,35 @@ fn compile_inline_numeric_contains_u64<M: Module>(
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
     args: &[VReg],
+    raw_data: bool,
 ) -> InstrResult<bool> {
-    if args.len() != 2 {
+    let expected_args = if raw_data { 3 } else { 2 };
+    if args.len() != expected_args {
         return Ok(false);
     }
     let Some(dest) = dest else {
         return Ok(false);
     };
 
-    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let needle = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let array_or_data = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let length_arg = if raw_data {
+        Some(coerce_vreg_to_i64(ctx, builder, args[1]))
+    } else {
+        None
+    };
+    let needle_arg = if raw_data { args[2] } else { args[1] };
+    let needle = coerce_vreg_to_i64(ctx, builder, needle_arg);
     let zero = builder.ins().iconst(types::I64, 0);
     let one = builder.ins().iconst(types::I64, 1);
-    let min_heap_value = builder.ins().iconst(types::I64, 4096);
-    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
-    let ptr_bits = builder.ins().band(array, ptr_mask);
 
-    let kind_block = builder.create_block();
-    let len_block = builder.create_block();
+    let ptr_bits = if raw_data {
+        None
+    } else {
+        let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+        Some(builder.ins().band(array_or_data, ptr_mask))
+    };
+    let kind_block = if raw_data { None } else { Some(builder.create_block()) };
+    let len_block = if raw_data { None } else { Some(builder.create_block()) };
     let loop_block = builder.create_block();
     let chunk_block = builder.create_block();
     let chunk_second_block = builder.create_block();
@@ -875,24 +886,34 @@ fn compile_inline_numeric_contains_u64<M: Module>(
     builder.append_block_param(tail_body_block, types::I64);
     builder.append_block_param(done_block, types::I64);
 
-    let too_small = builder.ins().icmp(IntCC::SignedLessThan, array, min_heap_value);
-    builder.ins().brif(too_small, done_block, &[zero], kind_block, &[]);
+    let length: Value;
+    if raw_data {
+        length = length_arg.unwrap();
+        builder.ins().jump(loop_block, &[zero, array_or_data]);
+    } else {
+        let ptr_bits = ptr_bits.unwrap();
+        let kind_block = kind_block.unwrap();
+        let len_block = len_block.unwrap();
+        let min_heap_value = builder.ins().iconst(types::I64, 4096);
+        let too_small = builder.ins().icmp(IntCC::SignedLessThan, array_or_data, min_heap_value);
+        builder.ins().brif(too_small, done_block, &[zero], kind_block, &[]);
 
-    builder.switch_to_block(kind_block);
-    let tag = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
-    let tag64 = builder.ins().uextend(types::I64, tag);
-    let is_array = builder.ins().icmp_imm(IntCC::Equal, tag64, 2);
-    builder.ins().brif(is_array, len_block, &[], done_block, &[zero]);
-    builder.seal_block(kind_block);
+        builder.switch_to_block(kind_block);
+        let tag = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
+        let tag64 = builder.ins().uextend(types::I64, tag);
+        let is_array = builder.ins().icmp_imm(IntCC::Equal, tag64, 2);
+        builder.ins().brif(is_array, len_block, &[], done_block, &[zero]);
+        builder.seal_block(kind_block);
 
-    builder.switch_to_block(len_block);
-    let length = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    let negative_len = builder.ins().icmp(IntCC::SignedLessThan, length, zero);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    builder
-        .ins()
-        .brif(negative_len, done_block, &[zero], loop_block, &[zero, data_ptr]);
-    builder.seal_block(len_block);
+        builder.switch_to_block(len_block);
+        length = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+        let negative_len = builder.ins().icmp(IntCC::SignedLessThan, length, zero);
+        let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+        builder
+            .ins()
+            .brif(negative_len, done_block, &[zero], loop_block, &[zero, data_ptr]);
+        builder.seal_block(len_block);
+    }
 
     builder.switch_to_block(loop_block);
     let idx = builder.block_params(loop_block)[0];
@@ -2141,7 +2162,12 @@ pub fn compile_call<M: Module>(
     if ffi_name == "rt_numeric_xor_sum_u64" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_numeric_contains_u64" && compile_inline_numeric_contains_u64(ctx, builder, dest, args)? {
+    if ffi_name == "rt_numeric_contains_u64_data"
+        && compile_inline_numeric_contains_u64(ctx, builder, dest, args, true)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "rt_numeric_contains_u64" && compile_inline_numeric_contains_u64(ctx, builder, dest, args, false)? {
         return Ok(());
     }
     if matches!(ffi_name, "rt_array_set_len_known" | "rt_array_set_len_known_text")
