@@ -231,6 +231,56 @@ fn scv_new_change_id(parent: text, tree: text) -> text:
     val change_payload = if parent == "": "root:{tree}" else: "change-parent:{parent}"
     scv_hash_text("change", change_payload)
 
+fn scv_new_change_id_multi(parents: [text], tree: text) -> text:
+    if parents.len() == 0:
+        return scv_hash_text("change", "root:{tree}")
+    if parents.len() == 1:
+        return scv_hash_text("change", "change-parent:{parents[0]}")
+    var joined = ""
+    var i = 0
+    while i < parents.len():
+        if i > 0:
+            joined = joined + " "
+        joined = joined + parents[i]
+        i = i + 1
+    scv_hash_text("change", "change-merge:{joined}")
+
+fn scv_commit_parents(root: text, commit_id: text) -> [text]:
+    val path = scv_object_path(root, "commits", commit_id)
+    if not file_exists(path):
+        return []
+    val parents_field = scv_object_field(file_read(path), "parents")
+    var out: [text] = []
+    for part in parents_field.split(" "):
+        val trimmed = part.trim()
+        if trimmed != "":
+            out.push(trimmed)
+    out
+
+fn scv_write_commit_multi(root: text, parents: [text], tree: text, state: text, author: text, committer: text) -> text:
+    val change_id = scv_new_change_id_multi(parents, tree)
+    var parents_joined = ""
+    var i = 0
+    while i < parents.len():
+        if i > 0:
+            parents_joined = parents_joined + " "
+        parents_joined = parents_joined + parents[i]
+        i = i + 1
+    var payload = "change: {change_id}\nparents: {parents_joined}\ntree: {tree}\nstate: {state}\n"
+    if author != "":
+        payload = payload + "author: {author}\n"
+    if committer != "":
+        payload = payload + "committer: {committer}\n"
+    val id = scv_hash_text("commit", payload)
+    val path = scv_object_path(root, "commits", id)
+    if not file_exists(path):
+        scv_write_text(path, payload)
+    val change_path = scv_object_path(root, "changes", change_id)
+    val previous = scv_change_latest(root, change_id)
+    val predecessors = if previous != "" and previous != id: previous else: ""
+    scv_write_text(change_path, "latest: {id}\npredecessors: {predecessors}\n")
+    id
+
 fn scv_write_commit_with_change(root: text, parent: text, tree: text, state: text, change_id: text) -> text:
     val payload = "change: {change_id}\nparents: {parent}\ntree: {tree}\nstate: {state}\n"
     val id = scv_hash_text("commit", payload)
@@ -246,6 +296,18 @@ fn scv_write_commit_with_change(root: text, parent: text, tree: text, state: tex
 fn scv_write_commit(root: text, parent: text, tree: text, state: text) -> text:
     scv_write_commit_with_change(root, parent, tree, state, scv_new_change_id(parent, tree))
 
+fn scv_write_tag_object(root: text, name: text, target: text, target_type: text, tagger: text, message: text) -> text:
+    dir_create("{scv_objects_dir(root)}/tags", true)
+    val payload = "target: {target}\ntype: {target_type}\ntagger: {tagger}\nmessage: {message}\n"
+    val id = scv_hash_text("tag", payload)
+    val path = scv_object_path(root, "tags", id)
+    if not file_exists(path):
+        scv_write_text(path, payload)
+    id
+
+fn scv_tag_name_valid(name: text) -> bool:
+    name != "" and not name.contains("|") and not name.contains("\n") and not name.contains("\r") and not name.contains(" ") and not name.contains("..") and not name.contains("//") and not name.starts_with("/") and not name.ends_with("/")
+
 fn scv_operation_commit_error(root: text, commit: text) -> text:
     if not scv_object_ref_safe(commit, "commit_") or not file_exists(scv_object_path(root, "commits", commit)):
         return "ERROR invalid operation commit\n"
@@ -257,7 +319,7 @@ fn scv_operation_commit_error(root: text, commit: text) -> text:
     if not scv_state_valid(state):
         return "ERROR invalid operation commit state\n"
     val parents = scv_object_field(content, "parents")
-    for parent in parents.split(","):
+    for parent in parents.split(" "):
         val parent_commit = parent.trim()
         if parent_commit == "":
             continue
