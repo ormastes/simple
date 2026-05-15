@@ -114,7 +114,7 @@ Implemented and checked:
 - Raw byte object store, content-addressed chunks, file/tree/commit/change/operation objects.
 - Operation log with restore, bookmarks, workspace view state, restore failure guard, commit-creating and state-promotion workspace-parent preflight, operation-write parent/commit/tree/state/bookmark validation, restore-op ref/view/bookmark validation, bookmark name/row/target validation, exact tree-row/tree-path/duplicate-path/chunk-size/chunk-hash safety validation, reserved worktree metadata path rejection, and fsck validation of view commit, operation-parent, commit-parent, bookmark, and stored-tree path references.
 - Working-copy `snapshot`, `auto-snapshot`, `watch`, `status`, `log`, and `op-log`.
-- Fallback parser index with text line nodes, binary chunk nodes, semantic hashes, explicit parser execution metadata, parser registry capsule, extension/shebang language detection, parser lockfile, parser install, parser artifact verification with cache path confinement, duplicate lock-entry rejection, fsck parser-lock artifact validation, parse-gate revalidation of selected locked artifacts, locked grammar/version/hash parser-index metadata, raw-hash/parser-identity cache reuse, unchanged fallback line-node reuse and reuse metrics across edits, fsck syntax-node validation, and langmap metadata.
+- Fallback parser index with text line nodes, binary chunk nodes, semantic hashes, explicit parser execution metadata, parser registry capsule, extension/shebang language detection, parser lockfile, parser install, parser artifact verification with hash safety and cache path confinement, duplicate lock-entry rejection, fsck parser-lock artifact validation, parse-gate revalidation of selected locked artifacts, locked grammar/version/hash parser-index metadata, raw-hash/parser-identity cache reuse, unchanged fallback line-node reuse and reuse metrics across edits, fsck syntax-node validation, and langmap metadata.
 - Raw, syntax, trailing-space, and language-sensitive formatting-policy diff modes, including exact-content rename detection.
 - Parse, compile, test, and public-ready gates.
 - File/tree merge with bounded exact-content move handling, merge input tree validation, conflict objects, conflict listing, conflict resolution, and conflict-aware GC behavior.
@@ -147,7 +147,7 @@ Latest focused verification:
 - `SIMPLE_LIB=src bin/release/simple test test/integration/app/scv_parser_incremental_spec.spl --mode=interpreter --clean` passed with 1 example.
 - `SIMPLE_LIB=src bin/release/simple test test/integration/app/scv_parser_binary_spec.spl --mode=interpreter --clean` passed with 1 example.
 - `SIMPLE_LIB=src bin/release/simple test test/integration/app/scv_parser_integrity_spec.spl --mode=interpreter --clean` passed with 2 examples.
-- `SIMPLE_LIB=src bin/release/simple test test/integration/app/scv_parser_wasm_spec.spl --mode=interpreter --clean` passed with 11 examples.
+- `SIMPLE_LIB=src bin/release/simple test test/integration/app/scv_parser_wasm_spec.spl --mode=interpreter --clean` passed with 12 examples.
 - `SIMPLE_LIB=src bin/release/simple test test/integration/app/scv_git_interop_spec.spl --mode=interpreter --clean` passed with 19 examples.
 - `SIMPLE_LIB=src bin/release/simple test test/integration/app/scv_fast_import_safety_spec.spl --mode=interpreter --clean` passed with 5 examples.
 - `SIMPLE_LIB=src bin/release/simple test test/integration/app/scv_gates_spec.spl --mode=interpreter --clean` passed with 8 examples.
@@ -170,8 +170,53 @@ Latest focused verification:
 
 ## Remaining Hardening Plan
 
-- Validate parser lock artifact hashes as object ids before artifact path construction.
 - Split `src/lib/scv/integrity.spl` if additional fsck checks push it near the 800-line guard.
+
+## Production-Level Feature Requests
+
+### SCV-PROD-001: Execute Tree-sitter WASM Parsers
+
+Implement sandboxed Tree-sitter WASM execution behind the existing parser lock
+contract. Acceptance: locked grammar bytes are loaded from `.scv/parsers`,
+parse results carry `execution: tree-sitter-wasm`, fallback execution remains
+available, parser failures still allow private snapshots, and grammar changes
+invalidate parser-index cache entries.
+
+### SCV-PROD-002: Changed-Range Persistent Syntax Rebuild
+
+Use Tree-sitter edit/changed-range data to rebuild only affected immutable
+syntax subtrees. Acceptance: unchanged nodes preserve object ids, changed ranges
+produce new ancestors up to the root, and parse-gate reports reuse metrics for
+Tree-sitter-backed files.
+
+### SCV-PROD-003: GumTree-Grade Structural Diff And Merge
+
+Add syntax-aware matching for moved/renamed code elements beyond exact-content
+file moves. Acceptance: named functions/classes/modules use logical anchors,
+unnamed statements use parent plus ordinal anchors, moved edits are shown as
+moves instead of delete/add where confidence is high, and low-confidence matches
+fall back to conflict data.
+
+### SCV-PROD-004: Full Git Interoperability
+
+Expand bounded fast-import support into practical Git import/export. Acceptance:
+multi-parent commits, tags, executable bits, deletes, renames, copies, branch
+refs, and parent-aware incremental export round-trip against representative Git
+fixtures.
+
+### SCV-PROD-005: Network Remote Transport
+
+Add authenticated private backup and shared public remote transport beyond the
+filesystem remote. Acceptance: push/pull uses fsck-verified packs, remote refs
+are compare-and-swapped, interrupted transfers are resumable or discarded, and
+shared-branch publish remains gated by `public_ready`.
+
+### SCV-PROD-006: Delta Pack Chains
+
+Add production archival packs with bounded delta chains over content-defined
+chunks. Acceptance: pack verify validates base/delta references, pack read
+limits chain depth, GC keeps reachable bases, and large edited files compress
+better than whole-object gzip packs on fixture repos.
 
 ## Completion Gate
 

@@ -39,6 +39,15 @@ describe "scv parser WASM registry":
         expect(out).to_contain("bad_code=1")
         expect(out).to_contain("exit=0")
 
+    it "rejects unsafe parser artifact hashes before path construction":
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-parser-hash-path-reject.XXXXXX)\ncd \"$TMP\"\nprintf '\\000asm\\001\\000\\000\\000' > parser.wasm\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parser-install foo tree-sitter-foo 1.0.0 parser.wasm wasm32 >/dev/null\nprintf 'parser|foo|tree-sitter-foo|1.0.0|wasm|wasm32|../bad|.scv/parsers/../bad.wasm\\n' > .scv/meta/parsers.sdn\nset +e\nBAD_VERIFY=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parser-verify)\nVERIFY_CODE=$?\nset -e\nprintf '%s\\nverify_code=%s\\n' \"$BAD_VERIFY\" \"$VERIFY_CODE\"\ntest \"$VERIFY_CODE\" -ne 0\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nset +e\nBAD_FSCK=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nFSCK_CODE=$?\nset -e\nprintf '%s\\nfsck_code=%s\\n' \"$BAD_FSCK\" \"$FSCK_CODE\"\ntest \"$FSCK_CODE\" -ne 0\n"
+        val out = _run_parser_wasm_script(script)
+        expect(out).to_contain("ERROR unsafe parser artifact hash: foo tree-sitter-foo")
+        expect(out).to_contain("verify_code=1")
+        expect(out).to_contain("unsafe parser artifact hash: foo tree-sitter-foo")
+        expect(out).to_contain("fsck_code=1")
+        expect(out).to_contain("exit=0")
+
     it "rejects non-WASM parser artifacts":
         val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-parser-reject.XXXXXX)\ncd \"$TMP\"\nprintf 'not wasm' > bad.bin\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parser-install foo tree-sitter-foo 1.0.0 bad.bin wasm32)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
         val out = _run_parser_wasm_script(script)

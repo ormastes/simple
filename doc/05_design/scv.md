@@ -391,11 +391,13 @@ semantic hash, and parse status against the referenced syntax root, so metadata
 row tampering cannot silently point at a valid but different syntax object.
 
 `parser-verify` validates exact eight-field parser lock entries, requires
-artifact paths to stay at `.scv/parsers/<hash>.wasm`, checks local WASM
-artifacts still exist, verifies the WASM magic header, recomputes the recorded
-content hash, and rejects duplicate language/grammar lock entries so parser
-identity remains unambiguous. `fsck` applies the same parser-lock shape, path,
-artifact, hash, and duplicate-entry checks as repository integrity validation.
+artifact hashes to be safe `sha256_` object ids before constructing cache
+paths, requires artifact paths to stay at `.scv/parsers/<hash>.wasm`, checks
+local WASM artifacts still exist, verifies the WASM magic header, recomputes the
+recorded content hash, and rejects duplicate language/grammar lock entries so
+parser identity remains unambiguous. `fsck` applies the same parser-lock shape,
+path, artifact, hash, and duplicate-entry checks as repository integrity
+validation.
 - `merge-commits <base> <left> <right>`
 - `conflicts`
 - `resolve-conflict <id>`
