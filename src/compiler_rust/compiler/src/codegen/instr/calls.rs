@@ -672,20 +672,31 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
     args: &[VReg],
+    raw_data: bool,
 ) -> InstrResult<bool> {
-    if args.len() != 2 {
+    let expected_args = if raw_data { 3 } else { 2 };
+    if args.len() != expected_args {
         return Ok(false);
     }
     let Some(dest) = dest else {
         return Ok(false);
     };
 
-    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let xor_value = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let first_arg = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let length_arg = if raw_data {
+        Some(coerce_vreg_to_i64(ctx, builder, args[1]))
+    } else {
+        None
+    };
+    let xor_value = coerce_vreg_to_i64(ctx, builder, args[if raw_data { 2 } else { 1 }]);
     let zero = builder.ins().iconst(types::I64, 0);
     let min_heap_value = builder.ins().iconst(types::I64, 4096);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
-    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let ptr_bits = if raw_data {
+        first_arg
+    } else {
+        builder.ins().band(first_arg, ptr_mask)
+    };
 
     let kind_block = builder.create_block();
     let len_block = builder.create_block();
@@ -719,29 +730,42 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     builder.append_block_param(tail_scalar_block, types::I64);
     builder.append_block_param(done_block, types::I64);
 
-    let too_small = builder.ins().icmp(IntCC::SignedLessThan, array, min_heap_value);
-    builder.ins().brif(too_small, done_block, &[zero], kind_block, &[]);
+    if raw_data {
+        let length = length_arg.expect("raw numeric xor-sum lowering provides length");
+        let negative_len = builder.ins().icmp(IntCC::SignedLessThan, length, zero);
+        let zero_vec = builder.ins().splat(types::I64X2, zero);
+        builder.ins().brif(
+            negative_len,
+            done_block,
+            &[zero],
+            loop_block,
+            &[zero_vec, zero_vec, zero_vec, zero_vec, zero, ptr_bits],
+        );
+    } else {
+        let too_small = builder.ins().icmp(IntCC::SignedLessThan, first_arg, min_heap_value);
+        builder.ins().brif(too_small, done_block, &[zero], kind_block, &[]);
 
-    builder.switch_to_block(kind_block);
-    let tag = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
-    let tag64 = builder.ins().uextend(types::I64, tag);
-    let is_array = builder.ins().icmp_imm(IntCC::Equal, tag64, 2);
-    builder.ins().brif(is_array, len_block, &[], done_block, &[zero]);
-    builder.seal_block(kind_block);
+        builder.switch_to_block(kind_block);
+        let tag = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
+        let tag64 = builder.ins().uextend(types::I64, tag);
+        let is_array = builder.ins().icmp_imm(IntCC::Equal, tag64, 2);
+        builder.ins().brif(is_array, len_block, &[], done_block, &[zero]);
+        builder.seal_block(kind_block);
 
-    builder.switch_to_block(len_block);
-    let length = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    let negative_len = builder.ins().icmp(IntCC::SignedLessThan, length, zero);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let zero_vec = builder.ins().splat(types::I64X2, zero);
-    builder.ins().brif(
-        negative_len,
-        done_block,
-        &[zero],
-        loop_block,
-        &[zero_vec, zero_vec, zero_vec, zero_vec, zero, data_ptr],
-    );
-    builder.seal_block(len_block);
+        builder.switch_to_block(len_block);
+        let length = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+        let negative_len = builder.ins().icmp(IntCC::SignedLessThan, length, zero);
+        let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+        let zero_vec = builder.ins().splat(types::I64X2, zero);
+        builder.ins().brif(
+            negative_len,
+            done_block,
+            &[zero],
+            loop_block,
+            &[zero_vec, zero_vec, zero_vec, zero_vec, zero, data_ptr],
+        );
+        builder.seal_block(len_block);
+    }
 
     builder.switch_to_block(loop_block);
     let sum0 = builder.block_params(loop_block)[0];
@@ -750,6 +774,11 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let sum3 = builder.block_params(loop_block)[3];
     let idx = builder.block_params(loop_block)[4];
     let cursor = builder.block_params(loop_block)[5];
+    let length = if raw_data {
+        length_arg.expect("raw numeric xor-sum lowering provides length")
+    } else {
+        builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8)
+    };
     let idx_plus_fifteen = builder.ins().iadd_imm(idx, 15);
     let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_fifteen, length);
     builder.ins().brif(
@@ -824,13 +853,17 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let tail_sum_lo = builder.ins().extractlane(tail_sum_vec, 0);
     let tail_sum_hi = builder.ins().extractlane(tail_sum_vec, 1);
     let tail_sum = builder.ins().iadd(tail_sum_lo, tail_sum_hi);
-    let shifted = builder.ins().ishl_imm(tail_sum, 3);
+    let result_sum = if raw_data {
+        tail_sum
+    } else {
+        builder.ins().ishl_imm(tail_sum, 3)
+    };
     builder.ins().brif(
         has_tail,
         tail_scalar_block,
         &[tail_sum, tail_idx, tail_cursor],
         done_block,
-        &[shifted],
+        &[result_sum],
     );
 
     builder.switch_to_block(tail_scalar_block);
@@ -838,10 +871,14 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     let tail_idx = builder.block_params(tail_scalar_block)[1];
     let tail_cursor = builder.block_params(tail_scalar_block)[2];
     let has_tail = builder.ins().icmp(IntCC::SignedLessThan, tail_idx, length);
-    let shifted = builder.ins().ishl_imm(tail_sum, 3);
+    let result_sum = if raw_data {
+        tail_sum
+    } else {
+        builder.ins().ishl_imm(tail_sum, 3)
+    };
     builder
         .ins()
-        .brif(has_tail, tail_body_block, &[], done_block, &[shifted]);
+        .brif(has_tail, tail_body_block, &[], done_block, &[result_sum]);
 
     builder.switch_to_block(tail_body_block);
     let value = builder.ins().load(types::I64, MemFlags::new(), tail_cursor, 0);
@@ -2320,7 +2357,10 @@ pub fn compile_call<M: Module>(
     if ffi_name == "rt_array_set_text" && compile_inline_array_set_word(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_numeric_xor_sum_u64" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args)? {
+    if ffi_name == "rt_numeric_xor_sum_u64_data" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args, true)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_numeric_xor_sum_u64" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args, false)? {
         return Ok(());
     }
     if ffi_name == "rt_numeric_contains_u64_data"

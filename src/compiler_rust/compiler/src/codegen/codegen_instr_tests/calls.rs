@@ -1179,6 +1179,34 @@ fn codegen_inline_typed_words_u64_raw_data_at_does_not_emit_runtime_symbol() {
 }
 
 #[test]
+fn codegen_inline_numeric_xor_sum_u64_data_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_numeric_xor_sum_u64_data", |f| {
+        let data_ptr = f.new_vreg();
+        let length = f.new_vreg();
+        let xor_value = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt {
+            dest: data_ptr,
+            value: 4096,
+        });
+        block.instructions.push(MirInst::ConstInt { dest: length, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: xor_value, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_numeric_xor_sum_u64_data"),
+            args: vec![data_ptr, length, xor_value],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(
+        &object,
+        "rt_numeric_xor_sum_u64_data"
+    ));
+}
+
+#[test]
 fn codegen_inline_array_data_ptr_does_not_emit_runtime_symbol() {
     let object = aot_object("inline_array_data_ptr", |f| {
         let array = f.new_vreg();
