@@ -748,3 +748,28 @@ Rejected follow-up:
   mutation through the alias did not persist to the object field. Direct
   `self.slot_keys[slot]` and `self.slot_used[slot]` writes are required for the
   interpreter facade specs.
+
+## 2026-05-15 Text Array Store Inline Update
+
+Native MIR lowering now recognizes direct assignments into `Array<text>` and
+emits `rt_array_set` instead of the generic `rt_index_set` path. The Cranelift
+backend inlines `rt_array_set` for packed-byte and word-backed arrays, preserving
+negative-index bounds semantics and avoiding boxed generic index/value dispatch
+on `HashSet.insert` slot writes.
+
+Clean five-sample source-closure benchmark with rebuilt `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, checksum parity, and no unresolved Rust runtime
+symbols in `build/perf/collections/collection_simple`:
+
+```text
+list_traverse     1.07x C / 0.53x Rust
+list_push         1.30x C / 7.85x Rust
+set_contains      1.95x C / 0.78x Rust
+hashset_contains  0.51x C / 0.79x Rust
+hashset_insert    0.22x C / 1.59x Rust
+```
+
+This improves retained `hashset_insert` from `0.16x C / 1.10x Rust` to `0.22x
+C / 1.59x Rust`. Strict parity remains open because `hashset_insert` is still
+below the C fixed-table reference, while `list_traverse`, `set_contains`, and
+`hashset_contains` still trail the fastest C/Rust reference in this run.

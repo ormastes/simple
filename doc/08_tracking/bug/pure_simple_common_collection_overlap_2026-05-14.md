@@ -66,11 +66,11 @@ Representative Simple collection files exist under these families:
   checksum parity:
 
 ```text
-list_traverse     1.47x C / 0.91x Rust
-list_push         1.30x C / 4.48x Rust
-set_contains      1.86x C / 0.74x Rust
-hashset_contains  0.50x C / 0.79x Rust
-hashset_insert    0.16x C / 1.10x Rust
+list_traverse     1.07x C / 0.53x Rust
+list_push         1.30x C / 7.85x Rust
+set_contains      1.95x C / 0.78x Rust
+hashset_contains  0.51x C / 0.79x Rust
+hashset_insert    0.22x C / 1.59x Rust
 ```
 
 - The established read/push lanes clear the current warning floor with checksum
@@ -82,10 +82,9 @@ hashset_insert    0.16x C / 1.10x Rust
 - The benchmark now also covers `hashset_insert` across C, Rust, and pure
   Simple with checksum parity. Removing the legacy side `items` array from
   pure Simple `HashSet`, retaining runtime-backed slot initialization, and
-  writing insert probes directly through `self.slot_keys` / `self.slot_used`
-  lifted the retained five-sample source-closure run to `0.16x C / 1.10x
-  Rust`. Insert is now at Rust parity in this run, but remains the largest
-  measured C gap.
+  lowering text slot writes to inlined native array stores lifted the retained
+  five-sample source-closure run to `0.22x C / 1.59x Rust`. Insert is now above
+  Rust parity in this run, but remains the largest measured C gap.
 - Broader probes for `hashset_remove`, `hashset_intersection`, and
   `hashmap_contains_get` were not retained: the first two did not provide
   checksum-equivalent evidence in the probe harness, and the HashMap probe
@@ -96,11 +95,11 @@ hashset_insert    0.16x C / 1.10x Rust
 
 | Objective requirement | Current evidence | Status |
 | --- | --- | --- |
-| Commit, pull/rebase, push | Latest pushed baseline before this retained optimization was `ed53ae8094`; VCS sync for this increment is verified after the commit/rebase/push step. | Done for prior increments; verify after current sync |
+| Commit, pull/rebase, push | Latest pushed baseline before this retained optimization was `c8635d6436`; VCS sync for this increment is verified after the commit/rebase/push step. | Done for prior increments; verify after current sync |
 | Remove Rust from pure Simple path/runtime unless OS-provided | `nm -u build/perf/collections/collection_simple` lists libc/OS symbols and weak startup hooks only; no unresolved Rust runtime symbols. | Verified for collection benchmark binary |
 | Port runtime support to pure Simple unless OS-provided | `build/simple-core/libsimple_runtime.a` provides the runtime helpers used by the collection benchmark; OS primitives remain `malloc`, `free`, `memcmp`, clocks, IO, and similar host services. | Verified for benchmark scope |
 | Check common libraries that overlap C/Rust/native surfaces | This audit enumerates array, typed-array, generic indexing, list/set/hash/map, persistent, noalloc, and checksum/hash overlap surfaces. The active C/Rust/Simple benchmark now covers list traversal, list push, numeric set contains, text HashSet contains, and text HashSet insert. | In progress |
-| Match or beat existing C/Rust performance for list/set/traverse and similar APIs | Latest retained benchmark beats C for `list_traverse`, `list_push`, and `set_contains`, beats Rust for `list_push` and `hashset_insert`, but trails Rust for `list_traverse` and `set_contains`, trails C for `hashset_contains`, and `hashset_insert` remains well below C. | Not complete |
+| Match or beat existing C/Rust performance for list/set/traverse and similar APIs | Latest retained benchmark beats C for `list_traverse`, `list_push`, `set_contains`, and `hashset_contains`, beats Rust for `list_push` and `hashset_insert`, but trails Rust for `list_traverse`, `set_contains`, and `hashset_contains`; `hashset_insert` remains well below C. | Not complete |
 
 ## Next optimization targets
 

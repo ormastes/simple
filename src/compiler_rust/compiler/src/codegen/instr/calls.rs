@@ -473,6 +473,82 @@ fn compile_inline_array_get<M: Module>(
     Ok(true)
 }
 
+fn compile_inline_array_set<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 3 {
+        return Ok(false);
+    }
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let value = get_vreg_or_default(ctx, builder, &args[2]);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let one = builder.ins().iconst(types::I64, 1);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let index_is_unsigned = vreg_is_signed(ctx, args[1]) == Some(false);
+    let normalized_index = if index_is_unsigned {
+        index
+    } else {
+        let negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
+        let from_end = builder.ins().iadd(len, index);
+        builder.ins().select(negative, from_end, index)
+    };
+
+    let store_block = builder.create_block();
+    let byte_block = builder.create_block();
+    let word_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    let in_bounds = if index_is_unsigned {
+        builder.ins().icmp(IntCC::UnsignedLessThan, normalized_index, len)
+    } else {
+        let ge_zero = builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
+        let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
+        builder.ins().band(ge_zero, lt_len)
+    };
+    builder.ins().brif(in_bounds, store_block, &[], done_block, &[zero]);
+
+    builder.switch_to_block(store_block);
+    let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
+    let flags64 = builder.ins().uextend(types::I64, flags);
+    let byte_packed = builder.ins().band_imm(flags64, 0x08);
+    let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+    builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
+    builder.seal_block(store_block);
+
+    builder.switch_to_block(byte_block);
+    let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
+    let byte_value = builder.ins().ireduce(types::I8, value);
+    builder.ins().store(MemFlags::new(), byte_value, byte_ptr, 0);
+    builder.ins().jump(done_block, &[one]);
+    builder.seal_block(byte_block);
+
+    builder.switch_to_block(word_block);
+    let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    builder.ins().store(MemFlags::new(), value, slot_ptr, 0);
+    builder.ins().jump(done_block, &[one]);
+    builder.seal_block(word_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    if let Some(dest) = dest {
+        ctx.vreg_values.insert(*dest, result);
+    }
+    Ok(true)
+}
+
 fn compile_inline_numeric_xor_sum_u64<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -1917,6 +1993,9 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
     if ffi_name == "rt_array_get" && compile_inline_array_get(ctx, builder, dest, args)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_array_set" && compile_inline_array_set(ctx, builder, dest, args)? {
         return Ok(());
     }
     if ffi_name == "rt_numeric_xor_sum_u64" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args)? {
