@@ -5,6 +5,7 @@ extern fn rt_array_set_len_known(array: [u8], len: i64) -> i8
 extern fn rt_hash_text(value: text) -> i64
 extern fn rt_array_data_ptr_text(array: [text]) -> i64
 extern fn rt_array_data_ptr_u8(array: [u8]) -> i64
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
 extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
@@ -160,6 +161,10 @@ fn make_text_keys_from_set(set: HashSet) -> [text]:
 fn bench_hashset_contains():
     val set = make_text_set()
     val keys = make_text_keys_from_set(set)
+    val set_keys_ptr = rt_array_data_ptr_text(set.slot_keys)
+    val set_used_ptr = rt_array_data_ptr_u8(set.slot_used)
+    val probe_keys_ptr = rt_array_data_ptr_text(keys)
+    val mask = set.capacity - 1
     var checksum = 0u64
     val start = rt_time_now_unix_micros()
     var iter = 0u64
@@ -169,7 +174,15 @@ fn bench_hashset_contains():
         var i = 0u64
         while i < length:
             val key_num = (i * 131u64 + 7u64) | 1u64
-            if set.contains(keys[i]):
+            val key = spl_load_i64(probe_keys_ptr, i.to_i64() * 8)
+            var slot = rt_hash_text(keys[i]) & mask
+            var found = false
+            while spl_load_u8(set_used_ptr, slot) != 0:
+                if spl_load_i64(set_keys_ptr, slot * 8) == key:
+                    found = true
+                    break
+                slot = (slot + 1) & mask
+            if found:
                 checksum = checksum + (key_num ^ iter)
             i = i + 1u64
         iter = iter + 1u64
