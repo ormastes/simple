@@ -6,7 +6,7 @@
 # TODO(prod-003): empirical calibration pass once WS-A tree-sitter lands.
 
 use app.io.mod (file_exists, file_read)
-use std.scv.core.{scv_object_path, scv_parser_index_path}
+use std.scv.core.{scv_object_path, scv_parser_index_path, scv_line_set_contains}
 use std.scv.store.{scv_hash_text}
 use std.scv.anchor.{Anchor, NamedAnchor, OrdinalAnchor, scv_named_anchor, scv_ordinal_anchor, scv_build_qpath, scv_anchor_id}
 
@@ -14,11 +14,10 @@ use std.scv.anchor.{Anchor, NamedAnchor, OrdinalAnchor, scv_named_anchor, scv_or
 # Config
 # ---------------------------------------------------------------------------
 
-struct StructuralMatchConfig {
-    min_dice: i64,    # ×1000 fixed-point; paper suggests 500
-    min_height: i64,  # minimum subtree height for top-down anchoring; paper: 2
-    max_size: i64     # skip subtrees larger than this (performance guard)
-}
+struct StructuralMatchConfig:
+    min_dice: i64    # ×1000 fixed-point; paper suggests 500
+    min_height: i64  # minimum subtree height for top-down anchoring; paper: 2
+    max_size: i64    # skip subtrees larger than this (performance guard)
 
 fn scv_default_match_config() -> StructuralMatchConfig:
     StructuralMatchConfig(min_dice: 500, min_height: 2, max_size: 1000)
@@ -80,16 +79,16 @@ fn scv_node_children_ids(node_fields: text) -> [text]:
 # Returns [] for kind==line (graceful degradation path).
 # ---------------------------------------------------------------------------
 
-fn scv_extract_anchors_rec(root: text, node_id: text, parent_qpath: text, out: [Anchor]) -> [Anchor]:
+fn scv_extract_anchors_rec(root: text, node_id: text, parent_qpath: text, acc: [Anchor]) -> [Anchor]:
     val fields = scv_load_node_fields(root, node_id)
     if fields == "":
-        return out
+        return acc
     val kind = scv_node_kind(fields)
     if kind == "line" or kind == "":
-        return out
+        return acc
     val name = scv_node_name(fields)
     var qpath = parent_qpath
-    var result = out
+    var result = acc
     if name != "":
         qpath = scv_build_qpath(parent_qpath, name)
         result.push(scv_named_anchor(qpath))
@@ -184,15 +183,15 @@ fn scv_subtree_height_rec(root: text, node_id: text, depth: i64) -> i64:
 fn scv_subtree_height(root: text, node_id: text) -> i64:
     scv_subtree_height_rec(root, node_id, 0)
 
-fn scv_descendant_labels_rec(root: text, node_id: text, depth: i64, out: [text]) -> [text]:
+fn scv_descendant_labels_rec(root: text, node_id: text, depth: i64, acc: [text]) -> [text]:
     if depth > 100:
-        return out
+        return acc
     val fields = scv_load_node_fields(root, node_id)
     if fields == "":
-        return out
+        return acc
     val kind = scv_node_kind(fields)
     val name = scv_node_name(fields)
-    var result = out
+    var result = acc
     if name != "":
         result.push(name)
     elif kind != "" and kind != "line":
@@ -259,10 +258,10 @@ fn scv_pairs_to_list(pairs: text) -> [(text, text)]:
 # Top-down matching: identical subtree hash → high-confidence anchor pair
 # ---------------------------------------------------------------------------
 
-fn scv_collect_node_ids_rec(root: text, node_id: text, depth: i64, out: [text]) -> [text]:
+fn scv_collect_node_ids_rec(root: text, node_id: text, depth: i64, acc: [text]) -> [text]:
     if depth > 200 or node_id == "":
-        return out
-    var result = out
+        return acc
+    var result = acc
     result.push(node_id)
     val fields = scv_load_node_fields(root, node_id)
     if fields == "":
@@ -333,24 +332,14 @@ fn scv_match_bottom_up(root: text, base_root: text, head_root: text, existing: [
 # Edit script
 # ---------------------------------------------------------------------------
 
-struct EditOp { kind: text, base_node: text, head_node: text, anchor: Anchor }
+struct EditOp:
+    kind: text
+    base_node: text
+    head_node: text
+    anchor: Anchor
 
 fn scv_make_edit_op(kind: text, base_node: text, head_node: text, anchor: Anchor) -> EditOp:
     EditOp(kind: kind, base_node: base_node, head_node: head_node, anchor: anchor)
-
-fn scv_pair_find_head(pairs: [(text, text)], base_id: text) -> text:
-    for pair in pairs:
-        val (b, h) = pair
-        if b == base_id:
-            return h
-    ""
-
-fn scv_pair_find_base(pairs: [(text, text)], head_id: text) -> text:
-    for pair in pairs:
-        val (b, h) = pair
-        if h == head_id:
-            return b
-    ""
 
 fn scv_pair_has_base(pairs: [(text, text)], base_id: text) -> bool:
     for pair in pairs:
@@ -365,22 +354,6 @@ fn scv_pair_has_head(pairs: [(text, text)], head_id: text) -> bool:
         if h == head_id:
             return true
     false
-
-fn scv_node_parent_in_pairs(pairs: [(text, text)], node_id: text) -> text:
-    # Approximate: return the matched counterpart of the parent
-    # Real GumTree tracks parent explicitly; here we return empty for simple case
-    ""
-
-fn scv_classify_edit_op(op: EditOp, base_matches: [(text, text)]) -> text:
-    if op.kind == "move":
-        return "move"
-    if op.kind == "update":
-        return "update"
-    if op.kind == "insert":
-        return "insert"
-    if op.kind == "delete":
-        return "delete"
-    "conflict"
 
 fn scv_compute_edit_script(root: text, base_root: text, head_root: text, cfg: StructuralMatchConfig) -> [EditOp]:
     val top_pairs = scv_match_top_down(root, base_root, head_root, cfg)
@@ -441,3 +414,270 @@ fn scv_structural_diff_ops_for_file(root: text, rel: text, cfg: StructuralMatchC
     # For working-copy diff: we don't have a second parse root yet (WS-A not delivered)
     # Return empty to keep diff graceful for now
     []
+
+# ---------------------------------------------------------------------------
+# Text-based structural block analysis
+# Works on raw source text without requiring tree-sitter parse output.
+# Identifies fn/class/struct/module definitions at column 0.
+# ---------------------------------------------------------------------------
+
+fn scv_find_char_pos(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.char_at(i) == ch:
+            return i
+        i = i + 1
+    -1
+
+fn scv_text_def_name(line: text) -> text:
+    if line.len() == 0:
+        return ""
+    if line.char_at(0) == " " or line.char_at(0) == "\t":
+        return ""
+    if line.starts_with("fn "):
+        val rest = line[3:]
+        val pos = scv_find_char_pos(rest, "(")
+        if pos > 0:
+            return rest[0:pos].trim()
+        return ""
+    if line.starts_with("class "):
+        val rest = line[6:]
+        var end_pos = scv_find_char_pos(rest, ":")
+        val ppos = scv_find_char_pos(rest, "(")
+        if ppos >= 0 and (end_pos < 0 or ppos < end_pos):
+            end_pos = ppos
+        if end_pos > 0:
+            return rest[0:end_pos].trim()
+        if rest.trim().len() > 0:
+            return rest.trim()
+        return ""
+    if line.starts_with("struct "):
+        val rest = line[7:]
+        val cpos = scv_find_char_pos(rest, ":")
+        if cpos > 0:
+            return rest[0:cpos].trim()
+        if rest.trim().len() > 0:
+            return rest.trim()
+        return ""
+    if line.starts_with("module "):
+        val rest = line[7:]
+        val cpos = scv_find_char_pos(rest, ":")
+        if cpos > 0:
+            return rest[0:cpos].trim()
+        if rest.trim().len() > 0:
+            return rest.trim()
+        return ""
+    ""
+
+fn scv_text_block_names(content: text) -> [text]:
+    var names: [text] = []
+    for line in content.split("\n"):
+        val name = scv_text_def_name(line)
+        if name != "":
+            var already = false
+            for n in names:
+                if n == name:
+                    already = true
+                    break
+            if not already:
+                names.push(name)
+    names
+
+fn scv_text_block_content(content: text, target: text) -> text:
+    val lines = content.split("\n")
+    var in_block = false
+    var result = ""
+    var first = true
+    var i = 0
+    while i < lines.len():
+        val name = scv_text_def_name(lines[i])
+        if name == target and not in_block:
+            in_block = true
+        elif name != "" and in_block:
+            break
+        if in_block:
+            if not first:
+                result = result + "\n"
+            result = result + lines[i]
+            first = false
+        i = i + 1
+    result
+
+fn scv_text_block_body(content: text, target: text) -> text:
+    val full = scv_text_block_content(content, target)
+    val lines = full.split("\n")
+    if lines.len() <= 1:
+        return ""
+    var result = ""
+    var i = 1
+    while i < lines.len():
+        if i > 1:
+            result = result + "\n"
+        result = result + lines[i]
+        i = i + 1
+    result
+
+fn scv_normalize_block(content: text) -> text:
+    val lines = content.split("\n")
+    var end_idx = lines.len()
+    while end_idx > 0 and lines[end_idx - 1].trim() == "":
+        end_idx = end_idx - 1
+    var result = ""
+    var i = 0
+    while i < end_idx:
+        if i > 0:
+            result = result + "\n"
+        result = result + lines[i]
+        i = i + 1
+    result
+
+fn scv_text_block_position(content: text, target: text) -> i64:
+    var pos = 0
+    for line in content.split("\n"):
+        val name = scv_text_def_name(line)
+        if name == target:
+            return pos
+        if name != "":
+            pos = pos + 1
+    -1
+
+fn scv_text_preamble(content: text) -> text:
+    var result = ""
+    var first = true
+    for line in content.split("\n"):
+        val name = scv_text_def_name(line)
+        if name != "":
+            break
+        if not first:
+            result = result + "\n"
+        result = result + line
+        first = false
+    result
+
+fn scv_names_contain(names: [text], target: text) -> bool:
+    for n in names:
+        if n == target:
+            return true
+    false
+
+fn scv_intra_block_moves(block_name: text, base_body: text, head_body: text) -> [EditOp]:
+    var result: [EditOp] = []
+    val base_lines = base_body.split("\n")
+    val head_lines = head_body.split("\n")
+    var base_idx = 0
+    for bline in base_lines:
+        val bt = bline.trim()
+        if bt == "":
+            base_idx = base_idx + 1
+            continue
+        var head_idx = 0
+        for hline in head_lines:
+            val ht = hline.trim()
+            if ht == bt and base_idx != head_idx:
+                result.push(scv_make_edit_op("move",
+                    "{block_name}.stmt[{base_idx}]",
+                    "{block_name}.stmt[{head_idx}]",
+                    scv_ordinal_anchor(block_name, base_idx)))
+                break
+            head_idx = head_idx + 1
+        base_idx = base_idx + 1
+    result
+
+fn scv_structural_diff_from_text(base_text: text, head_text: text, cfg: StructuralMatchConfig) -> [EditOp]:
+    val base_names = scv_text_block_names(base_text)
+    val head_names = scv_text_block_names(head_text)
+    if base_names.len() == 0 and head_names.len() == 0:
+        return []
+    var result: [EditOp] = []
+    var matched_head = ""
+    for bname in base_names:
+        if scv_names_contain(head_names, bname):
+            matched_head = matched_head + bname + "\n"
+            val bc = scv_normalize_block(scv_text_block_content(base_text, bname))
+            val hc = scv_normalize_block(scv_text_block_content(head_text, bname))
+            if bc == hc:
+                val bp = scv_text_block_position(base_text, bname)
+                val hp = scv_text_block_position(head_text, bname)
+                if bp != hp:
+                    result.push(scv_make_edit_op("move", bname, bname, scv_named_anchor(bname)))
+            else:
+                result.push(scv_make_edit_op("update", bname, bname, scv_named_anchor(bname)))
+                val bb = scv_text_block_body(base_text, bname)
+                val hb = scv_text_block_body(head_text, bname)
+                val intra = scv_intra_block_moves(bname, bb, hb)
+                for op in intra:
+                    result.push(op)
+        else:
+            val bb = scv_text_block_body(base_text, bname)
+            var renamed_to = ""
+            for hname in head_names:
+                if scv_line_set_contains(matched_head, hname):
+                    continue
+                val hb = scv_text_block_body(head_text, hname)
+                if bb == hb and bb != "":
+                    renamed_to = hname
+                    break
+            if renamed_to != "":
+                matched_head = matched_head + renamed_to + "\n"
+                result.push(scv_make_edit_op("update", bname, renamed_to, scv_named_anchor(bname)))
+            else:
+                result.push(scv_make_edit_op("delete", bname, "", scv_named_anchor(bname)))
+    for hname in head_names:
+        if not scv_line_set_contains(matched_head, hname):
+            result.push(scv_make_edit_op("insert", "", hname, scv_named_anchor(hname)))
+    result
+
+fn scv_structural_merge_from_text(base_text: text, left_text: text, right_text: text) -> text:
+    val base_names = scv_text_block_names(base_text)
+    val left_names = scv_text_block_names(left_text)
+    val right_names = scv_text_block_names(right_text)
+    if base_names.len() == 0 and left_names.len() == 0 and right_names.len() == 0:
+        return ""
+    for bname in base_names:
+        val bc = scv_normalize_block(scv_text_block_content(base_text, bname))
+        if scv_names_contain(left_names, bname) and scv_names_contain(right_names, bname):
+            val lc = scv_normalize_block(scv_text_block_content(left_text, bname))
+            val rc = scv_normalize_block(scv_text_block_content(right_text, bname))
+            if lc != bc and rc != bc:
+                return ""
+    var result = ""
+    var first_block = true
+    var used_names = ""
+    for lname in left_names:
+        used_names = used_names + lname + "\n"
+        val lc = scv_normalize_block(scv_text_block_content(left_text, lname))
+        val in_base = scv_names_contain(base_names, lname)
+        var chosen = lc
+        if in_base:
+            val bc = scv_normalize_block(scv_text_block_content(base_text, lname))
+            val left_changed = lc != bc
+            val in_right = scv_names_contain(right_names, lname)
+            if in_right:
+                val rc = scv_normalize_block(scv_text_block_content(right_text, lname))
+                val right_changed = rc != bc
+                if right_changed and not left_changed:
+                    chosen = rc
+                elif right_changed and left_changed:
+                    return ""
+        if not first_block:
+            result = result + "\n"
+        result = result + chosen
+        first_block = false
+    for rname in right_names:
+        if scv_line_set_contains(used_names, rname):
+            continue
+        val in_base = scv_names_contain(base_names, rname)
+        if in_base:
+            val bc = scv_normalize_block(scv_text_block_content(base_text, rname))
+            val rc = scv_normalize_block(scv_text_block_content(right_text, rname))
+            if rc != bc:
+                return ""
+            continue
+        val rc = scv_text_block_content(right_text, rname)
+        if not first_block:
+            result = result + "\n"
+        result = result + rc
+        first_block = false
+    if result != "":
+        result = result + "\n"
+    result

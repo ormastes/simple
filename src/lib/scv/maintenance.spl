@@ -3,7 +3,8 @@
 use app.io.mod (file_exists, file_read, file_delete, file_size, dir_create, dir_walk)
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
 use std.nogc_sync_mut.database.core.{SdnRow, SdnTable, new_sdn_database}
-use std.scv.core.{scv_objects_dir, scv_object_path, scv_chunk_path, scv_object_index_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe}
+use std.common.compress.gzip.{gzip_decompress}
+use std.scv.core.{scv_objects_dir, scv_object_path, scv_chunk_path, scv_object_index_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe, scv_parser_index_path}
 use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_workspace_parent_error, scv_commit_tree, scv_object_field, scv_content_id_for_file, scv_create_parent_dir, scv_i64_bytes_to_u8, scv_hash_text, scv_write_text, scv_write_file_object_from_bytes, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op}
 use std.scv.integrity.{scv_current_tree_content}
 
@@ -395,3 +396,153 @@ fn scv_gc_prune(root: text) -> text:
     out = out + "pruned_trees={scv_prune_unreachable_kind(root, \"trees\", reachable)}\n"
     out = out + "pruned_commits={scv_prune_unreachable_kind(root, \"commits\", reachable)}\n"
     out + "pruned_syntax={scv_prune_unreachable_kind(root, \"syntax\", reachable)}\n"
+
+# ─── GC pack awareness ───────────────────────────────────────────────────────
+
+# Enumerate base_ids referenced by entry-delta rows across all v2 packs.
+# Returns a newline-separated set of base object ids.
+fn scv_pack_reachable_base_ids(root: text) -> text:
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    if not file_exists(pack_dir):
+        return ""
+    var base_ids = ""
+    for path in dir_walk(pack_dir):
+        if not path.ends_with(".pack.gz"):
+            continue
+        val compressed = scv_i64_bytes_to_u8(file_read_bytes(path) ?? [])
+        val payload = gzip_decompress(compressed)
+        val v2_header = "format: scv-pack-payload-v2\n".bytes()
+        if payload.len() < v2_header.len() or payload[0:v2_header.len()] != v2_header:
+            continue
+        var pos = v2_header.len()
+        while pos < payload.len():
+            val (line, line_end) = scv_pack_bytes_line_m(payload, pos)
+            val trimmed = line.trim()
+            if trimmed == "":
+                pos = line_end + 1
+                continue
+            if trimmed.starts_with("entry-delta "):
+                val parts = trimmed.split(" ")
+                if parts.len() >= 4:
+                    val base_id = parts[3]
+                    if not scv_line_set_contains(base_ids, base_id):
+                        base_ids = base_ids + base_id + "\n"
+                val size = if parts.len() >= 6: (parts[5].to_i64() ?? -1) else: -1
+                if size < 0:
+                    pos = line_end + 1
+                    continue
+                val data_start = line_end + 1
+                val data_end = data_start + size
+                pos = data_end + "\nendentry\n".bytes().len()
+            elif trimmed.starts_with("entry "):
+                val parts = trimmed.split(" ")
+                val size = if parts.len() >= 4: (parts[3].to_i64() ?? -1) else: -1
+                if size < 0:
+                    pos = line_end + 1
+                    continue
+                val data_start = line_end + 1
+                val data_end = data_start + size
+                pos = data_end + "\nendentry\n".bytes().len()
+            else:
+                pos = line_end + 1
+    base_ids
+
+# scv_pack_bytes_line_m: same as scv_pack_bytes_line in pack.spl
+# but available in maintenance module
+fn scv_pack_bytes_line_m(payload: [u8], start: i64) -> (text, i64):
+    var end = start
+    while end < payload.len() and payload[end] != 10.to_u8():
+        end = end + 1
+    (text.from_bytes(payload[start:end]), end)
+
+# Delete packs where all objects are unreachable.
+# NEVER deletes a pack if any of its base_ids are still reachable.
+# Returns count of deleted packs.
+fn scv_gc_prune_packs(root: text, reachable: text) -> i64:
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    if not file_exists(pack_dir):
+        return 0
+    var pruned = 0
+    for path in dir_walk(pack_dir):
+        if not path.ends_with(".pack.gz"):
+            continue
+        val pack_id = scv_pack_id_from_path_m(path)
+        val compressed = scv_i64_bytes_to_u8(file_read_bytes(path) ?? [])
+        val payload = gzip_decompress(compressed)
+        val v2_header = "format: scv-pack-payload-v2\n".bytes()
+        if payload.len() < v2_header.len() or payload[0:v2_header.len()] != v2_header:
+            continue
+        # Check if any object (full or delta) in this pack is reachable
+        var any_reachable = false
+        var pos = v2_header.len()
+        while pos < payload.len():
+            val (line, line_end) = scv_pack_bytes_line_m(payload, pos)
+            val trimmed = line.trim()
+            if trimmed == "":
+                pos = line_end + 1
+                continue
+            if trimmed.starts_with("entry "):
+                val parts = trimmed.split(" ")
+                val id = if parts.len() >= 3: parts[2] else: ""
+                if id != "" and scv_line_set_contains(reachable, id):
+                    any_reachable = true
+                val size = if parts.len() >= 4: (parts[3].to_i64() ?? -1) else: -1
+                if size < 0:
+                    pos = line_end + 1
+                    continue
+                val data_start = line_end + 1
+                val data_end = data_start + size
+                pos = data_end + "\nendentry\n".bytes().len()
+            elif trimmed.starts_with("entry-delta "):
+                val parts = trimmed.split(" ")
+                val id = if parts.len() >= 3: parts[2] else: ""
+                val base_id = if parts.len() >= 4: parts[3] else: ""
+                if id != "" and scv_line_set_contains(reachable, id):
+                    any_reachable = true
+                if base_id != "" and scv_line_set_contains(reachable, base_id):
+                    any_reachable = true
+                val size = if parts.len() >= 6: (parts[5].to_i64() ?? -1) else: -1
+                if size < 0:
+                    pos = line_end + 1
+                    continue
+                val data_start = line_end + 1
+                val data_end = data_start + size
+                pos = data_end + "\nendentry\n".bytes().len()
+            else:
+                pos = line_end + 1
+        if not any_reachable:
+            val manifest_path = "{pack_dir}/{pack_id}.manifest"
+            file_delete(path)
+            if file_exists(manifest_path):
+                file_delete(manifest_path)
+            pruned = pruned + 1
+    pruned
+
+fn scv_pack_id_from_path_m(path: text) -> text:
+    val parts = path.split("/")
+    val name = parts[parts.len() - 1]
+    if name.ends_with(".pack.gz"):
+        name[0:name.len() - 8]
+    else:
+        name
+
+# GC with pack awareness: prune loose objects + prune unreachable packs
+fn scv_gc(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    # Build reachable set including pack base ids
+    var reachable = scv_reachable_object_ids(root)
+    # Add base ids from packs to pin them
+    val base_ids = scv_pack_reachable_base_ids(root)
+    for bid in base_ids.split("\n"):
+        val b = bid.trim()
+        if b != "" and not scv_line_set_contains(reachable, b):
+            reachable = reachable + b + "\n"
+    var out = ""
+    out = out + "pruned_chunks={scv_prune_unreachable_kind(root, \"chunks\", reachable)}\n"
+    out = out + "pruned_files={scv_prune_unreachable_kind(root, \"files\", reachable)}\n"
+    out = out + "pruned_trees={scv_prune_unreachable_kind(root, \"trees\", reachable)}\n"
+    out = out + "pruned_commits={scv_prune_unreachable_kind(root, \"commits\", reachable)}\n"
+    out = out + "pruned_syntax={scv_prune_unreachable_kind(root, \"syntax\", reachable)}\n"
+    val pruned_packs = scv_gc_prune_packs(root, reachable)
+    out + "pruned_packs={pruned_packs}\n"

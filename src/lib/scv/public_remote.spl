@@ -1,4 +1,12 @@
 # SCV filesystem public remote transport.
+#
+# Shared types used by both filesystem and network remote transports:
+#   ScvRemoteRef  — parsed row from refs.sdn
+# Shared helpers exported for network_remote.spl:
+#   scv_remote_refs_update, scv_validate_ref_row,
+#   scv_public_push_ref_line, scv_public_manifest_matches_imported_tree,
+#   scv_public_branch_safe, scv_public_result_token_value,
+#   scv_public_export, scv_public_export_verify, scv_public_push_verify
 
 use app.io.mod (file_exists, file_read, dir_create)
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
@@ -154,6 +162,36 @@ fn scv_public_remote_refs_error(refs: text) -> text:
         if scv_line_set_contains(seen, branch):
             return "ERROR duplicate public remote branch: {branch}\n"
         seen = seen + branch + "\n"
+    ""
+
+# Shared ref-row type used by filesystem and network remote transports.
+struct ScvRemoteRef {
+    branch: text,
+    commit: text,
+    artifact_dir: text,
+}
+
+# Parse a single refs.sdn branch row into an ScvRemoteRef.
+# Returns an ScvRemoteRef with empty fields on parse error.
+fn scv_parse_remote_ref(line: text) -> ScvRemoteRef:
+    val parts = line.trim().split("|")
+    if parts.len() != 3:
+        return ScvRemoteRef { branch: "", commit: "", artifact_dir: "" }
+    ScvRemoteRef { branch: parts[0], commit: parts[1], artifact_dir: parts[2] }
+
+# Validate a single refs.sdn row; returns "" on success or an "ERROR ..." message.
+fn scv_validate_ref_row(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed == "" or trimmed.starts_with("format:") or trimmed.starts_with("#"):
+        return ""
+    val parts = trimmed.split("|")
+    if parts.len() != 3:
+        return "ERROR corrupt public remote ref\n"
+    val branch = parts[0]
+    if not scv_public_branch_safe(branch):
+        return "ERROR unsafe public branch\n"
+    if not scv_public_marker_id_safe(parts[1], "commit_"):
+        return "ERROR unsafe public remote commit id\n"
     ""
 
 fn scv_public_push(root: text, remote_dir: text, branch: text) -> text:

@@ -2,38 +2,19 @@
 
 use app.io.mod (file_exists, file_read, file_delete, dir_walk)
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
-use std.scv.core.{scv_object_path, scv_chunk_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe, scv_parser_index_path}
+use std.scv.core.{scv_object_path, scv_chunk_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe}
 use std.scv.store.{scv_hash_text, scv_write_text, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op, scv_commit_tree}
-use std.scv.structural_match.{scv_default_match_config, scv_compute_edit_script}
+use std.scv.structural_match.{scv_default_match_config, scv_compute_edit_script, scv_parser_index_root_node, scv_text_block_names, scv_structural_merge_from_text}
 
 # ---------------------------------------------------------------------------
 # Structural merge helpers
 # ---------------------------------------------------------------------------
 
-# Load the root syntax-node id recorded in parser_index for a given rel path.
-fn scv_parser_index_node_for_rel(root: text, rel: text) -> text:
-    val index_path = scv_parser_index_path(root)
-    if not file_exists(index_path):
-        return ""
-    for line in file_read(index_path).split("\n"):
-        val trimmed = line.trim()
-        if trimmed == "":
-            continue
-        val parts = trimmed.split("|")
-        if parts.len() < 9:
-            continue
-        if parts[0] != rel:
-            continue
-        val marker = "node="
-        if parts[8].starts_with(marker):
-            return parts[8][marker.len():]
-    ""
-
 # Returns kind of root syntax node for rel.
 # Returns "" when the file has no parser_index entry (not parsed by WS-B path).
 # Returns "line" when parsed but only fallback-line nodes found.
 fn scv_node_kind_for_rel(root: text, rel: text) -> text:
-    val node_id = scv_parser_index_node_for_rel(root, rel)
+    val node_id = scv_parser_index_root_node(root, rel)
     if node_id == "":
         return ""
     val path = scv_object_path(root, "syntax", node_id)
@@ -50,7 +31,7 @@ fn scv_node_kind_for_rel(root: text, rel: text) -> text:
 fn scv_structural_merge_applicable(root: text, rel: text) -> bool:
     if rel.ends_with(".spl"):
         return true
-    val node_id = scv_parser_index_node_for_rel(root, rel)
+    val node_id = scv_parser_index_root_node(root, rel)
     node_id != ""
 
 # Returns merged file tree-line or "" to fall through.
@@ -61,27 +42,26 @@ fn scv_structural_merge_applicable(root: text, rel: text) -> bool:
 fn scv_try_structural_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
     if base_line == "" or left_line == "" or right_line == "":
         return ""
-    val node_kind = scv_node_kind_for_rel(root, rel)
-    # "" → not in parser index; "line" → fallback-line only; both return ""
-    if node_kind == "" or node_kind == "line":
+    val base_chunk = scv_tree_line_chunk_id(base_line)
+    val left_chunk = scv_tree_line_chunk_id(left_line)
+    val right_chunk = scv_tree_line_chunk_id(right_line)
+    val base_path = scv_chunk_path(root, base_chunk)
+    val left_path = scv_chunk_path(root, left_chunk)
+    val right_path = scv_chunk_path(root, right_chunk)
+    if not file_exists(base_path) or not file_exists(left_path) or not file_exists(right_path):
         return ""
-    # WS-A structural anchors available — attempt GumTree merge
-    val base_node = scv_parser_index_node_for_rel(root, rel)
-    if base_node == "":
+    val base_text = file_read(base_path)
+    val left_text = file_read(left_path)
+    val right_text = file_read(right_path)
+    val base_blocks = scv_text_block_names(base_text)
+    val left_blocks = scv_text_block_names(left_text)
+    val right_blocks = scv_text_block_names(right_text)
+    if base_blocks.len() == 0 and left_blocks.len() == 0 and right_blocks.len() == 0:
         return ""
-    # TODO(prod-003): need head-side syntax nodes from WS-A to compute real ops.
-    # Placeholder: diff base against itself always yields zero ops (dead path today).
-    # When WS-A delivers per-commit parse roots, pass left_node/right_node here.
-    val cfg = scv_default_match_config()
-    val left_node = base_node
-    val right_node = base_node
-    val left_ops = scv_compute_edit_script(root, base_node, left_node, cfg)
-    val right_ops = scv_compute_edit_script(root, base_node, right_node, cfg)
-    if left_ops.len() == 0 and right_ops.len() == 0:
+    val merged = scv_structural_merge_from_text(base_text, left_text, right_text)
+    if merged == "":
         return ""
-    # TODO(prod-003): apply left_ops + right_ops to produce merged text
-    # Unreachable until WS-A passes real left_node/right_node syntax roots.
-    ""
+    scv_write_merged_line_file(root, rel, merged)
 
 # ---------------------------------------------------------------------------
 

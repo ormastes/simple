@@ -5,7 +5,7 @@ use std.scv.core.{scv_status_index_path, scv_rel_path, scv_chunk_path, scv_line_
 use std.scv.working_copy.{scv_should_skip, scv_line_for_path, scv_line_chunk}
 use std.scv.store.{scv_content_id_for_file, scv_hash_text}
 use std.scv.anchor.{scv_anchor_display}
-use std.scv.structural_match.{scv_default_match_config, scv_structural_diff_ops_for_file}
+use std.scv.structural_match.{scv_default_match_config, scv_structural_diff_ops_for_file, scv_structural_diff_from_text}
 
 fn scv_trim_trailing_space(line: text) -> text:
     var end = line.len()
@@ -128,21 +128,21 @@ fn scv_diff_emit_unmatched(prefix: text, rows: text, used_paths: text) -> text:
             out = out + "{prefix} {path}\n"
     out
 
-fn scv_diff_emit_structural_ops(root: text, rel: text) -> text:
+fn scv_diff_emit_structural_ops(root: text, rel: text, old_text: text, new_text: text) -> text:
     val cfg = scv_default_match_config()
-    val ops = scv_structural_diff_ops_for_file(root, rel, cfg)
-    var out = ""
+    val ops = scv_structural_diff_from_text(old_text, new_text, cfg)
+    var result = ""
     for op in ops:
         val label = scv_anchor_display(op.anchor)
         if op.kind == "move":
-            out = out + "moved {label}\n"
+            result = result + "moved {label}\n"
         elif op.kind == "update":
-            out = out + "updated {label}\n"
+            result = result + "updated {label}\n"
         elif op.kind == "insert":
-            out = out + "added {label}\n"
+            result = result + "added {label}\n"
         elif op.kind == "delete":
-            out = out + "deleted {label}\n"
-    out
+            result = result + "deleted {label}\n"
+    result
 
 fn scv_diff(root: text, mode: text) -> text:
     val index = if file_exists(scv_status_index_path(root)): file_read(scv_status_index_path(root)) else: ""
@@ -163,7 +163,10 @@ fn scv_diff(root: text, mode: text) -> text:
             val new_chunk = scv_content_id_for_file(path)
             if old_chunk != new_chunk and not scv_diff_same_under_mode(root, path, old_chunk, mode):
                 if mode == "--structural":
-                    val struct_ops = scv_diff_emit_structural_ops(root, rel)
+                    val chunk_file = scv_chunk_path(root, old_chunk)
+                    val old_text = if file_exists(chunk_file): file_read(chunk_file) else: ""
+                    val new_text = file_read(path)
+                    val struct_ops = scv_diff_emit_structural_ops(root, rel, old_text, new_text)
                     if struct_ops != "":
                         out = out + struct_ops
                     else:

@@ -7,6 +7,7 @@ use std.scv.store.{scv_mark_current_state}
 use std.scv.core.{scv_parser_index_path, scv_object_path, scv_rel_path}
 use std.scv.core.{scv_state_parsed_error, scv_state_parsed_ok}
 use std.scv.parser_registry.{scv_langmap_validate, scv_language_for_path, scv_parser_for_path, scv_locked_parser_hash}
+use std.scv.wasm_executor.{scv_wasm_executor_available, scv_wasm_parse}
 
 fn scv_first_line(content: text) -> text:
     val lines = content.split("\n")
@@ -78,6 +79,8 @@ fn scv_fallback_semantic_hash(content: text) -> text:
 fn scv_parser_execution_for_kind(kind: text) -> text:
     if kind == "fallback-binary":
         "fallback-binary"
+    elif kind == "tree-sitter-wasm":
+        "tree-sitter-wasm"
     else:
         "fallback-line"
 
@@ -190,6 +193,23 @@ fn scv_fallback_syntax_root(root: text, path: text, content: text, language: tex
     val payload = "grammar: {parser_kind}\nversion: {parser_version}\nparser_hash: {parser_hash}\nexecution: fallback-line\nkind: file\nfield: root\nchildren: {child_ids}\npath: {rel}\nlanguage: {language}\nraw: {raw}\nsyntax: {syntax_hash}\nsemantic: {semantic_hash}\nparse_status: {parse_status}\n"
     scv_write_syntax_node(root, payload)
 
+fn scv_parse_file_wasm_or_fallback(root: text, path: text, content: text,
+                                    language: text, kind: text, version: text,
+                                    parser_hash: text, raw: text, syntax_hash: text,
+                                    semantic_hash: text, parse_status: text) -> text:
+    if kind == "tree-sitter-wasm" and scv_wasm_executor_available():
+        val (node_id, err) = scv_wasm_parse(root, language, kind, version, parser_hash, content)
+        if err != "":
+            scv_fallback_syntax_root(root, path, content, language,
+                                     kind, version, parser_hash,
+                                     raw, syntax_hash, semantic_hash, parse_status)
+        else:
+            node_id
+    else:
+        scv_fallback_syntax_root(root, path, content, language,
+                                 kind, version, parser_hash,
+                                 raw, syntax_hash, semantic_hash, parse_status)
+
 fn scv_parse_file(root: text, path: text) -> text:
     if not file_exists(path):
         return "ERROR missing file\n"
@@ -226,8 +246,8 @@ fn scv_parse_file(root: text, path: text) -> text:
         metric = "lines={content.split(\"\\n\").len()}"
         syntax_hash = scv_hash_text("syntax", "{kind}:{parser_version}:{parser_hash}:{scv_fallback_syntax_view(content)}")
         semantic_hash = scv_fallback_semantic_hash(content)
-        node = scv_fallback_syntax_root(root, path, content, language, kind, parser_version, parser_hash, raw, syntax_hash, semantic_hash, parse_status)
-    "path: {path}\nlanguage: {language}\nraw: {raw}\nsyntax: {syntax_hash}\nsemantic: {semantic_hash}\nnode: {node}\nparser: {kind}\nexecution: {scv_parser_execution_for_kind(kind)}\nstatus: {parse_status}\n{metric}\n"
+        node = scv_parse_file_wasm_or_fallback(root, path, content, language, kind, parser_version, parser_hash, raw, syntax_hash, semantic_hash, parse_status)
+    "path: {path}\nlanguage: {language}\nraw: {raw}\nsyntax: {syntax_hash}\nsemantic: {semantic_hash}\nnode: {node}\nparser: {kind}\nexecution={scv_parser_execution_for_kind(kind)}\nstatus: {parse_status}\n{metric}\n"
 
 fn scv_parse_index_line(root: text, path: text) -> text:
     val rel = scv_rel_path(root, path)
@@ -263,7 +283,7 @@ fn scv_parse_index_line(root: text, path: text) -> text:
         metric = "lines={content.split(\"\\n\").len()}"
         syntax_hash = scv_hash_text("syntax", "{kind}:{parser_version}:{parser_hash}:{scv_fallback_syntax_view(content)}")
         semantic_hash = scv_fallback_semantic_hash(content)
-        node = scv_fallback_syntax_root(root, path, content, language, kind, parser_version, parser_hash, raw, syntax_hash, semantic_hash, parse_status)
+        node = scv_parse_file_wasm_or_fallback(root, path, content, language, kind, parser_version, parser_hash, raw, syntax_hash, semantic_hash, parse_status)
     "{rel}|{language}|{raw}|{syntax_hash}|{semantic_hash}|{kind}|{parse_status}|{metric}|node={node}"
 
 fn scv_existing_parse_index_line(root: text, rel: text) -> text:
@@ -418,7 +438,7 @@ fn scv_parse_gate(root: text, path: text) -> text:
         val parts = cached.split("|")
         val status = if parts.len() >= 7: parts[6] else: "parsed_ok"
         val state = if status == "parsed_error": scv_state_parsed_error() else: scv_state_parsed_ok()
-        return "path: {path}\nlanguage: {parts[1]}\nraw: {parts[2]}\nsyntax: {parts[3]}\nsemantic: {parts[4]}\nparser: {parts[5]}\nexecution: {scv_parser_execution_for_kind(parts[5])}\nstatus: {status}\ncache: reused\n" + scv_mark_current_state(root, state)
+        return "path: {path}\nlanguage: {parts[1]}\nraw: {parts[2]}\nsyntax: {parts[3]}\nsemantic: {parts[4]}\nparser: {parts[5]}\nexecution={scv_parser_execution_for_kind(parts[5])}\nstatus: {status}\ncache: reused\n" + scv_mark_current_state(root, state)
     val result = scv_parse_file(root, path)
     if result.starts_with("ERROR"):
         return result
