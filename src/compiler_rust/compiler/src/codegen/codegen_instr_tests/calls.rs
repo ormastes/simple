@@ -1191,7 +1191,10 @@ fn codegen_inline_numeric_xor_sum_u64_data_does_not_emit_runtime_symbol() {
             value: 4096,
         });
         block.instructions.push(MirInst::ConstInt { dest: length, value: 0 });
-        block.instructions.push(MirInst::ConstInt { dest: xor_value, value: 0 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: xor_value,
+            value: 0,
+        });
         block.instructions.push(MirInst::Call {
             dest: Some(dest),
             target: crate::mir::CallTarget::from_name("rt_numeric_xor_sum_u64_data"),
@@ -1200,10 +1203,7 @@ fn codegen_inline_numeric_xor_sum_u64_data_does_not_emit_runtime_symbol() {
         dest
     });
 
-    assert!(!object_relocates_to_symbol(
-        &object,
-        "rt_numeric_xor_sum_u64_data"
-    ));
+    assert!(!object_relocates_to_symbol(&object, "rt_numeric_xor_sum_u64_data"));
 }
 
 #[test]
