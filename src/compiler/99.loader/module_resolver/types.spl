@@ -13,6 +13,7 @@ use parser.ast (
     ModulePath, Attribute, Visibility, CommonUseStmt,
     ExportUseStmt, AutoImportStmt, Capability
 )
+use compiler.common.gc_config (GcConfig)
 
 # ============================================================================
 # Compiler Backend
@@ -121,6 +122,17 @@ fn get_compiler_backend(ext: text) -> CompilerBackend:
 # Directory Manifest
 # ============================================================================
 
+enum AllocationCapability:
+    """Allocation capability advertised by a module manifest.
+
+    Unknown keeps legacy manifests compatible. NoAlloc means the module is
+    expected to stay stack/caller-storage only for restricted targets.
+    Allocating means the module may allocate or call allocation backends.
+    """
+    Unknown
+    NoAlloc
+    Allocating
+
 struct DirectoryManifest:
     """Represents a parsed __init__.spl directory manifest.
 
@@ -148,6 +160,13 @@ struct DirectoryManifest:
     # Empty means unrestricted (all effects allowed)
     capabilities: [Capability]
 
+    # GC mode declared by @no_gc/@gc directory attributes.
+    gc_config: GcConfig?
+
+    # Allocation behavior declared by @no_alloc/@alloc or inferred from a
+    # runtime-family manifest root.
+    allocation_capability: AllocationCapability
+
     # Whether this directory has the @bypass attribute.
     # Bypass directories are transparent for access control — they act as if
     # no __init__.spl exists. Only valid for directories with no .spl code files.
@@ -168,6 +187,8 @@ fn directorymanifest_new(name: text) -> DirectoryManifest:
             exports: [],
             auto_imports: [],
             capabilities: [],
+            gc_config: nil,
+            allocation_capability: AllocationCapability.Unknown,
             is_bypass: false
         )
 
@@ -193,6 +214,10 @@ struct ChildModule:
     # Module-specific attributes
     attributes: [Attribute]
 
+    # Optional GC and allocation metadata declared on the child module line.
+    gc_config: GcConfig?
+    allocation_capability: AllocationCapability
+
 
 # ============================================================================
 # ChildModule Methods (was: impl ChildModule:)
@@ -203,7 +228,9 @@ fn childmodule_new(name: text, visibility: Visibility) -> ChildModule:
         ChildModule(
             name: name,
             visibility: visibility,
-            attributes: []
+            attributes: [],
+            gc_config: nil,
+            allocation_capability: AllocationCapability.Unknown
         )
 
 

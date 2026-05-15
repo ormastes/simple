@@ -41,7 +41,7 @@ Date: 2026-05-13
 | Gap | Why It Still Matters |
 |-----|----------------------|
 | Compiler family enforcement remains partial | Runtime-family root attributes now include both `@no_gc` and `@gc`, but family membership is not fully mapped to manifest-backed compiler/interpreter hard errors for all modules. |
-| Noalloc allocation checker is partial | Direct noalloc imports from allocating runtime families, `app.*`, explicit `@alloc` markers, host allocation API calls, and unsafe reachable imports through helper modules are now blocked by regression tests and the baremetal verifier, and the noalloc family is checker-clean under rebuilt `simple check`; a compiler-owned manifest/capability model is still missing. |
+| Noalloc allocation checker is partial | Direct noalloc imports from allocating runtime families, `app.*`, explicit `@alloc` markers, host allocation API calls, and unsafe reachable imports through helper modules are now blocked by regression tests and the baremetal verifier, and the noalloc family is checker-clean under rebuilt `simple check`; resolver manifests now carry compiler-owned `AllocationCapability` metadata, but hard enforcement still depends on the covered strict-check/audit paths. |
 | SimpleOS direct POSIX imports remain inside `src/os` | This is acceptable for the current "libs must not depend POSIX" boundary, but replacing OS app/kernel direct POSIX calls with backend contracts would be a separate SimpleOS refactor. |
 
 ## Latest Verification

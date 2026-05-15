@@ -1,0 +1,43 @@
+"""
+Module resolver allocation-capability metadata regression.
+
+This locks the compiler-owned manifest surface used by target-restricted
+runtime-family checks. The test is source-scanning because the current
+interpreter cannot reliably import the module resolver implementation.
+"""
+
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _scan(pattern: text, path: text) -> text:
+    val cmd = "rg -n '" + pattern + "' " + path + " || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _has(pattern: text, path: text) -> bool:
+    _scan(pattern, path).len() > 0
+
+describe "module resolver allocation capability manifest":
+    it "stores allocation capability on directory manifests":
+        val path = "src/compiler/99.loader/module_resolver/types.spl"
+        expect(_has("enum AllocationCapability", path)).to_equal(true)
+        expect(_has("allocation_capability: AllocationCapability", path)).to_equal(true)
+
+    it "stores allocation capability on child module declarations":
+        val path = "src/compiler/99.loader/module_resolver/types.spl"
+        expect(_has("struct ChildModule", path)).to_equal(true)
+        expect(_has("gc_config: GcConfig\\?", path)).to_equal(true)
+        expect(_has("allocation_capability: AllocationCapability", path)).to_equal(true)
+
+    it "infers noalloc family roots as NoAlloc":
+        val path = "src/compiler/99.loader/module_resolver/manifest.spl"
+        expect(_has("fn allocation_capability_from_family_name", path)).to_equal(true)
+        expect(_has("nogc_async_mut_noalloc", path)).to_equal(true)
+        expect(_has("AllocationCapability\\.NoAlloc", path)).to_equal(true)
+
+    it "honors explicit allocation attributes":
+        val path = "src/compiler/99.loader/module_resolver/manifest.spl"
+        expect(_has("attr\\.name == \"no_alloc\"", path)).to_equal(true)
+        expect(_has("attr\\.name == \"alloc\"", path)).to_equal(true)
+        expect(_has("AllocationCapability\\.Allocating", path)).to_equal(true)

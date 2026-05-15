@@ -7,11 +7,29 @@
 # Port of: rust/compiler/src/module_resolver/manifest.rs (301 lines)
 
 
-use parser.ast (Module, Node, Capability, Effect, ImportTarget, Visibility)
+use parser.ast (Module, Node, Attribute, Capability, Effect, ImportTarget, Visibility)
 use parser (Parser)
-use compiler.module_resolver.types (ModuleResolver, DirectoryManifest, ChildModule)
+use compiler.module_resolver.types (ModuleResolver, DirectoryManifest, ChildModule, AllocationCapability)
 use compiler.common.error (CompileError, ErrorCode)
 use compiler.common.gc_config (GcMode, GcConfig)
+
+fn allocation_capability_from_family_name(name: text) -> AllocationCapability:
+    if name == "nogc_async_mut_noalloc":
+        return AllocationCapability.NoAlloc
+    if name == "common":
+        return AllocationCapability.Unknown
+    if name.starts_with("gc_") or name.starts_with("nogc_"):
+        return AllocationCapability.Allocating
+    AllocationCapability.Unknown
+
+fn allocation_capability_from_attributes(attrs: [Attribute], fallback: AllocationCapability) -> AllocationCapability:
+    var capability = fallback
+    for attr in attrs:
+        if attr.name == "no_alloc" or attr.name == "noalloc":
+            capability = AllocationCapability.NoAlloc
+        elif attr.name == "alloc":
+            capability = AllocationCapability.Allocating
+    capability
 
 # ============================================================================
 # Manifest Loading
@@ -150,6 +168,7 @@ impl ModuleResolver:
         val dir_name = path_basename(dir_path)
 
         var manifest = DirectoryManifest.new(dir_name)
+        manifest.allocation_capability = allocation_capability_from_family_name(dir_name)
 
         for item in module.items:
             match item:
@@ -167,21 +186,31 @@ impl ModuleResolver:
                                 manifest.gc_config = Some(GcConfig.from_module(GcMode.NoGc))
                             elif attr.name == "gc":
                                 manifest.gc_config = Some(GcConfig.from_module(GcMode.Gc))
+                        manifest.allocation_capability = allocation_capability_from_attributes(
+                            decl.attributes,
+                            manifest.allocation_capability
+                        )
                     else:
                         # This is a child module declaration
                         # Check for GC attributes on child module
                         var child_gc_config: GcConfig? = nil
+                        var child_allocation_capability = AllocationCapability.Unknown
                         for attr in decl.attributes:
                             if attr.name == "no_gc":
                                 child_gc_config = Some(GcConfig.from_module(GcMode.NoGc))
                             elif attr.name == "gc":
                                 child_gc_config = Some(GcConfig.from_module(GcMode.Gc))
+                            elif attr.name == "no_alloc" or attr.name == "noalloc":
+                                child_allocation_capability = AllocationCapability.NoAlloc
+                            elif attr.name == "alloc":
+                                child_allocation_capability = AllocationCapability.Allocating
 
                         manifest.child_modules.push(ChildModule(
                             name: decl.name.clone(),
                             visibility: decl.visibility,
                             attributes: decl.attributes.clone(),
-                            gc_config: child_gc_config
+                            gc_config: child_gc_config,
+                            allocation_capability: child_allocation_capability
                         ))
 
                 Node.CommonUseStmt(stmt):
