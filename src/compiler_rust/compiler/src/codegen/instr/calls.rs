@@ -730,6 +730,8 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     builder.append_block_param(tail_scalar_block, types::I64);
     builder.append_block_param(done_block, types::I64);
 
+    let xor_vec = builder.ins().splat(types::I64X2, xor_value);
+
     if raw_data {
         let length = length_arg.expect("raw numeric xor-sum lowering provides length");
         let negative_len = builder.ins().icmp(IntCC::SignedLessThan, length, zero);
@@ -790,7 +792,6 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     );
 
     builder.switch_to_block(chunk_block);
-    let xor_vec = builder.ins().splat(types::I64X2, xor_value);
     let value0 = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 0);
     let value1 = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 16);
     let value2 = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 32);
