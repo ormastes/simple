@@ -491,3 +491,17 @@ This improves `set_contains` again and removes byte occupancy dispatch from the
 hashset probe, but strict parity remains open. `hashset_contains` is still below
 the C fixed-table reference, and the median-selected `list_traverse` Rust ratio
 remains noisy across five-sample runs.
+
+Rejected follow-up:
+
+- Seeding parameter VRegs into the native codegen type map and routing
+  string-typed equality through `rt_string_eq` passed focused `vreg_types` and
+  u64 equality tests, but failed the clean source-closure collection build:
+  `missing runtime fn 'rt_string_eq' in HashSet.insert`. The experiment was
+  reverted rather than adding another runtime-map dependency to the pure Simple
+  source-closure path.
+- Declaring `rt_string_eq(left: text, right: text)` in the pure Simple
+  `HashSet` source and using it for insert/contains key comparisons preserved
+  the focused nogc_sync and nogc_async collection tests, but failed the
+  gc_async collection facade spec with `semantic: type mismatch: cannot convert
+  string to int`. The source-level rewrite was reverted.
