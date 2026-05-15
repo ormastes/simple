@@ -528,7 +528,9 @@ Rejected local variant:
   Rust` in a clean three-sample run. Reducing further to the C-sized
   `capacity` table regressed to `0.50x C / 0.83x Rust` and triggered the
   benchmark warning threshold. Both locality variants were reverted; the
-  retained `capacity * 8` table still provides the best observed C ratio.
+  retained `capacity * 8` table still provides the best observed C ratio for
+  the contains-only scoring used at the time. The later insert-inclusive
+  benchmark superseded this tradeoff.
 
 Focused validation:
 
@@ -644,6 +646,36 @@ hashset_insert    0.01x C / 0.06x Rust
 pure Simple construction/insert gap. Removing the dead bucket maintenance
 improved the probe insert ratio from about `0.02x Rust` to about `0.06x Rust`;
 it is still far from parity.
+
+## 2026-05-15 HashSet Insert Density Update
+
+Pure Simple `HashSet.with_capacity` now uses a `capacity * 2` probe table and
+capacity-aware array construction for `items`, `slot_keys`, `slot_used`, clear,
+remove, and storage rebuild. This intentionally gives back some contains-only
+sparsity to reduce construction and insert allocation work now that
+`hashset_insert` is part of the measured surface.
+
+Clean five-sample source-closure benchmark with rebuilt `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, and checksum parity:
+
+```text
+list_traverse     1.26x C / 0.82x Rust
+list_push         1.05x C / 2.05x Rust
+set_contains      1.93x C / 0.78x Rust
+hashset_contains  0.66x C / 1.02x Rust
+hashset_insert    0.03x C / 0.21x Rust
+```
+
+This keeps `hashset_contains` above Rust and improves the retained
+`hashset_insert` ratio from `0.06x Rust` to `0.21x Rust`, but insert remains
+well below both references and is still the largest measured pure Simple gap.
+
+Rejected insert follow-up:
+
+- Directly setting the text and byte array lengths after capacity allocation
+  made `hashset_insert` much faster in a probe run, but broke
+  `hashset_contains` checksum parity by leaving lookup storage semantically
+  invalid. The unsafe length-set shortcut was reverted.
 
 Rejected broader benchmark probes:
 
