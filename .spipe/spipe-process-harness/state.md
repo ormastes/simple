@@ -1,4 +1,4 @@
-# SStack State: spipe-process-harness
+# SPipe State: spipe-process-harness
 
 ## User Request
 > make spipe production level process harness; common hooks for Codex, Claude, Gemini; skill deploy infra; CLI HUD with model, jj worktree, commit, hours remaining, week remaining; goal state; prevention gate; commit pull rebase push.
