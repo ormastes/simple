@@ -568,3 +568,9 @@ Rejected follow-up:
   collection benchmark binary. The benchmark still preserved checksum parity,
   but the intended call-boundary optimization did not happen, so the inliner
   change was reverted.
+- Raising the MIR inliner limits to 16 blocks / 96 instructions and allowing
+  returning loop callees removed the hot `set_contains` call boundary and passed
+  updated focused inliner tests, but the clean five-sample source-closure
+  benchmark regressed `list_traverse` below C (`0.90x C / 0.73x Rust`) while
+  only nudging `set_contains` to `0.76x Rust`. The bounded loop-inliner change
+  was reverted.
