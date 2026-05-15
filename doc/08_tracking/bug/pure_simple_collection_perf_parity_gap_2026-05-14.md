@@ -663,11 +663,15 @@ Clean five-sample source-closure benchmark with rebuilt `simple-core`,
 list_traverse     1.18x C / 0.92x Rust
 list_push         1.29x C / 3.23x Rust
 set_contains      1.90x C / 0.77x Rust
-hashset_contains  0.55x C / 0.83x Rust
-hashset_insert    0.11x C / 0.73x Rust
+hashset_contains  0.53x C / 0.84x Rust
+hashset_insert    0.11x C / 0.80x Rust
 ```
 
-This improves the retained `hashset_insert` ratio from `0.06x Rust` to `0.73x
+The hot insert loop now mirrors the `contains` local-alias shape: it precomputes
+the mask, aliases `slot_keys` and `slot_used`, and avoids the general
+`_bucket_index_hash` helper because `with_capacity` normalizes the table to a
+power of two. This improves the retained `hashset_insert` ratio from `0.06x
+Rust` to `0.80x
 Rust`, but insert remains well below the C fixed-table reference and is still
 the largest measured pure Simple gap.
 
@@ -686,6 +690,10 @@ Rejected insert follow-up:
   / 0.18x Rust` and `hashset_insert` to `0.05x C / 0.35x Rust` because each
   probe paid text equality against the sentinel. The separate byte occupancy
   table was retained.
+- Moving insert probing to a pure Simple runtime helper
+  `rt_hashset_text_insert` compiled and linked through `simple-core`, but the
+  three-sample source-closure benchmark reported zero checksums for
+  `hashset_contains` and `hashset_insert`. The helper was reverted.
 
 Rejected broader benchmark probes:
 

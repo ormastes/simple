@@ -69,8 +69,8 @@ Representative Simple collection files exist under these families:
 list_traverse     1.18x C / 0.92x Rust
 list_push         1.29x C / 3.23x Rust
 set_contains      1.90x C / 0.77x Rust
-hashset_contains  0.55x C / 0.83x Rust
-hashset_insert    0.11x C / 0.73x Rust
+hashset_contains  0.53x C / 0.84x Rust
+hashset_insert    0.11x C / 0.80x Rust
 ```
 
 - The established read/push lanes clear the current warning floor with checksum
@@ -82,8 +82,9 @@ hashset_insert    0.11x C / 0.73x Rust
   Simple with checksum parity. Removing unused chained-bucket maintenance from
   the pure Simple `HashSet` insert path improved insertion, and using a
   `capacity`-sized probe table with repeat-filled text slots and zero-length-set
-  byte occupancy lifted the retained five-sample source-closure run to `0.11x C
-  / 0.73x Rust`. Insert parity remains the largest measured open gap.
+  byte occupancy plus local aliases in the insert probe loop lifted the
+  retained five-sample source-closure run to `0.11x C / 0.80x Rust`. Insert
+  parity remains the largest measured open gap.
 - Broader probes for `hashset_remove`, `hashset_intersection`, and
   `hashmap_contains_get` were not retained: the first two did not provide
   checksum-equivalent evidence in the probe harness, and the HashMap probe
