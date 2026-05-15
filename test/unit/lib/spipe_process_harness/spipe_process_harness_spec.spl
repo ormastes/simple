@@ -1,0 +1,86 @@
+use std.nogc_async_mut.spipe_process_harness.core.{
+    normalize_provider, state_path, event_log_path, provider_hook_events,
+    hook_command, hook_jsonl, gate_from_state, render_state, render_hud,
+    deploy_snippets
+}
+use std.nogc_async_mut.spipe_process_harness.types.{HudSnapshot}
+use std.spec.{describe, it, expect}
+
+describe "SPipe process harness":
+    describe "provider normalization":
+        it "normalizes the three supported LLM providers":
+            expect(normalize_provider("Claude Code")).to_equal("claude")
+            expect(normalize_provider("Codex GPT")).to_equal("codex")
+            expect(normalize_provider("Google Gemini")).to_equal("gemini")
+
+        it "keeps unknown provider names stable":
+            expect(normalize_provider("LocalAgent")).to_equal("localagent")
+
+    describe "state and event paths":
+        it "uses the default feature when blank":
+            expect(state_path("")).to_equal(".spipe/spipe-process-harness/state.md")
+            expect(event_log_path("")).to_equal(".spipe/spipe-process-harness/events.jsonl")
+
+        it "uses feature-specific durable state":
+            expect(state_path("demo")).to_equal(".spipe/demo/state.md")
+
+    describe "hook metadata":
+        it "lists Claude hook events":
+            val events = provider_hook_events("claude")
+            expect(events).to_contain("PreToolUse")
+            expect(events).to_contain("SessionStart")
+
+        it "builds provider-specific hook command":
+            expect(hook_command("gemini")).to_equal("bin/simple spipe-process-harness hook --provider gemini")
+
+        it "renders an append-only JSONL hook envelope":
+            val line = hook_jsonl("codex", "tool_start", "sid1", "gpt-5", "{\"x\":1}")
+            expect(line).to_contain("\"provider\":\"codex\"")
+            expect(line).to_contain("\"event\":\"tool_start\"")
+            expect(line).to_contain("\"session_id\":\"sid1\"")
+
+    describe "prevention gate":
+        it "blocks missing state":
+            val decision = gate_from_state("", true)
+            expect(decision.allowed).to_equal(false)
+            expect(decision.exit_code).to_equal(2)
+
+        it "blocks when approval is required and absent":
+            val state = render_state("demo", "request", "goal", false)
+            val decision = gate_from_state(state, true)
+            expect(decision.allowed).to_equal(false)
+            expect(decision.reason).to_equal("user approval missing")
+
+        it "allows approved state":
+            val state = render_state("demo", "request", "goal", true)
+            val decision = gate_from_state(state, true)
+            expect(decision.allowed).to_equal(true)
+            expect(decision.exit_code).to_equal(0)
+
+        it "blocks explicit prevention marker":
+            val decision = gate_from_state("User Approved: true\nPrevent: block\n", true)
+            expect(decision.allowed).to_equal(false)
+            expect(decision.reason).to_equal("SPipe prevention gate is blocking")
+
+    describe "HUD and deploy":
+        it "renders compact CLI HUD":
+            val snapshot = HudSnapshot(
+                model: "gpt-5",
+                jj_worktree: "abc",
+                commit_id: "def feat",
+                hours_remaining: "3",
+                week_remaining: "12",
+                goal: "ship"
+            )
+            val hud = render_hud(snapshot)
+            expect(hud).to_contain("model=gpt-5")
+            expect(hud).to_contain("jj=abc")
+            expect(hud).to_contain("goal=ship")
+
+        it "generates snippets for all providers":
+            val snippets = deploy_snippets()
+            expect(snippets.len()).to_equal(3)
+            expect(snippets[0].provider).to_equal("claude")
+            expect(snippets[1].provider).to_equal("codex")
+            expect(snippets[2].provider).to_equal("gemini")
+

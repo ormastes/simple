@@ -1,7 +1,7 @@
 # SPipe Process Harness User Approval Plan
 
 Date: 2026-05-15
-Status: awaiting explicit user approval
+Status: approved and implemented
 
 ## Objective
 
@@ -16,8 +16,8 @@ goal/SPipe gate that can prevent unsafe progress.
 The current workspace does not contain the previously referenced
 `spipe_process_harness_*` research, requirement, state, or completion-audit
 artifacts. The current dirty worktree contains unrelated `scv` feature changes.
-This plan therefore records the approvals needed before regenerating or
-recreating SPipe process harness artifacts.
+This plan records the approval and tracks the regenerated SPipe process harness
+artifacts.
 
 ## Recommended Selection
 
@@ -28,24 +28,21 @@ Recommended requirement selection:
 - NFR Option 3: hook-safe behavior, production gate targets, and operational HUD
   targets.
 
-This is only a recommendation. The repo rule requires the user to explicitly
-select requirements. A valid approval phrase is:
+The user selected full scope on 2026-05-15 with:
 
 ```text
-Approve Feature Option 3 and NFR Option 3 for SPipe process harness.
+do full scope and update plan and jj commit pull rebase and push
 ```
 
 ## User Verification Required
 
-The user must confirm these items before implementation starts:
+Completed user confirmations:
 
-1. Requirement selection:
-   - Confirm the exact feature option.
-   - Confirm the exact NFR option.
-   - Confirm whether unchosen option files should be deleted after final
-     requirement docs are written, as required by repo policy.
+1. Requirement selection: full shared hook/deploy/HUD/prevention scope.
+2. VCS action: commit, pull/rebase, and push after verification.
+3. Safety boundary: keep unrelated `scv` worktree changes untouched.
 
-2. Scope confirmation:
+Implementation scope:
    - Common hook infra must target Codex, Claude, and Gemini.
    - Hook behavior must preserve raw provider payloads for debugging and replay.
    - Hook behavior must normalize provider events into one internal contract.
@@ -61,38 +58,19 @@ The user must confirm these items before implementation starts:
    - The SPipe prevent/gate mechanism must block or fail progress when required
      state, checks, or approvals are missing.
 
-3. Design approval:
-   - Approve final architecture document.
-   - Approve final detail design.
-   - Approve TUI/HUD design if the HUD is interactive.
-   - Approve system test plan and SPipe spec locations.
+## Remaining Work
 
-4. Verification approval:
-   - Confirm acceptable local smoke commands if `bin/simple` is absent.
-   - Confirm required hook validation method for Codex, Claude, and Gemini
-     configs.
-   - Confirm whether live client manual verification is required or whether
-     config/rendered-hook tests are enough.
-
-5. VCS approval:
-   - Approve committing only SPipe process harness changes.
-   - Approve leaving unrelated current `scv` worktree changes untouched.
-   - Approve `jj pull --rebase` or repo-local equivalent before push.
-   - Approve push target and remote/branch.
-
-## Remaining Work After Approval
-
-1. Recreate research artifacts if absent:
+1. Created research artifacts:
    - `doc/01_research/local/spipe_process_harness.md`
    - `doc/01_research/domain/spipe_process_harness.md`
 
-2. Write selected final requirements:
+2. Created selected final requirements:
    - `doc/02_requirements/feature/spipe_process_harness.md`
    - `doc/02_requirements/nfr/spipe_process_harness.md`
 
-3. Remove unchosen option artifacts after final requirement docs exist.
+3. No unchosen option artifacts existed in this workspace.
 
-4. Create design artifacts:
+4. Created design artifacts:
    - `doc/04_architecture/spipe_process_harness.md`
    - `doc/05_design/spipe_process_harness.md`
    - `doc/05_design/spipe_process_harness_tui.md`
@@ -100,7 +78,7 @@ The user must confirm these items before implementation starts:
    - `doc/03_plan/agent_tasks/spipe_process_harness.md`
    - `doc/06_spec/app/<app_name>/feature/spipe_process_harness_spec.spl`
 
-5. Implement:
+5. Implemented:
    - Common provider hook event model.
    - Codex hook adapter/config deployment.
    - Claude hook adapter/config deployment.
@@ -111,24 +89,21 @@ The user must confirm these items before implementation starts:
    - Durable `.spipe/<feature>/state.md` goal state integration.
    - SPipe gate/prevent command.
 
-6. Verify:
+6. Verification:
    - Unit and integration tests for adapters, deploy/update, HUD, goal state, and
      gates.
    - Config generation tests for Codex, Claude, and Gemini.
    - SPipe quality checks for non-stub tests.
    - Runtime smoke checks available in this workspace.
 
-7. Ship after explicit user approval:
+7. Ship:
    - Review dirty worktree and separate unrelated changes.
    - Commit SPipe process harness changes.
    - Pull/rebase.
    - Re-run required verification after rebase.
    - Push to the approved remote/branch.
 
-## Approval Phrase Needed
+## Approval State
 
-To proceed, the user should reply with:
-
-```text
-Approve Feature Option 3 and NFR Option 3. Proceed with the plan doc, keep unrelated scv changes untouched, and ask again before jj commit/rebase/push.
-```
+No further user approval is needed for this requested scope. The remaining VCS
+work must still avoid committing unrelated `scv` changes.

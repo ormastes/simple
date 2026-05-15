@@ -118,7 +118,7 @@ Implemented and checked:
 - Raw, syntax, trailing-space, and language-sensitive formatting-policy diff modes, including exact-content rename detection.
 - Parse, compile, test, and public-ready gates.
 - File/tree merge with bounded exact-content move handling, merge input tree validation, conflict objects, conflict listing, conflict resolution, and conflict-aware GC behavior.
-- Integrity capsule: fsck validates byte objects, chunk parts, all tree object row/path/chunk integrity, all tree/file path-chunk-size linkage, parser lock uniqueness, parser-index syntax node id safety, parser-root lock/hash/execution identity, parser-index path and row/root field consistency, current HEAD_OP, current bookmark and workspace rows/targets, operation-view head/bookmark/workspace rows and targets, operation parent/view id safety, commit/change ref id safety, optional object-index DB rows, operation views, operation parents, commit parents, change latest/predecessor commits, commit-to-change links, and deterministic metadata object hashes.
+- Integrity capsule: fsck validates byte objects, chunk parts, all tree object row/path/chunk integrity, tree row file/chunk id safety, all tree/file path-chunk-size linkage, parser lock uniqueness, parser-index syntax node id safety, parser-root lock/hash/execution identity, parser-index path and row/root field consistency, current HEAD_OP, current bookmark and workspace rows/targets, operation-view head/bookmark/workspace rows and targets, operation parent/view id safety, commit/change ref id safety, optional object-index DB rows, operation views, operation parents, commit parents, change latest/predecessor commits, commit-to-change links, and deterministic metadata object hashes.
 - Fast-import capsule: bounded Git fast-import export/import with byte-count blob imports that also record large-payload chunk lists, regular/executable file updates, delete/deleteall imports that remove tracked paths, rename/copy imports, quoted-path application, and parent-aware delete emission.
 - Fast-import format capsule: metadata-payload skipping, duplicate and nonnumeric blob-mark rejection, Git ref-format branch and parent-ref validation, commit-context validation for file/delete/rename/copy/deleteall commands, byte-count public-export verification with blob-mark, command, parent-ref, shared worktree-path validation, quoted-path token parsing, and malformed/unquoted-path safety checks.
 - Storage maintenance: stats, DB index, manifest export/import with chunk validation, exact row shape, duplicate path rejection, and reserved metadata path rejection, GC dry-run/prune including syntax-node and operation-view bookmark reachability.
@@ -170,7 +170,6 @@ Latest focused verification:
 
 ## Remaining Hardening Plan
 
-- Validate tree row file and chunk ids before any object path lookup, matching the operation and commit/change ref safety pattern.
 - Validate parser lock artifact hashes as object ids before artifact path construction.
 - Split `src/lib/scv/integrity.spl` if additional fsck checks push it near the 800-line guard.
 

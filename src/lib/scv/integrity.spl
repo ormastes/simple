@@ -20,6 +20,8 @@ fn scv_current_tree_content(root: text) -> text:
         ""
 
 fn scv_validate_file_chunk_parts(root: text, file_id: text) -> text:
+    if not scv_object_ref_safe(file_id, "file_"):
+        return "bad file object ref: {file_id}\n"
     val path = scv_object_path(root, "files", file_id)
     if not file_exists(path):
         return "missing file object: {file_id}\n"
@@ -38,6 +40,9 @@ fn scv_validate_file_chunk_parts(root: text, file_id: text) -> text:
             errors = errors + "bad chunk part: {trimmed}\n"
             continue
         val chunk = parts[0]
+        if not scv_object_ref_safe(chunk, "sha256_"):
+            errors = errors + "bad chunk part ref: {chunk}\n"
+            continue
         val chunk_path = scv_chunk_path(root, chunk)
         if not file_exists(chunk_path):
             errors = errors + "missing chunk part: {chunk}\n"
@@ -46,6 +51,10 @@ fn scv_validate_file_chunk_parts(root: text, file_id: text) -> text:
     errors
 
 fn scv_validate_tree_file_link(root: text, rel: text, file_id: text, chunk: text, size_text: text) -> text:
+    if not scv_object_ref_safe(file_id, "file_"):
+        return "bad tree file ref: {file_id}\n"
+    if not scv_object_ref_safe(chunk, "sha256_"):
+        return "bad tree chunk ref: {chunk}\n"
     val path = scv_object_path(root, "files", file_id)
     if not file_exists(path):
         return "missing file object: {file_id}\n"
@@ -60,6 +69,15 @@ fn scv_validate_tree_file_link(root: text, rel: text, file_id: text, chunk: text
     val file_size = scv_object_field(content, "size")
     if file_size != size_text:
         errors = errors + "tree file size mismatch: {file_id}\n"
+    errors
+
+fn scv_validate_tree_row_object_refs(tree_id: text, file_id: text, chunk: text) -> text:
+    val label = if tree_id == "": "" else: "{tree_id} "
+    var errors = ""
+    if not scv_object_ref_safe(file_id, "file_"):
+        errors = errors + "bad tree file ref: {label}{file_id}\n"
+    if not scv_object_ref_safe(chunk, "sha256_"):
+        errors = errors + "bad tree chunk ref: {label}{chunk}\n"
     errors
 
 fn scv_validate_syntax_node(root: text, node_id: text, visited: text) -> (text, text):
@@ -543,6 +561,10 @@ fn scv_validate_tree_object_rows(root: text, tree_id: text, content: text) -> te
         val file_id = parts[1]
         val chunk = parts[2]
         val size_text = parts[3]
+        val ref_errors = scv_validate_tree_row_object_refs(tree_id, file_id, chunk)
+        if ref_errors != "":
+            errors = errors + ref_errors
+            continue
         val size = size_text.to_i64() ?? -1
         val chunk_path = scv_chunk_path(root, chunk)
         if not file_exists(scv_object_path(root, "files", file_id)):
@@ -657,6 +679,10 @@ fn scv_fsck(root: text) -> text:
         val file_id = parts[1]
         val chunk = parts[2]
         val size_text = parts[3]
+        val ref_errors = scv_validate_tree_row_object_refs("", file_id, chunk)
+        if ref_errors != "":
+            errors = errors + ref_errors
+            continue
         val size = parts[3].to_i64() ?? -1
         val chunk_path = scv_chunk_path(root, chunk)
         if not file_exists(chunk_path):

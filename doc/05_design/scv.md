@@ -51,7 +51,9 @@ byte-exact behavior; fsck validates both whole-file and part chunks.
 object's path, whole-file chunk, and size fields before accepting the tree/file
 linkage. It also walks every stored tree object, including non-current trees,
 and validates exact row shape, duplicate paths, file object presence, chunk
-presence, chunk size, and chunk hash.
+presence, chunk size, and chunk hash. Tree row file refs must be safe `file_`
+object ids and chunk refs must be safe `sha256_` object ids before `fsck`
+resolves them into object paths.
 `fsck` also validates derived parser-index root nodes and child syntax-node
 references when parser index metadata exists. Syntax nodes must carry execution
 metadata consistent with their grammar, so a future Tree-sitter execution result
