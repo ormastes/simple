@@ -3,21 +3,22 @@
 use std.cli.cli_util (get_cli_args)
 use app.io.mod (cwd)
 use std.scv.store.{scv_init_repo, scv_restore_op, scv_mark_current_state}
-use std.scv.working_copy.{scv_snapshot, scv_auto_snapshot, scv_watch, scv_status, scv_log, scv_op_log}
+use std.scv.working_copy.{scv_snapshot, scv_auto_snapshot, scv_watch, scv_status, scv_log, scv_log_branch, scv_op_log}
 use std.scv.parser.{scv_parse_gate, scv_parse_index}
 use std.scv.parser_registry.{scv_parsers, scv_parser_install, scv_parser_verify, scv_langmap, scv_langmap_set}
 use std.scv.diff.{scv_diff}
 use std.scv.gates.{scv_compile_gate, scv_test_gate, scv_public_ready}
-use std.scv.maintenance.{scv_stats, scv_export_tree, scv_export_manifest, scv_import_manifest, scv_rebuild_object_index, scv_gc_dry_run, scv_gc_prune}
+use std.scv.maintenance.{scv_stats, scv_export_tree, scv_export_manifest, scv_import_manifest, scv_rebuild_object_index, scv_gc_dry_run, scv_gc_prune, scv_gc}
 use std.scv.fast_import.{scv_export_git_fast_import, scv_import_git_fast_import}
 use std.scv.integrity.{scv_fsck}
-use std.scv.pack.{scv_pack_status, scv_pack_write, scv_pack_verify, scv_pack_import, scv_private_sync, scv_private_sync_verify, scv_private_sync_import}
+use std.scv.pack.{scv_pack_status, scv_pack_write, scv_pack_verify, scv_pack_import, scv_pack_write_v2, scv_pack_verify_v2, scv_pack_read_object, scv_private_sync, scv_private_sync_verify, scv_private_sync_import}
 use std.scv.public_remote.{scv_public_export, scv_public_export_verify, scv_public_push, scv_public_push_verify, scv_public_pull}
+use std.scv.network_remote.{scv_network_push, scv_network_push_chunked, scv_network_push_cas, scv_network_push_verify, scv_network_pull, scv_network_config_set_auth, scv_network_config_set_tls_no_verify, scv_network_pull_simulate_interrupt, scv_network_pull_discard}
 use std.scv.merge.{scv_merge_commits, scv_conflicts, scv_resolve_conflict}
-use std.scv.refs.{scv_bookmarks, scv_bookmark_set}
+use std.scv.refs.{scv_bookmarks, scv_bookmark_set, scv_tag_list, scv_tag_set}
 
 fn scv_help() -> text:
-    "Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set>\n"
+    "Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set>\n"
 
 fn scv_cli_result(result: text) -> i64:
     print result
@@ -71,7 +72,11 @@ fn main() -> i64:
         case "status", "st":
             return scv_cli_result(scv_status(root))
         case "log":
-            return scv_cli_result(scv_log(root))
+            val log_branch = if args.len() >= 2: args[1] else: ""
+            if log_branch == "":
+                return scv_cli_result(scv_log(root))
+            else:
+                return scv_cli_result(scv_log_branch(root, log_branch))
         case "op-log":
             return scv_cli_result(scv_op_log(root))
         case "restore-op":
@@ -146,8 +151,21 @@ fn main() -> i64:
             if args.len() < 2:
                 print "ERROR export-git-fast-import requires an output path"
                 return 1
-            val branch = if args.len() >= 3: args[2] else: "main"
-            return scv_cli_result(scv_export_git_fast_import(root, args[1], branch))
+            var export_branch = "main"
+            var export_since = ""
+            var export_i = 2
+            while export_i < args.len():
+                val export_arg = args[export_i]
+                if export_arg == "--since":
+                    if export_i + 1 >= args.len():
+                        print "ERROR --since requires a commit id"
+                        return 1
+                    export_since = args[export_i + 1]
+                    export_i = export_i + 1
+                elif not export_arg.starts_with("--"):
+                    export_branch = export_arg
+                export_i = export_i + 1
+            return scv_cli_result(scv_export_git_fast_import(root, args[1], export_branch, export_since))
         case "import-git-fast-import":
             if args.len() < 2:
                 print "ERROR import-git-fast-import requires an input path"
@@ -168,6 +186,24 @@ fn main() -> i64:
                 return 1
             val pack_id = if args.len() >= 3: args[2] else: ""
             return scv_cli_result(scv_pack_import(root, args[1], pack_id))
+        case "pack-write-v2":
+            return scv_cli_result(scv_pack_write_v2(root))
+        case "pack-verify-v2":
+            val pack_id_v2 = if args.len() >= 2: args[1] else: ""
+            return scv_cli_result(scv_pack_verify_v2(root, pack_id_v2))
+        case "pack-read-object":
+            if args.len() < 3:
+                print "ERROR pack-read-object requires kind and object-id"
+                return 1
+            val kind = args[1]
+            val object_id = args[2]
+            val pack_filter = if args.len() >= 4: args[3] else: ""
+            val data = scv_pack_read_object(root, pack_filter, object_id)
+            if data.len() == 0:
+                print "ERROR pack-read-object not found: {object_id}"
+                return 1
+            print text.from_bytes(data)
+            return 0
         case "private-sync":
             if args.len() < 2:
                 print "ERROR private-sync requires an output directory"
@@ -216,6 +252,8 @@ fn main() -> i64:
             return scv_cli_result(scv_gc_dry_run(root))
         case "gc-prune":
             return scv_cli_result(scv_gc_prune(root))
+        case "gc":
+            return scv_cli_result(scv_gc(root))
         case "merge-commits":
             if args.len() < 4:
                 print "ERROR merge-commits requires base, left, and right commits"
@@ -236,6 +274,96 @@ fn main() -> i64:
                 return 1
             val commit = if args.len() >= 3: args[2] else: ""
             return scv_cli_result(scv_bookmark_set(root, args[1], commit))
+        case "network-push":
+            if args.len() < 3:
+                print "ERROR network-push requires a base URL and remote directory"
+                return 1
+            var net_push_branch = "main"
+            var net_push_chunk = 0
+            var net_push_i = 3
+            while net_push_i < args.len():
+                val net_push_arg = args[net_push_i]
+                if net_push_arg.starts_with("--chunk-bytes="):
+                    net_push_chunk = net_push_arg[14:].to_i64() ?? 0
+                elif not net_push_arg.starts_with("--"):
+                    net_push_branch = net_push_arg
+                net_push_i = net_push_i + 1
+            if net_push_chunk > 0:
+                return scv_cli_result(scv_network_push_chunked(args[1], args[2], net_push_branch, net_push_chunk))
+            return scv_cli_result(scv_network_push(args[1], args[2], net_push_branch))
+        case "network-push-verify":
+            if args.len() < 2:
+                print "ERROR network-push-verify requires a remote directory"
+                return 1
+            val branch = if args.len() >= 3: args[2] else: "main"
+            return scv_cli_result(scv_network_push_verify(args[1], branch))
+        case "network-push-cas":
+            if args.len() < 5:
+                print "ERROR network-push-cas requires base URL, remote directory, branch, and old-etag"
+                return 1
+            return scv_cli_result(scv_network_push_cas(args[1], args[2], args[3], args[4]))
+        case "network-pull":
+            if args.len() < 3:
+                print "ERROR network-pull requires a base URL and remote directory"
+                return 1
+            val branch = if args.len() >= 4: args[3] else: "main"
+            return scv_cli_result(scv_network_pull(args[1], args[2], branch))
+        case "network-pull-simulate-interrupt":
+            if args.len() < 3:
+                print "ERROR network-pull-simulate-interrupt requires a base URL and remote directory"
+                return 1
+            val nps_branch = if args.len() >= 4: args[3] else: "main"
+            return scv_cli_result(scv_network_pull_simulate_interrupt(args[1], args[2], nps_branch))
+        case "network-pull-discard":
+            if args.len() < 2:
+                print "ERROR network-pull-discard requires a remote directory"
+                return 1
+            val npd_branch = if args.len() >= 3: args[2] else: "main"
+            return scv_cli_result(scv_network_pull_discard(args[1], npd_branch))
+        case "network-config":
+            if args.len() < 2:
+                print "ERROR network-config requires a subcommand"
+                return 1
+            if args[1] == "set-auth":
+                if args.len() < 3:
+                    print "ERROR network-config set-auth requires an auth kind"
+                    return 1
+                val kind = args[2]
+                if kind == "token":
+                    var header_name = "Authorization"
+                    var token_val = ""
+                    var nc_i = 3
+                    while nc_i < args.len():
+                        val nc_arg = args[nc_i]
+                        if nc_arg.starts_with("--header="):
+                            header_name = nc_arg[9:]
+                        elif nc_arg.starts_with("--token="):
+                            token_val = nc_arg[8:]
+                        nc_i = nc_i + 1
+                    return scv_cli_result(scv_network_config_set_auth(kind, header_name, token_val))
+                print "ERROR network-config set-auth unknown kind: {kind}"
+                return 1
+            if args[1] == "set-tls-no-verify":
+                var base_url_nc = ""
+                var nc2_i = 2
+                while nc2_i < args.len():
+                    val nc2_arg = args[nc2_i]
+                    if nc2_arg.starts_with("--base-url="):
+                        base_url_nc = nc2_arg[11:]
+                    nc2_i = nc2_i + 1
+                if base_url_nc == "":
+                    print "ERROR network-config set-tls-no-verify requires --base-url="
+                    return 1
+                return scv_cli_result(scv_network_config_set_tls_no_verify(base_url_nc))
+            print "ERROR network-config unknown subcommand: {args[1]}"
+            return 1
+        case "tag-list":
+            return scv_cli_result(scv_tag_list(root))
+        case "tag-set":
+            if args.len() < 3:
+                print "ERROR tag-set requires a name and commit"
+                return 1
+            return scv_cli_result(scv_tag_set(root, args[1], args[2]))
         case _:
             print scv_help()
             return 1
