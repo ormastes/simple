@@ -374,3 +374,7 @@ Follow-up experiments rejected:
   `rt_hashset_text_contains` avoided generic library indexing at the callsite
   but regressed the text membership benchmark to `0.27x` C / `0.43x` Rust in a
   clean five-sample source-closure run. The helper was reverted.
+- Adding a byte-loop short-string fast path to pure Simple `rt_string_eq`
+  avoided libc `memcmp` for the benchmark's small keys, but still measured
+  `hashset_contains` at `0.49x` C / `0.81x` Rust in a clean five-sample run.
+  The fast path was reverted.
