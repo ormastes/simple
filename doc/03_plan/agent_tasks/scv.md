@@ -1,6 +1,11 @@
-# SCV Agent Task Plan
+# SCV Implementation Plan
 
-Status: implementation plan with MVP progress, 2026-05-14.
+Status: MVP implemented with production hardening deferred, 2026-05-15.
+
+This document is the official SCV implementation and delivery plan. It is not a
+local-only agent checklist. Agent assignments below are workstream labels for
+parallel execution; the authoritative scope, gates, and completion status are
+owned by the SCV feature plan.
 
 ## Objective
 
@@ -28,9 +33,39 @@ Build `scv`, a Simple-native versioning system inspired by Git and Jujutsu. The 
 7. Pack storage and GC: content-defined chunking, pack files, compression, reachability.
 8. Git import/export: make the new model usable with existing repos.
 
-## Spawn Agent Breakdown
+## Official Delivery Status
 
-### Agent A: Local Research
+### Implemented MVP Scope
+
+The MVP is implemented at feature-slice level. It includes byte-exact private
+history, operation log, working-copy snapshots, parser-index metadata,
+formatting-aware diffs, file/tree merge, conflict objects, gates, maintenance,
+bounded fast-import interop, packs, filesystem-backed public remote, and CLI
+registration.
+
+### Not Complete For Production Scope
+
+SCV is not fully production-complete. The remaining work is intentionally
+tracked as production feature requests:
+
+- Tree-sitter WASM parser execution.
+- Changed-range persistent syntax subtree rebuild.
+- GumTree-grade structural diff and merge.
+- Full Git interoperability beyond the bounded fast-import subset.
+- Network remote transport beyond filesystem-backed public remotes.
+- Delta pack chains for archival pack efficiency.
+
+### Completion Answer
+
+For the selected MVP slice: complete, subject to keeping focused verification
+green as related SCV edits continue.
+
+For the full long-term SCV product: remains. The deferred production requests
+below must be implemented and verified before calling SCV fully complete.
+
+## Official Workstreams
+
+### Workstream A: Local Research
 
 Scope: read existing VCS, storage, DB, compression, hash, file I/O, process, and jj-related code.
 
@@ -40,7 +75,9 @@ Outputs:
 - Candidate reuse map for DB/compress/hash/file modules.
 - Existing CLI integration points.
 
-### Agent B: Domain Research
+Status: done.
+
+### Workstream B: Domain Research
 
 Scope: research primary sources for Jujutsu operation log/change IDs, Tree-sitter incremental parsing and grammar packaging, GumTree/ChangeDistiller structural diff, Git pack format, FastCDC, IPFS Merkle DAGs, SQLite WAL or LMDB transaction models.
 
@@ -49,7 +86,9 @@ Outputs:
 - `doc/01_research/domain/scv.md`
 - Source-backed risk notes and MVP recommendations.
 
-### Agent C: Architecture And Detail Design
+Status: done.
+
+### Workstream C: Architecture And Detail Design
 
 Scope: produce MDSOC+ architecture, module boundaries, data objects, transaction model, command surface, parser registry, and storage lifecycle.
 
@@ -60,7 +99,9 @@ Outputs:
 
 Include startup path, hot request paths, cache/index strategy, invalidation strategy, latency/RSS targets, and platform targets.
 
-### Agent D: Test Design
+Status: done; update when deferred production requests are selected.
+
+### Workstream D: Test Design
 
 Scope: turn requirements into SPipe system and integration tests.
 
@@ -72,7 +113,9 @@ Outputs:
 
 Use only built-in matchers.
 
-### Agent E: Raw Core Implementation
+Status: done for MVP.
+
+### Workstream E: Raw Core Implementation
 
 Owned files:
 
@@ -83,7 +126,9 @@ Owned files:
 
 Implement MVP steps 1 and 2 only. Do not implement Tree-sitter in this slice.
 
-### Agent F: Parser/Diff/Gates Implementation
+Status: done for MVP raw core and working-copy command scope.
+
+### Workstream F: Parser/Diff/Gates Implementation
 
 Owned files:
 
@@ -94,7 +139,9 @@ Owned files:
 
 Implement fallback parser, parser registry lockfile, raw/line diff, and parse/compile/test state transitions.
 
-### Agent G: Maintenance Implementation
+Status: done for MVP fallback parser, diff, and gate scope.
+
+### Workstream G: Maintenance Implementation
 
 Owned files:
 
@@ -106,6 +153,24 @@ Owned files:
 Implement stats, fsck, content-defined chunk list, pack-status, GC dry-run, private
 backup/export primitives, public remote artifacts, and bounded interchange
 format validation.
+
+Status: done for MVP; production network transport and delta chains remain
+deferred.
+
+## Release Gates
+
+SCV MVP can be treated as releasable only when:
+
+- focused SCV checks pass on all SCV source and test files
+- integration specs listed under Current Implementation Evidence remain green
+- `fsck` validates active and stored object graphs
+- byte identity tests prove same-size edits change content IDs
+- private snapshots still succeed when parser/compiler/test gates fail
+- public export/push remains gated by `public_ready`
+- primary and compatibility platform targets are documented
+
+The long-term SCV product can be called complete only after all production
+feature requests below are implemented, tested, and moved out of deferred state.
 
 ## Current Implementation Evidence
 
