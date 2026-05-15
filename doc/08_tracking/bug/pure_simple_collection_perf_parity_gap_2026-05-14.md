@@ -543,3 +543,12 @@ hashset_contains  0.65x C / 1.08x Rust
 This lifts `hashset_contains` over the Rust reference in this run, but strict
 parity remains open because it is still below the C fixed-table reference and
 `list_traverse` / `set_contains` remain below Rust in the median-selected run.
+
+Rejected follow-up:
+
+- A type-directed native codegen inline for `text == text` seeded parameter and
+  string-literal VRegs, emitted byte equality directly, and passed focused
+  compiler tests proving no `rt_native_eq` / `rt_string_eq` relocation for a
+  direct string equality object. A rebuilt three-sample source-closure
+  collection run preserved checksum parity but regressed `hashset_contains` to
+  `0.55x C / 0.99x Rust`, so the codegen change was reverted.
