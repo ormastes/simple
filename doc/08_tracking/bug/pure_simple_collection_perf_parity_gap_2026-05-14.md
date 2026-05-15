@@ -799,3 +799,33 @@ C / 1.68x Rust` and keeps `hashset_contains` above the C warning floor in the
 retained run. Strict parity remains open because `hashset_insert` is still well
 below the C fixed-table reference, while `list_traverse`, `set_contains`, and
 `hashset_contains` still trail the fastest C/Rust reference.
+
+## 2026-05-15 Typed Text Array And No-Fill HashSet Update
+
+MIR lowering now routes `Array<text>` indexing and assignment through
+text-specific runtime calls so Cranelift can inline them as word-slot
+loads/stores without the packed-byte branch required by generic `rt_array_get`
+and `rt_array_set`. The interpreter maps those text-specific calls back to the
+existing array handlers, preserving interpreter HashSet behavior. The typed
+`[u8]` store fast path now mirrors the existing typed `[u8]` load fast path and
+stores directly into packed byte arrays. Pure Simple `HashSet` also avoids
+filling every key slot with `""` on allocation/rebuild; it allocates text
+capacity, sets the logical length, and relies on `slot_used` to guard key reads.
+
+Clean five-sample source-closure benchmark with rebuilt `simple-core`,
+`SIMPLE_NATIVE_CPU=native`, checksum parity, and no unresolved Rust runtime
+symbols in `build/perf/collections/collection_simple`:
+
+```text
+list_traverse     1.52x C / 1.09x Rust
+list_push         1.03x C / 2.02x Rust
+set_contains      1.73x C / 0.70x Rust
+hashset_contains  0.54x C / 0.83x Rust
+hashset_insert    0.27x C / 1.85x Rust
+```
+
+This improves retained `hashset_insert` from `0.24x C / 1.68x Rust` to `0.27x
+C / 1.85x Rust`, keeps checksum parity, and keeps the collection binary free of
+unresolved Rust runtime symbols. Strict parity remains open because
+`hashset_insert` is still below the C fixed-table reference, while
+`set_contains` and `hashset_contains` still trail Rust throughput in this run.

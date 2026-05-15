@@ -429,6 +429,12 @@ pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue 
     }
 }
 
+/// Get a text element from a word-backed array.
+#[no_mangle]
+pub extern "C" fn rt_array_get_text(array: RuntimeValue, index: i64) -> RuntimeValue {
+    rt_array_get(array, index)
+}
+
 /// Set an element in an array
 #[no_mangle]
 pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeValue) -> bool {
@@ -450,6 +456,12 @@ pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeVa
         (*arr).as_mut_slice()[idx as usize] = value;
         true
     }
+}
+
+/// Set a text element in a word-backed array.
+#[no_mangle]
+pub extern "C" fn rt_array_set_text(array: RuntimeValue, index: i64, value: RuntimeValue) -> bool {
+    rt_array_set(array, index, value)
 }
 
 /// Read a single byte from a `[u8]`-style runtime array.
@@ -531,6 +543,11 @@ pub extern "C" fn rt_array_set_len_known(header_ptr: i64, len: i64) -> bool {
         (*arr).len = len as u64;
         true
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_array_set_len_known_text(header_ptr: i64, len: i64) -> bool {
+    rt_array_set_len_known(header_ptr, len)
 }
 
 #[no_mangle]

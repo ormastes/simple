@@ -66,11 +66,11 @@ Representative Simple collection files exist under these families:
   checksum parity:
 
 ```text
-list_traverse     0.77x C / 0.69x Rust
-list_push         1.28x C / 2.56x Rust
-set_contains      1.91x C / 0.77x Rust
-hashset_contains  0.52x C / 0.81x Rust
-hashset_insert    0.24x C / 1.68x Rust
+list_traverse     1.52x C / 1.09x Rust
+list_push         1.03x C / 2.02x Rust
+set_contains      1.73x C / 0.70x Rust
+hashset_contains  0.54x C / 0.83x Rust
+hashset_insert    0.27x C / 1.85x Rust
 ```
 
 - The established push and set/hash read lanes clear the current warning floor with checksum
@@ -82,9 +82,9 @@ hashset_insert    0.24x C / 1.68x Rust
 - The benchmark now also covers `hashset_insert` across C, Rust, and pure
   Simple with checksum parity. Removing the legacy side `items` array from
   pure Simple `HashSet`, retaining runtime-backed slot initialization, and
-  lowering text slot writes plus occupied-slot text comparisons away from
+  lowering text slot writes/loads plus occupied-slot text comparisons away from
   generic runtime dispatch lifted the retained five-sample source-closure run
-  to `0.24x C / 1.68x Rust`. Insert is now above Rust parity in this run, but
+  to `0.27x C / 1.85x Rust`. Insert is now above Rust parity in this run, but
   remains the largest measured C gap.
 - Broader probes for `hashset_remove`, `hashset_intersection`, and
   `hashmap_contains_get` were not retained: the first two did not provide
@@ -100,7 +100,7 @@ hashset_insert    0.24x C / 1.68x Rust
 | Remove Rust from pure Simple path/runtime unless OS-provided | `nm -u build/perf/collections/collection_simple` lists libc/OS symbols and weak startup hooks only; no unresolved Rust runtime symbols. | Verified for collection benchmark binary |
 | Port runtime support to pure Simple unless OS-provided | `build/simple-core/libsimple_runtime.a` provides the runtime helpers used by the collection benchmark; OS primitives remain `malloc`, `free`, `memcmp`, clocks, IO, and similar host services. | Verified for benchmark scope |
 | Check common libraries that overlap C/Rust/native surfaces | This audit enumerates array, typed-array, generic indexing, list/set/hash/map, persistent, noalloc, and checksum/hash overlap surfaces. The active C/Rust/Simple benchmark now covers list traversal, list push, numeric set contains, text HashSet contains, and text HashSet insert. | In progress |
-| Match or beat existing C/Rust performance for list/set/traverse and similar APIs | Latest retained benchmark beats C for `list_push`, `set_contains`, and `hashset_contains`, beats Rust for `list_push` and `hashset_insert`, but trails both C and Rust for `list_traverse`, trails Rust for `set_contains` and `hashset_contains`, and keeps `hashset_insert` well below C. | Not complete |
+| Match or beat existing C/Rust performance for list/set/traverse and similar APIs | Latest retained benchmark beats C for `list_traverse`, `list_push`, `set_contains`, and `hashset_contains`, beats Rust for `list_traverse`, `list_push`, and `hashset_insert`, but trails Rust for `set_contains` and `hashset_contains`, and keeps `hashset_insert` well below C. | Not complete |
 
 ## Next optimization targets
 

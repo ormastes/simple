@@ -359,7 +359,7 @@ impl<'a> MirLowerer<'a> {
                                 let block = func.block_mut(current_block).unwrap();
                                 block.instructions.push(MirInst::Call {
                                     dest: None,
-                                    target: crate::mir::CallTarget::from_name("rt_array_set"),
+                                    target: crate::mir::CallTarget::from_name("rt_array_set_text"),
                                     args: vec![receiver_reg, index_reg, val_reg],
                                 });
                             })?;

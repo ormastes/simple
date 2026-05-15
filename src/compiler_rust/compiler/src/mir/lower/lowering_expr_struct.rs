@@ -469,7 +469,11 @@ impl<'a> MirLowerer<'a> {
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(dest),
-                    target: CallTarget::from_name("rt_array_get"),
+                    target: CallTarget::from_name(if element_expr_ty == TypeId::STRING {
+                        "rt_array_get_text"
+                    } else {
+                        "rt_array_get"
+                    }),
                     args: vec![receiver_reg, index_reg],
                 });
                 dest

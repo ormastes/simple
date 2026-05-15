@@ -791,6 +791,28 @@ fn codegen_inline_typed_bytes_u32_le_set_does_not_emit_runtime_symbol() {
 }
 
 #[test]
+fn codegen_inline_typed_bytes_u8_set_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_typed_bytes_u8_set", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let value = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: value, value: 1 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_typed_bytes_u8_set"),
+            args: vec![array, index, value],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_typed_bytes_u8_set"));
+}
+
+#[test]
 fn codegen_inline_typed_words_u32_set_does_not_emit_runtime_symbol() {
     let object = aot_object("inline_typed_words_u32_set", |f| {
         let array = f.new_vreg();
@@ -1195,6 +1217,26 @@ fn codegen_inline_array_get_does_not_emit_runtime_symbol() {
 }
 
 #[test]
+fn codegen_inline_array_get_text_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_array_get_text", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_array_get_text"),
+            args: vec![array, index],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_array_get_text"));
+}
+
+#[test]
 fn codegen_inline_array_set_does_not_emit_runtime_symbol() {
     let object = aot_object("inline_array_set", |f| {
         let array = f.new_vreg();
@@ -1214,6 +1256,51 @@ fn codegen_inline_array_set_does_not_emit_runtime_symbol() {
     });
 
     assert!(!object_relocates_to_symbol(&object, "rt_array_set"));
+}
+
+#[test]
+fn codegen_inline_array_set_text_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_array_set_text", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let value = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::ConstString {
+            dest: value,
+            value: "stored".to_string(),
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_array_set_text"),
+            args: vec![array, index, value],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_array_set_text"));
+}
+
+#[test]
+fn codegen_inline_array_set_len_known_text_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_array_set_len_known_text", |f| {
+        let array = f.new_vreg();
+        let len = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: len, value: 4 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_array_set_len_known_text"),
+            args: vec![array, len],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_array_set_len_known_text"));
 }
 
 #[test]
