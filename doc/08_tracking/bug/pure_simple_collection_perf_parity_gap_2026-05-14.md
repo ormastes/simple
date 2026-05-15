@@ -505,3 +505,8 @@ Rejected follow-up:
   the focused nogc_sync and nogc_async collection tests, but failed the
   gc_async collection facade spec with `semantic: type mismatch: cannot convert
   string to int`. The source-level rewrite was reverted.
+- Inlining `rt_hash_text` in native codegen removed the runtime hash call and
+  passed focused codegen tests, but a rebuilt clean five-sample source-closure
+  collection run still measured `hashset_contains` at only `0.59x C / 0.98x
+  Rust` and dipped `list_push` to `0.87x C`. The inline hash lowering was
+  reverted.
