@@ -146,6 +146,9 @@ src/compiler_rust/target/debug/simple test test/feature/usage/cuda_spec.spl --mo
 src/compiler_rust/target/debug/simple test test/feature/scilib/cuda_device_buffer_spec.spl --mode=interpreter --clean --force-rebuild
 => Passed: 20, Failed: 0; covers explicit CUDA buffers, CUDA-owned NDArray storage, device-side arithmetic, shape/combine operations, reductions, and slicing on the same CUDA host
 
+src/compiler_rust/target/debug/simple os test --help
+=> Not a help-only path; attempted the default x86_64 Cranelift OS build and failed before QEMU because Ring's vendored curve25519.c requires missing third_party/fiat/curve25519_64.h and the link still had unresolved rt_typed_words_u64_push / rt_typed_words_u64_set
+
 bin/simple test test/unit/compiler/driver/compile_options_normalization_spec.spl --mode=interpreter
 => Passed: 10, Failed: 0
 
