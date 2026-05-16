@@ -1,0 +1,169 @@
+# Tiered JIT Manager — Java-style adaptive compilation in pure Simple
+#
+# Tier 0: Interpreted (default)
+# Tier 1: Cranelift-compiled (fast compile, moderate runtime perf)
+# Tier 2: LLVM-compiled (slow compile, fully optimized runtime)
+#
+# Policy, profiling, and tier decisions live here in Simple.
+# Only the actual machine code emission (Cranelift/LLVM) stays in Rust
+# via the LocalExecutionManager SFFI interface.
+
+use compiler.interp.execution.mod.{LocalExecutionManager}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct TieredJitConfig:
+    tier1_threshold: i64
+    tier2_threshold: i64
+    debug_mode: bool
+
+# ============================================================================
+# Tier State
+# ============================================================================
+
+enum JitTier:
+    Interpreted
+    Fast
+    Optimized
+
+struct FunctionProfile:
+    name: text
+    call_count: i64
+    tier: JitTier
+    compile_time_ms: f64
+
+struct JitStats:
+    tier1_compilations: i64
+    tier2_compilations: i64
+    total_compile_time_ms: f64
+
+# ============================================================================
+# TieredJitManager
+# ============================================================================
+
+class TieredJitManager:
+    config: TieredJitConfig
+    profiles: Dict<text, FunctionProfile>
+    cranelift_em: LocalExecutionManager?
+    llvm_em: LocalExecutionManager?
+    tier1_compilations: i64
+    tier2_compilations: i64
+
+    static fn create(config: TieredJitConfig) -> TieredJitManager:
+        TieredJitManager(config: config, profiles: {}, cranelift_em: nil, llvm_em: nil, tier1_compilations: 0, tier2_compilations: 0)
+
+    me record_call(name: text) -> JitTier:
+        if self.profiles.has(name):
+            var p = self.profiles[name]
+            var new_count = p.call_count + 1
+            var new_tier = p.tier
+            if p.tier == JitTier.Interpreted:
+                if new_count >= self.config.tier1_threshold:
+                    new_tier = JitTier.Fast
+                    self.tier1_compilations = self.tier1_compilations + 1
+            else if p.tier == JitTier.Fast:
+                if new_count >= self.config.tier2_threshold:
+                    new_tier = JitTier.Optimized
+                    self.tier2_compilations = self.tier2_compilations + 1
+            var updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: p.compile_time_ms)
+            self.profiles[name] = updated
+            new_tier
+        else:
+            var p = FunctionProfile(name: name, call_count: 1, tier: JitTier.Interpreted, compile_time_ms: 0.0)
+            self.profiles[name] = p
+            JitTier.Interpreted
+
+    fn get_tier(name: text) -> JitTier:
+        if self.profiles.has(name):
+            self.profiles[name].tier
+        else:
+            JitTier.Interpreted
+
+    fn is_compiled(name: text) -> bool:
+        var tier = self.get_tier(name)
+        tier != JitTier.Interpreted
+
+    me ensure_cranelift():
+        if self.cranelift_em.?:
+            pass_dn
+        else:
+            self.cranelift_em = LocalExecutionManager.cranelift()
+
+    me ensure_llvm():
+        if self.llvm_em.?:
+            pass_dn
+        else:
+            self.llvm_em = LocalExecutionManager.llvm()
+
+    me compile_module(mir_data: text, backend: JitTier) -> text:
+        if backend == JitTier.Fast:
+            self.ensure_cranelift()
+            var em = self.cranelift_em.unwrap()
+            em.compile(mir_data)
+        else if backend == JitTier.Optimized:
+            self.ensure_llvm()
+            var em = self.llvm_em.unwrap()
+            em.compile(mir_data)
+        else:
+            "err: cannot compile for interpreter tier"
+
+    fn execute_compiled(name: text, args: [i64]) -> text:
+        var tier = self.get_tier(name)
+        if tier == JitTier.Optimized:
+            if self.llvm_em.?:
+                var em = self.llvm_em.unwrap()
+                em.execute(name, args)
+            else:
+                "err: no llvm backend"
+        else if tier == JitTier.Fast:
+            if self.cranelift_em.?:
+                var em = self.cranelift_em.unwrap()
+                em.execute(name, args)
+            else:
+                "err: no cranelift backend"
+        else:
+            "err: function not compiled"
+
+    fn get_stats() -> JitStats:
+        JitStats(tier1_compilations: self.tier1_compilations, tier2_compilations: self.tier2_compilations, total_compile_time_ms: 0.0)
+
+    fn print_stats():
+        print("=== Tiered JIT Statistics ===")
+        print("  Functions tracked: " + self.profiles.keys().len().to_string())
+        print("  Tier 1 (Cranelift) compilations: " + self.tier1_compilations.to_string())
+        print("  Tier 2 (LLVM) compilations: " + self.tier2_compilations.to_string())
+        var interpreted = 0
+        var fast = 0
+        var optimized = 0
+        for name in self.profiles.keys():
+            var p = self.profiles[name]
+            if p.tier == JitTier.Interpreted:
+                interpreted = interpreted + 1
+            else if p.tier == JitTier.Fast:
+                fast = fast + 1
+            else:
+                optimized = optimized + 1
+        print("  Current tiers: " + interpreted.to_string() + " interpreted, " + fast.to_string() + " fast, " + optimized.to_string() + " optimized")
+
+    me cleanup():
+        if self.cranelift_em.?:
+            var em = self.cranelift_em.unwrap()
+            em.cleanup()
+        if self.llvm_em.?:
+            var em = self.llvm_em.unwrap()
+            em.cleanup()
+
+# ============================================================================
+# Factory functions
+# ============================================================================
+
+fn default_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 64, tier2_threshold: 1024, debug_mode: true)
+
+fn release_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 64, tier2_threshold: 1024, debug_mode: false)
+
+fn eager_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: true)

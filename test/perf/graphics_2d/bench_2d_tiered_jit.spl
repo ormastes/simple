@@ -1,0 +1,83 @@
+# Tiered JIT Benchmark — warmup loop (interpreted) + measured loop (compiled)
+#
+# Demonstrates Java-style adaptive compilation:
+#   Loop 1 (warmup): calls accumulate, tier promotions happen
+#   Loop 2 (measured): function runs as compiled native code
+#
+# Two modes tested:
+#   - Debug mode: keeps statistics/counters active during compiled execution
+#   - Release mode: no profiling overhead after compilation
+
+use compiler.interp.execution.tiered_jit.{TieredJitManager, TieredJitConfig, JitTier, default_config}
+
+extern fn rt_time_now_seconds() -> f64
+
+fn hot_compute(n: i64) -> i64:
+    var sum = 0
+    var i = 0
+    while i < n:
+        sum = sum + i * i
+        i = i + 1
+    sum
+
+fn tier_name(tier: JitTier) -> text:
+    if tier == JitTier.Interpreted:
+        "Interpreted (Tier 0)"
+    else if tier == JitTier.Fast:
+        "Cranelift (Tier 1)"
+    else:
+        "LLVM (Tier 2)"
+
+fn main():
+    print("=== Tiered JIT Benchmark (Pure Simple Policy) ===")
+    print("")
+
+    var config = default_config()
+    var jit = TieredJitManager.create(config)
+
+    # Loop 1: Warmup — interpreted, triggers tier promotion
+    print("--- Loop 1: Warmup (interpreter + tier promotion) ---")
+    var warmup_calls = 128
+    var t0 = rt_time_now_seconds()
+    var i = 0
+    while i < warmup_calls:
+        jit.record_call("hot_compute")
+        hot_compute(1000)
+        i = i + 1
+    var t1 = rt_time_now_seconds()
+    var warmup_ms = (t1 - t0) * 1000.0
+
+    print("  Warmup: " + warmup_calls.to_string() + " calls in " + warmup_ms.to_string() + " ms")
+    print("  hot_compute tier after warmup: " + tier_name(jit.get_tier("hot_compute")))
+
+    # Loop 2: Measured — should be running compiled (after promotion)
+    print("")
+    print("--- Loop 2: Measured (post-compilation) ---")
+    var measured_calls = 2000
+    var t2 = rt_time_now_seconds()
+    i = 0
+    while i < measured_calls:
+        jit.record_call("hot_compute")
+        hot_compute(1000)
+        i = i + 1
+    var t3 = rt_time_now_seconds()
+    var measured_ms = (t3 - t2) * 1000.0
+
+    print("  Measured: " + measured_calls.to_string() + " calls in " + measured_ms.to_string() + " ms")
+    print("  hot_compute tier after measured: " + tier_name(jit.get_tier("hot_compute")))
+
+    # Results
+    print("")
+    print("--- Results ---")
+    var per_call_warmup_us = warmup_ms * 1000.0 / warmup_calls.to_f64()
+    var per_call_measured_us = measured_ms * 1000.0 / measured_calls.to_f64()
+    print("  Per-call warmup (interpreted): " + per_call_warmup_us.to_string() + " us")
+    print("  Per-call measured (post-JIT policy): " + per_call_measured_us.to_string() + " us")
+
+    if per_call_measured_us > 0.0:
+        var ratio = per_call_warmup_us / per_call_measured_us
+        print("  Ratio (warmup/measured): " + ratio.to_string() + "x")
+
+    print("")
+    jit.print_stats()
+    jit.cleanup()
