@@ -179,13 +179,6 @@ pub(crate) fn call_extern_function(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    // JIT cache: record call for profiling (O(1) HashMap lookup per call)
-    {
-        if let Ok(mut cache) = crate::codegen::jit_cache::global_jit_cache().try_lock() {
-            cache.record_call(name);
-        }
-    }
-
     // Diagram tracing for extern function calls
     if diagram_ffi::is_diagram_enabled() {
         diagram_ffi::trace_call(name);
@@ -883,7 +876,6 @@ pub(crate) fn call_extern_function(
         "rt_cuda_memcpy_dtoh" => gpu::rt_cuda_memcpy_dtoh_fn(&evaluated),
         "rt_cuda_memcpy_dtod" => gpu::rt_cuda_memcpy_dtod_fn(&evaluated),
         "rt_cuda_memset" => gpu::rt_cuda_memset_fn(&evaluated),
-        "rt_cuda_rect_fill" => gpu::rt_cuda_rect_fill_fn(&evaluated),
         "rt_cuda_f64_binary_op" => gpu::rt_cuda_f64_binary_op_fn(&evaluated),
         "rt_cuda_f64_sum" => gpu::rt_cuda_f64_sum_fn(&evaluated),
         "rt_cuda_f64_minmax" => gpu::rt_cuda_f64_minmax_fn(&evaluated),
