@@ -1,0 +1,231 @@
+# GPU Framebuffer Rendering Benchmark — Simple + CUDA PTX (dlopen fallback)
+#
+# Allocates a 1920x1080 RGBA framebuffer on device, runs two PTX kernels:
+#   kernel_clear      — fill entire FB with a solid color (1 pixel/thread)
+#   kernel_rect_fill  — fill a rectangle (1 pixel/thread, 2D decomposition)
+#
+# Scene: clear + 100 deterministic rects (mirrors bench_2d_cuda.c fill_1080p).
+# Timing: 5 warmup frames + 100 timed frames; reports p50 / avg frame time.
+#
+# Target: sm_75 (TITAN RTX). PTX .version 7.5 / .target sm_75.
+#
+# Usage:
+#   bin/simple test/perf/graphics_2d/bench_3d_render.spl
+
+extern fn rt_cuda_init() -> i64
+extern fn rt_cuda_device_get(id: i64) -> i64
+extern fn rt_cuda_ctx_create(device: i64) -> i64
+extern fn rt_cuda_ctx_destroy(ctx: i64) -> i64
+extern fn rt_cuda_mem_alloc(size: i64) -> i64
+extern fn rt_cuda_mem_free(ptr: i64) -> i64
+extern fn rt_cuda_memset(ptr: i64, value: i64, size: i64) -> i64
+extern fn rt_cuda_memcpy_dtoh(dst: i64, src: i64, size: i64) -> i64
+extern fn rt_cuda_module_load_data(ptx: text) -> i64
+extern fn rt_cuda_module_unload(module: i64) -> i64
+extern fn rt_cuda_launch_kernel(module: i64, func_name: text, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64, args_ptr: i64) -> i64
+extern fn rt_cuda_sync() -> i64
+extern fn rt_time_now_seconds() -> f64
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_ptr_write_i64(ptr: i64, offset: i64, value: i64) -> i64
+extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
+
+# ---------------------------------------------------------------------------
+# PTX source
+# ---------------------------------------------------------------------------
+# Notes on PTX correctness:
+#   - mad.wide.u32 addend must be 64-bit; use mul.wide.u32 + cvt.u64.u32 + add.u64 instead
+#   - kernel_clear: tid = blockIdx.x * blockDim.x + threadIdx.x; guard tid < count
+#   - kernel_rect_fill: tid maps to (rx, ry) within rect; guard before writing
+# ---------------------------------------------------------------------------
+
+val PTX_RENDER = ".version 7.5\n.target sm_75\n.address_size 64\n\n// -----------------------------------------------------------------------\n// kernel_clear(fb: u64, color: u32, count: u32)\n// Each thread writes one RGBA pixel.  Grid = ceil(count/256) x 256.\n// -----------------------------------------------------------------------\n.visible .entry kernel_clear(\n    .param .u64 param_fb,\n    .param .u32 param_color,\n    .param .u32 param_count\n) {\n    .reg .u64  %rd<6>;\n    .reg .u32  %r<8>;\n    .reg .pred %p0;\n\n    // tid = blockIdx.x * blockDim.x + threadIdx.x\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n\n    // guard: if tid >= count, exit\n    ld.param.u32  %r4, [param_count];\n    setp.ge.u32   %p0, %r3, %r4;\n    @%p0 bra done_clear;\n\n    // addr = fb + tid * 4\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r3, 4;\n    add.u64       %rd2, %rd0, %rd1;\n\n    // store color\n    ld.param.u32  %r5, [param_color];\n    st.global.u32 [%rd2], %r5;\n\ndone_clear:\n    ret;\n}\n\n// -----------------------------------------------------------------------\n// kernel_rect_fill(fb: u64, x: u32, y: u32, w: u32, h: u32, stride: u32, color: u32)\n// tid = linear index within the w*h rect; thread (rx, ry) writes one pixel.\n// Grid = ceil(w*h/256) x 256.\n// -----------------------------------------------------------------------\n.visible .entry kernel_rect_fill(\n    .param .u64 param_fb,\n    .param .u32 param_x,\n    .param .u32 param_y,\n    .param .u32 param_w,\n    .param .u32 param_h,\n    .param .u32 param_stride,\n    .param .u32 param_color\n) {\n    .reg .u64  %rd<8>;\n    .reg .u32  %r<16>;\n    .reg .pred %p0;\n\n    // tid = blockIdx.x * blockDim.x + threadIdx.x\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n\n    // total = w * h; guard tid >= total\n    ld.param.u32  %r4, [param_w];\n    ld.param.u32  %r5, [param_h];\n    mul.lo.u32    %r6, %r4, %r5;\n    setp.ge.u32   %p0, %r3, %r6;\n    @%p0 bra done_rect;\n\n    // rx = tid % w,  ry = tid / w\n    div.u32  %r7, %r3, %r4;\n    rem.u32  %r8, %r3, %r4;\n\n    // pixel_x = x + rx,  pixel_y = y + ry\n    ld.param.u32  %r9,  [param_x];\n    ld.param.u32  %r10, [param_y];\n    add.u32  %r11, %r9,  %r8;\n    add.u32  %r12, %r10, %r7;\n\n    // addr = fb + (pixel_y * stride + pixel_x) * 4\n    ld.param.u32  %r13, [param_stride];\n    mad.lo.u32    %r14, %r12, %r13, %r11;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r14, 4;\n    add.u64       %rd2, %rd0, %rd1;\n\n    ld.param.u32  %r15, [param_color];\n    st.global.u32 [%rd2], %r15;\n\ndone_rect:\n    ret;\n}\n"
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+val FB_W:     i64 = 1920
+val FB_H:     i64 = 1080
+val FB_BYTES: i64 = 1920 * 1080 * 4   # 8,294,400
+val FB_PIX:   i64 = 1920 * 1080       # 2,073,600
+
+val BLOCK_SIZE:    i64 = 256
+val WARMUP_FRAMES: i64 = 5
+val TIMED_FRAMES:  i64 = 100
+val NUM_RECTS:     i64 = 100
+
+# ---------------------------------------------------------------------------
+# Helper: build param buffers for cuLaunchKernel double-indirection
+#
+# cuLaunchKernel expects:  void** params  where params[i] = &value_i
+# We lay out: val_buf = [v0, v1, v2, ...] (8 bytes each, padded)
+#             ptr_buf = [&v0, &v1, &v2, ...] (8-byte pointers)
+# ---------------------------------------------------------------------------
+
+# Launch kernel_clear: (fb: u64, color: u32, count: u32)
+# All params stored as i64 in val_buf (CUDA driver reads the right width from .param decls)
+fn launch_clear(module: i64, d_fb: i64, color: i64, count: i64):
+    var val_buf = rt_alloc(24)   # 3 params x 8 bytes
+    rt_ptr_write_i64(val_buf, 0,  d_fb)
+    rt_ptr_write_i64(val_buf, 8,  color)
+    rt_ptr_write_i64(val_buf, 16, count)
+    var ptr_buf = rt_alloc(24)   # 3 pointers x 8 bytes
+    rt_ptr_write_i64(ptr_buf, 0,  val_buf)
+    rt_ptr_write_i64(ptr_buf, 8,  val_buf + 8)
+    rt_ptr_write_i64(ptr_buf, 16, val_buf + 16)
+    var grid_x = (count + BLOCK_SIZE - 1) / BLOCK_SIZE
+    rt_cuda_launch_kernel(module, "kernel_clear", grid_x, 1, 1, BLOCK_SIZE, 1, 1, ptr_buf)
+
+# Launch kernel_rect_fill: (fb: u64, x: u32, y: u32, w: u32, h: u32, stride: u32, color: u32)
+fn launch_rect(module: i64, d_fb: i64, x: i64, y: i64, w: i64, h: i64, stride: i64, color: i64):
+    var total = w * h
+    var val_buf = rt_alloc(56)   # 7 params x 8 bytes
+    rt_ptr_write_i64(val_buf, 0,  d_fb)
+    rt_ptr_write_i64(val_buf, 8,  x)
+    rt_ptr_write_i64(val_buf, 16, y)
+    rt_ptr_write_i64(val_buf, 24, w)
+    rt_ptr_write_i64(val_buf, 32, h)
+    rt_ptr_write_i64(val_buf, 40, stride)
+    rt_ptr_write_i64(val_buf, 48, color)
+    var ptr_buf = rt_alloc(56)   # 7 pointers x 8 bytes
+    rt_ptr_write_i64(ptr_buf, 0,  val_buf)
+    rt_ptr_write_i64(ptr_buf, 8,  val_buf + 8)
+    rt_ptr_write_i64(ptr_buf, 16, val_buf + 16)
+    rt_ptr_write_i64(ptr_buf, 24, val_buf + 24)
+    rt_ptr_write_i64(ptr_buf, 32, val_buf + 32)
+    rt_ptr_write_i64(ptr_buf, 40, val_buf + 40)
+    rt_ptr_write_i64(ptr_buf, 48, val_buf + 48)
+    var grid_x = (total + BLOCK_SIZE - 1) / BLOCK_SIZE
+    rt_cuda_launch_kernel(module, "kernel_rect_fill", grid_x, 1, 1, BLOCK_SIZE, 1, 1, ptr_buf)
+
+# ---------------------------------------------------------------------------
+# Scene: clear + 100 deterministic rects (mirrors bench_2d_cuda.c fill_1080p)
+# ---------------------------------------------------------------------------
+
+fn fill_color(idx: i64) -> i64:
+    if idx == 0: return 0xFF0000FF
+    if idx == 1: return 0xFF00FF00
+    if idx == 2: return 0xFFFF0000
+    if idx == 3: return 0xFF808080
+    if idx == 4: return 0xFF00FFFF
+    if idx == 5: return 0xFFFF00FF
+    if idx == 6: return 0xFFFFFF00
+    return 0xFFFFFFFF
+
+fn scene_fill_1080p(module: i64, d_fb: i64):
+    # Clear to dark background
+    launch_clear(module, d_fb, 0xFF111111, FB_PIX)
+
+    # 100 deterministic rects — same formula as bench_2d_cuda.c
+    var i = 0
+    while i < NUM_RECTS:
+        var col   = (i * 37) % 8
+        var rx    = (i * 19) % (FB_W - 1)
+        var ry    = (i * 11) % (FB_H - 1)
+        var rw    = 1 + (i * 7)  % 320
+        var rh    = 1 + (i * 13) % 180
+        # clamp to framebuffer bounds
+        if rx < 0: rx = 0
+        if ry < 0: ry = 0
+        if rx + rw > FB_W: rw = FB_W - rx
+        if ry + rh > FB_H: rh = FB_H - ry
+        if rw > 0 and rh > 0:
+            launch_rect(module, d_fb, rx, ry, rw, rh, FB_W, fill_color(col))
+        i = i + 1
+
+    rt_cuda_sync()
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+fn main():
+    print("========================================")
+    print("GPU Framebuffer Benchmark — Simple + CUDA PTX")
+    print("Target: sm_75 (TITAN RTX), 1920x1080 RGBA")
+    print("========================================")
+    print("")
+
+    # Init CUDA
+    var err = rt_cuda_init()
+    if err != 0:
+        print("FAIL: rt_cuda_init error=" + err.to_string())
+        return
+
+    var dev = rt_cuda_device_get(0)
+    if dev < 0:
+        print("FAIL: device_get error=" + dev.to_string())
+        return
+
+    var ctx = rt_cuda_ctx_create(dev)
+    if ctx < 0:
+        print("FAIL: ctx_create error=" + ctx.to_string())
+        return
+    print("CUDA context: " + ctx.to_string())
+
+    # Load PTX module
+    var module = rt_cuda_module_load_data(PTX_RENDER)
+    if module <= 0:
+        print("FAIL: module_load_data error=" + module.to_string())
+        rt_cuda_ctx_destroy(ctx)
+        return
+    print("PTX module loaded (len=" + PTX_RENDER.len().to_string() + ")")
+
+    # Allocate device framebuffer
+    var d_fb = rt_cuda_mem_alloc(FB_BYTES)
+    if d_fb <= 0:
+        print("FAIL: mem_alloc error=" + d_fb.to_string())
+        rt_cuda_module_unload(module)
+        rt_cuda_ctx_destroy(ctx)
+        return
+    print("Device FB: " + FB_BYTES.to_string() + " bytes at " + d_fb.to_string())
+    print("")
+
+    # Warmup — not timed
+    print("Warmup: " + WARMUP_FRAMES.to_string() + " frames...")
+    var wi = 0
+    while wi < WARMUP_FRAMES:
+        scene_fill_1080p(module, d_fb)
+        wi = wi + 1
+    print("Warmup done.")
+    print("")
+
+    # Timed frames — batch measurement for sub-ms precision
+    print("Timed: " + TIMED_FRAMES.to_string() + " frames...")
+    var batch_t0 = rt_time_now_seconds()
+    var fi = 0
+    while fi < TIMED_FRAMES:
+        scene_fill_1080p(module, d_fb)
+        fi = fi + 1
+    var batch_t1 = rt_time_now_seconds()
+    var total_s = batch_t1 - batch_t0
+    var avg_us = total_s * 1000000.0 / 100.0
+    var avg_ms = total_s * 1000.0 / 100.0
+    print("Timed done.")
+    print("")
+
+    var pps_mpix = 0.0
+    if avg_us > 0.0:
+        pps_mpix = 2073600.0 / avg_us
+
+    print("=== Results ===")
+    print("  Frames:       " + TIMED_FRAMES.to_string())
+    print("  Total time:   " + total_s.to_string() + " s")
+    print("  avg:          " + avg_us.to_string() + " us/frame")
+    print("  avg:          " + avg_ms.to_string() + " ms/frame")
+    print("  ~Mpix/s:      " + pps_mpix.to_string())
+    print("")
+    print("BENCH_RESULT scene=fill_1080p backend=cuda_ptx_dlopen"
+        + " frames=" + TIMED_FRAMES.to_string()
+        + " avg_us=" + avg_us.to_string()
+        + " rects_per_frame=" + NUM_RECTS.to_string()
+        + " fb=" + FB_W.to_string() + "x" + FB_H.to_string())
+
+    # Cleanup
+    rt_cuda_mem_free(d_fb)
+    rt_cuda_module_unload(module)
+    rt_cuda_ctx_destroy(ctx)
+    print("")
+    print("Done.")
+
+main()
