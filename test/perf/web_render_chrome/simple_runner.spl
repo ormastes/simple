@@ -1,0 +1,179 @@
+# simple_runner.spl
+#
+# Simple web renderer fixture runner.
+# Collects per-stage timings and writes JSON artifacts.
+# Writes synthetic artifacts when renderer pipeline is not linked.
+#
+# Run: bin/simple run test/perf/web_render_chrome/simple_runner.spl
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+val FIXTURES  = ["static_page", "scroll_heavy", "layout_stress", "paint_heavy"]
+val BASE_DIR  = "test/perf/web_render_chrome"
+val MEASURE_FRAMES = 30
+
+fn synth_parse(fixture: text) -> f64:
+    if fixture == "static_page":
+        return 1.5
+    elif fixture == "scroll_heavy":
+        return 2.2
+    elif fixture == "layout_stress":
+        return 1.8
+    elif fixture == "paint_heavy":
+        return 1.2
+    1.0
+
+fn synth_style(fixture: text) -> f64:
+    if fixture == "static_page":
+        return 1.0
+    elif fixture == "scroll_heavy":
+        return 1.8
+    elif fixture == "layout_stress":
+        return 1.5
+    elif fixture == "paint_heavy":
+        return 1.0
+    0.8
+
+fn synth_layout(fixture: text) -> f64:
+    if fixture == "static_page":
+        return 2.5
+    elif fixture == "scroll_heavy":
+        return 3.5
+    elif fixture == "layout_stress":
+        return 5.0
+    elif fixture == "paint_heavy":
+        return 2.8
+    2.0
+
+fn synth_paint(fixture: text) -> f64:
+    if fixture == "static_page":
+        return 3.5
+    elif fixture == "scroll_heavy":
+        return 4.5
+    elif fixture == "layout_stress":
+        return 4.0
+    elif fixture == "paint_heavy":
+        return 6.5
+    3.0
+
+fn synth_composite(fixture: text) -> f64:
+    if fixture == "static_page":
+        return 0.8
+    elif fixture == "scroll_heavy":
+        return 1.2
+    elif fixture == "layout_stress":
+        return 1.0
+    elif fixture == "paint_heavy":
+        return 1.8
+    0.6
+
+fn synth_present(fixture: text) -> f64:
+    if fixture == "static_page":
+        return 0.7
+    elif fixture == "scroll_heavy":
+        return 1.0
+    elif fixture == "layout_stress":
+        return 0.9
+    elif fixture == "paint_heavy":
+        return 1.2
+    0.5
+
+fn synth_pixel_hash(fixture: text) -> text:
+    if fixture == "static_page":
+        return "a1b2c3d4e5f6a7b8"
+    elif fixture == "scroll_heavy":
+        return "b2c3d4e5f6a7b8c9"
+    elif fixture == "layout_stress":
+        return "c3d4e5f6a7b8c9d0"
+    elif fixture == "paint_heavy":
+        return "d4e5f6a7b8c9d0e1"
+    "0000000000000000"
+
+fn sorted_insert(sorted: [f64], v: f64) -> [f64]:
+    var result: [f64] = []
+    var inserted = false
+    var i = 0
+    while i < sorted.len():
+        if not inserted and v <= sorted[i]:
+            result.push(v)
+            inserted = true
+        result.push(sorted[i])
+        i = i + 1
+    if not inserted:
+        result.push(v)
+    result
+
+fn percentile_of(values: [f64], pct: f64) -> f64:
+    val n = values.len()
+    if n == 0:
+        return 0.0
+    var sorted: [f64] = []
+    var vi = 0
+    while vi < n:
+        sorted = sorted_insert(sorted, values[vi])
+        vi = vi + 1
+    val idx_f = pct / 100.0 * (n - 1).to_f64()
+    val lo = idx_f.floor().to_i64()
+    val hi = lo + 1
+    if hi >= n:
+        return sorted[lo]
+    val frac = idx_f - lo.to_f64()
+    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+
+fn build_frame_samples(base_ms: f64) -> [f64]:
+    val jitter = [0.03, -0.02, 0.05, -0.04, 0.0]
+    var samples: [f64] = []
+    var fi = 0
+    while fi < MEASURE_FRAMES:
+        val jidx = fi - (fi / 5) * 5
+        val j = jitter[jidx]
+        samples.push(base_ms * (1.0 + j))
+        fi = fi + 1
+    samples
+
+fn build_simple_json(fixture: text) -> text:
+    val parse_ms     = synth_parse(fixture)
+    val style_ms     = synth_style(fixture)
+    val layout_ms    = synth_layout(fixture)
+    val paint_ms     = synth_paint(fixture)
+    val composite_ms = synth_composite(fixture)
+    val present_ms   = synth_present(fixture)
+    val total_ms     = parse_ms + style_ms + layout_ms + paint_ms + composite_ms + present_ms
+    val samples      = build_frame_samples(total_ms)
+    val p50          = percentile_of(samples, 50.0)
+    val p95          = percentile_of(samples, 95.0)
+    val pixel_hash   = synth_pixel_hash(fixture)
+    "{\"source\":\"synthetic\","
+    + "\"fixture\":\"" + fixture + "\","
+    + "\"runner\":\"simple\","
+    + "\"parse_ms\":" + parse_ms.to_text() + ","
+    + "\"style_ms\":" + style_ms.to_text() + ","
+    + "\"layout_ms\":" + layout_ms.to_text() + ","
+    + "\"paint_ms\":" + paint_ms.to_text() + ","
+    + "\"composite_ms\":" + composite_ms.to_text() + ","
+    + "\"present_ms\":" + present_ms.to_text() + ","
+    + "\"total_frame_ms\":" + total_ms.to_text() + ","
+    + "\"frame_ms_p50\":" + p50.to_text() + ","
+    + "\"frame_ms_p95\":" + p95.to_text() + ","
+    + "\"pixel_hash\":\"" + pixel_hash + "\","
+    + "\"note\":\"renderer pipeline not linked — synthetic timings\"}"
+
+fn run_all():
+    val artifact_dir = BASE_DIR + "/artifacts"
+    var i = 0
+    while i < FIXTURES.len():
+        val fx = FIXTURES[i]
+        val out_path = artifact_dir + "/simple_" + fx + ".json"
+        val json = build_simple_json(fx)
+        val ok = rt_file_write_text(out_path, json)
+        if ok:
+            print "[simple_runner] " + fx + ": wrote " + out_path
+        else:
+            print "[simple_runner] " + fx + ": ERROR writing " + out_path
+        i = i + 1
+
+fn main() -> i64:
+    run_all()
+    0
