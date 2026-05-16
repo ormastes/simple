@@ -18,21 +18,40 @@ mod cuda_dlopen {
     type CuInit = unsafe extern "C" fn(u32) -> i32;
     type CuDeviceGet = unsafe extern "C" fn(*mut i32, i32) -> i32;
     type CuCtxCreate = unsafe extern "C" fn(*mut *mut c_void, u32, i32) -> i32;
+    type CuCtxDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxSynchronize = unsafe extern "C" fn() -> i32;
     type CuMemAlloc = unsafe extern "C" fn(*mut u64, usize) -> i32;
     type CuMemFree = unsafe extern "C" fn(u64) -> i32;
     type CuMemsetD32 = unsafe extern "C" fn(u64, u32, usize) -> i32;
+    type CuMemsetD8 = unsafe extern "C" fn(u64, u8, usize) -> i32;
+    type CuMemcpyHtoD = unsafe extern "C" fn(u64, *const c_void, usize) -> i32;
+    type CuMemcpyDtoH = unsafe extern "C" fn(*mut c_void, u64, usize) -> i32;
     type CuDeviceGetCount = unsafe extern "C" fn(*mut i32) -> i32;
+    type CuModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> i32;
+    type CuModuleUnload = unsafe extern "C" fn(*mut c_void) -> i32;
+    type CuModuleGetFunction = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const i8) -> i32;
+    type CuLaunchKernel = unsafe extern "C" fn(
+        *mut c_void, u32, u32, u32, u32, u32, u32, u32,
+        *mut c_void, *mut *mut c_void, *mut *mut c_void,
+    ) -> i32;
 
     pub struct CudaFns {
         pub init: CuInit,
         pub device_get: CuDeviceGet,
         pub device_get_count: CuDeviceGetCount,
         pub ctx_create: CuCtxCreate,
+        pub ctx_destroy: CuCtxDestroy,
         pub ctx_synchronize: CuCtxSynchronize,
         pub mem_alloc: CuMemAlloc,
         pub mem_free: CuMemFree,
         pub memset_d32: CuMemsetD32,
+        pub memset_d8: CuMemsetD8,
+        pub memcpy_htod: CuMemcpyHtoD,
+        pub memcpy_dtoh: CuMemcpyDtoH,
+        pub module_load_data: CuModuleLoadData,
+        pub module_unload: CuModuleUnload,
+        pub module_get_function: CuModuleGetFunction,
+        pub launch_kernel: CuLaunchKernel,
     }
 
     unsafe impl Send for CudaFns {}
@@ -68,10 +87,18 @@ mod cuda_dlopen {
             device_get: sym!("cuDeviceGet"),
             device_get_count: sym!("cuDeviceGetCount"),
             ctx_create: sym!("cuCtxCreate_v2"),
+            ctx_destroy: sym!("cuCtxDestroy_v2"),
             ctx_synchronize: sym!("cuCtxSynchronize"),
             mem_alloc: sym!("cuMemAlloc_v2"),
             mem_free: sym!("cuMemFree_v2"),
             memset_d32: sym!("cuMemsetD32_v2"),
+            memset_d8: sym!("cuMemsetD8_v2"),
+            memcpy_htod: sym!("cuMemcpyHtoD_v2"),
+            memcpy_dtoh: sym!("cuMemcpyDtoH_v2"),
+            module_load_data: sym!("cuModuleLoadData"),
+            module_unload: sym!("cuModuleUnload"),
+            module_get_function: sym!("cuModuleGetFunction"),
+            launch_kernel: sym!("cuLaunchKernel"),
         })
     }
 }
@@ -132,7 +159,6 @@ fn arg_text(args: &[Value], index: usize, name: &str, expected: usize) -> Result
     }
 }
 
-#[cfg(feature = "cuda")]
 fn c_string_or_error(text: String, name: &str) -> Result<CString, CompileError> {
     CString::new(text).map_err(|_| CompileError::semantic(format!("{name} does not accept embedded NUL bytes")))
 }
@@ -327,6 +353,10 @@ pub fn rt_cuda_memcpy_htod_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let r = unsafe { (fns.memcpy_htod)(dst as u64, src as *const std::os::raw::c_void, size as usize) };
+            return Ok(Value::Int(r as i64));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -341,6 +371,10 @@ pub fn rt_cuda_memcpy_dtoh_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let r = unsafe { (fns.memcpy_dtoh)(dst as *mut std::os::raw::c_void, src as u64, size as usize) };
+            return Ok(Value::Int(r as i64));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -370,7 +404,7 @@ pub fn rt_cuda_memset_fn(args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(not(feature = "cuda"))]
     {
         if let Some(fns) = get_cuda_dl() {
-            let r = unsafe { (fns.memset_d32)(ptr as u64, value as u32, size as usize) };
+            let r = unsafe { (fns.memset_d8)(ptr as u64, value as u8, size as usize) };
             return Ok(Value::Int(r as i64));
         }
         Ok(Value::Int(-3))
@@ -521,6 +555,13 @@ pub fn rt_cuda_module_load_data_fn(args: &[Value]) -> Result<Value, CompileError
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let c_ptx = c_string_or_error(ptx, "rt_cuda_module_load_data")?;
+            let mut module: *mut std::os::raw::c_void = std::ptr::null_mut();
+            let r = unsafe { (fns.module_load_data)(&mut module, c_ptx.as_ptr() as *const std::os::raw::c_void) };
+            if r == 0 { return Ok(Value::Int(module as i64)); }
+            return Ok(Value::Int(-(r as i64)));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -533,6 +574,10 @@ pub fn rt_cuda_module_unload_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let r = unsafe { (fns.module_unload)(module as *mut std::os::raw::c_void) };
+            return Ok(Value::Int(r as i64));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -547,6 +592,13 @@ pub fn rt_cuda_module_get_function_fn(args: &[Value]) -> Result<Value, CompileEr
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let c_name = c_string_or_error(func_name, "rt_cuda_module_get_function")?;
+            let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
+            let r = unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr()) };
+            if r == 0 { return Ok(Value::Int(func as i64)); }
+            return Ok(Value::Int(-(r as i64)));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -578,6 +630,24 @@ pub fn rt_cuda_launch_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel")?;
+            let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
+            let r = unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr()) };
+            if r != 0 { return Ok(Value::Int(-(r as i64))); }
+            let r = unsafe {
+                (fns.launch_kernel)(
+                    func,
+                    grid_x as u32, grid_y as u32, grid_z as u32,
+                    block_x as u32, block_y as u32, block_z as u32,
+                    0, // shared mem
+                    std::ptr::null_mut(), // stream
+                    args_ptr as *mut *mut std::os::raw::c_void,
+                    std::ptr::null_mut(), // extra
+                )
+            };
+            return Ok(Value::Int(r as i64));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -589,6 +659,10 @@ pub fn rt_cuda_sync_fn(_args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let r = unsafe { (fns.ctx_synchronize)() };
+            return Ok(Value::Int(r as i64));
+        }
         Ok(Value::Int(-3))
     }
 }
