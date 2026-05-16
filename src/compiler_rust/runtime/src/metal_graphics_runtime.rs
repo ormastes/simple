@@ -611,6 +611,90 @@ mod metal_impl {
     // Returns 1 on success, 0 on any failure (error set via set_last_error).
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // Batched blit frame — 3-buffer variant for blit_kernel
+    // Does: create_cmd_buf → create_encoder → set_pipeline → set_buffer×3
+    //       → set_bytes (fb_w at index 3) → dispatch → end_encoder → commit → wait
+    // buf0=src (read), buf1=dst (write), buf2=tile_descriptors (read)
+    // params_ptr/params_size: passed via setBytes at index 3.
+    // Returns 1 on success, 0 on any failure.
+    // -------------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_blit_frame(
+        queue_handle: i64,
+        pipeline_handle: i64,
+        buf0: i64,
+        buf1: i64,
+        buf2: i64,
+        params_ptr: i64,
+        params_size: i64,
+        gx: i64,
+        gy: i64,
+        gz: i64,
+        bx: i64,
+        by: i64,
+        bz: i64,
+    ) -> i64 {
+        let queue = with_queues(|m| m.get(&queue_handle).map(|w| w.0.clone()));
+        let pipeline = with_pipelines(|m| m.get(&pipeline_handle).map(|w| w.0.clone()));
+        let b0 = with_buffers(|m| m.get(&buf0).map(|w| w.0.clone()));
+        let b1 = with_buffers(|m| m.get(&buf1).map(|w| w.0.clone()));
+        let b2 = with_buffers(|m| m.get(&buf2).map(|w| w.0.clone()));
+
+        match (queue, pipeline, b0, b1, b2) {
+            (Some(queue), Some(pipeline), Some(b0), Some(b1), Some(b2)) => {
+                let cmd = match queue.commandBuffer() {
+                    Some(c) => c,
+                    None => {
+                        set_last_error("run_blit_frame: commandBuffer returned nil");
+                        return 0;
+                    }
+                };
+                let encoder = match cmd.computeCommandEncoder() {
+                    Some(e) => e,
+                    None => {
+                        set_last_error("run_blit_frame: computeCommandEncoder returned nil");
+                        return 0;
+                    }
+                };
+                encoder.setComputePipelineState(&pipeline);
+                unsafe {
+                    encoder.setBuffer_offset_atIndex(Some(&b0), 0, 0);
+                    encoder.setBuffer_offset_atIndex(Some(&b1), 0, 1);
+                    encoder.setBuffer_offset_atIndex(Some(&b2), 0, 2);
+                }
+                if params_ptr != 0 && params_size > 0 {
+                    let ptr = std::ptr::NonNull::new(params_ptr as *mut std::ffi::c_void);
+                    if let Some(ptr) = ptr {
+                        unsafe {
+                            encoder.setBytes_length_atIndex(ptr, params_size as usize, 3);
+                        }
+                    }
+                }
+                let threadgroups = MTLSize {
+                    width: gx as usize,
+                    height: gy as usize,
+                    depth: gz as usize,
+                };
+                let threads_per = MTLSize {
+                    width: bx as usize,
+                    height: by as usize,
+                    depth: bz as usize,
+                };
+                encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per);
+                encoder.endEncoding();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                1
+            }
+            _ => {
+                set_last_error("run_blit_frame: invalid queue, pipeline, or buffer handle");
+                0
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn run_compute_frame(
         queue_handle: i64,
@@ -1028,6 +1112,39 @@ pub extern "C" fn rt_metal_destroy_swapchain(_sc: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_metal_present(_sc: i64) -> i64 {
     0
+}
+
+// ============================================================================
+// Batched blit frame — 3-buffer single FFI call for blit_kernel dispatch
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn rt_metal_run_blit_frame(
+    _queue: i64,
+    _pipeline: i64,
+    _buf0: i64,
+    _buf1: i64,
+    _buf2: i64,
+    _params_ptr: i64,
+    _params_size: i64,
+    _gx: i64,
+    _gy: i64,
+    _gz: i64,
+    _bx: i64,
+    _by: i64,
+    _bz: i64,
+) -> i64 {
+    #[cfg(target_os = "macos")]
+    {
+        metal_impl::run_blit_frame(
+            _queue, _pipeline, _buf0, _buf1, _buf2,
+            _params_ptr, _params_size,
+            _gx, _gy, _gz,
+            _bx, _by, _bz,
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    { 0 }
 }
 
 // ============================================================================

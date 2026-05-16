@@ -31,6 +31,8 @@ extern fn rt_metal_commit_command_buffer(cmd: i64) -> i64
 extern fn rt_metal_wait_completed(cmd: i64) -> i64
 # batched: params_ptr is a raw heap pointer (rt_alloc), params_size in bytes
 extern fn rt_metal_run_compute_frame(queue: i64, pipeline: i64, buf0: i64, buf1: i64, params_ptr: i64, params_size: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> i64
+# batched blit: 3 buffers (src, dst, tiles) + setBytes params at index 3
+extern fn rt_metal_run_blit_frame(queue: i64, pipeline: i64, buf0: i64, buf1: i64, buf2: i64, params_ptr: i64, params_size: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> i64
 
 # ─── Memory helpers ──────────────────────────────────────────────────────────
 
@@ -188,48 +190,29 @@ fn bench_fill(samples: [i64]):
 
     rt_free(params)
 
-# ─── Scene: blit_tiles (per-call API — 3 buffers + fb_w setBytes at index 3) ─
+# ─── Scene: blit_tiles (batched extern — 3 buffers + fb_w setBytes at index 3) ─
 
 fn bench_blit(samples: [i64]):
-    var fw_bytes: [u8] = [0u8; 4]
-    # pack FRAME_W as little-endian u32
-    fw_bytes[0] = (FRAME_W and 0xFF) as u8
-    fw_bytes[1] = ((FRAME_W / 256) and 0xFF) as u8
-    fw_bytes[2] = ((FRAME_W / 65536) and 0xFF) as u8
-    fw_bytes[3] = 0u8
+    # fb_w param: FRAME_W as little-endian u32 in a 4-byte heap block
+    var params = rt_alloc(4)
+    rt_ptr_write_i32(params, 0, FRAME_W)
 
     # Warmup
     var w: i64 = 0
     while w < WARMUP_FRAMES:
-        var cmd = rt_metal_create_command_buffer(g_queue)
-        var enc = rt_metal_create_compute_encoder(cmd)
-        rt_metal_set_buffer(enc, g_src_buf,   0, 0)
-        rt_metal_set_buffer(enc, g_dst_buf,   0, 1)
-        rt_metal_set_buffer(enc, g_tiles_buf, 0, 2)
-        rt_metal_set_bytes(enc, fw_bytes, 4, 3)
-        rt_metal_dispatch_compute(enc, g_blit_pso, 1, 1, N_TILES, TILE_W, TILE_H, 1)
-        rt_metal_end_compute_encoder(enc)
-        rt_metal_commit_command_buffer(cmd)
-        rt_metal_wait_completed(cmd)
+        rt_metal_run_blit_frame(g_queue, g_blit_pso, g_src_buf, g_dst_buf, g_tiles_buf, params, 4, 1, 1, N_TILES, TILE_W, TILE_H, 1)
         w = w + 1
 
     # Timed
     var f: i64 = 0
     while f < TIMED_FRAMES:
         var t0 = rt_time_now_nanos()
-        var cmd = rt_metal_create_command_buffer(g_queue)
-        var enc = rt_metal_create_compute_encoder(cmd)
-        rt_metal_set_buffer(enc, g_src_buf,   0, 0)
-        rt_metal_set_buffer(enc, g_dst_buf,   0, 1)
-        rt_metal_set_buffer(enc, g_tiles_buf, 0, 2)
-        rt_metal_set_bytes(enc, fw_bytes, 4, 3)
-        rt_metal_dispatch_compute(enc, g_blit_pso, 1, 1, N_TILES, TILE_W, TILE_H, 1)
-        rt_metal_end_compute_encoder(enc)
-        rt_metal_commit_command_buffer(cmd)
-        rt_metal_wait_completed(cmd)
+        rt_metal_run_blit_frame(g_queue, g_blit_pso, g_src_buf, g_dst_buf, g_tiles_buf, params, 4, 1, 1, N_TILES, TILE_W, TILE_H, 1)
         var t1 = rt_time_now_nanos()
         samples[f] = t1 - t0
         f = f + 1
+
+    rt_free(params)
 
 # ─── Scene: clipped_scroll (batched extern) ───────────────────────────────────
 
