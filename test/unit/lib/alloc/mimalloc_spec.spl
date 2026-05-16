@@ -42,6 +42,7 @@ use std.nogc_sync_mut.mimalloc.{
     mi_heap_new,
     mi_heap_delete,
     mi_heap_malloc,
+    mi_heap_malloc_small,
     mi_heap_zalloc,
     mi_heap_calloc,
     mi_heap_realloc,
@@ -50,6 +51,7 @@ use std.nogc_sync_mut.mimalloc.{
     mi_usable_size,
     mi_zalloc,
     mi_mallocn,
+    mi_malloc_small,
     mi_malloc_aligned,
     mi_zalloc_aligned,
     mi_calloc,
@@ -57,6 +59,8 @@ use std.nogc_sync_mut.mimalloc.{
     mi_free_size,
     mi_free_size_aligned,
     mi_rezalloc,
+    mi_reallocn,
+    mi_recalloc,
     mi_realloc_aligned,
     mi_rezalloc_aligned,
     mi_stats_current,
@@ -287,6 +291,13 @@ describe "MimallocAllocator":
         val ptr = ptr_opt.unwrap()
         expect(ptr.len()).to_equal(32)
 
+    it "mi_malloc_small allocates through the small size-class path":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val ptr_opt = mi_malloc_small(15)
+        val ptr = ptr_opt.unwrap()
+        expect(ptr.len()).to_equal(16)
+
     it "aligned allocation validates power-of-two alignment":
         val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
         mimalloc_init(heap)
@@ -339,6 +350,29 @@ describe "MimallocAllocator":
         expect(new_ptr[0]).to_equal(7u8)
         expect(tail_zero_count).to_equal((new_ptr.len() - 8) as i64)
 
+    it "mi_reallocn reallocates to count times size bytes":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val old_ptr = mi_zalloc(8).unwrap()
+        old_ptr[0] = 11u8
+        val new_ptr = mi_reallocn(old_ptr, 4, 8).unwrap()
+        expect(new_ptr.len()).to_equal(32)
+        expect(new_ptr[0]).to_equal(11u8)
+
+    it "mi_recalloc zeros the grown tail":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val old_ptr = mi_zalloc(8).unwrap()
+        old_ptr[0] = 13u8
+        val new_ptr = mi_recalloc(old_ptr, 4, 8).unwrap()
+        var tail_zero_count: i64 = 0
+        for i in 8..new_ptr.len():
+            if new_ptr[i] == 0u8:
+                tail_zero_count = tail_zero_count + 1
+        expect(new_ptr.len()).to_equal(32)
+        expect(new_ptr[0]).to_equal(13u8)
+        expect(tail_zero_count).to_equal((new_ptr.len() - 8) as i64)
+
     it "aligned realloc variants validate alignment":
         val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
         mimalloc_init(heap)
@@ -363,9 +397,11 @@ describe "MimallocAllocator":
         val heap = mi_heap_new()
         mimalloc_init(heap)
         val ptr = mi_heap_malloc(heap, 16)
+        val small_ptr = mi_heap_malloc_small(heap, 15)
         val zptr = mi_heap_zalloc(heap, 16)
         val cptr = mi_heap_calloc(heap, 2, 8)
         expect(ptr.?).to_equal(true)
+        expect(small_ptr.?).to_equal(true)
         expect(zptr.?).to_equal(true)
         expect(cptr.?).to_equal(true)
         mi_heap_free(heap, ptr.unwrap(), 16)

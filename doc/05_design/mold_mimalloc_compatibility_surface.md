@@ -30,10 +30,10 @@ engine parity, and no upstream file/class/struct layout parity.
 | Public allocator structs | `MiBlock`, `MiPage`, `MiSegment`, `MiHeap` | Structural model for pages, segments, and size-class page lists. |
 | Allocator class | `MimallocAllocator` | Implements the repo-local `Allocator` trait over the global mimalloc heap. |
 | Heap initialization | `mimalloc_init` | Initializes one global heap; no TLS or per-thread heaps yet. |
-| Heap-specific APIs | `mi_heap_new`, `mi_heap_delete`, `mi_heap_malloc`, `mi_heap_zalloc`, `mi_heap_calloc`, `mi_heap_realloc`, `mi_heap_free` | Compatibility shims over the current single global heap; no independent per-heap arena ownership yet. |
+| Heap-specific APIs | `mi_heap_new`, `mi_heap_delete`, `mi_heap_malloc`, `mi_heap_malloc_small`, `mi_heap_zalloc`, `mi_heap_calloc`, `mi_heap_realloc`, `mi_heap_free` | Compatibility shims over the current single global heap; no independent per-heap arena ownership yet. |
 | OS page provider | `mimalloc_set_os_page_alloc` | Injection hook for SimpleOS/kernel backing pages. |
-| Basic allocation | `mi_malloc`, `mi_free`, `mi_realloc` | Implemented for the Simple mock array representation. |
-| Zeroing/count APIs | `mi_zalloc`, `mi_mallocn`, `mi_calloc`, `mi_rezalloc` | Implemented as compatibility shims over the existing allocator. |
+| Basic allocation | `mi_malloc`, `mi_malloc_small`, `mi_free`, `mi_realloc` | Implemented for the Simple mock array representation. |
+| Zeroing/count APIs | `mi_zalloc`, `mi_mallocn`, `mi_calloc`, `mi_rezalloc`, `mi_reallocn`, `mi_recalloc` | Implemented as compatibility shims over the existing allocator. |
 | Size query APIs | `mi_good_size`, `mi_usable_size` | Implemented for size classes and the Simple mock pointer representation. |
 | Sized/aligned APIs | `mi_malloc_aligned`, `mi_zalloc_aligned`, `mi_calloc_aligned`, `mi_realloc_aligned`, `mi_rezalloc_aligned`, `mi_free_size`, `mi_free_size_aligned` | Alignment input is validated; actual address alignment cannot be verified until allocation returns raw pointer metadata instead of `[u8]`. |
 | Stats and options APIs | `MiStats`, `MiOption`, `mi_stats_current`, `mi_stats_reset`, `mi_collect`, `mi_heap_collect`, `mi_version`, `mi_option_*` | Modeled over current global allocator counters and boolean options; collect hooks are no-ops until abandoned segments exist. |
@@ -49,8 +49,8 @@ allocation address metadata, and no upstream file/class/struct layout parity.
 
 - `test/unit/lib/alloc/mimalloc_spec.spl` covers size classes, allocator trait
   behavior, zeroing/count APIs, size-query APIs, aligned API validation, sized
-  free APIs, heap-specific shims, modeled stats/options APIs, and a 10k
-  alloc/free stress loop.
+  free APIs, small-allocation shims, count-based realloc APIs, heap-specific
+  shims, modeled stats/options APIs, and a 10k alloc/free stress loop.
 - `test/unit/os/kernel/memory/heap_mimalloc_spec.spl` covers the SimpleOS
   kernel heap pre-init contract and locks the `heap_alloc` to `mi_malloc_raw`
   type boundary plus sized-free null safety.
