@@ -1,5 +1,4 @@
-// Benchmark: batch rect_fill vs per-row memset (interpreter dispatch overhead)
-// Compares rt_cuda_rect_fill (1 dispatch) vs rt_cuda_memset loop (h dispatches)
+
 
 extern fn rt_cuda_available() -> i64
 extern fn rt_cuda_init() -> i64
@@ -12,75 +11,68 @@ extern fn rt_cuda_rect_fill(fb: i64, x: i64, y: i64, w: i64, h: i64, stride: i64
 extern fn rt_cuda_ctx_synchronize() -> i64
 extern fn rt_time_now_seconds() -> f64
 
-fn main() {
-    if rt_cuda_available() != 1 {
+fn main():
+    if rt_cuda_available() != 1:
         print("CUDA not available")
-        return
-    }
-    rt_cuda_init()
-    var dev = rt_cuda_device_get()
-    rt_cuda_ctx_create(dev)
+    else:
+        rt_cuda_init()
+        var dev = rt_cuda_device_get(0)
+        rt_cuda_ctx_create(dev)
 
-    var WIDTH = 640
-    var HEIGHT = 480
-    var fb = rt_cuda_mem_alloc(WIDTH * HEIGHT * 4)
-    if fb == 0 {
-        print("Failed to allocate framebuffer")
-        return
-    }
+        var WIDTH = 640
+        var HEIGHT = 480
+        var fb = rt_cuda_mem_alloc(WIDTH * HEIGHT * 4)
+        if fb == 0:
+            print("Failed to allocate framebuffer")
+        else:
+            var RECTS = 20
+            var FRAMES = 20
+            var color = 0xFF2244FF
 
-    var RECTS = 20
-    var FRAMES = 20
-    var color = 0xFF2244FF
+            var t0 = rt_time_now_seconds()
+            var frame = 0
+            while frame < FRAMES:
+                var r = 0
+                while r < RECTS:
+                    var x = (r * 31) % (WIDTH - 50)
+                    var y = (r * 17 + frame * 7) % (HEIGHT - 50)
+                    var w = 40
+                    var h = 40
+                    var row = 0
+                    while row < h:
+                        var row_ptr = fb + ((y + row) * WIDTH + x) * 4
+                        rt_cuda_memset(row_ptr, color, w)
+                        row = row + 1
+                    r = r + 1
+                rt_cuda_ctx_synchronize()
+                frame = frame + 1
+            var t1 = rt_time_now_seconds()
+            var per_row_ms = (t1 - t0) * 1000.0
 
-    // --- Benchmark 1: per-row memset (old path) ---
-    var t0 = rt_time_now_seconds()
-    var frame = 0
-    while frame < FRAMES {
-        var r = 0
-        while r < RECTS {
-            var x = (r * 31) % (WIDTH - 50)
-            var y = (r * 17 + frame * 7) % (HEIGHT - 50)
-            var w = 40
-            var h = 40
-            var row = 0
-            while row < h {
-                var row_ptr = fb + ((y + row) * WIDTH + x) * 4
-                rt_cuda_memset(row_ptr, color, w)
-                row = row + 1
-            }
-            r = r + 1
-        }
-        rt_cuda_ctx_synchronize()
-        frame = frame + 1
-    }
-    var t1 = rt_time_now_seconds()
-    var per_row_ms = (t1 - t0) * 1000.0
+            var t2 = rt_time_now_seconds()
+            frame = 0
+            while frame < FRAMES:
+                var r = 0
+                while r < RECTS:
+                    var x = (r * 31) % (WIDTH - 50)
+                    var y = (r * 17 + frame * 7) % (HEIGHT - 50)
+                    rt_cuda_rect_fill(fb, x, y, 40, 40, WIDTH, color)
+                    r = r + 1
+                rt_cuda_ctx_synchronize()
+                frame = frame + 1
+            var t3 = rt_time_now_seconds()
+            var batch_ms = (t3 - t2) * 1000.0
 
-    // --- Benchmark 2: batch rect_fill (new path) ---
-    var t2 = rt_time_now_seconds()
-    frame = 0
-    while frame < FRAMES {
-        var r = 0
-        while r < RECTS {
-            var x = (r * 31) % (WIDTH - 50)
-            var y = (r * 17 + frame * 7) % (HEIGHT - 50)
-            rt_cuda_rect_fill(fb, x, y, 40, 40, WIDTH, color)
-            r = r + 1
-        }
-        rt_cuda_ctx_synchronize()
-        frame = frame + 1
-    }
-    var t3 = rt_time_now_seconds()
-    var batch_ms = (t3 - t2) * 1000.0
+            print("=== Batch vs Per-Row Dispatch Benchmark ===")
+            print("  Per-row memset (20 rects x 40 rows x 20 frames = 16000 dispatches):")
+            print("    Total: " + per_row_ms.to_string() + " ms")
+            print("  Batch rect_fill (20 rects x 20 frames = 400 dispatches):")
+            print("    Total: " + batch_ms.to_string() + " ms")
+            if batch_ms > 0.0:
+                var speedup = per_row_ms / batch_ms
+                print("  Speedup: " + speedup.to_string() + "x")
+            else:
+                print("  Speedup: batch too fast to measure (sub-ms) vs " + per_row_ms.to_string() + " ms per-row")
+                print("  Dispatch reduction: 16000 -> 400 (40x fewer interpreter calls)")
 
-    print("=== Batch vs Per-Row Dispatch Benchmark ===")
-    print("  Per-row memset (20 rects × 40 rows × 20 frames = 16000 dispatches):")
-    print("    Total: " + per_row_ms.to_string() + " ms")
-    print("  Batch rect_fill (20 rects × 20 frames = 400 dispatches):")
-    print("    Total: " + batch_ms.to_string() + " ms")
-    var speedup = per_row_ms / batch_ms
-    print("  Speedup: " + speedup.to_string() + "x")
-
-    rt_cuda_mem_free(fb)
-}
+            rt_cuda_mem_free(fb)
