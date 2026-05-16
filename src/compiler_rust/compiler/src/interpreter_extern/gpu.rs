@@ -2,10 +2,87 @@
 //!
 //! Vulkan compute operations for GPU acceleration (feature-gated).
 //! WebGPU compute-draw stub for interpreter mode (always returns false).
+//! When `cuda` feature is disabled, uses dlopen fallback for CUDA driver API.
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::ffi::{CStr, CString};
+use std::sync::OnceLock;
+
+// dlopen-based CUDA fallback when compiled without cuda feature
+#[cfg(not(feature = "cuda"))]
+mod cuda_dlopen {
+    use std::os::raw::c_void;
+    use std::ffi::CString;
+
+    type CuInit = unsafe extern "C" fn(u32) -> i32;
+    type CuDeviceGet = unsafe extern "C" fn(*mut i32, i32) -> i32;
+    type CuCtxCreate = unsafe extern "C" fn(*mut *mut c_void, u32, i32) -> i32;
+    type CuCtxSynchronize = unsafe extern "C" fn() -> i32;
+    type CuMemAlloc = unsafe extern "C" fn(*mut u64, usize) -> i32;
+    type CuMemFree = unsafe extern "C" fn(u64) -> i32;
+    type CuMemsetD32 = unsafe extern "C" fn(u64, u32, usize) -> i32;
+    type CuDeviceGetCount = unsafe extern "C" fn(*mut i32) -> i32;
+
+    pub struct CudaFns {
+        pub init: CuInit,
+        pub device_get: CuDeviceGet,
+        pub device_get_count: CuDeviceGetCount,
+        pub ctx_create: CuCtxCreate,
+        pub ctx_synchronize: CuCtxSynchronize,
+        pub mem_alloc: CuMemAlloc,
+        pub mem_free: CuMemFree,
+        pub memset_d32: CuMemsetD32,
+    }
+
+    unsafe impl Send for CudaFns {}
+    unsafe impl Sync for CudaFns {}
+
+    pub fn load_cuda() -> Option<CudaFns> {
+        unsafe {
+            let lib_name = CString::new("libcuda.so.1").ok()?;
+            let handle = libc::dlopen(lib_name.as_ptr(), libc::RTLD_LAZY);
+            if handle.is_null() {
+                let lib_name2 = CString::new("libcuda.so").ok()?;
+                let handle2 = libc::dlopen(lib_name2.as_ptr(), libc::RTLD_LAZY);
+                if handle2.is_null() {
+                    return None;
+                }
+                return load_syms(handle2);
+            }
+            load_syms(handle)
+        }
+    }
+
+    unsafe fn load_syms(handle: *mut c_void) -> Option<CudaFns> {
+        macro_rules! sym {
+            ($name:expr) => {{
+                let n = CString::new($name).ok()?;
+                let p = libc::dlsym(handle, n.as_ptr());
+                if p.is_null() { return None; }
+                std::mem::transmute(p)
+            }};
+        }
+        Some(CudaFns {
+            init: sym!("cuInit"),
+            device_get: sym!("cuDeviceGet"),
+            device_get_count: sym!("cuDeviceGetCount"),
+            ctx_create: sym!("cuCtxCreate_v2"),
+            ctx_synchronize: sym!("cuCtxSynchronize"),
+            mem_alloc: sym!("cuMemAlloc_v2"),
+            mem_free: sym!("cuMemFree_v2"),
+            memset_d32: sym!("cuMemsetD32_v2"),
+        })
+    }
+}
+
+#[cfg(not(feature = "cuda"))]
+static CUDA_DL: OnceLock<Option<cuda_dlopen::CudaFns>> = OnceLock::new();
+
+#[cfg(not(feature = "cuda"))]
+fn get_cuda_dl() -> Option<&'static cuda_dlopen::CudaFns> {
+    CUDA_DL.get_or_init(|| cuda_dlopen::load_cuda()).as_ref()
+}
 
 // Import Vulkan FFI functions when feature is enabled
 #[cfg(feature = "vulkan")]
@@ -75,6 +152,15 @@ pub fn rt_cuda_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let mut count: i32 = 0;
+            let r = unsafe { (fns.init)(0) };
+            if r != 0 { return Ok(Value::Int(0)); }
+            let r = unsafe { (fns.device_get_count)(&mut count) };
+            if r == 0 && count > 0 {
+                return Ok(Value::Int(1));
+            }
+        }
         Ok(Value::Int(0))
     }
 }
@@ -86,6 +172,10 @@ pub fn rt_cuda_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let r = unsafe { (fns.init)(0) };
+            return Ok(Value::Int(r as i64));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -97,6 +187,11 @@ pub fn rt_cuda_device_count_fn(_args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let mut count: i32 = 0;
+            let r = unsafe { (fns.device_get_count)(&mut count) };
+            if r == 0 { return Ok(Value::Int(count as i64)); }
+        }
         Ok(Value::Int(0))
     }
 }
@@ -109,6 +204,12 @@ pub fn rt_cuda_device_get_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let mut dev: i32 = 0;
+            let r = unsafe { (fns.device_get)(&mut dev, device_id as i32) };
+            if r == 0 { return Ok(Value::Int(dev as i64)); }
+            return Ok(Value::Int(-(r as i64)));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -145,6 +246,12 @@ pub fn rt_cuda_ctx_create_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let mut ctx: *mut std::os::raw::c_void = std::ptr::null_mut();
+            let r = unsafe { (fns.ctx_create)(&mut ctx, 0, device as i32) };
+            if r == 0 { return Ok(Value::Int(ctx as i64)); }
+            return Ok(Value::Int(-(r as i64)));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -168,6 +275,10 @@ pub fn rt_cuda_ctx_synchronize_fn(_args: &[Value]) -> Result<Value, CompileError
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let r = unsafe { (fns.ctx_synchronize)() };
+            return Ok(Value::Int(r as i64));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -180,6 +291,12 @@ pub fn rt_cuda_mem_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let mut ptr: u64 = 0;
+            let r = unsafe { (fns.mem_alloc)(&mut ptr, size as usize) };
+            if r == 0 { return Ok(Value::Int(ptr as i64)); }
+            return Ok(Value::Int(-(r as i64)));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -192,6 +309,10 @@ pub fn rt_cuda_mem_free_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let r = unsafe { (fns.mem_free)(ptr as u64) };
+            return Ok(Value::Int(r as i64));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -248,6 +369,10 @@ pub fn rt_cuda_memset_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let r = unsafe { (fns.memset_d32)(ptr as u64, value as u32, size as usize) };
+            return Ok(Value::Int(r as i64));
+        }
         Ok(Value::Int(-3))
     }
 }
