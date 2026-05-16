@@ -8,7 +8,88 @@
 
 use os.tools.tool_registry.{ToolRegistry, ToolEntry}
 
+struct MkdirPlan:
+    path: text
+    parents: bool
+
+struct ChmodPlan:
+    mode: text
+    path: text
+
+struct SudoPlan:
+    command: text
+    args: [text]
+
 # Standalone wrappers (print-based, no Terminal needed)
+
+fn parse_mkdir_args(args: [text]) -> Result<MkdirPlan, text>:
+    var parents = false
+    var path = ""
+    for arg in args:
+        if arg == "-p" or arg == "--parents":
+            parents = true
+        elif path == "":
+            path = arg
+        else:
+            return Err("mkdir: too many operands")
+    if path == "":
+        return Err("mkdir: missing operand")
+    Ok(MkdirPlan(path: path, parents: parents))
+
+fn chmod_mode_is_octal(mode: text) -> bool:
+    if mode.len() == 0:
+        return false
+    for ch in mode:
+        if ch < "0" or ch > "7":
+            return false
+    true
+
+fn parse_chmod_args(args: [text]) -> Result<ChmodPlan, text>:
+    if args.len() < 2:
+        return Err("chmod: missing mode or operand")
+    val mode = args[0]
+    if not chmod_mode_is_octal(mode):
+        return Err("chmod: mode must be octal")
+    Ok(ChmodPlan(mode: mode, path: args[1]))
+
+fn parse_sudo_args(args: [text]) -> Result<SudoPlan, text>:
+    if args.len() == 0:
+        return Err("sudo: command required")
+    Ok(SudoPlan(command: args[0], args: args.slice(1, args.len())))
+
+fn _run_unavailable(name: text) -> i32:
+    print "{name}: standalone registry runner requires shell context"
+    return 1
+
+fn _run_ls(args: [text]) -> i32:
+    _run_unavailable("ls")
+
+fn _run_mkdir(args: [text]) -> i32:
+    val parsed = parse_mkdir_args(args)
+    if val Err(e) = parsed:
+        print e
+        return 1
+    _run_unavailable("mkdir")
+
+fn _run_chmod(args: [text]) -> i32:
+    val parsed = parse_chmod_args(args)
+    if val Err(e) = parsed:
+        print e
+        return 1
+    _run_unavailable("chmod")
+
+fn _run_sudo(args: [text]) -> i32:
+    val parsed = parse_sudo_args(args)
+    if val Err(e) = parsed:
+        print e
+        return 1
+    _run_unavailable("sudo")
+
+fn _run_tmux(args: [text]) -> i32:
+    _run_unavailable("tmux")
+
+fn _run_ssh(args: [text]) -> i32:
+    _run_unavailable("ssh")
 
 fn _run_basename(args: [text]) -> i32:
     if args.len() == 0:
@@ -126,10 +207,59 @@ fn _run_yes(args: [text]) -> i32:
         count = count + 1
     return 0
 
-fn register_shell_tools(registry: ToolRegistry):
+fn register_shell_tools(registry: ToolRegistry) -> ToolRegistry:
     """Register shell/coreutils tools with the ToolRegistry."""
+    var out = registry
 
-    registry.register(ToolEntry(
+    out.register(ToolEntry(
+        name: "ls",
+        description: "List directory entries",
+        category: "shell",
+        run_fn: _run_ls,
+        capabilities: ["read"]
+    ))
+
+    out.register(ToolEntry(
+        name: "mkdir",
+        description: "Create directories",
+        category: "shell",
+        run_fn: _run_mkdir,
+        capabilities: ["write"]
+    ))
+
+    out.register(ToolEntry(
+        name: "chmod",
+        description: "Change file permissions",
+        category: "shell",
+        run_fn: _run_chmod,
+        capabilities: ["write"]
+    ))
+
+    out.register(ToolEntry(
+        name: "sudo",
+        description: "Run a command with elevated privileges",
+        category: "shell",
+        run_fn: _run_sudo,
+        capabilities: ["privilege"]
+    ))
+
+    out.register(ToolEntry(
+        name: "tmux",
+        description: "Terminal multiplexer",
+        category: "shell",
+        run_fn: _run_tmux,
+        capabilities: ["terminal"]
+    ))
+
+    out.register(ToolEntry(
+        name: "ssh",
+        description: "Secure shell client",
+        category: "shell",
+        run_fn: _run_ssh,
+        capabilities: ["network"]
+    ))
+
+    out.register(ToolEntry(
         name: "basename",
         description: "Strip directory from path",
         category: "shell",
@@ -137,7 +267,7 @@ fn register_shell_tools(registry: ToolRegistry):
         capabilities: ["read"]
     ))
 
-    registry.register(ToolEntry(
+    out.register(ToolEntry(
         name: "dirname",
         description: "Strip filename from path",
         category: "shell",
@@ -145,7 +275,7 @@ fn register_shell_tools(registry: ToolRegistry):
         capabilities: ["read"]
     ))
 
-    registry.register(ToolEntry(
+    out.register(ToolEntry(
         name: "seq",
         description: "Print number sequence",
         category: "shell",
@@ -153,7 +283,7 @@ fn register_shell_tools(registry: ToolRegistry):
         capabilities: ["read"]
     ))
 
-    registry.register(ToolEntry(
+    out.register(ToolEntry(
         name: "expr",
         description: "Evaluate arithmetic expression",
         category: "shell",
@@ -161,7 +291,7 @@ fn register_shell_tools(registry: ToolRegistry):
         capabilities: ["read"]
     ))
 
-    registry.register(ToolEntry(
+    out.register(ToolEntry(
         name: "true",
         description: "Exit with code 0",
         category: "shell",
@@ -169,7 +299,7 @@ fn register_shell_tools(registry: ToolRegistry):
         capabilities: []
     ))
 
-    registry.register(ToolEntry(
+    out.register(ToolEntry(
         name: "false",
         description: "Exit with code 1",
         category: "shell",
@@ -177,10 +307,15 @@ fn register_shell_tools(registry: ToolRegistry):
         capabilities: []
     ))
 
-    registry.register(ToolEntry(
+    out.register(ToolEntry(
         name: "yes",
         description: "Repeatedly output a string",
         category: "shell",
         run_fn: _run_yes,
         capabilities: ["read"]
     ))
+
+    out
+
+fn shell_tool_registry() -> ToolRegistry:
+    register_shell_tools(ToolRegistry.new())
