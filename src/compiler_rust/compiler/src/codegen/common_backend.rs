@@ -167,6 +167,149 @@ pub struct CodegenBackend<M: Module> {
     pub vtable_type_ids: BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
 }
 
+/// Toggle individual ISA extensions on or off.
+/// `None` = use Cranelift default (detect from host CPU or target CPU profile).
+///
+/// # Notes on flag availability
+/// - Tokens `neon`, `sve`, `sve2`, `sse2` are accepted by the parser but are
+///   **no-ops** at the Cranelift level: Cranelift's aarch64 backend exposes only
+///   `has_lse`, `has_pauth`, and `has_fp16`; it has no NEON/SVE toggles. SSE2
+///   is also an unconditional x86_64 baseline with no Cranelift flag. Toggles
+///   that actually take effect are the x86 ones from `has_sse3` onward, plus
+///   `has_lse`/`has_pauth`/`has_fp16` on aarch64.
+/// - Unknown tokens generate a warning to stderr and are silently ignored.
+#[derive(Debug, Clone, Default)]
+pub struct CpuFeatureConfig {
+    pub neon: Option<bool>,     // aarch64 — accepted but no-op (no Cranelift flag)
+    pub sve: Option<bool>,      // aarch64 — accepted but no-op
+    pub sve2: Option<bool>,     // aarch64 — accepted but no-op
+    pub sse2: Option<bool>,     // x86_64  — accepted but no-op (unconditional baseline)
+    pub sse3: Option<bool>,
+    pub ssse3: Option<bool>,
+    pub sse41: Option<bool>,
+    pub sse42: Option<bool>,
+    pub avx: Option<bool>,
+    pub avx2: Option<bool>,
+    pub avx512f: Option<bool>,
+    pub avx512vl: Option<bool>,
+    pub bmi1: Option<bool>,
+    pub bmi2: Option<bool>,
+    pub fma: Option<bool>,
+    pub lzcnt: Option<bool>,
+    pub popcnt: Option<bool>,
+}
+
+impl CpuFeatureConfig {
+    /// Parse from an environment string like `+neon,-sve2,+avx2,-avx512f`
+    /// (`+` = enable, `-` = disable, bare name = enable, comma-separated).
+    /// Unknown tokens are logged to stderr and silently ignored.
+    pub fn from_env_string(s: &str) -> Self {
+        let mut out = Self::default();
+        for token in s.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            let (op, name) = match token.chars().next() {
+                Some('+') => (Some(true), &token[1..]),
+                Some('-') => (Some(false), &token[1..]),
+                _ => (Some(true), token), // bare name = enable
+            };
+            match name {
+                "neon" => out.neon = op,
+                "sve" => out.sve = op,
+                "sve2" => out.sve2 = op,
+                "sse2" => out.sse2 = op,
+                "sse3" => out.sse3 = op,
+                "ssse3" => out.ssse3 = op,
+                "sse41" => out.sse41 = op,
+                "sse42" => out.sse42 = op,
+                "avx" => out.avx = op,
+                "avx2" => out.avx2 = op,
+                "avx512f" => out.avx512f = op,
+                "avx512vl" => out.avx512vl = op,
+                "bmi1" => out.bmi1 = op,
+                "bmi2" => out.bmi2 = op,
+                "fma" => out.fma = op,
+                "lzcnt" => out.lzcnt = op,
+                "popcnt" => out.popcnt = op,
+                _ => eprintln!("simple: unknown cpu feature token '{}' ignored", name),
+            }
+        }
+        out
+    }
+
+    /// Read from the `SIMPLE_CPU_FEATURES` environment variable.
+    /// Unset or empty string = all defaults.
+    pub fn from_env() -> Self {
+        match std::env::var("SIMPLE_CPU_FEATURES") {
+            Ok(s) if !s.is_empty() => Self::from_env_string(&s),
+            _ => Self::default(),
+        }
+    }
+}
+
+/// Apply `CpuFeatureConfig` overrides to a Cranelift ISA builder.
+///
+/// Called AFTER `apply_cranelift_cpu_policy` so per-level presets (x86-64-v2/v3/v4)
+/// are applied first, then env overrides can selectively enable or disable individual
+/// features (e.g. `--cpu x86-64-v3` + `SIMPLE_CPU_FEATURES=-avx512f`).
+///
+/// Flags that the target ISA does not recognise are silently ignored — Cranelift
+/// returns an error for unknown flag names, which we swallow here.
+fn apply_feature_overrides(
+    isa_builder: &mut dyn cranelift_codegen::settings::Configurable,
+    cfg: &CpuFeatureConfig,
+) {
+    let mut set = |key: &str, val: bool| {
+        // Ignore errors: unknown flags are silently no-op across ISAs.
+        let _ = isa_builder.set(key, if val { "true" } else { "false" });
+    };
+    // x86_64 flags (no-op on other ISAs):
+    if let Some(v) = cfg.sse3 {
+        set("has_sse3", v);
+    }
+    if let Some(v) = cfg.ssse3 {
+        set("has_ssse3", v);
+    }
+    if let Some(v) = cfg.sse41 {
+        set("has_sse41", v);
+    }
+    if let Some(v) = cfg.sse42 {
+        set("has_sse42", v);
+    }
+    if let Some(v) = cfg.avx {
+        set("has_avx", v);
+    }
+    if let Some(v) = cfg.avx2 {
+        set("has_avx2", v);
+    }
+    if let Some(v) = cfg.avx512f {
+        set("has_avx512f", v);
+    }
+    if let Some(v) = cfg.avx512vl {
+        set("has_avx512vl", v);
+    }
+    if let Some(v) = cfg.bmi1 {
+        set("has_bmi1", v);
+    }
+    if let Some(v) = cfg.bmi2 {
+        set("has_bmi2", v);
+    }
+    if let Some(v) = cfg.fma {
+        set("has_fma", v);
+    }
+    if let Some(v) = cfg.lzcnt {
+        set("has_lzcnt", v);
+    }
+    if let Some(v) = cfg.popcnt {
+        set("has_popcnt", v);
+    }
+    // aarch64 flags (no-op on other ISAs — neon/sve have no Cranelift flag):
+    // has_lse and has_pauth are the real aarch64 toggles but are not yet in the
+    // CpuFeatureConfig token set; neon/sve are parsed but produce no set() call.
+}
+
 /// Settings for creating a codegen backend
 #[derive(Debug, Clone)]
 pub struct BackendSettings {
@@ -174,6 +317,10 @@ pub struct BackendSettings {
     pub is_pic: bool,
     pub target: Target,
     pub cpu: TargetCpu,
+    /// Per-feature override config. Defaults to all-None (use Cranelift defaults).
+    /// Populated from `SIMPLE_CPU_FEATURES` env var when calling `aot()`, `jit()`,
+    /// or `aot_for_target()`.
+    pub cpu_features: CpuFeatureConfig,
 }
 
 impl Default for BackendSettings {
@@ -183,6 +330,7 @@ impl Default for BackendSettings {
             is_pic: false,
             target: Target::host(),
             cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
+            cpu_features: CpuFeatureConfig::default(),
         }
     }
 }
@@ -196,6 +344,7 @@ impl BackendSettings {
             is_pic: true,
             target: Target::host(),
             cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
+            cpu_features: CpuFeatureConfig::from_env(),
         }
     }
 
@@ -208,16 +357,29 @@ impl BackendSettings {
             is_pic: !target.is_baremetal(),
             target,
             cpu: TargetCpu::builtin_default_for_arch(target.arch),
+            cpu_features: CpuFeatureConfig::from_env(),
         }
     }
 
-    /// Settings for JIT compilation (always host target)
+    /// Settings for JIT compilation (always host target).
+    ///
+    /// PLT entries (required when `is_pic=true`) are only implemented for x86_64
+    /// in cranelift-jit (`vendor/cranelift-jit/src/backend.rs:297`).
+    /// On aarch64, riscv64, and other non-x86_64 hosts the PLT write path
+    /// asserts and panics, so we disable PIC there.  The AOT path
+    /// (`BackendSettings::aot_for_target`) is unaffected — it uses
+    /// `ObjectModule`, not `JITModule`, and never touches the PLT writer.
     pub fn jit() -> Self {
+        // PLT entries needed by is_pic=true are only implemented for x86_64
+        // in cranelift-jit (vendor/cranelift-jit/src/backend.rs:297).
+        // On aarch64/riscv/etc., disable PIC so the assert never fires.
+        let is_pic = cfg!(target_arch = "x86_64");
         Self {
             opt_level: "speed",
-            is_pic: true,
+            is_pic,
             target: Target::host(),
             cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
+            cpu_features: CpuFeatureConfig::from_env(),
         }
     }
 
@@ -235,6 +397,12 @@ impl BackendSettings {
 
     pub fn with_cpu(mut self, cpu: TargetCpu) -> Self {
         self.cpu = cpu;
+        self
+    }
+
+    /// Override the CPU feature config (replaces what `from_env()` set).
+    pub fn with_cpu_features(mut self, features: CpuFeatureConfig) -> Self {
+        self.cpu_features = features;
         self
     }
 }
@@ -274,7 +442,7 @@ pub fn create_isa_and_flags(
             .map_err(|e: target_lexicon::ParseError| BackendError::UnsupportedTarget(e.to_string()))?
     };
 
-    create_isa_from_settings(triple, flags, &settings.target, &settings.cpu)
+    create_isa_from_settings(triple, flags, &settings.target, &settings.cpu, &settings.cpu_features)
 }
 
 /// Helper to create ISA from a triple
@@ -295,6 +463,7 @@ fn create_isa_from_settings(
     flags: settings::Flags,
     target: &Target,
     cpu: &TargetCpu,
+    cpu_features: &CpuFeatureConfig,
 ) -> Result<(settings::Flags, OwnedTargetIsa), BackendError> {
     if matches!(target.arch, TargetArch::Arm | TargetArch::Riscv32) {
         return Err(BackendError::UnsupportedTarget(format!(
@@ -309,7 +478,11 @@ fn create_isa_from_settings(
         cranelift_codegen::isa::lookup(triple).map_err(|e| BackendError::Compilation(e.to_string()))?
     };
 
+    // Apply CPU-level presets first (e.g. x86-64-v3 enables avx2, bmi1, etc.)
     apply_cranelift_cpu_policy(&mut isa_builder, target, cpu)?;
+    // Then apply per-feature env overrides so users can selectively enable/disable
+    // individual features on top of the preset (e.g. --cpu x86-64-v3 + -avx512f).
+    apply_feature_overrides(&mut isa_builder, cpu_features);
 
     let isa = isa_builder
         .finish(flags.clone())
