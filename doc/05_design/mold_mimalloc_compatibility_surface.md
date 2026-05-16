@@ -12,10 +12,12 @@ classes, functions, roles, and remaining gaps.
 
 | Role | Simple artifact | Current status |
 | --- | --- | --- |
-| Linker detection | `src/compiler/70.backend/linker/mold.spl` | Implemented as a native linker wrapper. Detects bundled mold first, then system mold, LLD, and GNU ld. |
+| Role/feature metadata | `src/compiler/70.backend/linker/mold_compatibility.spl`, `MoldCompatibilityRole`, `MoldCompatibilityFeature`, `mold_compatibility_features` | Implemented as an auditable Simple API for the current mold compatibility surface. |
+| Linker detection | `src/compiler/70.backend/linker/mold.spl`, `mold_default_linker_order` | Implemented as a native linker wrapper. Detects bundled mold first, then system mold, LLD, and GNU ld. |
 | Linker execution | `MoldBackend.link_objects` | Delegates to external mold/lld/ld process with CRT/runtime arguments. |
-| User override | `SIMPLE_LINKER`, CLI linker paths | Supports `mold`, `lld`, `ld.lld`, `lld-link`, `ld`, `gnu`, and `bfd` aliases in the Simple wrapper. |
+| User override | `SIMPLE_LINKER`, `mold_supported_override_aliases`, CLI linker paths | Supports `mold`, `lld`, `ld.lld`, `lld-link`, `ld`, `gnu`, and `bfd` aliases in the Simple wrapper. |
 | Bundled binary install | `scripts/install-mold.shs` | Installs an upstream mold binary into `bin/mold/mold`; not a source reimplementation. |
+| Completion predicate | `mold_is_pure_simple_linker_complete` | Returns `false` until a real in-process ELF/Mach-O/COFF linker is implemented. |
 
 Remaining mold gaps: no pure-Simple ELF/Mach-O/COFF linker, no linker-script
 language, no archive/object parser parity, no symbol resolution/relocation
@@ -52,5 +54,6 @@ allocation address metadata, and no upstream file/class/struct layout parity.
 - `test/unit/os/kernel/memory/heap_mimalloc_spec.spl` covers the SimpleOS
   kernel heap pre-init contract and locks the `heap_alloc` to `mi_malloc_raw`
   type boundary plus sized-free null safety.
-- `test/unit/os/memory/mold_linker_spec.spl` covers current linker discovery and
-  fallback behavior.
+- `test/unit/os/memory/mold_linker_spec.spl` covers current linker discovery,
+  fallback behavior, override aliases, bundled search suffixes, and the
+  implemented/missing mold role-feature surface.

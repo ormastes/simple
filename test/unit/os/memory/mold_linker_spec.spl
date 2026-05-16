@@ -28,6 +28,14 @@ and is correct cross-compile behavior — it is NOT a mold override on the host.
 
 use std.spipe.*
 use std.io_runtime.{file_exists}
+use compiler.backend.linker.mold_compatibility.{
+    MoldCompatibilityRole,
+    mold_default_linker_order,
+    mold_supported_override_aliases,
+    mold_bundled_search_suffixes,
+    mold_compatibility_features,
+    mold_is_pure_simple_linker_complete,
+}
 
 
 # ============================================================================
@@ -61,14 +69,11 @@ describe "find_linker priority — mold-first invariant":
     """
 
     it "mold is first in the preference chain":
-        # Simulate the three-step preference order as documented in mold.spl.
-        # We test the ordering rule, not the binary's presence (which is
-        # network-dependent and belongs in integration / CI smoke tests).
-        val preference_order: [text] = ["mold", "lld", "ld"]
+        val preference_order = mold_default_linker_order()
         expect(preference_order[0]).to_equal("mold")
 
     it "lld is second choice after mold":
-        val preference_order: [text] = ["mold", "lld", "ld"]
+        val preference_order = mold_default_linker_order()
         expect(preference_order[1]).to_equal("lld")
 
     it "ld.lld is the preferred lld frontend":
@@ -77,18 +82,15 @@ describe "find_linker priority — mold-first invariant":
         expect(lld_frontends[1]).to_equal("lld")
 
     it "SIMPLE_LINKER supports Rust-compatible linker aliases":
-        val mold_aliases: [text] = ["mold"]
-        val lld_aliases: [text] = ["lld", "ld.lld", "lld-link"]
-        val ld_aliases: [text] = ["ld", "gnu", "bfd"]
-
-        expect(mold_aliases.contains("mold")).to_equal(true)
-        expect(lld_aliases.contains("ld.lld")).to_equal(true)
-        expect(lld_aliases.contains("lld-link")).to_equal(true)
-        expect(ld_aliases.contains("gnu")).to_equal(true)
-        expect(ld_aliases.contains("bfd")).to_equal(true)
+        val aliases = mold_supported_override_aliases()
+        expect(aliases.contains("mold")).to_equal(true)
+        expect(aliases.contains("ld.lld")).to_equal(true)
+        expect(aliases.contains("lld-link")).to_equal(true)
+        expect(aliases.contains("gnu")).to_equal(true)
+        expect(aliases.contains("bfd")).to_equal(true)
 
     it "ld is last resort":
-        val preference_order: [text] = ["mold", "lld", "ld"]
+        val preference_order = mold_default_linker_order()
         expect(preference_order[2]).to_equal("ld")
 
     it "local bin/mold/mold path is checked before system PATH":
@@ -110,17 +112,10 @@ describe "find_linker priority — mold-first invariant":
         expect(bundled_names.contains("mold-freebsd-aarch64")).to_equal(true)
 
     it "bundled mold locations cover repo bin and lib layouts":
-        val bundled_locations: [text] = [
-            "bin/mold/mold",
-            "bin/mold/mold-linux-x86_64",
-            "bin/mold-linux-x86_64",
-            "bin/mold",
-            "lib/simple/mold",
-            "lib/simple/mold-linux-x86_64"
-        ]
+        val bundled_locations = mold_bundled_search_suffixes()
         expect(bundled_locations[0]).to_equal("bin/mold/mold")
-        expect(bundled_locations.contains("bin/mold-linux-x86_64")).to_equal(true)
-        expect(bundled_locations.contains("lib/simple/mold-linux-x86_64")).to_equal(true)
+        expect(bundled_locations.contains("bin/mold")).to_equal(true)
+        expect(bundled_locations.contains("lib/simple/mold")).to_equal(true)
 
     it "bin/mold/mold presence gates mold selection":
         # When the local binary exists, find_linker() must return Mold.
@@ -134,3 +129,12 @@ describe "find_linker priority — mold-first invariant":
             # Without binary: fallback chain applies — this is expected in
             # clean-checkout environments before running install-mold.shs.
             expect(file_exists("scripts/install-mold.shs")).to_equal(true)
+
+    it "mold role feature surface documents implemented and missing roles":
+        val features = mold_compatibility_features()
+        expect(features.len()).to_equal(7)
+        expect(features[0].role).to_equal(MoldCompatibilityRole.LinkerDetection)
+        expect(features[0].status).to_equal("implemented")
+        expect(features[6].role).to_equal(MoldCompatibilityRole.PureSimpleLinker)
+        expect(features[6].status).to_equal("missing")
+        expect(mold_is_pure_simple_linker_complete()).to_equal(false)
