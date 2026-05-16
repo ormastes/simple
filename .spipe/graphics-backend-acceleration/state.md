@@ -35,7 +35,7 @@ The output is executable benchmarks (not just docs) tied to measurable acceptanc
 - [x] 5-impl — 2026-05-16
 - [x] 6-refactor — 2026-05-16
 - [x] 7-verify — 2026-05-16
-- [ ] 8-ship
+- [x] 8-ship — 2026-05-16
 
 ## Phase Outputs
 
