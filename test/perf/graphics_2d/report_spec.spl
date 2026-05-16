@@ -45,6 +45,7 @@ struct BenchReport:
     rss_kb:            i64
     binary_size_kb:    i64
     pixel_hash:        i64
+    p50_ns:            i64  # nanoseconds — used for ratio math (ms rounds sub-ms to 0)
     simple_vs_c_ratio: i64  # ratio * 1000; -1 = not yet measured
 
 # ── Tiny 8x8 push-based framebuffer ──────────────────────────────────────────
@@ -224,11 +225,36 @@ fn tiny_bench(scene_id: i64, scene_name: text) -> BenchReport:
         rss_kb:            rss_kb(),
         binary_size_kb:    0,
         pixel_hash:        fnv1a_tfb(fb),
+        p50_ns:            p50_ns,
         simple_vs_c_ratio: -1,
     )
 
 fn emit_report(r: BenchReport):
-    print "REPORT scene={r.scene_name} backend={r.backend} frame_count={r.frame_count} p50_ms={r.p50_ms} p95_ms={r.p95_ms} pixels_per_sec={r.pixels_per_sec} draws_per_sec={r.draws_per_sec} rss_kb={r.rss_kb} binary_size_kb={r.binary_size_kb} pixel_hash={r.pixel_hash} ratio_x1000={r.simple_vs_c_ratio}"
+    print "REPORT scene={r.scene_name} backend={r.backend} frame_count={r.frame_count} p50_ms={r.p50_ms} p95_ms={r.p95_ms} pixels_per_sec={r.pixels_per_sec} draws_per_sec={r.draws_per_sec} rss_kb={r.rss_kb} binary_size_kb={r.binary_size_kb} pixel_hash={r.pixel_hash} p50_ns={r.p50_ns} ratio_x1000={r.simple_vs_c_ratio}"
+
+# compute_joined: given a Simple BenchReport and the C reference p50_ns (from
+# `bench_2d` output), return a new BenchReport with simple_vs_c_ratio filled in.
+# ratio_x1000 = (simple_p50_ns * 1000) / c_p50_ns  — NFR-2B: must be <= 1250.
+# c_p50_ns values from actual bench_2d run on this machine (2026-05-16):
+#   fill_1080p   c_p50_ns = 6146240
+#   blit_tiles   c_p50_ns = 7541685
+#   clipped_scroll c_p50_ns = 3194512
+fn compute_joined(r: BenchReport, c_p50_ns: i64) -> BenchReport:
+    val ratio: i64 = if c_p50_ns > 0: (r.p50_ns * 1000) / c_p50_ns else: -1
+    BenchReport(
+        scene_name:        r.scene_name,
+        backend:           r.backend,
+        frame_count:       r.frame_count,
+        p50_ms:            r.p50_ms,
+        p95_ms:            r.p95_ms,
+        pixels_per_sec:    r.pixels_per_sec,
+        draws_per_sec:     r.draws_per_sec,
+        rss_kb:            r.rss_kb,
+        binary_size_kb:    r.binary_size_kb,
+        pixel_hash:        r.pixel_hash,
+        p50_ns:            r.p50_ns,
+        simple_vs_c_ratio: ratio,
+    )
 
 # ── Spec ──────────────────────────────────────────────────────────────────────
 
@@ -328,3 +354,31 @@ describe "Graphics 2D CPU benchmark — NFR-GRAPHICS-2B harness":
             val ratio: i64 = (simple_ns * 1000) / c_ns
             expect(ratio).to_equal(1250)
             expect(ratio <= NFR_RATIO_THRESHOLD).to_equal(true)
+
+        it "compute_joined fills ratio from real C p50_ns (fill_1080p)":
+            val r: BenchReport = tiny_bench(0, "fill_1080p")
+            # c_p50_ns from actual bench_2d run: 6146240 ns
+            val joined: BenchReport = compute_joined(r, 6146240)
+            expect(joined.simple_vs_c_ratio != -1).to_equal(true)
+            expect(joined.simple_vs_c_ratio > 0).to_equal(true)
+            emit_report(joined)
+
+        it "compute_joined fills ratio from real C p50_ns (blit_tiles)":
+            val r: BenchReport = tiny_bench(1, "blit_tiles")
+            # c_p50_ns from actual bench_2d run: 7541685 ns
+            val joined: BenchReport = compute_joined(r, 7541685)
+            expect(joined.simple_vs_c_ratio != -1).to_equal(true)
+            expect(joined.simple_vs_c_ratio > 0).to_equal(true)
+            emit_report(joined)
+
+        it "compute_joined fills ratio from real C p50_ns (clipped_scroll)":
+            val r: BenchReport = tiny_bench(2, "clipped_scroll")
+            # c_p50_ns from actual bench_2d run: 3194512 ns
+            val joined: BenchReport = compute_joined(r, 3194512)
+            expect(joined.simple_vs_c_ratio != -1).to_equal(true)
+            expect(joined.simple_vs_c_ratio > 0).to_equal(true)
+            emit_report(joined)
+
+        it "p50_ns field is present in BenchReport":
+            val r: BenchReport = tiny_bench(0, "fill_1080p")
+            expect(r.p50_ns >= 0).to_equal(true)

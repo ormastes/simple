@@ -73,11 +73,15 @@ static void do_rect(uint8_t *fb, ClipRect cr, int bx, int by, int bw, int bh, in
     uint8_t r=c_r(color), g=c_g(color), b=c_b(color), a=c_a(color);
     int x0=bx, y0=by, x1=bx+bw, y1=by+bh;
     if (cr.active) {
-        if (x0<cr.x) x0=cr.x; if (y0<cr.y) y0=cr.y;
-        if (x1>cr.x2) x1=cr.x2; if (y1>cr.y2) y1=cr.y2;
+        if (x0 < cr.x)  x0 = cr.x;
+        if (y0 < cr.y)  y0 = cr.y;
+        if (x1 > cr.x2) x1 = cr.x2;
+        if (y1 > cr.y2) y1 = cr.y2;
     }
-    if (x0<0) x0=0; if (y0<0) y0=0;
-    if (x1>FRAME_W) x1=FRAME_W; if (y1>FRAME_H) y1=FRAME_H;
+    if (x0 < 0)       x0 = 0;
+    if (y0 < 0)       y0 = 0;
+    if (x1 > FRAME_W) x1 = FRAME_W;
+    if (y1 > FRAME_H) y1 = FRAME_H;
     if (x0>=x1 || y0>=y1) return;
     int row_bytes = (x1-x0)*BYTES_PER_PX;
     for (int row=y0; row<y1; row++) {

@@ -1,0 +1,107 @@
+# 2D Engine — Backend Probe Contract
+#
+# Typed diagnostics for backend initialization and forced-backend creation.
+# Prevents silent fallback when hardware proof is required.
+#
+# Usage:
+#   use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+
+# ============================================================================
+# Backend Status
+# ============================================================================
+
+enum BackendStatus:
+    Available
+    Unavailable
+    Initialized
+    Failed
+
+fn backend_status_to_text(status: BackendStatus) -> text:
+    if status == BackendStatus.Available:
+        return "available"
+    if status == BackendStatus.Unavailable:
+        return "unavailable"
+    if status == BackendStatus.Initialized:
+        return "initialized"
+    if status == BackendStatus.Failed:
+        return "failed"
+    "unknown"
+
+# ============================================================================
+# Backend Probe Result
+# ============================================================================
+
+class BackendProbeResult:
+    """Diagnostic record for backend initialization attempts.
+
+    Captures what was requested, what was selected, and why a backend
+    succeeded or failed. Used by strict creation to report typed errors
+    instead of silently falling back to CPU.
+    """
+
+    requested_name: text
+    selected_name: text
+    status: BackendStatus
+    device_name: text
+    api_name: text
+    feature_gate: text
+    shader_format: text
+    fallback_reason: text
+
+    static fn success(requested: text, device: text, api: text, shader_fmt: text) -> BackendProbeResult:
+        BackendProbeResult(
+            requested_name: requested,
+            selected_name: requested,
+            status: BackendStatus.Initialized,
+            device_name: device,
+            api_name: api,
+            feature_gate: "",
+            shader_format: shader_fmt,
+            fallback_reason: ""
+        )
+
+    static fn unavailable(requested: text, reason: text, gate: text) -> BackendProbeResult:
+        BackendProbeResult(
+            requested_name: requested,
+            selected_name: "cpu",
+            status: BackendStatus.Unavailable,
+            device_name: "",
+            api_name: "",
+            feature_gate: gate,
+            shader_format: "",
+            fallback_reason: reason
+        )
+
+    static fn failed(requested: text, reason: text, api: text) -> BackendProbeResult:
+        BackendProbeResult(
+            requested_name: requested,
+            selected_name: "cpu",
+            status: BackendStatus.Failed,
+            device_name: "",
+            api_name: api,
+            feature_gate: "",
+            shader_format: "",
+            fallback_reason: reason
+        )
+
+    fn is_ok(self) -> bool:
+        self.status == BackendStatus.Initialized
+
+    fn is_hardware(self) -> bool:
+        self.is_ok() and self.selected_name != "cpu" and self.selected_name != "software"
+
+    fn diagnostic_text(self) -> text:
+        var msg = "Backend probe: requested=" + self.requested_name
+        msg = msg + " selected=" + self.selected_name
+        msg = msg + " status=" + backend_status_to_text(self.status)
+        if self.device_name != "":
+            msg = msg + " device=" + self.device_name
+        if self.api_name != "":
+            msg = msg + " api=" + self.api_name
+        if self.feature_gate != "":
+            msg = msg + " gate=" + self.feature_gate
+        if self.shader_format != "":
+            msg = msg + " shader=" + self.shader_format
+        if self.fallback_reason != "":
+            msg = msg + " reason=" + self.fallback_reason
+        msg
