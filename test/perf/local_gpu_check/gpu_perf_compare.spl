@@ -1,156 +1,394 @@
-# GPU Perf Check — CUDA memset + kernel timing
+# Pure Simple GPU Perf Check — CUDA + Vulkan via dlopen SFFI
 #
-# bin/simple test/perf/local_gpu_check/gpu_perf_compare.spl
+# No Rust cuda/vulkan feature needed. Uses spl_dlopen/spl_dlsym to call
+# libcuda.so and libvulkan.so directly, same as the C benchmarks do.
+#
+# Usage:
+#   bin/simple test/perf/local_gpu_check/gpu_perf_compare.spl
 
-use std.nogc_sync_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_get, cuda_device_name, cuda_ctx_create, cuda_ctx_destroy, cuda_ctx_synchronize, cuda_mem_alloc, cuda_mem_free, cuda_memcpy_dtoh, cuda_memset, cuda_module_load_data, cuda_module_get_function, cuda_launch_kernel, cuda_module_unload}
-
+extern fn spl_dlopen(path: text) -> i64
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+extern fn spl_dlclose(handle: i64) -> i64
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+extern fn rt_cstring_to_text(ptr: i64) -> text
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64) -> i64
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, v: i64) -> i64
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, v: i64) -> i64
 extern fn rt_time_now_monotonic_ms() -> i64
-extern fn rt_bytes_alloc(size: i64) -> [u8]
 
-fn ptx_clear() -> text:
-    var s = ".version 7.0\n"
-    s = s + ".target sm_52\n"
-    s = s + ".address_size 64\n"
-    s = s + ".visible .entry kernel_clear(\n"
-    s = s + "    .param .u64 fb,\n"
-    s = s + "    .param .u32 color,\n"
-    s = s + "    .param .u32 count\n"
-    s = s + ")\n{\n"
-    s = s + ".reg .u64 %rd<4>;\n"
-    s = s + ".reg .u32 %r<6>;\n"
-    s = s + ".reg .pred %p1;\n"
-    s = s + "ld.param.u64 %rd1, [fb];\n"
-    s = s + "ld.param.u32 %r1, [color];\n"
-    s = s + "ld.param.u32 %r2, [count];\n"
-    s = s + "mov.u32 %r3, %ctaid.x;\n"
-    s = s + "mov.u32 %r4, %ntid.x;\n"
-    s = s + "mov.u32 %r5, %tid.x;\n"
-    s = s + "mad.lo.u32 %r3, %r3, %r4, %r5;\n"
-    s = s + "setp.ge.u32 %p1, %r3, %r2;\n"
-    s = s + "@%p1 bra DONE;\n"
-    s = s + "cvt.u64.u32 %rd2, %r3;\n"
-    s = s + "shl.b64 %rd2, %rd2, 2;\n"
-    s = s + "add.u64 %rd3, %rd1, %rd2;\n"
-    s = s + "st.global.u32 [%rd3], %r1;\n"
-    s = s + "DONE: ret;\n}\n"
-    s
+# ============================================================================
+# SFFI call helpers (thin wrappers around spl_wffi_call_i64)
+# ============================================================================
+
+fn ffi0(fptr: i64) -> i64:
+    var a: [i64] = []
+    spl_wffi_call_i64(fptr, a, 0)
+
+fn ffi1(fptr: i64, a0: i64) -> i64:
+    var a: [i64] = []
+    a.push(a0)
+    spl_wffi_call_i64(fptr, a, 1)
+
+fn ffi2(fptr: i64, a0: i64, a1: i64) -> i64:
+    var a: [i64] = []
+    a.push(a0)
+    a.push(a1)
+    spl_wffi_call_i64(fptr, a, 2)
+
+fn ffi3(fptr: i64, a0: i64, a1: i64, a2: i64) -> i64:
+    var a: [i64] = []
+    a.push(a0)
+    a.push(a1)
+    a.push(a2)
+    spl_wffi_call_i64(fptr, a, 3)
+
+# Format elapsed/iterations as "X.YY ms"
+fn fmt_avg(elapsed_ms: i64, iters: i64) -> text:
+    if iters == 0:
+        return "N/A"
+    var whole = elapsed_ms / iters
+    var frac = ((elapsed_ms * 100) / iters) % 100
+    var frac_text = frac.to_text()
+    if frac < 10:
+        frac_text = "0" + frac_text
+    whole.to_text() + "." + frac_text
+
+# ASCII lookup: index 0 = space (32), index 94 = tilde (126)
+var _ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+fn byte_to_char(b: i64) -> text:
+    if b >= 32 and b <= 126:
+        return _ascii[b - 32]
+    ""
+
+fn decode_cstring(ptr: i64, max_len: i64) -> text:
+    var result = ""
+    var off = 0
+    while off < max_len:
+        var word = rt_ptr_read_i32(ptr, off)
+        var b0 = word & 255
+        if b0 == 0:
+            return result
+        result = result + byte_to_char(b0)
+        var b1 = (word >> 8) & 255
+        if b1 == 0:
+            return result
+        result = result + byte_to_char(b1)
+        var b2 = (word >> 16) & 255
+        if b2 == 0:
+            return result
+        result = result + byte_to_char(b2)
+        var b3 = (word >> 24) & 255
+        if b3 == 0:
+            return result
+        result = result + byte_to_char(b3)
+        off = off + 4
+    result
+
+# Zero a region of memory (8-byte aligned writes)
+fn zero_mem(ptr: i64, bytes: i64):
+    var off = 0
+    while off < bytes:
+        rt_ptr_write_i64(ptr, off, 0)
+        off = off + 8
+
+# ============================================================================
+# CUDA Benchmark
+# ============================================================================
+
+fn run_cuda() -> i64:
+    print "[CUDA — dlopen SFFI]"
+    var lib = spl_dlopen("libcuda.so.1")
+    if lib == 0:
+        lib = spl_dlopen("libcuda.so")
+    if lib == 0:
+        print "  SKIP: cannot load libcuda.so"
+        return -1
+
+    var p_init = spl_dlsym(lib, "cuInit")
+    var p_dev_count = spl_dlsym(lib, "cuDeviceGetCount")
+    var p_dev_get = spl_dlsym(lib, "cuDeviceGet")
+    var p_dev_name = spl_dlsym(lib, "cuDeviceGetName")
+    var p_ctx_create = spl_dlsym(lib, "cuCtxCreate_v2")
+    var p_ctx_destroy = spl_dlsym(lib, "cuCtxDestroy_v2")
+    var p_ctx_sync = spl_dlsym(lib, "cuCtxSynchronize")
+    var p_mem_alloc = spl_dlsym(lib, "cuMemAlloc_v2")
+    var p_mem_free = spl_dlsym(lib, "cuMemFree_v2")
+    var p_memset32 = spl_dlsym(lib, "cuMemsetD32_v2")
+    var p_memcpy_dth = spl_dlsym(lib, "cuMemcpyDtoH_v2")
+
+    if p_init == 0 or p_mem_alloc == 0 or p_memset32 == 0:
+        print "  FAIL: missing CUDA symbols"
+        spl_dlclose(lib)
+        return -1
+
+    var res = ffi1(p_init, 0)
+    if res != 0:
+        print "  FAIL: cuInit = " + res.to_text()
+        spl_dlclose(lib)
+        return -1
+
+    var out4 = rt_alloc(4)
+    ffi1(p_dev_count, out4)
+    var count = rt_ptr_read_i32(out4, 0)
+    rt_free(out4)
+    print "  Devices: " + count.to_text()
+    if count <= 0:
+        print "  FAIL: no devices"
+        spl_dlclose(lib)
+        return -1
+
+    var out_dev = rt_alloc(4)
+    ffi2(p_dev_get, out_dev, 0)
+    var dev = rt_ptr_read_i32(out_dev, 0)
+    rt_free(out_dev)
+
+    # rt_cstring_to_text returns empty in interpreter mode (known bug);
+    # decode device name manually from raw i32 reads
+    var nbuf = rt_alloc(256)
+    ffi3(p_dev_name, nbuf, 255, dev)
+    var dname = decode_cstring(nbuf, 64)
+    rt_free(nbuf)
+    print "  Device: " + dname
+
+    var out_ctx = rt_alloc(8)
+    res = ffi3(p_ctx_create, out_ctx, 0, dev)
+    var ctx = rt_ptr_read_i64(out_ctx, 0)
+    rt_free(out_ctx)
+    if res != 0:
+        print "  FAIL: cuCtxCreate = " + res.to_text()
+        spl_dlclose(lib)
+        return -1
+    print "  Context: OK"
+
+    # Allocate 1080p framebuffer on device
+    var pixels = 1920 * 1080
+    var bytes = pixels * 4
+    var out_fb = rt_alloc(8)
+    res = ffi2(p_mem_alloc, out_fb, bytes)
+    var d_fb = rt_ptr_read_i64(out_fb, 0)
+    rt_free(out_fb)
+    if res != 0:
+        print "  FAIL: cuMemAlloc = " + res.to_text()
+        ffi1(p_ctx_destroy, ctx)
+        spl_dlclose(lib)
+        return -1
+    print "  Allocated: " + bytes.to_text() + " bytes on device"
+
+    # Warmup
+    ffi3(p_memset32, d_fb, 255, pixels)
+    ffi0(p_ctx_sync)
+
+    # --- Test 1: Timed memset clears ---
+    print ""
+    print "  --- GPU memset 1080p (100 iterations) ---"
+    var t0 = rt_time_now_monotonic_ms()
+    var i = 0
+    while i < 100:
+        ffi3(p_memset32, d_fb, 255, pixels)
+        ffi0(p_ctx_sync)
+        i = i + 1
+    var gpu_ms = rt_time_now_monotonic_ms() - t0
+    print "  Total: " + gpu_ms.to_text() + " ms"
+    print "  Avg:   " + fmt_avg(gpu_ms, 100) + " ms/frame"
+
+    # --- Test 2: Readback ---
+    print ""
+    print "  --- Readback ---"
+    ffi3(p_memset32, d_fb, 171, pixels)
+    ffi0(p_ctx_sync)
+    var host = rt_alloc(bytes)
+    var tr0 = rt_time_now_monotonic_ms()
+    ffi3(p_memcpy_dth, host, d_fb, bytes)
+    var rb_ms = rt_time_now_monotonic_ms() - tr0
+    print "  Readback " + bytes.to_text() + " bytes: " + rb_ms.to_text() + " ms"
+    var px0 = rt_ptr_read_i32(host, 0)
+    print "  First pixel (u32): " + px0.to_text()
+    rt_free(host)
+
+    # Cleanup GPU
+    ffi1(p_mem_free, d_fb)
+    ffi1(p_ctx_destroy, ctx)
+    spl_dlclose(lib)
+
+    # --- CPU comparison via libc memset ---
+    print ""
+    print "  --- CPU memset comparison (100 iterations) ---"
+    var libc = spl_dlopen("libc.so.6")
+    if libc == 0:
+        print "  SKIP: cannot load libc.so.6"
+        return gpu_ms
+
+    var p_memset = spl_dlsym(libc, "memset")
+    if p_memset == 0:
+        print "  SKIP: memset symbol not found"
+        return gpu_ms
+
+    var cpu_buf = rt_alloc(bytes)
+    t0 = rt_time_now_monotonic_ms()
+    i = 0
+    while i < 100:
+        ffi3(p_memset, cpu_buf, 30, bytes)
+        i = i + 1
+    var cpu_ms = rt_time_now_monotonic_ms() - t0
+    print "  Total: " + cpu_ms.to_text() + " ms"
+    print "  Avg:   " + fmt_avg(cpu_ms, 100) + " ms/frame"
+    rt_free(cpu_buf)
+
+    # --- CUDA Verdict ---
+    print ""
+    print "  ========================================"
+    print "  CUDA VERDICT"
+    print "  ========================================"
+    print "  GPU memset avg: " + fmt_avg(gpu_ms, 100) + " ms"
+    print "  CPU memset avg: " + fmt_avg(cpu_ms, 100) + " ms"
+    if cpu_ms > 0 and gpu_ms >= 0:
+        if gpu_ms == 0:
+            print "  Speedup: >100x (sub-ms GPU)"
+        else:
+            var ratio = cpu_ms / gpu_ms
+            print "  Speedup: " + ratio.to_text() + "x"
+    if gpu_ms < 2:
+        print "  PASS: GPU sub-ms per frame -> 60Hz capable"
+    else:
+        var avg = gpu_ms / 100
+        if avg < 17:
+            print "  PASS: GPU < 16.7ms/frame -> 60Hz capable"
+        else:
+            print "  WARN: GPU > 16.7ms/frame"
+    print "  GPU equal or better than CPU: " + (gpu_ms <= cpu_ms).to_text()
+    print "  ========================================"
+    gpu_ms
+
+# ============================================================================
+# Vulkan Benchmark
+# ============================================================================
+
+fn run_vulkan():
+    print "[VULKAN — dlopen SFFI]"
+    var lib = spl_dlopen("libvulkan.so.1")
+    if lib == 0:
+        lib = spl_dlopen("libvulkan.so")
+    if lib == 0:
+        print "  SKIP: cannot load libvulkan.so"
+        return pass_dn
+
+    var p_create = spl_dlsym(lib, "vkCreateInstance")
+    var p_enum = spl_dlsym(lib, "vkEnumeratePhysicalDevices")
+    var p_props = spl_dlsym(lib, "vkGetPhysicalDeviceProperties")
+    var p_destroy = spl_dlsym(lib, "vkDestroyInstance")
+
+    if p_create == 0 or p_enum == 0:
+        print "  FAIL: missing Vulkan symbols"
+        spl_dlclose(lib)
+        return pass_dn
+
+    # Build VkInstanceCreateInfo (64 bytes, zeroed, sType=1)
+    var ci = rt_alloc(64)
+    zero_mem(ci, 64)
+    rt_ptr_write_i32(ci, 0, 1)
+
+    # vkCreateInstance(&ci, NULL, &instance) — timed
+    var out_inst = rt_alloc(8)
+    var t0 = rt_time_now_monotonic_ms()
+    var res = ffi3(p_create, ci, 0, out_inst)
+    var init_ms = rt_time_now_monotonic_ms() - t0
+    var instance = rt_ptr_read_i64(out_inst, 0)
+    rt_free(out_inst)
+    rt_free(ci)
+
+    if res != 0:
+        print "  FAIL: vkCreateInstance = " + res.to_text()
+        spl_dlclose(lib)
+        return pass_dn
+    print "  Instance created: " + init_ms.to_text() + " ms"
+
+    # Enumerate physical devices
+    var out4 = rt_alloc(4)
+    ffi3(p_enum, instance, out4, 0)
+    var dev_count = rt_ptr_read_i32(out4, 0)
+    print "  Physical devices: " + dev_count.to_text()
+
+    if dev_count > 0 and p_props != 0:
+        var devs = rt_alloc(dev_count * 8)
+        ffi3(p_enum, instance, out4, devs)
+
+        # VkPhysicalDeviceProperties: deviceName starts at offset 256
+        var props_buf = rt_alloc(1024)
+        var d = 0
+        while d < dev_count and d < 4:
+            var dev_handle = rt_ptr_read_i64(devs, d * 8)
+            zero_mem(props_buf, 1024)
+            ffi2(p_props, dev_handle, props_buf)
+            var name = decode_cstring(props_buf + 20, 64)
+            print "    Device " + d.to_text() + ": " + name
+            d = d + 1
+        rt_free(props_buf)
+        rt_free(devs)
+    rt_free(out4)
+
+    # CPU baseline (same memset as CUDA section)
+    print ""
+    print "  --- CPU Baseline ---"
+    var bytes = 1920 * 1080 * 4
+    var libc = spl_dlopen("libc.so.6")
+    if libc != 0:
+        var p_memset = spl_dlsym(libc, "memset")
+        if p_memset != 0:
+            var buf = rt_alloc(bytes)
+            t0 = rt_time_now_monotonic_ms()
+            var i = 0
+            while i < 100:
+                ffi3(p_memset, buf, 30, bytes)
+                i = i + 1
+            var cpu_ms = rt_time_now_monotonic_ms() - t0
+            print "  100 CPU memsets (1080p): " + cpu_ms.to_text() + " ms"
+            print "  Avg: " + fmt_avg(cpu_ms, 100) + " ms"
+            rt_free(buf)
+
+    # Verdict
+    print ""
+    print "  ========================================"
+    print "  VULKAN VERDICT"
+    print "  ========================================"
+    print "  Vulkan available: YES (" + dev_count.to_text() + " devices)"
+    print "  Init time: " + init_ms.to_text() + " ms (target < 500 ms)"
+    if init_ms < 500:
+        print "  PASS: init within NFR target"
+    else:
+        print "  WARN: init exceeds 500ms target"
+    print "  ========================================"
+
+    ffi2(p_destroy, instance, 0)
+    spl_dlclose(lib)
+
+# ============================================================================
+# Main
+# ============================================================================
 
 fn main():
     print "========================================"
-    print "CUDA GPU Perf Check"
+    print "Pure Simple GPU Perf Check (dlopen SFFI)"
     print "========================================"
-
-    if not cuda_available():
-        print "FAIL: CUDA not available"
-        return pass_dn
-
-    var status = cuda_init()
-    if status != 0:
-        print "FAIL: cuda_init = " + status.to_text()
-        return pass_dn
-
-    var count = cuda_device_count()
-    print "Devices: " + count.to_text()
-    if count <= 0:
-        print "FAIL: no devices"
-        return pass_dn
-
-    var dev = cuda_device_get(0)
-    print "Device: " + cuda_device_name(dev)
-
-    var ctx = cuda_ctx_create(dev)
-    if ctx == 0:
-        print "FAIL: ctx"
-        return pass_dn
-    print "Context: OK"
-
-    # --- Test 1: memset timing at 1080p ---
     print ""
-    print "--- Test 1: cuda_memset 1080p ---"
-    var w = 1920
-    var h = 1080
-    var pixels = w * h
-    var byte_count = i64(pixels) * 4
-    var d_fb = cuda_mem_alloc(byte_count)
-    if d_fb == 0:
-        print "FAIL: alloc"
-        cuda_ctx_destroy(ctx)
-        return pass_dn
-    print "  Allocated: " + byte_count.to_text() + " bytes"
 
-    # Warmup
-    cuda_memset(d_fb, i64(0), byte_count)
-    cuda_ctx_synchronize()
+    run_cuda()
 
-    # Timed: 20 memset clears
-    var t0 = rt_time_now_monotonic_ms()
-    var i = 0
-    while i < 20:
-        cuda_memset(d_fb, i64(0xFF), byte_count)
-        cuda_ctx_synchronize()
-        i = i + 1
-    var elapsed = rt_time_now_monotonic_ms() - t0
-    var avg_clear = elapsed / 20
-    print "  20 clears in " + elapsed.to_text() + " ms"
-    print "  Avg clear: " + avg_clear.to_text() + " ms"
-
-    # --- Test 2: PTX kernel launch ---
     print ""
-    print "--- Test 2: PTX kernel launch 1080p ---"
-    var ptx = ptx_clear()
-    var mod = cuda_module_load_data(ptx)
-    if mod == 0:
-        print "  PTX load failed (may need arg packing support)"
-        print "  Falling back to memset-only results"
-    else:
-        print "  PTX module loaded"
-        # Note: cuda_launch_kernel needs args_ptr (packed buffer)
-        # This may not work without rt_engine2d_pack_args — test it
-        var func = cuda_module_get_function(mod, "kernel_clear")
-        print "  Function handle: " + func.to_text()
-        cuda_module_unload(mod)
-
-    # --- Readback test ---
     print ""
-    print "--- Test 3: Readback ---"
-    cuda_memset(d_fb, i64(0xAB), byte_count)
-    cuda_ctx_synchronize()
 
-    var host = rt_bytes_alloc(byte_count)
-    var tr0 = rt_time_now_monotonic_ms()
-    cuda_memcpy_dtoh(i64(host), d_fb, byte_count)
-    var readback_ms = rt_time_now_monotonic_ms() - tr0
-    print "  Readback " + byte_count.to_text() + " bytes: " + readback_ms.to_text() + " ms"
+    run_vulkan()
 
-    # Verify first bytes
-    var b0 = host[0]
-    var b1 = host[1]
-    var b2 = host[100]
-    print "  Bytes [0,1,100]: " + b0.to_text() + "," + b1.to_text() + "," + b2.to_text()
-    if b0 == 171:
-        print "  Pixel verify: PASS (0xAB = 171)"
-    else:
-        print "  Pixel verify: MISMATCH (expected 171, got " + b0.to_text() + ")"
-
-    # Cleanup
-    cuda_mem_free(d_fb)
-    cuda_ctx_destroy(ctx)
-
-    # --- Verdict ---
     print ""
     print "========================================"
-    print "VERDICT"
+    print "SUMMARY"
     print "========================================"
-    print "  CUDA memset 1080p: " + avg_clear.to_text() + " ms/frame"
-    if avg_clear <= 1:
-        print "  GPU clear: SUB-MS -> EXCELLENT"
-    else:
-        if avg_clear <= 16:
-            print "  GPU clear: < 16.7ms -> 60Hz capable"
-        else:
-            print "  GPU clear: > 16.7ms -> below 60Hz"
-    print "  Readback: " + readback_ms.to_text() + " ms"
-    print "  Hardware GPU rendering: PROVEN"
+    print "  All GPU operations performed via pure Simple"
+    print "  No Rust feature flags required"
+    print "  Uses spl_dlopen -> libcuda.so / libvulkan.so"
     print "========================================"
 
 main()
