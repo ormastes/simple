@@ -3,6 +3,8 @@
 # This module is deliberately string-only and side-effect free so boot lanes,
 # SPipe tests, and later driver services can share one truthful marker contract.
 
+use os.drivers.driver_platform_contract.{driver_platform_marker, driver_platform_summary}
+
 struct DesktopDriverSummary:
     boot_mode: text
     acpi_state: text
@@ -138,6 +140,26 @@ fn desktop_driver_summary_text(summary: DesktopDriverSummary) -> text:
         " iommu=" + summary.iommu_state +
         " xhci=" + summary.xhci_state
 
+fn desktop_driver_platform_marker(summary: DesktopDriverSummary) -> text:
+    val gpu_backend = if summary.display_driver == "virtio-gpu": "virtio-gpu" else: summary.display_mode
+    val audio_dma = summary.dma_mode != "none" and summary.dma_mode != "heap-copy"
+    val audio_period = audio_dma and summary.interrupt_mode != "polling"
+    driver_platform_marker(driver_platform_summary(
+        gpu_backend,
+        false,
+        "intel-hda",
+        "realtek-hda",
+        audio_dma,
+        audio_period,
+        summary.input_driver,
+        summary.input_driver == "ps2",
+        summary.input_driver,
+        summary.input_driver == "ps2",
+        "bar,irq,dma,iommu:" + summary.iommu_state,
+        summary.iommu_state,
+        false
+    ))
+
 fn desktop_driver_summary_has_false_claim(summary_text: text) -> bool:
     summary_text.contains("process-backed:resident") or
         summary_text.contains("process-backed:unknown") or
@@ -148,7 +170,9 @@ fn desktop_driver_summary_has_false_claim(summary_text: text) -> bool:
         summary_text.contains("vfs-app-read:resident") or
         summary_text.contains("vfs-app-read:host") or
         summary_text.contains("accelerated=true display_driver=vga") or
+        summary_text.contains("display_driver=vga accelerated=true") or
         summary_text.contains("accelerated=true display_driver=bga") or
+        summary_text.contains("display_driver=bga accelerated=true") or
         summary_text.contains("accelerated=true display=framebuffer")
 
 fn desktop_driver_summary_has_required_devices(summary_text: text) -> bool:
@@ -178,7 +202,8 @@ fn desktop_driver_summary_has_required_processes(summary_text: text) -> bool:
         desktop_driver_summary_has_process_marker(summary_text, "file_manager")
 
 fn desktop_driver_summary_has_required_vfs(summary_text: text) -> bool:
-    summary_text.contains("[desktop-e2e] vfs-app-read:ok source=generic-vfs")
+    summary_text.contains("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/browser_demo bytes=") and
+        summary_text.contains("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/info bytes=")
 
 fn desktop_driver_summary_has_required_network(summary_text: text) -> bool:
     summary_text.contains("[desktop-e2e] virtio-net:mac=") and
