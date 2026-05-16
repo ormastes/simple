@@ -118,3 +118,23 @@ If the target is `MLK-S02-100T` or another Artix-7 100T board, complete this che
 - Do not reuse `constraints/zedboard.xdc` for an Artix-7 board.
 - Do not keep `xilinx_generic` or `BOARD_PART_TBD` and call the board configured.
 - Do not treat a generated manifest or passing unit spec as hardware validation.
+
+## SimpleOS Purity Boundary
+
+SimpleOS should be as pure Simple as practical. Keep kernel policy, boot
+decisions after entry, filesystem probing, app loading, services, and drivers in
+`.spl` whenever the compiler/runtime can express the required operation.
+
+Keep non-Simple code limited to the smallest unavoidable boundary: reset entry,
+linker scripts, calling-convention shims, trap/vector setup, and raw
+MMIO/runtime primitives that Simple cannot yet emit directly. Shell, Vivado Tcl,
+QEMU commands, UART capture, and JTAG inventory scripts are host-side lab tools,
+not SimpleOS runtime design.
+
+For SD-image verification, prefer the Simple inspector:
+
+```bash
+bin/simple run scripts/simpleos_fat32_image_list.spl -- build/os/fat32-riscv64.img
+```
+
+This keeps FAT32 image inspection in Simple instead of Python.
