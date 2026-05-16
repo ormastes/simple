@@ -1,5 +1,7 @@
 # Rust to Simple Migration Plan
 
+> **Superseded (2026-05-16):** The section "Keep in Rust when: … Low-level memory management / FFI bindings / Unsafe operations" no longer applies to the core runtime. The newer C-core ABI plan (`doc/05_design/default_native_runtime_shift_to_c_core_abi.md`) and Phase 0 baseline (`doc/01_research/local/rust_runtime_minimization_baseline_2026-05-16.md`) establish that `libsimple_runtime.a` must be replaced by a C-only archive. Rust remains acceptable only for explicitly Rust-required hosted-lane features (compositor bindings, Rust-only downloaded crates). See `doc/03_plan/agent_tasks/rust_runtime_minimization.md` for the migration plan.
+
 ## Principle
 
 **Simple code MUST be shorter than Rust equivalent.**

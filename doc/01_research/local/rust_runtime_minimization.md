@@ -3,6 +3,8 @@
 
 Date: 2026-05-04
 
+> **Phase 0 baseline added 2026-05-16.** See `doc/01_research/local/rust_runtime_minimization_baseline_2026-05-16.md` for measured binary sizes, Rust symbol counts, archive lane mapping, and the finding that `libsimple_runtime.a` (the `core-c-bootstrap` archive) is a Rust crate archive today.
+
 ## Objective
 
 Reduce generated executable size by moving default host/runtime dependencies away from Rust and toward pure Simple code, with C shims only where Simple would make binaries too large or where direct OS ABI access is required. Rust remains acceptable only when the requirement is explicitly a Rust library or Rust-owned toolchain integration.
@@ -54,7 +56,7 @@ Rust remains justified for:
 
 ## Conflicts With Current Assumptions
 
-`doc/05_design/rust_to_simple_migration_plan.md` says the core `runtime` should be kept in Rust. That conflicts with the current objective and with the newer C-core ABI work. Treat the newer C-core/default-native plan as the preferred direction.
+`doc/05_design/rust_to_simple_migration.md` and `doc/05_design/rust_to_simple_migration_v2_plan.md` (note: there is no `rust_to_simple_migration_plan.md`) imply the core runtime stays in Rust. That conflicts with the current objective and with the newer C-core ABI work. Both files now carry a supersession note (added 2026-05-16). Treat the newer C-core/default-native plan as the preferred direction.
 
 `doc/05_design/rust_to_simple_migration_v2_plan.md` classifies runtime value representation, GC, native loader, SIMD, GPU APIs, and WASM runtime as not pure-Simple portable. This does not block the objective if those surfaces are either C-core shims, hosted-only, or explicit Rust-required dependencies.
 

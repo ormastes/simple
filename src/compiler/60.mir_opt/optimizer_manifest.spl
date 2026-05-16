@@ -1,0 +1,320 @@
+# Versioned Dynamic Optimizer Manifest — Skeleton Implementation
+#
+# Provides types and load/validate logic for external pass plugins.
+# See: doc/05_design/optimizer_manifest_versioned_design.md
+#
+# Built-in passes (registered in mir_opt/mod.spl) always take precedence.
+# Dynamic passes are loaded into a per-session DynamicPassRegistry and
+# dispatched after the built-in PassKind match in run_pass_on_module.
+#
+# ABI contract: "simple.opt.mir.v1"
+
+use compiler.common.json.{JsonValue, json_parse}
+use compiler.mir_opt.mir_opt.mod.{
+    PassScope, mir_pass_descriptor_registry
+}
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
+    optimization_rule_provider_builtin_with_contract
+}
+
+# ============================================================================
+# Manifest Schema Version
+# ============================================================================
+
+enum ManifestSchemaVersion:
+    """Supported manifest schema versions."""
+    V1
+
+fn manifest_schema_version_from_int(n: i64) -> ManifestSchemaVersion?:
+    if n == 1:
+        Some(ManifestSchemaVersion.V1)
+    else:
+        nil
+
+fn manifest_schema_version_to_int(v: ManifestSchemaVersion) -> i64:
+    match v:
+        case V1: 1
+
+# ============================================================================
+# Manifest Error
+# ============================================================================
+
+enum ManifestError:
+    """Errors that can occur when loading or validating a manifest."""
+    ParseError(msg: text)
+    UnsupportedSchemaVersion(found: i64)
+    IncompatibleCompilerAbi(found: text)
+    MissingField(field: text)
+    StableNameConflict(name: text)
+    AliasConflict(alias: text)
+    DuplicateInManifest(name: text)
+
+fn manifest_error_message(err: ManifestError) -> text:
+    match err:
+        case ParseError(msg):
+            "manifest parse error: {msg}"
+        case UnsupportedSchemaVersion(found):
+            "unsupported manifest schema version: {found} (supported: 1)"
+        case IncompatibleCompilerAbi(found):
+            "incompatible compiler ABI in manifest: '{found}' (expected: simple.opt.mir.v1)"
+        case MissingField(field):
+            "manifest missing required field: '{field}'"
+        case StableNameConflict(name):
+            "dynamic pass stable_name conflicts with built-in: '{name}'"
+        case AliasConflict(alias):
+            "dynamic pass alias conflicts with built-in alias: '{alias}'"
+        case DuplicateInManifest(name):
+            "duplicate stable_name within manifest: '{name}'"
+
+# ============================================================================
+# Per-pass contract (mirrors OptimizationRuleProvider fields)
+# ============================================================================
+
+struct ManifestPassContract:
+    inputs: [text]
+    outputs: [text]
+    purity: text
+
+fn manifest_pass_contract_default() -> ManifestPassContract:
+    ManifestPassContract(
+        inputs: ["typed_mir"],
+        outputs: ["canonical_mir"],
+        purity: "pure"
+    )
+
+# ============================================================================
+# Per-pass entry parsed from manifest
+# ============================================================================
+
+struct ManifestPassEntry:
+    stable_name: text
+    aliases: [text]
+    scope: PassScope
+    capability_requires: [text]
+    contract: ManifestPassContract
+    entry_symbol: text
+
+# ============================================================================
+# Loaded, validated manifest
+# ============================================================================
+
+struct OptimizerManifest:
+    schema_version: ManifestSchemaVersion
+    compiler_abi: text
+    name: text
+    version: text
+    min_compiler_version: text
+    passes: [ManifestPassEntry]
+
+# ============================================================================
+# Dynamic pass descriptor (used after manifest is registered)
+# ============================================================================
+
+struct DynamicPassDescriptor:
+    stable_name: text
+    aliases: [text]
+    scope: PassScope
+    capability_requires: [text]
+    provider: OptimizationRuleProvider
+    entry_symbol: text
+
+fn dynamic_pass_provider(entry: ManifestPassEntry, plugin_name: text) -> OptimizationRuleProvider:
+    optimization_rule_provider_builtin_with_contract(
+        "simple.opt.mir.dynamic." + plugin_name + "." + entry.stable_name,
+        OptimizerProviderKind.Mir,
+        OptimizerRuleLookupKind.PipelinePass,
+        false,
+        entry.contract.inputs,
+        entry.contract.outputs,
+        entry.contract.purity
+    )
+
+fn dynamic_pass_descriptor_from_entry(entry: ManifestPassEntry, plugin_name: text) -> DynamicPassDescriptor:
+    DynamicPassDescriptor(
+        stable_name: entry.stable_name,
+        aliases: entry.aliases,
+        scope: entry.scope,
+        capability_requires: entry.capability_requires,
+        provider: dynamic_pass_provider(entry, plugin_name),
+        entry_symbol: entry.entry_symbol
+    )
+
+# ============================================================================
+# Dynamic Pass Registry — session-scoped
+# ============================================================================
+
+struct DynamicPassRegistry:
+    """Holds dynamic pass descriptors loaded from manifests for this session."""
+    descriptors: [DynamicPassDescriptor]
+
+fn dynamic_pass_registry_new() -> DynamicPassRegistry:
+    DynamicPassRegistry(descriptors: [])
+
+fn dynamic_pass_registry_lookup(registry: DynamicPassRegistry, name: text) -> DynamicPassDescriptor?:
+    """Look up a dynamic pass by stable_name or alias."""
+    for desc in registry.descriptors:
+        if desc.stable_name == name:
+            return Some(desc)
+        for alias in desc.aliases:
+            if alias == name:
+                return Some(desc)
+    nil
+
+# ============================================================================
+# Built-in name conflict guard
+# ============================================================================
+
+fn builtin_stable_names() -> [text]:
+    var names: [text] = []
+    for desc in mir_pass_descriptor_registry():
+        names = names.push(desc.stable_name)
+    names
+
+fn builtin_alias_set() -> [text]:
+    var aliases: [text] = []
+    for desc in mir_pass_descriptor_registry():
+        for alias in desc.aliases:
+            aliases = aliases.push(alias)
+    aliases
+
+fn is_builtin_stable_name(name: text) -> bool:
+    for n in builtin_stable_names():
+        if n == name:
+            return true
+    false
+
+fn is_builtin_alias(alias: text) -> bool:
+    for a in builtin_alias_set():
+        if a == alias:
+            return true
+    false
+
+# ============================================================================
+# Manifest validation
+# ============================================================================
+
+fn validate_manifest_pass(entry: ManifestPassEntry) -> ManifestError?:
+    """Validate a single pass entry against the built-in registry."""
+    if is_builtin_stable_name(entry.stable_name):
+        return Some(ManifestError.StableNameConflict(entry.stable_name))
+    for alias in entry.aliases:
+        if is_builtin_alias(alias):
+            return Some(ManifestError.AliasConflict(alias))
+    nil
+
+fn validate_manifest(manifest: OptimizerManifest) -> ManifestError?:
+    """Validate an entire manifest (cross-pass uniqueness + built-in conflicts)."""
+    var seen_names: [text] = []
+    for entry in manifest.passes:
+        # Check built-in conflicts
+        val err = validate_manifest_pass(entry)
+        if err.?:
+            return err
+        # Check intra-manifest duplicates
+        for seen in seen_names:
+            if seen == entry.stable_name:
+                return Some(ManifestError.DuplicateInManifest(entry.stable_name))
+        seen_names = seen_names.push(entry.stable_name)
+    nil
+
+# ============================================================================
+# Manifest loading (v1)
+# ============================================================================
+
+fn parse_scope(scope_text: text) -> PassScope:
+    if scope_text == "module":
+        PassScope.Module
+    else:
+        PassScope.Function
+
+fn load_manifest_v1_from_parsed(
+    schema_version: i64,
+    compiler_abi: text,
+    name: text,
+    version: text,
+    min_compiler_version: text,
+    passes: [ManifestPassEntry]
+) -> Result<OptimizerManifest, ManifestError>:
+    """Validate header fields and construct an OptimizerManifest."""
+    val version_opt = manifest_schema_version_from_int(schema_version)
+    if not version_opt.?:
+        return Err(ManifestError.UnsupportedSchemaVersion(schema_version))
+    if compiler_abi != "simple.opt.mir.v1":
+        return Err(ManifestError.IncompatibleCompilerAbi(compiler_abi))
+    val manifest = OptimizerManifest(
+        schema_version: version_opt.unwrap(),
+        compiler_abi: compiler_abi,
+        name: name,
+        version: version,
+        min_compiler_version: min_compiler_version,
+        passes: passes
+    )
+    val validation_err = validate_manifest(manifest)
+    if validation_err.?:
+        return Err(validation_err.unwrap())
+    Ok(manifest)
+
+fn load_manifest_v1(json_text: text) -> Result<OptimizerManifest, ManifestError>:
+    """Parse a v1 optimizer manifest from JSON text.
+
+    Validates schema_version, compiler_abi, and all pass entries against
+    the built-in pass registry before returning a usable OptimizerManifest.
+
+    TODO(manifest-v1): Replace stub field extraction with full JSON parsing
+    once the compiler's JSON library supports typed field access on arbitrary
+    objects.  Current json_parse returns a JsonValue tree; full extraction
+    requires walking the tree per field.
+    """
+    val parse_result = json_parse(json_text)
+    if not parse_result.?:
+        return Err(ManifestError.ParseError("invalid JSON"))
+    # Stub: return a minimal valid manifest for schema conformance testing.
+    # Full field extraction is deferred — see TODO above.
+    load_manifest_v1_from_parsed(
+        1,
+        "simple.opt.mir.v1",
+        "stub_manifest",
+        "0.0.0",
+        "0.0.0",
+        []
+    )
+
+# ============================================================================
+# Registry registration
+# ============================================================================
+
+fn dynamic_pass_registry_register(
+    registry: DynamicPassRegistry,
+    manifest: OptimizerManifest
+) -> Result<DynamicPassRegistry, ManifestError>:
+    """Register all passes from a validated manifest into the registry.
+
+    Returns the updated registry on success, or an error if a conflict is found
+    at registration time (second-pass guard).
+    """
+    var updated = registry
+    for entry in manifest.passes:
+        # Check conflicts against already-registered dynamic passes
+        for existing in updated.descriptors:
+            if existing.stable_name == entry.stable_name:
+                return Err(ManifestError.StableNameConflict(entry.stable_name))
+        val desc = dynamic_pass_descriptor_from_entry(entry, manifest.name)
+        updated = DynamicPassRegistry(descriptors: updated.descriptors.push(desc))
+    Ok(updated)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ManifestSchemaVersion, manifest_schema_version_from_int, manifest_schema_version_to_int
+export ManifestError, manifest_error_message
+export ManifestPassContract, manifest_pass_contract_default
+export ManifestPassEntry
+export OptimizerManifest
+export DynamicPassDescriptor, dynamic_pass_descriptor_from_entry
+export DynamicPassRegistry, dynamic_pass_registry_new
+export dynamic_pass_registry_lookup, dynamic_pass_registry_register
+export load_manifest_v1, load_manifest_v1_from_parsed
+export validate_manifest, validate_manifest_pass
+export is_builtin_stable_name, is_builtin_alias

@@ -32,7 +32,7 @@ use compiler.mir_opt.mir_opt.tco (create_tco_pass, tco_run_on_function)
 use compiler.mir_opt.mir_opt.gvn (create_gvn_pass, gvn_run_on_function)
 use compiler.mir_opt.mir_opt.predicate_promote (run_predicate_promote)
 use compiler.mir_opt.mir_opt.auto_vectorize (run_auto_vectorize)
-use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass, run_pattern_idiom_pass_x86, run_pattern_idiom_pass_generic)
+use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass, run_pattern_idiom_pass_x86, run_pattern_idiom_pass_generic, run_narrow_form_pass)
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
     optimization_rule_provider_builtin_with_contract,
@@ -106,10 +106,49 @@ trait MirPass:
         """List of pass names this pass depends on."""
         []
 
+# ============================================================================
+# PassKind — typed pass identity (replaces string matching in dispatch)
+# ============================================================================
+
+enum PassKind:
+    """Typed identity for each known optimization pass.
+
+    Replaces string-based dispatch in run_named_pass / run_pass_on_module.
+    Public pass names (stable_name + aliases) remain unchanged for callers.
+    """
+    DeadCodeElimination
+    ConstantFolding
+    CopyPropagation
+    CommonSubexprElim
+    InlineSmallFunctions
+    InlineFunctions
+    InlineAggressive
+    LoopInvariantMotion
+    LoopUnroll
+    BoundsCheckElimination
+    StrengthReduction
+    CollectionOpt
+    StringBuilderOpt
+    BodyOutlining
+    GeneratorStateMachine
+    TailCallOptimization
+    GlobalValueNumbering
+    PatternIdiom
+    AutoVectorize
+    PredicatePromote
+    TargetNarrowForm
+
+enum PassScope:
+    """Whether a pass operates per-function or on the whole module."""
+    Function   # pass runs independently on each MirFunction
+    Module     # pass needs the whole MirModule (may add/remove functions)
+
 struct MirPassDescriptor:
     stable_name: text
     aliases: [text]
     provider: OptimizationRuleProvider
+    kind: PassKind
+    scope: PassScope
 
 fn mir_pipeline_provider(name: text, hot_path: bool) -> OptimizationRuleProvider:
     optimization_rule_provider_builtin_with_contract(
@@ -122,31 +161,32 @@ fn mir_pipeline_provider(name: text, hot_path: bool) -> OptimizationRuleProvider
         "pure"
     )
 
-fn mir_pass_descriptor(stable_name: text, aliases: [text], provider: OptimizationRuleProvider) -> MirPassDescriptor:
-    MirPassDescriptor(stable_name: stable_name, aliases: aliases, provider: provider)
+fn mir_pass_descriptor(stable_name: text, aliases: [text], provider: OptimizationRuleProvider, kind: PassKind, scope: PassScope) -> MirPassDescriptor:
+    MirPassDescriptor(stable_name: stable_name, aliases: aliases, provider: provider, kind: kind, scope: scope)
 
 fn mir_pass_descriptor_registry() -> [MirPassDescriptor]:
     [
-        mir_pass_descriptor("dead_code_elimination", ["dce"], mir_pipeline_provider("dead_code_elimination", false)),
-        mir_pass_descriptor("constant_folding", ["const_fold"], mir_pipeline_provider("constant_folding", false)),
-        mir_pass_descriptor("copy_propagation", [], mir_pipeline_provider("copy_propagation", false)),
-        mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider("common_subexpr_elim", false)),
-        mir_pass_descriptor("inline_small_functions", [], mir_pipeline_provider("inline_small_functions", false)),
-        mir_pass_descriptor("inline_functions", [], mir_pipeline_provider("inline_functions", false)),
-        mir_pass_descriptor("inline_aggressive", [], mir_pipeline_provider("inline_aggressive", false)),
-        mir_pass_descriptor("loop_invariant_motion", [], mir_pipeline_provider("loop_invariant_motion", false)),
-        mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider("loop_unroll", false)),
-        mir_pass_descriptor("bounds_check_elimination", [], mir_pipeline_provider("bounds_check_elimination", false)),
-        mir_pass_descriptor("strength_reduction", [], strength_reduction_provider()),
-        mir_pass_descriptor("collection_opt", ["collection_optimization"], collection_optimization_provider()),
-        mir_pass_descriptor("string_builder_opt", [], mir_pipeline_provider("string_builder_opt", false)),
-        mir_pass_descriptor("body_outlining", [], mir_pipeline_provider("body_outlining", false)),
-        mir_pass_descriptor("generator_state_machine", [], mir_pipeline_provider("generator_state_machine", false)),
-        mir_pass_descriptor("tail_call_optimization", [], mir_pipeline_provider("tail_call_optimization", false)),
-        mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider("global_value_numbering", false)),
-        mir_pass_descriptor("pattern_idiom", [], mir_pipeline_provider("pattern_idiom", true)),
-        mir_pass_descriptor("auto_vectorize", ["vectorization"], mir_pipeline_provider("auto_vectorize", false)),
-        mir_pass_descriptor("predicate_promote", [], mir_pipeline_provider("predicate_promote", false))
+        mir_pass_descriptor("dead_code_elimination", ["dce"], mir_pipeline_provider("dead_code_elimination", false), PassKind.DeadCodeElimination, PassScope.Function),
+        mir_pass_descriptor("constant_folding", ["const_fold"], mir_pipeline_provider("constant_folding", false), PassKind.ConstantFolding, PassScope.Function),
+        mir_pass_descriptor("copy_propagation", [], mir_pipeline_provider("copy_propagation", false), PassKind.CopyPropagation, PassScope.Function),
+        mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider("common_subexpr_elim", false), PassKind.CommonSubexprElim, PassScope.Function),
+        mir_pass_descriptor("inline_small_functions", [], mir_pipeline_provider("inline_small_functions", false), PassKind.InlineSmallFunctions, PassScope.Module),
+        mir_pass_descriptor("inline_functions", [], mir_pipeline_provider("inline_functions", false), PassKind.InlineFunctions, PassScope.Module),
+        mir_pass_descriptor("inline_aggressive", [], mir_pipeline_provider("inline_aggressive", false), PassKind.InlineAggressive, PassScope.Module),
+        mir_pass_descriptor("loop_invariant_motion", [], mir_pipeline_provider("loop_invariant_motion", false), PassKind.LoopInvariantMotion, PassScope.Function),
+        mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider("loop_unroll", false), PassKind.LoopUnroll, PassScope.Function),
+        mir_pass_descriptor("bounds_check_elimination", [], mir_pipeline_provider("bounds_check_elimination", false), PassKind.BoundsCheckElimination, PassScope.Function),
+        mir_pass_descriptor("strength_reduction", [], strength_reduction_provider(), PassKind.StrengthReduction, PassScope.Function),
+        mir_pass_descriptor("collection_opt", ["collection_optimization"], collection_optimization_provider(), PassKind.CollectionOpt, PassScope.Function),
+        mir_pass_descriptor("string_builder_opt", [], mir_pipeline_provider("string_builder_opt", false), PassKind.StringBuilderOpt, PassScope.Function),
+        mir_pass_descriptor("body_outlining", [], mir_pipeline_provider("body_outlining", false), PassKind.BodyOutlining, PassScope.Module),
+        mir_pass_descriptor("generator_state_machine", [], mir_pipeline_provider("generator_state_machine", false), PassKind.GeneratorStateMachine, PassScope.Function),
+        mir_pass_descriptor("tail_call_optimization", [], mir_pipeline_provider("tail_call_optimization", false), PassKind.TailCallOptimization, PassScope.Function),
+        mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider("global_value_numbering", false), PassKind.GlobalValueNumbering, PassScope.Function),
+        mir_pass_descriptor("pattern_idiom", [], mir_pipeline_provider("pattern_idiom", true), PassKind.PatternIdiom, PassScope.Module),
+        mir_pass_descriptor("auto_vectorize", ["vectorization"], mir_pipeline_provider("auto_vectorize", false), PassKind.AutoVectorize, PassScope.Module),
+        mir_pass_descriptor("predicate_promote", [], mir_pipeline_provider("predicate_promote", false), PassKind.PredicatePromote, PassScope.Module),
+        mir_pass_descriptor("target_narrow_form", [], mir_pipeline_provider("target_narrow_form", false), PassKind.TargetNarrowForm, PassScope.Module)
     ]
 
 fn mir_pass_provider_registry() -> [OptimizationRuleProvider]:
@@ -157,45 +197,47 @@ fn mir_pass_provider_registry() -> [OptimizationRuleProvider]:
 
 fn mir_pass_descriptor_for_name(pass_name: text) -> MirPassDescriptor?:
     if pass_name == "dead_code_elimination" or pass_name == "dce":
-        return Some(mir_pass_descriptor("dead_code_elimination", ["dce"], mir_pipeline_provider("dead_code_elimination", false)))
+        return Some(mir_pass_descriptor("dead_code_elimination", ["dce"], mir_pipeline_provider("dead_code_elimination", false), PassKind.DeadCodeElimination, PassScope.Function))
     if pass_name == "constant_folding" or pass_name == "const_fold":
-        return Some(mir_pass_descriptor("constant_folding", ["const_fold"], mir_pipeline_provider("constant_folding", false)))
+        return Some(mir_pass_descriptor("constant_folding", ["const_fold"], mir_pipeline_provider("constant_folding", false), PassKind.ConstantFolding, PassScope.Function))
     if pass_name == "copy_propagation":
-        return Some(mir_pass_descriptor("copy_propagation", [], mir_pipeline_provider("copy_propagation", false)))
+        return Some(mir_pass_descriptor("copy_propagation", [], mir_pipeline_provider("copy_propagation", false), PassKind.CopyPropagation, PassScope.Function))
     if pass_name == "common_subexpr_elim":
-        return Some(mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider("common_subexpr_elim", false)))
+        return Some(mir_pass_descriptor("common_subexpr_elim", [], mir_pipeline_provider("common_subexpr_elim", false), PassKind.CommonSubexprElim, PassScope.Function))
     if pass_name == "inline_small_functions":
-        return Some(mir_pass_descriptor("inline_small_functions", [], mir_pipeline_provider("inline_small_functions", false)))
+        return Some(mir_pass_descriptor("inline_small_functions", [], mir_pipeline_provider("inline_small_functions", false), PassKind.InlineSmallFunctions, PassScope.Module))
     if pass_name == "inline_functions":
-        return Some(mir_pass_descriptor("inline_functions", [], mir_pipeline_provider("inline_functions", false)))
+        return Some(mir_pass_descriptor("inline_functions", [], mir_pipeline_provider("inline_functions", false), PassKind.InlineFunctions, PassScope.Module))
     if pass_name == "inline_aggressive":
-        return Some(mir_pass_descriptor("inline_aggressive", [], mir_pipeline_provider("inline_aggressive", false)))
+        return Some(mir_pass_descriptor("inline_aggressive", [], mir_pipeline_provider("inline_aggressive", false), PassKind.InlineAggressive, PassScope.Module))
     if pass_name == "loop_invariant_motion":
-        return Some(mir_pass_descriptor("loop_invariant_motion", [], mir_pipeline_provider("loop_invariant_motion", false)))
+        return Some(mir_pass_descriptor("loop_invariant_motion", [], mir_pipeline_provider("loop_invariant_motion", false), PassKind.LoopInvariantMotion, PassScope.Function))
     if pass_name == "loop_unroll":
-        return Some(mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider("loop_unroll", false)))
+        return Some(mir_pass_descriptor("loop_unroll", [], mir_pipeline_provider("loop_unroll", false), PassKind.LoopUnroll, PassScope.Function))
     if pass_name == "bounds_check_elimination":
-        return Some(mir_pass_descriptor("bounds_check_elimination", [], mir_pipeline_provider("bounds_check_elimination", false)))
+        return Some(mir_pass_descriptor("bounds_check_elimination", [], mir_pipeline_provider("bounds_check_elimination", false), PassKind.BoundsCheckElimination, PassScope.Function))
     if pass_name == "strength_reduction":
-        return Some(mir_pass_descriptor("strength_reduction", [], strength_reduction_provider()))
+        return Some(mir_pass_descriptor("strength_reduction", [], strength_reduction_provider(), PassKind.StrengthReduction, PassScope.Function))
     if pass_name == "collection_opt" or pass_name == "collection_optimization":
-        return Some(mir_pass_descriptor("collection_opt", ["collection_optimization"], collection_optimization_provider()))
+        return Some(mir_pass_descriptor("collection_opt", ["collection_optimization"], collection_optimization_provider(), PassKind.CollectionOpt, PassScope.Function))
     if pass_name == "string_builder_opt":
-        return Some(mir_pass_descriptor("string_builder_opt", [], mir_pipeline_provider("string_builder_opt", false)))
+        return Some(mir_pass_descriptor("string_builder_opt", [], mir_pipeline_provider("string_builder_opt", false), PassKind.StringBuilderOpt, PassScope.Function))
     if pass_name == "body_outlining":
-        return Some(mir_pass_descriptor("body_outlining", [], mir_pipeline_provider("body_outlining", false)))
+        return Some(mir_pass_descriptor("body_outlining", [], mir_pipeline_provider("body_outlining", false), PassKind.BodyOutlining, PassScope.Module))
     if pass_name == "generator_state_machine":
-        return Some(mir_pass_descriptor("generator_state_machine", [], mir_pipeline_provider("generator_state_machine", false)))
+        return Some(mir_pass_descriptor("generator_state_machine", [], mir_pipeline_provider("generator_state_machine", false), PassKind.GeneratorStateMachine, PassScope.Function))
     if pass_name == "tail_call_optimization":
-        return Some(mir_pass_descriptor("tail_call_optimization", [], mir_pipeline_provider("tail_call_optimization", false)))
+        return Some(mir_pass_descriptor("tail_call_optimization", [], mir_pipeline_provider("tail_call_optimization", false), PassKind.TailCallOptimization, PassScope.Function))
     if pass_name == "global_value_numbering":
-        return Some(mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider("global_value_numbering", false)))
+        return Some(mir_pass_descriptor("global_value_numbering", [], mir_pipeline_provider("global_value_numbering", false), PassKind.GlobalValueNumbering, PassScope.Function))
     if pass_name == "pattern_idiom":
-        return Some(mir_pass_descriptor("pattern_idiom", [], mir_pipeline_provider("pattern_idiom", true)))
+        return Some(mir_pass_descriptor("pattern_idiom", [], mir_pipeline_provider("pattern_idiom", true), PassKind.PatternIdiom, PassScope.Module))
     if pass_name == "auto_vectorize" or pass_name == "vectorization":
-        return Some(mir_pass_descriptor("auto_vectorize", ["vectorization"], mir_pipeline_provider("auto_vectorize", false)))
+        return Some(mir_pass_descriptor("auto_vectorize", ["vectorization"], mir_pipeline_provider("auto_vectorize", false), PassKind.AutoVectorize, PassScope.Module))
     if pass_name == "predicate_promote":
-        return Some(mir_pass_descriptor("predicate_promote", [], mir_pipeline_provider("predicate_promote", false)))
+        return Some(mir_pass_descriptor("predicate_promote", [], mir_pipeline_provider("predicate_promote", false), PassKind.PredicatePromote, PassScope.Module))
+    if pass_name == "target_narrow_form":
+        return Some(mir_pass_descriptor("target_narrow_form", [], mir_pipeline_provider("target_narrow_form", false), PassKind.TargetNarrowForm, PassScope.Module))
     nil
 
 fn mir_pass_provider_name(pass_name: text) -> text:
@@ -333,6 +375,7 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
                         "global_value_numbering",
                         "common_subexpr_elim",
                         "tail_call_optimization",
+                        "target_narrow_form",
                         "pattern_idiom",
                         "inline_functions",
                         "constant_folding",
@@ -354,6 +397,7 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
                         "global_value_numbering",
                         "common_subexpr_elim",
                         "tail_call_optimization",
+                        "target_narrow_form",
                         "pattern_idiom",
                         "inline_aggressive",
                         "body_outlining",
@@ -433,71 +477,80 @@ fn optimize_function(func: MirFunction, passes: [text]) -> MirFunction:
 # ============================================================================
 
 fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
-    """Dispatch optimization pass by name."""
+    """Dispatch optimization pass by name using typed PassKind."""
     val descriptor = mir_pass_descriptor_for_name(pass_name)
     if not descriptor.?:
         return func
-    val stable_name = descriptor.unwrap().stable_name
-    match stable_name:
-        case "dead_code_elimination":
+    run_typed_pass_on_function(descriptor.unwrap().kind, func)
+
+fn run_typed_pass_on_function(kind: PassKind, func: MirFunction) -> MirFunction:
+    """Run a per-function pass identified by PassKind.
+    Module-scope passes (PatternIdiom, AutoVectorize, etc.) are no-ops here;
+    callers must use run_typed_pass_on_module for those.
+    """
+    match kind:
+        case DeadCodeElimination:
             var dce = create_dce_pass()
             dce_run_on_function(dce, func)
-        case "constant_folding":
+        case ConstantFolding:
             var cf = create_const_fold_pass()
             cf_run_on_function(cf, func)
-        case "copy_propagation":
+        case CopyPropagation:
             var cp = create_copy_prop_pass()
             copypropagation_run_on_function(cp, func)
-        case "common_subexpr_elim":
+        case CommonSubexprElim:
             var cse = create_cse_pass()
             cse_run_on_function(cse, func)
-        case "inline_small_functions":
-            var inl = create_inline_small_pass()
-            inline_run_on_function(inl, func)
-        case "inline_functions":
-            var inl = create_inline_pass()
-            inline_run_on_function(inl, func)
-        case "inline_aggressive":
-            var inl = create_inline_aggressive_pass()
-            inline_run_on_function(inl, func)
-        case "loop_invariant_motion":
+        case InlineSmallFunctions:
+            var inl_s = create_inline_small_pass()
+            inline_run_on_function(inl_s, func)
+        case InlineFunctions:
+            var inl_f = create_inline_pass()
+            inline_run_on_function(inl_f, func)
+        case InlineAggressive:
+            var inl_a = create_inline_aggressive_pass()
+            inline_run_on_function(inl_a, func)
+        case LoopInvariantMotion:
             var lo = create_loop_opt_conservative()
             loop_opt_run_on_function(lo, func)
-        case "loop_unroll":
+        case LoopUnroll:
             var lo = create_loop_opt_pass()
             loop_opt_run_on_function(lo, func)
-        case "bounds_check_elimination":
+        case BoundsCheckElimination:
             var bce = create_bounds_check_elim_pass()
             bounds_check_elim_run_on_function(bce, func)
-        case "strength_reduction":
+        case StrengthReduction:
             var sr = create_strength_reduction_pass()
             strength_reduction_run_on_function(sr, func)
-        case "collection_opt":
+        case CollectionOpt:
             var co = create_collection_opt_pass()
             collection_opt_run_on_function(co, func)
-        case "string_builder_opt":
+        case StringBuilderOpt:
             var sb = create_string_builder_opt_pass()
             string_builder_opt_run_on_function(sb, func)
-        case "body_outlining":
+        case BodyOutlining:
             var ol = create_outline_pass()
             outline_run_on_function(ol, func)
-        case "generator_state_machine":
+        case GeneratorStateMachine:
             var gsm = create_generator_sm_pass()
             generator_sm_run_on_function(gsm, func)
-        case "tail_call_optimization":
+        case TailCallOptimization:
             var tco = create_tco_pass()
             tco_run_on_function(tco, func)
-        case "global_value_numbering":
+        case GlobalValueNumbering:
             var gvn = create_gvn_pass()
             gvn_run_on_function(gvn, func)
-        case "pattern_idiom":
-            # Module-level pass, not per-function — no-op here
+        case PatternIdiom:
+            # Module-level pass — no-op per function
             func
-        case "auto_vectorize":
-            # Module-level pass, not per-function — no-op here
+        case AutoVectorize:
+            # Module-level pass — no-op per function
             func
-        case _:
-            # Unknown pass - return function unchanged
+        case PredicatePromote:
+            # Module-level pass — no-op per function
+            func
+        case TargetNarrowForm:
+            # Module-level pass — no-op per function
             func
 
 fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirModule:
@@ -515,103 +568,125 @@ fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirMo
                     optimized_module = run_pattern_idiom_pass_x86(optimized_module, ctx.x86_caps, ctx.cipher_remark)
                 case _:
                     optimized_module = run_pattern_idiom_pass_generic(optimized_module, ctx.caps_kind, ctx.cipher_remark)
+        elif pass_name == "target_narrow_form":
+            optimized_module = run_narrow_form_pass(optimized_module, ctx.caps_kind)
         else:
             optimized_module = run_pass_on_module(pass_name, optimized_module)
     optimized_module
 
 
 fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
-    """Apply a single named pass to every function in a module.
+    """Apply a single named pass to a module.
 
-    The pass name is matched once; a fresh pass instance is created per
-    function (passes accumulate per-function analysis state via `me` methods,
-    so they cannot be shared across functions).  This avoids the overhead of
-    re-dispatching run_named_pass for every function.
+    The pass name is resolved to a typed PassKind once, then run_typed_pass_on_module
+    handles dispatch.  Per-function passes create a fresh pass instance per function
+    (passes accumulate per-function analysis state via `me` methods).
     """
-    var result_module = module
     val descriptor = mir_pass_descriptor_for_name(pass_name)
     if not descriptor.?:
-        return result_module
-    val stable_name = descriptor.unwrap().stable_name
-    match stable_name:
-        case "dead_code_elimination":
+        return module
+    run_typed_pass_on_module(descriptor.unwrap().kind, module)
+
+fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
+    """Typed module-level pass runner.  Dispatches on PassKind, not strings."""
+    var result_module = module
+    match kind:
+        case DeadCodeElimination:
             for sym in module.functions.keys():
                 var p = create_dce_pass()
                 result_module.functions[sym] = dce_run_on_function(p, result_module.functions[sym])
-        case "constant_folding":
+        case ConstantFolding:
             for sym in module.functions.keys():
                 var p = create_const_fold_pass()
                 result_module.functions[sym] = cf_run_on_function(p, result_module.functions[sym])
-        case "copy_propagation":
+        case CopyPropagation:
             for sym in module.functions.keys():
                 var p = create_copy_prop_pass()
                 result_module.functions[sym] = copypropagation_run_on_function(p, result_module.functions[sym])
-        case "common_subexpr_elim":
+        case CommonSubexprElim:
             for sym in module.functions.keys():
                 var p = create_cse_pass()
                 result_module.functions[sym] = cse_run_on_function(p, result_module.functions[sym])
-        case "inline_small_functions":
+        case InlineSmallFunctions:
             var p = create_inline_small_pass()
             result_module = inline_run_on_module(p, result_module)
-        case "inline_functions":
+        case InlineFunctions:
             var p = create_inline_pass()
             result_module = inline_run_on_module(p, result_module)
-        case "inline_aggressive":
+        case InlineAggressive:
             var p = create_inline_aggressive_pass()
             result_module = inline_run_on_module(p, result_module)
-        case "loop_invariant_motion":
+        case LoopInvariantMotion:
             for sym in module.functions.keys():
                 var p = create_loop_opt_conservative()
                 result_module.functions[sym] = loop_opt_run_on_function(p, result_module.functions[sym])
-        case "loop_unroll":
+        case LoopUnroll:
             for sym in module.functions.keys():
                 var p = create_loop_opt_pass()
                 result_module.functions[sym] = loop_opt_run_on_function(p, result_module.functions[sym])
-        case "bounds_check_elimination":
+        case BoundsCheckElimination:
             for sym in module.functions.keys():
                 var p = create_bounds_check_elim_pass()
                 result_module.functions[sym] = bounds_check_elim_run_on_function(p, result_module.functions[sym])
-        case "strength_reduction":
+        case StrengthReduction:
             for sym in module.functions.keys():
                 var p = create_strength_reduction_pass()
                 result_module.functions[sym] = strength_reduction_run_on_function(p, result_module.functions[sym])
-        case "collection_opt":
+        case CollectionOpt:
             for sym in module.functions.keys():
                 var p = create_collection_opt_pass()
                 result_module.functions[sym] = collection_opt_run_on_function(p, result_module.functions[sym])
-        case "string_builder_opt":
+        case StringBuilderOpt:
             for sym in module.functions.keys():
                 var p = create_string_builder_opt_pass()
                 result_module.functions[sym] = string_builder_opt_run_on_function(p, result_module.functions[sym])
-        case "body_outlining":
+        case BodyOutlining:
             # Module-level pass: outlining creates new functions
             var ol = create_outline_pass()
             result_module = outline_run_on_module(ol, result_module)
-        case "generator_state_machine":
+        case GeneratorStateMachine:
             for sym in module.functions.keys():
                 var p = create_generator_sm_pass()
                 result_module.functions[sym] = generator_sm_run_on_function(p, result_module.functions[sym])
-        case "tail_call_optimization":
+        case TailCallOptimization:
             for sym in module.functions.keys():
                 var p = create_tco_pass()
                 result_module.functions[sym] = tco_run_on_function(p, result_module.functions[sym])
-        case "global_value_numbering":
+        case GlobalValueNumbering:
             for sym in module.functions.keys():
                 var p = create_gvn_pass()
                 result_module.functions[sym] = gvn_run_on_function(p, result_module.functions[sym])
-        case "predicate_promote":
+        case PredicatePromote:
             result_module = run_predicate_promote(result_module)
-        case "auto_vectorize":
+        case AutoVectorize:
             # Module-level pass: pattern-match + log; no MIR rewrite in Wave K3.
             # See: doc/05_design/simd_auto_vectorize_design.md §2, §10
             result_module = run_auto_vectorize(result_module)
-        case "pattern_idiom":
+        case PatternIdiom:
+            # pattern_idiom is dispatched by pipeline_optimize with target context;
+            # bare run_pass_on_module callers without context get a no-op.
             pass_do_nothing
-        case _:
-            # Unknown pass — return module unchanged
+        case TargetNarrowForm:
+            # target_narrow_form is dispatched by pipeline_optimize with target context;
+            # bare run_pass_on_module callers without context get a no-op.
             pass_do_nothing
     result_module
 
 # ============================================================================
 # Exports
 # ============================================================================
+
+export PassKind, PassScope
+export MirPass, MirPassDescriptor
+export TargetOptContext, target_opt_context_default
+export OptLevel, optlevel_name
+export PassManager, passmanager_new, passmanager_run_on_module
+export PassStatistics, passstatistics_new
+export OptimizationPipeline, optimizationpipeline_for_level, optimizationpipeline_passes_for_level, optimizationpipeline_inventory_lines
+export optimize_module, optimize_module_with_caps, optimize_module_with_context
+export optimize_function
+export mir_pipeline_provider, mir_pass_descriptor, mir_pass_descriptor_registry, mir_pass_descriptor_for_name
+export mir_pass_provider_registry, mir_pass_provider_name, mir_pass_uses_pipeline_provider
+export run_named_pass, run_typed_pass_on_function
+export run_pass_on_module, run_typed_pass_on_module
+export pipeline_optimize

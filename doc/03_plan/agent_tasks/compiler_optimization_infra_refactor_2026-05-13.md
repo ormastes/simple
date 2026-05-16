@@ -17,8 +17,31 @@ Date: 2026-05-13
 
 ## Remaining
 
-1. Implement a shared MIR visitor/transform API.
-2. Convert the remaining `run_pass_on_module` execution branch from pass-name
-   string matching to a typed runner while preserving stable public pass names.
-3. Design a versioned dynamic optimizer manifest.
-4. Add native compile-time benchmark coverage for `pattern_idiom` on large MIR.
+_(none — all items completed 2026-05-16)_
+
+## Completed (continued 2026-05-16)
+
+- Added `PassKind` enum (one variant per built-in pass) and `PassScope`
+  (`Function` / `Module`) to `MirPassDescriptor`; both `mir_pass_descriptor()`
+  constructor and `mir_pass_descriptor_for_name()` now carry typed kind+scope.
+- Replaced string-match dispatch in `run_named_pass` and `run_pass_on_module`
+  with typed runners: `run_typed_pass_on_function(kind, func)` and
+  `run_typed_pass_on_module(kind, module)`.  Public pass names and aliases are
+  unchanged.  Module-scope passes (`PatternIdiom`, `AutoVectorize`,
+  `BodyOutlining`, inline variants, `PredicatePromote`) are explicitly routed
+  to module-level runners; per-function no-ops removed.
+- Implemented `MirVisitor` and `MirRewriter` shared traits in
+  `mir_opt/mir_visitor.spl` with default walk helpers
+  (`mir_visitor_walk_module/function/block/inst`) and rewriter application
+  functions (`mir_rewriter_apply_to_function/block/module`).  Includes a
+  `MirInstCounter` utility visitor.
+- Designed versioned dynamic optimizer manifest: design doc at
+  `doc/05_design/optimizer_manifest_versioned_design.md`; skeleton impl at
+  `src/compiler/60.mir_opt/optimizer_manifest.spl` with `ManifestError`,
+  `OptimizerManifest`, `DynamicPassRegistry`, `load_manifest_v1`, and
+  conflict-guard helpers.
+- Added `test/unit/compiler/mir/mir_pattern_idiom_benchmark_spec.spl` with
+  synthetic large-MIR builders (100-function modules) and benchmark specs
+  verifying `pattern_idiom` pass correctness, typed vs string dispatch
+  consistency, `MirInstCounter` accuracy, and `PassScope` correctness for all
+  built-in passes.

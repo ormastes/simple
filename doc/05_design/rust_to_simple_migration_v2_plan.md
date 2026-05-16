@@ -1,5 +1,7 @@
 # Rust to Simple Migration Plan v2 - Test-First Approach
 
+> **Superseded in part (2026-05-16):** This plan classifies GC, runtime value representation, native loader, SIMD, GPU APIs, and WASM runtime as "not pure-Simple portable" and leaves them in Rust. That classification is still accurate for those surfaces, but it does **not** apply to the core OS-primitive runtime. The C-core ABI plan (`doc/05_design/default_native_runtime_shift_to_c_core_abi.md`) supersedes any implication that `libsimple_runtime.a` must remain a Rust archive. The Phase 0 baseline (`doc/01_research/local/rust_runtime_minimization_baseline_2026-05-16.md`) confirms that the `core-c-bootstrap` lane is currently a Rust crate archive and must be replaced. See `doc/03_plan/agent_tasks/rust_runtime_minimization.md` for the phased replacement plan.
+
 **Date:** 2026-01-30
 **Version:** 0.4.0 Planning
 **Strategy:** Write SPipe tests first, then port Rust → Simple with verification

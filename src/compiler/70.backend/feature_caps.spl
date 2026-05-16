@@ -5,8 +5,12 @@
 # 70.backend and the MIR pattern-idiom pass at 60.mir_opt both consume this
 # interface without importing backend internals.
 #
-# Concrete impls (X86Caps, Aarch64Caps, Rv64Caps) are derived from a target-
-# triple text string via the *_caps_from_target helpers.
+# Concrete impls (X86Caps, Aarch64Caps, Rv64Caps, ArmCaps, Rv32Caps, X86_32Caps)
+# are derived from a target-triple text string via the *_caps_from_target helpers.
+#
+# TargetFamilyRow / all_target_family_rows() — Task 1 capability matrix:
+#   Six architecture family rows (x86-64, x86-32, AArch64, ARM32, RV64, RV32)
+#   with per-(family, TargetFeatureClass) enable/disable flags and reasons.
 #
 # To add a new idiom:
 #   1. Add a variant to TargetIdiom.
@@ -137,6 +141,42 @@ fn preferred_lane_count_aarch64(caps: Aarch64Caps, element_bits: i64) -> i64:
 fn preferred_lane_count_rv64(caps: Rv64Caps, element_bits: i64) -> i64:
     preferred_lane_count_for_bits(caps.preferred_vector_width_bits(), element_bits)
 
+fn preferred_lane_count_arm(caps: ArmCaps, element_bits: i64) -> i64:
+    preferred_lane_count_for_bits(caps.preferred_vector_width_bits(), element_bits)
+
+fn preferred_lane_count_rv32(caps: Rv32Caps, element_bits: i64) -> i64:
+    preferred_lane_count_for_bits(caps.preferred_vector_width_bits(), element_bits)
+
+fn preferred_lane_count_x86_32(caps: X86_32Caps, element_bits: i64) -> i64:
+    preferred_lane_count_for_bits(caps.preferred_vector_width_bits(), element_bits)
+
+fn arm_supports_feature_class(caps: ArmCaps, class_: TargetFeatureClass) -> bool:
+    """Class-level query for ARM32 targets used by auto-vectorize planning."""
+    match class_:
+        case FixedWidthSimd: caps.has_neon
+        case ScalableSimd:   false
+        case BitManip:       true
+        case Crypto:         caps.has_aes or caps.has_sha2 or caps.has_crc32
+        case Matrix:         caps.has_neon
+
+fn rv32_supports_feature_class(caps: Rv32Caps, class_: TargetFeatureClass) -> bool:
+    """Class-level query for RV32 targets used by auto-vectorize planning."""
+    match class_:
+        case FixedWidthSimd: caps.has_v
+        case ScalableSimd:   false
+        case BitManip:       caps.has_zbb or caps.has_zbkb
+        case Crypto:         caps.has_zknd or caps.has_zkne or caps.has_zknh
+        case Matrix:         false
+
+fn x86_32_supports_feature_class(caps: X86_32Caps, class_: TargetFeatureClass) -> bool:
+    """Class-level query for IA-32 targets used by auto-vectorize planning."""
+    match class_:
+        case FixedWidthSimd: caps.has_sse2
+        case ScalableSimd:   false
+        case BitManip:       caps.has_sse42
+        case Crypto:         caps.has_aes or caps.has_sha_ni or caps.has_pclmul
+        case Matrix:         caps.has_avx
+
 # ============================================================================
 # InstructionCost — calibrated latency / throughput hints
 # ============================================================================
@@ -198,6 +238,34 @@ fn aarch64_instruction_cost(caps: Aarch64Caps, idiom: TargetIdiom) -> Instructio
         case RotateRight:     instruction_cost_new(1, 50, 1)
         case SimdI32x4:       instruction_cost_new(1, 50, 1)
         case SimdF32x4:       instruction_cost_new(1, 50, 1)
+        case _:               instruction_cost_from_latency(caps.cost(idiom))
+
+fn arm_instruction_cost(caps: ArmCaps, idiom: TargetIdiom) -> InstructionCost:
+    if not caps.supports(idiom):
+        return instruction_cost_unsupported()
+    match idiom:
+        case AesEnc:          instruction_cost_new(4, 100, 1)
+        case AesEncLast:      instruction_cost_new(4, 100, 1)
+        case AesDec:          instruction_cost_new(4, 100, 1)
+        case AesDecLast:      instruction_cost_new(4, 100, 1)
+        case RotateLeft:      instruction_cost_new(1, 25, 1)
+        case RotateRight:     instruction_cost_new(1, 25, 1)
+        case CountLeadingZeros: instruction_cost_new(1, 25, 1)
+        case ByteSwap:        instruction_cost_new(1, 25, 1)
+        case BitReverse:      instruction_cost_new(1, 25, 1)
+        case SimdI32x4:       instruction_cost_new(2, 50, 1)
+        case SimdF32x4:       instruction_cost_new(2, 50, 1)
+        case _:               instruction_cost_from_latency(caps.cost(idiom))
+
+fn rv32_instruction_cost(caps: Rv32Caps, idiom: TargetIdiom) -> InstructionCost:
+    if not caps.supports(idiom):
+        return instruction_cost_unsupported()
+    match idiom:
+        case AesEnc:          instruction_cost_new(4, 100, 1)
+        case AesDec:          instruction_cost_new(4, 100, 1)
+        case Sha256Rounds2:   instruction_cost_new(6, 100, 1)
+        case RotateLeft:      instruction_cost_new(1, 100, 1)
+        case RotateRight:     instruction_cost_new(1, 100, 1)
         case _:               instruction_cost_from_latency(caps.cost(idiom))
 
 fn rv64_instruction_cost(caps: Rv64Caps, idiom: TargetIdiom) -> InstructionCost:
@@ -726,49 +794,604 @@ fn rv64_caps_from_target(triple: text) -> Rv64Caps:
         )
 
 # ============================================================================
+# ArmCaps — ARM32 (Thumb2 / Cortex-M / Cortex-A 32-bit) concrete impl
+# ============================================================================
+
+"""ARM32 capability set for Cortex-M / Cortex-A 32-bit cores.
+
+Conservative by default: no advanced crypto (not in Thumb ISA baseline).
+has_neon covers Cortex-A NEON (D-registers); Cortex-M has none.
+has_dsp covers the DSP extension (Cortex-M4/M7, Cortex-A with DSP).
+"""
+struct ArmCaps:
+    has_neon: bool
+    has_aes:  bool
+    has_sha2: bool
+    has_dsp:  bool
+    has_crc32: bool
+
+impl TargetCaps for ArmCaps:
+    fn supports(idiom: TargetIdiom) -> bool:
+        match idiom:
+            case AesEnc:            self.has_aes
+            case AesEncLast:        self.has_aes
+            case AesDec:            self.has_aes
+            case AesDecLast:        self.has_aes
+            case AesImc:            self.has_aes
+            case AesKeygenAssist:   self.has_aes
+            case Sha256Rounds2:     self.has_sha2
+            case Sha256Msg1:        self.has_sha2
+            case Sha256Msg2:        self.has_sha2
+            case Crc32U8:           self.has_crc32
+            case Crc32U32:          self.has_crc32
+            case Crc32U64:          false  # ARM32 CRC32 only supports 8/32-bit operands
+            case ClmulLo:           false
+            case ClmulHi:           false
+            case RotateLeft:        true   # ROR/ROL via ROR instruction (free in barrel shifter)
+            case RotateRight:       true
+            case Popcount:          false  # no VCNT for scalars without NEON
+            case CountLeadingZeros: true   # CLZ is a base ARMv5+ instruction
+            case CountTrailingZeros: false # no CTZ; emulate with REV+CLZ
+            case ByteSwap:          true   # REV instruction (ARMv6+)
+            case BitReverse:        true   # RBIT instruction (ARMv6T2+)
+            case Parity:            false
+            case Sha512Rounds2:     false
+            case Sha512Msg1:        false
+            case Sha512Msg2:        false
+            case MatrixDot:         self.has_neon
+            case MatrixOuterProduct: self.has_neon
+            case MatrixFmaKernel:   self.has_neon
+            case SimdI32x4:         self.has_neon
+            case SimdF32x4:         self.has_neon
+            case SimdI32x8:         false  # no 256-bit SIMD on ARM32
+            case SimdF32x8:         false
+
+    fn cost(idiom: TargetIdiom) -> i64:
+        """Latency hints (cycles) for ARM32 — Cortex-M4/Cortex-A17 reference."""
+        if not self.supports(idiom):
+            return -1
+        match idiom:
+            case AesEnc:            4
+            case AesEncLast:        4
+            case AesDec:            4
+            case AesDecLast:        4
+            case AesImc:            4
+            case AesKeygenAssist:   4
+            case Sha256Rounds2:     6
+            case Sha256Msg1:        4
+            case Sha256Msg2:        4
+            case Crc32U8:           2
+            case Crc32U32:          2
+            case Crc32U64:          -1
+            case RotateLeft:        1
+            case RotateRight:       1
+            case CountLeadingZeros: 1
+            case ByteSwap:          1
+            case BitReverse:        1
+            case MatrixDot:         4
+            case MatrixOuterProduct: 4
+            case MatrixFmaKernel:   3
+            case SimdI32x4:         2
+            case SimdF32x4:         2
+            case _:                 -1
+
+    fn preferred_vector_width_bits() -> i64:
+        """Return 128 with NEON, else 32 (scalar ARM32)."""
+        if self.has_neon:
+            return 128
+        32
+
+fn arm_caps_from_target(triple: text) -> ArmCaps:
+    """Derive ArmCaps from a target-triple / arch preset name.
+
+    Recognised presets:
+      thumbv7em-neon+crypto:  Cortex-A with NEON + AES + SHA2 + CRC32
+      thumbv7em-neon:         Cortex-A with NEON only (no crypto)
+      thumbv7em:              Cortex-M4 (DSP, no NEON)
+      thumbv6m:               Cortex-M0 (baseline, minimal)
+    Unknown triples return all-false (safe software fallback).
+    """
+    if triple.contains("neon") and triple.contains("crypto"):
+        ArmCaps(has_neon: true, has_aes: true, has_sha2: true, has_dsp: false, has_crc32: true)
+    elif triple.contains("neon"):
+        ArmCaps(has_neon: true, has_aes: false, has_sha2: false, has_dsp: false, has_crc32: false)
+    elif triple.contains("thumbv7em") or triple.contains("thumbv7m"):
+        ArmCaps(has_neon: false, has_aes: false, has_sha2: false, has_dsp: true, has_crc32: false)
+    else:
+        ArmCaps(has_neon: false, has_aes: false, has_sha2: false, has_dsp: false, has_crc32: false)
+
+# ============================================================================
+# Rv32Caps — RV32 concrete impl (subset of Rv64Caps — no Zvkned/Zvknhb)
+# ============================================================================
+
+"""RV32 capability set derived from ISA string.
+
+RV32 supports Zbb, Zbkb and the scalar (non-vector) crypto extensions.
+Zvkned/Zvknhb (vector crypto) are RV64-only in the current spec; they are
+excluded here. Vector is marked conservatively absent on RV32 targets until
+the V spec mandates VLEN >= 128 on 32-bit cores.
+"""
+struct Rv32Caps:
+    has_zbb:  bool   # Base Bitmanip: CLZ, CTZ, CPOP, ANDN, ORN, ROL/ROR, REV8, ORC.B
+    has_zbkb: bool   # Bitmanip for scalar crypto: PACK, BREV8
+    has_zknd: bool   # Scalar AES decrypt
+    has_zkne: bool   # Scalar AES encrypt
+    has_zknh: bool   # Scalar SHA-256/512 (SHA-256 reachable on RV32)
+    has_v:    bool   # RVV (very conservative; most RV32 boards lack it)
+
+impl TargetCaps for Rv32Caps:
+    fn supports(idiom: TargetIdiom) -> bool:
+        match idiom:
+            case AesEnc:            self.has_zkne
+            case AesEncLast:        self.has_zkne
+            case AesDec:            self.has_zknd
+            case AesDecLast:        self.has_zknd
+            case AesImc:            self.has_zknd  # aes32dsi uses decrypt round key schedule
+            case AesKeygenAssist:   self.has_zkne
+            case Sha256Rounds2:     self.has_zknh
+            case Sha256Msg1:        self.has_zknh
+            case Sha256Msg2:        self.has_zknh
+            case Crc32U8:           false
+            case Crc32U32:          false
+            case Crc32U64:          false
+            case ClmulLo:           false  # Zbc not guaranteed on RV32 bare-metal
+            case ClmulHi:           false
+            case RotateLeft:        self.has_zbb or self.has_zbkb
+            case RotateRight:       self.has_zbb or self.has_zbkb
+            case Popcount:          self.has_zbb
+            case CountLeadingZeros: self.has_zbb
+            case CountTrailingZeros: self.has_zbb
+            case ByteSwap:          self.has_zbb
+            case BitReverse:        self.has_zbb and self.has_zbkb
+            case Parity:            self.has_zbb
+            case Sha512Rounds2:     false  # SHA-512 needs 64-bit ops; not possible on RV32
+            case Sha512Msg1:        false
+            case Sha512Msg2:        false
+            case MatrixDot:         self.has_v
+            case MatrixOuterProduct: self.has_v
+            case MatrixFmaKernel:   self.has_v
+            case SimdI32x4:         self.has_v
+            case SimdF32x4:         self.has_v
+            case SimdI32x8:         false
+            case SimdF32x8:         false
+
+    fn cost(idiom: TargetIdiom) -> i64:
+        """Latency hints for RV32 scalar — GD32VF103 / ESP32-C3 reference."""
+        if not self.supports(idiom):
+            return -1
+        match idiom:
+            case AesEnc:            4
+            case AesEncLast:        4
+            case AesDec:            4
+            case AesDecLast:        4
+            case AesImc:            4
+            case AesKeygenAssist:   6
+            case Sha256Rounds2:     6
+            case Sha256Msg1:        4
+            case Sha256Msg2:        4
+            case RotateLeft:        1
+            case RotateRight:       1
+            case Popcount:          2
+            case CountLeadingZeros: 2
+            case CountTrailingZeros: 2
+            case ByteSwap:          1
+            case BitReverse:        2
+            case Parity:            2
+            case _:                 -1
+
+    fn preferred_vector_width_bits() -> i64:
+        """Return 128 with V extension, else 32 (scalar RV32)."""
+        if self.has_v:
+            return 128
+        32
+
+fn rv32_caps_from_target(triple: text) -> Rv32Caps:
+    """Derive Rv32Caps from a target-triple / ISA preset name.
+
+    Recognised presets:
+      riscv32imac_zknd_zkne_zknh:  scalar crypto (AES + SHA-256)
+      riscv32imac_zbb_zbkb:        bitmanip only
+      riscv32imac:                 baseline integer (no crypto, no bitmanip)
+    Unknown triples return all-false (safe software fallback).
+    """
+    val has_zbb  = triple.contains("zbb")
+    val has_zbkb = triple.contains("zbkb")
+    val has_zknd = triple.contains("zknd")
+    val has_zkne = triple.contains("zkne")
+    val has_zknh = triple.contains("zknh")
+    val has_v    = triple.contains("rvv") or triple.contains("_v")
+    Rv32Caps(has_zbb: has_zbb, has_zbkb: has_zbkb, has_zknd: has_zknd, has_zkne: has_zkne, has_zknh: has_zknh, has_v: has_v)
+
+# ============================================================================
+# X86_32Caps — IA-32 (i386/i686) concrete impl
+# ============================================================================
+
+"""x86 32-bit (IA-32 / i686) capability set.
+
+IA-32 lacks REX prefix so 64-bit registers are unavailable. SSE2 is
+guaranteed from i686 level (Pentium 4+). AVX requires i686+ microarch.
+Crypto extensions (AES-NI, SHA-NI) exist on modern 32-bit-mode runs but
+are gated by the same CPUID flags as x86_64.
+"""
+struct X86_32Caps:
+    has_sse2:   bool   # Guaranteed on i686; baseline for 32-bit float SIMD
+    has_sse42:  bool   # CRC32, POPCNT (via separate CPUID)
+    has_aes:    bool
+    has_sha_ni: bool
+    has_pclmul: bool
+    has_avx:    bool
+    has_bmi1:   bool
+    has_popcnt: bool
+
+impl TargetCaps for X86_32Caps:
+    fn supports(idiom: TargetIdiom) -> bool:
+        match idiom:
+            case AesEnc:            self.has_aes
+            case AesEncLast:        self.has_aes
+            case AesDec:            self.has_aes
+            case AesDecLast:        self.has_aes
+            case AesImc:            self.has_aes
+            case AesKeygenAssist:   self.has_aes
+            case Sha256Rounds2:     self.has_sha_ni
+            case Sha256Msg1:        self.has_sha_ni
+            case Sha256Msg2:        self.has_sha_ni
+            case Crc32U8:           self.has_sse42
+            case Crc32U32:          self.has_sse42
+            case Crc32U64:          false            # CRC32Q uses 64-bit dst — unavail in 32-bit mode
+            case ClmulLo:           self.has_pclmul
+            case ClmulHi:           self.has_pclmul
+            case RotateLeft:        true             # ROL/ROR available in 32-bit mode (ROTL m32)
+            case RotateRight:       true
+            case Popcount:          self.has_popcnt
+            case CountLeadingZeros: self.has_bmi1
+            case CountTrailingZeros: self.has_bmi1
+            case ByteSwap:          true             # BSWAP r32 (486+)
+            case BitReverse:        false            # No GFNI or equivalent in 32-bit baseline
+            case Parity:            self.has_popcnt
+            case Sha512Rounds2:     false
+            case Sha512Msg1:        false
+            case Sha512Msg2:        false
+            case MatrixDot:         self.has_avx
+            case MatrixOuterProduct: self.has_avx
+            case MatrixFmaKernel:   self.has_avx
+            case SimdI32x4:         self.has_sse2
+            case SimdF32x4:         self.has_sse2
+            case SimdI32x8:         false
+            case SimdF32x8:         false
+
+    fn cost(idiom: TargetIdiom) -> i64:
+        """Latency hints (cycles) for IA-32 — Pentium4/Core2 reference."""
+        if not self.supports(idiom):
+            return -1
+        match idiom:
+            case AesEnc:            4
+            case AesEncLast:        4
+            case AesDec:            4
+            case AesDecLast:        4
+            case AesImc:            14
+            case AesKeygenAssist:   14
+            case Sha256Rounds2:     4
+            case Sha256Msg1:        2
+            case Sha256Msg2:        2
+            case Crc32U8:           3
+            case Crc32U32:          3
+            case Crc32U64:          -1
+            case ClmulLo:           7
+            case ClmulHi:           7
+            case RotateLeft:        1
+            case RotateRight:       1
+            case Popcount:          3
+            case CountLeadingZeros: 3
+            case CountTrailingZeros: 3
+            case ByteSwap:          1
+            case Parity:            3
+            case MatrixDot:         5
+            case MatrixOuterProduct: 5
+            case MatrixFmaKernel:   4
+            case SimdI32x4:         1
+            case SimdF32x4:         1
+            case _:                 -1
+
+    fn preferred_vector_width_bits() -> i64:
+        """Return 256 with AVX, else 128 (SSE2)."""
+        if self.has_avx:
+            return 256
+        128
+
+fn x86_32_caps_from_target(triple: text) -> X86_32Caps:
+    """Derive X86_32Caps from a target-triple / micro-arch level preset name.
+
+    Recognised presets:
+      i686-v3:  SSE4.2 + AES-NI + PCLMUL + AVX + BMI1 + POPCNT + SHA-NI
+      i686-v2:  SSE4.2 + BMI1 + POPCNT (no crypto, no AVX)
+      i686:     baseline SSE2 (Pentium4/Core2 level)
+    Unknown triples return SSE2-only.
+    """
+    if triple.contains("i686-v3") or triple.contains("i686_v3"):
+        X86_32Caps(
+            has_sse2: true, has_sse42: true, has_aes: true, has_sha_ni: true,
+            has_pclmul: true, has_avx: true, has_bmi1: true, has_popcnt: true
+        )
+    elif triple.contains("i686-v2") or triple.contains("i686_v2"):
+        X86_32Caps(
+            has_sse2: true, has_sse42: true, has_aes: false, has_sha_ni: false,
+            has_pclmul: false, has_avx: false, has_bmi1: true, has_popcnt: true
+        )
+    else:
+        X86_32Caps(
+            has_sse2: true, has_sse42: false, has_aes: false, has_sha_ni: false,
+            has_pclmul: false, has_avx: false, has_bmi1: false, has_popcnt: false
+        )
+
+# ============================================================================
+# TargetFamily — architecture family descriptor with enable/disable matrix
+# ============================================================================
+
+"""Architecture family row for the target capability matrix.
+
+Describes coarse-grained enablement for each (family, TargetFeatureClass)
+pair. disabled_reasons maps feature class name to a human-readable
+explanation when the feature is disabled.
+"""
+struct TargetFamilyRow:
+    name:              text    # Human-readable identifier (e.g. "x86-64", "arm32")
+    pointer_bits:      i64     # Pointer size: 32 or 64
+    fixed_simd:        bool
+    scalable_simd:     bool
+    bitmanip:          bool
+    crypto:            bool
+    matrix:            bool
+    fixed_simd_reason:    text
+    scalable_simd_reason: text
+    bitmanip_reason:      text
+    crypto_reason:        text
+    matrix_reason:        text
+
+fn target_family_row_x86_64() -> TargetFamilyRow:
+    """x86-64: full feature set; AVX-512 gated by CPUID at runtime."""
+    TargetFamilyRow(
+        name: "x86-64",
+        pointer_bits: 64,
+        fixed_simd: true,
+        scalable_simd: true,
+        bitmanip: true,
+        crypto: true,
+        matrix: true,
+        fixed_simd_reason: "",
+        scalable_simd_reason: "",
+        bitmanip_reason: "",
+        crypto_reason: "",
+        matrix_reason: ""
+    )
+
+fn target_family_row_x86_32() -> TargetFamilyRow:
+    """IA-32 (i686): 32-bit mode. No 64-bit SIMD lanes, no scalable SIMD."""
+    TargetFamilyRow(
+        name: "x86-32",
+        pointer_bits: 32,
+        fixed_simd: true,
+        scalable_simd: false,
+        bitmanip: true,
+        crypto: true,
+        matrix: false,
+        fixed_simd_reason: "",
+        scalable_simd_reason: "IA-32 lacks AVX-512 / scalable vector; 32-bit mode caps out at 256-bit AVX",
+        bitmanip_reason: "",
+        crypto_reason: "",
+        matrix_reason: "Matrix micro-kernels need 256-bit+ SIMD; disabled until AVX2 confirmed"
+    )
+
+fn target_family_row_aarch64() -> TargetFamilyRow:
+    """AArch64: NEON baseline; SVE2 gates scalable SIMD."""
+    TargetFamilyRow(
+        name: "aarch64",
+        pointer_bits: 64,
+        fixed_simd: true,
+        scalable_simd: true,
+        bitmanip: true,
+        crypto: true,
+        matrix: true,
+        fixed_simd_reason: "",
+        scalable_simd_reason: "",
+        bitmanip_reason: "",
+        crypto_reason: "",
+        matrix_reason: ""
+    )
+
+fn target_family_row_arm32() -> TargetFamilyRow:
+    """ARM32 (Thumb2 / Cortex-M/A 32-bit): no scalable SIMD, no SHA-512."""
+    TargetFamilyRow(
+        name: "arm32",
+        pointer_bits: 32,
+        fixed_simd: true,
+        scalable_simd: false,
+        bitmanip: true,
+        crypto: true,
+        matrix: false,
+        fixed_simd_reason: "",
+        scalable_simd_reason: "No scalable vector ISA on ARM32; NEON is fixed 128-bit",
+        bitmanip_reason: "",
+        crypto_reason: "",
+        matrix_reason: "Matrix micro-kernels require AVX2/SVE2 width; unsupported on ARM32"
+    )
+
+fn target_family_row_rv64() -> TargetFamilyRow:
+    """RV64: V extension for SIMD; Zvkn bundle for crypto."""
+    TargetFamilyRow(
+        name: "rv64",
+        pointer_bits: 64,
+        fixed_simd: true,
+        scalable_simd: true,
+        bitmanip: true,
+        crypto: true,
+        matrix: true,
+        fixed_simd_reason: "",
+        scalable_simd_reason: "",
+        bitmanip_reason: "",
+        crypto_reason: "",
+        matrix_reason: ""
+    )
+
+fn target_family_row_rv32() -> TargetFamilyRow:
+    """RV32: scalar crypto only; no vector, no SHA-512."""
+    TargetFamilyRow(
+        name: "rv32",
+        pointer_bits: 32,
+        fixed_simd: false,
+        scalable_simd: false,
+        bitmanip: true,
+        crypto: true,
+        matrix: false,
+        fixed_simd_reason: "RV32 V extension rarely present on bare-metal boards; disabled by default",
+        scalable_simd_reason: "No scalable vector on RV32 baseline",
+        bitmanip_reason: "",
+        crypto_reason: "",
+        matrix_reason: "Matrix micro-kernels need vector width; no RV32V mandate"
+    )
+
+fn all_target_family_rows() -> [TargetFamilyRow]:
+    """Return all six architecture family rows for the capability matrix."""
+    [
+        target_family_row_x86_64(),
+        target_family_row_x86_32(),
+        target_family_row_aarch64(),
+        target_family_row_arm32(),
+        target_family_row_rv64(),
+        target_family_row_rv32()
+    ]
+
+fn target_family_row_supports_class(row: TargetFamilyRow, class_: TargetFeatureClass) -> bool:
+    """Query the family-level enable bit for a feature class."""
+    match class_:
+        case FixedWidthSimd: row.fixed_simd
+        case ScalableSimd:   row.scalable_simd
+        case BitManip:       row.bitmanip
+        case Crypto:         row.crypto
+        case Matrix:         row.matrix
+
+fn target_family_row_disabled_reason(row: TargetFamilyRow, class_: TargetFeatureClass) -> text:
+    """Return the disabled reason for a feature class (empty means enabled)."""
+    match class_:
+        case FixedWidthSimd: row.fixed_simd_reason
+        case ScalableSimd:   row.scalable_simd_reason
+        case BitManip:       row.bitmanip_reason
+        case Crypto:         row.crypto_reason
+        case Matrix:         row.matrix_reason
+
+# ============================================================================
 # TargetCapsKind — discriminated enum for multi-arch dispatch
 # ============================================================================
 
 enum TargetCapsKind:
     X86(X86Caps)
+    X86_32(X86_32Caps)
     Aarch64(Aarch64Caps)
+    Arm(ArmCaps)
     Rv64(Rv64Caps)
+    Rv32(Rv32Caps)
     None_
 
 fn caps_kind_supports(kind: TargetCapsKind, idiom: TargetIdiom) -> bool:
     match kind:
         case X86(caps):     caps.supports(idiom)
+        case X86_32(caps):  caps.supports(idiom)
         case Aarch64(caps): caps.supports(idiom)
+        case Arm(caps):     caps.supports(idiom)
         case Rv64(caps):    caps.supports(idiom)
+        case Rv32(caps):    caps.supports(idiom)
         case None_:         false
 
 fn caps_kind_cost(kind: TargetCapsKind, idiom: TargetIdiom) -> i64:
     match kind:
         case X86(caps):     caps.cost(idiom)
+        case X86_32(caps):  caps.cost(idiom)
         case Aarch64(caps): caps.cost(idiom)
+        case Arm(caps):     caps.cost(idiom)
         case Rv64(caps):    caps.cost(idiom)
+        case Rv32(caps):    caps.cost(idiom)
         case None_:         -1
 
 fn caps_kind_preferred_vector_width_bits(kind: TargetCapsKind) -> i64:
     match kind:
         case X86(caps):     caps.preferred_vector_width_bits()
+        case X86_32(caps):  caps.preferred_vector_width_bits()
         case Aarch64(caps): caps.preferred_vector_width_bits()
+        case Arm(caps):     caps.preferred_vector_width_bits()
         case Rv64(caps):    caps.preferred_vector_width_bits()
+        case Rv32(caps):    caps.preferred_vector_width_bits()
         case None_:         128
 
 fn caps_kind_target_name(kind: TargetCapsKind) -> text:
     match kind:
         case X86(_):     "x86_64"
+        case X86_32(_):  "x86_32"
         case Aarch64(_): "aarch64"
+        case Arm(_):     "arm32"
         case Rv64(_):    "riscv64"
+        case Rv32(_):    "riscv32"
         case None_:      "unknown"
 
 fn caps_kind_from_triple(triple: text) -> TargetCapsKind:
     if triple.starts_with("x86_64") or triple.starts_with("x86-64"):
         TargetCapsKind.X86(x86_caps_from_target(triple))
+    elif triple.starts_with("i686") or triple.starts_with("i386") or triple.starts_with("x86-32"):
+        TargetCapsKind.X86_32(x86_32_caps_from_target(triple))
     elif triple.starts_with("aarch64") or triple.starts_with("armv8"):
         TargetCapsKind.Aarch64(aarch64_caps_from_target(triple))
+    elif triple.starts_with("thumbv") or triple.starts_with("armv7") or triple.starts_with("armv6"):
+        TargetCapsKind.Arm(arm_caps_from_target(triple))
     elif triple.starts_with("rv64") or triple.starts_with("riscv64"):
         TargetCapsKind.Rv64(rv64_caps_from_target(triple))
+    elif triple.starts_with("rv32") or triple.starts_with("riscv32"):
+        TargetCapsKind.Rv32(rv32_caps_from_target(triple))
+    else:
+        TargetCapsKind.None_
+
+# ============================================================================
+# TargetFamily name → TargetCapsKind bridge
+# ============================================================================
+
+fn x86_caps_default() -> X86Caps:
+    """Baseline x86 caps (no extensions)."""
+    X86Caps(false, false, false, false, false, false, false, false, false)
+
+fn aarch64_caps_default() -> Aarch64Caps:
+    """Baseline AArch64 caps (NEON only)."""
+    Aarch64Caps(false, false, false, false, false, true, false, false)
+
+fn rv64_caps_default() -> Rv64Caps:
+    """Baseline RV64 caps (no extensions)."""
+    Rv64Caps(false, false, false, false, false, false, false, 128)
+
+fn arm_caps_default() -> ArmCaps:
+    """Baseline ARM32 caps (no NEON, no crypto — Cortex-M0 safe baseline)."""
+    ArmCaps(has_neon: false, has_aes: false, has_sha2: false, has_dsp: false, has_crc32: false)
+
+fn rv32_caps_default() -> Rv32Caps:
+    """Baseline RV32 caps (no extensions — riscv32imac)."""
+    Rv32Caps(has_zbb: false, has_zbkb: false, has_zknd: false, has_zkne: false, has_zknh: false, has_v: false)
+
+fn x86_32_caps_default() -> X86_32Caps:
+    """Baseline IA-32 caps (SSE2 only — i686 Pentium4 level)."""
+    X86_32Caps(has_sse2: true, has_sse42: false, has_aes: false, has_sha_ni: false, has_pclmul: false, has_avx: false, has_bmi1: false, has_popcnt: false)
+
+fn caps_kind_for_family(family_name: text) -> TargetCapsKind:
+    """Map a TargetFamily name to a default TargetCapsKind.
+
+    Wired families: X86_64, X86_32, Aarch64, Arm32, Rv64, Rv32.
+    Unknown names → None_.
+    """
+    if family_name == "X86_64":
+        TargetCapsKind.X86(x86_caps_default())
+    elif family_name == "X86_32":
+        TargetCapsKind.X86_32(x86_32_caps_default())
+    elif family_name == "Aarch64":
+        TargetCapsKind.Aarch64(aarch64_caps_default())
+    elif family_name == "Arm32":
+        TargetCapsKind.Arm(arm_caps_default())
+    elif family_name == "Rv64":
+        TargetCapsKind.Rv64(rv64_caps_default())
+    elif family_name == "Rv32":
+        TargetCapsKind.Rv32(rv32_caps_default())
     else:
         TargetCapsKind.None_
