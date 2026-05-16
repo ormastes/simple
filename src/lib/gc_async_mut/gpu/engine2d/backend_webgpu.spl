@@ -40,7 +40,8 @@ use std.nogc_sync_mut.gpu.engine2d.webgpu_ffi.{
     webgpu_ffi_is_available, webgpu_ffi_init, webgpu_ffi_shutdown,
     webgpu_ffi_create_surface, webgpu_ffi_destroy_surface,
     webgpu_ffi_upload_pixels, webgpu_ffi_present,
-    webgpu_ffi_compute_draw
+    webgpu_ffi_compute_draw,
+    webgpu_ffi_adapter_count, webgpu_ffi_adapter_name, webgpu_ffi_adapter_is_cpu
 }
 
 # ============================================================================
@@ -55,6 +56,106 @@ fn webgpu_available() -> bool:
     should skip this backend when the return value is false.
     """
     webgpu_ffi_is_available()
+
+# ============================================================================
+# Adapter Enumeration and Strict Probe
+# ============================================================================
+
+class WebGpuAdapterInfo:
+    """Metadata for a single enumerated WebGPU adapter."""
+    index: i64
+    name: text
+    is_cpu: bool
+
+class WebGpuProbeResult:
+    """Result of webgpu_probe_adapter().
+
+    status values: "Ok" | "Failed" | "Fallback"
+    - Ok: a discrete or integrated GPU adapter was selected
+    - Failed: no adapters found at all
+    - Fallback: only a CPU/software adapter was found (strict mode rejects this)
+    """
+    status: text
+    adapter_count: i64
+    selected_adapter: text
+    fell_through_to_cpu: bool
+    fallback_reason: text
+
+class WebGpuFallbackError:
+    """Typed error for AC-5: no GPU adapter found or only CPU fallback available.
+
+    Returned instead of silently continuing on the CPU path.
+    """
+    reason: text
+    adapter_count: i64
+
+fn webgpu_probe_adapter() -> WebGpuProbeResult:
+    """Enumerate WebGPU adapters via wgpuInstanceRequestAdapter.
+
+    Logs the selected backend name. Returns Failed if no adapters exist.
+    Returns Fallback (not Ok) if the only available adapter is a CPU/software
+    renderer — callers in strict mode must treat Fallback as an error.
+
+    This function never silently falls through to CPU rendering.
+    """
+    if not webgpu_ffi_is_available():
+        return WebGpuProbeResult(
+            status: "Failed",
+            adapter_count: 0,
+            selected_adapter: "",
+            fell_through_to_cpu: false,
+            fallback_reason: "WebGPU runtime not available"
+        )
+
+    val count = webgpu_ffi_adapter_count()
+    if count == 0:
+        return WebGpuProbeResult(
+            status: "Failed",
+            adapter_count: 0,
+            selected_adapter: "",
+            fell_through_to_cpu: false,
+            fallback_reason: "no adapters enumerated"
+        )
+
+    # Prefer the first non-CPU adapter
+    var selected_index: i64 = -1
+    var i: i64 = 0
+    while i < count:
+        if not webgpu_ffi_adapter_is_cpu(i):
+            selected_index = i
+            i = count  # break
+        i = i + 1
+
+    if selected_index < 0:
+        # Only CPU/software adapters found — strict error, not silent fallback
+        val cpu_name = webgpu_ffi_adapter_name(0)
+        return WebGpuProbeResult(
+            status: "Fallback",
+            adapter_count: count,
+            selected_adapter: cpu_name,
+            fell_through_to_cpu: true,
+            fallback_reason: "only CPU/software adapter available"
+        )
+
+    val adapter_name = webgpu_ffi_adapter_name(selected_index)
+    WebGpuProbeResult(
+        status: "Ok",
+        adapter_count: count,
+        selected_adapter: adapter_name,
+        fell_through_to_cpu: false,
+        fallback_reason: ""
+    )
+
+fn webgpu_strict_init_check() -> WebGpuFallbackError:
+    """Return a WebGpuFallbackError if no real GPU adapter is available.
+
+    Call before init() in strict mode. Empty reason means no error.
+    """
+    val probe = webgpu_probe_adapter()
+    if probe.status == "Ok":
+        WebGpuFallbackError(reason: "", adapter_count: probe.adapter_count)
+    else:
+        WebGpuFallbackError(reason: probe.fallback_reason, adapter_count: probe.adapter_count)
 
 # ============================================================================
 # WebGPU Backend

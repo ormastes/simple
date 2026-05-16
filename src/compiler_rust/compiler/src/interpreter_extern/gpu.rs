@@ -377,6 +377,41 @@ pub fn rt_cuda_memset_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_cuda_rect_fill(fb_ptr, x, y, w, h, stride, color)` — batch rectangle fill.
+///
+/// Fills a w×h rectangle at (x,y) in a framebuffer with stride `stride` using
+/// a single extern call. Replaces h individual `rt_cuda_memset` calls, cutting
+/// interpreter dispatch overhead from O(h) to O(1) per rectangle.
+pub fn rt_cuda_rect_fill_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let fb_ptr = arg_i64(args, 0, "rt_cuda_rect_fill", 7)?;
+    let x = arg_i64(args, 1, "rt_cuda_rect_fill", 7)?;
+    let y = arg_i64(args, 2, "rt_cuda_rect_fill", 7)?;
+    let w = arg_i64(args, 3, "rt_cuda_rect_fill", 7)?;
+    let h = arg_i64(args, 4, "rt_cuda_rect_fill", 7)?;
+    let stride = arg_i64(args, 5, "rt_cuda_rect_fill", 7)?;
+    let color = arg_i64(args, 6, "rt_cuda_rect_fill", 7)?;
+
+    #[cfg(feature = "cuda")]
+    {
+        for row in 0..h {
+            let row_ptr = fb_ptr + ((y + row) * stride + x) * 4;
+            let _r = rt_cuda_memset(row_ptr, color, w);
+        }
+        return Ok(Value::Int(0));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if let Some(fns) = get_cuda_dl() {
+            for row in 0..h {
+                let row_ptr = (fb_ptr as u64) + ((y + row) as u64 * stride as u64 + x as u64) * 4;
+                unsafe { (fns.memset_d32)(row_ptr, color as u32, w as usize) };
+            }
+            return Ok(Value::Int(0));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
 pub fn rt_cuda_f64_binary_op_fn(args: &[Value]) -> Result<Value, CompileError> {
     let dst = arg_i64(args, 0, "rt_cuda_f64_binary_op", 5)?;
     let left = arg_i64(args, 1, "rt_cuda_f64_binary_op", 5)?;

@@ -14,6 +14,14 @@ Core operations are chosen to be:
   - Sufficient: the emulation layer can build ALL advanced operations from these
 
 See: backend_adv.spl (advanced trait), backend_emu.spl (stateless emulation)
+
+Phase 5 adds:
+  - probe() — returns BackendProbeResult identifying this backend
+  - fill(x, y, w, h, color) — fill a rectangle with a flat color
+  - blit(src_pixels, dst_x, dst_y, src_w, src_h) — copy pixel block
+  - alpha_blend(src_pixels, dst_x, dst_y, src_w, src_h, alpha) — blend with alpha
+  - scroll(dx, dy, clip_x, clip_y, clip_w, clip_h) — scroll viewport region
+  - sync_readback() — copy device framebuffer to host; returns pixel bytes
 """
 
 # ============================================================================
@@ -61,3 +69,50 @@ trait RenderBackendCore:
     fn read_pixels() -> [u32]
     fn width() -> i32
     fn height() -> i32
+
+# ============================================================================
+# Phase 5 — RenderBackendCoreV2 (probe-aware, region-based dispatch)
+# ============================================================================
+#
+# Extends the core trait with probe identity and the five kernel operations
+# required by the architecture (fill, blit, alpha_blend, scroll, sync_readback).
+# Backends implement this trait via composition — no inheritance.
+#
+# The trait is separate from RenderBackendCore so legacy backends do not need
+# to implement probe() before the migration is complete.
+
+trait RenderBackendProbe:
+    """Identity probe — every Phase 5 backend must implement this."""
+
+    # Returns the probe result that describes this backend (name, shader format, etc.).
+    # Must NOT return a result with shader_format == "glsl" for any GPU backend
+    # that is admitted into the selection path.
+    fn probe() -> BackendProbeResult
+
+trait RenderBackendRegionOps:
+    """Region-level rendering operations added in Phase 5.
+
+    All coordinates are in framebuffer pixel space: origin top-left, x right, y down.
+    Colors are packed u32 in ARGB layout (0xAARRGGBB).
+    alpha is a value in [0, 255] (u8-range, not float) for alpha_blend.
+    """
+
+    # Fill a rectangular region with a flat color.
+    me fill(x: i32, y: i32, w: i32, h: i32, color: u32)
+
+    # Copy a pixel block (src_pixels in row-major ARGB u32) to (dst_x, dst_y).
+    # src_pixels length must be >= src_w * src_h.
+    me blit(src_pixels: [u32], dst_x: i32, dst_y: i32, src_w: i32, src_h: i32)
+
+    # Alpha-blend src pixel block onto the framebuffer at (dst_x, dst_y).
+    # alpha is 0 (transparent) .. 255 (opaque).
+    me alpha_blend(src_pixels: [u32], dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, alpha: i32)
+
+    # Scroll the clipping region by (dx, dy) pixels.
+    # Pixels shifted outside the clip region are discarded; vacated area is cleared to 0.
+    me scroll(dx: i32, dy: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32)
+
+    # Copy the device framebuffer to a host-side byte buffer and return it.
+    # Pixels are in ARGB u32 layout packed as 4 bytes per pixel (little-endian).
+    # Returns an empty list if the backend does not support readback.
+    fn sync_readback() -> [u8]

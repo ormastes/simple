@@ -1,0 +1,81 @@
+"""SIMD Provider — trait, hit-count accumulator, and provider registration.
+
+@tag:stdlib
+@tag:gpu
+
+Defines the SimdProvider trait and SimdHitCounts accumulator consumed by
+simd_kernels.spl and the optimization plugin metadata hook.
+
+Usage:
+    use std.nogc_sync_mut.gpu.engine2d.simd_provider.{SimdProvider, SimdHitCounts, g_simd_hits, reset_simd_hits}
+"""
+
+# ============================================================================
+# Hit-count accumulator (module-level singleton)
+# ============================================================================
+
+class SimdHitCounts:
+    """Per-frame SIMD kernel invocation counters.
+
+    Each span/rect kernel call increments the corresponding counter.
+    vectorize_changes is incremented by the optimization plugin hook
+    whenever a loop is reported as newly vectorized (changed == true).
+    """
+    fill_hits:         i64
+    copy_hits:         i64
+    alpha_hits:        i64
+    blit_hits:         i64
+    scroll_hits:       i64
+    vectorize_changes: i64
+
+fn make_simd_hit_counts_zero() -> SimdHitCounts:
+    SimdHitCounts(
+        fill_hits:         0,
+        copy_hits:         0,
+        alpha_hits:        0,
+        blit_hits:         0,
+        scroll_hits:       0,
+        vectorize_changes: 0
+    )
+
+var g_simd_hits: SimdHitCounts = make_simd_hit_counts_zero()
+
+fn reset_simd_hits():
+    """Reset all counters — call at frame boundary before rendering."""
+    g_simd_hits = make_simd_hit_counts_zero()
+
+# ============================================================================
+# SimdProvider trait
+# ============================================================================
+
+trait SimdProvider:
+    """Abstraction over a SIMD kernel set.
+
+    Implementations provide the five span/rect kernels and expose the
+    accumulated hit counts for the current frame. The optimization plugin
+    metadata hook (plugin_hook_vectorize_event) updates vectorize_changes.
+    """
+
+    # Return snapshot of hit counts for this frame
+    fn hit_counts() -> SimdHitCounts
+
+    # Return target feature list
+    fn target_features() -> [text]
+
+# ============================================================================
+# Provider registration — module-level singleton registry
+# ============================================================================
+
+var _registered_provider_name: text = ""
+var _provider_registered: bool = false
+
+fn register_simd_provider(name: text):
+    """Register a named SIMD provider. Call once at engine init."""
+    _registered_provider_name = name
+    _provider_registered = true
+
+fn registered_provider_name() -> text:
+    _registered_provider_name
+
+fn has_registered_provider() -> bool:
+    _provider_registered

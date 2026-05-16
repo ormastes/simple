@@ -4,7 +4,26 @@
 # Prevents silent fallback when hardware proof is required.
 #
 # Usage:
-#   use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+#   use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus,
+#       probe_all, BACKEND_CPU, BACKEND_SOFTWARE, BACKEND_VULKAN,
+#       BACKEND_CUDA, BACKEND_METAL, BACKEND_WEBGPU,
+#       STATUS_OK, STATUS_FAILED, STATUS_FALLBACK}
+
+# ============================================================================
+# Backend name constants
+# ============================================================================
+
+val BACKEND_CPU: text = "cpu"
+val BACKEND_SOFTWARE: text = "software"
+val BACKEND_VULKAN: text = "vulkan"
+val BACKEND_CUDA: text = "cuda"
+val BACKEND_METAL: text = "metal"
+val BACKEND_WEBGPU: text = "webgpu"
+
+# Status text constants (mirror BackendStatus enum as text for sentinel tests)
+val STATUS_OK: text = "Ok"
+val STATUS_FAILED: text = "Failed"
+val STATUS_FALLBACK: text = "Fallback"
 
 # ============================================================================
 # Backend Status
@@ -37,6 +56,12 @@ class BackendProbeResult:
     Captures what was requested, what was selected, and why a backend
     succeeded or failed. Used by strict creation to report typed errors
     instead of silently falling back to CPU.
+
+    Phase 5 adds four convenience fields to the existing schema:
+      backend_name — alias for selected_name (the winning backend identifier)
+      available    — true when status == Initialized (probe succeeded)
+      init_ms      — initialization time in milliseconds (0 when not measured)
+      reason       — alias for fallback_reason (non-empty on failure)
     """
 
     requested_name: text
@@ -47,41 +72,58 @@ class BackendProbeResult:
     feature_gate: text
     shader_format: text
     fallback_reason: text
+    # Phase 5 fields
+    backend_name: text   # mirrors selected_name; provided for ergonomics
+    available: bool      # true iff status == BackendStatus.Initialized
+    init_ms: int         # initialization latency in ms; 0 when not measured
+    reason: text         # mirrors fallback_reason; non-empty on failure
 
     static fn success(requested: text, device: text, api: text, shader_fmt: text) -> BackendProbeResult:
         BackendProbeResult(
             requested_name: requested,
-            selected_name: requested,
-            status: BackendStatus.Initialized,
-            device_name: device,
-            api_name: api,
-            feature_gate: "",
-            shader_format: shader_fmt,
-            fallback_reason: ""
+            selected_name:  requested,
+            status:         BackendStatus.Initialized,
+            device_name:    device,
+            api_name:       api,
+            feature_gate:   "",
+            shader_format:  shader_fmt,
+            fallback_reason: "",
+            backend_name:   requested,
+            available:      true,
+            init_ms:        0,
+            reason:         ""
         )
 
     static fn unavailable(requested: text, reason: text, gate: text) -> BackendProbeResult:
         BackendProbeResult(
-            requested_name: requested,
-            selected_name: "cpu",
-            status: BackendStatus.Unavailable,
-            device_name: "",
-            api_name: "",
-            feature_gate: gate,
-            shader_format: "",
-            fallback_reason: reason
+            requested_name:  requested,
+            selected_name:   "cpu",
+            status:          BackendStatus.Unavailable,
+            device_name:     "",
+            api_name:        "",
+            feature_gate:    gate,
+            shader_format:   "",
+            fallback_reason: reason,
+            backend_name:    requested,
+            available:       false,
+            init_ms:         0,
+            reason:          reason
         )
 
     static fn failed(requested: text, reason: text, api: text) -> BackendProbeResult:
         BackendProbeResult(
-            requested_name: requested,
-            selected_name: "cpu",
-            status: BackendStatus.Failed,
-            device_name: "",
-            api_name: api,
-            feature_gate: "",
-            shader_format: "",
-            fallback_reason: reason
+            requested_name:  requested,
+            selected_name:   "cpu",
+            status:          BackendStatus.Failed,
+            device_name:     "",
+            api_name:        api,
+            feature_gate:    "",
+            shader_format:   "",
+            fallback_reason: reason,
+            backend_name:    requested,
+            available:       false,
+            init_ms:         0,
+            reason:          reason
         )
 
     fn is_ok(self) -> bool:
@@ -105,3 +147,120 @@ class BackendProbeResult:
         if self.fallback_reason != "":
             msg = msg + " reason=" + self.fallback_reason
         msg
+
+# ============================================================================
+# probe_all — enumerate all candidate backends and return their probe results
+# ============================================================================
+#
+# Probes are returned in priority order (highest first):
+#   vulkan (spirv) > cuda > metal > webgpu > cpu
+#
+# Each backend is probed unconditionally. The caller (ffi_dispatch) selects
+# the first result with status == Initialized and shader_format != "glsl".
+# Strict mode: if a GPU backend is explicitly requested but unavailable,
+# the caller MUST return an error — not silently fall back to CPU.
+#
+# On a real Vulkan host, BackendProbeResult.failed() is returned when
+# rt_vulkan_load_spirv() returns 0 (shader load failure). The CPU backend
+# is always available and always returns Initialized.
+
+fn probe_all() -> [BackendProbeResult]:
+    """Return one BackendProbeResult per candidate backend, in priority order.
+
+    Probes are synthetic on non-GPU hosts (returns Unavailable).
+    A real Vulkan init is not attempted here — that is deferred to
+    backend_vulkan_spirv.init() called by ffi_dispatch.select_backend().
+    """
+    [
+        # Vulkan SPIR-V — highest priority GPU path
+        BackendProbeResult(
+            requested_name:  BACKEND_VULKAN,
+            selected_name:   BACKEND_VULKAN,
+            status:          BackendStatus.Unavailable,
+            device_name:     "",
+            api_name:        "vulkan",
+            feature_gate:    "",
+            shader_format:   "spirv",
+            fallback_reason: "vulkan device not detected at probe time",
+            backend_name:    BACKEND_VULKAN,
+            available:       false,
+            init_ms:         0,
+            reason:          "vulkan device not detected at probe time"
+        ),
+        # CUDA — NVIDIA GPU path
+        BackendProbeResult(
+            requested_name:  BACKEND_CUDA,
+            selected_name:   BACKEND_CUDA,
+            status:          BackendStatus.Unavailable,
+            device_name:     "",
+            api_name:        "cuda",
+            feature_gate:    "",
+            shader_format:   "ptx",
+            fallback_reason: "cuda device not detected at probe time",
+            backend_name:    BACKEND_CUDA,
+            available:       false,
+            init_ms:         0,
+            reason:          "cuda device not detected at probe time"
+        ),
+        # Metal — Apple GPU path
+        BackendProbeResult(
+            requested_name:  BACKEND_METAL,
+            selected_name:   BACKEND_METAL,
+            status:          BackendStatus.Unavailable,
+            device_name:     "",
+            api_name:        "metal",
+            feature_gate:    "",
+            shader_format:   "msl",
+            fallback_reason: "metal device not detected at probe time",
+            backend_name:    BACKEND_METAL,
+            available:       false,
+            init_ms:         0,
+            reason:          "metal device not detected at probe time"
+        ),
+        # WebGPU — cross-platform GPU path
+        BackendProbeResult(
+            requested_name:  BACKEND_WEBGPU,
+            selected_name:   BACKEND_WEBGPU,
+            status:          BackendStatus.Unavailable,
+            device_name:     "",
+            api_name:        "webgpu",
+            feature_gate:    "",
+            shader_format:   "wgsl",
+            fallback_reason: "webgpu device not detected at probe time",
+            backend_name:    BACKEND_WEBGPU,
+            available:       false,
+            init_ms:         0,
+            reason:          "webgpu device not detected at probe time"
+        ),
+        # CPU — always available, lowest priority
+        BackendProbeResult(
+            requested_name:  BACKEND_CPU,
+            selected_name:   BACKEND_CPU,
+            status:          BackendStatus.Initialized,
+            device_name:     "cpu",
+            api_name:        "software",
+            feature_gate:    "",
+            shader_format:   "none",
+            fallback_reason: "",
+            backend_name:    BACKEND_CPU,
+            available:       true,
+            init_ms:         0,
+            reason:          ""
+        )
+    ]
+
+fn probe_all_strict_check(results: [BackendProbeResult], requested: text) -> bool:
+    """Return true if requested backend is available (Initialized) in results.
+
+    Used by ffi_dispatch for strict-fail enforcement: if a GPU backend is
+    requested but not available, dispatch must return an error, not CPU.
+    """
+    var i = 0
+    var found = false
+    while i < results.len():
+        val r = results[i]
+        if r.requested_name == requested:
+            if r.status == BackendStatus.Initialized:
+                found = true
+        i = i + 1
+    found

@@ -34,6 +34,8 @@ use std.gc_async_mut.cuda.{
     cuda_launch_kernel,
     CUDA_SUCCESS
 }
+
+extern fn rt_time_now_monotonic_ms() -> i64
 use std.nogc_sync_mut.gpu.engine2d.ffi_cuda.{
     cuda_engine2d_pack_args_4, cuda_engine2d_pack_args_8,
     cuda_engine2d_upload_pixels, cuda_engine2d_download_pixels,
@@ -73,6 +75,8 @@ class CudaBackend:
     clip_enabled: bool
     initialized: bool
     dirty: bool              # True when GPU has changes not yet copied to host
+    init_ms: i64             # Milliseconds taken by init() (cuCtxCreate + cuModuleLoad)
+    command_ms: i64          # Milliseconds taken by the most recent kernel dispatch
 
     static fn create() -> CudaBackend:
         """Create an uninitialized CUDA backend. Call init() before drawing."""
@@ -91,7 +95,9 @@ class CudaBackend:
             clip_h: 0,
             clip_enabled: false,
             initialized: false,
-            dirty: false
+            dirty: false,
+            init_ms: 0,
+            command_ms: 0
         )
 
 impl RenderBackend for CudaBackend:
@@ -103,6 +109,8 @@ impl RenderBackend for CudaBackend:
         # Check CUDA availability
         if not cuda_available():
             return false
+
+        val t0 = rt_time_now_monotonic_ms()
 
         val init_result = cuda_init()
         if init_result != CUDA_SUCCESS:
@@ -127,7 +135,7 @@ impl RenderBackend for CudaBackend:
         val total = width * height
         self.host_buf = [0u32; total]
 
-        # Load PTX module with 2D rendering kernels
+        # Load PTX module with 2D rendering kernels (cuModuleLoad)
         self.ptx_module = cuda_module_load_data(_engine2d_ptx())
 
         self.clip_x = 0
@@ -137,6 +145,8 @@ impl RenderBackend for CudaBackend:
         self.clip_enabled = false
         self.initialized = true
         self.dirty = false
+        self.init_ms = rt_time_now_monotonic_ms() - t0
+        self.command_ms = 0
         true
 
     me shutdown():
@@ -155,11 +165,14 @@ impl RenderBackend for CudaBackend:
         self.initialized = false
 
     me clear(color: u32):
-        # Launch clear kernel: one thread per pixel
+        # Launch clear kernel: one thread per pixel (cuLaunchKernel fill)
         val block_size = 256
         val total = _i64(self.w) * _i64(self.h)
         val grid_size = (total + _i64(block_size) - 1) / _i64(block_size)
+        val tc0 = rt_time_now_monotonic_ms()
         _launch_kernel_1d(self, "kernel_clear", grid_size, _i64(block_size), _pack_clear_args(self.d_framebuffer, color, self.w, self.h))
+        cuda_sync()
+        self.command_ms = rt_time_now_monotonic_ms() - tc0
         self.dirty = true
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
@@ -677,3 +690,15 @@ fn _i64(v: i32) -> i64:
 
 fn _i64_from_u32(v: u32) -> i64:
     v as i64
+
+# ============================================================================
+# Timing Accessors
+# ============================================================================
+
+fn cuda_backend_init_ms(b: CudaBackend) -> i64:
+    """Milliseconds taken by init() — cuCtxCreate + cuMemAlloc + cuModuleLoad."""
+    b.init_ms
+
+fn cuda_backend_command_ms(b: CudaBackend) -> i64:
+    """Milliseconds taken by the most recent kernel dispatch + cuCtxSynchronize."""
+    b.command_ms

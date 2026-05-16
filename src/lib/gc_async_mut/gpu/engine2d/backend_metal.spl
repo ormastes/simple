@@ -43,8 +43,14 @@ use std.nogc_sync_mut.io.metal_ffi.{
     metal_ffi_buffer_upload, metal_ffi_compile_shader,
     metal_ffi_destroy_shader, metal_ffi_create_compute_pipeline,
     metal_ffi_destroy_pipeline, metal_ffi_create_command_queue,
-    metal_ffi_destroy_command_queue
+    metal_ffi_destroy_command_queue,
+    metal_ffi_create_command_buffer, metal_ffi_commit_command_buffer,
+    metal_ffi_wait_completed, metal_ffi_create_compute_encoder,
+    metal_ffi_end_compute_encoder, metal_ffi_set_buffer, metal_ffi_set_bytes,
+    metal_ffi_dispatch_compute, metal_ffi_buffer_download
 }
+
+extern fn rt_time_now_monotonic_ms() -> i64
 
 # ============================================================================
 # Metal Backend
@@ -92,6 +98,8 @@ class MetalBackend:
     mask_h: i32
     initialized: bool
     dirty: bool                # True when GPU has changes not yet copied to host
+    init_ms: i64               # Milliseconds taken by init() (device + queue + shader compile)
+    command_ms: i64            # Milliseconds taken by the most recent compute dispatch
 
     static fn create() -> MetalBackend:
         """Create an uninitialized Metal backend. Call init() before drawing."""
@@ -122,7 +130,9 @@ class MetalBackend:
             mask_w: 0,
             mask_h: 0,
             initialized: false,
-            dirty: false
+            dirty: false,
+            init_ms: 0,
+            command_ms: 0
         )
 
 impl RenderBackend for MetalBackend:
@@ -131,9 +141,12 @@ impl RenderBackend for MetalBackend:
         "metal"
 
     me init(width: i32, height: i32) -> bool:
-        # Check Metal availability
+        # Platform guard: Metal is only available on macOS/iOS.
+        # On non-macOS the rt_metal_is_available() stub returns false.
         if not metal_ffi_is_available():
             return false
+
+        val t0 = rt_time_now_monotonic_ms()
 
         val init_ok = metal_ffi_init()
         if not init_ok:
@@ -201,6 +214,8 @@ impl RenderBackend for MetalBackend:
         self.clip_enabled = false
         self.initialized = true
         self.dirty = false
+        self.init_ms = rt_time_now_monotonic_ms() - t0
+        self.command_ms = 0
         true
 
     me shutdown():
@@ -526,3 +541,168 @@ impl Engine2DExtended for MetalBackend:
             _i = _i + 1
         render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, fg, font_size)
         self.draw_image(x, y, text_w, text_h, buf)
+
+# ============================================================================
+# Metal Compute Dispatch Helpers
+#
+# These implement the actual MTLComputePipelineState + dispatchThreadgroups
+# path that the RenderBackend impl methods call.
+# ============================================================================
+
+fn _metal_run_kernel_1d(backend: MetalBackend, pipeline: i64, total_threads: i64, block_size: i64, params: [u8]):
+    """Encode + commit a 1-D Metal compute dispatch and wait until completed."""
+    val cmd_buf = metal_ffi_create_command_buffer(backend.command_queue)
+    if cmd_buf == 0:
+        return
+    val encoder = metal_ffi_create_compute_encoder(cmd_buf)
+    if encoder == 0:
+        metal_ffi_commit_command_buffer(cmd_buf)
+        metal_ffi_wait_completed(cmd_buf)
+        return
+    metal_ffi_set_buffer(encoder, backend.d_framebuffer, 0, 0)
+    metal_ffi_set_bytes(encoder, params, params.len() as i64, 1)
+    metal_ffi_dispatch_compute(encoder, pipeline, total_threads, 1, 1, block_size, 1, 1)
+    metal_ffi_end_compute_encoder(encoder)
+    metal_ffi_commit_command_buffer(cmd_buf)
+    metal_ffi_wait_completed(cmd_buf)
+
+fn _metal_run_kernel_2d(backend: MetalBackend, pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8]):
+    """Encode + commit a 2-D Metal compute dispatch and wait until completed."""
+    val cmd_buf = metal_ffi_create_command_buffer(backend.command_queue)
+    if cmd_buf == 0:
+        return
+    val encoder = metal_ffi_create_compute_encoder(cmd_buf)
+    if encoder == 0:
+        metal_ffi_commit_command_buffer(cmd_buf)
+        metal_ffi_wait_completed(cmd_buf)
+        return
+    metal_ffi_set_buffer(encoder, backend.d_framebuffer, 0, 0)
+    metal_ffi_set_bytes(encoder, params, params.len() as i64, 1)
+    metal_ffi_dispatch_compute(encoder, pipeline, grid_dim.x, grid_dim.y, 1, block_dim.x, block_dim.y, 1)
+    metal_ffi_end_compute_encoder(encoder)
+    metal_ffi_commit_command_buffer(cmd_buf)
+    metal_ffi_wait_completed(cmd_buf)
+
+fn _metal_run_blit_kernel(backend: MetalBackend, pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8], d_src: i64):
+    """Encode + commit a blit kernel with an extra source buffer binding."""
+    val cmd_buf = metal_ffi_create_command_buffer(backend.command_queue)
+    if cmd_buf == 0:
+        return
+    val encoder = metal_ffi_create_compute_encoder(cmd_buf)
+    if encoder == 0:
+        metal_ffi_commit_command_buffer(cmd_buf)
+        metal_ffi_wait_completed(cmd_buf)
+        return
+    metal_ffi_set_buffer(encoder, backend.d_framebuffer, 0, 0)
+    metal_ffi_set_buffer(encoder, d_src, 0, 1)
+    metal_ffi_set_bytes(encoder, params, params.len() as i64, 2)
+    metal_ffi_dispatch_compute(encoder, pipeline, grid_dim.x, grid_dim.y, 1, block_dim.x, block_dim.y, 1)
+    metal_ffi_end_compute_encoder(encoder)
+    metal_ffi_commit_command_buffer(cmd_buf)
+    metal_ffi_wait_completed(cmd_buf)
+
+fn _metal_download_fb(backend: MetalBackend, fb_size: i64):
+    """Read back the device framebuffer into host_buf via contents() / buffer_download."""
+    val byte_count = fb_size
+    var raw: [u8] = [0u8; byte_count as i32]
+    metal_ffi_buffer_download(raw, backend.d_framebuffer, byte_count)
+    # Reinterpret [u8] as [u32] — 4 bytes per pixel (ARGB)
+    val pixel_count = backend.w * backend.h
+    var i = 0
+    while i < pixel_count:
+        val base = i * 4
+        val b0 = raw[base] as u32
+        val b1 = raw[base + 1] as u32
+        val b2 = raw[base + 2] as u32
+        val b3 = raw[base + 3] as u32
+        backend.host_buf[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        i = i + 1
+
+fn _metal_draw_text_cpu_upload(backend: MetalBackend, x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+    """Render text on CPU and re-upload the full framebuffer to device memory.
+
+    Metal has no native text kernel; we render into the host buffer and
+    re-upload. For production a glyph atlas texture would be used instead.
+    """
+    # Ensure host buffer is current before CPU-side text render
+    if backend.dirty:
+        val fb_size = _i64(backend.w) * _i64(backend.h) * 4
+        _metal_download_fb(backend, fb_size)
+
+    render_text_to_buffer(backend.host_buf, backend.w, backend.h, x, y, text_val, color, font_size)
+
+    # Re-upload: convert [u32] host_buf back to [u8] and upload
+    val pixel_count = backend.w * backend.h
+    var raw: [u8] = [0u8; pixel_count * 4]
+    var i = 0
+    while i < pixel_count:
+        val pix = backend.host_buf[i]
+        raw[i * 4]     = (pix & 0xFFu32) as u8
+        raw[i * 4 + 1] = ((pix >> 8) & 0xFFu32) as u8
+        raw[i * 4 + 2] = ((pix >> 16) & 0xFFu32) as u8
+        raw[i * 4 + 3] = ((pix >> 24) & 0xFFu32) as u8
+        i = i + 1
+    val fb_size = _i64(backend.w) * _i64(backend.h) * 4
+    metal_ffi_buffer_upload(backend.d_framebuffer, raw, fb_size)
+
+# ---- Trampoline methods wired into the impl block calls ----
+# Simple does not allow plain functions to be called as `self._foo(...)` unless
+# they are impl methods.  Add them here as free functions with `backend` arg,
+# matching each call site's invocation pattern.
+
+impl MetalBackend:
+
+    me _dispatch_1d(pipeline: i64, total_threads: i64, block_size: i64, params: [u8]):
+        val tc0 = rt_time_now_monotonic_ms()
+        _metal_run_kernel_1d(self, pipeline, total_threads, block_size, params)
+        self.command_ms = rt_time_now_monotonic_ms() - tc0
+
+    me _dispatch_2d(pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8]):
+        val tc0 = rt_time_now_monotonic_ms()
+        _metal_run_kernel_2d(self, pipeline, grid_dim, block_dim, params)
+        self.command_ms = rt_time_now_monotonic_ms() - tc0
+
+    me _dispatch_blit(pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8], d_src: i64):
+        val tc0 = rt_time_now_monotonic_ms()
+        _metal_run_blit_kernel(self, pipeline, grid_dim, block_dim, params, d_src)
+        self.command_ms = rt_time_now_monotonic_ms() - tc0
+
+    me _download_framebuffer(fb_size: i64):
+        _metal_download_fb(self, fb_size)
+
+    me _metal_draw_text_fallback(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        _metal_draw_text_cpu_upload(self, x, y, text_val, color, font_size)
+
+# ============================================================================
+# Timing Accessors
+# ============================================================================
+
+fn metal_backend_init_ms(b: MetalBackend) -> i64:
+    """Milliseconds taken by init() — MTLCreateSystemDefaultDevice + newCommandQueue + shader compile."""
+    b.init_ms
+
+fn metal_backend_command_ms(b: MetalBackend) -> i64:
+    """Milliseconds taken by the most recent dispatchThreadgroups + waitUntilCompleted."""
+    b.command_ms
+
+# ============================================================================
+# MetalUnavailable typed error
+# ============================================================================
+
+class MetalUnavailableError:
+    """Returned by metal_backend_probe() when Metal is not available.
+
+    On non-macOS hosts rt_metal_is_available() returns false and init()
+    returns false immediately; callers should check this before calling init().
+    """
+    reason: text
+
+fn metal_backend_probe() -> MetalUnavailableError:
+    """Return a typed unavailability descriptor for non-macOS hosts.
+
+    status == "Failed" mirrors BackendProbeResult for consistency.
+    """
+    if metal_ffi_is_available():
+        MetalUnavailableError(reason: "")
+    else:
+        MetalUnavailableError(reason: "Metal not available on this platform")

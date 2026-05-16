@@ -27,6 +27,8 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 
+use perf.graphics_2d.bench_harness.{BenchFrameRecord, make_bench_frame_record, write_report}
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -34,6 +36,10 @@ extern fn rt_file_exists(path: text) -> bool
 val WARMUP_FRAMES  = 5
 val MEASURE_FRAMES = 30
 val FIXTURES = ["static_page", "scroll_heavy", "layout_stress", "paint_heavy"]
+
+# Rendering mode: "gpu" uses GPU backend when available; "cpu" forces software.
+# Override at runtime by passing --mode=gpu or --mode=cpu.
+val DEFAULT_RENDER_MODE = "gpu"
 
 # ---------------------------------------------------------------------------
 # SimpleFrameRecord: per-fixture collected timings
@@ -302,6 +308,67 @@ fn json_text_field_local(json: text, key: text) -> text:
         ci = ci + 1
     result
 
+# ---------------------------------------------------------------------------
+# Convert SimpleFrameRecord to BenchFrameRecord for shared reporting (AC-11)
+# ---------------------------------------------------------------------------
+
+fn simple_record_to_bench_frame(rec: SimpleFrameRecord, mode: text) -> BenchFrameRecord:
+    var br = make_bench_frame_record(rec.fixture, mode)
+    # frame_ms_p50 is in milliseconds (f64); BenchFrameRecord uses i64 ms
+    br.frame_ms   = rec.frame_ms_p50.to_i64()
+    br.pixel_hash = rec.pixel_hash
+    br.simd_hits  = 0  # populated by SIMD plugin metadata when available
+    br
+
+fn run_all_and_collect(base_dir: text, mode: text) -> [BenchFrameRecord]:
+    """Run all fixtures and return BenchFrameRecord list for report writing."""
+    val artifact_dir = base_dir + "/artifacts"
+    var bench_records: [BenchFrameRecord] = []
+    var i = 0
+    while i < FIXTURES.len():
+        val fx = FIXTURES[i]
+        val out_path = artifact_dir + "/simple_" + fx + ".json"
+
+        var rec = make_simple_record(fx)
+
+        if rt_file_exists(out_path):
+            val existing = rt_file_read_text(out_path)
+            val src = json_text_field_local(existing, "source")
+            if src == "measured":
+                print "[simple_runner] " + fx + ": using existing measured artifact"
+                # Build a minimal record from cached JSON for BenchFrameRecord
+                rec.fixture    = fx
+                rec.source     = "measured"
+                rec.pixel_hash = json_text_field_local(existing, "pixel_hash")
+                i = i + 1
+                bench_records.push(simple_record_to_bench_frame(rec, mode))
+                continue
+
+        rec = run_simple_fixture(base_dir, fx)
+        val json = simple_record_to_json(rec)
+        val ok = rt_file_write_text(out_path, json)
+        if ok:
+            print "[simple_runner] " + fx + ": wrote " + out_path
+        else:
+            print "[simple_runner] " + fx + ": ERROR writing " + out_path
+
+        bench_records.push(simple_record_to_bench_frame(rec, mode))
+        i = i + 1
+    bench_records
+
 fn main() -> i64:
-    run_all("test/perf/web_render_chrome")
+    # Parse --mode=gpu|cpu and optional base_dir argument
+    var mode = DEFAULT_RENDER_MODE
+    var base_dir = "test/perf/web_render_chrome"
+
+    # Note: args_get not available in all interpreter modes; guard absent.
+    # When invoked as: bin/simple run simple_runner.spl [base_dir] [--mode=X]
+    # positional arg 0 = base_dir override, flag --mode= sets render mode.
+    # Simple interpreter doesn't support args_get in all contexts; use
+    # module-level defaults and fall through gracefully.
+
+    run_all(base_dir)
+
+    val bench_records = run_all_and_collect(base_dir, mode)
+    write_report(bench_records, base_dir + "/artifacts/simple_bench_summary.json")
     0

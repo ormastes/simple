@@ -16,6 +16,7 @@
 
 use std.io.{print, args_get, process_exit, shell_output_trimmed, shell_int}
 use std.io.{file_exists}
+use perf.graphics_2d.bench_harness.{BenchFrameRecord, make_bench_frame_record, write_report}
 
 # ============================================================================
 # Constants — NFR 2B thresholds
@@ -247,6 +248,27 @@ fn run_app(cmd: text) -> text:
     shell_output_trimmed(cmd)
 
 # ============================================================================
+# BenchFrameRecord emission (AC-11)
+# ============================================================================
+
+fn build_bench_frame_records(rows: [ComparisonRow],
+                             simple_idle: WorkflowResult) -> [BenchFrameRecord]:
+    """Convert comparison rows into BenchFrameRecord for shared reporting."""
+    var records: [BenchFrameRecord] = []
+    var i: i64 = 0
+    while i < rows.length():
+        val row = rows[i]
+        var rec = make_bench_frame_record(row.workflow, "simple")
+        # frame_ms: use simple p50 converted from µs to ms (integer)
+        rec.frame_ms = row.simple_p50_us / 1000
+        # pixel_hash not available in workflow benchmarks; leave empty
+        rec.pixel_hash = ""
+        rec.simd_hits = 0
+        records = records.push(rec)
+        i = i + 1
+    records
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -292,6 +314,10 @@ fn main():
     print_idle_row(simple_idle, tauri_idle)
 
     val all_pass = check_nfr_2b(rows, simple_idle, tauri_idle)
+
+    # Emit BenchFrameRecord report for shared graphics_2d reporting (AC-11)
+    val bench_records = build_bench_frame_records(rows, simple_idle)
+    write_report(bench_records, "test/perf/graphics_2d/tauri_equiv_report.json")
 
     if not all_pass:
         process_exit(1)
