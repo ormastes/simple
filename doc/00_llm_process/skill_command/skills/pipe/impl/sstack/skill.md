@@ -32,14 +32,14 @@ SStack is a full-lifecycle development pipeline that combines three frameworks:
 
 | # | Phase | Role | Agent Definition | Cooperative Skill |
 |---|-------|------|-----------------|-------------------|
-| 1 | dev | Developer Lead | `.claude/agents/sstack/dev.md` | (inline) |
-| 2 | research | Analyst | `.claude/agents/sstack/research.md` | `/research` + `/research_codex` |
-| 3 | arch | Architect | `.claude/agents/sstack/arch.md` | `/design` + `/gemini_ui_design` |
-| 4 | spec | QA Lead | `.claude/agents/sstack/spec.md` | `/spipe` |
-| 5 | implement | Engineer | `.claude/agents/sstack/implement.md` | `/coding` |
-| 6 | refactor | Tech Lead | `.claude/agents/sstack/refactor.md` | `/refactor` |
-| 7 | verify | QA | `.claude/agents/sstack/verify.md` | `/verify` |
-| 8 | ship | Release Mgr | `.claude/agents/sstack/ship.md` | `/sync` |
+| 1 | dev | Developer Lead | `.claude/agents/spipe/dev.md` | (inline) |
+| 2 | research | Analyst | `.claude/agents/spipe/research.md` | `/research` + `/research_codex` |
+| 3 | arch | Architect | `.claude/agents/spipe/arch.md` | `/design` + `/gemini_ui_design` |
+| 4 | spec | QA Lead | `.claude/agents/spipe/spec.md` | `/spipe` |
+| 5 | implement | Engineer | `.claude/agents/spipe/implement.md` | `/coding` |
+| 6 | refactor | Tech Lead | `.claude/agents/spipe/refactor.md` | `/refactor` |
+| 7 | verify | QA | `.claude/agents/spipe/verify.md` | `/verify` |
+| 8 | ship | Release Mgr | `.claude/agents/spipe/ship.md` | `/sync` |
 
 ## Cooperative Workflow Integration
 
@@ -115,7 +115,7 @@ For each phase N (2 through 8):
 5. **Spawn a fresh Agent** with this prompt:
 
 ```
-Read .claude/agents/sstack/<phase-name>.md and follow its instructions.
+Read .claude/agents/spipe/<phase-name>.md and follow its instructions.
 
 State file: .sstack/<feature>/state.md
 Feature: <feature>

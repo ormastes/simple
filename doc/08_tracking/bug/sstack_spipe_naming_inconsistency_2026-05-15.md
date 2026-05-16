@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-15
 **Severity:** Low (cosmetic/tooling)
-**Status:** Open
+**Status:** Partially resolved — tracking/plan/requirements docs clean (2026-05-16)
 
 ## Summary
 
@@ -23,8 +23,16 @@ both `sstack` and `spipe` as separate skills.
 One consistent name. Either consolidate sstack into spipe or keep them separate
 with clear distinct roles. Update all references and the skill registry.
 
-## Proposed Fix
+## Notes (2026-05-16)
 
-1. Decide: merge sstack orchestrator into spipe, or keep separate with clear names.
-2. Update all cross-references in skills, agents, and CLAUDE.md.
-3. Remove the stale skill file.
+- `.claude/agents/spipe/` directory confirmed present.
+- The 8 tracking/plan/requirements docs in scope were already clean (no stale refs found).
+- Remaining 328 stale `sspec` hits in `doc/` are concentrated in `doc/09_report/` (historical
+  reports predating the rename) and `doc/00_llm_process/` (rename migration tables — intentional
+  historical references). These do not need updating.
+
+## Proposed Fix (remaining)
+
+1. Decide: merge sstack orchestrator into spipe, or keep them separate with clear distinct roles.
+2. Update `.claude/skills/dev.md` alias and `.claude/skills/repo_and_pull_req.md` cross-references.
+3. Remove or consolidate the stale `.claude/skills/sstack.md` skill file once roles are clarified.

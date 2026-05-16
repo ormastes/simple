@@ -9,7 +9,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 | Field | Value |
 |-------|-------|
 | **Role** | Developer Lead |
-| **Agent** | `.claude/agents/sstack/dev.md` |
+| **Agent** | `.claude/agents/spipe/dev.md` |
 | **Focus** | Analyze the task, categorize it, and refine into a testable goal with acceptance criteria |
 | **Context Budget** | 10% (runs inline in orchestrator) |
 
@@ -38,7 +38,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 | Field | Value |
 |-------|-------|
 | **Role** | Analyst |
-| **Agent** | `.claude/agents/sstack/research.md` |
+| **Agent** | `.claude/agents/spipe/research.md` |
 | **Focus** | Gather all information needed to make architectural and implementation decisions |
 | **Context Budget** | 35% |
 
@@ -66,7 +66,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 | Field | Value |
 |-------|-------|
 | **Role** | Architect |
-| **Agent** | `.claude/agents/sstack/arch.md` |
+| **Agent** | `.claude/agents/spipe/arch.md` |
 | **Focus** | Define the structural design: modules, interfaces, data flow |
 | **Context Budget** | 30% |
 
@@ -95,7 +95,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 | Field | Value |
 |-------|-------|
 | **Role** | QA Lead |
-| **Agent** | `.claude/agents/sstack/spec.md` |
+| **Agent** | `.claude/agents/spipe/spec.md` |
 | **Focus** | Write BDD specs and test skeletons BEFORE implementation (Superpowers: spec-first) |
 | **Context Budget** | 30% |
 
@@ -124,7 +124,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 | Field | Value |
 |-------|-------|
 | **Role** | Engineer |
-| **Agent** | `.claude/agents/sstack/implement.md` |
+| **Agent** | `.claude/agents/spipe/implement.md` |
 | **Focus** | Write the minimum code to make all specs pass (Superpowers: test-first, green phase) |
 | **Context Budget** | 40% |
 
@@ -153,7 +153,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 | Field | Value |
 |-------|-------|
 | **Role** | Tech Lead |
-| **Agent** | `.claude/agents/sstack/refactor.md` |
+| **Agent** | `.claude/agents/spipe/refactor.md` |
 | **Focus** | Clean up implementation without changing behavior (Superpowers: refactor phase) |
 | **Context Budget** | 30% |
 
@@ -183,7 +183,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 | Field | Value |
 |-------|-------|
 | **Role** | QA |
-| **Agent** | `.claude/agents/sstack/verify.md` |
+| **Agent** | `.claude/agents/spipe/verify.md` |
 | **Focus** | Full verification: tests pass, ACs met, no regressions |
 | **Context Budget** | 35% |
 
@@ -211,7 +211,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 | Field | Value |
 |-------|-------|
 | **Role** | Release Manager |
-| **Agent** | `.claude/agents/sstack/ship.md` |
+| **Agent** | `.claude/agents/spipe/ship.md` |
 | **Focus** | Commit, sync, and close out the feature |
 | **Context Budget** | 15% |
 
