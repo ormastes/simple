@@ -5,10 +5,17 @@
 # Tier 2: LLVM-compiled (slow compile, fully optimized runtime)
 #
 # Policy, profiling, and tier decisions live here in Simple.
-# Only the actual machine code emission (Cranelift/LLVM) stays in Rust
-# via the LocalExecutionManager SFFI interface.
+# Actual machine code emission uses Cranelift via rt_jit_* externs (Rust bridge).
 
-use compiler.interp.execution.mod.{LocalExecutionManager}
+# Native JIT externs — bridge to Rust LocalExecutionManager (Cranelift)
+extern fn rt_jit_create() -> i64
+extern fn rt_jit_compile_source(handle: i64, source: text) -> text
+extern fn rt_jit_call_i64(handle: i64, name: text, arg: i64) -> i64
+extern fn rt_jit_call_void(handle: i64, name: text) -> i64
+extern fn rt_jit_call_i64_i64(handle: i64, name: text, arg0: i64, arg1: i64) -> i64
+extern fn rt_jit_has_function(handle: i64, name: text) -> bool
+extern fn rt_jit_cleanup(handle: i64) -> i64
+extern fn rt_time_now_seconds() -> f64
 
 # ============================================================================
 # Configuration
@@ -33,6 +40,7 @@ struct FunctionProfile:
     call_count: i64
     tier: JitTier
     compile_time_ms: f64
+    source: text
 
 struct JitStats:
     tier1_compilations: i64
@@ -46,34 +54,73 @@ struct JitStats:
 class TieredJitManager:
     config: TieredJitConfig
     profiles: Dict<text, FunctionProfile>
-    cranelift_em: LocalExecutionManager?
-    llvm_em: LocalExecutionManager?
+    jit_handle: i64
     tier1_compilations: i64
     tier2_compilations: i64
+    total_compile_time_ms: f64
 
     static fn create(config: TieredJitConfig) -> TieredJitManager:
-        TieredJitManager(config: config, profiles: {}, cranelift_em: nil, llvm_em: nil, tier1_compilations: 0, tier2_compilations: 0)
+        var handle = rt_jit_create()
+        TieredJitManager(config: config, profiles: {}, jit_handle: handle, tier1_compilations: 0, tier2_compilations: 0, total_compile_time_ms: 0.0)
+
+    me register_function(name: text, source: text):
+        if not self.profiles.has(name):
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source)
+            self.profiles[name] = p
 
     me record_call(name: text) -> JitTier:
         if self.profiles.has(name):
             var p = self.profiles[name]
             var new_count = p.call_count + 1
             var new_tier = p.tier
+            var compile_ms = p.compile_time_ms
             if p.tier == JitTier.Interpreted:
                 if new_count >= self.config.tier1_threshold:
                     new_tier = JitTier.Fast
+                    compile_ms = self._compile_function(p.source)
                     self.tier1_compilations = self.tier1_compilations + 1
             else if p.tier == JitTier.Fast:
                 if new_count >= self.config.tier2_threshold:
                     new_tier = JitTier.Optimized
                     self.tier2_compilations = self.tier2_compilations + 1
-            var updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: p.compile_time_ms)
+            var updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source)
             self.profiles[name] = updated
             new_tier
         else:
-            var p = FunctionProfile(name: name, call_count: 1, tier: JitTier.Interpreted, compile_time_ms: 0.0)
+            var p = FunctionProfile(name: name, call_count: 1, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "")
             self.profiles[name] = p
             JitTier.Interpreted
+
+    me _compile_function(source: text) -> f64:
+        if source == "":
+            return 0.0
+        var t0 = rt_time_now_seconds()
+        var err = rt_jit_compile_source(self.jit_handle, source)
+        var t1 = rt_time_now_seconds()
+        var ms = (t1 - t0) * 1000.0
+        self.total_compile_time_ms = self.total_compile_time_ms + ms
+        if err != "":
+            if self.config.debug_mode:
+                print("  [JIT] compile error: " + err)
+        else:
+            if self.config.debug_mode:
+                print("  [JIT] compiled in " + ms.to_string() + " ms")
+        ms
+
+    fn call_i64(name: text, arg: i64) -> i64:
+        if rt_jit_has_function(self.jit_handle, name):
+            rt_jit_call_i64(self.jit_handle, name, arg)
+        else:
+            -1
+
+    fn call_void(name: text) -> i64:
+        if rt_jit_has_function(self.jit_handle, name):
+            rt_jit_call_void(self.jit_handle, name)
+        else:
+            -1
+
+    fn is_native(name: text) -> bool:
+        rt_jit_has_function(self.jit_handle, name)
 
     fn get_tier(name: text) -> JitTier:
         if self.profiles.has(name):
@@ -85,55 +132,15 @@ class TieredJitManager:
         var tier = self.get_tier(name)
         tier != JitTier.Interpreted
 
-    me ensure_cranelift():
-        if self.cranelift_em.?:
-            pass_dn
-        else:
-            self.cranelift_em = LocalExecutionManager.cranelift()
-
-    me ensure_llvm():
-        if self.llvm_em.?:
-            pass_dn
-        else:
-            self.llvm_em = LocalExecutionManager.llvm()
-
-    me compile_module(mir_data: text, backend: JitTier) -> text:
-        if backend == JitTier.Fast:
-            self.ensure_cranelift()
-            var em = self.cranelift_em.unwrap()
-            em.compile(mir_data)
-        else if backend == JitTier.Optimized:
-            self.ensure_llvm()
-            var em = self.llvm_em.unwrap()
-            em.compile(mir_data)
-        else:
-            "err: cannot compile for interpreter tier"
-
-    fn execute_compiled(name: text, args: [i64]) -> text:
-        var tier = self.get_tier(name)
-        if tier == JitTier.Optimized:
-            if self.llvm_em.?:
-                var em = self.llvm_em.unwrap()
-                em.execute(name, args)
-            else:
-                "err: no llvm backend"
-        else if tier == JitTier.Fast:
-            if self.cranelift_em.?:
-                var em = self.cranelift_em.unwrap()
-                em.execute(name, args)
-            else:
-                "err: no cranelift backend"
-        else:
-            "err: function not compiled"
-
     fn get_stats() -> JitStats:
-        JitStats(tier1_compilations: self.tier1_compilations, tier2_compilations: self.tier2_compilations, total_compile_time_ms: 0.0)
+        JitStats(tier1_compilations: self.tier1_compilations, tier2_compilations: self.tier2_compilations, total_compile_time_ms: self.total_compile_time_ms)
 
     fn print_stats():
         print("=== Tiered JIT Statistics ===")
         print("  Functions tracked: " + self.profiles.keys().len().to_string())
         print("  Tier 1 (Cranelift) compilations: " + self.tier1_compilations.to_string())
         print("  Tier 2 (LLVM) compilations: " + self.tier2_compilations.to_string())
+        print("  Total compile time: " + self.total_compile_time_ms.to_string() + " ms")
         var interpreted = 0
         var fast = 0
         var optimized = 0
@@ -148,12 +155,7 @@ class TieredJitManager:
         print("  Current tiers: " + interpreted.to_string() + " interpreted, " + fast.to_string() + " fast, " + optimized.to_string() + " optimized")
 
     me cleanup():
-        if self.cranelift_em.?:
-            var em = self.cranelift_em.unwrap()
-            em.cleanup()
-        if self.llvm_em.?:
-            var em = self.llvm_em.unwrap()
-            em.cleanup()
+        rt_jit_cleanup(self.jit_handle)
 
 # ============================================================================
 # Factory functions

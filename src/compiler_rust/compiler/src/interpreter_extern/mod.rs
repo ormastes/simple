@@ -67,6 +67,7 @@ pub mod cargo;
 pub mod sdn;
 pub mod coverage;
 pub mod cranelift;
+pub mod jit_native;
 // pub mod perf; // TODO: file not yet created
 pub mod sandbox;
 pub mod mock_policy;
@@ -1510,6 +1511,17 @@ pub(crate) fn call_extern_function(
         "rt_exec" => cranelift::rt_exec(&evaluated),
         "rt_file_hash" => cranelift::rt_file_hash(&evaluated),
         "rt_write_file" => cranelift::rt_write_file(&evaluated),
+
+        // ====================================================================
+        // Native JIT Bridge (tiered compilation: source → Cranelift native)
+        // ====================================================================
+        "rt_jit_create" => jit_native::rt_jit_create(&evaluated),
+        "rt_jit_compile_source" => jit_native::rt_jit_compile_source(&evaluated),
+        "rt_jit_call_i64" => jit_native::rt_jit_call_i64(&evaluated),
+        "rt_jit_call_void" => jit_native::rt_jit_call_void(&evaluated),
+        "rt_jit_call_i64_i64" => jit_native::rt_jit_call_i64_i64(&evaluated),
+        "rt_jit_has_function" => jit_native::rt_jit_has_function(&evaluated),
+        "rt_jit_cleanup" => jit_native::rt_jit_cleanup(&evaluated),
 
         // ====================================================================
         // Mock Policy Operations (6 functions)
