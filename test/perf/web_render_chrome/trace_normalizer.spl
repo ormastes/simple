@@ -1,191 +1,225 @@
 # trace_normalizer.spl
 #
-# Normalize Chrome and Simple renderer trace data into common records.
-# Falls back to synthetic baseline when artifact files are absent.
+# Normalize Chrome DevTools trace data and Simple renderer trace data into a
+# common record format consumed by report_spec.spl.
 #
-# Run: bin/simple run test/perf/web_render_chrome/trace_normalizer.spl
+# Input: JSON artifact files in artifacts/chrome_<fixture>.json and
+#        artifacts/simple_<fixture>.json.  When source == "synthetic" the
+#        record is valid but marked PENDING — no threshold assertion fires.
+#
+# Output format (printed, one JSON object per line):
+#   {"fixture":"...", "simple_frame_ms":..., "chrome_frame_ms":...,
+#    "simple_vs_chrome_ratio":..., "pixel_hash_simple":"...",
+#    "pixel_hash_chrome":"...", "pixel_match_pct":...,
+#    "source":"synthetic|measured", "status":"PASS|WARN|FAIL|PENDING"}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
 
-val P95_FRAME_LIMIT_MS  = 16.7
-val PASS_RATIO_MAX      = 1.5
-val WARN_RATIO_MAX      = 2.0
-val PASS_PIXEL_MIN_PCT  = 99.0
-val WARN_PIXEL_MIN_PCT  = 95.0
-val FIXTURES = ["static_page", "scroll_heavy", "layout_stress", "paint_heavy"]
+# ---------------------------------------------------------------------------
+# Threshold constants (NFR 2B)
+# ---------------------------------------------------------------------------
+
+val P95_FRAME_LIMIT_MS = 16.7
+val PASS_RATIO_MAX     = 1.5
+val WARN_RATIO_MAX     = 2.0
+val PASS_PIXEL_MIN     = 99.0
+val WARN_PIXEL_MIN     = 95.0
+
+# ---------------------------------------------------------------------------
+# Helpers: naive JSON field extraction (interpreter-safe, no imports)
+# ---------------------------------------------------------------------------
+
+# Extract a text value for a JSON string field, e.g. "key":"value"
+fn json_text_field(json: text, key: text) -> text:
+    val search = "\"" + key + "\":"
+    val idx = json.index_of(search)
+    if idx < 0:
+        return ""
+    val after = json.substring(idx + search.len(), json.len())
+    # skip whitespace and opening quote
+    var ci = 0
+    while ci < after.len():
+        val c = after.char_at(ci)
+        if c != " " and c != "\t" and c != "\n" and c != "\r":
+            break
+        ci = ci + 1
+    if ci >= after.len():
+        return ""
+    val first = after.char_at(ci)
+    if first != "\"":
+        return ""
+    ci = ci + 1
+    var result = ""
+    while ci < after.len():
+        val c = after.char_at(ci)
+        if c == "\"":
+            break
+        result = result + c
+        ci = ci + 1
+    result
+
+# Extract a numeric value for a JSON number field, e.g. "key": 3.14
+fn json_num_field(json: text, key: text) -> f64:
+    val search = "\"" + key + "\":"
+    val idx = json.index_of(search)
+    if idx < 0:
+        return 0.0
+    val after = json.substring(idx + search.len(), json.len())
+    # skip whitespace
+    var ci = 0
+    while ci < after.len():
+        val c = after.char_at(ci)
+        if c != " " and c != "\t" and c != "\n" and c != "\r":
+            break
+        ci = ci + 1
+    # collect digits, dot, minus
+    var numstr = ""
+    while ci < after.len():
+        val c = after.char_at(ci)
+        if c == "," or c == "}" or c == "]" or c == "\n":
+            break
+        numstr = numstr + c
+        ci = ci + 1
+    val trimmed = numstr.trim()
+    if trimmed == "":
+        return 0.0
+    trimmed.parse_f64()
+
+# ---------------------------------------------------------------------------
+# NormalizedRecord: combined timing + pixel fields for one fixture
+# ---------------------------------------------------------------------------
 
 class NormalizedRecord:
-    fixture:               text
-    simple_frame_ms:       f64
-    chrome_frame_ms:       f64
+    fixture:              text
+    simple_frame_ms_p95:  f64
+    chrome_frame_ms_p95:  f64
     simple_vs_chrome_ratio: f64
-    pixel_hash_simple:     text
-    pixel_hash_chrome:     text
-    pixel_match_pct:       f64
+    pixel_hash_simple:    text
+    pixel_hash_chrome:    text
+    pixel_match_pct:      f64
+    # Stage breakdown (Simple only)
     parse_ms:      f64
     style_ms:      f64
     layout_ms:     f64
     paint_ms:      f64
     composite_ms:  f64
     present_ms:    f64
+    # Chrome extras
     chrome_fps:          f64
     chrome_dropped:      f64
     chrome_gpu_raster_ms: f64
     chrome_memory_mb:    f64
-    source: text
-    status: text
+    # Provenance
+    source: text  # "synthetic" | "measured"
+    status: text  # "PASS" | "WARN" | "FAIL" | "PENDING"
 
 fn make_record(fixture: text) -> NormalizedRecord:
     NormalizedRecord(
-        fixture: fixture, simple_frame_ms: 0.0, chrome_frame_ms: 0.0,
-        simple_vs_chrome_ratio: 0.0, pixel_hash_simple: "", pixel_hash_chrome: "",
-        pixel_match_pct: 0.0, parse_ms: 0.0, style_ms: 0.0, layout_ms: 0.0,
-        paint_ms: 0.0, composite_ms: 0.0, present_ms: 0.0, chrome_fps: 0.0,
-        chrome_dropped: 0.0, chrome_gpu_raster_ms: 0.0, chrome_memory_mb: 0.0,
-        source: "synthetic", status: "PENDING",
+        fixture:               fixture,
+        simple_frame_ms_p95:   0.0,
+        chrome_frame_ms_p95:   0.0,
+        simple_vs_chrome_ratio: 0.0,
+        pixel_hash_simple:     "",
+        pixel_hash_chrome:     "",
+        pixel_match_pct:       0.0,
+        parse_ms:      0.0,
+        style_ms:      0.0,
+        layout_ms:     0.0,
+        paint_ms:      0.0,
+        composite_ms:  0.0,
+        present_ms:    0.0,
+        chrome_fps:          0.0,
+        chrome_dropped:      0.0,
+        chrome_gpu_raster_ms: 0.0,
+        chrome_memory_mb:    0.0,
+        source: "synthetic",
+        status: "PENDING",
     )
 
-fn synth_simple_frame_ms(fixture: text) -> f64:
-    if fixture == "static_page":
-        return 12.0
-    elif fixture == "scroll_heavy":
-        return 16.5
-    elif fixture == "layout_stress":
-        return 16.0
-    elif fixture == "paint_heavy":
-        return 16.5
-    12.0
+# ---------------------------------------------------------------------------
+# Load and merge artifact JSON files into a NormalizedRecord
+# ---------------------------------------------------------------------------
 
-fn synth_chrome_frame_ms(fixture: text) -> f64:
-    if fixture == "static_page":
-        return 10.5
-    elif fixture == "scroll_heavy":
-        return 14.0
-    elif fixture == "layout_stress":
-        return 15.0
-    elif fixture == "paint_heavy":
-        return 16.0
-    10.5
+fn load_record(base_dir: text, fixture: text) -> NormalizedRecord:
+    var rec = make_record(fixture)
 
-fn synth_pixel_hash(fixture: text) -> text:
-    if fixture == "static_page":
-        return "a1b2c3d4e5f6a7b8"
-    elif fixture == "scroll_heavy":
-        return "b2c3d4e5f6a7b8c9"
-    elif fixture == "layout_stress":
-        return "c3d4e5f6a7b8c9d0"
-    elif fixture == "paint_heavy":
-        return "d4e5f6a7b8c9d0e1"
-    "0000000000000000"
+    val chrome_path = base_dir + "/artifacts/chrome_" + fixture + ".json"
+    val simple_path = base_dir + "/artifacts/simple_" + fixture + ".json"
 
-fn synth_stage(fixture: text, stage: text) -> f64:
-    if stage == "parse":
-        if fixture == "static_page":
-            return 1.5
-        elif fixture == "scroll_heavy":
-            return 2.2
-        elif fixture == "layout_stress":
-            return 1.8
-        elif fixture == "paint_heavy":
-            return 1.2
-        return 1.0
-    elif stage == "style":
-        if fixture == "static_page":
-            return 1.0
-        elif fixture == "scroll_heavy":
-            return 1.8
-        elif fixture == "layout_stress":
-            return 1.5
-        elif fixture == "paint_heavy":
-            return 1.0
-        return 0.8
-    elif stage == "layout":
-        if fixture == "static_page":
-            return 2.5
-        elif fixture == "scroll_heavy":
-            return 3.5
-        elif fixture == "layout_stress":
-            return 5.0
-        elif fixture == "paint_heavy":
-            return 2.8
-        return 2.0
-    elif stage == "paint":
-        if fixture == "static_page":
-            return 3.5
-        elif fixture == "scroll_heavy":
-            return 4.5
-        elif fixture == "layout_stress":
-            return 4.0
-        elif fixture == "paint_heavy":
-            return 6.5
-        return 3.0
-    elif stage == "composite":
-        if fixture == "static_page":
-            return 0.8
-        elif fixture == "scroll_heavy":
-            return 1.2
-        elif fixture == "layout_stress":
-            return 1.0
-        elif fixture == "paint_heavy":
-            return 1.8
-        return 0.6
-    if fixture == "static_page":
-        return 0.7
-    elif fixture == "scroll_heavy":
-        return 1.0
-    elif fixture == "layout_stress":
-        return 0.9
-    elif fixture == "paint_heavy":
-        return 1.2
-    0.5
+    if rt_file_exists(chrome_path):
+        val cj = rt_file_read_text(chrome_path)
+        rec.chrome_fps          = json_num_field(cj, "fps")
+        rec.chrome_dropped      = json_num_field(cj, "dropped_frames")
+        rec.chrome_gpu_raster_ms = json_num_field(cj, "gpu_raster_ms")
+        rec.chrome_memory_mb    = json_num_field(cj, "memory_mb")
+        rec.chrome_frame_ms_p95 = json_num_field(cj, "frame_ms_p95")
 
-fn classify_status(source: text, simple_ms: f64, ratio: f64, pixel_pct: f64) -> text:
-    if source == "synthetic":
+    if rt_file_exists(simple_path):
+        val sj = rt_file_read_text(simple_path)
+        rec.parse_ms      = json_num_field(sj, "parse_ms")
+        rec.style_ms      = json_num_field(sj, "style_ms")
+        rec.layout_ms     = json_num_field(sj, "layout_ms")
+        rec.paint_ms      = json_num_field(sj, "paint_ms")
+        rec.composite_ms  = json_num_field(sj, "composite_ms")
+        rec.present_ms    = json_num_field(sj, "present_ms")
+        rec.simple_frame_ms_p95 = json_num_field(sj, "frame_ms_p95")
+        rec.pixel_hash_simple   = json_text_field(sj, "pixel_hash")
+        val src = json_text_field(sj, "source")
+        if src != "":
+            rec.source = src
+
+    # Pixel hash comparison — synthetic records don't have chrome pixel hash yet
+    if rec.pixel_hash_chrome == "" and rec.pixel_hash_simple != "":
+        # No chrome pixel capture yet: use synthetic match indicator
+        rec.pixel_match_pct = if rec.source == "measured" then 0.0 else 95.0
+    elif rec.pixel_hash_simple == rec.pixel_hash_chrome and rec.pixel_hash_simple != "":
+        rec.pixel_match_pct = 100.0
+    else:
+        rec.pixel_match_pct = 0.0
+
+    # Ratio
+    if rec.chrome_frame_ms_p95 > 0.0:
+        rec.simple_vs_chrome_ratio = rec.simple_frame_ms_p95 / rec.chrome_frame_ms_p95
+    else:
+        rec.simple_vs_chrome_ratio = 0.0
+
+    # Status classification
+    rec.status = classify_status(rec)
+    rec
+
+fn classify_status(rec: NormalizedRecord) -> text:
+    if rec.source == "synthetic":
         return "PENDING"
-    if simple_ms > P95_FRAME_LIMIT_MS:
+    val over_frame = rec.simple_frame_ms_p95 > P95_FRAME_LIMIT_MS
+    val ratio_fail = rec.simple_vs_chrome_ratio > WARN_RATIO_MAX
+    val pixel_fail = rec.pixel_match_pct < WARN_PIXEL_MIN
+    if over_frame or ratio_fail or pixel_fail:
         return "FAIL"
-    if ratio > WARN_RATIO_MAX:
-        return "FAIL"
-    if pixel_pct < WARN_PIXEL_MIN_PCT:
-        return "FAIL"
-    if simple_ms > P95_FRAME_LIMIT_MS * 0.9:
-        return "WARN"
-    if ratio > PASS_RATIO_MAX:
-        return "WARN"
-    if pixel_pct < PASS_PIXEL_MIN_PCT:
+    val warn_frame = rec.simple_frame_ms_p95 > P95_FRAME_LIMIT_MS * 0.85
+    val warn_ratio = rec.simple_vs_chrome_ratio > PASS_RATIO_MAX
+    val warn_pixel = rec.pixel_match_pct < PASS_PIXEL_MIN
+    if warn_frame or warn_ratio or warn_pixel:
         return "WARN"
     "PASS"
 
-fn build_synthetic_record(fixture: text) -> NormalizedRecord:
-    var rec = make_record(fixture)
-    rec.parse_ms     = synth_stage(fixture, "parse")
-    rec.style_ms     = synth_stage(fixture, "style")
-    rec.layout_ms    = synth_stage(fixture, "layout")
-    rec.paint_ms     = synth_stage(fixture, "paint")
-    rec.composite_ms = synth_stage(fixture, "composite")
-    rec.present_ms   = synth_stage(fixture, "present")
-    rec.simple_frame_ms = synth_simple_frame_ms(fixture)
-    rec.chrome_frame_ms = synth_chrome_frame_ms(fixture)
-    rec.pixel_hash_simple = synth_pixel_hash(fixture)
-    rec.pixel_hash_chrome = ""
-    rec.pixel_match_pct = 95.0
-    rec.chrome_fps = 60.0
-    if rec.chrome_frame_ms > 0.0:
-        rec.simple_vs_chrome_ratio = rec.simple_frame_ms / rec.chrome_frame_ms
-    rec.source = "synthetic"
-    rec.status = classify_status(rec.source, rec.simple_frame_ms, rec.simple_vs_chrome_ratio, rec.pixel_match_pct)
-    rec
+# ---------------------------------------------------------------------------
+# Format a NormalizedRecord as a single-line JSON string
+# ---------------------------------------------------------------------------
 
 fn record_to_json(rec: NormalizedRecord) -> text:
+    val ratio_s = rec.simple_vs_chrome_ratio.to_text()
+    val spct_s  = rec.pixel_match_pct.to_text()
+    val sf_s    = rec.simple_frame_ms_p95.to_text()
+    val cf_s    = rec.chrome_frame_ms_p95.to_text()
     "{\"fixture\":\"" + rec.fixture + "\","
-    + "\"simple_frame_ms\":" + rec.simple_frame_ms.to_text() + ","
-    + "\"chrome_frame_ms\":" + rec.chrome_frame_ms.to_text() + ","
-    + "\"simple_vs_chrome_ratio\":" + rec.simple_vs_chrome_ratio.to_text() + ","
+    + "\"simple_frame_ms\":" + sf_s + ","
+    + "\"chrome_frame_ms\":" + cf_s + ","
+    + "\"simple_vs_chrome_ratio\":" + ratio_s + ","
     + "\"pixel_hash_simple\":\"" + rec.pixel_hash_simple + "\","
     + "\"pixel_hash_chrome\":\"" + rec.pixel_hash_chrome + "\","
-    + "\"pixel_match_pct\":" + rec.pixel_match_pct.to_text() + ","
+    + "\"pixel_match_pct\":" + spct_s + ","
     + "\"parse_ms\":" + rec.parse_ms.to_text() + ","
     + "\"style_ms\":" + rec.style_ms.to_text() + ","
     + "\"layout_ms\":" + rec.layout_ms.to_text() + ","
@@ -193,17 +227,26 @@ fn record_to_json(rec: NormalizedRecord) -> text:
     + "\"composite_ms\":" + rec.composite_ms.to_text() + ","
     + "\"present_ms\":" + rec.present_ms.to_text() + ","
     + "\"chrome_fps\":" + rec.chrome_fps.to_text() + ","
+    + "\"chrome_dropped_frames\":" + rec.chrome_dropped.to_text() + ","
+    + "\"chrome_gpu_raster_ms\":" + rec.chrome_gpu_raster_ms.to_text() + ","
+    + "\"chrome_memory_mb\":" + rec.chrome_memory_mb.to_text() + ","
     + "\"source\":\"" + rec.source + "\","
     + "\"status\":\"" + rec.status + "\"}"
 
-fn normalize_all():
+# ---------------------------------------------------------------------------
+# Module-level entry: load all fixtures and print normalized JSON lines
+# ---------------------------------------------------------------------------
+
+val FIXTURES = ["static_page", "scroll_heavy", "layout_stress", "paint_heavy"]
+
+fn normalize_all(base_dir: text):
     var i = 0
     while i < FIXTURES.len():
         val fx = FIXTURES[i]
-        val rec = build_synthetic_record(fx)
+        val rec = load_record(base_dir, fx)
         print record_to_json(rec)
         i = i + 1
 
 fn main() -> i64:
-    normalize_all()
+    normalize_all("test/perf/web_render_chrome")
     0
