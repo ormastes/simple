@@ -37,9 +37,9 @@ class MetalSession:
           ...
           s.release()   # each backend calls release() in shutdown()
 
-    Note: init() returns bool (not i64) because backend_metal checks
-    `if not self.session.init()`. This is the one documented deviation from
-    CUDA/Vulkan which return i64 error codes.
+    init_status() follows the same 0-success/non-zero-error convention used by
+    CUDA/Vulkan sessions. init() remains as a bool compatibility wrapper for
+    older MetalBackend callers.
     """
 
     device: i64               # MTLDevice handle
@@ -58,6 +58,7 @@ class MetalSession:
     ref_count: i64            # Live reference count (i64 matches CUDA/Vulkan/CPU)
     is_initialized: bool      # True after a successful init() (matches CUDA/Vulkan/CPU naming)
     generation: i64           # Stale-resource detection; incremented on init and cleanup
+    last_error: i64            # Last init_status() code; 0 means success
 
     static fn create() -> MetalSession:
         """Return a zero-initialised, uninitialised session. Call init() before use."""
@@ -77,35 +78,52 @@ class MetalSession:
             pipe_blit: 0,
             ref_count: 0,
             is_initialized: false,
-            generation: 0
+            generation: 0,
+            last_error: 0
         )
 
     me init() -> bool:
-        """Create device, command queue, compile shaders, and create all pipelines.
+        """Compatibility bool wrapper for legacy Metal callers."""
+        self.init_status() == 0
 
-        Returns true on success.  On failure all handles are zeroed and valid
-        remains false.
+    me init_status() -> i64:
+        """Create device, command queue, compile shaders, and compute pipelines.
+
+        Returns 0 on success, non-zero error code on failure.
+        Error codes:
+          1 — Metal FFI not available
+          2 — metal_ffi_init() failed
+          3 — no Metal devices found
+          4 — device creation failed
+          5 — command queue creation failed
+          6 — shader library compilation failed
+          7 — one or more pipeline creations failed
         """
         if not metal_ffi_is_available():
-            return false
+            self.last_error = 1
+            return 1
 
         if not metal_ffi_init():
-            return false
+            self.last_error = 2
+            return 2
 
         if metal_ffi_device_count() < 1:
-            return false
+            self.last_error = 3
+            return 3
 
         # Metal device (index 0 = system default GPU)
         self.device = metal_ffi_create_device(0)
         if self.device == 0:
-            return false
+            self.last_error = 4
+            return 4
 
         # Persistent command queue
         self.command_queue = metal_ffi_create_command_queue(self.device)
         if self.command_queue == 0:
             metal_ffi_destroy_device(self.device)
             self.device = 0
-            return false
+            self.last_error = 5
+            return 5
 
         # Compile MSL shader library
         self.shader_lib = metal_ffi_compile_shader(self.device, _engine2d_msl())
@@ -114,7 +132,8 @@ class MetalSession:
             metal_ffi_destroy_device(self.device)
             self.command_queue = 0
             self.device = 0
-            return false
+            self.last_error = 6
+            return 6
 
         # Create all compute pipelines
         self.pipe_clear        = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_clear")
@@ -128,10 +147,20 @@ class MetalSession:
         self.pipe_gradient     = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect")
         self.pipe_blit         = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_blit_image")
 
+        if (self.pipe_clear == 0 or self.pipe_rect_filled == 0 or
+            self.pipe_rect_outline == 0 or self.pipe_line == 0 or
+            self.pipe_circle == 0 or self.pipe_circle_filled == 0 or
+            self.pipe_rounded_rect == 0 or self.pipe_triangle == 0 or
+            self.pipe_gradient == 0 or self.pipe_blit == 0):
+            self.last_error = 7
+            self._cleanup()
+            return 7
+
         self.ref_count = 1
         self.is_initialized = true
         self.generation = self.generation + 1
-        true
+        self.last_error = 0
+        0
 
     me retain() -> MetalSession:
         """Increment the reference count and return self for convenient assignment."""
@@ -148,6 +177,9 @@ class MetalSession:
 
     me is_valid() -> bool:
         self.is_initialized and self.device != 0 and self.command_queue != 0
+
+    me error_code() -> i64:
+        self.last_error
 
     me _cleanup():
         """Destroy all GPU objects. Called automatically by release() on zero refcount."""

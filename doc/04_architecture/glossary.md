@@ -197,6 +197,23 @@ Provider state must be keyed by provider id, backend kind, target triple, sessio
 mode, and policy hash. `ManagedShared` and `PerfExclusive` providers must not
 share mutable state.
 
+## Qualcomm Vulkan Graphics Profile
+Qualcomm graphics support is modeled as an Adreno profile over Vulkan, not as a
+Metal backend. Current profile keys:
+
+- `qualcomm-adreno:vulkan:arm64`
+- `qualcomm-adreno:vulkan:arm32`
+- `qualcomm-adreno:vulkan:arm32+arm64`
+
+ARM32 and mixed ARM32/ARM64 entries are preparation profiles. Runtime support
+still depends on OS, driver, loader, and executable-memory/JIT availability.
+
+## ARM Mixed JIT
+ARM mixed JIT is a facade over explicit ARM64 (`aarch64`) and ARM32 (`arm32`)
+JIT handles. It provides width-dispatched compile, call, and query helpers while
+keeping architecture-specific code generation, executable mapping, and icache
+flush rules separate.
+
 Policy:
 - Release/native link path should prefer LLVM-compatible object generation.
 - Debug/dev can keep Cranelift path.

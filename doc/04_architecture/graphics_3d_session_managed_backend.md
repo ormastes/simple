@@ -77,6 +77,7 @@ Mode rules:
 | Vulkan | Native graphics/compute/session backend | Vulkan surface/swapchain or external handle |
 | Metal | Apple graphics/compute/session backend | Metal layer/surface |
 | WebGPU | Browser/native portable backend | Browser canvas, native WebGPU surface |
+| Qualcomm | Adreno profile over Vulkan | Vulkan surface/swapchain where driver exists |
 
 ## Surface Consumers
 
@@ -106,3 +107,5 @@ Graphics JIT and backend optimization must use the Simple Optimization Plugin pr
 - Do not require Rust runtime libraries for graphics backends. Use Pure Simple API and C ABI shims for native GPU calls.
 - Do not make CUDA the only render path on Windows; use interop with a presentation backend when direct display is needed.
 - Do not hide readback. Every CPU readback path must be visible in counters.
+- Do not route Qualcomm through Metal. Qualcomm ARM64/ARM32 preparation uses Vulkan/WebGPU/CPU capability records.
+- Do not create a separate ARM mixed JIT runtime. Use one mixed facade over explicit ARM64 and ARM32 JIT handles.

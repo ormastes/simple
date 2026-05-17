@@ -82,6 +82,14 @@ describe "ArmMixedJit - hotspot detection":
         expect(still_promoted).to_equal(false)
 
 describe "ArmMixedJit - aarch64 compile and execute":
+    it "compile_for_bits dispatches to aarch64":
+        val jit = ArmMixedJit.create()
+        val src = "fn plus_two(n: i64) -> i64:\n    return n + 2\n"
+        val result = jit.compile_for_bits(64, "plus_two", src)
+        jit.cleanup()
+        val ok = result.err == "" or result.err.contains("SKIP")
+        expect(ok).to_equal(true)
+
     it "compiles a loop function for aarch64":
         val jit = ArmMixedJit.create()
         val src = "fn loop_sum(n: i64) -> i64:\n    var s: i64 = 0\n    var i: i64 = 0\n    while i < n:\n        s = s + i\n        i = i + 1\n    return s\n"
@@ -105,6 +113,21 @@ describe "ArmMixedJit - aarch64 compile and execute":
             expect(result.err).to_contain("SKIP")
 
 describe "ArmMixedJit - arm32 compile and execute":
+    it "compile_for_bits dispatches to arm32":
+        val jit = ArmMixedJit.create()
+        val src = "fn plus_three(n: i64) -> i64:\n    return n + 3\n"
+        val result = jit.compile_for_bits(32, "plus_three", src)
+        jit.cleanup()
+        val ok = result.err == "" or result.err.contains("SKIP")
+        expect(ok).to_equal(true)
+
+    it "compile_for_bits rejects unsupported widths":
+        val jit = ArmMixedJit.create()
+        val src = "fn unsupported(n: i64) -> i64:\n    return n\n"
+        val result = jit.compile_for_bits(16, "unsupported", src)
+        jit.cleanup()
+        expect(result.err).to_contain("unsupported ARM JIT width")
+
     it "compiles a simple function for arm32":
         val jit = ArmMixedJit.create()
         val src = "fn triple(n: i64) -> i64:\n    return n * 3\n"
@@ -144,9 +167,10 @@ describe "ArmMixedJit - optimized compile (I32Narrow + arm32)":
 describe "ArmMixedJit - compile timing comparison":
     it "plain vs optimized compile both succeed or skip":
         val jit = ArmMixedJit.create()
-        val src = "fn bench(n: i64) -> i64:\n    var s: i64 = 0\n    var i: i64 = 0\n    while i < n:\n        s = s + i\n        i = i + 1\n    return s\n"
-        val plain = jit.compile_for_32("bench_plain", src)
-        val opt = jit.compile_optimized("bench_opt", src)
+        val plain_src = "fn bench_plain(n: i64) -> i64:\n    var s: i64 = 0\n    var i: i64 = 0\n    while i < n:\n        s = s + i\n        i = i + 1\n    return s\n"
+        val opt_src = "fn bench_opt(n: i64) -> i64:\n    var s: i64 = 0\n    var i: i64 = 0\n    while i < n:\n        s = s + i\n        i = i + 1\n    return s\n"
+        val plain = jit.compile_for_32("bench_plain", plain_src)
+        val opt = jit.compile_optimized("bench_opt", opt_src)
         jit.cleanup()
         val plain_ok = plain.err == "" or plain.err.contains("SKIP")
         val opt_ok = opt.err == "" or opt.err.contains("SKIP")
@@ -165,3 +189,11 @@ describe "ArmMixedJit - stats":
         val s = jit.stats()
         jit.cleanup()
         expect(s).to_contain("I32NarrowPass:")
+
+    it "target profile declares 32 and 64 bit ARM mix":
+        val jit = ArmMixedJit.create()
+        val profile = jit.target_profile()
+        jit.cleanup()
+        expect(profile).to_contain("arm64=aarch64")
+        expect(profile).to_contain("arm32=armv7")
+        expect(profile).to_contain("mixed=arm64+arm32")

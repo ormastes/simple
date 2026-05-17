@@ -11,6 +11,9 @@ Delegates all rendering to VulkanBackend with Adreno-specific tuning:
 
 On Linux arm64, uses Mesa Turnip (open-source Vulkan for Adreno).
 On Android, uses Qualcomm proprietary Vulkan driver.
+On Windows ARM64, uses the platform Adreno Vulkan driver when available.
+ARM32 support is prepared as a capability/profile surface; runtime enablement
+depends on OS driver availability.
 
 Usage:
     use std.gpu.engine2d.backend_qualcomm.{QualcommBackend}
@@ -54,9 +57,27 @@ val ADRENO_SUBGROUP_SIZE: i32 = 64
 class QualcommBackend:
     _inner: VulkanBackend
     _initialized: bool
+    _target_arch: text
+    _target_bits: i64
+    _mixed_32_64: bool
 
     static fn create() -> QualcommBackend:
-        QualcommBackend(_inner: VulkanBackend.create(), _initialized: false)
+        QualcommBackend(
+            _inner: VulkanBackend.create(),
+            _initialized: false,
+            _target_arch: "arm64",
+            _target_bits: 64,
+            _mixed_32_64: false
+        )
+
+    static fn create_for_target(target_arch: text, target_bits: i64) -> QualcommBackend:
+        QualcommBackend(
+            _inner: VulkanBackend.create(),
+            _initialized: false,
+            _target_arch: target_arch,
+            _target_bits: target_bits,
+            _mixed_32_64: target_arch == "arm-mixed" or target_bits == 3264
+        )
 
 impl RenderBackend for QualcommBackend:
 
@@ -64,6 +85,8 @@ impl RenderBackend for QualcommBackend:
         "qualcomm"
 
     me init(width: i32, height: i32) -> bool:
+        if not qualcomm_supports_target(self._target_arch, self._target_bits):
+            return false
         val result = self._inner.init(width, height)
         self._initialized = result
         result
@@ -129,6 +152,18 @@ impl RenderBackend for QualcommBackend:
             self._inner.height()
         else:
             0
+
+    fn target_arch() -> text:
+        self._target_arch
+
+    fn target_bits() -> i64:
+        self._target_bits
+
+    fn mixed_32_64() -> bool:
+        self._mixed_32_64
+
+    fn target_profile() -> text:
+        qualcomm_vulkan_profile_key(self._target_arch, self._target_bits)
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
         emu_draw_ellipse(self, cx, cy, rx, ry, color)
@@ -207,3 +242,26 @@ fn qualcomm_preferred_workgroup_size() -> i32:
 
 fn qualcomm_subgroup_size() -> i32:
     ADRENO_SUBGROUP_SIZE
+
+fn qualcomm_supports_target(target_arch: text, target_bits: i64) -> bool:
+    if target_arch == "arm64" and target_bits == 64:
+        return true
+    if target_arch == "arm32" and target_bits == 32:
+        return true
+    if target_arch == "arm-mixed" and target_bits == 3264:
+        return true
+    false
+
+fn qualcomm_vulkan_profile_key(target_arch: text, target_bits: i64) -> text:
+    if target_arch == "arm64" and target_bits == 64:
+        return "qualcomm-adreno:vulkan:arm64"
+    if target_arch == "arm32" and target_bits == 32:
+        return "qualcomm-adreno:vulkan:arm32"
+    if target_arch == "arm-mixed" and target_bits == 3264:
+        return "qualcomm-adreno:vulkan:arm32+arm64"
+    return "qualcomm-adreno:vulkan:unsupported"
+
+fn qualcomm_preferred_backend_for_target(target_arch: text, target_bits: i64) -> text:
+    if qualcomm_supports_target(target_arch, target_bits):
+        return "vulkan"
+    return "cpu"

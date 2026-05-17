@@ -88,6 +88,30 @@ Each wrapper internally creates `LegacyNoSession` unless passed an explicit `Gra
 - ARM32/ARM64 and RISC-V32/RISC-V64 start with CPU and WebGPU/Vulkan where available.
 - JIT paths must keep architecture-specific executable-memory and icache behavior behind the shared mapper/provider layer.
 
+## ARM 32/64 Mixed JIT Interface
+
+- ARM JIT exposes explicit 64-bit (`aarch64`) and 32-bit (`arm32`) compile/call paths plus a width-dispatched facade:
+  - `compile_for_bits(64, name, source)`
+  - `compile_for_bits(32, name, source)`
+  - `call_i64_on_bits(bits, name, arg)`
+  - `is_compiled_for_bits(bits, name)`
+- The mixed facade is not a third ISA. It is a coordination surface for tools, game engines, render backends, and perf harnesses that need one API while preserving target-specific executable-memory and icache rules.
+- `I32NarrowPass` remains the first optimization shared by ARM32-heavy code and mixed ARM profiles.
+
+## Qualcomm ARM Vulkan Preparation
+
+- Qualcomm Adreno is a Vulkan-backed profile, not a Metal backend.
+- `arm64` + `64` maps to `qualcomm-adreno:vulkan:arm64`.
+- `arm32` + `32` maps to `qualcomm-adreno:vulkan:arm32` as a preparation profile; runtime enablement depends on OS and driver availability.
+- `arm-mixed` + `3264` maps to `qualcomm-adreno:vulkan:arm32+arm64` for mixed 32/64 build and test planning.
+- Unsupported Qualcomm targets must prefer CPU fallback rather than pretending Metal or another backend exists.
+
+## Metal 2D Session Consistency
+
+- Metal keeps the existing bool `init()` API for old callers.
+- New session-aware code should use `init_status()` and `error_code()` so Metal follows the same `0 == success`, non-zero error code convention as Vulkan/CUDA-style sessions.
+- Metal remains Apple-platform only. Qualcomm ARM targets must use Vulkan/WebGPU/CPU paths.
+
 ## Verification Plan
 
 - Unit tests for mode conflict errors.

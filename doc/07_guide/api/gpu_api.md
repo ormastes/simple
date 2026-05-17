@@ -73,6 +73,7 @@ enum GpuBackend:
     Vulkan     # Vulkan compute backend
     Metal      # Apple Metal backend where available
     WebGpu     # Browser/native WebGPU backend where available
+    Qualcomm   # Qualcomm Adreno profile over Vulkan where available
     Cpu        # CPU-only reference/fallback backend
     None       # No GPU available
 ```
@@ -730,9 +731,19 @@ Engine3D (facade)
 | OpenGL | `backend_opengl.spl` | OpenGL |
 | Intel | `backend_intel.spl` | Intel GPU |
 | WebGPU | `backend_webgpu.spl` | Chrome WebGPU (browser + native) |
-| Qualcomm | `backend_qualcomm.spl` | Qualcomm Adreno |
+| Qualcomm | `backend_qualcomm.spl` | Qualcomm Adreno over Vulkan (`arm64`, `arm32`, `arm32+arm64` preparation profiles) |
 | Baremetal | `backend_baremetal.spl` | No-alloc baremetal target |
 | VirtioGPU | `backend_virtio_gpu.spl` | VirtIO GPU (QEMU/VM) |
+
+Qualcomm profile helpers:
+
+| Function | Description |
+|----------|-------------|
+| `qualcomm_supports_target("arm64", 64)` | ARM64 Adreno/Vulkan profile |
+| `qualcomm_supports_target("arm32", 32)` | ARM32 Adreno/Vulkan preparation profile |
+| `qualcomm_supports_target("arm-mixed", 3264)` | Mixed ARM32/ARM64 planning profile |
+| `qualcomm_vulkan_profile_key(arch, bits)` | Stable provider/cache key suffix |
+| `qualcomm_preferred_backend_for_target(arch, bits)` | Returns `vulkan` for supported Qualcomm targets, otherwise `cpu` |
 
 ### Quick Start
 
