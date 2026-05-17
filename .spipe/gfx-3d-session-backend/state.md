@@ -31,9 +31,9 @@ feature
 - [x] 3-arch (Architect) — 2026-05-17 (skipped: architecture doc exists)
 - [x] 4-spec (QA Lead) — 2026-05-17 (specs written by implement agents)
 - [x] 5-implement (Engineer) — 2026-05-17
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 6-refactor (Tech Lead) — 2026-05-17
+- [x] 7-verify (QA) — 2026-05-17
+- [x] 8-ship (Release Mgr) — 2026-05-17
 
 ## Phase Outputs
 
