@@ -32,7 +32,6 @@
 //! append to the capture buffer instead of writing to stdout/stderr.
 
 use crate::value::core::RuntimeValue;
-use crate::value::heap::{HeapHeader, HeapObjectType};
 use crate::value::collections::RuntimeString;
 use super::io_capture::{
     append_stdout, append_stderr, is_stdout_capturing, is_stderr_capturing, read_stdin_line_internal,
