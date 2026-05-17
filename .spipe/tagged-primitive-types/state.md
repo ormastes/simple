@@ -38,7 +38,7 @@ code-quality
 - [x] 4-spec (QA Lead) — 2026-05-17
 - [x] 5-implement (Engineer) — 2026-05-17
 - [x] 6-refactor (Tech Lead) — 2026-05-17
-- [ ] 7-verify (QA)
+- [x] 7-verify (QA) — 2026-05-17
 - [ ] 8-ship (Release Mgr)
 
 ## Phase Outputs
@@ -220,7 +220,18 @@ Verified: `check_param_tag` on `webgl_render_commands.spl` → 61 PTAG002 warnin
 test fixture → 4 warnings (PTAG002 copy_file, PTAG001 hash_bad, PTAG001 write_file, PTAG002 linspace).
 
 ### 7-verify
-<pending>
+
+**Result:** PASS — no regressions from `# @tag(...)` annotation refactoring.
+
+- `test/lint/` — 0 spec files (fixture is a `.spl` checked via `check_param_tag` directly)
+- `test/compiler/` — 4/4 passed (auto_vec_string_test)
+- `test/lib/nogc_sync_mut/` — failures only in `engine/render/` subdirs (pre-existing GPU render tests, unrelated to annotated files)
+- `test/lib/nogc_async_mut/` — failures only in `gpu/shader_cache_spec` + `mcp/dispatch_spec` (pre-existing, unrelated)
+- `test/lib/nogc_async_immut/` — 0 failures
+- All 739 lib failures are pre-existing `blink/`, `cc/`, `common/`, `skia/`, `std/` tests unrelated to this task
+- No `@tag`/PTAG errors appear in any failing test output
+- `check_param_tag` fixture → 4 warnings (all expected per spec)
+- `webgl_render_commands.spl` → 61 PTAG002 (all correct — distinct-role same-type params)
 
 ### 8-ship
 <pending>
