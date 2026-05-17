@@ -19,6 +19,7 @@ use compiler.semantics.lint.star_import.{StarWildcardWarning, check_star_import_
 use compiler.semantics.lint.critical_file_guard.{check_all_critical_files}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
 use compiler.semantics.gc_boundary_check.{check_gc_boundary_imports, format_family_warnings}
+use compiler.semantics.lint.param_tag.{ParamTagWarning, check_param_tag}
 
 fn _emit_lint_if_readable(file: text, format: text):
     """Emit lint diagnostics if the file is readable."""
@@ -55,6 +56,8 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     - W0407: star export warnings
     - W0404: wide public API warnings
     - CFG001/CFG002: critical file guard (project-level)
+    - PTAG001: pub fn with ≥2 same-type primitive params and no @tag annotation
+    - PTAG002: pub fn with different @tag roles on same-type params
 
     Returns the number of diagnostics emitted.
     """
@@ -116,6 +119,22 @@ fn _emit_text_heuristic_lints(lines: [text], file: text, format: text) -> i64:
     count = count + _check_multiline_bool_text(lines, file, format)
     count = count + _check_safety_text(lines, file, format)
     count = count + _check_visibility_text(lines, file, format)
+    count = count + _check_param_tag_text(lines, file, format)
+    count
+
+fn _check_param_tag_text(lines: [text], file: text, format: text) -> i64:
+    """Emit PTAG001/PTAG002 warnings for public functions with untagged same-type primitive params."""
+    val warnings = check_param_tag(lines, file)
+    var count = 0
+    for w in warnings:
+        val sev = 2  # Warning
+        if format == "json":
+            val msg = _escape_json(w.message)
+            val hint = _escape_json(w.hint)
+            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg} — {hint}\",\"line\":{w.line_num},\"col\":1,\"end_line\":{w.line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{w.line_num}: warning[{w.code}]: {w.message} — {w.hint}"
+        count = count + 1
     count
 
 fn _check_gc_boundary_imports_text(lines: [text], file: text, format: text) -> i64:

@@ -139,28 +139,18 @@ pub unsafe extern "C" fn rt_base64_encode(input_ptr: *const u8, input_len: u64) 
 }
 
 // ============================================================================
-// Hash Functions
+// Hash Functions — implementation in src/runtime/runtime_hash.c
 // ============================================================================
 
-/// FNV-1a hash function (Fowler-Noll-Vo hash)
-/// Fast non-cryptographic hash function suitable for hash tables
-/// Returns 64-bit hash value, or 0 if input is null
-#[no_mangle]
-pub unsafe extern "C" fn rt_fnv_hash(data_ptr: *const u8, data_len: u64) -> u64 {
-    if data_ptr.is_null() {
-        return 0;
+mod c_ffi_hash {
+    extern "C" {
+        pub(super) fn rt_fnv_hash(data_ptr: *const u8, data_len: u64) -> u64;
     }
+}
 
-    let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
-    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
-    const FNV_PRIME: u64 = 0x100000001b3; // FNV prime
-
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-
-    hash
+#[inline(always)]
+pub unsafe fn rt_fnv_hash(data_ptr: *const u8, data_len: u64) -> u64 {
+    c_ffi_hash::rt_fnv_hash(data_ptr, data_len)
 }
 
 // ============================================================================
