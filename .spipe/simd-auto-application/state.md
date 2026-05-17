@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-17
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-17
+- [x] 6-refactor (Tech Lead) — 2026-05-17
+- [x] 7-verify (QA) — 2026-05-17
+- [x] 8-ship (Release Mgr) — 2026-05-17
 
 ## Phase Outputs
 
@@ -35,4 +35,11 @@ feature
 10 ACs across 5 areas. 5 parallel agents (A-E). Existing: auto_vectorize*.spl (8 files in 60.mir_opt), runtime_simd_*.c (5 files), lint_simd.spl.
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 5 files created:
+- src/compiler/60.mir_opt/mir_opt/simd_recipe_infra.spl (265 lines) — SimdRecipeEntry + SimdRecipeTable + VectorWidthRouter + FastMathPolicy + SimdAutoApplyContext
+- src/compiler/60.mir_opt/mir_opt/bitmanip_lowering.spl (270 lines) — BitmanipOp + X86/Aarch64/Riscv lowering + dispatch
+- src/compiler/60.mir_opt/mir_opt/simd_library_candidates.spl (249 lines) — SimdCandidate + Crypto/Compression candidates + VectorizationMetadata
+- src/compiler/60.mir_opt/mir_opt/simd_matrix_rewrites.spl (248 lines) — MatrixOpProfile + DotProduct/OuterProduct/Matvec rewrites + engine
+- test/unit/compiler/simd_auto_apply_spec.spl (~245 lines) — 20 tests
+### 7-verify
+20/20 tests PASS. Commit 03f8b1b1a5 pushed to origin/main.
