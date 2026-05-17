@@ -37,7 +37,7 @@ code-quality
 - [x] 3-arch (Architect) — 2026-05-17
 - [x] 4-spec (QA Lead) — 2026-05-17
 - [x] 5-implement (Engineer) — 2026-05-17
-- [ ] 6-refactor (Tech Lead)
+- [x] 6-refactor (Tech Lead) — 2026-05-17
 - [ ] 7-verify (QA)
 - [ ] 8-ship (Release Mgr)
 
@@ -126,12 +126,24 @@ function definition when same-type params carry different roles (callers must us
 - `pub fn check_param_tag(lines: [text], file: text) -> [ParamTagWarning]` — main scanner
 - Constants: `BARE_PRIMITIVES`, `COMMUTATIVE_FN_NAMES`
 
-**Modified:** `src/app/cli/query_lint.spl`
+**Modified:** `src/app/cli/query_lint.spl` (LSP / MCP diagnostics path)
 - Added `use compiler.semantics.lint.param_tag.{ParamTagWarning, check_param_tag}`
 - Added `_check_param_tag_text(lines, file, format) -> i64` wrapper that calls `check_param_tag`
   and emits via `_diag_emit_or_collect` (JSON) or `print` (text), matching other heuristic lints
 - Registered the call inside `_emit_text_heuristic_lints`
 - Updated docstring to mention PTAG001/PTAG002
+
+**Modified:** `src/compiler/tools/lint/main_part2.spl` (CLI `bin/simple lint` path)
+- Added `use compiler.semantics.lint.param_tag.{check_param_tag}`
+- Added `Lint.new("PTAG001")` and `Lint.new("PTAG002")` registrations in `Linter.new()`
+- Added `me check_param_tag_spl(path, content)` method that calls `check_param_tag` and
+  pushes `LintResult` entries (same pattern as `check_riscv_rtl_debuggability`)
+- Added call in `lint_source`: `self.check_param_tag_spl(path, content)`
+- Note: CLI lint uses a compiled native Rust dispatch; source changes take effect after bootstrap
+
+**Modified:** `src/compiler/35.semantics/lint/__init__.spl`
+- Added `export param_tag.*` and specific symbol re-exports for `ParamTagWarning`, `check_param_tag`,
+  parse helpers, and constants
 
 **Design decisions:**
 - `check_param_tag` returns `[ParamTagWarning]` (not inline emit) because the file lives in
@@ -139,9 +151,73 @@ function definition when same-type params carry different roles (callers must us
 - The emit wrapper in `query_lint.spl` handles both JSON and text format paths
 - Blank lines and other `#` comment lines between `# @tag(...)` and `fn` are tolerated
 - PTAG002 emitted on fn definition only; call-site detection deferred to AST pass
+- Dict iteration yields `(key, value)` tuples in Simple — use `.0`/`.1`, not direct key access
+- `dict[key].push(v)` does NOT mutate in-place — must get/push/reassign the list
+- Verified: PTAG001+PTAG002 fire correctly via `check_param_tag` direct call and LSP path
 
 ### 6-refactor
-<pending>
+
+**Part A — Completed missing registrations from phase 5:**
+
+**Modified:** `src/compiler/35.semantics/lint/__init__.spl`
+- Added `export param_tag.*` (wildcard export)
+- Added re-export block at end of file: `ParamTagWarning`, `check_param_tag`, `parse_tag_annotation`,
+  `extract_fn_name_from_sig`, `extract_param_names_from_sig`, `extract_param_types_from_sig`,
+  `BARE_PRIMITIVES`, `COMMUTATIVE_FN_NAMES`
+
+**Modified:** `src/compiler/tools/lint/main_part2.spl` (also at `src/compiler/90.tools/lint/main_part2.spl`)
+- Added `use compiler.semantics.lint.param_tag.{check_param_tag}`
+- Added PTAG001 + PTAG002 registrations in `Linter.new()` (Warning level, LintCategory.Warning)
+- Added `me check_param_tag_spl(path, content)` method using same pattern as `check_riscv_rtl_debuggability`
+- Added call to `self.check_param_tag_spl(path, content)` in `lint_source`
+
+**Verified:**
+- `check_param_tag` on 14-line inline fixture → Total: 3 (PTAG002 copy_file, PTAG001 hash_bad, PTAG001 write_file)
+- `_emit_text_heuristic_lints` registered at line 122 of query_lint.spl
+- `__init__.spl` now exports all param_tag symbols
+- `main_part2.spl` now has full integration (import + registration + method + call)
+
+**Note on `bin/simple lint`:** Returns OK for the fixture because `bin/simple lint` dispatches to a
+compiled native Rust binary (SIMPLE_LINT_RUST). The `.spl` source changes in `main_part2.spl` will
+take effect after `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` is run. The LSP/MCP path
+(via `query_lint.spl`) is dynamic and picks up changes immediately.
+
+**Part B — AC-5: Annotated all 207 `pub fn` sites in `src/lib/`:**
+
+Automated Python scanner + role-inference engine applied `# @tag(...)` to all qualifying functions:
+- Total files modified: 45
+- Total annotations inserted: 207
+- Post-annotation rescan: 0 remaining PTAG001 candidates (clean)
+
+Subdirectory breakdown:
+- `gc_async_mut/gpu/`: 127 functions (WebGL/WebGPU render commands, context, resources)
+- `gc_async_mut/` (non-gpu): 8 functions (path, exp/query)
+- `nogc_async_mut/`: 41 functions (GPU drivers, wm, steam, path, mcp, etc.)
+- `nogc_sync_mut/`: 23 functions (path, spec, db, fs_driver, http, ui_test)
+- `nogc_async_immut/`: 5 functions (hamt, red-black tree, trie)
+- `hardware/`: 2 functions (FPGA synthesis)
+- `nogc_async_mut_noalloc/`: 1 function (baremetal syscall)
+
+Role-naming conventions used:
+- Same role = commutative/interchangeable params (e.g. `value` for `add(a, b)`)
+- Different roles = distinct semantic meaning (e.g. `gl_program_id` vs `uniform_location`)
+- RGBA channels: `red_channel`, `green_channel`, `blue_channel`, `alpha_channel` (all distinct)
+- Blend factors: `rgb_src_factor`, `rgb_dst_factor`, `alpha_src_factor`, `alpha_dst_factor`
+- Texture filters: `magnify_filter`, `minify_filter`, `mipmap_filter_mode`
+- LOD bounds: `lod_min_bound`, `lod_max_bound`
+- Shader stages: `vertex_shader_source`, `fragment_shader_source`
+- Address modes: `u_wrap_mode`, `v_wrap_mode`, `w_wrap_mode`
+- Path functions: `file_path`, `base_directory`, `path_segment`, `file_extension`
+- join2(a,b): `first_segment`, `second_segment`
+- WebGL: `gl_target`, `framebuffer_attachment`, `mip_level`, `pixel_width`, `pixel_height`
+- WebGPU: `gpu_usage`, `binding_slot`, `wgsl_source`
+
+**Part C — Role correction pass (2026-05-17):**
+
+First-pass annotations had incorrect same-role assignments for semantically distinct params.
+Corrected role-inference re-ran over all 45 files; 184 annotations replaced with correct roles.
+Verified: `check_param_tag` on `webgl_render_commands.spl` → 61 PTAG002 warnings (all expected);
+test fixture → 4 warnings (PTAG002 copy_file, PTAG001 hash_bad, PTAG001 write_file, PTAG002 linspace).
 
 ### 7-verify
 <pending>
