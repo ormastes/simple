@@ -1,58 +1,59 @@
-//! Stub regex FFI bindings used when the runtime-regex feature is disabled.
+//! Stub regex FFI bindings — implementations in src/runtime/runtime_regex_stub.c.
 
-use super::super::RuntimeValue;
-use super::super::collections::{rt_array_new, rt_array_push};
+use crate::value::core::RuntimeValue;
+
+mod c_ffi {
+    use crate::value::core::RuntimeValue;
+    extern "C" {
+        pub(super) fn ffi_regex_is_match(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue;
+        pub(super) fn ffi_regex_find(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue;
+        pub(super) fn ffi_regex_find_all(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue;
+        pub(super) fn ffi_regex_captures(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue;
+        pub(super) fn ffi_regex_replace(pattern: RuntimeValue, text: RuntimeValue, replacement: RuntimeValue) -> RuntimeValue;
+        pub(super) fn ffi_regex_replace_all(pattern: RuntimeValue, text: RuntimeValue, replacement: RuntimeValue) -> RuntimeValue;
+        pub(super) fn ffi_regex_split(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue;
+        pub(super) fn ffi_regex_split_n(pattern: RuntimeValue, text: RuntimeValue, limit: RuntimeValue) -> RuntimeValue;
+    }
+}
 
 pub fn clear_regex_cache() {}
 
-#[no_mangle]
-pub extern "C" fn ffi_regex_is_match(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
-    RuntimeValue::FALSE
+#[inline(always)]
+pub fn ffi_regex_is_match(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue {
+    unsafe { c_ffi::ffi_regex_is_match(pattern, text) }
 }
 
-#[no_mangle]
-pub extern "C" fn ffi_regex_find(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
-    rt_array_new(0)
+#[inline(always)]
+pub fn ffi_regex_find(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue {
+    unsafe { c_ffi::ffi_regex_find(pattern, text) }
 }
 
-#[no_mangle]
-pub extern "C" fn ffi_regex_find_all(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
-    rt_array_new(0)
+#[inline(always)]
+pub fn ffi_regex_find_all(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue {
+    unsafe { c_ffi::ffi_regex_find_all(pattern, text) }
 }
 
-#[no_mangle]
-pub extern "C" fn ffi_regex_captures(_pattern: RuntimeValue, _text: RuntimeValue) -> RuntimeValue {
-    rt_array_new(0)
+#[inline(always)]
+pub fn ffi_regex_captures(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue {
+    unsafe { c_ffi::ffi_regex_captures(pattern, text) }
 }
 
-#[no_mangle]
-pub extern "C" fn ffi_regex_replace(
-    _pattern: RuntimeValue,
-    text: RuntimeValue,
-    _replacement: RuntimeValue,
-) -> RuntimeValue {
-    text
+#[inline(always)]
+pub fn ffi_regex_replace(pattern: RuntimeValue, text: RuntimeValue, replacement: RuntimeValue) -> RuntimeValue {
+    unsafe { c_ffi::ffi_regex_replace(pattern, text, replacement) }
 }
 
-#[no_mangle]
-pub extern "C" fn ffi_regex_replace_all(
-    _pattern: RuntimeValue,
-    text: RuntimeValue,
-    _replacement: RuntimeValue,
-) -> RuntimeValue {
-    text
+#[inline(always)]
+pub fn ffi_regex_replace_all(pattern: RuntimeValue, text: RuntimeValue, replacement: RuntimeValue) -> RuntimeValue {
+    unsafe { c_ffi::ffi_regex_replace_all(pattern, text, replacement) }
 }
 
-#[no_mangle]
-pub extern "C" fn ffi_regex_split(_pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue {
-    let result = rt_array_new(1);
-    rt_array_push(result, text);
-    result
+#[inline(always)]
+pub fn ffi_regex_split(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue {
+    unsafe { c_ffi::ffi_regex_split(pattern, text) }
 }
 
-#[no_mangle]
-pub extern "C" fn ffi_regex_split_n(_pattern: RuntimeValue, text: RuntimeValue, _limit: RuntimeValue) -> RuntimeValue {
-    let result = rt_array_new(1);
-    rt_array_push(result, text);
-    result
+#[inline(always)]
+pub fn ffi_regex_split_n(pattern: RuntimeValue, text: RuntimeValue, limit: RuntimeValue) -> RuntimeValue {
+    unsafe { c_ffi::ffi_regex_split_n(pattern, text, limit) }
 }

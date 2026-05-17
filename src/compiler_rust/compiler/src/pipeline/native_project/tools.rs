@@ -144,6 +144,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         "runtime_base64.c",
         "runtime_format.c",
         "runtime_error.c",
+        "runtime_regex_stub.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_fork.h",

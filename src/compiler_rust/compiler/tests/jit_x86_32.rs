@@ -4,11 +4,11 @@
 //! selects LLVM (when available) or falls back to Cranelift, and that
 //! the resulting manager is usable for compilation.
 
-use simple_common::target::{Target, TargetArch, TargetOs};
-use simple_compiler::codegen::local_execution::{JitBackend, LocalExecutionManager};
+use simple_common::target::{Target, TargetArch, TargetOS};
+use simple_compiler::codegen::{ExecutionManager, local_execution::{JitBackend, LocalExecutionManager}};
 
 fn x86_32_linux() -> Target {
-    Target { arch: TargetArch::X86, os: TargetOs::Linux, ..Target::host() }
+    Target { arch: TargetArch::X86, os: TargetOS::Linux, ..Target::host() }
 }
 
 /// Verify that `for_target` with an x86_32 target constructs successfully
@@ -72,7 +72,6 @@ fn test_x86_32_llvm_compile_simple_function() {
     use simple_compiler::mir::{
         BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirModule, Terminator, VReg,
     };
-    use simple_compiler::codegen::execution_manager::ExecutionManager;
     use simple_parser::Visibility;
 
     // Build: fn add_b_times_2(a: i64, b: i64) -> i64 { a + b * 2 }
