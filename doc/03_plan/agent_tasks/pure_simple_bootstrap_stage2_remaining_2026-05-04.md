@@ -1,5 +1,7 @@
 # Pure-Simple Bootstrap Stage2 Remaining
 
+> Status: PARTIAL — stage2 build exists; cross-compile path still blocked
+
 Status: active
 Date: 2026-05-04
 

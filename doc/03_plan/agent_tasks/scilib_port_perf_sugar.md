@@ -1,5 +1,7 @@
 # Scilib Port — Perf-Sugar Agent Task List
 
+> Status: PARTIAL — Phase 3 arch complete; ready for Phase 5 execution
+
 **Area:** `perf_sugar`  
 **File:** `doc/03_plan/agent_tasks/scilib_port_perf_sugar.md`  
 **Date:** 2026-04-27  

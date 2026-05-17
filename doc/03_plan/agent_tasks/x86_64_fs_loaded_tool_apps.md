@@ -1,5 +1,7 @@
 # x86_64 FS-Loaded Tool Apps Completion Remainder
 
+> Status: PARTIAL — x86_64_fs_exec_spawn.spl exists; .spipe/simpleos-fs-apps-mdsoc-audit spec done; implement/verify/ship pending
+
 ## Goal
 
 Close the remaining gap for the existing `x64-desktop-uefi` lane so the six

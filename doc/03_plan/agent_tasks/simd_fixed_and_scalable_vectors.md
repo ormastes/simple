@@ -1,5 +1,7 @@
 # Agent Tasks: simd_fixed_and_scalable_vectors
 
+> Status: PARTIAL — fixed SIMD shipped via portable_simd_fp_modules_phase2; scalable-vector doc/test tasks remain
+
 - Update SIMD feature docs to reflect the dual fixed/scalable surface.
 - Replace placeholder scalable stdlib tests with executable parity coverage.
 - Add adapter-level scalable lowering diagnostics and tests.

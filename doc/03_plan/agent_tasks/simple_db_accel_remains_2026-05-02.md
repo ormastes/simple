@@ -1,5 +1,7 @@
 # Simple DB Accel Remains — 2026-05-02
 
+> Status: PARTIAL — Phase 1 (bitmap/batch/text/trigram) landed; Phase 2 (index) and Phase 3 (ML/planner) TODO
+
 ## Do Now — Phase 1 landed
 
 - shared `std.db.accel` module with bitmap, batch, text, trigram, and key-scan

@@ -1,5 +1,7 @@
 # Rust Runtime Minimization Plan
 
+> Status: TODO — blocked on user option selection before requirements can be written; .spipe/migrate-rust-runtime-to-c is separate C migration track
+
 Date: 2026-05-04
 
 ## Goal

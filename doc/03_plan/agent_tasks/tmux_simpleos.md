@@ -1,6 +1,8 @@
 <!-- codex-design -->
 # `tmux_simpleos` Agent Tasks
 
+> Status: PARTIAL — mod.spl stubs exist in 3 lib dirs; core native service slices not yet implemented
+
 ## Slice 1: Core Native Service
 
 - add `src/os/apps/smux/contract.spl`

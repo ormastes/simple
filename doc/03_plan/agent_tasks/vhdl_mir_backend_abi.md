@@ -1,5 +1,7 @@
 # VHDL MIR Backend ABI Parity Task
 
+> Status: TODO — analysis-only; Rust implementation intentionally deferred
+
 Date: 2026-04-23
 Task ID: VHDL-PARITY-016
 Owner: Rust MIR backend parity agent

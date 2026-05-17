@@ -1,5 +1,7 @@
 # TLS Baremetal Verify Remaining — 2026-04-18
 
+> Status: PARTIAL — TLS dev/research/arch/spec/implement done; Ed25519 CertificateVerify deferred; blocked on TLS server for testing
+
 ## Scope
 
 Last substantive failing lane:

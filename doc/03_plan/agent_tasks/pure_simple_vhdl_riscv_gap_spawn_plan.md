@@ -1,5 +1,7 @@
 # Pure Simple VHDL RISC-V Gap Implementation Plan
 
+> Status: TODO — ready for parallel agent implementation; needs typed return labels, hardware call lowering, bit-width semantics
+
 **Status:** Ready for parallel agent implementation
 **Goal:** Close the minimum pure-Simple VHDL backend gaps needed before a
 maintainable RV32I-class CPU can be generated from Simple source.

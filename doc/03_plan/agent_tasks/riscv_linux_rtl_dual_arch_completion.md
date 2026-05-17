@@ -1,5 +1,7 @@
 # RISC-V Linux RTL Dual-Arch Completion Agent Tasks
 
+> Status: TODO — depends on RTL completion; RV32+RV64 dual-arch promotion
+
 - Task 1: promote shared RISC-V Linux/platform contracts to dual-arch public truth.
 - Task 2: add a repo-native `rv32gc` hardware tree with a Linux-capable QEMU `virt` contract.
 - Task 3: align FPGA orchestration/readiness logic to the shared contracts and dual-arch status reporting.

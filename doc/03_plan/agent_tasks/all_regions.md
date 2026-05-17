@@ -1,6 +1,8 @@
 <!-- codex-design -->
 # All Regions Agent Tasks
 
+> Status: PARTIAL — parser/lexer/HIR metadata landed; Tree-sitter LSP, parser tests, per-domain hardening remaining
+
 Filed: 2026-04-22
 
 ## Completed This Session

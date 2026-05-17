@@ -1,5 +1,7 @@
 # SimpleOS FS Apps Remaining Plan - 2026-04-26
 
+> Status: PARTIAL — VFS/UEFI/desktop structure exists; 6 tool apps packaging and qemu_runner markers remaining
+
 Feature: `simpleos_fs_apps_remains_2026-04-26`
 
 ## Goal

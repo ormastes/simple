@@ -1,5 +1,7 @@
 # svim Agent Task Breakdown
 
+> Status: PARTIAL — src/app/svim/ exists; modal grammar, shell UX, SimpleOS adapter, language bridge partially started
+
 1. Complete shared-core modal grammar, search repeat, text-object editing, quickfix traversal, and deterministic visual edit behavior.
 2. Keep the host shell thin while adding line-shell UX for multi-file sessions, open/save/search prompts, and command batching.
 3. Add a SimpleOS-facing adapter shim that reuses `SvimSession` instead of duplicating edit logic.

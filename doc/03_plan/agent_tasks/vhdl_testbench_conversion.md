@@ -1,5 +1,7 @@
 # VHDL-PARITY-012: Testbench Conversion
 
+> Status: PARTIAL — vhdl_testbench_converter.spl exists (622 lines); completeness needs deeper inspection
+
 Owner: Worker E
 Status: Pending
 Scope: First runnable converter for one-DUT Simple hardware tests. This task

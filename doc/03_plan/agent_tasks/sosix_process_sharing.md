@@ -1,6 +1,8 @@
 <!-- codex-design -->
 # SOSIX Process Sharing Agent Tasks
 
+> Status: PARTIAL — Implemented Slice done (process/share/io/mod); Follow-Up Slice (socket/dylib/FD ownership) TODO
+
 ## Implemented Slice
 
 - Add `src/os/sosix/process.spl` as the async process owner.

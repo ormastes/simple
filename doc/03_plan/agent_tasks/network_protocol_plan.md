@@ -1,5 +1,7 @@
 # Network & Protocol — Agent Task Plan (2026-05-03)
 
+> Status: PARTIAL — 12 modules DONE (TLS 1.3, HTTP/2, HPACK, WebSocket, etc.); HTTP/3, TLS KeyUpdate, WS deflate, STUN remaining
+
 ## Status Summary
 
 | Module | Standard | Status | Tests |

@@ -1,5 +1,7 @@
 # VHDL Subprogram Emission Task
 
+> Status: PARTIAL — vhdl_builder.spl and vhdl_helpers.spl have subprogram support; specific function/procedure lowering tasks need verification
+
 Date: 2026-04-23
 Task ID: VHDL-PARITY-010
 Owner: Worker D
