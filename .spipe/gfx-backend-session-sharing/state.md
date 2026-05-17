@@ -24,13 +24,25 @@ feature
 ## Phase Checklist
 - [x] 1-dev — 2026-05-17
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement
-- [ ] 6-refactor
-- [ ] 7-verify
-- [ ] 8-ship
+- [x] 5-implement — 2026-05-17
+- [x] 6-refactor — 2026-05-17 (clean on first pass)
+- [x] 7-verify — 2026-05-17
+- [x] 8-ship — 2026-05-17
 
 ## Phase Outputs
 ### 1-dev
 10 ACs, 10 agents (A-J). Plan at doc/03_plan/agent_tasks/graphics_backend_session_sharing.md.
 ### 5-implement
-<pending>
+10 parallel Sonnet agents. 10 files created:
+- src/lib/nogc_sync_mut/gpu/engine2d/backend_session.spl (255 lines) — session contract
+- src/lib/nogc_sync_mut/gpu/engine2d/cuda_session.spl (183 lines) — CUDA PTX cache
+- src/lib/nogc_sync_mut/gpu/engine2d/vulkan_session.spl (183 lines) — Vulkan SPIR-V + thread policy
+- src/lib/nogc_sync_mut/gpu/engine2d/metal_session.spl (171 lines) — Metal macOS guard
+- src/lib/nogc_sync_mut/gpu/engine2d/webgpu_session.spl (140 lines) — real/stub diagnostics
+- src/lib/nogc_sync_mut/gpu/engine2d/cpu_simd_session.spl (175 lines) — target-gated kernels
+- src/lib/gc_async_mut/gpu/engine2d/engine2d_session.spl (248 lines) — Engine2D API migration
+- src/lib/gc_async_mut/gpu/engine2d/web_wm_session.spl (210 lines) — Web/WM adoption
+- src/lib/nogc_sync_mut/gpu/engine2d/arm_riscv_session.spl (185 lines) — ARM/RISC-V validation
+- test/unit/gpu/backend_session_sharing_spec.spl (228 lines) — 20 mode separation tests
+### 7-verify
+20/20 tests PASS (108ms). Commit d75c684d2d pushed to origin/main.
