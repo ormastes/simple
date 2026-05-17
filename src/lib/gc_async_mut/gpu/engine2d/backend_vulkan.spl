@@ -53,6 +53,7 @@ use std.nogc_sync_mut.gpu.engine2d.ffi_vulkan.{
     vulkan_ffi_create_compute_pipeline, vulkan_ffi_destroy_pipeline,
     vulkan_ffi_wait_idle
 }
+use std.gpu.engine2d.vulkan_session.{VulkanSession}
 
 # ============================================================================
 # Vulkan Availability Check
@@ -127,6 +128,8 @@ class VulkanBackend:
     clip_enabled: bool
     initialized: bool
     dirty: bool                  # True when GPU has changes not yet copied to host
+    session: VulkanSession       # Shared session (null-like when not session-owned)
+    owns_session: bool           # True when this backend must release the session
 
     static fn create() -> VulkanBackend:
         """Create an uninitialized Vulkan backend. Call init() before drawing."""
@@ -164,7 +167,9 @@ class VulkanBackend:
             clip_h: 0,
             clip_enabled: false,
             initialized: false,
-            dirty: false
+            dirty: false,
+            session: VulkanSession.create(),
+            owns_session: false
         )
 
 impl RenderBackend for VulkanBackend:
@@ -243,7 +248,91 @@ impl RenderBackend for VulkanBackend:
         self.dirty = false
         true
 
+    me init_with_session(width: i32, height: i32, session: VulkanSession) -> bool:
+        """Initialise this backend surface using a pre-initialised shared VulkanSession.
+
+        The session must already have been successfully init()ed.  This backend
+        borrows the session's pipelines (no shader recompilation) and retains
+        the session so it stays alive for the lifetime of this surface.
+        shutdown() will call session.release().
+
+        Per-surface state (framebuffer, host buffer, clip region) is still
+        owned exclusively by this backend.
+        """
+        if not session.is_valid():
+            return false
+
+        # Retain the shared session; we will release it in shutdown()
+        val retained = session.retain()
+        self.session = retained
+        self.owns_session = true
+
+        # Borrow shared pipeline handles from the session
+        self.shader_clear         = session.shader_clear
+        self.shader_rect_filled   = session.shader_rect_filled
+        self.shader_rect_outline  = session.shader_rect_outline
+        self.shader_circle_filled = session.shader_circle_filled
+        self.shader_circle_outline = session.shader_circle_outline
+        self.shader_line          = session.shader_line
+        self.shader_rounded_rect  = session.shader_rounded_rect
+        self.shader_triangle      = session.shader_triangle
+        self.shader_gradient      = session.shader_gradient
+        self.shader_blit          = session.shader_blit
+
+        self.pipe_clear          = session.pipe_clear
+        self.pipe_rect_filled    = session.pipe_rect_filled
+        self.pipe_rect_outline   = session.pipe_rect_outline
+        self.pipe_circle_filled  = session.pipe_circle_filled
+        self.pipe_circle_outline = session.pipe_circle_outline
+        self.pipe_line           = session.pipe_line
+        self.pipe_rounded_rect   = session.pipe_rounded_rect
+        self.pipe_triangle       = session.pipe_triangle
+        self.pipe_gradient       = session.pipe_gradient
+        self.pipe_blit           = session.pipe_blit
+
+        self.w = width
+        self.h = height
+
+        # Allocate per-surface device framebuffer storage buffer
+        # Usage 0x80 = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+        val fb_size = _i64(width) * _i64(height) * 4
+        self.d_framebuffer = vulkan_ffi_alloc_buffer(fb_size, 0x80)
+        if self.d_framebuffer == 0:
+            self.session.release()
+            self.owns_session = false
+            return false
+
+        # Allocate host readback buffer
+        val total = width * height
+        self.host_buf = [0u32; total]
+
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = width
+        self.clip_h = height
+        self.clip_enabled = false
+        self.initialized = true
+        self.dirty = false
+        true
+
     me shutdown():
+        if self.owns_session:
+            # Session owns shaders/pipelines — do not destroy them here
+            if self.d_framebuffer != 0:
+                vulkan_ffi_free_buffer(self.d_framebuffer)
+                self.d_framebuffer = 0
+            self.host_buf = []
+            self.w = 0
+            self.h = 0
+            self.mask_buf = []
+            self.mask_w = 0
+            self.mask_h = 0
+            self.initialized = false
+            self.session.release()
+            self.owns_session = false
+            return
+
+        # Standalone (no shared session): destroy pipelines and shaders here
         # Destroy pipelines
         if self.pipe_clear != 0: vulkan_ffi_destroy_pipeline(self.pipe_clear)
         if self.pipe_rect_filled != 0: vulkan_ffi_destroy_pipeline(self.pipe_rect_filled)

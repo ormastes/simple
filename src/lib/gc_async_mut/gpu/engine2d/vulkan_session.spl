@@ -1,0 +1,291 @@
+# Vulkan Session
+#
+# Shared GPU state extracted from VulkanBackend so multiple Engine2D surfaces
+# can share one Vulkan device selection, shader compilation, and compute
+# pipelines.  Each surface still owns its own per-surface d_framebuffer.
+#
+# `class` in Simple uses reference semantics, so VulkanSession instances can be
+# retained by multiple VulkanBackend surfaces and the ref_count field correctly
+# tracks live references.
+#
+# Note: The rt_vulkan_* runtime abstracts instance, physical_device, queue,
+# queue_family, command_pool, pipeline_cache, and allocator behind a global
+# opaque context (init/select_device/get_device).  Those fields are kept here
+# as forward-compatibility placeholders and populated where the FFI permits.
+#
+# Usage:
+#   use std.gpu.engine2d.vulkan_session.{VulkanSession}
+
+use std.gpu.engine2d.backend_vulkan_glsl.{
+    _glsl_clear, _glsl_rect_filled, _glsl_rect_outline,
+    _glsl_circle_filled, _glsl_circle_outline, _glsl_line,
+    _glsl_rounded_rect, _glsl_triangle_filled, _glsl_gradient_rect, _glsl_blit
+}
+use std.nogc_sync_mut.gpu.engine2d.ffi_vulkan.{
+    vulkan_ffi_compile_glsl, vulkan_ffi_destroy_shader,
+    vulkan_ffi_create_compute_pipeline, vulkan_ffi_destroy_pipeline,
+    vulkan_ffi_init, vulkan_ffi_shutdown, vulkan_ffi_is_available,
+    vulkan_ffi_device_count, vulkan_ffi_select_device
+}
+
+extern fn rt_vulkan_get_device() -> i64
+extern fn rt_vulkan_begin_compute() -> i64
+extern fn rt_vulkan_submit_and_wait(cmd: i64) -> bool
+
+# Push constant size in bytes — matches VulkanBackend's VK_PUSH_CONSTANT_SIZE
+val _VS_PUSH_CONSTANT_SIZE: i64 = 64
+
+# ============================================================================
+# VulkanSession
+# ============================================================================
+
+class VulkanSession:
+    """Shared Vulkan GPU context: device + compiled shaders + compute pipelines.
+
+    Multiple VulkanBackend surfaces can share a single VulkanSession, avoiding
+    the cost of redundant device selection and shader/pipeline compilation.
+
+    Lifecycle:
+      val s = VulkanSession.create()
+      if s.init() == 0:
+          # hand s (or s.retain()) to each VulkanBackend via init_with_session()
+          ...
+          s.release()   # each backend calls release() in shutdown()
+
+    Fields that the runtime abstracts (physical_device, queue, queue_family,
+    command_pool, pipeline_cache, allocator) are kept as forward-compat
+    placeholders; the rt_vulkan_* layer manages them internally.
+    """
+
+    instance: i64         # VkInstance handle (runtime-managed; populated after init)
+    physical_device: i64  # VkPhysicalDevice (runtime-managed placeholder)
+    device: i64           # VkDevice logical handle from rt_vulkan_get_device()
+    queue: i64            # VkQueue (runtime-managed placeholder)
+    queue_family: i64     # queue family index (runtime-managed placeholder)
+    command_pool: i64     # VkCommandPool (runtime-managed placeholder)
+    pipeline_cache: i64   # VkPipelineCache (runtime-managed placeholder)
+    allocator: i64        # memory allocator handle (runtime-managed placeholder)
+
+    # Compiled GLSL shader module handles
+    shader_clear: i64
+    shader_rect_filled: i64
+    shader_rect_outline: i64
+    shader_circle_filled: i64
+    shader_circle_outline: i64
+    shader_line: i64
+    shader_rounded_rect: i64
+    shader_triangle: i64
+    shader_gradient: i64
+    shader_blit: i64
+
+    # Compute pipeline handles
+    pipe_clear: i64
+    pipe_rect_filled: i64
+    pipe_rect_outline: i64
+    pipe_circle_filled: i64
+    pipe_circle_outline: i64
+    pipe_line: i64
+    pipe_rounded_rect: i64
+    pipe_triangle: i64
+    pipe_gradient: i64
+    pipe_blit: i64
+
+    ref_count: i64
+    is_initialized: bool
+    generation: i64
+
+    static fn create() -> VulkanSession:
+        """Return a zero-initialised, uninitialised session. Call init() before use."""
+        VulkanSession(
+            instance: 0,
+            physical_device: 0,
+            device: 0,
+            queue: 0,
+            queue_family: 0,
+            command_pool: 0,
+            pipeline_cache: 0,
+            allocator: 0,
+            shader_clear: 0,
+            shader_rect_filled: 0,
+            shader_rect_outline: 0,
+            shader_circle_filled: 0,
+            shader_circle_outline: 0,
+            shader_line: 0,
+            shader_rounded_rect: 0,
+            shader_triangle: 0,
+            shader_gradient: 0,
+            shader_blit: 0,
+            pipe_clear: 0,
+            pipe_rect_filled: 0,
+            pipe_rect_outline: 0,
+            pipe_circle_filled: 0,
+            pipe_circle_outline: 0,
+            pipe_line: 0,
+            pipe_rounded_rect: 0,
+            pipe_triangle: 0,
+            pipe_gradient: 0,
+            pipe_blit: 0,
+            ref_count: 0,
+            is_initialized: false,
+            generation: 0
+        )
+
+    me init() -> i64:
+        """Initialise Vulkan, select device, compile shaders, create all pipelines.
+
+        Returns 0 on success, non-zero error code on failure.
+        Error codes:
+          1 — Vulkan not available
+          2 — vulkan_ffi_init() failed
+          3 — no Vulkan devices found
+          4 — device selection failed
+          5 — one or more shader compilations failed
+          6 — one or more pipeline creations failed
+        """
+        if not vulkan_ffi_is_available():
+            return 1
+
+        if not vulkan_ffi_init():
+            return 2
+
+        if vulkan_ffi_device_count() < 1:
+            return 3
+
+        if not vulkan_ffi_select_device(0):
+            return 4
+
+        # Retrieve the opaque device handle exposed by the runtime
+        self.device = rt_vulkan_get_device()
+
+        # Compile all GLSL compute shaders
+        self.shader_clear         = vulkan_ffi_compile_glsl(_glsl_clear())
+        self.shader_rect_filled   = vulkan_ffi_compile_glsl(_glsl_rect_filled())
+        self.shader_rect_outline  = vulkan_ffi_compile_glsl(_glsl_rect_outline())
+        self.shader_circle_filled = vulkan_ffi_compile_glsl(_glsl_circle_filled())
+        self.shader_circle_outline = vulkan_ffi_compile_glsl(_glsl_circle_outline())
+        self.shader_line          = vulkan_ffi_compile_glsl(_glsl_line())
+        self.shader_rounded_rect  = vulkan_ffi_compile_glsl(_glsl_rounded_rect())
+        self.shader_triangle      = vulkan_ffi_compile_glsl(_glsl_triangle_filled())
+        self.shader_gradient      = vulkan_ffi_compile_glsl(_glsl_gradient_rect())
+        self.shader_blit          = vulkan_ffi_compile_glsl(_glsl_blit())
+
+        if (self.shader_clear == 0 or self.shader_rect_filled == 0 or
+            self.shader_rect_outline == 0 or self.shader_circle_filled == 0 or
+            self.shader_circle_outline == 0 or self.shader_line == 0 or
+            self.shader_rounded_rect == 0 or self.shader_triangle == 0 or
+            self.shader_gradient == 0 or self.shader_blit == 0):
+            self._cleanup()
+            return 5
+
+        # Create compute pipelines (all use push constants)
+        self.pipe_clear          = vulkan_ffi_create_compute_pipeline(self.shader_clear,         "main", _VS_PUSH_CONSTANT_SIZE)
+        self.pipe_rect_filled    = vulkan_ffi_create_compute_pipeline(self.shader_rect_filled,   "main", _VS_PUSH_CONSTANT_SIZE)
+        self.pipe_rect_outline   = vulkan_ffi_create_compute_pipeline(self.shader_rect_outline,  "main", _VS_PUSH_CONSTANT_SIZE)
+        self.pipe_circle_filled  = vulkan_ffi_create_compute_pipeline(self.shader_circle_filled, "main", _VS_PUSH_CONSTANT_SIZE)
+        self.pipe_circle_outline = vulkan_ffi_create_compute_pipeline(self.shader_circle_outline,"main", _VS_PUSH_CONSTANT_SIZE)
+        self.pipe_line           = vulkan_ffi_create_compute_pipeline(self.shader_line,          "main", _VS_PUSH_CONSTANT_SIZE)
+        self.pipe_rounded_rect   = vulkan_ffi_create_compute_pipeline(self.shader_rounded_rect,  "main", _VS_PUSH_CONSTANT_SIZE)
+        self.pipe_triangle       = vulkan_ffi_create_compute_pipeline(self.shader_triangle,      "main", _VS_PUSH_CONSTANT_SIZE)
+        self.pipe_gradient       = vulkan_ffi_create_compute_pipeline(self.shader_gradient,      "main", _VS_PUSH_CONSTANT_SIZE)
+        self.pipe_blit           = vulkan_ffi_create_compute_pipeline(self.shader_blit,          "main", _VS_PUSH_CONSTANT_SIZE)
+
+        if (self.pipe_clear == 0 or self.pipe_rect_filled == 0 or
+            self.pipe_rect_outline == 0 or self.pipe_circle_filled == 0 or
+            self.pipe_circle_outline == 0 or self.pipe_line == 0 or
+            self.pipe_rounded_rect == 0 or self.pipe_triangle == 0 or
+            self.pipe_gradient == 0 or self.pipe_blit == 0):
+            self._cleanup()
+            return 6
+
+        self.ref_count = 1
+        self.is_initialized = true
+        self.generation = self.generation + 1
+        0
+
+    me retain() -> VulkanSession:
+        """Increment the reference count and return self for convenient assignment."""
+        self.ref_count = self.ref_count + 1
+        self
+
+    me release():
+        """Decrement the reference count; destroy GPU resources when it reaches zero."""
+        if self.ref_count <= 0:
+            return
+        self.ref_count = self.ref_count - 1
+        if self.ref_count == 0:
+            self._cleanup()
+
+    me is_valid() -> bool:
+        self.is_initialized and self.device != 0
+
+    me create_command_buffer() -> i64:
+        """Allocate a per-frame compute command buffer.
+
+        Returns a command buffer handle (> 0) on success, 0 on failure.
+        The caller is responsible for submitting via submit_and_wait().
+        """
+        rt_vulkan_begin_compute()
+
+    me submit_and_wait(cmd: i64) -> i64:
+        """Submit a command buffer and block until the GPU is idle.
+
+        Returns 0 on success, 1 on failure.
+        """
+        if rt_vulkan_submit_and_wait(cmd):
+            0
+        else:
+            1
+
+    me _cleanup():
+        """Destroy all GPU objects. Called automatically by release() on zero refcount."""
+        if self.pipe_clear != 0:          vulkan_ffi_destroy_pipeline(self.pipe_clear)
+        if self.pipe_rect_filled != 0:    vulkan_ffi_destroy_pipeline(self.pipe_rect_filled)
+        if self.pipe_rect_outline != 0:   vulkan_ffi_destroy_pipeline(self.pipe_rect_outline)
+        if self.pipe_circle_filled != 0:  vulkan_ffi_destroy_pipeline(self.pipe_circle_filled)
+        if self.pipe_circle_outline != 0: vulkan_ffi_destroy_pipeline(self.pipe_circle_outline)
+        if self.pipe_line != 0:           vulkan_ffi_destroy_pipeline(self.pipe_line)
+        if self.pipe_rounded_rect != 0:   vulkan_ffi_destroy_pipeline(self.pipe_rounded_rect)
+        if self.pipe_triangle != 0:       vulkan_ffi_destroy_pipeline(self.pipe_triangle)
+        if self.pipe_gradient != 0:       vulkan_ffi_destroy_pipeline(self.pipe_gradient)
+        if self.pipe_blit != 0:           vulkan_ffi_destroy_pipeline(self.pipe_blit)
+        self.pipe_clear = 0
+        self.pipe_rect_filled = 0
+        self.pipe_rect_outline = 0
+        self.pipe_circle_filled = 0
+        self.pipe_circle_outline = 0
+        self.pipe_line = 0
+        self.pipe_rounded_rect = 0
+        self.pipe_triangle = 0
+        self.pipe_gradient = 0
+        self.pipe_blit = 0
+
+        if self.shader_clear != 0:          vulkan_ffi_destroy_shader(self.shader_clear)
+        if self.shader_rect_filled != 0:    vulkan_ffi_destroy_shader(self.shader_rect_filled)
+        if self.shader_rect_outline != 0:   vulkan_ffi_destroy_shader(self.shader_rect_outline)
+        if self.shader_circle_filled != 0:  vulkan_ffi_destroy_shader(self.shader_circle_filled)
+        if self.shader_circle_outline != 0: vulkan_ffi_destroy_shader(self.shader_circle_outline)
+        if self.shader_line != 0:           vulkan_ffi_destroy_shader(self.shader_line)
+        if self.shader_rounded_rect != 0:   vulkan_ffi_destroy_shader(self.shader_rounded_rect)
+        if self.shader_triangle != 0:       vulkan_ffi_destroy_shader(self.shader_triangle)
+        if self.shader_gradient != 0:       vulkan_ffi_destroy_shader(self.shader_gradient)
+        if self.shader_blit != 0:           vulkan_ffi_destroy_shader(self.shader_blit)
+        self.shader_clear = 0
+        self.shader_rect_filled = 0
+        self.shader_rect_outline = 0
+        self.shader_circle_filled = 0
+        self.shader_circle_outline = 0
+        self.shader_line = 0
+        self.shader_rounded_rect = 0
+        self.shader_triangle = 0
+        self.shader_gradient = 0
+        self.shader_blit = 0
+
+        self.device = 0
+        self.instance = 0
+        self.physical_device = 0
+        self.queue = 0
+        self.queue_family = 0
+        self.command_pool = 0
+        self.pipeline_cache = 0
+        self.allocator = 0
+        self.is_initialized = false

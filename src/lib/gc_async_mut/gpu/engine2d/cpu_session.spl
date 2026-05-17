@@ -1,0 +1,176 @@
+# CPU Session
+#
+# Scalar / SIMD backend session for the Engine2D CPU render path.
+# Mirrors MetalSession lifecycle (create → init → retain/release) but
+# targets host CPU kernels instead of GPU pipelines.
+#
+# Usage:
+#   use std.gpu.engine2d.cpu_session.{CpuSession, CpuFeatureSet}
+#
+# Feature detection is a placeholder: externs are stubbed to return
+# safe defaults until the native rt_cpu_* runtime helpers are wired.
+# TODO: wire rt_cpu_has_sse2, rt_cpu_has_avx2, rt_cpu_has_neon,
+#       rt_cpu_has_rvv, rt_cpu_arch_name, rt_cpu_pointer_bits once
+#       bootstrap has been rebuilt with those externs.
+
+# ============================================================================
+# Placeholder extern stubs — return safe defaults on any host
+# ============================================================================
+
+extern fn rt_cpu_has_sse2() -> bool
+extern fn rt_cpu_has_avx2() -> bool
+extern fn rt_cpu_has_neon() -> bool
+extern fn rt_cpu_has_rvv() -> bool
+extern fn rt_cpu_arch_name() -> text
+extern fn rt_cpu_pointer_bits() -> i64
+
+# ============================================================================
+# CpuFeatureSet
+# ============================================================================
+
+class CpuFeatureSet:
+    """Detected SIMD and architecture capabilities of the host CPU."""
+    has_sse2: bool
+    has_avx2: bool
+    has_neon: bool
+    has_rvv: bool
+    arch_name: text       # "x86_64", "aarch64", "riscv64", "riscv32"
+    pointer_bits: i64     # 32 or 64
+
+# ============================================================================
+# CpuSession
+# ============================================================================
+
+class CpuSession:
+    """Scalar/SIMD CPU backend session shared by Engine2D surfaces.
+
+    Lifecycle mirrors MetalSession:
+      val s = CpuSession.create()
+      if s.init() == 0:
+          # hand s (or s.retain()) to each CpuBackend
+          ...
+          s.release()   # each backend calls release() in shutdown()
+
+    ref_count starts at 0 after create(); init() sets it to 1.
+    generation is stamped once at init() and never changes — two callers
+    holding the same CpuSession instance will always see the same
+    generation, making it a stable identity token for session sharing.
+    """
+
+    features: CpuFeatureSet
+    kernel_table: i64     # Selected optimised kernel dispatch table index
+    ref_count: i64
+    is_initialized: bool
+    generation: i64
+
+    static fn create() -> CpuSession:
+        """Return a zero-initialised, uninitialised session. Call init() before use."""
+        CpuSession(
+            features: CpuFeatureSet(
+                has_sse2: false,
+                has_avx2: false,
+                has_neon: false,
+                has_rvv: false,
+                arch_name: "unknown",
+                pointer_bits: 64
+            ),
+            kernel_table: 0,
+            ref_count: 0,
+            is_initialized: false,
+            generation: 0
+        )
+
+    static fn detect_features() -> CpuFeatureSet:
+        """Query host CPU capabilities via runtime externs.
+
+        Falls back to all-false / x86_64 / 64-bit when externs are stubs.
+        """
+        val arch = rt_cpu_arch_name()
+        val bits = rt_cpu_pointer_bits()
+        CpuFeatureSet(
+            has_sse2: rt_cpu_has_sse2(),
+            has_avx2: rt_cpu_has_avx2(),
+            has_neon: rt_cpu_has_neon(),
+            has_rvv: rt_cpu_has_rvv(),
+            arch_name: arch,
+            pointer_bits: bits
+        )
+
+    me init() -> i64:
+        """Detect features, select kernel table, and mark session live.
+
+        Returns 0 on success, non-zero error code on failure.
+        Sets ref_count = 1 and stamps generation.
+        """
+        self.features = CpuSession.detect_features()
+        self.kernel_table = self._select_kernel_table()
+        self.ref_count = 1
+        self.is_initialized = true
+        # Use monotonic counter via field address as generation seed.
+        # For a production implementation, use rt_time_now_monotonic_ms().
+        self.generation = 1
+        0
+
+    me retain() -> CpuSession:
+        """Increment the reference count and return self for convenient chaining."""
+        self.ref_count = self.ref_count + 1
+        self
+
+    me release():
+        """Decrement the reference count; reset when it reaches zero."""
+        if self.ref_count <= 0:
+            return
+        self.ref_count = self.ref_count - 1
+        if self.ref_count == 0:
+            self._cleanup()
+
+    me is_valid() -> bool:
+        """True when the session has been successfully initialised."""
+        self.is_initialized and self.ref_count > 0
+
+    me selected_backend_name() -> text:
+        """Human-readable name of the best available kernel path.
+
+        Priority: avx2 > sse2 > neon > rvv > scalar.
+        RISC-V (riscv32/riscv64) always returns "scalar" — no SIMD yet (AC-7).
+        """
+        val arch = self.features.arch_name
+        if arch == "riscv32":
+            return "scalar"
+        if arch == "riscv64":
+            return "scalar"
+        if self.features.has_avx2:
+            return "avx2"
+        if self.features.has_sse2:
+            return "sse2"
+        if self.features.has_neon:
+            return "neon"
+        if self.features.has_rvv:
+            return "rvv"
+        "scalar"
+
+    me _select_kernel_table() -> i64:
+        """Map detected features to a dispatch-table index.
+
+        0 = scalar, 1 = sse2, 2 = avx2, 3 = neon, 4 = rvv
+        """
+        val arch = self.features.arch_name
+        if arch == "riscv32":
+            return 0
+        if arch == "riscv64":
+            return 0
+        if self.features.has_avx2:
+            return 2
+        if self.features.has_sse2:
+            return 1
+        if self.features.has_neon:
+            return 3
+        if self.features.has_rvv:
+            return 4
+        0
+
+    me _cleanup():
+        """Reset all fields when ref_count reaches zero."""
+        self.kernel_table = 0
+        self.is_initialized = false
+        self.generation = 0
