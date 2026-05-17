@@ -232,7 +232,7 @@ fn execute_operation(operation: Operation) -> Completion {
             let Ok(c_path) = std::ffi::CString::new(path) else {
                 return completion(id, -(libc::EINVAL as i64));
             };
-            let fd = unsafe { libc::open(c_path.as_ptr(), flags as libc::c_int, mode as libc::mode_t as libc::c_uint) };
+            let fd = unsafe { libc::open(c_path.as_ptr(), flags as libc::c_int, mode as libc::mode_t) };
             completion(id, if fd < 0 { os_error_code() } else { fd as i64 })
         }
         Operation::Close { id, fd } => {
