@@ -6,8 +6,11 @@ use std::path::{Path, PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
     println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_math.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_SYMBOL_TABLE");
+
+    compile_c_runtime_sources();
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let source = manifest_dir.join("../common/src/runtime_symbols.rs");
@@ -88,6 +91,51 @@ fn main() {
     generated.push_str("];\n");
 
     fs::write(out_dir.join("runtime_symbol_entries.rs"), generated).expect("write runtime symbol entries");
+}
+
+fn compile_c_runtime_sources() {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let runtime_c_dir = manifest_dir.join("../../runtime");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+
+    let c_sources = ["runtime_math.c"];
+
+    for source in &c_sources {
+        let src_path = runtime_c_dir.join(source);
+        if !src_path.exists() {
+            continue;
+        }
+        let obj_name = source.replace(".c", ".o");
+        let obj_path = out_dir.join(&obj_name);
+        let status = std::process::Command::new("cc")
+            .arg("-c")
+            .arg("-O2")
+            .arg("-fPIC")
+            .arg("-std=gnu11")
+            .arg(&src_path)
+            .arg("-o")
+            .arg(&obj_path)
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                println!("cargo:rustc-link-lib=static=runtime_math");
+                let ar_status = std::process::Command::new("ar")
+                    .arg("rcs")
+                    .arg(out_dir.join("libruntime_math.a"))
+                    .arg(&obj_path)
+                    .status();
+                if let Ok(s) = ar_status {
+                    if s.success() {
+                        println!("cargo:rustc-link-search=native={}", out_dir.display());
+                    }
+                }
+            }
+            _ => {
+                // Fallback: if cc isn't available, the build still succeeds without C math
+                // (symbol resolution will fail at link time if math functions are used)
+            }
+        }
+    }
 }
 
 fn runtime_defines_symbol(root: &Path, symbol: &str) -> bool {

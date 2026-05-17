@@ -128,6 +128,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         "runtime_thread.c",
         "runtime_fork.c",
         "runtime_process.c",
+        "runtime_math.c",
         "runtime_memtrack.c",
         "runtime.h",
         "runtime_fork.h",
