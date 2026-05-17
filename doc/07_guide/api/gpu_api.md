@@ -38,6 +38,26 @@ compiler.backend
 └── vulkan.spirv_builder   # SPIR-V assembly builder
 ```
 
+Candidate graphics-session extension:
+
+```text
+std.graphics.session       # Persistent 2D/3D/web/GUI/WM backend sessions
+├── policy                 # LegacyNoSession, ManagedShared, PerfExclusive
+├── capabilities           # CPU/CUDA/Vulkan/Metal/WebGPU + arch records
+├── frame                  # begin_frame, submit, end_frame, readback
+└── optimization           # persistent provider facts and policy keys
+```
+
+The graphics-session API is Pure Simple at the public boundary. Native CUDA,
+Vulkan, Metal, WebGPU, or platform presentation calls should be reached through
+stable C ABI shims where direct native binding is required. Do not make a Rust
+runtime library the required graphics API boundary.
+
+`LegacyNoSession` keeps old constructors working. `ManagedShared` is the normal
+app/game/UI mode for retained devices, queues, allocators, and caches.
+`PerfExclusive` is the benchmark/profiler mode and must not share mutable
+backend state with managed sessions.
+
 ---
 
 ## std.gpu Module
@@ -51,6 +71,9 @@ compiler.backend
 enum GpuBackend:
     Cuda       # NVIDIA CUDA backend
     Vulkan     # Vulkan compute backend
+    Metal      # Apple Metal backend where available
+    WebGpu     # Browser/native WebGPU backend where available
+    Cpu        # CPU-only reference/fallback backend
     None       # No GPU available
 ```
 

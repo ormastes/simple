@@ -138,6 +138,65 @@ Simple uses two codegen backends:
 - LLVM: release/native-focused builds.
 - Cranelift: fast debug/dev path.
 
+## Graphics Session
+A `GraphicsSession` is the persistent backend lifetime object for rendering and
+GPU/CPU acceleration. It owns or references backend state such as a CPU raster
+context, CUDA context/interop state, Vulkan device and queues, Metal device and
+command queue, WebGPU device and queue, allocators, command pools, caches,
+capability records, and performance counters.
+
+The session model applies across:
+
+- 2D engine
+- 2D game engine
+- 3D engine
+- 3D game engine
+- web renderer
+- GUI library
+- window manager
+
+Public APIs should be Pure Simple first. Native GPU calls should cross a stable
+C ABI shim where the platform API requires native binding. A Rust runtime library
+must not be the required graphics backend boundary.
+
+## Legacy No-Session Graphics Mode
+`LegacyNoSession` preserves old constructors and smoke-test APIs that do not ask
+the caller to pass a session. Implementations may create short-lived resources
+internally, but must not silently join managed shared caches or perf-exclusive
+benchmark state.
+
+Use it for compatibility and one-shot tests. Do not use it as the preferred API
+for multi-window apps, games, web rendering, or benchmarking.
+
+## Managed Shared Graphics Mode
+`ManagedShared` is the normal app/game/UI mode. A managed session may retain and
+share expensive resources across frames and related surfaces: device handles,
+queues, allocators, shader and pipeline caches, immutable capability records, and
+optimization provider facts.
+
+Managed state is valid only inside the same session generation and compatible
+policy hash. Device loss, backend switch, policy change, or target-feature change
+must invalidate affected handles and provider facts.
+
+## Perf Exclusive Graphics Mode
+`PerfExclusive` is the benchmark/profiler mode. It isolates queues, allocators,
+command pools, mutable pipeline caches, warmup state, and timing counters from
+managed sessions so measurements are not polluted by app-managed state.
+
+Perf mode may read immutable capability tables, but must reject mutable resource
+sharing with `ManagedShared`. Cross-mode sharing errors should be typed and
+visible in tests.
+
+## Graphics Optimization Provider
+A graphics optimization provider is a Simple Optimization Plugin provider used
+by rendering and backend code. It can persist facts such as shader variant keys,
+pipeline layout compatibility, SIMD width, memory alignment, backend feature
+flags, CUDA kernel specialization choices, or WebGPU bind layout facts.
+
+Provider state must be keyed by provider id, backend kind, target triple, session
+mode, and policy hash. `ManagedShared` and `PerfExclusive` providers must not
+share mutable state.
+
 Policy:
 - Release/native link path should prefer LLVM-compatible object generation.
 - Debug/dev can keep Cranelift path.

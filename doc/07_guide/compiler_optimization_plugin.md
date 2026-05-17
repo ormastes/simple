@@ -53,6 +53,13 @@ Bad examples:
 | `interpreter` | interpreter runtime | dispatch caches and evaluated-form specialization |
 | `backend-metadata` | backend boundary | target-independent facts that help LLVM or native lowering |
 
+Graphics and rendering providers use the same plugin contract. Examples include
+shader specialization, pipeline-cache keys, CPU SIMD vectorization facts, CUDA
+kernel specialization, Vulkan/Metal/WebGPU layout compatibility, and web-renderer
+paint-fragment lowering facts. These providers should be reusable by the 2D
+engine, 2D game engine, 3D engine, 3D game engine, web renderer, GUI library,
+and window manager instead of being duplicated in each renderer.
+
 ## Load Modes
 
 Simple uses two load modes.
@@ -90,6 +97,19 @@ Every provider should declare:
 | `required_facts` | facts needed before the pass may run |
 | `produced_facts` | facts exposed to later passes |
 | `safety_class` | `pure`, `target-aware`, `unsafe-facts`, or `experimental` |
+
+For persistent backend optimization, providers should also define a stable state
+key:
+
+```text
+provider_id + provider_version + target_triple + backend_kind
+  + session_mode + session_policy_hash + produced_fact_schema
+```
+
+`ManagedShared` providers may retain warm caches across app frames. `PerfExclusive`
+providers must use isolated mutable state so benchmark results do not include
+managed-session warmup, queues, allocators, or counters. Immutable capability
+tables may be shared when the target and backend feature records are identical.
 
 ## Lookup Strategy
 
