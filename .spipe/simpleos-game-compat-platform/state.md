@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-17
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-17
+- [x] 6-refactor (Tech Lead) — 2026-05-17
+- [x] 7-verify (QA) — 2026-05-17
+- [x] 8-ship (Release Mgr) — 2026-05-17
 
 ## Phase Outputs
 
@@ -35,4 +35,13 @@ feature
 10 ACs across 5 tasks. 5 parallel agents (A-E). Plan at doc/03_plan/agent_tasks/simpleos_game_compatibility_platform.md. Existing: kernel/loader (ELF, dynlib), posix/ (fd, pipe, errno, dynlib), game/ (platform contract, steam support), libc/ (cxxabi).
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 7 files created:
+- src/os/linux_personality/syscall_contract.spl (305 lines) — SyscallCapability + LinuxSyscallMatrix + LinuxPersonalityContract
+- src/os/linux_personality/vfs_stubs.spl (209 lines) — ProcfsEntry + VfsStubRegistry + LinuxVfsContract
+- src/os/game/platform/device_readiness.spl (286 lines) — GPU/Audio/Input/Network/Fs/Cpu readiness + aggregate report
+- src/os/game/runtime/prefix_sandbox.spl (~300 lines) — PrefixManifest + SandboxCapability + SandboxPolicy + SandboxEnforcer
+- src/os/game/proton/host_readiness.spl (288 lines) — ProtonComponent + ProtonHostReport + MultilibReadiness + CrashLogContract + ProtonPlatformGate
+- src/os/game/porting_toolkit/compat_toolkit.spl — CompatEntry + CompatDatabase + MissingAbiReport + TraceReport + PortingFixture + PortingToolkitReport
+- test/unit/os/game_compat_spec.spl — 18 tests
+### 7-verify
+18/18 tests PASS. Commit d246b0b1b5 pushed to origin/main.
