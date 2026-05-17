@@ -136,6 +136,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         "runtime_random.c",
         "runtime_hash.c",
         "runtime_value.c",
+        "runtime_equality.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_fork.h",

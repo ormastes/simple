@@ -13,6 +13,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_random.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hash.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_equality.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_SYMBOL_TABLE");
@@ -105,7 +106,7 @@ fn compile_c_runtime_sources() {
     let runtime_c_dir = manifest_dir.join("../../runtime");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
 
-    let c_sources = ["runtime_math.c", "runtime_memory.c", "runtime_time.c", "runtime_ctype.c", "runtime_random.c", "runtime_hash.c", "runtime_value.c"];
+    let c_sources = ["runtime_math.c", "runtime_memory.c", "runtime_time.c", "runtime_ctype.c", "runtime_random.c", "runtime_hash.c", "runtime_value.c", "runtime_equality.c"];
     let mut objects = Vec::new();
 
     for source in &c_sources {
@@ -142,6 +143,7 @@ fn compile_c_runtime_sources() {
             if s.success() {
                 println!("cargo:rustc-link-search=native={}", out_dir.display());
                 println!("cargo:rustc-link-lib=static=runtime_ffi_c");
+                println!("cargo:rustc-link-lib=dylib=m");
             }
         }
     }

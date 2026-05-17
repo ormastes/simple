@@ -60,4 +60,41 @@ static inline int rv_is_error(RuntimeValue v) {
     return rv_tag(v) == TAG_SPECIAL && rv_payload(v) == SPECIAL_ERROR;
 }
 
+/* Heap object type tags (matches HeapObjectType repr(u8)) */
+#define HEAP_TYPE_STRING  0x01
+#define HEAP_TYPE_ARRAY   0x02
+#define HEAP_TYPE_DICT    0x03
+#define HEAP_TYPE_ENUM    0x07
+
+/* HeapHeader: #[repr(C)] — 8 bytes */
+typedef struct {
+    uint8_t  object_type;
+    uint8_t  gc_flags;
+    uint16_t reserved;
+    uint32_t size;
+} HeapHeader;
+
+/* RuntimeString: HeapHeader + len + hash + inline UTF-8 bytes */
+typedef struct {
+    HeapHeader header;
+    uint64_t len;
+    uint64_t hash;
+    /* uint8_t data[] follows */
+} RuntimeString;
+
+/* RuntimeEnum: HeapHeader + enum_id + discriminant + payload */
+typedef struct {
+    HeapHeader header;
+    uint32_t enum_id;
+    uint32_t discriminant;
+    RuntimeValue payload;
+} RuntimeEnum;
+
+/* Extract heap pointer from a RuntimeValue (strips tag bits) */
+static inline void *rv_as_heap_ptr(RuntimeValue v) {
+    return (void *)(v & ~(uint64_t)TAG_MASK);
+}
+
+#define MIN_HEAP_ADDR 0x100000
+
 #endif
