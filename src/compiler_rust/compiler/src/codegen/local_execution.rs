@@ -27,8 +27,6 @@ pub enum JitBackend {
 impl JitBackend {
     /// Select the best backend for the current host.
     pub fn auto_select() -> JitBackend {
-        // Cranelift is preferred: ~72us compile time vs ms-range for LLVM.
-        // LLVM JIT is only needed for 32-bit/WASM hosts or explicit request.
         #[cfg(target_pointer_width = "64")]
         {
             JitBackend::Cranelift
@@ -42,6 +40,25 @@ impl JitBackend {
             #[cfg(not(feature = "llvm"))]
             {
                 JitBackend::Cranelift
+            }
+        }
+    }
+
+    /// Select the best backend for a specific target architecture.
+    /// Cranelift supports x86_64, aarch64, riscv64; all others route to LLVM.
+    pub fn for_target(target: &simple_common::target::Target) -> JitBackend {
+        use simple_common::target::TargetArch;
+        match target.arch {
+            TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::Riscv64 => JitBackend::Cranelift,
+            _ => {
+                #[cfg(feature = "llvm")]
+                {
+                    JitBackend::Llvm
+                }
+                #[cfg(not(feature = "llvm"))]
+                {
+                    JitBackend::Cranelift
+                }
             }
         }
     }
@@ -71,8 +88,24 @@ impl LocalExecutionManager {
 
     /// Create with a specific runtime symbol provider.
     pub fn with_provider(backend: JitBackend, provider: Arc<dyn RuntimeSymbolProvider>) -> Result<Self, String> {
+        Self::with_provider_and_target(backend, provider, None)
+    }
+
+    /// Create with a specific runtime symbol provider and target.
+    /// When target is Some, 32-bit targets automatically route to LLVM.
+    pub fn with_provider_and_target(
+        backend: JitBackend,
+        provider: Arc<dyn RuntimeSymbolProvider>,
+        target: Option<simple_common::target::Target>,
+    ) -> Result<Self, String> {
         let resolved = match backend {
-            JitBackend::Auto => JitBackend::auto_select(),
+            JitBackend::Auto => {
+                if let Some(ref t) = target {
+                    JitBackend::for_target(t)
+                } else {
+                    JitBackend::auto_select()
+                }
+            }
             other => other,
         };
 
@@ -83,7 +116,9 @@ impl LocalExecutionManager {
             }
             #[cfg(feature = "llvm")]
             JitBackend::Llvm => {
-                let jit = super::llvm_jit::LlvmJitCompiler::new().map_err(|e| format!("LLVM JIT init: {}", e))?;
+                let t = target.unwrap_or_else(simple_common::target::Target::host);
+                let jit = super::llvm_jit::LlvmJitCompiler::new_for_target(t)
+                    .map_err(|e| format!("LLVM JIT init: {}", e))?;
                 JitBackendImpl::Llvm(jit)
             }
             #[cfg(not(feature = "llvm"))]
@@ -96,6 +131,15 @@ impl LocalExecutionManager {
             backend: backend_impl,
             backend_kind: resolved,
         })
+    }
+
+    /// Create for a specific target (auto-selects best backend).
+    pub fn for_target(target: simple_common::target::Target) -> Result<Self, String> {
+        Self::with_provider_and_target(
+            JitBackend::Auto,
+            default_runtime_provider(),
+            Some(target),
+        )
     }
 
     /// Create with Cranelift backend (convenience).
@@ -242,5 +286,66 @@ impl ExecutionManager for LocalExecutionManager {
             #[cfg(not(feature = "llvm"))]
             JitBackend::Llvm => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_common::target::{Target, TargetArch, TargetOs};
+
+    #[test]
+    fn test_backend_selection_64bit_targets() {
+        let x86_64 = Target { arch: TargetArch::X86_64, os: TargetOs::Linux, ..Target::host() };
+        assert_eq!(JitBackend::for_target(&x86_64), JitBackend::Cranelift);
+
+        let aarch64 = Target { arch: TargetArch::Aarch64, os: TargetOs::Linux, ..Target::host() };
+        assert_eq!(JitBackend::for_target(&aarch64), JitBackend::Cranelift);
+
+        let rv64 = Target { arch: TargetArch::Riscv64, os: TargetOs::Linux, ..Target::host() };
+        assert_eq!(JitBackend::for_target(&rv64), JitBackend::Cranelift);
+    }
+
+    #[test]
+    fn test_backend_selection_32bit_targets() {
+        let x86_32 = Target { arch: TargetArch::X86, os: TargetOs::Linux, ..Target::host() };
+        let rv32 = Target { arch: TargetArch::Riscv32, os: TargetOs::Linux, ..Target::host() };
+        let arm32 = Target { arch: TargetArch::Arm, os: TargetOs::Linux, ..Target::host() };
+
+        #[cfg(feature = "llvm")]
+        {
+            assert_eq!(JitBackend::for_target(&x86_32), JitBackend::Llvm);
+            assert_eq!(JitBackend::for_target(&rv32), JitBackend::Llvm);
+            assert_eq!(JitBackend::for_target(&arm32), JitBackend::Llvm);
+        }
+        #[cfg(not(feature = "llvm"))]
+        {
+            assert_eq!(JitBackend::for_target(&x86_32), JitBackend::Cranelift);
+            assert_eq!(JitBackend::for_target(&rv32), JitBackend::Cranelift);
+            assert_eq!(JitBackend::for_target(&arm32), JitBackend::Cranelift);
+        }
+    }
+
+    #[test]
+    fn test_auto_select_host() {
+        let em = LocalExecutionManager::auto();
+        assert!(em.is_ok());
+        assert_eq!(em.unwrap().backend_kind(), JitBackend::Cranelift);
+    }
+
+    #[test]
+    fn test_for_target_host() {
+        let em = LocalExecutionManager::for_target(Target::host());
+        assert!(em.is_ok());
+        assert_eq!(em.unwrap().backend_kind(), JitBackend::Cranelift);
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn test_for_target_32bit_uses_llvm() {
+        let x86_32 = Target { arch: TargetArch::X86, os: TargetOs::Linux, ..Target::host() };
+        let em = LocalExecutionManager::for_target(x86_32);
+        assert!(em.is_ok());
+        assert_eq!(em.unwrap().backend_kind(), JitBackend::Llvm);
     }
 }

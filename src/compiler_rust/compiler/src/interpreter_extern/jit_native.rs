@@ -54,6 +54,60 @@ pub fn rt_jit_create(_args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// rt_jit_create_for_target(arch: text) -> i64
+/// Creates a JIT instance targeting a specific architecture.
+/// arch: "x86_64", "x86_32", "aarch64", "arm32", "riscv64", "riscv32"
+/// Routes 32-bit targets through LLVM, 64-bit through Cranelift.
+/// Returns handle (>0) or -1 on failure.
+pub fn rt_jit_create_for_target(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Ok(Value::Int(-1));
+    }
+    let arch_name = value_to_str(&args[0]);
+    let target = match arch_name_to_target(&arch_name) {
+        Some(t) => t,
+        None => return Ok(Value::Int(-2)),
+    };
+    match LocalExecutionManager::for_target(target) {
+        Ok(em) => {
+            let handle = next_handle();
+            JIT_INSTANCES.lock().unwrap().insert(handle, em);
+            Ok(Value::Int(handle))
+        }
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+fn arch_name_to_target(name: &str) -> Option<simple_common::target::Target> {
+    use simple_common::target::{Target, TargetArch};
+    let host = Target::host();
+    let arch = match name {
+        "x86_64" => TargetArch::X86_64,
+        "x86_32" | "x86" | "i686" => TargetArch::X86,
+        "aarch64" | "arm64" => TargetArch::Aarch64,
+        "arm32" | "arm" | "armv7" => TargetArch::Arm,
+        "riscv64" | "rv64" => TargetArch::Riscv64,
+        "riscv32" | "rv32" => TargetArch::Riscv32,
+        "host" => return Some(host),
+        _ => return None,
+    };
+    Some(Target { arch, ..host })
+}
+
+/// rt_jit_backend_name(handle: i64) -> text
+/// Returns the backend name ("cranelift-jit" or "llvm-jit") for a JIT instance.
+pub fn rt_jit_backend_name(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Ok(Value::Str("invalid".into()));
+    }
+    let handle = value_to_i64(&args[0]);
+    let instances = JIT_INSTANCES.lock().unwrap();
+    match instances.get(&handle) {
+        Some(em) => Ok(Value::Str(em.backend_name().to_string())),
+        None => Ok(Value::Str("invalid".into())),
+    }
+}
+
 /// rt_jit_compile_source(handle: i64, source: text) -> text
 /// Compiles Simple source through full pipeline. Returns "" on success, error on failure.
 pub fn rt_jit_compile_source(args: &[Value]) -> Result<Value, CompileError> {

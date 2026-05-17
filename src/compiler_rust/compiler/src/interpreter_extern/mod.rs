@@ -794,12 +794,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_is_debug_mode_enabled", system::rt_is_debug_mode_enabled as ExternFn);
     m.insert("rt_is_error", ffi_value::rt_is_error_fn as ExternFn);
     m.insert("rt_is_macro_trace_enabled", system::rt_is_macro_trace_enabled as ExternFn);
+    m.insert("rt_jit_backend_name", jit_native::rt_jit_backend_name as ExternFn);
     m.insert("rt_jit_call_i64_i64", jit_native::rt_jit_call_i64_i64 as ExternFn);
     m.insert("rt_jit_call_i64", jit_native::rt_jit_call_i64 as ExternFn);
     m.insert("rt_jit_call_void", jit_native::rt_jit_call_void as ExternFn);
     m.insert("rt_jit_cleanup", jit_native::rt_jit_cleanup as ExternFn);
     m.insert("rt_jit_compile_source", jit_native::rt_jit_compile_source as ExternFn);
     m.insert("rt_jit_create", jit_native::rt_jit_create as ExternFn);
+    m.insert("rt_jit_create_for_target", jit_native::rt_jit_create_for_target as ExternFn);
     m.insert("rt_jit_has_function", jit_native::rt_jit_has_function as ExternFn);
     m.insert("rt_math_acos", math::rt_math_acos_fn as ExternFn);
     m.insert("rt_math_asin", math::rt_math_asin_fn as ExternFn);

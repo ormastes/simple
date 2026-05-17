@@ -25,6 +25,7 @@ pub struct LlvmJitCompiler {
     context: &'static Context,
     execution_engine: Option<ExecutionEngine<'static>>,
     compiled_funcs: HashMap<String, u64>,
+    target: simple_common::target::Target,
 }
 
 // Safety: LlvmJitCompiler owns its data and function pointers are valid
@@ -32,11 +33,31 @@ pub struct LlvmJitCompiler {
 unsafe impl Send for LlvmJitCompiler {}
 
 impl LlvmJitCompiler {
-    /// Create a new LLVM JIT compiler.
+    /// Create a new LLVM JIT compiler targeting the host.
     pub fn new() -> Result<Self, String> {
-        // Initialize LLVM targets for the host
-        inkwell::targets::Target::initialize_native(&InitializationConfig::default())
-            .map_err(|e| format!("LLVM native init: {}", e))?;
+        Self::new_for_target(simple_common::target::Target::host())
+    }
+
+    /// Create an LLVM JIT compiler for a specific target.
+    /// Initializes the appropriate LLVM target backend.
+    pub fn new_for_target(target: simple_common::target::Target) -> Result<Self, String> {
+        use simple_common::target::TargetArch;
+        match target.arch {
+            TargetArch::X86 | TargetArch::X86_64 => {
+                inkwell::targets::Target::initialize_x86(&InitializationConfig::default());
+            }
+            TargetArch::Aarch64 | TargetArch::Arm => {
+                inkwell::targets::Target::initialize_arm(&InitializationConfig::default());
+                inkwell::targets::Target::initialize_aarch64(&InitializationConfig::default());
+            }
+            TargetArch::Riscv32 | TargetArch::Riscv64 => {
+                inkwell::targets::Target::initialize_riscv(&InitializationConfig::default());
+            }
+            _ => {
+                inkwell::targets::Target::initialize_native(&InitializationConfig::default())
+                    .map_err(|e| format!("LLVM native init: {}", e))?;
+            }
+        }
 
         let context = Box::leak(Box::new(Context::create()));
 
@@ -44,6 +65,7 @@ impl LlvmJitCompiler {
             context,
             execution_engine: None,
             compiled_funcs: HashMap::new(),
+            target,
         })
     }
 
@@ -53,7 +75,7 @@ impl LlvmJitCompiler {
 
         // Set up the LLVM backend for compilation
         let backend =
-            LlvmBackend::new(simple_common::target::Target::host()).map_err(|e| format!("LLVM backend init: {}", e))?;
+            LlvmBackend::new(self.target.clone()).map_err(|e| format!("LLVM backend init: {}", e))?;
 
         // Initialize the backend's internal module and builder
         backend

@@ -1541,8 +1541,9 @@ mod vulkan_dlopen {
         pub(super) device_type: u32,
         pub(super) device_name: [u8; 256],
         pub(super) pipeline_cache_uuid: [u8; 16],
-        // limits and sparse properties omitted — we only read device_name
-        pub(super) _limits_and_sparse: [u8; 504],
+        // VkPhysicalDeviceLimits (504 bytes) + VkPhysicalDeviceSparseProperties (20 bytes)
+        // Both are written by vkGetPhysicalDeviceProperties; we only read device_name above.
+        pub(super) _limits_and_sparse: [u8; 524],
     }
 
     pub struct VkFns {
@@ -2050,7 +2051,7 @@ pub fn rt_vulkan_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
                 device_type: 0,
                 device_name: [0u8; 256],
                 pipeline_cache_uuid: [0u8; 16],
-                _limits_and_sparse: [0u8; 504],
+                _limits_and_sparse: [0u8; 524],
             };
             unsafe {
                 (s.fns.get_physical_device_properties)(pd, &mut props);
@@ -2082,7 +2083,7 @@ pub fn rt_vulkan_alloc_buffer_fn(args: &[Value]) -> Result<Value, CompileError> 
             p_next: ptr::null(),
             flags: 0,
             size,
-            usage: 0x02 | 0x01, // STORAGE_BUFFER | TRANSFER_SRC
+            usage: 0x20 | 0x02 | 0x01, // STORAGE_BUFFER | TRANSFER_DST | TRANSFER_SRC
             sharing_mode: 0,
             queue_family_index_count: 0,
             p_queue_family_indices: ptr::null(),
@@ -2176,6 +2177,9 @@ pub fn rt_vulkan_compile_glsl_fn(args: &[Value]) -> Result<Value, CompileError> 
         let src_c = match std::ffi::CString::new(src) {
             Ok(c) => c,
             Err(_) => {
+                if !opts.is_null() {
+                    (shaderc.compile_options_release)(opts);
+                }
                 (shaderc.compiler_release)(compiler);
                 return Ok(Value::Int(0));
             }
