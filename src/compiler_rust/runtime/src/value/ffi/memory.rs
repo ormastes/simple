@@ -2,7 +2,6 @@
 //! rt_ptr_to_value/rt_value_to_ptr stay in Rust (RuntimeValue internals).
 
 use crate::value::core::RuntimeValue;
-use crate::value::heap::HeapHeader;
 
 mod c_ffi {
     extern "C" {
@@ -43,18 +42,15 @@ pub fn rt_memset(dst: *mut u8, val: i8, n: i64) -> *mut u8 { unsafe { c_ffi::rt_
 #[inline(always)]
 pub fn rt_memcpy(dst: *mut u8, src: *const u8, n: i64) -> *mut u8 { unsafe { c_ffi::rt_memcpy(dst, src, n) } }
 
-#[no_mangle]
-pub extern "C" fn rt_ptr_to_value(ptr: *mut u8) -> RuntimeValue {
-    if ptr.is_null() {
-        return RuntimeValue::NIL;
+mod c_ffi_mem {
+    use crate::value::core::RuntimeValue;
+    extern "C" {
+        pub(super) fn rt_ptr_to_value(ptr: *mut u8) -> RuntimeValue;
+        pub(super) fn rt_value_to_ptr(v: RuntimeValue) -> *mut u8;
     }
-    unsafe { RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader) }
 }
 
-#[no_mangle]
-pub extern "C" fn rt_value_to_ptr(v: RuntimeValue) -> *mut u8 {
-    if !v.is_heap() {
-        return std::ptr::null_mut();
-    }
-    v.as_heap_ptr() as *mut u8
-}
+#[inline(always)]
+pub fn rt_ptr_to_value(ptr: *mut u8) -> RuntimeValue { unsafe { c_ffi_mem::rt_ptr_to_value(ptr) } }
+#[inline(always)]
+pub fn rt_value_to_ptr(v: RuntimeValue) -> *mut u8 { unsafe { c_ffi_mem::rt_value_to_ptr(v) } }

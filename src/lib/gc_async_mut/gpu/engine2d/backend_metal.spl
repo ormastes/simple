@@ -10,6 +10,7 @@
 # Usage:
 #   use std.gpu.engine2d.backend_metal.{MetalBackend}
 
+use std.gpu.engine2d.metal_session.{MetalSession}
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
@@ -22,7 +23,6 @@ use std.gpu.engine2d.backend_metal_helpers.{
     _pixels_to_bytes, _i64, _i64_from_u32, _to_u32, _to_i32,
     _i32_to_u8, _u8_to_i32
 }
-use std.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -37,13 +37,9 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_rect_blend_mode
 }
 use std.nogc_sync_mut.io.metal_ffi.{
-    metal_ffi_init, metal_ffi_is_available, metal_ffi_device_count,
-    metal_ffi_create_device, metal_ffi_destroy_device,
+    metal_ffi_is_available,
     metal_ffi_alloc_buffer, metal_ffi_free_buffer,
-    metal_ffi_buffer_upload, metal_ffi_compile_shader,
-    metal_ffi_destroy_shader, metal_ffi_create_compute_pipeline,
-    metal_ffi_destroy_pipeline, metal_ffi_create_command_queue,
-    metal_ffi_destroy_command_queue,
+    metal_ffi_buffer_upload,
     metal_ffi_create_command_buffer, metal_ffi_commit_command_buffer,
     metal_ffi_wait_completed, metal_ffi_create_compute_encoder,
     metal_ffi_end_compute_encoder, metal_ffi_set_buffer, metal_ffi_set_bytes,
@@ -74,20 +70,8 @@ class MetalBackend:
     host_buf: [u32]
     w: i32
     h: i32
-    device: i64               # Metal device handle
-    command_queue: i64         # Persistent command queue
-    d_framebuffer: i64         # Device buffer for framebuffer
-    shader_lib: i64            # Compiled MSL shader library
-    pipe_clear: i64            # Compute pipeline: clear
-    pipe_rect_filled: i64      # Compute pipeline: filled rect
-    pipe_rect_outline: i64     # Compute pipeline: rect outline
-    pipe_line: i64             # Compute pipeline: line
-    pipe_circle: i64           # Compute pipeline: circle outline
-    pipe_circle_filled: i64    # Compute pipeline: filled circle
-    pipe_rounded_rect: i64     # Compute pipeline: rounded rect
-    pipe_triangle: i64         # Compute pipeline: filled triangle
-    pipe_gradient: i64         # Compute pipeline: gradient rect
-    pipe_blit: i64             # Compute pipeline: image blit
+    session: MetalSession       # Shared GPU context (device + queue + shaders + pipelines)
+    d_framebuffer: i64          # Per-surface device buffer for framebuffer
     clip_x: i32
     clip_y: i32
     clip_w: i32
@@ -107,20 +91,8 @@ class MetalBackend:
             host_buf: [],
             w: 0,
             h: 0,
-            device: 0,
-            command_queue: 0,
+            session: MetalSession.create(),
             d_framebuffer: 0,
-            shader_lib: 0,
-            pipe_clear: 0,
-            pipe_rect_filled: 0,
-            pipe_rect_outline: 0,
-            pipe_line: 0,
-            pipe_circle: 0,
-            pipe_circle_filled: 0,
-            pipe_rounded_rect: 0,
-            pipe_triangle: 0,
-            pipe_gradient: 0,
-            pipe_blit: 0,
             clip_x: 0,
             clip_y: 0,
             clip_w: 0,
@@ -141,133 +113,22 @@ impl RenderBackend for MetalBackend:
         "metal"
 
     me init(width: i32, height: i32) -> bool:
-        # Platform guard: Metal is only available on macOS/iOS.
-        # On non-macOS the rt_metal_is_available() stub returns false.
-        if not metal_ffi_is_available():
-            return false
-
+        """Initialize with an internally-created session (LegacyNoSession mode)."""
         val t0 = rt_time_now_monotonic_ms()
-
-        val init_ok = metal_ffi_init()
-        if not init_ok:
+        self.session = MetalSession.create()
+        if not self.session.init():
             return false
-
-        if metal_ffi_device_count() < 1:
-            return false
-
-        self.w = width
-        self.h = height
-
-        # Create Metal device (device 0 = default GPU)
-        self.device = metal_ffi_create_device(0)
-        if self.device == 0:
-            return false
-
-        # Create persistent command queue
-        self.command_queue = metal_ffi_create_command_queue(self.device)
-        if self.command_queue == 0:
-            metal_ffi_destroy_device(self.device)
-            self.device = 0
-            return false
-
-        # Allocate device framebuffer (4 bytes per pixel = u32 ARGB)
-        val fb_size = _i64(width) * _i64(height) * 4
-        self.d_framebuffer = metal_ffi_alloc_buffer(self.device, fb_size)
-        if self.d_framebuffer == 0:
-            metal_ffi_destroy_command_queue(self.command_queue)
-            metal_ffi_destroy_device(self.device)
-            self.command_queue = 0
-            self.device = 0
-            return false
-
-        # Allocate host buffer
-        val total = width * height
-        self.host_buf = [0u32; total]
-
-        # Compile MSL shader library
-        self.shader_lib = metal_ffi_compile_shader(self.device, _engine2d_msl())
-        if self.shader_lib == 0:
-            metal_ffi_free_buffer(self.d_framebuffer)
-            metal_ffi_destroy_command_queue(self.command_queue)
-            metal_ffi_destroy_device(self.device)
-            self.d_framebuffer = 0
-            self.command_queue = 0
-            self.device = 0
-            return false
-
-        # Create compute pipelines for each kernel
-        self.pipe_clear = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_clear")
-        self.pipe_rect_filled = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_filled")
-        self.pipe_rect_outline = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_outline")
-        self.pipe_line = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_line")
-        self.pipe_circle = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle")
-        self.pipe_circle_filled = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle_filled")
-        self.pipe_rounded_rect = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rounded_rect")
-        self.pipe_triangle = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_triangle_filled")
-        self.pipe_gradient = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect")
-        self.pipe_blit = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_blit_image")
-
-        self.clip_x = 0
-        self.clip_y = 0
-        self.clip_w = width
-        self.clip_h = height
-        self.clip_enabled = false
-        self.initialized = true
-        self.dirty = false
-        self.init_ms = rt_time_now_monotonic_ms() - t0
-        self.command_ms = 0
-        true
+        self._init_surface(width, height, t0)
 
     me shutdown():
-        # Destroy pipelines
-        if self.pipe_clear != 0:
-            metal_ffi_destroy_pipeline(self.pipe_clear)
-            self.pipe_clear = 0
-        if self.pipe_rect_filled != 0:
-            metal_ffi_destroy_pipeline(self.pipe_rect_filled)
-            self.pipe_rect_filled = 0
-        if self.pipe_rect_outline != 0:
-            metal_ffi_destroy_pipeline(self.pipe_rect_outline)
-            self.pipe_rect_outline = 0
-        if self.pipe_line != 0:
-            metal_ffi_destroy_pipeline(self.pipe_line)
-            self.pipe_line = 0
-        if self.pipe_circle != 0:
-            metal_ffi_destroy_pipeline(self.pipe_circle)
-            self.pipe_circle = 0
-        if self.pipe_circle_filled != 0:
-            metal_ffi_destroy_pipeline(self.pipe_circle_filled)
-            self.pipe_circle_filled = 0
-        if self.pipe_rounded_rect != 0:
-            metal_ffi_destroy_pipeline(self.pipe_rounded_rect)
-            self.pipe_rounded_rect = 0
-        if self.pipe_triangle != 0:
-            metal_ffi_destroy_pipeline(self.pipe_triangle)
-            self.pipe_triangle = 0
-        if self.pipe_gradient != 0:
-            metal_ffi_destroy_pipeline(self.pipe_gradient)
-            self.pipe_gradient = 0
-        if self.pipe_blit != 0:
-            metal_ffi_destroy_pipeline(self.pipe_blit)
-            self.pipe_blit = 0
-
-        # Destroy shader library
-        if self.shader_lib != 0:
-            metal_ffi_destroy_shader(self.shader_lib)
-            self.shader_lib = 0
-
-        # Free framebuffer
+        # Free per-surface framebuffer
         if self.d_framebuffer != 0:
             metal_ffi_free_buffer(self.d_framebuffer)
             self.d_framebuffer = 0
 
-        # Destroy command queue and device
-        if self.command_queue != 0:
-            metal_ffi_destroy_command_queue(self.command_queue)
-            self.command_queue = 0
-        if self.device != 0:
-            metal_ffi_destroy_device(self.device)
-            self.device = 0
+        # Release our reference to the shared session; cleans up GPU resources
+        # (device/queue/shaders/pipelines) when refcount hits zero
+        self.session.release()
 
         self.host_buf = []
         self.w = 0
@@ -282,21 +143,21 @@ impl RenderBackend for MetalBackend:
         val total = _i64(self.w) * _i64(self.h)
         val block_size: i64 = 256
         val grid_size = (total + block_size - 1) / block_size
-        self._dispatch_1d(self.pipe_clear, grid_size * block_size, block_size, params)
+        self._dispatch_1d(self.session.pipe_clear, grid_size * block_size, block_size, params)
         self.dirty = true
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         val params = _pack_rect_params(x, y, w, h, color, self.w, self.h)
         val grid_dim = _grid_for_rect(w, h)
         val block = _block_for_rect()
-        self._dispatch_2d(self.pipe_rect_outline, grid_dim, block, params)
+        self._dispatch_2d(self.session.pipe_rect_outline, grid_dim, block, params)
         self.dirty = true
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         val params = _pack_rect_params(x, y, w, h, color, self.w, self.h)
         val grid_dim = _grid_for_rect(w, h)
         val block = _block_for_rect()
-        self._dispatch_2d(self.pipe_rect_filled, grid_dim, block, params)
+        self._dispatch_2d(self.session.pipe_rect_filled, grid_dim, block, params)
         self.dirty = true
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
@@ -314,7 +175,7 @@ impl RenderBackend for MetalBackend:
         val params = _pack_line_params(x1, y1, x2, y2, color, thickness, self.w, self.h)
         val block_size: i64 = 256
         val grid_size = (_i64(line_len) + block_size - 1) / block_size
-        self._dispatch_1d(self.pipe_line, grid_size * block_size, block_size, params)
+        self._dispatch_1d(self.session.pipe_line, grid_size * block_size, block_size, params)
         self.dirty = true
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
@@ -323,7 +184,7 @@ impl RenderBackend for MetalBackend:
         val params = _pack_circle_params(cx, cy, r, color, self.w, self.h, 0)
         val grid_dim = _grid_for_rect(bw, bh)
         val block = _block_for_rect()
-        self._dispatch_2d(self.pipe_circle, grid_dim, block, params)
+        self._dispatch_2d(self.session.pipe_circle, grid_dim, block, params)
         self.dirty = true
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
@@ -332,14 +193,14 @@ impl RenderBackend for MetalBackend:
         val params = _pack_circle_params(cx, cy, r, color, self.w, self.h, 1)
         val grid_dim = _grid_for_rect(bw, bh)
         val block = _block_for_rect()
-        self._dispatch_2d(self.pipe_circle_filled, grid_dim, block, params)
+        self._dispatch_2d(self.session.pipe_circle_filled, grid_dim, block, params)
         self.dirty = true
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         val params = _pack_rounded_rect_params(x, y, w, h, radius, color, self.w, self.h)
         val grid_dim = _grid_for_rect(w, h)
         val block = _block_for_rect()
-        self._dispatch_2d(self.pipe_rounded_rect, grid_dim, block, params)
+        self._dispatch_2d(self.session.pipe_rounded_rect, grid_dim, block, params)
         self.dirty = true
 
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
@@ -362,14 +223,14 @@ impl RenderBackend for MetalBackend:
         val params = _pack_triangle_params(x1, y1, x2, y2, x3, y3, color, self.w, self.h, min_x, min_y)
         val grid_dim = _grid_for_rect(bw, bh)
         val block = _block_for_rect()
-        self._dispatch_2d(self.pipe_triangle, grid_dim, block, params)
+        self._dispatch_2d(self.session.pipe_triangle, grid_dim, block, params)
         self.dirty = true
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         val params = _pack_gradient_params(x, y, w, h, top_color, bottom_color, self.w, self.h)
         val grid_dim = _grid_for_rect(w, h)
         val block = _block_for_rect()
-        self._dispatch_2d(self.pipe_gradient, grid_dim, block, params)
+        self._dispatch_2d(self.session.pipe_gradient, grid_dim, block, params)
         self.dirty = true
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
@@ -384,7 +245,7 @@ impl RenderBackend for MetalBackend:
         # a blit kernel to copy it into the framebuffer
         val pixel_count = _i64(w) * _i64(h)
         val byte_size = pixel_count * 4
-        val d_src = metal_ffi_alloc_buffer(self.device, byte_size)
+        val d_src = metal_ffi_alloc_buffer(self.session.device, byte_size)
         if d_src != 0:
             # Upload source pixels to device
             val upload_data = _pixels_to_bytes(pixels, pixel_count)
@@ -393,7 +254,7 @@ impl RenderBackend for MetalBackend:
             val params = _pack_blit_params(x, y, w, h, self.w, self.h)
             val grid_dim = _grid_for_rect(w, h)
             val block = _block_for_rect()
-            self._dispatch_blit(self.pipe_blit, grid_dim, block, params, d_src)
+            self._dispatch_blit(self.session.pipe_blit, grid_dim, block, params, d_src)
             metal_ffi_free_buffer(d_src)
         self.dirty = true
 
@@ -551,7 +412,7 @@ impl Engine2DExtended for MetalBackend:
 
 fn _metal_run_kernel_1d(backend: MetalBackend, pipeline: i64, total_threads: i64, block_size: i64, params: [u8]):
     """Encode + commit a 1-D Metal compute dispatch and wait until completed."""
-    val cmd_buf = metal_ffi_create_command_buffer(backend.command_queue)
+    val cmd_buf = metal_ffi_create_command_buffer(backend.session.command_queue)
     if cmd_buf == 0:
         return
     val encoder = metal_ffi_create_compute_encoder(cmd_buf)
@@ -568,7 +429,7 @@ fn _metal_run_kernel_1d(backend: MetalBackend, pipeline: i64, total_threads: i64
 
 fn _metal_run_kernel_2d(backend: MetalBackend, pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8]):
     """Encode + commit a 2-D Metal compute dispatch and wait until completed."""
-    val cmd_buf = metal_ffi_create_command_buffer(backend.command_queue)
+    val cmd_buf = metal_ffi_create_command_buffer(backend.session.command_queue)
     if cmd_buf == 0:
         return
     val encoder = metal_ffi_create_compute_encoder(cmd_buf)
@@ -585,7 +446,7 @@ fn _metal_run_kernel_2d(backend: MetalBackend, pipeline: i64, grid_dim: GridDim,
 
 fn _metal_run_blit_kernel(backend: MetalBackend, pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8], d_src: i64):
     """Encode + commit a blit kernel with an extra source buffer binding."""
-    val cmd_buf = metal_ffi_create_command_buffer(backend.command_queue)
+    val cmd_buf = metal_ffi_create_command_buffer(backend.session.command_queue)
     if cmd_buf == 0:
         return
     val encoder = metal_ffi_create_compute_encoder(cmd_buf)
@@ -651,6 +512,45 @@ fn _metal_draw_text_cpu_upload(backend: MetalBackend, x: i32, y: i32, text_val: 
 # matching each call site's invocation pattern.
 
 impl MetalBackend:
+
+    me init_with_session(width: i32, height: i32, session: MetalSession) -> bool:
+        """Initialize using an externally-provided shared session (ManagedShared mode).
+
+        The session's refcount is incremented so this backend holds its own
+        reference.  Call shutdown() to release it.
+        """
+        if not session.is_valid():
+            return false
+        val t0 = rt_time_now_monotonic_ms()
+        self.session = session.retain()
+        self._init_surface(width, height, t0)
+
+    me _init_surface(width: i32, height: i32, t0: i64) -> bool:
+        """Allocate the per-surface framebuffer and finish surface-level setup."""
+        self.w = width
+        self.h = height
+
+        # Allocate device framebuffer (4 bytes per pixel = u32 ARGB)
+        val fb_size = _i64(width) * _i64(height) * 4
+        self.d_framebuffer = metal_ffi_alloc_buffer(self.session.device, fb_size)
+        if self.d_framebuffer == 0:
+            self.session.release()
+            return false
+
+        # Allocate host buffer
+        val total = width * height
+        self.host_buf = [0u32; total]
+
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = width
+        self.clip_h = height
+        self.clip_enabled = false
+        self.initialized = true
+        self.dirty = false
+        self.init_ms = rt_time_now_monotonic_ms() - t0
+        self.command_ms = 0
+        true
 
     me _dispatch_1d(pipeline: i64, total_threads: i64, block_size: i64, params: [u8]):
         val tc0 = rt_time_now_monotonic_ms()

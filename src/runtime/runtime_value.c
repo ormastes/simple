@@ -29,3 +29,13 @@ bool rt_value_is_bool(RuntimeValue v) { return rv_is_bool(v); }
 bool rt_value_is_heap(RuntimeValue v) { return rv_is_heap(v); }
 uint8_t rt_value_type_tag(RuntimeValue v) { return (uint8_t)rv_tag(v); }
 bool rt_is_error(RuntimeValue v) { return rv_is_error(v); }
+
+RuntimeValue rt_ptr_to_value(uint8_t *ptr) {
+    if (!ptr) return RT_NIL;
+    return (uint64_t)(uintptr_t)ptr | TAG_HEAP;
+}
+
+uint8_t *rt_value_to_ptr(RuntimeValue v) {
+    if (rv_tag(v) != TAG_HEAP) return (uint8_t *)0;
+    return (uint8_t *)(uintptr_t)(v & ~(uint64_t)TAG_MASK);
+}

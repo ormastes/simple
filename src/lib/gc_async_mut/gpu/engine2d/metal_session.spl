@@ -1,0 +1,186 @@
+# Metal Session
+#
+# Shared GPU state extracted from MetalBackend so multiple Engine2D surfaces
+# can share one Metal device, command queue, shader library, and compute
+# pipelines.  Each surface still owns its own per-surface d_framebuffer.
+#
+# `class` in Simple uses reference semantics (like most OO classes), so
+# MetalSession instances can be retained by multiple MetalBackend surfaces
+# and the refcount field correctly tracks live references.
+#
+# Usage:
+#   use std.gpu.engine2d.metal_session.{MetalSession}
+
+use std.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
+use std.nogc_sync_mut.io.metal_ffi.{
+    metal_ffi_init, metal_ffi_is_available, metal_ffi_device_count,
+    metal_ffi_create_device, metal_ffi_destroy_device,
+    metal_ffi_compile_shader, metal_ffi_destroy_shader,
+    metal_ffi_create_compute_pipeline, metal_ffi_destroy_pipeline,
+    metal_ffi_create_command_queue, metal_ffi_destroy_command_queue
+}
+
+# ============================================================================
+# MetalSession
+# ============================================================================
+
+class MetalSession:
+    """Shared Metal GPU context: device + command queue + shader library + pipelines.
+
+    Multiple MetalBackend surfaces can share a single MetalSession, avoiding
+    the cost of redundant device creation and shader compilation.
+
+    Lifecycle:
+      val s = MetalSession.create()
+      if s.init():
+          # hand s (or s.retain()) to each MetalBackend via init_with_session()
+          ...
+          s.release()   # each backend calls release() in shutdown()
+    """
+
+    device: i64               # MTLDevice handle
+    command_queue: i64         # MTLCommandQueue handle
+    shader_lib: i64            # Compiled MSL shader library handle
+    pipe_clear: i64            # Compute pipeline: clear
+    pipe_rect_filled: i64      # Compute pipeline: filled rect
+    pipe_rect_outline: i64     # Compute pipeline: rect outline
+    pipe_line: i64             # Compute pipeline: line
+    pipe_circle: i64           # Compute pipeline: circle outline
+    pipe_circle_filled: i64    # Compute pipeline: filled circle
+    pipe_rounded_rect: i64     # Compute pipeline: rounded rect
+    pipe_triangle: i64         # Compute pipeline: filled triangle
+    pipe_gradient: i64         # Compute pipeline: gradient rect
+    pipe_blit: i64             # Compute pipeline: image blit
+    refcount: i32              # Live reference count
+    valid: bool                # True after a successful init()
+
+    static fn create() -> MetalSession:
+        """Return a zero-initialised, uninitialised session. Call init() before use."""
+        MetalSession(
+            device: 0,
+            command_queue: 0,
+            shader_lib: 0,
+            pipe_clear: 0,
+            pipe_rect_filled: 0,
+            pipe_rect_outline: 0,
+            pipe_line: 0,
+            pipe_circle: 0,
+            pipe_circle_filled: 0,
+            pipe_rounded_rect: 0,
+            pipe_triangle: 0,
+            pipe_gradient: 0,
+            pipe_blit: 0,
+            refcount: 0,
+            valid: false
+        )
+
+    me init() -> bool:
+        """Create device, command queue, compile shaders, and create all pipelines.
+
+        Returns true on success.  On failure all handles are zeroed and valid
+        remains false.
+        """
+        if not metal_ffi_is_available():
+            return false
+
+        if not metal_ffi_init():
+            return false
+
+        if metal_ffi_device_count() < 1:
+            return false
+
+        # Metal device (index 0 = system default GPU)
+        self.device = metal_ffi_create_device(0)
+        if self.device == 0:
+            return false
+
+        # Persistent command queue
+        self.command_queue = metal_ffi_create_command_queue(self.device)
+        if self.command_queue == 0:
+            metal_ffi_destroy_device(self.device)
+            self.device = 0
+            return false
+
+        # Compile MSL shader library
+        self.shader_lib = metal_ffi_compile_shader(self.device, _engine2d_msl())
+        if self.shader_lib == 0:
+            metal_ffi_destroy_command_queue(self.command_queue)
+            metal_ffi_destroy_device(self.device)
+            self.command_queue = 0
+            self.device = 0
+            return false
+
+        # Create all compute pipelines
+        self.pipe_clear        = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_clear")
+        self.pipe_rect_filled  = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_filled")
+        self.pipe_rect_outline = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_outline")
+        self.pipe_line         = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_line")
+        self.pipe_circle       = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle")
+        self.pipe_circle_filled = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle_filled")
+        self.pipe_rounded_rect = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rounded_rect")
+        self.pipe_triangle     = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_triangle_filled")
+        self.pipe_gradient     = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect")
+        self.pipe_blit         = metal_ffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_blit_image")
+
+        self.refcount = 1
+        self.valid = true
+        true
+
+    me retain() -> MetalSession:
+        """Increment the reference count and return self for convenient assignment."""
+        self.refcount = self.refcount + 1
+        self
+
+    me release():
+        """Decrement the reference count; destroy GPU resources when it reaches zero."""
+        if self.refcount <= 0:
+            return
+        self.refcount = self.refcount - 1
+        if self.refcount == 0:
+            self._cleanup()
+
+    me is_valid() -> bool:
+        self.valid and self.device != 0 and self.command_queue != 0
+
+    me _cleanup():
+        """Destroy all GPU objects. Called automatically by release() on zero refcount."""
+        if self.pipe_clear != 0:
+            metal_ffi_destroy_pipeline(self.pipe_clear)
+            self.pipe_clear = 0
+        if self.pipe_rect_filled != 0:
+            metal_ffi_destroy_pipeline(self.pipe_rect_filled)
+            self.pipe_rect_filled = 0
+        if self.pipe_rect_outline != 0:
+            metal_ffi_destroy_pipeline(self.pipe_rect_outline)
+            self.pipe_rect_outline = 0
+        if self.pipe_line != 0:
+            metal_ffi_destroy_pipeline(self.pipe_line)
+            self.pipe_line = 0
+        if self.pipe_circle != 0:
+            metal_ffi_destroy_pipeline(self.pipe_circle)
+            self.pipe_circle = 0
+        if self.pipe_circle_filled != 0:
+            metal_ffi_destroy_pipeline(self.pipe_circle_filled)
+            self.pipe_circle_filled = 0
+        if self.pipe_rounded_rect != 0:
+            metal_ffi_destroy_pipeline(self.pipe_rounded_rect)
+            self.pipe_rounded_rect = 0
+        if self.pipe_triangle != 0:
+            metal_ffi_destroy_pipeline(self.pipe_triangle)
+            self.pipe_triangle = 0
+        if self.pipe_gradient != 0:
+            metal_ffi_destroy_pipeline(self.pipe_gradient)
+            self.pipe_gradient = 0
+        if self.pipe_blit != 0:
+            metal_ffi_destroy_pipeline(self.pipe_blit)
+            self.pipe_blit = 0
+        if self.shader_lib != 0:
+            metal_ffi_destroy_shader(self.shader_lib)
+            self.shader_lib = 0
+        if self.command_queue != 0:
+            metal_ffi_destroy_command_queue(self.command_queue)
+            self.command_queue = 0
+        if self.device != 0:
+            metal_ffi_destroy_device(self.device)
+            self.device = 0
+        self.valid = false

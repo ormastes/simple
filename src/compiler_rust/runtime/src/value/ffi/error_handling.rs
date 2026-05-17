@@ -1,91 +1,25 @@
-//! Error handling FFI for runtime errors.
-//!
-//! Provides FFI functions for reporting runtime errors such as function not found
-//! and method not found. These are called from compiled code when runtime lookups fail.
-//!
-//! ## Usage Pattern
-//!
-//! 1. Compiled code attempts to call a function or method
-//! 2. If lookup fails, calls `rt_function_not_found` or `rt_method_not_found`
-//! 3. Error is printed to stderr
-//! 4. Returns NIL to allow caller to handle the error
-//!
-//! ## Error Handling Strategy
-//!
-//! These functions print errors to stderr but do not panic, allowing the caller
-//! to handle the error gracefully (e.g., by checking for NIL return value).
+//! Error handling FFI — implementations in src/runtime/runtime_error.c.
 
 use crate::value::core::RuntimeValue;
 
-/// Called when a function is not found at runtime.
-/// Prints an error message and returns NIL (caller should handle the error).
-///
-/// # Arguments
-/// * `name_ptr` - Pointer to function name string (UTF-8)
-/// * `name_len` - Length of function name
-///
-/// # Returns
-/// RuntimeValue::NIL
-///
-/// # Safety
-/// name_ptr must be a valid pointer to name_len bytes of UTF-8 data, or null.
-#[no_mangle]
-pub unsafe extern "C" fn rt_function_not_found(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
-    if name_ptr.is_null() {
-        eprintln!("Runtime error: Function not found (unknown name)");
-    } else {
-        let name_slice = std::slice::from_raw_parts(name_ptr, name_len as usize);
-        if let Ok(name_str) = std::str::from_utf8(name_slice) {
-            eprintln!("Runtime error: Function '{}' not found", name_str);
-        } else {
-            eprintln!("Runtime error: Function not found (invalid UTF-8 name)");
-        }
+mod c_ffi {
+    use crate::value::core::RuntimeValue;
+    extern "C" {
+        pub(super) fn rt_function_not_found(name_ptr: *const u8, name_len: u64) -> RuntimeValue;
+        pub(super) fn rt_method_not_found(
+            type_ptr: *const u8, type_len: u64,
+            method_ptr: *const u8, method_len: u64,
+        ) -> RuntimeValue;
     }
-    use crate::value::tags;
-    RuntimeValue::from_special(tags::SPECIAL_ERROR)
 }
 
-/// Called when a method is not found at runtime.
-/// Prints an error message and returns NIL.
-///
-/// # Arguments
-/// * `type_ptr` - Pointer to type name string (UTF-8)
-/// * `type_len` - Length of type name
-/// * `method_ptr` - Pointer to method name string (UTF-8)
-/// * `method_len` - Length of method name
-///
-/// # Returns
-/// RuntimeValue::NIL
-///
-/// # Safety
-/// type_ptr and method_ptr must be valid pointers to UTF-8 data, or null.
-#[no_mangle]
-pub unsafe extern "C" fn rt_method_not_found(
-    type_ptr: *const u8,
-    type_len: u64,
-    method_ptr: *const u8,
-    method_len: u64,
-) -> RuntimeValue {
-    let type_name = if type_ptr.is_null() {
-        "<unknown type>"
-    } else {
-        let slice = std::slice::from_raw_parts(type_ptr, type_len as usize);
-        std::str::from_utf8(slice).unwrap_or("<invalid UTF-8>")
-    };
-
-    let method_name = if method_ptr.is_null() {
-        "<unknown method>"
-    } else {
-        let slice = std::slice::from_raw_parts(method_ptr, method_len as usize);
-        std::str::from_utf8(slice).unwrap_or("<invalid UTF-8>")
-    };
-
-    eprintln!(
-        "Runtime error: Method '{}' not found on type '{}'",
-        method_name, type_name
-    );
-    use crate::value::tags;
-    RuntimeValue::from_special(tags::SPECIAL_ERROR)
+#[inline(always)]
+pub unsafe fn rt_function_not_found(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
+    c_ffi::rt_function_not_found(name_ptr, name_len)
+}
+#[inline(always)]
+pub unsafe fn rt_method_not_found(type_ptr: *const u8, type_len: u64, method_ptr: *const u8, method_len: u64) -> RuntimeValue {
+    c_ffi::rt_method_not_found(type_ptr, type_len, method_ptr, method_len)
 }
 
 #[cfg(test)]
