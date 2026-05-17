@@ -9,6 +9,8 @@ mod c_ffi {
         pub(super) fn rt_random_randint(min: i64, max: i64) -> i64;
         pub(super) fn rt_random_random() -> f64;
         pub(super) fn rt_random_uniform(min: f64, max: f64) -> f64;
+        #[link_name = "__c_rt_random_hex_buf"]
+        pub(super) fn random_hex_buf(out: *mut u8, byte_count: i64) -> i64;
     }
 }
 
@@ -29,15 +31,14 @@ pub fn rt_random_uniform(min: f64, max: f64) -> f64 { unsafe { c_ffi::rt_random_
 
 #[no_mangle]
 pub extern "C" fn rt_random_hex(len: i64) -> crate::value::RuntimeValue {
-    use rand::RngCore;
     let n = len.max(0) as usize;
-    let mut bytes = vec![0u8; n];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    let mut hex = String::with_capacity(n * 2);
-    for b in &bytes {
-        use std::fmt::Write;
-        let _ = write!(&mut hex, "{:02x}", b);
+    if n == 0 {
+        return unsafe { crate::value::collections::rt_string_new(std::ptr::null(), 0) };
     }
-    let hex_bytes = hex.as_bytes();
-    crate::value::collections::rt_string_new(hex_bytes.as_ptr(), hex_bytes.len() as u64)
+    let mut buf = vec![0u8; n * 2];
+    let written = unsafe { c_ffi::random_hex_buf(buf.as_mut_ptr(), n as i64) };
+    if written <= 0 {
+        return crate::value::RuntimeValue::NIL;
+    }
+    unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), written as u64) }
 }

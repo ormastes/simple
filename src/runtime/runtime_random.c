@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <time.h>
 
@@ -66,4 +67,47 @@ double rt_random_random(void) {
 
 double rt_random_uniform(double min, double max) {
     return min + rt_random_random() * (max - min);
+}
+
+/* Cryptographic random hex string generation.
+   Fills `out` with `hex_len` hex characters (from `hex_len/2` random bytes).
+   Uses getrandom() on Linux, /dev/urandom as fallback. */
+#include <unistd.h>
+#include <fcntl.h>
+#ifdef __linux__
+#include <sys/random.h>
+#endif
+
+static int _fill_random_bytes(uint8_t *buf, size_t len) {
+#ifdef __linux__
+    ssize_t ret = getrandom(buf, len, 0);
+    if (ret == (ssize_t)len) return 0;
+#endif
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, len);
+    close(fd);
+    return (n == (ssize_t)len) ? 0 : -1;
+}
+
+int64_t __c_rt_random_hex_buf(uint8_t *out, int64_t byte_count) {
+    if (byte_count <= 0 || !out) return 0;
+    size_t n = (size_t)byte_count;
+    uint8_t tmp[512];
+    uint8_t *bytes = (n <= sizeof(tmp)) ? tmp : (uint8_t *)malloc(n);
+    if (!bytes) return 0;
+
+    if (_fill_random_bytes(bytes, n) != 0) {
+        if (bytes != tmp) free(bytes);
+        return 0;
+    }
+
+    static const char hex[16] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        out[i * 2]     = hex[bytes[i] >> 4];
+        out[i * 2 + 1] = hex[bytes[i] & 0x0F];
+    }
+
+    if (bytes != tmp) free(bytes);
+    return (int64_t)(n * 2);
 }
