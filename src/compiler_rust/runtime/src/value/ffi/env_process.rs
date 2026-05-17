@@ -29,6 +29,14 @@ mod c_ffi_env {
         pub(super) fn platform_name(out_ptr: *mut *const u8) -> i64;
         #[link_name = "__c_rt_term_get_size"]
         pub(super) fn term_get_size(cols: *mut i32, rows: *mut i32);
+        #[link_name = "__c_rt_env_get_str"]
+        pub(super) fn env_get_str(name_ptr: *const u8, name_len: u64, out_ptr: *mut *const u8, out_len: *mut u64) -> i32;
+        #[link_name = "__c_rt_env_cwd"]
+        pub(super) fn env_cwd(out: *mut u8, out_cap: u64) -> i64;
+        #[link_name = "__c_rt_env_home"]
+        pub(super) fn env_home(out_ptr: *mut *const u8, out_len: *mut u64) -> i32;
+        #[link_name = "__c_rt_env_temp"]
+        pub(super) fn env_temp(out: *mut u8, out_cap: u64) -> i64;
     }
 }
 
@@ -132,22 +140,13 @@ pub extern "C" fn rt_exit(code: i32) -> ! {
 /// Get environment variable value
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_get(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
-    if name_ptr.is_null() {
-        return RuntimeValue::NIL;
-    }
-
-    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
-    let name_str = match std::str::from_utf8(name_bytes) {
-        Ok(s) => s,
-        Err(_) => return RuntimeValue::NIL,
-    };
-
-    match std::env::var(name_str) {
-        Ok(value) => {
-            let bytes = value.as_bytes();
-            rt_string_new(bytes.as_ptr(), bytes.len() as u64)
-        }
-        Err(_) => RuntimeValue::NIL,
+    if name_ptr.is_null() { return RuntimeValue::NIL; }
+    let mut out_ptr: *const u8 = std::ptr::null();
+    let mut out_len: u64 = 0;
+    if c_ffi_env::env_get_str(name_ptr, name_len, &mut out_ptr, &mut out_len) != 0 {
+        rt_string_new(out_ptr, out_len)
+    } else {
+        RuntimeValue::NIL
     }
 }
 
@@ -178,14 +177,9 @@ pub unsafe extern "C" fn rt_set_env(name_ptr: *const u8, name_len: u64, value_pt
 /// Get current working directory
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_cwd() -> RuntimeValue {
-    match std::env::current_dir() {
-        Ok(path) => {
-            let path_str = path.to_string_lossy();
-            let bytes = path_str.as_bytes();
-            rt_string_new(bytes.as_ptr(), bytes.len() as u64)
-        }
-        Err(_) => RuntimeValue::NIL,
-    }
+    let mut buf = [0u8; 4096];
+    let len = c_ffi_env::env_cwd(buf.as_mut_ptr(), buf.len() as u64);
+    if len > 0 { rt_string_new(buf.as_ptr(), len as u64) } else { RuntimeValue::NIL }
 }
 
 /// Get all environment variables as array of (key, value) tuples
@@ -243,22 +237,21 @@ pub unsafe extern "C" fn rt_env_remove(name_ptr: *const u8, name_len: u64) -> bo
 /// Get home directory path
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_home() -> RuntimeValue {
-    match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        Ok(home) => {
-            let bytes = home.as_bytes();
-            rt_string_new(bytes.as_ptr(), bytes.len() as u64)
-        }
-        Err(_) => RuntimeValue::NIL,
+    let mut out_ptr: *const u8 = std::ptr::null();
+    let mut out_len: u64 = 0;
+    if c_ffi_env::env_home(&mut out_ptr, &mut out_len) != 0 {
+        rt_string_new(out_ptr, out_len)
+    } else {
+        RuntimeValue::NIL
     }
 }
 
 /// Get temp directory path
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_temp() -> RuntimeValue {
-    let temp = std::env::temp_dir();
-    let path_str = temp.to_string_lossy();
-    let bytes = path_str.as_bytes();
-    rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+    let mut buf = [0u8; 4096];
+    let len = unsafe { c_ffi_env::env_temp(buf.as_mut_ptr(), buf.len() as u64) };
+    if len > 0 { rt_string_new(buf.as_ptr(), len as u64) } else { RuntimeValue::NIL }
 }
 
 // ============================================================================

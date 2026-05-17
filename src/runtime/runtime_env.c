@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 
 int64_t __c_rt_env_get_i64(const uint8_t *name_ptr, uint64_t name_len, int64_t default_value) {
     if (!name_ptr || name_len == 0) return default_value;
@@ -90,6 +91,52 @@ int64_t __c_rt_platform_name(const uint8_t **out_ptr) {
 #include <sys/ioctl.h>
 #include <unistd.h>
 #endif
+
+int32_t __c_rt_env_get_str(const uint8_t *name_ptr, uint64_t name_len,
+                            const uint8_t **out_ptr, uint64_t *out_len) {
+    if (!name_ptr || name_len == 0 || name_len > 4095) return 0;
+    char buf[4096];
+    memcpy(buf, name_ptr, (size_t)name_len);
+    buf[name_len] = '\0';
+    const char *val = getenv(buf);
+    if (!val) return 0;
+    *out_ptr = (const uint8_t *)val;
+    *out_len = (uint64_t)strlen(val);
+    return 1;
+}
+
+int64_t __c_rt_env_cwd(uint8_t *out, uint64_t out_cap) {
+    if (!out || out_cap == 0) return 0;
+    char *result = getcwd((char *)out, (size_t)out_cap);
+    if (!result) return 0;
+    return (int64_t)strlen(result);
+}
+
+int32_t __c_rt_env_home(const uint8_t **out_ptr, uint64_t *out_len) {
+    const char *val = getenv("HOME");
+#ifdef _WIN32
+    if (!val) val = getenv("USERPROFILE");
+#endif
+    if (!val) return 0;
+    *out_ptr = (const uint8_t *)val;
+    *out_len = (uint64_t)strlen(val);
+    return 1;
+}
+
+int64_t __c_rt_env_temp(uint8_t *out, uint64_t out_cap) {
+    const char *val = getenv("TMPDIR");
+    if (!val) val = getenv("TMP");
+    if (!val) val = getenv("TEMP");
+#ifdef _WIN32
+    if (!val) val = "C:\\Temp";
+#else
+    if (!val) val = "/tmp";
+#endif
+    size_t len = strlen(val);
+    if (len >= out_cap) return 0;
+    memcpy(out, val, len);
+    return (int64_t)len;
+}
 
 void __c_rt_term_get_size(int32_t *cols, int32_t *rows) {
     *cols = 80; *rows = 24;
