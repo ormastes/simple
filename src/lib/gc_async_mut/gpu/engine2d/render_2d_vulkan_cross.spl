@@ -1,0 +1,227 @@
+# Vulkan 2D Rendering — Cross-Architecture (RISC-V 64/32 + ARM 64/32)
+#
+# Manages Vulkan device selection and CPU scalar fallback for non-x86 targets.
+# Provides QEMU diagnostic command generation for each supported architecture.
+#
+# Backend selection:
+#   riscv64 — Vulkan via virtio-gpu-pci (QEMU) or native GPU
+#   riscv32 — scalar CPU only (no Vulkan silicon for rv32)
+#   aarch64 — Vulkan via virtio-gpu-pci (QEMU) / Mali / Adreno on real HW
+#   arm32   — scalar CPU only (OpenGL ES preferred; no Vulkan in this layer)
+#
+# Usage:
+#   use std.gpu.engine2d.render_2d_vulkan_cross.{VulkanCrossRenderer}
+#
+#   val r = VulkanCrossRenderer.create_for_target("riscv64")
+#   val err = r.init_device()
+#   if err == "":
+#       r.fill_rect(0, 0, 64, 64, 0xFFFF0000u32)
+#       r.present()
+#   print(r.get_backend_info())
+
+# ============================================================================
+# VulkanCrossTarget — arch capability record
+# ============================================================================
+
+class VulkanCrossTarget:
+    arch: text
+    bits: i64
+    vulkan_capable: bool
+    fallback_reason: text
+    qemu_cmd: text
+
+    static fn for_arch(arch: text) -> VulkanCrossTarget:
+        if arch == "riscv64":
+            return VulkanCrossTarget(
+                arch: "riscv64",
+                bits: 64,
+                vulkan_capable: true,
+                fallback_reason: "",
+                qemu_cmd: "qemu-system-riscv64 -M virt -device virtio-gpu-pci"
+            )
+        if arch == "riscv32":
+            return VulkanCrossTarget(
+                arch: "riscv32",
+                bits: 32,
+                vulkan_capable: false,
+                fallback_reason: "GPU unavailable on riscv32",
+                qemu_cmd: "qemu-system-riscv32 -M virt"
+            )
+        if arch == "aarch64":
+            return VulkanCrossTarget(
+                arch: "aarch64",
+                bits: 64,
+                vulkan_capable: true,
+                fallback_reason: "",
+                qemu_cmd: "qemu-system-aarch64 -M virt -device virtio-gpu-pci"
+            )
+        if arch == "arm32":
+            return VulkanCrossTarget(
+                arch: "arm32",
+                bits: 32,
+                vulkan_capable: false,
+                fallback_reason: "GLES preferred; scalar fallback in pure Simple layer",
+                qemu_cmd: "qemu-system-arm -M virt"
+            )
+        # Unknown arch — scalar fallback
+        VulkanCrossTarget(
+            arch: arch,
+            bits: 0,
+            vulkan_capable: false,
+            fallback_reason: "unknown architecture",
+            qemu_cmd: "qemu-system-unknown -M virt"
+        )
+
+# ============================================================================
+# VulkanCrossRenderer — unified renderer for RISC-V and ARM targets
+# ============================================================================
+
+class VulkanCrossRenderer:
+    """Cross-architecture Vulkan 2D renderer.
+
+    Selects Vulkan backend on capable 64-bit RISC-V and ARM targets.
+    Falls back to scalar CPU rendering on rv32 and arm32.
+
+    Fields:
+      target        — architecture string passed to create_for_target
+      target_bits   — pointer width: 32 or 64
+      backend       — "vulkan" | "scalar"
+      initialized   — true after a successful init_device() call
+      frame_count   — incremented by each present() call
+      last_frame_ns — nanosecond timestamp of last frame (placeholder)
+      total_render_ns — cumulative render time (placeholder)
+      width / height  — framebuffer dimensions (set on first fill_rect)
+      host_buf      — scalar CPU pixel buffer ([u32] ARGB)
+      diagnostic    — non-empty when backend == "scalar" due to arch limits
+    """
+
+    target: text
+    target_bits: i64
+    backend: text
+    initialized: bool
+    frame_count: i64
+    last_frame_ns: i64
+    total_render_ns: i64
+    width: i32
+    height: i32
+    host_buf: [u32]
+    diagnostic: text
+
+    # -------------------------------------------------------------------------
+    # Constructor
+    # -------------------------------------------------------------------------
+
+    static fn create_for_target(arch: text) -> VulkanCrossRenderer:
+        """Create a renderer pre-configured for the given architecture string.
+
+        Does not initialise the GPU device — call init_device() next.
+        """
+        val cap = VulkanCrossTarget.for_arch(arch)
+        val bknd = if cap.vulkan_capable: "vulkan" else: "scalar"
+        VulkanCrossRenderer(
+            target: arch,
+            target_bits: cap.bits,
+            backend: bknd,
+            initialized: false,
+            frame_count: 0,
+            last_frame_ns: 0,
+            total_render_ns: 0,
+            width: 0,
+            height: 0,
+            host_buf: [],
+            diagnostic: cap.fallback_reason
+        )
+
+    # -------------------------------------------------------------------------
+    # Device initialisation
+    # -------------------------------------------------------------------------
+
+    me init_device() -> text:
+        """Initialise the backend selected at construction time.
+
+        Returns "" on success; returns a non-empty error string on failure.
+        For scalar targets the diagnostic set at construction is returned
+        as an informational string (init still succeeds for scalar path).
+        """
+        if self.backend == "vulkan":
+            # Pure Simple layer: no real Vulkan FFI here.
+            # Production runtime wires rt_vulkan_* externs; this layer
+            # manages selection and reports capability.
+            self.initialized = true
+            return ""
+        # scalar path: always succeeds
+        self.initialized = true
+        self.diagnostic
+
+    # -------------------------------------------------------------------------
+    # 2D Rendering operations
+    # -------------------------------------------------------------------------
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """Fill a rectangle in the framebuffer.
+
+        Vulkan path: delegates to device (stub in pure Simple layer).
+        Scalar path: writes directly into host_buf.
+        """
+        if not self.initialized:
+            return
+        if w <= 0 or h <= 0:
+            return
+        # Expand host_buf if needed (scalar path)
+        if self.backend == "scalar":
+            val needed = w * h
+            if needed > 0 and self.host_buf.len() < needed:
+                self.width = w
+                self.height = h
+                self.host_buf = [color; needed]
+                return
+            # Fill into existing buffer
+            var idx = 0
+            while idx < w * h:
+                self.host_buf[idx] = color
+                idx = idx + 1
+
+    me present() -> i64:
+        """Submit the current frame.
+
+        Increments frame_count and returns the new count.
+        Accumulates a fixed placeholder render time (1000 ns per frame).
+        """
+        if not self.initialized:
+            return 0
+        self.frame_count = self.frame_count + 1
+        self.last_frame_ns = self.last_frame_ns + 1000
+        self.total_render_ns = self.total_render_ns + 1000
+        self.frame_count
+
+    # -------------------------------------------------------------------------
+    # Info / diagnostics
+    # -------------------------------------------------------------------------
+
+    fn get_backend_info() -> text:
+        """Return a human-readable summary of the active backend."""
+        val init_str = if self.initialized: "yes" else: "no"
+        val diag_str = if self.diagnostic == "": "" else: "; note=" + self.diagnostic
+        ("target=" + self.target
+            + " bits=" + self.target_bits.to_text()
+            + " backend=" + self.backend
+            + " initialized=" + init_str
+            + " frames=" + self.frame_count.to_text()
+            + diag_str)
+
+    fn qemu_system_cmd() -> text:
+        """Return the QEMU launch command appropriate for this target."""
+        val cap = VulkanCrossTarget.for_arch(self.target)
+        cap.qemu_cmd
+
+    fn target_name() -> text:
+        """Return the architecture string."""
+        self.target
+
+    fn is_vulkan() -> bool:
+        """True when the Vulkan backend was selected."""
+        self.backend == "vulkan"
+
+    fn is_scalar() -> bool:
+        """True when the scalar CPU fallback is active."""
+        self.backend == "scalar"
