@@ -938,3 +938,20 @@ enum SimdLevel3D:
 | `simd_normalize_batch` | `(vecs: [f32], count: i32)` | Batch normalize 3D vectors |
 
 Falls back to scalar loops when no SIMD instructions are available.
+
+## Verification Commands
+
+Use these commands when changing GPU sessions, backend adapters, or ARM/RISC-V target-profile behavior.
+
+| Area | Command | Hardware required |
+| --- | --- | --- |
+| Session/backend API syntax | `bin/simple check src/lib/gc_async_mut/gpu/session src/lib/gc_async_mut/gpu/engine2d src/lib/nogc_sync_mut/jit/jit_arm_mixed.spl` | No |
+| Managed session behavior | `bin/simple test test/unit/gpu/graphics_session_spec.spl --mode=interpreter` | No |
+| Qualcomm ARM32/ARM64 Vulkan target profiles | `bin/simple test test/unit/gpu/qualcomm_vulkan_target_profile_spec.spl --mode=interpreter --clean` | No |
+| ARM mixed JIT target dispatch | `SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/unit/jit/jit_arm_hotspot_opt_spec.spl --mode=interpreter --clean` | No, unless validating native JIT execution |
+| 2D graphics perf harness | `bin/simple test test/perf/graphics_2d/report_spec.spl --mode=interpreter --clean` | Depends on selected backend |
+| Metal smoke/perf | `bin/simple test test/perf/graphics_2d/metal_smoke_spec.spl --mode=interpreter --clean` | macOS + Metal |
+| CUDA smoke/perf | `bin/simple test test/perf/graphics_2d/cuda_smoke_spec.spl --mode=interpreter --clean` | NVIDIA CUDA device/runtime |
+| Vulkan/SPIR-V smoke | `bin/simple test test/perf/graphics_2d/vulkan_spirv_spec.spl --mode=interpreter --clean` | Vulkan runtime or software ICD |
+
+Backend guides must state whether a test is CPU-only, software-ICD, or hardware-dependent. Do not use hardware-dependent perf tests as the only release gate for API compatibility.

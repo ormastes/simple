@@ -167,6 +167,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | Guide | Description |
 |-------|-------------|
 | [simpleos_apps.md](simpleos_apps.md) | SimpleOS desktop applications guide -- all 30 apps, widget builder DSL, entry points |
+| [simpleos_driver_platform_index.md](simpleos_driver_platform_index.md) | SimpleOS driver/platform plan and test routing index |
 | [simpleos_executable_format.md](simpleos_executable_format.md) | SimpleOS executable format |
 | [userspace_spawn_api.md](userspace_spawn_api.md) | Userspace spawn API |
 | [ui_stack_guide.md](ui_stack_guide.md) | UI stack guide |
@@ -177,6 +178,7 @@ User-facing guides for the Simple programming language. For specifications see `
 |-------|-------------|
 | [compiler_optimization_levels.md](compiler_optimization_levels.md) | Compiler optimization levels |
 | [compiler_optimization_plugin.md](compiler_optimization_plugin.md) | Simple Optimization Plugin guide -- reusable optimizer providers, built-in vs dynamic load modes, safety and validation |
+| [compiler_simd_auto_application.md](compiler_simd_auto_application.md) | SIMD auto-application maintainer guide -- rewrite rules, fallback, duplication checks, tests |
 
 ## Miscellaneous
 
