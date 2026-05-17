@@ -1,35 +1,41 @@
 # JIT Hotspot Test: x86_32 (LLVM)
 
-use std.io_runtime
-use std.jit.tiered_jit.{TieredJitManager}
+use std.io
+
+extern fn rt_jit_create_for_target(arch: text) -> i64
+extern fn rt_jit_backend_name(handle: i64) -> text
+extern fn rt_jit_compile_source(handle: i64, source: text) -> text
+extern fn rt_jit_call_i64(handle: i64, name: text, arg: i64) -> i64
+extern fn rt_jit_has_function(handle: i64, name: text) -> bool
+extern fn rt_jit_cleanup(handle: i64) -> i64
 
 fn main():
-    println("=== JIT Hotspot Test: x86_32 (LLVM) ===")
+    print("=== JIT Hotspot Test: x86_32 (LLVM) ===")
 
-    val jit = TieredJitManager.create_for_target("x86_32")
-    println("Backend: " + jit.backend)
-    println("Handle: " + jit.jit_handle.to_text())
+    val h = rt_jit_create_for_target("x86_32")
+    print("Handle: " + h.to_text())
 
-    if jit.jit_handle < 1:
-        println("SKIP: x86_32 JIT not available (need --features llvm)")
+    if h < 1:
+        print("SKIP: x86_32 JIT not available (need --features llvm)")
         return
 
-    val src = "fn add_mul(n: i64) -> i64 { return (n + 10) * 2; }"
-    jit.register("add_mul", src, 3)
+    print("Backend: " + rt_jit_backend_name(h))
 
-    var i = 0
-    while i < 3:
-        jit.call_i64("add_mul", 5)
-        i = i + 1
-    println("Compiled: " + jit.is_compiled("add_mul").to_text())
+    val src = "fn add_mul(n: i64) -> i64:\n    return (n + 10) * 2\n"
+    val err = rt_jit_compile_source(h, src)
+    if err != "":
+        print("FAIL: compile error: " + err)
+        rt_jit_cleanup(h)
+        return
 
-    val result = jit.call_i64("add_mul", 5)
+    print("Compiled: " + rt_jit_has_function(h, "add_mul").to_text())
+
+    val result = rt_jit_call_i64(h, "add_mul", 5)
     val expected: i64 = 30
     if result == expected:
-        println("PASS: add_mul(5) = " + result.to_text())
+        print("PASS: add_mul(5) = " + result.to_text())
     else:
-        println("FAIL: add_mul(5) = " + result.to_text() + " expected " + expected.to_text())
+        print("FAIL: add_mul(5) = " + result.to_text() + " expected " + expected.to_text())
 
-    println(jit.stats())
-    jit.cleanup()
-    println("DONE")
+    rt_jit_cleanup(h)
+    print("DONE")

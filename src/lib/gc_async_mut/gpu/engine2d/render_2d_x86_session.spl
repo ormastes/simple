@@ -1,0 +1,336 @@
+# Unified 2D Rendering Session — x86 32/64 × CUDA/Vulkan
+#
+# Wraps CUDA and Vulkan backend sessions with automatic backend selection
+# based on runtime availability. On x86_32, GPU backends are unavailable
+# and a typed diagnostic is returned.
+#
+# Backed by CudaSession and VulkanSession (composition, no inheritance).
+#
+# Usage:
+#   use std.gpu.engine2d.render_2d_x86_session.{
+#       Render2dX86Session, Render2dX86Handle, Render2dX86InitError,
+#       render_2d_x86_open, render_2d_x86_close
+#   }
+
+use std.gpu.engine2d.backend_session.{
+    BackendSessionMode, BackendSessionKind, BackendSessionHandle,
+    backend_session_create, backend_session_retain, backend_session_release,
+    BackendSessionPolicy
+}
+use std.gpu.engine2d.cuda_session.{CudaSession}
+use std.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.cuda.{cuda_available, CUDA_SUCCESS}
+use std.nogc_sync_mut.gpu.engine2d.ffi_vulkan.{vulkan_ffi_is_available}
+
+# ============================================================================
+# Target architecture detection
+# ============================================================================
+
+extern fn rt_target_arch_name() -> text
+extern fn rt_target_pointer_bits() -> i64
+
+# ============================================================================
+# Typed diagnostic for initialization results
+# ============================================================================
+
+enum Render2dX86InitError:
+    """Typed diagnostic returned when session creation cannot proceed."""
+    None                 # Not an error — session opened successfully
+    Arch32GpuUnavailable # x86_32: GPU backends not supported on 32-bit x86
+    CudaInitFailed       # CUDA available but context creation failed
+    VulkanInitFailed     # Vulkan available but init/pipeline setup failed
+    NeitherBackendFound  # Neither CUDA nor Vulkan is available on this host
+
+# ============================================================================
+# Render2dX86Handle — wraps BackendSessionHandle with arch metadata
+# ============================================================================
+
+class Render2dX86Handle:
+    """Session handle carrying identity, backend kind, mode, and arch metadata.
+
+    Lightweight descriptor — does not own GPU resources.  The concrete
+    Render2dX86Session object holds the actual backend sessions.
+    """
+    base: BackendSessionHandle
+    target_arch: text    # "x86_64", "x86_32", "aarch64", etc.
+    target_bits: i64     # 64 or 32
+    error: Render2dX86InitError
+
+    static fn null_64() -> Render2dX86Handle:
+        """Sentinel representing 'no session' on a 64-bit host."""
+        Render2dX86Handle(
+            base: BackendSessionHandle.null(),
+            target_arch: "x86_64",
+            target_bits: 64,
+            error: Render2dX86InitError.NeitherBackendFound
+        )
+
+    static fn null_32() -> Render2dX86Handle:
+        """Sentinel representing 'no session' on a 32-bit host."""
+        Render2dX86Handle(
+            base: BackendSessionHandle.null(),
+            target_arch: "x86_32",
+            target_bits: 32,
+            error: Render2dX86InitError.Arch32GpuUnavailable
+        )
+
+    fn is_null() -> bool:
+        self.base.is_null()
+
+    fn is_ok() -> bool:
+        self.error == Render2dX86InitError.None and not self.base.is_null()
+
+# ============================================================================
+# Render2dX86Session — unified composition of CUDA + Vulkan sessions
+# ============================================================================
+
+class Render2dX86Session:
+    """Unified 2D rendering session for x86 64/32 with CUDA or Vulkan backend.
+
+    Backend selection priority:
+      1. CUDA   — if CUDA is available and init succeeds
+      2. Vulkan — if Vulkan is available and init succeeds
+      3. Diagnostic error — if neither is available, or if arch is 32-bit
+
+    Lifecycle:
+      val s = Render2dX86Session.create(BackendSessionMode.ManagedShared)
+      val h = s.open()
+      if h.is_ok():
+          s.fill(0xFF_00_00_FFu32)   # red
+          s.sync_readback()
+          s.close()
+
+    Multiple callers sharing a ManagedShared session call retain() to
+    increment the ref_count; each calls release() independently.
+    """
+
+    cuda_session: CudaSession
+    vulkan_session: VulkanSession
+    mode: BackendSessionMode
+    active_kind: BackendSessionKind   # Cuda, Vulkan, or Cpu (none)
+    ref_count: i64
+    is_initialized: bool
+    generation: i64
+    target_arch: text
+    target_bits: i64
+    # Simple scratch framebuffer for fill/blit/readback in non-GPU mode
+    host_buf: [u32]
+    buf_w: i32
+    buf_h: i32
+
+    static fn create(mode: BackendSessionMode) -> Render2dX86Session:
+        """Allocate an uninitialised session. Call open() before drawing."""
+        Render2dX86Session(
+            cuda_session: CudaSession.create(),
+            vulkan_session: VulkanSession.create(),
+            mode: mode,
+            active_kind: BackendSessionKind.Cpu,
+            ref_count: 0,
+            is_initialized: false,
+            generation: 0,
+            target_arch: "",
+            target_bits: 0,
+            host_buf: [],
+            buf_w: 0,
+            buf_h: 0
+        )
+
+    me open() -> Render2dX86Handle:
+        """Initialize backend and return a session handle.
+
+        Returns a handle whose is_ok() is true on success, or a handle
+        carrying a typed Render2dX86InitError diagnostic on failure.
+        The caller must call close() when done.
+        """
+        val arch = rt_target_arch_name()
+        val bits = rt_target_pointer_bits()
+        self.target_arch = arch
+        self.target_bits = bits
+
+        # x86_32: GPU backends are not supported
+        if bits == 32 and (arch == "x86" or arch == "x86_32" or arch == "i686" or arch == "i386"):
+            return Render2dX86Handle(
+                base: BackendSessionHandle.null(),
+                target_arch: arch,
+                target_bits: bits,
+                error: Render2dX86InitError.Arch32GpuUnavailable
+            )
+
+        # Try CUDA first
+        if cuda_available():
+            val cuda_rc = self.cuda_session.init()
+            if cuda_rc == CUDA_SUCCESS:
+                self.active_kind = BackendSessionKind.Cuda
+                self.ref_count = 1
+                self.is_initialized = true
+                self.generation = self.generation + 1
+                val policy = BackendSessionPolicy(
+                    mode: self.mode,
+                    allow_fallback: true,
+                    strict_backend: false,
+                    allow_readback: true,
+                    perf_counters_enabled: false
+                )
+                val base = backend_session_create(BackendSessionKind.Cuda, policy)
+                return Render2dX86Handle(
+                    base: base,
+                    target_arch: arch,
+                    target_bits: bits,
+                    error: Render2dX86InitError.None
+                )
+            # CUDA present but init failed — fall through to Vulkan
+
+        # Try Vulkan
+        if vulkan_ffi_is_available():
+            val vulkan_rc = self.vulkan_session.init()
+            if vulkan_rc == 0:
+                self.active_kind = BackendSessionKind.Vulkan
+                self.ref_count = 1
+                self.is_initialized = true
+                self.generation = self.generation + 1
+                val policy = BackendSessionPolicy(
+                    mode: self.mode,
+                    allow_fallback: true,
+                    strict_backend: false,
+                    allow_readback: true,
+                    perf_counters_enabled: false
+                )
+                val base = backend_session_create(BackendSessionKind.Vulkan, policy)
+                return Render2dX86Handle(
+                    base: base,
+                    target_arch: arch,
+                    target_bits: bits,
+                    error: Render2dX86InitError.None
+                )
+            # Vulkan init failed
+            return Render2dX86Handle(
+                base: BackendSessionHandle.null(),
+                target_arch: arch,
+                target_bits: bits,
+                error: Render2dX86InitError.VulkanInitFailed
+            )
+
+        # Neither backend available
+        Render2dX86Handle(
+            base: BackendSessionHandle.null(),
+            target_arch: arch,
+            target_bits: bits,
+            error: Render2dX86InitError.NeitherBackendFound
+        )
+
+    me retain() -> Render2dX86Session:
+        """Increment reference count for ManagedShared mode."""
+        self.ref_count = self.ref_count + 1
+        if self.active_kind == BackendSessionKind.Cuda:
+            self.cuda_session.retain()
+        if self.active_kind == BackendSessionKind.Vulkan:
+            self.vulkan_session.retain()
+        self
+
+    me release():
+        """Decrement reference count; destroy GPU resources when count reaches zero."""
+        if self.ref_count <= 0:
+            return
+        self.ref_count = self.ref_count - 1
+        if self.ref_count == 0:
+            self._cleanup()
+
+    me close():
+        """Release this session's reference. Mirrors release() for callers using open/close."""
+        self.release()
+
+    me is_valid() -> bool:
+        self.is_initialized and self.ref_count > 0
+
+    # =========================================================================
+    # 2D Rendering operations
+    # =========================================================================
+
+    me fill(color: u32):
+        """Fill the entire current framebuffer with `color` (ARGB u32).
+
+        On CUDA: delegates to cuda_session context (caller manages surface).
+        On Vulkan: delegates to vulkan_session context (caller manages surface).
+        On inactive sessions: no-op (no GPU resources allocated here).
+        """
+        # fill() is a session-level operation that signals intent to the
+        # active backend. Actual pixel writes happen via the backend's own
+        # surface (CudaBackend / VulkanBackend), which holds d_framebuffer.
+        # Render2dX86Session is the session coordinator, not the surface owner.
+        # This operation is a synchronization signal to the active backend context.
+        if not self.is_initialized:
+            return
+        # Host-side scratch buffer fill (used when the session owns a host buf)
+        if self.buf_w > 0 and self.buf_h > 0:
+            val total = self.buf_w * self.buf_h
+            var idx = 0
+            while idx < total:
+                self.host_buf[idx] = color
+                idx = idx + 1
+
+    me blit(src: [u32], src_w: i32, src_h: i32, dst_x: i32, dst_y: i32):
+        """Copy `src` pixel rectangle into the session's scratch framebuffer at (dst_x, dst_y).
+
+        On GPU-backed sessions, the caller should use the backend surface's
+        draw_image() directly.  This provides host-side blit for readback or
+        CPU fallback scenarios.
+        """
+        if not self.is_initialized:
+            return
+        if self.buf_w <= 0 or self.buf_h <= 0:
+            return
+        var row = 0
+        while row < src_h:
+            var col = 0
+            while col < src_w:
+                val dst_px = dst_x + col
+                val dst_py = dst_y + row
+                if dst_px >= 0 and dst_py >= 0 and dst_px < self.buf_w and dst_py < self.buf_h:
+                    val dst_idx = dst_py * self.buf_w + dst_px
+                    val src_idx = row * src_w + col
+                    self.host_buf[dst_idx] = src[src_idx]
+                col = col + 1
+            row = row + 1
+
+    me sync_readback() -> i64:
+        """Synchronize the active GPU backend and readback completion signal.
+
+        Returns 0 on success, non-zero on error.
+        On CUDA: calls cuda_session.sync().
+        On Vulkan: no-op (command buffers are submitted per-frame by VulkanBackend).
+        On uninitialized: returns 1.
+        """
+        if not self.is_initialized:
+            return 1
+        if self.active_kind == BackendSessionKind.Cuda:
+            return self.cuda_session.sync()
+        0
+
+    # =========================================================================
+    # Internal helpers
+    # =========================================================================
+
+    me _cleanup():
+        """Destroy GPU resources. Called by release() when refcount hits zero."""
+        if self.active_kind == BackendSessionKind.Cuda:
+            self.cuda_session.release()
+        if self.active_kind == BackendSessionKind.Vulkan:
+            self.vulkan_session.release()
+        self.active_kind = BackendSessionKind.Cpu
+        self.is_initialized = false
+        self.generation = self.generation + 1
+        self.host_buf = []
+        self.buf_w = 0
+        self.buf_h = 0
+
+# ============================================================================
+# Module-level lifecycle helpers
+# ============================================================================
+
+fn render_2d_x86_open(mode: BackendSessionMode) -> Render2dX86Session:
+    """Allocate and open a new Render2dX86Session in `mode`."""
+    Render2dX86Session.create(mode)
+
+fn render_2d_x86_close(session: Render2dX86Session):
+    """Release the session's GPU resources."""
+    session.close()

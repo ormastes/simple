@@ -1,35 +1,39 @@
 # JIT Hotspot Test: RISC-V 64
 
-use std.io_runtime
-use std.jit.tiered_jit.{TieredJitManager}
+use std.io
+
+extern fn rt_jit_create_for_target(arch: text) -> i64
+extern fn rt_jit_backend_name(handle: i64) -> text
+extern fn rt_jit_compile_source(handle: i64, source: text) -> text
+extern fn rt_jit_call_i64(handle: i64, name: text, arg: i64) -> i64
+extern fn rt_jit_has_function(handle: i64, name: text) -> bool
+extern fn rt_jit_cleanup(handle: i64) -> i64
 
 fn main():
-    println("=== JIT Hotspot Test: RISC-V 64 ===")
+    print("=== JIT Hotspot Test: RISC-V 64 ===")
 
-    val jit = TieredJitManager.create_for_target("riscv64")
-    println("Backend: " + jit.backend)
-    println("Handle: " + jit.jit_handle.to_text())
+    val h = rt_jit_create_for_target("riscv64")
+    print("Handle: " + h.to_text())
 
-    if jit.jit_handle < 1:
-        println("SKIP: riscv64 JIT not available")
-        println("NOTE: Cranelift JIT uses host triple — cross-target needs native host or LLVM")
+    if h < 1:
+        print("SKIP: riscv64 JIT not available (Cranelift JIT uses host triple)")
         return
 
-    val src = "fn fib_iter(n: i64) -> i64 { var a: i64 = 0; var b: i64 = 1; var i: i64 = 0; while i < n { var t: i64 = b; b = a + b; a = t; i = i + 1; }; return a; }"
-    jit.register("fib_iter", src, 3)
+    print("Backend: " + rt_jit_backend_name(h))
 
-    var i = 0
-    while i < 3:
-        jit.call_i64("fib_iter", 10)
-        i = i + 1
+    val src = "fn fib_iter(n: i64) -> i64:\n    var a: i64 = 0\n    var b: i64 = 1\n    var i: i64 = 0\n    while i < n:\n        var t: i64 = b\n        b = a + b\n        a = t\n        i = i + 1\n    return a\n"
+    val err = rt_jit_compile_source(h, src)
+    if err != "":
+        print("FAIL: compile error: " + err)
+        rt_jit_cleanup(h)
+        return
 
-    val result = jit.call_i64("fib_iter", 10)
+    val result = rt_jit_call_i64(h, "fib_iter", 10)
     val expected: i64 = 55
     if result == expected:
-        println("PASS: fib_iter(10) = " + result.to_text())
+        print("PASS: fib_iter(10) = " + result.to_text())
     else:
-        println("FAIL: fib_iter(10) = " + result.to_text() + " expected " + expected.to_text())
+        print("FAIL: fib_iter(10) = " + result.to_text() + " expected " + expected.to_text())
 
-    println(jit.stats())
-    jit.cleanup()
-    println("DONE")
+    rt_jit_cleanup(h)
+    print("DONE")

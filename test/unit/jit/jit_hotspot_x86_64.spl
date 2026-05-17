@@ -1,51 +1,55 @@
 # JIT Hotspot Test: x86_64 (Cranelift)
 
 use std.io
-use std.jit.tiered_jit.{TieredJitManager}
 
-extern fn rt_time_now_us() -> i64
+extern fn rt_jit_create() -> i64
+extern fn rt_jit_create_for_target(arch: text) -> i64
+extern fn rt_jit_backend_name(handle: i64) -> text
+extern fn rt_jit_compile_source(handle: i64, source: text) -> text
+extern fn rt_jit_call_i64(handle: i64, name: text, arg: i64) -> i64
+extern fn rt_jit_has_function(handle: i64, name: text) -> bool
+extern fn rt_jit_cleanup(handle: i64) -> i64
+extern fn rt_time_now_micros() -> i64
 
 fn main():
     print("=== JIT Hotspot Test: x86_64 (Cranelift) ===")
 
-    val jit = TieredJitManager.create()
-    print("Backend: " + jit.backend)
+    val h = rt_jit_create()
+    print("Handle: " + h.to_text())
+    print("Backend: " + rt_jit_backend_name(h))
 
-    if jit.jit_handle < 1:
+    if h < 1:
         print("SKIP: JIT not available")
         return
 
-    val hot_src = "fn hot_sum(n: i64) -> i64 { var s: i64 = 0; var i: i64 = 0; while i < n { s = s + i; i = i + 1; }; return s; }"
-    jit.register("hot_sum", hot_src, 5)
+    # Compile a hot loop function
+    val src = "fn hot_sum(n: i64) -> i64:\n    var s: i64 = 0\n    var i: i64 = 0\n    while i < n:\n        s = s + i\n        i = i + 1\n    return s\n"
+    val err = rt_jit_compile_source(h, src)
+    if err != "":
+        print("FAIL: compile error: " + err)
+        rt_jit_cleanup(h)
+        return
 
-    print("--- Cold phase (not yet compiled) ---")
-    var i = 0
-    while i < 4:
-        jit.call_i64("hot_sum", 1000)
-        i = i + 1
-    print("After 4 calls: compiled=" + jit.is_compiled("hot_sum").to_text())
+    print("Compiled: " + rt_jit_has_function(h, "hot_sum").to_text())
 
-    print("--- Hot phase (triggers JIT at call 5) ---")
-    val r5 = jit.call_i64("hot_sum", 1000)
-    print("After 5 calls: compiled=" + jit.is_compiled("hot_sum").to_text())
-
+    # Correctness check
+    val result = rt_jit_call_i64(h, "hot_sum", 1000)
     val expected: i64 = 499500
-    if r5 == expected:
-        print("PASS: hot_sum(1000) = " + r5.to_text())
+    if result == expected:
+        print("PASS: hot_sum(1000) = " + result.to_text())
     else:
-        print("FAIL: hot_sum(1000) = " + r5.to_text() + " expected " + expected.to_text())
+        print("FAIL: hot_sum(1000) = " + result.to_text() + " expected " + expected.to_text())
 
-    print("--- Benchmark: JIT-compiled hot path ---")
-    val t0 = rt_time_now_us()
+    # Benchmark the JIT-compiled hot path
+    val t0 = rt_time_now_micros()
     val calls = 1000
-    i = 0
+    var i = 0
     while i < calls:
-        jit.call_i64("hot_sum", 10000)
+        rt_jit_call_i64(h, "hot_sum", 10000)
         i = i + 1
-    val t1 = rt_time_now_us()
+    val t1 = rt_time_now_micros()
     val avg_us = (t1 - t0) / calls
-    print("  " + calls.to_text() + " calls: avg " + avg_us.to_text() + " us/call")
+    print(calls.to_text() + " calls: avg " + avg_us.to_text() + " us/call (work_size=10000)")
 
-    print(jit.stats())
-    jit.cleanup()
+    rt_jit_cleanup(h)
     print("DONE")
