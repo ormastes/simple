@@ -24,10 +24,17 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-17
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-17
+- [x] 6-refactor (Tech Lead) — 2026-05-17
+- [x] 7-verify (QA) — 2026-05-17
+- [x] 8-ship (Release Mgr) — 2026-05-17
+
+### 6-refactor
+Duplication analysis added at `doc/05_design/scheduler_process_isolation_duplication_analysis.md`.
+Result: no exact public symbol duplication; responsibility overlap remains with scheduler task management, scheduler algorithm, syscall dispatch, realtime scheduler, and scheduler service modules.
+
+### 7-verify
+20/20 tests PASS. Commit b25c3b8a91 pushed to origin/main.
 
 ## Phase Outputs
 
@@ -35,4 +42,9 @@ feature
 10 ACs across 5 plan items. 5 parallel agents (A-E). Existing: scheduler (13 files), task_types.spl, scheduler_task_mgmt.spl, syscall_process.spl, capability.spl.
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 5 files created:
+- src/os/kernel/scheduler/sched_class_queue.spl — SchedClass + SchedTask + ClassQueue + PerCpuScheduler + MultiCpuScheduler
+- src/os/kernel/scheduler/process_isolation.spl — IsolationLevel + ProcessIsolationPolicy + IsolationEnforcer + NamespaceMapping + NamespaceRegistry
+- src/os/kernel/ipc/syscall_scheduler.spl — SchedRequest + SchedctlOp + SysScheduleHandler + SysSchedctlHandler + SchedSyscallShim
+- src/os/kernel/scheduler/sched_policy_engine.spl — TaskAnnotation + TaskAnnotationValidator + TimeSliceCalculator + StarvationPrevention + SchedulerPolicyEngine
+- test/unit/os/scheduler_isolation_spec.spl — 20 tests
