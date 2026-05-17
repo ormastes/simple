@@ -39,7 +39,7 @@ code-quality
 - [x] 5-implement (Engineer) — 2026-05-17
 - [x] 6-refactor (Tech Lead) — 2026-05-17
 - [x] 7-verify (QA) — 2026-05-17
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-17
 
 ## Phase Outputs
 
@@ -234,4 +234,19 @@ test fixture → 4 warnings (PTAG002 copy_file, PTAG001 hash_bad, PTAG001 write_
 - `webgl_render_commands.spl` → 61 PTAG002 (all correct — distinct-role same-type params)
 
 ### 8-ship
-<pending>
+
+**Shipped:** 2026-05-17
+
+Commits on `origin/main`:
+- `35ef889381` — `feat(lint): add PTAG001/PTAG002 param-tag lint + annotate 207 pub fn sites in src/lib/`
+- `8f76a7860f` — `docs(spipe): mark 7-verify complete — no regressions from @tag annotation refactoring`
+- `04c2d5fc09` — `fix(lint): add missing @tag to wrap_method — complete AC-5 zero-PTAG001 sweep`
+
+**AC status at ship:**
+- [x] AC-1: Lint parser recognizes `# @tag(name)` annotations on parameter lines
+- [x] AC-2: Same tag on same-type params = no warning (commutative case)
+- [x] AC-3: Different tags on same-type params = PTAG002 warning on fn definition
+- [x] AC-4: Missing tags on same-type params = PTAG001 warning suggesting to add tags
+- [x] AC-5: 208 `pub fn` annotated in `src/lib/`; full sweep confirms 0 PTAG001 remaining
+- [~] AC-6: Lint integrates via `.spl` source (LSP/MCP path active); CLI compiled path needs bootstrap rebuild
+- [x] AC-7: No regressions — all test failures are pre-existing and unrelated to annotation changes
