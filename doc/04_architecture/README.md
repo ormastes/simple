@@ -26,3 +26,4 @@ See individual files in this directory for specialized topics (LLVM backend, mem
 Relevant current feature slices:
 
 - [KAIROS-Like Simple MCP + LLM Dashboard](kairos_like_simple_mcp_llm_dashboard.md) - Assistant/dashboard architecture, live bridge, and web-login/PBP bootstrap notes
+- [Graphics 3D Session Managed Backend](graphics_3d_session_managed_backend.md) - Common session architecture for 2D, 2D game, 3D, 3D game, web renderer, GUI, WM, and CPU/CUDA/Vulkan/Metal/WebGPU backends

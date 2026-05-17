@@ -96,3 +96,9 @@ Create a design doc when:
 - A major change to an existing system
 
 For decisions within design docs → extract significant ones to `doc/04_architecture/adr/`.
+
+## Current Graphics Designs
+
+| Design | Description |
+|--------|-------------|
+| [graphics_3d_session_managed_backend.md](graphics_3d_session_managed_backend.md) | 3D/3D game backend detail design with session modes, backend adapters, Pure Simple API boundary, C ABI native shims, persistent optimization providers, and ARM/RISC-V capability records |

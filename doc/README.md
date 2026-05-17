@@ -48,12 +48,26 @@ All documentation lives under numbered top-level folders.
 
 ## Recent Major Changes (2026-05)
 
+- **Graphics backend sessions:** 2D/3D/game/web/GUI/WM backend session plans now cover `LegacyNoSession`, `ManagedShared`, `PerfExclusive`, CUDA, Vulkan, Metal, WebGPU, CPU-only, Pure Simple API boundaries, C ABI native shims, and persistent optimization-provider state.
 - **SimpleOS desktop apps:** 30 desktop applications implemented under `src/os/apps/` (calculator, clock, terminal, settings, etc.)
 - **spipe renamed to spipe:** testing framework renamed across the entire codebase
 - **Bug fixes:** HIR type-inference, SIMD/AES-NI, Zstd HUF all resolved
 - **Compiler passes:** suspension analysis and FFI gen stubs implemented
 - **MIR SIMD:** masked/predicated SIMD opcodes and Cranelift Vec16u8 ABI marshalling for AOT
 - **Code cleanup:** 482 dead `#![allow]` lines removed, 436 lines of CSV module duplication removed
+
+## Current Graphics Backend Docs
+
+| Area | Document |
+|------|----------|
+| 2D session sharing | [03_plan/agent_tasks/graphics_backend_session_sharing.md](03_plan/agent_tasks/graphics_backend_session_sharing.md) |
+| 3D/game session architecture | [04_architecture/graphics_3d_session_managed_backend.md](04_architecture/graphics_3d_session_managed_backend.md) |
+| 3D/game detail design | [05_design/graphics_3d_session_managed_backend.md](05_design/graphics_3d_session_managed_backend.md) |
+| 3D/game agent plan | [03_plan/agent_tasks/graphics_3d_session_managed_backend.md](03_plan/agent_tasks/graphics_3d_session_managed_backend.md) |
+| 3D/game system test plan | [03_plan/sys_test/graphics_3d_session_managed_backend.md](03_plan/sys_test/graphics_3d_session_managed_backend.md) |
+| Graphics feature spec | [06_spec/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl](06_spec/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl) |
+| GPU API notes | [07_guide/api/gpu_api.md](07_guide/api/gpu_api.md) |
+| Optimization plugin integration | [07_guide/compiler_optimization_plugin.md](07_guide/compiler_optimization_plugin.md) |
 
 ## Maintenance
 
