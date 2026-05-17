@@ -1,0 +1,347 @@
+# SFFI Custom Primitive ABI Mapping
+#
+# AC-3: SFFI transparent wrapper acceptance — validates that custom primitives
+#       used across SFFI boundaries are transparent value types.
+# AC-4: ABI type mapping — maps Simple custom primitive underlying types to
+#       the canonical C, Rust, and LLVM IR type names.
+# AC-9: Migration helper — scaffolding to track API migration from raw
+#       primitives to named custom primitive wrappers.
+#
+# ============================================================================
+
+
+# ============================================================================
+# SffiPrimitiveCheck — AC-3: Transparent wrapper validation
+# ============================================================================
+
+pub struct SffiPrimitiveCheck:
+    """Validates a custom primitive for SFFI compliance.
+
+    A custom primitive is SFFI-compatible when it is both transparent
+    (no hidden fields, layout identical to underlying) and a value type
+    (passed by value, not as an object handle).
+    """
+    name: text
+    underlying: text
+    is_transparent: bool
+    is_value_type: bool
+    error_msg: text
+
+    fn is_sffi_compatible() -> bool:
+        self.is_transparent and self.is_value_type
+
+    fn validate() -> text:
+        if self.is_transparent == false and self.is_value_type == false:
+            return "custom primitive '" + self.name + "': must be transparent and a value type for SFFI"
+        if self.is_transparent == false:
+            return "custom primitive '" + self.name + "': must be transparent (@repr transparent) for SFFI"
+        if self.is_value_type == false:
+            return "custom primitive '" + self.name + "': must be a value type (not object handle) for SFFI"
+        ""
+
+pub fn sffi_primitive_check_create(name: text, underlying: text, transparent: bool, value_type: bool) -> SffiPrimitiveCheck:
+    """Construct an SffiPrimitiveCheck with explicit flags."""
+    var msg = ""
+    if transparent == false and value_type == false:
+        msg = "custom primitive '" + name + "': must be transparent and a value type for SFFI"
+    elif transparent == false:
+        msg = "custom primitive '" + name + "': must be transparent (@repr transparent) for SFFI"
+    elif value_type == false:
+        msg = "custom primitive '" + name + "': must be a value type (not object handle) for SFFI"
+    SffiPrimitiveCheck(
+        name: name,
+        underlying: underlying,
+        is_transparent: transparent,
+        is_value_type: value_type,
+        error_msg: msg
+    )
+
+pub fn sffi_primitive_check_from_info(name: text, underlying: text) -> SffiPrimitiveCheck:
+    """Construct an SffiPrimitiveCheck with default flags (transparent=true, value_type=true)."""
+    sffi_primitive_check_create(name, underlying, true, true)
+
+
+# ============================================================================
+# SffiAbiMapper — AC-4: ABI type name mapping
+# ============================================================================
+
+pub struct SffiAbiMapper:
+    """Maps Simple custom primitive underlying types to C, Rust, and LLVM ABI types."""
+    _placeholder: i32
+
+pub fn sffi_abi_mapper_new() -> SffiAbiMapper:
+    SffiAbiMapper(_placeholder: 0)
+
+pub fn sffi_abi_map_to_c(underlying: text) -> text:
+    """Map a Simple primitive type name to its C ABI type name."""
+    if underlying == "u8":
+        return "uint8_t"
+    if underlying == "u16":
+        return "uint16_t"
+    if underlying == "u32":
+        return "uint32_t"
+    if underlying == "u64":
+        return "uint64_t"
+    if underlying == "i8":
+        return "int8_t"
+    if underlying == "i16":
+        return "int16_t"
+    if underlying == "i32":
+        return "int32_t"
+    if underlying == "i64":
+        return "int64_t"
+    if underlying == "f32":
+        return "float"
+    if underlying == "f64":
+        return "double"
+    if underlying == "bool":
+        return "bool"
+    if underlying == "char":
+        return "uint32_t"
+    "/* unknown: " + underlying + " */"
+
+pub fn sffi_abi_map_to_rust(underlying: text) -> text:
+    """Map a Simple primitive type name to its Rust ABI type name."""
+    if underlying == "u8":
+        return "u8"
+    if underlying == "u16":
+        return "u16"
+    if underlying == "u32":
+        return "u32"
+    if underlying == "u64":
+        return "u64"
+    if underlying == "i8":
+        return "i8"
+    if underlying == "i16":
+        return "i16"
+    if underlying == "i32":
+        return "i32"
+    if underlying == "i64":
+        return "i64"
+    if underlying == "f32":
+        return "f32"
+    if underlying == "f64":
+        return "f64"
+    if underlying == "bool":
+        return "bool"
+    if underlying == "char":
+        return "char"
+    "/* unknown: " + underlying + " */"
+
+pub fn sffi_abi_map_to_llvm(underlying: text) -> text:
+    """Map a Simple primitive type name to its LLVM IR type name."""
+    if underlying == "u8":
+        return "i8"
+    if underlying == "u16":
+        return "i16"
+    if underlying == "u32":
+        return "i32"
+    if underlying == "u64":
+        return "i64"
+    if underlying == "i8":
+        return "i8"
+    if underlying == "i16":
+        return "i16"
+    if underlying == "i32":
+        return "i32"
+    if underlying == "i64":
+        return "i64"
+    if underlying == "f32":
+        return "float"
+    if underlying == "f64":
+        return "double"
+    if underlying == "bool":
+        return "i1"
+    if underlying == "char":
+        return "i32"
+    "/* unknown: " + underlying + " */"
+
+pub fn sffi_abi_map_all(underlying: text) -> text:
+    """Return a summary of all ABI mappings for an underlying type."""
+    val c_name = sffi_abi_map_to_c(underlying)
+    val rust_name = sffi_abi_map_to_rust(underlying)
+    val llvm_name = sffi_abi_map_to_llvm(underlying)
+    "c=" + c_name + " rust=" + rust_name + " llvm=" + llvm_name
+
+
+# ============================================================================
+# SffiMigrationHelper — AC-9: Migration scaffolding entry
+# ============================================================================
+
+pub struct SffiMigrationHelper:
+    """Tracks the migration status of one raw primitive to a named custom wrapper.
+
+    Scopes: sffi / os / hal / lib
+    Statuses: pending / migrated / blocked
+    """
+    original_type: text
+    wrapper_type: text
+    scope: text
+    status: text
+    blocker: text
+
+    fn can_migrate() -> bool:
+        self.status != "blocked"
+
+    fn summary() -> text:
+        var base = self.scope + ": " + self.original_type + " -> " + self.wrapper_type + " [" + self.status + "]"
+        if self.status == "blocked":
+            base = base + " (blocker: " + self.blocker + ")"
+        base
+
+pub fn sffi_migration_pending(orig: text, wrapper: text, scope: text) -> SffiMigrationHelper:
+    """Create a pending migration entry."""
+    SffiMigrationHelper(
+        original_type: orig,
+        wrapper_type: wrapper,
+        scope: scope,
+        status: "pending",
+        blocker: ""
+    )
+
+pub fn sffi_migration_blocked(orig: text, wrapper: text, scope: text, reason: text) -> SffiMigrationHelper:
+    """Create a blocked migration entry with a reason."""
+    SffiMigrationHelper(
+        original_type: orig,
+        wrapper_type: wrapper,
+        scope: scope,
+        status: "blocked",
+        blocker: reason
+    )
+
+pub fn sffi_migration_migrated(orig: text, wrapper: text, scope: text) -> SffiMigrationHelper:
+    """Create a completed migration entry."""
+    SffiMigrationHelper(
+        original_type: orig,
+        wrapper_type: wrapper,
+        scope: scope,
+        status: "migrated",
+        blocker: ""
+    )
+
+
+# ============================================================================
+# SffiMigrationRegistry — flat 16-slot registry
+# ============================================================================
+
+pub struct SffiMigrationRegistry:
+    """Flat 16-slot registry of SFFI migration entries."""
+    count: i32
+    m0: SffiMigrationHelper
+    m1: SffiMigrationHelper
+    m2: SffiMigrationHelper
+    m3: SffiMigrationHelper
+    m4: SffiMigrationHelper
+    m5: SffiMigrationHelper
+    m6: SffiMigrationHelper
+    m7: SffiMigrationHelper
+    m8: SffiMigrationHelper
+    m9: SffiMigrationHelper
+    m10: SffiMigrationHelper
+    m11: SffiMigrationHelper
+    m12: SffiMigrationHelper
+    m13: SffiMigrationHelper
+    m14: SffiMigrationHelper
+    m15: SffiMigrationHelper
+
+pub fn sffi_migration_registry_empty_entry() -> SffiMigrationHelper:
+    SffiMigrationHelper(original_type: "", wrapper_type: "", scope: "", status: "", blocker: "")
+
+pub fn sffi_migration_registry_new() -> SffiMigrationRegistry:
+    val empty = sffi_migration_registry_empty_entry()
+    SffiMigrationRegistry(
+        count: 0,
+        m0: empty, m1: empty, m2: empty, m3: empty,
+        m4: empty, m5: empty, m6: empty, m7: empty,
+        m8: empty, m9: empty, m10: empty, m11: empty,
+        m12: empty, m13: empty, m14: empty, m15: empty
+    )
+
+pub fn sffi_registry_add(reg: SffiMigrationRegistry, entry: SffiMigrationHelper) -> bool:
+    """Add an entry to the registry. Returns false if the registry is full (16 slots)."""
+    if reg.count >= 16:
+        return false
+    if reg.count == 0:
+        reg.m0 = entry
+    elif reg.count == 1:
+        reg.m1 = entry
+    elif reg.count == 2:
+        reg.m2 = entry
+    elif reg.count == 3:
+        reg.m3 = entry
+    elif reg.count == 4:
+        reg.m4 = entry
+    elif reg.count == 5:
+        reg.m5 = entry
+    elif reg.count == 6:
+        reg.m6 = entry
+    elif reg.count == 7:
+        reg.m7 = entry
+    elif reg.count == 8:
+        reg.m8 = entry
+    elif reg.count == 9:
+        reg.m9 = entry
+    elif reg.count == 10:
+        reg.m10 = entry
+    elif reg.count == 11:
+        reg.m11 = entry
+    elif reg.count == 12:
+        reg.m12 = entry
+    elif reg.count == 13:
+        reg.m13 = entry
+    elif reg.count == 14:
+        reg.m14 = entry
+    elif reg.count == 15:
+        reg.m15 = entry
+    reg.count = reg.count + 1
+    true
+
+fn _registry_entry_at(reg: SffiMigrationRegistry, idx: i32) -> SffiMigrationHelper:
+    if idx == 0: return reg.m0
+    if idx == 1: return reg.m1
+    if idx == 2: return reg.m2
+    if idx == 3: return reg.m3
+    if idx == 4: return reg.m4
+    if idx == 5: return reg.m5
+    if idx == 6: return reg.m6
+    if idx == 7: return reg.m7
+    if idx == 8: return reg.m8
+    if idx == 9: return reg.m9
+    if idx == 10: return reg.m10
+    if idx == 11: return reg.m11
+    if idx == 12: return reg.m12
+    if idx == 13: return reg.m13
+    if idx == 14: return reg.m14
+    reg.m15
+
+pub fn sffi_registry_count_by_status(reg: SffiMigrationRegistry, status: text) -> i32:
+    """Count entries matching the given status string."""
+    var found: i32 = 0
+    var i: i32 = 0
+    while i < reg.count:
+        val entry = _registry_entry_at(reg, i)
+        if entry.status == status:
+            found = found + 1
+        i = i + 1
+    found
+
+pub fn sffi_registry_report(reg: SffiMigrationRegistry) -> text:
+    """Generate a text summary of all migration entries."""
+    var out = "SffiMigrationRegistry (" + reg.count.to_text() + " entries):\n"
+    var i: i32 = 0
+    while i < reg.count:
+        val entry = _registry_entry_at(reg, i)
+        out = out + "  " + entry.summary() + "\n"
+        i = i + 1
+    val pending_count = sffi_registry_count_by_status(reg, "pending")
+    val migrated_count = sffi_registry_count_by_status(reg, "migrated")
+    val blocked_count = sffi_registry_count_by_status(reg, "blocked")
+    out = out + "pending=" + pending_count.to_text()
+    out = out + " migrated=" + migrated_count.to_text()
+    out = out + " blocked=" + blocked_count.to_text()
+    out
+
+
+# ============================================================================
+# Exports
+# ============================================================================
