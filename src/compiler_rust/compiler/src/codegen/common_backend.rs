@@ -70,6 +70,38 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     MirInst::SliceOp { .. } => {
                         names.insert("rt_slice".to_string());
                     }
+                    MirInst::ActorSpawn { .. } => {
+                        names.insert("rt_actor_spawn".to_string());
+                    }
+                    MirInst::ActorSend { .. } => {
+                        names.insert("rt_actor_send".to_string());
+                    }
+                    MirInst::ActorJoin { .. } => {
+                        names.insert("rt_actor_join".to_string());
+                    }
+                    MirInst::ActorReply { .. } => {
+                        names.insert("rt_actor_reply".to_string());
+                    }
+                    MirInst::FutureCreate { .. } => {
+                        names.insert("rt_future_new".to_string());
+                    }
+                    MirInst::Await { .. } => {
+                        names.insert("rt_future_await".to_string());
+                    }
+                    MirInst::GeneratorCreate { .. } => {
+                        names.insert("rt_generator_new".to_string());
+                    }
+                    MirInst::GeneratorNext { .. } => {
+                        names.insert("rt_generator_next".to_string());
+                        names.insert("rt_value_as_int".to_string());
+                    }
+                    MirInst::Yield { .. } => {
+                        names.insert("rt_generator_set_state".to_string());
+                        names.insert("rt_value_int".to_string());
+                    }
+                    MirInst::Wait { .. } => {
+                        names.insert("rt_wait".to_string());
+                    }
                     _ => {}
                 }
             }
