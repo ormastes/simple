@@ -49,6 +49,10 @@ mod c_ffi_io {
         pub(super) fn rt_stderr_flush() -> i64;
         #[link_name = "__c_rt_value_format_string"]
         pub(super) fn value_format_string(v: RuntimeValue, fmt_ptr: *const u8, fmt_len: u64, out: *mut u8, out_cap: u64) -> i64;
+        #[link_name = "__c_rt_raw_u64_to_str"]
+        pub(super) fn raw_u64_to_str(raw: i64, out: *mut u8, out_cap: u64) -> i64;
+        #[link_name = "__c_rt_value_to_display_str"]
+        pub(super) fn value_to_display_str(v: RuntimeValue, out: *mut u8, out_cap: u64) -> i64;
     }
 }
 
@@ -275,9 +279,10 @@ pub extern "C" fn rt_value_to_string(v: RuntimeValue) -> RuntimeValue {
 /// through this helper instead of `rt_value_to_string`.
 #[no_mangle]
 pub extern "C" fn rt_raw_u64_to_string(raw: i64) -> RuntimeValue {
-    let s = (raw as u64).to_string();
-    let bytes = s.as_bytes();
-    unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+    let mut buf = [0u8; 32];
+    let len = unsafe { c_ffi_io::raw_u64_to_str(raw, buf.as_mut_ptr(), buf.len() as u64) };
+    if len <= 0 { return RuntimeValue::NIL; }
+    unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), len as u64) }
 }
 
 /// Format a RuntimeValue using a format specifier string.
@@ -312,35 +317,22 @@ pub extern "C" fn rt_value_format_string(v: RuntimeValue, fmt_ptr: *const u8, fm
 }
 
 
-/// Convert RuntimeValue to display string.
 fn value_to_display_string(v: RuntimeValue) -> String {
-    if v.is_nil() {
-        "nil".to_string()
-    } else if v.is_int() {
-        v.as_int().to_string()
-    } else if v.is_float() {
-        v.as_float().to_string()
-    } else if v.is_bool() {
-        if v.as_bool() { "true" } else { "false" }.to_string()
-    } else if v.is_heap() {
-        let ptr = v.as_heap_ptr();
-        unsafe {
-            match (*ptr).object_type {
-                HeapObjectType::String => {
-                    let str_obj = ptr as *const RuntimeString;
-                    let data = (str_obj.add(1)) as *const u8;
-                    let slice = std::slice::from_raw_parts(data, (*str_obj).len as usize);
-                    String::from_utf8_lossy(slice).into_owned()
-                }
-                HeapObjectType::Array => format!("<array@{:p}>", ptr),
-                HeapObjectType::Dict => format!("<dict@{:p}>", ptr),
-                HeapObjectType::Object => format!("<object@{:p}>", ptr),
-                HeapObjectType::Closure => format!("<closure@{:p}>", ptr),
-                _ => format!("<heap@{:p}>", ptr),
-            }
+    let mut buf = [0u8; 256];
+    let len = unsafe { c_ffi_io::value_to_display_str(v, buf.as_mut_ptr(), buf.len() as u64) };
+    if len > 0 {
+        unsafe { String::from_utf8_unchecked(buf[..len as usize].to_vec()) }
+    } else if len < 0 {
+        let need = (-len) as usize;
+        let mut heap_buf = vec![0u8; need];
+        let len2 = unsafe { c_ffi_io::value_to_display_str(v, heap_buf.as_mut_ptr(), need as u64) };
+        if len2 > 0 {
+            unsafe { String::from_utf8_unchecked(heap_buf[..len2 as usize].to_vec()) }
+        } else {
+            String::new()
         }
     } else {
-        format!("<value:{:#x}>", v.to_raw())
+        String::new()
     }
 }
 

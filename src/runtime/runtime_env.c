@@ -69,3 +69,37 @@ int64_t __c_rt_stderr_flush(void) {
     fflush(stderr);
     return 0;
 }
+
+int64_t __c_rt_platform_name(const uint8_t **out_ptr) {
+#if defined(_WIN32)
+    static const uint8_t name[] = "windows";
+    *out_ptr = name; return 7;
+#elif defined(__APPLE__)
+    static const uint8_t name[] = "macos";
+    *out_ptr = name; return 5;
+#elif defined(__linux__)
+    static const uint8_t name[] = "linux";
+    *out_ptr = name; return 5;
+#else
+    static const uint8_t name[] = "unix";
+    *out_ptr = name; return 4;
+#endif
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
+
+void __c_rt_term_get_size(int32_t *cols, int32_t *rows) {
+    *cols = 80; *rows = 24;
+#if defined(__unix__) || defined(__APPLE__)
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+        *cols = (int32_t)ws.ws_col;
+        *rows = (int32_t)ws.ws_row;
+    }
+#elif defined(_WIN32)
+    /* Windows: GetConsoleScreenBufferInfo handled in Rust wrapper */
+#endif
+}

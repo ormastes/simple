@@ -227,3 +227,66 @@ int64_t __c_rt_value_format_string(RuntimeValue v, const uint8_t *fmt_ptr, uint6
     int result = apply_alignment((char *)out, (int)out_cap, raw, rlen, &fs);
     return (int64_t)result;
 }
+
+int64_t __c_rt_raw_u64_to_str(int64_t raw, uint8_t *out, uint64_t out_cap) {
+    uint64_t val = (uint64_t)raw;
+    int n = snprintf((char *)out, (size_t)out_cap, "%lu", (unsigned long)val);
+    return (n >= 0 && (uint64_t)n < out_cap) ? (int64_t)n : 0;
+}
+
+int64_t __c_rt_value_to_display_str(RuntimeValue v, uint8_t *out, uint64_t out_cap) {
+    uint64_t tag = rv_tag(v);
+    if (tag == TAG_SPECIAL) {
+        uint64_t p = rv_payload(v);
+        if (p == SPECIAL_NIL) { if (out_cap >= 3) { memcpy(out, "nil", 3); return 3; } return 0; }
+        if (p == SPECIAL_TRUE) { if (out_cap >= 4) { memcpy(out, "true", 4); return 4; } return 0; }
+        if (p == SPECIAL_FALSE) { if (out_cap >= 5) { memcpy(out, "false", 5); return 5; } return 0; }
+        if (p == SPECIAL_ERROR) { if (out_cap >= 5) { memcpy(out, "error", 5); return 5; } return 0; }
+        int n = snprintf((char *)out, (size_t)out_cap, "<special:%lu>", (unsigned long)p);
+        return (n > 0 && (uint64_t)n < out_cap) ? n : 0;
+    }
+    if (tag == TAG_INT) {
+        int64_t i = (int64_t)v >> 3;
+        int n = snprintf((char *)out, (size_t)out_cap, "%ld", (long)i);
+        return (n > 0 && (uint64_t)n < out_cap) ? n : 0;
+    }
+    if (tag == TAG_FLOAT) {
+        double f = rv_to_float(v);
+        char tmp[64];
+        for (int prec = 1; prec <= 17; prec++) {
+            int n = snprintf(tmp, sizeof(tmp), "%.*g", prec, f);
+            double check;
+            if (sscanf(tmp, "%lf", &check) == 1 && check == f) {
+                if ((uint64_t)n < out_cap) { memcpy(out, tmp, n); return n; }
+                return 0;
+            }
+        }
+        int n = snprintf((char *)out, (size_t)out_cap, "%.17g", f);
+        return (n > 0 && (uint64_t)n < out_cap) ? n : 0;
+    }
+    if (tag == TAG_HEAP) {
+        HeapHeader *h = (HeapHeader *)rv_as_heap_ptr(v);
+        if (!h) { if (out_cap >= 3) { memcpy(out, "nil", 3); return 3; } return 0; }
+        if (h->object_type == HEAP_TYPE_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            uint64_t len = s->len;
+            if (len > out_cap) return -(int64_t)len;
+            memcpy(out, (uint8_t *)(s + 1), len);
+            return (int64_t)len;
+        }
+        const char *tname;
+        switch (h->object_type) {
+            case HEAP_TYPE_ARRAY: tname = "array"; break;
+            case HEAP_TYPE_DICT: tname = "dict"; break;
+            case 0x04: tname = "tuple"; break;
+            case 0x05: tname = "object"; break;
+            case 0x06: tname = "closure"; break;
+            case HEAP_TYPE_ENUM: tname = "enum"; break;
+            default: tname = "heap"; break;
+        }
+        int n = snprintf((char *)out, (size_t)out_cap, "<%s@%p>", tname, (void *)h);
+        return (n > 0 && (uint64_t)n < out_cap) ? n : 0;
+    }
+    int n = snprintf((char *)out, (size_t)out_cap, "<value:0x%lx>", (unsigned long)v);
+    return (n > 0 && (uint64_t)n < out_cap) ? n : 0;
+}
