@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-17
 - [ ] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-17
+- [x] 6-refactor (Tech Lead) — 2026-05-17
+- [x] 7-verify (QA) — 2026-05-17
+- [x] 8-ship (Release Mgr) — 2026-05-17
 
 ## Phase Outputs
 
@@ -35,4 +35,17 @@ feature
 10 ACs across 5 lanes. 5 parallel agents (A-E), one per lane. Plan at doc/03_plan/agent_tasks/simpleos_driver_mdsoc_plus_platform.md. Existing infra: driver_platform_contract.spl (303 lines), driver_platform_report.spl (76 lines), virtio_gpu/framebuffer/BGA GPU drivers, PS/2 keyboard+mouse, xHCI USB, pcimgr, driver_supervisor.
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 11 files created:
+- src/os/drivers/gpu/gpu_vendor_probe.spl (296 lines) — 5 vendor probe classes + registry
+- src/os/drivers/gpu/gpu_vendor_integration.spl (131 lines) — platform bridge + lane status
+- src/os/drivers/audio/hda_controller.spl (284 lines) — HDA ring buffer, timer, mixer, controller
+- src/os/drivers/audio/hda_codec_probe.spl (179 lines) — Realtek/Cirrus codec + lane status
+- src/os/drivers/input/input_event.spl (233 lines) — Key/Mouse/Touch/Gamepad events + queue
+- src/os/drivers/usb/usb_hid_bridge.spl (271 lines) — HID descriptor, device, hotplug bridge
+- src/os/services/driver_supervisor/resource_grant.spl — BAR/IRQ/DMA/IOMMU grants
+- src/os/services/driver_supervisor/grant_broker.spl — broker + raw-device passthrough
+- src/os/drivers/driver_layer_audit.spl (205 lines) — MDSOC layer visibility audit
+- src/os/drivers/driver_release_gate.spl (220 lines) — DriverTeamPlan + DriverPlatformReport
+- test/unit/os/driver_platform_spec.spl — 18 tests
+### 7-verify
+18/18 tests PASS. Commit b97a81b1fc pushed to origin/main.
