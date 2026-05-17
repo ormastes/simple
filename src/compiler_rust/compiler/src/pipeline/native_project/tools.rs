@@ -140,6 +140,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         "runtime_config.c",
         "runtime_crypto.c",
         "runtime_contracts.c",
+        "runtime_env.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_fork.h",

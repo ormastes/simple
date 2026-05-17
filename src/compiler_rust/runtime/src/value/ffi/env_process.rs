@@ -11,6 +11,23 @@ use crate::coverage::{rt_coverage_condition_probe, rt_coverage_decision_probe, r
 use crate::value::collections::{rt_array_get, rt_array_len, rt_string_new, rt_tuple_new, rt_tuple_set};
 use crate::value::{HeapObjectType, RuntimeString, RuntimeValue};
 
+mod c_ffi_env {
+    extern "C" {
+        #[link_name = "__c_rt_env_get_i64"]
+        pub(super) fn rt_env_get_i64(name_ptr: *const u8, name_len: u64, default_value: i64) -> i64;
+        #[link_name = "__c_rt_env_set"]
+        pub(super) fn rt_env_set(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) -> bool;
+        #[link_name = "__c_rt_set_env"]
+        pub(super) fn rt_set_env(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64);
+        #[link_name = "__c_rt_env_exists"]
+        pub(super) fn rt_env_exists(name_ptr: *const u8, name_len: u64) -> bool;
+        #[link_name = "__c_rt_env_remove"]
+        pub(super) fn rt_env_remove(name_ptr: *const u8, name_len: u64) -> bool;
+        #[link_name = "__c_rt_exit"]
+        pub(super) fn rt_exit(code: i32);
+    }
+}
+
 fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
 }
@@ -100,7 +117,8 @@ pub extern "C" fn rt_path_probe(path_id: u64, block_id: u32) {
 /// Exit the process with the given exit code
 #[no_mangle]
 pub extern "C" fn rt_exit(code: i32) -> ! {
-    std::process::exit(code)
+    unsafe { c_ffi_env::rt_exit(code) }
+    unreachable!()
 }
 
 // ============================================================================
@@ -132,20 +150,7 @@ pub unsafe extern "C" fn rt_env_get(name_ptr: *const u8, name_len: u64) -> Runti
 /// Get environment variable parsed as i64, or return the supplied default.
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_get_i64(name_ptr: *const u8, name_len: u64, default_value: i64) -> i64 {
-    if name_ptr.is_null() {
-        return default_value;
-    }
-
-    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
-    let name_str = match std::str::from_utf8(name_bytes) {
-        Ok(s) => s,
-        Err(_) => return default_value,
-    };
-
-    match std::env::var(name_str) {
-        Ok(value) => value.parse::<i64>().unwrap_or(default_value),
-        Err(_) => default_value,
-    }
+    c_ffi_env::rt_env_get_i64(name_ptr, name_len, default_value)
 }
 
 /// Alias for rt_env_get for backwards compatibility
@@ -157,30 +162,13 @@ pub unsafe extern "C" fn rt_get_env(name_ptr: *const u8, name_len: u64) -> Runti
 /// Set environment variable
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_set(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) -> bool {
-    if name_ptr.is_null() || value_ptr.is_null() {
-        return false;
-    }
-
-    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
-    let name_str = match std::str::from_utf8(name_bytes) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
-    let value_bytes = std::slice::from_raw_parts(value_ptr, value_len as usize);
-    let value_str = match std::str::from_utf8(value_bytes) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
-    std::env::set_var(name_str, value_str);
-    true
+    c_ffi_env::rt_env_set(name_ptr, name_len, value_ptr, value_len)
 }
 
 /// Alias for rt_env_set for backwards compatibility
 #[no_mangle]
 pub unsafe extern "C" fn rt_set_env(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) {
-    rt_env_set(name_ptr, name_len, value_ptr, value_len);
+    c_ffi_env::rt_set_env(name_ptr, name_len, value_ptr, value_len);
 }
 
 /// Get current working directory
@@ -239,34 +227,13 @@ pub unsafe extern "C" fn rt_env_all() -> RuntimeValue {
 /// Check if environment variable exists
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_exists(name_ptr: *const u8, name_len: u64) -> bool {
-    if name_ptr.is_null() {
-        return false;
-    }
-
-    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
-    let name_str = match std::str::from_utf8(name_bytes) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
-    std::env::var(name_str).is_ok()
+    c_ffi_env::rt_env_exists(name_ptr, name_len)
 }
 
 /// Remove environment variable
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_remove(name_ptr: *const u8, name_len: u64) -> bool {
-    if name_ptr.is_null() {
-        return false;
-    }
-
-    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
-    let name_str = match std::str::from_utf8(name_bytes) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
-    std::env::remove_var(name_str);
-    true
+    c_ffi_env::rt_env_remove(name_ptr, name_len)
 }
 
 /// Get home directory path
