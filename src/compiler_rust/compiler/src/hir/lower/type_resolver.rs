@@ -592,14 +592,15 @@ impl Lowerer {
                             return Ok((idx, *field_ty));
                         }
                     }
-                    if fields.is_empty() {
-                        if let Some((global_idx, global_field_ty)) =
-                            self.try_resolve_global_field_for_struct(&name, field)
-                        {
-                            return Ok((global_idx, global_field_ty));
-                        }
+                    // Field not in local definition — try global/duplicate
+                    // struct defs. Handles same-name structs from different
+                    // modules where the locally-registered definition has
+                    // different fields than the one actually in scope.
+                    if let Some((global_idx, global_field_ty)) =
+                        self.try_resolve_global_field_for_struct(&name, field)
+                    {
+                        return Ok((global_idx, global_field_ty));
                     }
-                    // Collect available field names for suggestions
                     let available_fields = fields.iter().map(|(name, _)| name.clone()).collect();
                     Err(LowerError::CannotInferFieldType {
                         struct_name: name,

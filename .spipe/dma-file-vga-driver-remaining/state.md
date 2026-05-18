@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-18
+- [x] 6-refactor (Tech Lead) — 2026-05-18
+- [x] 7-verify (QA) — 2026-05-18
+- [x] 8-ship (Release Mgr) — 2026-05-18
 
 ## Phase Outputs
 
@@ -35,4 +35,12 @@ feature
 10 ACs across P0/P1/P2. 5 parallel agents (A-E). Existing: device.spl (DmaAllocResult, SharedDmaBuffer), syscall.spl, task_cleanup.spl, nvme/, virtio_blk.spl, framebuffer/, virtio_gpu.spl, vmm.spl.
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 5 files created:
+- src/os/drivers/dma/dma_descriptor.spl — CachePolicy + DmaDescriptor + DmaSyncHelper + IsolationDomain + DmaRegistry
+- src/os/drivers/dma/direct_io.spl — DirectIoCapability + DirectIoRequest + DirectIoResult + BlockDmaSubmit + BlockDmaCompletion
+- src/os/drivers/dma/display_dma.spl — DisplayCapability + DirtyRect + DirtyRectQueue + VirtioGpuDmaTransfer + DisplayDmaManager
+- src/os/drivers/dma/dma_safety_gate.spl — DmaOwnerCheck + CrossDeviceGuard + SriovIsolationGate + DisplayDmaFallbackGate + SafetyGateReport
+- test/unit/os/dma_driver_spec.spl — 20 tests
+
+### 7-verify
+20/20 tests PASS. Commit 9cdf11de0f pushed to origin/main.
