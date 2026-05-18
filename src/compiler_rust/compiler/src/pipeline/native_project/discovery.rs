@@ -82,6 +82,10 @@ impl NativeProjectBuilder {
                 continue;
             }
 
+            if canonical.extension().is_some_and(|e| e == "smf") {
+                continue;
+            }
+
             let mut source = std::fs::read_to_string(&canonical)
                 .map_err(|e| format!("failed to read {}: {}", canonical.display(), e))?;
             if source.contains('\r') {
