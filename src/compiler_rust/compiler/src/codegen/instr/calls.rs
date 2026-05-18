@@ -2667,7 +2667,8 @@ pub fn compile_call<M: Module>(
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
         let sig_ref = builder.func.dfg.ext_funcs[callee_ref].signature;
         let sig_params = builder.func.dfg.signatures[sig_ref].params.len();
-        eprintln!("[LOCAL-CALL] func={:?} args.len()={} sig_params={}", func_name, args.len(), sig_params);
+        let sig_returns = builder.func.dfg.signatures[sig_ref].returns.len();
+        eprintln!("[LOCAL-CALL] func={:?} args.len()={} sig_params={} sig_returns={} dest={:?}", func_name, args.len(), sig_params, sig_returns, dest);
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
         let arg_vals = adapt_args_to_signature(builder, callee_ref, arg_vals);
         let call = adapted_call(builder, callee_ref, &arg_vals);
