@@ -1,0 +1,253 @@
+"""CPU LAPACK Provider — pure-Simple scalar implementation.
+
+CpuLapackProvider performs correct arithmetic using pivoted Gaussian
+elimination without any native LAPACK library dependency.  Use when:
+  - SIMPLE_BLAS_BACKEND=scalar (or unset and no native shim found)
+  - Real arithmetic needed without any native dependency
+
+Import path: use std.nogc_sync_mut.linalg.lapack_cpu.*
+
+THREAD-SAFETY: one handle per process in v1; actor boundary crossing forbidden.
+
+LP64 integer ABI only; row-major flat buffers throughout.
+"""
+
+use std.common.science_math.lapack_provider.{LapackProvider}
+use std.common.science_math.lapack.{LinalgError}
+
+# ============================================================
+# Internal math helpers
+# ============================================================
+
+fn _cpu_lapack_sqrt_f64(value: f64) -> f64:
+    if value <= 0.0:
+        return 0.0
+    var estimate = value
+    if estimate < 1.0:
+        estimate = 1.0
+    var i = 0
+    while i < 20:
+        estimate = 0.5 * (estimate + value / estimate)
+        i = i + 1
+    estimate
+
+fn _cpu_lapack_abs_f64(value: f64) -> f64:
+    if value < 0.0:
+        return -value
+    value
+
+# ============================================================
+# CpuLapackProvider
+# Pure-Simple scalar loops — no native library dependency.
+# Implements LapackProvider trait.
+# ============================================================
+
+pub class CpuLapackProvider:
+
+    pub fn provider_name(self) -> text:
+        "scalar"
+
+    # gesv: Solve A*x = b via pivoted Gaussian elimination.
+    pub fn gesv(self, n: i64, a_buf: [f64], b_buf: [f64]) -> Result<[f64], LinalgError>:
+        # Copy A and b to local buffers for in-place elimination
+        var mat: [f64] = []
+        var rhs: [f64] = []
+        var row = 0
+        while row < n:
+            var col = 0
+            while col < n:
+                mat.push(a_buf[row * n + col])
+                col = col + 1
+            rhs.push(b_buf[row])
+            row = row + 1
+
+        # Pivoted forward elimination
+        var pivot = 0
+        while pivot < n:
+            var pivot_row = pivot
+            var max_abs = _cpu_lapack_abs_f64(mat[pivot * n + pivot])
+            var probe = pivot + 1
+            while probe < n:
+                val candidate_abs = _cpu_lapack_abs_f64(mat[probe * n + pivot])
+                if candidate_abs > max_abs:
+                    max_abs = candidate_abs
+                    pivot_row = probe
+                probe = probe + 1
+
+            if max_abs == 0.0:
+                return Err(LinalgError.Singular(row: pivot))
+
+            if pivot_row != pivot:
+                var swap_col = 0
+                while swap_col < n:
+                    val pidx = pivot * n + swap_col
+                    val pridx = pivot_row * n + swap_col
+                    val tmp = mat[pidx]
+                    mat[pidx] = mat[pridx]
+                    mat[pridx] = tmp
+                    swap_col = swap_col + 1
+                val rhs_tmp = rhs[pivot]
+                rhs[pivot] = rhs[pivot_row]
+                rhs[pivot_row] = rhs_tmp
+
+            var lower = pivot + 1
+            while lower < n:
+                val factor = mat[lower * n + pivot] / mat[pivot * n + pivot]
+                var col = pivot
+                while col < n:
+                    mat[lower * n + col] = mat[lower * n + col] - factor * mat[pivot * n + col]
+                    col = col + 1
+                rhs[lower] = rhs[lower] - factor * rhs[pivot]
+                lower = lower + 1
+            pivot = pivot + 1
+
+        # Back substitution
+        var x: [f64] = []
+        var i = 0
+        while i < n:
+            x.push(0.0)
+            i = i + 1
+        i = n - 1
+        while i >= 0:
+            var total = rhs[i]
+            var col = i + 1
+            while col < n:
+                total = total - mat[i * n + col] * x[col]
+                col = col + 1
+            val diag = mat[i * n + i]
+            if diag == 0.0:
+                return Err(LinalgError.Singular(row: i))
+            x[i] = total / diag
+            i = i - 1
+        Ok(x)
+
+    # getrf: LU factorization storing multipliers in lower triangle.
+    pub fn getrf(self, n: i64, a_buf: [f64]) -> Result<[f64], LinalgError>:
+        var mat: [f64] = []
+        var i = 0
+        while i < n * n:
+            mat.push(a_buf[i])
+            i = i + 1
+
+        var pivot = 0
+        while pivot < n:
+            var pivot_row = pivot
+            var max_abs = _cpu_lapack_abs_f64(mat[pivot * n + pivot])
+            var probe = pivot + 1
+            while probe < n:
+                val candidate_abs = _cpu_lapack_abs_f64(mat[probe * n + pivot])
+                if candidate_abs > max_abs:
+                    max_abs = candidate_abs
+                    pivot_row = probe
+                probe = probe + 1
+
+            if max_abs == 0.0:
+                return Err(LinalgError.Singular(row: pivot))
+
+            if pivot_row != pivot:
+                var swap_col = 0
+                while swap_col < n:
+                    val pidx = pivot * n + swap_col
+                    val pridx = pivot_row * n + swap_col
+                    val tmp = mat[pidx]
+                    mat[pidx] = mat[pridx]
+                    mat[pridx] = tmp
+                    swap_col = swap_col + 1
+
+            var lower = pivot + 1
+            while lower < n:
+                val factor = mat[lower * n + pivot] / mat[pivot * n + pivot]
+                # Store multiplier in lower triangle (LAPACK LU format)
+                mat[lower * n + pivot] = factor
+                var col = pivot + 1
+                while col < n:
+                    mat[lower * n + col] = mat[lower * n + col] - factor * mat[pivot * n + col]
+                    col = col + 1
+                lower = lower + 1
+            pivot = pivot + 1
+        Ok(mat)
+
+    # inv: matrix inverse via repeated gesv on identity columns.
+    pub fn inv(self, n: i64, a_buf: [f64]) -> Result<[f64], LinalgError>:
+        var out: [f64] = []
+        var i = 0
+        while i < n * n:
+            out.push(0.0)
+            i = i + 1
+
+        var col = 0
+        while col < n:
+            var rhs_col: [f64] = []
+            var row = 0
+            while row < n:
+                if row == col:
+                    rhs_col.push(1.0)
+                else:
+                    rhs_col.push(0.0)
+                row = row + 1
+
+            val col_result = self.gesv(n, a_buf, rhs_col)?
+            row = 0
+            while row < n:
+                out[row * n + col] = col_result[row]
+                row = row + 1
+            col = col + 1
+        Ok(out)
+
+    # det: determinant via pivoted LU.
+    pub fn det(self, n: i64, a_buf: [f64]) -> Result<f64, LinalgError>:
+        var mat: [f64] = []
+        var i = 0
+        while i < n * n:
+            mat.push(a_buf[i])
+            i = i + 1
+
+        var sign = 1.0
+        var product = 1.0
+        var pivot = 0
+        while pivot < n:
+            var pivot_row = pivot
+            var max_abs = _cpu_lapack_abs_f64(mat[pivot * n + pivot])
+            var probe = pivot + 1
+            while probe < n:
+                val candidate_abs = _cpu_lapack_abs_f64(mat[probe * n + pivot])
+                if candidate_abs > max_abs:
+                    max_abs = candidate_abs
+                    pivot_row = probe
+                probe = probe + 1
+
+            if max_abs == 0.0:
+                return Ok(0.0)
+
+            if pivot_row != pivot:
+                var swap_col = 0
+                while swap_col < n:
+                    val pidx = pivot * n + swap_col
+                    val pridx = pivot_row * n + swap_col
+                    val tmp = mat[pidx]
+                    mat[pidx] = mat[pridx]
+                    mat[pridx] = tmp
+                    swap_col = swap_col + 1
+                sign = -sign
+
+            val pivot_value = mat[pivot * n + pivot]
+            product = product * pivot_value
+            var lower = pivot + 1
+            while lower < n:
+                val factor = mat[lower * n + pivot] / pivot_value
+                var col = pivot
+                while col < n:
+                    mat[lower * n + col] = mat[lower * n + col] - factor * mat[pivot * n + col]
+                    col = col + 1
+                lower = lower + 1
+            pivot = pivot + 1
+        Ok(sign * product)
+
+    # nrm2: Euclidean norm.
+    pub fn nrm2(self, n: i64, x_buf: [f64]) -> f64:
+        var sum_sq = 0.0
+        var i = 0
+        while i < n:
+            sum_sq = sum_sq + x_buf[i] * x_buf[i]
+            i = i + 1
+        _cpu_lapack_sqrt_f64(sum_sq)

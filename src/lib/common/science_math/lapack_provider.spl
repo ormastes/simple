@@ -1,0 +1,65 @@
+"""LAPACK Provider Trait — Phase 4 LAPACK Provider Boundary.
+
+Defines the provider interface that all LAPACK backends implement.
+Consumers acquire a handle and call operations through this trait.
+
+Import path: use std.common.science_math.lapack_provider.*
+
+Backends:
+  - MockLapackProvider (lapack.spl)             — always available; computes correct values
+  - CpuLapackProvider  (nogc_sync_mut/linalg/lapack_cpu.spl) — pure-Simple scalar GE
+  - LapackeProvider    (nogc_sync_mut/linalg/lapack_lapacke.spl) — SFFI LAPACKE boundary
+
+Selection order (SIMPLE_BLAS_BACKEND env var):
+  mock → scalar (CpuLapackProvider) → lapacke
+
+All operations use flat row-major [f64] buffers (LP64 integers).
+Row-major ↔ column-major conversion is done at Layer A (lapack_lapacke.spl)
+via operand-swap (OQ-C: (AB)^T = B^T A^T).  Callers always see row-major.
+"""
+
+use std.common.science_math.lapack.{LinalgError}
+
+# ============================================================
+# LapackProvider trait
+#
+# All float operations are Float64 (non-generic; PERF-SUGAR-003 deferred).
+# Vectors are [f64] flat buffers.  Matrices are flat row-major [f64] buffers
+# with explicit n dimension.
+#
+# T-LAPACK-07: Pivot is NEVER exposed at Layer C; all raw pivot arrays are
+# fully encapsulated inside provider implementations.
+# ============================================================
+
+pub trait LapackProvider:
+    # gesv: solve A * x = b for x (LAPACK dgesv).
+    # n:     matrix order
+    # a_buf: flat row-major n×n matrix (not modified by mock)
+    # b_buf: flat rhs vector length n
+    # Returns: solution vector [f64] length n, or LinalgError
+    fn gesv(self, n: i64, a_buf: [f64], b_buf: [f64]) -> Result<[f64], LinalgError>
+
+    # getrf: LU factorization of a_buf in-place (LAPACK dgetrf).
+    # Returns: factored buffer [f64] (lower tri in strict lower, upper in upper+diag)
+    fn getrf(self, n: i64, a_buf: [f64]) -> Result<[f64], LinalgError>
+
+    # inv: compute matrix inverse via gesv columns.
+    # n:     matrix order
+    # a_buf: flat row-major n×n matrix
+    # Returns: flat row-major n×n inverse, or LinalgError
+    fn inv(self, n: i64, a_buf: [f64]) -> Result<[f64], LinalgError>
+
+    # det: compute scalar determinant.
+    # n:     matrix order
+    # a_buf: flat row-major n×n matrix
+    # Returns: determinant as f64, or LinalgError
+    fn det(self, n: i64, a_buf: [f64]) -> Result<f64, LinalgError>
+
+    # nrm2: Euclidean norm of a flat vector.
+    # n:     vector length
+    # x_buf: flat vector [f64] of length n
+    # Returns: sqrt(sum(x[i]^2))
+    fn nrm2(self, n: i64, x_buf: [f64]) -> f64
+
+    # Diagnostic name for this provider
+    fn provider_name(self) -> text
