@@ -30,7 +30,7 @@ refactor
 - [x] 5-implement (Engineer) — 2026-05-18
 - [x] 6-refactor (Tech Lead) — 2026-05-18
 - [x] 7-verify (QA) — 2026-05-18
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-18 (partial: ctype slice shipped, math/random/time benchmarks deferred)
 
 ## Phase Outputs
 
@@ -164,4 +164,18 @@ Specs created and passing for all implemented modules:
 - `pure_simple_ctype_perf_gap_2026-05-18.md` — 0.07-0.46x C, inlining needed (AC-5 candidate)
 
 ### 8-ship
-<pending>
+**Shipped (partial — ctype slice):** 2026-05-18
+
+**Committed & pushed:**
+- Deleted `runtime_ctype.c` + `ctype_shims.rs` (zero callers)
+- Deleted `runtime_audio_effects.c` (zero callers, not in tools.rs)
+- Removed ctype from `tools.rs` C file list and `sffi/mod.rs`
+- 7 pure Simple stdlib modules: ctype(9/9), math(13/13), error(4/4), contracts(8/8), random(21/21), time_utils(53/53), audio_effects(7/7)
+- Native benchmark: `bench_ctype_inline.spl` — 0.07-0.46x C (inlining gap)
+- Bug reports: cross-module ABI, ctype perf gap, C exclusion analysis
+
+**Deferred:**
+- Native benchmarks for math/random/time (blocked by cross-module ABI bug for real callers)
+- AC-5 compiler inlining optimization
+- Wave-2+ module conversions (format, string_index, env)
+- C file exclusion for math/random/contracts/error/time (active Rust/codegen callers)
