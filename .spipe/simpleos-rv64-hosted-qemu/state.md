@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-18
+- [x] 6-refactor (Tech Lead) — 2026-05-18
+- [x] 7-verify (QA) — 2026-05-18
+- [x] 8-ship (Release Mgr) — 2026-05-18
 
 ## Phase Outputs
 
@@ -35,7 +35,12 @@ feature
 10 ACs across 4 plan tasks. Existing: qemu_runner.spl (5 parts), ssh_qemu_contract.spl, desktop_qemu_contract.spl.
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 4 source + 1 test:
+- src/os/kernel/arch/riscv64/rv64_hosted_scenario.spl — HostedScenario + TargetRegistration + ScenarioConfig + ScenarioReport
+- src/os/kernel/arch/riscv64/rv64_preflight.spl — PreflightEntry + GuestProbe + ProbeResult + ProbeSchedule
+- src/os/kernel/arch/riscv64/rv64_hosted_boot.spl — SmokeMedia + BootPhase + HostedBoot + BootReport
+- src/os/kernel/arch/riscv64/rv64_smoke_lane.spl — LaneEntry + SmokeLane + SmfLaneConfig + LaneGate
+- test/unit/os/rv64_hosted_qemu_spec.spl — 20 tests
 
 ### 7-verify
-<pending>
+20/20 tests PASS.
