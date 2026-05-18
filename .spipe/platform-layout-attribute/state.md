@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-18
+- [x] 6-refactor (Tech Lead) — 2026-05-18
+- [x] 7-verify (QA) — 2026-05-18
+- [x] 8-ship (Release Mgr) — 2026-05-18
 
 ## Phase Outputs
 
@@ -35,4 +35,12 @@ feature
 10 ACs across 7 plan phases. Existing: PlatformAbi, PlatformBit, PlatformPredicate, PlatformVariant in type_layout_part1.spl. Task: build attribute parsing, match filtering, layout integration, diagnostics, migration.
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 5 files created:
+- src/compiler/30.types/platform_attr_parser.spl — PlatformAttrKey + PlatformAttrValue + PlatformAttrForm + AttrValidationResult
+- src/compiler/30.types/platform_match.spl — CompileTarget + PlatformPredMatch + VariantMatch + MatchSelector + MatchResult
+- src/compiler/30.types/platform_layout_variant.spl — PointerWidth + FieldLayout + PlatformLayoutVariant + PlatformLayoutSelector
+- src/compiler/30.types/platform_diagnostic.spl — PlatformDiagnostic + TypePlatformCheck + MigrationCandidate + MigrationReport
+- test/unit/compiler/platform_layout_attr_spec.spl — 20 tests
+
+### 7-verify
+20/20 tests PASS.
