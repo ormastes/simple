@@ -42,13 +42,12 @@ impl<'a> MirLowerer<'a> {
             let left_reg = self.lower_expr(left)?;
             let right_reg = self.lower_expr(right)?;
 
-            // String concatenation: if either side is text/string and op is Add,
-            // emit rt_string_concat call instead of iadd
+            // Only use string concat when at least one operand is known STRING.
+            // ANY-typed operands (untyped fn params) default to arithmetic iadd,
+            // consistent with Sub/Mul which always emit BinOp.
             let is_string_add = op == BinOp::Add
                 && (left.ty == TypeId::STRING
-                    || right.ty == TypeId::STRING
-                    || left.ty == TypeId::ANY
-                    || right.ty == TypeId::ANY);
+                    || right.ty == TypeId::STRING);
             if is_string_add {
                 // Convert non-string side to string via rt_to_string if needed
                 let left_str = if left.ty != TypeId::STRING && left.ty != TypeId::ANY {
