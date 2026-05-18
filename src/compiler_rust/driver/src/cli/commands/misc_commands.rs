@@ -459,26 +459,32 @@ struct StageResult {
 fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
     use std::process::Command;
 
-    // Try Rust driver format first:
-    //   compiler compile src/app/cli/main.spl --native -o <output>
-    // Falls back to self-hosted Simple format:
+    // Rust driver uses native-build with --entry-closure for cross-module resolution:
+    //   compiler native-build --source ... --entry ... --entry-closure -o <output>
+    // Self-hosted Simple format:
     //   compiler src/app/compile/native.spl src/app/cli/main.spl <output>
     let is_rust_driver = is_rust_driver_binary(compiler);
 
     let mut cmd = Command::new(compiler);
     if is_rust_driver {
-        cmd.arg("compile")
+        cmd.arg("native-build")
+            .arg("--source")
+            .arg("src/compiler")
+            .arg("--source")
+            .arg("src/lib")
+            .arg("--source")
+            .arg("src/app")
+            .arg("--entry")
             .arg("src/app/cli/main.spl")
-            .arg("--native")
+            .arg("--entry-closure")
             .arg("-o")
             .arg(output);
-        // Pass SIMPLE_BOOTSTRAP=1 and SIMPLE_RUNTIME_PATH for proper linking
         cmd.env("SIMPLE_BOOTSTRAP", "1");
         if let Ok(rtp) = std::env::var("SIMPLE_RUNTIME_PATH") {
             cmd.env("SIMPLE_RUNTIME_PATH", rtp);
         }
         println!(
-            "  Running: {} compile src/app/cli/main.spl --native -o {}",
+            "  Running: {} native-build --entry-closure --entry src/app/cli/main.spl -o {}",
             compiler, output
         );
     } else {
