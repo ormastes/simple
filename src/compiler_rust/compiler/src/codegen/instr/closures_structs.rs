@@ -187,7 +187,6 @@ pub(crate) fn compile_method_call_static<M: Module>(
     func_name: &str,
     args: &[VReg],
 ) -> InstrResult<()> {
-    eprintln!("[MCS-DEBUG] func_name={:?} receiver={:?} args.len()={}", func_name, receiver, args.len());
     let lookup_name_storage = if func_name.contains("_dot_") {
         Some(func_name.replace("_dot_", "."))
     } else {
@@ -400,7 +399,13 @@ pub(crate) fn compile_method_call_static<M: Module>(
 
     if let Some(func_id) = func_id {
         let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-        let mut call_args = vec![get_vreg_or_default(ctx, builder, &receiver)];
+        let sig_ref = builder.func.dfg.ext_funcs[func_ref].signature;
+        let sig_params = builder.func.dfg.signatures[sig_ref].params.len();
+        let mut call_args = if sig_params == args.len() {
+            vec![]
+        } else {
+            vec![get_vreg_or_default(ctx, builder, &receiver)]
+        };
         for arg in args {
             call_args.push(get_vreg_or_default(ctx, builder, arg));
         }
@@ -518,12 +523,14 @@ pub(crate) fn compile_method_call_static<M: Module>(
             } else {
                 std::borrow::Cow::Borrowed(resolved)
             };
-            // Check if the function is already declared (avoids "Incompatible declaration" errors
-            // when the function was already declared with a specific signature in declare_functions)
+            let is_free_fn = ctx.fn_arities.get(resolved.as_ref())
+                .map(|&arity| arity == args.len())
+                .unwrap_or(false);
             let fid = ctx.func_ids.get(resolved.as_ref()).copied().unwrap_or_else(|| {
                 let call_conv = platform_call_conv();
                 let mut sig = Signature::new(call_conv);
-                for _ in 0..args.len() + 1 {
+                let param_count = if is_free_fn { args.len() } else { args.len() + 1 };
+                for _ in 0..param_count {
                     sig.params.push(AbiParam::new(types::I64));
                 }
                 sig.returns.push(AbiParam::new(types::I64));
@@ -532,15 +539,14 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     .declare_function(&resolved, Linkage::Import, &sig)
                     .or_else(|_| {
                         let mut sig2 = Signature::new(call_conv);
-                        for _ in 0..args.len() {
+                        let alt_count = if is_free_fn { args.len() + 1 } else { args.len() };
+                        for _ in 0..alt_count {
                             sig2.params.push(AbiParam::new(types::I64));
                         }
                         sig2.returns.push(AbiParam::new(types::I64));
                         ctx.module.declare_function(&resolved, Linkage::Import, &sig2)
                     })
                     .unwrap_or_else(|_| {
-                        // Fallback: name may already be declared (imported impl method
-                        // declared as Export). Use get_name to find existing FuncId.
                         match ctx.module.get_name(&resolved) {
                             Some(cranelift_module::FuncOrDataId::Func(id)) => id,
                             _ => ctx.runtime_funcs["rt_function_not_found"],
@@ -550,7 +556,11 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 id
             });
             let fref = ctx.module.declare_func_in_func(fid, builder.func);
-            let mut call_args = vec![get_vreg_or_default(ctx, builder, &receiver)];
+            let mut call_args = if is_free_fn {
+                vec![]
+            } else {
+                vec![get_vreg_or_default(ctx, builder, &receiver)]
+            };
             for a in args {
                 call_args.push(get_vreg_or_default(ctx, builder, a));
             }

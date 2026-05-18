@@ -2828,12 +2828,8 @@ pub fn compile_call<M: Module>(
         // Strip spurious nil receiver from module-qualified free function calls.
         // HIR→MIR lowers `mod.func(args)` as [nil_receiver, args...]; when
         // fn_arities proves the callee expects fewer params, drop the leading nil.
-        eprintln!("[ABI-DEBUG] func_name={:?} resolved={:?} arg_count={} fn_arities_entry={:?}",
-            func_name, resolved_name.as_ref(), arg_vals.len(),
-            ctx.fn_arities.get(resolved_name.as_ref()));
         let arg_vals = if let Some(&arity) = ctx.fn_arities.get(resolved_name.as_ref()) {
             if arg_vals.len() > arity && arg_vals.len() == arity + 1 {
-                eprintln!("[ABI-DEBUG] STRIPPING nil receiver: arity={} args={}", arity, arg_vals.len());
                 arg_vals[1..].to_vec()
             } else {
                 arg_vals
