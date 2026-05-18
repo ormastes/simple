@@ -16,12 +16,12 @@ pub(crate) struct ImportMapResult {
     /// module_prefix -> (func_name -> actual_mangled_name) for re-exported functions.
     pub re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// Global struct definitions: struct_name -> field names (in order).
-    pub struct_defs: std::collections::HashMap<String, Vec<(String, String)>>,
+    pub struct_defs: std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
     /// Duplicate global struct/class definitions keyed by bare type name.
     /// Each entry preserves the full field layout for every colliding
     /// definition so the HIR lowerer can disambiguate field lookups by the
     /// requested field name instead of relying on the lossy first-wins map.
-    pub duplicate_struct_defs: std::collections::HashMap<String, Vec<Vec<(String, String)>>>,
+    pub duplicate_struct_defs: std::collections::HashMap<String, Vec<Vec<(String, simple_parser::Type)>>>,
     /// Global enum definitions: enum_name -> variants, where each variant is
     /// `(variant_name, payload_arity)`. `payload_arity = None` means a unit
     /// variant (no fields); `Some(n)` means a payload variant with `n` fields
@@ -207,8 +207,8 @@ pub(crate) fn build_import_map(
     use std::collections::{HashMap, HashSet};
 
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
-    let mut struct_defs: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    let mut duplicate_struct_defs: HashMap<String, Vec<Vec<(String, String)>>> = HashMap::new();
+    let mut struct_defs: HashMap<String, Vec<(String, simple_parser::Type)>> = HashMap::new();
+    let mut duplicate_struct_defs: HashMap<String, Vec<Vec<(String, simple_parser::Type)>>> = HashMap::new();
     let mut enum_defs: HashMap<String, Vec<(String, Option<usize>)>> = HashMap::new();
     let mut data_exports: HashSet<String> = HashSet::new();
 
@@ -248,13 +248,10 @@ pub(crate) fn build_import_map(
                         // not function symbols — mark them so declare_globals uses the data path.
                         data_exports.insert(type_mangled);
                         if !c.fields.is_empty() {
-                            let fields: Vec<(String, String)> = c
+                            let fields: Vec<(String, simple_parser::Type)> = c
                                 .fields
                                 .iter()
-                                .map(|f| {
-                                    let ty_name = format!("{:?}", f.ty);
-                                    (f.name.clone(), ty_name)
-                                })
+                                .map(|f| (f.name.clone(), f.ty.clone()))
                                 .collect();
                             record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &c.name, fields);
                         }
@@ -309,13 +306,10 @@ pub(crate) fn build_import_map(
                             .push(type_mangled.clone());
                         data_exports.insert(type_mangled);
                         if !s.fields.is_empty() {
-                            let fields: Vec<(String, String)> = s
+                            let fields: Vec<(String, simple_parser::Type)> = s
                                 .fields
                                 .iter()
-                                .map(|f| {
-                                    let ty_name = format!("{:?}", f.ty);
-                                    (f.name.clone(), ty_name)
-                                })
+                                .map(|f| (f.name.clone(), f.ty.clone()))
                                 .collect();
                             record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &s.name, fields);
                         }
@@ -363,13 +357,10 @@ pub(crate) fn build_import_map(
                             let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, e.name, v.name));
                             raw_to_mangled.entry(raw).or_default().push(mangled);
                             if let Some(ref fields) = v.fields {
-                                let named: Vec<(String, String)> = fields
+                                let named: Vec<(String, simple_parser::Type)> = fields
                                     .iter()
                                     .filter_map(|f| {
-                                        f.name.as_ref().map(|n| {
-                                            let ty_name = format!("{:?}", f.ty);
-                                            (n.clone(), ty_name)
-                                        })
+                                        f.name.as_ref().map(|n| (n.clone(), f.ty.clone()))
                                     })
                                     .collect();
                                 if !named.is_empty() {
@@ -519,10 +510,10 @@ pub(crate) fn build_import_map(
 }
 
 fn record_struct_fields(
-    struct_defs: &mut std::collections::HashMap<String, Vec<(String, String)>>,
-    duplicate_struct_defs: &mut std::collections::HashMap<String, Vec<Vec<(String, String)>>>,
+    struct_defs: &mut std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
+    duplicate_struct_defs: &mut std::collections::HashMap<String, Vec<Vec<(String, simple_parser::Type)>>>,
     name: &str,
-    fields: Vec<(String, String)>,
+    fields: Vec<(String, simple_parser::Type)>,
 ) {
     if fields.is_empty() {
         return;

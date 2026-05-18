@@ -354,7 +354,7 @@ impl Lowerer {
                 .iter()
                 .find_map(|(fname, ftype)| if fname == field_name { Some(ftype.clone()) } else { None })?
         };
-        self.resolve_global_type_spec(&field_type_name)
+        self.resolve_type(&field_type_name).ok()
     }
 
     fn try_resolve_global_field_index_by_name(&self, struct_name: &str, field_name: &str) -> Option<usize> {
@@ -416,7 +416,7 @@ impl Lowerer {
                     })
             })?;
 
-        Self::named_struct_name_from_type_spec(&field_type_spec).and_then(|candidate| {
+        Self::named_struct_name_from_type(&field_type_spec).and_then(|candidate| {
             self.global_struct_defs
                 .as_ref()
                 .is_some_and(|defs| defs.contains_key(&candidate))
@@ -474,14 +474,12 @@ impl Lowerer {
         matches!(struct_name, "ANY" | "Any" | "wildcard") || struct_name.starts_with("TypeId(")
     }
 
-    fn named_struct_name_from_type_spec(spec: &str) -> Option<String> {
-        let spec = spec.trim();
-        if let Some(inner) = spec.strip_prefix("Simple(\"").and_then(|rest| rest.strip_suffix("\")")) {
-            return Some(inner.to_string());
+    fn named_struct_name_from_type(ty: &simple_parser::Type) -> Option<String> {
+        match ty {
+            simple_parser::Type::Simple(name) => Some(name.clone()),
+            simple_parser::Type::Generic { name, .. } => Some(name.clone()),
+            _ => None,
         }
-        spec.chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.'))
-            .then_some(spec.to_string())
     }
 
     fn has_known_method_for_struct_name(&self, struct_name: &str, method_name: &str) -> bool {

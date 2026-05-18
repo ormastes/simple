@@ -99,7 +99,7 @@ pub(crate) fn effective_target() -> simple_common::target::Target {
 }
 
 /// Grouped duplicate struct definitions: bare type name → list of field-lists.
-type DuplicateStructDefs = std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, String)>>>>;
+type DuplicateStructDefs = std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, simple_parser::Type)>>>>;
 /// Enum definitions: enum name → list of (variant name, optional payload arity).
 type EnumDefs = std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>;
 
@@ -119,7 +119,7 @@ pub(crate) struct ModuleImports {
     pub re_exports: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
     /// Global struct definitions: struct_name -> [(field_name, field_type_name)].
     /// Shared across all compilation units for consistent cross-module field offsets.
-    pub struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>,
+    pub struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>>,
     /// Duplicate global struct/class definitions grouped by bare type name.
     /// Used only for bounded field-name disambiguation when `struct_defs`
     /// lost information due to same-name collisions across modules.

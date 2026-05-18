@@ -10,7 +10,7 @@ impl Lowerer {
         struct_name: &str,
         field_name: &str,
     ) -> Option<(usize, TypeId)> {
-        let field_type_name = {
+        let field_type = {
             let variants = self.duplicate_global_struct_defs.as_ref()?.get(struct_name)?;
             let mut matches = variants.iter().filter_map(|fields| {
                 fields
@@ -24,16 +24,16 @@ impl Lowerer {
             }
             first
         };
-        let (index, field_type_name) = field_type_name;
-        let field_ty = self.resolve_global_type_spec(&field_type_name).unwrap_or(TypeId::ANY);
+        let (index, field_type) = field_type;
+        let field_ty = self.resolve_type(&field_type).unwrap_or(TypeId::ANY);
         Some((index, field_ty))
     }
 
     pub(super) fn resolve_global_field_info(&mut self, field: &str) -> Option<(usize, TypeId, usize, String)> {
-        let mut best_global: Option<(usize, String, usize, String)> = None;
+        let mut best_global: Option<(usize, Type, usize, String)> = None;
         let global_defs = self.global_struct_defs.clone()?;
         for (struct_name, fields) in global_defs.iter() {
-            for (idx, (field_name, field_type_spec)) in fields.iter().enumerate() {
+            for (idx, (field_name, field_type)) in fields.iter().enumerate() {
                 if field_name != field {
                     continue;
                 }
@@ -44,41 +44,13 @@ impl Lowerer {
                 {
                     continue;
                 }
-                best_global = Some((idx, field_type_spec.clone(), count, struct_name.clone()));
+                best_global = Some((idx, field_type.clone(), count, struct_name.clone()));
             }
         }
 
-        let (idx, field_type_spec, count, struct_name) = best_global?;
-        let field_ty = self.resolve_global_type_spec(&field_type_spec).unwrap_or(TypeId::ANY);
+        let (idx, field_type, count, struct_name) = best_global?;
+        let field_ty = self.resolve_type(&field_type).unwrap_or(TypeId::ANY);
         Some((idx, field_ty, count, struct_name))
-    }
-
-    pub(super) fn resolve_global_type_spec(&mut self, spec: &str) -> Option<TypeId> {
-        let spec = spec.trim();
-        if spec.is_empty() {
-            return None;
-        }
-        if let Some(inner) = spec.strip_prefix("Simple(\"").and_then(|rest| rest.strip_suffix("\")")) {
-            return self.resolve_type(&Type::Simple(inner.to_string())).ok();
-        }
-        if let Some(inner) = spec.strip_suffix('?') {
-            let inner_ty = self.resolve_global_type_spec(inner.trim())?;
-            return Some(self.module.types.register(HirType::Enum {
-                name: "Option".to_string(),
-                variants: vec![("Some".to_string(), Some(vec![inner_ty])), ("None".to_string(), None)],
-                generic_params: vec!["T".to_string()],
-                is_generic_template: false,
-                type_bindings: std::collections::HashMap::from([("T".to_string(), inner_ty)]),
-            }));
-        }
-        if let Some(inner) = spec.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
-            let element_ty = self.resolve_global_type_spec(inner.trim())?;
-            return Some(self.module.types.register(HirType::Array {
-                element: element_ty,
-                size: None,
-            }));
-        }
-        self.resolve_type(&Type::Simple(spec.to_string())).ok()
     }
 
     fn instantiate_builtin_generic_enum(&mut self, family: &str, args: &[Type]) -> Option<LowerResult<TypeId>> {
@@ -759,7 +731,7 @@ impl Lowerer {
                         })
                 })?;
 
-        let field_ty = self.resolve_global_type_spec(&field_type_spec).unwrap_or(TypeId::ANY);
+        let field_ty = self.resolve_type(&field_type_spec).unwrap_or(TypeId::ANY);
         Some((field_index, field_ty))
     }
 

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use simple_parser::Pattern;
+use simple_parser::{Pattern, Type};
 
 use super::super::capability::CapabilityEnv;
 use super::super::lifetime::LifetimeContext;
@@ -11,8 +11,8 @@ use super::memory_warning::MemoryWarningCollector;
 use crate::module_resolver::ModuleResolver;
 use crate::type_inference_config::TypeInferenceConfig;
 
-type GlobalStructDefs = std::sync::Arc<HashMap<String, Vec<(String, String)>>>;
-type DuplicateGlobalStructDefs = std::sync::Arc<HashMap<String, Vec<Vec<(String, String)>>>>;
+type GlobalStructDefs = std::sync::Arc<HashMap<String, Vec<(String, Type)>>>;
+type DuplicateGlobalStructDefs = std::sync::Arc<HashMap<String, Vec<Vec<(String, Type)>>>>;
 type AmbiguousFieldNames = std::sync::Arc<HashSet<String>>;
 type GlobalEnumDefs = std::sync::Arc<HashMap<String, Vec<(String, Option<usize>)>>>;
 
@@ -255,7 +255,7 @@ impl Lowerer {
     }
 
     /// Get global struct definitions (if set).
-    pub fn global_struct_defs(&self) -> Option<&HashMap<String, Vec<(String, String)>>> {
+    pub fn global_struct_defs(&self) -> Option<&HashMap<String, Vec<(String, Type)>>> {
         self.global_struct_defs.as_deref()
     }
 
