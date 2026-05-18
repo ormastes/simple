@@ -4,7 +4,7 @@
 //! enabling compile-time type checking for imports like `import a.{ShapeError}`.
 
 use simple_parser::ast::{ImportTarget, ModulePath, Node};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::super::types::{HirType, TypeId};
 use super::error::{LowerError, LowerResult};
@@ -73,15 +73,17 @@ impl Lowerer {
             match item {
                 Node::UseStmt(use_stmt) => {
                     if Self::import_target_intersects(target, &use_stmt.target) {
-                        self.load_imported_types(&use_stmt.path, &use_stmt.target)?;
-                        imported_count += 1;
+                        if self.load_imported_types(&use_stmt.path, &use_stmt.target).is_ok() {
+                            imported_count += 1;
+                        }
                     }
                 }
                 Node::MultiUse(multi_use) => {
                     for (path, nested_target) in &multi_use.imports {
                         if Self::import_target_intersects(target, nested_target) {
-                            self.load_imported_types(path, nested_target)?;
-                            imported_count += 1;
+                            if self.load_imported_types(path, nested_target).is_ok() {
+                                imported_count += 1;
+                            }
                         }
                     }
                 }
@@ -90,8 +92,9 @@ impl Lowerer {
                         continue;
                     }
                     if Self::import_target_intersects(target, &export_use.target) {
-                        self.load_imported_types(&export_use.path, &export_use.target)?;
-                        imported_count += 1;
+                        if self.load_imported_types(&export_use.path, &export_use.target).is_ok() {
+                            imported_count += 1;
+                        }
                     }
                 }
                 _ => {}
@@ -809,6 +812,10 @@ impl Lowerer {
         }
         self.loaded_modules.insert(resolved.path.clone());
 
+        if resolved.path.extension().is_some_and(|ext| ext == "smf") {
+            return self.load_types_from_smf(&resolved.path, target);
+        }
+
         // Read and parse the module file
         let mut source = std::fs::read_to_string(&resolved.path).map_err(|e| {
             LowerError::ModuleResolution(format!("Failed to read module file {:?}: {}", resolved.path, e))
@@ -840,6 +847,98 @@ impl Lowerer {
         result
     }
 
+    fn load_types_from_smf(&mut self, smf_path: &Path, target: &ImportTarget) -> LowerResult<()> {
+        use simple_common::smf::{SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolType};
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut file = std::fs::File::open(smf_path).map_err(|e| {
+            LowerError::ModuleResolution(format!("Failed to open SMF {:?}: {}", smf_path, e))
+        })?;
+
+        let header = SmfHeader::read_trailer(&mut file).map_err(|e| {
+            LowerError::ModuleResolution(format!("Failed to read SMF header {:?}: {}", smf_path, e))
+        })?;
+
+        if header.symbol_count == 0 {
+            return Ok(());
+        }
+
+        let mut string_table = Vec::new();
+        if header.section_count > 0 && header.section_table_offset > 0 {
+            let sec_size = std::mem::size_of::<SmfSection>();
+            if file.seek(SeekFrom::Start(header.section_table_offset)).is_ok() {
+                let mut sec_buf = vec![0u8; sec_size * header.section_count as usize];
+                if file.read_exact(&mut sec_buf).is_ok() {
+                    for i in 0..header.section_count as usize {
+                        let section: SmfSection = unsafe {
+                            std::ptr::read(sec_buf[i * sec_size..].as_ptr() as *const SmfSection)
+                        };
+                        if section.section_type == SectionType::StrTab && section.size > 0 {
+                            if file.seek(SeekFrom::Start(section.offset)).is_ok() {
+                                string_table.resize(section.size as usize, 0u8);
+                                let _ = file.read_exact(&mut string_table);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if string_table.is_empty() {
+            return Ok(());
+        }
+
+        let sym_size = std::mem::size_of::<SmfSymbol>();
+        if file.seek(SeekFrom::Start(header.symbol_table_offset)).is_err() {
+            return Ok(());
+        }
+        let mut sym_buf = vec![0u8; sym_size * header.symbol_count as usize];
+        if file.read_exact(&mut sym_buf).is_err() {
+            return Ok(());
+        }
+
+        for i in 0..header.symbol_count as usize {
+            let sym: SmfSymbol =
+                unsafe { std::ptr::read(sym_buf[i * sym_size..].as_ptr() as *const SmfSymbol) };
+
+            let name = smf_read_string(&string_table, sym.name_offset as usize);
+            if name.is_empty() || !self.should_import_symbol(&name, target) {
+                continue;
+            }
+
+            match sym.sym_type {
+                SymbolType::Type | SymbolType::Trait => {
+                    if self.module.types.lookup(&name).is_none() {
+                        self.module.types.register_named(
+                            name.clone(),
+                            HirType::Struct {
+                                name: name.clone(),
+                                fields: vec![],
+                                has_snapshot: false,
+                                generic_params: vec![],
+                                is_generic_template: sym.is_generic_template(),
+                                type_bindings: std::collections::HashMap::new(),
+                            },
+                        );
+                    }
+                    let type_id = self.module.types.lookup(&name).unwrap_or(TypeId::ANY);
+                    self.globals.insert(name, type_id);
+                }
+                SymbolType::Function => {
+                    self.globals.insert(name.clone(), TypeId::ANY);
+                    self.imported_function_names.insert(name);
+                }
+                SymbolType::Constant => {
+                    self.globals.insert(name, TypeId::ANY);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
     /// Check if a symbol should be imported based on the import target.
     #[allow(clippy::only_used_in_recursion)] // reason: parameter threaded for consistency with sibling function signatures
     fn should_import_symbol(&self, name: &str, target: &ImportTarget) -> bool {
@@ -853,6 +952,18 @@ impl Lowerer {
             ImportTarget::Aliased { name: n, .. } => n == name, // Import if matches (will be aliased later)
         }
     }
+}
+
+fn smf_read_string(table: &[u8], offset: usize) -> String {
+    if offset >= table.len() {
+        return String::new();
+    }
+    let end = table[offset..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|p| offset + p)
+        .unwrap_or(table.len());
+    String::from_utf8_lossy(&table[offset..end]).into_owned()
 }
 
 #[cfg(test)]

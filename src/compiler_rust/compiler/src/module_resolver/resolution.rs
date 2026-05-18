@@ -205,6 +205,16 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
         });
     }
 
+    let smf_path = dir.join(format!("{}.smf", last));
+    if smf_path.exists() && smf_path.is_file() {
+        return Some(ResolvedModule {
+            path: smf_path,
+            module_path: original_path.clone(),
+            is_directory: false,
+            manifest: None,
+        });
+    }
+
     None
 }
 
