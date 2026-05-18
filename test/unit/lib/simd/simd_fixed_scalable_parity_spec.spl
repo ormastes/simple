@@ -1,0 +1,287 @@
+use std.spec.*
+
+# ============================================================================
+# Inline definitions — test is self-contained (no library imports)
+# ============================================================================
+
+class FixedVec:
+    data: [f32]
+    lane_count: i32
+
+impl FixedVec:
+    static fn new(data: [f32]) -> FixedVec:
+        FixedVec(data: data, lane_count: data.len())
+
+    static fn splat(v: f32, n: i32) -> FixedVec:
+        var d: [f32] = []
+        var i = 0
+        while i < n:
+            d.push(v)
+            i = i + 1
+        FixedVec(data: d, lane_count: n)
+
+    fn lanes(self) -> i32:
+        self.lane_count
+
+    fn get(self, idx: i32) -> f32:
+        self.data[idx]
+
+    fn add(self, rhs: FixedVec) -> FixedVec:
+        var out: [f32] = []
+        var i = 0
+        while i < self.lane_count:
+            out.push(self.data[i] + rhs.data[i])
+            i = i + 1
+        FixedVec(data: out, lane_count: self.lane_count)
+
+    fn sub(self, rhs: FixedVec) -> FixedVec:
+        var out: [f32] = []
+        var i = 0
+        while i < self.lane_count:
+            out.push(self.data[i] - rhs.data[i])
+            i = i + 1
+        FixedVec(data: out, lane_count: self.lane_count)
+
+    fn mul(self, rhs: FixedVec) -> FixedVec:
+        var out: [f32] = []
+        var i = 0
+        while i < self.lane_count:
+            out.push(self.data[i] * rhs.data[i])
+            i = i + 1
+        FixedVec(data: out, lane_count: self.lane_count)
+
+    fn sum(self) -> f32:
+        var acc: f32 = 0.0
+        var i = 0
+        while i < self.lane_count:
+            acc = acc + self.data[i]
+            i = i + 1
+        acc
+
+    fn eq_lanes(self, rhs: FixedVec) -> bool:
+        if self.lane_count != rhs.lane_count:
+            return false
+        var i = 0
+        while i < self.lane_count:
+            if self.data[i] != rhs.data[i]:
+                return false
+            i = i + 1
+        true
+
+class ScalableVec:
+    data: [f32]
+    min_granule: i32
+
+impl ScalableVec:
+    static fn new(data: [f32], min_granule: i32) -> ScalableVec:
+        ScalableVec(data: data, min_granule: min_granule)
+
+    static fn splat(v: f32, n: i32, granule: i32) -> ScalableVec:
+        var d: [f32] = []
+        var i = 0
+        while i < n:
+            d.push(v)
+            i = i + 1
+        ScalableVec(data: d, min_granule: granule)
+
+    fn lanes(self) -> i32:
+        self.data.len()
+
+    fn granule(self) -> i32:
+        self.min_granule
+
+    fn get(self, idx: i32) -> f32:
+        self.data[idx]
+
+    fn add(self, rhs: ScalableVec) -> ScalableVec:
+        var out: [f32] = []
+        var n = self.data.len()
+        var i = 0
+        while i < n:
+            out.push(self.data[i] + rhs.data[i])
+            i = i + 1
+        ScalableVec(data: out, min_granule: self.min_granule)
+
+    fn mul(self, rhs: ScalableVec) -> ScalableVec:
+        var out: [f32] = []
+        var n = self.data.len()
+        var i = 0
+        while i < n:
+            out.push(self.data[i] * rhs.data[i])
+            i = i + 1
+        ScalableVec(data: out, min_granule: self.min_granule)
+
+    fn sum(self) -> f32:
+        var acc: f32 = 0.0
+        var i = 0
+        var n = self.data.len()
+        while i < n:
+            acc = acc + self.data[i]
+            i = i + 1
+        acc
+
+    fn eq_lanes(self, rhs: ScalableVec) -> bool:
+        if self.data.len() != rhs.data.len():
+            return false
+        var i = 0
+        var n = self.data.len()
+        while i < n:
+            if self.data[i] != rhs.data[i]:
+                return false
+            i = i + 1
+        true
+
+class VLen:
+    base_bits: i32
+    multiplier: i32
+
+impl VLen:
+    static fn sve(multiplier: i32) -> VLen:
+        VLen(base_bits: 128, multiplier: multiplier)
+
+    static fn riscv_v(multiplier: i32) -> VLen:
+        VLen(base_bits: 64, multiplier: multiplier)
+
+    fn total_bits(self) -> i32:
+        self.base_bits * self.multiplier
+
+    fn f32_lanes(self) -> i32:
+        self.total_bits() / 32
+
+    fn f64_lanes(self) -> i32:
+        self.total_bits() / 64
+
+class LoweringDiag:
+    kind: i32
+    fixed_lanes: i32
+    target_lanes: i32
+    note: text
+
+fn make_diag(kind: i32, fixed_lanes: i32, target_lanes: i32, msg: text) -> LoweringDiag:
+    LoweringDiag(kind: kind, fixed_lanes: fixed_lanes, target_lanes: target_lanes, note: msg)
+
+fn lower_f32(fixed_lanes: i32, target_f32_lanes: i32) -> LoweringDiag:
+    if fixed_lanes == target_f32_lanes:
+        return make_diag(0, fixed_lanes, target_f32_lanes, "direct map")
+    if fixed_lanes > target_f32_lanes:
+        return make_diag(1, fixed_lanes, target_f32_lanes, "split required")
+    make_diag(2, fixed_lanes, target_f32_lanes, "padding required")
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "FixedVec":
+    it "new creates vector with correct lane count":
+        val fv = FixedVec.new([1.0, 2.0, 3.0, 4.0])
+        expect(fv.lanes()).to_equal(4)
+
+    it "splat fills all lanes with given value":
+        val fv = FixedVec.splat(3.0, 4)
+        expect(fv.get(0)).to_equal(3.0)
+        expect(fv.get(3)).to_equal(3.0)
+
+    it "add computes lane-wise sum":
+        val a = FixedVec.new([1.0, 2.0, 3.0, 4.0])
+        val b = FixedVec.new([4.0, 3.0, 2.0, 1.0])
+        val c = a.add(b)
+        expect(c.get(0)).to_equal(5.0)
+        expect(c.get(3)).to_equal(5.0)
+
+    it "sub computes lane-wise difference":
+        val a = FixedVec.new([10.0, 8.0, 6.0, 4.0])
+        val b = FixedVec.new([1.0, 2.0, 3.0, 4.0])
+        val c = a.sub(b)
+        expect(c.get(0)).to_equal(9.0)
+        expect(c.get(3)).to_equal(0.0)
+
+    it "mul computes lane-wise product":
+        val a = FixedVec.new([2.0, 3.0, 4.0, 5.0])
+        val b = FixedVec.splat(2.0, 4)
+        val c = a.mul(b)
+        expect(c.get(0)).to_equal(4.0)
+        expect(c.get(3)).to_equal(10.0)
+
+    it "sum reduces all lanes":
+        val fv = FixedVec.splat(1.0, 4)
+        expect(fv.sum()).to_equal(4.0)
+
+    it "eq_lanes returns true for identical vectors":
+        val a = FixedVec.new([1.0, 2.0, 3.0, 4.0])
+        val b = FixedVec.new([1.0, 2.0, 3.0, 4.0])
+        expect(a.eq_lanes(b)).to_equal(true)
+
+    it "eq_lanes returns false for different vectors":
+        val a = FixedVec.new([1.0, 2.0, 3.0, 4.0])
+        val b = FixedVec.new([1.0, 2.0, 3.0, 5.0])
+        expect(a.eq_lanes(b) == false).to_equal(true)
+
+describe "ScalableVec":
+    it "new creates scalable vector with correct lane count":
+        val sv = ScalableVec.new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 4)
+        expect(sv.lanes()).to_equal(8)
+
+    it "granule is preserved on construction":
+        val sv = ScalableVec.new([1.0, 2.0, 3.0, 4.0], 4)
+        expect(sv.granule()).to_equal(4)
+
+    it "splat fills all lanes":
+        val sv = ScalableVec.splat(5.0, 8, 4)
+        expect(sv.get(0)).to_equal(5.0)
+        expect(sv.get(7)).to_equal(5.0)
+
+    it "add computes lane-wise sum":
+        val a = ScalableVec.splat(1.0, 4, 4)
+        val b = ScalableVec.splat(2.0, 4, 4)
+        val c = a.add(b)
+        expect(c.get(0)).to_equal(3.0)
+
+    it "mul computes lane-wise product":
+        val a = ScalableVec.new([2.0, 4.0, 6.0, 8.0], 4)
+        val b = ScalableVec.splat(0.5, 4, 4)
+        val c = a.mul(b)
+        expect(c.get(0)).to_equal(1.0)
+        expect(c.get(3)).to_equal(4.0)
+
+    it "sum reduces all scalable lanes":
+        val sv = ScalableVec.splat(1.0, 8, 4)
+        expect(sv.sum()).to_equal(8.0)
+
+    it "eq_lanes returns true for matching scalable vectors":
+        val a = ScalableVec.splat(3.0, 4, 4)
+        val b = ScalableVec.splat(3.0, 4, 4)
+        expect(a.eq_lanes(b)).to_equal(true)
+
+describe "VLen":
+    it "SVE x1 gives 128-bit total":
+        val vl = VLen.sve(1)
+        expect(vl.total_bits()).to_equal(128)
+
+    it "SVE x1 gives 4 f32 lanes":
+        val vl = VLen.sve(1)
+        expect(vl.f32_lanes()).to_equal(4)
+
+    it "SVE x2 gives 8 f32 lanes":
+        val vl = VLen.sve(2)
+        expect(vl.f32_lanes()).to_equal(8)
+
+    it "RISC-V V x1 gives 64-bit total":
+        val vl = VLen.riscv_v(1)
+        expect(vl.total_bits()).to_equal(64)
+
+describe "ScalableAdapter lowering diagnostics":
+    it "direct map when fixed lanes equal target lanes":
+        val d = lower_f32(4, 4)
+        expect(d.kind).to_equal(0)
+
+    it "split required when fixed lanes exceed target":
+        val d = lower_f32(8, 4)
+        expect(d.kind).to_equal(1)
+
+    it "padding required when fixed lanes less than target":
+        val d = lower_f32(4, 8)
+        expect(d.kind).to_equal(2)
+
+    it "note text is set for direct map":
+        val d = lower_f32(4, 4)
+        expect(d.note).to_equal("direct map")
