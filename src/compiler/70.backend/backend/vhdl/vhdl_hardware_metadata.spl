@@ -1,0 +1,243 @@
+# VHDL Hardware Metadata — Typed hardware annotation, return labels, call lowering.
+#
+# Implements AC-1 (typed hardware metadata) and AC-2 (hardware call lowering)
+# for the VHDL RISC-V gap plan.
+#
+# Classes:
+#   HardwareAttr          — hardware annotation metadata preserved through IR
+#   ReturnLabel           — labeled return field for multi-output hardware
+#   HardwareCallInstance  — lowered hardware call to entity instance
+#   CallLowerResult       — result of a lowering attempt
+
+# ============================================================================
+# HardwareAttr — hardware annotation metadata preserved through IR
+# ============================================================================
+
+class HardwareAttr:
+    """Hardware annotation metadata preserved through IR lowering."""
+    kind: text
+    is_clocked: bool
+    is_generic: bool
+    entity_name: text
+    label_count: i32
+    l0_name: text
+    l0_type: text
+    l1_name: text
+    l1_type: text
+    l2_name: text
+    l2_type: text
+
+    me has_labels():
+        """Returns true if this attribute carries any port labels."""
+        return label_count > 0
+
+    me has_duplicate_label():
+        """Returns true if any two labels within label_count share the same name."""
+        if label_count < 2:
+            return false
+        if label_count >= 2:
+            if l0_name == l1_name:
+                return true
+        if label_count >= 3:
+            if l0_name == l2_name:
+                return true
+            if l1_name == l2_name:
+                return true
+        return false
+
+    me is_hardware():
+        """Returns true when kind is "hardware"."""
+        return kind == "hardware"
+
+    static fn hardware(name: text) -> HardwareAttr:
+        """Create a combinational hardware attribute."""
+        return HardwareAttr(
+            kind: "hardware",
+            is_clocked: false,
+            is_generic: false,
+            entity_name: name,
+            label_count: 0,
+            l0_name: "",
+            l0_type: "",
+            l1_name: "",
+            l1_type: "",
+            l2_name: "",
+            l2_type: ""
+        )
+
+    static fn clocked(name: text) -> HardwareAttr:
+        """Create a clocked (registered) hardware attribute."""
+        return HardwareAttr(
+            kind: "hardware",
+            is_clocked: true,
+            is_generic: false,
+            entity_name: name,
+            label_count: 0,
+            l0_name: "",
+            l0_type: "",
+            l1_name: "",
+            l1_type: "",
+            l2_name: "",
+            l2_type: ""
+        )
+
+# ============================================================================
+# ReturnLabel — labeled return field for multi-output hardware
+# ============================================================================
+
+class ReturnLabel:
+    """Labeled return field for multi-output hardware entities."""
+    name: text
+    type_name: text
+    bit_width: i32
+    index: i32
+    is_output: bool
+
+    me port_direction():
+        """Returns VHDL port direction string."""
+        if is_output:
+            return "out"
+        return "in"
+
+    me vhdl_type():
+        """Returns VHDL signal type string for this label."""
+        if bit_width == 1:
+            return "std_logic"
+        return "std_logic_vector(" + (bit_width - 1).to_text() + " downto 0)"
+
+    static fn output(name: text, type_n: text, width: i32, idx: i32) -> ReturnLabel:
+        """Create an output return label."""
+        return ReturnLabel(
+            name: name,
+            type_name: type_n,
+            bit_width: width,
+            index: idx,
+            is_output: true
+        )
+
+    static fn input(name: text, type_n: text, width: i32, idx: i32) -> ReturnLabel:
+        """Create an input return label."""
+        return ReturnLabel(
+            name: name,
+            type_name: type_n,
+            bit_width: width,
+            index: idx,
+            is_output: false
+        )
+
+# ============================================================================
+# HardwareCallInstance — lowered hardware call to entity instance
+# ============================================================================
+
+class HardwareCallInstance:
+    """A hardware call lowered to a VHDL entity instantiation."""
+    instance_name: text
+    entity_name: text
+    port_count: i32
+    p0_formal: text
+    p0_actual: text
+    p1_formal: text
+    p1_actual: text
+    p2_formal: text
+    p2_actual: text
+    p3_formal: text
+    p3_actual: text
+
+    me has_port(formal: text):
+        """Returns true if any mapped port formal matches the given name."""
+        if port_count >= 1:
+            if p0_formal == formal:
+                return true
+        if port_count >= 2:
+            if p1_formal == formal:
+                return true
+        if port_count >= 3:
+            if p2_formal == formal:
+                return true
+        if port_count >= 4:
+            if p3_formal == formal:
+                return true
+        return false
+
+    me is_valid():
+        """Returns true when the instance has a name, entity, and at least one port."""
+        if instance_name == "":
+            return false
+        if entity_name == "":
+            return false
+        return port_count > 0
+
+    static fn create(inst: text, entity: text) -> HardwareCallInstance:
+        """Create an empty hardware call instance with no ports."""
+        return HardwareCallInstance(
+            instance_name: inst,
+            entity_name: entity,
+            port_count: 0,
+            p0_formal: "",
+            p0_actual: "",
+            p1_formal: "",
+            p1_actual: "",
+            p2_formal: "",
+            p2_actual: "",
+            p3_formal: "",
+            p3_actual: ""
+        )
+
+# ============================================================================
+# CallLowerResult — result of a lowering attempt
+# ============================================================================
+
+class CallLowerResult:
+    """Result of attempting to lower a hardware call to an entity instance."""
+    success: bool
+    instance_name: text
+    error_reason: text
+    is_indirect: bool
+    is_recursive: bool
+
+    me is_rejected():
+        """Returns true when the lowering attempt failed."""
+        return success == false
+
+    me rejection_text():
+        """Returns the error reason on failure, or "none" on success."""
+        if success == false:
+            return error_reason
+        return "none"
+
+    static fn ok(inst_name: text) -> CallLowerResult:
+        """Create a successful lowering result."""
+        return CallLowerResult(
+            success: true,
+            instance_name: inst_name,
+            error_reason: "",
+            is_indirect: false,
+            is_recursive: false
+        )
+
+    static fn reject_indirect() -> CallLowerResult:
+        """Create a failure result for indirect (function-pointer) calls."""
+        return CallLowerResult(
+            success: false,
+            instance_name: "",
+            error_reason: "indirect calls not supported",
+            is_indirect: true,
+            is_recursive: false
+        )
+
+    static fn reject_recursive() -> CallLowerResult:
+        """Create a failure result for recursive hardware calls."""
+        return CallLowerResult(
+            success: false,
+            instance_name: "",
+            error_reason: "recursion not supported in hardware",
+            is_indirect: false,
+            is_recursive: true
+        )
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+fn main():
+    print("vhdl_hardware_metadata loaded")
