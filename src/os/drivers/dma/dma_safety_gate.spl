@@ -1,0 +1,232 @@
+# AC-9: Failure mode safety gates for DMA operations.
+
+class DmaOwnerCheck:
+    descriptor_owner: i32
+    requesting_task: i32
+    operation: text
+
+    me is_authorized() -> bool:
+        self.descriptor_owner == self.requesting_task
+
+    me denial_reason() -> text:
+        if self.is_authorized():
+            ""
+        else:
+            "wrong_owner:task_" + self.requesting_task.to_text() +
+                "_tried_" + self.operation +
+                "_on_task_" + self.descriptor_owner.to_text() + "_buffer"
+
+impl DmaOwnerCheck:
+    static fn check(descriptor_owner: i32, requesting_task: i32, operation: text) -> DmaOwnerCheck:
+        DmaOwnerCheck(
+            descriptor_owner: descriptor_owner,
+            requesting_task: requesting_task,
+            operation: operation
+        )
+
+class CrossDeviceGuard:
+    buffer_device: i32
+    requesting_device: i32
+
+    me is_same_device() -> bool:
+        self.buffer_device == self.requesting_device
+
+    me rejection_reason() -> text:
+        if self.is_same_device():
+            ""
+        else:
+            "cross_device:device_" + self.requesting_device.to_text() +
+                "_tried_buffer_owned_by_device_" + self.buffer_device.to_text()
+
+impl CrossDeviceGuard:
+    static fn check(buffer_device: i32, requesting_device: i32) -> CrossDeviceGuard:
+        CrossDeviceGuard(
+            buffer_device: buffer_device,
+            requesting_device: requesting_device
+        )
+
+class SriovIsolationGate:
+    has_iommu: bool
+    vf_requested: bool
+    trust_mode: text
+
+    me can_proceed() -> bool:
+        if self.vf_requested == false:
+            true
+        else:
+            self.has_iommu
+
+    me rejection_reason() -> text:
+        if self.can_proceed():
+            ""
+        else:
+            "sriov_no_iommu:vf_requested_but_iommu_absent"
+
+    me advertises_isolated() -> bool:
+        self.has_iommu
+
+impl SriovIsolationGate:
+    static fn request_vf(has_iommu: bool) -> SriovIsolationGate:
+        SriovIsolationGate(
+            has_iommu: has_iommu,
+            vf_requested: true,
+            trust_mode: "none"
+        )
+
+    static fn trusted_no_iommu() -> SriovIsolationGate:
+        SriovIsolationGate(
+            has_iommu: false,
+            vf_requested: true,
+            trust_mode: "trusted"
+        )
+
+class DisplayDmaFallbackGate:
+    dma_available: bool
+    fallback_ready: bool
+    chosen_path: text
+
+    me effective_path() -> text:
+        if self.dma_available:
+            "dma"
+        else:
+            if self.fallback_ready:
+                "framebuffer"
+            else:
+                "error"
+
+    me summary() -> text:
+        "display_dma_gate:path=" + self.effective_path() +
+            " dma=" + self.dma_available.to_text() +
+            " fallback=" + self.fallback_ready.to_text()
+
+impl DisplayDmaFallbackGate:
+    static fn with_dma() -> DisplayDmaFallbackGate:
+        DisplayDmaFallbackGate(
+            dma_available: true,
+            fallback_ready: true,
+            chosen_path: "dma"
+        )
+
+    static fn fallback_only() -> DisplayDmaFallbackGate:
+        DisplayDmaFallbackGate(
+            dma_available: false,
+            fallback_ready: true,
+            chosen_path: "framebuffer"
+        )
+
+class SafetyGateReport:
+    total_checks: i32
+    passed: i32
+    failed: i32
+    g0_name: text
+    g0_passed: bool
+    g0_reason: text
+    g1_name: text
+    g1_passed: bool
+    g1_reason: text
+    g2_name: text
+    g2_passed: bool
+    g2_reason: text
+    g3_name: text
+    g3_passed: bool
+    g3_reason: text
+    g4_name: text
+    g4_passed: bool
+    g4_reason: text
+    g5_name: text
+    g5_passed: bool
+    g5_reason: text
+    g6_name: text
+    g6_passed: bool
+    g6_reason: text
+    g7_name: text
+    g7_passed: bool
+    g7_reason: text
+
+    me record(name: text, passed: bool, reason: text) -> bool:
+        if self.total_checks == 0:
+            self.g0_name = name
+            self.g0_passed = passed
+            self.g0_reason = reason
+        else:
+            if self.total_checks == 1:
+                self.g1_name = name
+                self.g1_passed = passed
+                self.g1_reason = reason
+            else:
+                if self.total_checks == 2:
+                    self.g2_name = name
+                    self.g2_passed = passed
+                    self.g2_reason = reason
+                else:
+                    if self.total_checks == 3:
+                        self.g3_name = name
+                        self.g3_passed = passed
+                        self.g3_reason = reason
+                    else:
+                        if self.total_checks == 4:
+                            self.g4_name = name
+                            self.g4_passed = passed
+                            self.g4_reason = reason
+                        else:
+                            if self.total_checks == 5:
+                                self.g5_name = name
+                                self.g5_passed = passed
+                                self.g5_reason = reason
+                            else:
+                                if self.total_checks == 6:
+                                    self.g6_name = name
+                                    self.g6_passed = passed
+                                    self.g6_reason = reason
+                                else:
+                                    if self.total_checks == 7:
+                                        self.g7_name = name
+                                        self.g7_passed = passed
+                                        self.g7_reason = reason
+        self.total_checks = self.total_checks + 1
+        if passed:
+            self.passed = self.passed + 1
+        else:
+            self.failed = self.failed + 1
+        passed
+
+    me all_passed() -> bool:
+        self.failed == 0
+
+    me summary() -> text:
+        "safety_gate_report:total=" + self.total_checks.to_text() +
+            " passed=" + self.passed.to_text() +
+            " failed=" + self.failed.to_text() +
+            " ok=" + self.all_passed().to_text()
+
+impl SafetyGateReport:
+    static fn create() -> SafetyGateReport:
+        SafetyGateReport(
+            total_checks: 0,
+            passed: 0,
+            failed: 0,
+            g0_name: "",
+            g0_passed: false,
+            g0_reason: "",
+            g1_name: "",
+            g1_passed: false,
+            g1_reason: "",
+            g2_name: "",
+            g2_passed: false,
+            g2_reason: "",
+            g3_name: "",
+            g3_passed: false,
+            g3_reason: "",
+            g4_name: "",
+            g4_passed: false,
+            g4_reason: "",
+            g5_name: "",
+            g5_passed: false,
+            g5_reason: "",
+            g6_name: "",
+            g6_passed: false,
+            g6_reason: "",
+            g7_name: "",
+            g7_passed: false,
+            g7_reason: ""
+        )
