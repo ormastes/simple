@@ -759,8 +759,8 @@ impl Lowerer {
                         })
                 })?;
 
-        self.resolve_global_type_spec(&field_type_spec)
-            .map(|field_ty| (field_index, field_ty))
+        let field_ty = self.resolve_global_type_spec(&field_type_spec).unwrap_or(TypeId::ANY);
+        Some((field_index, field_ty))
     }
 
     pub(super) fn get_index_element_type(&self, arr_ty: TypeId) -> LowerResult<TypeId> {
