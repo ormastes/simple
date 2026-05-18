@@ -187,6 +187,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
     func_name: &str,
     args: &[VReg],
 ) -> InstrResult<()> {
+    eprintln!("[MCS-DEBUG] func_name={:?} receiver={:?} args.len()={}", func_name, receiver, args.len());
     let lookup_name_storage = if func_name.contains("_dot_") {
         Some(func_name.replace("_dot_", "."))
     } else {
