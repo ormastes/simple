@@ -10,13 +10,13 @@ refactor
 > Systematically convert all C runtime modules (`src/runtime/*.c`) to pure Simple implementations, benchmark each against the C original, optimize the Simple compiler/JIT for hot paths, and file perf bugs for any module where Simple cannot reach Go/C-level performance. Interface Rust libs (hosted/*.rs platform bindings) and the seed compiler (`compiler_rust/`) are excluded. The Rust allocator bridge (`runtime_memtrack_rust.rs`) stays as it hooks `#[global_allocator]`.
 
 ## Acceptance Criteria
-- [ ] AC-1: Inventory — complete list of all C runtime modules with LOC, categorized as "convertible" vs "must-stay-native" with rationale
-- [ ] AC-2: Wave-1 conversions — pure Simple replacements for all "easy" modules (base64, math, hash, equality, ctype, value, contracts, error, config) with passing tests
-- [ ] AC-3: Wave-2 conversions — pure Simple replacements for "medium" modules (format, string_index, random, time, env, regex_stub) with passing tests
-- [ ] AC-4: Perf benchmarks — each converted module benchmarked against C original; results documented
-- [ ] AC-5: Compiler/JIT optimization — at least 2 concrete compiler optimizations identified and implemented to close perf gaps
-- [ ] AC-6: Perf bugs filed — any module where Simple is >2x slower than C after optimization gets a concrete perf bug filed in doc/bugs/
-- [ ] AC-7: "Must-stay-native" modules (runtime.c, native, thread, simd_*, process, fork, async_driver, sdl2, audio, font, image) documented with clear rationale why they can't be pure Simple yet
+- [x] AC-1: Inventory — complete list of all C runtime modules with LOC, categorized as "convertible" vs "must-stay-native" with rationale
+- [~] AC-2: Wave-1 conversions — ctype(9/9), error(4/4), contracts(8/8), math(13/13) DONE; hash EXISTS; base64 NEEDS REWRITE; equality/value/config DEFERRED
+- [~] AC-3: Wave-2 conversions — random(21/21), time_utils(53/53), audio_effects(7/7) DONE; format/string_index/env DEFERRED
+- [~] AC-4: Perf benchmarks — ctype benchmarked (0.07-0.46x C native, see §7-verify); other modules pending
+- [~] AC-5: Compiler/JIT optimization — 2 optimizations identified: (1) function inlining (primary gap), (2) cross-module ABI fix; not yet implemented
+- [x] AC-6: Perf bugs filed — `pure_simple_ctype_perf_gap_2026-05-18.md`, `native_cross_module_call_abi_broken_2026-05-18.md`
+- [x] AC-7: "Must-stay-native" documented — see `c_runtime_exclusion_analysis_2026-05-18.md`; math/random/contracts/error/time need Rust shim rewrite; runtime.c/native/thread/simd/process/fork/sdl2/font/image stay native (GC, SIMD intrinsics, platform APIs)
 
 ## Cooperative Providers
 - Codex: unavailable
@@ -130,15 +130,38 @@ Specs created and passing for all implemented modules:
 | hash | Already in `hash.spl` | — | — | EXISTS (needs thin bridge) |
 | base64 | `.smf` only, no `.spl` source | — | — | NEEDS REWRITE |
 
-**Pending (Wave-1c-e agent running):** error, contracts, math
+**Wave-1c-e (completed earlier this session):** error (4/4), contracts (8/8), math (13/13)
 
 **Analysis docs:** `wave1a_hash_analysis.md`, `wave1b_base64_analysis.md`
 
 ### 6-refactor
-<pending>
+**C file exclusion (ctype):**
+- Deleted `src/runtime/runtime_ctype.c` — zero callers (dead code)
+- Deleted `src/compiler_rust/runtime/src/value/sffi/ctype_shims.rs` — zero public functions, zero callers
+- Removed from `sffi/mod.rs` (pub mod + pub use)
+- Removed from `tools.rs` C file list
+- Rust build verified clean (`cargo check` passes)
 
 ### 7-verify
-<pending>
+**Benchmark results (ctype, AC-4):**
+
+| Function | C -O2 (ops/ms) | Simple native (ops/ms) | Ratio |
+|----------|----------------|----------------------|-------|
+| is_digit | 1,003,071 | 464,964 | 0.46x |
+| is_upper | 941,314 | 328,729 | 0.35x |
+| is_lower | 603,466 | 253,957 | 0.42x |
+| is_alpha | 856,594 | 125,779 | 0.15x |
+| is_alnum | 1,082,562 | 77,612 | 0.07x |
+| is_xdigit | 549,007 | 153,279 | 0.28x |
+| is_space | 1,335,294 | 195,241 | 0.15x |
+| to_lower | 1,218,049 | 236,592 | 0.19x |
+| to_upper | 1,427,472 | 227,271 | 0.16x |
+
+**Root cause:** Cranelift does not inline function calls. Leaf functions reach 0.35-0.46x C; composite functions drop to 0.07-0.15x.
+
+**Bugs filed:**
+- `native_cross_module_call_abi_broken_2026-05-18.md` — cross-module calls return wrong values
+- `pure_simple_ctype_perf_gap_2026-05-18.md` — 0.07-0.46x C, inlining needed (AC-5 candidate)
 
 ### 8-ship
 <pending>
