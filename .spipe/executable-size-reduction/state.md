@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-18
+- [x] 6-refactor (Tech Lead) — 2026-05-18
+- [x] 7-verify (QA) — 2026-05-18
+- [x] 8-ship (Release Mgr) — 2026-05-18
 
 ## Phase Outputs
 
@@ -35,4 +35,11 @@ feature
 10 ACs across 9 plan tasks. 5 parallel agents (A-E). Existing: executable-size-bloat-analysis spipe (empty state).
 
 ### 5-implement
-<pending>
+4 parallel Sonnet agents. 4 files created:
+- src/compiler/90.tools/size/symbol_root_registry.spl — SymbolRoot + SymbolRootRegistry + AbiSurface + AbiBoundaryCheck
+- src/compiler/90.tools/size/size_budget_tracker.spl — SizeBudget + StripConfig + SizeComparison + SizeTrackingReport
+- src/compiler/90.tools/size/dependency_audit.spl — DependencyEdge + DependencyClosure + BinaryDepMap + ArchSplitPlan + SplitPlanReport
+- test/unit/compiler/executable_size_spec.spl — 20 tests
+
+### 7-verify
+20/20 tests PASS. Commit 6db49a9b3c pushed to origin/main.
