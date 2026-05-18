@@ -867,7 +867,7 @@ pub enum Value {
     /// `f64` slot would introduce double rounding at literal parse time.
     Float32(f32),
     Bool(bool),
-    Str(Arc<str>),
+    Str(String),
     Symbol(String),
     /// Mutable array (default for array literals)
     /// Wrapped in Arc for O(1) clone (COW via Arc::make_mut for mutations)
@@ -1012,12 +1012,6 @@ impl Clone for NativeFunction {
 }
 
 impl Value {
-    /// Create a Value::Str from anything that converts to Arc<str>.
-    #[inline]
-    pub fn str(s: impl Into<Arc<str>>) -> Self {
-        Value::Str(s.into())
-    }
-
     /// Create a new mutable array value (default for array literals)
     pub fn array(vec: Vec<Value>) -> Self {
         Value::Array(Arc::new(vec))

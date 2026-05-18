@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use cranelift_codegen::ir::{types, InstBuilder, UserFuncName};
 use cranelift_codegen::isa::{CallConv, OwnedTargetIsa};
@@ -450,10 +451,42 @@ fn target_arch_to_triple(arch: TargetArch) -> BackendResult<Triple> {
         .map_err(|e: target_lexicon::ParseError| BackendError::UnsupportedTarget(e.to_string()))
 }
 
-/// Create ISA and flags from settings
+/// Cache key for ISA instances: stringified from all discriminating `BackendSettings` fields.
+type IsaCacheKey = (
+    Target,       // target (Hash+Eq)
+    TargetCpu,    // cpu    (Hash+Eq)
+    &'static str, // opt_level
+    bool,         // is_pic
+    String,       // cpu_features — Debug-stringified (no Hash impl)
+);
+
+/// Process-wide ISA cache. ISA construction (especially `cranelift_native::builder_with_options`
+/// + CPUID inference) is expensive and the result is immutable within a process.
+/// `Arc<dyn TargetIsa>` is `Send + Sync`, so sharing across threads is safe.
+static ISA_CACHE: LazyLock<Mutex<HashMap<IsaCacheKey, (Flags, Arc<dyn cranelift_codegen::isa::TargetIsa>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Create ISA and flags from settings, caching by (target, cpu, opt_level, is_pic, cpu_features).
 pub fn create_isa_and_flags(
     settings: &BackendSettings,
 ) -> BackendResult<(Flags, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
+    let cache_key: IsaCacheKey = (
+        settings.target,
+        settings.cpu.clone(),
+        settings.opt_level,
+        settings.is_pic,
+        format!("{:?}", settings.cpu_features),
+    );
+
+    // Fast path: return cached ISA.
+    {
+        let guard = ISA_CACHE.lock().unwrap();
+        if let Some((flags, isa)) = guard.get(&cache_key) {
+            return Ok((flags.clone(), Arc::clone(isa)));
+        }
+    }
+
+    // Slow path: build ISA, then cache it.
     let mut settings_builder = settings::builder();
     settings_builder
         .set("opt_level", settings.opt_level)
@@ -477,7 +510,14 @@ pub fn create_isa_and_flags(
             .map_err(|e: target_lexicon::ParseError| BackendError::UnsupportedTarget(e.to_string()))?
     };
 
-    create_isa_from_settings(triple, flags, &settings.target, &settings.cpu, &settings.cpu_features)
+    let (flags, isa) = create_isa_from_settings(triple, flags, &settings.target, &settings.cpu, &settings.cpu_features)?;
+
+    {
+        let mut guard = ISA_CACHE.lock().unwrap();
+        guard.entry(cache_key).or_insert_with(|| (flags.clone(), Arc::clone(&isa)));
+    }
+
+    Ok((flags, isa))
 }
 
 /// Helper to create ISA from a triple

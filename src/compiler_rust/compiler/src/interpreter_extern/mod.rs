@@ -162,11 +162,51 @@ fn call_loaded_function_by_name(
 }
 
 
+// ---------------------------------------------------------------------------
+// Stub wrappers for functions whose natural call-site passes an empty slice
+// or returns a fixed value — needed so they match `ExternFn = fn(&[Value])`.
+// ---------------------------------------------------------------------------
+
+/// `rt_stdin_read_line` — read a line from stdin (ignores all args)
+fn rt_stdin_read_line_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    io::input::input(&[])
+}
+
+/// `rt_tls_client_connect` / `rt_tls_client_connect_with_sni` — stub
+fn rt_tls_client_connect_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(-1))
+}
+
+/// `rt_tls_client_write` — stub
+fn rt_tls_client_write_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(-1))
+}
+
+/// `rt_tls_client_read` — stub
+fn rt_tls_client_read_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Str(String::new()))
+}
+
+/// `rt_tls_client_close` — stub
+fn rt_tls_client_close_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(false))
+}
+
+/// `rt_tls_get_protocol_version` — stub
+fn rt_tls_get_protocol_version_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Str(String::new()))
+}
+
+/// `rt_perf_*` stubs — perf module not yet implemented
+fn rt_perf_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Nil)
+}
+
 /// Build the dispatch table mapping extern function names to their implementations.
 /// Only includes "simple" functions that take `&[Value]` and return `Result<Value, CompileError>`.
 /// Complex functions (needing env, functions, classes, etc.) remain in the match fallback.
 fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
-    let mut m = HashMap::with_capacity(1100);
+    let mut m = HashMap::with_capacity(1200);
     m.insert("abs", math::abs as ExternFn);
     m.insert("arc_box_dec_strong", rc::arc_box_dec_strong as ExternFn);
     m.insert("arc_box_dec_weak", rc::arc_box_dec_weak as ExternFn);
@@ -1241,6 +1281,73 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
         m.insert("rt_vk_kernel_launch_1d", gpu::rt_vk_kernel_launch_1d_fn as ExternFn);
         m.insert("rt_vk_kernel_launch", gpu::rt_vk_kernel_launch_fn as ExternFn);
     }
+
+    // Previously missing from HashMap — simple &[Value] functions
+    // PBKDF2, SHA-512, TLS 1.3 crypto helpers
+    m.insert("rt_pbkdf2_hmac_sha1", pbkdf2::rt_pbkdf2_hmac_sha1 as ExternFn);
+    m.insert("rt_pbkdf2_hmac_sha256", pbkdf2::rt_pbkdf2_hmac_sha256 as ExternFn);
+    m.insert("rt_pbkdf2_hmac_sha384", pbkdf2::rt_pbkdf2_hmac_sha384 as ExternFn);
+    m.insert("rt_pbkdf2_hmac_sha512", pbkdf2::rt_pbkdf2_hmac_sha512 as ExternFn);
+    m.insert("rt_sha512_hash", sha512::rt_sha512_hash as ExternFn);
+    m.insert("rt_sha512_byte", sha512::rt_sha512_byte as ExternFn);
+    m.insert("rt_sha512_K", sha512::rt_sha512_k as ExternFn);
+    m.insert("rt_sha512_H", sha512::rt_sha512_h as ExternFn);
+    m.insert("rt_tls13_sha256", tls13::rt_tls13_sha256 as ExternFn);
+    m.insert("rt_tls13_hkdf_extract", tls13::rt_tls13_hkdf_extract as ExternFn);
+    m.insert("rt_tls13_hkdf_extract_into", tls13::rt_tls13_hkdf_extract_into as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_into", tls13::rt_tls13_hkdf_expand_into as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_label", tls13::rt_tls13_hkdf_expand_label as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_label_into", tls13::rt_tls13_hkdf_expand_label_into as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_label_derived", tls13::rt_tls13_hkdf_expand_label_derived as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_label_key", tls13::rt_tls13_hkdf_expand_label_key as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_label_iv", tls13::rt_tls13_hkdf_expand_label_iv as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_label_finished", tls13::rt_tls13_hkdf_expand_label_finished as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_label_client_hs", tls13::rt_tls13_hkdf_expand_label_client_hs as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_label_server_hs", tls13::rt_tls13_hkdf_expand_label_server_hs as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_label_client_app", tls13::rt_tls13_hkdf_expand_label_client_app as ExternFn);
+    m.insert("rt_tls13_hkdf_expand_label_server_app", tls13::rt_tls13_hkdf_expand_label_server_app as ExternFn);
+    // TLS client stubs (interpreter mode — no real TLS)
+    m.insert("rt_tls_client_connect", rt_tls_client_connect_stub as ExternFn);
+    m.insert("rt_tls_client_connect_with_sni", rt_tls_client_connect_stub as ExternFn);
+    m.insert("rt_tls_client_write", rt_tls_client_write_stub as ExternFn);
+    m.insert("rt_tls_client_read", rt_tls_client_read_stub as ExternFn);
+    m.insert("rt_tls_client_close", rt_tls_client_close_stub as ExternFn);
+    m.insert("rt_tls_get_protocol_version", rt_tls_get_protocol_version_stub as ExternFn);
+    // I/O wrappers that pass empty slice or alias another function
+    m.insert("rt_stdin_read_line", rt_stdin_read_line_stub as ExternFn);
+    m.insert("rt_stdout_flush", io::stdout_flush as ExternFn);
+    m.insert("rt_stderr_flush", io::stderr_flush as ExternFn);
+    // Hosted surface selection
+    m.insert("rt_hosted_select_surface", hosted::select_surface as ExternFn);
+    m.insert("rt_hosted_set_surface_override", hosted::set_surface_override as ExternFn);
+    // Native compilation & execution
+    m.insert("rt_compile_to_llvm_ir", native_sffi::rt_compile_to_llvm_ir as ExternFn);
+    m.insert("rt_compile_to_native", native_sffi::rt_compile_to_native as ExternFn);
+    m.insert("rt_compile_to_native_with_opt", native_sffi::rt_compile_to_native as ExternFn);
+    m.insert("rt_execute_native", native_sffi::rt_execute_native as ExternFn);
+    // Package management
+    m.insert("rt_package_sha256", package::sha256 as ExternFn);
+    m.insert("rt_package_create_tarball", package::create_tarball as ExternFn);
+    m.insert("rt_package_extract_tarball", package::extract_tarball as ExternFn);
+    m.insert("rt_package_file_size", package::file_size as ExternFn);
+    m.insert("rt_package_copy_file", package::copy_file as ExternFn);
+    m.insert("rt_package_mkdir_all", package::mkdir_all as ExternFn);
+    m.insert("rt_package_remove_dir_all", package::remove_dir_all as ExternFn);
+    m.insert("rt_package_create_symlink", package::create_symlink as ExternFn);
+    m.insert("rt_package_chmod", package::chmod as ExternFn);
+    m.insert("rt_package_exists", package::exists as ExternFn);
+    m.insert("rt_package_is_dir", package::is_dir as ExternFn);
+    // Performance stubs
+    m.insert("rt_perf_enable", rt_perf_stub as ExternFn);
+    m.insert("rt_perf_enabled", rt_perf_stub as ExternFn);
+    m.insert("rt_perf_clock_ns", rt_perf_stub as ExternFn);
+    m.insert("rt_perf_rdtsc", rt_perf_stub as ExternFn);
+    m.insert("rt_perf_cycles_to_ns", rt_perf_stub as ExternFn);
+    m.insert("rt_perf_region_enter", rt_perf_stub as ExternFn);
+    m.insert("rt_perf_region_exit", rt_perf_stub as ExternFn);
+    m.insert("rt_perf_dump_sdn", rt_perf_stub as ExternFn);
+    m.insert("rt_perf_free_sdn", rt_perf_stub as ExternFn);
+    m.insert("rt_perf_clear", rt_perf_stub as ExternFn);
 
     m
 }

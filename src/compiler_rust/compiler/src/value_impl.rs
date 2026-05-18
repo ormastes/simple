@@ -88,7 +88,7 @@ impl Value {
             Value::Float(f) => f.to_string(),
             Value::Float32(f) => f.to_string(),
             Value::Bool(b) => b.to_string(),
-            Value::Str(s) => s.to_string(),
+            Value::Str(s) => s.clone(),
             Value::Symbol(s) => s.clone(),
             Value::Unit { value, suffix, .. } => format!("{}_{}", value.to_key_string(), suffix),
             Value::Unique(u) => u.inner().to_key_string(),
@@ -152,7 +152,7 @@ impl Value {
 
     pub fn to_display_string(&self) -> String {
         match self {
-            Value::Str(s) => s.to_string(),
+            Value::Str(s) => s.clone(),
             Value::Symbol(s) => format!(":{s}"),
             Value::Int(i) => i.to_string(),
             Value::UInt { value, .. } => value.to_string(),

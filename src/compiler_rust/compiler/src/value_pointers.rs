@@ -229,7 +229,7 @@ impl Clone for Value {
             Value::Float(f) => Value::Float(*f),
             Value::Float32(f) => Value::Float32(*f),
             Value::Bool(b) => Value::Bool(*b),
-            Value::Str(s) => Value::Str(Arc::clone(s)),
+            Value::Str(s) => Value::Str(s.clone()),
             Value::Symbol(s) => Value::Symbol(s.clone()),
             Value::Array(a) => Value::Array(Arc::clone(a)),
             Value::FrozenArray(a) => Value::FrozenArray(a.clone()),

@@ -3,19 +3,43 @@ use std::collections::HashMap;
 use crate::mir::{BlockId, CallTarget, LocalKind, MirBlock, MirFunction, MirInst, MirModule, Terminator, VReg};
 
 pub fn inline_small_pure_functions(mir: &MirModule, functions: Vec<MirFunction>) -> Vec<MirFunction> {
-    let callees: HashMap<String, MirFunction> = functions
+    // Build a name→index map for candidate callees; no body clones yet.
+    let candidate_indices: HashMap<String, usize> = functions
         .iter()
-        .filter(|f| is_inline_candidate(f))
-        .map(|f| (f.name.clone(), f.clone()))
+        .enumerate()
+        .filter(|(_, f)| is_inline_candidate(f))
+        .map(|(idx, f)| (f.name.clone(), idx))
         .collect();
 
-    functions
-        .into_iter()
-        .map(|mut caller| {
-            inline_in_function(&mut caller, &callees);
-            caller
-        })
-        .collect()
+    // Wrap every function in an Option so we can take() a caller out while
+    // still borrowing callees by index from the same pool.
+    let mut pool: Vec<Option<MirFunction>> = functions.into_iter().map(Some).collect();
+
+    for i in 0..pool.len() {
+        // Quick scan: does this caller reference any inline candidate at all?
+        let has_candidate = pool[i].as_ref().map_or(false, |f| {
+            f.blocks.iter().any(|b| {
+                b.instructions.iter().any(|inst| {
+                    if let MirInst::Call { target, .. } = inst {
+                        candidate_indices.contains_key(target.name())
+                    } else {
+                        false
+                    }
+                })
+            })
+        });
+        if !has_candidate {
+            continue;
+        }
+
+        // Take caller out of the pool so we can mutate it while borrowing
+        // callees from other pool slots.
+        let mut caller = pool[i].take().unwrap();
+        inline_in_function_indexed(&mut caller, &pool, &candidate_indices);
+        pool[i] = Some(caller);
+    }
+
+    pool.into_iter().map(|opt| opt.unwrap()).collect()
 }
 
 fn is_inline_candidate(func: &MirFunction) -> bool {
@@ -58,9 +82,12 @@ fn is_supported_inline_inst(inst: &MirInst) -> bool {
     matches!(
         inst,
         MirInst::ConstInt { .. }
+            | MirInst::ConstFloat { .. }
             | MirInst::ConstBool { .. }
             | MirInst::Copy { .. }
             | MirInst::BinOp { .. }
+            | MirInst::UnaryOp { .. }
+            | MirInst::Cast { .. }
             | MirInst::Call { .. }
             | MirInst::MethodCallStatic { .. }
             | MirInst::LocalAddr { .. }
@@ -78,14 +105,23 @@ fn is_supported_inline_terminator(term: &Terminator) -> bool {
     )
 }
 
-fn inline_in_function(caller: &mut MirFunction, callees: &HashMap<String, MirFunction>) {
+fn inline_in_function_indexed(
+    caller: &mut MirFunction,
+    pool: &[Option<MirFunction>],
+    candidate_indices: &HashMap<String, usize>,
+) {
     let mut index = 0;
     while index < caller.blocks.len() {
         let Some((call_pos, dest, target, args)) = tail_call_in_block(&caller.blocks[index]) else {
             index += 1;
             continue;
         };
-        let Some(callee) = callees.get(target.name()) else {
+        let Some(&callee_idx) = candidate_indices.get(target.name()) else {
+            index += 1;
+            continue;
+        };
+        // Borrow callee by reference — no clone unless we actually inline.
+        let Some(callee) = pool[callee_idx].as_ref() else {
             index += 1;
             continue;
         };
@@ -96,7 +132,9 @@ fn inline_in_function(caller: &mut MirFunction, callees: &HashMap<String, MirFun
             index += 1;
             continue;
         }
-        inline_tail_call(caller, index, call_pos, dest, args, callee);
+        // Clone happens here, at the actual inline site.
+        let callee = callee.clone();
+        inline_tail_call(caller, index, call_pos, dest, args, &callee);
         index += 1;
     }
 }
@@ -248,6 +286,10 @@ fn remap_inst(
             dest: remap_vreg(caller, *dest, vreg_map),
             value: *value,
         },
+        MirInst::ConstFloat { dest, value } => MirInst::ConstFloat {
+            dest: remap_vreg(caller, *dest, vreg_map),
+            value: *value,
+        },
         MirInst::ConstBool { dest, value } => MirInst::ConstBool {
             dest: remap_vreg(caller, *dest, vreg_map),
             value: *value,
@@ -261,6 +303,17 @@ fn remap_inst(
             op: *op,
             left: remap_vreg(caller, *left, vreg_map),
             right: remap_vreg(caller, *right, vreg_map),
+        },
+        MirInst::UnaryOp { dest, op, operand } => MirInst::UnaryOp {
+            dest: remap_vreg(caller, *dest, vreg_map),
+            op: *op,
+            operand: remap_vreg(caller, *operand, vreg_map),
+        },
+        MirInst::Cast { dest, source, from_ty, to_ty } => MirInst::Cast {
+            dest: remap_vreg(caller, *dest, vreg_map),
+            source: remap_vreg(caller, *source, vreg_map),
+            from_ty: *from_ty,
+            to_ty: *to_ty,
         },
         MirInst::Call { dest, target, args } => MirInst::Call {
             dest: dest.map(|v| remap_vreg(caller, v, vreg_map)),
