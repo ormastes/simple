@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-18
+- [x] 6-refactor (Tech Lead) — 2026-05-18
+- [x] 7-verify (QA) — 2026-05-18
+- [x] 8-ship (Release Mgr) — 2026-05-18
 
 ## Phase Outputs
 
@@ -35,7 +35,12 @@ feature
 10 ACs across 5 plan phases. Existing: SMF reader/writer in compiler, moduleloader, kernel parser.
 
 ### 5-implement
-<pending>
+4 source + 1 test:
+- src/os/smf/smf_header_contract.spl — SmfHeader + TrailerDetection + HeaderFallback + SmfTestVector
+- src/os/smf/smf_generation.spl — GenerationState + CandidateMapping + SymbolSwap + RetiredMapping
+- src/os/smf/smf_jit_bridge.spl — SmfSource + ExportMetadata + ImportMetadata + JitManifest
+- src/os/smf/smf_dynlib.spl — LibraryRole + LinkNamespace + DynLoadRequest + DynLoadResult
+- test/unit/os/smf_runtime_spec.spl — 20 tests
 
 ### 7-verify
-<pending>
+20/20 tests PASS. Fixed: reserved keyword gen->g, ref->r; to_equal(false) workaround (bug SPEC-TOEQUAL-FALSE filed).
