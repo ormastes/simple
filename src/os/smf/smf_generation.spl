@@ -1,0 +1,129 @@
+# SMF generation states, candidate staging, and symbol swap lifecycle.
+# Hosted atomic replacement model for SMF runtime.
+
+class GenerationState:
+    """Tracks lifecycle state of an SMF module generation."""
+    state: text
+    module_name: text
+    generation_id: int
+    ref_count: int
+
+    me is_active() -> bool:
+        """Returns true if this generation is active."""
+        return self.state == "active"
+
+    me is_retiring() -> bool:
+        """Returns true if this generation is retiring."""
+        return self.state == "retiring"
+
+    me is_failed() -> bool:
+        """Returns true if this generation has failed."""
+        return self.state == "failed"
+
+    me promote() -> GenerationState:
+        """Promote candidate generation to active."""
+        return GenerationState(state: "active", module_name: self.module_name, generation_id: self.generation_id, ref_count: self.ref_count)
+
+    me retire() -> GenerationState:
+        """Retire this active generation."""
+        return GenerationState(state: "retiring", module_name: self.module_name, generation_id: self.generation_id, ref_count: self.ref_count)
+
+    me to_text() -> text:
+        """Human-readable description."""
+        return self.module_name + " gen=" + self.generation_id.to_text() + " state=" + self.state
+
+    static fn loaded(name: text, gen: int) -> GenerationState:
+        """Create a generation in loaded state."""
+        return GenerationState(state: "loaded", module_name: name, generation_id: gen, ref_count: 0)
+
+    static fn candidate(name: text, gen: int) -> GenerationState:
+        """Create a generation in candidate state."""
+        return GenerationState(state: "candidate", module_name: name, generation_id: gen, ref_count: 0)
+
+
+class CandidateMapping:
+    """Tracks relocation and import validation for a staged candidate."""
+    candidate_ref: text
+    relocation_done: bool
+    import_valid: bool
+    ready_to_swap: bool
+
+    me is_ready() -> bool:
+        """Returns true if candidate is ready to swap into active position."""
+        return self.ready_to_swap
+
+    me complete_relocation() -> CandidateMapping:
+        """Mark relocation as done; update ready_to_swap if imports also valid."""
+        val now_ready = self.import_valid
+        return CandidateMapping(candidate_ref: self.candidate_ref, relocation_done: true, import_valid: self.import_valid, ready_to_swap: now_ready)
+
+    me validate_imports() -> CandidateMapping:
+        """Mark imports as valid; update ready_to_swap if relocation also done."""
+        val now_ready = self.relocation_done
+        return CandidateMapping(candidate_ref: self.candidate_ref, relocation_done: self.relocation_done, import_valid: true, ready_to_swap: now_ready)
+
+    me to_text() -> text:
+        """Human-readable description."""
+        return "candidate:" + self.candidate_ref + " reloc=" + self.relocation_done.to_text() + " imports=" + self.import_valid.to_text()
+
+    static fn create(ref: text) -> CandidateMapping:
+        """Create a new candidate mapping with all flags false."""
+        return CandidateMapping(candidate_ref: ref, relocation_done: false, import_valid: false, ready_to_swap: false)
+
+
+class SymbolSwap:
+    """Represents an in-progress symbol export swap between generations."""
+    old_export: text
+    new_export: text
+    swap_status: text
+    drain_count: int
+
+    me is_complete() -> bool:
+        """Returns true if the swap has completed."""
+        return self.swap_status == "complete"
+
+    me is_rollback() -> bool:
+        """Returns true if the swap was rolled back."""
+        return self.swap_status == "rollback"
+
+    me complete() -> SymbolSwap:
+        """Mark swap as complete."""
+        return SymbolSwap(old_export: self.old_export, new_export: self.new_export, swap_status: "complete", drain_count: self.drain_count)
+
+    me rollback() -> SymbolSwap:
+        """Mark swap as rolled back."""
+        return SymbolSwap(old_export: self.old_export, new_export: self.new_export, swap_status: "rollback", drain_count: self.drain_count)
+
+    me to_text() -> text:
+        """Human-readable description."""
+        return self.old_export + " -> " + self.new_export + " status=" + self.swap_status
+
+    static fn create(old: text, new_ref: text) -> SymbolSwap:
+        """Create a new pending symbol swap."""
+        return SymbolSwap(old_export: old, new_export: new_ref, swap_status: "pending", drain_count: 0)
+
+
+class RetiredMapping:
+    """Tracks a retired generation waiting for references to drain before freeing."""
+    module_name: text
+    generation_id: int
+    remaining_refs: int
+    can_free: bool
+
+    me is_drained() -> bool:
+        """Returns true if all references have drained."""
+        return self.remaining_refs == 0
+
+    me decrement() -> RetiredMapping:
+        """Decrement remaining_refs by 1; set can_free if refs reach zero."""
+        val new_refs = self.remaining_refs - 1
+        val now_free = new_refs == 0
+        return RetiredMapping(module_name: self.module_name, generation_id: self.generation_id, remaining_refs: new_refs, can_free: now_free)
+
+    me to_text() -> text:
+        """Human-readable description."""
+        return "retired:" + self.module_name + " gen=" + self.generation_id.to_text() + " refs=" + self.remaining_refs.to_text()
+
+    static fn create(name: text, gen: int, refs: int) -> RetiredMapping:
+        """Create a new retired mapping entry."""
+        return RetiredMapping(module_name: name, generation_id: gen, remaining_refs: refs, can_free: false)
