@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-18
+- [x] 6-refactor (Tech Lead) — 2026-05-18
+- [x] 7-verify (QA) — 2026-05-18
+- [x] 8-ship (Release Mgr) — 2026-05-18
 
 ## Phase Outputs
 
@@ -35,7 +35,12 @@ feature
 10 ACs across 7 plan subtasks. Existing: vhdl_testbench_converter.spl (622 lines).
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 4 source + 1 test:
+- src/compiler/70.backend/backend/vhdl/vhdl_testbench_model.spl — TestbenchCandidate + DutPort + StimulusStep + TestAssertion
+- src/compiler/70.backend/backend/vhdl/vhdl_testbench_clock.spl — ClockConfig + ResetSequence + CycleAdvance + TimingConstraint
+- src/compiler/70.backend/backend/vhdl/vhdl_testbench_render.spl — CombinationalBench + ClockedBench + GhdlResult + RenderOutput
+- src/compiler/70.backend/backend/vhdl/vhdl_testbench_source.spl — SourceMapHook + TestDiagnostic + ConversionResult + PendingSpec
+- test/unit/compiler/vhdl_testbench_spec.spl — 20 tests
 
 ### 7-verify
-<pending>
+20/20 tests PASS.
