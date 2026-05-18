@@ -1,0 +1,112 @@
+class PreflightEntry:
+    entry_name: text
+    keep_alive: bool
+    timeout_ms: int
+    probe_count: int
+
+    me is_persistent() -> bool:
+        return self.keep_alive
+
+    me with_timeout(ms: int) -> PreflightEntry:
+        return PreflightEntry(entry_name: self.entry_name, keep_alive: self.keep_alive, timeout_ms: ms, probe_count: self.probe_count)
+
+    me to_text() -> text:
+        return "preflight:" + self.entry_name + " alive=" + self.keep_alive.to_text() + " timeout=" + self.timeout_ms.to_text() + "ms probes=" + self.probe_count.to_text()
+
+    static fn create(name: text, probes: int) -> PreflightEntry:
+        return PreflightEntry(entry_name: name, keep_alive: true, timeout_ms: 30000, probe_count: probes)
+
+
+class GuestProbe:
+    probe_type: text
+    host: text
+    port: int
+    expected_response: text
+    passed: bool
+
+    me is_ssh() -> bool:
+        return self.probe_type == "ssh"
+
+    me is_http() -> bool:
+        return self.probe_type == "http"
+
+    me is_serial() -> bool:
+        return self.probe_type == "serial"
+
+    me mark_passed() -> GuestProbe:
+        return GuestProbe(probe_type: self.probe_type, host: self.host, port: self.port, expected_response: self.expected_response, passed: true)
+
+    me mark_failed() -> GuestProbe:
+        return GuestProbe(probe_type: self.probe_type, host: self.host, port: self.port, expected_response: self.expected_response, passed: false)
+
+    me to_text() -> text:
+        return "probe:" + self.probe_type + " " + self.host + ":" + self.port.to_text() + " passed=" + self.passed.to_text()
+
+    static fn ssh(h: text, p: int) -> GuestProbe:
+        return GuestProbe(probe_type: "ssh", host: h, port: p, expected_response: "SSH-2.0", passed: false)
+
+    static fn http(h: text, p: int) -> GuestProbe:
+        return GuestProbe(probe_type: "http", host: h, port: p, expected_response: "200 OK", passed: false)
+
+
+class ProbeResult:
+    probe_type: text
+    latency_ms: int
+    success: bool
+    error_msg: text
+    retry_count: int
+
+    me is_success() -> bool:
+        return self.success
+
+    me is_timeout() -> bool:
+        return self.error_msg == "timeout"
+
+    me with_retry() -> ProbeResult:
+        return ProbeResult(probe_type: self.probe_type, latency_ms: self.latency_ms, success: self.success, error_msg: self.error_msg, retry_count: self.retry_count + 1)
+
+    me to_text() -> text:
+        if self.success:
+            return "OK " + self.probe_type + " " + self.latency_ms.to_text() + "ms"
+        return "FAIL " + self.probe_type + ": " + self.error_msg
+
+    static fn ok(ptype: text, lat: int) -> ProbeResult:
+        return ProbeResult(probe_type: ptype, latency_ms: lat, success: true, error_msg: "", retry_count: 0)
+
+    static fn fail(ptype: text, err: text) -> ProbeResult:
+        return ProbeResult(probe_type: ptype, latency_ms: 0, success: false, error_msg: err, retry_count: 0)
+
+
+class ProbeSchedule:
+    f0_probe: GuestProbe
+    f1_probe: GuestProbe
+    f2_probe: GuestProbe
+    active_count: int
+
+    me all_passed() -> bool:
+        if self.active_count == 0:
+            return true
+        if self.active_count >= 1:
+            if self.f0_probe.passed == false:
+                return false
+        if self.active_count >= 2:
+            if self.f1_probe.passed == false:
+                return false
+        if self.active_count >= 3:
+            if self.f2_probe.passed == false:
+                return false
+        return true
+
+    me add_probe(p: GuestProbe) -> ProbeSchedule:
+        if self.active_count == 0:
+            return ProbeSchedule(f0_probe: p, f1_probe: self.f1_probe, f2_probe: self.f2_probe, active_count: 1)
+        if self.active_count == 1:
+            return ProbeSchedule(f0_probe: self.f0_probe, f1_probe: p, f2_probe: self.f2_probe, active_count: 2)
+        return ProbeSchedule(f0_probe: self.f0_probe, f1_probe: self.f1_probe, f2_probe: p, active_count: 3)
+
+    me to_text() -> text:
+        return "schedule(" + self.active_count.to_text() + " probes)"
+
+    static fn create() -> ProbeSchedule:
+        val dummy = GuestProbe(probe_type: "", host: "", port: 0, expected_response: "", passed: false)
+        return ProbeSchedule(f0_probe: dummy, f1_probe: dummy, f2_probe: dummy, active_count: 0)
