@@ -191,6 +191,9 @@ pub struct CodegenBackend<M: Module> {
     /// style constants get registered as function imports and `GlobalLoad`
     /// returns the symbol's address instead of its value.
     pub data_exports: std::sync::Arc<std::collections::HashSet<String>>,
+    /// Mangled function name → declared parameter count for cross-module free
+    /// functions. Used to strip spurious nil receivers from module-qualified calls.
+    pub fn_arities: std::sync::Arc<std::collections::HashMap<String, usize>>,
     /// Vtable data object IDs: struct_name -> DataId for each trait-impl struct.
     /// Used by compile_struct_init to write vtable_ptr at offset 0.
     pub vtable_data_ids: BTreeMap<String, cranelift_module::DataId>,
@@ -661,6 +664,7 @@ impl<M: Module> CodegenBackend<M> {
             ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
             use_map: std::collections::HashMap::new(),
             data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+            fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
             vtable_data_ids: BTreeMap::new(),
             vtable_type_ids: BTreeMap::new(),
         })
@@ -705,6 +709,10 @@ impl<M: Module> CodegenBackend<M> {
     /// them through the function-import fast path.
     pub fn set_data_exports(&mut self, exports: std::sync::Arc<std::collections::HashSet<String>>) {
         self.data_exports = exports;
+    }
+
+    pub fn set_fn_arities(&mut self, arities: std::sync::Arc<std::collections::HashMap<String, usize>>) {
+        self.fn_arities = arities;
     }
 
     /// Mangle a function name with the module prefix (if set).
@@ -1123,6 +1131,7 @@ impl<M: Module> CodegenBackend<M> {
                 &self.data_exports,
                 &self.vtable_data_ids,
                 &self.vtable_type_ids,
+                &self.fn_arities,
             )
         }));
         match body_result {

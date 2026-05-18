@@ -2825,6 +2825,18 @@ pub fn compile_call<M: Module>(
         };
 
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+        // Strip spurious nil receiver from module-qualified free function calls.
+        // HIR→MIR lowers `mod.func(args)` as [nil_receiver, args...]; when
+        // fn_arities proves the callee expects fewer params, drop the leading nil.
+        let arg_vals = if let Some(&arity) = ctx.fn_arities.get(resolved_name.as_ref()) {
+            if arg_vals.len() > arity && arg_vals.len() == arity + 1 {
+                arg_vals[1..].to_vec()
+            } else {
+                arg_vals
+            }
+        } else {
+            arg_vals
+        };
         if !has_resolved_name {
             if let Some((type_name, "new")) = func_name.rsplit_once('.') {
                 if arg_vals.len() == 1 && type_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
@@ -2842,7 +2854,8 @@ pub fn compile_call<M: Module>(
         } else {
             let call_conv = crate::codegen::shared::platform_call_conv();
             let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
-            for _ in 0..arg_vals.len() {
+            let param_count = ctx.fn_arities.get(resolved_name.as_ref()).copied().unwrap_or(arg_vals.len());
+            for _ in 0..param_count {
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
             }
             sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));

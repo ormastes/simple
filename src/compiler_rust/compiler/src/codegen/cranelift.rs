@@ -109,6 +109,10 @@ impl Codegen {
         self.backend.set_data_exports(exports);
     }
 
+    pub fn set_fn_arities(&mut self, arities: std::sync::Arc<std::collections::HashMap<String, usize>>) {
+        self.backend.set_fn_arities(arities);
+    }
+
     /// Get a reference to the inner backend for accessing mangling and resolution state.
     pub fn backend(&self) -> &CodegenBackend<ObjectModule> {
         &self.backend

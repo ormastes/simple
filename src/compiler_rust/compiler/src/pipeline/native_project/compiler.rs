@@ -522,6 +522,7 @@ pub(crate) fn compile_file_to_object(
     codegen.set_ambiguous_names(imports.ambiguous_names.clone());
     codegen.set_use_map(use_map);
     codegen.set_data_exports(imports.data_exports.clone());
+    codegen.set_fn_arities(imports.fn_arities.clone());
     if !no_mangle {
         let prefix = module_prefix_from_path(file_path, source_root);
         codegen.set_module_prefix(prefix);

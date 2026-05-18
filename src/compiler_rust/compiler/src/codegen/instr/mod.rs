@@ -135,6 +135,8 @@ pub struct InstrContext<'a, M: Module> {
     /// during the pre-emit walk. Missing entries mean "unknown type" (treat as signed by
     /// default when FR-0002b lands).
     pub vreg_types: &'a mut HashMap<VReg, TypeId>,
+    /// Mangled function name → declared parameter count for cross-module free functions.
+    pub fn_arities: &'a std::sync::Arc<std::collections::HashMap<String, usize>>,
 }
 
 impl<'a, M: Module> InstrContext<'a, M> {
@@ -190,6 +192,8 @@ impl<'a, M: Module> InstrContext<'a, M> {
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
         let use_map: &'static std::collections::HashMap<String, String> =
             Box::leak(Box::new(std::collections::HashMap::new()));
+        let fn_arities: &'static std::sync::Arc<std::collections::HashMap<String, usize>> =
+            Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
         let data_exports: &'static std::sync::Arc<std::collections::HashSet<String>> =
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashSet::new())));
         let vtable_data_ids: &'static std::collections::BTreeMap<String, cranelift_module::DataId> =
@@ -230,6 +234,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             vtable_data_ids,
             vtable_type_ids,
             vreg_types,
+            fn_arities,
         }
     }
 }

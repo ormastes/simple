@@ -19,8 +19,10 @@ impl Lowerer {
                     .find_map(|(idx, (fname, ftype))| (fname == field_name).then(|| (idx, ftype.clone())))
             });
             let first = matches.next()?;
-            if matches.next().is_some() {
-                return None;
+            for m in matches {
+                if m.0 != first.0 {
+                    return None;
+                }
             }
             first
         };
@@ -543,8 +545,11 @@ impl Lowerer {
                     if let Some((idx, ty, _)) = best {
                         return Ok((idx, ty));
                     }
-                    // No struct with this field found — return error to fall back to
-                    // dynamic method dispatch instead of wrong FieldGet at offset 0
+                    if !self.is_ambiguous_global_field(field) {
+                        if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
+                            return Ok((idx, field_ty));
+                        }
+                    }
                     Err(LowerError::CannotInferFieldType {
                         struct_name: "Any".to_string(),
                         field: field.to_string(),
@@ -727,7 +732,12 @@ impl Lowerer {
                                 })
                             });
                             let first = matches.next()?;
-                            matches.next().is_none().then_some(first)
+                            for m in matches {
+                                if m.0 != first.0 {
+                                    return None;
+                                }
+                            }
+                            Some(first)
                         })
                 })?;
 

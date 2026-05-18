@@ -43,6 +43,13 @@ pub(crate) struct ImportMapResult {
     /// get incorrectly routed through the function-import fast path and
     /// `GlobalLoad` returns the symbol's address instead of its value.
     pub data_exports: std::collections::HashSet<String>,
+    /// Mangled function name → declared parameter count. Used by the codegen
+    /// backend to strip the spurious nil receiver that HIR→MIR lowering adds
+    /// to module-qualified free function calls (`mod.func(args)` → MIR args
+    /// `[nil, args...]`). Without this, the cross-module import signature is
+    /// built from `arg_vals.len()` which includes the nil, causing the callee
+    /// to receive nil in its first register instead of the real argument.
+    pub fn_arities: std::collections::HashMap<String, usize>,
 }
 
 /// Sanitize a mangled symbol name for the host platform.
@@ -211,6 +218,7 @@ pub(crate) fn build_import_map(
     let mut duplicate_struct_defs: HashMap<String, Vec<Vec<(String, simple_parser::Type)>>> = HashMap::new();
     let mut enum_defs: HashMap<String, Vec<(String, Option<usize>)>> = HashMap::new();
     let mut data_exports: HashSet<String> = HashSet::new();
+    let mut fn_arities: HashMap<String, usize> = HashMap::new();
 
     let mut seen_canonical = HashSet::new();
     for (path, source) in file_sources {
@@ -230,6 +238,7 @@ pub(crate) fn build_import_map(
                     simple_parser::ast::Node::Function(f) => {
                         if !f.body.statements.is_empty() {
                             let mangled = format!("{}__{}", prefix, f.name);
+                            fn_arities.insert(mangled.clone(), f.params.len());
                             raw_to_mangled.entry(f.name.clone()).or_default().push(mangled);
                         }
                     }
@@ -506,6 +515,7 @@ pub(crate) fn build_import_map(
         duplicate_struct_defs,
         enum_defs,
         data_exports,
+        fn_arities,
     }
 }
 
