@@ -556,7 +556,7 @@ impl NativeProjectBuilder {
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
                 data_exports: std::sync::Arc::new(result.data_exports),
-                populate_global_struct_defs: self.config.entry_closure,
+                populate_global_struct_defs: true,
                 populate_global_enum_defs: true,
             }
         } else {

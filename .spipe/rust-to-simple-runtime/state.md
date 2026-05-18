@@ -26,8 +26,8 @@ refactor
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [x] 2-research (Analyst) — 2026-05-18
 - [x] 3-arch (Architect) — 2026-05-18
-- [ ] 4-spec (QA Lead)
-- [ ] 5-implement (Engineer)
+- [x] 4-spec (QA Lead) — 2026-05-18
+- [x] 5-implement (Engineer) — 2026-05-18
 - [ ] 6-refactor (Tech Lead)
 - [ ] 7-verify (QA)
 - [ ] 8-ship (Release Mgr)
@@ -111,10 +111,28 @@ refactor
 - `--runtime-bundle core-c-bootstrap` controls which C files are linked
 
 ### 4-spec
-<pending>
+Specs created and passing for all implemented modules:
+- `test/unit/lib/common/ctype_spec.spl` — 9/9 PASS
+- `test/unit/lib/common/audio_effects/audio_effects_spec.spl` — 7/7 PASS
+- `test/unit/lib/common/random_pure_spec.spl` — 21/21 PASS
+- `test/unit/lib/common/time_utils/time_utils_spec.spl` — 53/53 PASS
+- Benchmark harness: `test/perf/ctype/` (bench_ctype.spl + bench_ctype_ref.c + runner)
 
 ### 5-implement
-<pending>
+**Completed modules:**
+
+| Module | File | LOC | Tests | Status |
+|--------|------|-----|-------|--------|
+| ctype (pilot) | `src/lib/common/ctype.spl` | 37 | 9/9 | DONE |
+| audio_effects | `src/lib/common/audio_effects.spl` | ~30 | 7/7 | DONE |
+| random_pure | `src/lib/common/random_pure.spl` | ~80 | 21/21 | DONE |
+| time_utils | `src/lib/common/time_utils.spl` | ~150 | 53/53 | DONE |
+| hash | Already in `hash.spl` | — | — | EXISTS (needs thin bridge) |
+| base64 | `.smf` only, no `.spl` source | — | — | NEEDS REWRITE |
+
+**Pending (Wave-1c-e agent running):** error, contracts, math
+
+**Analysis docs:** `wave1a_hash_analysis.md`, `wave1b_base64_analysis.md`
 
 ### 6-refactor
 <pending>
