@@ -6,7 +6,7 @@ use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, exec_block};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode};
-use simple_runtime::value::diagram_ffi;
+use simple_runtime::value::diagram_sffi;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -34,8 +34,8 @@ pub(crate) fn instantiate_class(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     // Diagram tracing for class instantiation
-    if diagram_ffi::is_diagram_enabled() {
-        diagram_ffi::trace_method(class_name, "new");
+    if diagram_sffi::is_diagram_enabled() {
+        diagram_sffi::trace_method(class_name, "new");
     }
 
     let class_def = classes.get(class_name).cloned().ok_or_else(|| {

@@ -1,6 +1,6 @@
-//! Mock policy FFI for the Simple interpreter
+//! Mock policy SFFI for the Simple interpreter
 //!
-//! This module provides FFI wrappers for mock policy functions from crate::mock_helper.
+//! This module provides SFFI wrappers for mock policy functions from crate::mock_helper.
 //! These allow Simple code to configure and check mock policies at runtime.
 
 use crate::error::CompileError;

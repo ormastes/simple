@@ -1,10 +1,10 @@
 //! UPX (Ultimate Packer for eXecutables) compression wrapper
 //!
-//! Provides Rust API and FFI bindings for UPX compression/decompression.
+//! Provides Rust API and SFFI bindings for UPX compression/decompression.
 //! UPX is auto-downloaded if not found in system PATH.
 
 use crate::compress::upx_download::{ensure_upx_available, find_upx_binary};
-use std::ffi::{CStr, CString};
+use std::sffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -192,10 +192,10 @@ pub fn get_compression_ratio(file: &str) -> Result<f64, String> {
 }
 
 // ============================================================================
-// FFI Bindings for Simple
+// SFFI Bindings for Simple
 // ============================================================================
 
-/// FFI: Compress a file with UPX
+/// SFFI: Compress a file with UPX
 ///
 /// # Safety
 /// - `input` and `output` must be valid null-terminated C strings
@@ -231,7 +231,7 @@ pub unsafe extern "C" fn upx_compress_file(input: *const c_char, output: *const 
     }
 }
 
-/// FFI: Decompress a UPX-compressed file
+/// SFFI: Decompress a UPX-compressed file
 ///
 /// # Safety
 /// - `input` and `output` must be valid null-terminated C strings
@@ -258,7 +258,7 @@ pub unsafe extern "C" fn upx_decompress_file(input: *const c_char, output: *cons
     }
 }
 
-/// FFI: Check if a file is UPX-compressed
+/// SFFI: Check if a file is UPX-compressed
 ///
 /// # Safety
 /// - `file` must be a valid null-terminated C string
@@ -281,7 +281,7 @@ pub unsafe extern "C" fn upx_is_compressed(file: *const c_char) -> i32 {
     }
 }
 
-/// FFI: Get compression ratio of a file
+/// SFFI: Get compression ratio of a file
 ///
 /// # Safety
 /// - `file` must be a valid null-terminated C string
@@ -300,7 +300,7 @@ pub unsafe extern "C" fn upx_get_ratio(file: *const c_char) -> f64 {
     get_compression_ratio(file_str).unwrap_or(-1.0)
 }
 
-/// FFI: Check if UPX is available
+/// SFFI: Check if UPX is available
 ///
 /// # Safety
 /// - Returns 1 if UPX is available, 0 if not
@@ -313,7 +313,7 @@ pub extern "C" fn upx_is_available() -> i32 {
     }
 }
 
-/// FFI: Ensure UPX is available (auto-download if needed)
+/// SFFI: Ensure UPX is available (auto-download if needed)
 ///
 /// # Safety
 /// - Returns 0 on success, -1 on failure
@@ -325,7 +325,7 @@ pub extern "C" fn upx_ensure_available() -> i32 {
     }
 }
 
-/// FFI: Get path to UPX binary
+/// SFFI: Get path to UPX binary
 ///
 /// # Safety
 /// - `buffer` must be a valid pointer to a writable char array

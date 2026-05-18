@@ -300,7 +300,7 @@ pub(crate) fn find_abi_complete_simple_core_runtime_library() -> Option<PathBuf>
         .filter(|path| runtime_archive_has_core_required_symbols(path))
 }
 
-/// Find the combined native_all library (runtime + compiler with Cranelift FFI).
+/// Find the combined native_all library (runtime + compiler with Cranelift SFFI).
 pub(crate) fn find_native_all_library() -> Option<PathBuf> {
     if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
         let p = dir.join("libsimple_native_all.a");

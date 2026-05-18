@@ -269,7 +269,7 @@ impl<'a> Parser<'a> {
             | TokenKind::Dollar => self.parse_primary_control(),
             TokenKind::Grid => self.parse_primary_math(),
             TokenKind::At => {
-                // FFI call prefix: @rt_function_name
+                // SFFI call prefix: @rt_function_name
                 // No ambiguity: decorators only appear before declarations, not in expressions
                 // Matrix multiplication (@) requires a left operand, while @rt_func appears at expression start
 
@@ -282,10 +282,10 @@ impl<'a> Parser<'a> {
                     // Create identifier with @ prefix preserved for debugging/tooling
                     Ok(Expr::Identifier(format!("@{}", name)))
                 } else {
-                    // Not an FFI call pattern - let it fall through to default error
+                    // Not an SFFI call pattern - let it fall through to default error
                     Err(ParseError::unexpected_token(
                         "expression",
-                        "@ (matrix multiplication requires left operand, FFI calls require @identifier pattern)".to_string(),
+                        "@ (matrix multiplication requires left operand, SFFI calls require @identifier pattern)".to_string(),
                         self.current.span,
                     ))
                 }

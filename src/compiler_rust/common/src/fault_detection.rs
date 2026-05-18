@@ -1,7 +1,7 @@
 //! Shared fault detection atomics for both interpreter and compiled modes.
 //!
 //! These globals live in `simple-common` so that both the compiler crate
-//! (interpreter mode) and the runtime crate (compiled-mode FFI) can read
+//! (interpreter mode) and the runtime crate (compiled-mode SFFI) can read
 //! and write the same atomic flags without crate dependency issues.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};

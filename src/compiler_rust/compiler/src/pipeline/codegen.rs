@@ -272,7 +272,7 @@ fn vhdl_unsupported_mir_reason(inst: &MirInst) -> Option<&'static str> {
             Some("indirect dispatch; VHDL lowering requires statically resolved direct @hardware calls")
         }
         MirInst::InterpCall { .. } | MirInst::InterpEval { .. } | MirInst::ExternMethodCall { .. } => {
-            Some("runtime-only call boundary; VHDL cannot invoke the interpreter, FFI, or host runtime")
+            Some("runtime-only call boundary; VHDL cannot invoke the interpreter, SFFI, or host runtime")
         }
         MirInst::Wait { .. }
         | MirInst::FutureCreate { .. }
@@ -2558,7 +2558,7 @@ mod tests {
     use super::*;
     use simple_parser::Parser;
     #[cfg(feature = "cuda")]
-    use std::ffi::CString;
+    use std::sffi::CString;
     use tempfile::NamedTempFile;
 
     fn vhdl_module_with_instruction(inst: MirInst) -> mir::MirModule {

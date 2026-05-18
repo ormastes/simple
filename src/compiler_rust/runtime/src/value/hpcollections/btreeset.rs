@@ -1,4 +1,4 @@
-//! BTreeSet FFI - Ordered set using Rust std::collections::BTreeSet
+//! BTreeSet SFFI - Ordered set using Rust std::collections::BTreeSet
 
 use super::super::core::RuntimeValue;
 use super::super::heap::{HeapHeader, HeapObjectType};

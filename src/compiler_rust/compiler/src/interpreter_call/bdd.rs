@@ -1290,7 +1290,7 @@ pub(super) fn eval_bdd_builtin(
                 epsilon: epsilon_f,
             })))
         }
-        // BDD Registry FFI functions - shared across all modules
+        // BDD Registry SFFI functions - shared across all modules
         "__bdd_register_group" => {
             let group = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| {

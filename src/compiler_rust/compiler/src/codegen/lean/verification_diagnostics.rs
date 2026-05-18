@@ -45,7 +45,7 @@ pub enum VerificationErrorCode {
     UnsafeInVerified,
     /// Raw pointer operation in verified context
     RawPointerInVerified,
-    /// FFI call in verified context
+    /// SFFI call in verified context
     FfiInVerified,
 
     // Dependency violations
@@ -134,7 +134,7 @@ impl VerificationErrorCode {
 
             Self::UnsafeInVerified => "unsafe operation in verified context",
             Self::RawPointerInVerified => "raw pointer operation in verified context",
-            Self::FfiInVerified => "FFI call in verified context",
+            Self::FfiInVerified => "SFFI call in verified context",
 
             Self::MissingTrustedBoundary => "verified code depends on unverified code without @trusted boundary",
             Self::CircularVerifiedDep => "circular dependency in verification context",
@@ -168,7 +168,7 @@ impl VerificationErrorCode {
 
             Self::UnsafeInVerified => "remove unsafe operations or move to @trusted function",
             Self::RawPointerInVerified => "use references instead of raw pointers",
-            Self::FfiInVerified => "wrap FFI calls in @trusted functions",
+            Self::FfiInVerified => "wrap SFFI calls in @trusted functions",
 
             Self::MissingTrustedBoundary => "add @trusted annotation to the dependency or verify the dependency",
             Self::CircularVerifiedDep => "break the circular dependency using @trusted annotations",

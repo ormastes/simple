@@ -1015,7 +1015,7 @@ pub enum ValueKind {
     Block,
     /// Native function (Rust callback)
     NativeFunction,
-    /// FFI-wrapped Rust object
+    /// SFFI-wrapped Rust object
     FfiObject,
     /// Contract violation (error value)
     ContractViolation,
@@ -1072,7 +1072,7 @@ impl ValueKind {
             ValueKind::Matcher => "matcher",
             ValueKind::Block => "block",
             ValueKind::NativeFunction => "native_function",
-            ValueKind::FfiObject => "ffi_object",
+            ValueKind::FfiObject => "sffi_object",
             ValueKind::ContractViolation => "contract_violation",
             ValueKind::MonoioFuture => "monoio_future",
             ValueKind::BlockClosure => "block_closure",

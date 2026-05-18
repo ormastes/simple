@@ -1,4 +1,4 @@
-//! Actor operations and FFI functions.
+//! Actor operations and SFFI functions.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

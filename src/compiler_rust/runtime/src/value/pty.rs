@@ -1,4 +1,4 @@
-//! PTY (Pseudo-Terminal) FFI functions for console I/O testing
+//! PTY (Pseudo-Terminal) SFFI functions for console I/O testing
 
 use crate::value::RuntimeValue;
 #[cfg(unix)]

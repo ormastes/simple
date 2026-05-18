@@ -26,7 +26,7 @@ pub enum VerificationMode {
 
     /// Trusted boundary between verified and unverified code.
     /// The function's contracts are assumed without proof.
-    /// Used for FFI, runtime primitives, or verified-elsewhere code.
+    /// Used for SFFI, runtime primitives, or verified-elsewhere code.
     Trusted,
 }
 

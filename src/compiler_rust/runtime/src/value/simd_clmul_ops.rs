@@ -85,7 +85,7 @@ fn xor_u64x2_scalar(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
 }
 
 // ---------------------------------------------------------------------------
-// Lane-level kernels (the shared core for both compiled-mode FFI and the
+// Lane-level kernels (the shared core for both compiled-mode SFFI and the
 // interpreter-extern handler).
 // ---------------------------------------------------------------------------
 

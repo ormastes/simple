@@ -84,7 +84,7 @@ pub extern "C" fn monoio_spawn_local(_task_fn: RuntimeValue) -> RuntimeValue {
     // 2. Create async block that calls the closure
     // 3. Spawn on thread-local monoio runtime using spawn_local()
     // 4. Wrap returned JoinHandle in RuntimeValue
-    // Requires FFI bridge between RuntimeValue and async Rust
+    // Requires SFFI bridge between RuntimeValue and async Rust
 
     tracing::warn!("monoio_spawn_local: stub implementation");
     RuntimeValue::from_int(0)
@@ -602,7 +602,7 @@ pub mod direct {
         IO_REGISTRY.with(|reg| f(&mut reg.borrow_mut()))
     }
 
-    /// FFI: Initialize direct runtime
+    /// SFFI: Initialize direct runtime
     #[no_mangle]
     pub extern "C" fn rt_monoio_direct_init(entries: i64) -> crate::value::RuntimeValue {
         let entries = if entries < 1 || entries > 32768 {
@@ -620,20 +620,20 @@ pub mod direct {
         }
     }
 
-    /// FFI: Check if direct runtime is available
+    /// SFFI: Check if direct runtime is available
     #[no_mangle]
     pub extern "C" fn rt_monoio_direct_available() -> crate::value::RuntimeValue {
         crate::value::RuntimeValue::from_bool(has_direct_runtime())
     }
 
-    /// FFI: Shutdown direct runtime
+    /// SFFI: Shutdown direct runtime
     #[no_mangle]
     pub extern "C" fn rt_monoio_direct_shutdown() -> crate::value::RuntimeValue {
         shutdown_direct_runtime();
         crate::value::RuntimeValue::from_int(1)
     }
 
-    /// FFI: Get I/O resource counts for debugging
+    /// SFFI: Get I/O resource counts for debugging
     #[no_mangle]
     pub extern "C" fn rt_monoio_direct_resource_count() -> crate::value::RuntimeValue {
         let count = with_registry(|reg| reg.tcp_listener_count() + reg.tcp_stream_count() + reg.udp_socket_count());

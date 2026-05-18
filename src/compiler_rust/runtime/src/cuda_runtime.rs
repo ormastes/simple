@@ -36,7 +36,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::sffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::os::raw::{c_int, c_uint, c_void};
 use std::ptr;
@@ -1097,10 +1097,10 @@ pub fn get_device_count() -> CudaResult<i32> {
 }
 
 // =============================================================================
-// FFI Functions for Runtime
+// SFFI Functions for Runtime
 // =============================================================================
 
-/// Initialize CUDA runtime (FFI)
+/// Initialize CUDA runtime (SFFI)
 #[no_mangle]
 pub extern "C" fn rt_cuda_init() -> i64 {
     match init_cuda() {
@@ -1109,13 +1109,13 @@ pub extern "C" fn rt_cuda_init() -> i64 {
     }
 }
 
-/// Get CUDA device count (FFI)
+/// Get CUDA device count (SFFI)
 #[no_mangle]
 pub extern "C" fn rt_cuda_device_count() -> i64 {
     get_device_count().unwrap_or(0) as i64
 }
 
-/// Check if CUDA is available (FFI)
+/// Check if CUDA is available (SFFI)
 #[no_mangle]
 pub extern "C" fn rt_cuda_available() -> i64 {
     match get_device_count() {
@@ -1125,7 +1125,7 @@ pub extern "C" fn rt_cuda_available() -> i64 {
 }
 
 // =============================================================================
-// Additional FFI Functions - Device, Context, Memory, Module, Launch
+// Additional SFFI Functions - Device, Context, Memory, Module, Launch
 // =============================================================================
 
 /// Get CUDA device handle by ID
@@ -2194,13 +2194,13 @@ pub extern "C" fn rt_cuda_get_error_string(error_code: i64) -> *const c_char {
     };
     // Return static string - no allocation needed
     let cstr = CString::new(msg).unwrap_or_default();
-    cstr.into_raw() // Leaked intentionally for FFI
+    cstr.into_raw() // Leaked intentionally for SFFI
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
+    use std::sffi::CString;
 
     #[test]
     fn test_cuda_error_display() {
@@ -2216,7 +2216,7 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "cuda"))]
-    fn test_cuda_ffi_stubs_report_not_initialized() {
+    fn test_cuda_sffi_stubs_report_not_initialized() {
         let ptx = CString::new(".version 7.0\n.target sm_50\n.address_size 64\n").unwrap();
         assert_eq!(rt_cuda_module_load_data(ptx.as_ptr()), -3);
         assert_eq!(rt_cuda_launch_kernel(0, ptx.as_ptr(), 1, 1, 1, 1, 1, 1, 0), -3);
@@ -2257,7 +2257,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "cuda")]
-    fn test_raw_ffi_invalid_ptx_is_rejected_when_cuda_is_available() {
+    fn test_raw_sffi_invalid_ptx_is_rejected_when_cuda_is_available() {
         let Ok(device_count) = get_device_count() else {
             return;
         };
@@ -2275,7 +2275,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "cuda")]
-    fn test_raw_ffi_can_load_and_launch_noop_kernel_when_cuda_is_available() {
+    fn test_raw_sffi_can_load_and_launch_noop_kernel_when_cuda_is_available() {
         let Ok(device_count) = get_device_count() else {
             return;
         };
@@ -2311,7 +2311,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "cuda")]
-    fn test_raw_ffi_f64_binary_kernel_when_cuda_is_available() {
+    fn test_raw_sffi_f64_binary_kernel_when_cuda_is_available() {
         let Ok(device_count) = get_device_count() else {
             return;
         };
@@ -2354,7 +2354,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "cuda")]
-    fn test_raw_ffi_f64_sum_kernel_when_cuda_is_available() {
+    fn test_raw_sffi_f64_sum_kernel_when_cuda_is_available() {
         let Ok(device_count) = get_device_count() else {
             return;
         };
@@ -2380,7 +2380,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "cuda")]
-    fn test_raw_ffi_f64_minmax_kernels_when_cuda_is_available() {
+    fn test_raw_sffi_f64_minmax_kernels_when_cuda_is_available() {
         let Ok(device_count) = get_device_count() else {
             return;
         };
@@ -2412,7 +2412,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "cuda")]
-    fn test_raw_ffi_f64_sum_axis_kernels_when_cuda_is_available() {
+    fn test_raw_sffi_f64_sum_axis_kernels_when_cuda_is_available() {
         let Ok(device_count) = get_device_count() else {
             return;
         };
@@ -2460,7 +2460,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "cuda")]
-    fn test_raw_ffi_f64_scalar_div_kernel_when_cuda_is_available() {
+    fn test_raw_sffi_f64_scalar_div_kernel_when_cuda_is_available() {
         let Ok(device_count) = get_device_count() else {
             return;
         };
@@ -2490,7 +2490,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "cuda")]
-    fn test_raw_ffi_f64_slice_kernels_when_cuda_is_available() {
+    fn test_raw_sffi_f64_slice_kernels_when_cuda_is_available() {
         let Ok(device_count) = get_device_count() else {
             return;
         };

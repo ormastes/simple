@@ -247,7 +247,7 @@ async function loadWasm() {{
 
     const imports = {{
         env: {{
-            // App lifecycle FFI
+            // App lifecycle SFFI
             electron_app_on: (eventPtr, callbackId) => {{
                 const event = readString(eventPtr);
                 console.log('Registered event:', event, callbackId);
@@ -274,7 +274,7 @@ async function loadWasm() {{
                 }}
             }},
 
-            // Tray FFI
+            // Tray SFFI
             electron_tray_create: (titlePtr) => {{
                 const title = readString(titlePtr);
                 try {{
@@ -299,7 +299,7 @@ async function loadWasm() {{
                 }}
             }},
 
-            // Power monitor FFI
+            // Power monitor SFFI
             electron_power_on: (eventPtr, callbackId) => {{
                 const event = readString(eventPtr);
                 powerMonitor.on(event, () => {{
@@ -314,7 +314,7 @@ async function loadWasm() {{
                 return -1.0; // Not available
             }},
 
-            // Notification FFI
+            // Notification SFFI
             electron_notification_show: (titlePtr, bodyPtr, optionsPtr) => {{
                 const title = readString(titlePtr);
                 const body = readString(bodyPtr);
@@ -328,7 +328,7 @@ async function loadWasm() {{
                 }}
             }},
 
-            // Clipboard FFI
+            // Clipboard SFFI
             electron_clipboard_read_text: () => {{
                 const text = clipboard.readText();
                 return writeString(text);
@@ -338,7 +338,7 @@ async function loadWasm() {{
                 clipboard.writeText(text);
             }},
 
-            // Shortcuts FFI
+            // Shortcuts SFFI
             electron_shortcuts_register: (acceleratorPtr, callbackId) => {{
                 const accelerator = readString(acceleratorPtr);
                 try {{
@@ -354,7 +354,7 @@ async function loadWasm() {{
                 }}
             }},
 
-            // IPC FFI
+            // IPC SFFI
             electron_ipc_send: (channelPtr, dataPtr) => {{
                 const channel = readString(channelPtr);
                 const data = readString(dataPtr);

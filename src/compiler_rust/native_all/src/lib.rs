@@ -1,8 +1,8 @@
 // Combined static library for native Simple binaries.
 //
 // This crate produces a single `libsimple_native_all.a` that includes
-// ALL transitive dependencies from both `simple-compiler` (Cranelift FFI,
-// codegen, parser) and `simple-runtime` (GC, FFI wrappers, actors).
+// ALL transitive dependencies from both `simple-compiler` (Cranelift SFFI,
+// codegen, parser) and `simple-runtime` (GC, SFFI wrappers, actors).
 //
 // When linked into a native binary produced by `native-build`, the binary
 // gains access to `rt_cranelift_*` functions, enabling self-hosted
@@ -61,7 +61,7 @@ fn extract_rt_string_array(arr: RuntimeValue) -> Vec<String> {
     result
 }
 
-/// FFI entry point for native-build command.
+/// SFFI entry point for native-build command.
 ///
 /// Args is a Simple runtime array of strings:
 ///   ["native-build", "--source", "src/compiler", "--source", "src/app", ...]
@@ -737,7 +737,7 @@ pub extern "C" fn sys_exit(code: i64) -> i64 {
 // NOTE: Do NOT export a raw `exit` symbol — it overrides libc's exit()
 // and causes infinite recursion with std::process::exit(). The Simple
 // `exit()` function is compiled to `app__io__cli_ops__exit` by the LLVM
-// backend, and `sys_exit` handles the FFI path.
+// backend, and `sys_exit` handles the SFFI path.
 
 #[no_mangle]
 pub extern "C" fn sys_malloc(size: i64) -> i64 {
@@ -1559,7 +1559,7 @@ noop_stubs!(
 );
 
 // ============================================================================
-// Test runner FFI — allows self-hosted binaries to run tests via the Rust
+// Test runner SFFI — allows self-hosted binaries to run tests via the Rust
 // test runner from simple-driver. Kept behind `driver-compat` so minimal
 // native lanes do not inherit the driver dependency closure.
 // ============================================================================
@@ -1600,7 +1600,7 @@ pub extern "C" fn rt_run_tests(args: RuntimeValue, gc_log: i64, gc_off: i64) -> 
 }
 
 // ============================================================================
-// CLI `run` FFI — executes a single .spl source file in-process via the Rust
+// CLI `run` SFFI — executes a single .spl source file in-process via the Rust
 // seed's interpreter. Replaces the runtime-side stub (gated out by the
 // `driver-hooks` feature on simple-runtime) so the self-hosted binary can
 // service `simple run <file>` without recursing through a subprocess. Kept

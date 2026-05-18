@@ -1,6 +1,6 @@
 //! Tensor creation and availability functions
 //!
-//! This module provides FFI functions for:
+//! This module provides SFFI functions for:
 //! - PyTorch availability detection (CPU/CUDA)
 //! - Tensor creation (zeros, ones, randn, arange)
 //! - Tensor cloning and memory management
@@ -21,7 +21,7 @@ use super::dynamic_runtime;
 use crate::value::{rt_array_get, rt_array_len, RuntimeValue};
 
 // ============================================================================
-// FFI Helper Functions
+// SFFI Helper Functions
 // ============================================================================
 
 #[cfg(feature = "pytorch")]
@@ -45,7 +45,7 @@ fn device_from_code(code: i32) -> Option<TchDevice> {
 }
 
 // ============================================================================
-// FFI Functions: Availability & Metadata
+// SFFI Functions: Availability & Metadata
 // ============================================================================
 
 /// Check if PyTorch backend is available
@@ -88,7 +88,7 @@ pub extern "C" fn rt_torch_cuda_device_count() -> i32 {
 }
 
 // ============================================================================
-// FFI Functions: Tensor Creation (10 functions)
+// SFFI Functions: Tensor Creation (10 functions)
 // ============================================================================
 
 /// Create zeros tensor
@@ -505,7 +505,7 @@ pub extern "C" fn rt_torch_free(tensor_handle: u64) -> i32 {
 }
 
 // ============================================================================
-// FFI Functions: CUDA Memory Management
+// SFFI Functions: CUDA Memory Management
 // ============================================================================
 
 /// Get CUDA memory allocated on device (in bytes)
@@ -564,7 +564,7 @@ pub extern "C" fn rt_torch_cuda_synchronize(device: i32) -> i32 {
 }
 
 // ============================================================================
-// FFI Helper Functions: Dimension-Specific Tensor Creation
+// SFFI Helper Functions: Dimension-Specific Tensor Creation
 // ============================================================================
 
 /// Create 1D random normal tensor

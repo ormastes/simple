@@ -3,7 +3,7 @@
 use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use parking_lot::Mutex;
-use std::ffi::{CStr, CString};
+use std::sffi::{CStr, CString};
 use std::sync::Arc;
 
 /// Global Vulkan instance (singleton)
@@ -208,7 +208,7 @@ unsafe extern "system" fn debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     _message_type: vk::DebugUtilsMessageTypeFlagsEXT,
     p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
-    _p_user_data: *mut std::ffi::c_void,
+    _p_user_data: *mut std::sffi::c_void,
 ) -> vk::Bool32 {
     let message = CStr::from_ptr((*p_callback_data).p_message);
     let message_str = message.to_string_lossy();

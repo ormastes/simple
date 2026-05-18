@@ -66,7 +66,7 @@ pub enum GpuBackendType {
 }
 
 impl GpuBackendType {
-    /// Convert from i32 (for FFI)
+    /// Convert from i32 (for SFFI)
     pub fn from_i32(value: i32) -> Option<Self> {
         match value {
             0 => Some(GpuBackendType::Cpu),
@@ -207,7 +207,7 @@ impl GpuBackendManager {
 }
 
 // =============================================================================
-// FFI Functions for Backend Selection
+// SFFI Functions for Backend Selection
 // =============================================================================
 
 /// Get list of available backends
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ffi_backend_available() {
+    fn test_sffi_backend_available() {
         let mut backends = [0i32; 10];
         let count = rt_gpu_backend_available(backends.as_mut_ptr(), 10);
         assert!(count > 0);
@@ -391,20 +391,20 @@ mod tests {
     }
 
     #[test]
-    fn test_ffi_backend_set_get() {
+    fn test_sffi_backend_set_get() {
         let result = rt_gpu_backend_set(0); // CPU
         assert!(result >= 0);
         assert_eq!(rt_gpu_backend_get(), 0);
     }
 
     #[test]
-    fn test_ffi_backend_is_available() {
+    fn test_sffi_backend_is_available() {
         assert_eq!(rt_gpu_backend_is_available(0), 1); // CPU always available
         assert!(rt_gpu_backend_is_available(100) < 0); // Invalid ID
     }
 
     #[test]
-    fn test_ffi_backend_name() {
+    fn test_sffi_backend_name() {
         let mut buffer = [0u8; 32];
         let len = rt_gpu_backend_name(0, buffer.as_mut_ptr(), 32);
         assert!(len > 0);
@@ -414,13 +414,13 @@ mod tests {
     }
 
     #[test]
-    fn test_ffi_backend_name_null_buffer() {
+    fn test_sffi_backend_name_null_buffer() {
         let len = rt_gpu_backend_name(0, std::ptr::null_mut(), 32);
         assert_eq!(len, -1);
     }
 
     #[test]
-    fn test_ffi_backend_name_zero_length() {
+    fn test_sffi_backend_name_zero_length() {
         let mut buffer = [0u8; 32];
         let len = rt_gpu_backend_name(0, buffer.as_mut_ptr(), 0);
         assert_eq!(len, -1);

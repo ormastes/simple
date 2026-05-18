@@ -1,6 +1,6 @@
 //! I18n (Internationalization) extern functions
 //!
-//! Provides FFI bindings to the i18n system for Simple code.
+//! Provides SFFI bindings to the i18n system for Simple code.
 //! Note: The Rust i18n crate has been removed. These functions now use
 //! a simple HashMap-based context and return messages as-is (no localization).
 

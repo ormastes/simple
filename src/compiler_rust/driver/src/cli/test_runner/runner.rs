@@ -392,8 +392,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 fn initialize_diagrams(options: &TestOptions, quiet: bool) {
     let diagrams_enabled = options.seq_diagram || options.class_diagram || options.arch_diagram || options.diagram_all;
     if diagrams_enabled {
-        simple_runtime::value::diagram_ffi::enable_diagrams();
-        simple_runtime::value::diagram_ffi::clear_diagram_data();
+        simple_runtime::value::diagram_sffi::enable_diagrams();
+        simple_runtime::value::diagram_sffi::clear_diagram_data();
         if !quiet {
             println!("Call flow diagram recording enabled");
         }
@@ -425,11 +425,11 @@ fn initialize_profiling(options: &TestOptions, quiet: bool) {
     // The global profiler uses default config; start it to activate
     simple_compiler::runtime_profile::start_profiling();
 
-    // Enable runtime FFI profiling for Cranelift-compiled code
-    simple_runtime::value::profiler_ffi::enable_profiling();
+    // Enable runtime SFFI profiling for Cranelift-compiled code
+    simple_runtime::value::profiler_sffi::enable_profiling();
 
-    // Register callbacks so runtime FFI can delegate to compiler profiler
-    simple_runtime::value::profiler_ffi::register_profiler_callbacks(
+    // Register callbacks so runtime SFFI can delegate to compiler profiler
+    simple_runtime::value::profiler_sffi::register_profiler_callbacks(
         |name| {
             simple_compiler::runtime_profile::record_full_call(
                 name,
@@ -1074,7 +1074,7 @@ fn finalize_profiling(options: &TestOptions, quiet: bool) {
     }
 
     simple_compiler::runtime_profile::stop_profiling();
-    simple_runtime::value::profiler_ffi::disable_profiling();
+    simple_runtime::value::profiler_sffi::disable_profiling();
 
     let metrics = simple_compiler::runtime_profile::collect_global_metrics();
 

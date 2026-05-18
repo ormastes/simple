@@ -1808,7 +1808,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     // =========================================================================
-    // Boxing (FFI boundary) — inline LLVM IR
+    // Boxing (SFFI boundary) — inline LLVM IR
     // =========================================================================
     fn emit_box_int(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let mut val = self.get(value)?;

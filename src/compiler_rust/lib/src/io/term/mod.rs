@@ -25,7 +25,7 @@ impl TermNative {
 
     pub fn strlen(&self, s: &str) -> Option<i64> {
         let func: StrlenFn = self.module.get_function("term_strlen")?;
-        let cstr = std::ffi::CString::new(s).ok()?;
+        let cstr = std::sffi::CString::new(s).ok()?;
         Some(unsafe { func(cstr.as_ptr()) })
     }
 }

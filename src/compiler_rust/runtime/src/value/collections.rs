@@ -1,5 +1,5 @@
-//! Collection types: Array, Tuple, String and their FFI functions.
-//! Dict FFI functions are in the dict module.
+//! Collection types: Array, Tuple, String and their SFFI functions.
+//! Dict SFFI functions are in the dict module.
 
 use std::cmp::Ordering;
 
@@ -14,7 +14,7 @@ use super::primitive_sort;
 use simple_simd::{active_simd_tier, SimdTier};
 
 // ============================================================================
-// Helper macros to reduce FFI boilerplate
+// Helper macros to reduce SFFI boilerplate
 // ============================================================================
 
 /// Get typed pointer from heap object with validation, returning early if invalid
@@ -295,7 +295,7 @@ impl RuntimeTuple {
 // RuntimeDict is in dict.rs module
 
 // ============================================================================
-// Array FFI functions
+// Array SFFI functions
 // ============================================================================
 
 /// Allocate a new array with the given capacity.
@@ -1315,7 +1315,7 @@ pub extern "C" fn rt_array_free(array: RuntimeValue) {
 }
 
 // ============================================================================
-// Tuple FFI functions
+// Tuple SFFI functions
 // ============================================================================
 
 /// Allocate a new tuple with the given length
@@ -1383,7 +1383,7 @@ pub extern "C" fn rt_tuple_free(tuple: RuntimeValue) {
 }
 
 // ============================================================================
-// String FFI functions
+// String SFFI functions
 // ============================================================================
 
 /// Create a string from UTF-8 bytes
@@ -2149,11 +2149,11 @@ pub extern "C" fn rt_str_hash(string: RuntimeValue) -> i64 {
 /// Convert any value to a string representation
 #[no_mangle]
 pub extern "C" fn rt_to_string(value: RuntimeValue) -> RuntimeValue {
-    use super::ffi::io_print::rt_value_to_string;
+    use super::sffi::io_print::rt_value_to_string;
     rt_value_to_string(value)
 }
 
-// Dict FFI functions are in dict.rs module
+// Dict SFFI functions are in dict.rs module
 
 // ============================================================================
 // Generic collection operations
@@ -2445,7 +2445,7 @@ pub extern "C" fn rt_array_last(array: RuntimeValue) -> RuntimeValue {
 /// Returns -1 if not found
 #[no_mangle]
 pub extern "C" fn rt_array_index_of(array: RuntimeValue, value: RuntimeValue) -> i64 {
-    use super::ffi::rt_value_eq;
+    use super::sffi::rt_value_eq;
 
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
@@ -2463,7 +2463,7 @@ pub extern "C" fn rt_array_index_of(array: RuntimeValue, value: RuntimeValue) ->
 /// Returns -1 if not found
 #[no_mangle]
 pub extern "C" fn rt_array_last_index_of(array: RuntimeValue, value: RuntimeValue) -> i64 {
-    use super::ffi::rt_value_eq;
+    use super::sffi::rt_value_eq;
 
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
@@ -2619,7 +2619,7 @@ pub extern "C" fn rt_array_max(array: RuntimeValue) -> RuntimeValue {
 /// Count occurrences of a value in an array
 #[no_mangle]
 pub extern "C" fn rt_array_count(array: RuntimeValue, value: RuntimeValue) -> i64 {
-    use super::ffi::rt_value_eq;
+    use super::sffi::rt_value_eq;
 
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
@@ -2744,7 +2744,7 @@ pub extern "C" fn rt_array_flatten(array: RuntimeValue) -> RuntimeValue {
 /// Returns a new array
 #[no_mangle]
 pub extern "C" fn rt_array_unique(array: RuntimeValue) -> RuntimeValue {
-    use super::ffi::rt_value_eq;
+    use super::sffi::rt_value_eq;
 
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
 
@@ -2822,7 +2822,7 @@ pub extern "C" fn rt_array_drop(array: RuntimeValue, n: i64) -> RuntimeValue {
 /// Join array elements into a string with separator
 #[no_mangle]
 pub extern "C" fn rt_array_join(array: RuntimeValue, separator: RuntimeValue) -> RuntimeValue {
-    use super::ffi::rt_value_to_string;
+    use super::sffi::rt_value_to_string;
 
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
 
@@ -2981,7 +2981,7 @@ pub extern "C" fn rt_array_range(start: i64, end: i64, step: i64) -> RuntimeValu
 /// Returns true (1) if found, false (0) if not
 #[no_mangle]
 pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> u8 {
-    use super::ffi::rt_value_eq;
+    use super::sffi::rt_value_eq;
 
     if !collection.is_heap() {
         return 0;

@@ -1,6 +1,6 @@
 //! SIMD vector operations for Simple language runtime
 //!
-//! Provides FFI functions for vector reduction, lane access, element-wise math,
+//! Provides SFFI functions for vector reduction, lane access, element-wise math,
 //! and shuffle/blend operations on RuntimeValue arrays.
 
 use super::collections::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_string_new, RuntimeArray};

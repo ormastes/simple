@@ -1,6 +1,6 @@
 //! Tensor metadata inspection functions
 //!
-//! This module provides FFI functions for querying tensor metadata such as
+//! This module provides SFFI functions for querying tensor metadata such as
 //! shape, dtype, device, and number of elements.
 
 #[cfg(feature = "pytorch")]
@@ -10,7 +10,7 @@ use tch::{Device as TchDevice, Kind as TchKind};
 use super::registry::TENSOR_REGISTRY;
 
 // ============================================================================
-// FFI Functions: Tensor Metadata (4 functions)
+// SFFI Functions: Tensor Metadata (4 functions)
 // ============================================================================
 
 /// Get tensor shape

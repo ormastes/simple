@@ -84,7 +84,7 @@ mod error_macros;
 // Coverage instrumentation helpers
 mod coverage_helpers;
 pub(crate) use coverage_helpers::{
-    extract_node_location, record_node_coverage, record_decision_coverage_ffi, record_condition_coverage,
+    extract_node_location, record_node_coverage, record_decision_coverage_sffi, record_condition_coverage,
     decision_id_from_span, is_coverage_enabled,
 };
 
@@ -202,8 +202,8 @@ use interpreter_context::dispatch_context_method;
 pub(crate) mod interpreter_extern;
 pub(crate) use interpreter_extern::call_extern_function;
 pub use interpreter_extern::collections::clear_collection_registries;
-pub use interpreter_extern::ast_ffi::clear_ast_ffi_registries;
-pub use interpreter_extern::env_ffi::clear_env_ffi_registry;
-pub use interpreter_extern::error_ffi::clear_error_ffi_registry;
-pub use interpreter_extern::span_ffi::clear_span_ffi_registry;
+pub use interpreter_extern::ast_sffi::clear_ast_sffi_registries;
+pub use interpreter_extern::env_sffi::clear_env_sffi_registry;
+pub use interpreter_extern::error_sffi::clear_error_sffi_registry;
+pub use interpreter_extern::span_sffi::clear_span_sffi_registry;
 pub use interpreter_extern::concurrency::clear_concurrency_registries;

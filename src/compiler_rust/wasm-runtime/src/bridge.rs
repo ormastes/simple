@@ -1,4 +1,4 @@
-//! FFI bridge between Simple's RuntimeValue and WebAssembly values
+//! SFFI bridge between Simple's RuntimeValue and WebAssembly values
 //!
 //! This module provides bidirectional conversion between Simple's RuntimeValue
 //! (64-bit tagged pointer) and WebAssembly's value types (i32, i64, f32, f64).

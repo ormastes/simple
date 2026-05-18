@@ -1,6 +1,6 @@
-//! PyTorch tensor FFI bridge
+//! PyTorch tensor SFFI bridge
 //!
-//! This module provides FFI functions for PyTorch tensor operations,
+//! This module provides SFFI functions for PyTorch tensor operations,
 //! following the handle-based registry pattern.
 //!
 //! Key patterns:
@@ -63,7 +63,7 @@ mod scheduler;
 // Re-export error types
 pub use error::TorchFfiError;
 
-// Re-export all FFI functions from submodules
+// Re-export all SFFI functions from submodules
 pub use autograd::*;
 pub use creation::*;
 pub use data::*;

@@ -39,7 +39,7 @@ pub(crate) fn compile_pointer_new<M: Module>(
             return Ok(());
         }
         PointerKind::RawConst | PointerKind::RawMut => {
-            // FFI raw pointers - pass through the address without wrapping
+            // SFFI raw pointers - pass through the address without wrapping
             // Used for extern function parameters
             ctx.vreg_values.insert(dest, value_val);
             return Ok(());
@@ -95,7 +95,7 @@ pub(crate) fn compile_pointer_deref<M: Module>(
             return Ok(());
         }
         PointerKind::RawConst | PointerKind::RawMut => {
-            // FFI raw pointers - transparent dereference
+            // SFFI raw pointers - transparent dereference
             ctx.vreg_values.insert(dest, ptr_val);
             return Ok(());
         }

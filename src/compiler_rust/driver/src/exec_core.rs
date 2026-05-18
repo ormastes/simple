@@ -452,7 +452,7 @@ impl ExecCore {
 
     /// Compile using native codegen and run source string (uses temp file)
     ///
-    /// Uses JIT compilation for proper symbol resolution of runtime FFI functions.
+    /// Uses JIT compilation for proper symbol resolution of runtime SFFI functions.
     pub fn run_source_native(&self, source: &str) -> Result<i32, String> {
         // Delegate to in-memory version since JIT doesn't need disk I/O
         self.run_source_in_memory_native(source)
@@ -460,7 +460,7 @@ impl ExecCore {
 
     /// Compile using native codegen and run source string in memory (no disk I/O)
     ///
-    /// Uses JIT compilation for proper symbol resolution of runtime FFI functions.
+    /// Uses JIT compilation for proper symbol resolution of runtime SFFI functions.
     /// Falls back to interpreter for code without explicit `fn main()`.
     pub fn run_source_in_memory_native(&self, source: &str) -> Result<i32, String> {
         use simple_compiler::codegen::JitCompiler;

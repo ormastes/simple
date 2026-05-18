@@ -1,4 +1,4 @@
-//! RC/ARC FFI wrappers for Simple language
+//! RC/ARC SFFI wrappers for Simple language
 //!
 //! Provides reference counting operations for Rc<T> and Arc<T>.
 //! Uses raw pointers where Simple manages allocation with sys_malloc/sys_free.

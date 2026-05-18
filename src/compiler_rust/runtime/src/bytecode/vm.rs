@@ -14,7 +14,7 @@
 //! ├─────────────────┤
 //! │  Constants Pool │ ← Compile-time constants
 //! ├─────────────────┤
-//! │  FFI Table      │ ← Runtime function pointers
+//! │  SFFI Table      │ ← Runtime function pointers
 //! └─────────────────┘
 //! ```
 
@@ -50,13 +50,13 @@ pub enum VmError {
     InvalidFunctionIndex(u32),
     /// Invalid constant index.
     InvalidConstantIndex(u32),
-    /// Invalid FFI function index.
+    /// Invalid SFFI function index.
     InvalidFfiIndex(u16),
     /// Type mismatch (expected one type, got another).
     TypeMismatch { expected: &'static str, got: &'static str },
     /// End of bytecode reached unexpectedly.
     UnexpectedEndOfCode,
-    /// Runtime FFI call failed.
+    /// Runtime SFFI call failed.
     FfiCallFailed(String),
 }
 
@@ -72,10 +72,10 @@ impl fmt::Display for VmError {
             VmError::InvalidJumpTarget(offset) => write!(f, "Invalid jump target: {}", offset),
             VmError::InvalidFunctionIndex(idx) => write!(f, "Invalid function index: {}", idx),
             VmError::InvalidConstantIndex(idx) => write!(f, "Invalid constant index: {}", idx),
-            VmError::InvalidFfiIndex(idx) => write!(f, "Invalid FFI index: {}", idx),
+            VmError::InvalidFfiIndex(idx) => write!(f, "Invalid SFFI index: {}", idx),
             VmError::TypeMismatch { expected, got } => write!(f, "Type mismatch: expected {}, got {}", expected, got),
             VmError::UnexpectedEndOfCode => write!(f, "Unexpected end of bytecode"),
-            VmError::FfiCallFailed(msg) => write!(f, "FFI call failed: {}", msg),
+            VmError::FfiCallFailed(msg) => write!(f, "SFFI call failed: {}", msg),
         }
     }
 }
@@ -141,7 +141,7 @@ pub struct FunctionMetadata {
     pub local_count: u16,
 }
 
-/// FFI function pointer type.
+/// SFFI function pointer type.
 ///
 /// Takes a slice of arguments and returns a result.
 pub type FfiFunctionPtr = fn(&[RuntimeValue]) -> VmResult<RuntimeValue>;
@@ -177,8 +177,8 @@ pub struct BytecodeVM {
     /// Function metadata table.
     functions: Vec<FunctionMetadata>,
 
-    /// FFI function table (runtime native functions).
-    ffi_table: Vec<FfiFunctionPtr>,
+    /// SFFI function table (runtime native functions).
+    sffi_table: Vec<FfiFunctionPtr>,
 }
 
 impl BytecodeVM {
@@ -192,7 +192,7 @@ impl BytecodeVM {
             code: Vec::new(),
             constants: Vec::new(),
             functions: Vec::new(),
-            ffi_table: Vec::new(),
+            sffi_table: Vec::new(),
         }
     }
 
@@ -217,9 +217,9 @@ impl BytecodeVM {
         self.functions = functions;
     }
 
-    /// Set the FFI function table.
-    pub fn set_ffi_table(&mut self, ffi_table: Vec<FfiFunctionPtr>) {
-        self.ffi_table = ffi_table;
+    /// Set the SFFI function table.
+    pub fn set_sffi_table(&mut self, sffi_table: Vec<FfiFunctionPtr>) {
+        self.sffi_table = sffi_table;
     }
 
     // =========================================================================
@@ -839,8 +839,8 @@ impl BytecodeVM {
                     self.ip = func.code_offset;
                 }
 
-                CALL_FFI => {
-                    let ffi_idx = self.read_u16()?;
+                CALL_SFFI => {
+                    let sffi_idx = self.read_u16()?;
                     let argc = self.read_u16()?;
 
                     // Pop arguments from eval stack
@@ -850,12 +850,12 @@ impl BytecodeVM {
                     }
                     args.reverse();
 
-                    let ffi_fn = self
-                        .ffi_table
-                        .get(ffi_idx as usize)
-                        .ok_or(VmError::InvalidFfiIndex(ffi_idx))?;
+                    let sffi_fn = self
+                        .sffi_table
+                        .get(sffi_idx as usize)
+                        .ok_or(VmError::InvalidFfiIndex(sffi_idx))?;
 
-                    let result = ffi_fn(&args)?;
+                    let result = sffi_fn(&args)?;
                     self.push(result)?;
                 }
 
@@ -863,19 +863,19 @@ impl BytecodeVM {
                     let rt_idx = self.read_u16()?;
                     let argc = self.read_u16()?;
 
-                    // Same as CALL_FFI for now
+                    // Same as CALL_SFFI for now
                     let mut args = Vec::with_capacity(argc as usize);
                     for _ in 0..argc {
                         args.push(self.pop()?);
                     }
                     args.reverse();
 
-                    let ffi_fn = self
-                        .ffi_table
+                    let sffi_fn = self
+                        .sffi_table
                         .get(rt_idx as usize)
                         .ok_or(VmError::InvalidFfiIndex(rt_idx))?;
 
-                    let result = ffi_fn(&args)?;
+                    let result = sffi_fn(&args)?;
                     self.push(result)?;
                 }
 

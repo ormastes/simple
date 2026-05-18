@@ -591,7 +591,7 @@ fn is_runtime_or_builtin_name(name: &str, extern_fns: &std::collections::HashSet
         || name.starts_with("__set_global_")
         || name.starts_with("bit_")
         || name.starts_with("bitwise_")
-        || name.starts_with("ffi_")
+        || name.starts_with("sffi_")
         || name.starts_with("rc_box_")
         || name.starts_with("arc_box_")
         || (name.contains('.') && {

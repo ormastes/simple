@@ -1,4 +1,4 @@
-//! BTreeSet FFI functions for the interpreter
+//! BTreeSet SFFI functions for the interpreter
 
 use crate::concurrent_providers::ConcurrentBackend;
 use crate::error::CompileError;

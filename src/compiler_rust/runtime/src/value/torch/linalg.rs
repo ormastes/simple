@@ -1,7 +1,7 @@
 //! Linear algebra operations for PyTorch tensors
 //!
 //! Simple Math #1950-#1959: Linear Algebra Operations
-//! Provides FFI functions for matrix operations:
+//! Provides SFFI functions for matrix operations:
 //! - det: Matrix determinant
 //! - inv: Matrix inverse
 //! - solve: Linear system solver (Ax = b)

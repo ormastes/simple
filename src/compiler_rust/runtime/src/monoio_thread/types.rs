@@ -1,6 +1,6 @@
 // Request/Response Types
 
-/// Requests sent from FFI to runtime thread
+/// Requests sent from SFFI to runtime thread
 #[derive(Debug)]
 pub enum IoRequest {
     // TCP operations
@@ -113,7 +113,7 @@ pub enum IoRequest {
     Shutdown,
 }
 
-/// Responses sent from runtime thread back to FFI
+/// Responses sent from runtime thread back to SFFI
 #[derive(Debug, Clone)]
 pub enum IoResponse {
     Success { id: i64 },

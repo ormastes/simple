@@ -647,7 +647,7 @@ impl ModuleResolver {
                 }
 
                 // Strategy 4: Try source_root as base for top-level module names
-                // e.g., "use app.ffi_gen.parser" → source_root/app/ffi_gen/parser.spl
+                // e.g., "use app.sffi_gen.parser" → source_root/app/sffi_gen/parser.spl
                 // This handles cross-project imports declared in simple.sdn
                 if segments[0] != "crate" && segments.len() > 1 {
                     for root in ordered_source_roots(self) {

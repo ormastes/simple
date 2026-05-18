@@ -243,7 +243,7 @@ fn runtime_value_to_string(value: RuntimeValue) -> Option<String> {
 /// 4. Optionally performs progressive prefaulting
 /// 5. Closes the file descriptor (mmap keeps reference)
 fn load_file_mmap(path: &str, mode: i32, prefault: bool) -> Result<MmapRegion, String> {
-    // Note: These FFI functions are defined in the parent mod.rs module
+    // Note: These SFFI functions are defined in the parent mod.rs module
     extern "C" {
         fn sys_file_size(fd: i32) -> i64;
         fn sys_mmap(addr: i64, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> i64;
@@ -255,7 +255,7 @@ fn load_file_mmap(path: &str, mode: i32, prefault: bool) -> Result<MmapRegion, S
     let fd = unsafe {
         #[cfg(target_family = "unix")]
         {
-            use std::ffi::CString;
+            use std::sffi::CString;
             let c_path = CString::new(path).map_err(|e| format!("Invalid path: {}", e))?;
             libc::open(c_path.as_ptr(), mode)
         }
@@ -361,7 +361,7 @@ fn progressive_prefault(ptr: *mut u8, size: usize) {
 }
 
 // =============================================================================
-// Async File Handle FFI Functions
+// Async File Handle SFFI Functions
 // =============================================================================
 
 /// Create a new async file handle

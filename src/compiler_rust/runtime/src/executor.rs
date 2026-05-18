@@ -411,7 +411,7 @@ pub fn is_manual_mode() -> bool {
 }
 
 // ============================================================================
-// FFI Functions for Executor
+// SFFI Functions for Executor
 // ============================================================================
 
 /// Set the async execution mode.
@@ -507,7 +507,7 @@ use crate::value::RuntimeValue;
 /// Handle for an isolated thread
 #[repr(C)]
 pub struct IsolatedThreadHandle {
-    /// Thread join handle (boxed to be FFI-safe)
+    /// Thread join handle (boxed to be SFFI-safe)
     join_handle: Option<JoinHandle<RuntimeValue>>,
     /// Thread ID
     thread_id: u64,

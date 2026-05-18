@@ -1,4 +1,4 @@
-//! HashMap FFI functions for the interpreter
+//! HashMap SFFI functions for the interpreter
 
 use crate::concurrent_providers::ConcurrentBackend;
 use crate::error::CompileError;

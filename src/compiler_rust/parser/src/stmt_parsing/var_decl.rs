@@ -1061,7 +1061,7 @@ impl Parser<'_> {
             return self.parse_extern_class_impl(start_span, attributes);
         }
 
-        // Check for extern "C": block syntax (block of FFI declarations)
+        // Check for extern "C": block syntax (block of SFFI declarations)
         if matches!(
             &self.current.kind,
             TokenKind::String(_) | TokenKind::FString(_) | TokenKind::RawString(_)

@@ -122,7 +122,7 @@ pub trait Backend: Send + Sync {
         block_dim: [u32; 3],
         shared_mem: usize,
         stream: StreamHandle,
-        args: &[*const std::ffi::c_void],
+        args: &[*const std::sffi::c_void],
     ) -> GpuResult<()>;
 
     // Stream management

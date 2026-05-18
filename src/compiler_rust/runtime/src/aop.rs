@@ -10,7 +10,7 @@ pub type AopTargetFn = extern "C" fn(argc: u64, argv: *const RuntimeValue) -> Ru
 /// Around advice function signature.
 pub type AopAroundFn = extern "C" fn(ctx: *mut ProceedContext, argc: u64, argv: *const RuntimeValue) -> RuntimeValue;
 
-// Thread-local storage for panic payload that needs to cross FFI boundary
+// Thread-local storage for panic payload that needs to cross SFFI boundary
 thread_local! {
     static PENDING_PANIC: Cell<Option<Box<dyn std::any::Any + Send + 'static>>> = const { Cell::new(None) };
 }
@@ -93,7 +93,7 @@ fn invoke_around_inner(
 ///
 /// Advice order is outermost-first (advices[0] wraps advices[1], etc.).
 ///
-/// This is the FFI-safe version that catches panics and re-throws them
+/// This is the SFFI-safe version that catches panics and re-throws them
 /// after leaving the extern "C" boundary.
 #[no_mangle]
 pub extern "C" fn rt_aop_invoke_around(
@@ -103,7 +103,7 @@ pub extern "C" fn rt_aop_invoke_around(
     argc: u64,
     argv: *const RuntimeValue,
 ) -> RuntimeValue {
-    // Wrap in catch_unwind to handle panics safely at FFI boundary
+    // Wrap in catch_unwind to handle panics safely at SFFI boundary
     let result = catch_unwind(AssertUnwindSafe(|| {
         invoke_around_inner(target, advices, advice_len, argc, argv)
     }));
@@ -152,7 +152,7 @@ pub use test_helpers::*;
 mod test_helpers {
     use super::*;
 
-    /// Test-only function that bypasses FFI and allows panics to propagate normally
+    /// Test-only function that bypasses SFFI and allows panics to propagate normally
     pub fn rt_aop_invoke_around_test(
         target: AopTargetFn,
         advices: *const AopAroundFn,

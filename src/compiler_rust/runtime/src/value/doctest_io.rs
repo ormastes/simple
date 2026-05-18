@@ -1,4 +1,4 @@
-//! FFI functions for doctest file I/O operations
+//! SFFI functions for doctest file I/O operations
 //!
 //! This module provides minimal file system operations needed by the doctest
 //! discovery module until the full `std.io` library is implemented.
@@ -38,7 +38,7 @@ fn string_to_runtime_value(s: &str) -> RuntimeValue {
 // File reading functions
 // ============================================================================
 
-/// Read entire file as string (FFI-safe)
+/// Read entire file as string (SFFI-safe)
 ///
 /// Returns RuntimeString on success, NIL on error
 #[no_mangle]
@@ -55,7 +55,7 @@ pub extern "C" fn doctest_read_file(path_val: RuntimeValue) -> RuntimeValue {
     }
 }
 
-/// Check if path exists (FFI-safe)
+/// Check if path exists (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn doctest_path_exists(path_val: RuntimeValue) -> RuntimeValue {
     unsafe {
@@ -68,7 +68,7 @@ pub extern "C" fn doctest_path_exists(path_val: RuntimeValue) -> RuntimeValue {
     }
 }
 
-/// Check if path is a file (FFI-safe)
+/// Check if path is a file (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn doctest_is_file(path_val: RuntimeValue) -> RuntimeValue {
     unsafe {
@@ -81,7 +81,7 @@ pub extern "C" fn doctest_is_file(path_val: RuntimeValue) -> RuntimeValue {
     }
 }
 
-/// Check if path is a directory (FFI-safe)
+/// Check if path is a directory (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn doctest_is_dir(path_val: RuntimeValue) -> RuntimeValue {
     unsafe {

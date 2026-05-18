@@ -1,11 +1,11 @@
-//! Ratatui TUI FFI bridge for Simple TUI framework
+//! Ratatui TUI SFFI bridge for Simple TUI framework
 //!
-//! Provides FFI functions to expose Ratatui functionality to Simple language.
+//! Provides SFFI functions to expose Ratatui functionality to Simple language.
 //! Ratatui is a modern, thread-safe (Send + Sync) terminal UI framework.
 //!
 //! # Ratatui Features
 //!
-//! - ✅ Thread-safe (Send + Sync) - works with FFI + static storage
+//! - ✅ Thread-safe (Send + Sync) - works with SFFI + static storage
 //! - ✅ Rich widget library (Block, Paragraph, List, Table, etc.)
 //! - ✅ Crossterm backend compatible
 //! - ✅ Immediate-mode rendering

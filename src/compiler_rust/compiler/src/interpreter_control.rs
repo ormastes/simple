@@ -71,7 +71,7 @@ use super::interpreter_call::exec_block_value;
 use super::interpreter_patterns::{is_catch_all_pattern, pattern_matches};
 
 // Import coverage helpers
-use super::coverage_helpers::{record_decision_coverage_ffi, decision_id_from_span};
+use super::coverage_helpers::{record_decision_coverage_sffi, decision_id_from_span};
 
 /// Handle loop control flow result. Returns Some if we should exit the loop.
 /// `my_label` is this loop's label (if any).
@@ -144,7 +144,7 @@ pub(super) fn exec_if(
     let decision_result = cond_val.truthy();
 
     // COVERAGE: Record decision for if statement
-    record_decision_coverage_ffi("<source>", if_stmt.span.line, if_stmt.span.column, decision_result);
+    record_decision_coverage_sffi("<source>", if_stmt.span.line, if_stmt.span.column, decision_result);
 
     if decision_result {
         return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
@@ -172,7 +172,7 @@ pub(super) fn exec_if(
 
             // COVERAGE: Record decision for elif statement
             let elif_decision_id = if_stmt.span.line as u32 + idx as u32;
-            record_decision_coverage_ffi("<source>", if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
+            record_decision_coverage_sffi("<source>", if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
 
             if elif_decision {
                 return exec_block(block, env, functions, classes, enums, impl_methods);
@@ -258,7 +258,7 @@ pub(super) fn exec_while(
                     // This should be very rare; fall through to a full condition eval.
                     let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
                     let decision_result = cond_val.truthy();
-                    record_decision_coverage_ffi(
+                    record_decision_coverage_sffi(
                         "<source>",
                         while_stmt.span.line,
                         while_stmt.span.column,
@@ -299,7 +299,7 @@ pub(super) fn exec_while(
                 }
             };
 
-            record_decision_coverage_ffi(
+            record_decision_coverage_sffi(
                 "<source>",
                 while_stmt.span.line,
                 while_stmt.span.column,
@@ -331,7 +331,7 @@ pub(super) fn exec_while(
         let decision_result = cond_val.truthy();
 
         // COVERAGE: Record decision for while condition on each iteration
-        record_decision_coverage_ffi(
+        record_decision_coverage_sffi(
             "<source>",
             while_stmt.span.line,
             while_stmt.span.column,
@@ -1044,7 +1044,7 @@ fn exec_match_core(
             }
 
             // COVERAGE: Record that this match arm was taken
-            record_decision_coverage_ffi(
+            record_decision_coverage_sffi(
                 "<source>",
                 match_stmt.span.line + arm_index,
                 match_stmt.span.column,

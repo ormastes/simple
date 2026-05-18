@@ -31,7 +31,7 @@ use crate::value::RuntimeValue;
 /// Unique task identifier.
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
-// Use the public FFI functions for future operations.
+// Use the public SFFI functions for future operations.
 use crate::value::{rt_future_await, rt_future_get_result, rt_future_is_ready};
 
 /// An async task managed by the scheduler.
@@ -173,7 +173,7 @@ lazy_static::lazy_static! {
 }
 
 // =============================================================================
-// FFI Functions
+// SFFI Functions
 // =============================================================================
 
 /// Spawn a future as an async task in the global scheduler.
@@ -275,14 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn ffi_schedule_await_resolved() {
+    fn sffi_schedule_await_resolved() {
         let future = rt_future_resolve(RuntimeValue::from_int(99));
         let result = rt_async_schedule_await(future);
         assert_eq!(result.as_int(), 99);
     }
 
     #[test]
-    fn ffi_run_until_complete_resolved() {
+    fn sffi_run_until_complete_resolved() {
         let future = rt_future_resolve(RuntimeValue::from_int(7));
         let result = rt_async_run_until_complete(future);
         assert_eq!(result.as_int(), 7);

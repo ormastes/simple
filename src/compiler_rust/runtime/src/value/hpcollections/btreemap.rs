@@ -1,4 +1,4 @@
-//! BTreeMap FFI - Ordered map using Rust std::collections::BTreeMap
+//! BTreeMap SFFI - Ordered map using Rust std::collections::BTreeMap
 //!
 //! Provides O(log n) operations with deterministic iteration order.
 //! Useful for context packs and other scenarios requiring sorted keys.

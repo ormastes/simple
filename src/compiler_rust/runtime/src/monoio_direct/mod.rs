@@ -1,9 +1,9 @@
-// Direct I/O FFI functions for monoio
+// Direct I/O SFFI functions for monoio
 // Feature: monoio-direct
 // Provides zero-overhead async I/O by executing on thread-local monoio runtime
 //
 // This module has been refactored into focused submodules for better maintainability.
-// All public FFI functions are re-exported to maintain backward compatibility.
+// All public SFFI functions are re-exported to maintain backward compatibility.
 
 #![cfg(feature = "monoio-direct")]
 
@@ -16,7 +16,7 @@ mod udp_options;
 mod future;
 mod stats;
 
-// Re-export all public FFI functions for backward compatibility
+// Re-export all public SFFI functions for backward compatibility
 
 // Runtime initialization
 pub use init::rt_monoio_init;

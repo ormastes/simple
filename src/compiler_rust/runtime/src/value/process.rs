@@ -1,4 +1,4 @@
-//! Process spawning and management FFI functions
+//! Process spawning and management SFFI functions
 
 use crate::value::RuntimeValue;
 #[cfg(unix)]
@@ -9,7 +9,7 @@ use nix::sys::signal::{kill, Signal};
 #[cfg(unix)]
 use nix::unistd::{execvp, fork, setsid, ForkResult};
 #[cfg(unix)]
-use std::ffi::CString;
+use std::sffi::CString;
 
 /// Spawn a process with PTY
 /// Returns: process ID (pid), or -1 on error

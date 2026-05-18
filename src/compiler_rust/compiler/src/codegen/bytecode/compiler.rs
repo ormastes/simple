@@ -396,10 +396,10 @@ impl BytecodeCompiler {
                     self.encoder.emit_u16(arg_slot);
                 }
 
-                // Emit FFI call (for now, all calls go through FFI)
-                // TODO: In Phase 2, distinguish between bytecode calls and FFI calls
-                self.encoder.emit_opcode(opcodes::CALL_FFI);
-                self.encoder.emit_u16(0); // FFI index (to be resolved by loader)
+                // Emit SFFI call (for now, all calls go through SFFI)
+                // TODO: In Phase 2, distinguish between bytecode calls and SFFI calls
+                self.encoder.emit_opcode(opcodes::CALL_SFFI);
+                self.encoder.emit_u16(0); // SFFI index (to be resolved by loader)
                 self.encoder.emit_u16(args.len() as u16);
 
                 // Pop result if dest is Some

@@ -28,12 +28,12 @@ use std::time::Duration;
 /// NOTE: Monoio wrapper architecture limitation
 ///
 /// Monoio's TcpListener and TcpStream are not Send/Sync, which means they cannot
-/// be stored in global static variables. This FFI wrapper uses a simplified approach:
+/// be stored in global static variables. This SFFI wrapper uses a simplified approach:
 ///
 /// 1. For listeners: We store only the bind address and recreate the listener for each accept
 /// 2. For streams: We store addresses and reconnect for each read/write operation
 ///
-/// This is inefficient but functional for FFI boundaries. For production use,
+/// This is inefficient but functional for SFFI boundaries. For production use,
 /// applications should be written in Simple language directly and use the monoio
 /// runtime properly (spawn tasks on the runtime, keep streams alive).
 ///
@@ -156,7 +156,7 @@ pub extern "C" fn monoio_tcp_accept(listener_handle: RuntimeValue) -> RuntimeVal
     };
 
     // Accept connection
-    // Note: We have to recreate the listener for each accept (inefficient but necessary for FFI)
+    // Note: We have to recreate the listener for each accept (inefficient but necessary for SFFI)
     let entries = get_entries();
     let accept_result = execute_async(entries, async move {
         let listener = TcpListener::bind(listener_addr)?;
@@ -231,7 +231,7 @@ pub extern "C" fn monoio_tcp_connect(addr: RuntimeValue) -> RuntimeValue {
         let stream = TcpStream::connect(socket_addr).await?;
         let peer_addr = stream.peer_addr()?;
         let local_addr = stream.local_addr()?;
-        drop(stream); // Can't store the stream across FFI boundary
+        drop(stream); // Can't store the stream across SFFI boundary
         Ok::<_, std::io::Error>((peer_addr, local_addr))
     });
 

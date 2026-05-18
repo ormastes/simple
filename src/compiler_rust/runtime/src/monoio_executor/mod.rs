@@ -16,7 +16,7 @@
 
 // Module declarations
 mod executor;
-mod ffi;
+mod sffi;
 mod handle_store;
 mod pending_op;
 mod runtime;
@@ -31,7 +31,7 @@ pub use handle_store::HandleStore;
 pub use pending_op::PendingOp;
 pub use types::{OpResult, OpState, OpType};
 
-// Re-export FFI functions
+// Re-export SFFI functions
 pub use ffi::{
     rt_monoio_async_init, rt_monoio_async_pending_count, rt_monoio_async_poll_all, rt_monoio_async_poll_one,
     rt_monoio_async_tcp_accept, rt_monoio_async_tcp_close, rt_monoio_async_tcp_connect, rt_monoio_async_tcp_listen,

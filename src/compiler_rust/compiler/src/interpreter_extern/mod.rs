@@ -26,7 +26,7 @@
 //! - `filesystem`: File and directory operations
 //! - `terminal`: Terminal I/O operations
 //!
-//! ### FFI Operations
+//! ### SFFI Operations
 //! - `atomic`: Atomic operations (AtomicBool, AtomicInt, AtomicFlag)
 //! - `tui`: Ratatui TUI bindings
 //! - `repl`: REPL runner integration
@@ -78,32 +78,32 @@ pub mod jit_native;
 // pub mod perf; // TODO: file not yet created
 pub mod sandbox;
 pub mod mock_policy;
-pub mod ffi_value;
-pub mod ffi_array;
-pub mod ffi_dict;
+pub mod sffi_value;
+pub mod sffi_array;
+pub mod sffi_dict;
 pub mod signatures;
 pub mod pbkdf2;
-pub mod ffi_string;
+pub mod sffi_string;
 pub mod collections;
-pub mod lexer_ffi;
+pub mod lexer_sffi;
 pub mod tls13;
 pub mod i18n;
-pub mod native_ffi;
+pub mod native_sffi;
 pub mod package;
 pub mod regex;
 pub mod hosted;
-pub mod ast_ffi;
-pub mod env_ffi;
-pub mod error_ffi;
-pub mod span_ffi;
+pub mod ast_sffi;
+pub mod env_sffi;
+pub mod error_sffi;
+pub mod span_sffi;
 pub mod rc;
 pub mod wffi;
 pub mod crypto;
 pub mod sha512;
-pub mod dynamic_ffi;
+pub mod dynamic_sffi;
 #[cfg(feature = "gui")]
-pub mod winit_ffi;
-pub mod rapier2d_ffi;
+pub mod winit_sffi;
+pub mod rapier2d_sffi;
 pub mod qmp_socket;
 pub mod host_wm_bridge;
 
@@ -117,7 +117,7 @@ use crate::interpreter::interpreter_call::exec_function_with_values;
 use crate::interpreter::interpreter_native_net;
 
 // Import diagram tracing
-use simple_runtime::value::diagram_ffi;
+use simple_runtime::value::diagram_sffi;
 
 /// Resolve fmt() methods on Object values for print functions.
 /// Converts Objects with fmt() methods to their string representation.
@@ -198,19 +198,19 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("eprintln", io::print::eprintln as ExternFn);
     m.insert("exit", process::exit as ExternFn);
     m.insert("f32_from_bits", memory::f32_from_bits as ExternFn);
-    m.insert("ffi_regex_captures", regex::captures as ExternFn);
-    m.insert("ffi_regex_find_all", regex::find_all as ExternFn);
-    m.insert("ffi_regex_find", regex::find as ExternFn);
-    m.insert("ffi_regex_is_match", regex::is_match as ExternFn);
-    m.insert("ffi_regex_replace_all", regex::replace_all as ExternFn);
-    m.insert("ffi_regex_replace", regex::replace as ExternFn);
-    m.insert("ffi_regex_split_n", regex::split_n as ExternFn);
-    m.insert("ffi_regex_split", regex::split as ExternFn);
+    m.insert("sffi_regex_captures", regex::captures as ExternFn);
+    m.insert("sffi_regex_find_all", regex::find_all as ExternFn);
+    m.insert("sffi_regex_find", regex::find as ExternFn);
+    m.insert("sffi_regex_is_match", regex::is_match as ExternFn);
+    m.insert("sffi_regex_replace_all", regex::replace_all as ExternFn);
+    m.insert("sffi_regex_replace", regex::replace as ExternFn);
+    m.insert("sffi_regex_split_n", regex::split_n as ExternFn);
+    m.insert("sffi_regex_split", regex::split as ExternFn);
     m.insert("floor", math::floor as ExternFn);
     m.insert("format_bytes", memory::format_bytes as ExternFn);
     m.insert("input", io::input::input as ExternFn);
     m.insert("is_memory_limited", memory::is_memory_limited as ExternFn);
-    m.insert("lexer_tokenize", lexer_ffi::simple_lexer_tokenize as ExternFn);
+    m.insert("lexer_tokenize", lexer_sffi::simple_lexer_tokenize as ExternFn);
     m.insert("max", math::max as ExternFn);
     m.insert("memory_limit", memory::memory_limit as ExternFn);
     m.insert("memory_usage", memory::memory_usage as ExternFn);
@@ -318,50 +318,50 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_aes_rcon", simd::rt_aes_rcon as ExternFn);
     m.insert("rt_aes_sbox", simd::rt_aes_sbox as ExternFn);
     m.insert("rt_alloc", memory::rt_alloc as ExternFn);
-    m.insert("rt_array_clear", ffi_array::rt_array_clear_fn as ExternFn);
-    m.insert("rt_array_extend_i64", ffi_array::rt_array_extend_i64_fn as ExternFn);
-    m.insert("rt_array_get", ffi_array::rt_array_get_fn as ExternFn);
-    m.insert("rt_array_get_text", ffi_array::rt_array_get_fn as ExternFn);
-    m.insert("rt_array_len", ffi_array::rt_array_len_fn as ExternFn);
-    m.insert("rt_array_new", ffi_array::rt_array_new_fn as ExternFn);
-    m.insert("rt_array_new_with_cap", ffi_array::rt_array_new_with_cap_fn as ExternFn);
-    m.insert("rt_array_new_with_cap_text", ffi_array::rt_array_new_with_cap_fn as ExternFn);
-    m.insert("rt_array_pop", ffi_array::rt_array_pop_fn as ExternFn);
-    m.insert("rt_array_push", ffi_array::rt_array_push_fn as ExternFn);
-    m.insert("rt_array_repeat", ffi_array::rt_array_repeat_fn as ExternFn);
-    m.insert("rt_array_set", ffi_array::rt_array_set_fn as ExternFn);
-    m.insert("rt_array_set_len_known", ffi_array::rt_array_set_len_known_fn as ExternFn);
-    m.insert("rt_array_set_len_known_text", ffi_array::rt_array_set_len_known_fn as ExternFn);
-    m.insert("rt_array_set_text", ffi_array::rt_array_set_fn as ExternFn);
-    m.insert("rt_ast_arg_free", ast_ffi::rt_ast_arg_free as ExternFn);
-    m.insert("rt_ast_arg_name", ast_ffi::rt_ast_arg_name as ExternFn);
-    m.insert("rt_ast_arg_value", ast_ffi::rt_ast_arg_value as ExternFn);
-    m.insert("rt_ast_expr_array_get", ast_ffi::rt_ast_expr_array_get as ExternFn);
-    m.insert("rt_ast_expr_array_len", ast_ffi::rt_ast_expr_array_len as ExternFn);
-    m.insert("rt_ast_expr_binary_left", ast_ffi::rt_ast_expr_binary_left as ExternFn);
-    m.insert("rt_ast_expr_binary_op", ast_ffi::rt_ast_expr_binary_op as ExternFn);
-    m.insert("rt_ast_expr_binary_right", ast_ffi::rt_ast_expr_binary_right as ExternFn);
-    m.insert("rt_ast_expr_bool_value", ast_ffi::rt_ast_expr_bool_value as ExternFn);
-    m.insert("rt_ast_expr_call_arg", ast_ffi::rt_ast_expr_call_arg as ExternFn);
-    m.insert("rt_ast_expr_call_arg_count", ast_ffi::rt_ast_expr_call_arg_count as ExternFn);
-    m.insert("rt_ast_expr_call_callee", ast_ffi::rt_ast_expr_call_callee as ExternFn);
-    m.insert("rt_ast_expr_field_name", ast_ffi::rt_ast_expr_field_name as ExternFn);
-    m.insert("rt_ast_expr_field_receiver", ast_ffi::rt_ast_expr_field_receiver as ExternFn);
-    m.insert("rt_ast_expr_float_value", ast_ffi::rt_ast_expr_float_value as ExternFn);
-    m.insert("rt_ast_expr_free", ast_ffi::rt_ast_expr_free as ExternFn);
-    m.insert("rt_ast_expr_ident_name", ast_ffi::rt_ast_expr_ident_name as ExternFn);
-    m.insert("rt_ast_expr_int_value", ast_ffi::rt_ast_expr_int_value as ExternFn);
-    m.insert("rt_ast_expr_method_arg", ast_ffi::rt_ast_expr_method_arg as ExternFn);
-    m.insert("rt_ast_expr_method_arg_count", ast_ffi::rt_ast_expr_method_arg_count as ExternFn);
-    m.insert("rt_ast_expr_method_name", ast_ffi::rt_ast_expr_method_name as ExternFn);
-    m.insert("rt_ast_expr_method_receiver", ast_ffi::rt_ast_expr_method_receiver as ExternFn);
-    m.insert("rt_ast_expr_string_value", ast_ffi::rt_ast_expr_string_value as ExternFn);
-    m.insert("rt_ast_expr_tag", ast_ffi::rt_ast_expr_tag as ExternFn);
-    m.insert("rt_ast_expr_unary_op", ast_ffi::rt_ast_expr_unary_op as ExternFn);
-    m.insert("rt_ast_expr_unary_operand", ast_ffi::rt_ast_expr_unary_operand as ExternFn);
-    m.insert("rt_ast_node_free", ast_ffi::rt_ast_node_free as ExternFn);
-    m.insert("rt_ast_registry_clear", ast_ffi::rt_ast_registry_clear as ExternFn);
-    m.insert("rt_ast_registry_count", ast_ffi::rt_ast_registry_count as ExternFn);
+    m.insert("rt_array_clear", sffi_array::rt_array_clear_fn as ExternFn);
+    m.insert("rt_array_extend_i64", sffi_array::rt_array_extend_i64_fn as ExternFn);
+    m.insert("rt_array_get", sffi_array::rt_array_get_fn as ExternFn);
+    m.insert("rt_array_get_text", sffi_array::rt_array_get_fn as ExternFn);
+    m.insert("rt_array_len", sffi_array::rt_array_len_fn as ExternFn);
+    m.insert("rt_array_new", sffi_array::rt_array_new_fn as ExternFn);
+    m.insert("rt_array_new_with_cap", sffi_array::rt_array_new_with_cap_fn as ExternFn);
+    m.insert("rt_array_new_with_cap_text", sffi_array::rt_array_new_with_cap_fn as ExternFn);
+    m.insert("rt_array_pop", sffi_array::rt_array_pop_fn as ExternFn);
+    m.insert("rt_array_push", sffi_array::rt_array_push_fn as ExternFn);
+    m.insert("rt_array_repeat", sffi_array::rt_array_repeat_fn as ExternFn);
+    m.insert("rt_array_set", sffi_array::rt_array_set_fn as ExternFn);
+    m.insert("rt_array_set_len_known", sffi_array::rt_array_set_len_known_fn as ExternFn);
+    m.insert("rt_array_set_len_known_text", sffi_array::rt_array_set_len_known_fn as ExternFn);
+    m.insert("rt_array_set_text", sffi_array::rt_array_set_fn as ExternFn);
+    m.insert("rt_ast_arg_free", ast_sffi::rt_ast_arg_free as ExternFn);
+    m.insert("rt_ast_arg_name", ast_sffi::rt_ast_arg_name as ExternFn);
+    m.insert("rt_ast_arg_value", ast_sffi::rt_ast_arg_value as ExternFn);
+    m.insert("rt_ast_expr_array_get", ast_sffi::rt_ast_expr_array_get as ExternFn);
+    m.insert("rt_ast_expr_array_len", ast_sffi::rt_ast_expr_array_len as ExternFn);
+    m.insert("rt_ast_expr_binary_left", ast_sffi::rt_ast_expr_binary_left as ExternFn);
+    m.insert("rt_ast_expr_binary_op", ast_sffi::rt_ast_expr_binary_op as ExternFn);
+    m.insert("rt_ast_expr_binary_right", ast_sffi::rt_ast_expr_binary_right as ExternFn);
+    m.insert("rt_ast_expr_bool_value", ast_sffi::rt_ast_expr_bool_value as ExternFn);
+    m.insert("rt_ast_expr_call_arg", ast_sffi::rt_ast_expr_call_arg as ExternFn);
+    m.insert("rt_ast_expr_call_arg_count", ast_sffi::rt_ast_expr_call_arg_count as ExternFn);
+    m.insert("rt_ast_expr_call_callee", ast_sffi::rt_ast_expr_call_callee as ExternFn);
+    m.insert("rt_ast_expr_field_name", ast_sffi::rt_ast_expr_field_name as ExternFn);
+    m.insert("rt_ast_expr_field_receiver", ast_sffi::rt_ast_expr_field_receiver as ExternFn);
+    m.insert("rt_ast_expr_float_value", ast_sffi::rt_ast_expr_float_value as ExternFn);
+    m.insert("rt_ast_expr_free", ast_sffi::rt_ast_expr_free as ExternFn);
+    m.insert("rt_ast_expr_ident_name", ast_sffi::rt_ast_expr_ident_name as ExternFn);
+    m.insert("rt_ast_expr_int_value", ast_sffi::rt_ast_expr_int_value as ExternFn);
+    m.insert("rt_ast_expr_method_arg", ast_sffi::rt_ast_expr_method_arg as ExternFn);
+    m.insert("rt_ast_expr_method_arg_count", ast_sffi::rt_ast_expr_method_arg_count as ExternFn);
+    m.insert("rt_ast_expr_method_name", ast_sffi::rt_ast_expr_method_name as ExternFn);
+    m.insert("rt_ast_expr_method_receiver", ast_sffi::rt_ast_expr_method_receiver as ExternFn);
+    m.insert("rt_ast_expr_string_value", ast_sffi::rt_ast_expr_string_value as ExternFn);
+    m.insert("rt_ast_expr_tag", ast_sffi::rt_ast_expr_tag as ExternFn);
+    m.insert("rt_ast_expr_unary_op", ast_sffi::rt_ast_expr_unary_op as ExternFn);
+    m.insert("rt_ast_expr_unary_operand", ast_sffi::rt_ast_expr_unary_operand as ExternFn);
+    m.insert("rt_ast_node_free", ast_sffi::rt_ast_node_free as ExternFn);
+    m.insert("rt_ast_registry_clear", ast_sffi::rt_ast_registry_clear as ExternFn);
+    m.insert("rt_ast_registry_count", ast_sffi::rt_ast_registry_count as ExternFn);
     m.insert("rt_async_ws_read_raw", network::rt_async_ws_read_raw as ExternFn);
     m.insert("rt_async_ws_write_raw", network::rt_async_ws_write_raw as ExternFn);
     m.insert("rt_atomic_bool_free", atomic::rt_atomic_bool_free as ExternFn);
@@ -431,15 +431,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("__rt_btreeset_symmetric_difference", collections::__rt_btreeset_symmetric_difference as ExternFn);
     m.insert("__rt_btreeset_to_array", collections::__rt_btreeset_to_array as ExternFn);
     m.insert("__rt_btreeset_union", collections::__rt_btreeset_union as ExternFn);
-    m.insert("rt_byte_array_new", ffi_array::rt_byte_array_new_fn as ExternFn);
+    m.insert("rt_byte_array_new", sffi_array::rt_byte_array_new_fn as ExternFn);
     m.insert("rt_byte_char", conversion::rt_byte_char_fn as ExternFn);
     m.insert("rt_bytes_alloc", file_io::rt_bytes_alloc as ExternFn);
     m.insert("rt_bytes_from_raw", file_io::rt_bytes_from_raw as ExternFn);
     m.insert("rt_bytes_to_text", conversion::rt_bytes_to_text_fn as ExternFn);
-    m.insert("rt_bytes_u32_le_at", ffi_array::rt_bytes_u32_le_at_fn as ExternFn);
-    m.insert("rt_bytes_u64_le_at", ffi_array::rt_bytes_u64_le_at_fn as ExternFn);
-    m.insert("rt_bytes_u8_at", ffi_array::rt_bytes_u8_at_fn as ExternFn);
-    m.insert("rt_bytes_u8_set", ffi_array::rt_bytes_u8_set_fn as ExternFn);
+    m.insert("rt_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn as ExternFn);
+    m.insert("rt_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn as ExternFn);
+    m.insert("rt_bytes_u8_at", sffi_array::rt_bytes_u8_at_fn as ExternFn);
+    m.insert("rt_bytes_u8_set", sffi_array::rt_bytes_u8_set_fn as ExternFn);
     m.insert("rt_cargo_build", cargo::rt_cargo_build as ExternFn);
     m.insert("rt_cargo_check", cargo::rt_cargo_check as ExternFn);
     m.insert("rt_cargo_clean", cargo::rt_cargo_clean as ExternFn);
@@ -480,7 +480,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_cli_run_context", cli::rt_cli_run_context as ExternFn);
     m.insert("rt_cli_run_diff", cli::rt_cli_run_diff as ExternFn);
     m.insert("rt_cli_run_feature_gen", cli::rt_cli_run_feature_gen as ExternFn);
-    m.insert("rt_cli_run_ffi_gen", cli::rt_cli_run_ffi_gen as ExternFn);
+    m.insert("rt_cli_run_sffi_gen", cli::rt_cli_run_sffi_gen as ExternFn);
     m.insert("rt_cli_run_file", cli::rt_cli_run_file as ExternFn);
     m.insert("rt_cli_run_fmt", cli::rt_cli_run_fmt as ExternFn);
     m.insert("rt_cli_run_gen_lean", cli::rt_cli_run_gen_lean as ExternFn);
@@ -502,9 +502,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_cli_run_verify", cli::rt_cli_run_verify as ExternFn);
     m.insert("rt_cli_version", cli::rt_cli_version as ExternFn);
     m.insert("rt_cli_watch_file", cli::rt_cli_watch_file as ExternFn);
-    m.insert("rt_compile_to_llvm_ir", native_ffi::rt_compile_to_llvm_ir as ExternFn);
-    m.insert("rt_compile_to_native", native_ffi::rt_compile_to_native as ExternFn);
-    m.insert("rt_compile_to_native_with_opt", native_ffi::rt_compile_to_native as ExternFn);
+    m.insert("rt_compile_to_llvm_ir", native_sffi::rt_compile_to_llvm_ir as ExternFn);
+    m.insert("rt_compile_to_native", native_sffi::rt_compile_to_native as ExternFn);
+    m.insert("rt_compile_to_native_with_opt", native_sffi::rt_compile_to_native as ExternFn);
     m.insert("rt_constant_time_compare", crypto::rt_constant_time_compare as ExternFn);
     m.insert("rt_context_generate", cli::rt_context_generate as ExternFn);
     m.insert("rt_context_stats", cli::rt_context_stats as ExternFn);
@@ -625,13 +625,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_diagram_trace_method", diagram::rt_diagram_trace_method as ExternFn);
     m.insert("rt_diagram_trace_method_with_args", diagram::rt_diagram_trace_method_with_args as ExternFn);
     m.insert("rt_diagram_trace_return", diagram::rt_diagram_trace_return as ExternFn);
-    m.insert("rt_dict_clear", ffi_dict::rt_dict_clear_fn as ExternFn);
-    m.insert("rt_dict_get", ffi_dict::rt_dict_get_fn as ExternFn);
-    m.insert("rt_dict_keys", ffi_dict::rt_dict_keys_fn as ExternFn);
-    m.insert("rt_dict_len", ffi_dict::rt_dict_len_fn as ExternFn);
-    m.insert("rt_dict_new", ffi_dict::rt_dict_new_fn as ExternFn);
-    m.insert("rt_dict_set", ffi_dict::rt_dict_set_fn as ExternFn);
-    m.insert("rt_dict_values", ffi_dict::rt_dict_values_fn as ExternFn);
+    m.insert("rt_dict_clear", sffi_dict::rt_dict_clear_fn as ExternFn);
+    m.insert("rt_dict_get", sffi_dict::rt_dict_get_fn as ExternFn);
+    m.insert("rt_dict_keys", sffi_dict::rt_dict_keys_fn as ExternFn);
+    m.insert("rt_dict_len", sffi_dict::rt_dict_len_fn as ExternFn);
+    m.insert("rt_dict_new", sffi_dict::rt_dict_new_fn as ExternFn);
+    m.insert("rt_dict_set", sffi_dict::rt_dict_set_fn as ExternFn);
+    m.insert("rt_dict_values", sffi_dict::rt_dict_values_fn as ExternFn);
     m.insert("rt_dir_create_all", file_io::rt_dir_create_all as ExternFn);
     m.insert("rt_dir_create", file_io::rt_dir_create as ExternFn);
     m.insert("rt_dir_exists", file_io::rt_dir_exists as ExternFn);
@@ -649,36 +649,36 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_entropy_hardware_ready", random::rt_entropy_hardware_ready_fn as ExternFn);
     m.insert("rt_env_all", system::rt_env_all as ExternFn);
     m.insert("rt_env_cwd", system::rt_env_cwd as ExternFn);
-    m.insert("rt_env_define_var", env_ffi::rt_env_define as ExternFn);
+    m.insert("rt_env_define_var", env_sffi::rt_env_define as ExternFn);
     m.insert("rt_env_exists", system::rt_env_exists as ExternFn);
-    m.insert("rt_env_free_handle", env_ffi::rt_env_free_handle as ExternFn);
+    m.insert("rt_env_free_handle", env_sffi::rt_env_free_handle as ExternFn);
     m.insert("rt_env_get_i64", system::rt_env_get_i64 as ExternFn);
     m.insert("rt_env_get", system::rt_env_get as ExternFn);
-    m.insert("rt_env_get_var", env_ffi::rt_env_get_var as ExternFn);
-    m.insert("rt_env_has_var", env_ffi::rt_env_has_var as ExternFn);
+    m.insert("rt_env_get_var", env_sffi::rt_env_get_var as ExternFn);
+    m.insert("rt_env_has_var", env_sffi::rt_env_has_var as ExternFn);
     m.insert("rt_env_home", system::rt_env_home as ExternFn);
-    m.insert("rt_env_new_handle", env_ffi::rt_env_new as ExternFn);
-    m.insert("rt_env_pop_scope", env_ffi::rt_env_pop_scope as ExternFn);
-    m.insert("rt_env_push_scope", env_ffi::rt_env_push_scope as ExternFn);
+    m.insert("rt_env_new_handle", env_sffi::rt_env_new as ExternFn);
+    m.insert("rt_env_pop_scope", env_sffi::rt_env_pop_scope as ExternFn);
+    m.insert("rt_env_push_scope", env_sffi::rt_env_push_scope as ExternFn);
     m.insert("rt_env_remove", system::rt_env_remove as ExternFn);
-    m.insert("rt_env_scope_depth", env_ffi::rt_env_scope_depth as ExternFn);
+    m.insert("rt_env_scope_depth", env_sffi::rt_env_scope_depth as ExternFn);
     m.insert("rt_env_set", system::rt_env_set as ExternFn);
-    m.insert("rt_env_set_var", env_ffi::rt_env_set_var as ExternFn);
-    m.insert("rt_env_snapshot", env_ffi::rt_env_snapshot as ExternFn);
+    m.insert("rt_env_set_var", env_sffi::rt_env_set_var as ExternFn);
+    m.insert("rt_env_snapshot", env_sffi::rt_env_snapshot as ExternFn);
     m.insert("rt_env_temp", system::rt_env_temp as ExternFn);
-    m.insert("rt_env_var_count", env_ffi::rt_env_var_count as ExternFn);
-    m.insert("rt_env_var_names", env_ffi::rt_env_var_names as ExternFn);
-    m.insert("rt_error_arg_count", error_ffi::rt_error_arg_count as ExternFn);
-    m.insert("rt_error_division_by_zero", error_ffi::rt_error_division_by_zero as ExternFn);
-    m.insert("rt_error_free", error_ffi::rt_error_free as ExternFn);
-    m.insert("rt_error_index_oob", error_ffi::rt_error_index_oob as ExternFn);
-    m.insert("rt_error_message", error_ffi::rt_error_message as ExternFn);
-    m.insert("rt_error_semantic", error_ffi::rt_error_semantic as ExternFn);
-    m.insert("rt_error_throw", error_ffi::rt_error_throw as ExternFn);
-    m.insert("rt_error_type_mismatch", error_ffi::rt_error_type_mismatch as ExternFn);
-    m.insert("rt_error_undefined_var", error_ffi::rt_error_undefined_var as ExternFn);
+    m.insert("rt_env_var_count", env_sffi::rt_env_var_count as ExternFn);
+    m.insert("rt_env_var_names", env_sffi::rt_env_var_names as ExternFn);
+    m.insert("rt_error_arg_count", error_sffi::rt_error_arg_count as ExternFn);
+    m.insert("rt_error_division_by_zero", error_sffi::rt_error_division_by_zero as ExternFn);
+    m.insert("rt_error_free", error_sffi::rt_error_free as ExternFn);
+    m.insert("rt_error_index_oob", error_sffi::rt_error_index_oob as ExternFn);
+    m.insert("rt_error_message", error_sffi::rt_error_message as ExternFn);
+    m.insert("rt_error_semantic", error_sffi::rt_error_semantic as ExternFn);
+    m.insert("rt_error_throw", error_sffi::rt_error_throw as ExternFn);
+    m.insert("rt_error_type_mismatch", error_sffi::rt_error_type_mismatch as ExternFn);
+    m.insert("rt_error_undefined_var", error_sffi::rt_error_undefined_var as ExternFn);
     m.insert("rt_exec", cranelift::rt_exec as ExternFn);
-    m.insert("rt_execute_native", native_ffi::rt_execute_native as ExternFn);
+    m.insert("rt_execute_native", native_sffi::rt_execute_native as ExternFn);
     m.insert("rt_exit", system::rt_exit as ExternFn);
     m.insert("rt_fault_set_execution_limit", cli::rt_fault_set_execution_limit as ExternFn);
     m.insert("rt_fault_set_max_recursion_depth", cli::rt_fault_set_max_recursion_depth as ExternFn);
@@ -692,7 +692,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_file_canonicalize", file_io::rt_file_canonicalize as ExternFn);
     m.insert("rt_file_close", file_io::rt_file_close as ExternFn);
     m.insert("rt_file_copy", file_io::rt_file_copy as ExternFn);
-    m.insert("rt_file_delete", native_ffi::rt_file_delete as ExternFn);
+    m.insert("rt_file_delete", native_sffi::rt_file_delete as ExternFn);
     m.insert("rt_file_exists", file_io::rt_file_exists as ExternFn);
     m.insert("rt_file_exists_str", file_io::rt_file_exists as ExternFn);
     m.insert("rt_file_find", file_io::rt_file_find as ExternFn);
@@ -726,7 +726,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_file_write_text_at", file_io::rt_file_write_text_at as ExternFn);
     m.insert("rt_file_write_text", file_io::rt_file_write_text as ExternFn);
     m.insert("rt_free", memory::rt_free as ExternFn);
-    m.insert("rt_function_not_found", ffi_value::rt_function_not_found_fn as ExternFn);
+    m.insert("rt_function_not_found", sffi_value::rt_function_not_found_fn as ExternFn);
     m.insert("rt_get_concurrent_backend", concurrency::rt_get_concurrent_backend as ExternFn);
     m.insert("rt_get_cwd", file_io::rt_get_cwd as ExternFn);
     m.insert("rt_getpid", file_io::rt_getpid as ExternFn);
@@ -792,7 +792,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_io_tcp_write_text", interpreter_native_net::rt_io_tcp_write_text_interp as ExternFn);
     m.insert("rt_io_tcp_write_text_read_exact_len", interpreter_native_net::rt_io_tcp_write_text_read_exact_len_interp as ExternFn);
     m.insert("rt_is_debug_mode_enabled", system::rt_is_debug_mode_enabled as ExternFn);
-    m.insert("rt_is_error", ffi_value::rt_is_error_fn as ExternFn);
+    m.insert("rt_is_error", sffi_value::rt_is_error_fn as ExternFn);
     m.insert("rt_is_macro_trace_enabled", system::rt_is_macro_trace_enabled as ExternFn);
     m.insert("rt_jit_backend_name", jit_native::rt_jit_backend_name as ExternFn);
     m.insert("rt_jit_call_i64_i64", jit_native::rt_jit_call_i64_i64 as ExternFn);
@@ -829,7 +829,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_math_tan", math::rt_math_tan_fn as ExternFn);
     m.insert("rt_memcpy", memory::rt_memcpy as ExternFn);
     m.insert("rt_memset", memory::rt_memset as ExternFn);
-    m.insert("rt_method_not_found", ffi_value::rt_method_not_found_fn as ExternFn);
+    m.insert("rt_method_not_found", sffi_value::rt_method_not_found_fn as ExternFn);
     m.insert("rt_mkdir", file_io::rt_mkdir as ExternFn);
     m.insert("rt_mkdir_p", file_io::rt_dir_create_all as ExternFn);
     m.insert("rt_mutex_lock", atomic::rt_mutex_lock_fn as ExternFn);
@@ -1007,19 +1007,19 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_sleep_ms", time::rt_sleep_ms as ExternFn);
     m.insert("rt_smf_parse_relocs", file_io::rt_smf_parse_relocs as ExternFn);
     m.insert("rt_smf_relocs_from_path", file_io::rt_smf_relocs_from_path as ExternFn);
-    m.insert("rt_span_column", span_ffi::rt_span_column as ExternFn);
-    m.insert("rt_span_create", span_ffi::rt_span_create as ExternFn);
-    m.insert("rt_span_end", span_ffi::rt_span_end as ExternFn);
-    m.insert("rt_span_free", span_ffi::rt_span_free as ExternFn);
-    m.insert("rt_span_line", span_ffi::rt_span_line as ExternFn);
-    m.insert("rt_span_start", span_ffi::rt_span_start as ExternFn);
+    m.insert("rt_span_column", span_sffi::rt_span_column as ExternFn);
+    m.insert("rt_span_create", span_sffi::rt_span_create as ExternFn);
+    m.insert("rt_span_end", span_sffi::rt_span_end as ExternFn);
+    m.insert("rt_span_free", span_sffi::rt_span_free as ExternFn);
+    m.insert("rt_span_line", span_sffi::rt_span_line as ExternFn);
+    m.insert("rt_span_start", span_sffi::rt_span_start as ExternFn);
     m.insert("rt_stat_open", file_io::rt_stat_open as ExternFn);
     m.insert("rt_stderr_write", io::stderr_write as ExternFn);
     m.insert("rt_stdout_write_text", io::stdout_write as ExternFn);
-    m.insert("rt_string_concat", ffi_string::rt_string_concat_fn as ExternFn);
-    m.insert("rt_string_eq", ffi_string::rt_string_eq_fn as ExternFn);
-    m.insert("rt_string_len", ffi_string::rt_string_len_fn as ExternFn);
-    m.insert("rt_string_new", ffi_string::rt_string_new_fn as ExternFn);
+    m.insert("rt_string_concat", sffi_string::rt_string_concat_fn as ExternFn);
+    m.insert("rt_string_eq", sffi_string::rt_string_eq_fn as ExternFn);
+    m.insert("rt_string_len", sffi_string::rt_string_len_fn as ExternFn);
+    m.insert("rt_string_new", sffi_string::rt_string_new_fn as ExternFn);
     m.insert("rt_swi_build", simd::rt_swi_build as ExternFn);
     m.insert("rt_swi_byte_to_char", simd::rt_swi_byte_to_char as ExternFn);
     m.insert("rt_swi_char_to_byte", simd::rt_swi_char_to_byte as ExternFn);
@@ -1081,17 +1081,17 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_torch_tensor", torch::rt_torch_tensor as ExternFn);
     m.insert("rt_torch_to_cpu", torch::rt_torch_to_cpu as ExternFn);
     m.insert("rt_torch_to_cuda", torch::rt_torch_to_cuda as ExternFn);
-    m.insert("rt_typed_bytes_u32_le_at", ffi_array::rt_bytes_u32_le_at_fn as ExternFn);
-    m.insert("rt_typed_bytes_u64_le_at", ffi_array::rt_bytes_u64_le_at_fn as ExternFn);
-    m.insert("rt_typed_bytes_u64_le_unchecked", ffi_array::rt_bytes_u64_le_at_fn as ExternFn);
-    m.insert("rt_typed_bytes_u8_push", ffi_array::rt_typed_bytes_u8_push_fn as ExternFn);
-    m.insert("rt_typed_bytes_u8_unchecked", ffi_array::rt_bytes_u8_at_fn as ExternFn);
-    m.insert("rt_typed_words_u32_at", ffi_array::rt_typed_words_u32_at_fn as ExternFn);
-    m.insert("rt_typed_words_u32_push", ffi_array::rt_typed_words_u32_push_fn as ExternFn);
-    m.insert("rt_typed_words_u32_set", ffi_array::rt_typed_words_u32_set_fn as ExternFn);
-    m.insert("rt_typed_words_u32_unchecked", ffi_array::rt_typed_words_u32_unchecked_fn as ExternFn);
-    m.insert("rt_typed_words_u64_at", ffi_array::rt_typed_words_u64_at_fn as ExternFn);
-    m.insert("rt_typed_words_u64_unchecked", ffi_array::rt_typed_words_u64_unchecked_fn as ExternFn);
+    m.insert("rt_typed_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn as ExternFn);
+    m.insert("rt_typed_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn as ExternFn);
+    m.insert("rt_typed_bytes_u64_le_unchecked", sffi_array::rt_bytes_u64_le_at_fn as ExternFn);
+    m.insert("rt_typed_bytes_u8_push", sffi_array::rt_typed_bytes_u8_push_fn as ExternFn);
+    m.insert("rt_typed_bytes_u8_unchecked", sffi_array::rt_bytes_u8_at_fn as ExternFn);
+    m.insert("rt_typed_words_u32_at", sffi_array::rt_typed_words_u32_at_fn as ExternFn);
+    m.insert("rt_typed_words_u32_push", sffi_array::rt_typed_words_u32_push_fn as ExternFn);
+    m.insert("rt_typed_words_u32_set", sffi_array::rt_typed_words_u32_set_fn as ExternFn);
+    m.insert("rt_typed_words_u32_unchecked", sffi_array::rt_typed_words_u32_unchecked_fn as ExternFn);
+    m.insert("rt_typed_words_u64_at", sffi_array::rt_typed_words_u64_at_fn as ExternFn);
+    m.insert("rt_typed_words_u64_unchecked", sffi_array::rt_typed_words_u64_unchecked_fn as ExternFn);
     m.insert("rt_u32_alloc_filled", file_io::rt_u32_alloc_filled as ExternFn);
     m.insert("rt_unix_socket_accept", qmp_socket::rt_unix_socket_accept as ExternFn);
     m.insert("rt_unix_socket_close", qmp_socket::rt_unix_socket_close as ExternFn);
@@ -1102,20 +1102,20 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_utf8_count_codepoints", simd::rt_utf8_count_codepoints as ExternFn);
     m.insert("rt_utf8_find_invalid", simd::rt_utf8_find_invalid as ExternFn);
     m.insert("rt_utf8_validate", simd::rt_utf8_validate as ExternFn);
-    m.insert("rt_value_as_bool", ffi_value::rt_value_as_bool_fn as ExternFn);
-    m.insert("rt_value_as_float", ffi_value::rt_value_as_float_fn as ExternFn);
-    m.insert("rt_value_as_int", ffi_value::rt_value_as_int_fn as ExternFn);
-    m.insert("rt_value_bool", ffi_value::rt_value_bool_fn as ExternFn);
-    m.insert("rt_value_float", ffi_value::rt_value_float_fn as ExternFn);
-    m.insert("rt_value_int", ffi_value::rt_value_int_fn as ExternFn);
-    m.insert("rt_value_is_bool", ffi_value::rt_value_is_bool_fn as ExternFn);
-    m.insert("rt_value_is_float", ffi_value::rt_value_is_float_fn as ExternFn);
-    m.insert("rt_value_is_heap", ffi_value::rt_value_is_heap_fn as ExternFn);
-    m.insert("rt_value_is_int", ffi_value::rt_value_is_int_fn as ExternFn);
-    m.insert("rt_value_is_nil", ffi_value::rt_value_is_nil_fn as ExternFn);
-    m.insert("rt_value_nil", ffi_value::rt_value_nil_fn as ExternFn);
-    m.insert("rt_value_truthy", ffi_value::rt_value_truthy_fn as ExternFn);
-    m.insert("rt_value_type_tag", ffi_value::rt_value_type_tag_fn as ExternFn);
+    m.insert("rt_value_as_bool", sffi_value::rt_value_as_bool_fn as ExternFn);
+    m.insert("rt_value_as_float", sffi_value::rt_value_as_float_fn as ExternFn);
+    m.insert("rt_value_as_int", sffi_value::rt_value_as_int_fn as ExternFn);
+    m.insert("rt_value_bool", sffi_value::rt_value_bool_fn as ExternFn);
+    m.insert("rt_value_float", sffi_value::rt_value_float_fn as ExternFn);
+    m.insert("rt_value_int", sffi_value::rt_value_int_fn as ExternFn);
+    m.insert("rt_value_is_bool", sffi_value::rt_value_is_bool_fn as ExternFn);
+    m.insert("rt_value_is_float", sffi_value::rt_value_is_float_fn as ExternFn);
+    m.insert("rt_value_is_heap", sffi_value::rt_value_is_heap_fn as ExternFn);
+    m.insert("rt_value_is_int", sffi_value::rt_value_is_int_fn as ExternFn);
+    m.insert("rt_value_is_nil", sffi_value::rt_value_is_nil_fn as ExternFn);
+    m.insert("rt_value_nil", sffi_value::rt_value_nil_fn as ExternFn);
+    m.insert("rt_value_truthy", sffi_value::rt_value_truthy_fn as ExternFn);
+    m.insert("rt_value_type_tag", sffi_value::rt_value_type_tag_fn as ExternFn);
     m.insert("rt_vk_available", gpu::rt_vk_available_fn as ExternFn);
     m.insert("rt_vulkan_begin_graphics_frame", gpu::rt_vulkan_begin_graphics_frame_fn as ExternFn);
     m.insert("rt_vulkan_begin_render_pass", gpu::rt_vulkan_begin_render_pass_fn as ExternFn);
@@ -1273,8 +1273,8 @@ pub(crate) fn call_extern_function(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     // Diagram tracing for extern function calls
-    if diagram_ffi::is_diagram_enabled() {
-        diagram_ffi::trace_call(name);
+    if diagram_sffi::is_diagram_enabled() {
+        diagram_sffi::trace_call(name);
     }
 
     // Evaluate all arguments upfront
@@ -1366,7 +1366,7 @@ pub(crate) fn call_extern_function(
         "rt_stderr_flush" => io::stderr_flush(&[]),
 
         // ====================================================================
-        // Math Operations (7 integer + 18 float FFI + 5 special = 30 functions)
+        // Math Operations (7 integer + 18 float SFFI + 5 special = 30 functions)
         // ====================================================================
         // Integer math operations
         "abs" => math::abs(&evaluated),
@@ -1377,7 +1377,7 @@ pub(crate) fn call_extern_function(
         "ceil" => math::ceil(&evaluated),
         "pow" => math::pow(&evaluated),
 
-        // Float math FFI operations
+        // Float math SFFI operations
         "rt_math_pow" => math::rt_math_pow_fn(&evaluated),
         "rt_math_log" => math::rt_math_log_fn(&evaluated),
         "rt_math_log10" => math::rt_math_log10_fn(&evaluated),
@@ -1589,13 +1589,13 @@ pub(crate) fn call_extern_function(
         "rt_base64url_decode" => crypto::rt_base64url_decode(&evaluated),
         "rt_base64url_encode" => crypto::rt_base64url_encode(&evaluated),
         // Constant-time text compare (must dispatch here so Value::Str args
-        // aren't routed through dynamic_ffi, which marshals strings as
+        // aren't routed through dynamic_sffi, which marshals strings as
         // C-pointers and silently breaks the runtime's RuntimeValue inputs).
         "rt_constant_time_compare" => crypto::rt_constant_time_compare(&evaluated),
 
         // Signature sign / verify (RFC 8332 RSA + RFC 5656 ECDSA-P256).
-        // These must be dispatched here (not via dynamic_ffi) because the
-        // sign paths return [u8], and dynamic_ffi marshals all returns as
+        // These must be dispatched here (not via dynamic_sffi) because the
+        // sign paths return [u8], and dynamic_sffi marshals all returns as
         // i64 — it cannot round-trip byte arrays. See signatures.rs.
         "rt_rsa_sha256_sign" => signatures::rt_rsa_sha256_sign(&evaluated),
         "rt_rsa_sha256_verify" => signatures::rt_rsa_sha256_verify(&evaluated),
@@ -1798,7 +1798,7 @@ pub(crate) fn call_extern_function(
         // ====================================================================
         // Lexer Operations (1 function)
         // ====================================================================
-        "lexer_tokenize" => lexer_ffi::simple_lexer_tokenize(&evaluated),
+        "lexer_tokenize" => lexer_sffi::simple_lexer_tokenize(&evaluated),
 
         // ====================================================================
         // Environment Operations (8 functions)
@@ -1832,7 +1832,7 @@ pub(crate) fn call_extern_function(
         "sys_malloc" => memory::sys_malloc(&evaluated),
         "sys_free" => memory::sys_free(&evaluated),
         "sys_realloc" => memory::sys_realloc(&evaluated),
-        // Raw memory operations (for LLVM-lib FFI backend)
+        // Raw memory operations (for LLVM-lib SFFI backend)
         "rt_alloc" => memory::rt_alloc(&evaluated),
         "rt_free" => memory::rt_free(&evaluated),
         "rt_ptr_write_i64" => memory::rt_ptr_write_i64(&evaluated),
@@ -2175,7 +2175,7 @@ pub(crate) fn call_extern_function(
         "rt_db_accel_bitmap_or_words" => simd::rt_db_accel_bitmap_or_words(&evaluated),
 
         // ====================================================================
-        // Diagram FFI Functions (12 functions)
+        // Diagram SFFI Functions (12 functions)
         // ====================================================================
         "rt_diagram_enable" => diagram::rt_diagram_enable(&evaluated),
         "rt_diagram_disable" => diagram::rt_diagram_disable(&evaluated),
@@ -2191,7 +2191,7 @@ pub(crate) fn call_extern_function(
         "rt_diagram_free_string" => diagram::rt_diagram_free_string(&evaluated),
 
         // ====================================================================
-        // File I/O FFI Operations (rt_* functions)
+        // File I/O SFFI Operations (rt_* functions)
         // ====================================================================
         // File metadata
         "rt_file_exists" | "rt_file_exists_str" => file_io::rt_file_exists(&evaluated),
@@ -2224,7 +2224,7 @@ pub(crate) fn call_extern_function(
         "rt_file_write_bytes" => file_io::rt_file_write_bytes(&evaluated),
         "rt_file_truncate" => file_io::rt_file_truncate(&evaluated),
         "rt_file_move" => file_io::rt_file_move(&evaluated),
-        "rt_file_delete" => native_ffi::rt_file_delete(&evaluated),
+        "rt_file_delete" => native_sffi::rt_file_delete(&evaluated),
         // Directory operations
         "rt_dir_exists" => file_io::rt_dir_exists(&evaluated),
         "rt_dir_create" => file_io::rt_dir_create(&evaluated),
@@ -2289,7 +2289,7 @@ pub(crate) fn call_extern_function(
         "rt_time_now_monotonic_ms" => file_io::rt_time_now_monotonic_ms(&evaluated),
 
         // ====================================================================
-        // Collections FFI Operations (HashMap, HashSet, BTree)
+        // Collections SFFI Operations (HashMap, HashSet, BTree)
         // ====================================================================
         // HashMap operations
         "__rt_hashmap_new" => collections::__rt_hashmap_new(&evaluated),
@@ -2347,7 +2347,7 @@ pub(crate) fn call_extern_function(
         "__rt_btreeset_is_superset" => collections::__rt_btreeset_is_superset(&evaluated),
 
         // ====================================================================
-        // CLI FFI Functions (46 functions - for Simple-based CLI)
+        // CLI SFFI Functions (46 functions - for Simple-based CLI)
         // ====================================================================
         // Basic CLI operations
         "rt_cli_version" => cli::rt_cli_version(&evaluated),
@@ -2405,8 +2405,8 @@ pub(crate) fn call_extern_function(
         // i18n
         "rt_cli_run_i18n" => cli::rt_cli_run_i18n(&evaluated),
 
-        // FFI generator
-        "rt_cli_run_ffi_gen" => cli::rt_cli_run_ffi_gen(&evaluated),
+        // SFFI generator
+        "rt_cli_run_sffi_gen" => cli::rt_cli_run_sffi_gen(&evaluated),
 
         // Context pack generation
         "rt_context_generate" => cli::rt_context_generate(&evaluated),
@@ -2473,7 +2473,7 @@ pub(crate) fn call_extern_function(
         "rt_sdn_fmt" => sdn::rt_sdn_fmt(&evaluated),
 
         // ====================================================================
-        // Coverage Operations (7 functions + 5 FFI functions)
+        // Coverage Operations (7 functions + 5 SFFI functions)
         // ====================================================================
         "coverage_scan" => coverage::coverage_scan(&evaluated),
         "coverage_class" => coverage::coverage_class(&evaluated),
@@ -2482,7 +2482,7 @@ pub(crate) fn call_extern_function(
         "coverage_generate" => coverage::coverage_generate(&evaluated),
         "coverage_check" => coverage::coverage_check(&evaluated),
         "coverage_summary" => coverage::coverage_summary(&evaluated),
-        // FFI functions for coverage.spl
+        // SFFI functions for coverage.spl
         "rt_coverage_enable" => coverage::rt_coverage_enable_fn(&evaluated),
         "rt_coverage_enable_timed" => coverage::rt_coverage_enable_timed_fn(&evaluated),
         "rt_coverage_enabled" => coverage::rt_coverage_enabled(&evaluated),
@@ -2508,14 +2508,14 @@ pub(crate) fn call_extern_function(
         }
 
         // ====================================================================
-        // Profiler FFI Functions (no-op in interpreter mode)
+        // Profiler SFFI Functions (no-op in interpreter mode)
         // ====================================================================
         "rt_profiler_record_call" => time::rt_profiler_record_call_fn(&evaluated),
         "rt_profiler_record_return" => time::rt_profiler_record_return_fn(&evaluated),
         "rt_profiler_is_active" => time::rt_profiler_is_active_fn(&evaluated),
 
         // ====================================================================
-        // Cranelift FFI Functions (for self-hosting compiler)
+        // Cranelift SFFI Functions (for self-hosting compiler)
         // ====================================================================
         // Module management
         "rt_cranelift_module_new" => cranelift::rt_cranelift_module_new(&evaluated),
@@ -2605,7 +2605,7 @@ pub(crate) fn call_extern_function(
         "rt_cranelift_get_function_ptr" => cranelift::rt_cranelift_get_function_ptr(&evaluated),
         "rt_cranelift_call_function_ptr" => cranelift::rt_cranelift_call_function_ptr(&evaluated),
 
-        // Bootstrap test FFI
+        // Bootstrap test SFFI
         "rt_exec" => cranelift::rt_exec(&evaluated),
         "rt_file_hash" => cranelift::rt_file_hash(&evaluated),
         "rt_write_file" => cranelift::rt_write_file(&evaluated),
@@ -2659,86 +2659,86 @@ pub(crate) fn call_extern_function(
         "rt_sandbox_get_fs_mode" => sandbox::rt_sandbox_get_fs_mode_fn(&evaluated),
 
         // ====================================================================
-        // FFI Value Operations (17 functions)
+        // SFFI Value Operations (17 functions)
         // ====================================================================
         // Value creation
-        "rt_value_int" => ffi_value::rt_value_int_fn(&evaluated),
-        "rt_value_float" => ffi_value::rt_value_float_fn(&evaluated),
-        "rt_value_bool" => ffi_value::rt_value_bool_fn(&evaluated),
-        "rt_value_nil" => ffi_value::rt_value_nil_fn(&evaluated),
+        "rt_value_int" => sffi_value::rt_value_int_fn(&evaluated),
+        "rt_value_float" => sffi_value::rt_value_float_fn(&evaluated),
+        "rt_value_bool" => sffi_value::rt_value_bool_fn(&evaluated),
+        "rt_value_nil" => sffi_value::rt_value_nil_fn(&evaluated),
 
         // Value extraction
-        "rt_value_as_int" => ffi_value::rt_value_as_int_fn(&evaluated),
-        "rt_value_as_float" => ffi_value::rt_value_as_float_fn(&evaluated),
-        "rt_value_as_bool" => ffi_value::rt_value_as_bool_fn(&evaluated),
+        "rt_value_as_int" => sffi_value::rt_value_as_int_fn(&evaluated),
+        "rt_value_as_float" => sffi_value::rt_value_as_float_fn(&evaluated),
+        "rt_value_as_bool" => sffi_value::rt_value_as_bool_fn(&evaluated),
 
         // Value type checking
-        "rt_value_truthy" => ffi_value::rt_value_truthy_fn(&evaluated),
-        "rt_value_is_nil" => ffi_value::rt_value_is_nil_fn(&evaluated),
-        "rt_value_is_int" => ffi_value::rt_value_is_int_fn(&evaluated),
-        "rt_value_is_float" => ffi_value::rt_value_is_float_fn(&evaluated),
-        "rt_value_is_bool" => ffi_value::rt_value_is_bool_fn(&evaluated),
-        "rt_value_is_heap" => ffi_value::rt_value_is_heap_fn(&evaluated),
-        "rt_value_type_tag" => ffi_value::rt_value_type_tag_fn(&evaluated),
+        "rt_value_truthy" => sffi_value::rt_value_truthy_fn(&evaluated),
+        "rt_value_is_nil" => sffi_value::rt_value_is_nil_fn(&evaluated),
+        "rt_value_is_int" => sffi_value::rt_value_is_int_fn(&evaluated),
+        "rt_value_is_float" => sffi_value::rt_value_is_float_fn(&evaluated),
+        "rt_value_is_bool" => sffi_value::rt_value_is_bool_fn(&evaluated),
+        "rt_value_is_heap" => sffi_value::rt_value_is_heap_fn(&evaluated),
+        "rt_value_type_tag" => sffi_value::rt_value_type_tag_fn(&evaluated),
 
         // Error handling
-        "rt_function_not_found" => ffi_value::rt_function_not_found_fn(&evaluated),
-        "rt_method_not_found" => ffi_value::rt_method_not_found_fn(&evaluated),
-        "rt_is_error" => ffi_value::rt_is_error_fn(&evaluated),
+        "rt_function_not_found" => sffi_value::rt_function_not_found_fn(&evaluated),
+        "rt_method_not_found" => sffi_value::rt_method_not_found_fn(&evaluated),
+        "rt_is_error" => sffi_value::rt_is_error_fn(&evaluated),
 
         // ====================================================================
-        // FFI Array Operations (7 functions)
+        // SFFI Array Operations (7 functions)
         // ====================================================================
-        "rt_array_new" => ffi_array::rt_array_new_fn(&evaluated),
+        "rt_array_new" => sffi_array::rt_array_new_fn(&evaluated),
         // `rt_array_new_with_cap(cap)` — returns Value::Array so Simple-land method
         // dispatch (.len(), .push(), etc.) works on the result.
         // See doc/08_tracking/bug/interpreter_class_field_method_dispatch_2026-04-28.md
-        "rt_array_new_with_cap" | "rt_array_new_with_cap_text" => ffi_array::rt_array_new_with_cap_fn(&evaluated),
-        "rt_byte_array_new" => ffi_array::rt_byte_array_new_fn(&evaluated),
-        "rt_array_set_len_known" | "rt_array_set_len_known_text" => ffi_array::rt_array_set_len_known_fn(&evaluated),
-        "rt_array_repeat" => ffi_array::rt_array_repeat_fn(&evaluated),
-        "rt_array_push" => ffi_array::rt_array_push_fn(&evaluated),
-        "rt_typed_bytes_u8_push" => ffi_array::rt_typed_bytes_u8_push_fn(&evaluated),
-        "rt_typed_words_u32_push" => ffi_array::rt_typed_words_u32_push_fn(&evaluated),
-        "rt_array_get" | "rt_array_get_text" => ffi_array::rt_array_get_fn(&evaluated),
-        "rt_array_set" | "rt_array_set_text" => ffi_array::rt_array_set_fn(&evaluated),
-        "rt_array_pop" => ffi_array::rt_array_pop_fn(&evaluated),
-        "rt_array_clear" => ffi_array::rt_array_clear_fn(&evaluated),
-        "rt_array_len" => ffi_array::rt_array_len_fn(&evaluated),
+        "rt_array_new_with_cap" | "rt_array_new_with_cap_text" => sffi_array::rt_array_new_with_cap_fn(&evaluated),
+        "rt_byte_array_new" => sffi_array::rt_byte_array_new_fn(&evaluated),
+        "rt_array_set_len_known" | "rt_array_set_len_known_text" => sffi_array::rt_array_set_len_known_fn(&evaluated),
+        "rt_array_repeat" => sffi_array::rt_array_repeat_fn(&evaluated),
+        "rt_array_push" => sffi_array::rt_array_push_fn(&evaluated),
+        "rt_typed_bytes_u8_push" => sffi_array::rt_typed_bytes_u8_push_fn(&evaluated),
+        "rt_typed_words_u32_push" => sffi_array::rt_typed_words_u32_push_fn(&evaluated),
+        "rt_array_get" | "rt_array_get_text" => sffi_array::rt_array_get_fn(&evaluated),
+        "rt_array_set" | "rt_array_set_text" => sffi_array::rt_array_set_fn(&evaluated),
+        "rt_array_pop" => sffi_array::rt_array_pop_fn(&evaluated),
+        "rt_array_clear" => sffi_array::rt_array_clear_fn(&evaluated),
+        "rt_array_len" => sffi_array::rt_array_len_fn(&evaluated),
         // `rt_array_extend_i64(dst, src, count)` — bulk-append from src into dst (SIMD bulk-copy workaround).
-        "rt_array_extend_i64" => ffi_array::rt_array_extend_i64_fn(&evaluated),
+        "rt_array_extend_i64" => sffi_array::rt_array_extend_i64_fn(&evaluated),
         // `rt_bytes_u8_at(arr, idx)` — index into a Value::Array byte buffer.
-        "rt_bytes_u8_at" => ffi_array::rt_bytes_u8_at_fn(&evaluated),
-        "rt_typed_bytes_u8_unchecked" => ffi_array::rt_bytes_u8_at_fn(&evaluated),
-        "rt_bytes_u8_set" => ffi_array::rt_bytes_u8_set_fn(&evaluated),
-        "rt_typed_words_u32_at" => ffi_array::rt_typed_words_u32_at_fn(&evaluated),
-        "rt_typed_words_u32_unchecked" => ffi_array::rt_typed_words_u32_unchecked_fn(&evaluated),
-        "rt_typed_words_u32_set" => ffi_array::rt_typed_words_u32_set_fn(&evaluated),
-        "rt_typed_words_u64_at" => ffi_array::rt_typed_words_u64_at_fn(&evaluated),
-        "rt_typed_words_u64_unchecked" => ffi_array::rt_typed_words_u64_unchecked_fn(&evaluated),
-        "rt_bytes_u32_le_at" | "rt_typed_bytes_u32_le_at" => ffi_array::rt_bytes_u32_le_at_fn(&evaluated),
+        "rt_bytes_u8_at" => sffi_array::rt_bytes_u8_at_fn(&evaluated),
+        "rt_typed_bytes_u8_unchecked" => sffi_array::rt_bytes_u8_at_fn(&evaluated),
+        "rt_bytes_u8_set" => sffi_array::rt_bytes_u8_set_fn(&evaluated),
+        "rt_typed_words_u32_at" => sffi_array::rt_typed_words_u32_at_fn(&evaluated),
+        "rt_typed_words_u32_unchecked" => sffi_array::rt_typed_words_u32_unchecked_fn(&evaluated),
+        "rt_typed_words_u32_set" => sffi_array::rt_typed_words_u32_set_fn(&evaluated),
+        "rt_typed_words_u64_at" => sffi_array::rt_typed_words_u64_at_fn(&evaluated),
+        "rt_typed_words_u64_unchecked" => sffi_array::rt_typed_words_u64_unchecked_fn(&evaluated),
+        "rt_bytes_u32_le_at" | "rt_typed_bytes_u32_le_at" => sffi_array::rt_bytes_u32_le_at_fn(&evaluated),
         "rt_bytes_u64_le_at" | "rt_typed_bytes_u64_le_at" | "rt_typed_bytes_u64_le_unchecked" => {
-            ffi_array::rt_bytes_u64_le_at_fn(&evaluated)
+            sffi_array::rt_bytes_u64_le_at_fn(&evaluated)
         }
 
         // ====================================================================
-        // FFI Dictionary Operations (7 functions)
+        // SFFI Dictionary Operations (7 functions)
         // ====================================================================
-        "rt_dict_new" => ffi_dict::rt_dict_new_fn(&evaluated),
-        "rt_dict_set" => ffi_dict::rt_dict_set_fn(&evaluated),
-        "rt_dict_get" => ffi_dict::rt_dict_get_fn(&evaluated),
-        "rt_dict_len" => ffi_dict::rt_dict_len_fn(&evaluated),
-        "rt_dict_clear" => ffi_dict::rt_dict_clear_fn(&evaluated),
-        "rt_dict_keys" => ffi_dict::rt_dict_keys_fn(&evaluated),
-        "rt_dict_values" => ffi_dict::rt_dict_values_fn(&evaluated),
+        "rt_dict_new" => sffi_dict::rt_dict_new_fn(&evaluated),
+        "rt_dict_set" => sffi_dict::rt_dict_set_fn(&evaluated),
+        "rt_dict_get" => sffi_dict::rt_dict_get_fn(&evaluated),
+        "rt_dict_len" => sffi_dict::rt_dict_len_fn(&evaluated),
+        "rt_dict_clear" => sffi_dict::rt_dict_clear_fn(&evaluated),
+        "rt_dict_keys" => sffi_dict::rt_dict_keys_fn(&evaluated),
+        "rt_dict_values" => sffi_dict::rt_dict_values_fn(&evaluated),
 
         // ====================================================================
-        // FFI String Operations (4 functions)
+        // SFFI String Operations (4 functions)
         // ====================================================================
-        "rt_string_new" => ffi_string::rt_string_new_fn(&evaluated),
-        "rt_string_concat" => ffi_string::rt_string_concat_fn(&evaluated),
-        "rt_string_len" => ffi_string::rt_string_len_fn(&evaluated),
-        "rt_string_eq" => ffi_string::rt_string_eq_fn(&evaluated),
+        "rt_string_new" => sffi_string::rt_string_new_fn(&evaluated),
+        "rt_string_concat" => sffi_string::rt_string_concat_fn(&evaluated),
+        "rt_string_len" => sffi_string::rt_string_len_fn(&evaluated),
+        "rt_string_eq" => sffi_string::rt_string_eq_fn(&evaluated),
 
         // ====================================================================
         // I18n Operations (5 functions)
@@ -2753,16 +2753,16 @@ pub(crate) fn call_extern_function(
         "rt_hosted_set_surface_override" => hosted::set_surface_override(&evaluated),
 
         #[cfg(feature = "gui")]
-        _ if name.starts_with("rt_winit_") => winit_ffi::dispatch(name, &evaluated),
-        _ if name.starts_with("rt_rapier2d_") => rapier2d_ffi::dispatch(name, &evaluated),
+        _ if name.starts_with("rt_winit_") => winit_sffi::dispatch(name, &evaluated),
+        _ if name.starts_with("rt_rapier2d_") => rapier2d_sffi::dispatch(name, &evaluated),
 
         // Unknown extern function
         // ====================================================================
         // Native Compilation & Execution (4 functions)
         // ====================================================================
-        "rt_compile_to_llvm_ir" => native_ffi::rt_compile_to_llvm_ir(&evaluated),
-        "rt_compile_to_native" | "rt_compile_to_native_with_opt" => native_ffi::rt_compile_to_native(&evaluated),
-        "rt_execute_native" => native_ffi::rt_execute_native(&evaluated),
+        "rt_compile_to_llvm_ir" => native_sffi::rt_compile_to_llvm_ir(&evaluated),
+        "rt_compile_to_native" | "rt_compile_to_native_with_opt" => native_sffi::rt_compile_to_native(&evaluated),
+        "rt_execute_native" => native_sffi::rt_execute_native(&evaluated),
 
         // ====================================================================
         // Package Management Operations (11 functions)
@@ -2782,86 +2782,86 @@ pub(crate) fn call_extern_function(
         // ====================================================================
         // Regex Operations (8 functions)
         // ====================================================================
-        "ffi_regex_is_match" => regex::is_match(&evaluated),
-        "ffi_regex_find" => regex::find(&evaluated),
-        "ffi_regex_find_all" => regex::find_all(&evaluated),
-        "ffi_regex_captures" => regex::captures(&evaluated),
-        "ffi_regex_replace" => regex::replace(&evaluated),
-        "ffi_regex_replace_all" => regex::replace_all(&evaluated),
-        "ffi_regex_split" => regex::split(&evaluated),
-        "ffi_regex_split_n" => regex::split_n(&evaluated),
+        "sffi_regex_is_match" => regex::is_match(&evaluated),
+        "sffi_regex_find" => regex::find(&evaluated),
+        "sffi_regex_find_all" => regex::find_all(&evaluated),
+        "sffi_regex_captures" => regex::captures(&evaluated),
+        "sffi_regex_replace" => regex::replace(&evaluated),
+        "sffi_regex_replace_all" => regex::replace_all(&evaluated),
+        "sffi_regex_split" => regex::split(&evaluated),
+        "sffi_regex_split_n" => regex::split_n(&evaluated),
 
         // ====================================================================
-        // AST Node Accessor FFI (28 functions)
+        // AST Node Accessor SFFI (28 functions)
         // ====================================================================
-        "rt_ast_expr_tag" => ast_ffi::rt_ast_expr_tag(&evaluated),
-        "rt_ast_expr_int_value" => ast_ffi::rt_ast_expr_int_value(&evaluated),
-        "rt_ast_expr_float_value" => ast_ffi::rt_ast_expr_float_value(&evaluated),
-        "rt_ast_expr_string_value" => ast_ffi::rt_ast_expr_string_value(&evaluated),
-        "rt_ast_expr_bool_value" => ast_ffi::rt_ast_expr_bool_value(&evaluated),
-        "rt_ast_expr_ident_name" => ast_ffi::rt_ast_expr_ident_name(&evaluated),
-        "rt_ast_expr_binary_op" => ast_ffi::rt_ast_expr_binary_op(&evaluated),
-        "rt_ast_expr_binary_left" => ast_ffi::rt_ast_expr_binary_left(&evaluated),
-        "rt_ast_expr_binary_right" => ast_ffi::rt_ast_expr_binary_right(&evaluated),
-        "rt_ast_expr_unary_op" => ast_ffi::rt_ast_expr_unary_op(&evaluated),
-        "rt_ast_expr_unary_operand" => ast_ffi::rt_ast_expr_unary_operand(&evaluated),
-        "rt_ast_expr_call_callee" => ast_ffi::rt_ast_expr_call_callee(&evaluated),
-        "rt_ast_expr_call_arg_count" => ast_ffi::rt_ast_expr_call_arg_count(&evaluated),
-        "rt_ast_expr_call_arg" => ast_ffi::rt_ast_expr_call_arg(&evaluated),
-        "rt_ast_arg_value" => ast_ffi::rt_ast_arg_value(&evaluated),
-        "rt_ast_arg_name" => ast_ffi::rt_ast_arg_name(&evaluated),
-        "rt_ast_expr_method_receiver" => ast_ffi::rt_ast_expr_method_receiver(&evaluated),
-        "rt_ast_expr_method_name" => ast_ffi::rt_ast_expr_method_name(&evaluated),
-        "rt_ast_expr_method_arg_count" => ast_ffi::rt_ast_expr_method_arg_count(&evaluated),
-        "rt_ast_expr_method_arg" => ast_ffi::rt_ast_expr_method_arg(&evaluated),
-        "rt_ast_expr_field_receiver" => ast_ffi::rt_ast_expr_field_receiver(&evaluated),
-        "rt_ast_expr_field_name" => ast_ffi::rt_ast_expr_field_name(&evaluated),
-        "rt_ast_expr_array_len" => ast_ffi::rt_ast_expr_array_len(&evaluated),
-        "rt_ast_expr_array_get" => ast_ffi::rt_ast_expr_array_get(&evaluated),
-        "rt_ast_expr_free" => ast_ffi::rt_ast_expr_free(&evaluated),
-        "rt_ast_node_free" => ast_ffi::rt_ast_node_free(&evaluated),
-        "rt_ast_arg_free" => ast_ffi::rt_ast_arg_free(&evaluated),
-        "rt_ast_registry_clear" => ast_ffi::rt_ast_registry_clear(&evaluated),
-        "rt_ast_registry_count" => ast_ffi::rt_ast_registry_count(&evaluated),
+        "rt_ast_expr_tag" => ast_sffi::rt_ast_expr_tag(&evaluated),
+        "rt_ast_expr_int_value" => ast_sffi::rt_ast_expr_int_value(&evaluated),
+        "rt_ast_expr_float_value" => ast_sffi::rt_ast_expr_float_value(&evaluated),
+        "rt_ast_expr_string_value" => ast_sffi::rt_ast_expr_string_value(&evaluated),
+        "rt_ast_expr_bool_value" => ast_sffi::rt_ast_expr_bool_value(&evaluated),
+        "rt_ast_expr_ident_name" => ast_sffi::rt_ast_expr_ident_name(&evaluated),
+        "rt_ast_expr_binary_op" => ast_sffi::rt_ast_expr_binary_op(&evaluated),
+        "rt_ast_expr_binary_left" => ast_sffi::rt_ast_expr_binary_left(&evaluated),
+        "rt_ast_expr_binary_right" => ast_sffi::rt_ast_expr_binary_right(&evaluated),
+        "rt_ast_expr_unary_op" => ast_sffi::rt_ast_expr_unary_op(&evaluated),
+        "rt_ast_expr_unary_operand" => ast_sffi::rt_ast_expr_unary_operand(&evaluated),
+        "rt_ast_expr_call_callee" => ast_sffi::rt_ast_expr_call_callee(&evaluated),
+        "rt_ast_expr_call_arg_count" => ast_sffi::rt_ast_expr_call_arg_count(&evaluated),
+        "rt_ast_expr_call_arg" => ast_sffi::rt_ast_expr_call_arg(&evaluated),
+        "rt_ast_arg_value" => ast_sffi::rt_ast_arg_value(&evaluated),
+        "rt_ast_arg_name" => ast_sffi::rt_ast_arg_name(&evaluated),
+        "rt_ast_expr_method_receiver" => ast_sffi::rt_ast_expr_method_receiver(&evaluated),
+        "rt_ast_expr_method_name" => ast_sffi::rt_ast_expr_method_name(&evaluated),
+        "rt_ast_expr_method_arg_count" => ast_sffi::rt_ast_expr_method_arg_count(&evaluated),
+        "rt_ast_expr_method_arg" => ast_sffi::rt_ast_expr_method_arg(&evaluated),
+        "rt_ast_expr_field_receiver" => ast_sffi::rt_ast_expr_field_receiver(&evaluated),
+        "rt_ast_expr_field_name" => ast_sffi::rt_ast_expr_field_name(&evaluated),
+        "rt_ast_expr_array_len" => ast_sffi::rt_ast_expr_array_len(&evaluated),
+        "rt_ast_expr_array_get" => ast_sffi::rt_ast_expr_array_get(&evaluated),
+        "rt_ast_expr_free" => ast_sffi::rt_ast_expr_free(&evaluated),
+        "rt_ast_node_free" => ast_sffi::rt_ast_node_free(&evaluated),
+        "rt_ast_arg_free" => ast_sffi::rt_ast_arg_free(&evaluated),
+        "rt_ast_registry_clear" => ast_sffi::rt_ast_registry_clear(&evaluated),
+        "rt_ast_registry_count" => ast_sffi::rt_ast_registry_count(&evaluated),
 
         // ====================================================================
-        // Environment/Scope FFI (12 functions)
+        // Environment/Scope SFFI (12 functions)
         // ====================================================================
-        "rt_env_new_handle" => env_ffi::rt_env_new(&evaluated),
-        "rt_env_push_scope" => env_ffi::rt_env_push_scope(&evaluated),
-        "rt_env_pop_scope" => env_ffi::rt_env_pop_scope(&evaluated),
-        "rt_env_define_var" => env_ffi::rt_env_define(&evaluated),
-        "rt_env_get_var" => env_ffi::rt_env_get_var(&evaluated),
-        "rt_env_set_var" => env_ffi::rt_env_set_var(&evaluated),
-        "rt_env_has_var" => env_ffi::rt_env_has_var(&evaluated),
-        "rt_env_snapshot" => env_ffi::rt_env_snapshot(&evaluated),
-        "rt_env_scope_depth" => env_ffi::rt_env_scope_depth(&evaluated),
-        "rt_env_free_handle" => env_ffi::rt_env_free_handle(&evaluated),
-        "rt_env_var_count" => env_ffi::rt_env_var_count(&evaluated),
-        "rt_env_var_names" => env_ffi::rt_env_var_names(&evaluated),
+        "rt_env_new_handle" => env_sffi::rt_env_new(&evaluated),
+        "rt_env_push_scope" => env_sffi::rt_env_push_scope(&evaluated),
+        "rt_env_pop_scope" => env_sffi::rt_env_pop_scope(&evaluated),
+        "rt_env_define_var" => env_sffi::rt_env_define(&evaluated),
+        "rt_env_get_var" => env_sffi::rt_env_get_var(&evaluated),
+        "rt_env_set_var" => env_sffi::rt_env_set_var(&evaluated),
+        "rt_env_has_var" => env_sffi::rt_env_has_var(&evaluated),
+        "rt_env_snapshot" => env_sffi::rt_env_snapshot(&evaluated),
+        "rt_env_scope_depth" => env_sffi::rt_env_scope_depth(&evaluated),
+        "rt_env_free_handle" => env_sffi::rt_env_free_handle(&evaluated),
+        "rt_env_var_count" => env_sffi::rt_env_var_count(&evaluated),
+        "rt_env_var_names" => env_sffi::rt_env_var_names(&evaluated),
 
         // ====================================================================
-        // Error Creation FFI (9 functions)
+        // Error Creation SFFI (9 functions)
         // ====================================================================
-        "rt_error_semantic" => error_ffi::rt_error_semantic(&evaluated),
-        "rt_error_type_mismatch" => error_ffi::rt_error_type_mismatch(&evaluated),
-        "rt_error_undefined_var" => error_ffi::rt_error_undefined_var(&evaluated),
-        "rt_error_arg_count" => error_ffi::rt_error_arg_count(&evaluated),
-        "rt_error_division_by_zero" => error_ffi::rt_error_division_by_zero(&evaluated),
-        "rt_error_index_oob" => error_ffi::rt_error_index_oob(&evaluated),
-        "rt_error_throw" => error_ffi::rt_error_throw(&evaluated),
-        "rt_error_message" => error_ffi::rt_error_message(&evaluated),
-        "rt_error_free" => error_ffi::rt_error_free(&evaluated),
+        "rt_error_semantic" => error_sffi::rt_error_semantic(&evaluated),
+        "rt_error_type_mismatch" => error_sffi::rt_error_type_mismatch(&evaluated),
+        "rt_error_undefined_var" => error_sffi::rt_error_undefined_var(&evaluated),
+        "rt_error_arg_count" => error_sffi::rt_error_arg_count(&evaluated),
+        "rt_error_division_by_zero" => error_sffi::rt_error_division_by_zero(&evaluated),
+        "rt_error_index_oob" => error_sffi::rt_error_index_oob(&evaluated),
+        "rt_error_throw" => error_sffi::rt_error_throw(&evaluated),
+        "rt_error_message" => error_sffi::rt_error_message(&evaluated),
+        "rt_error_free" => error_sffi::rt_error_free(&evaluated),
 
         // ====================================================================
-        // Span Interop FFI (6 functions)
+        // Span Interop SFFI (6 functions)
         // ====================================================================
-        "rt_span_create" => span_ffi::rt_span_create(&evaluated),
-        "rt_span_start" => span_ffi::rt_span_start(&evaluated),
-        "rt_span_end" => span_ffi::rt_span_end(&evaluated),
-        "rt_span_line" => span_ffi::rt_span_line(&evaluated),
-        "rt_span_column" => span_ffi::rt_span_column(&evaluated),
-        "rt_span_free" => span_ffi::rt_span_free(&evaluated),
+        "rt_span_create" => span_sffi::rt_span_create(&evaluated),
+        "rt_span_start" => span_sffi::rt_span_start(&evaluated),
+        "rt_span_end" => span_sffi::rt_span_end(&evaluated),
+        "rt_span_line" => span_sffi::rt_span_line(&evaluated),
+        "rt_span_column" => span_sffi::rt_span_column(&evaluated),
+        "rt_span_free" => span_sffi::rt_span_free(&evaluated),
 
         // ====================================================================
         // WFFI Dynamic Library Functions (8 functions)
@@ -2876,10 +2876,10 @@ pub(crate) fn call_extern_function(
         "rt_cstring_to_text" => wffi::rt_cstring_to_text(&evaluated),
 
         _ => {
-            // Try dynamic FFI dispatch via the runtime shared library.
+            // Try dynamic SFFI dispatch via the runtime shared library.
             // This handles extern fn declarations that aren't in the built-in table
             // by loading libsimple_runtime.so/.dylib/.dll and calling via dlsym.
-            if let Some(result) = dynamic_ffi::try_call_dynamic(name, &evaluated) {
+            if let Some(result) = dynamic_sffi::try_call_dynamic(name, &evaluated) {
                 return result;
             }
             Err(common::unknown_function(name))

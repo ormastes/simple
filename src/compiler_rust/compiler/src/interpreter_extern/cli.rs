@@ -1,4 +1,4 @@
-//! CLI FFI functions for the Simple language interpreter
+//! CLI SFFI functions for the Simple language interpreter
 //!
 //! These functions allow Simple code to call into CLI functionality.
 //! Basic operations are implemented directly, while complex operations
@@ -341,9 +341,9 @@ pub fn rt_cli_run_i18n(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_cli_run_i18n")
 }
 
-/// Run FFI generator command
-pub fn rt_cli_run_ffi_gen(_args: &[Value]) -> Result<Value, CompileError> {
-    interpreter_not_supported("rt_cli_run_ffi_gen")
+/// Run SFFI generator command
+pub fn rt_cli_run_sffi_gen(_args: &[Value]) -> Result<Value, CompileError> {
+    interpreter_not_supported("rt_cli_run_sffi_gen")
 }
 
 /// Generate context pack
@@ -448,7 +448,7 @@ pub fn rt_cli_handle_run(_args: &[Value]) -> Result<Value, CompileError> {
 }
 
 // =========================================================================
-// Fault Detection Configuration FFI
+// Fault Detection Configuration SFFI
 // =========================================================================
 
 /// Set stack overflow detection enabled/disabled

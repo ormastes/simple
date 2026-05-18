@@ -295,7 +295,7 @@ pub trait TraceConcurrent {
     fn approximate_len(&self) -> usize;
 }
 
-// FFI functions for write barrier control (callable from compiled code)
+// SFFI functions for write barrier control (callable from compiled code)
 
 /// Start a GC collection cycle
 #[no_mangle]
@@ -489,18 +489,18 @@ mod tests {
     }
 
     #[test]
-    fn test_ffi_functions() {
+    fn test_sffi_functions() {
         simple_gc_barrier_start_collection();
         assert!(GC_STATE.is_collecting());
 
         let epoch = simple_gc_barrier_epoch();
         assert!(epoch > 0);
 
-        // Test new FFI functions
+        // Test new SFFI functions
         let _mark_count = simple_gc_barrier_mark_count();
         let _queue_len = simple_gc_gray_queue_len();
 
-        // Test write barrier FFI
+        // Test write barrier SFFI
         let value = RuntimeValue::from_int(42);
         simple_gc_write_barrier(value);
 

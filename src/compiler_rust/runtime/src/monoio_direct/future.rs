@@ -4,7 +4,7 @@
 use crate::value::monoio_future::{rt_monoio_future_new, IoOperationType, MonoioFuture, PENDING_MARKER};
 use crate::value::{HeapObjectType, RuntimeValue};
 
-// Import FFI functions from other modules
+// Import SFFI functions from other modules
 use super::tcp::{rt_monoio_tcp_accept, rt_monoio_tcp_connect, rt_monoio_tcp_read, rt_monoio_tcp_write};
 
 // ============================================================================

@@ -372,7 +372,7 @@ unsafe impl monoio::buf::IoBufMut for OwnedBuf {
 }
 
 // ============================================================================
-// FFI Functions
+// SFFI Functions
 // ============================================================================
 
 /// Create a SimpleBuf from a RuntimeArray for direct I/O

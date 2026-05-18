@@ -1,7 +1,7 @@
 //! GPU instruction codegen for Cranelift.
 //!
 //! This module implements compilation of GPU MIR instructions to Cranelift IR.
-//! GPU operations are implemented by calling runtime FFI functions.
+//! GPU operations are implemented by calling runtime SFFI functions.
 
 use cranelift_codegen::ir::{types, InstBuilder};
 use cranelift_frontend::FunctionBuilder;

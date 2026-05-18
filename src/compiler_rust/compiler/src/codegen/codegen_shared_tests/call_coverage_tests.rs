@@ -358,7 +358,7 @@ cranelift_only_test!(shared_call_ok_no_dest, |f: &mut MirFunction| {
 });
 
 // =============================================================================
-// Branch coverage: Call — runtime FFI name mapping
+// Branch coverage: Call — runtime SFFI name mapping
 // =============================================================================
 
 cranelift_only_test!(shared_call_sys_get_args, |f: &mut MirFunction| {
@@ -385,8 +385,8 @@ cranelift_only_test!(shared_call_sys_exit, |f: &mut MirFunction| {
     dest
 });
 
-// Call to runtime FFI function directly (e.g., rt_array_new)
-cranelift_only_test!(shared_call_runtime_ffi, |f: &mut MirFunction| {
+// Call to runtime SFFI function directly (e.g., rt_array_new)
+cranelift_only_test!(shared_call_runtime_sffi, |f: &mut MirFunction| {
     let cap = f.new_vreg();
     let dest = f.new_vreg();
     let block = f.block_mut(BlockId(0)).unwrap();

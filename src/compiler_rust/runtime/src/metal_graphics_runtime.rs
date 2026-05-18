@@ -1,11 +1,11 @@
-//! Metal Graphics FFI implementations.
+//! Metal Graphics SFFI implementations.
 //!
 //! On macOS: real Metal calls via `objc2-metal`.
 //! On all other platforms: no-op stubs returning 0 / empty strings.
 //!
 //! All `rt_metal_*` function signatures are unchanged from the original stubs.
 
-use std::ffi::CString;
+use std::sffi::CString;
 use std::os::raw::c_char;
 
 fn empty_cstr() -> *const c_char {
@@ -20,7 +20,7 @@ fn empty_cstr() -> *const c_char {
 #[cfg(target_os = "macos")]
 mod metal_impl {
     use std::collections::HashMap;
-    use std::ffi::{CStr, CString};
+    use std::sffi::{CStr, CString};
     use std::os::raw::c_char;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Mutex;
@@ -547,7 +547,7 @@ mod metal_impl {
         let encoder = with_encoders(|m| m.get(&encoder_handle).map(|w| w.0.clone()));
         match encoder {
             Some(encoder) => {
-                let ptr = std::ptr::NonNull::new(data as *mut std::ffi::c_void);
+                let ptr = std::ptr::NonNull::new(data as *mut std::sffi::c_void);
                 match ptr {
                     Some(ptr) => {
                         unsafe {
@@ -604,7 +604,7 @@ mod metal_impl {
     }
 
     // -------------------------------------------------------------------------
-    // Batched compute frame — avoids per-call FFI overhead
+    // Batched compute frame — avoids per-call SFFI overhead
     // Does: create_cmd_buf → create_encoder → set_pipeline → set_buffer×2
     //       → set_bytes → dispatch → end_encoder → commit → waitUntilCompleted
     // params_ptr/params_size: passed via setBytes at index 2.
@@ -665,7 +665,7 @@ mod metal_impl {
                     encoder.setBuffer_offset_atIndex(Some(&b2), 0, 2);
                 }
                 if params_ptr != 0 && params_size > 0 {
-                    let ptr = std::ptr::NonNull::new(params_ptr as *mut std::ffi::c_void);
+                    let ptr = std::ptr::NonNull::new(params_ptr as *mut std::sffi::c_void);
                     if let Some(ptr) = ptr {
                         unsafe {
                             encoder.setBytes_length_atIndex(ptr, params_size as usize, 3);
@@ -737,7 +737,7 @@ mod metal_impl {
                     encoder.setBuffer_offset_atIndex(Some(&b1), 0, 1);
                 }
                 if params_ptr != 0 && params_size > 0 {
-                    let ptr = std::ptr::NonNull::new(params_ptr as *mut std::ffi::c_void);
+                    let ptr = std::ptr::NonNull::new(params_ptr as *mut std::sffi::c_void);
                     if let Some(ptr) = ptr {
                         unsafe {
                             encoder.setBytes_length_atIndex(ptr, params_size as usize, 2);
@@ -1115,7 +1115,7 @@ pub extern "C" fn rt_metal_present(_sc: i64) -> i64 {
 }
 
 // ============================================================================
-// Batched blit frame — 3-buffer single FFI call for blit_kernel dispatch
+// Batched blit frame — 3-buffer single SFFI call for blit_kernel dispatch
 // ============================================================================
 
 #[no_mangle]
@@ -1148,7 +1148,7 @@ pub extern "C" fn rt_metal_run_blit_frame(
 }
 
 // ============================================================================
-// Batched compute frame — single FFI call for a full dispatch cycle
+// Batched compute frame — single SFFI call for a full dispatch cycle
 // ============================================================================
 
 #[no_mangle]

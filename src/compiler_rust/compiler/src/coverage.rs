@@ -62,7 +62,7 @@ pub struct CoverageStats {
     pub functions_hit: u64,
     pub functions_total: u64,
     pub total_functions: u64,
-    pub total_ffi_calls: u64,
+    pub total_sffi_calls: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -79,7 +79,7 @@ pub struct CoverageSummary {
 pub struct CoverageCollector {
     line_hits: BTreeMap<String, BTreeSet<usize>>,
     function_calls: BTreeMap<String, u64>,
-    ffi_calls: BTreeMap<String, u64>,
+    sffi_calls: BTreeMap<String, u64>,
     label: Option<String>,
 }
 
@@ -94,7 +94,7 @@ impl CoverageCollector {
         Self {
             line_hits: BTreeMap::new(),
             function_calls: BTreeMap::new(),
-            ffi_calls: BTreeMap::new(),
+            sffi_calls: BTreeMap::new(),
             label: None,
         }
     }
@@ -129,9 +129,9 @@ impl CoverageCollector {
         }
         out.push('\n');
 
-        if !self.ffi_calls.is_empty() {
-            out.push_str("ffi_calls |name, call_count|\n");
-            for (name, count) in &self.ffi_calls {
+        if !self.sffi_calls.is_empty() {
+            out.push_str("sffi_calls |name, call_count|\n");
+            for (name, count) in &self.sffi_calls {
                 out.push_str(&format!("    {}, {}\n", name, count));
             }
             out.push('\n');
@@ -144,7 +144,7 @@ impl CoverageCollector {
         out.push_str(&format!("    covered_lines: {}\n", stats.lines_hit));
         out.push_str(&format!("    total_functions: {}\n", stats.total_functions));
         out.push_str(&format!("    covered_functions: {}\n", stats.functions_hit));
-        out.push_str(&format!("    total_ffi_calls: {}\n", stats.total_ffi_calls));
+        out.push_str(&format!("    total_sffi_calls: {}\n", stats.total_sffi_calls));
         out
     }
 
@@ -157,14 +157,14 @@ impl CoverageCollector {
         *self.function_calls.entry(name.to_string()).or_insert(0) += 1;
     }
 
-    pub fn record_ffi_call(&mut self, name: &str) {
-        *self.ffi_calls.entry(name.to_string()).or_insert(0) += 1;
+    pub fn record_sffi_call(&mut self, name: &str) {
+        *self.sffi_calls.entry(name.to_string()).or_insert(0) += 1;
     }
 
     pub fn clear(&mut self) {
         self.line_hits.clear();
         self.function_calls.clear();
-        self.ffi_calls.clear();
+        self.sffi_calls.clear();
     }
 
     pub fn stats(&self) -> CoverageStats {
@@ -180,20 +180,20 @@ impl CoverageCollector {
             functions_hit: total_functions,
             functions_total: total_functions,
             total_functions,
-            total_ffi_calls: self.ffi_calls.len() as u64,
+            total_sffi_calls: self.sffi_calls.len() as u64,
         }
     }
 
     pub fn has_data(&self) -> bool {
-        !self.line_hits.is_empty() || !self.function_calls.is_empty() || !self.ffi_calls.is_empty()
+        !self.line_hits.is_empty() || !self.function_calls.is_empty() || !self.sffi_calls.is_empty()
     }
 
     pub fn function_call_count(&self, name: &str) -> u64 {
         self.function_calls.get(name).copied().unwrap_or(0)
     }
 
-    pub fn ffi_call_count(&self, name: &str) -> u64 {
-        self.ffi_calls.get(name).copied().unwrap_or(0)
+    pub fn sffi_call_count(&self, name: &str) -> u64 {
+        self.sffi_calls.get(name).copied().unwrap_or(0)
     }
 
     pub fn merge(&mut self, other: &CoverageCollector) {
@@ -206,8 +206,8 @@ impl CoverageCollector {
         for (name, count) in &other.function_calls {
             *self.function_calls.entry(name.clone()).or_insert(0) += count;
         }
-        for (name, count) in &other.ffi_calls {
-            *self.ffi_calls.entry(name.clone()).or_insert(0) += count;
+        for (name, count) in &other.sffi_calls {
+            *self.sffi_calls.entry(name.clone()).or_insert(0) += count;
         }
     }
 
@@ -270,8 +270,8 @@ impl CoverageCollector {
         for (name, count) in &self.function_calls {
             out.push_str(&format!("  {}: {}\n", name, count));
         }
-        out.push_str("FFI calls:\n");
-        for (name, count) in &self.ffi_calls {
+        out.push_str("SFFI calls:\n");
+        for (name, count) in &self.sffi_calls {
             out.push_str(&format!("  {}: {}\n", name, count));
         }
         out
@@ -365,7 +365,7 @@ fn dump_runtime_coverage_sdn() -> String {
         if ptr.is_null() {
             return String::new();
         }
-        let sdn = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        let sdn = std::sffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
         simple_runtime::rt_coverage_free_sdn(ptr);
         sdn
     }
@@ -377,19 +377,19 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn collector_records_lines_functions_and_ffi_calls() {
+    fn collector_records_lines_functions_and_sffi_calls() {
         let mut cov = CoverageCollector::new();
         cov.record_line(Path::new("test.spl"), 10);
         cov.record_line(Path::new("test.spl"), 10);
         cov.record_function_call("main");
         cov.record_function_call("main");
-        cov.record_ffi_call("rt_print");
+        cov.record_sffi_call("rt_print");
 
         assert!(cov.has_data());
         assert_eq!(cov.stats().total_lines, 1);
         assert_eq!(cov.stats().total_files, 1);
         assert_eq!(cov.function_call_count("main"), 2);
-        assert_eq!(cov.ffi_call_count("rt_print"), 1);
+        assert_eq!(cov.sffi_call_count("rt_print"), 1);
         assert!(cov.was_line_executed_compat("test.spl", 10));
     }
 
@@ -413,12 +413,12 @@ mod tests {
         let mut b = CoverageCollector::new();
         b.record_line(Path::new("a.spl"), 2);
         b.record_function_call("main");
-        b.record_ffi_call("rt_print");
+        b.record_sffi_call("rt_print");
 
         a.merge(&b);
         assert_eq!(a.stats().total_lines, 2);
         assert_eq!(a.function_call_count("main"), 2);
-        assert_eq!(a.ffi_call_count("rt_print"), 1);
+        assert_eq!(a.sffi_call_count("rt_print"), 1);
     }
 
     impl CoverageCollector {

@@ -115,7 +115,7 @@ pub fn declare_functions<M: Module>(
 pub fn build_mir_signature(func: &MirFunction) -> Signature {
     let call_conv = platform_call_conv();
     let mut sig = Signature::new(call_conv);
-    let runtime_param_types = crate::codegen::runtime_ffi::RUNTIME_FUNCS
+    let runtime_param_types = crate::codegen::runtime_sffi::RUNTIME_FUNCS
         .iter()
         .find(|spec| spec.name == func.name)
         .and_then(|spec| {
@@ -150,7 +150,7 @@ pub fn build_mir_signature(func: &MirFunction) -> Signature {
     if func.name == "main" {
         sig.returns.push(AbiParam::new(types::I32));
     } else if func.return_type != TypeId::VOID {
-        let runtime_return = crate::codegen::runtime_ffi::RUNTIME_FUNCS
+        let runtime_return = crate::codegen::runtime_sffi::RUNTIME_FUNCS
             .iter()
             .find(|spec| spec.name == func.name)
             .and_then(|spec| spec.returns.first().copied());

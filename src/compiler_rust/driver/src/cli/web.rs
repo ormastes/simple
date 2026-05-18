@@ -476,7 +476,7 @@ pub fn web_features() -> i32 {
     println!("✓ Client-side hydration (WASM)");
     println!("✓ Automatic event binding");
     println!("✓ Shared state (SSR → client)");
-    println!("✓ Browser FFI (DOM, Fetch, Console, Storage)");
+    println!("✓ Browser SFFI (DOM, Fetch, Console, Storage)");
     println!("✓ ES6 module loading");
     println!("✓ Auto-initialization");
     println!();

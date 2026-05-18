@@ -421,7 +421,7 @@ impl RuntimeValue {
                 Some(HeapObjectType::BTreeMap) => "btreemap",
                 Some(HeapObjectType::HashSet) => "hashset",
                 Some(HeapObjectType::BTreeSet) => "btreeset",
-                Some(HeapObjectType::FfiObject) => "ffi_object",
+                Some(HeapObjectType::FfiObject) => "sffi_object",
                 None => "null",
             },
             _ => "unknown",

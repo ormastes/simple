@@ -276,7 +276,7 @@ fn infer_category_from_path(path: &std::path::Path) -> String {
     } else if path_str.contains("/dap/") {
         "Developer Tools".to_string()
     } else if path_str.contains("/ffi/") {
-        "FFI".to_string()
+        "SFFI".to_string()
     } else if path_str.contains("/io/") {
         "I/O".to_string()
     } else if path_str.contains("/platform/") {

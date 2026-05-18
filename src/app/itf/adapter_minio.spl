@@ -7,7 +7,7 @@
 use std.common.crypto.types.{rotr32}
 use std.nogc_sync_mut.env.{env_get}
 use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_exists}
-use std.nogc_sync_mut.io.http_ffi.{rt_http_request, rt_http_download}
+use std.nogc_sync_mut.io.http_sffi.{rt_http_request, rt_http_download}
 use std.nogc_sync_mut.aws_sigv4.{
     SIGV4_EMPTY_SHA256, SIGV4_UNSIGNED_PAYLOAD,
     SigV4Header, SigV4QueryParam,
@@ -92,7 +92,7 @@ fn load_minio_config() -> MinioConfig:
     val cfg = _parse_minio_section(content)
     if cfg.tls_skip_verify:
         # Memory note: rt_http_client doesn't expose a TLS-verify knob (2026-04-26).
-        # We log the warning; effective enforcement requires runtime FFI follow-up.
+        # We log the warning; effective enforcement requires runtime SFFI follow-up.
         print "[WARN] MinIO TLS verify disabled — not safe for production"
     cfg
 
@@ -209,17 +209,17 @@ fn _signed_get(
         cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt
     )
 
-    var ffi_headers: [text] = []
-    ffi_headers = ffi_headers + ["Host: {host}"]
-    ffi_headers = ffi_headers + ["x-amz-content-sha256: {payload_hash}"]
-    ffi_headers = ffi_headers + ["x-amz-date: {amz_dt}"]
-    ffi_headers = ffi_headers + ["Authorization: {auth}"]
+    var sffi_headers: [text] = []
+    sffi_headers = sffi_headers + ["Host: {host}"]
+    sffi_headers = sffi_headers + ["x-amz-content-sha256: {payload_hash}"]
+    sffi_headers = sffi_headers + ["x-amz-date: {amz_dt}"]
+    sffi_headers = sffi_headers + ["Authorization: {auth}"]
 
     val full_url = if canonical_query == "":
         "{cfg.url}{canonical_uri}"
     else:
         "{cfg.url}{canonical_uri}?{canonical_query}"
-    val (status, body, err) = rt_http_request("GET", full_url, ffi_headers, "")
+    val (status, body, err) = rt_http_request("GET", full_url, sffi_headers, "")
     S3Response(status: status, body: body, error: err)
 
 
@@ -460,12 +460,12 @@ fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: tex
     )
 
     var ffi: [text] = []
-    ffi = ffi + ["Host: {host}"]
-    ffi = ffi + ["x-amz-content-sha256: {payload_hash}"]
-    ffi = ffi + ["x-amz-date: {amz_dt}"]
+    sffi = sffi + ["Host: {host}"]
+    sffi = sffi + ["x-amz-content-sha256: {payload_hash}"]
+    sffi = sffi + ["x-amz-date: {amz_dt}"]
     if range_header != "":
-        ffi = ffi + ["Range: {range_header}"]
-    ffi = ffi + ["Authorization: {auth}"]
+        sffi = sffi + ["Range: {range_header}"]
+    sffi = sffi + ["Authorization: {auth}"]
 
     val (status, body, err) = rt_http_request("GET", "{cfg.url}{canonical_uri}", ffi, "")
     val mapped = map_s3_error(status, body, err)
@@ -508,7 +508,7 @@ fn minio_head_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, HeadOb
 
     NOTE: rt_http_request returns body only — header parsing is not exposed here.
     The result fields are best-effort: content_length comes from the GET path
-    when available; for HEAD via this FFI we surface the status only.
+    when available; for HEAD via this SFFI we surface the status only.
     """
     val canonical_uri = _build_object_path(bucket, key)
     val amz_dt = _amz_datetime_now()
@@ -526,10 +526,10 @@ fn minio_head_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, HeadOb
     )
 
     var ffi: [text] = []
-    ffi = ffi + ["Host: {host}"]
-    ffi = ffi + ["x-amz-content-sha256: {payload_hash}"]
-    ffi = ffi + ["x-amz-date: {amz_dt}"]
-    ffi = ffi + ["Authorization: {auth}"]
+    sffi = sffi + ["Host: {host}"]
+    sffi = sffi + ["x-amz-content-sha256: {payload_hash}"]
+    sffi = sffi + ["x-amz-date: {amz_dt}"]
+    sffi = sffi + ["Authorization: {auth}"]
 
     val (status, body, err) = rt_http_request("HEAD", "{cfg.url}{canonical_uri}", ffi, "")
     val mapped = map_s3_error(status, body, err)
@@ -537,7 +537,7 @@ fn minio_head_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, HeadOb
     if mapped.kind != "ok":
         return (false, empty, mapped.message)
     # TODO(issue #10 follow-up): rt_http_request doesn't expose response headers;
-    # to populate Content-Length / ETag / Last-Modified we need a richer FFI or
+    # to populate Content-Length / ETag / Last-Modified we need a richer SFFI or
     # a one-byte ranged GET fallback. Surface success only for now.
     (true, empty, body)
 
@@ -550,7 +550,7 @@ fn minio_head_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, HeadOb
 #   images) cannot round-trip through `text` losslessly. We therefore expose
 #   `minio_put_text` for text/JSON/XML bodies (≤64 MiB) and reject binary PUTs
 #   with a clear error. Multipart upload + binary streaming PUT require a new
-#   `rt_http_request_bytes`/`rt_http_upload_raw` FFI — see TODO below.
+#   `rt_http_request_bytes`/`rt_http_upload_raw` SFFI — see TODO below.
 # ---------------------------------------------------------------------------
 
 fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content_type: text) -> (bool, text, text):
@@ -580,12 +580,12 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
     )
 
     var ffi: [text] = []
-    ffi = ffi + ["Host: {host}"]
-    ffi = ffi + ["Content-Type: {ct}"]
-    ffi = ffi + ["Content-Length: {body.len()}"]
-    ffi = ffi + ["x-amz-content-sha256: {payload_hash}"]
-    ffi = ffi + ["x-amz-date: {amz_dt}"]
-    ffi = ffi + ["Authorization: {auth}"]
+    sffi = sffi + ["Host: {host}"]
+    sffi = sffi + ["Content-Type: {ct}"]
+    sffi = sffi + ["Content-Length: {body.len()}"]
+    sffi = sffi + ["x-amz-content-sha256: {payload_hash}"]
+    sffi = sffi + ["x-amz-date: {amz_dt}"]
+    sffi = sffi + ["Authorization: {auth}"]
 
     val (status, resp_body, err) = rt_http_request("PUT", "{cfg.url}{canonical_uri}", ffi, body)
     val mapped = map_s3_error(status, resp_body, err)
@@ -598,14 +598,14 @@ fn minio_put_object(cfg: MinioConfig, bucket: text, key: text, local_path: text)
     """PUT a local file as an object.
 
     BLOCKER (issue #10 follow-up): the existing `rt_http_request`/`rt_http_upload`
-    FFI does not support raw-bytes PUT bodies — `rt_http_request` body is `text`
+    SFFI does not support raw-bytes PUT bodies — `rt_http_request` body is `text`
     (UTF-8) and `rt_http_upload` is multipart/form-data. Until a `rt_http_put_file`
-    or `rt_http_request_bytes` FFI lands, this returns a clear error rather than
+    or `rt_http_request_bytes` SFFI lands, this returns a clear error rather than
     silently corrupting binary uploads. Small text files can use `minio_put_text`.
     """
     if not file_exists(local_path):
         return (false, "", "local file not found: {local_path}")
-    (false, "", "minio_put_object: binary PUT not yet implemented — needs raw-bytes HTTP FFI (issue #10 follow-up). Use minio_put_text for ≤64 MiB text bodies.")
+    (false, "", "minio_put_object: binary PUT not yet implemented — needs raw-bytes HTTP SFFI (issue #10 follow-up). Use minio_put_text for ≤64 MiB text bodies.")
 
 
 # ---------------------------------------------------------------------------

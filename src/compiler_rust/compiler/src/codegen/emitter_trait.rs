@@ -323,7 +323,7 @@ pub trait CodegenEmitter {
     }
 
     // =========================================================================
-    // Boxing (FFI boundary)
+    // Boxing (SFFI boundary)
     // =========================================================================
     fn emit_box_int(&mut self, dest: VReg, value: VReg) -> Result<(), Self::Error>;
     fn emit_box_float(&mut self, dest: VReg, value: VReg) -> Result<(), Self::Error>;

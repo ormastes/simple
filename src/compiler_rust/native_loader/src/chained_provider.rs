@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// Example use cases:
 /// - Plugin systems: load custom libraries before the base runtime
 /// - Testing: mock specific functions while using real implementations for others
-/// - Extensions: add new FFI functions without modifying the core runtime
+/// - Extensions: add new SFFI functions without modifying the core runtime
 pub struct ChainedProvider {
     /// Providers in lookup order (first match wins).
     providers: Vec<Arc<dyn RuntimeSymbolProvider>>,

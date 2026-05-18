@@ -79,14 +79,14 @@ lazy_static::lazy_static! {
     static ref SPAWNED_PROCESSES: Mutex<HashMap<i64, std::process::Child>> = Mutex::new(HashMap::new());
 }
 use simple_runtime::value::{
-    rt_env_all as ffi_env_all, rt_env_cwd as ffi_env_cwd, rt_env_exists as ffi_env_exists, rt_env_get as ffi_env_get,
-    rt_env_get_i64 as ffi_env_get_i64, rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove,
-    rt_env_set as ffi_env_set, rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode,
-    rt_set_macro_trace as ffi_set_macro_trace, rt_platform_name as ffi_platform_name,
-    rt_term_enable_ansi as ffi_term_enable_ansi,
+    rt_env_all as sffi_env_all, rt_env_cwd as sffi_env_cwd, rt_env_exists as sffi_env_exists, rt_env_get as sffi_env_get,
+    rt_env_get_i64 as sffi_env_get_i64, rt_env_home as sffi_env_home, rt_env_remove as sffi_env_remove,
+    rt_env_set as sffi_env_set, rt_env_temp as sffi_env_temp, rt_set_debug_mode as sffi_set_debug_mode,
+    rt_set_macro_trace as sffi_set_macro_trace, rt_platform_name as sffi_platform_name,
+    rt_term_enable_ansi as sffi_term_enable_ansi,
 };
-use simple_runtime::value::ffi::config::{
-    rt_is_debug_mode_enabled as ffi_is_debug_mode_enabled, rt_is_macro_trace_enabled as ffi_is_macro_trace_enabled,
+use simple_runtime::value::sffi::config::{
+    rt_is_debug_mode_enabled as sffi_is_debug_mode_enabled, rt_is_macro_trace_enabled as sffi_is_macro_trace_enabled,
 };
 
 /// Get command-line arguments
@@ -99,7 +99,7 @@ use simple_runtime::value::ffi::config::{
 /// # Returns
 /// * Array of strings representing command-line arguments
 pub fn sys_get_args(_args: &[Value]) -> Result<Value, CompileError> {
-    // Get command line arguments from runtime FFI (unified approach)
+    // Get command line arguments from runtime SFFI (unified approach)
     use crate::value_bridge::runtime_to_value;
     use simple_runtime::value::rt_get_args;
 
@@ -150,7 +150,7 @@ pub fn rt_env_set(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     unsafe {
-        let result = ffi_env_set(key.as_ptr(), key.len() as u64, value.as_ptr(), value.len() as u64);
+        let result = sffi_env_set(key.as_ptr(), key.len() as u64, value.as_ptr(), value.len() as u64);
         Ok(Value::Bool(result))
     }
 }
@@ -175,7 +175,7 @@ pub fn rt_env_get(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     unsafe {
-        let result = ffi_env_get(key.as_ptr(), key.len() as u64);
+        let result = sffi_env_get(key.as_ptr(), key.len() as u64);
         Ok(runtime_to_value(result))
     }
 }
@@ -195,7 +195,7 @@ pub fn rt_env_get_i64(args: &[Value]) -> Result<Value, CompileError> {
     let default_value = args[1].as_int()?;
 
     unsafe {
-        Ok(Value::Int(ffi_env_get_i64(
+        Ok(Value::Int(sffi_env_get_i64(
             key.as_ptr(),
             key.len() as u64,
             default_value,
@@ -223,7 +223,7 @@ pub fn rt_env_exists(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     unsafe {
-        let result = ffi_env_exists(key.as_ptr(), key.len() as u64);
+        let result = sffi_env_exists(key.as_ptr(), key.len() as u64);
         Ok(Value::Bool(result))
     }
 }
@@ -248,7 +248,7 @@ pub fn rt_env_remove(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     unsafe {
-        let result = ffi_env_remove(key.as_ptr(), key.len() as u64);
+        let result = sffi_env_remove(key.as_ptr(), key.len() as u64);
         Ok(Value::Bool(result))
     }
 }
@@ -261,7 +261,7 @@ pub fn rt_env_remove(args: &[Value]) -> Result<Value, CompileError> {
 /// * Array of (key, value) tuples
 pub fn rt_env_all(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
-        let result = ffi_env_all();
+        let result = sffi_env_all();
         Ok(runtime_to_value(result))
     }
 }
@@ -274,8 +274,8 @@ pub fn rt_env_all(_args: &[Value]) -> Result<Value, CompileError> {
 /// * String path to home directory
 pub fn rt_env_home(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
-        let result = ffi_env_home();
-        // Return raw RuntimeValue as i64 for FFI interop
+        let result = sffi_env_home();
+        // Return raw RuntimeValue as i64 for SFFI interop
         Ok(Value::Int(result.to_raw() as i64))
     }
 }
@@ -288,8 +288,8 @@ pub fn rt_env_home(_args: &[Value]) -> Result<Value, CompileError> {
 /// * String path to temp directory
 pub fn rt_env_temp(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
-        let result = ffi_env_temp();
-        // Return raw RuntimeValue as i64 for FFI interop
+        let result = sffi_env_temp();
+        // Return raw RuntimeValue as i64 for SFFI interop
         Ok(Value::Int(result.to_raw() as i64))
     }
 }
@@ -302,7 +302,7 @@ pub fn rt_env_temp(_args: &[Value]) -> Result<Value, CompileError> {
 /// * String path to current working directory
 pub fn rt_env_cwd(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
-        let result = ffi_env_cwd();
+        let result = sffi_env_cwd();
         Ok(runtime_to_value(result))
     }
 }
@@ -321,7 +321,7 @@ pub fn rt_set_macro_trace(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Bool(b)) => *b,
         _ => false,
     };
-    ffi_set_macro_trace(enabled);
+    sffi_set_macro_trace(enabled);
     Ok(Value::Nil)
 }
 
@@ -339,7 +339,7 @@ pub fn rt_set_debug_mode(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Bool(b)) => *b,
         _ => false,
     };
-    ffi_set_debug_mode(enabled);
+    sffi_set_debug_mode(enabled);
     Ok(Value::Nil)
 }
 
@@ -350,7 +350,7 @@ pub fn rt_set_debug_mode(args: &[Value]) -> Result<Value, CompileError> {
 /// # Returns
 /// * Bool - true if macro trace is enabled
 pub fn rt_is_macro_trace_enabled(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(ffi_is_macro_trace_enabled()))
+    Ok(Value::Bool(sffi_is_macro_trace_enabled()))
 }
 
 /// Check if debug mode is enabled
@@ -360,15 +360,15 @@ pub fn rt_is_macro_trace_enabled(_args: &[Value]) -> Result<Value, CompileError>
 /// # Returns
 /// * Bool - true if debug mode is enabled
 pub fn rt_is_debug_mode_enabled(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(ffi_is_debug_mode_enabled()))
+    Ok(Value::Bool(sffi_is_debug_mode_enabled()))
 }
 
 /// Run a command and capture output
 ///
 /// Callable from Simple as: `rt_process_run(cmd, args)`
 ///
-/// Implemented directly in the interpreter (not via FFI) to return proper
-/// Value::Tuple with Value::Str elements. The FFI path via runtime_to_value
+/// Implemented directly in the interpreter (not via SFFI) to return proper
+/// Value::Tuple with Value::Str elements. The SFFI path via runtime_to_value
 /// converts heap objects (strings, tuples) to opaque Value::Int pointers,
 /// breaking tuple destructuring in interpreted code.
 ///
@@ -478,7 +478,7 @@ pub fn rt_process_execute(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_process_run_timeout(cmd, args, timeout_ms)`
 ///
-/// Implemented directly in the interpreter (not via FFI) to return proper
+/// Implemented directly in the interpreter (not via SFFI) to return proper
 /// Value::Tuple with Value::Str elements, avoiding the runtime_to_value bug.
 ///
 /// # Arguments
@@ -702,7 +702,7 @@ pub fn rt_process_kill(args: &[Value]) -> Result<Value, CompileError> {
 /// * String: "linux", "macos", "windows", etc.
 pub fn rt_platform_name(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
-        let result = ffi_platform_name();
+        let result = sffi_platform_name();
         Ok(runtime_to_value(result))
     }
 }
@@ -715,7 +715,7 @@ pub fn rt_platform_name(_args: &[Value]) -> Result<Value, CompileError> {
 /// * Bool: always true
 pub fn rt_term_enable_ansi(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
-        let result = ffi_term_enable_ansi();
+        let result = sffi_term_enable_ansi();
         Ok(runtime_to_value(result))
     }
 }

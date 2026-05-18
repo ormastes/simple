@@ -502,7 +502,7 @@ if let Value::Str(ref s) = recv_val {
             }
         }
         "ptr" => {
-            // Return raw pointer to string's bytes as i64 (for FFI/codegen)
+            // Return raw pointer to string's bytes as i64 (for SFFI/codegen)
             // We must pin the string so the pointer remains valid after this Value is dropped.
             // PINNED_STRINGS is defined at module level in mod.rs so it can be cleared externally.
             let cloned = s.to_string();

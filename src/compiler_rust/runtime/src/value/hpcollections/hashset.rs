@@ -1,4 +1,4 @@
-//! HashSet FFI - High-performance set using Rust std::collections::HashSet
+//! HashSet SFFI - High-performance set using Rust std::collections::HashSet
 
 use super::super::core::RuntimeValue;
 use super::super::heap::{HeapHeader, HeapObjectType};

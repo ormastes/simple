@@ -1,4 +1,4 @@
-// HTTP FFI functions for runtime/value/net module
+// HTTP SFFI functions for runtime/value/net module
 
 /// HTTP request structure passed from Simple code
 /// This is a simplified representation - the actual parsing happens in this function

@@ -578,8 +578,8 @@ fn test_vm_bytecode_call() {
 }
 
 #[test]
-fn test_vm_ffi_call() {
-    // Test CALL_FFI: call an FFI function that adds 100
+fn test_vm_sffi_call() {
+    // Test CALL_SFFI: call an SFFI function that adds 100
     fn add_100(args: &[RuntimeValue]) -> super::vm::VmResult<RuntimeValue> {
         let x = args[0].as_int();
         Ok(RuntimeValue::from_int(x + 100))
@@ -591,8 +591,8 @@ fn test_vm_ffi_call() {
     encoder.emit_i64(42);
     encoder.emit_opcode(PUSH);
     encoder.emit_u16(0);
-    encoder.emit_opcode(CALL_FFI);
-    encoder.emit_u16(0); // ffi index 0
+    encoder.emit_opcode(CALL_SFFI);
+    encoder.emit_u16(0); // sffi index 0
     encoder.emit_u16(1); // 1 arg
     encoder.emit_opcode(POP);
     encoder.emit_u16(1);
@@ -602,7 +602,7 @@ fn test_vm_ffi_call() {
     let code = encoder.finish();
     let mut vm = BytecodeVM::new();
     vm.load_bytecode(&code);
-    vm.set_ffi_table(vec![add_100]);
+    vm.set_sffi_table(vec![add_100]);
 
     let result = vm.execute().expect("Execution failed");
     assert_eq!(result.as_int(), 142);

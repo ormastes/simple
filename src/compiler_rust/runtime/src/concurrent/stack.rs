@@ -124,7 +124,7 @@ impl TraceConcurrent for ConcurrentStack {
     }
 }
 
-// FFI functions for ConcurrentStack (callable from compiled code)
+// SFFI functions for ConcurrentStack (callable from compiled code)
 
 /// Create a new concurrent stack
 #[no_mangle]
@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ffi_functions() {
+    fn test_sffi_functions() {
         unsafe {
             let stack = simple_concurrent_stack_new();
             assert!(!stack.is_null());

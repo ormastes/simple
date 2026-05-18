@@ -9,30 +9,30 @@ use crate::value_bridge::{runtime_to_value, value_to_runtime};
 use simple_runtime::value::aes::{
     aes128_decrypt_one_block, aes128_encrypt_one_block, aes128_gcm_decrypt_bytes, aes128_gcm_encrypt_bytes,
     aes256_encrypt_one_block, aes256_gcm_decrypt_bytes, aes256_gcm_encrypt_bytes, decrypt_block_with_expanded_bytes,
-    encrypt_block_with_expanded_bytes, rt_aes_rcon as ffi_aes_rcon, rt_aes_sbox as ffi_aes_sbox, AesGcmDecryptOutcome,
+    encrypt_block_with_expanded_bytes, rt_aes_rcon as sffi_aes_rcon, rt_aes_sbox as sffi_aes_sbox, AesGcmDecryptOutcome,
 };
 use simple_runtime::value::simd::{
-    rt_simd_detect_profile as ffi_detect_profile, rt_simd_has_avx as ffi_has_avx, rt_simd_has_avx2 as ffi_has_avx2,
-    rt_simd_has_neon as ffi_has_neon, rt_simd_has_rvv as ffi_has_rvv, rt_simd_has_sse as ffi_has_sse,
-    rt_simd_profile_name as ffi_profile_name,
+    rt_simd_detect_profile as sffi_detect_profile, rt_simd_has_avx as sffi_has_avx, rt_simd_has_avx2 as sffi_has_avx2,
+    rt_simd_has_neon as sffi_has_neon, rt_simd_has_rvv as sffi_has_rvv, rt_simd_has_sse as sffi_has_sse,
+    rt_simd_profile_name as sffi_profile_name,
 };
 use simple_runtime::value::simd_aes_ops::{
-    aes_round_last_u8x16 as ffi_aes_round_last_u8x16, aes_round_u8x16 as ffi_aes_round_u8x16,
+    aes_round_last_u8x16 as sffi_aes_round_last_u8x16, aes_round_u8x16 as sffi_aes_round_u8x16,
 };
 use simple_runtime::value::db_accel_bitmap_ops::{
-    bitmap_and_words as ffi_bitmap_and_words, bitmap_or_words as ffi_bitmap_or_words,
+    bitmap_and_words as sffi_bitmap_and_words, bitmap_or_words as sffi_bitmap_or_words,
 };
-use simple_runtime::value::simd_byte_ops::{add_u8x16 as ffi_add_u8x16, xor_u8x16 as ffi_xor_u8x16};
+use simple_runtime::value::simd_byte_ops::{add_u8x16 as sffi_add_u8x16, xor_u8x16 as sffi_xor_u8x16};
 use simple_runtime::value::simd_clmul_ops::{
-    clmul_hi_u64 as ffi_clmul_hi_u64, clmul_lo_u64 as ffi_clmul_lo_u64, xor_u64x2 as ffi_xor_u64x2,
+    clmul_hi_u64 as sffi_clmul_hi_u64, clmul_lo_u64 as sffi_clmul_lo_u64, xor_u64x2 as sffi_xor_u64x2,
 };
 use simple_runtime::value::simd_int_ops::{
-    add_i32x4 as ffi_add_i32x4, add_i32x8 as ffi_add_i32x8, and_i32x4 as ffi_and_i32x4, and_i32x8 as ffi_and_i32x8,
-    mul_i32x4 as ffi_mul_i32x4, mul_i32x8 as ffi_mul_i32x8, or_i32x4 as ffi_or_i32x4, or_i32x8 as ffi_or_i32x8,
-    shl_i32x4 as ffi_shl_i32x4, shl_i32x8 as ffi_shl_i32x8, shr_i32x4 as ffi_shr_i32x4, shr_i32x8 as ffi_shr_i32x8,
-    sub_i32x4 as ffi_sub_i32x4, sub_i32x8 as ffi_sub_i32x8, xor_i32x4 as ffi_xor_i32x4, xor_i32x8 as ffi_xor_i32x8,
+    add_i32x4 as sffi_add_i32x4, add_i32x8 as sffi_add_i32x8, and_i32x4 as sffi_and_i32x4, and_i32x8 as sffi_and_i32x8,
+    mul_i32x4 as sffi_mul_i32x4, mul_i32x8 as sffi_mul_i32x8, or_i32x4 as sffi_or_i32x4, or_i32x8 as sffi_or_i32x8,
+    shl_i32x4 as sffi_shl_i32x4, shl_i32x8 as sffi_shl_i32x8, shr_i32x4 as sffi_shr_i32x4, shr_i32x8 as sffi_shr_i32x8,
+    sub_i32x4 as sffi_sub_i32x4, sub_i32x8 as sffi_sub_i32x8, xor_i32x4 as sffi_xor_i32x4, xor_i32x8 as sffi_xor_i32x8,
 };
-use simple_runtime::value::{rt_text_count_codepoints as ffi_text_count_codepoints};
+use simple_runtime::value::{rt_text_count_codepoints as sffi_text_count_codepoints};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -89,37 +89,37 @@ fn count_utf8_codepoints(bytes: &[u8]) -> i64 {
 
 pub fn rt_simd_has_sse(args: &[Value]) -> Result<Value, CompileError> {
     expect_no_args("rt_simd_has_sse", args)?;
-    Ok(Value::Bool(ffi_has_sse()))
+    Ok(Value::Bool(sffi_has_sse()))
 }
 
 pub fn rt_simd_has_avx(args: &[Value]) -> Result<Value, CompileError> {
     expect_no_args("rt_simd_has_avx", args)?;
-    Ok(Value::Bool(ffi_has_avx()))
+    Ok(Value::Bool(sffi_has_avx()))
 }
 
 pub fn rt_simd_has_avx2(args: &[Value]) -> Result<Value, CompileError> {
     expect_no_args("rt_simd_has_avx2", args)?;
-    Ok(Value::Bool(ffi_has_avx2()))
+    Ok(Value::Bool(sffi_has_avx2()))
 }
 
 pub fn rt_simd_has_neon(args: &[Value]) -> Result<Value, CompileError> {
     expect_no_args("rt_simd_has_neon", args)?;
-    Ok(Value::Bool(ffi_has_neon()))
+    Ok(Value::Bool(sffi_has_neon()))
 }
 
 pub fn rt_simd_has_rvv(args: &[Value]) -> Result<Value, CompileError> {
     expect_no_args("rt_simd_has_rvv", args)?;
-    Ok(Value::Bool(ffi_has_rvv()))
+    Ok(Value::Bool(sffi_has_rvv()))
 }
 
 pub fn rt_simd_detect_profile(args: &[Value]) -> Result<Value, CompileError> {
     expect_no_args("rt_simd_detect_profile", args)?;
-    Ok(Value::Int(ffi_detect_profile()))
+    Ok(Value::Int(sffi_detect_profile()))
 }
 
 pub fn rt_simd_profile_name(args: &[Value]) -> Result<Value, CompileError> {
     expect_no_args("rt_simd_profile_name", args)?;
-    Ok(runtime_to_value(ffi_profile_name()))
+    Ok(runtime_to_value(sffi_profile_name()))
 }
 
 pub fn rt_utf8_count_codepoints(args: &[Value]) -> Result<Value, CompileError> {
@@ -159,7 +159,7 @@ pub fn rt_text_count_codepoints(args: &[Value]) -> Result<Value, CompileError> {
             "rt_text_count_codepoints expects 1 argument".to_string(),
         ));
     }
-    Ok(Value::Int(ffi_text_count_codepoints(value_to_runtime(&args[0]))))
+    Ok(Value::Int(sffi_text_count_codepoints(value_to_runtime(&args[0]))))
 }
 
 pub fn rt_aes_encrypt_block_with_expanded(args: &[Value]) -> Result<Value, CompileError> {
@@ -217,7 +217,7 @@ pub fn rt_aes_sbox(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("rt_aes_sbox expects 1 argument".to_string()));
     }
     match &args[0] {
-        Value::Int(i) => Ok(Value::Int(ffi_aes_sbox(*i))),
+        Value::Int(i) => Ok(Value::Int(sffi_aes_sbox(*i))),
         _ => Err(CompileError::runtime(
             "rt_aes_sbox expects an integer index".to_string(),
         )),
@@ -229,7 +229,7 @@ pub fn rt_aes_rcon(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("rt_aes_rcon expects 1 argument".to_string()));
     }
     match &args[0] {
-        Value::Int(i) => Ok(Value::Int(ffi_aes_rcon(*i))),
+        Value::Int(i) => Ok(Value::Int(sffi_aes_rcon(*i))),
         _ => Err(CompileError::runtime(
             "rt_aes_rcon expects an integer index".to_string(),
         )),
@@ -242,7 +242,7 @@ pub fn rt_aes_rcon(args: &[Value]) -> Result<Value, CompileError> {
 // `Value::Array` is `Arc<Vec<Value>>`; the args we receive are clones of the
 // caller's Arc, so mutation of `out` does NOT propagate back to the caller.
 // This matches the AES-128-GCM caller's design (it's an unused fallback path
-// when rt_tls13_aes128_gcm_encrypt returns non-empty). Compile-mode (raw FFI
+// when rt_tls13_aes128_gcm_encrypt returns non-empty). Compile-mode (raw SFFI
 // pointer) does mutate the caller's array in place via rt_array_set.
 pub fn rt_aes128_encrypt_block_into(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 3 {
@@ -791,67 +791,67 @@ where
 }
 
 pub fn rt_simd_add_i32x4(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x4("rt_simd_add_i32x4", args, ffi_add_i32x4)
+    binop_i32x4("rt_simd_add_i32x4", args, sffi_add_i32x4)
 }
 
 pub fn rt_simd_sub_i32x4(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x4("rt_simd_sub_i32x4", args, ffi_sub_i32x4)
+    binop_i32x4("rt_simd_sub_i32x4", args, sffi_sub_i32x4)
 }
 
 pub fn rt_simd_mul_i32x4(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x4("rt_simd_mul_i32x4", args, ffi_mul_i32x4)
+    binop_i32x4("rt_simd_mul_i32x4", args, sffi_mul_i32x4)
 }
 
 pub fn rt_simd_xor_i32x4(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x4("rt_simd_xor_i32x4", args, ffi_xor_i32x4)
+    binop_i32x4("rt_simd_xor_i32x4", args, sffi_xor_i32x4)
 }
 
 pub fn rt_simd_and_i32x4(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x4("rt_simd_and_i32x4", args, ffi_and_i32x4)
+    binop_i32x4("rt_simd_and_i32x4", args, sffi_and_i32x4)
 }
 
 pub fn rt_simd_or_i32x4(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x4("rt_simd_or_i32x4", args, ffi_or_i32x4)
+    binop_i32x4("rt_simd_or_i32x4", args, sffi_or_i32x4)
 }
 
 pub fn rt_simd_shl_i32x4(args: &[Value]) -> Result<Value, CompileError> {
-    shift_i32x4("rt_simd_shl_i32x4", args, ffi_shl_i32x4)
+    shift_i32x4("rt_simd_shl_i32x4", args, sffi_shl_i32x4)
 }
 
 pub fn rt_simd_shr_i32x4(args: &[Value]) -> Result<Value, CompileError> {
-    shift_i32x4("rt_simd_shr_i32x4", args, ffi_shr_i32x4)
+    shift_i32x4("rt_simd_shr_i32x4", args, sffi_shr_i32x4)
 }
 
 pub fn rt_simd_add_i32x8(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x8("rt_simd_add_i32x8", args, ffi_add_i32x8)
+    binop_i32x8("rt_simd_add_i32x8", args, sffi_add_i32x8)
 }
 
 pub fn rt_simd_sub_i32x8(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x8("rt_simd_sub_i32x8", args, ffi_sub_i32x8)
+    binop_i32x8("rt_simd_sub_i32x8", args, sffi_sub_i32x8)
 }
 
 pub fn rt_simd_mul_i32x8(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x8("rt_simd_mul_i32x8", args, ffi_mul_i32x8)
+    binop_i32x8("rt_simd_mul_i32x8", args, sffi_mul_i32x8)
 }
 
 pub fn rt_simd_xor_i32x8(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x8("rt_simd_xor_i32x8", args, ffi_xor_i32x8)
+    binop_i32x8("rt_simd_xor_i32x8", args, sffi_xor_i32x8)
 }
 
 pub fn rt_simd_and_i32x8(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x8("rt_simd_and_i32x8", args, ffi_and_i32x8)
+    binop_i32x8("rt_simd_and_i32x8", args, sffi_and_i32x8)
 }
 
 pub fn rt_simd_or_i32x8(args: &[Value]) -> Result<Value, CompileError> {
-    binop_i32x8("rt_simd_or_i32x8", args, ffi_or_i32x8)
+    binop_i32x8("rt_simd_or_i32x8", args, sffi_or_i32x8)
 }
 
 pub fn rt_simd_shl_i32x8(args: &[Value]) -> Result<Value, CompileError> {
-    shift_i32x8("rt_simd_shl_i32x8", args, ffi_shl_i32x8)
+    shift_i32x8("rt_simd_shl_i32x8", args, sffi_shl_i32x8)
 }
 
 pub fn rt_simd_shr_i32x8(args: &[Value]) -> Result<Value, CompileError> {
-    shift_i32x8("rt_simd_shr_i32x8", args, ffi_shr_i32x8)
+    shift_i32x8("rt_simd_shr_i32x8", args, sffi_shr_i32x8)
 }
 
 pub fn rt_simd_add_f32x4(args: &[Value]) -> Result<Value, CompileError> {
@@ -989,19 +989,19 @@ where
 }
 
 pub fn rt_simd_add_u8x16(args: &[Value]) -> Result<Value, CompileError> {
-    binop_u8x16("rt_simd_add_u8x16", args, ffi_add_u8x16)
+    binop_u8x16("rt_simd_add_u8x16", args, sffi_add_u8x16)
 }
 
 pub fn rt_simd_xor_u8x16(args: &[Value]) -> Result<Value, CompileError> {
-    binop_u8x16("rt_simd_xor_u8x16", args, ffi_xor_u8x16)
+    binop_u8x16("rt_simd_xor_u8x16", args, sffi_xor_u8x16)
 }
 
 pub fn rt_simd_aes_round_u8x16(args: &[Value]) -> Result<Value, CompileError> {
-    binop_u8x16("rt_simd_aes_round_u8x16", args, ffi_aes_round_u8x16)
+    binop_u8x16("rt_simd_aes_round_u8x16", args, sffi_aes_round_u8x16)
 }
 
 pub fn rt_simd_aes_round_last_u8x16(args: &[Value]) -> Result<Value, CompileError> {
-    binop_u8x16("rt_simd_aes_round_last_u8x16", args, ffi_aes_round_last_u8x16)
+    binop_u8x16("rt_simd_aes_round_last_u8x16", args, sffi_aes_round_last_u8x16)
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,15 +1147,15 @@ pub fn rt_simd_vec2u64_hi(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn rt_simd_clmul_lo_u64(args: &[Value]) -> Result<Value, CompileError> {
-    binop_u64x2("rt_simd_clmul_lo_u64", args, ffi_clmul_lo_u64)
+    binop_u64x2("rt_simd_clmul_lo_u64", args, sffi_clmul_lo_u64)
 }
 
 pub fn rt_simd_clmul_hi_u64(args: &[Value]) -> Result<Value, CompileError> {
-    binop_u64x2("rt_simd_clmul_hi_u64", args, ffi_clmul_hi_u64)
+    binop_u64x2("rt_simd_clmul_hi_u64", args, sffi_clmul_hi_u64)
 }
 
 pub fn rt_simd_xor_u64x2(args: &[Value]) -> Result<Value, CompileError> {
-    binop_u64x2("rt_simd_xor_u64x2", args, ffi_xor_u64x2)
+    binop_u64x2("rt_simd_xor_u64x2", args, sffi_xor_u64x2)
 }
 
 pub fn rt_db_accel_bitmap_and_words(args: &[Value]) -> Result<Value, CompileError> {
@@ -1166,7 +1166,7 @@ pub fn rt_db_accel_bitmap_and_words(args: &[Value]) -> Result<Value, CompileErro
     }
     let lhs = unpack_u64_array("rt_db_accel_bitmap_and_words(lhs)", &args[0])?;
     let rhs = unpack_u64_array("rt_db_accel_bitmap_and_words(rhs)", &args[1])?;
-    Ok(pack_u64_array(ffi_bitmap_and_words(&lhs, &rhs)))
+    Ok(pack_u64_array(sffi_bitmap_and_words(&lhs, &rhs)))
 }
 
 pub fn rt_db_accel_bitmap_or_words(args: &[Value]) -> Result<Value, CompileError> {
@@ -1177,7 +1177,7 @@ pub fn rt_db_accel_bitmap_or_words(args: &[Value]) -> Result<Value, CompileError
     }
     let lhs = unpack_u64_array("rt_db_accel_bitmap_or_words(lhs)", &args[0])?;
     let rhs = unpack_u64_array("rt_db_accel_bitmap_or_words(rhs)", &args[1])?;
-    Ok(pack_u64_array(ffi_bitmap_or_words(&lhs, &rhs)))
+    Ok(pack_u64_array(sffi_bitmap_or_words(&lhs, &rhs)))
 }
 
 // ============================================================================

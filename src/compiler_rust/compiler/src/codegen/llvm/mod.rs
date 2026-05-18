@@ -3,7 +3,7 @@
 /// This backend complements Cranelift by providing:
 /// - 32-bit architecture support (i686, armv7, riscv32)
 /// - Alternative 64-bit backend option
-/// - Shared MIR transforms and runtime FFI specs
+/// - Shared MIR transforms and runtime SFFI specs
 ///
 /// Requires the `llvm` feature flag and LLVM 18 toolchain to be enabled.
 // Module structure

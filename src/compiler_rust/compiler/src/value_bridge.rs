@@ -6,14 +6,14 @@
 //! to the interpreter for unsupported features.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, CStr, CString};
+use std::sffi::{c_char, CStr, CString};
 use std::sync::Arc;
 
 use crate::value::Value;
 
-/// A C-compatible value representation for FFI.
+/// A C-compatible value representation for SFFI.
 ///
-/// This is used when we need to pass values through the FFI boundary
+/// This is used when we need to pass values through the SFFI boundary
 /// in a format that's easy to marshal from both Rust and generated code.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -287,7 +287,7 @@ impl From<&Value> for BridgeValue {
             Value::Int(i) => BridgeValue::int(*i),
             Value::UInt { value, .. } => BridgeValue::int(*value as i64),
             Value::Float(f) => BridgeValue::float(*f),
-            // Float32 widens to f64 at the FFI boundary; bridge tag set has no f32 slot.
+            // Float32 widens to f64 at the SFFI boundary; bridge tag set has no f32 slot.
             Value::Float32(f) => BridgeValue::float(*f as f64),
             Value::Bool(b) => BridgeValue::bool(*b),
             Value::Str(s) => BridgeValue::string(s),
@@ -419,19 +419,19 @@ impl From<&Value> for BridgeValue {
                 }
             }
             Value::Channel(_) => {
-                // Channels cannot be bridged across FFI - use nil
+                // Channels cannot be bridged across SFFI - use nil
                 BridgeValue::nil()
             }
             Value::ThreadPool(_) => {
-                // ThreadPools cannot be bridged across FFI - use nil
+                // ThreadPools cannot be bridged across SFFI - use nil
                 BridgeValue::nil()
             }
             Value::Mock(_) => {
-                // Mocks cannot be bridged across FFI - use nil
+                // Mocks cannot be bridged across SFFI - use nil
                 BridgeValue::nil()
             }
             Value::Matcher(_) => {
-                // Matchers cannot be bridged across FFI - use nil
+                // Matchers cannot be bridged across SFFI - use nil
                 BridgeValue::nil()
             }
             Value::NativeFunction(_) => {
@@ -447,15 +447,15 @@ impl From<&Value> for BridgeValue {
                 }
             }
             Value::TraitObject { inner, .. } => {
-                // Bridge the inner value - trait info is lost in FFI
+                // Bridge the inner value - trait info is lost in SFFI
                 BridgeValue::from(inner.as_ref())
             }
             Value::Unit { value, .. } => {
-                // Bridge the inner value - unit suffix is lost in FFI
+                // Bridge the inner value - unit suffix is lost in SFFI
                 BridgeValue::from(value.as_ref())
             }
             Value::Union { inner, .. } => {
-                // Bridge the inner value - union type info is lost in FFI
+                // Bridge the inner value - union type info is lost in SFFI
                 BridgeValue::from(inner.as_ref())
             }
             Value::Block { kind, payload, .. } => {
@@ -578,58 +578,58 @@ impl BridgeValue {
 pub use crate::runtime_bridge::{runtime_to_value, value_to_runtime};
 
 // ============================================================================
-// FFI Functions
+// SFFI Functions
 // ============================================================================
 
-/// Create a BridgeValue from an integer (FFI-safe)
+/// Create a BridgeValue from an integer (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn bridge_value_int(i: i64) -> BridgeValue {
     BridgeValue::int(i)
 }
 
-/// Create a BridgeValue from a float (FFI-safe)
+/// Create a BridgeValue from a float (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn bridge_value_float(f: f64) -> BridgeValue {
     BridgeValue::float(f)
 }
 
-/// Create a BridgeValue from a bool (FFI-safe)
+/// Create a BridgeValue from a bool (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn bridge_value_bool(b: bool) -> BridgeValue {
     BridgeValue::bool(b)
 }
 
-/// Create a nil BridgeValue (FFI-safe)
+/// Create a nil BridgeValue (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn bridge_value_nil() -> BridgeValue {
     BridgeValue::nil()
 }
 
-/// Extract integer from BridgeValue (FFI-safe)
+/// Extract integer from BridgeValue (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn bridge_value_as_int(bv: BridgeValue) -> i64 {
     bv.as_int()
 }
 
-/// Extract float from BridgeValue (FFI-safe)
+/// Extract float from BridgeValue (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn bridge_value_as_float(bv: BridgeValue) -> f64 {
     bv.as_float()
 }
 
-/// Extract bool from BridgeValue (FFI-safe)
+/// Extract bool from BridgeValue (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn bridge_value_as_bool(bv: BridgeValue) -> bool {
     bv.as_bool()
 }
 
-/// Check if BridgeValue is nil (FFI-safe)
+/// Check if BridgeValue is nil (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn bridge_value_is_nil(bv: BridgeValue) -> bool {
     bv.is_nil()
 }
 
-/// Get the tag of a BridgeValue (FFI-safe)
+/// Get the tag of a BridgeValue (SFFI-safe)
 #[no_mangle]
 pub extern "C" fn bridge_value_tag(bv: BridgeValue) -> u8 {
     bv.tag

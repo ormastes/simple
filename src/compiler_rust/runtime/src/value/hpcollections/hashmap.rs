@@ -1,4 +1,4 @@
-//! HashMap FFI - High-performance hash table using Rust std::collections::HashMap
+//! HashMap SFFI - High-performance hash table using Rust std::collections::HashMap
 //!
 //! Uses a registry pattern to store actual Rust HashMaps, with RuntimeValue handles
 //! referencing them. This provides O(1) average-case performance vs O(n) for the

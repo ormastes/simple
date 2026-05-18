@@ -1,7 +1,7 @@
 use crate::error::CompileError;
 use crate::value::Value;
 use std::env;
-use std::ffi::OsString;
+use std::sffi::OsString;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 const SEL_WINIT: i64 = 0;

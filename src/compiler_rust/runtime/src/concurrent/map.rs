@@ -180,7 +180,7 @@ impl TraceConcurrent for ConcurrentMap {
     }
 }
 
-// FFI functions for ConcurrentMap (callable from compiled code)
+// SFFI functions for ConcurrentMap (callable from compiled code)
 
 /// Create a new concurrent map
 #[no_mangle]
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ffi_functions() {
+    fn test_sffi_functions() {
         unsafe {
             let map = simple_concurrent_map_new();
             assert!(!map.is_null());

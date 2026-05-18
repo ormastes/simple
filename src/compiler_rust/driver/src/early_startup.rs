@@ -10,7 +10,7 @@
 //! - Fast parsing (single pass)
 //! - Cross-platform (Linux + Windows)
 
-use std::ffi::{OsStr, OsString};
+use std::sffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 /// Application type detected from arguments or binary metadata
@@ -188,7 +188,7 @@ where
 /// - `argv[argc]` is null
 #[cfg(unix)]
 pub unsafe fn parse_early_args_raw(argc: i32, argv: *const *const u8) -> EarlyConfig {
-    use std::ffi::CStr;
+    use std::sffi::CStr;
 
     let mut args = Vec::new();
 

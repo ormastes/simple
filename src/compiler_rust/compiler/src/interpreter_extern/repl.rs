@@ -76,7 +76,7 @@ pub fn is_repl_runner_registered() -> bool {
     REGISTERED.load(Ordering::Acquire)
 }
 
-// Public C-compatible wrappers for the driver's FFI tests
+// Public C-compatible wrappers for the driver's SFFI tests
 #[no_mangle]
 pub extern "C" fn simple_repl_runner_init() -> bool {
     (runner().init)()

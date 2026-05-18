@@ -49,7 +49,7 @@ pub fn init_logging(metrics: &mut StartupMetrics) {
 /// Initialize interpreter handlers for hybrid execution
 pub fn init_interpreter_handlers(metrics: &mut StartupMetrics) {
     let handler_start = std::time::Instant::now();
-    simple_compiler::interpreter_ffi::init_interpreter_handlers();
+    simple_compiler::interpreter_sffi::init_interpreter_handlers();
     metrics.record(crate::StartupPhase::HandlerInit, handler_start.elapsed());
 }
 
@@ -265,7 +265,7 @@ pub fn init_timeout_watchdog(metrics: &mut StartupMetrics) {
 pub fn init_runtime(metrics: &mut StartupMetrics) {
     init_logging(metrics);
     cleanup_stale_db_files(metrics);
-    crate::repl_runner_ffi::register();
+    crate::repl_runner_sffi::register();
     init_interpreter_handlers(metrics);
     init_panic_hook(metrics);
     init_signal_handlers(metrics);

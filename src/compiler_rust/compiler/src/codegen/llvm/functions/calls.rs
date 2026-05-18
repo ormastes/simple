@@ -12,9 +12,9 @@ use inkwell::values::BasicValue;
 #[cfg(feature = "llvm")]
 use inkwell::IntPredicate;
 
-/// Map Simple builtin names to runtime FFI function names.
+/// Map Simple builtin names to runtime SFFI function names.
 /// Mirrors the Cranelift backend's name mapping in codegen/instr/calls.rs.
-fn map_ffi_name(func_name: &str) -> &str {
+fn map_sffi_name(func_name: &str) -> &str {
     // Strip module prefix to find the base function name
     let base = func_name.rsplit_once("__").map(|(_, tail)| tail).unwrap_or(func_name);
     match base {
@@ -52,8 +52,8 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
 }
 
 /// Returns which Simple-level argument indices are text parameters for a given
-/// runtime FFI function. Text arguments are RuntimeValue strings that must be
-/// expanded to (ptr, len) pairs when calling the C-ABI FFI function.
+/// runtime SFFI function. Text arguments are RuntimeValue strings that must be
+/// expanded to (ptr, len) pairs when calling the C-ABI SFFI function.
 /// Mirrors the Cranelift backend's text_arg_indices in codegen/instr/calls.rs.
 fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
@@ -113,11 +113,11 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // Interpreter bridge
         "rt_interp_call" => Some(&[0]),
 
-        // FFI object system (method name at index 1)
-        "rt_ffi_call_method" | "rt_ffi_has_method" | "rt_ffi_object_call_method" | "rt_ffi_object_has_method" => {
+        // SFFI object system (method name at index 1)
+        "rt_sffi_call_method" | "rt_sffi_has_method" | "rt_sffi_object_call_method" | "rt_sffi_object_has_method" => {
             Some(&[1])
         }
-        "rt_ffi_type_register" => Some(&[0]),
+        "rt_sffi_type_register" => Some(&[0]),
 
         // BDD test framework
         "rt_bdd_describe_start" | "rt_bdd_it_start" | "rt_bdd_expect_fail" => Some(&[0]),
@@ -137,11 +137,11 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "native_udp_send_to" => Some(&[1, 2]),
 
         // Regex (pattern and text)
-        "ffi_regex_is_match" | "ffi_regex_find" | "ffi_regex_find_all" | "ffi_regex_captures" | "ffi_regex_split" => {
+        "sffi_regex_is_match" | "sffi_regex_find" | "sffi_regex_find_all" | "sffi_regex_captures" | "sffi_regex_split" => {
             Some(&[0, 1])
         }
-        "ffi_regex_replace" | "ffi_regex_replace_all" => Some(&[0, 1, 2]),
-        "ffi_regex_split_n" => Some(&[0, 1]),
+        "sffi_regex_replace" | "sffi_regex_replace_all" => Some(&[0, 1, 2]),
+        "sffi_regex_split_n" => Some(&[0, 1]),
 
         // Cranelift self-hosting
         "rt_cranelift_new_module" | "rt_cranelift_new_aot_module" => Some(&[0]),
@@ -314,7 +314,7 @@ impl LlvmBackend {
         Ok(true)
     }
 
-    /// Expand text RuntimeValue arguments to (ptr, len) pairs for FFI calls.
+    /// Expand text RuntimeValue arguments to (ptr, len) pairs for SFFI calls.
     /// Calls rt_string_data and rt_string_len at runtime on each text argument.
     #[cfg(feature = "llvm")]
     fn expand_text_args_llvm(
@@ -1710,80 +1710,80 @@ impl LlvmBackend {
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
         let func_name_raw = target.name();
-        let ffi_name = map_ffi_name(func_name_raw);
+        let sffi_name = map_sffi_name(func_name_raw);
         let i64_type = self.runtime_int_type();
 
-        if ffi_name == "rt_typed_bytes_u8_at" && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, true)? {
+        if sffi_name == "rt_typed_bytes_u8_at" && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, true)? {
             return Ok(());
         }
-        if ffi_name == "rt_bytes_u8_at" && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, false)? {
+        if sffi_name == "rt_bytes_u8_at" && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, false)? {
             return Ok(());
         }
-        if ffi_name == "rt_typed_bytes_u32_le_at"
+        if sffi_name == "rt_typed_bytes_u32_le_at"
             && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 4)?
         {
             return Ok(());
         }
-        if ffi_name == "rt_typed_bytes_u64_le_at"
+        if sffi_name == "rt_typed_bytes_u64_le_at"
             && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 8)?
         {
             return Ok(());
         }
-        if ffi_name == "rt_typed_bytes_u32_le_unchecked"
+        if sffi_name == "rt_typed_bytes_u32_le_unchecked"
             && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 4)?
         {
             return Ok(());
         }
-        if ffi_name == "rt_typed_bytes_u64_le_unchecked"
+        if sffi_name == "rt_typed_bytes_u64_le_unchecked"
             && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 8)?
         {
             return Ok(());
         }
-        if ffi_name == "rt_typed_bytes_u8_unchecked"
+        if sffi_name == "rt_typed_bytes_u8_unchecked"
             && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 1)?
         {
             return Ok(());
         }
-        if ffi_name == "rt_typed_words_u32_at"
+        if sffi_name == "rt_typed_words_u32_at"
             && self.compile_inline_typed_words_at(dest, args, vreg_map, builder, 32)?
         {
             return Ok(());
         }
-        if ffi_name == "rt_typed_words_u64_at"
+        if sffi_name == "rt_typed_words_u64_at"
             && self.compile_inline_typed_words_at(dest, args, vreg_map, builder, 64)?
         {
             return Ok(());
         }
-        if ffi_name == "_adler_reduce" && self.compile_inline_adler_reduce(dest, args, vreg_map, builder)? {
+        if sffi_name == "_adler_reduce" && self.compile_inline_adler_reduce(dest, args, vreg_map, builder)? {
             return Ok(());
         }
-        if ffi_name == "rt_typed_bytes_u32_le_set"
+        if sffi_name == "rt_typed_bytes_u32_le_set"
             && self.compile_inline_typed_bytes_le_set_unchecked(dest, args, vreg_map, builder, 4)?
         {
             return Ok(());
         }
-        if ffi_name == "rt_typed_bytes_u64_le_set"
+        if sffi_name == "rt_typed_bytes_u64_le_set"
             && self.compile_inline_typed_bytes_le_set_unchecked(dest, args, vreg_map, builder, 8)?
         {
             return Ok(());
         }
-        if ffi_name == "rt_bytes_u32_le_at" && self.compile_inline_bytes_le_at(dest, args, vreg_map, builder, 4)? {
+        if sffi_name == "rt_bytes_u32_le_at" && self.compile_inline_bytes_le_at(dest, args, vreg_map, builder, 4)? {
             return Ok(());
         }
-        if ffi_name == "rt_bytes_u64_le_at" && self.compile_inline_bytes_le_at(dest, args, vreg_map, builder, 8)? {
+        if sffi_name == "rt_bytes_u64_le_at" && self.compile_inline_bytes_le_at(dest, args, vreg_map, builder, 8)? {
             return Ok(());
         }
-        if ffi_name == "rt_typed_bytes_u8_set"
+        if sffi_name == "rt_typed_bytes_u8_set"
             && self.compile_inline_bytes_u8_set(dest, args, vreg_map, builder, true)?
         {
             return Ok(());
         }
-        if ffi_name == "rt_bytes_u8_set" && self.compile_inline_bytes_u8_set(dest, args, vreg_map, builder, false)? {
+        if sffi_name == "rt_bytes_u8_set" && self.compile_inline_bytes_u8_set(dest, args, vreg_map, builder, false)? {
             return Ok(());
         }
 
-        if matches!(ffi_name, "rt_len" | "rt_array_len")
-            && self.compile_inline_len(dest, args, vreg_map, builder, ffi_name == "rt_array_len")?
+        if matches!(sffi_name, "rt_len" | "rt_array_len")
+            && self.compile_inline_len(dest, args, vreg_map, builder, sffi_name == "rt_array_len")?
         {
             return Ok(());
         }
@@ -2183,7 +2183,7 @@ impl LlvmBackend {
 
         // Get or declare the called function (with suffix matching safety net)
         let called_func = module
-            .get_function(ffi_name)
+            .get_function(sffi_name)
             .or_else(|| module.get_function(resolved_name))
             .or_else(|| module.get_function(&resolved_dotted))
             .or_else(|| module.get_function(func_name_raw))
@@ -2267,11 +2267,11 @@ impl LlvmBackend {
             raw_arg_vals.push(casted.into_int_value());
         }
 
-        // Expand text RuntimeValue arguments to (ptr, len) pairs for FFI calls.
+        // Expand text RuntimeValue arguments to (ptr, len) pairs for SFFI calls.
         // This handles the ABI mismatch between Simple (text = RuntimeValue i64)
-        // and Rust FFI (text = *const u8 + u64 len).
+        // and Rust SFFI (text = *const u8 + u64 len).
         let arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> =
-            if let Some(text_indices) = crate::codegen::instr::calls::text_arg_indices(ffi_name) {
+            if let Some(text_indices) = crate::codegen::instr::calls::text_arg_indices(sffi_name) {
                 let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
                     let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                     module.add_function("rt_string_data", fn_type, None)

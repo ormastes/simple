@@ -1,5 +1,5 @@
 // ============================================================================
-// Unix-domain socket FFI functions
+// Unix-domain socket SFFI functions
 //
 // Server-side externs (SJ-UDS-001 / D-4 of jj-wrapper-daemon design):
 //   rt_unix_socket_listen(path, backlog) -> i64    (fd or negative errno)

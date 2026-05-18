@@ -1,4 +1,4 @@
-//! Future and Generator types and their FFI functions.
+//! Future and Generator types and their SFFI functions.
 #![allow(clippy::unused_unit)]
 
 use super::core::RuntimeValue;

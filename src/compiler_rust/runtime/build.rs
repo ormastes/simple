@@ -141,7 +141,7 @@ fn compile_c_runtime_sources() {
     }
 
     if !objects.is_empty() {
-        let archive = out_dir.join("libruntime_ffi_c.a");
+        let archive = out_dir.join("libruntime_sffi_c.a");
         let mut cmd = std::process::Command::new("ar");
         cmd.arg("rcs").arg(&archive);
         for obj in &objects {
@@ -150,7 +150,7 @@ fn compile_c_runtime_sources() {
         if let Ok(s) = cmd.status() {
             if s.success() {
                 println!("cargo:rustc-link-search=native={}", out_dir.display());
-                println!("cargo:rustc-link-lib=static=runtime_ffi_c");
+                println!("cargo:rustc-link-lib=static=runtime_sffi_c");
                 println!("cargo:rustc-link-lib=dylib=m");
             }
         }

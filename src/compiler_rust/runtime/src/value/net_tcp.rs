@@ -1,5 +1,5 @@
 // ============================================================================
-// TCP FFI functions
+// TCP SFFI functions
 // ============================================================================
 
 /// Bind a TCP listener to an address.
@@ -390,7 +390,7 @@ pub extern "C" fn rt_io_tcp_read(handle: i64, size: i64) -> crate::value::Runtim
     if err != NetError::Success as i64 || read <= 0 {
         return crate::value::collections::rt_array_new(0);
     }
-    unsafe { crate::value::ffi::file_io::rt_bytes_from_raw(buffer.as_ptr() as i64, read) }
+    unsafe { crate::value::sffi::file_io::rt_bytes_from_raw(buffer.as_ptr() as i64, read) }
 }
 
 #[no_mangle]
@@ -409,7 +409,7 @@ pub extern "C" fn rt_io_tcp_read_exact(handle: i64, size: i64) -> crate::value::
         }
         offset += read as usize;
     }
-    unsafe { crate::value::ffi::file_io::file_ops::bytes_to_runtime_array(&buffer) }
+    unsafe { crate::value::sffi::file_io::file_ops::bytes_to_runtime_array(&buffer) }
 }
 
 #[no_mangle]

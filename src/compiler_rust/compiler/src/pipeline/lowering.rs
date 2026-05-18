@@ -1794,7 +1794,7 @@ impl CompilerPipeline {
     ///
     /// This variant uses strict mode where memory safety warnings become errors.
     /// Use for production builds after bootstrap.
-    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
+    #[allow(dead_code)] // reason: reachable via SFFI or future entry point; not yet wired
     pub(super) fn type_check_and_lower_with_context_strict(
         &mut self,
         ast_module: &simple_parser::ast::Module,
@@ -1805,7 +1805,7 @@ impl CompilerPipeline {
 
     /// Strict lowering variant with an optional external project hint used for
     /// temp native probes compiled outside the repo tree.
-    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
+    #[allow(dead_code)] // reason: reachable via SFFI or future entry point; not yet wired
     pub(super) fn type_check_and_lower_with_context_strict_and_project_hint(
         &mut self,
         ast_module: &simple_parser::ast::Module,

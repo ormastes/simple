@@ -21,7 +21,7 @@ use crate::mir::{MirFunction, MirInst, MirModule};
 
 use super::instr::compile_function_body;
 use super::mir_inline::inline_small_pure_functions;
-use super::runtime_ffi::runtime_funcs_for_target;
+use super::runtime_sffi::runtime_funcs_for_target;
 use super::shared::{build_mir_signature, create_body_stub, expand_with_outlined};
 
 /// Common error type for codegen backends
@@ -738,7 +738,7 @@ impl<M: Module> CodegenBackend<M> {
         }
     }
 
-    /// Declare external runtime functions for FFI using shared specifications.
+    /// Declare external runtime functions for SFFI using shared specifications.
     ///
     /// Only declares functions appropriate for the given target (e.g., ARM-specific
     /// functions are excluded from x86_64 baremetal builds) to avoid spurious
@@ -784,7 +784,7 @@ impl<M: Module> CodegenBackend<M> {
     }
 
     /// Create or return a no-op body stub (fn() -> void) and return its FuncId.
-    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
+    #[allow(dead_code)] // reason: reachable via SFFI or future entry point; not yet wired
     pub fn ensure_body_stub(&mut self) -> BackendResult<cranelift_module::FuncId> {
         if let Some(id) = self.body_stub {
             return Ok(id);
@@ -1099,7 +1099,7 @@ impl<M: Module> CodegenBackend<M> {
             .get(&func.name)
             .ok_or_else(|| BackendError::UnknownFunction(func.name.clone()))?;
 
-        // Skip extern/imported functions (no body expected; provided by runtime/FFI).
+        // Skip extern/imported functions (no body expected; provided by runtime/SFFI).
         let decl = self.module.declarations().get_function_decl(func_id);
         if decl.linkage == cranelift_module::Linkage::Import {
             return Ok(());
@@ -1338,7 +1338,7 @@ impl<M: Module> CodegenBackend<M> {
             }
             if let Some(&func_id) = self.func_ids.get(&func.name) {
                 // If this function is declared as an import (extern), skip stub creation;
-                // the symbol is expected to be provided by the runtime/FFI.
+                // the symbol is expected to be provided by the runtime/SFFI.
                 let decl = self.module.declarations().get_function_decl(func_id);
                 if decl.linkage == cranelift_module::Linkage::Import {
                     continue;

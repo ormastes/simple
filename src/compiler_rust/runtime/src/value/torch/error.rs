@@ -1,6 +1,6 @@
-//! PyTorch FFI error codes
+//! PyTorch SFFI error codes
 
-/// PyTorch FFI error codes
+/// PyTorch SFFI error codes
 ///
 /// Success = 0, errors are negative values (C convention)
 #[repr(i32)]

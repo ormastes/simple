@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tch::Tensor;
 
 // ============================================================================
-// FFI Functions: Activation Functions (3 functions)
+// SFFI Functions: Activation Functions (3 functions)
 // ============================================================================
 
 /// ReLU activation: max(0, x)

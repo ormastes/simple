@@ -83,7 +83,7 @@ pub fn rt_time_now(_args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_progress_init()`
 pub fn rt_progress_init(_args: &[Value]) -> Result<Value, CompileError> {
-    simple_runtime::value::ffi::rt_progress_init();
+    simple_runtime::value::sffi::rt_progress_init();
     Ok(Value::Nil)
 }
 
@@ -91,7 +91,7 @@ pub fn rt_progress_init(_args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_progress_reset()`
 pub fn rt_progress_reset(_args: &[Value]) -> Result<Value, CompileError> {
-    simple_runtime::value::ffi::rt_progress_reset();
+    simple_runtime::value::sffi::rt_progress_reset();
     Ok(Value::Nil)
 }
 
@@ -102,19 +102,19 @@ pub fn rt_progress_reset(_args: &[Value]) -> Result<Value, CompileError> {
 /// # Returns
 /// * Float representing seconds since init (0.0 if never initialized)
 pub fn rt_progress_get_elapsed_seconds(_args: &[Value]) -> Result<Value, CompileError> {
-    let elapsed = simple_runtime::value::ffi::rt_progress_get_elapsed_seconds();
+    let elapsed = simple_runtime::value::sffi::rt_progress_get_elapsed_seconds();
     Ok(Value::Float(elapsed))
 }
 
 // ============================================================================
-// DateTime FFI Functions
+// DateTime SFFI Functions
 // ============================================================================
 
 /// Get current Unix timestamp in microseconds since epoch
 ///
 /// Callable from Simple as: `rt_time_now_unix_micros()`
 pub fn rt_time_now_unix_micros(_args: &[Value]) -> Result<Value, CompileError> {
-    let micros = simple_runtime::value::ffi::rt_time_now_unix_micros();
+    let micros = simple_runtime::value::sffi::rt_time_now_unix_micros();
     Ok(Value::Int(micros))
 }
 
@@ -126,7 +126,7 @@ pub fn rt_timestamp_get_year(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Int(m)) => *m,
         _ => return Err(CompileError::semantic("rt_timestamp_get_year requires i64 argument")),
     };
-    let year = simple_runtime::value::ffi::rt_timestamp_get_year(micros);
+    let year = simple_runtime::value::sffi::rt_timestamp_get_year(micros);
     Ok(Value::Int(year as i64))
 }
 
@@ -138,7 +138,7 @@ pub fn rt_timestamp_get_month(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Int(m)) => *m,
         _ => return Err(CompileError::semantic("rt_timestamp_get_month requires i64 argument")),
     };
-    let month = simple_runtime::value::ffi::rt_timestamp_get_month(micros);
+    let month = simple_runtime::value::sffi::rt_timestamp_get_month(micros);
     Ok(Value::Int(month as i64))
 }
 
@@ -150,7 +150,7 @@ pub fn rt_timestamp_get_day(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Int(m)) => *m,
         _ => return Err(CompileError::semantic("rt_timestamp_get_day requires i64 argument")),
     };
-    let day = simple_runtime::value::ffi::rt_timestamp_get_day(micros);
+    let day = simple_runtime::value::sffi::rt_timestamp_get_day(micros);
     Ok(Value::Int(day as i64))
 }
 
@@ -162,7 +162,7 @@ pub fn rt_timestamp_get_hour(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Int(m)) => *m,
         _ => return Err(CompileError::semantic("rt_timestamp_get_hour requires i64 argument")),
     };
-    let hour = simple_runtime::value::ffi::rt_timestamp_get_hour(micros);
+    let hour = simple_runtime::value::sffi::rt_timestamp_get_hour(micros);
     Ok(Value::Int(hour as i64))
 }
 
@@ -174,7 +174,7 @@ pub fn rt_timestamp_get_minute(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Int(m)) => *m,
         _ => return Err(CompileError::semantic("rt_timestamp_get_minute requires i64 argument")),
     };
-    let minute = simple_runtime::value::ffi::rt_timestamp_get_minute(micros);
+    let minute = simple_runtime::value::sffi::rt_timestamp_get_minute(micros);
     Ok(Value::Int(minute as i64))
 }
 
@@ -186,7 +186,7 @@ pub fn rt_timestamp_get_second(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Int(m)) => *m,
         _ => return Err(CompileError::semantic("rt_timestamp_get_second requires i64 argument")),
     };
-    let second = simple_runtime::value::ffi::rt_timestamp_get_second(micros);
+    let second = simple_runtime::value::sffi::rt_timestamp_get_second(micros);
     Ok(Value::Int(second as i64))
 }
 
@@ -202,7 +202,7 @@ pub fn rt_timestamp_get_microsecond(args: &[Value]) -> Result<Value, CompileErro
             ))
         }
     };
-    let microsecond = simple_runtime::value::ffi::rt_timestamp_get_microsecond(micros);
+    let microsecond = simple_runtime::value::sffi::rt_timestamp_get_microsecond(micros);
     Ok(Value::Int(microsecond as i64))
 }
 
@@ -246,7 +246,7 @@ pub fn rt_timestamp_from_components(args: &[Value]) -> Result<Value, CompileErro
     };
 
     let timestamp =
-        simple_runtime::value::ffi::rt_timestamp_from_components(year, month, day, hour, minute, second, microsecond);
+        simple_runtime::value::sffi::rt_timestamp_from_components(year, month, day, hour, minute, second, microsecond);
     Ok(Value::Int(timestamp))
 }
 
@@ -267,7 +267,7 @@ pub fn rt_timestamp_add_days(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::semantic("days must be i64")),
     };
 
-    let result = simple_runtime::value::ffi::rt_timestamp_add_days(micros, days);
+    let result = simple_runtime::value::sffi::rt_timestamp_add_days(micros, days);
     Ok(Value::Int(result))
 }
 
@@ -288,7 +288,7 @@ pub fn rt_timestamp_diff_days(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::semantic("micros2 must be i64")),
     };
 
-    let result = simple_runtime::value::ffi::rt_timestamp_diff_days(micros1, micros2);
+    let result = simple_runtime::value::sffi::rt_timestamp_diff_days(micros1, micros2);
     Ok(Value::Int(result))
 }
 
@@ -395,7 +395,7 @@ pub fn rt_sleep_ms(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 // ============================================================================
-// Profiler FFI Stubs (no-op in interpreter mode)
+// Profiler SFFI Stubs (no-op in interpreter mode)
 // ============================================================================
 
 /// Record a function call (no-op in interpreter)

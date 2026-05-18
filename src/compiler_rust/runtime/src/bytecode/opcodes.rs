@@ -16,7 +16,7 @@
 //! - `i32` - Jump offset (4 bytes)
 //! - `i64` - Constant integer value (8 bytes)
 //! - `f64` - Constant float value (8 bytes)
-//! - `u32` - Function/FFI index (4 bytes)
+//! - `u32` - Function/SFFI index (4 bytes)
 
 use std::fmt;
 
@@ -298,15 +298,15 @@ pub const CALL_INDIRECT: Opcode = 0x0046;
 pub const TAIL_CALL: Opcode = 0x0047;
 
 // ============================================================================
-// FFI (3 instructions - Phase 2)
+// SFFI (3 instructions - Phase 2)
 // ============================================================================
 
-/// Call FFI function.
+/// Call SFFI function.
 ///
-/// **Encoding:** `CALL_FFI ffi_idx:u16 argc:u16`
+/// **Encoding:** `CALL_SFFI sffi_idx:u16 argc:u16`
 /// **Size:** 6 bytes
-/// **Effect:** Call runtime FFI function, args on stack
-pub const CALL_FFI: Opcode = 0x0050;
+/// **Effect:** Call runtime SFFI function, args on stack
+pub const CALL_SFFI: Opcode = 0x0050;
 
 /// Call runtime function (built-in operations).
 ///
@@ -641,8 +641,8 @@ pub fn opcode_name(opcode: Opcode) -> &'static str {
         RET_VOID => "RET_VOID",
         CALL_INDIRECT => "CALL_INDIRECT",
         TAIL_CALL => "TAIL_CALL",
-        // FFI
-        CALL_FFI => "CALL_FFI",
+        // SFFI
+        CALL_SFFI => "CALL_SFFI",
         CALL_RUNTIME => "CALL_RUNTIME",
         CALL_INTERP => "CALL_INTERP",
         // Memory

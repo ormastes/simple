@@ -1,6 +1,6 @@
 //! Runtime symbol resolution abstraction.
 //!
-//! Provides a unified interface for resolving runtime FFI symbols,
+//! Provides a unified interface for resolving runtime SFFI symbols,
 //! supporting both static linking (compiled into binary) and dynamic
 //! loading (.so/.dylib/.dll).
 
@@ -59,7 +59,7 @@ impl Default for AbiVersion {
     }
 }
 
-/// Trait for resolving runtime FFI symbols.
+/// Trait for resolving runtime SFFI symbols.
 ///
 /// This trait abstracts over different symbol resolution strategies:
 /// - `StaticSymbolProvider`: Compiled-in function pointers (zero runtime cost)
@@ -246,7 +246,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_hostname")
         || name.starts_with("rt_system_")
         || name.starts_with("rt_time_")
-        || name.starts_with("ffi_regex_")
+        || name.starts_with("sffi_regex_")
         || name.starts_with("rt_sdn_")
         || name.starts_with("rt_sandbox_")
         || name.starts_with("rt_coverage_")
@@ -264,7 +264,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_settlement_")
         || name.starts_with("rt_context_")
         || name.starts_with("rt_test_")
-        || name.starts_with("rt_ffi_")
+        || name.starts_with("rt_sffi_")
         || name.starts_with("rt_random_")
         || name.starts_with("rt_rsa_")
         || name.starts_with("rt_ed25519_")
@@ -332,7 +332,7 @@ pub fn runtime_symbols_for_baremetal(is_baremetal: bool) -> Vec<&'static str> {
         .collect()
 }
 
-/// List of all runtime FFI symbols.
+/// List of all runtime SFFI symbols.
 ///
 /// These are the extern "C" functions exported by the runtime library
 /// that can be called from compiled Simple code.
@@ -416,14 +416,14 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_rank_select_free",
     "rt_hash_text",
     // Regex operations
-    "ffi_regex_is_match",
-    "ffi_regex_find",
-    "ffi_regex_find_all",
-    "ffi_regex_captures",
-    "ffi_regex_replace",
-    "ffi_regex_replace_all",
-    "ffi_regex_split",
-    "ffi_regex_split_n",
+    "sffi_regex_is_match",
+    "sffi_regex_find",
+    "sffi_regex_find_all",
+    "sffi_regex_captures",
+    "sffi_regex_replace",
+    "sffi_regex_replace_all",
+    "sffi_regex_split",
+    "sffi_regex_split_n",
     // Value creation/conversion
     "rt_value_int",
     "rt_value_float",
@@ -490,7 +490,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_generator_load_slot",
     "rt_generator_get_ctx",
     "rt_generator_mark_done",
-    // Interpreter bridge FFI
+    // Interpreter bridge SFFI
     "rt_interp_call",
     "rt_interp_eval",
     // Error handling
@@ -589,7 +589,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cli_run_lex",
     "rt_cli_run_migrate",
     "rt_cli_run_query",
-    "rt_cli_run_ffi_gen",
+    "rt_cli_run_sffi_gen",
     "rt_cli_run_gen_lean",
     "rt_compile_to_native",
     "rt_compile_to_llvm_ir",

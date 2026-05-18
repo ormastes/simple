@@ -1,6 +1,6 @@
 //! WebAssembly Bindgen Code Generation
 //!
-//! Generates wasm-bindgen bindings for browser FFI functions marked with @extern("browser", "function_name").
+//! Generates wasm-bindgen bindings for browser SFFI functions marked with @extern("browser", "function_name").
 //! This enables Simple code compiled to WASM to call JavaScript browser APIs.
 //!
 //! # Example
@@ -20,7 +20,7 @@
 //! let mut extractor = BindingExtractor::new();
 //! # let module = Module::default();
 //! let bindings = extractor.extract(&module);
-//! // Process extracted browser FFI bindings
+//! // Process extracted browser SFFI bindings
 //! ```
 //!
 //! Generated wasm-bindgen output:
@@ -36,7 +36,7 @@ use simple_parser::ast::{Argument, Expr, FunctionDef, Module, Node, Type};
 use simple_parser::token::Span;
 use std::collections::HashMap;
 
-/// Represents a browser FFI binding extracted from @extern decorator
+/// Represents a browser SFFI binding extracted from @extern decorator
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrowserBinding {
     /// Simple function name
@@ -53,7 +53,7 @@ pub struct BrowserBinding {
     pub is_async: bool,
 }
 
-/// Extracts browser FFI bindings from an AST module
+/// Extracts browser SFFI bindings from an AST module
 pub struct BindingExtractor {
     bindings: Vec<BrowserBinding>,
 }
@@ -157,7 +157,7 @@ impl BindgenCodeGenerator {
     pub fn generate(&self) -> String {
         let mut code = String::new();
 
-        code.push_str("// Generated wasm-bindgen bindings for Simple browser FFI\n");
+        code.push_str("// Generated wasm-bindgen bindings for Simple browser SFFI\n");
         code.push_str("use wasm_bindgen::prelude::*;\n\n");
 
         // Group bindings by module

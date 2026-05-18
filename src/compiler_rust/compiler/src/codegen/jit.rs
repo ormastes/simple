@@ -27,7 +27,7 @@ pub struct JitCompiler {
     /// Map of function names to their native function pointers
     compiled_funcs: HashMap<String, *const u8>,
     /// Runtime symbol provider (kept alive for the lifetime of the compiler)
-    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
+    #[allow(dead_code)] // reason: reachable via SFFI or future entry point; not yet wired
     provider: Arc<dyn RuntimeSymbolProvider>,
 }
 
@@ -47,7 +47,7 @@ impl JitCompiler {
 
     /// Create a new JIT compiler with a specific runtime symbol provider.
     ///
-    /// This allows customizing how runtime FFI symbols are resolved:
+    /// This allows customizing how runtime SFFI symbols are resolved:
     /// - `StaticSymbolProvider`: Zero-cost, compiled-in symbols
     /// - `DynamicSymbolProvider`: Load from shared library
     /// - `ChainedProvider`: Multiple libraries, first match wins
@@ -57,7 +57,7 @@ impl JitCompiler {
 
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
-        // Register runtime FFI symbols from the provider
+        // Register runtime SFFI symbols from the provider
         register_runtime_symbols_from_provider(&mut builder, provider.as_ref());
 
         let module = JITModule::new(builder);
@@ -153,9 +153,9 @@ impl Default for JitCompiler {
     }
 }
 
-/// Register runtime FFI function symbols with the JIT builder from a provider.
+/// Register runtime SFFI function symbols with the JIT builder from a provider.
 ///
-/// This allows the JIT to resolve external function calls to runtime FFI functions
+/// This allows the JIT to resolve external function calls to runtime SFFI functions
 /// like print, array operations, etc. The symbols are obtained from the provider,
 /// which can be static (compiled-in) or dynamic (loaded from shared library).
 fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &dyn RuntimeSymbolProvider) {

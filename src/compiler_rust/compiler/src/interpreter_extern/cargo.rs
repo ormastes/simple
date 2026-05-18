@@ -1,4 +1,4 @@
-//! Cargo FFI functions for the Simple language interpreter
+//! Cargo SFFI functions for the Simple language interpreter
 //!
 //! These functions allow Simple code to call cargo build operations.
 

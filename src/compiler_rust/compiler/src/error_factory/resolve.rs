@@ -408,7 +408,7 @@ pub fn undefined_field(field_name: &str) -> CompileError {
 }
 
 // ============================================
-// FFI/Handle Errors
+// SFFI/Handle Errors
 // ============================================
 
 /// Error when a handle argument is expected but not provided.
@@ -416,9 +416,9 @@ pub fn expected_handle(index: usize) -> CompileError {
     CompileError::Semantic(format!("argument {} must be a handle", index))
 }
 
-/// Error when an FFI call returns an invalid handle.
-pub fn invalid_ffi_handle(function_name: &str) -> CompileError {
-    CompileError::Semantic(format!("FFI call '{}' returned invalid handle", function_name))
+/// Error when an SFFI call returns an invalid handle.
+pub fn invalid_sffi_handle(function_name: &str) -> CompileError {
+    CompileError::Semantic(format!("SFFI call '{}' returned invalid handle", function_name))
 }
 
 // ============================================

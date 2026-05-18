@@ -6,7 +6,7 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
-use simple_runtime::value::ffi::{
+use simple_runtime::value::sffi::{
     rt_sandbox_reset, rt_sandbox_set_cpu_time, rt_sandbox_set_memory, rt_sandbox_set_fd_limit,
     rt_sandbox_set_thread_limit, rt_sandbox_disable_network, rt_sandbox_set_network_allowlist,
     rt_sandbox_set_network_blocklist, rt_sandbox_add_allowed_domain, rt_sandbox_add_blocked_domain,

@@ -1,6 +1,6 @@
 //! TUI (Text User Interface) extern functions
 //!
-//! Ratatui FFI bindings for building terminal UIs.
+//! Ratatui SFFI bindings for building terminal UIs.
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
@@ -15,7 +15,7 @@ pub struct TuiEvent {
     pub char_value: u32,
 }
 
-// Extern declarations for Ratatui FFI functions
+// Extern declarations for Ratatui SFFI functions
 extern "C" {
     fn ratatui_terminal_new() -> u64;
     fn ratatui_terminal_cleanup(terminal: u64);

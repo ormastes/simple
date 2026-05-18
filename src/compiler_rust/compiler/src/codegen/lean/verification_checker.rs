@@ -47,7 +47,7 @@ impl<'a> VerificationChecker<'a> {
             // Note: decreases clause not yet in HirContract, would report here
         }
 
-        // V-EFFECT: Check for IO/FFI in function body
+        // V-EFFECT: Check for IO/SFFI in function body
         for stmt in &func.body {
             self.check_statement_effects(stmt, &func.name);
         }

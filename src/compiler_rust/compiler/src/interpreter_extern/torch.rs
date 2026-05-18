@@ -3,7 +3,7 @@
 use crate::error::CompileError;
 use crate::value::Value;
 #[cfg(not(feature = "pytorch"))]
-use std::ffi::CString;
+use std::sffi::CString;
 #[cfg(not(feature = "pytorch"))]
 use std::sync::OnceLock;
 

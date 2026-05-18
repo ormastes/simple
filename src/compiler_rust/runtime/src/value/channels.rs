@@ -1,4 +1,4 @@
-//! Channel operations and FFI functions.
+//! Channel operations and SFFI functions.
 //!
 //! Channels provide multi-producer, single-consumer communication between
 //! actors or async tasks.
@@ -57,7 +57,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_CHANNEL_ID: AtomicU64 = AtomicU64::new(1);
 
 // ============================================================================
-// Channel FFI Functions
+// Channel SFFI Functions
 // ============================================================================
 
 /// Create a new channel. Returns a channel pair with sender and receiver.

@@ -11,7 +11,7 @@ use crate::interpreter::{
 use crate::value::*;
 use simple_common::actor::Message;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, RangeBound};
-use simple_runtime::value::diagram_ffi;
+use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -27,8 +27,8 @@ pub(super) fn eval_builtin(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     // Diagram tracing for builtin function calls
-    if diagram_ffi::is_diagram_enabled() {
-        diagram_ffi::trace_call(name);
+    if diagram_sffi::is_diagram_enabled() {
+        diagram_sffi::trace_call(name);
     }
 
     match name {

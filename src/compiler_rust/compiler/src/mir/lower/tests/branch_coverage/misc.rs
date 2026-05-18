@@ -215,10 +215,10 @@ fn string_interpolation() {
     let _ = compile_to_mir(src);
 }
 
-// --- lowering_expr.rs: FFI call with int arg (box int for FFI) ---
+// --- lowering_expr.rs: SFFI call with int arg (box int for SFFI) ---
 
 #[test]
-fn ffi_call_with_int_arg() {
+fn sffi_call_with_int_arg() {
     let src = "fn test() -> i64:\n    var x = 42\n    var s = str(x)\n    return 0\n";
     let _ = try_compile_to_mir(src);
 }

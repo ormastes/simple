@@ -22,7 +22,7 @@ use std.driver.types.{DriverClass, DriverHandle, DriverContext, DeviceId,
                       IoctlCmd, PowerState, ProbeResult}
 # Layering note (FR-DRIVER-0006): the CUDA native-lib adapter routes its
 # init through the userland `gpu_driver` module, NOT the compiler-side
-# `src/compiler/70.backend/backend/cuda/cuda_ffi.spl`. `src/lib/*` is not
+# `src/compiler/70.backend/backend/cuda/cuda_sffi.spl`. `src/lib/*` is not
 # allowed to depend on `src/compiler/*` — doing so would break stdlib
 # bootstrap layering. `gpu_driver/mod.spl` already owns the `rt_cuda_*`
 # extern surface and re-exports a clean `GpuError`/`Result` API.
@@ -57,7 +57,7 @@ fn nativelib_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:
 # lib's own startup. Keeping the adapters thin means changing a lib
 # later (e.g. CUDA runtime version bump) never touches the registry.
 
-fn __cuda_ffi_map_err(err: GpuError) -> DriverError:
+fn __cuda_sffi_map_err(err: GpuError) -> DriverError:
     # Mirrors gpu_driver/driver_adapter.spl::__gpu_map_err for consistency;
     # kept local so a bump in CUDA error codes only touches one file per
     # adapter.
@@ -70,7 +70,7 @@ fn __cuda_ffi_map_err(err: GpuError) -> DriverError:
         return DriverError.NoMemory
     return DriverError.IoError
 
-fn cuda_ffi_init(ctx: DriverContext) -> Result<(), DriverError>:
+fn cuda_sffi_init(ctx: DriverContext) -> Result<(), DriverError>:
     # Route through gpu_driver/mod.spl (NOT src/compiler/70.backend/...).
     # On a CUDA-less host gpu_init returns Err; the registry's tolerant
     # init_all policy then leaves this native-lib entry with loaded=false
@@ -78,21 +78,21 @@ fn cuda_ffi_init(ctx: DriverContext) -> Result<(), DriverError>:
     val rc = gpu_init()
     match rc:
         Result.Ok(_)   -> return Result.Ok(())
-        Result.Err(e)  -> return Result.Err(__cuda_ffi_map_err(e))
+        Result.Err(e)  -> return Result.Err(__cuda_sffi_map_err(e))
 
-fn lld_ffi_init(ctx: DriverContext) -> Result<(), DriverError>:
+fn lld_sffi_init(ctx: DriverContext) -> Result<(), DriverError>:
     # Real integration: call lld_init() / probe for simple_lld_elf_link.
     # Current adapter succeeds trivially.
     return Result.Ok(())
 
 # --- Registration helpers — kernel boot calls each once at startup ---
 
-fn register_cuda_ffi_native_lib() -> Result<i32, DriverError>:
-    val m: DriverManifest = DriverManifest.for_native_lib("cuda_ffi", "1.0")
+fn register_cuda_sffi_native_lib() -> Result<i32, DriverError>:
+    val m: DriverManifest = DriverManifest.for_native_lib("cuda_sffi", "1.0")
     val ops: DriverOps = DriverOps(
         self_ptr: 0,
         manifest_abi: nativelib_abi_rev,
-        init_fn:   cuda_ffi_init,
+        init_fn:   cuda_sffi_init,
         probe_fn:  nativelib_probe,
         attach_fn: nativelib_attach,
         detach_fn: nativelib_detach,
@@ -102,12 +102,12 @@ fn register_cuda_ffi_native_lib() -> Result<i32, DriverError>:
     )
     return register_static_driver(m, ops)
 
-fn register_lld_ffi_native_lib() -> Result<i32, DriverError>:
-    val m: DriverManifest = DriverManifest.for_native_lib("lld_ffi", "1.0")
+fn register_lld_sffi_native_lib() -> Result<i32, DriverError>:
+    val m: DriverManifest = DriverManifest.for_native_lib("lld_sffi", "1.0")
     val ops: DriverOps = DriverOps(
         self_ptr: 0,
         manifest_abi: nativelib_abi_rev,
-        init_fn:   lld_ffi_init,
+        init_fn:   lld_sffi_init,
         probe_fn:  nativelib_probe,
         attach_fn: nativelib_attach,
         detach_fn: nativelib_detach,

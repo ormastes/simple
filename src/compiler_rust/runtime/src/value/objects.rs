@@ -1,4 +1,4 @@
-//! Object types: Object, Closure, Enum and their FFI functions.
+//! Object types: Object, Closure, Enum and their SFFI functions.
 
 use super::core::RuntimeValue;
 use super::heap::{get_typed_ptr, get_typed_ptr_mut, HeapHeader, HeapObjectType};
@@ -84,7 +84,7 @@ pub struct RuntimeEnum {
 }
 
 // ============================================================================
-// Object FFI functions
+// Object SFFI functions
 // ============================================================================
 
 /// Allocate a new object with the given number of fields
@@ -169,7 +169,7 @@ pub extern "C" fn rt_object_free(object: RuntimeValue) {
 }
 
 // ============================================================================
-// Closure FFI functions
+// Closure SFFI functions
 // ============================================================================
 
 /// Allocate a new closure with the given function pointer and captures
@@ -244,7 +244,7 @@ pub extern "C" fn rt_closure_free(closure: RuntimeValue) {
 }
 
 // ============================================================================
-// Enum FFI functions
+// Enum SFFI functions
 // ============================================================================
 
 /// Hash a variant name to get its discriminant, matching the compiler's hashing scheme.
@@ -367,7 +367,7 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
 }
 
 // ============================================================================
-// Unique Pointer - Heap structure and FFI functions
+// Unique Pointer - Heap structure and SFFI functions
 // ============================================================================
 //
 // Unique pointers provide single-owner semantics with RAII cleanup.
@@ -481,7 +481,7 @@ pub extern "C" fn rt_unique_needs_trace(unique: RuntimeValue) -> RuntimeValue {
 }
 
 // ============================================================================
-// Shared Pointer - Heap structure and FFI functions
+// Shared Pointer - Heap structure and SFFI functions
 // ============================================================================
 //
 // Shared pointers (*T) provide reference-counted ownership semantics.
@@ -612,7 +612,7 @@ pub extern "C" fn rt_shared_downgrade(shared: RuntimeValue) -> RuntimeValue {
 }
 
 // ============================================================================
-// Weak Pointer - Heap structure and FFI functions
+// Weak Pointer - Heap structure and SFFI functions
 // ============================================================================
 //
 // Weak pointers (-T) are non-owning references to shared pointers.
@@ -726,7 +726,7 @@ pub extern "C" fn rt_weak_free(weak: RuntimeValue) {
 }
 
 // ============================================================================
-// Handle Pointer - Heap structure and FFI functions
+// Handle Pointer - Heap structure and SFFI functions
 // ============================================================================
 //
 // Handle pointers are pool-allocated index-based references. They provide

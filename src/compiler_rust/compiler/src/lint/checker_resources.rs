@@ -662,8 +662,8 @@ impl LintChecker {
                 return;
             }
 
-            // Skip FFI wrapper naming conventions
-            if func.name.starts_with("_ffi_") || func.name.starts_with("_raw_") || func.name.starts_with("rt_") {
+            // Skip SFFI wrapper naming conventions
+            if func.name.starts_with("_sffi_") || func.name.starts_with("_raw_") || func.name.starts_with("rt_") {
                 return;
             }
 

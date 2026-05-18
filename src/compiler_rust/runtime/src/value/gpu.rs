@@ -1,6 +1,6 @@
 //! GPU runtime support for software backend execution.
 //!
-//! This module provides FFI functions for GPU intrinsics that execute
+//! This module provides SFFI functions for GPU intrinsics that execute
 //! on the CPU using a software emulation approach. Work items are
 //! simulated using thread-local state.
 
@@ -56,7 +56,7 @@ pub fn get_work_item_state() -> GpuWorkItemState {
 }
 
 // =============================================================================
-// GPU Intrinsic FFI Functions (Work Item Identification)
+// GPU Intrinsic SFFI Functions (Work Item Identification)
 // =============================================================================
 
 /// Get global work item ID for dimension (0=x, 1=y, 2=z)
@@ -120,7 +120,7 @@ pub extern "C" fn rt_gpu_num_groups(dim: u32) -> u64 {
 }
 
 // =============================================================================
-// GPU Synchronization FFI Functions
+// GPU Synchronization SFFI Functions
 // =============================================================================
 
 /// Work group barrier - synchronize all work items in the group.
@@ -145,7 +145,7 @@ pub extern "C" fn rt_gpu_mem_fence(scope: u32) {
 }
 
 // =============================================================================
-// GPU Atomic Operations FFI Functions (i64)
+// GPU Atomic Operations SFFI Functions (i64)
 // =============================================================================
 
 /// Atomic add for i64
@@ -216,7 +216,7 @@ pub unsafe extern "C" fn rt_gpu_atomic_xor_i64(ptr: *mut i64, value: i64) -> i64
 }
 
 // =============================================================================
-// GPU Atomic Operations FFI Functions (u32)
+// GPU Atomic Operations SFFI Functions (u32)
 // =============================================================================
 
 /// Atomic add for u32
@@ -286,7 +286,7 @@ pub unsafe extern "C" fn rt_gpu_atomic_xor_u32(ptr: *mut u32, value: u32) -> u32
 }
 
 // =============================================================================
-// GPU Shared Memory FFI Functions
+// GPU Shared Memory SFFI Functions
 // =============================================================================
 
 // Thread-local shared memory allocation
@@ -402,7 +402,7 @@ pub fn execute_kernel_3d(kernel: GpuKernelFn, global_size: [u32; 3], local_size:
     }
 }
 
-/// Launch a GPU kernel (FFI entry point)
+/// Launch a GPU kernel (SFFI entry point)
 /// kernel_ptr: Function pointer to the kernel
 /// gx, gy, gz: Global work size
 /// lx, ly, lz: Local work group size
@@ -413,7 +413,7 @@ pub extern "C" fn rt_gpu_launch(kernel_ptr: u64, gx: u32, gy: u32, gz: u32, lx: 
     0 // Success
 }
 
-/// Launch a 1D GPU kernel (convenience FFI entry point)
+/// Launch a 1D GPU kernel (convenience SFFI entry point)
 #[no_mangle]
 pub extern "C" fn rt_gpu_launch_1d(kernel_ptr: u64, global_size: u32, local_size: u32) -> i32 {
     let kernel: GpuKernelFn = unsafe { std::mem::transmute(kernel_ptr as usize) };

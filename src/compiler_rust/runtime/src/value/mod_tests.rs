@@ -124,7 +124,7 @@ fn test_default() {
 }
 
 #[test]
-fn test_ffi_functions() {
+fn test_sffi_functions() {
     assert_eq!(rt_value_as_int(rt_value_int(42)), 42);
     assert!((rt_value_as_float(rt_value_float(3.15)) - 3.15).abs() < 1e-10);
     assert!(rt_value_as_bool(rt_value_bool(true)));

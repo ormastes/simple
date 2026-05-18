@@ -15,7 +15,7 @@
 //! - Custom compression levels
 
 use crate::compress::lzma_stub::{Trailer, TRAILER_SIZE};
-use std::ffi::{CStr, CString};
+use std::sffi::{CStr, CString};
 use std::fs;
 use std::io::Write;
 use std::os::raw::c_char;
@@ -249,10 +249,10 @@ pub fn create_self_extracting_auto(input: &Path, output: &Path) -> Result<f64, S
 }
 
 // ============================================================================
-// FFI Bindings for Simple
+// SFFI Bindings for Simple
 // ============================================================================
 
-/// FFI: Create a self-extracting executable
+/// SFFI: Create a self-extracting executable
 ///
 /// # Safety
 /// - `input` and `output` must be valid null-terminated C strings
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn self_extract_create(input: *const c_char, output: *cons
     }
 }
 
-/// FFI: Check if a file is a self-extracting executable
+/// SFFI: Check if a file is a self-extracting executable
 ///
 /// # Safety
 /// - `file` must be a valid null-terminated C string
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn self_extract_is_compressed(file: *const c_char) -> i32 
     }
 }
 
-/// FFI: Get compression ratio of a self-extracting executable
+/// SFFI: Get compression ratio of a self-extracting executable
 ///
 /// # Safety
 /// - `file` must be a valid null-terminated C string

@@ -132,7 +132,7 @@ impl TraceConcurrent for ConcurrentQueue {
     }
 }
 
-// FFI functions for ConcurrentQueue (callable from compiled code)
+// SFFI functions for ConcurrentQueue (callable from compiled code)
 
 /// Create a new concurrent queue
 #[no_mangle]
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ffi_functions() {
+    fn test_sffi_functions() {
         unsafe {
             let queue = simple_concurrent_queue_new();
             assert!(!queue.is_null());

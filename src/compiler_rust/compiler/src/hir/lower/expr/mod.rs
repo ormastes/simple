@@ -229,8 +229,8 @@ impl Lowerer {
             });
         }
 
-        // Handle FFI calls: @rt_function_name
-        // The parser creates identifiers with @ prefix for FFI calls
+        // Handle SFFI calls: @rt_function_name
+        // The parser creates identifiers with @ prefix for SFFI calls
         // Look up the extern function without the @ prefix
         if let Some(stripped_name) = name.strip_prefix('@') {
             if let Some(ty) = self.globals.get(stripped_name).copied() {
@@ -247,7 +247,7 @@ impl Lowerer {
                 });
             } else {
                 return Err(LowerError::UnknownVariable(format!(
-                    "{} (FFI call to undefined extern function '{}')",
+                    "{} (SFFI call to undefined extern function '{}')",
                     name, stripped_name
                 )));
             }

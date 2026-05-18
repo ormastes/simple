@@ -1,4 +1,4 @@
-//! SDN FFI functions for the Simple language interpreter
+//! SDN SFFI functions for the Simple language interpreter
 
 use crate::error::CompileError;
 use crate::value::Value;

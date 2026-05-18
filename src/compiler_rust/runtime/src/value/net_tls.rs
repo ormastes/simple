@@ -1,5 +1,5 @@
 // ============================================================================
-// TLS transport FFI — rustls-backed server + client
+// TLS transport SFFI — rustls-backed server + client
 // ============================================================================
 //
 // Both server and client paths use real TLS via rustls 0.23 (ring crypto

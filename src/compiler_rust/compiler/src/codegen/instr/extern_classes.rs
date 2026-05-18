@@ -1,7 +1,7 @@
-//! Extern class FFI method call compilation.
+//! Extern class SFFI method call compilation.
 //!
 //! This module handles codegen for `extern class` method calls, generating
-//! calls to the runtime FFI object system (rt_ffi_object_call_method).
+//! calls to the runtime SFFI object system (rt_sffi_object_call_method).
 
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature};
 use cranelift_codegen::isa::CallConv;
@@ -16,11 +16,11 @@ use super::{InstrContext, InstrResult};
 
 /// Compile an extern class method call.
 ///
-/// For static methods: calls `rt_ffi_object_call_method` with a null receiver
-/// For instance methods: calls `rt_ffi_object_call_method` with the receiver object
+/// For static methods: calls `rt_sffi_object_call_method` with a null receiver
+/// For instance methods: calls `rt_sffi_object_call_method` with the receiver object
 ///
 /// The runtime function signature is:
-/// `rt_ffi_object_call_method(obj: i64, method_name_ptr: i64, method_name_len: i64, argc: i64, argv: i64) -> i64`
+/// `rt_sffi_object_call_method(obj: i64, method_name_ptr: i64, method_name_len: i64, argc: i64, argv: i64) -> i64`
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn compile_extern_method_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -37,24 +37,24 @@ pub fn compile_extern_method_call<M: Module>(
 
     if is_static {
         // Static method call: ClassName::method_name(args...)
-        // We use a convention where static methods are called via rt_ffi_call_static
+        // We use a convention where static methods are called via rt_sffi_call_static
         // The method name is "ClassName::method_name"
         let full_method_name = format!("{}::{}", class_name, method_name);
-        compile_ffi_static_call(ctx, builder, dest, &full_method_name, args)?;
+        compile_sffi_static_call(ctx, builder, dest, &full_method_name, args)?;
     } else {
         // Instance method call: receiver.method_name(args...)
         let recv = receiver.expect("Instance method call requires receiver");
-        compile_ffi_instance_call(ctx, builder, dest, recv, method_name, args)?;
+        compile_sffi_instance_call(ctx, builder, dest, recv, method_name, args)?;
     }
 
     Ok(())
 }
 
-/// Compile a static FFI method call (factory methods like ClassName::open).
+/// Compile a static SFFI method call (factory methods like ClassName::open).
 ///
 /// These are dispatched through the type registry to find the appropriate
 /// constructor or static method.
-fn compile_ffi_static_call<M: Module>(
+fn compile_sffi_static_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
@@ -63,14 +63,14 @@ fn compile_ffi_static_call<M: Module>(
 ) -> InstrResult<()> {
     // Get the runtime function for calling static methods
     // For now, we'll use a naming convention: the function is named rt_<ClassName>_<method>
-    // Or we can use a generic dispatcher: rt_ffi_call_static(class_name_ptr, class_name_len, method_name_ptr, method_name_len, argc, argv)
+    // Or we can use a generic dispatcher: rt_sffi_call_static(class_name_ptr, class_name_len, method_name_ptr, method_name_len, argc, argv)
 
     // For simplicity, let's use the generic dispatcher approach
     // We need to:
     // 1. Create a data section for the method name string
     // 2. Get the pointer to the method name
     // 3. Build the argument array
-    // 4. Call rt_ffi_object_call_method with null receiver for static methods
+    // 4. Call rt_sffi_object_call_method with null receiver for static methods
 
     // Build argument array on stack
     let argc = args.len() as i64;
@@ -104,8 +104,8 @@ fn compile_ffi_static_call<M: Module>(
     // For static methods, receiver is 0 (null)
     let null_receiver = builder.ins().iconst(types::I64, 0);
 
-    // Call rt_ffi_object_call_method(null, method_name_ptr, method_name_len, argc, argv)
-    if let Some(&runtime_id) = ctx.runtime_funcs.get("rt_ffi_object_call_method") {
+    // Call rt_sffi_object_call_method(null, method_name_ptr, method_name_len, argc, argv)
+    if let Some(&runtime_id) = ctx.runtime_funcs.get("rt_sffi_object_call_method") {
         let runtime_ref = ctx.module.declare_func_in_func(runtime_id, builder.func);
         let call = adapted_call(
             builder,
@@ -145,11 +145,11 @@ fn compile_ffi_static_call<M: Module>(
     Ok(())
 }
 
-/// Compile an instance FFI method call (methods on FFI objects).
+/// Compile an instance SFFI method call (methods on SFFI objects).
 ///
-/// The receiver is an FFI object (RuntimeValue with FfiObject heap type),
-/// and we call rt_ffi_object_call_method to dispatch to the appropriate method.
-fn compile_ffi_instance_call<M: Module>(
+/// The receiver is an SFFI object (RuntimeValue with FfiObject heap type),
+/// and we call rt_sffi_object_call_method to dispatch to the appropriate method.
+fn compile_sffi_instance_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
@@ -187,8 +187,8 @@ fn compile_ffi_instance_call<M: Module>(
     let method_name_ptr = create_cstring_constant(ctx, builder, method_name)?;
     let method_name_len = builder.ins().iconst(types::I64, method_name.len() as i64);
 
-    // Call rt_ffi_object_call_method(receiver, method_name_ptr, method_name_len, argc, argv)
-    if let Some(&runtime_id) = ctx.runtime_funcs.get("rt_ffi_object_call_method") {
+    // Call rt_sffi_object_call_method(receiver, method_name_ptr, method_name_len, argc, argv)
+    if let Some(&runtime_id) = ctx.runtime_funcs.get("rt_sffi_object_call_method") {
         let runtime_ref = ctx.module.declare_func_in_func(runtime_id, builder.func);
         let call = adapted_call(
             builder,

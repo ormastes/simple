@@ -281,7 +281,7 @@ fn net_err_msg(msg: &str) -> Value {
     }
 }
 
-/// Convert an io::Error to a numeric error code for FFI return values.
+/// Convert an io::Error to a numeric error code for SFFI return values.
 /// Returns 0 for success (never called for Ok cases), non-zero for errors.
 fn io_error_to_code(err: &std::io::Error) -> i64 {
     match err.kind() {

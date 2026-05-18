@@ -19,20 +19,20 @@ use simple_compiler::i18n::clear_registry as clear_i18n_state;
 use simple_compiler::interpreter::{
     clear_bdd_state, clear_class_instantiation_state, clear_effects_state, clear_interpreter_state, clear_io_state,
     clear_macro_state, clear_module_cache, clear_module_cache_selective, clear_net_state, clear_collection_registries,
-    clear_ast_ffi_registries, clear_env_ffi_registry, clear_error_ffi_registry, clear_span_ffi_registry,
+    clear_ast_sffi_registries, clear_env_sffi_registry, clear_error_sffi_registry, clear_span_sffi_registry,
 };
 use simple_compiler::runtime_profile::profiler::clear_global_profiler;
 use simple_compiler::layout_recorder::clear_recording;
 use simple_runtime::value::clear_all_runtime_registries;
-use simple_compiler::interpreter_ffi::clear_interpreter_state as clear_interp_ffi_state;
-use simple_compiler::interpreter_ffi::clear_expr_registry;
+use simple_compiler::interpreter_sffi::clear_interpreter_state as clear_interp_sffi_state;
+use simple_compiler::interpreter_sffi::clear_expr_registry;
 use simple_compiler::hir::clear_hir_thread_arena;
 use simple_compiler::mir::clear_mir_thread_arena;
 use simple_compiler::codegen::clear_thread_buffer_pool;
 use simple_compiler::interpreter::clear_pinned_strings;
 use simple_compiler::interpreter::clear_concurrency_registries;
 use simple_compiler::codegen::clear_cranelift_registries;
-use simple_compiler::interpreter_ffi::clear_compiled_functions;
+use simple_compiler::interpreter_sffi::clear_compiled_functions;
 use simple_compiler::{set_watchdog_context, start_watchdog, stop_watchdog};
 use simple_compiler::import_loader::collect_imported_module_paths;
 use simple_common::fault_detection::{reset_timeout, set_stack_overflow_detection_enabled, reset_recursion_depth};
@@ -455,9 +455,9 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     clear_net_state();
     clear_all_runtime_registries();
     clear_collection_registries();
-    clear_env_ffi_registry();
-    clear_error_ffi_registry();
-    clear_interp_ffi_state();
+    clear_env_sffi_registry();
+    clear_error_sffi_registry();
+    clear_interp_sffi_state();
     clear_expr_registry();
     clear_thread_buffer_pool();
     clear_pinned_strings();
@@ -469,8 +469,8 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     // - clear_cranelift_registries: Cranelift not used in interpreter
     // - clear_compiled_functions: no compilation in interpreter
     // - clear_i18n_state: i18n state is idempotent across tests
-    // - clear_ast_ffi_registries: AST FFI is internal, rarely leaks
-    // - clear_span_ffi_registry: span tracking has negligible state
+    // - clear_ast_sffi_registries: AST SFFI is internal, rarely leaks
+    // - clear_span_sffi_registry: span tracking has negligible state
     // - clear_global_profiler: profiling disabled during tests
     // - clear_recording: recording disabled during tests
 

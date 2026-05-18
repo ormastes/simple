@@ -720,7 +720,7 @@ impl NativeBackend for LlvmBackend {
                     .map(|func| func.name.as_str())
                     .collect();
 
-                for spec in crate::codegen::runtime_ffi::RUNTIME_FUNCS {
+                for spec in crate::codegen::runtime_sffi::RUNTIME_FUNCS {
                     if !referenced_function_names.contains(spec.name)
                         && !crate::codegen::common_backend::runtime_symbol_is_codegen_root(spec.name)
                     {

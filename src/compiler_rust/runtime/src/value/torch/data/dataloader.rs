@@ -41,7 +41,7 @@ pub struct DataLoaderState {
 }
 
 // ============================================================================
-// DataLoader FFI Functions
+// DataLoader SFFI Functions
 // ============================================================================
 
 /// Create a DataLoader for batch iteration

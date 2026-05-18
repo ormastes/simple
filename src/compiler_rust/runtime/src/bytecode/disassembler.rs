@@ -78,8 +78,8 @@ pub fn disassemble(code: &[u8]) -> String {
                 write!(output, " s{}", reg).unwrap();
             }
             RET_VOID => {}
-            // CALL_FFI/CALL_RUNTIME: u16 + u16
-            CALL_FFI | CALL_RUNTIME => {
+            // CALL_SFFI/CALL_RUNTIME: u16 + u16
+            CALL_SFFI | CALL_RUNTIME => {
                 let idx = decoder.read_u16().unwrap_or(0);
                 let argc = decoder.read_u16().unwrap_or(0);
                 write!(output, " ffi#{}, argc={}", idx, argc).unwrap();

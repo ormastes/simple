@@ -79,7 +79,7 @@ use simple_driver::cli::basic::{
 use simple_driver::cli::check::{CheckOptions, run_check};
 use simple_driver::cli::code_quality::{run_fmt, run_lint};
 use simple_driver::cli::gen_lean::run_gen_lean;
-use simple_driver::cli::help::{print_ffi_gen_help, print_help, print_test_help, print_version, version};
+use simple_driver::cli::help::{print_sffi_gen_help, print_help, print_test_help, print_version, version};
 use simple_driver::cli::llm_tools::{run_constr, run_context, run_diff, run_mcp};
 use simple_driver::cli::migrate::run_migrate;
 use simple_driver::cli::native_build::handle_native_build;
@@ -251,8 +251,8 @@ fn handle_ui_wrapper(_ctx: &CommandContext) -> i32 {
     1
 }
 
-fn handle_ffi_gen_wrapper(_ctx: &CommandContext) -> i32 {
-    print_ffi_gen_help();
+fn handle_sffi_gen_wrapper(_ctx: &CommandContext) -> i32 {
+    print_sffi_gen_help();
     0
 }
 
@@ -560,8 +560,8 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "ffi-gen",
-        app_path: "src/compiler/90.tools/ffi_gen/main.spl",
-        rust_handler: Handler::Custom(handle_ffi_gen_wrapper),
+        app_path: "src/compiler/90.tools/sffi_gen/main.spl",
+        rust_handler: Handler::Custom(handle_sffi_gen_wrapper),
         env_override: "",
         needs_rust_flags: &["--help", "-h"],
     },
@@ -1006,7 +1006,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/os/main.spl"
         && app_relative_path != "src/app/dashboard/main.spl"
         && app_relative_path != "src/app/lsp/main.spl"
-        && app_relative_path != "src/compiler/90.tools/ffi_gen/main.spl"
+        && app_relative_path != "src/compiler/90.tools/sffi_gen/main.spl"
         && app_relative_path != "src/app/plugin/main.spl"
         && app_relative_path != "src/app/wrapper_gen/mod.spl"
         && app_relative_path != "src/app/llm_process_gen/main.spl"
@@ -1016,7 +1016,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
 
     let path = resolve_app_path(app_relative_path)?;
 
-    if app_relative_path == "src/compiler/90.tools/ffi_gen/main.spl" {
+    if app_relative_path == "src/compiler/90.tools/sffi_gen/main.spl" {
         let previous_force_args = std::env::var("SIMPLE_FORCE_ARGS").ok();
         let forced_args = args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
         std::env::set_var("SIMPLE_FORCE_ARGS", forced_args);

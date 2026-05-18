@@ -1,7 +1,7 @@
 //! PyTorch tensor backend for math evaluation.
 //!
 //! When the `pytorch` feature is enabled, delegates tensor operations to
-//! PyTorch via the runtime FFI. Otherwise, all operations fall back to CPU.
+//! PyTorch via the runtime SFFI. Otherwise, all operations fall back to CPU.
 //!
 //! Function names and parameter names match the core runtime library
 //! (`simple_runtime::value::torch`) conventions:
@@ -722,7 +722,7 @@ fn eval_torch_function(name: &str, args: &[MathExpr], device: i32) -> Result<Val
     }
 }
 
-/// Create a tensor via PyTorch FFI (zeros/ones/randn), then fall back to CPU result.
+/// Create a tensor via PyTorch SFFI (zeros/ones/randn), then fall back to CPU result.
 fn eval_torch_create(args: &[Value], device: i32, func: &str) -> Result<Value, CompileError> {
     let shape = values_to_shape(args)?;
 
@@ -756,7 +756,7 @@ fn eval_torch_create(args: &[Value], device: i32, func: &str) -> Result<Value, C
     eval_cpu(&expr)
 }
 
-/// Create an arange tensor via PyTorch FFI.
+/// Create an arange tensor via PyTorch SFFI.
 fn eval_torch_arange(args: &[Value], device: i32) -> Result<Value, CompileError> {
     let (start, end, step) = match args.len() {
         1 => (0i64, value_to_i64(&args[0])?, 1i64),

@@ -5,7 +5,7 @@
 //!
 //! Rules implemented:
 //! - V-UNSAFE: Code marked @verify cannot use @unsafe operations
-//! - V-EFFECT: Verified code cannot use IO/FFI effects (must be @pure)
+//! - V-EFFECT: Verified code cannot use IO/SFFI effects (must be @pure)
 //! - V-REFLECT: Verified code cannot use reflection
 //! - V-GHOST: Ghost code can only access ghost state
 

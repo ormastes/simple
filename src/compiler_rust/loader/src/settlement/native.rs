@@ -3,7 +3,7 @@
 //! Handles loading and managing native libraries (static, shared, system).
 
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::sffi::CString;
 use std::path::{Path, PathBuf};
 
 use crate::smf::settlement::{NATIVE_LIB_SHARED, NATIVE_LIB_STATIC, NATIVE_LIB_SYSTEM};
@@ -77,9 +77,9 @@ enum NativeLibHandle {
     Static(*const u8, usize),
     /// Dynamically loaded library
     #[cfg(unix)]
-    Dynamic(*mut std::ffi::c_void),
+    Dynamic(*mut std::sffi::c_void),
     #[cfg(windows)]
-    Dynamic(*mut std::ffi::c_void),
+    Dynamic(*mut std::sffi::c_void),
     /// Not loaded yet
     #[allow(dead_code)]
     Unloaded,
@@ -114,7 +114,7 @@ impl LoadedNativeLib {
                 if err.is_null() {
                     "Unknown error".to_string()
                 } else {
-                    std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned()
+                    std::sffi::CStr::from_ptr(err).to_string_lossy().into_owned()
                 }
             };
             return Err(format!("Failed to load {}: {}", path_str, error));
@@ -130,7 +130,7 @@ impl LoadedNativeLib {
 
     #[cfg(windows)]
     pub fn load_shared(name: String, path: &Path) -> Result<Self, String> {
-        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::sffi::OsStrExt;
 
         let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
 
@@ -163,7 +163,7 @@ impl LoadedNativeLib {
                 if err.is_null() {
                     "Unknown error".to_string()
                 } else {
-                    std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned()
+                    std::sffi::CStr::from_ptr(err).to_string_lossy().into_owned()
                 }
             };
             return Err(format!("Failed to load current process: {}", error));
@@ -179,7 +179,7 @@ impl LoadedNativeLib {
 
     #[cfg(windows)]
     pub fn load_process(name: String) -> Result<Self, String> {
-        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::sffi::OsStrExt;
         let _ = name;
         let handle = unsafe { winapi::um::libloaderapi::GetModuleHandleW(std::ptr::null()) };
         if handle.is_null() {
@@ -228,10 +228,10 @@ impl LoadedNativeLib {
 
     #[cfg(windows)]
     pub fn load_system(name: String) -> Result<Self, String> {
-        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::sffi::OsStrExt;
 
         let dll_name = format!("{}.dll", name);
-        let wide_name: Vec<u16> = std::ffi::OsStr::new(&dll_name).encode_wide().chain(Some(0)).collect();
+        let wide_name: Vec<u16> = std::sffi::OsStr::new(&dll_name).encode_wide().chain(Some(0)).collect();
 
         let handle = unsafe { winapi::um::libloaderapi::LoadLibraryW(wide_name.as_ptr()) };
 
@@ -280,7 +280,7 @@ impl LoadedNativeLib {
     /// Platform-agnostic symbol lookup implementation
     fn get_symbol_impl<F>(&mut self, name: &str, lookup: F) -> Option<usize>
     where
-        F: FnOnce(*mut std::ffi::c_void, &CString) -> Option<usize>,
+        F: FnOnce(*mut std::sffi::c_void, &CString) -> Option<usize>,
     {
         // Check cache first
         if let Some(&addr) = self.symbols.get(name) {

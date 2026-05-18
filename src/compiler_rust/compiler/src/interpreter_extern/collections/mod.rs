@@ -1,4 +1,4 @@
-//! Collections FFI functions for the interpreter
+//! Collections SFFI functions for the interpreter
 //!
 //! This module re-exports from the four collection-kind sub-modules.
 //! Split by kind: hashmap, hashset, btreemap, btreeset.

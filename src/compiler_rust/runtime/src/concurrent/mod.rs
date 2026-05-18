@@ -55,7 +55,7 @@ pub use map::ConcurrentMap;
 pub use queue::ConcurrentQueue;
 pub use stack::ConcurrentStack;
 
-// Re-export FFI functions from submodules
+// Re-export SFFI functions from submodules
 pub use gc_barrier::{simple_gc_barrier_end_collection, simple_gc_barrier_epoch, simple_gc_barrier_start_collection};
 pub use map::{
     simple_concurrent_map_clear, simple_concurrent_map_contains_key, simple_concurrent_map_free,

@@ -28,8 +28,8 @@ refactor
 - [x] 3-arch (Architect) — 2026-05-18
 - [x] 4-spec (QA Lead) — 2026-05-18
 - [x] 5-implement (Engineer) — 2026-05-18
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
+- [x] 6-refactor (Tech Lead) — 2026-05-18
+- [x] 7-verify (QA) — 2026-05-18
 - [ ] 8-ship (Release Mgr)
 
 ## Phase Outputs

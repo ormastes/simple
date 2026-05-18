@@ -179,7 +179,7 @@ fn get_coverage_data() -> &'static Mutex<CoverageData> {
 }
 
 //==============================================================================
-// FFI Functions
+// SFFI Functions
 //==============================================================================
 
 /// Record a decision probe
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn rt_coverage_decision_probe(
     let file_str = if file.is_null() {
         ""
     } else {
-        std::ffi::CStr::from_ptr(file).to_str().unwrap_or("")
+        std::sffi::CStr::from_ptr(file).to_str().unwrap_or("")
     };
 
     if let Ok(mut data) = get_coverage_data().lock() {
@@ -221,7 +221,7 @@ pub unsafe extern "C" fn rt_coverage_condition_probe(
     let file_str = if file.is_null() {
         ""
     } else {
-        std::ffi::CStr::from_ptr(file).to_str().unwrap_or("")
+        std::sffi::CStr::from_ptr(file).to_str().unwrap_or("")
     };
 
     if let Ok(mut data) = get_coverage_data().lock() {
@@ -258,7 +258,7 @@ pub extern "C" fn rt_coverage_dump_sdn() -> *mut i8 {
     };
 
     // Convert to C string and leak it (caller must free)
-    match std::ffi::CString::new(sdn) {
+    match std::sffi::CString::new(sdn) {
         Ok(cstr) => cstr.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
@@ -271,7 +271,7 @@ pub extern "C" fn rt_coverage_dump_sdn() -> *mut i8 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_coverage_free_sdn(ptr: *mut i8) {
     if !ptr.is_null() {
-        drop(std::ffi::CString::from_raw(ptr));
+        drop(std::sffi::CString::from_raw(ptr));
     }
 }
 

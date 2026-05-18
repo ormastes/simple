@@ -406,7 +406,7 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
 
     // Stage 2: Compile again with the SAME seed compiler.
     // The Cranelift-compiled Stage 1 binary cannot yet serve as a compiler
-    // (runtime FFI stubs). For now, re-compile with the seed to verify
+    // (runtime SFFI stubs). For now, re-compile with the seed to verify
     // deterministic output.
     println!();
     println!("=== Stage 2: Compile with seed compiler (determinism check) ===");

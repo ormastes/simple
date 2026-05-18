@@ -1,4 +1,4 @@
-//! Networking FFI functions for TCP, UDP, and HTTP.
+//! Networking SFFI functions for TCP, UDP, and HTTP.
 //!
 //! This module provides the native implementations for the Simple language's
 //! networking APIs. Sockets are managed via numeric handles stored in a
@@ -194,7 +194,7 @@ pub extern "C" fn rt_net_free_addr_string(ptr: i64, len: i64) {
 }
 
 // ============================================================================
-// Helper macros for reducing FFI boilerplate
+// Helper macros for reducing SFFI boilerplate
 // ============================================================================
 
 /// Macro to get registry and socket entry with error handling
@@ -241,7 +241,7 @@ macro_rules! validate_buffer {
     };
 }
 
-/// Macro to parse socket address from FFI parameters
+/// Macro to parse socket address from SFFI parameters
 /// Returns early with error if parsing fails
 macro_rules! parse_addr {
     ($addr_ptr:expr, $addr_len:expr, $error_ret:expr) => {{
@@ -325,12 +325,12 @@ macro_rules! impl_timeout_setter {
 }
 
 // ============================================================================
-// TCP FFI functions (extracted to net_tcp.rs)
+// TCP SFFI functions (extracted to net_tcp.rs)
 // ============================================================================
 include!("net_tcp.rs");
 
 // ============================================================================
-// TLS transport FFI shims (extracted to net_tls.rs)
+// TLS transport SFFI shims (extracted to net_tls.rs)
 // ============================================================================
 #[cfg(feature = "runtime-tls")]
 include!("net_tls.rs");
@@ -338,12 +338,12 @@ include!("net_tls.rs");
 include!("net_tls_stub.rs");
 
 // ============================================================================
-// UDP FFI functions (extracted to net_udp.rs)
+// UDP SFFI functions (extracted to net_udp.rs)
 // ============================================================================
 include!("net_udp.rs");
 
 // ============================================================================
-// HTTP FFI functions (extracted to net_http.rs)
+// HTTP SFFI functions (extracted to net_http.rs)
 // ============================================================================
 #[cfg(feature = "runtime-http")]
 include!("net_http.rs");
@@ -351,7 +351,7 @@ include!("net_http.rs");
 include!("net_http_stub.rs");
 
 // ============================================================================
-// Unix-domain socket FFI functions (extracted to net_uds.rs)
+// Unix-domain socket SFFI functions (extracted to net_uds.rs)
 // Added 2026-04-26 for jj-wrapper-daemon (D-4 / SJ-UDS-001)
 // ============================================================================
 include!("net_uds.rs");

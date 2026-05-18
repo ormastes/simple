@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tch::Tensor;
 
 // ============================================================================
-// FFI Functions: Matrix Operations (3 functions)
+// SFFI Functions: Matrix Operations (3 functions)
 // ============================================================================
 
 /// Helper macro for binary tensor operations (two tensor inputs)

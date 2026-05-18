@@ -269,7 +269,7 @@ pub enum HirType {
         is_generic_template: bool,
         type_bindings: HashMap<String, TypeId>,
     },
-    /// External class for FFI object-based bindings
+    /// External class for SFFI object-based bindings
     ExternClass {
         name: String,
     },

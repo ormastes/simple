@@ -30,7 +30,7 @@ mod tests {
 
     // ===== File-level regression tests =====
 
-    // NOTE: ffi_usage.spl and profile.spl use multi-line double-quoted strings
+    // NOTE: sffi_usage.spl and profile.spl use multi-line double-quoted strings
     // which the self-hosted Simple parser supports but are not safe to enable in
     // the Rust parser (causes 16+ regressions in other files). Skipped.
 

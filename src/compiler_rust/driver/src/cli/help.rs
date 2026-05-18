@@ -78,7 +78,7 @@ pub fn print_help() {
     eprintln!("Documentation Generation:");
     eprintln!("  simple spipe-docgen <files...>           Generate docs from SPipe test files");
     eprintln!("  simple spipe-docgen <files...> -o <dir>  Output to specific directory");
-    eprintln!("  simple ffi-gen <file.spl> [options]      Generate FFI wrappers from @Lib extern declarations");
+    eprintln!("  simple ffi-gen <file.spl> [options]      Generate SFFI wrappers from @Lib extern declarations");
     eprintln!();
     eprintln!("WASM App Packaging:");
     eprintln!("  simple vscode build <file.spl> [options]     Emit WASM + VSCode extension scaffold");
@@ -226,8 +226,8 @@ pub fn print_help() {
     eprintln!("  simple script.spl --sandbox --time-limit 60 --memory-limit 256M  # Combined");
 }
 
-pub fn print_ffi_gen_help() {
-    eprintln!("FFI Wrapper Generator");
+pub fn print_sffi_gen_help() {
+    eprintln!("SFFI Wrapper Generator");
     eprintln!("=====================");
     eprintln!();
     eprintln!("Generates Rust/C wrapper code from @Lib annotated extern class declarations.");
@@ -238,14 +238,14 @@ pub fn print_ffi_gen_help() {
     eprintln!("  simple ffi-gen <file.spl> [OPTIONS]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --output=<dir>    Output directory (default: build/rust/ffi_gen/)");
+    eprintln!("  --output=<dir>    Output directory (default: build/rust/sffi_gen/)");
     eprintln!("  --dry-run         Print generated code without writing");
     eprintln!("  --verbose         Verbose logging");
     eprintln!("  --lang=<lang>     Filter by language: rust, c");
     eprintln!("  --gen-intern      Generate interpreter_extern Rust module from spec");
     eprintln!("  --gen-all         Generate entire build/rust/ from all full specs");
     eprintln!("  --gen-module      Generate a single module from a full spec file");
-    eprintln!("  --gen-workspace   Generate multi-crate workspace (16 FFI crates)");
+    eprintln!("  --gen-workspace   Generate multi-crate workspace (16 SFFI crates)");
     eprintln!("  --verify          Verify generated code compiles (cargo check)");
     eprintln!("  --clean           Clean build/rust/ and re-setup from scratch");
     eprintln!("  -h, --help        Show this help");

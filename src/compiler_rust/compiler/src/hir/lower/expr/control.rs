@@ -856,7 +856,7 @@ impl Lowerer {
     ///
     /// This is lowered to a nil check: `expr != nil`
     /// For more sophisticated checks (e.g., empty collections), the interpreter
-    /// handles this at runtime through the appropriate FFI calls.
+    /// handles this at runtime through the appropriate SFFI calls.
     pub(super) fn lower_exists_check(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         let expr_hir = self.lower_expr(expr, ctx)?;
 

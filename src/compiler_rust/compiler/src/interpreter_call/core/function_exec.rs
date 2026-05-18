@@ -8,7 +8,7 @@ use crate::interpreter::{exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode, Type};
-use simple_runtime::value::diagram_ffi;
+use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -250,13 +250,13 @@ fn exec_function_inner(
     crate::layout_recorder::record_function_call(&func.name);
 
     // Diagram tracing for call flow profiling
-    if diagram_ffi::is_diagram_enabled() {
+    if diagram_sffi::is_diagram_enabled() {
         if let Some((class_name, _)) = self_ctx {
             // Method call on a class
-            diagram_ffi::trace_method(class_name, &func.name);
+            diagram_sffi::trace_method(class_name, &func.name);
         } else {
             // Free function call
-            diagram_ffi::trace_call(&func.name);
+            diagram_sffi::trace_call(&func.name);
         }
     }
 
@@ -408,8 +408,8 @@ fn exec_function_with_values_inner(
     crate::layout_recorder::record_function_call(&func.name);
 
     // Diagram tracing for call flow profiling
-    if diagram_ffi::is_diagram_enabled() {
-        diagram_ffi::trace_call(&func.name);
+    if diagram_sffi::is_diagram_enabled() {
+        diagram_sffi::trace_call(&func.name);
     }
 
     // Runtime profiler hooks

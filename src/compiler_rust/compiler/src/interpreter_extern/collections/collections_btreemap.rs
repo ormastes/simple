@@ -1,4 +1,4 @@
-//! BTreeMap FFI functions for the interpreter
+//! BTreeMap SFFI functions for the interpreter
 
 use crate::concurrent_providers::ConcurrentBackend;
 use crate::error::CompileError;

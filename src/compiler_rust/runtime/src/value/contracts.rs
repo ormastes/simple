@@ -190,7 +190,7 @@ impl RuntimeContractViolation {
 }
 
 // ============================================================================
-// FFI Functions for Contract Violations
+// SFFI Functions for Contract Violations
 // ============================================================================
 
 /// Create a new contract violation object.
@@ -433,8 +433,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ffi_contract_violation_new() {
-        let func_name = b"ffi_test";
+    fn test_sffi_contract_violation_new() {
+        let func_name = b"sffi_test";
         let message = b"test message";
 
         unsafe {
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ffi_not_a_violation() {
+    fn test_sffi_not_a_violation() {
         let int_val = RuntimeValue::from_int(42);
         assert_eq!(rt_is_contract_violation(int_val), 0);
         assert_eq!(rt_contract_violation_kind(int_val), -1);

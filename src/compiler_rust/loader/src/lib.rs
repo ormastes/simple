@@ -1,4 +1,4 @@
-// Allow warnings for FFI code and incomplete features
+// Allow warnings for SFFI code and incomplete features
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::fn_to_numeric_cast)]
 #![allow(clippy::fn_to_numeric_cast_with_truncation)]

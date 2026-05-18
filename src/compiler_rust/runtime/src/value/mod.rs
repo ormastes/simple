@@ -20,31 +20,31 @@
 mod actors;
 pub mod aes;
 mod args;
-pub mod bdd_ffi;
+pub mod bdd_sffi;
 mod async_gen;
 mod byte_kernels;
 mod channels;
-pub mod cli_ffi;
-pub mod cargo_ffi;
-// time_ffi and fs_ffi removed - duplicates of ffi/file_io and ffi/env_process
+pub mod cli_sffi;
+pub mod cargo_sffi;
+// time_sffi and fs_ffi removed - duplicates of ffi/file_io and ffi/env_process
 mod collections;
-pub mod log_ffi;
+pub mod log_sffi;
 mod contracts;
 mod core;
-pub mod diagram_ffi;
-pub mod profiler_ffi;
+pub mod diagram_sffi;
+pub mod profiler_sffi;
 mod dict;
 pub mod db_accel_bitmap_ops;
-// FFI object-based system
-pub mod ffi_example;
-pub mod ffi_macros;
-pub mod ffi_object;
-pub mod ffi_registry;
-pub mod sdn_ffi;
+// SFFI object-based system
+pub mod sffi_example;
+pub mod sffi_macros;
+pub mod sffi_object;
+pub mod sffi_registry;
+pub mod sdn_sffi;
 // High-performance collections module (using Rust std::collections)
 pub mod hpcollections;
 mod doctest_io;
-pub mod ffi;
+pub mod sffi;
 mod file_io;
 pub mod gpu;
 pub mod gpu_backend;
@@ -63,7 +63,7 @@ mod pty;
 pub mod serial;
 // Always compile ratatui_tui module (it has stubs when feature is disabled)
 pub mod ratatui_tui;
-pub mod screenshot_ffi;
+pub mod screenshot_sffi;
 pub mod simd;
 pub mod simd_aes_ops;
 pub mod simd_byte_ops;
@@ -96,33 +96,33 @@ pub use aes::{
 // Re-export object types
 pub use objects::{RuntimeClosure, RuntimeEnum, RuntimeObject, RuntimeShared, RuntimeUnique, RuntimeWeak};
 
-// Re-export FFI object types
-pub use ffi_object::{
-    FfiMethodEntry, FfiVtable, RuntimeFfiObject, fnv1a_hash, fnv1a_hash_str, method_flags, rt_ffi_object_call_method,
-    rt_ffi_object_free, rt_ffi_object_handle, rt_ffi_object_has_method, rt_ffi_object_is_ffi, rt_ffi_object_new,
-    rt_ffi_object_type_id, rt_ffi_object_type_name, rt_ffi_object_vtable,
+// Re-export SFFI object types
+pub use sffi_object::{
+    FfiMethodEntry, FfiVtable, RuntimeFfiObject, fnv1a_hash, fnv1a_hash_str, method_flags, rt_sffi_object_call_method,
+    rt_sffi_object_free, rt_sffi_object_handle, rt_sffi_object_has_method, rt_sffi_object_is_ffi, rt_sffi_object_new,
+    rt_sffi_object_type_id, rt_sffi_object_type_name, rt_sffi_object_vtable,
 };
 
-// Re-export FFI registry types and functions
-pub use ffi_registry::{
-    FfiObjectStorage, FfiTypeMetadata, FfiTypeRegistry, get_registry, rt_ffi_call_method, rt_ffi_clear_registry,
-    rt_ffi_clone, rt_ffi_drop, rt_ffi_has_method, rt_ffi_is_type, rt_ffi_new, rt_ffi_type_id, rt_ffi_type_name,
-    rt_ffi_type_register,
+// Re-export SFFI registry types and functions
+pub use sffi_registry::{
+    FfiObjectStorage, FfiTypeMetadata, FfiTypeRegistry, get_registry, rt_sffi_call_method, rt_sffi_clear_registry,
+    rt_sffi_clone, rt_sffi_drop, rt_sffi_has_method, rt_sffi_is_type, rt_sffi_new, rt_sffi_type_id, rt_sffi_type_name,
+    rt_sffi_type_register,
 };
 
-// Re-export FFI macro helpers and traits
-pub use ffi_macros::{
+// Re-export SFFI macro helpers and traits
+pub use sffi_macros::{
     FfiError, FfiResult, FromRuntimeValue, IntoRuntimeValue, get_arg, get_arg_as, get_bool_arg, get_float_arg,
     get_int_arg, get_string_arg, sort_method_entries,
 };
 
-// Re-export FFI example (Counter) for demonstration and testing
-pub use ffi_example::{Counter, counter_new_ffi, counter_register_type, counter_vtable};
+// Re-export SFFI example (Counter) for demonstration and testing
+pub use sffi_example::{Counter, counter_new_sffi, counter_register_type, counter_vtable};
 
 // Re-export channel types
 pub use channels::RuntimeChannel;
 
-// Re-export collection FFI functions
+// Re-export collection SFFI functions
 pub use collections::{
     rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_data_ptr_u8, rt_array_extend_i64,
     rt_array_first, rt_array_get, rt_array_get_text, rt_array_header_ptr, rt_array_len, rt_array_new,
@@ -147,12 +147,12 @@ pub use utf8_kernels::{
     rt_utf8_validate,
 };
 
-// Re-export dict FFI functions
+// Re-export dict SFFI functions
 pub use dict::{
     rt_dict_clear, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_remove, rt_dict_set, rt_dict_values,
 };
 
-// Re-export high-performance collection FFI functions (Rust std::collections)
+// Re-export high-performance collection SFFI functions (Rust std::collections)
 pub use hpcollections::{
     // HashMap
     rt_hashmap_clear,
@@ -214,35 +214,35 @@ pub use hpcollections::{
     rt_btreeset_union,
 };
 
-// Re-export object FFI functions
+// Re-export object SFFI functions
 pub use objects::{
     rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture, rt_enum_check_discriminant,
     rt_enum_discriminant, rt_enum_new, rt_enum_payload, rt_option_map, rt_object_class_id, rt_object_field_count,
     rt_object_field_get, rt_object_field_set, rt_object_new, rt_is_some, rt_unwrap_or_self,
 };
 
-// Re-export unique pointer FFI functions
+// Re-export unique pointer SFFI functions
 pub use objects::{rt_unique_free, rt_unique_get, rt_unique_needs_trace, rt_unique_new, rt_unique_set};
 
-// Re-export shared pointer FFI functions
+// Re-export shared pointer SFFI functions
 pub use objects::{
     rt_shared_clone, rt_shared_downgrade, rt_shared_get, rt_shared_needs_trace, rt_shared_new, rt_shared_ref_count,
     rt_shared_release,
 };
 
-// Re-export weak pointer FFI functions
+// Re-export weak pointer SFFI functions
 pub use objects::{rt_weak_free, rt_weak_is_valid, rt_weak_new, rt_weak_upgrade};
 
-// Re-export actor FFI functions
+// Re-export actor SFFI functions
 pub use actors::{rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn, rt_wait};
 
-// Re-export channel FFI functions
+// Re-export channel SFFI functions
 pub use channels::{
     rt_channel_close, rt_channel_free, rt_channel_id, rt_channel_is_closed, rt_channel_new, rt_channel_recv,
     rt_channel_recv_timeout, rt_channel_send, rt_channel_try_recv,
 };
 
-// Re-export synchronization primitives FFI functions
+// Re-export synchronization primitives SFFI functions
 pub use sync::{
     // Atomic
     rt_atomic_compare_exchange,
@@ -288,7 +288,7 @@ pub use sync::{
 // Re-export synchronization types
 pub use sync::{RuntimeAtomic, RuntimeBarrier, RuntimeMutex, RuntimeRwLock, RuntimeSemaphore};
 
-// Re-export async/generator FFI functions
+// Re-export async/generator SFFI functions
 pub use async_gen::{
     rt_async_get_ctx, rt_async_get_state, rt_async_mark_done, rt_async_set_state, rt_future_all, rt_future_await,
     rt_future_get_result, rt_future_is_ready, rt_future_new, rt_future_race, rt_future_reject, rt_future_resolve,
@@ -296,7 +296,7 @@ pub use async_gen::{
     rt_generator_next, rt_generator_set_state, rt_generator_store_slot,
 };
 
-// Re-export core FFI functions
+// Re-export core SFFI functions
 pub use ffi::{
     rt_alloc, rt_free, rt_function_not_found, rt_interp_call, rt_interp_eval, rt_memcpy, rt_memset,
     rt_method_not_found, rt_ptr_read_i64, rt_ptr_to_value, rt_ptr_write_i32, rt_ptr_write_i64, rt_ptr_write_u8,
@@ -321,24 +321,24 @@ pub use ffi::{
 // Re-export stdin mock functions (for testing)
 pub use ffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_stdin_line, rt_set_stdin};
 
-// Re-export print FFI functions
+// Re-export print SFFI functions
 pub use ffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
     rt_println_value, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush, rt_stdout_write,
     rt_value_format_string, rt_value_to_string,
 };
 
-// Re-export log FFI functions
-pub use log_ffi::{
+// Re-export log SFFI functions
+pub use log_sffi::{
     rt_log_clear_scope_levels, rt_log_debug, rt_log_emit, rt_log_emit_rv, rt_log_error, rt_log_fatal,
     rt_log_get_global_level, rt_log_get_scope_level, rt_log_info, rt_log_is_enabled, rt_log_level_name,
     rt_log_set_global_level, rt_log_set_scope_level, rt_log_trace, rt_log_verbose, rt_log_warn,
 };
 
-// Re-export time FFI functions
+// Re-export time SFFI functions
 pub use ffi::rt_time_now_seconds;
 
-// Re-export environment & process FFI functions
+// Re-export environment & process SFFI functions
 pub use ffi::{
     rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_get_i64,
     rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_path_probe,
@@ -347,20 +347,20 @@ pub use ffi::{
     rt_term_get_size,
 };
 
-// Re-export runtime configuration FFI functions
+// Re-export runtime configuration SFFI functions
 pub use ffi::{rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_set_debug_mode, rt_set_macro_trace};
 
-// Re-export CLI FFI functions
-pub use cli_ffi::{
+// Re-export CLI SFFI functions
+pub use cli_sffi::{
     rt_cli_dispatch_rust, rt_cli_exit, rt_cli_file_exists, rt_cli_get_args, rt_cli_handle_compile,
     rt_cli_handle_diagram, rt_cli_handle_linkers, rt_cli_handle_run, rt_cli_handle_web, rt_cli_print_help,
-    rt_cli_print_version, rt_cli_read_file, rt_cli_run_check, rt_cli_run_code, rt_cli_run_ffi_gen, rt_cli_run_file,
+    rt_cli_print_version, rt_cli_read_file, rt_cli_run_check, rt_cli_run_code, rt_cli_run_sffi_gen, rt_cli_run_file,
     rt_cli_run_fix, rt_cli_run_fmt, rt_cli_run_gen_lean, rt_cli_run_lex, rt_cli_run_lint, rt_cli_run_migrate,
     rt_cli_run_query, rt_cli_run_repl, rt_cli_run_tests, rt_cli_run_verify, rt_cli_version, rt_cli_watch_file,
     rt_compile_to_llvm_ir, rt_compile_to_native,
 };
 
-// Re-export file I/O FFI functions
+// Re-export file I/O SFFI functions
 pub use ffi::{
     // Metadata
     rt_file_exists,
@@ -427,7 +427,7 @@ pub use ffi::{
     rt_path_join,
 };
 
-// Re-export hash FFI functions
+// Re-export hash SFFI functions
 pub use ffi::{
     rt_sha1_finish, rt_sha1_finish_base64, rt_sha1_finish_bytes, rt_sha1_free, rt_sha1_new, rt_sha1_reset,
     rt_sha1_write, rt_sha256_finish, rt_sha256_finish_bytes, rt_sha256_free, rt_sha256_new, rt_sha256_reset,
@@ -435,7 +435,7 @@ pub use ffi::{
     rt_xxhash_write,
 };
 
-// Re-export atomic operations FFI functions
+// Re-export atomic operations SFFI functions
 pub use ffi::{
     rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new, rt_atomic_bool_store, rt_atomic_bool_swap,
     rt_atomic_flag_clear, rt_atomic_flag_free, rt_atomic_flag_new, rt_atomic_flag_test_and_set,
@@ -444,20 +444,20 @@ pub use ffi::{
     rt_atomic_int_store, rt_atomic_int_swap,
 };
 
-// Re-export doctest I/O FFI functions
+// Re-export doctest I/O SFFI functions
 pub use doctest_io::{
     doctest_is_dir, doctest_is_file, doctest_path_contains, doctest_path_exists, doctest_path_has_extension,
     doctest_read_file, doctest_walk_directory,
 };
 
-// Re-export contract violation types and FFI functions (CTR-050-054)
+// Re-export contract violation types and SFFI functions (CTR-050-054)
 pub use contracts::{
     rt_contract_violation_free, rt_contract_violation_func_name, rt_contract_violation_kind,
     rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation, ContractViolationKind,
     RuntimeContractViolation,
 };
 
-// Re-export GPU runtime FFI functions
+// Re-export GPU runtime SFFI functions
 pub use gpu::{
     execute_kernel_1d,
     execute_kernel_3d,
@@ -504,7 +504,7 @@ pub use gpu::{
     GpuWorkItemState,
 };
 
-// Re-export Vulkan GPU FFI functions
+// Re-export Vulkan GPU SFFI functions
 #[cfg(feature = "vulkan")]
 pub use gpu_vulkan::{
     // Device management
@@ -748,7 +748,7 @@ pub use torch::{
     TorchFfiError,
 };
 
-// Re-export Ratatui TUI FFI functions
+// Re-export Ratatui TUI SFFI functions
 #[cfg(feature = "ratatui-tui")]
 pub use ratatui_tui::{
     // Cleanup
@@ -771,7 +771,7 @@ pub use ratatui_tui::{
     ratatui_textbuffer_set_text,
 };
 
-// Re-export networking FFI functions
+// Re-export networking SFFI functions
 pub use net::{
     native_http_response_free,
     // HTTP functions
@@ -879,7 +879,7 @@ pub use net::{
     NetError,
 };
 
-// Re-export file I/O FFI functions - Mold-inspired optimizations
+// Re-export file I/O SFFI functions - Mold-inspired optimizations
 pub use file_io::{
     async_yield,
     // Async file loading (#1765-#1769)
@@ -940,29 +940,29 @@ pub use numeric_kernels::{
     rt_numeric_mul_f32, rt_numeric_mul_f64, rt_numeric_sum_f32, rt_numeric_sum_f64, rt_numeric_xor_sum_u64,
 };
 
-// Re-export Phase 1 SIMD int bitwise / shift / arithmetic FFI symbols.
+// Re-export Phase 1 SIMD int bitwise / shift / arithmetic SFFI symbols.
 pub use simd_int_ops::{
     rt_simd_add_i32x4, rt_simd_add_i32x8, rt_simd_and_i32x4, rt_simd_and_i32x8, rt_simd_mul_i32x4, rt_simd_mul_i32x8,
     rt_simd_or_i32x4, rt_simd_or_i32x8, rt_simd_shl_i32x4, rt_simd_shl_i32x8, rt_simd_shr_i32x4, rt_simd_shr_i32x8,
     rt_simd_sub_i32x4, rt_simd_sub_i32x8, rt_simd_xor_i32x4, rt_simd_xor_i32x8,
 };
 
-// Re-export Phase 2 (seed) SIMD byte FFI symbol.
+// Re-export Phase 2 (seed) SIMD byte SFFI symbol.
 pub use simd_byte_ops::rt_simd_add_u8x16;
 
-// Re-export Phase 2 SIMD AES round FFI symbols.
+// Re-export Phase 2 SIMD AES round SFFI symbols.
 pub use simd_aes_ops::{rt_simd_aes_round_last_u8x16, rt_simd_aes_round_u8x16};
 
-// Re-export Phase 3 SIMD u64x2 + PCLMUL FFI symbols.
+// Re-export Phase 3 SIMD u64x2 + PCLMUL SFFI symbols.
 pub use simd_clmul_ops::{rt_simd_clmul_hi_u64, rt_simd_clmul_lo_u64, rt_simd_xor_u64x2};
 
-// Re-export regex FFI functions
+// Re-export regex SFFI functions
 pub use ffi::{
-    ffi_regex_captures, ffi_regex_find, ffi_regex_find_all, ffi_regex_is_match, ffi_regex_replace,
-    ffi_regex_replace_all, ffi_regex_split, ffi_regex_split_n,
+    sffi_regex_captures, sffi_regex_find, sffi_regex_find_all, sffi_regex_is_match, sffi_regex_replace,
+    sffi_regex_replace_all, sffi_regex_split, sffi_regex_split_n,
 };
 
-// Re-export sandbox FFI functions
+// Re-export sandbox SFFI functions
 pub use ffi::sandbox::{
     rt_sandbox_add_allowed_domain, rt_sandbox_add_blocked_domain, rt_sandbox_add_read_path, rt_sandbox_add_write_path,
     rt_sandbox_apply, rt_sandbox_cleanup, rt_sandbox_disable_network, rt_sandbox_get_cpu_time, rt_sandbox_get_fs_mode,
@@ -972,24 +972,24 @@ pub use ffi::sandbox::{
     rt_sandbox_set_network_blocklist, rt_sandbox_set_thread_limit,
 };
 
-// Re-export diagram FFI functions (for spec framework)
-pub use diagram_ffi::{
+// Re-export diagram SFFI functions (for spec framework)
+pub use diagram_sffi::{
     rt_diagram_clear, rt_diagram_disable, rt_diagram_enable, rt_diagram_free_string, rt_diagram_generate_arch,
     rt_diagram_generate_class, rt_diagram_generate_sequence, rt_diagram_is_enabled, rt_diagram_mark_architectural,
     rt_diagram_trace_method, rt_diagram_trace_method_with_args, rt_diagram_trace_return,
 };
 
-// Re-export screenshot FFI functions (for spec framework)
-pub use screenshot_ffi::{
+// Re-export screenshot SFFI functions (for spec framework)
+pub use screenshot_sffi::{
     rt_screenshot_capture_after_terminal, rt_screenshot_capture_before_terminal, rt_screenshot_capture_count,
     rt_screenshot_clear_captures, rt_screenshot_clear_context, rt_screenshot_disable, rt_screenshot_enable,
     rt_screenshot_exists, rt_screenshot_free_string, rt_screenshot_get_output_dir, rt_screenshot_get_path,
     rt_screenshot_is_enabled, rt_screenshot_is_refresh, rt_screenshot_set_context, rt_screenshot_set_output_dir,
     rt_screenshot_set_refresh,
 };
-pub use screenshot_ffi::{CaptureType, ImageFormat};
+pub use screenshot_sffi::{CaptureType, ImageFormat};
 
-// Re-export MonoioFuture types and FFI functions
+// Re-export MonoioFuture types and SFFI functions
 #[cfg(feature = "monoio-direct")]
 pub use monoio_future::{
     rt_monoio_future_free, rt_monoio_future_get_async_state, rt_monoio_future_get_ctx, rt_monoio_future_get_io_handle,
@@ -999,8 +999,8 @@ pub use monoio_future::{
     FUTURE_STATE_ERROR, FUTURE_STATE_PENDING, FUTURE_STATE_READY, PENDING_MARKER,
 };
 
-// Re-export BDD FFI functions (for native/SMF test execution)
-pub use bdd_ffi::{
+// Re-export BDD SFFI functions (for native/SMF test execution)
+pub use bdd_sffi::{
     rt_bdd_after_each, rt_bdd_before_each, rt_bdd_clear_state, rt_bdd_describe_end, rt_bdd_describe_start,
     rt_bdd_expect_eq, rt_bdd_expect_fail, rt_bdd_expect_truthy, rt_bdd_format_results, rt_bdd_has_failure,
     rt_bdd_it_end, rt_bdd_it_start, rt_bdd_snapshot_results,
@@ -1080,21 +1080,21 @@ pub fn clear_all_runtime_registries() {
     // Clear global variables
     clear_global_variables();
 
-    // Clear FFI type registry
-    rt_ffi_clear_registry();
+    // Clear SFFI type registry
+    rt_sffi_clear_registry();
 
     // Clear ratatui registry (if enabled)
     #[cfg(feature = "ratatui-tui")]
     ratatui_tui::clear_ratatui_registry();
 
     // Clear diagram state
-    diagram_ffi::clear_diagram_data();
+    diagram_sffi::clear_diagram_data();
 
     // Clear screenshot captures
-    screenshot_ffi::rt_screenshot_clear_captures();
+    screenshot_sffi::rt_screenshot_clear_captures();
 
     // Clear log state
-    log_ffi::clear_log_state();
+    log_sffi::clear_log_state();
 }
 
 // ============================================================================

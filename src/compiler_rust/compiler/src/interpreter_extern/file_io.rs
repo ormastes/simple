@@ -1,4 +1,4 @@
-//! File I/O FFI functions for the interpreter
+//! File I/O SFFI functions for the interpreter
 //!
 //! This module provides interpreter implementations for the rt_* file I/O functions
 //! that are declared in simple/std_lib/src/infra/file_io.spl.

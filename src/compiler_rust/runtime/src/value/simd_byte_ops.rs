@@ -23,7 +23,7 @@
 //!   the SIMD bit pattern and carry does NOT leak across lane boundaries.
 
 // ---------------------------------------------------------------------------
-// Lane-level kernel (the shared core for both compiled-mode FFI and the
+// Lane-level kernel (the shared core for both compiled-mode SFFI and the
 // interpreter-extern handler).
 // ---------------------------------------------------------------------------
 

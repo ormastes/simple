@@ -2,7 +2,7 @@
 //!
 //! Provides breakpoint management, step control, call stack tracking,
 //! and variable inspection. Used by both the interpreter (via hooks in
-//! `exec_node`) and by FFI functions exposed to Simple-side debug tooling.
+//! `exec_node`) and by SFFI functions exposed to Simple-side debug tooling.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -221,7 +221,7 @@ fn rv_array(items: Vec<RuntimeValue>) -> RuntimeValue {
 }
 
 // ---------------------------------------------------------------------------
-// FFI functions
+// SFFI functions
 // ---------------------------------------------------------------------------
 
 #[no_mangle]

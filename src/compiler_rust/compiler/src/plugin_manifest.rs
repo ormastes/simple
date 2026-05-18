@@ -9,7 +9,7 @@
 //! plugins:
 //!     -
 //!         name: regex
-//!         library: /abs/path/libsimple_regex_ffi.so
+//!         library: /abs/path/libsimple_regex_sffi.so
 //!         version: "0.1.0"
 //!         functions: [rt_regex_new, rt_regex_destroy]
 //! ```
@@ -492,7 +492,7 @@ mod tests {
 plugins:
     -
         name: regex
-        library: /tmp/libsimple_regex_ffi.so
+        library: /tmp/libsimple_regex_sffi.so
         version: "0.1.0"
         functions: [rt_regex_new, rt_regex_destroy]
 "#,
@@ -504,7 +504,7 @@ plugins:
         assert!(manifest.symbols.contains("rt_regex_new"));
         assert_eq!(
             manifest.symbol_to_library.get("rt_regex_destroy"),
-            Some(&"/tmp/libsimple_regex_ffi.so".to_string())
+            Some(&"/tmp/libsimple_regex_sffi.so".to_string())
         );
     }
 
@@ -518,11 +518,11 @@ plugins:
 plugins:
     -
         name: regex
-        library: /tmp/libsimple_regex_ffi.so
+        library: /tmp/libsimple_regex_sffi.so
         functions: [rt_regex_new]
     -
         name: http
-        library: /tmp/libsimple_http_ffi.so
+        library: /tmp/libsimple_http_sffi.so
         functions: [rt_regex_new]
 "#,
         )

@@ -349,7 +349,7 @@ impl SymbolUsageAnalyzer {
         }
     }
 
-    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
+    #[allow(dead_code)] // reason: reachable via SFFI or future entry point; not yet wired
     fn is_builtin_type(&self, name: &str) -> bool {
         matches!(
             name,

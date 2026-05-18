@@ -700,7 +700,7 @@ fn test_parse_attribute_before_extern_fn() {
     let source = format!(
         r#"
 {}
-extern fn some_ffi_function() -> i32
+extern fn some_sffi_function() -> i32
 "#,
         format!("{}{}{}({})]", "#", "[", "doc", "\"ffi boundary\"")
     );
@@ -753,9 +753,9 @@ fn test_parse_multiple_attributes_before_extern_fn() {
         r#"
 {}
 {}
-extern fn another_ffi() -> i64
+extern fn another_sffi() -> i64
 "#,
-        format!("{}{}{}({})]", "#", "[", "doc", "\"FFI function\""),
+        format!("{}{}{}({})]", "#", "[", "doc", "\"SFFI function\""),
         format!("{}{}{}({})]", "#", "[", "cfg", "hosted")
     );
     let result = parse(source);

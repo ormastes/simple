@@ -1,6 +1,6 @@
 //! High-performance collections using Rust std::collections.
 //!
-//! This module provides FFI bindings to Rust's standard library collections,
+//! This module provides SFFI bindings to Rust's standard library collections,
 //! offering significantly better performance than the basic RuntimeDict.
 //!
 //! - HashMap: O(1) average-case operations vs O(n) for RuntimeDict
@@ -15,7 +15,7 @@ pub mod btreeset;
 pub mod hashmap;
 pub mod hashset;
 
-// Re-export all FFI functions
+// Re-export all SFFI functions
 pub use btreemap::*;
 pub use btreeset::*;
 pub use hashmap::*;

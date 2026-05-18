@@ -289,7 +289,7 @@ impl GcAllocator for GcRuntime {
     }
 
     fn collect(&self) {
-        self.collect("ffi");
+        self.collect("sffi");
     }
 
     fn memory_usage(&self) -> usize {

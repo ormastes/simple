@@ -1,9 +1,9 @@
 //! Interpreter-side handlers for signing externs.
 //!
 //! These mirror `src/compiler_rust/runtime/src/value/ffi/signature.rs` (the
-//! native-code FFI) but return the interpreter's `Value::Array` directly,
+//! native-code SFFI) but return the interpreter's `Value::Array` directly,
 //! so `bin/simple test` can execute `it` blocks that call the sign/verify
-//! paths without going through `dynamic_ffi` (which marshals all extern
+//! paths without going through `dynamic_sffi` (which marshals all extern
 //! returns as `i64` and therefore can't round-trip `[u8]`).
 //!
 //! # Symbols
@@ -310,7 +310,7 @@ pub fn rt_ed25519_sign(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 // ---------------------------------------------------------------------------
-// ECDSA P-256 sign / verify (fixed-width r‖s on the FFI boundary)
+// ECDSA P-256 sign / verify (fixed-width r‖s on the SFFI boundary)
 // ---------------------------------------------------------------------------
 
 /// `rt_ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> [u8]` (64-byte r‖s)

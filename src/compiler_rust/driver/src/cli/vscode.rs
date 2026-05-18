@@ -306,7 +306,7 @@ async function loadWasm() {{
     const wasmPath = path.join(__dirname, '{}.wasm');
     const wasmBuffer = fs.readFileSync(wasmPath);
 
-    // VSCode Extension API FFI bridge
+    // VSCode Extension API SFFI bridge
     const imports = {{
         env: {{
             // Commands API

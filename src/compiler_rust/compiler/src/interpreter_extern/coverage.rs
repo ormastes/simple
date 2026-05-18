@@ -1,4 +1,4 @@
-//! Coverage FFI functions for the Simple language interpreter
+//! Coverage SFFI functions for the Simple language interpreter
 //!
 //! These functions allow Simple code to call into coverage functionality
 //! from src/app/coverage/main.spl
@@ -526,7 +526,7 @@ pub fn coverage_summary(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 // ============================================================================
-// FFI functions for coverage.spl (rt_coverage_* interface)
+// SFFI functions for coverage.spl (rt_coverage_* interface)
 // ============================================================================
 
 /// Check if coverage is enabled (always returns true in interpreter)

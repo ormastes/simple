@@ -1,7 +1,7 @@
 //! WebAssembly Runtime for Simple Language
 //!
 //! This crate provides WASM execution capabilities using Wasmer runtime.
-//! It allows executing compiled WASM modules with WASI support and FFI
+//! It allows executing compiled WASM modules with WASI support and SFFI
 //! bridges to Simple's RuntimeValue system.
 //!
 //! # Architecture

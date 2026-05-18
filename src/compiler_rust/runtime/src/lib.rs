@@ -1,4 +1,4 @@
-// Allow warnings for incomplete features and FFI code
+// Allow warnings for incomplete features and SFFI code
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -13,7 +13,7 @@ pub mod hir_core;
 pub mod loader;
 pub mod aop;
 pub mod async_runtime;
-pub mod async_driver_ffi;
+pub mod async_driver_sffi;
 pub mod bytecode;
 #[cfg(feature = "packaging-compression")]
 pub mod compress;
@@ -153,7 +153,7 @@ pub use executor::{
     pending_count,
     poll_all,
     poll_one,
-    // Executor FFI functions
+    // Executor SFFI functions
     rt_executor_get_mode,
     rt_executor_is_manual,
     rt_executor_pending_count,
@@ -170,7 +170,7 @@ pub use executor::{
     rt_thread_join,
     rt_thread_join_limited,
     rt_thread_sleep,
-    // Isolated thread FFI functions
+    // Isolated thread SFFI functions
     rt_thread_free_limited,
     rt_thread_get_violation_type,
     rt_thread_get_violation_value,
@@ -222,16 +222,16 @@ pub use value::{
     RuntimeShared, RuntimeString, RuntimeTuple, RuntimeUnique, RuntimeValue, RuntimeWeak,
 };
 
-// Re-export async runtime scheduler FFI functions
+// Re-export async runtime scheduler SFFI functions
 pub use async_runtime::{
     rt_async_poll_tasks, rt_async_run_until_complete, rt_async_schedule_await, rt_async_spawn, rt_async_spawn_task,
     AsyncScheduler,
 };
 
-// Re-export AOP runtime FFI functions
+// Re-export AOP runtime SFFI functions
 pub use aop::{rt_aop_invoke_around, rt_aop_proceed, AopAroundFn, AopTargetFn, ProceedContext};
 
-// Re-export runtime FFI functions for codegen
+// Re-export runtime SFFI functions for codegen
 pub use value::{
     // Doctest I/O operations
     doctest_is_dir,
@@ -410,7 +410,7 @@ pub use value::{
 pub use value::RuntimeDict;
 pub use value::rt_raw_u64_to_string;
 
-// Re-export network FFI functions used by compiled host SMFs.
+// Re-export network SFFI functions used by compiled host SMFs.
 pub use value::{
     native_tcp_accept, native_tcp_bind, native_tcp_close, native_tcp_connect, native_tcp_connect_timeout,
     native_tcp_flush, native_tcp_get_nodelay, native_tcp_peek, native_tcp_read, native_tcp_set_backlog,
@@ -432,14 +432,14 @@ pub use value::{
     rt_tls_server_write, rt_tls_server_write_bytes, rt_tls_verify_cert,
 };
 
-// Re-export contract violation types and FFI functions (CTR-050-054)
+// Re-export contract violation types and SFFI functions (CTR-050-054)
 pub use value::{
     rt_contract_violation_free, rt_contract_violation_func_name, rt_contract_violation_kind,
     rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation, ContractViolationKind,
     RuntimeContractViolation,
 };
 
-// Re-export GPU runtime FFI functions
+// Re-export GPU runtime SFFI functions
 pub use value::{
     execute_kernel_1d,
     execute_kernel_3d,
@@ -486,7 +486,7 @@ pub use value::{
     GpuWorkItemState,
 };
 
-// Re-export CUDA runtime types and FFI functions
+// Re-export CUDA runtime types and SFFI functions
 pub use cuda_runtime::{
     get_device_count, rt_cuda_available, rt_cuda_device_count, rt_cuda_init, CudaDevice, CudaDevicePtr, CudaError,
     CudaKernel, CudaModule, CudaResult,
@@ -510,7 +510,7 @@ pub use vulkan::{
     VulkanResult,
 };
 
-// Re-export Vulkan FFI functions
+// Re-export Vulkan SFFI functions
 #[cfg(feature = "vulkan")]
 pub use value::{
     // Device management
@@ -532,7 +532,7 @@ pub use value::{
     VulkanFfiError,
 };
 
-// Re-export Ratatui TUI FFI functions
+// Re-export Ratatui TUI SFFI functions
 #[cfg(feature = "ratatui-tui")]
 pub use value::{
     // Cleanup
@@ -555,7 +555,7 @@ pub use value::{
     ratatui_textbuffer_set_text,
 };
 
-// Re-export CPU parallel runtime FFI functions (Rayon backend)
+// Re-export CPU parallel runtime SFFI functions (Rayon backend)
 pub use parallel::{
     // Atomic operations
     rt_par_atomic_add_i64,
@@ -585,13 +585,13 @@ pub use parallel::{
     KernelFn,
 };
 
-// Re-export coverage instrumentation types and FFI functions
+// Re-export coverage instrumentation types and SFFI functions
 pub use coverage::{
     rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_dump_sdn,
     rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize, rt_coverage_path_probe, CoverageData,
 };
 
-// Re-export debug FFI functions
+// Re-export debug SFFI functions
 pub use debug::{
     rt_debug_add_breakpoint, rt_debug_continue, rt_debug_current_file, rt_debug_current_line, rt_debug_is_active,
     rt_debug_list_breakpoints, rt_debug_locals, rt_debug_pause, rt_debug_remove_all_breakpoints,
@@ -599,7 +599,7 @@ pub use debug::{
     rt_debug_stack_trace, DebugFrame, DebugState, StepMode,
 };
 
-// Re-export concurrent collections types and FFI functions (#1108-#1112)
+// Re-export concurrent collections types and SFFI functions (#1108-#1112)
 pub use concurrent::{
     simple_concurrent_map_clear,
     simple_concurrent_map_contains_key,
@@ -608,27 +608,27 @@ pub use concurrent::{
     simple_concurrent_map_insert,
     simple_concurrent_map_is_empty,
     simple_concurrent_map_len,
-    // ConcurrentMap FFI
+    // ConcurrentMap SFFI
     simple_concurrent_map_new,
     simple_concurrent_map_remove,
     simple_concurrent_map_with_capacity,
     simple_concurrent_queue_free,
     simple_concurrent_queue_is_empty,
     simple_concurrent_queue_len,
-    // ConcurrentQueue FFI
+    // ConcurrentQueue SFFI
     simple_concurrent_queue_new,
     simple_concurrent_queue_push,
     simple_concurrent_queue_try_pop,
     simple_concurrent_stack_free,
     simple_concurrent_stack_is_empty,
     simple_concurrent_stack_len,
-    // ConcurrentStack FFI
+    // ConcurrentStack SFFI
     simple_concurrent_stack_new,
     simple_concurrent_stack_push,
     simple_concurrent_stack_try_pop,
     simple_gc_barrier_end_collection,
     simple_gc_barrier_epoch,
-    // Write barrier FFI
+    // Write barrier SFFI
     simple_gc_barrier_start_collection,
     ConcurrentMap,
     // Types
@@ -709,7 +709,7 @@ pub use monoio_udp_v2::{
     monoio_udp_set_multicast_ttl,
 };
 
-// Re-export monoio-direct types and FFI functions (zero-overhead async I/O)
+// Re-export monoio-direct types and SFFI functions (zero-overhead async I/O)
 #[cfg(feature = "monoio-direct")]
 pub use monoio_buffer::{OwnedBuf, SimpleBuf};
 
@@ -776,11 +776,11 @@ pub use value::{
     FUTURE_STATE_ERROR, FUTURE_STATE_PENDING, FUTURE_STATE_READY, PENDING_MARKER,
 };
 
-// Re-export async executor types and FFI functions
+// Re-export async executor types and SFFI functions
 #[cfg(feature = "monoio-direct")]
 pub use monoio_executor::{
     with_executor,
-    // FFI functions
+    // SFFI functions
     rt_monoio_async_init,
     rt_monoio_async_pending_count,
     rt_monoio_async_poll_all,
@@ -816,5 +816,5 @@ mod tests {
     mod no_gc_allocator;
 
     #[cfg(feature = "vulkan")]
-    mod vulkan_ffi_tests;
+    mod vulkan_sffi_tests;
 }

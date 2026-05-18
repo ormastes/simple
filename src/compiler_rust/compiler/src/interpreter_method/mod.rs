@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 // Thread-local storage for pinned strings used by the "ptr" method on strings.
-// Strings are kept alive here so that raw pointers returned to FFI/codegen remain valid.
+// Strings are kept alive here so that raw pointers returned to SFFI/codegen remain valid.
 // Call `clear_pinned_strings()` between test runs or when the interpreter resets to reclaim memory.
 thread_local! {
     static PINNED_STRINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };

@@ -1,4 +1,4 @@
-//! QMP Unix-socket FFI for the interpreter
+//! QMP Unix-socket SFFI for the interpreter
 //!
 //! Provides interpreter-mode implementations of the 4 rt_* primitives declared
 //! in src/runtime/platform/unix_common.h and used by qmp_client.spl.

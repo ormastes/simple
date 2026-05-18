@@ -1,11 +1,11 @@
-// spl_fonts — Phase 1 font rasterization FFI backed by fontdue.
+// spl_fonts — Phase 1 font rasterization SFFI backed by fontdue.
 //
 // C ABI entry points, all i64-in / i64-out, using a single global slot
 // for the loaded font and a single global slot for the most recently
 // rasterized glyph bitmap. This is deliberately minimal — Phase 2 will grow a
 // proper handle table.
 
-use std::ffi::CString;
+use std::sffi::CString;
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 use std::sync::Mutex;
 

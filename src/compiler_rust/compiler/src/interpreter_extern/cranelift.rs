@@ -1,4 +1,4 @@
-//! Cranelift FFI functions for the Simple language interpreter
+//! Cranelift SFFI functions for the Simple language interpreter
 //!
 //! These functions allow Simple code to call Cranelift code generation functions.
 //! This enables the self-hosting compiler to generate native code.
@@ -7,10 +7,10 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_runtime::RuntimeValue;
 
-// Import the actual Cranelift FFI implementations
-use crate::codegen::cranelift_ffi;
+// Import the actual Cranelift SFFI implementations
+use crate::codegen::cranelift_sffi;
 
-/// Helper to convert Value::Str to RuntimeValue for FFI
+/// Helper to convert Value::Str to RuntimeValue for SFFI
 fn value_to_runtime_string(val: &Value) -> RuntimeValue {
     match val {
         Value::Str(s) => simple_runtime::value::rt_string_new(s.as_ptr(), s.len() as u64),
@@ -73,7 +73,7 @@ pub fn rt_cranelift_module_new(args: &[Value]) -> Result<Value, CompileError> {
     }
     let name = value_to_runtime_string(&args[0]);
     let target = value_to_i64(&args[1]);
-    let handle = cranelift_ffi::rt_cranelift_module_new(name, target);
+    let handle = cranelift_sffi::rt_cranelift_module_new(name, target);
     Ok(Value::Int(handle))
 }
 
@@ -87,7 +87,7 @@ pub fn rt_cranelift_new_module(args: &[Value]) -> Result<Value, CompileError> {
     let name_ptr = value_to_i64(&args[0]);
     let name_len = value_to_i64(&args[1]);
     let target = value_to_i64(&args[2]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_new_module(name_ptr, name_len, target) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_new_module(name_ptr, name_len, target) };
     Ok(Value::Int(handle))
 }
 
@@ -97,7 +97,7 @@ pub fn rt_cranelift_finalize_module(args: &[Value]) -> Result<Value, CompileErro
         return Ok(Value::Int(0));
     }
     let module = value_to_i64(&args[0]);
-    let result = unsafe { cranelift_ffi::rt_cranelift_finalize_module(module) };
+    let result = unsafe { cranelift_sffi::rt_cranelift_finalize_module(module) };
     Ok(Value::Int(result))
 }
 
@@ -107,7 +107,7 @@ pub fn rt_cranelift_free_module(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Nil);
     }
     let module = value_to_i64(&args[0]);
-    unsafe { cranelift_ffi::rt_cranelift_free_module(module) };
+    unsafe { cranelift_sffi::rt_cranelift_free_module(module) };
     Ok(Value::Nil)
 }
 
@@ -119,7 +119,7 @@ pub fn rt_cranelift_emit_object(args: &[Value]) -> Result<Value, CompileError> {
     }
     let module = value_to_i64(&args[0]);
     let path = value_to_runtime_string(&args[1]);
-    let result = unsafe { cranelift_ffi::rt_cranelift_emit_object(module, path) };
+    let result = unsafe { cranelift_sffi::rt_cranelift_emit_object(module, path) };
     Ok(Value::Bool(result))
 }
 
@@ -134,7 +134,7 @@ pub fn rt_cranelift_new_signature(args: &[Value]) -> Result<Value, CompileError>
         return Ok(Value::Int(0));
     }
     let call_conv = value_to_i64(&args[0]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_new_signature(call_conv) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_new_signature(call_conv) };
     Ok(Value::Int(handle))
 }
 
@@ -146,7 +146,7 @@ pub fn rt_cranelift_sig_add_param(args: &[Value]) -> Result<Value, CompileError>
     }
     let sig = value_to_i64(&args[0]);
     let type_code = value_to_i64(&args[1]);
-    unsafe { cranelift_ffi::rt_cranelift_sig_add_param(sig, type_code) };
+    unsafe { cranelift_sffi::rt_cranelift_sig_add_param(sig, type_code) };
     Ok(Value::Nil)
 }
 
@@ -158,7 +158,7 @@ pub fn rt_cranelift_sig_set_return(args: &[Value]) -> Result<Value, CompileError
     }
     let sig = value_to_i64(&args[0]);
     let type_code = value_to_i64(&args[1]);
-    unsafe { cranelift_ffi::rt_cranelift_sig_set_return(sig, type_code) };
+    unsafe { cranelift_sffi::rt_cranelift_sig_set_return(sig, type_code) };
     Ok(Value::Nil)
 }
 
@@ -176,7 +176,7 @@ pub fn rt_cranelift_begin_function(args: &[Value]) -> Result<Value, CompileError
     let name_ptr = value_to_i64(&args[1]);
     let name_len = value_to_i64(&args[2]);
     let sig = value_to_i64(&args[3]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_begin_function(module, name_ptr, name_len, sig) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_begin_function(module, name_ptr, name_len, sig) };
     Ok(Value::Int(handle))
 }
 
@@ -187,7 +187,7 @@ pub fn rt_cranelift_end_function(args: &[Value]) -> Result<Value, CompileError> 
         return Ok(Value::Int(0));
     }
     let ctx = value_to_i64(&args[0]);
-    let result = unsafe { cranelift_ffi::rt_cranelift_end_function(ctx) };
+    let result = unsafe { cranelift_sffi::rt_cranelift_end_function(ctx) };
     Ok(Value::Int(result))
 }
 
@@ -200,7 +200,7 @@ pub fn rt_cranelift_define_function(args: &[Value]) -> Result<Value, CompileErro
     let module = value_to_i64(&args[0]);
     let func_id = value_to_i64(&args[1]);
     let ctx = value_to_i64(&args[2]);
-    let result = unsafe { cranelift_ffi::rt_cranelift_define_function(module, func_id, ctx) };
+    let result = unsafe { cranelift_sffi::rt_cranelift_define_function(module, func_id, ctx) };
     Ok(Value::Bool(result))
 }
 
@@ -215,7 +215,7 @@ pub fn rt_cranelift_create_block(args: &[Value]) -> Result<Value, CompileError> 
         return Ok(Value::Int(0));
     }
     let ctx = value_to_i64(&args[0]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_create_block(ctx) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_create_block(ctx) };
     Ok(Value::Int(handle))
 }
 
@@ -227,7 +227,7 @@ pub fn rt_cranelift_switch_to_block(args: &[Value]) -> Result<Value, CompileErro
     }
     let ctx = value_to_i64(&args[0]);
     let block = value_to_i64(&args[1]);
-    unsafe { cranelift_ffi::rt_cranelift_switch_to_block(ctx, block) };
+    unsafe { cranelift_sffi::rt_cranelift_switch_to_block(ctx, block) };
     Ok(Value::Nil)
 }
 
@@ -239,7 +239,7 @@ pub fn rt_cranelift_seal_block(args: &[Value]) -> Result<Value, CompileError> {
     }
     let ctx = value_to_i64(&args[0]);
     let block = value_to_i64(&args[1]);
-    unsafe { cranelift_ffi::rt_cranelift_seal_block(ctx, block) };
+    unsafe { cranelift_sffi::rt_cranelift_seal_block(ctx, block) };
     Ok(Value::Nil)
 }
 
@@ -250,7 +250,7 @@ pub fn rt_cranelift_seal_all_blocks(args: &[Value]) -> Result<Value, CompileErro
         return Ok(Value::Nil);
     }
     let ctx = value_to_i64(&args[0]);
-    unsafe { cranelift_ffi::rt_cranelift_seal_all_blocks(ctx) };
+    unsafe { cranelift_sffi::rt_cranelift_seal_all_blocks(ctx) };
     Ok(Value::Nil)
 }
 
@@ -263,7 +263,7 @@ pub fn rt_cranelift_append_block_param(args: &[Value]) -> Result<Value, CompileE
     let ctx = value_to_i64(&args[0]);
     let block = value_to_i64(&args[1]);
     let type_ = value_to_i64(&args[2]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_append_block_param(ctx, block, type_) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_append_block_param(ctx, block, type_) };
     Ok(Value::Int(handle))
 }
 
@@ -276,7 +276,7 @@ pub fn rt_cranelift_block_param(args: &[Value]) -> Result<Value, CompileError> {
     let ctx = value_to_i64(&args[0]);
     let block = value_to_i64(&args[1]);
     let index = value_to_i64(&args[2]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_block_param(ctx, block, index) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_block_param(ctx, block, index) };
     Ok(Value::Int(handle))
 }
 
@@ -293,7 +293,7 @@ pub fn rt_cranelift_iconst(args: &[Value]) -> Result<Value, CompileError> {
     let ctx = value_to_i64(&args[0]);
     let type_ = value_to_i64(&args[1]);
     let val = value_to_i64(&args[2]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_iconst(ctx, type_, val) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_iconst(ctx, type_, val) };
     Ok(Value::Int(handle))
 }
 
@@ -306,7 +306,7 @@ pub fn rt_cranelift_fconst(args: &[Value]) -> Result<Value, CompileError> {
     let ctx = value_to_i64(&args[0]);
     let type_ = value_to_i64(&args[1]);
     let val = value_to_f64(&args[2]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_fconst(ctx, type_, val) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_fconst(ctx, type_, val) };
     Ok(Value::Int(handle))
 }
 
@@ -318,7 +318,7 @@ pub fn rt_cranelift_bconst(args: &[Value]) -> Result<Value, CompileError> {
     }
     let ctx = value_to_i64(&args[0]);
     let val = value_to_bool(&args[1]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_bconst(ctx, val) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_bconst(ctx, val) };
     Ok(Value::Int(handle))
 }
 
@@ -330,7 +330,7 @@ pub fn rt_cranelift_null(args: &[Value]) -> Result<Value, CompileError> {
     }
     let ctx = value_to_i64(&args[0]);
     let type_ = value_to_i64(&args[1]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_null(ctx, type_) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_null(ctx, type_) };
     Ok(Value::Int(handle))
 }
 
@@ -339,7 +339,7 @@ pub fn rt_cranelift_null(args: &[Value]) -> Result<Value, CompileError> {
 // ============================================================================
 
 macro_rules! impl_binop_wrapper {
-    ($wrapper_name:ident, $ffi_name:ident) => {
+    ($wrapper_name:ident, $sffi_name:ident) => {
         pub fn $wrapper_name(args: &[Value]) -> Result<Value, CompileError> {
             if args.len() < 3 {
                 return Ok(Value::Int(0));
@@ -347,7 +347,7 @@ macro_rules! impl_binop_wrapper {
             let ctx = value_to_i64(&args[0]);
             let a = value_to_i64(&args[1]);
             let b = value_to_i64(&args[2]);
-            let handle = unsafe { cranelift_ffi::$ffi_name(ctx, a, b) };
+            let handle = unsafe { cranelift_sffi::$sffi_name(ctx, a, b) };
             Ok(Value::Int(handle))
         }
     };
@@ -379,7 +379,7 @@ pub fn rt_cranelift_bnot(args: &[Value]) -> Result<Value, CompileError> {
     }
     let ctx = value_to_i64(&args[0]);
     let a = value_to_i64(&args[1]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_bnot(ctx, a) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_bnot(ctx, a) };
     Ok(Value::Int(handle))
 }
 
@@ -397,7 +397,7 @@ pub fn rt_cranelift_icmp(args: &[Value]) -> Result<Value, CompileError> {
     let cond = value_to_i64(&args[1]);
     let a = value_to_i64(&args[2]);
     let b = value_to_i64(&args[3]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_icmp(ctx, cond, a, b) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_icmp(ctx, cond, a, b) };
     Ok(Value::Int(handle))
 }
 
@@ -411,7 +411,7 @@ pub fn rt_cranelift_fcmp(args: &[Value]) -> Result<Value, CompileError> {
     let cond = value_to_i64(&args[1]);
     let a = value_to_i64(&args[2]);
     let b = value_to_i64(&args[3]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_fcmp(ctx, cond, a, b) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_fcmp(ctx, cond, a, b) };
     Ok(Value::Int(handle))
 }
 
@@ -429,7 +429,7 @@ pub fn rt_cranelift_load(args: &[Value]) -> Result<Value, CompileError> {
     let type_ = value_to_i64(&args[1]);
     let addr = value_to_i64(&args[2]);
     let offset = value_to_i64(&args[3]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_load(ctx, type_, addr, offset) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_load(ctx, type_, addr, offset) };
     Ok(Value::Int(handle))
 }
 
@@ -443,7 +443,7 @@ pub fn rt_cranelift_store(args: &[Value]) -> Result<Value, CompileError> {
     let val = value_to_i64(&args[1]);
     let addr = value_to_i64(&args[2]);
     let offset = value_to_i64(&args[3]);
-    unsafe { cranelift_ffi::rt_cranelift_store(ctx, val, addr, offset) };
+    unsafe { cranelift_sffi::rt_cranelift_store(ctx, val, addr, offset) };
     Ok(Value::Nil)
 }
 
@@ -456,7 +456,7 @@ pub fn rt_cranelift_stack_slot(args: &[Value]) -> Result<Value, CompileError> {
     let ctx = value_to_i64(&args[0]);
     let size = value_to_i64(&args[1]);
     let align = value_to_i64(&args[2]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_stack_slot(ctx, size, align) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_stack_slot(ctx, size, align) };
     Ok(Value::Int(handle))
 }
 
@@ -469,7 +469,7 @@ pub fn rt_cranelift_stack_addr(args: &[Value]) -> Result<Value, CompileError> {
     let ctx = value_to_i64(&args[0]);
     let slot = value_to_i64(&args[1]);
     let offset = value_to_i64(&args[2]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_stack_addr(ctx, slot, offset) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_stack_addr(ctx, slot, offset) };
     Ok(Value::Int(handle))
 }
 
@@ -485,7 +485,7 @@ pub fn rt_cranelift_jump(args: &[Value]) -> Result<Value, CompileError> {
     }
     let ctx = value_to_i64(&args[0]);
     let block = value_to_i64(&args[1]);
-    unsafe { cranelift_ffi::rt_cranelift_jump(ctx, block) };
+    unsafe { cranelift_sffi::rt_cranelift_jump(ctx, block) };
     Ok(Value::Nil)
 }
 
@@ -499,7 +499,7 @@ pub fn rt_cranelift_brif(args: &[Value]) -> Result<Value, CompileError> {
     let cond = value_to_i64(&args[1]);
     let then_block = value_to_i64(&args[2]);
     let else_block = value_to_i64(&args[3]);
-    unsafe { cranelift_ffi::rt_cranelift_brif(ctx, cond, then_block, else_block) };
+    unsafe { cranelift_sffi::rt_cranelift_brif(ctx, cond, then_block, else_block) };
     Ok(Value::Nil)
 }
 
@@ -511,7 +511,7 @@ pub fn rt_cranelift_return(args: &[Value]) -> Result<Value, CompileError> {
     }
     let ctx = value_to_i64(&args[0]);
     let val = value_to_i64(&args[1]);
-    unsafe { cranelift_ffi::rt_cranelift_return(ctx, val) };
+    unsafe { cranelift_sffi::rt_cranelift_return(ctx, val) };
     Ok(Value::Nil)
 }
 
@@ -522,7 +522,7 @@ pub fn rt_cranelift_return_void(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Nil);
     }
     let ctx = value_to_i64(&args[0]);
-    unsafe { cranelift_ffi::rt_cranelift_return_void(ctx) };
+    unsafe { cranelift_sffi::rt_cranelift_return_void(ctx) };
     Ok(Value::Nil)
 }
 
@@ -534,7 +534,7 @@ pub fn rt_cranelift_trap(args: &[Value]) -> Result<Value, CompileError> {
     }
     let ctx = value_to_i64(&args[0]);
     let code = value_to_i64(&args[1]);
-    unsafe { cranelift_ffi::rt_cranelift_trap(ctx, code) };
+    unsafe { cranelift_sffi::rt_cranelift_trap(ctx, code) };
     Ok(Value::Nil)
 }
 
@@ -552,7 +552,7 @@ pub fn rt_cranelift_call(args: &[Value]) -> Result<Value, CompileError> {
     let func = value_to_i64(&args[1]);
     let args_ptr = value_to_i64(&args[2]);
     let args_len = value_to_i64(&args[3]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_call(ctx, func, args_ptr, args_len) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_call(ctx, func, args_ptr, args_len) };
     Ok(Value::Int(handle))
 }
 
@@ -567,7 +567,7 @@ pub fn rt_cranelift_call_indirect(args: &[Value]) -> Result<Value, CompileError>
     let callee = value_to_i64(&args[2]);
     let args_ptr = value_to_i64(&args[3]);
     let args_len = value_to_i64(&args[4]);
-    let handle = unsafe { cranelift_ffi::rt_cranelift_call_indirect(ctx, sig, callee, args_ptr, args_len) };
+    let handle = unsafe { cranelift_sffi::rt_cranelift_call_indirect(ctx, sig, callee, args_ptr, args_len) };
     Ok(Value::Int(handle))
 }
 
@@ -576,7 +576,7 @@ pub fn rt_cranelift_call_indirect(args: &[Value]) -> Result<Value, CompileError>
 // ============================================================================
 
 macro_rules! impl_conv_wrapper {
-    ($wrapper_name:ident, $ffi_name:ident) => {
+    ($wrapper_name:ident, $sffi_name:ident) => {
         pub fn $wrapper_name(args: &[Value]) -> Result<Value, CompileError> {
             if args.len() < 3 {
                 return Ok(Value::Int(0));
@@ -584,7 +584,7 @@ macro_rules! impl_conv_wrapper {
             let ctx = value_to_i64(&args[0]);
             let to_type = value_to_i64(&args[1]);
             let value = value_to_i64(&args[2]);
-            let handle = unsafe { cranelift_ffi::$ffi_name(ctx, to_type, value) };
+            let handle = unsafe { cranelift_sffi::$sffi_name(ctx, to_type, value) };
             Ok(Value::Int(handle))
         }
     };
@@ -612,7 +612,7 @@ pub fn rt_cranelift_get_function_ptr(args: &[Value]) -> Result<Value, CompileErr
     let module = value_to_i64(&args[0]);
     let name_ptr = value_to_i64(&args[1]);
     let name_len = value_to_i64(&args[2]);
-    let ptr = unsafe { cranelift_ffi::rt_cranelift_get_function_ptr(module, name_ptr, name_len) };
+    let ptr = unsafe { cranelift_sffi::rt_cranelift_get_function_ptr(module, name_ptr, name_len) };
     Ok(Value::Int(ptr))
 }
 
@@ -625,12 +625,12 @@ pub fn rt_cranelift_call_function_ptr(args: &[Value]) -> Result<Value, CompileEr
     let func_ptr = value_to_i64(&args[0]);
     let args_ptr = value_to_i64(&args[1]);
     let args_len = value_to_i64(&args[2]);
-    let result = unsafe { cranelift_ffi::rt_cranelift_call_function_ptr(func_ptr, args_ptr, args_len) };
+    let result = unsafe { cranelift_sffi::rt_cranelift_call_function_ptr(func_ptr, args_ptr, args_len) };
     Ok(Value::Int(result))
 }
 
 // ============================================================================
-// Bootstrap Test FFI
+// Bootstrap Test SFFI
 // ============================================================================
 
 /// Execute shell command
@@ -639,7 +639,7 @@ pub fn rt_exec(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(-1));
     }
     let cmd = value_to_runtime_string(&args[0]);
-    let result = simple_runtime::value::cli_ffi::rt_exec(cmd);
+    let result = simple_runtime::value::cli_sffi::rt_exec(cmd);
     Ok(Value::Int(result as i64))
 }
 
@@ -649,7 +649,7 @@ pub fn rt_file_hash(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Str(String::new()));
     }
     let path = value_to_runtime_string(&args[0]);
-    let result = simple_runtime::value::cli_ffi::rt_file_hash(path);
+    let result = simple_runtime::value::cli_sffi::rt_file_hash(path);
     Ok(runtime_string_to_value(result))
 }
 
@@ -660,6 +660,6 @@ pub fn rt_write_file(args: &[Value]) -> Result<Value, CompileError> {
     }
     let path = value_to_runtime_string(&args[0]);
     let content = value_to_runtime_string(&args[1]);
-    let result = simple_runtime::value::cli_ffi::rt_write_file(path, content);
+    let result = simple_runtime::value::cli_sffi::rt_write_file(path, content);
     Ok(Value::Bool(result))
 }

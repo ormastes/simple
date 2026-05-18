@@ -4,7 +4,7 @@
 //! HIP provides a CUDA-like API that works on both AMD and NVIDIA GPUs.
 
 use std::collections::HashMap;
-use std::ffi::{c_void, CString};
+use std::sffi::{c_void, CString};
 use std::ptr;
 use std::sync::Mutex;
 
@@ -41,7 +41,7 @@ const HIP_MEMCPY_DEVICE_TO_HOST: i32 = 2;
 const HIP_MEMCPY_DEVICE_TO_DEVICE: i32 = 3;
 const HIP_MEMCPY_HOST_TO_HOST: i32 = 4;
 
-// HIP Runtime API FFI
+// HIP Runtime API SFFI
 #[link(name = "amdhip64")]
 extern "C" {
     fn hipInit(flags: u32) -> HipError;
@@ -267,7 +267,7 @@ impl Backend for RocmBackend {
             // Get device name
             let mut name_buf = [0i8; 256];
             hip_check(hipDeviceGetName(name_buf.as_mut_ptr(), 256, device))?;
-            let name = std::ffi::CStr::from_ptr(name_buf.as_ptr())
+            let name = std::sffi::CStr::from_ptr(name_buf.as_ptr())
                 .to_string_lossy()
                 .into_owned();
 

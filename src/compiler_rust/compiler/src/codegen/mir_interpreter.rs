@@ -39,7 +39,7 @@ impl std::error::Error for InterpError {}
 
 /// MIR interpreter emitter. Evaluates MIR instructions directly using
 /// a value map (VReg → i64). Pure operations are computed inline;
-/// runtime-dependent operations (collections, FFI) return stub values.
+/// runtime-dependent operations (collections, SFFI) return stub values.
 pub struct MirInterpreterEmitter {
     /// Map from virtual register to computed value
     pub values: HashMap<VReg, i64>,

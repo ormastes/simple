@@ -1230,7 +1230,7 @@ pub fn compile_instruction<M: Module>(
             let _ = local_index; // Suppress unused warnings
         }
 
-        // Value boxing instructions for FFI boundary
+        // Value boxing instructions for SFFI boundary
         MirInst::BoxInt { dest, value } => {
             // Box integer as RuntimeValue: (value << 3) | TAG_INT
             // TAG_INT is 0, so this is equivalent to value << 3
@@ -1238,7 +1238,7 @@ pub fn compile_instruction<M: Module>(
                 // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
-            // Ensure value is i64 - some paths may produce i32 (e.g., FFI returns).
+            // Ensure value is i64 - some paths may produce i32 (e.g., SFFI returns).
             // FR-DRIVER-0002b: pick `sextend` for signed VRegs so negative i8/i16/i32
             // values survive the widen. Unsigned and unknown keep the old `uextend`.
             let val_type = builder.func.dfg.value_type(val);

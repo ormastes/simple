@@ -1,13 +1,13 @@
 //! Function call instruction compilation.
 //!
-//! Handles all forms of function calls: user-defined, runtime FFI, and built-in functions.
+//! Handles all forms of function calls: user-defined, runtime SFFI, and built-in functions.
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
-use crate::codegen::runtime_ffi::RUNTIME_FUNCS;
+use crate::codegen::runtime_sffi::RUNTIME_FUNCS;
 use crate::hir::TypeId;
 use crate::mir::{CallTarget, VReg};
 
@@ -1976,7 +1976,7 @@ fn coerce_vreg_to_i64<M: Module>(
     }
 }
 
-/// Get the return type for a runtime FFI function.
+/// Get the return type for a runtime SFFI function.
 /// Returns None if the function is not found or has no return value.
 fn get_runtime_return_type(func_name: &str) -> Option<types::Type> {
     RUNTIME_FUNCS
@@ -1994,7 +1994,7 @@ fn get_runtime_return_type(func_name: &str) -> Option<types::Type> {
 /// - A float (needs different tagging)
 ///
 /// NOTE: MirInst::BoxInt is now implemented and inserted during MIR lowering
-/// in lowering_expr.rs when passing native integers to FFI functions.
+/// in lowering_expr.rs when passing native integers to SFFI functions.
 fn needs_runtime_value_tagging(_func_name: &str) -> Option<Vec<usize>> {
     // Disabled - tagging is done at MIR level via MirInst::BoxInt
     None
@@ -2026,7 +2026,7 @@ fn needs_runtime_value_untagging(func_name: &str) -> bool {
 /// Untag a RuntimeValue to raw i64 by right-shifting 3 bits.
 /// RuntimeValue integers are encoded as (value << 3) | TAG_INT where TAG_INT = 0.
 /// So untagging is simply value >> 3 (arithmetic shift).
-#[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
+#[allow(dead_code)] // reason: reachable via SFFI or future entry point; not yet wired
 fn untag_runtime_value_to_int(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,
@@ -2036,12 +2036,12 @@ fn untag_runtime_value_to_int(
 }
 
 /// Returns which Simple-level argument indices are text parameters for a given
-/// runtime FFI function. Text arguments are RuntimeValue strings that must be
-/// expanded to (ptr, len) pairs when calling the C-ABI FFI function.
+/// runtime SFFI function. Text arguments are RuntimeValue strings that must be
+/// expanded to (ptr, len) pairs when calling the C-ABI SFFI function.
 ///
 /// For example, `rt_process_run(cmd, args)` has text at index 0: the `cmd`
 /// RuntimeValue string must be expanded to `(cmd_ptr, cmd_len)` before calling
-/// the Rust FFI function `rt_process_run(cmd_ptr, cmd_len, args)`.
+/// the Rust SFFI function `rt_process_run(cmd_ptr, cmd_len, args)`.
 pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
         // Print/IO (text → ptr, len)
@@ -2100,11 +2100,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // Interpreter bridge
         "rt_interp_call" => Some(&[0]),
 
-        // FFI object system (method name at index 1)
-        "rt_ffi_call_method" | "rt_ffi_has_method" | "rt_ffi_object_call_method" | "rt_ffi_object_has_method" => {
+        // SFFI object system (method name at index 1)
+        "rt_sffi_call_method" | "rt_sffi_has_method" | "rt_sffi_object_call_method" | "rt_sffi_object_has_method" => {
             Some(&[1])
         }
-        "rt_ffi_type_register" => Some(&[0]),
+        "rt_sffi_type_register" => Some(&[0]),
 
         // BDD test framework
         "rt_bdd_describe_start" | "rt_bdd_it_start" | "rt_bdd_expect_fail" => Some(&[0]),
@@ -2124,11 +2124,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "native_udp_send_to" => Some(&[1, 2]),
 
         // Regex (pattern and text)
-        "ffi_regex_is_match" | "ffi_regex_find" | "ffi_regex_find_all" | "ffi_regex_captures" | "ffi_regex_split" => {
+        "sffi_regex_is_match" | "sffi_regex_find" | "sffi_regex_find_all" | "sffi_regex_captures" | "sffi_regex_split" => {
             Some(&[0, 1])
         }
-        "ffi_regex_replace" | "ffi_regex_replace_all" => Some(&[0, 1, 2]),
-        "ffi_regex_split_n" => Some(&[0, 1]),
+        "sffi_regex_replace" | "sffi_regex_replace_all" => Some(&[0, 1, 2]),
+        "sffi_regex_split_n" => Some(&[0, 1]),
 
         // Cranelift self-hosting
         "rt_cranelift_new_module" | "rt_cranelift_new_aot_module" => Some(&[0]),
@@ -2155,7 +2155,7 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     }
 }
 
-/// Expand text RuntimeValue arguments to (ptr, len) pairs for FFI calls.
+/// Expand text RuntimeValue arguments to (ptr, len) pairs for SFFI calls.
 ///
 /// Given the original Simple-level argument values and the text_indices specification,
 /// this expands each text argument into two values by calling rt_string_data and
@@ -2255,7 +2255,7 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
             } else if actual_ty.is_int() && expected_ty.is_int() {
                 // Integer width conversion. FR-DRIVER-0002b: pick sextend for
                 // signed VRegs, uextend otherwise (or when no hint is given —
-                // preserves legacy unsigned-widen default for runtime/FFI
+                // preserves legacy unsigned-widen default for runtime/SFFI
                 // boundaries).
                 if actual_ty.bits() < expected_ty.bits() {
                     let signed = arg_signed.and_then(|s| s.get(i).copied()).flatten().unwrap_or(false);
@@ -2304,12 +2304,12 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
     adapted
 }
 
-/// Compile Call instruction: dispatches to user-defined, built-in I/O, or runtime FFI functions
+/// Compile Call instruction: dispatches to user-defined, built-in I/O, or runtime SFFI functions
 ///
 /// This handles three types of function calls:
 /// 1. Built-in I/O functions (print, println, etc.) - handled via compile_builtin_io_call
 /// 2. User-defined functions - looked up in func_ids
-/// 3. Runtime FFI functions - looked up in runtime_funcs
+/// 3. Runtime SFFI functions - looked up in runtime_funcs
 pub fn compile_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -2318,15 +2318,15 @@ pub fn compile_call<M: Module>(
     args: &[VReg],
 ) -> InstrResult<()> {
     let func_name_raw = target.name();
-    // For runtime FFI matching only, strip module prefix to find the base function name.
+    // For runtime SFFI matching only, strip module prefix to find the base function name.
     // e.g., "compiler__driver__driver_types__rt_file_read_text" → "rt_file_read_text"
-    let func_name_for_ffi = func_name_raw
+    let func_name_for_sffi = func_name_raw
         .rsplit_once("__")
         .map(|(_, tail)| tail)
         .unwrap_or(func_name_raw);
-    // Map Simple builtin names to runtime FFI function names (for FFI lookup only)
+    // Map Simple builtin names to runtime SFFI function names (for SFFI lookup only)
     // Note: "str", "int", "input" are handled in compile_builtin_io_call, not here
-    let ffi_name: &str = match func_name_for_ffi {
+    let sffi_name: &str = match func_name_for_sffi {
         "sys_get_args" => "rt_get_args",
         "sys_exit" => "rt_exit",
         "rt_file_read_text" => "rt_file_read_text_rv",
@@ -2337,7 +2337,7 @@ pub fn compile_call<M: Module>(
         other => other,
     };
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
-    // but mapped FFI name for runtime_funcs and builtin I/O checks
+    // but mapped SFFI name for runtime_funcs and builtin I/O checks
     let func_name: &str = func_name_raw;
 
     // Handle Result/Option constructor builtins (Ok, Err, Some, None)
@@ -2371,178 +2371,178 @@ pub fn compile_call<M: Module>(
         return Ok(());
     }
 
-    if compile_simple_runtime_memory_intrinsic(ctx, builder, dest, func_name_for_ffi, args)? {
+    if compile_simple_runtime_memory_intrinsic(ctx, builder, dest, func_name_for_sffi, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_array_data_ptr" && compile_inline_array_data_ptr(ctx, builder, dest, args)? {
+    if sffi_name == "rt_array_data_ptr" && compile_inline_array_data_ptr(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_array_header_ptr" && compile_inline_array_header_ptr(ctx, builder, dest, args)? {
+    if sffi_name == "rt_array_header_ptr" && compile_inline_array_header_ptr(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_array_get" && compile_inline_array_get(ctx, builder, dest, args)? {
+    if sffi_name == "rt_array_get" && compile_inline_array_get(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_array_get_text" && compile_inline_array_get_word(ctx, builder, dest, args)? {
+    if sffi_name == "rt_array_get_text" && compile_inline_array_get_word(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_array_set" && compile_inline_array_set(ctx, builder, dest, args)? {
+    if sffi_name == "rt_array_set" && compile_inline_array_set(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_array_set_text" && compile_inline_array_set_word(ctx, builder, dest, args)? {
+    if sffi_name == "rt_array_set_text" && compile_inline_array_set_word(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_numeric_xor_sum_u64_data" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args, true)? {
+    if sffi_name == "rt_numeric_xor_sum_u64_data" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args, true)? {
         return Ok(());
     }
-    if ffi_name == "rt_numeric_xor_sum_u64" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args, false)? {
+    if sffi_name == "rt_numeric_xor_sum_u64" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args, false)? {
         return Ok(());
     }
-    if ffi_name == "rt_numeric_contains_u64_data"
+    if sffi_name == "rt_numeric_contains_u64_data"
         && compile_inline_numeric_contains_u64(ctx, builder, dest, args, true)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_numeric_contains_u64" && compile_inline_numeric_contains_u64(ctx, builder, dest, args, false)? {
+    if sffi_name == "rt_numeric_contains_u64" && compile_inline_numeric_contains_u64(ctx, builder, dest, args, false)? {
         return Ok(());
     }
-    if ffi_name == "rt_hash_text" && compile_inline_hash_text(ctx, builder, dest, args)? {
+    if sffi_name == "rt_hash_text" && compile_inline_hash_text(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if matches!(ffi_name, "rt_array_set_len_known" | "rt_array_set_len_known_text")
+    if matches!(sffi_name, "rt_array_set_len_known" | "rt_array_set_len_known_text")
         && compile_inline_array_set_len_known(ctx, builder, dest, args)?
     {
         return Ok(());
     }
-    if matches!(ffi_name, "rt_len" | "rt_array_len")
-        && compile_inline_len(ctx, builder, dest, args, ffi_name == "rt_array_len")?
+    if matches!(sffi_name, "rt_len" | "rt_array_len")
+        && compile_inline_len(ctx, builder, dest, args, sffi_name == "rt_array_len")?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u8_at" && compile_inline_bytes_u8_at(ctx, builder, dest, args, true)? {
+    if sffi_name == "rt_typed_bytes_u8_at" && compile_inline_bytes_u8_at(ctx, builder, dest, args, true)? {
         return Ok(());
     }
-    if ffi_name == "rt_bytes_u8_at" && compile_inline_bytes_u8_at(ctx, builder, dest, args, false)? {
+    if sffi_name == "rt_bytes_u8_at" && compile_inline_bytes_u8_at(ctx, builder, dest, args, false)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u32_le_at" && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 4)? {
+    if sffi_name == "rt_typed_bytes_u32_le_at" && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 4)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u64_le_at" && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 8)? {
+    if sffi_name == "rt_typed_bytes_u64_le_at" && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 8)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u32_le_unchecked"
+    if sffi_name == "rt_typed_bytes_u32_le_unchecked"
         && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 4)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u64_le_unchecked"
+    if sffi_name == "rt_typed_bytes_u64_le_unchecked"
         && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 8)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u8_unchecked"
+    if sffi_name == "rt_typed_bytes_u8_unchecked"
         && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 1)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u8_data_at" && compile_inline_typed_bytes_data_at(ctx, builder, dest, args)? {
+    if sffi_name == "rt_typed_bytes_u8_data_at" && compile_inline_typed_bytes_data_at(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u32_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 4)? {
+    if sffi_name == "rt_typed_words_u32_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 4)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u64_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 8)? {
+    if sffi_name == "rt_typed_words_u64_at" && compile_inline_typed_words_at(ctx, builder, dest, args, 8)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u32_unchecked" && compile_inline_typed_words_unchecked(ctx, builder, dest, args, 4)?
+    if sffi_name == "rt_typed_words_u32_unchecked" && compile_inline_typed_words_unchecked(ctx, builder, dest, args, 4)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u64_unchecked" && compile_inline_typed_words_unchecked(ctx, builder, dest, args, 8)?
+    if sffi_name == "rt_typed_words_u64_unchecked" && compile_inline_typed_words_unchecked(ctx, builder, dest, args, 8)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u32_data_at" && compile_inline_typed_words_data_at(ctx, builder, dest, args, 4)? {
+    if sffi_name == "rt_typed_words_u32_data_at" && compile_inline_typed_words_data_at(ctx, builder, dest, args, 4)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u64_data_at" && compile_inline_typed_words_data_at(ctx, builder, dest, args, 8)? {
+    if sffi_name == "rt_typed_words_u64_data_at" && compile_inline_typed_words_data_at(ctx, builder, dest, args, 8)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u64_data_at_checked"
+    if sffi_name == "rt_typed_words_u64_data_at_checked"
         && compile_inline_typed_words_data_at_checked(ctx, builder, dest, args)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u64_raw_data_at" && compile_inline_typed_words_raw_data_at(ctx, builder, dest, args)?
+    if sffi_name == "rt_typed_words_u64_raw_data_at" && compile_inline_typed_words_raw_data_at(ctx, builder, dest, args)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u32_set" && compile_inline_typed_words_u32_set(ctx, builder, dest, args)? {
+    if sffi_name == "rt_typed_words_u32_set" && compile_inline_typed_words_u32_set(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u32_push" && compile_inline_typed_words_push(ctx, builder, dest, args, 4)? {
+    if sffi_name == "rt_typed_words_u32_push" && compile_inline_typed_words_push(ctx, builder, dest, args, 4)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u64_push" && compile_inline_typed_words_push(ctx, builder, dest, args, 8)? {
+    if sffi_name == "rt_typed_words_u64_push" && compile_inline_typed_words_push(ctx, builder, dest, args, 8)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u32_push_known_at"
+    if sffi_name == "rt_typed_words_u32_push_known_at"
         && compile_inline_typed_words_push_known_at(ctx, builder, dest, args, 4)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u64_push_known_at"
+    if sffi_name == "rt_typed_words_u64_push_known_at"
         && compile_inline_typed_words_push_known_at(ctx, builder, dest, args, 8)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u32_push_known_data_at"
+    if sffi_name == "rt_typed_words_u32_push_known_data_at"
         && compile_inline_typed_words_push_known_data_at(ctx, builder, dest, args, 4)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u64_push_known_data_at"
+    if sffi_name == "rt_typed_words_u64_push_known_data_at"
         && compile_inline_typed_words_push_known_data_at(ctx, builder, dest, args, 8)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u32_store_known_data_at"
+    if sffi_name == "rt_typed_words_u32_store_known_data_at"
         && compile_inline_typed_words_store_known_data_at(ctx, builder, dest, args, 4)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_words_u64_store_known_data_at"
+    if sffi_name == "rt_typed_words_u64_store_known_data_at"
         && compile_inline_typed_words_store_known_data_at(ctx, builder, dest, args, 8)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u8_push" && compile_inline_typed_bytes_u8_push(ctx, builder, dest, args)? {
+    if sffi_name == "rt_typed_bytes_u8_push" && compile_inline_typed_bytes_u8_push(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "_adler_reduce" && compile_inline_adler_reduce(ctx, builder, dest, args)? {
+    if sffi_name == "_adler_reduce" && compile_inline_adler_reduce(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u32_le_set"
+    if sffi_name == "rt_typed_bytes_u32_le_set"
         && compile_inline_typed_bytes_le_set_unchecked(ctx, builder, dest, args, 4)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u64_le_set"
+    if sffi_name == "rt_typed_bytes_u64_le_set"
         && compile_inline_typed_bytes_le_set_unchecked(ctx, builder, dest, args, 8)?
     {
         return Ok(());
     }
-    if ffi_name == "rt_bytes_u32_le_at" && compile_inline_bytes_le_at(ctx, builder, dest, args, 4)? {
+    if sffi_name == "rt_bytes_u32_le_at" && compile_inline_bytes_le_at(ctx, builder, dest, args, 4)? {
         return Ok(());
     }
-    if ffi_name == "rt_bytes_u64_le_at" && compile_inline_bytes_le_at(ctx, builder, dest, args, 8)? {
+    if sffi_name == "rt_bytes_u64_le_at" && compile_inline_bytes_le_at(ctx, builder, dest, args, 8)? {
         return Ok(());
     }
-    if ffi_name == "rt_typed_bytes_u8_set" && compile_inline_bytes_u8_set(ctx, builder, dest, args, true)? {
+    if sffi_name == "rt_typed_bytes_u8_set" && compile_inline_bytes_u8_set(ctx, builder, dest, args, true)? {
         return Ok(());
     }
-    if ffi_name == "rt_bytes_u8_set" && compile_inline_bytes_u8_set(ctx, builder, dest, args, false)? {
+    if sffi_name == "rt_bytes_u8_set" && compile_inline_bytes_u8_set(ctx, builder, dest, args, false)? {
         return Ok(());
     }
 
@@ -2572,25 +2572,25 @@ pub fn compile_call<M: Module>(
     }
 
     // Check if this is a built-in I/O function (print, println, etc.)
-    // Use ffi_name for builtin/runtime checks since these match on short names
-    if let Some(result) = compile_builtin_io_call(ctx, builder, ffi_name, args, dest)? {
+    // Use sffi_name for builtin/runtime checks since these match on short names
+    if let Some(result) = compile_builtin_io_call(ctx, builder, sffi_name, args, dest)? {
         if let Some(d) = dest {
             ctx.vreg_values.insert(*d, result);
         }
-    } else if let Some(&runtime_id) = ctx.runtime_funcs.get(ffi_name) {
-        // Runtime FFI function — checked BEFORE func_ids because runtime functions
+    } else if let Some(&runtime_id) = ctx.runtime_funcs.get(sffi_name) {
+        // Runtime SFFI function — checked BEFORE func_ids because runtime functions
         // are also registered in func_ids for name resolution. Checking here first
-        // ensures text expansion and FFI-specific handling (tagging, return type
+        // ensures text expansion and SFFI-specific handling (tagging, return type
         // extension) is always applied for known runtime functions.
-        if !is_profiler_function(ffi_name) {
-            emit_profiler_call(ctx, builder, ffi_name)?;
+        if !is_profiler_function(sffi_name) {
+            emit_profiler_call(ctx, builder, sffi_name)?;
         }
         let runtime_ref = ctx.module.declare_func_in_func(runtime_id, builder.func);
 
         // Check if this function needs RuntimeValue tagging for certain arguments
-        let tagging_indices = needs_runtime_value_tagging(ffi_name);
+        let tagging_indices = needs_runtime_value_tagging(sffi_name);
         // Check if this function returns RuntimeValue that needs untagging
-        let needs_untagging = needs_runtime_value_untagging(ffi_name);
+        let needs_untagging = needs_runtime_value_untagging(sffi_name);
 
         // First collect VReg values with defaults
         let mut arg_vals = Vec::with_capacity(args.len());
@@ -2609,11 +2609,11 @@ pub fn compile_call<M: Module>(
             arg_vals.push(val);
         }
 
-        // Expand text RuntimeValue arguments for C-ABI FFI calls.
+        // Expand text RuntimeValue arguments for C-ABI SFFI calls.
         // Two modes: (ptr, len) for Rust-style APIs, or ptr-only for C-string APIs.
-        let arg_vals = if let Some(text_indices) = text_arg_indices(ffi_name) {
+        let arg_vals = if let Some(text_indices) = text_arg_indices(sffi_name) {
             expand_text_args(ctx, builder, &arg_vals, text_indices)
-        } else if let Some(cstr_indices) = text_cstr_arg_indices(ffi_name) {
+        } else if let Some(cstr_indices) = text_cstr_arg_indices(sffi_name) {
             expand_text_cstr_args(ctx, builder, &arg_vals, cstr_indices)
         } else {
             arg_vals
@@ -2627,17 +2627,17 @@ pub fn compile_call<M: Module>(
                 let mut result = results[0];
 
                 // Extend smaller return types to i64 (the standard vreg type)
-                // This is needed because some FFI functions return i32 (e.g., rt_exec)
+                // This is needed because some SFFI functions return i32 (e.g., rt_exec)
                 // but all vregs are expected to be i64.
                 //
                 // FR-DRIVER-0002b: if the destination VReg is declared signed,
                 // use `sextend` so negative runtime-returned narrow values keep
                 // their sign. Unsigned and unknown destinations keep the old
-                // `uextend` (zero-extend) behavior — this preserves Rust-FFI
+                // `uextend` (zero-extend) behavior — this preserves Rust-SFFI
                 // contracts where values like `u32 = 0xFFFFFFFF` must not
                 // sign-extend to `-1` when consumed as `i64`.
                 let dest_signed = super::core::vreg_is_signed(ctx, *d) == Some(true);
-                if let Some(ret_type) = get_runtime_return_type(ffi_name) {
+                if let Some(ret_type) = get_runtime_return_type(sffi_name) {
                     if ret_type == types::I32 || ret_type == types::I8 {
                         result = if dest_signed {
                             builder.ins().sextend(types::I64, result)
@@ -2656,11 +2656,11 @@ pub fn compile_call<M: Module>(
                 ctx.vreg_values.insert(*d, final_result);
             }
         }
-        if !is_profiler_function(ffi_name) {
+        if !is_profiler_function(sffi_name) {
             emit_profiler_return(ctx, builder)?;
         }
     } else if let Some(&callee_id) = ctx.func_ids.get(func_name) {
-        // User-defined function (not a known runtime FFI function)
+        // User-defined function (not a known runtime SFFI function)
         if !is_profiler_function(func_name) {
             emit_profiler_call(ctx, builder, func_name)?;
         }

@@ -33,7 +33,7 @@ pub enum DatasetState {
 }
 
 // ============================================================================
-// Dataset FFI Functions
+// Dataset SFFI Functions
 // ============================================================================
 
 /// Create a TensorDataset from feature and label tensors

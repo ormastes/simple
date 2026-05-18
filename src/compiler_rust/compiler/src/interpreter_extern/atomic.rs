@@ -519,7 +519,7 @@ fn runtime_to_value(rv: RuntimeValue) -> Value {
         Value::Nil
     } else if rv.is_heap() {
         // For heap objects, we pass the raw u64 representation as an Int
-        // This allows the interpreter to pass heap pointers between FFI calls
+        // This allows the interpreter to pass heap pointers between SFFI calls
         Value::Int(rv.to_raw() as i64)
     } else {
         Value::Nil

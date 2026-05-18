@@ -1,7 +1,7 @@
-//! SIMD instruction compilation via runtime FFI delegation
+//! SIMD instruction compilation via runtime SFFI delegation
 //!
 //! This module handles compilation of SIMD instructions by delegating
-//! to runtime FFI functions. This provides correct functionality while
+//! to runtime SFFI functions. This provides correct functionality while
 //! native Cranelift SIMD support can be added later for better performance.
 //!
 //! Instructions handled:
@@ -29,7 +29,7 @@ use crate::mir::VReg;
 use super::helpers::adapted_call;
 use super::{InstrContext, InstrResult};
 
-/// Compile NeighborLoad instruction via runtime FFI
+/// Compile NeighborLoad instruction via runtime SFFI
 pub fn compile_neighbor_load<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -58,7 +58,7 @@ pub fn compile_neighbor_load<M: Module>(
     Ok(())
 }
 
-/// Compile VecLoad instruction via runtime FFI
+/// Compile VecLoad instruction via runtime SFFI
 pub fn compile_vec_load<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -82,7 +82,7 @@ pub fn compile_vec_load<M: Module>(
     Ok(())
 }
 
-/// Compile VecStore instruction via runtime FFI
+/// Compile VecStore instruction via runtime SFFI
 pub fn compile_vec_store<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -103,7 +103,7 @@ pub fn compile_vec_store<M: Module>(
     Ok(())
 }
 
-/// Compile VecGather instruction via runtime FFI
+/// Compile VecGather instruction via runtime SFFI
 pub fn compile_vec_gather<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -125,7 +125,7 @@ pub fn compile_vec_gather<M: Module>(
     Ok(())
 }
 
-/// Compile VecScatter instruction via runtime FFI
+/// Compile VecScatter instruction via runtime SFFI
 pub fn compile_vec_scatter<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -146,7 +146,7 @@ pub fn compile_vec_scatter<M: Module>(
     Ok(())
 }
 
-/// Compile VecFma instruction via runtime FFI
+/// Compile VecFma instruction via runtime SFFI
 pub fn compile_vec_fma<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -170,7 +170,7 @@ pub fn compile_vec_fma<M: Module>(
     Ok(())
 }
 
-/// Compile VecRecip instruction via runtime FFI
+/// Compile VecRecip instruction via runtime SFFI
 pub fn compile_vec_recip<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -190,7 +190,7 @@ pub fn compile_vec_recip<M: Module>(
     Ok(())
 }
 
-/// Compile VecMaskedLoad instruction via runtime FFI
+/// Compile VecMaskedLoad instruction via runtime SFFI
 pub fn compile_vec_masked_load<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -216,7 +216,7 @@ pub fn compile_vec_masked_load<M: Module>(
     Ok(())
 }
 
-/// Compile VecMaskedStore instruction via runtime FFI
+/// Compile VecMaskedStore instruction via runtime SFFI
 pub fn compile_vec_masked_store<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -239,7 +239,7 @@ pub fn compile_vec_masked_store<M: Module>(
     Ok(())
 }
 
-/// Compile VecMinVec instruction via runtime FFI
+/// Compile VecMinVec instruction via runtime SFFI
 pub fn compile_vec_min_vec<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -261,7 +261,7 @@ pub fn compile_vec_min_vec<M: Module>(
     Ok(())
 }
 
-/// Compile VecMaxVec instruction via runtime FFI
+/// Compile VecMaxVec instruction via runtime SFFI
 pub fn compile_vec_max_vec<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -283,7 +283,7 @@ pub fn compile_vec_max_vec<M: Module>(
     Ok(())
 }
 
-/// Compile VecClamp instruction via runtime FFI
+/// Compile VecClamp instruction via runtime SFFI
 pub fn compile_vec_clamp<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,

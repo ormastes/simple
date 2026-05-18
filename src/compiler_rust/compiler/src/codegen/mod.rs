@@ -5,7 +5,7 @@ pub mod common_backend;
 mod cranelift;
 pub mod cranelift_emitter;
 #[allow(clippy::missing_safety_doc)] // reason: safety contract documented in the calling module-level doc comment
-pub mod cranelift_ffi;
+pub mod cranelift_sffi;
 pub mod dispatch;
 pub mod emitter_trait;
 pub mod execution_manager;
@@ -23,7 +23,7 @@ mod jit;
 pub mod lean;
 pub mod llvm;
 pub mod parallel;
-pub mod runtime_ffi;
+pub mod runtime_sffi;
 pub mod shared;
 pub mod types_util;
 pub mod vulkan;
@@ -53,7 +53,7 @@ pub use buffer_pool::{
     PooledBuffer,
 };
 pub use common_backend::{BackendError, BackendResult, BackendSettings, CodegenBackend};
-pub use cranelift_ffi::clear_cranelift_registries;
+pub use cranelift_sffi::clear_cranelift_registries;
 pub use cranelift::*;
 pub use execution_manager::{CodeInfo, ExecutionManager, ExecutionResult};
 #[cfg(not(doctest))]

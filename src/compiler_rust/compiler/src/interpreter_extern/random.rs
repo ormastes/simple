@@ -5,8 +5,8 @@
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
-// Import runtime FFI random functions
-use simple_runtime::value::ffi::random::{
+// Import runtime SFFI random functions
+use simple_runtime::value::sffi::random::{
     rt_random_seed, rt_random_getstate, rt_random_setstate, rt_random_next, rt_random_randint, rt_random_random,
     rt_random_uniform,
 };

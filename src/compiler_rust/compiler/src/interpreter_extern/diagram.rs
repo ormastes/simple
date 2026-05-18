@@ -1,32 +1,32 @@
-//! Diagram FFI functions for the Simple language interpreter
+//! Diagram SFFI functions for the Simple language interpreter
 //!
 //! This module provides interpreter bindings for diagram tracing and generation.
 
 use crate::error::CompileError;
 use crate::value::Value;
-use simple_runtime::value::diagram_ffi;
+use simple_runtime::value::diagram_sffi;
 
 /// Enable diagram recording
 pub fn rt_diagram_enable(_args: &[Value]) -> Result<Value, CompileError> {
-    diagram_ffi::enable_diagrams();
+    diagram_sffi::enable_diagrams();
     Ok(Value::Nil)
 }
 
 /// Disable diagram recording
 pub fn rt_diagram_disable(_args: &[Value]) -> Result<Value, CompileError> {
-    diagram_ffi::disable_diagrams();
+    diagram_sffi::disable_diagrams();
     Ok(Value::Nil)
 }
 
 /// Clear all recorded events
 pub fn rt_diagram_clear(_args: &[Value]) -> Result<Value, CompileError> {
-    diagram_ffi::clear_diagram_data();
+    diagram_sffi::clear_diagram_data();
     Ok(Value::Nil)
 }
 
 /// Check if diagram recording is enabled
 pub fn rt_diagram_is_enabled(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(diagram_ffi::is_diagram_enabled()))
+    Ok(Value::Bool(diagram_sffi::is_diagram_enabled()))
 }
 
 /// Trace a method call
@@ -47,7 +47,7 @@ pub fn rt_diagram_trace_method(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::semantic("method_name must be a string")),
     };
 
-    diagram_ffi::trace_method(&class_name, &method_name);
+    diagram_sffi::trace_method(&class_name, &method_name);
     Ok(Value::Nil)
 }
 
@@ -82,7 +82,7 @@ pub fn rt_diagram_trace_method_with_args(args: &[Value]) -> Result<Value, Compil
         _ => vec![],
     };
 
-    diagram_ffi::trace_method_with_args(&class_name, &method_name, &arguments);
+    diagram_sffi::trace_method_with_args(&class_name, &method_name, &arguments);
     Ok(Value::Nil)
 }
 
@@ -98,7 +98,7 @@ pub fn rt_diagram_trace_return(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    diagram_ffi::trace_return(value);
+    diagram_sffi::trace_return(value);
     Ok(Value::Nil)
 }
 
@@ -115,33 +115,33 @@ pub fn rt_diagram_mark_architectural(args: &[Value]) -> Result<Value, CompileErr
         _ => return Err(CompileError::semantic("entity must be a string")),
     };
 
-    diagram_ffi::mark_architectural(&entity);
+    diagram_sffi::mark_architectural(&entity);
     Ok(Value::Nil)
 }
 
 /// Generate sequence diagram as mermaid string
 pub fn rt_diagram_generate_sequence(_args: &[Value]) -> Result<Value, CompileError> {
-    let events = diagram_ffi::get_recorded_events();
+    let events = diagram_sffi::get_recorded_events();
     let mermaid = generate_sequence_mermaid(&events);
     Ok(Value::Str(mermaid))
 }
 
 /// Generate class diagram as mermaid string
 pub fn rt_diagram_generate_class(_args: &[Value]) -> Result<Value, CompileError> {
-    let events = diagram_ffi::get_recorded_events();
+    let events = diagram_sffi::get_recorded_events();
     let mermaid = generate_class_mermaid(&events);
     Ok(Value::Str(mermaid))
 }
 
 /// Generate architecture diagram as mermaid string
 pub fn rt_diagram_generate_arch(_args: &[Value]) -> Result<Value, CompileError> {
-    let events = diagram_ffi::get_recorded_events();
-    let arch_entities = diagram_ffi::get_architectural_entities();
+    let events = diagram_sffi::get_recorded_events();
+    let arch_entities = diagram_sffi::get_architectural_entities();
     let mermaid = generate_arch_mermaid(&events, &arch_entities);
     Ok(Value::Str(mermaid))
 }
 
-/// Free a string (no-op in interpreter, for FFI compatibility)
+/// Free a string (no-op in interpreter, for SFFI compatibility)
 pub fn rt_diagram_free_string(_args: &[Value]) -> Result<Value, CompileError> {
     // No-op in interpreter - memory is managed by Rust
     Ok(Value::Nil)
@@ -151,7 +151,7 @@ pub fn rt_diagram_free_string(_args: &[Value]) -> Result<Value, CompileError> {
 // Helper functions for diagram generation
 // ============================================================================
 
-fn generate_sequence_mermaid(events: &[diagram_ffi::CallEvent]) -> String {
+fn generate_sequence_mermaid(events: &[diagram_sffi::CallEvent]) -> String {
     let mut output = String::from("sequenceDiagram\n");
 
     // Extract participants
@@ -177,7 +177,7 @@ fn generate_sequence_mermaid(events: &[diagram_ffi::CallEvent]) -> String {
             let caller = stack.last().cloned().unwrap_or_else(|| "Test".to_string());
 
             match event.call_type {
-                diagram_ffi::CallType::Method | diagram_ffi::CallType::Function => {
+                diagram_sffi::CallType::Method | diagram_sffi::CallType::Function => {
                     let args = if event.arguments.is_empty() {
                         String::new()
                     } else {
@@ -196,7 +196,7 @@ fn generate_sequence_mermaid(events: &[diagram_ffi::CallEvent]) -> String {
                     ));
                     stack.push(cls.clone());
                 }
-                diagram_ffi::CallType::Return => {
+                diagram_sffi::CallType::Return => {
                     if stack.len() > 1 {
                         stack.pop();
                         let returnee = stack.last().cloned().unwrap_or_else(|| "Test".to_string());
@@ -204,7 +204,7 @@ fn generate_sequence_mermaid(events: &[diagram_ffi::CallEvent]) -> String {
                         output.push_str(&format!("    {}-->>{}:{}\n", cls, returnee, ret_val));
                     }
                 }
-                diagram_ffi::CallType::Constructor => {
+                diagram_sffi::CallType::Constructor => {
                     output.push_str(&format!("    {}->>{}:new()\n", caller, cls));
                     stack.push(cls.clone());
                 }
@@ -215,7 +215,7 @@ fn generate_sequence_mermaid(events: &[diagram_ffi::CallEvent]) -> String {
     output
 }
 
-fn generate_class_mermaid(events: &[diagram_ffi::CallEvent]) -> String {
+fn generate_class_mermaid(events: &[diagram_sffi::CallEvent]) -> String {
     let mut output = String::from("classDiagram\n");
 
     // Extract classes and methods
@@ -265,7 +265,7 @@ fn generate_class_mermaid(events: &[diagram_ffi::CallEvent]) -> String {
     output
 }
 
-fn generate_arch_mermaid(events: &[diagram_ffi::CallEvent], arch_entities: &[String]) -> String {
+fn generate_arch_mermaid(events: &[diagram_sffi::CallEvent], arch_entities: &[String]) -> String {
     let mut output = String::from("flowchart TD\n");
 
     // Add architectural nodes

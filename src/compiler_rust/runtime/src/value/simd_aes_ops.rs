@@ -35,7 +35,7 @@
 
 use super::aes::SBOX;
 use super::core::RuntimeValue;
-use super::ffi::memory::rt_alloc;
+use super::sffi::memory::rt_alloc;
 
 // ---------------------------------------------------------------------------
 // Scalar primitives — shared with the scalar fallback below.
@@ -132,7 +132,7 @@ fn xor_u8x16(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
 }
 
 // ---------------------------------------------------------------------------
-// Lane-level kernels (the shared core for both compiled-mode FFI and the
+// Lane-level kernels (the shared core for both compiled-mode SFFI and the
 // interpreter-extern handler).
 // ---------------------------------------------------------------------------
 

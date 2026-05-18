@@ -1,4 +1,4 @@
-//! Synchronization primitives and FFI functions.
+//! Synchronization primitives and SFFI functions.
 //!
 //! This module provides runtime implementations for:
 //! - Atomic: Lock-free atomic operations (#1101)

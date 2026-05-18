@@ -30,7 +30,7 @@ pub enum Node {
     /// Function alias: `fn new_name = old_name`
     FunctionAlias(FunctionAliasDef),
     Extern(ExternDef),
-    /// External class for FFI object-based bindings
+    /// External class for SFFI object-based bindings
     ExternClass(ExternClassDef),
     Macro(MacroDef),
     Unit(UnitDef),
@@ -434,8 +434,8 @@ pub enum PointerKind {
     Handle,    // +T
     Borrow,    // &T_borrow (immutable borrow)
     BorrowMut, // &mut T_borrow (mutable borrow)
-    RawConst,  // *const T (FFI const pointer)
-    RawMut,    // *mut T (FFI mutable pointer)
+    RawConst,  // *const T (SFFI const pointer)
+    RawMut,    // *mut T (SFFI mutable pointer)
 }
 
 /// Function effect annotations for capability-based effect tracking.

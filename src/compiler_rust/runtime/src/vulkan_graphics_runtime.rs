@@ -1,4 +1,4 @@
-//! Vulkan Graphics FFI runtime — thin dispatcher that pulls in submodules.
+//! Vulkan Graphics SFFI runtime — thin dispatcher that pulls in submodules.
 //!
 //! See submodules for implementation. Public C symbols (`rt_vulkan_*`) are
 //! defined in the submodules and exported directly via `#[no_mangle]`.

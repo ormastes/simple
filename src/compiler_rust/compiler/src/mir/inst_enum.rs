@@ -493,7 +493,7 @@ pub enum MirInst {
         args: Vec<VReg>,
     },
 
-    /// Extern class method call (FFI object method dispatch)
+    /// Extern class method call (SFFI object method dispatch)
     /// Used for `extern class` method calls (static, immutable, mutable).
     ExternMethodCall {
         dest: Option<VReg>,
@@ -869,15 +869,15 @@ pub enum MirInst {
     },
 
     // =========================================================================
-    // Value Boxing Instructions (for FFI boundary)
+    // Value Boxing Instructions (for SFFI boundary)
     // =========================================================================
 
-    /// Box a native integer as RuntimeValue for FFI calls.
+    /// Box a native integer as RuntimeValue for SFFI calls.
     /// RuntimeValue layout: (value << 3) | TAG_INT, where TAG_INT = 0.
-    /// Used when passing native integers to FFI functions that expect RuntimeValue.
+    /// Used when passing native integers to SFFI functions that expect RuntimeValue.
     BoxInt { dest: VReg, value: VReg },
 
-    /// Box a native float as RuntimeValue for FFI calls.
+    /// Box a native float as RuntimeValue for SFFI calls.
     /// RuntimeValue layout: (bits >> 3) << 3 | TAG_FLOAT, where TAG_FLOAT = 2.
     BoxFloat { dest: VReg, value: VReg },
 

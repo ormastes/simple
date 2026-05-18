@@ -1,6 +1,6 @@
 //! Element-wise operations for PyTorch tensors
 //!
-//! This module provides FFI functions for element-wise tensor operations:
+//! This module provides SFFI functions for element-wise tensor operations:
 //! - Binary operations: add, sub, mul, div (tensor + tensor)
 //! - Scalar operations: add_scalar, sub_scalar, mul_scalar, div_scalar (tensor + scalar)
 //! - Unary operations: pow, sqrt, exp, log
@@ -104,7 +104,7 @@ macro_rules! tensor_unary_op {
 }
 
 // ============================================================================
-// FFI Functions: Element-wise Binary Operations (4 functions)
+// SFFI Functions: Element-wise Binary Operations (4 functions)
 // ============================================================================
 
 /// Element-wise addition: a + b
@@ -120,7 +120,7 @@ tensor_binary_op!(rt_torch_mul, |a: &Tensor, b: &Tensor| a * b);
 tensor_binary_op!(rt_torch_div, |a: &Tensor, b: &Tensor| a / b);
 
 // ============================================================================
-// FFI Functions: Scalar Operations (5 functions)
+// SFFI Functions: Scalar Operations (5 functions)
 // ============================================================================
 
 /// Add scalar: tensor + scalar
@@ -139,7 +139,7 @@ tensor_scalar_op!(rt_torch_div_scalar, |t: &Tensor, s| t / s);
 tensor_scalar_op!(rt_torch_pow, |t: &Tensor, exp| t.pow_tensor_scalar(exp));
 
 // ============================================================================
-// FFI Functions: Unary Operations (3 functions)
+// SFFI Functions: Unary Operations (3 functions)
 // ============================================================================
 
 /// Square root
@@ -152,7 +152,7 @@ tensor_unary_op!(rt_torch_exp, |t: &Tensor| t.exp());
 tensor_unary_op!(rt_torch_log, |t: &Tensor| t.log());
 
 // ============================================================================
-// FFI Functions: Simple Math Extensions (#1940-#1949)
+// SFFI Functions: Simple Math Extensions (#1940-#1949)
 // ============================================================================
 
 /// Clamp tensor values to range [min, max]

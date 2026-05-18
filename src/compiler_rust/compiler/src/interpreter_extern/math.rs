@@ -5,8 +5,8 @@
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
-// Import runtime FFI math functions
-use simple_runtime::value::ffi::math::{
+// Import runtime SFFI math functions
+use simple_runtime::value::sffi::math::{
     rt_math_pow, rt_math_log, rt_math_log10, rt_math_log2, rt_math_exp, rt_math_sqrt, rt_math_cbrt, rt_math_sin,
     rt_math_cos, rt_math_tan, rt_math_asin, rt_math_acos, rt_math_atan, rt_math_atan2, rt_math_sinh, rt_math_cosh,
     rt_math_tanh, rt_math_floor, rt_math_ceil, rt_math_nan, rt_math_inf, rt_math_is_nan, rt_math_is_inf,
@@ -161,7 +161,7 @@ pub fn pow(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 // ============================================================================
-// Float Math FFI Wrappers
+// Float Math SFFI Wrappers
 // ============================================================================
 
 /// rt_math_pow - Power function for floats

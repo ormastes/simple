@@ -1,4 +1,4 @@
-// UDP FFI functions for runtime/value/net module
+// UDP SFFI functions for runtime/value/net module
 
 /// Bind a UDP socket to an address.
 /// Returns (handle, error_code)

@@ -1,4 +1,4 @@
-//! Dictionary type and FFI functions.
+//! Dictionary type and SFFI functions.
 
 use super::collections::{rt_array_new, rt_array_push, RuntimeString};
 use super::core::RuntimeValue;

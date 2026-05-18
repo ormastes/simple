@@ -1,6 +1,6 @@
 // Monoio runtime thread with message passing
 // Solves the !Send/!Sync problem by running monoio on a dedicated thread
-// FFI calls send messages to this thread via channels
+// SFFI calls send messages to this thread via channels
 
 #![cfg(feature = "monoio-net")]
 

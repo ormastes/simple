@@ -1,6 +1,6 @@
 # Enhanced Codegen - Intelligence in Simple Layer
 #
-# Full codegen logic implemented in Simple, using FFI as thin translation layer.
+# Full codegen logic implemented in Simple, using SFFI as thin translation layer.
 # This module adds:
 # - Type analysis and tracking
 # - Constant folding and propagation
@@ -9,7 +9,7 @@
 # - Better error messages
 #
 # Architecture:
-#   MIR -> Optimization (Simple) -> Validation (Simple) -> FFI (thin IR emit)
+#   MIR -> Optimization (Simple) -> Validation (Simple) -> SFFI (thin IR emit)
 
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.{SymbolId}
@@ -24,9 +24,9 @@ class CodegenEnhanced:
     """
     Enhanced code generator with optimization in Simple.
 
-    FFI layer is used ONLY for IR emission - all logic here.
+    SFFI layer is used ONLY for IR emission - all logic here.
     """
-    # Cranelift state (from FFI)
+    # Cranelift state (from SFFI)
     module_handle: i64
     current_ctx: i64
 
@@ -36,7 +36,7 @@ class CodegenEnhanced:
     use_count: {i64: i64}             # LocalId -> number of uses
     dead_locals: [i64]                # Dead code locals
 
-    # Value tracking (FFI handles)
+    # Value tracking (SFFI handles)
     local_values: {i64: i64}          # LocalId -> Cranelift value
     block_map: {i64: i64}             # BlockId -> Cranelift block
     function_map: {text: i64}         # name -> function id
@@ -282,7 +282,7 @@ impl CodegenEnhanced:
         uses == 0
 
     # ========================================================================
-    # Validation (Before FFI)
+    # Validation (Before SFFI)
     # ========================================================================
 
     fn validate_binop(op: MirBinOp, left: MirOperand, right: MirOperand) -> CodegenError?:
@@ -369,7 +369,7 @@ impl CodegenEnhanced:
         Flow:
         1. Validate instruction
         2. Apply optimizations
-        3. Emit FFI call
+        3. Emit SFFI call
         """
         match inst.kind:
             case BinOp(dest, op, left, right):
@@ -382,14 +382,14 @@ impl CodegenEnhanced:
                 if self.const_map.has(dest.id):
                     # Already folded during analysis
                     val const_val = self.const_map[dest.id]
-                    val cl_value = self.emit_const_ffi(const_val, self.type_map[dest.id])
+                    val cl_value = self.emit_const_sffi(const_val, self.type_map[dest.id])
                     self.local_values[dest.id] = cl_value
                     return nil
 
                 # Emit normal binop
-                val lv = self.compile_operand_ffi(left)
-                val rv = self.compile_operand_ffi(right)
-                val result = self.emit_binop_ffi(op, lv, rv)
+                val lv = self.compile_operand_sffi(left)
+                val rv = self.compile_operand_sffi(right)
+                val result = self.emit_binop_sffi(op, lv, rv)
                 self.local_values[dest.id] = result
                 nil
 
@@ -397,13 +397,13 @@ impl CodegenEnhanced:
                 # Check if folded
                 if self.const_map.has(dest.id):
                     val const_val = self.const_map[dest.id]
-                    val cl_value = self.emit_const_ffi(const_val, self.type_map[dest.id])
+                    val cl_value = self.emit_const_sffi(const_val, self.type_map[dest.id])
                     self.local_values[dest.id] = cl_value
                     return nil
 
                 # Emit normal unaryop
-                val v = self.compile_operand_ffi(operand)
-                val result = self.emit_unaryop_ffi(op, v)
+                val v = self.compile_operand_sffi(operand)
+                val result = self.emit_unaryop_sffi(op, v)
                 self.local_values[dest.id] = result
                 nil
 
@@ -412,26 +412,26 @@ impl CodegenEnhanced:
                 val src_type = self.get_operand_type(operand)
                 if src_type.? and self.types_equal(src_type.unwrap(), target):
                     # No-op cast - just copy value
-                    val v = self.compile_operand_ffi(operand)
+                    val v = self.compile_operand_sffi(operand)
                     self.local_values[dest.id] = v
                     return nil
 
                 # Emit real cast
-                val v = self.compile_operand_ffi(operand)
-                val result = self.emit_cast_ffi(v, target)
+                val v = self.compile_operand_sffi(operand)
+                val result = self.emit_cast_sffi(v, target)
                 self.local_values[dest.id] = result
                 nil
 
             case _:
-                # Default: just emit FFI
+                # Default: just emit SFFI
                 nil
 
     # ========================================================================
-    # FFI Emission Layer (Thin Wrapper)
+    # SFFI Emission Layer (Thin Wrapper)
     # ========================================================================
 
-    me emit_const_ffi(value: MirConstValue, type_: MirType) -> i64:
-        """Emit constant via FFI - THIN WRAPPER."""
+    me emit_const_sffi(value: MirConstValue, type_: MirType) -> i64:
+        """Emit constant via SFFI - THIN WRAPPER."""
         match value:
             case Int(v):
                 val cl_type = self.mir_type_to_cl(type_)
@@ -444,8 +444,8 @@ impl CodegenEnhanced:
             case _:
                 cranelift_iconst(self.current_ctx, CL_TYPE_I64, 0)
 
-    me emit_binop_ffi(op: MirBinOp, left: i64, right: i64) -> i64:
-        """Emit binop via FFI - THIN WRAPPER."""
+    me emit_binop_sffi(op: MirBinOp, left: i64, right: i64) -> i64:
+        """Emit binop via SFFI - THIN WRAPPER."""
         match op:
             case Add: cranelift_iadd(self.current_ctx, left, right)
             case Sub: cranelift_isub(self.current_ctx, left, right)
@@ -465,8 +465,8 @@ impl CodegenEnhanced:
             case Ge: cranelift_icmp(self.current_ctx, CL_CMP_SGE, left, right)
             case _: 0
 
-    me emit_unaryop_ffi(op: MirUnaryOp, operand: i64) -> i64:
-        """Emit unaryop via FFI - THIN WRAPPER."""
+    me emit_unaryop_sffi(op: MirUnaryOp, operand: i64) -> i64:
+        """Emit unaryop via SFFI - THIN WRAPPER."""
         match op:
             case Neg:
                 val zero = cranelift_iconst(self.current_ctx, CL_TYPE_I64, 0)
@@ -479,18 +479,18 @@ impl CodegenEnhanced:
             case _:
                 0
 
-    me emit_cast_ffi(value: i64, target: MirType) -> i64:
-        """Emit cast via FFI - THIN WRAPPER."""
+    me emit_cast_sffi(value: i64, target: MirType) -> i64:
+        """Emit cast via SFFI - THIN WRAPPER."""
         val cl_target = self.mir_type_to_cl(target)
         cranelift_bitcast(self.current_ctx, cl_target, value)
 
-    me compile_operand_ffi(operand: MirOperand) -> i64:
-        """Compile operand via FFI - THIN WRAPPER."""
+    me compile_operand_sffi(operand: MirOperand) -> i64:
+        """Compile operand via SFFI - THIN WRAPPER."""
         match operand.kind:
             case Copy(local) | Move(local):
                 self.local_values[local.id] ?? 0
             case Const(value, type_):
-                self.emit_const_ffi(value, type_)
+                self.emit_const_sffi(value, type_)
 
     fn mir_type_to_cl(type_: MirType) -> i64:
         """Convert MIR type to Cranelift type constant."""
@@ -536,7 +536,7 @@ val CL_CMP_SGT: i64 = 4
 val CL_CMP_SGE: i64 = 5
 
 # ============================================================================
-# FFI Declarations (Thin Layer)
+# SFFI Declarations (Thin Layer)
 # ============================================================================
 
 extern fn cranelift_iconst(ctx: i64, type_: i64, value: i64) -> i64

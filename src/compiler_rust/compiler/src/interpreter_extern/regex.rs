@@ -1,9 +1,9 @@
-//! Regex FFI functions for the interpreter
+//! Regex SFFI functions for the interpreter
 
 use crate::error::CompileError;
 use crate::value::Value;
 
-/// ffi_regex_is_match(pattern, text) -> bool
+/// sffi_regex_is_match(pattern, text) -> bool
 pub fn is_match(args: &[Value]) -> Result<Value, CompileError> {
     let pattern = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
@@ -13,7 +13,7 @@ pub fn is_match(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// ffi_regex_find(pattern, text) -> [text, start, end] or []
+/// sffi_regex_find(pattern, text) -> [text, start, end] or []
 pub fn find(args: &[Value]) -> Result<Value, CompileError> {
     let pattern = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
@@ -33,7 +33,7 @@ pub fn find(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// ffi_regex_find_all(pattern, text) -> [[text, start, end], ...]
+/// sffi_regex_find_all(pattern, text) -> [[text, start, end], ...]
 pub fn find_all(args: &[Value]) -> Result<Value, CompileError> {
     let pattern = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
@@ -55,7 +55,7 @@ pub fn find_all(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// ffi_regex_captures(pattern, text) -> [full_match, group1, ...] or []
+/// sffi_regex_captures(pattern, text) -> [full_match, group1, ...] or []
 pub fn captures(args: &[Value]) -> Result<Value, CompileError> {
     let pattern = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
@@ -78,7 +78,7 @@ pub fn captures(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// ffi_regex_replace(pattern, text, replacement) -> text
+/// sffi_regex_replace(pattern, text, replacement) -> text
 pub fn replace(args: &[Value]) -> Result<Value, CompileError> {
     let pattern = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
@@ -89,7 +89,7 @@ pub fn replace(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// ffi_regex_replace_all(pattern, text, replacement) -> text
+/// sffi_regex_replace_all(pattern, text, replacement) -> text
 pub fn replace_all(args: &[Value]) -> Result<Value, CompileError> {
     let pattern = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
@@ -100,7 +100,7 @@ pub fn replace_all(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// ffi_regex_split(pattern, text) -> [text]
+/// sffi_regex_split(pattern, text) -> [text]
 pub fn split(args: &[Value]) -> Result<Value, CompileError> {
     let pattern = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
@@ -113,7 +113,7 @@ pub fn split(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-/// ffi_regex_split_n(pattern, text, limit) -> [text]
+/// sffi_regex_split_n(pattern, text, limit) -> [text]
 pub fn split_n(args: &[Value]) -> Result<Value, CompileError> {
     let pattern = args.first().map(|v| v.to_display_string()).unwrap_or_default();
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();

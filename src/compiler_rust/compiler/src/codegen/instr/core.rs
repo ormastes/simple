@@ -84,11 +84,11 @@ fn compile_text_eq_with_identity_fast_path<M: Module>(
 }
 
 /// Ensure a value is i64, extending smaller integer types and bitcasting floats if needed.
-/// This is necessary because some values (e.g., from FFI functions returning i32 or
+/// This is necessary because some values (e.g., from SFFI functions returning i32 or
 /// float constants) may not be i64 even though runtime functions expect i64.
 ///
 /// Uses `uextend` (zero-extend) for backward compatibility with the pre-FR-0002b
-/// behavior — most non-shift call sites are widening runtime / FFI return values
+/// behavior — most non-shift call sites are widening runtime / SFFI return values
 /// where zero-extending is either correct or indistinguishable.
 fn ensure_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
     ensure_i64_typed(builder, val, None)

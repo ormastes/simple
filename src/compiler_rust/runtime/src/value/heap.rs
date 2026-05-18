@@ -35,7 +35,7 @@ pub enum HeapObjectType {
     BTreeMap = 0x18,
     HashSet = 0x19,
     BTreeSet = 0x1A,
-    // FFI-wrapped Rust objects (object-based FFI system)
+    // SFFI-wrapped Rust objects (object-based SFFI system)
     FfiObject = 0x1B,
 }
 
@@ -150,7 +150,7 @@ use super::core::RuntimeValue;
 
 /// Validate heap object type, returns None if invalid
 ///
-/// This is a shared helper to reduce boilerplate in FFI functions.
+/// This is a shared helper to reduce boilerplate in SFFI functions.
 #[inline]
 pub fn validate_heap_obj(val: RuntimeValue, expected: HeapObjectType) -> Option<*mut HeapHeader> {
     if !val.is_heap() {

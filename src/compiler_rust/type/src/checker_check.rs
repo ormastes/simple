@@ -156,7 +156,7 @@ impl TypeChecker {
                     self.env.insert(ext.name.clone(), ty);
                 }
                 Node::ExternClass(ec) => {
-                    // Register extern class as a type (FFI object type)
+                    // Register extern class as a type (SFFI object type)
                     let ty = self.fresh_var();
                     self.env.insert(ec.name.clone(), ty);
                 }

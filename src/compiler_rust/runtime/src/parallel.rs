@@ -1,6 +1,6 @@
 //! CPU parallel execution backend using Rayon.
 //!
-//! This module provides FFI functions for `@simd` kernels that execute
+//! This module provides SFFI functions for `@simd` kernels that execute
 //! on CPU using Rayon's work-stealing parallel scheduler. It provides
 //! the same programming model as GPU kernels but runs on CPU cores.
 //!
@@ -16,7 +16,7 @@
 //!                                    Work-stealing across CPU cores
 //! ```
 //!
-//! # FFI Functions
+//! # SFFI Functions
 //!
 //! | Function | Description |
 //! |----------|-------------|
@@ -78,7 +78,7 @@ fn set_group_barrier(barrier: Option<Arc<Barrier>>) {
 }
 
 // =============================================================================
-// FFI Functions: Work Item Identification
+// SFFI Functions: Work Item Identification
 // =============================================================================
 
 /// Get global work item ID for dimension (0=x, 1=y, 2=z).
@@ -142,7 +142,7 @@ pub extern "C" fn rt_par_num_groups(dim: u32) -> i64 {
 }
 
 // =============================================================================
-// FFI Functions: Synchronization
+// SFFI Functions: Synchronization
 // =============================================================================
 
 /// Work group barrier - synchronize all work items in the group.
@@ -163,7 +163,7 @@ pub extern "C" fn rt_par_mem_fence(_scope: u32) {
 }
 
 // =============================================================================
-// FFI Functions: Shared Memory
+// SFFI Functions: Shared Memory
 // =============================================================================
 
 /// Allocate shared memory (work group local memory).
@@ -310,7 +310,7 @@ fn execute_kernel_parallel(kernel: KernelFn, global_size: [i64; 3], local_size: 
 }
 
 // =============================================================================
-// FFI Functions: Kernel Launch
+// SFFI Functions: Kernel Launch
 // =============================================================================
 
 /// Launch a 1D kernel.

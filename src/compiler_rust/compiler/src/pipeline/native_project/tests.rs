@@ -980,8 +980,8 @@ fn test_duplicate_struct_sidecar_resolves_unique_compiler_context_handle() {
     std::fs::create_dir_all(compiler_root.join("99.loader")).unwrap();
     std::fs::create_dir_all(compiler_root.join("70.backend/linker")).unwrap();
 
-    let alive_ctx = compiler_root.join("99.loader/compiler_ffi.spl");
-    let handle_ctx = compiler_root.join("99.loader/loader/compiler_ffi.spl");
+    let alive_ctx = compiler_root.join("99.loader/compiler_sffi.spl");
+    let handle_ctx = compiler_root.join("99.loader/loader/compiler_sffi.spl");
     let consumer = compiler_root.join("70.backend/linker/obj_taker.spl");
 
     std::fs::write(&alive_ctx, "class CompilerContext:\n    alive: bool\n").unwrap();
@@ -1351,7 +1351,7 @@ fn rt_value_int(value: i64) -> i64:
     );
     assert!(
         stdout.contains("rt_value_int"),
-        "archive symbols did not include known runtime-FFI parameterized function:\n{}",
+        "archive symbols did not include known runtime-SFFI parameterized function:\n{}",
         stdout
     );
 }

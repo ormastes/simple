@@ -652,7 +652,7 @@ pub struct ExternDef {
     pub attributes: Vec<Attribute>,
 }
 
-/// External class definition for FFI object-based bindings.
+/// External class definition for SFFI object-based bindings.
 ///
 /// Syntax:
 /// ```simple
@@ -663,7 +663,7 @@ pub struct ExternDef {
 ///     fn close()
 /// ```
 ///
-/// External classes wrap Rust objects through the FFI system.
+/// External classes wrap Rust objects through the SFFI system.
 /// - `static fn` - static factory methods (no self parameter)
 /// - `fn` - immutable methods (takes &self)
 /// - `me` - mutable methods (takes &mut self)
@@ -678,7 +678,7 @@ pub struct ExternClassDef {
     pub methods: Vec<ExternMethodDef>,
     /// Visibility (pub/private)
     pub visibility: Visibility,
-    /// Attributes (e.g., `#[ffi_type = "Database"]`)
+    /// Attributes (e.g., `#[sffi_type = "Database"]`)
     pub attributes: Vec<Attribute>,
     /// Documentation comment
     pub doc_comment: Option<DocComment>,

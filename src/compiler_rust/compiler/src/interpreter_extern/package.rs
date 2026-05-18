@@ -1,12 +1,12 @@
 //! Package management extern functions
-//! Provides access to package FFI operations from Simple code
+//! Provides access to package SFFI operations from Simple code
 
 use crate::error::CompileError;
 use crate::value::Value;
-use std::ffi::CString;
+use std::sffi::CString;
 use std::os::raw::c_char;
 
-// Import FFI functions from runtime
+// Import SFFI functions from runtime
 extern "C" {
     fn rt_package_sha256(file_path: *const c_char) -> *mut c_char;
     fn rt_package_create_tarball(source_dir: *const c_char, output_path: *const c_char) -> i32;
@@ -58,7 +58,7 @@ pub fn sha256(args: &[Value]) -> Result<Value, CompileError> {
             return Err(CompileError::semantic("Failed to calculate checksum".to_string()));
         }
 
-        let c_str = std::ffi::CStr::from_ptr(result_ptr);
+        let c_str = std::sffi::CStr::from_ptr(result_ptr);
         let result = c_str.to_string_lossy().to_string();
         rt_package_free_string(result_ptr);
 

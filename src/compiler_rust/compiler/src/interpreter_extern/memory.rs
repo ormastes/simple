@@ -245,7 +245,7 @@ pub fn sys_free(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 // ============================================================================
-// Raw Memory Operations (for LLVM-lib FFI backend)
+// Raw Memory Operations (for LLVM-lib SFFI backend)
 // ============================================================================
 
 /// Allocate zeroed memory with alignment 8.

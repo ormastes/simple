@@ -5,7 +5,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{await_value, evaluate_expr};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
-use simple_runtime::value::diagram_ffi;
+use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -26,8 +26,8 @@ pub(crate) fn exec_lambda(
     use super::super::block_execution::exec_block_closure;
 
     // Diagram tracing for lambda execution
-    if diagram_ffi::is_diagram_enabled() {
-        diagram_ffi::trace_call("<lambda>");
+    if diagram_sffi::is_diagram_enabled() {
+        diagram_sffi::trace_call("<lambda>");
     }
 
     let mut local_env = captured_env.clone();

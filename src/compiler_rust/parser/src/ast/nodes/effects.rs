@@ -16,7 +16,7 @@ pub enum Effect {
     Net,
     /// Filesystem operations allowed (read/write files, directories)
     Fs,
-    /// Unsafe/unchecked operations allowed (raw pointers, FFI)
+    /// Unsafe/unchecked operations allowed (raw pointers, SFFI)
     Unsafe,
     /// Verification mode - enables Lean proof generation and verification constraints
     /// Code marked @verify must follow the verified subset (no unsafe, no reflection, etc.)
@@ -185,7 +185,7 @@ pub enum Capability {
     Net,
     /// Filesystem operations (read/write files, directories)
     Fs,
-    /// Unsafe/unchecked operations (raw pointers, FFI)
+    /// Unsafe/unchecked operations (raw pointers, SFFI)
     Unsafe,
     /// Garbage collection allowed
     Gc,

@@ -667,7 +667,7 @@ pub fn compile_function_body<M: Module>(
                 // FR-DRIVER-0002b: pick `sextend` for signed narrow ints so a
                 // later `>>` on the widened value still sees the sign bit.
                 // Unsigned and unknown keep the legacy `uextend` default —
-                // that matches Rust-FFI contracts for `u32 = 0xFFFFFFFF`.
+                // that matches Rust-SFFI contracts for `u32 = 0xFFFFFFFF`.
                 if let Some(dest) = inst.dest() {
                     if let Some(&val) = vreg_values.get(&dest) {
                         let ty = builder.func.dfg.value_type(val);
@@ -742,7 +742,7 @@ pub fn compile_function_body<M: Module>(
                         let ret_ty = if func.name == "main" {
                             types::I32
                         } else {
-                            crate::codegen::runtime_ffi::RUNTIME_FUNCS
+                            crate::codegen::runtime_sffi::RUNTIME_FUNCS
                                 .iter()
                                 .find(|spec| spec.name == func.name)
                                 .and_then(|spec| spec.returns.first().copied())

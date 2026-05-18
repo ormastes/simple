@@ -10,7 +10,7 @@ use crate::interpreter::{
 };
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
-use simple_runtime::value::diagram_ffi;
+use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -147,8 +147,8 @@ pub(super) fn exec_block_closure(
     IMMUTABLE_VARS.with(|cell| cell.borrow_mut().clear());
 
     // Diagram tracing for block closure execution
-    if diagram_ffi::is_diagram_enabled() {
-        diagram_ffi::trace_call("<block>");
+    if diagram_sffi::is_diagram_enabled() {
+        diagram_sffi::trace_call("<block>");
     }
 
     let mut local_env = captured_env.clone();

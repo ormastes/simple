@@ -189,7 +189,7 @@ pub mod codes {
 
     // Codegen errors (E20xx)
     pub const UNSUPPORTED_FEATURE: &str = "E2001";
-    pub const FFI_ERROR: &str = "E2002";
+    pub const SFFI_ERROR: &str = "E2002";
     pub const FAILED_BUILD_LOAD: &str = "E2003";
     pub const FAILED_BUILD_STORE: &str = "E2004";
     pub const FAILED_BUILD_ALLOCA: &str = "E2005";
@@ -209,8 +209,8 @@ pub mod codes {
     pub const FUNCTION_NOT_FOUND: &str = "E3008";
     pub const METHOD_NOT_FOUND: &str = "E3009";
 
-    // FFI errors (E40xx)
-    pub const TYPE_NOT_FFI_SAFE: &str = "E4005";
+    // SFFI errors (E40xx)
+    pub const TYPE_NOT_SFFI_SAFE: &str = "E4005";
 
     // Contract errors (E50xx)
     pub const CONTRACT_PRECONDITION_FAILED: &str = "E5001";

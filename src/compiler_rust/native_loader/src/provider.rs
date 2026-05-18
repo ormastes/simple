@@ -11,7 +11,7 @@ use simple_runtime_abi::RuntimeSymbolProvider;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Loading mode for runtime FFI symbols.
+/// Loading mode for runtime SFFI symbols.
 ///
 /// Determines how runtime symbols are resolved at execution time.
 #[derive(Clone, Debug, Default)]

@@ -1,40 +1,40 @@
-//! Vulkan GPU FFI bridge
+//! Vulkan GPU SFFI bridge
 //!
-//! Exposes Vulkan runtime to Simple language through C-compatible FFI functions.
+//! Exposes Vulkan runtime to Simple language through C-compatible SFFI functions.
 //! Uses handle-based API with global HashMaps for resource management.
 //!
-//! This is now organized as a module system under `vulkan_ffi/` with submodules for:
+//! This is now organized as a module system under `vulkan_sffi/` with submodules for:
 //! - `common`: Shared registries, error types, and utilities
 //! - `device`: Device creation, destruction, and synchronization
 //! - `buffer`: Buffer allocation, deallocation, uploads, and downloads
 
-// Re-export the vulkan_ffi module and its public items
-pub mod vulkan_ffi;
+// Re-export the vulkan_sffi module and its public items
+pub mod vulkan_sffi;
 
-pub use vulkan_ffi::common::VulkanFfiError;
-pub use vulkan_ffi::{BUFFER_REGISTRY, DEVICE_REGISTRY, PIPELINE_REGISTRY};
+pub use vulkan_sffi::common::VulkanFfiError;
+pub use vulkan_sffi::{BUFFER_REGISTRY, DEVICE_REGISTRY, PIPELINE_REGISTRY};
 
-// Re-export FFI functions for backward compatibility
-pub use vulkan_ffi::buffer::{rt_vk_buffer_alloc, rt_vk_buffer_download, rt_vk_buffer_free, rt_vk_buffer_upload};
-pub use vulkan_ffi::common::rt_vk_available;
-pub use vulkan_ffi::descriptor::{
+// Re-export SFFI functions for backward compatibility
+pub use vulkan_sffi::buffer::{rt_vk_buffer_alloc, rt_vk_buffer_download, rt_vk_buffer_free, rt_vk_buffer_upload};
+pub use vulkan_sffi::common::rt_vk_available;
+pub use vulkan_sffi::descriptor::{
     rt_vk_descriptor_layout_create_sampler, rt_vk_descriptor_layout_create_uniform, rt_vk_descriptor_layout_free,
     rt_vk_descriptor_pool_create, rt_vk_descriptor_pool_free, rt_vk_descriptor_set_allocate, rt_vk_descriptor_set_free,
     rt_vk_descriptor_set_update_buffer,
 };
-pub use vulkan_ffi::device::{rt_vk_device_create, rt_vk_device_free, rt_vk_device_sync};
-pub use vulkan_ffi::kernel::{rt_vk_kernel_compile, rt_vk_kernel_free, rt_vk_kernel_launch, rt_vk_kernel_launch_1d};
-pub use vulkan_ffi::swapchain::{
+pub use vulkan_sffi::device::{rt_vk_device_create, rt_vk_device_free, rt_vk_device_sync};
+pub use vulkan_sffi::kernel::{rt_vk_kernel_compile, rt_vk_kernel_free, rt_vk_kernel_launch, rt_vk_kernel_launch_1d};
+pub use vulkan_sffi::swapchain::{
     rt_vk_swapchain_acquire_next_image, rt_vk_swapchain_create, rt_vk_swapchain_destroy, rt_vk_swapchain_get_extent,
     rt_vk_swapchain_get_image_count, rt_vk_swapchain_present, rt_vk_swapchain_recreate,
 };
-pub use vulkan_ffi::window::{
+pub use vulkan_sffi::window::{
     rt_vk_window_create, rt_vk_window_destroy, rt_vk_window_get_size, rt_vk_window_poll_event,
     rt_vk_window_set_fullscreen, rt_vk_window_wait_event,
 };
 
 // Graphics pipeline management
-pub use vulkan_ffi::graphics::{
+pub use vulkan_sffi::graphics::{
     rt_vk_framebuffer_create, rt_vk_framebuffer_create_for_swapchain, rt_vk_framebuffer_free,
     rt_vk_framebuffer_get_dimensions, rt_vk_graphics_pipeline_create, rt_vk_graphics_pipeline_free,
     rt_vk_render_pass_create_simple, rt_vk_render_pass_create_with_depth, rt_vk_render_pass_free,
@@ -42,13 +42,13 @@ pub use vulkan_ffi::graphics::{
 };
 
 // Image and sampler management
-pub use vulkan_ffi::image::{
+pub use vulkan_sffi::image::{
     rt_vk_image_create_2d, rt_vk_image_download, rt_vk_image_free, rt_vk_image_get_view, rt_vk_image_upload,
     rt_vk_sampler_create, rt_vk_sampler_free,
 };
 
 // Command buffer management
-pub use vulkan_ffi::command::{
+pub use vulkan_sffi::command::{
     rt_vk_cmd_begin_render_pass, rt_vk_cmd_bind_index_buffer, rt_vk_cmd_bind_pipeline, rt_vk_cmd_bind_vertex_buffer,
     rt_vk_cmd_draw, rt_vk_cmd_draw_indexed, rt_vk_cmd_end_render_pass, rt_vk_cmd_set_scissor, rt_vk_cmd_set_viewport,
     rt_vk_command_buffer_begin, rt_vk_command_buffer_end, rt_vk_command_buffer_free, rt_vk_command_buffer_submit,

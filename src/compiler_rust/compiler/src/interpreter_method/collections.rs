@@ -643,7 +643,7 @@ pub fn handle_array_methods(
             Value::array(vec![value; arr.len()])
         }
         "ptr" | "data_ptr" => {
-            // Return raw pointer to array's data as i64 (for FFI/codegen)
+            // Return raw pointer to array's data as i64 (for SFFI/codegen)
             let ptr = arr.as_ptr() as i64;
             Value::Int(ptr)
         }

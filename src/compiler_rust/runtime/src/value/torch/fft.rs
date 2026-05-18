@@ -1,7 +1,7 @@
 //! Fast Fourier Transform operations for PyTorch tensors
 //!
 //! Simple Math #1950-#1959: FFT Operations
-//! Provides FFI functions for frequency domain operations:
+//! Provides SFFI functions for frequency domain operations:
 //! - fft: 1D Fast Fourier Transform
 //! - ifft: 1D Inverse Fast Fourier Transform
 //! - rfft: 1D Real FFT (for real-valued inputs)

@@ -358,7 +358,7 @@ pub fn unknown_block_type(kind: &str) -> CompileError {
 }
 
 // ============================================
-// FFI/Interpreter Errors
+// SFFI/Interpreter Errors
 // ============================================
 
 /// Error when an expression index is invalid.

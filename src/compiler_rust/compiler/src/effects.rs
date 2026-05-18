@@ -119,9 +119,9 @@ const UNSAFE_OPERATIONS: &[&str] = &[
     "native_free",
     "native_memcpy",
     "native_memmove",
-    // FFI operations
-    "ffi_call",
-    "ffi_load",
+    // SFFI operations
+    "sffi_call",
+    "sffi_load",
     "dlopen",
     "dlsym",
     "dlclose",

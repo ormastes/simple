@@ -43,7 +43,7 @@ impl RuntimeThread {
             let mut registry = StreamRegistry::new();
 
             loop {
-                // Receive request from FFI
+                // Receive request from SFFI
                 let request = match request_rx.recv() {
                     Ok(req) => req,
                     Err(_) => {

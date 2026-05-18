@@ -2,7 +2,7 @@
 //!
 //! Supports multiple computation backends:
 //! - CPU: Native interpreter (always available)
-//! - Torch: PyTorch tensor backend via FFI
+//! - Torch: PyTorch tensor backend via SFFI
 //! - CUDA: Direct CUDA computation via PyTorch
 //!
 //! Default behavior is auto-selection at runtime based on expression

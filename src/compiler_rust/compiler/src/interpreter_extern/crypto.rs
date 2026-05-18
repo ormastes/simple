@@ -172,7 +172,7 @@ pub fn rt_base64_decode(args: &[Value]) -> Result<Value, CompileError> {
 /// path); this implementation simply matches behaviour.
 ///
 /// Without this case, the unknown-extern fallthrough sends each `Value::Str`
-/// argument through `dynamic_ffi::value_to_i64`, which leaks a C-string
+/// argument through `dynamic_sffi::value_to_i64`, which leaks a C-string
 /// pointer. The runtime then reinterprets those bits as packed
 /// `RuntimeValue`s, `rt_string_data` returns null, and the function
 /// returns 0 unconditionally — making `constant_time_compare(a, a)`

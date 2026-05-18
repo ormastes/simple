@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::sffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;

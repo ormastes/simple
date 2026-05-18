@@ -1,7 +1,7 @@
 //! EasyFix Rules — thin bridge to Simple implementation
 //!
 //! Instead of duplicating rule logic in Rust, this module provides:
-//! 1. A bridge to call the Simple rules (`src/app/fix/rules.spl`) via the interpreter FFI
+//! 1. A bridge to call the Simple rules (`src/app/fix/rules.spl`) via the interpreter SFFI
 //! 2. Conversion from interpreter `Value` → Rust `EasyFix` structs
 //! 3. Helper functions for rules that need compiler integration (typo, type coercion)
 //!

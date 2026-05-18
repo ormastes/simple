@@ -100,7 +100,7 @@ impl GraphicsPipeline {
         };
 
         // Shader stages
-        let entry_name = std::ffi::CString::new("main").unwrap();
+        let entry_name = std::sffi::CString::new("main").unwrap();
 
         let vert_stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)

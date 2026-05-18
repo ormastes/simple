@@ -277,7 +277,7 @@ extern fn native_tcp_bind(addr_ptr: i64, addr_len: i64) -> (i64, i64)
 extern fn native_tcp_close(handle: i64) -> i64
 
 fn main() -> i64:
-    # Call with pointer and length (JIT path uses raw FFI)
+    # Call with pointer and length (JIT path uses raw SFFI)
     # For now, just return 0 to verify JIT compilation works
     return 0
 "#;

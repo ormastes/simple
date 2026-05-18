@@ -3,7 +3,7 @@
 //! Phase 1 of the SIMD int-intrinsics feature
 //! (`doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md`).
 //!
-//! These FFI symbols back the `rt_simd_{add,sub,mul,xor,and,or,shl,shr}_i32x{4,8}`
+//! These SFFI symbols back the `rt_simd_{add,sub,mul,xor,and,or,shl,shr}_i32x{4,8}`
 //! extern declarations in `src/lib/nogc_sync_mut/simd.spl`. They operate on
 //! plain `[i32; 4]` / `[i32; 8]` lane arrays so they can be reused by both
 //! compiled code (via a future Vec4i/Vec8i marshalling layer) and by the
@@ -33,7 +33,7 @@ fn mask_shift(n: i64) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Lane-level kernels (the shared core for both compiled-mode FFI and the
+// Lane-level kernels (the shared core for both compiled-mode SFFI and the
 // interpreter-extern handlers).
 // ---------------------------------------------------------------------------
 
