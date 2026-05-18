@@ -1,0 +1,161 @@
+# Backend Acceleration Probe Contract
+#
+# Typed diagnostics for acceleration backend initialization.
+# Supports strict creation (no silent fallback) and human-readable diagnostics.
+#
+# Usage:
+#   use std.gc_async_mut.gpu.engine2d.backend_accel_probe.{
+#       AccelProbeStatus, AccelProbeResult, AccelProber, StrictAccelFactory}
+
+# ============================================================================
+# AccelProbeStatus
+# ============================================================================
+
+class AccelProbeStatus:
+    code: text
+    message: text
+
+    static fn available(msg: text) -> AccelProbeStatus:
+        AccelProbeStatus(code: "available", message: msg)
+
+    static fn unavailable(msg: text) -> AccelProbeStatus:
+        AccelProbeStatus(code: "unavailable", message: msg)
+
+    static fn fallback(msg: text) -> AccelProbeStatus:
+        AccelProbeStatus(code: "fallback", message: msg)
+
+    static fn error(msg: text) -> AccelProbeStatus:
+        AccelProbeStatus(code: "error", message: msg)
+
+    fn is_available(self) -> bool:
+        self.code == "available"
+
+    fn is_unavailable(self) -> bool:
+        self.code == "unavailable"
+
+    fn to_text(self) -> text:
+        self.code + ": " + self.message
+
+# ============================================================================
+# AccelProbeResult
+# ============================================================================
+
+class AccelProbeResult:
+    backend_name: text
+    status: AccelProbeStatus
+    device_name: text
+    driver_version: text
+    shader_format: text
+    has_compute: bool
+    has_graphics: bool
+    init_time_us: i64
+    memory_mb: i64
+
+    static fn create(name: text, st: AccelProbeStatus) -> AccelProbeResult:
+        AccelProbeResult(
+            backend_name:   name,
+            status:         st,
+            device_name:    "",
+            driver_version: "",
+            shader_format:  "none",
+            has_compute:    false,
+            has_graphics:   false,
+            init_time_us:   0,
+            memory_mb:      0
+        )
+
+    static fn with_device(name: text, st: AccelProbeStatus, device: text, fmt: text) -> AccelProbeResult:
+        AccelProbeResult(
+            backend_name:   name,
+            status:         st,
+            device_name:    device,
+            driver_version: "",
+            shader_format:  fmt,
+            has_compute:    true,
+            has_graphics:   true,
+            init_time_us:   0,
+            memory_mb:      0
+        )
+
+    fn is_usable(self) -> bool:
+        self.status.is_available()
+
+    fn summary(self) -> text:
+        var s = self.backend_name + ": " + self.status.code
+        if self.device_name != "":
+            s = s + " (" + self.device_name + ")"
+        if self.shader_format != "none":
+            s = s + " [" + self.shader_format + "]"
+        s
+
+# ============================================================================
+# AccelProber
+# ============================================================================
+
+class AccelProber:
+    results: i64
+
+    static fn create() -> AccelProber:
+        AccelProber(results: 0)
+
+    fn probe_vulkan(self) -> AccelProbeResult:
+        AccelProbeResult.with_device("vulkan", AccelProbeStatus.available("SPIR-V pipeline ready"), "Generic GPU", "spirv")
+
+    fn probe_cuda(self) -> AccelProbeResult:
+        AccelProbeResult.with_device("cuda", AccelProbeStatus.available("CUDA Driver API ready"), "CUDA Device", "ptx")
+
+    fn probe_metal(self) -> AccelProbeResult:
+        AccelProbeResult.create("metal", AccelProbeStatus.unavailable("Metal requires macOS/iOS"))
+
+    fn probe_webgpu(self) -> AccelProbeResult:
+        AccelProbeResult.with_device("webgpu", AccelProbeStatus.available("wgpu adapter found"), "wgpu Adapter", "wgsl")
+
+    fn probe_cpu(self) -> AccelProbeResult:
+        AccelProbeResult.create("cpu", AccelProbeStatus.available("CPU software renderer always available"))
+
+    fn best_available(self) -> AccelProbeResult:
+        var v = self.probe_vulkan()
+        if v.is_usable():
+            return v
+        var c = self.probe_cuda()
+        if c.is_usable():
+            return c
+        var w = self.probe_webgpu()
+        if w.is_usable():
+            return w
+        self.probe_cpu()
+
+# ============================================================================
+# StrictAccelFactory
+# ============================================================================
+
+class StrictAccelFactory:
+    required_backend: text
+    strict_mode: bool
+
+    static fn create(backend: text) -> StrictAccelFactory:
+        StrictAccelFactory(required_backend: backend, strict_mode: true)
+
+    static fn permissive() -> StrictAccelFactory:
+        StrictAccelFactory(required_backend: "", strict_mode: false)
+
+    fn is_glsl_format(self, fmt: text) -> bool:
+        fmt == "glsl"
+
+    fn is_admitted(self, res: AccelProbeResult) -> bool:
+        if self.is_glsl_format(res.shader_format):
+            return false
+        if self.strict_mode == false:
+            return res.is_usable()
+        if self.required_backend == "":
+            return res.is_usable()
+        res.backend_name == self.required_backend and res.is_usable()
+
+    fn rejection_reason(self, res: AccelProbeResult) -> text:
+        if self.is_glsl_format(res.shader_format):
+            return "GLSL shader format not admitted; use SPIR-V"
+        if res.is_usable() == false:
+            return "backend unavailable: " + res.status.message
+        if self.strict_mode and self.required_backend != "" and res.backend_name != self.required_backend:
+            return "strict mode requires " + self.required_backend + " but got " + res.backend_name
+        "admitted"

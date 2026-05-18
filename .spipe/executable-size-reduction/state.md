@@ -39,6 +39,7 @@ feature
 - src/compiler/90.tools/size/symbol_root_registry.spl — SymbolRoot + SymbolRootRegistry + AbiSurface + AbiBoundaryCheck
 - src/compiler/90.tools/size/size_budget_tracker.spl — SizeBudget + StripConfig + SizeComparison + SizeTrackingReport
 - src/compiler/90.tools/size/dependency_audit.spl — DependencyEdge + DependencyClosure + BinaryDepMap + ArchSplitPlan + SplitPlanReport
+- src/compiler/90.tools/size/size_report.spl — SizeReportEntry + SizeCiGate + BinarySizeReport + SizeReportSummary
 - test/unit/compiler/executable_size_spec.spl — 20 tests
 
 ### 7-verify

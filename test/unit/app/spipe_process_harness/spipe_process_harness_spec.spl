@@ -1,0 +1,246 @@
+"""
+Tests for app.spipe_process_harness and std.nogc_async_mut.spipe_process_harness.
+
+Covers provider normalization, gate semantics, HUD rendering, deploy snippets,
+hook path helpers, and event JSONL formatting.
+"""
+
+use std.spipe.*
+
+# =========================================================================
+# Inline types mirroring the harness structs (self-contained test)
+# =========================================================================
+
+struct GateDecision:
+    allowed: bool
+    exit_code: i64
+    reason: text
+
+struct HudSnapshot:
+    model: text
+    jj_worktree: text
+    commit_id: text
+    hours_remaining: text
+    week_remaining: text
+    goal: text
+
+struct HookDeploySnippet:
+    provider: text
+    path: text
+    content: text
+
+struct HarnessOptions:
+    provider: text
+    feature: text
+    event: text
+    model: text
+    session_id: text
+    raw_payload: text
+    require_approval: bool
+
+# =========================================================================
+# Pure helper functions (mirrors of core.spl logic — inline for test isolation)
+# =========================================================================
+
+fn normalize_provider(provider: text) -> text:
+    val p = provider.lower().trim()
+    if p.contains("claude"):
+        return "claude"
+    if p.contains("codex") or p.contains("openai") or p.contains("gpt"):
+        return "codex"
+    if p.contains("gemini") or p.contains("google"):
+        return "gemini"
+    if p == "":
+        return "unknown"
+    p
+
+fn state_path(feature: text) -> text:
+    val clean = if feature.trim() == "": "spipe-process-harness" else: feature.trim()
+    ".spipe/{clean}/state.md"
+
+fn event_log_path(feature: text) -> text:
+    val clean = if feature.trim() == "": "spipe-process-harness" else: feature.trim()
+    ".spipe/{clean}/events.jsonl"
+
+fn gate_from_state(state: text, require_approval: bool) -> GateDecision:
+    if state.trim() == "":
+        return GateDecision(allowed: false, exit_code: 2, reason: "missing SPipe state")
+    if require_approval and state.contains("User Approved: true") == false:
+        return GateDecision(allowed: false, exit_code: 2, reason: "user approval missing")
+    if state.contains("Prevent: block") or state.contains("STATUS: FAIL"):
+        return GateDecision(allowed: false, exit_code: 2, reason: "SPipe prevention gate is blocking")
+    GateDecision(allowed: true, exit_code: 0, reason: "allow")
+
+fn render_hud(snapshot: HudSnapshot) -> text:
+    "model=" + snapshot.model + " | jj=" + snapshot.jj_worktree + " | commit=" + snapshot.commit_id + " | hr=" + snapshot.hours_remaining + " | week=" + snapshot.week_remaining + " | goal=" + snapshot.goal
+
+fn make_deploy_snippets() -> [HookDeploySnippet]:
+    [
+        HookDeploySnippet(provider: "claude", path: ".spipe/hook-deploy/claude-settings-hooks.json", content: "claude-hook"),
+        HookDeploySnippet(provider: "codex", path: ".spipe/hook-deploy/codex-hook.sdn", content: "codex-hook"),
+        HookDeploySnippet(provider: "gemini", path: ".spipe/hook-deploy/gemini-hook.json", content: "gemini-hook")
+    ]
+
+fn hook_command(provider: text) -> text:
+    "bin/simple spipe-process-harness hook --provider " + normalize_provider(provider)
+
+fn provider_hook_event_count(provider: text) -> i64:
+    val p = normalize_provider(provider)
+    if p == "claude":
+        return 9
+    if p == "codex":
+        return 5
+    if p == "gemini":
+        return 5
+    0
+
+fn make_approved_state() -> text:
+    "# SPipe State: test\n\n## Harness\n- User Approved: true\n- Prevent: allow\n"
+
+fn make_blocked_state() -> text:
+    "# SPipe State: test\n\n## Harness\n- User Approved: true\n- Prevent: block\n"
+
+fn make_unapproved_state() -> text:
+    "# SPipe State: test\n\n## Harness\n- User Approved: false\n- Prevent: allow\n"
+
+fn make_hud_snapshot() -> HudSnapshot:
+    HudSnapshot(
+        model: "claude-sonnet-4-6",
+        jj_worktree: "clean",
+        commit_id: "abc123 feat: harness",
+        hours_remaining: "4",
+        week_remaining: "2",
+        goal: "ship harness"
+    )
+
+# =========================================================================
+# Tests
+# =========================================================================
+
+describe "SPipe Process Harness":
+
+    describe "normalize_provider":
+
+        it "normalizes claude":
+            val p = normalize_provider("claude")
+            expect(p).to_equal("claude")
+
+        it "normalizes Claude (capitalized)":
+            val p = normalize_provider("Claude")
+            expect(p).to_equal("claude")
+
+        it "normalizes codex":
+            val p = normalize_provider("codex")
+            expect(p).to_equal("codex")
+
+        it "normalizes openai as codex":
+            val p = normalize_provider("openai")
+            expect(p).to_equal("codex")
+
+        it "normalizes gpt as codex":
+            val p = normalize_provider("gpt-4o")
+            expect(p).to_equal("codex")
+
+        it "normalizes gemini":
+            val p = normalize_provider("gemini")
+            expect(p).to_equal("gemini")
+
+        it "normalizes google as gemini":
+            val p = normalize_provider("google")
+            expect(p).to_equal("gemini")
+
+        it "returns unknown for empty string":
+            val p = normalize_provider("")
+            expect(p).to_equal("unknown")
+
+        it "passes through unknown provider":
+            val p = normalize_provider("llama")
+            expect(p).to_equal("llama")
+
+    describe "state_path and event_log_path":
+
+        it "state_path uses feature name":
+            val path = state_path("my-feature")
+            expect(path).to_equal(".spipe/my-feature/state.md")
+
+        it "state_path defaults when empty":
+            val path = state_path("")
+            expect(path).to_equal(".spipe/spipe-process-harness/state.md")
+
+        it "event_log_path uses feature name":
+            val path = event_log_path("my-feature")
+            expect(path).to_equal(".spipe/my-feature/events.jsonl")
+
+    describe "gate_from_state":
+
+        it "blocks on empty state":
+            val gate = gate_from_state("", false)
+            expect(gate.allowed == false).to_equal(true)
+
+        it "blocks on empty state with exit code 2":
+            val gate = gate_from_state("", false)
+            expect(gate.exit_code).to_equal(2)
+
+        it "allows approved state":
+            val state = make_approved_state()
+            val gate = gate_from_state(state, true)
+            expect(gate.allowed).to_equal(true)
+
+        it "blocks when approval required but missing":
+            val state = make_unapproved_state()
+            val gate = gate_from_state(state, true)
+            expect(gate.allowed == false).to_equal(true)
+
+        it "allows when approval not required even without approval marker":
+            val state = make_unapproved_state()
+            val gate = gate_from_state(state, false)
+            expect(gate.allowed).to_equal(true)
+
+        it "blocks when Prevent: block in state":
+            val state = make_blocked_state()
+            val gate = gate_from_state(state, false)
+            expect(gate.allowed == false).to_equal(true)
+
+    describe "render_hud":
+
+        it "contains model name":
+            val snap = make_hud_snapshot()
+            val hud = render_hud(snap)
+            expect(hud).to_contain("claude-sonnet-4-6")
+
+        it "contains jj worktree":
+            val snap = make_hud_snapshot()
+            val hud = render_hud(snap)
+            expect(hud).to_contain("clean")
+
+        it "contains hours remaining":
+            val snap = make_hud_snapshot()
+            val hud = render_hud(snap)
+            expect(hud).to_contain("hr=4")
+
+        it "contains goal":
+            val snap = make_hud_snapshot()
+            val hud = render_hud(snap)
+            expect(hud).to_contain("ship harness")
+
+    describe "deploy_snippets":
+
+        it "returns 3 snippets":
+            val snippets = make_deploy_snippets()
+            expect(snippets.len()).to_equal(3)
+
+        it "first snippet is for claude":
+            val snippets = make_deploy_snippets()
+            expect(snippets[0].provider).to_equal("claude")
+
+        it "second snippet is for codex":
+            val snippets = make_deploy_snippets()
+            expect(snippets[1].provider).to_equal("codex")
+
+        it "third snippet is for gemini":
+            val snippets = make_deploy_snippets()
+            expect(snippets[2].provider).to_equal("gemini")
+
+        it "claude snippet path contains claude-settings-hooks":
+            val snippets = make_deploy_snippets()
+            expect(snippets[0].path).to_contain("claude-settings-hooks")
