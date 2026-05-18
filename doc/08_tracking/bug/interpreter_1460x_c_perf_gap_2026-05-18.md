@@ -11,11 +11,11 @@ Tree-walking interpreter overhead on recursive fib:
 - Each expression: recursive eval with pattern match on AST node type
 - No JIT, no bytecode compilation
 
-## Already Optimized (this session)
-- debug_state() AtomicBool fast-path (was already done before this session)
-- Extern dispatch: 1080-arm match → HashMap with OnceLock (for rt_* heavy programs)
-- MIR inliner: borrow-first + expanded allowlist (ConstFloat, Cast, UnaryOp)
-- ISA cache: Cranelift AOT reuses Arc<TargetIsa> across compilation units
+## Already Optimized
+- debug_state() AtomicBool fast-path (pre-existing, commit 51c85da213)
+- MIR inliner: borrow-first + expanded allowlist (pre-existing, commit 51c85da213)
+- ISA cache: Cranelift AOT reuses Arc<TargetIsa> across compilation units (pre-existing, commit 51c85da213)
+- Extern dispatch: 1080-arm match → HashMap with OnceLock (commit fca3f29b05, this session)
 
 ## Remaining Optimization Targets
 1. **Value::Str(String) → Arc<str>** — eliminate deep copies on clone. Estimated 15-25% on string-heavy workloads. Large refactor (hundreds of callsites).
