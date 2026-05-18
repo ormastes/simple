@@ -12,6 +12,10 @@ enum DfError:
     DuplicateColumn
     ParseError
 
+enum NaHow:
+    Any
+    All
+
 enum ConcatAxis:
     Rows
     Cols
@@ -91,6 +95,133 @@ struct Series:
                 Ok(Series(name: self.name, values: values, dtype: self.dtype, missing: filter_missing(self.missing, mask)?))
             case Err(_):
                 Err(DfError.ShapeMismatch)
+
+    fn add_scalar(self, rhs: Float64) -> Series:
+        var out: [Float64] = []
+        var i = 0
+        while i < self.values.len().value:
+            if self.missing[i].value:
+                out.push(Float64.new(0.0))
+            else:
+                out.push(Float64.new(self.values.flat_f64(i).value + rhs.value))
+            i = i + 1
+        Series(name: self.name, values: array(out), dtype: DType.F64, missing: self.missing)
+
+    fn sub_scalar(self, rhs: Float64) -> Series:
+        var out: [Float64] = []
+        var i = 0
+        while i < self.values.len().value:
+            if self.missing[i].value:
+                out.push(Float64.new(0.0))
+            else:
+                out.push(Float64.new(self.values.flat_f64(i).value - rhs.value))
+            i = i + 1
+        Series(name: self.name, values: array(out), dtype: DType.F64, missing: self.missing)
+
+    fn mul_scalar(self, rhs: Float64) -> Series:
+        var out: [Float64] = []
+        var i = 0
+        while i < self.values.len().value:
+            if self.missing[i].value:
+                out.push(Float64.new(0.0))
+            else:
+                out.push(Float64.new(self.values.flat_f64(i).value * rhs.value))
+            i = i + 1
+        Series(name: self.name, values: array(out), dtype: DType.F64, missing: self.missing)
+
+    fn div_scalar(self, rhs: Float64) -> Result<Series, DfError>:
+        if rhs.value == 0.0:
+            return Err(DfError.ShapeMismatch)
+        var out: [Float64] = []
+        var i = 0
+        while i < self.values.len().value:
+            if self.missing[i].value:
+                out.push(Float64.new(0.0))
+            else:
+                out.push(Float64.new(self.values.flat_f64(i).value / rhs.value))
+            i = i + 1
+        Ok(Series(name: self.name, values: array(out), dtype: DType.F64, missing: self.missing))
+
+    fn is_na(self) -> Series:
+        var out: [Bool] = []
+        var i = 0
+        while i < self.missing.len():
+            out.push(self.missing[i])
+            i = i + 1
+        Series(name: self.name, values: array_bool(out), dtype: DType.Bool, missing: no_missing_values(out.len()))
+
+    fn fill_na(self, value: Float64) -> Series:
+        var new_missing: [Bool] = []
+        var i = 0
+        while i < self.missing.len():
+            new_missing.push(Bool.new(false))
+            i = i + 1
+        if self.dtype == DType.I64:
+            var out: [Int64] = []
+            var j = 0
+            while j < self.values.len().value:
+                if self.missing[j].value:
+                    out.push(Int64.new(value.value as i64))
+                else:
+                    out.push(self.values.flat_i64(j))
+                j = j + 1
+            return Series(name: self.name, values: array_i64(out), dtype: DType.I64, missing: new_missing)
+        var out: [Float64] = []
+        var j = 0
+        while j < self.values.len().value:
+            if self.missing[j].value:
+                out.push(value)
+            else:
+                out.push(self.values.flat_f64(j))
+            j = j + 1
+        Series(name: self.name, values: array(out), dtype: DType.F64, missing: new_missing)
+
+    fn unique_f64(self) -> Series:
+        var seen: [Float64] = []
+        var seen_missing = false
+        var out_missing: [Bool] = []
+        var i = 0
+        while i < self.values.len().value:
+            if self.missing[i].value:
+                if not seen_missing:
+                    seen_missing = true
+                    seen.push(Float64.new(0.0))
+                    out_missing.push(Bool.new(true))
+            else:
+                val v = self.values.flat_f64(i)
+                val found = f64_group_index(seen, v) >= 0
+                if not found:
+                    seen.push(v)
+                    out_missing.push(Bool.new(false))
+            i = i + 1
+        Series(name: self.name, values: array(seen), dtype: DType.F64, missing: out_missing)
+
+    fn unique_i64(self) -> Series:
+        var seen: [Int64] = []
+        var seen_missing = false
+        var out_missing: [Bool] = []
+        var i = 0
+        while i < self.values.len().value:
+            if self.missing[i].value:
+                if not seen_missing:
+                    seen_missing = true
+                    seen.push(Int64.new(0))
+                    out_missing.push(Bool.new(true))
+            else:
+                val v = self.values.flat_i64(i)
+                val found = i64_group_index(seen, v) >= 0
+                if not found:
+                    seen.push(v)
+                    out_missing.push(Bool.new(false))
+            i = i + 1
+        Series(name: self.name, values: array_i64(seen), dtype: DType.I64, missing: out_missing)
+
+    fn nunique(self) -> Index:
+        if self.dtype == DType.I64:
+            val u = self.unique_i64()
+            return u.len()
+        val u = self.unique_f64()
+        u.len()
 
 struct CategoricalEncoding:
     series: Series
@@ -323,6 +454,49 @@ struct DataFrame:
     fn take_rows(self, idx: NDArray) -> Result<DataFrame, DfError>:
         self.gather_rows(idx)
 
+    fn is_na(self) -> DataFrame:
+        var out: [Series] = []
+        var i = 0
+        while i < self.columns_internal.len():
+            out.push(self.columns_internal[i].is_na())
+            i = i + 1
+        DataFrame(columns_internal: out)
+
+    fn fill_na(self, value: Float64) -> DataFrame:
+        var out: [Series] = []
+        var i = 0
+        while i < self.columns_internal.len():
+            out.push(self.columns_internal[i].fill_na(value))
+            i = i + 1
+        DataFrame(columns_internal: out)
+
+    fn drop_na(self, how: NaHow) -> DataFrame:
+        val rows = self.num_rows().value
+        var keep: [Bool] = []
+        var row = 0
+        while row < rows:
+            var any_na = false
+            var all_na = true
+            var col = 0
+            while col < self.columns_internal.len():
+                if self.columns_internal[col].missing[row].value:
+                    any_na = true
+                else:
+                    all_na = false
+                col = col + 1
+            if self.columns_internal.len() == 0:
+                all_na = false
+            match how:
+                case NaHow.Any:
+                    keep.push(Bool.new(not any_na))
+                case NaHow.All:
+                    keep.push(Bool.new(not all_na))
+            row = row + 1
+        val mask = array_bool(keep)
+        match self.filter(mask):
+            case Ok(df): df
+            case Err(_): DataFrame(columns_internal: self.columns_internal)
+
     fn join(self, other: DataFrame, on: Symbol, how: JoinHow) -> Result<DataFrame, DfError>:
         merge(self, other, on, how)
 
@@ -481,3 +655,55 @@ fn series_value_at(series: Series, row: i64) -> DfValue:
             DfValue.I64(series.values.flat_i64(row))
         case DType.Bool:
             DfValue.B(series.values.flat_bool(row))
+
+fn f64_group_index(keys: [Float64], value: Float64) -> i64:
+    var i = 0
+    while i < keys.len():
+        if keys[i] == value:
+            return i
+        i = i + 1
+    -1
+
+fn i64_group_index(keys: [Int64], value: Int64) -> i64:
+    var i = 0
+    while i < keys.len():
+        if keys[i] == value:
+            return i
+        i = i + 1
+    -1
+
+fn value_counts(series: Series) -> DataFrame:
+    if series.dtype == DType.I64:
+        var keys: [Int64] = []
+        var counts: [Int64] = []
+        var i = 0
+        while i < series.values.len().value:
+            if not series.missing[i].value:
+                val v = series.values.flat_i64(i)
+                val idx = i64_group_index(keys, v)
+                if idx < 0:
+                    keys.push(v)
+                    counts.push(Int64.new(1))
+                else:
+                    counts[idx] = Int64.new(counts[idx].value + 1)
+            i = i + 1
+        val key_col = Series(name: series.name, values: array_i64(keys), dtype: DType.I64, missing: no_missing_values(keys.len()))
+        val cnt_col = Series(name: Symbol.from("count"), values: array_i64(counts), dtype: DType.I64, missing: no_missing_values(counts.len()))
+        DataFrame(columns_internal: [key_col, cnt_col])
+    else:
+        var keys: [Float64] = []
+        var counts: [Int64] = []
+        var i = 0
+        while i < series.values.len().value:
+            if not series.missing[i].value:
+                val v = series.values.flat_f64(i)
+                val idx = f64_group_index(keys, v)
+                if idx < 0:
+                    keys.push(v)
+                    counts.push(Int64.new(1))
+                else:
+                    counts[idx] = Int64.new(counts[idx].value + 1)
+            i = i + 1
+        val key_col = Series(name: series.name, values: array(keys), dtype: DType.F64, missing: no_missing_values(keys.len()))
+        val cnt_col = Series(name: Symbol.from("count"), values: array_i64(counts), dtype: DType.I64, missing: no_missing_values(counts.len()))
+        DataFrame(columns_internal: [key_col, cnt_col])

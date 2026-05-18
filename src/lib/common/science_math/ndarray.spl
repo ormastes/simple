@@ -1,86 +1,254 @@
-"""NDArray — simple N-dimensional array scaffold.
+"""NDArray core types — Shape, Index, Axis, Stride, Device, Layout, KernelProfile,
+NdarrayError, BroadcastPlan, and utility functions used by std.ndarray.
 
-Phase 2 of the science math lib plan: constructors, dtype/device/layout,
-axis reductions (sum, mean), and basic shape/indexing utilities.
+All public types use typed wrappers (Index, Shape, Stride, Axis) — never raw i64/f64
+in public signatures. No inheritance; no generics except where essential.
 
-Mock backend: pure-Simple, no SIMD, no GPU.
-Import path: use std.common.science_math.ndarray.{NDArray, ndarray_zeros, ...}
+Import path: use std.common.science_math.ndarray.*
 """
 
-pub class NDArray:
-    data: [f64]
-    rows: i64
-    cols: i64
+pub struct Index:
+    value: i64
 
-    fn get(row: i64, col: i64) -> f64:
-        """Element access (row-major)."""
-        self.data[row * self.cols + col]
+    static fn new(v: i64) -> Index:
+        Index(value: v)
 
-    fn size() -> i64:
-        """Total element count."""
-        self.rows * self.cols
+pub struct Axis:
+    value: i64
 
-    fn row_sum(row: i64) -> f64:
-        """Sum of all elements in a row."""
-        var s = 0.0
-        var c = 0
-        while c < self.cols:
-            s = s + self.data[row * self.cols + c]
-            c = c + 1
-        s
+    static fn new(v: i64) -> Axis:
+        Axis(value: v)
 
-    fn col_sum(col: i64) -> f64:
-        """Sum of all elements in a column."""
-        var s = 0.0
-        var r = 0
-        while r < self.rows:
-            s = s + self.data[r * self.cols + col]
-            r = r + 1
-        s
+pub struct Shape:
+    dims: [Index]
 
-    fn total_sum() -> f64:
-        """Sum of all elements."""
-        var s = 0.0
+    static fn new(dims: [Index]) -> Shape:
+        Shape(dims: dims)
+
+    fn numel(self) -> Index:
+        var total = 1
         var i = 0
-        while i < self.data.len():
-            s = s + self.data[i]
+        while i < self.dims.len():
+            total = total * self.dims[i].value
             i = i + 1
-        s
+        Index.new(total)
 
-    fn mean() -> f64:
-        """Grand mean of all elements."""
-        val n = self.data.len()
-        if n == 0:
-            return 0.0
-        self.total_sum() / n.to_f64()
+    fn ndim(self) -> i64:
+        self.dims.len()
 
-pub fn ndarray_zeros(rows: i64, cols: i64) -> NDArray:
-    """Create an NDArray filled with zeros."""
-    var data: [f64] = []
+pub struct Stride:
+    dims: [Index]
+
+    static fn new(dims: [Index]) -> Stride:
+        Stride(dims: dims)
+
+pub enum Device:
+    CPU
+    CUDA
+
+pub enum Layout:
+    RowMajor
+    Strided
+
+pub enum KernelProfile:
+    SimdReady
+    ScalarOnly
+
+pub enum NdarrayError:
+    InvalidShape
+    InvalidStep
+    InvalidLinspace
+    ShapeMismatch
+    UnsupportedDType
+    IndexOutOfBounds
+
+pub struct SliceSpec:
+    start: Index
+    stop: Index
+    step: Index
+
+pub struct Slice:
+    start: Index
+    stop: Index
+    step: Index
+
+    static fn new(start: Index, stop: Index, step: Index) -> Slice:
+        Slice(start: start, stop: stop, step: step)
+
+pub struct BroadcastPlan:
+    shape: Shape
+    left: Stride
+    right: Stride
+
+pub fn derive_row_major_strides(shape: Shape) -> Stride:
+    val ndim = shape.dims.len()
+    if ndim == 0:
+        return Stride.new([])
+    var strides: [Index] = []
     var i = 0
-    while i < rows * cols:
-        data.push(0.0)
+    while i < ndim:
+        strides.push(Index.new(1))
         i = i + 1
-    NDArray(data: data, rows: rows, cols: cols)
+    var i2 = ndim - 2
+    while i2 >= 0:
+        val s = strides[i2 + 1].value * shape.dims[i2 + 1].value
+        strides[i2] = Index.new(s)
+        i2 = i2 - 1
+    Stride.new(strides)
 
-pub fn ndarray_ones(rows: i64, cols: i64) -> NDArray:
-    """Create an NDArray filled with ones."""
-    var data: [f64] = []
+pub fn is_row_major_contiguous(shape: Shape, strides: Stride) -> bool:
+    val ndim = shape.dims.len()
+    if ndim == 0:
+        return true
+    if ndim != strides.dims.len():
+        return false
+    val expected = derive_row_major_strides(shape)
     var i = 0
-    while i < rows * cols:
-        data.push(1.0)
+    while i < ndim:
+        if strides.dims[i].value != expected.dims[i].value:
+            return false
         i = i + 1
-    NDArray(data: data, rows: rows, cols: cols)
+    true
 
-pub fn ndarray_fill(rows: i64, cols: i64, v: f64) -> NDArray:
-    """Create an NDArray filled with value v."""
-    var data: [f64] = []
+pub fn resolve_offset(shape: Shape, strides: Stride, offset: Index, indices: [Index]) -> Index:
+    var pos = offset.value
     var i = 0
-    while i < rows * cols:
-        data.push(v)
+    while i < indices.len():
+        pos = pos + indices[i].value * strides.dims[i].value
         i = i + 1
-    NDArray(data: data, rows: rows, cols: cols)
+    Index.new(pos)
 
-pub fn ndarray_from(rows: i64, cols: i64, data: [f64]) -> NDArray:
-    """Wrap existing flat data buffer (row-major)."""
-    NDArray(data: data, rows: rows, cols: cols)
+pub fn try_resolve_offset(shape: Shape, strides: Stride, offset: Index, indices: [Index]) -> Result<Index, NdarrayError>:
+    var i = 0
+    while i < indices.len():
+        if i >= shape.dims.len():
+            return Err(NdarrayError.IndexOutOfBounds)
+        val idx = indices[i].value
+        if idx < 0 or idx >= shape.dims[i].value:
+            return Err(NdarrayError.IndexOutOfBounds)
+        i = i + 1
+    Ok(resolve_offset(shape, strides, offset, indices))
+
+pub fn unravel_index(linear: i64, shape: Shape) -> [Index]:
+    val ndim = shape.dims.len()
+    var out: [Index] = []
+    var rem = linear
+    var i = 0
+    while i < ndim:
+        out.push(Index.new(0))
+        i = i + 1
+    var j = ndim - 1
+    while j >= 0:
+        val dim = shape.dims[j].value
+        out[j] = Index.new(rem - (rem / dim) * dim)
+        rem = rem / dim
+        j = j - 1
+    out
+
+pub fn transpose_shape(shape: Shape, left: Axis, right: Axis) -> Result<Shape, NdarrayError>:
+    val ndim = shape.dims.len()
+    if left.value < 0 or left.value >= ndim or right.value < 0 or right.value >= ndim:
+        return Err(NdarrayError.IndexOutOfBounds)
+    var dims: [Index] = []
+    var i = 0
+    while i < ndim:
+        dims.push(shape.dims[i])
+        i = i + 1
+    val tmp = dims[left.value]
+    dims[left.value] = dims[right.value]
+    dims[right.value] = tmp
+    Ok(Shape.new(dims))
+
+pub fn transpose_strides(strides: Stride, left: Axis, right: Axis) -> Result<Stride, NdarrayError>:
+    val ndim = strides.dims.len()
+    if left.value < 0 or left.value >= ndim or right.value < 0 or right.value >= ndim:
+        return Err(NdarrayError.IndexOutOfBounds)
+    var dims: [Index] = []
+    var i = 0
+    while i < ndim:
+        dims.push(strides.dims[i])
+        i = i + 1
+    val tmp = dims[left.value]
+    dims[left.value] = dims[right.value]
+    dims[right.value] = tmp
+    Ok(Stride.new(dims))
+
+pub fn slice_len(spec: Slice, size: i64) -> Result<Index, NdarrayError>:
+    if spec.step.value == 0:
+        return Err(NdarrayError.InvalidStep)
+    var start = spec.start.value
+    var stop = spec.stop.value
+    if start < 0:
+        start = size + start
+    if stop < 0:
+        stop = size + stop
+    if stop > size:
+        return Err(NdarrayError.IndexOutOfBounds)
+    if start < 0 or start > size:
+        return Err(NdarrayError.IndexOutOfBounds)
+    val step = spec.step.value
+    if step > 0:
+        if stop <= start:
+            return Ok(Index.new(0))
+        val count = (stop - start + step - 1) / step
+        Ok(Index.new(count))
+    else:
+        if start <= stop:
+            return Ok(Index.new(0))
+        val neg_step = -step
+        val count = (start - stop + neg_step - 1) / neg_step
+        Ok(Index.new(count))
+
+pub fn normalize_axis(axis: Axis, ndim: i64) -> Result<Axis, NdarrayError>:
+    var v = axis.value
+    if v < 0:
+        v = ndim + v
+    if v < 0 or v >= ndim:
+        return Err(NdarrayError.IndexOutOfBounds)
+    Ok(Axis.new(v))
+
+pub fn broadcast_shapes(left: Shape, right: Shape) -> Result<Shape, NdarrayError>:
+    val left_n = left.dims.len()
+    val right_n = right.dims.len()
+    val out_n = if left_n > right_n: left_n else: right_n
+    var out: [Index] = []
+    var i = 0
+    while i < out_n:
+        out.push(Index.new(1))
+        i = i + 1
+    var i2 = 0
+    while i2 < out_n:
+        val j = out_n - 1 - i2
+        val li = j - (out_n - left_n)
+        val ri = j - (out_n - right_n)
+        val ld = if li >= 0: left.dims[li].value else: 1
+        val rd = if ri >= 0: right.dims[ri].value else: 1
+        if ld != rd and ld != 1 and rd != 1:
+            return Err(NdarrayError.ShapeMismatch)
+        out[j] = Index.new(if ld > rd: ld else: rd)
+        i2 = i2 + 1
+    Ok(Shape.new(out))
+
+pub fn make_broadcast_plan(left_shape: Shape, left_strides: Stride, right_shape: Shape, right_strides: Stride) -> Result<BroadcastPlan, NdarrayError>:
+    val out_shape = broadcast_shapes(left_shape, right_shape)?
+    val ndim = out_shape.dims.len()
+    val left_offset = ndim - left_shape.dims.len()
+    val right_offset = ndim - right_shape.dims.len()
+    var ls: [Index] = []
+    var rs: [Index] = []
+    var i = 0
+    while i < ndim:
+        val li = i - left_offset
+        val ri = i - right_offset
+        val l_stride = if li >= 0:
+            if left_shape.dims[li].value == 1: 0 else: left_strides.dims[li].value
+        else:
+            0
+        val r_stride = if ri >= 0:
+            if right_shape.dims[ri].value == 1: 0 else: right_strides.dims[ri].value
+        else:
+            0
+        ls.push(Index.new(l_stride))
+        rs.push(Index.new(r_stride))
+        i = i + 1
+    Ok(BroadcastPlan(shape: out_shape, left: Stride.new(ls), right: Stride.new(rs)))
