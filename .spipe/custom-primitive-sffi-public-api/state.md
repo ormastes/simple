@@ -44,4 +44,4 @@ feature
 
 ### 7-verify
 Syntax checks pass for the custom primitive metadata and SFFI spec files.
-Follow-up required: `bin/simple test test/unit/compiler/custom_primitive_sffi_spec.spl --mode=interpreter --clean` currently exits successfully but reports `Passed: 0`, so the spec is not yet behavioral release evidence until its manual test functions are converted into runner-discovered examples.
+`bin/simple test test/unit/compiler/custom_primitive_sffi_spec.spl --mode=interpreter --clean` now reports `Passed: 20`, `Failed: 0` after converting the manual checks into runner-discovered examples.
