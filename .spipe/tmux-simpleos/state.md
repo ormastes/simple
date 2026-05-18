@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-18
+- [x] 6-refactor (Tech Lead) — 2026-05-18
+- [x] 7-verify (QA) — 2026-05-18
+- [x] 8-ship (Release Mgr) — 2026-05-18
 
 ## Phase Outputs
 
@@ -35,7 +35,12 @@ feature
 10 ACs across 4 plan slices. Existing: mod.spl stubs in 3 lib dirs, tmux_session_model.spl, dashboard tmux adapters.
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 4 source + 1 test:
+- src/os/apps/smux/smux_contract.spl — SessionId + WindowId + PaneId + SessionState
+- src/os/apps/smux/smux_layout.spl — LayoutSplit + LayoutNode + LayoutTree + ResizeOp
+- src/os/apps/smux/smux_backend.spl — PtyConfig + OutputBuffer + PaneBackend + ShellBinding
+- src/os/apps/smux/smux_api.spl — SmuxCommand + SmuxResponse + ApiDispatch + CompatAdapter
+- test/unit/os/smux_spec.spl — 20 tests
 
 ### 7-verify
-<pending>
+20/20 tests PASS.
