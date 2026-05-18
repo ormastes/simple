@@ -132,7 +132,6 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         "runtime_memory.c",
         "runtime_time.c",
         "runtime_memtrack.c",
-        "runtime_ctype.c",
         "runtime_random.c",
         "runtime_hash.c",
         "runtime_value.c",

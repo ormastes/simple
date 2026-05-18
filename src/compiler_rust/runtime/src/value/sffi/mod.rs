@@ -55,8 +55,6 @@
 //! All SFFI functions use `#[no_mangle]` and `extern "C"` for C compatibility.
 
 // Phase 1: Core value operations
-#[cfg(unix)]
-pub mod ctype_shims;
 pub mod equality;
 pub mod memory;
 pub mod value_ops;
@@ -134,8 +132,6 @@ pub mod dh;
 
 // Re-export all public SFFI functions for backward compatibility
 // Phase 1
-#[cfg(unix)]
-pub use ctype_shims::*;
 pub use equality::*;
 pub use memory::*;
 pub use value_ops::*;

@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-18
+- [x] 6-refactor (Tech Lead) — 2026-05-18
+- [x] 7-verify (QA) — 2026-05-18
+- [x] 8-ship (Release Mgr) — 2026-05-18
 
 ## Phase Outputs
 
@@ -35,4 +35,12 @@ feature
 10 ACs across 4 lanes. Existing: trap_model.spl, app_switcher.spl, shell.spl, crash_policy.spl, qemu_runner.spl, verify/main.spl.
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 5 files created:
+- src/os/kernel/verify/kernel_proof_model.spl — TrapFrame + SyscallDispatch + CapGrant + AuthorizationCheck + SchedState + LifecycleTransition
+- src/os/desktop/verify/desktop_contract_model.spl — SelectionModel + FocusTracker + WindowProvenance + CrashPolicy + CrashVerdict
+- src/os/kernel/verify/verify_status.spl — VerifyResult + StatusReport + VerifyStatus
+- src/os/kernel/verify/evidence_taxonomy.spl — VerifyClaim + AssumptionLedger + EvidenceEntry + EvidenceClassification + TaxonomyReport
+- test/unit/os/formal_verification_spec.spl — 20 tests
+
+### 7-verify
+20/20 tests PASS.
