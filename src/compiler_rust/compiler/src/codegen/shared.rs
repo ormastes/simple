@@ -146,10 +146,13 @@ pub fn build_mir_signature(func: &MirFunction) -> Signature {
         }
     }
 
-    // Return type: main() must return I32 for process exit code
+    // Return type: main() must return I32 for process exit code.
+    // All other functions get I64 return — Simple semantics guarantee every
+    // function returns a value (nil when no explicit return), and MIR
+    // return_type is VOID for inferred-return functions.
     if func.name == "main" {
         sig.returns.push(AbiParam::new(types::I32));
-    } else if func.return_type != TypeId::VOID {
+    } else {
         let runtime_return = crate::codegen::runtime_sffi::RUNTIME_FUNCS
             .iter()
             .find(|spec| spec.name == func.name)

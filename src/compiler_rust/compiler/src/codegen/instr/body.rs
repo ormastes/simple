@@ -733,11 +733,15 @@ pub fn compile_function_body<M: Module>(
                     // (this can happen when return with value is used in a void function)
                     if func.return_type == TypeId::VOID {
                         if func.name == "main" {
-                            // C main() must return 0 for success
                             let zero = builder.ins().iconst(types::I32, 0);
                             builder.ins().return_(&[zero]);
                         } else {
-                            builder.ins().return_(&[]);
+                            let ret_val = if let Some(&rv) = vreg_values.get(v) {
+                                rv
+                            } else {
+                                builder.ins().iconst(types::I64, 0)
+                            };
+                            builder.ins().return_(&[ret_val]);
                         }
                     } else {
                         // Use signature return type (main returns I32 for C ABI,
@@ -811,7 +815,8 @@ pub fn compile_function_body<M: Module>(
                         let zero = builder.ins().iconst(types::I32, 0);
                         builder.ins().return_(&[zero]);
                     } else {
-                        builder.ins().return_(&[]);
+                        let nil_val = builder.ins().iconst(types::I64, 0);
+                        builder.ins().return_(&[nil_val]);
                     }
                 } else {
                     builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));

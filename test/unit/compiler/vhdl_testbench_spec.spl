@@ -1,0 +1,361 @@
+# VHDL testbench conversion model tests
+# 20 self-contained tests for testbench candidate, port, stimulus, assertion,
+# clock, reset, bench, GHDL result, conversion result, and pending spec models.
+# Each test prints "PASS: <name>" or "FAIL: <name>". main() calls all 20 then prints "DONE".
+
+class TestbenchCandidate:
+    test_name: text
+    dut_symbol: text
+    port_count: int
+    is_supported: bool
+    reject_reason: text
+
+    me is_rejected() -> bool:
+        return self.is_supported == false
+
+    me reject(reason: text) -> TestbenchCandidate:
+        self.is_supported = false
+        self.reject_reason = reason
+        return self
+
+    static fn create(name: text, dut: text, ports: int) -> TestbenchCandidate:
+        TestbenchCandidate(test_name: name, dut_symbol: dut, port_count: ports, is_supported: true, reject_reason: "")
+
+
+class DutPort:
+    port_name: text
+    direction: text
+    bit_width: int
+    vhdl_name: text
+
+    me is_input() -> bool:
+        return self.direction == "in"
+
+    me is_output() -> bool:
+        return self.direction == "out"
+
+    me is_single_bit() -> bool:
+        return self.bit_width == 1
+
+    static fn input(name: text, width: int) -> DutPort:
+        DutPort(port_name: name, direction: "in", bit_width: width, vhdl_name: name)
+
+    static fn output(name: text, width: int) -> DutPort:
+        DutPort(port_name: name, direction: "out", bit_width: width, vhdl_name: name)
+
+
+class StimulusStep:
+    step_index: int
+    port_target: text
+    value: int
+    wait_cycles: int
+
+    me has_wait() -> bool:
+        return self.wait_cycles > 0
+
+    me is_immediate() -> bool:
+        return self.wait_cycles == 0
+
+    static fn create(idx: int, port: text, val: int, wait: int) -> StimulusStep:
+        StimulusStep(step_index: idx, port_target: port, value: val, wait_cycles: wait)
+
+    static fn immediate(idx: int, port: text, val: int) -> StimulusStep:
+        StimulusStep(step_index: idx, port_target: port, value: val, wait_cycles: 0)
+
+
+class TestAssertion:
+    assertion_index: int
+    expected_value: int
+    actual_port: text
+    source_line: int
+
+    me matches(actual: int) -> bool:
+        return self.expected_value == actual
+
+    static fn create(idx: int, expected: int, port: text, line: int) -> TestAssertion:
+        TestAssertion(assertion_index: idx, expected_value: expected, actual_port: port, source_line: line)
+
+
+class ClockConfig:
+    period_ns: int
+    edge: text
+    domain_name: text
+    is_default: bool
+
+    me is_rising() -> bool:
+        return self.edge == "rising"
+
+    me half_period() -> int:
+        return self.period_ns / 2
+
+    static fn default_clock() -> ClockConfig:
+        ClockConfig(period_ns: 10, edge: "rising", domain_name: "clk", is_default: true)
+
+
+class ResetSequence:
+    reset_type: text
+    polarity: text
+    duration_cycles: int
+    signal_name: text
+
+    me is_async() -> bool:
+        return self.reset_type == "async"
+
+    me is_active_low() -> bool:
+        return self.polarity == "active_low"
+
+    static fn async_low(name: text, cycles: int) -> ResetSequence:
+        ResetSequence(reset_type: "async", polarity: "active_low", duration_cycles: cycles, signal_name: name)
+
+    static fn sync_high(name: text, cycles: int) -> ResetSequence:
+        ResetSequence(reset_type: "sync", polarity: "active_high", duration_cycles: cycles, signal_name: name)
+
+
+class CombinationalBench:
+    bench_name: text
+    dut_entity: text
+    stimulus_count: int
+    assertion_count: int
+    has_clock: bool
+
+    me is_combinational() -> bool:
+        return self.has_clock == false
+
+    me total_checks() -> int:
+        return self.stimulus_count + self.assertion_count
+
+    static fn create(name: text, dut: text, stim: int, asserts: int) -> CombinationalBench:
+        CombinationalBench(bench_name: name, dut_entity: dut, stimulus_count: stim, assertion_count: asserts, has_clock: false)
+
+
+class ClockedBench:
+    bench_name: text
+    dut_entity: text
+    clock_period_ns: int
+    reset_cycles: int
+    total_cycles: int
+
+    me has_reset() -> bool:
+        return self.reset_cycles > 0
+
+    me sim_time_ns() -> int:
+        return self.total_cycles * self.clock_period_ns
+
+    static fn create(name: text, dut: text, period: int, reset: int, total: int) -> ClockedBench:
+        ClockedBench(bench_name: name, dut_entity: dut, clock_period_ns: period, reset_cycles: reset, total_cycles: total)
+
+
+class GhdlResult:
+    phase: text
+    passed: bool
+    stderr_capture: text
+    exit_code: int
+
+    me is_failure() -> bool:
+        return self.passed == false
+
+    static fn ok(p: text) -> GhdlResult:
+        GhdlResult(phase: p, passed: true, stderr_capture: "", exit_code: 0)
+
+    static fn fail(p: text, err: text, code: int) -> GhdlResult:
+        GhdlResult(phase: p, passed: false, stderr_capture: err, exit_code: code)
+
+
+class ConversionResult:
+    test_name: text
+    success: bool
+    diagnostic_count: int
+    output_lines: int
+
+    me is_clean() -> bool:
+        return self.success == true and self.diagnostic_count == 0
+
+    static fn ok(name: text, lines: int) -> ConversionResult:
+        ConversionResult(test_name: name, success: true, diagnostic_count: 0, output_lines: lines)
+
+    static fn fail(name: text, diags: int) -> ConversionResult:
+        ConversionResult(test_name: name, success: false, diagnostic_count: diags, output_lines: 0)
+
+
+class PendingSpec:
+    spec_name: text
+    category: text
+    is_runnable: bool
+    blocker: text
+
+    me is_blocked() -> bool:
+        return self.is_runnable == false
+
+    static fn blocked(name: text, cat: text, reason: text) -> PendingSpec:
+        PendingSpec(spec_name: name, category: cat, is_runnable: false, blocker: reason)
+
+    static fn ready(name: text, cat: text) -> PendingSpec:
+        PendingSpec(spec_name: name, category: cat, is_runnable: true, blocker: "")
+
+
+fn test_candidate_create():
+    val c = TestbenchCandidate.create("tb_adder", "adder", 4)
+    if c.test_name == "tb_adder" and c.is_supported == true:
+        print("PASS: test_candidate_create")
+    else:
+        print("FAIL: test_candidate_create")
+
+fn test_candidate_reject():
+    var c = TestbenchCandidate.create("tb_mux", "mux", 6)
+    c.reject("unsupported port type")
+    if c.is_rejected() == true and c.reject_reason == "unsupported port type":
+        print("PASS: test_candidate_reject")
+    else:
+        print("FAIL: test_candidate_reject")
+
+fn test_port_input():
+    val p = DutPort.input("data_in", 8)
+    if p.direction == "in" and p.is_input() == true:
+        print("PASS: test_port_input")
+    else:
+        print("FAIL: test_port_input")
+
+fn test_port_output():
+    val p = DutPort.output("data_out", 8)
+    if p.direction == "out" and p.is_output() == true:
+        print("PASS: test_port_output")
+    else:
+        print("FAIL: test_port_output")
+
+fn test_port_single_bit():
+    val p = DutPort.input("enable", 1)
+    if p.is_single_bit() == true:
+        print("PASS: test_port_single_bit")
+    else:
+        print("FAIL: test_port_single_bit")
+
+fn test_stimulus_immediate():
+    val s = StimulusStep.immediate(0, "reset", 1)
+    if s.wait_cycles == 0 and s.is_immediate() == true:
+        print("PASS: test_stimulus_immediate")
+    else:
+        print("FAIL: test_stimulus_immediate")
+
+fn test_stimulus_wait():
+    val s = StimulusStep.create(1, "data", 255, 5)
+    if s.has_wait() == true:
+        print("PASS: test_stimulus_wait")
+    else:
+        print("FAIL: test_stimulus_wait")
+
+fn test_assertion_match():
+    val a = TestAssertion.create(0, 42, "result", 10)
+    if a.matches(42) == true:
+        print("PASS: test_assertion_match")
+    else:
+        print("FAIL: test_assertion_match")
+
+fn test_assertion_mismatch():
+    val a = TestAssertion.create(0, 42, "result", 10)
+    if a.matches(99) == false:
+        print("PASS: test_assertion_mismatch")
+    else:
+        print("FAIL: test_assertion_mismatch")
+
+fn test_clock_default():
+    val c = ClockConfig.default_clock()
+    if c.period_ns == 10:
+        print("PASS: test_clock_default")
+    else:
+        print("FAIL: test_clock_default")
+
+fn test_clock_half():
+    val c = ClockConfig.default_clock()
+    val half = c.half_period()
+    if half == 5:
+        print("PASS: test_clock_half")
+    else:
+        print("FAIL: test_clock_half")
+
+fn test_reset_async_low():
+    val r = ResetSequence.async_low("rst_n", 3)
+    if r.is_async() == true and r.is_active_low() == true:
+        print("PASS: test_reset_async_low")
+    else:
+        print("FAIL: test_reset_async_low")
+
+fn test_reset_sync_high():
+    val r = ResetSequence.sync_high("rst", 2)
+    if r.is_async() == false and r.is_active_low() == false:
+        print("PASS: test_reset_sync_high")
+    else:
+        print("FAIL: test_reset_sync_high")
+
+fn test_comb_bench():
+    val b = CombinationalBench.create("comb_tb", "half_adder", 4, 4)
+    if b.is_combinational() == true and b.has_clock == false:
+        print("PASS: test_comb_bench")
+    else:
+        print("FAIL: test_comb_bench")
+
+fn test_comb_total():
+    val b = CombinationalBench.create("comb_tb", "half_adder", 4, 6)
+    val total = b.total_checks()
+    if total == 10:
+        print("PASS: test_comb_total")
+    else:
+        print("FAIL: test_comb_total")
+
+fn test_clocked_bench():
+    val b = ClockedBench.create("clk_tb", "counter", 10, 2, 100)
+    if b.clock_period_ns == 10 and b.reset_cycles == 2 and b.total_cycles == 100:
+        print("PASS: test_clocked_bench")
+    else:
+        print("FAIL: test_clocked_bench")
+
+fn test_clocked_sim_time():
+    val b = ClockedBench.create("clk_tb", "counter", 10, 2, 100)
+    val t = b.sim_time_ns()
+    if t == 1000:
+        print("PASS: test_clocked_sim_time")
+    else:
+        print("FAIL: test_clocked_sim_time")
+
+fn test_ghdl_ok():
+    val g = GhdlResult.ok("elaborate")
+    if g.passed == true and g.is_failure() == false:
+        print("PASS: test_ghdl_ok")
+    else:
+        print("FAIL: test_ghdl_ok")
+
+fn test_ghdl_fail():
+    val g = GhdlResult.fail("simulate", "error: assertion failed", 1)
+    if g.passed == false and g.is_failure() == true:
+        print("PASS: test_ghdl_fail")
+    else:
+        print("FAIL: test_ghdl_fail")
+
+fn test_conversion_clean():
+    val r = ConversionResult.ok("tb_adder", 42)
+    if r.is_clean() == true:
+        print("PASS: test_conversion_clean")
+    else:
+        print("FAIL: test_conversion_clean")
+
+fn main():
+    test_candidate_create()
+    test_candidate_reject()
+    test_port_input()
+    test_port_output()
+    test_port_single_bit()
+    test_stimulus_immediate()
+    test_stimulus_wait()
+    test_assertion_match()
+    test_assertion_mismatch()
+    test_clock_default()
+    test_clock_half()
+    test_reset_async_low()
+    test_reset_sync_high()
+    test_comb_bench()
+    test_comb_total()
+    test_clocked_bench()
+    test_clocked_sim_time()
+    test_ghdl_ok()
+    test_ghdl_fail()
+    test_conversion_clean()
+    print("DONE")

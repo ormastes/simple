@@ -1,0 +1,41 @@
+# SStack State: vhdl-testbench-conversion
+
+## User Request
+> next task from the plan — vhdl_testbench_conversion (testbench IR, DUT extraction, stimulus/assertions, clock/reset, rendering, GHDL runner)
+
+## Task Type
+feature
+
+## Refined Goal
+> Implement VHDL testbench conversion models: testbench candidate extraction with DUT port mapping, stimulus steps and assertion models, clock/reset configuration with cycle-based timing, rendering config for combinational/clocked benches, and source-map/diagnostic hooks.
+
+## Acceptance Criteria
+- [ ] AC-1: TestbenchCandidate — test name, DUT symbol, port count, supported flag, rejection diagnostic
+- [ ] AC-2: DutPort — port name, direction (in/out), bit width, sanitized VHDL name
+- [ ] AC-3: StimulusStep — step index, port target, value, wait cycles
+- [ ] AC-4: TestAssertion — assertion index, expected value, actual port, source line ref
+- [ ] AC-5: ClockConfig — period_ns, edge (rising/falling), domain name, is_default
+- [ ] AC-6: ResetSequence — reset type (sync/async), polarity (active_high/active_low), duration cycles
+- [ ] AC-7: CombinationalBench — DUT ref, stimulus list, assertion list, no-clock flag
+- [ ] AC-8: ClockedBench — DUT ref, clock config, reset sequence, cycle-based stimuli
+- [ ] AC-9: GhdlResult — phase (analyze/elaborate/run), passed, stderr capture, exit code
+- [ ] AC-10: Verification spec — 20 tests covering candidates, ports, stimuli, assertions, clock, rendering, GHDL
+
+## Phase Checklist
+- [x] 1-dev (Developer Lead) — 2026-05-18
+- [x] 2-4 — skipped (plan doc comprehensive)
+- [ ] 5-implement (Engineer)
+- [ ] 6-refactor (Tech Lead)
+- [ ] 7-verify (QA)
+- [ ] 8-ship (Release Mgr)
+
+## Phase Outputs
+
+### 1-dev
+10 ACs across 7 plan subtasks. Existing: vhdl_testbench_converter.spl (622 lines).
+
+### 5-implement
+<pending>
+
+### 7-verify
+<pending>
