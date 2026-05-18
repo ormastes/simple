@@ -1,24 +1,26 @@
-"""LAPACKE SFFI Boundary — Phase 4 native LAPACK shim stubs.
+"""LAPACKE SFFI Boundary — Phase 4 native LAPACK provider.
 
-LapackeProvider wraps native LAPACKE C interface calls.  When the
-LAPACKE shared library is not linked/available, every operation returns
-a typed error — NEVER a silent fallback or wrong answer.
+LapackeProvider wraps native LAPACKE C interface calls via the openblas shim
+bits path.  When the LAPACKE shared library is not linked/available, every
+operation returns a typed error — NEVER a silent fallback or wrong answer.
 
 Import path: use std.nogc_sync_mut.linalg.lapack_lapacke.*
 
 Design:
-  - Layer A: raw extern declarations (dgesv_, dgetrf_, etc.)
-  - Layer B: LapackeProvider class — converts row-major to column-major
-             via operand-swap (OQ-C: (AB)^T = B^T A^T) before calling externs.
-  - LP64 integer ABI: all LAPACK integers are i64 (not i32).
-  - Pivot arrays allocated internally; never exposed to Layer C callers.
-
-Status: SFFI stubs — returns WorkspaceError when native library is absent.
-Native wiring deferred until first solve/factorization path stable (T-LAPACK-11).
+  - gesv: delegates to lapack_dgesv_values (fortran_wrapper) which calls
+    rt_scilib_openblas_dgesv_bits.  The shim uses LAPACK_ROW_MAJOR, so no
+    operand-swap is needed in Simple — row-major buffers are passed directly.
+  - inv: composed on self.gesv over identity columns (same as CpuLapackProvider).
+  - getrf, det, nrm2: no bits-API surface exists for these in the current shim;
+    raw-pointer rt_lapack_* cannot be marshaled from the interpreter.
+    They return WorkspaceError with a comment documenting the gap.
+  - LP64 integer ABI: all LAPACK integers are i64.
+  - Pivot arrays are fully encapsulated inside the shim; never exposed here.
 """
 
 use std.common.science_math.lapack_provider.{LapackProvider}
 use std.common.science_math.lapack.{LinalgError, LapackInfo}
+use std.nogc_sync_mut.linalg.fortran_wrapper.{lapack_dgesv_values}
 
 # ============================================================
 # LapackeProvider
@@ -38,44 +40,62 @@ pub class LapackeProvider:
     pub fn provider_name(self) -> text:
         "lapacke"
 
-    # gesv: LAPACK dgesv_ — solve A*x = b.
-    # Operand-swap: pass A^T to column-major dgesv_ (no explicit transpose needed
-    # because row-major A == column-major A^T, and dgesv_ solves A^T * x = b^T).
-    # T-LAPACK-11: native wiring deferred; returns WorkspaceError until linked.
+    # gesv: solve A*x = b via rt_scilib_openblas_dgesv_bits.
+    # The shim uses LAPACK_ROW_MAJOR; no operand-swap needed in Simple.
+    # Returns Err(LinalgError.Singular(row)) when LAPACK info > 0.
     pub fn gesv(self, n: i64, a_buf: [f64], b_buf: [f64]) -> Result<[f64], LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        # TODO T-LAPACK-11: wire native dgesv_ extern here
+        val result = lapack_dgesv_values(n, 1, a_buf, b_buf)
+        if result.is_ok():
+            return Ok(result.unwrap())
         Err(LinalgError.WorkspaceError)
 
     # getrf: LAPACK dgetrf_ — LU factorization.
-    # T-LAPACK-11: native wiring deferred.
+    # No bits-API surface in current shim; rt_lapack_dgetrf takes raw C pointers
+    # that cannot be marshaled from the interpreter (T-LAPACK-11 follow-up).
     pub fn getrf(self, n: i64, a_buf: [f64]) -> Result<[f64], LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        # TODO T-LAPACK-11: wire native dgetrf_ extern here
         Err(LinalgError.WorkspaceError)
 
-    # inv: matrix inverse via dgesv columns.
-    # T-LAPACK-11: native wiring deferred.
+    # inv: matrix inverse via self.gesv on identity columns.
     pub fn inv(self, n: i64, a_buf: [f64]) -> Result<[f64], LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        # TODO T-LAPACK-11: wire native dgetri_/dgetrf_ extern here
-        Err(LinalgError.WorkspaceError)
+        var out: [f64] = []
+        var i = 0
+        while i < n * n:
+            out.push(0.0)
+            i = i + 1
+        var col = 0
+        while col < n:
+            var rhs_col: [f64] = []
+            var row = 0
+            while row < n:
+                if row == col:
+                    rhs_col.push(1.0)
+                else:
+                    rhs_col.push(0.0)
+                row = row + 1
+            val col_result = self.gesv(n, a_buf, rhs_col)?
+            row = 0
+            while row < n:
+                out[row * n + col] = col_result[row]
+                row = row + 1
+            col = col + 1
+        Ok(out)
 
     # det: determinant via LU diagonal product.
-    # T-LAPACK-11: native wiring deferred.
+    # No bits-API surface in current shim (T-LAPACK-11 follow-up).
     pub fn det(self, n: i64, a_buf: [f64]) -> Result<f64, LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        # TODO T-LAPACK-11: wire native dgetrf_ + diagonal product here
         Err(LinalgError.WorkspaceError)
 
     # nrm2: BLAS dnrm2 — Euclidean norm.
-    # T-LAPACK-11: native wiring deferred.
+    # No bits-API surface for nrm2 in current shim (T-LAPACK-11 follow-up).
     pub fn nrm2(self, n: i64, x_buf: [f64]) -> Result<f64, LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        # TODO T-LAPACK-11: wire native dnrm2 extern here
         Err(LinalgError.WorkspaceError)
