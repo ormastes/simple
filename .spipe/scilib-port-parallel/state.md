@@ -55,4 +55,4 @@ No refactoring needed — implementation is clean, no duplicated logic across mo
 - AC-10: No CUDA requirement for baseline; CUDA tests skip-safe
 
 ### 8-ship
-<pending>
+Pushed to origin/main: a7e0cd9c2b (implementation) + 7bb9ac0e31 (test specs). All 10 ACs met. Pipeline complete.
