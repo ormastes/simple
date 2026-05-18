@@ -35,6 +35,10 @@ functions (they're `static inline` in the reference). Result:
 functions (< ~10 IR instructions, no loops) should be inlined at call sites.
 This alone would likely bring all ctype functions to 0.8-1.0x C.
 
+**Note:** The inlined benchmark represents the *upper bound* on real stdlib
+performance — `use std.common.ctype` callers will hit the same or worse numbers
+because cross-module calls add overhead even after the ABI bug is fixed.
+
 ## Cross-Module Bug
 
 Additionally, cross-module function calls return wrong values in native mode
