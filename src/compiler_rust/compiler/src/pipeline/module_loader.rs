@@ -1372,6 +1372,19 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         .cloned()
         .collect();
 
+    // Reject deprecated `std.ffi` — must use `std.sffi` instead
+    if parts.len() >= 2 && parts[0] == "std" && parts[1] == "ffi" {
+        eprintln!(
+            "\x1b[31merror\x1b[0m: `use std.ffi` is deprecated — use `use std.sffi` instead"
+        );
+        eprintln!("  hint: rename `std.ffi.{}` → `std.sffi.{}`",
+            parts[2..].join("."), parts[2..].join("."));
+        if std::env::var("SIMPLE_STRICT_SFFI").is_ok() {
+            std::process::exit(1);
+        }
+        parts[1] = "sffi".to_string();
+    }
+
     // For Single/Aliased imports, the target name may be a module file (not a symbol).
     // Append it to the path so we try resolving `std.mcp.main_lazy_json` as
     // `mcp/main_lazy_json.spl` first, matching the interpreter's behavior.
