@@ -24,10 +24,10 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [x] 2-4 — skipped (plan doc comprehensive)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer) — 2026-05-18
+- [x] 6-refactor (Tech Lead) — 2026-05-18
+- [x] 7-verify (QA) — 2026-05-18
+- [x] 8-ship (Release Mgr) — 2026-05-18
 
 ## Phase Outputs
 
@@ -35,7 +35,12 @@ feature
 10 ACs across function/procedure/entity lowering, naming, diagnostics. Existing: vhdl_builder.spl, vhdl_helpers.spl.
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents. 4 source + 1 test:
+- src/compiler/70.backend/backend/vhdl/vhdl_subprogram_model.spl — SubprogramKind + FunctionLower + ProcedureLower + SubprogramDecision
+- src/compiler/70.backend/backend/vhdl/vhdl_subprogram_naming.spl — VhdlSanitizedName + CollisionCheck + SanitizedParam + MangledSignature
+- src/compiler/70.backend/backend/vhdl/vhdl_subprogram_diag.spl — StatefulCheck + CycleDetection + EmissionDiagnostic + DiagnosticReport
+- src/compiler/70.backend/backend/vhdl/vhdl_subprogram_select.spl — SelectionCriteria + EntityKeep + SubprogramCandidate + EmissionPlan
+- test/unit/compiler/vhdl_subprogram_spec.spl — 20 tests
 
 ### 7-verify
-<pending>
+20/20 tests PASS.
