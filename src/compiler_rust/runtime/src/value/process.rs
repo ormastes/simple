@@ -9,7 +9,7 @@ use nix::sys::signal::{kill, Signal};
 #[cfg(unix)]
 use nix::unistd::{execvp, fork, setsid, ForkResult};
 #[cfg(unix)]
-use std::sffi::CString;
+use std::ffi::CString;
 
 /// Spawn a process with PTY
 /// Returns: process ID (pid), or -1 on error

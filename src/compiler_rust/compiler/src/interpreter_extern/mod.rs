@@ -97,7 +97,7 @@ pub mod env_sffi;
 pub mod error_sffi;
 pub mod span_sffi;
 pub mod rc;
-pub mod wffi;
+pub mod wsffi;
 pub mod crypto;
 pub mod sha512;
 pub mod dynamic_sffi;
@@ -579,7 +579,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_cranelift_urem", cranelift::rt_cranelift_urem as ExternFn);
     m.insert("rt_cranelift_ushr", cranelift::rt_cranelift_ushr as ExternFn);
     m.insert("rt_cstring_to_text", coverage::rt_cstring_to_text as ExternFn);
-    m.insert("rt_cstring_to_text", wffi::rt_cstring_to_text as ExternFn);
+    m.insert("rt_cstring_to_text", wsffi::rt_cstring_to_text as ExternFn);
     m.insert("rt_cuda_available", gpu::rt_cuda_available_fn as ExternFn);
     m.insert("rt_cuda_ctx_create", gpu::rt_cuda_ctx_create_fn as ExternFn);
     m.insert("rt_cuda_ctx_destroy", gpu::rt_cuda_ctx_destroy_fn as ExternFn);
@@ -1191,14 +1191,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("simple_layout_mark", layout::simple_layout_mark as ExternFn);
     m.insert("simple_repl_runner_cleanup", repl::simple_repl_runner_cleanup_fn as ExternFn);
     m.insert("simple_repl_runner_init", repl::simple_repl_runner_init_fn as ExternFn);
-    m.insert("spl_bits_to_f64", wffi::spl_bits_to_f64 as ExternFn);
-    m.insert("spl_dlclose", wffi::spl_dlclose as ExternFn);
-    m.insert("spl_dlopen", wffi::spl_dlopen as ExternFn);
-    m.insert("spl_dlsym", wffi::spl_dlsym as ExternFn);
-    m.insert("spl_f64_to_bits", wffi::spl_f64_to_bits as ExternFn);
+    m.insert("spl_bits_to_f64", wsffi::spl_bits_to_f64 as ExternFn);
+    m.insert("spl_dlclose", wsffi::spl_dlclose as ExternFn);
+    m.insert("spl_dlopen", wsffi::spl_dlopen as ExternFn);
+    m.insert("spl_dlsym", wsffi::spl_dlsym as ExternFn);
+    m.insert("spl_f64_to_bits", wsffi::spl_f64_to_bits as ExternFn);
     m.insert("spl_i64_is_zero", memory::spl_i64_is_zero as ExternFn);
-    m.insert("spl_str_ptr", wffi::spl_str_ptr as ExternFn);
-    m.insert("spl_wffi_call_i64", wffi::spl_wffi_call_i64 as ExternFn);
+    m.insert("spl_str_ptr", wsffi::spl_str_ptr as ExternFn);
+    m.insert("spl_wffi_call_i64", wsffi::spl_wffi_call_i64 as ExternFn);
     m.insert("sqrt", math::sqrt as ExternFn);
     m.insert("stderr_flush", io::stderr_flush as ExternFn);
     m.insert("stderr_write", io::stderr_write as ExternFn);
@@ -2866,14 +2866,14 @@ pub(crate) fn call_extern_function(
         // ====================================================================
         // WFFI Dynamic Library Functions (8 functions)
         // ====================================================================
-        "spl_dlopen" => wffi::spl_dlopen(&evaluated),
-        "spl_dlsym" => wffi::spl_dlsym(&evaluated),
-        "spl_dlclose" => wffi::spl_dlclose(&evaluated),
-        "spl_wffi_call_i64" => wffi::spl_wffi_call_i64(&evaluated),
-        "spl_f64_to_bits" => wffi::spl_f64_to_bits(&evaluated),
-        "spl_bits_to_f64" => wffi::spl_bits_to_f64(&evaluated),
-        "spl_str_ptr" => wffi::spl_str_ptr(&evaluated),
-        "rt_cstring_to_text" => wffi::rt_cstring_to_text(&evaluated),
+        "spl_dlopen" => wsffi::spl_dlopen(&evaluated),
+        "spl_dlsym" => wsffi::spl_dlsym(&evaluated),
+        "spl_dlclose" => wsffi::spl_dlclose(&evaluated),
+        "spl_wffi_call_i64" => wsffi::spl_wffi_call_i64(&evaluated),
+        "spl_f64_to_bits" => wsffi::spl_f64_to_bits(&evaluated),
+        "spl_bits_to_f64" => wsffi::spl_bits_to_f64(&evaluated),
+        "spl_str_ptr" => wsffi::spl_str_ptr(&evaluated),
+        "rt_cstring_to_text" => wsffi::rt_cstring_to_text(&evaluated),
 
         _ => {
             // Try dynamic SFFI dispatch via the runtime shared library.

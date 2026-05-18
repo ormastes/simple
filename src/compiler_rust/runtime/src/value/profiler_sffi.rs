@@ -3,7 +3,7 @@
 //! These extern "C" functions are called from Cranelift-compiled code
 //! to record function calls and returns for the runtime profiler.
 
-use std::sffi::CStr;
+use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 

@@ -6,7 +6,7 @@ use super::api_scanner::{scan_directory, write_yaml};
 use super::coverage::{load_llvm_cov_export, LlvmCovExport};
 use super::coverage_extended::{print_coverage_summary, CoverageAnalyzer, ExtendedCoverageReport};
 use std::collections::HashMap;
-use std::sffi::CStr;
+use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::path::Path;
 

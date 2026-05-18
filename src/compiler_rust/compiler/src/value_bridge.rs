@@ -6,7 +6,7 @@
 //! to the interpreter for unsupported features.
 
 use std::collections::HashMap;
-use std::sffi::{c_char, CStr, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::sync::Arc;
 
 use crate::value::Value;

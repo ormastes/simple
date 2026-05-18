@@ -2,7 +2,7 @@
 //! Provides SFFI functions for SPK package operations, checksums, and file operations
 
 use sha2::{Digest, Sha256};
-use std::sffi::{CStr, CString};
+use std::ffi::{CStr, CString};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::raw::c_char;

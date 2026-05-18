@@ -5,7 +5,7 @@
 //!
 //! All `rt_metal_*` function signatures are unchanged from the original stubs.
 
-use std::sffi::CString;
+use std::ffi::CString;
 use std::os::raw::c_char;
 
 fn empty_cstr() -> *const c_char {
@@ -20,7 +20,7 @@ fn empty_cstr() -> *const c_char {
 #[cfg(target_os = "macos")]
 mod metal_impl {
     use std::collections::HashMap;
-    use std::sffi::{CStr, CString};
+    use std::ffi::{CStr, CString};
     use std::os::raw::c_char;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Mutex;
@@ -547,7 +547,7 @@ mod metal_impl {
         let encoder = with_encoders(|m| m.get(&encoder_handle).map(|w| w.0.clone()));
         match encoder {
             Some(encoder) => {
-                let ptr = std::ptr::NonNull::new(data as *mut std::sffi::c_void);
+                let ptr = std::ptr::NonNull::new(data as *mut std::ffi::c_void);
                 match ptr {
                     Some(ptr) => {
                         unsafe {
@@ -665,7 +665,7 @@ mod metal_impl {
                     encoder.setBuffer_offset_atIndex(Some(&b2), 0, 2);
                 }
                 if params_ptr != 0 && params_size > 0 {
-                    let ptr = std::ptr::NonNull::new(params_ptr as *mut std::sffi::c_void);
+                    let ptr = std::ptr::NonNull::new(params_ptr as *mut std::ffi::c_void);
                     if let Some(ptr) = ptr {
                         unsafe {
                             encoder.setBytes_length_atIndex(ptr, params_size as usize, 3);
@@ -737,7 +737,7 @@ mod metal_impl {
                     encoder.setBuffer_offset_atIndex(Some(&b1), 0, 1);
                 }
                 if params_ptr != 0 && params_size > 0 {
-                    let ptr = std::ptr::NonNull::new(params_ptr as *mut std::sffi::c_void);
+                    let ptr = std::ptr::NonNull::new(params_ptr as *mut std::ffi::c_void);
                     if let Some(ptr) = ptr {
                         unsafe {
                             encoder.setBytes_length_atIndex(ptr, params_size as usize, 2);

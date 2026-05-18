@@ -4,7 +4,7 @@
 // to invoke cargo commands and get results back.
 
 use super::{rt_dict_new, rt_dict_set, rt_string_new, RuntimeValue};
-use std::sffi::{CStr, CString};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::process::Command;

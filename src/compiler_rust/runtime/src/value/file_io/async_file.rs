@@ -255,7 +255,7 @@ fn load_file_mmap(path: &str, mode: i32, prefault: bool) -> Result<MmapRegion, S
     let fd = unsafe {
         #[cfg(target_family = "unix")]
         {
-            use std::sffi::CString;
+            use std::ffi::CString;
             let c_path = CString::new(path).map_err(|e| format!("Invalid path: {}", e))?;
             libc::open(c_path.as_ptr(), mode)
         }

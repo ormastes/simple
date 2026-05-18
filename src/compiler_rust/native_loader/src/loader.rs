@@ -1,4 +1,4 @@
-use std::sffi::CString;
+use std::ffi::CString;
 use std::path::Path;
 
 use libloading::Library;

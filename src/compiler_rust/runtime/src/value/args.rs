@@ -17,7 +17,7 @@
 //! 3. **JIT/Interpreter**: Driver sets args from command line before evaluation
 
 use parking_lot::Mutex;
-use std::sffi::CStr;
+use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{rt_array_new, rt_array_push, rt_string_new, RuntimeValue};
@@ -233,7 +233,7 @@ fn auto_init_args_if_empty() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sffi::CString;
+    use std::ffi::CString;
 
     #[test]
     fn test_set_and_get_args_empty() {

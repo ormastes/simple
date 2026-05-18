@@ -25,7 +25,7 @@ pub extern "C" fn rt_serial_open(device: RuntimeValue, baud: i64) -> i64 {
             None => return 0,
         };
 
-        let dev_c = match std::sffi::CString::new(dev.as_str()) {
+        let dev_c = match std::ffi::CString::new(dev.as_str()) {
             Ok(c) => c,
             Err(_) => return 0,
         };

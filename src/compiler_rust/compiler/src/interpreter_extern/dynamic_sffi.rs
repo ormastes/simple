@@ -30,7 +30,7 @@ use crate::plugin_manifest;
 use crate::value::Value;
 use simple_simd::{active_simd_tier, SimdTier};
 use std::collections::HashMap;
-use std::sffi::CString;
+use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -625,7 +625,7 @@ fn dlsym_lookup(handle: usize, name: &str) -> Option<usize> {
     #[cfg(windows)]
     {
         extern "system" {
-            fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *mut std::sffi::c_void;
+            fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *mut std::ffi::c_void;
         }
         let c_name = CString::new(name).ok()?;
         let sym = unsafe { GetProcAddress(handle as isize, c_name.as_ptr() as *const u8) };

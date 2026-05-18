@@ -5,7 +5,7 @@
 //! - TUI widget state
 //! - Vulkan framebuffer (when available)
 
-use std::sffi::{CStr, CString};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;

@@ -14,7 +14,7 @@
 //!
 //! Mold 2.0+ is MIT licensed and can be freely bundled with Simple.
 
-use std::sffi::{CStr, CString};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::process::Command;

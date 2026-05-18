@@ -6,14 +6,14 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
-use std::sffi::{CStr, CString};
+use std::ffi::{CStr, CString};
 use std::sync::OnceLock;
 
 // dlopen-based CUDA fallback when compiled without cuda feature
 #[cfg(not(feature = "cuda"))]
 mod cuda_dlopen {
     use std::os::raw::c_void;
-    use std::sffi::CString;
+    use std::ffi::CString;
 
     type CuInit = unsafe extern "C" fn(u32) -> i32;
     type CuDeviceGet = unsafe extern "C" fn(*mut i32, i32) -> i32;
@@ -1181,7 +1181,7 @@ pub fn rt_vulkan_shutdown_graphics_fn(_args: &[Value]) -> Result<Value, CompileE
 // ============================================================================
 
 mod vulkan_dlopen {
-    use std::sffi::CString;
+    use std::ffi::CString;
     use std::os::raw::{c_char, c_void};
     use std::sync::Mutex;
 
@@ -1811,7 +1811,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         None => return Ok(Value::Int(0)),
     };
     unsafe {
-        let app_name = std::sffi::CString::new("simple").unwrap();
+        let app_name = std::ffi::CString::new("simple").unwrap();
         let app_info = VkApplicationInfo {
             s_type: 0,
             p_next: ptr::null(),
@@ -2174,7 +2174,7 @@ pub fn rt_vulkan_compile_glsl_fn(args: &[Value]) -> Result<Value, CompileError> 
             return Ok(Value::Int(0));
         }
         let opts = (shaderc.compile_options_initialize)();
-        let src_c = match std::sffi::CString::new(src) {
+        let src_c = match std::ffi::CString::new(src) {
             Ok(c) => c,
             Err(_) => {
                 if !opts.is_null() {
@@ -2184,8 +2184,8 @@ pub fn rt_vulkan_compile_glsl_fn(args: &[Value]) -> Result<Value, CompileError> 
                 return Ok(Value::Int(0));
             }
         };
-        let fname = std::sffi::CString::new("shader.glsl").unwrap();
-        let entry = std::sffi::CString::new("main").unwrap();
+        let fname = std::ffi::CString::new("shader.glsl").unwrap();
+        let entry = std::ffi::CString::new("main").unwrap();
         let result = (shaderc.compile_into_spv)(
             compiler,
             src_c.as_ptr(),
@@ -2314,7 +2314,7 @@ pub fn rt_vulkan_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Com
             return Ok(Value::Int(0));
         }
 
-        let entry_c = match std::sffi::CString::new(entry) {
+        let entry_c = match std::ffi::CString::new(entry) {
             Ok(c) => c,
             Err(_) => {
                 (s.fns.destroy_pipeline_layout)(s.device, layout, ptr::null());

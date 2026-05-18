@@ -5,7 +5,7 @@
 
 use crate::hir_core::LogLevel;
 use std::collections::HashMap;
-use std::sffi::c_void;
+use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
 use super::{rt_string_data, rt_string_len, RuntimeValue};

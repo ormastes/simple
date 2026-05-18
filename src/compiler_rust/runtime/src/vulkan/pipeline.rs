@@ -93,7 +93,7 @@ impl ComputePipeline {
         };
 
         // Create compute pipeline
-        let entry_name = std::sffi::CString::new("main")
+        let entry_name = std::ffi::CString::new("main")
             .map_err(|e| VulkanError::PipelineCreationFailed(format!("Entry name: {:?}", e)))?;
 
         let stage_info = vk::PipelineShaderStageCreateInfo::default()

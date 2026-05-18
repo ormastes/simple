@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sffi::{c_char, CStr};
+use std::ffi::{c_char, CStr};
 use std::sync::RwLock;
 
 use simple_parser::ast::{ClassDef, Expr, FunctionDef, Node, Type, Visibility};

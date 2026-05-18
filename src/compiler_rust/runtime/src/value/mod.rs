@@ -77,7 +77,7 @@ pub mod bench_support;
 #[cfg(feature = "pytorch")]
 pub mod torch;
 #[cfg(unix)]
-pub mod wffi_native;
+pub mod wsffi_native;
 
 // Re-export core types
 pub use core::RuntimeValue;
@@ -297,7 +297,7 @@ pub use async_gen::{
 };
 
 // Re-export core SFFI functions
-pub use ffi::{
+pub use sffi::{
     rt_alloc, rt_free, rt_function_not_found, rt_interp_call, rt_interp_eval, rt_memcpy, rt_memset,
     rt_method_not_found, rt_ptr_read_i64, rt_ptr_to_value, rt_ptr_write_i32, rt_ptr_write_i64, rt_ptr_write_u8,
     rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_compare, rt_value_eq, rt_value_float,
@@ -306,23 +306,23 @@ pub use ffi::{
 };
 
 // Re-export interpreter bridge handler setters (for compiler crate)
-pub use ffi::{set_interp_call_handler, set_interp_eval_handler, InterpCallFn, InterpEvalFn};
+pub use sffi::{set_interp_call_handler, set_interp_eval_handler, InterpCallFn, InterpEvalFn};
 
 // Re-export argument handling functions
 pub use args::{rt_clear_args, rt_get_argc, rt_get_args, rt_set_args, rt_set_args_vec};
 
 // Re-export I/O capture functions (for testing)
-pub use ffi::{
+pub use sffi::{
     rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start, rt_capture_stdout_stop,
     rt_clear_captured_stderr, rt_clear_captured_stdout, rt_get_captured_stderr, rt_get_captured_stdout,
     rt_is_stderr_capturing, rt_is_stdout_capturing,
 };
 
 // Re-export stdin mock functions (for testing)
-pub use ffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_stdin_line, rt_set_stdin};
+pub use sffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_stdin_line, rt_set_stdin};
 
 // Re-export print SFFI functions
-pub use ffi::{
+pub use sffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
     rt_println_value, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush, rt_stdout_write,
     rt_value_format_string, rt_value_to_string,
@@ -336,10 +336,10 @@ pub use log_sffi::{
 };
 
 // Re-export time SFFI functions
-pub use ffi::rt_time_now_seconds;
+pub use sffi::rt_time_now_seconds;
 
 // Re-export environment & process SFFI functions
-pub use ffi::{
+pub use sffi::{
     rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_get_i64,
     rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_path_probe,
     rt_platform_name, rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run,
@@ -348,7 +348,7 @@ pub use ffi::{
 };
 
 // Re-export runtime configuration SFFI functions
-pub use ffi::{rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_set_debug_mode, rt_set_macro_trace};
+pub use sffi::{rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_set_debug_mode, rt_set_macro_trace};
 
 // Re-export CLI SFFI functions
 pub use cli_sffi::{
@@ -361,7 +361,7 @@ pub use cli_sffi::{
 };
 
 // Re-export file I/O SFFI functions
-pub use ffi::{
+pub use sffi::{
     // Metadata
     rt_file_exists,
     rt_file_stat,
@@ -428,7 +428,7 @@ pub use ffi::{
 };
 
 // Re-export hash SFFI functions
-pub use ffi::{
+pub use sffi::{
     rt_sha1_finish, rt_sha1_finish_base64, rt_sha1_finish_bytes, rt_sha1_free, rt_sha1_new, rt_sha1_reset,
     rt_sha1_write, rt_sha256_finish, rt_sha256_finish_bytes, rt_sha256_free, rt_sha256_new, rt_sha256_reset,
     rt_sha256_write, rt_xxhash_finish, rt_xxhash_free, rt_xxhash_new, rt_xxhash_new_with_seed, rt_xxhash_reset,
@@ -436,7 +436,7 @@ pub use ffi::{
 };
 
 // Re-export atomic operations SFFI functions
-pub use ffi::{
+pub use sffi::{
     rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new, rt_atomic_bool_store, rt_atomic_bool_swap,
     rt_atomic_flag_clear, rt_atomic_flag_free, rt_atomic_flag_new, rt_atomic_flag_test_and_set,
     rt_atomic_int_compare_exchange, rt_atomic_int_fetch_add, rt_atomic_int_fetch_and, rt_atomic_int_fetch_or,
@@ -957,13 +957,13 @@ pub use simd_aes_ops::{rt_simd_aes_round_last_u8x16, rt_simd_aes_round_u8x16};
 pub use simd_clmul_ops::{rt_simd_clmul_hi_u64, rt_simd_clmul_lo_u64, rt_simd_xor_u64x2};
 
 // Re-export regex SFFI functions
-pub use ffi::{
+pub use sffi::{
     sffi_regex_captures, sffi_regex_find, sffi_regex_find_all, sffi_regex_is_match, sffi_regex_replace,
     sffi_regex_replace_all, sffi_regex_split, sffi_regex_split_n,
 };
 
 // Re-export sandbox SFFI functions
-pub use ffi::sandbox::{
+pub use sffi::sandbox::{
     rt_sandbox_add_allowed_domain, rt_sandbox_add_blocked_domain, rt_sandbox_add_read_path, rt_sandbox_add_write_path,
     rt_sandbox_apply, rt_sandbox_cleanup, rt_sandbox_disable_network, rt_sandbox_get_cpu_time, rt_sandbox_get_fs_mode,
     rt_sandbox_get_memory, rt_sandbox_get_network_mode, rt_sandbox_is_configured, rt_sandbox_reset,
@@ -1015,11 +1015,11 @@ pub use hpcollections::hashmap::clear_hashmap_registry;
 pub use hpcollections::hashset::clear_hashset_registry;
 pub use hpcollections::btreemap::clear_btreemap_registry;
 pub use hpcollections::btreeset::clear_btreeset_registry;
-pub use ffi::clear_regex_cache;
-pub use ffi::sync::clear_sync_registries;
-pub use ffi::atomic::clear_atomic_registries;
-pub use ffi::hash::clear_hash_registries;
-pub use ffi::concurrent::clear_concurrent_registries;
+pub use sffi::clear_regex_cache;
+pub use sffi::sync::clear_sync_registries;
+pub use sffi::atomic::clear_atomic_registries;
+pub use sffi::hash::clear_hash_registries;
+pub use sffi::concurrent::clear_concurrent_registries;
 pub use net::clear_socket_registry;
 
 // ============================================================================

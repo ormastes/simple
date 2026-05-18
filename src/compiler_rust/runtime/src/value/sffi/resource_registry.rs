@@ -7,7 +7,7 @@
 //!
 //! ```ignore
 //! use simple_runtime::value::sffi::resource_registry::*;
-//! use std::sffi::CString;
+//! use std::ffi::CString;
 //!
 //! // Register a resource when opened
 //! let name = CString::new("File").unwrap();
@@ -27,7 +27,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sffi::{CStr, CString};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
 /// Internal resource entry

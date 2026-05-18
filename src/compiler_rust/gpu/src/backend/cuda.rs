@@ -3,7 +3,7 @@
 //! NVIDIA CUDA backend using the CUDA Driver API.
 
 use std::collections::HashMap;
-use std::sffi::{c_void, CString};
+use std::ffi::{c_void, CString};
 use std::ptr;
 use std::sync::Mutex;
 
@@ -297,7 +297,7 @@ impl Backend for CudaBackend {
             // Get device name
             let mut name_buf = [0i8; 256];
             cuda_check(cuDeviceGetName(name_buf.as_mut_ptr(), 256, device))?;
-            let name = std::sffi::CStr::from_ptr(name_buf.as_ptr())
+            let name = std::ffi::CStr::from_ptr(name_buf.as_ptr())
                 .to_string_lossy()
                 .into_owned();
 

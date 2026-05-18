@@ -2558,7 +2558,7 @@ mod tests {
     use super::*;
     use simple_parser::Parser;
     #[cfg(feature = "cuda")]
-    use std::sffi::CString;
+    use std::ffi::CString;
     use tempfile::NamedTempFile;
 
     fn vhdl_module_with_instruction(inst: MirInst) -> mir::MirModule {

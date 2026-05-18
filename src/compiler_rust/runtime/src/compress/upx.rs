@@ -4,7 +4,7 @@
 //! UPX is auto-downloaded if not found in system PATH.
 
 use crate::compress::upx_download::{ensure_upx_available, find_upx_binary};
-use std::sffi::{CStr, CString};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::process::Command;

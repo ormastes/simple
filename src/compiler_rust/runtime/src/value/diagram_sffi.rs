@@ -4,7 +4,7 @@
 //! generating sequence, class, and architecture diagrams.
 
 use std::cell::RefCell;
-use std::sffi::{CStr, CString};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;

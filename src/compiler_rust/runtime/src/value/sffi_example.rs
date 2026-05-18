@@ -167,13 +167,13 @@ fn get_counter_sffi() -> &'static CounterFfi {
 #[no_mangle]
 pub extern "C" fn counter_register_type() -> u32 {
     let sffi = get_counter_sffi();
-    get_registry().register_type("Counter", &ffi.vtable)
+    get_registry().register_type("Counter", &sffi.vtable)
 }
 
 /// Get the Counter vtable.
 pub fn counter_vtable() -> *const FfiVtable {
     let sffi = get_counter_sffi();
-    &ffi.vtable
+    &sffi.vtable
 }
 
 /// Create a new Counter SFFI object.

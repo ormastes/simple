@@ -118,7 +118,7 @@ pub fn record_decision_coverage_sffi(file: &str, line: usize, column: usize, dec
     }
 
     let decision_id = generate_decision_id(file, line, column);
-    let file_cstr = std::sffi::CString::new(file).unwrap_or_else(|_| std::sffi::CString::new("<error>").unwrap());
+    let file_cstr = std::ffi::CString::new(file).unwrap_or_else(|_| std::ffi::CString::new("<error>").unwrap());
 
     unsafe {
         simple_runtime::rt_coverage_decision_probe(
@@ -155,7 +155,7 @@ pub fn record_condition_coverage(
     let base_id = generate_decision_id(file, line, column);
     let condition_id = base_id.wrapping_mul(31).wrapping_add(condition_index);
 
-    let file_cstr = std::sffi::CString::new(file).unwrap_or_else(|_| std::sffi::CString::new("<error>").unwrap());
+    let file_cstr = std::ffi::CString::new(file).unwrap_or_else(|_| std::ffi::CString::new("<error>").unwrap());
 
     unsafe {
         // Use decision probe with modified ID to track condition coverage

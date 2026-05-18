@@ -177,7 +177,7 @@ impl Drop for ExamplesWatchdogGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sffi::OsString;
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 

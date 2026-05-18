@@ -365,7 +365,7 @@ fn dump_runtime_coverage_sdn() -> String {
         if ptr.is_null() {
             return String::new();
         }
-        let sdn = std::sffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        let sdn = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
         simple_runtime::rt_coverage_free_sdn(ptr);
         sdn
     }

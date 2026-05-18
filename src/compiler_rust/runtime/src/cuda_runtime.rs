@@ -36,7 +36,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sffi::{CStr, CString};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::os::raw::{c_int, c_uint, c_void};
 use std::ptr;
@@ -2200,7 +2200,7 @@ pub extern "C" fn rt_cuda_get_error_string(error_code: i64) -> *const c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sffi::CString;
+    use std::ffi::CString;
 
     #[test]
     fn test_cuda_error_display() {

@@ -176,7 +176,7 @@ impl Backend for SoftwareBackend {
         _block_dim: [u32; 3],
         _shared_mem: usize,
         _stream: StreamHandle,
-        _args: &[*const std::sffi::c_void],
+        _args: &[*const std::ffi::c_void],
     ) -> GpuResult<()> {
         // Software kernel execution is handled separately via parallel.rs
         // This is just a stub for the backend interface

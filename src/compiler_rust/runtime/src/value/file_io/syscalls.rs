@@ -169,7 +169,7 @@ pub extern "C" fn sys_munmap(addr: i64, length: u64) -> i32 {
         unsafe {
             // UnmapViewOfFile unmaps entire view (length parameter ignored)
             let view = MEMORY_MAPPED_VIEW_ADDRESS {
-                Value: addr as *mut std::sffi::c_void,
+                Value: addr as *mut std::ffi::c_void,
             };
             if UnmapViewOfFile(view) != 0 {
                 0 // Success
@@ -236,7 +236,7 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
                 3 => {
                     // MADV_WILLNEED -> PrefetchVirtualMemory (Windows 8+)
                     let mut range = WIN32_MEMORY_RANGE_ENTRY {
-                        VirtualAddress: addr as *mut std::sffi::c_void,
+                        VirtualAddress: addr as *mut std::ffi::c_void,
                         NumberOfBytes: length as usize,
                     };
 
@@ -257,7 +257,7 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
                 }
                 4 => {
                     // MADV_DONTNEED -> DiscardVirtualMemory (Windows 8.1+)
-                    if DiscardVirtualMemory(addr as *mut std::sffi::c_void, length as usize) != 0 {
+                    if DiscardVirtualMemory(addr as *mut std::ffi::c_void, length as usize) != 0 {
                         0
                     } else {
                         // Not fatal if unsupported
@@ -317,7 +317,7 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
     #[cfg(target_family = "unix")]
     {
         use libc::open;
-        use std::sffi::CStr;
+        use std::ffi::CStr;
 
         unsafe {
             let path_cstr = CStr::from_ptr(path_ptr as *const libc::c_char);
@@ -327,7 +327,7 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
 
     #[cfg(target_family = "windows")]
     {
-        use std::sffi::CStr;
+        use std::ffi::CStr;
         use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
             CreateFileA, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
@@ -529,7 +529,7 @@ pub extern "C" fn sys_file_exists(path_ptr: i64) -> i32 {
     {
         use libc::access;
         use libc::F_OK;
-        use std::sffi::CStr;
+        use std::ffi::CStr;
 
         unsafe {
             let path_cstr = CStr::from_ptr(path_ptr as *const libc::c_char);
@@ -543,7 +543,7 @@ pub extern "C" fn sys_file_exists(path_ptr: i64) -> i32 {
 
     #[cfg(target_family = "windows")]
     {
-        use std::sffi::CStr;
+        use std::ffi::CStr;
         use windows_sys::Win32::Storage::FileSystem::GetFileAttributesA;
         use windows_sys::Win32::Storage::FileSystem::INVALID_FILE_ATTRIBUTES;
 

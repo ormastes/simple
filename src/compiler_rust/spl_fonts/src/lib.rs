@@ -5,7 +5,7 @@
 // rasterized glyph bitmap. This is deliberately minimal — Phase 2 will grow a
 // proper handle table.
 
-use std::sffi::CString;
+use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 use std::sync::Mutex;
 

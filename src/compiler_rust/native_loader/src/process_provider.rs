@@ -65,7 +65,7 @@ fn current_process_handle() -> Result<ProcessHandle, String> {
             if err.is_null() {
                 "Unknown error".to_string()
             } else {
-                std::sffi::CStr::from_ptr(err).to_string_lossy().into_owned()
+                std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned()
             }
         };
         Err(format!("failed to open current process: {}", error))
@@ -86,7 +86,7 @@ fn current_process_handle() -> Result<ProcessHandle, String> {
 
 #[cfg(unix)]
 fn lookup_symbol(handle: ProcessHandle, name: &str) -> Option<*const u8> {
-    let c_name = std::sffi::CString::new(name).ok()?;
+    let c_name = std::ffi::CString::new(name).ok()?;
     let sym = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
     if sym.is_null() {
         None
@@ -97,7 +97,7 @@ fn lookup_symbol(handle: ProcessHandle, name: &str) -> Option<*const u8> {
 
 #[cfg(windows)]
 fn lookup_symbol(handle: ProcessHandle, name: &str) -> Option<*const u8> {
-    let c_name = std::sffi::CString::new(name).ok()?;
+    let c_name = std::ffi::CString::new(name).ok()?;
     let sym =
         unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(handle, c_name.as_ptr() as *const u8) };
     match sym {

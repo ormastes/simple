@@ -26,13 +26,13 @@ mod udp_ops;
 
 // Re-export public types for backward compatibility
 pub use executor::AsyncExecutor;
-pub use ffi::with_executor;
+pub use sffi::with_executor;
 pub use handle_store::HandleStore;
 pub use pending_op::PendingOp;
 pub use types::{OpResult, OpState, OpType};
 
 // Re-export SFFI functions
-pub use ffi::{
+pub use sffi::{
     rt_monoio_async_init, rt_monoio_async_pending_count, rt_monoio_async_poll_all, rt_monoio_async_poll_one,
     rt_monoio_async_tcp_accept, rt_monoio_async_tcp_close, rt_monoio_async_tcp_connect, rt_monoio_async_tcp_listen,
     rt_monoio_async_tcp_listener_close, rt_monoio_async_tcp_read, rt_monoio_async_tcp_write, rt_monoio_async_udp_bind,

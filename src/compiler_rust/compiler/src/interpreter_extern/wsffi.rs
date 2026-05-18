@@ -8,7 +8,7 @@
 use crate::error::CompileError;
 use crate::value::Value;
 use std::collections::HashMap;
-use std::sffi::{CStr, CString};
+use std::ffi::{CStr, CString};
 use std::sync::Mutex;
 
 /// Global registry of loaded libraries to prevent double-loading
@@ -109,7 +109,7 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(windows)]
     {
         extern "system" {
-            fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *mut std::sffi::c_void;
+            fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *mut std::ffi::c_void;
         }
         let sym = unsafe { GetProcAddress(handle_val as isize, c_name.as_ptr() as *const u8) };
         Ok(Value::Int(sym as usize as i64))

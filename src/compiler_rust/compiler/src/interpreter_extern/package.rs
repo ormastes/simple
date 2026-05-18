@@ -3,7 +3,7 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
-use std::sffi::CString;
+use std::ffi::CString;
 use std::os::raw::c_char;
 
 // Import SFFI functions from runtime
@@ -58,7 +58,7 @@ pub fn sha256(args: &[Value]) -> Result<Value, CompileError> {
             return Err(CompileError::semantic("Failed to calculate checksum".to_string()));
         }
 
-        let c_str = std::sffi::CStr::from_ptr(result_ptr);
+        let c_str = std::ffi::CStr::from_ptr(result_ptr);
         let result = c_str.to_string_lossy().to_string();
         rt_package_free_string(result_ptr);
 

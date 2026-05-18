@@ -3,7 +3,7 @@
 //! Handles loading and managing native libraries (static, shared, system).
 
 use std::collections::HashMap;
-use std::sffi::CString;
+use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
 use super::super::smf::settlement::{NATIVE_LIB_SHARED, NATIVE_LIB_STATIC, NATIVE_LIB_SYSTEM};
@@ -77,15 +77,15 @@ enum NativeLibHandle {
     Static(*const u8, usize),
     /// Current process image
     #[cfg(unix)]
-    Process(*mut std::sffi::c_void),
+    Process(*mut std::ffi::c_void),
     /// Current process image
     #[cfg(windows)]
-    Process(*mut std::sffi::c_void),
+    Process(*mut std::ffi::c_void),
     /// Dynamically loaded library
     #[cfg(unix)]
-    Dynamic(*mut std::sffi::c_void),
+    Dynamic(*mut std::ffi::c_void),
     #[cfg(windows)]
-    Dynamic(*mut std::sffi::c_void),
+    Dynamic(*mut std::ffi::c_void),
     /// Not loaded yet
     #[allow(dead_code)]
     Unloaded,
@@ -120,7 +120,7 @@ impl LoadedNativeLib {
                 if err.is_null() {
                     "Unknown error".to_string()
                 } else {
-                    std::sffi::CStr::from_ptr(err).to_string_lossy().into_owned()
+                    std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned()
                 }
             };
             return Err(format!("Failed to load {}: {}", path_str, error));
@@ -170,7 +170,7 @@ impl LoadedNativeLib {
                 if err.is_null() {
                     "Unknown error".to_string()
                 } else {
-                    std::sffi::CStr::from_ptr(err).to_string_lossy().into_owned()
+                    std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned()
                 }
             };
             return Err(format!("Failed to load current process: {}", error));
@@ -239,7 +239,7 @@ impl LoadedNativeLib {
         use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 
         let dll_name = format!("{}.dll", name);
-        let wide_name: Vec<u16> = std::sffi::OsStr::new(&dll_name).encode_wide().chain(Some(0)).collect();
+        let wide_name: Vec<u16> = std::ffi::OsStr::new(&dll_name).encode_wide().chain(Some(0)).collect();
 
         let handle = unsafe { LoadLibraryW(wide_name.as_ptr()) };
 
@@ -289,7 +289,7 @@ impl LoadedNativeLib {
     /// Platform-agnostic symbol lookup implementation
     fn get_symbol_impl<F>(&mut self, name: &str, lookup: F) -> Option<usize>
     where
-        F: FnOnce(*mut std::sffi::c_void, &CString) -> Option<usize>,
+        F: FnOnce(*mut std::ffi::c_void, &CString) -> Option<usize>,
     {
         // Check cache first
         if let Some(&addr) = self.symbols.get(name) {
