@@ -1,6 +1,6 @@
 # Cross-Module ABI Fix — State
 
-## Status: IN PROGRESS
+## Status: DONE (committed in 5d65a6a7f8)
 
 ## Bug Reference
 `doc/08_tracking/bug/native_cross_module_call_abi_broken_2026-05-18.md`
@@ -44,6 +44,11 @@ Alternatively (simpler): in `resolve_import_name_strict`, when `func_name` is ba
 
 This means: for `use std.common.ctype` with segments `["lib","common","ctype"]`, when iterating bare names, `resolve_import_name_strict("is_digit", ["lib","common","ctype"], ...)` finds `common__ctype__is_digit` because `mangled_matches_use_path("common__ctype__is_digit", ["lib","common","ctype"])` should be true.
 
-## Files to Modify
+## Files Modified
 
-- `src/compiler_rust/compiler/src/pipeline/native_project/imports.rs` — `collect_use_imports` Single branch
+- `src/compiler_rust/compiler/src/pipeline/native_project/imports.rs` — `collect_use_imports` Single branch (lines 613-634)
+
+## Verification
+
+- Bootstrap build (`cargo build --profile bootstrap`) completed successfully (4m 12s, no errors)
+- `nm .simple/native_cache/objects/*.o` confirmed: caller was importing bare `is_digit`, exporter was exporting `common__ctype__is_digit` — symbol mismatch at link time
