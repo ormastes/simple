@@ -1,6 +1,6 @@
 # RISC-V 64 FPGA Hardware Inventory — 2026-05-19
 
-**Board:** ML_Carrier_Card (Xilinx/AMD Zynq-7020 carrier)
+**Board:** ML_Carrier_Card (Xilinx/AMD Kria K26 / XCZU5EV carrier)
 **Date:** 2026-05-19
 **Operator:** ormastes
 
@@ -11,7 +11,7 @@
 | Field          | Value                                         |
 |----------------|-----------------------------------------------|
 | Board Model    | ML_Carrier_Card (Xilinx/AMD)                  |
-| FPGA           | Zynq-7020 (XC7Z020CLG484)                     |
+| FPGA           | Kria K26 (XCZU5EV Zynq UltraScale+ MPSoC)     |
 | USB Device     | 0403:6011 (Future Technology Devices FT4232H) |
 | USB Serial     | XFL1OSWWFM2B                                  |
 | USB Path       | 3-2 (interfaces 0–3)                          |
