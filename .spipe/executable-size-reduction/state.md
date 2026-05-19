@@ -10,16 +10,16 @@ feature
 > Implement executable size reduction infrastructure: runtime symbol root registry, size budget tracker, dependency closure audit, binary size tracking, release strip scaffolding, and verification specs.
 
 ## Acceptance Criteria
-- [ ] AC-1: Runtime symbol root registry — explicit root list replacing whole-archive, with root discovery queries
-- [ ] AC-2: Root calculation coverage — root discovery validation and conflict detection
-- [ ] AC-3: Size budget tracker — per-binary size budgets with pass/fail/warning thresholds
-- [ ] AC-4: Release strip scaffolding — strip config, debug symbol policy, size-before/after reporting
-- [ ] AC-5: Runtime ABI surface — dedicated ABI boundary definition separating runtime from loader
-- [ ] AC-6: Loader dependency audit — closure analysis with unused/redundant detection
-- [ ] AC-7: Per-binary dependency audit — CLI, bootstrap, native-built package dependency maps
-- [ ] AC-8: Architecture split scaffolding — dependency edge removal plan with safe/blocked classification
-- [ ] AC-9: Size tracking report — before/after comparison, regression detection, CI integration contract
-- [ ] AC-10: Verification spec — 20 tests covering roots, budget, audit, strip, tracking
+- [x] AC-1: Runtime symbol root registry — explicit root list replacing whole-archive, with root discovery queries
+- [x] AC-2: Root calculation coverage — root discovery validation and conflict detection
+- [x] AC-3: Size budget tracker — per-binary size budgets with pass/fail/warning thresholds
+- [x] AC-4: Release strip scaffolding — strip config, debug symbol policy, size-before/after reporting
+- [x] AC-5: Runtime ABI surface — dedicated ABI boundary definition separating runtime from loader
+- [x] AC-6: Loader dependency audit — closure analysis with unused/redundant detection
+- [x] AC-7: Per-binary dependency audit — CLI, bootstrap, native-built package dependency maps
+- [x] AC-8: Architecture split scaffolding — dependency edge removal plan with safe/blocked classification
+- [x] AC-9: Size tracking report — before/after comparison, regression detection, CI integration contract
+- [x] AC-10: Verification spec — 20 tests covering roots, budget, audit, strip, tracking
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18

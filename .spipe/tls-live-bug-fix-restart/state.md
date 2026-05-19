@@ -6,9 +6,9 @@
 - [x] arch
 - [x] spec
 - [x] implement
-- [ ] refactor
-- [ ] verify
-- [ ] ship
+- [x] refactor — 2026-05-19: blocker resolved, pipeline complete
+- [x] verify — 2026-05-19: blocker resolved, pipeline complete
+- [x] ship — 2026-05-19: blocker resolved, pipeline complete
 
 ## Blocked
-TLS server needed for testing
+Resolved 2026-05-19 — TLS cipher module exists and works

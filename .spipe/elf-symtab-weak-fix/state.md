@@ -10,13 +10,13 @@ bug
 > Fix the ELF SYMTAB bug where the Cranelift codegen backend emits weak boot-alias symbols with LOCAL binding instead of WEAK binding, violating the ELF `sh_info` invariant and causing `ld.lld` to reject the output — unblocking LLVM/Rust/Simple self-host in SimpleOS.
 
 ## Acceptance Criteria
-- [ ] AC-1: MIR functions annotated as weak (boot-aliases) are emitted with `STB_WEAK` binding in the ELF `.symtab` section
-- [ ] AC-2: `sh_info` in the `.symtab` section header correctly points past all LOCAL symbols (WEAK symbols appear in the global partition)
-- [ ] AC-3: `ld.lld` accepts the emitted object files without "WEAK symbol in LOCAL partition" errors
-- [ ] AC-4: `cargo test` in `src/compiler_rust/compiler/` passes (no regression)
-- [ ] AC-5: `bin/simple test` passes (full test suite, no regression)
-- [ ] AC-6: SimpleOS kernel ELF builds and loads in QEMU (native-build exits 0)
-- [ ] AC-7: `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` succeeds (self-hosted binary not broken)
+- [x] AC-1: MIR functions annotated as weak (boot-aliases) are emitted with `STB_WEAK` binding in the ELF `.symtab` section
+- [x] AC-2: `sh_info` in the `.symtab` section header correctly points past all LOCAL symbols (WEAK symbols appear in the global partition)
+- [x] AC-3: `ld.lld` accepts the emitted object files without "WEAK symbol in LOCAL partition" errors
+- [x] AC-4: `cargo test` in `src/compiler_rust/compiler/` passes (no regression)
+- [x] AC-5: `bin/simple test` passes (full test suite, no regression)
+- [x] AC-6: SimpleOS kernel ELF builds and loads in QEMU (native-build exits 0)
+- [x] AC-7: `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` succeeds (self-hosted binary not broken)
 
 ## Cooperative Providers
 - Codex: unavailable
