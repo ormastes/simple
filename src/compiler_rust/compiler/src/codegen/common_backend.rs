@@ -890,7 +890,8 @@ impl<M: Module> CodegenBackend<M> {
                 if self.is_entry_module {
                     ("spl_main".to_string(), cranelift_module::Linkage::Export)
                 } else {
-                    (self.mangle_name(&func.name), cranelift_module::Linkage::Local)
+                    // Export with mangled name so cross-module trampolines can call it
+                    (self.mangle_name(&func.name), cranelift_module::Linkage::Export)
                 }
             } else if !has_body {
                 if !referenced_names.contains(func.name.as_str()) {

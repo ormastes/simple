@@ -10,16 +10,16 @@ feature
 > Implement host CPU runtime variant infrastructure: CPU feature detection + SIMD tier config, tier clamping/precedence, compiler+runtime dispatch routing, loader suffixed-variant probing with fallback, package multi-variant manifest with round-trip, and verification specs.
 
 ## Acceptance Criteria
-- [ ] AC-1: Host CPU config — detect CPU features (SSE/AVX/AVX2/AVX-512/NEON/SVE), report active SIMD tier
-- [ ] AC-2: Config clamping — clamp requested tier to hardware-supported max
-- [ ] AC-3: Tier precedence — tier ordering with fallback chain (avx512 > avx2 > sse4 > scalar)
-- [ ] AC-4: Compiler dispatch routing — route codegen to active tier based on config
-- [ ] AC-5: Runtime dispatch consumer — runtime function selection based on active tier
-- [ ] AC-6: Loader variant probing — probe for suffixed library siblings (libfoo_avx2.so)
-- [ ] AC-7: Loader probe fallback — fallback chain when preferred variant missing
-- [ ] AC-8: Package multi-variant manifest — metadata for variant payloads with platform/tier/path
-- [ ] AC-9: Manifest round-trip — serialize/deserialize variant manifest entries
-- [ ] AC-10: Verification spec — 20 tests covering config, clamping, dispatch, probing, manifest
+- [x] AC-1: Host CPU config — detect CPU features (SSE/AVX/AVX2/AVX-512/NEON/SVE), report active SIMD tier
+- [x] AC-2: Config clamping — clamp requested tier to hardware-supported max
+- [x] AC-3: Tier precedence — tier ordering with fallback chain (avx512 > avx2 > sse4 > scalar)
+- [x] AC-4: Compiler dispatch routing — route codegen to active tier based on config
+- [x] AC-5: Runtime dispatch consumer — runtime function selection based on active tier
+- [x] AC-6: Loader variant probing — probe for suffixed library siblings (libfoo_avx2.so)
+- [x] AC-7: Loader probe fallback — fallback chain when preferred variant missing
+- [x] AC-8: Package multi-variant manifest — metadata for variant payloads with platform/tier/path
+- [x] AC-9: Manifest round-trip — serialize/deserialize variant manifest entries
+- [x] AC-10: Verification spec — 20 tests covering config, clamping, dispatch, probing, manifest
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18

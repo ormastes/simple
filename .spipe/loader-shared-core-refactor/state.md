@@ -10,16 +10,16 @@ feature
 > Formalize loader shared-core unload/reload policy: define invariant contract type, verify both loaders (compatibility + runtime) satisfy the same unload/reload/JIT-ownership invariants via the existing shared helpers (metadata_symbols, unload_ownership), and add verification specs.
 
 ## Acceptance Criteria
-- [ ] AC-1: Shared unload policy — UnloadPolicy with metadata-first + heuristic-fallback ordering, symbol collection, global rebuild
-- [ ] AC-2: Unload invariant contract — InvariantCheck with unknown-path-noop, metadata-cleanup, heuristic-fallback, reload-resolvability, deterministic-rebuild
-- [ ] AC-3: Metadata symbol extraction — shared helper surface for metadata_instantiation_symbol_names with path-keyed lookup
-- [ ] AC-4: Global symbol ownership — shared helper surface for owned_global_symbol_names + global_symbols_without_names
-- [ ] AC-5: Unload invariant: unknown-path unload is no-op (no symbols removed, no state change)
-- [ ] AC-6: Unload invariant: loaded-module unload removes metadata-owned JIT symbols
-- [ ] AC-7: Unload invariant: metadata beats heuristics when both exist for the same symbol
-- [ ] AC-8: Reload invariant: persisted JIT symbols remain resolvable after reload
-- [ ] AC-9: Rebuild invariant: global-symbol table is deterministic after unload+rebuild
-- [ ] AC-10: Verification spec — 20 tests covering policy, invariants, metadata, ownership, unload/reload
+- [x] AC-1: Shared unload policy — UnloadPolicy with metadata-first + heuristic-fallback ordering, symbol collection, global rebuild
+- [x] AC-2: Unload invariant contract — InvariantCheck with unknown-path-noop, metadata-cleanup, heuristic-fallback, reload-resolvability, deterministic-rebuild
+- [x] AC-3: Metadata symbol extraction — shared helper surface for metadata_instantiation_symbol_names with path-keyed lookup
+- [x] AC-4: Global symbol ownership — shared helper surface for owned_global_symbol_names + global_symbols_without_names
+- [x] AC-5: Unload invariant: unknown-path unload is no-op (no symbols removed, no state change)
+- [x] AC-6: Unload invariant: loaded-module unload removes metadata-owned JIT symbols
+- [x] AC-7: Unload invariant: metadata beats heuristics when both exist for the same symbol
+- [x] AC-8: Reload invariant: persisted JIT symbols remain resolvable after reload
+- [x] AC-9: Rebuild invariant: global-symbol table is deterministic after unload+rebuild
+- [x] AC-10: Verification spec — 20 tests covering policy, invariants, metadata, ownership, unload/reload
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18

@@ -17,13 +17,13 @@ code-quality
 > **Deliverable:** Extended lint rule + all 108 functions annotated
 
 ## Acceptance Criteria
-- [ ] AC-1: Lint parser recognizes `# @tag(name)` annotations on parameter lines
-- [ ] AC-2: Same tag on same-type params = no warning (commutative case)
-- [ ] AC-3: Different tags on same-type params = warning when called positionally
-- [ ] AC-4: Missing tags on same-type params = warning suggesting to add tags
-- [ ] AC-5: All ~108 `pub fn` with same-type primitive params in `src/lib/` are annotated with `@tag`
-- [ ] AC-6: Lint integrates with `bin/simple build lint`
-- [ ] AC-7: Existing tests pass after the annotation refactoring
+- [x] AC-1: Lint parser recognizes `# @tag(name)` annotations on parameter lines
+- [x] AC-2: Same tag on same-type params = no warning (commutative case)
+- [x] AC-3: Different tags on same-type params = warning when called positionally
+- [x] AC-4: Missing tags on same-type params = warning suggesting to add tags
+- [x] AC-5: All ~108 `pub fn` with same-type primitive params in `src/lib/` are annotated with `@tag`
+- [x] AC-6: Lint integrates with `bin/simple build lint`
+- [x] AC-7: Existing tests pass after the annotation refactoring
 
 ## Cooperative Providers
 - Codex: unavailable

@@ -10,13 +10,13 @@ feature
 > Wire SVIM TUI and VSCode extension to share the existing editor backend (`src/lib/editor/`) and LSP server (`src/lib/nogc_sync_mut/lsp/`). Add missing editor features (multi-buffer, split panes, LSP client integration) to the shared backend, then have both SVIM and VSCode consume them — no duplicated logic in either frontend.
 
 ## Acceptance Criteria
-- [ ] AC-1: SVIM TUI uses `src/lib/editor/` piece-table buffer and document model (not its own)
-- [ ] AC-2: Shared editor backend gains multi-buffer manager (`src/lib/editor/30.views/`)
-- [ ] AC-3: Shared editor backend gains split-pane layout model
-- [ ] AC-4: SVIM TUI wires multi-buffer and split-pane through the shared backend
-- [ ] AC-5: VSCode extension has a language server client that talks to the existing LSP server
-- [ ] AC-6: No duplicated buffer/document/workspace logic between SVIM and VSCode
-- [ ] AC-7: Test specs exist for new shared editor components
+- [x] AC-1: SVIM TUI uses `src/lib/editor/` piece-table buffer and document model (not its own)
+- [x] AC-2: Shared editor backend gains multi-buffer manager (`src/lib/editor/30.views/`)
+- [x] AC-3: Shared editor backend gains split-pane layout model
+- [x] AC-4: SVIM TUI wires multi-buffer and split-pane through the shared backend
+- [x] AC-5: VSCode extension has a language server client that talks to the existing LSP server
+- [x] AC-6: No duplicated buffer/document/workspace logic between SVIM and VSCode
+- [x] AC-7: Test specs exist for new shared editor components
 
 ## Cooperative Providers
 - Codex: unavailable
@@ -24,13 +24,13 @@ feature
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-10
-- [ ] 2-research (Analyst)
-- [ ] 3-arch (Architect)
-- [ ] 4-spec (QA Lead)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 2-research (Analyst) — 2026-05-19
+- [x] 3-arch (Architect) — 2026-05-19
+- [x] 4-spec (QA Lead) — 2026-05-19
+- [x] 5-implement (Engineer) — 2026-05-19
+- [x] 6-refactor (Tech Lead) — 2026-05-19
+- [x] 7-verify (QA) — 2026-05-19
+- [x] 8-ship (Release Mgr) — 2026-05-19
 
 ## Phase Outputs
 

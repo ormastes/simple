@@ -45,17 +45,17 @@ feature
 - `test/unit/gpu/web_render_session_spec.spl` — session/managed mode web test
 
 ## Acceptance Criteria
-- [ ] AC-1: JIT i32 narrowing produces measurably smaller code on x86_64 benchmark
-- [ ] AC-2: JIT x86_32 compiles and runs via LLVM backend
-- [ ] AC-3: CUDA 2D rendering works with ManagedShared session on x86_64
-- [ ] AC-4: Vulkan 2D rendering works with ManagedShared session on x86_64
-- [ ] AC-5: CUDA 2D compile-check passes for x86_32 target
-- [ ] AC-6: Vulkan 2D compile-check passes for x86_32 target
-- [ ] AC-7: CUDA 2D rendering with session on RISC-V 64 (scalar CPU fallback if no GPU)
-- [ ] AC-8: RISC-V 32 compiles with typed "GPU unavailable" diagnostic
-- [ ] AC-9: Web rendering surfaces use BackendSessionHandle for lifecycle
-- [ ] AC-10: Engine2D.create_managed() and create_with_session() work
-- [ ] AC-11: PerfExclusive cannot be retained by web/managed paths
+- [x] AC-1: JIT i32 narrowing produces measurably smaller code on x86_64 benchmark
+- [x] AC-2: JIT x86_32 compiles and runs via LLVM backend
+- [x] AC-3: CUDA 2D rendering works with ManagedShared session on x86_64
+- [x] AC-4: Vulkan 2D rendering works with ManagedShared session on x86_64
+- [x] AC-5: CUDA 2D compile-check passes for x86_32 target
+- [x] AC-6: Vulkan 2D compile-check passes for x86_32 target
+- [x] AC-7: CUDA 2D rendering with session on RISC-V 64 (scalar CPU fallback if no GPU)
+- [x] AC-8: RISC-V 32 compiles with typed "GPU unavailable" diagnostic
+- [x] AC-9: Web rendering surfaces use BackendSessionHandle for lifecycle
+- [x] AC-10: Engine2D.create_managed() and create_with_session() work
+- [x] AC-11: PerfExclusive cannot be retained by web/managed paths
 
 ## Cooperative Providers
 - Codex: unavailable
@@ -63,13 +63,13 @@ feature
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-17
-- [ ] 2-research (skip — already researched in prior session)
-- [ ] 3-arch (skip — plan doc exists)
-- [ ] 4-spec (skip)
-- [ ] 5-implement (Engineer) — ACTIVE
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 2-research (skip — already researched in prior session) — 2026-05-19
+- [x] 3-arch (skip — plan doc exists) — 2026-05-19
+- [x] 4-spec (skip) — 2026-05-19
+- [x] 5-implement (Engineer) — 2026-05-19
+- [x] 6-refactor (Tech Lead) — 2026-05-19
+- [x] 7-verify (QA) — 2026-05-19
+- [x] 8-ship (Release Mgr) — 2026-05-19
 
 ## Phase Outputs
 

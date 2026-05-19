@@ -10,13 +10,13 @@ feature
 > Implement CUDA and Vulkan backend sessions plus CPU scalar/SIMD sessions for x86-64, RISC-V 64, and RISC-V 32 targets — completing Agents B, C, F, I, and J from the graphics_backend_session_sharing.md plan. Metal session (Agent D) is already done. Each backend must support LegacyNoSession (existing behavior), ManagedShared (retained session), and PerfExclusive (benchmark-only) modes using the BackendSessionHandle/Policy types already created in backend_session.spl.
 
 ## Acceptance Criteria
-- [ ] AC-1: CudaSession class in `gpu/engine2d/cuda_session.spl` — retains primary context, module/kernel cache, device buffer pool; supports retain/release
-- [ ] AC-2: VulkanSession class in `gpu/engine2d/vulkan_session.spl` — owns instance, device, queue, command pool, pipeline cache, allocator; supports retain/release
-- [ ] AC-3: CpuSession class in `gpu/engine2d/cpu_session.spl` — CPU feature detection, scalar/SIMD kernel table selection for x86-64 (SSE/AVX), aarch64 (NEON), RISC-V 64/32 (scalar + future RVV)
-- [ ] AC-4: Engine2D backends (CUDA, Vulkan, CPU) accept session via `init_with_session()` — same pattern as Metal
-- [ ] AC-5: Legacy `init()` still works for all backends (creates internal LegacyNoSession)
-- [ ] AC-6: Mode separation tests — PerfExclusive cannot be retained by managed paths; managed sessions reuse state across instances
-- [ ] AC-7: RISC-V 32/64 and ARM64 compile with scalar CPU fallback and typed "GPU unavailable" diagnostics
+- [x] AC-1: CudaSession class in `gpu/engine2d/cuda_session.spl` — retains primary context, module/kernel cache, device buffer pool; supports retain/release
+- [x] AC-2: VulkanSession class in `gpu/engine2d/vulkan_session.spl` — owns instance, device, queue, command pool, pipeline cache, allocator; supports retain/release
+- [x] AC-3: CpuSession class in `gpu/engine2d/cpu_session.spl` — CPU feature detection, scalar/SIMD kernel table selection for x86-64 (SSE/AVX), aarch64 (NEON), RISC-V 64/32 (scalar + future RVV)
+- [x] AC-4: Engine2D backends (CUDA, Vulkan, CPU) accept session via `init_with_session()` — same pattern as Metal
+- [x] AC-5: Legacy `init()` still works for all backends (creates internal LegacyNoSession)
+- [x] AC-6: Mode separation tests — PerfExclusive cannot be retained by managed paths; managed sessions reuse state across instances
+- [x] AC-7: RISC-V 32/64 and ARM64 compile with scalar CPU fallback and typed "GPU unavailable" diagnostics
 
 ## Cooperative Providers
 - Codex: unavailable
@@ -24,13 +24,13 @@ feature
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-17
-- [ ] 2-research (Analyst)
-- [ ] 3-arch (Architect)
-- [ ] 4-spec (QA Lead)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 2-research (Analyst) — 2026-05-19
+- [x] 3-arch (Architect) — 2026-05-19
+- [x] 4-spec (QA Lead) — 2026-05-19
+- [x] 5-implement (Engineer) — 2026-05-19
+- [x] 6-refactor (Tech Lead) — 2026-05-19
+- [x] 7-verify (QA) — 2026-05-19
+- [x] 8-ship (Release Mgr) — 2026-05-19
 
 ## Phase Outputs
 

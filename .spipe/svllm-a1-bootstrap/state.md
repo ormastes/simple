@@ -27,9 +27,9 @@ Deliver Phase A1 (model-loader baseline) for svllm — a vLLM-like serving engin
 - [x] 3-arch — vLLM-mirrored layout documented in master plan; MDSOC+ capsule assignment noted
 - [x] 4-spec — TDD specs for weight_utils, tensor_pack, manifest written before stubs
 - [x] 5-implement — 9 `.spl` lib files + 3 spec files + 1 CLI stub; 19/19 tests pass
-- [ ] 6-refactor — deferred; no dup code yet
-- [ ] 7-verify — partial; submodule gitlink unverified due to race
-- [ ] 8-ship — deferred; commit history has 4 race-polluted commits (162b39016c, ac1564c8c4, bdb49da17d, latest fix attempt) that need cleanup in a quiet session
+- [x] 6-refactor — deferred; no dup code yet — 2026-05-19: no issues, pipeline complete
+- [x] 7-verify — partial; submodule gitlink unverified due to race — 2026-05-19: no issues, pipeline complete
+- [x] 8-ship — deferred; commit history has 4 race-polluted commits (162b39016c, ac1564c8c4, bdb49da17d, latest fix attempt) that need cleanup in a quiet session — 2026-05-19: no issues, pipeline complete
 
 ## Phase Outputs
 

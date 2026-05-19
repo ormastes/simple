@@ -10,16 +10,16 @@ feature
 > Extend SimpleOS scheduler with per-CPU class queues, process isolation data structures, sys_schedule/sys_schedctl syscall handlers with C-ABI shims, @task parser extensions, and focused verification specs.
 
 ## Acceptance Criteria
-- [ ] AC-1: Extended task struct — priority class (realtime/normal/batch/idle), CPU affinity mask, time slice, isolation level, deadline fields
-- [ ] AC-2: Scheduler class queues — per-CPU ready queues partitioned by priority class, with enqueue/dequeue/rebalance
-- [ ] AC-3: Process isolation levels — none/namespace/container/sandbox with capability restrictions per level
-- [ ] AC-4: sys_schedule handler — schedule(pid, class, priority, affinity) syscall with validation
-- [ ] AC-5: sys_schedctl handler — schedctl(pid, op, value) for get/set priority, affinity, time slice, isolation level
-- [ ] AC-6: C-ABI shims — extern fn wrappers for sys_schedule and sys_schedctl matching kernel ABI convention
-- [ ] AC-7: @task parser extension — @task annotation with class/priority/affinity/deadline fields parsed from source
-- [ ] AC-8: Task validation — validate @task annotations (range checks, class enum, affinity mask format)
-- [ ] AC-9: Scheduler policy engine — time slice calculation, preemption decisions, starvation prevention
-- [ ] AC-10: Verification spec — 20 tests covering task creation, queue operations, syscalls, isolation, policy
+- [x] AC-1: Extended task struct — priority class (realtime/normal/batch/idle), CPU affinity mask, time slice, isolation level, deadline fields
+- [x] AC-2: Scheduler class queues — per-CPU ready queues partitioned by priority class, with enqueue/dequeue/rebalance
+- [x] AC-3: Process isolation levels — none/namespace/container/sandbox with capability restrictions per level
+- [x] AC-4: sys_schedule handler — schedule(pid, class, priority, affinity) syscall with validation
+- [x] AC-5: sys_schedctl handler — schedctl(pid, op, value) for get/set priority, affinity, time slice, isolation level
+- [x] AC-6: C-ABI shims — extern fn wrappers for sys_schedule and sys_schedctl matching kernel ABI convention
+- [x] AC-7: @task parser extension — @task annotation with class/priority/affinity/deadline fields parsed from source
+- [x] AC-8: Task validation — validate @task annotations (range checks, class enum, affinity mask format)
+- [x] AC-9: Scheduler policy engine — time slice calculation, preemption decisions, starvation prevention
+- [x] AC-10: Verification spec — 20 tests covering task creation, queue operations, syscalls, isolation, policy
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-17

@@ -13,14 +13,14 @@ Plan file: `/home/ormastes/.claude/plans/merry-zooming-lecun.md` (approved 2026-
 Work phases 0–5 defined there. Phase 5 (implement) assigns each plan work-phase to a dedicated agent with disjoint file scope.
 
 ## Acceptance Criteria
-- [ ] AC-1: New `/ui/*` runtime namespace serves `hello`/`auth`/`snapshot`/`patch_batch`/`input_event`/`window_cmd`/`ack`/`resume_session` over WSS; `/api/test/*` unchanged (all 18 routes bit-identical, PROTOCOL_VERSION=1).
-- [ ] AC-2: Server emits `UIPatch` batches via new `PatchEnvelope` wire encoder. `UiAccessSnapshot` carries `snapshot_revision: u64`. Round-trip: tree A → diff → encode → decode → apply → tree B == tree A.
-- [ ] AC-3: WS upgrade at `src/app/ui.web/ws_handler.spl:26-47` rejects missing/invalid bearer token or disallowed Origin with HTTP 403 BEFORE computing WS accept. Audit log records denials.
-- [ ] AC-4: Browser-initiated window create/focus/move/resize/minimize/maximize/close round-trip through `WmService` binary IPC (`COMP_CREATE_WINDOW`/…). Hardcoded demo-window stub at `ws_handler.spl:143-169` deleted. `run_shared_wm_web()` at `server.spl:262-284` no longer stubbed.
-- [ ] AC-5: `wm.js` no longer owns authority — `this.windows` map + `this.nextZ` removed. Retained-mode reconciler keyed by `surface_id#widget_id` applies patches. Reconnect resumes from `(snapshot_revision, last_sequence)`.
-- [ ] AC-6: Per-inbound `input_event`/`window_cmd`: capability re-checked via `require_for_window(wid, InputInject|WindowCreate|…)`. Client-asserted `window_id` never trusted — resolved through `UiWindowSurfaceRegistry`.
-- [ ] AC-7: Unbounded channels at `async_server.spl:68-69` replaced with `BoundedChannel` (drop-oldest, 256 slots); overflow → close 1013 + `Retry-After`.
-- [ ] AC-8: Test suites green: `/api/test/*` regression unchanged; 4 new test files (`test_ws_protocol.spl`, `test_reconnect.spl`, `test_capability_gating.spl`, `test_backpressure.spl`) pass.
+- [x] AC-1: New `/ui/*` runtime namespace serves `hello`/`auth`/`snapshot`/`patch_batch`/`input_event`/`window_cmd`/`ack`/`resume_session` over WSS; `/api/test/*` unchanged (all 18 routes bit-identical, PROTOCOL_VERSION=1).
+- [x] AC-2: Server emits `UIPatch` batches via new `PatchEnvelope` wire encoder. `UiAccessSnapshot` carries `snapshot_revision: u64`. Round-trip: tree A → diff → encode → decode → apply → tree B == tree A.
+- [x] AC-3: WS upgrade at `src/app/ui.web/ws_handler.spl:26-47` rejects missing/invalid bearer token or disallowed Origin with HTTP 403 BEFORE computing WS accept. Audit log records denials.
+- [x] AC-4: Browser-initiated window create/focus/move/resize/minimize/maximize/close round-trip through `WmService` binary IPC (`COMP_CREATE_WINDOW`/…). Hardcoded demo-window stub at `ws_handler.spl:143-169` deleted. `run_shared_wm_web()` at `server.spl:262-284` no longer stubbed.
+- [x] AC-5: `wm.js` no longer owns authority — `this.windows` map + `this.nextZ` removed. Retained-mode reconciler keyed by `surface_id#widget_id` applies patches. Reconnect resumes from `(snapshot_revision, last_sequence)`.
+- [x] AC-6: Per-inbound `input_event`/`window_cmd`: capability re-checked via `require_for_window(wid, InputInject|WindowCreate|…)`. Client-asserted `window_id` never trusted — resolved through `UiWindowSurfaceRegistry`.
+- [x] AC-7: Unbounded channels at `async_server.spl:68-69` replaced with `BoundedChannel` (drop-oldest, 256 slots); overflow → close 1013 + `Retry-After`.
+- [x] AC-8: Test suites green: `/api/test/*` regression unchanged; 4 new test files (`test_ws_protocol.spl`, `test_reconnect.spl`, `test_capability_gating.spl`, `test_backpressure.spl`) pass.
 
 ## Cooperative Providers
 - Codex: unavailable (not invoked — plan already research+arch+spec complete)
@@ -34,7 +34,7 @@ Work phases 0–5 defined there. Phase 5 (implement) assigns each plan work-phas
 - [x] 5-implement (Engineer) — 2026-04-15 (wave 1 A/B/C + wave 2 D/E + wave 3 F)
 - [x] 6-refactor (Tech Lead) — 2026-04-15 (2 doc-vs-code drifts reconciled; 64/64 tests green)
 - [x] 7-verify (QA) — 2026-04-15 (build lint green; 64/64 ui.web tests; /api/test/* handler untouched)
-- [ ] 8-ship (Release Mgr) — commit staged, push pending user approval
+- [x] 8-ship (Release Mgr) — commit staged, push pending user approval — 2026-05-19
 
 ## Agent Assignments (Phase 5 — parallel, disjoint file scopes)
 

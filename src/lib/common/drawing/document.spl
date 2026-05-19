@@ -1,1 +1,164 @@
-pass_todo
+# Drawing document model — layers, blend modes, and document metadata.
+#
+# DrawingDocument owns an ordered list of DrawingLayers.  Each layer carries
+# a pixel buffer (flat ARGB, row-major) plus blend/visibility metadata.
+# BlendMode matches the Skia / CSS compositing vocabulary used by the
+# compositor module that imports this file.
+
+# ============================================================================
+# Blend modes
+# ============================================================================
+
+enum BlendMode:
+    """Compositing blend mode (CSS/Skia naming)."""
+    Normal
+    Multiply
+    Screen
+    Overlay
+    Darken
+    Lighten
+    ColorDodge
+    ColorBurn
+    HardLight
+    SoftLight
+    Difference
+    Exclusion
+    Erase
+
+impl BlendMode:
+    fn name(self) -> text:
+        match self:
+            case Normal: "normal"
+            case Multiply: "multiply"
+            case Screen: "screen"
+            case Overlay: "overlay"
+            case Darken: "darken"
+            case Lighten: "lighten"
+            case ColorDodge: "color-dodge"
+            case ColorBurn: "color-burn"
+            case HardLight: "hard-light"
+            case SoftLight: "soft-light"
+            case Difference: "difference"
+            case Exclusion: "exclusion"
+            case Erase: "erase"
+
+# ============================================================================
+# Layer
+# ============================================================================
+
+struct DrawingLayer:
+    """A single raster layer within a DrawingDocument."""
+    layer_id: i64
+    name: text
+    width: i32
+    height: i32
+    # Flat ARGB pixel buffer: pixel at (x,y) = pixels[y*width+x]
+    pixels: [i64]
+    opacity: f64        # 0.0 – 1.0
+    blend_mode: BlendMode
+    visible: bool
+    locked: bool
+
+impl DrawingLayer:
+    static fn create(layer_id: i64, name: text, width: i32, height: i32) -> DrawingLayer:
+        """Allocate a transparent layer filled with 0 (fully transparent black)."""
+        val count = width * height
+        var pixels: [i64] = []
+        var i = 0
+        while i < count:
+            pixels = pixels.push(0)
+            i = i + 1
+        DrawingLayer(
+            layer_id: layer_id,
+            name: name,
+            width: width,
+            height: height,
+            pixels: pixels,
+            opacity: 1.0,
+            blend_mode: BlendMode.Normal,
+            visible: true,
+            locked: false
+        )
+
+    fn pixel_count(self) -> i32:
+        self.width * self.height
+
+    fn get_pixel(self, x: i32, y: i32) -> i64:
+        """Return ARGB value at (x, y), or 0 if out of bounds."""
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return 0
+        self.pixels[(y * self.width + x) as i64]
+
+    fn with_opacity(self, opacity: f64) -> DrawingLayer:
+        DrawingLayer(
+            layer_id: self.layer_id, name: self.name,
+            width: self.width, height: self.height, pixels: self.pixels,
+            opacity: opacity, blend_mode: self.blend_mode,
+            visible: self.visible, locked: self.locked
+        )
+
+    fn with_blend_mode(self, mode: BlendMode) -> DrawingLayer:
+        DrawingLayer(
+            layer_id: self.layer_id, name: self.name,
+            width: self.width, height: self.height, pixels: self.pixels,
+            opacity: self.opacity, blend_mode: mode,
+            visible: self.visible, locked: self.locked
+        )
+
+    fn with_visibility(self, visible: bool) -> DrawingLayer:
+        DrawingLayer(
+            layer_id: self.layer_id, name: self.name,
+            width: self.width, height: self.height, pixels: self.pixels,
+            opacity: self.opacity, blend_mode: self.blend_mode,
+            visible: visible, locked: self.locked
+        )
+
+# ============================================================================
+# Document
+# ============================================================================
+
+struct DrawingDocument:
+    """A drawing canvas made up of an ordered list of layers."""
+    width: i32
+    height: i32
+    layers: [DrawingLayer]
+    active_layer_id: i64
+    next_layer_id: i64
+
+impl DrawingDocument:
+    static fn create(width: i32, height: i32) -> DrawingDocument:
+        """Create an empty document with one default transparent layer."""
+        val bg = DrawingLayer.create(0, "Background", width, height)
+        DrawingDocument(
+            width: width,
+            height: height,
+            layers: [bg],
+            active_layer_id: 0,
+            next_layer_id: 1
+        )
+
+    fn layer_count(self) -> i64:
+        self.layers.len()
+
+    fn find_layer(self, layer_id: i64) -> DrawingLayer?:
+        """Return the layer with the given id, or nil."""
+        for layer in self.layers:
+            if layer.layer_id == layer_id:
+                return Some(layer)
+        nil
+
+    fn add_layer(self, name: text) -> DrawingDocument:
+        """Append a new transparent layer and return the updated document."""
+        val new_layer = DrawingLayer.create(self.next_layer_id, name, self.width, self.height)
+        DrawingDocument(
+            width: self.width, height: self.height,
+            layers: self.layers.push(new_layer),
+            active_layer_id: self.next_layer_id,
+            next_layer_id: self.next_layer_id + 1
+        )
+
+    fn with_active_layer(self, layer_id: i64) -> DrawingDocument:
+        DrawingDocument(
+            width: self.width, height: self.height, layers: self.layers,
+            active_layer_id: layer_id, next_layer_id: self.next_layer_id
+        )

@@ -1,1 +1,162 @@
-pass_todo
+# Generic Remote Debug Backend
+# Architecture-agnostic DebugBackend implementation.
+# Takes a DebugTargetInfo trait object, eliminating per-arch backend duplication.
+
+use app.debug.coordinator.{DebugBackend, VarInfo, FrameInfo, LocationInfo}
+use app.debug.remote.types.{DebugConfig, Architecture}
+use app.debug.remote.target.target_info.DebugTargetInfo
+use app.debug.remote.feature.features.FeatureId
+use app.debug.remote.feature.registry.{FeatureRegistry, FeatureHandler}
+use app.debug.remote.feature.register_gdb.{register_gdb_features, serialize_vars}
+use app.debug.remote.feature.register_trace32.register_trace32_features
+use app.debug.remote.feature.register_openocd.register_openocd_features
+use app.debug.remote.feature.register_t32_gdb.register_t32_gdb_features
+use app.debug.remote.protocol.gdb_mi.GdbMiClient
+use app.debug.remote.protocol.trace32.Trace32Client
+use app.debug.remote.protocol.openocd.OpenocdClient
+use app.debug.remote.protocol.t32_gdb_bridge.T32GdbBridgeClient
+
+class RemoteGenericBackend:
+    config: DebugConfig
+    registry: FeatureRegistry
+    gdb: Option<GdbMiClient>
+    t32: Option<Trace32Client>
+    openocd: Option<OpenocdClient>
+    t32_gdb: Option<T32GdbBridgeClient>
+    target_info: DebugTargetInfo
+    attached: bool
+
+impl RemoteGenericBackend:
+    static fn gdb_only(config: DebugConfig, target_info: DebugTargetInfo) -> Result<RemoteGenericBackend, text>:
+        val gdb = GdbMiClient.connect(config)?
+        var registry = FeatureRegistry.empty()
+        register_gdb_features(registry, gdb)
+        Ok(RemoteGenericBackend(
+            config: config,
+            registry: registry,
+            gdb: Some(gdb),
+            t32: nil,
+            openocd: nil,
+            t32_gdb: nil,
+            target_info: target_info,
+            attached: true
+        ))
+
+    static fn trace32_only(config: DebugConfig, target_info: DebugTargetInfo) -> Result<RemoteGenericBackend, text>:
+        val t32 = Trace32Client.connect(config)?
+        var registry = FeatureRegistry.empty()
+        register_trace32_features(registry, t32)
+        Ok(RemoteGenericBackend(
+            config: config,
+            registry: registry,
+            gdb: nil,
+            t32: Some(t32),
+            openocd: nil,
+            t32_gdb: nil,
+            target_info: target_info,
+            attached: true
+        ))
+
+    static fn openocd_gdb(cfg_path: text, gdb_port: i32, program: text, target_info: DebugTargetInfo) -> Result<RemoteGenericBackend, text>:
+        val config = DebugConfig(host: "localhost", port: gdb_port, target: target_info.arch(), program: program, options: {})
+        val openocd = OpenocdClient.connect(cfg_path, gdb_port, gdb_port + 1000, program, "")?
+        var registry = FeatureRegistry.empty()
+        register_openocd_features(registry, openocd)
+        Ok(RemoteGenericBackend(
+            config: config,
+            registry: registry,
+            gdb: nil,
+            t32: nil,
+            openocd: Some(openocd),
+            t32_gdb: nil,
+            target_info: target_info,
+            attached: true
+        ))
+
+    static fn openocd_gdb_with_serial(cfg_path: text, gdb_port: i32, program: text, target_info: DebugTargetInfo, serial: text) -> Result<RemoteGenericBackend, text>:
+        pass_todo
+
+    static fn t32_gdb_bridge(config: DebugConfig, target_info: DebugTargetInfo) -> Result<RemoteGenericBackend, text>:
+        val t32_gdb = T32GdbBridgeClient.connect(config)?
+        var registry = FeatureRegistry.empty()
+        register_t32_gdb_features(registry, t32_gdb)
+        Ok(RemoteGenericBackend(
+            config: config,
+            registry: registry,
+            gdb: nil,
+            t32: nil,
+            openocd: nil,
+            t32_gdb: Some(t32_gdb),
+            target_info: target_info,
+            attached: true
+        ))
+
+    me add_emulation():
+        use app.debug.remote.feature.emulation.register_emulation_features
+        match self.gdb:
+            Some(gdb):
+                register_emulation_features(self.registry, gdb, self.target_info)
+            nil:
+                pass_dn
+
+    fn capabilities() -> text:
+        self.registry.capabilities_report()
+
+    fn supports(feat: FeatureId) -> bool:
+        self.registry.is_supported(feat)
+
+    fn name() -> text:
+        "remote-{self.target_info.arch().to_string()}"
+
+    fn attach(program_path: text, args: [text]) -> Result<Nil, text>:
+        match self.gdb:
+            Some(gdb):
+                if program_path.len() > 0:
+                    gdb.send_command("file-exec-and-symbols {program_path}")?
+            nil: pass_dn
+        self.attached = true
+        Ok(nil)
+
+    fn target_name() -> text:
+        self.target_info.name()
+
+    fn detach() -> Result<Nil, text>:
+        match self.gdb:
+            Some(gdb):
+                gdb.disconnect()
+            nil: pass_dn
+        match self.t32:
+            Some(t32):
+                t32.disconnect()
+            nil: pass_dn
+        match self.openocd:
+            Some(openocd):
+                openocd.disconnect()
+            nil: pass_dn
+        match self.t32_gdb:
+            Some(t32_gdb):
+                t32_gdb.disconnect()
+            nil: pass_dn
+        self.attached = false
+        Ok(nil)
+
+    fn set_breakpoint(file: text, line: i64) -> Result<Nil, text>:
+        pass_todo
+
+    fn remove_breakpoint(file: text, line: i64) -> Result<Nil, text>:
+        pass_todo
+
+    fn step() -> Result<Nil, text>:
+        pass_todo
+
+    fn continue_exec() -> Result<Nil, text>:
+        pass_todo
+
+    fn stack_frames() -> Result<[FrameInfo], text>:
+        pass_todo
+
+    fn locals() -> Result<[VarInfo], text>:
+        pass_todo
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        pass_todo

@@ -10,16 +10,16 @@ feature
 > Implement formal verification infrastructure for SimpleOS desktop core: kernel trap/syscall/capability invariant models, desktop selection/focus/crash-containment contract models, verification status tooling scaffolding, and claim/assumption/evidence taxonomy.
 
 ## Acceptance Criteria
-- [ ] AC-1: Kernel trap model — TrapFrame + SyscallDispatch + PrivilegeSeam with trap-preserves-registers and syscall-returns-to-caller invariants
-- [ ] AC-2: Capability authorization — CapGrant + AuthorizationCheck + GrantChain with no-escalation and revocation-propagates invariants
-- [ ] AC-3: Scheduler lifecycle — SchedState + LifecycleTransition + LifecycleInvariant with no-zombie-runnable and yield-preserves-context invariants
-- [ ] AC-4: Desktop selection uniqueness — SelectionModel + FocusTracker with at-most-one-focused and selection-implies-visible invariants
-- [ ] AC-5: Window provenance — WindowProvenance + LauncherBinding with launcher-owns-window and orphan-detection invariants
-- [ ] AC-6: Crash containment — CrashPolicy + ContainmentScope + CrashVerdict with crash-doesnt-propagate and default-restart-safe invariants
-- [ ] AC-7: Verification status — VerifyStatus + VerifyResult + StatusReport with pass/fail/skip tracking and summary
-- [ ] AC-8: Claim policy — VerifyClaim + AssumptionLedger + EvidenceEntry with claim-needs-evidence and assumption-documented invariants
-- [ ] AC-9: Evidence taxonomy — EvidenceKind + EvidenceClassification + TaxonomyReport with proof/test/review/assertion categories
-- [ ] AC-10: Verification spec — 20 tests covering all 4 lanes
+- [x] AC-1: Kernel trap model — TrapFrame + SyscallDispatch + PrivilegeSeam with trap-preserves-registers and syscall-returns-to-caller invariants
+- [x] AC-2: Capability authorization — CapGrant + AuthorizationCheck + GrantChain with no-escalation and revocation-propagates invariants
+- [x] AC-3: Scheduler lifecycle — SchedState + LifecycleTransition + LifecycleInvariant with no-zombie-runnable and yield-preserves-context invariants
+- [x] AC-4: Desktop selection uniqueness — SelectionModel + FocusTracker with at-most-one-focused and selection-implies-visible invariants
+- [x] AC-5: Window provenance — WindowProvenance + LauncherBinding with launcher-owns-window and orphan-detection invariants
+- [x] AC-6: Crash containment — CrashPolicy + ContainmentScope + CrashVerdict with crash-doesnt-propagate and default-restart-safe invariants
+- [x] AC-7: Verification status — VerifyStatus + VerifyResult + StatusReport with pass/fail/skip tracking and summary
+- [x] AC-8: Claim policy — VerifyClaim + AssumptionLedger + EvidenceEntry with claim-needs-evidence and assumption-documented invariants
+- [x] AC-9: Evidence taxonomy — EvidenceKind + EvidenceClassification + TaxonomyReport with proof/test/review/assertion categories
+- [x] AC-10: Verification spec — 20 tests covering all 4 lanes
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18

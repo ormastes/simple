@@ -10,16 +10,16 @@ feature
 > Implement the graphics 3D session-managed backend architecture: common GraphicsSession API with LegacyNoSession/ManagedShared/PerfExclusive modes, backend adapters (CPU/CUDA/Vulkan/Metal/WebGPU), 2D/3D/game/web/GUI/WM surface adoption, optimization provider integration, and ARM/RISC-V capability design — all in Pure Simple with C ABI shims.
 
 ## Acceptance Criteria
-- [ ] AC-1: GraphicsSession + GraphicsSessionPolicy + GraphicsCapabilities common types exist in src/lib/gc_async_mut/gpu/
-- [ ] AC-2: Backend adapters (CPU, CUDA, Vulkan, Metal, WebGPU) implement a common interface behind C ABI shims
-- [ ] AC-3: Mode conflict enforcement — PerfExclusive cannot borrow ManagedShared mutable resources (typed error)
-- [ ] AC-4: Legacy no-session wrappers (Engine2D.create, Engine3D.create, etc.) internally use LegacyNoSession
-- [ ] AC-5: 3D engine resource skeletons: mesh buffer, texture, material, render pass, scene graph node, camera
-- [ ] AC-6: Optimization providers registered in plugin registry with persistent keys per backend/session/arch
-- [ ] AC-7: ARM/RISC-V 32/64 capability records with arch-specific fields (simd_kind, vector_bits, icache_flush, etc.)
-- [ ] AC-8: Spec tests covering mode conflicts, session lifecycle, backend capabilities, and cross-surface policy acceptance
-- [ ] AC-9: 2D game adoption (sprites, tiles, particles) and 3D game engine (frame lifecycle, asset streaming, animation) use GraphicsSession
-- [ ] AC-10: Web renderer/GUI/WM route through same session policy; UISession does NOT own raw GPU handles
+- [x] AC-1: GraphicsSession + GraphicsSessionPolicy + GraphicsCapabilities common types exist in src/lib/gc_async_mut/gpu/
+- [x] AC-2: Backend adapters (CPU, CUDA, Vulkan, Metal, WebGPU) implement a common interface behind C ABI shims
+- [x] AC-3: Mode conflict enforcement — PerfExclusive cannot borrow ManagedShared mutable resources (typed error)
+- [x] AC-4: Legacy no-session wrappers (Engine2D.create, Engine3D.create, etc.) internally use LegacyNoSession
+- [x] AC-5: 3D engine resource skeletons: mesh buffer, texture, material, render pass, scene graph node, camera
+- [x] AC-6: Optimization providers registered in plugin registry with persistent keys per backend/session/arch
+- [x] AC-7: ARM/RISC-V 32/64 capability records with arch-specific fields (simd_kind, vector_bits, icache_flush, etc.)
+- [x] AC-8: Spec tests covering mode conflicts, session lifecycle, backend capabilities, and cross-surface policy acceptance
+- [x] AC-9: 2D game adoption (sprites, tiles, particles) and 3D game engine (frame lifecycle, asset streaming, animation) use GraphicsSession
+- [x] AC-10: Web renderer/GUI/WM route through same session policy; UISession does NOT own raw GPU handles
 
 ## Cooperative Providers
 - Codex: unavailable

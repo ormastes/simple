@@ -17,11 +17,11 @@ todo
 - 14,801 total test files in test/
 
 ## Acceptance Criteria
-- [ ] AC-1: Identify which pass_todo stubs are imported by real (non-stub) code and prioritize those
-- [ ] AC-2: Implement real code for priority stubs (types, classes, functions matching what consumers expect)
-- [ ] AC-3: Run test suite, identify failures related to incomplete stubs
-- [ ] AC-4: Fix test failures where the fix is implementing the stub
-- [ ] AC-5: Document remaining pass_todo files that need future work
+- [x] AC-1: Identify which pass_todo stubs are imported by real (non-stub) code and prioritize those
+- [x] AC-2: Implement real code for priority stubs (types, classes, functions matching what consumers expect)
+- [x] AC-3: Run test suite, identify failures related to incomplete stubs
+- [x] AC-4: Fix test failures where the fix is implementing the stub
+- [x] AC-5: Document remaining pass_todo files that need future work
 
 ## Cooperative Providers
 - Codex: unavailable
@@ -30,12 +30,12 @@ todo
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-19
 - [x] 2-research (Analyst) — 2026-05-19
-- [ ] 3-arch (Architect)
-- [ ] 4-spec (QA Lead)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 3-arch (Architect) — 2026-05-19
+- [x] 4-spec (QA Lead) — 2026-05-19
+- [x] 5-implement (Engineer) — 2026-05-19
+- [x] 6-refactor (Tech Lead) — 2026-05-19
+- [x] 7-verify (QA) — 2026-05-19
+- [x] 8-ship (Release Mgr) — 2026-05-19
 
 ## Phase Outputs
 

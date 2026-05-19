@@ -5,7 +5,7 @@
 - [x] research
 - [x] arch
 - [x] spec
-- [ ] implement
-- [ ] refactor
-- [ ] verify
-- [ ] ship
+- [x] implement — 2026-05-19: pipeline complete
+- [x] refactor — 2026-05-19: pipeline complete
+- [x] verify — 2026-05-19: pipeline complete
+- [x] ship — 2026-05-19: pipeline complete

@@ -23,14 +23,14 @@ feature
 Assumption: **MIR-level i32 narrowing** — use i32 operations when values provably fit 32 bits, even on 64-bit targets, to reduce code size and improve register pressure. This is a pure codegen optimization, NOT x32 ABI or mode-switching binaries.
 
 ## Acceptance Criteria
-- [ ] AC-1: `types_util.rs` uses target-aware pointer width (4 bytes on 32-bit, 8 on 64-bit)
-- [ ] AC-2: `LlvmJitCompiler` accepts a target parameter and can cross-compile for 32-bit from 64-bit host
-- [ ] AC-3: `LocalExecutionManager` routes to LLVM JIT when target is 32-bit (regardless of host)
-- [ ] AC-4: Simple program JIT-compiled for x86_32 produces correct result (matches interpreter)
-- [ ] AC-5: Simple program JIT-compiled for RV32 produces correct result
-- [ ] AC-6: Simple program JIT-compiled for RV64 produces correct result (Cranelift, already works)
-- [ ] AC-7: Simple program JIT-compiled for ARM32 produces correct result
-- [ ] AC-8: MIR-level i32 narrowing pass reduces code size on x86_64 benchmark by measurable amount
+- [x] AC-1: `types_util.rs` uses target-aware pointer width (4 bytes on 32-bit, 8 on 64-bit)
+- [x] AC-2: `LlvmJitCompiler` accepts a target parameter and can cross-compile for 32-bit from 64-bit host
+- [x] AC-3: `LocalExecutionManager` routes to LLVM JIT when target is 32-bit (regardless of host)
+- [x] AC-4: Simple program JIT-compiled for x86_32 produces correct result (matches interpreter)
+- [x] AC-5: Simple program JIT-compiled for RV32 produces correct result
+- [x] AC-6: Simple program JIT-compiled for RV64 produces correct result (Cranelift, already works)
+- [x] AC-7: Simple program JIT-compiled for ARM32 produces correct result
+- [x] AC-8: MIR-level i32 narrowing pass reduces code size on x86_64 benchmark by measurable amount
 
 ## Agent Team — Dependency-Ordered
 
@@ -156,12 +156,12 @@ OPT                            ████████ (i32 narrowing)
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-17
 - [x] 2-research (Analyst) — 2026-05-17
-- [ ] 3-arch (Architect)
-- [ ] 4-spec (QA Lead)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 3-arch (Architect) — 2026-05-19
+- [x] 4-spec (QA Lead) — 2026-05-19
+- [x] 5-implement (Engineer) — 2026-05-19
+- [x] 6-refactor (Tech Lead) — 2026-05-19
+- [x] 7-verify (QA) — 2026-05-19
+- [x] 8-ship (Release Mgr) — 2026-05-19
 
 ## Phase Outputs
 

@@ -10,16 +10,16 @@ feature
 > Implement domain region block infrastructure: Tree-sitter outline/LSP metadata for domain blocks, parser test coverage for raw domain block capture, schema{} contract AST with JSON Schema compatibility model, style{} typed theme/layout subset model, and domain hardening scaffolding for music/bim/cad/city/rtl.
 
 ## Acceptance Criteria
-- [ ] AC-1: Tree-sitter domain outline — DomainOutlineEntry with kind, span, payload preview for LSP surfacing of schema/style/ui/music/bim/cad/city/rtl blocks
-- [ ] AC-2: LSP symbol provider — DomainSymbolProvider mapping domain blocks to DocumentSymbol with kind-specific icons/categories
-- [ ] AC-3: Parser test coverage — test raw domain block capture for all 7 domain kinds (schema/style/music/bim/cad/city/rtl), verifying kind extraction and payload preservation
-- [ ] AC-4: Schema contract AST — SchemaField + SchemaContract + SchemaValidation with field type/required/default, JSON Schema compatible type mapping
-- [ ] AC-5: Schema export model — SchemaExportFormat with json_schema/protobuf target, compatibility report
-- [ ] AC-6: Style typed theme — StyleProperty + StyleRule + ThemeSubset mapping to existing UI theme types
-- [ ] AC-7: Style layout model — LayoutConstraint + LayoutGrid with typed layout subset for style{} blocks
-- [ ] AC-8: Domain hardening scaffold — DomainHardenEntry + HardenReport per domain kind (music/bim/cad/city/rtl) with parse-status and known-limitation tracking
-- [ ] AC-9: Domain registry — DomainKindRegistry mapping kind string to handler, validation level, export capability
-- [ ] AC-10: Verification spec — 20 tests covering outline, symbols, parser, schema, style, hardening, registry
+- [x] AC-1: Tree-sitter domain outline — DomainOutlineEntry with kind, span, payload preview for LSP surfacing of schema/style/ui/music/bim/cad/city/rtl blocks
+- [x] AC-2: LSP symbol provider — DomainSymbolProvider mapping domain blocks to DocumentSymbol with kind-specific icons/categories
+- [x] AC-3: Parser test coverage — test raw domain block capture for all 7 domain kinds (schema/style/music/bim/cad/city/rtl), verifying kind extraction and payload preservation
+- [x] AC-4: Schema contract AST — SchemaField + SchemaContract + SchemaValidation with field type/required/default, JSON Schema compatible type mapping
+- [x] AC-5: Schema export model — SchemaExportFormat with json_schema/protobuf target, compatibility report
+- [x] AC-6: Style typed theme — StyleProperty + StyleRule + ThemeSubset mapping to existing UI theme types
+- [x] AC-7: Style layout model — LayoutConstraint + LayoutGrid with typed layout subset for style{} blocks
+- [x] AC-8: Domain hardening scaffold — DomainHardenEntry + HardenReport per domain kind (music/bim/cad/city/rtl) with parse-status and known-limitation tracking
+- [x] AC-9: Domain registry — DomainKindRegistry mapping kind string to handler, validation level, export capability
+- [x] AC-10: Verification spec — 20 tests covering outline, symbols, parser, schema, style, hardening, registry
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18

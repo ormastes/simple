@@ -10,16 +10,16 @@ feature
 > Implement backend session sharing: session contract, per-backend integration (CUDA/Vulkan/Metal/WebGPU/CPU), Engine2D session-aware constructors, web/WM adoption, ARM/RISC-V validation, and mode-separation tests.
 
 ## Acceptance Criteria
-- [ ] AC-1: backend_session.spl with mode/kind/policy/handle/error + create/retain/release/probe APIs
-- [ ] AC-2: CUDA session retains primary context, caches PTX modules/kernels
-- [ ] AC-3: Vulkan session owns device/queue/allocator/pipeline/command pools
-- [ ] AC-4: Metal session owns MTLDevice/queue/pipeline states (macOS-only guard)
-- [ ] AC-5: WebGPU session owns adapter/device/queue with real/stub diagnostics
-- [ ] AC-6: CPU SIMD session with scalar/SIMD provider selection, target-gated
-- [ ] AC-7: Engine2D session-aware constructors + read-only perf counters
-- [ ] AC-8: Web engine RenderSurfaceSession + WM session adoption
-- [ ] AC-9: ARM/RISC-V 32/64 scalar session checks
-- [ ] AC-10: Mode separation tests (legacy compat, managed sharing, perf isolation)
+- [x] AC-1: backend_session.spl with mode/kind/policy/handle/error + create/retain/release/probe APIs
+- [x] AC-2: CUDA session retains primary context, caches PTX modules/kernels
+- [x] AC-3: Vulkan session owns device/queue/allocator/pipeline/command pools
+- [x] AC-4: Metal session owns MTLDevice/queue/pipeline states (macOS-only guard)
+- [x] AC-5: WebGPU session owns adapter/device/queue with real/stub diagnostics
+- [x] AC-6: CPU SIMD session with scalar/SIMD provider selection, target-gated
+- [x] AC-7: Engine2D session-aware constructors + read-only perf counters
+- [x] AC-8: Web engine RenderSurfaceSession + WM session adoption
+- [x] AC-9: ARM/RISC-V 32/64 scalar session checks
+- [x] AC-10: Mode separation tests (legacy compat, managed sharing, perf isolation)
 
 ## Phase Checklist
 - [x] 1-dev — 2026-05-17

@@ -10,14 +10,14 @@ feature
 > Build the `simple` compiler as a static ELF for SimpleOS x86_64, pack it into the initramfs, and verify it loads and executes inside SimpleOS QEMU. Add file-write syscall support so the compiler can produce output. Then cross-compile clang and rustc as static SimpleOS executables. End result: SimpleOS can compile Simple source files using its own hosted compiler.
 
 ## Acceptance Criteria
-- [ ] AC-1: `native-build` produces a valid static ELF for SimpleOS x86_64 (the `simple` compiler binary)
-- [ ] AC-2: The compiler binary is packed into the SimpleOS initramfs (zstd+cpio)
-- [ ] AC-3: SimpleOS loads and runs the `simple` binary as a user process (posix_spawn path)
-- [ ] AC-4: File-write syscall exists so compiler output can be persisted to FAT32
-- [ ] AC-5: End-to-end: compile a trivial .spl file inside SimpleOS, producing an ELF that SimpleOS can load and run
-- [ ] AC-6: clang (static) cross-compiled for SimpleOS and loadable as a user process
-- [ ] AC-7: rustc (static) cross-compiled for SimpleOS and loadable as a user process
-- [ ] AC-8: QEMU smoke test passes (scripted verification)
+- [x] AC-1: `native-build` produces a valid static ELF for SimpleOS x86_64 (the `simple` compiler binary)
+- [x] AC-2: The compiler binary is packed into the SimpleOS initramfs (zstd+cpio)
+- [x] AC-3: SimpleOS loads and runs the `simple` binary as a user process (posix_spawn path)
+- [x] AC-4: File-write syscall exists so compiler output can be persisted to FAT32
+- [x] AC-5: End-to-end: compile a trivial .spl file inside SimpleOS, producing an ELF that SimpleOS can load and run
+- [x] AC-6: clang (static) cross-compiled for SimpleOS and loadable as a user process
+- [x] AC-7: rustc (static) cross-compiled for SimpleOS and loadable as a user process
+- [x] AC-8: QEMU smoke test passes (scripted verification)
 
 ## Cooperative Providers
 - Codex: unavailable
