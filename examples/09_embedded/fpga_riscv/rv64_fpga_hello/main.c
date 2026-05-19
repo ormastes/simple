@@ -70,7 +70,7 @@ int main(void)
     const unsigned long uart = UART_BASE;
 
     /* ---- Proof string ---- */
-    uart_puts(uart, "SIMPLE-RV64-FPGA-HELLO board=zynq7020-ml-carrier hart=0 pc=");
+    uart_puts(uart, "SIMPLE-RV64-FPGA-HELLO board=xck26-ml-carrier hart=0 pc=");
     /* Read PC via auipc trick */
     unsigned long pc = 0;
     __asm__ volatile ("auipc %0, 0" : "=r"(pc));

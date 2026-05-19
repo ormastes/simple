@@ -1,6 +1,6 @@
 /* linker.ld — Fixed-address linker script for RV64 FPGA bare-metal hello
  *
- * Memory map (ML Carrier Card / Zynq-7020 with RV64 soft-core):
+ * Memory map (ML Carrier Card / Kria K26 XCZU5EV with RV64 soft-core):
  *   DDR  : 0x80000000, 64 MB  — load target for code + data
  *   BRAM : 0x00000000, 64 KB  — optional tightly-coupled RAM (unused here)
  *

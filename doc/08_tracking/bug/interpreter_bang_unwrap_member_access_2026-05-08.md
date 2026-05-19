@@ -34,13 +34,19 @@ return Err(x.err()!)    # FAILS
 
 Lint (`bin/simple build lint`) accepts ALL forms without errors.
 
-## Root Cause (Hypothesis)
+## Root Cause (Confirmed)
 
-The interpreter parser only handles `!` as a postfix operator after method-call expressions (`.method()!`). It does not handle `!` after:
-- Bare identifiers (`variable!`)
-- Any expression when followed by `.`, `)`, or `,`
+Fix location: `src/compiler_rust/parser/src/expressions/postfix.rs` — the `parse_postfix` loop's `TokenKind::Bang` arm (lines 114–141).
 
-Likely location: `src/compiler_rust/compiler/src/interpreter/` or `src/compiler_rust/compiler/src/parser/` — the expression parser's postfix-operator handling.
+Before the fix the bang arm only existed for `name!(args)` macro invocations. Any `!` after a non-call expression fell through without producing a `ForceUnwrap` node, causing the downstream parser to see an unexpected `Bang` token.
+
+After the fix (2026-05-10) the arm has two branches:
+
+1. **Identifier + `!` + `(`** → macro invocation (unchanged).
+2. **Identifier + `!` + anything else** → `advance()` past `!`, wrap in `Expr::ForceUnwrap`. Case A (bare variable) is handled here.
+3. **Any other expr + `!`** → `advance()` past `!`, wrap in `Expr::ForceUnwrap`. Cases B and C are handled here — the postfix loop then continues, so `best!.address` parses as `FieldAccess(ForceUnwrap(best), "address")` and `fn(expr!)` works because `ForceUnwrap` is a valid argument expression.
+
+The interpreter's `evaluate_expr` in `src/compiler_rust/compiler/src/interpreter/expr.rs` already had a complete `Expr::ForceUnwrap` handler (line 462) using `try_unwrap_option_or_result`; no interpreter-side change was needed — only the parser fix was required.
 
 ## Workaround
 
@@ -86,11 +92,15 @@ All files below have been patched to use the workaround patterns.
 | `src/compiler/70.backend/linker/pe_parser.spl` | 266 | `Err(inspect_result.err()!)` |
 | `src/lib/nogc_sync_mut/debug/formats/pdb_parser.spl` | 152, 162 | `Err(msf_result.err()!)`, `Err(dbi_result.err()!)` |
 
-## Proposed Fix
+## Fix Applied
 
-Update the interpreter expression parser to:
-1. Allow `!` after any expression (not just method calls)
-2. Allow `!` to be followed by `.` (member access), `)` (closing paren), and `,` (argument separator)
+`src/compiler_rust/parser/src/expressions/postfix.rs` — `TokenKind::Bang` arm in `parse_postfix` loop:
+- Identifier + `!` + non-`(`: `advance()` → `Expr::ForceUnwrap(ident)` (covers Case A)
+- Any other expr + `!`: `advance()` → `Expr::ForceUnwrap(expr)` (covers Cases B and C)
+
+The postfix loop continues after wrapping, so `best!.address` correctly becomes `FieldAccess(ForceUnwrap(best), "address")`.
+
+No change needed in `interpreter/expr.rs` — the `Expr::ForceUnwrap` handler at line 462 was already complete.
 
 ## Related Bugs
 

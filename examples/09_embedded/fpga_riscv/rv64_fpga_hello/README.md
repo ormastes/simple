@@ -1,6 +1,6 @@
 # rv64_fpga_hello — RV64 Bare-Metal FPGA Hello Payload
 
-Minimal RV64 bare-metal proof payload for the ML Carrier Card (Zynq-7020).
+Minimal RV64 bare-metal proof payload for the ML Carrier Card (Kria K26 / XCZU5EV).
 Boots at 0x80000000, prints a proof string over UART, then emits tick markers.
 
 ## Files
@@ -55,7 +55,7 @@ Load address: `0x80000000` — the soft-core reset vector must point here.
 ## Expected Output
 
 ```
-SIMPLE-RV64-FPGA-HELLO board=zynq7020-ml-carrier hart=0 pc=0x80000000
+SIMPLE-RV64-FPGA-HELLO board=xck26-ml-carrier hart=0 pc=0x80000000
 TICK 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 TICK 16 17 ...
 ```
