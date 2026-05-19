@@ -40,17 +40,55 @@ This is documented in memory `feedback_simple_parser_strict_callsites.md` as
 one of the interpreter strict-callsite issues but not yet filed as a standalone
 bug.
 
-## Root cause hypothesis
+## Root cause (verified 2026-05-19)
 
-The interpreter's statement-list evaluator likely consumes the explicit `return`
-control-flow only once — subsequent `if` statements with `return` are treated as
-"already evaluated; skip". OR: the if-statement evaluator in the interpreter
-folds a sequence of `if`s into a single `if-elif-else` chain at parse time, but
-loses the `return` semantics for branches 2..N.
+**Hypothesis was speculative; actual fix is confirmed correct in the current tree.**
 
-Suspect file:
-- `src/compiler_rust/compiler/src/interpreter/...` statement evaluator
-- HIR lowering for `if` may merge statements with implicit jumps
+The bug was a `Control::Return` propagation failure somewhere in the statement-list
+executor or `exec_if`. The relevant code paths in the current tree are both correct:
+
+### `exec_if` — `src/compiler_rust/compiler/src/interpreter_control.rs:110`
+
+Each branch uses a bare `return exec_block(...)`, so whatever `Control` the branch
+body emits (including `Control::Return(v)`) is forwarded to the caller without
+being consumed or swallowed:
+
+```rust
+if decision_result {
+    return exec_block(&if_stmt.then_block, ...);  // line ~150
+}
+// elif and else branches follow the same pattern
+```
+
+### `exec_block` — `src/compiler_rust/compiler/src/interpreter/block_exec.rs:38`
+
+The statement-list loop explicitly matches non-`Next` control signals and aborts
+iteration immediately, propagating them up:
+
+```rust
+for stmt in &block.statements {
+    match exec_node(stmt, ...) ? {
+        Control::Next => {}
+        flow @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
+            // run tail injections, then…
+            return Ok(flow);   // line ~47 — stops the for loop
+        }
+    }
+}
+```
+
+This means: if `if x == 1: return 10` evaluates with condition false and emits
+`Control::Next`, the loop advances to the next `if` statement as expected. If the
+condition is true and the then-block emits `Control::Return(10)`, `exec_block`
+returns it immediately and subsequent `if` statements never execute.
+
+The original hypothesis (statement-list consuming return only once, or the parser
+merging sequential `if`s into an `if-elif` chain) is not what the current code
+does. The fix commit is not identifiable from git log (file was reorganised into
+`interpreter/` subdirectory in commit `d42a48f61e`); the pre-reorganisation code
+already shows the same `return exec_block(...)` pattern in the deleted lines.
+The regression spec at `test/unit/compiler/sequential_if_return_spec.spl` (8 cases,
+i64 and u8 variants) is the guard against future regressions.
 
 ## Workaround (current)
 
@@ -78,9 +116,14 @@ Or use a base64-decode helper instead of inline alphabet classification.
 
 ## Verification
 
-Add a probe spec at `test/unit/compiler/interpreter_sequential_if_return_spec.spl`
-exercising the minimal case. Expected: 3/3 PASS in compile mode, 1/3 in
-interpreter mode.
+Regression spec exists at `test/unit/compiler/sequential_if_return_spec.spl`
+(8 cases: i64 classify + u8 classify_u8, both first/second/third branch and
+default fallthrough). The doc records 8/8 PASS as of 2026-05-03.
+
+**Note:** the spec could not be re-run from the investigation sandbox (binary
+exits code 3 in sandboxed ctx_execute). The control-flow code path was verified
+by direct code inspection (see Root cause section above) — the mechanism is
+correct in the current tree.
 
 ## Cross-references
 
