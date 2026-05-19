@@ -465,3 +465,124 @@ fn rt_driver_supports_sendfile(handle: i64) -> bool:
 fn rt_driver_supports_zero_copy(handle: i64) -> bool:
     """Baremetal does not support zero-copy send."""
     false
+
+# ============================================================================
+# Driver Registration
+# ============================================================================
+
+fn driver_shim_link_anchor() -> bool:
+    """Force this module into freestanding boot closures that need rt_driver_* exports."""
+    true
+
+@export("C")
+fn rt_driver_register(handle: i64) -> bool:
+    """Register a driver handle as active.
+
+    B3 stub: driver_create() already tracks the handle in g_drivers.
+    This call verifies the handle is live and returns true if found.
+    Used by the IoDriver runtime to confirm the driver is operational.
+    """
+    val drv = driver_get(handle)
+    drv != nil
+
+@export("C")
+fn rt_driver_unregister(handle: i64) -> bool:
+    """Unregister and destroy a driver handle.
+
+    Delegates to driver_destroy and returns true. Safe to call on an
+    already-dead handle (destroy is idempotent).
+    """
+    driver_destroy(handle)
+    true
+
+# ============================================================================
+# MTU Handling
+# ============================================================================
+
+# Default MTU for the baremetal virtual NIC (Ethernet II standard).
+val RT_DRIVER_DEFAULT_MTU: i64 = 1500
+
+@export("C")
+fn rt_driver_mtu(handle: i64) -> i64:
+    """Return the MTU (Maximum Transmission Unit) for this driver handle.
+
+    B3 stub: returns the standard Ethernet MTU (1500 bytes) for all handles.
+    A dead handle returns -1.
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return -1
+    RT_DRIVER_DEFAULT_MTU
+
+@export("C")
+fn rt_driver_set_mtu(handle: i64, mtu: i64) -> bool:
+    """Request an MTU change on this driver handle.
+
+    B3 stub: validates the handle is live and the MTU is within the
+    Ethernet range (576–9000). The value is accepted but not stored
+    (baremetal virtual NIC has a fixed MTU). Returns false for dead
+    handles or out-of-range values.
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return false
+    if mtu < 576 or mtu > 9000:
+        return false
+    # Live handle, valid range -- accepted (no-op on fixed-MTU baremetal NIC)
+    true
+
+# ============================================================================
+# Link State
+# ============================================================================
+
+# Link state constants (match Linux IFLA_OPERSTATE values for portability).
+val RT_LINK_STATE_UNKNOWN: i64 = 0
+val RT_LINK_STATE_UP: i64 = 1
+val RT_LINK_STATE_DOWN: i64 = 2
+
+@export("C")
+fn rt_driver_link_state(handle: i64) -> i64:
+    """Return the link state for this driver handle.
+
+    Returns one of:
+      RT_LINK_STATE_UNKNOWN (0) -- handle not found or driver dead
+      RT_LINK_STATE_UP      (1) -- link is up (baremetal always reports UP when alive)
+      RT_LINK_STATE_DOWN    (2) -- link is down
+
+    B3 stub: a live handle always reports UP (the cooperative netstack is
+    assumed to be the only consumer). A dead handle returns UNKNOWN.
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return RT_LINK_STATE_UNKNOWN
+    RT_LINK_STATE_UP
+
+@export("C")
+fn rt_driver_link_up(handle: i64) -> bool:
+    """Return true if the link for this handle is UP."""
+    rt_driver_link_state(handle) == RT_LINK_STATE_UP
+
+@export("C")
+fn rt_driver_link_speed_mbps(handle: i64) -> i64:
+    """Return the link speed in Mbps.
+
+    B3 stub: baremetal virtual NIC reports 1000 Mbps (1 GbE) when alive,
+    -1 for a dead handle.
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return -1
+    1000
+
+@export("C")
+fn rt_driver_mac_addr(handle: i64) -> text:
+    """Return the MAC address for this driver handle as "XX:XX:XX:XX:XX:XX".
+
+    B3 stub: returns a fixed locally-administered unicast address. The
+    address is deterministic so upper layers can use it for ARP/NDP.
+    An empty string is returned for dead handles.
+    """
+    val drv = driver_get(handle)
+    if drv == nil:
+        return ""
+    "02:00:00:00:00:01"
