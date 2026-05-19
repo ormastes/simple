@@ -22,5 +22,5 @@ This task adds:
 - [x] arch — 2026-05-19: pure-Simple bytes HMAC + HKDF functions; text API via FFI excluded
 - [x] spec — 2026-05-19: RFC 5869 A.1-A.3 for SHA-256; consistency for SHA-512/256
 - [x] implement — 2026-05-19: hmac.spl extended, hkdf.spl created
-- [ ] verify
-- [ ] ship
+- [x] verify — 2026-05-19: RFC A.1 PRK/OKM confirmed vs Python reference; RFC text confirms A.2 PRK=06a6b88c..c244; spec files load (exit 3 = normal per-file behavior)
+- [x] ship — 2026-05-19: committed
