@@ -2725,14 +2725,27 @@ pub fn compile_call<M: Module>(
                 if rt_name == "rt_len" && compile_inline_len(ctx, builder, dest, args, false)? {
                     return Ok(());
                 }
-                if let Some(&func_id) = ctx.runtime_funcs.get(rt_name) {
-                    // The first argument to the runtime call is the receiver (the part before the dot).
-                    // For a Call instruction, the receiver was lowered as the first arg by MIR.
-                    // However, for qualified calls like `X.method(args)`, there may be no
-                    // explicit receiver arg — re-check by looking at whether the receiver is
-                    // a known global.  In practice the MIR lowering wraps these as
-                    // Call { target: "X.method", args } with no implicit receiver, so we pass
-                    // args as-is (the runtime function expects receiver + method args).
+                let func_id = if let Some(&fid) = ctx.runtime_funcs.get(rt_name) {
+                    Some(fid)
+                } else {
+                    // On-demand declaration: MIR referenced "str.starts_with" etc.
+                    // but referenced_names only had the dotted form, not the rt_ name.
+                    let call_conv = crate::codegen::shared::platform_call_conv();
+                    let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+                    let param_count = args.len();
+                    for _ in 0..param_count {
+                        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                    }
+                    sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                    ctx.module
+                        .declare_function(rt_name, cranelift_module::Linkage::Import, &sig)
+                        .ok()
+                        .map(|fid| {
+                            ctx.func_ids.insert(rt_name.to_string(), fid);
+                            fid
+                        })
+                };
+                if let Some(func_id) = func_id {
                     let runtime_ref = ctx.module.declare_func_in_func(func_id, builder.func);
                     let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
                     let arg_vals = adapt_args_to_signature(builder, runtime_ref, arg_vals);
