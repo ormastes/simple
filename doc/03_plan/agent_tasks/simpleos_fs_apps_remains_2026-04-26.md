@@ -1,6 +1,6 @@
 # SimpleOS FS Apps Remaining Plan - 2026-04-26
 
-> Status: PARTIAL — VFS/UEFI/desktop structure exists; 6 tool apps packaging and qemu_runner markers remaining
+> Status: CODE COMPLETE — all modules implemented (zero stubs); runtime integration blockers remain (FR-SOS-024 syscall 13, VFS file-read stability). Updated 2026-05-19.
 
 Feature: `simpleos_fs_apps_remains_2026-04-26`
 

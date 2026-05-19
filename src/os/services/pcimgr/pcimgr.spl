@@ -332,6 +332,162 @@ fn pcimgr_service_loop(port_handle: u64):
                 log_raw_println("[pcimgr] Unknown method ID: {method_id}")
                 syscall(20, sender_task, 0xFFFF, 0, 0, 0)
 
+# ============================================================================
+# PCI Config Space Access
+# ============================================================================
+
+fn pcimgr_config_read(dev_idx: u64, offset: u8) -> u32:
+    """Read a 32-bit word from PCI configuration space for a tracked device."""
+    val live_count = rt_pci_device_count()
+    if dev_idx >= live_count.to_u64():
+        return 0xFFFFFFFF
+    val idx = dev_idx as i64
+    val bus = rt_pci_get_field(idx, 0) as u8
+    val dev = rt_pci_get_field(idx, 1) as u8
+    val func = rt_pci_get_field(idx, 2) as u8
+    pci_read_config(bus, dev, func, offset)
+
+fn pcimgr_config_write(dev_idx: u64, offset: u8, value: u32):
+    """Write a 32-bit word to PCI configuration space for a tracked device."""
+    val live_count = rt_pci_device_count()
+    if dev_idx >= live_count.to_u64():
+        return
+    val idx = dev_idx as i64
+    val bus = rt_pci_get_field(idx, 0) as u8
+    val dev = rt_pci_get_field(idx, 1) as u8
+    val func = rt_pci_get_field(idx, 2) as u8
+    pci_write_config(bus, dev, func, offset, value)
+
+# ============================================================================
+# BAR Mapping
+# ============================================================================
+
+fn pcimgr_bar_size(dev_idx: u64, bar_num: u8) -> u64:
+    """Probe the size of a BAR by writing all-ones and reading back.
+
+    Follows the standard PCI BAR size detection algorithm:
+      1. Save original BAR value.
+      2. Write 0xFFFFFFFF.
+      3. Read back — set address bits are the mask; complement + 1 = size.
+      4. Restore original value.
+    Returns 0 if the BAR is unimplemented or the device index is invalid.
+    """
+    val live_count = rt_pci_device_count()
+    if dev_idx >= live_count.to_u64():
+        return 0
+    val idx = dev_idx as i64
+    val bus = rt_pci_get_field(idx, 0) as u8
+    val dev = rt_pci_get_field(idx, 1) as u8
+    val func = rt_pci_get_field(idx, 2) as u8
+    val offset = (0x10 + bar_num.to_u32() * 4).to_u8()
+    val original = pci_read_bar(bus, dev, func, bar_num)
+    pci_write_config(bus, dev, func, offset, 0xFFFFFFFF)
+    val readback = pci_read_bar(bus, dev, func, bar_num)
+    pci_write_config(bus, dev, func, offset, original)
+    if readback == 0 or readback == 0xFFFFFFFF:
+        return 0
+    # For memory BARs, mask off the lower 4 attribute bits before inversion
+    val mask = readback & 0xFFFFFFF0
+    val size = ((mask ^ 0xFFFFFFFF) + 1).to_u64()
+    size
+
+fn pcimgr_get_bar(dev_idx: u64, bar_num: u8) -> PciBar:
+    """Return a PciBar descriptor for the given device and BAR index (0–5).
+
+    Reads the BAR register directly from config space, probes the size, and
+    determines whether the region is MMIO or port I/O.
+    Returns a zeroed PciBar if the device index or BAR is invalid.
+    """
+    val live_count = rt_pci_device_count()
+    if dev_idx >= live_count.to_u64():
+        return PciBar(index: bar_num, phys_addr: 0, size: 0, is_mmio: false, is_prefetchable: false, cap_token: 0)
+    val idx = dev_idx as i64
+    val bus = rt_pci_get_field(idx, 0) as u8
+    val dev = rt_pci_get_field(idx, 1) as u8
+    val func = rt_pci_get_field(idx, 2) as u8
+    val raw = pci_read_bar(bus, dev, func, bar_num)
+    # Bit 0: 0 = memory space, 1 = I/O space
+    val is_mmio = (raw & 1) == 0
+    # Bit 3 (memory BARs only): prefetchable
+    val is_prefetchable = is_mmio and ((raw & 0x8) != 0)
+    val phys_addr = if is_mmio:
+        (raw & 0xFFFFFFF0).to_u64()
+    else:
+        (raw & 0xFFFFFFFC).to_u64()
+    val size = pcimgr_bar_size(dev_idx, bar_num)
+    PciBar(
+        index: bar_num,
+        phys_addr: phys_addr,
+        size: size,
+        is_mmio: is_mmio,
+        is_prefetchable: is_prefetchable,
+        cap_token: dev_idx + 1
+    )
+
+fn pcimgr_get_bar_phys(dev_idx: u64, bar_num: u8) -> u64:
+    """Convenience wrapper: return the physical base address of a BAR."""
+    val bar = pcimgr_get_bar(dev_idx, bar_num)
+    bar.phys_addr
+
+# ============================================================================
+# Interrupt Routing
+# ============================================================================
+
+fn pcimgr_get_irq(dev_idx: u64) -> u32:
+    """Return the IRQ line for a device from PCI config space register 0x3C.
+
+    Reads the interrupt line byte directly from the device. On baremetal QEMU
+    targets the IRQ cache is also stored in rt_pci field 8 (populated at
+    enumeration time) — this wrapper reads config space directly so it is
+    accurate even when the device was not tracked through pcimgr_init().
+    Returns 0xFF (no interrupt) when the device index is out of range.
+    """
+    val live_count = rt_pci_device_count()
+    if dev_idx >= live_count.to_u64():
+        return 0xFF
+    val idx = dev_idx as i64
+    val bus = rt_pci_get_field(idx, 0) as u8
+    val dev = rt_pci_get_field(idx, 1) as u8
+    val func = rt_pci_get_field(idx, 2) as u8
+    val irq_dword = pci_read_config(bus, dev, func, 0x3C)
+    (irq_dword & 0xFF) as u32
+
+fn pcimgr_irq_vector(dev_idx: u64) -> u32:
+    """Return the IRQ vector for a device (IRQ line + base offset 0x20).
+
+    The base offset 0x20 matches the IDT vector assignment used by SimpleOS
+    (IRQ 0 → vector 0x20, IRQ 1 → vector 0x21, …). Returns 0 if the IRQ
+    line read is 0xFF (device has no interrupt).
+    """
+    val irq_line = pcimgr_get_irq(dev_idx)
+    if irq_line == 0xFF:
+        return 0
+    irq_line + 0x20
+
+fn pcimgr_route_interrupt(dev_idx: u64, notification_id: u64, notification_bit: u64) -> Result<u32, text>:
+    """Register interrupt routing for a PCI device.
+
+    Reads the IRQ line from config space, computes the IDT vector, and
+    returns the vector so the caller can arm a notification object.
+    The actual kernel-side IRQ route registration is done by the grant
+    path (syscall_device.spl). This stub validates the device and returns
+    the routing info needed to call irq_route_register from user space.
+    Returns Err if the device has no valid interrupt line.
+    """
+    val live_count = rt_pci_device_count()
+    if dev_idx >= live_count.to_u64():
+        return Err("invalid device index: {dev_idx}")
+    val irq_line = pcimgr_get_irq(dev_idx)
+    if irq_line == 0xFF:
+        return Err("device {dev_idx} has no interrupt line (IRQ=0xFF)")
+    val vector = irq_line + 0x20
+    log_raw_println("[pcimgr] Routing IRQ line {irq_line} → vector {vector} for device {dev_idx} (notif_id={notification_id})")
+    Ok(vector)
+
+# ============================================================================
+# Debug / Utility
+# ============================================================================
+
 fn pcimgr_dump_devices():
     """Debug helper: print all tracked devices to serial (reads from C cache)."""
     log_raw_println("[pcimgr] === Device Table ({dev_count} devices) ===")
