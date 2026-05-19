@@ -261,6 +261,70 @@ fn sample_image_bilinear(image: SkImage, u: f64, v: f64) -> SkColor4f:
         )
 
 # ============================================================================
+# eval_image_shader
+#   SkShader image encoding convention (SkShaderKind.Image):
+#     colors    — flat pixel array as packed ARGB SkColor, row-major
+#     pt0.x     — image width  (f64, integer value)
+#     pt0.y     — image height (f64, integer value)
+#     tile_mode — UV tiling for both axes
+# ============================================================================
+
+fn _fetch_shader_pixel(colors: [SkColor], w: i64, h: i64, px: i64, py: i64) -> SkColor4f:
+    if px < 0 or px >= w or py < 0 or py >= h:
+        _transparent_black()
+    else:
+        val idx = py * w + px
+        val n = colors.length()
+        if idx < 0 or idx >= n:
+            _transparent_black()
+        else:
+            _color4f_from_sk_color(colors[idx])
+
+fn eval_image_shader(shader: SkShader, x: f64, y: f64) -> SkColor4f:
+    val w = shader.pt0.x.to_i64()
+    val h = shader.pt0.y.to_i64()
+    val n = shader.colors.length()
+    if w <= 0 or h <= 0 or n == 0:
+        _transparent_black()
+    else:
+        # Compute normalised UV [0,1] then apply tiling
+        val u_norm = x / shader.pt0.x
+        val v_norm = y / shader.pt0.y
+        val u_tiled = tile_coord(u_norm, shader.tile_mode)
+        val v_tiled = tile_coord(v_norm, shader.tile_mode)
+        # Decal mode: out-of-range → transparent
+        if u_tiled < 0.0 or v_tiled < 0.0:
+            _transparent_black()
+        else:
+            # Bilinear sample in pixel space
+            val u_px = u_tiled * shader.pt0.x
+            val v_px = v_tiled * shader.pt0.y
+            val x0 = u_px.to_i64()
+            val y0 = v_px.to_i64()
+            val x1 = x0 + 1
+            val y1 = y0 + 1
+            val tx = u_px - x0.to_f64()
+            val ty = v_px - y0.to_f64()
+            val c00 = _fetch_shader_pixel(shader.colors, w, h, x0, y0)
+            val c10 = _fetch_shader_pixel(shader.colors, w, h, x1, y0)
+            val c01 = _fetch_shader_pixel(shader.colors, w, h, x0, y1)
+            val c11 = _fetch_shader_pixel(shader.colors, w, h, x1, y1)
+            val r0 = c00.r + (c10.r - c00.r) * tx
+            val g0 = c00.g + (c10.g - c00.g) * tx
+            val b0 = c00.b + (c10.b - c00.b) * tx
+            val a0 = c00.a + (c10.a - c00.a) * tx
+            val r1 = c01.r + (c11.r - c01.r) * tx
+            val g1 = c01.g + (c11.g - c01.g) * tx
+            val b1 = c01.b + (c11.b - c01.b) * tx
+            val a1 = c01.a + (c11.a - c01.a) * tx
+            SkColor4f(
+                r: r0 + (r1 - r0) * ty,
+                g: g0 + (g1 - g0) * ty,
+                b: b0 + (b1 - b0) * ty,
+                a: a0 + (a1 - a0) * ty
+            )
+
+# ============================================================================
 # eval_shader — main dispatch
 # ============================================================================
 

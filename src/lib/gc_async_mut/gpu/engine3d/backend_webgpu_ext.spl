@@ -83,6 +83,78 @@ impl WebGpuBackend3D:
     me pipeline_barrier():
         emu_pipeline_barrier(self)
 
+    # -- Compute pipeline (WebGPU native: GPUComputePipeline / GPUComputePassEncoder) --
+
+    me create_compute_pipeline(shader_src: text, entry_point: text) -> i32:
+        # WebGPU: device.createComputePipeline({ compute: { module, entryPoint } })
+        # Delegate to emulation layer using compute kernel abstraction.
+        emu_create_shader(self, shader_src, entry_point)
+
+    me dispatch_compute_indirect(pipeline_id: i32, indirect_buffer_id: i32, indirect_offset: i32):
+        # WebGPU: GPUComputePassEncoder.dispatchWorkgroupsIndirect(indirectBuffer, offset)
+        # Reads workgroup counts (x,y,z) from the indirect buffer at the given byte offset.
+        emu_draw_indirect(self, indirect_buffer_id, indirect_offset, pipeline_id)
+
+    # -- Storage buffers (WebGPU native: GPUBufferUsage.STORAGE) --
+
+    me create_storage_buffer_mapped(size: i32, initial_data: [u8]) -> i32:
+        # WebGPU: device.createBuffer({ usage: STORAGE | COPY_DST, mappedAtCreation: true })
+        val buf_id = emu_create_storage_buffer(self, size)
+        if buf_id >= 0:
+            emu_update_buffer(self, buf_id, initial_data)
+        buf_id
+
+    me copy_buffer_to_buffer(src_id: i32, src_offset: i32, dst_id: i32, dst_offset: i32, size: i32):
+        # WebGPU: GPUCommandEncoder.copyBufferToBuffer(src, srcOffset, dst, dstOffset, size)
+        # Read source data slice and write to destination at offset.
+        val data = emu_read_buffer(self, src_id)
+        val end_off = src_offset + size
+        val clamped_end = if end_off > data.len(): data.len() else: end_off
+        var slice: [u8] = [0u8; clamped_end - src_offset]
+        var i = 0
+        while i < slice.len():
+            slice[i] = data[src_offset + i]
+            i = i + 1
+        emu_update_buffer(self, dst_id, slice)
+
+    # -- Timestamp queries (WebGPU: GPUQuerySet / timestamp-query feature) --
+
+    me create_timestamp_query_set(count: i32) -> i32:
+        # WebGPU: device.createQuerySet({ type: "timestamp", count })
+        # Returns a query-set id (stored as a virtual buffer handle).
+        emu_create_storage_buffer(self, count * 8)
+
+    me write_timestamp(query_set_id: i32, query_index: i32):
+        # WebGPU: GPUComputePassEncoder/GPURenderPassEncoder.writeTimestamp(querySet, index)
+        # Records current GPU timestamp into query_set_id at slot query_index.
+        # Emulation: no-op (timestamp writes require native GPU command encoder).
+        self._stats.draw_calls = self._stats.draw_calls
+
+    me resolve_query_set(query_set_id: i32, first_query: i32, query_count: i32, dst_buffer_id: i32, dst_offset: i32):
+        # WebGPU: GPUCommandEncoder.resolveQuerySet(querySet, first, count, destination, offset)
+        # Copies resolved timestamp values (nanoseconds) into dst_buffer_id.
+        # Emulation: writes zeroed 64-bit timestamps for each resolved query slot.
+        var zeroes: [u8] = [0u8; query_count * 8]
+        emu_update_buffer(self, dst_buffer_id, zeroes)
+
+    me read_timestamp_ns(query_set_id: i32, query_index: i32) -> i64:
+        # Read a resolved 64-bit nanosecond timestamp from a query-set buffer.
+        # Decodes little-endian i64 from the 8-byte slot at query_index.
+        val data = emu_read_buffer(self, query_set_id)
+        val off = query_index * 8
+        if (off + 8) > data.len():
+            return 0
+        val b0 = data[off + 0]
+        val b1 = data[off + 1]
+        val b2 = data[off + 2]
+        val b3 = data[off + 3]
+        val b4 = data[off + 4]
+        val b5 = data[off + 5]
+        val b6 = data[off + 6]
+        val b7 = data[off + 7]
+        (b0 as i64) or ((b1 as i64) << 8) or ((b2 as i64) << 16) or ((b3 as i64) << 24) or
+        ((b4 as i64) << 32) or ((b5 as i64) << 40) or ((b6 as i64) << 48) or ((b7 as i64) << 56)
+
     # -- Texture3D extended --
 
     me create_texture_ex(desc: TextureDescriptor3D, data: [u8]) -> i32:
