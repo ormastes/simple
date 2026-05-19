@@ -622,18 +622,26 @@ pub fn rt_bytes_from_raw(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Write bytes to file
+///
+/// Handles both `Value::Int(i)` (plain integer byte) and
+/// `Value::UInt { value, width: 8 }` (u8-typed values from `as u8` casts in
+/// compression/encoding code). Previously only matched `Int`, silently dropping
+/// all UInt-tagged elements and producing truncated output (observed: single-byte
+/// zstd frames). Fix: map both variants to their u8 representation.
 pub fn rt_file_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let bytes_arr = match args.get(1) {
         Some(Value::Array(arr)) => arr,
+        Some(Value::FrozenArray(arr)) => arr,
         _ => return Ok(Value::Bool(false)),
     };
 
     let bytes: Vec<u8> = bytes_arr
         .iter()
-        .filter_map(|v| match v {
-            Value::Int(i) => Some(*i as u8),
-            _ => None,
+        .map(|v| match v {
+            Value::Int(i) => *i as u8,
+            Value::UInt { value, .. } => *value as u8,
+            _ => 0u8,
         })
         .collect();
 
