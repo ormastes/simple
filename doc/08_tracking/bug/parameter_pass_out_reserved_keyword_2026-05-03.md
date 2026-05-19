@@ -1,8 +1,10 @@
 # Function parameters named `pass` or `out` silently misbehave
 
-**Status:** FIXED. Parser rejects reserved keywords as parameter names at parse time with clear error.
-**Fixed in:** `is_reserved_parameter_name` check in `parse_parameters` (function params) + lambda param paths (`parse_lambda_params`, `parse_pipe_lambda_params`, `parse_remaining_lambda_params`).
-**Previously:** Reproduced multiple times across the W17-W29 cohort. Severity: silent miscompute.
+**Status:** FIXED (two-stage).
+- Stage 1 (W29-G): `is_reserved_parameter_name` check added to all param parse paths; `"out"` mistakenly included.
+- Stage 2 (W5-wave): Removed `"out"` from `is_reserved_parameter_name` — `out` is a context-dependent contract keyword, not a true reserved identifier. 12 existing `.spl` files legitimately use `out` as an output-buffer parameter name (e.g., `fn f(out: [u8])`). Ambiguity is positional: in a parameter list `out` binds as a name; at statement position it is the contract clause keyword.
+**Fixed in:** `is_reserved_parameter_name` in `src/compiler_rust/parser/src/parser_impl/core.rs`.
+**Previously:** Reproduced multiple times across the W17-W29 cohort. Severity: silent miscompute (`pass`), then over-rejection (`out`).
 **Path:** `bug` track. Compiler/parser.
 
 ## Symptom

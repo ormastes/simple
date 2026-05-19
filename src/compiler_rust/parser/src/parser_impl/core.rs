@@ -937,7 +937,6 @@ impl<'a> Parser<'a> {
         matches!(
             name,
             "pass"
-                | "out"
                 | "gen"
                 | "val"
                 | "def"
@@ -949,6 +948,12 @@ impl<'a> Parser<'a> {
                 | "pass_do_nothing"
                 | "pass_dn"
         )
+        // Note: "out" is intentionally NOT reserved here — it is a context-dependent
+        // keyword (used in contract clauses at statement level: `out x: expr`) but is
+        // legitimately used as a parameter name throughout the codebase for output
+        // buffer parameters (e.g., `fn f(out: [u8])`).  The ambiguity is resolved
+        // positionally: inside a parameter list `out` binds as a name; at statement
+        // position inside a function body it binds as the contract keyword.
     }
 
     /// Parse block body (assumes INDENT has already been consumed).
