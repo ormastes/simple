@@ -1,0 +1,286 @@
+"""AppLoaderService — public API for filesystem-loaded tool app management.
+
+Composes the ECS AppLoaderWorld with existing kernel loader, VFS, and app
+registry subsystems. Provides discover_apps(), spawn_app(), list_apps(),
+and query_app() as the unified service interface for x86_64 SimpleOS.
+MDSOC: feature dimension, fs_apps layer. ECS business layer for userland.
+"""
+
+use std.ecs.entity.{Entity}
+use os.services.fs_apps.app_loader_world.{
+    AppLoaderWorld, AppIdentity, AppDiskState, AppRunState
+}
+use os.kernel.loader.app_registry.{
+    app_registry_register, app_registry_is_loaded,
+    app_registry_load_hardcoded_fallback, app_registry_entries, AppEntry
+}
+use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn}
+use os.services.vfs.vfs_write_ops.{g_vfs_readdir}
+use os.kernel.types.fs_types.{DirEntry}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# Global app loader world instance
+# ============================================================================
+
+var g_app_loader: AppLoaderWorld = AppLoaderWorld.new()
+var g_app_loader_initialized: bool = false
+
+# ============================================================================
+# App info returned by list/query operations
+# ============================================================================
+
+pub struct AppInfo:
+    """Snapshot of a tool app visible to callers."""
+    name: text
+    path: text
+    short_name: text
+    on_disk: bool
+    smf_present: bool
+    fat32_alias: text
+    pid: i64
+    status: text
+
+# ============================================================================
+# FAT32 directory scanning — replaces hardcoded fallback
+# ============================================================================
+
+fn _derive_short_name(name: text) -> text:
+    """Derive a short alias from a canonical app name."""
+    if name.starts_with("simple_"):
+        return "s" + name.slice(7, name.len())
+    name
+
+fn _derive_fat32_alias(name: text) -> text:
+    """Derive the FAT32 8.3 uppercase leaf for an app name."""
+    val upper = name.upper()
+    if upper.len() > 8:
+        return upper.slice(0, 8) + ".SMF"
+    upper + ".SMF"
+
+fn _is_app_file(entry_name: text) -> bool:
+    """Check whether a directory entry looks like an app (has .smf extension)."""
+    entry_name.ends_with(".smf") or entry_name.ends_with(".SMF")
+
+fn _strip_smf_extension(name: text) -> text:
+    """Remove .smf or .SMF suffix from a filename."""
+    if name.ends_with(".smf"):
+        return name.slice(0, name.len() - 4)
+    if name.ends_with(".SMF"):
+        return name.slice(0, name.len() - 4)
+    name
+
+fn _scan_directory_for_apps(world: AppLoaderWorld, dir_path: text) -> i32:
+    """Scan a directory via VFS readdir and register discovered app entities.
+
+    Returns the number of apps discovered.
+    """
+    val entries = g_vfs_readdir(dir_path)
+    var count: i32 = 0
+    for entry in entries:
+        val name = entry.name
+        if not _is_app_file(name):
+            continue
+        val stripped = _strip_smf_extension(name)
+        val canonical = stripped.lower()
+        val existing = world.find_by_name(canonical)
+        if existing != nil:
+            val e = existing.unwrap()
+            world.mark_smf_present(e)
+            continue
+        val short = _derive_short_name(canonical)
+        val fat32 = _derive_fat32_alias(canonical)
+        val app_path = dir_path + "/" + canonical
+        val e = world.spawn_app(canonical, app_path, short, fat32)
+        world.mark_on_disk(e)
+        world.mark_smf_present(e)
+        # Also register in the kernel app registry for backward compat
+        app_registry_register(app_path, fat32, false)
+        count = count + 1
+    serial_println("[app-loader] scan dir={dir_path} discovered={count}")
+    count
+
+fn _seed_from_registry(world: AppLoaderWorld) -> i32:
+    """Seed the ECS world from the existing app registry entries."""
+    val entries = app_registry_entries()
+    var count: i32 = 0
+    for entry in entries:
+        val canonical = entry.canonical_path
+        val existing = world.find_by_path(canonical)
+        if existing != nil:
+            continue
+        # Extract name from path: /sys/apps/<name> -> <name>
+        var name = canonical
+        if canonical.starts_with("/sys/apps/"):
+            name = canonical.slice(10, canonical.len())
+        val short = _derive_short_name(name)
+        val fat32 = entry.fat32_leaf
+        val e = world.spawn_app(name, canonical, short, fat32)
+        world.mark_on_disk(e)
+        if fat32.ends_with(".SMF") or fat32.ends_with(".smf"):
+            world.mark_smf_present(e)
+        count = count + 1
+    count
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn discover_apps() -> i32:
+    """Discover tool apps from the FAT32 filesystem and app registry.
+
+    First seeds from the existing kernel app registry (backward compat),
+    then scans /sys/apps/ via VFS readdir for additional apps.
+    Returns the total number of apps in the world.
+    """
+    if not g_app_loader_initialized:
+        g_app_loader = AppLoaderWorld.new()
+        g_app_loader_initialized = true
+
+    # Seed from existing registry if loaded
+    if app_registry_is_loaded():
+        val seeded = _seed_from_registry(g_app_loader)
+        serial_println("[app-loader] seeded from registry count={seeded}")
+    else:
+        # Fall back to hardcoded registry then seed
+        app_registry_load_hardcoded_fallback()
+        val seeded = _seed_from_registry(g_app_loader)
+        serial_println("[app-loader] seeded from hardcoded fallback count={seeded}")
+
+    # Scan FAT32 filesystem for additional apps
+    val scanned = _scan_directory_for_apps(g_app_loader, "/sys/apps")
+    serial_println("[app-loader] total apps={g_app_loader.app_count()}")
+    g_app_loader.app_count()
+
+pub fn spawn_app(path: text, argv: [text], envp: [text]) -> i64:
+    """Spawn a tool app by path, delegating to x86_64_fs_exec_spawn.
+
+    Updates the ECS run state for the app entity. Returns pid > 0 on success,
+    or a negative error code on failure.
+    """
+    if not g_app_loader_initialized:
+        discover_apps()
+
+    val pid = x86_64_fs_exec_spawn(path, argv, envp)
+    if pid <= 0:
+        serial_println("[app-loader] spawn failed path={path} err={pid}")
+        return pid
+
+    # Update ECS run state
+    val entity = g_app_loader.find_by_path(path)
+    if entity != nil:
+        g_app_loader.set_run_state(entity.unwrap(), pid, "running")
+    else:
+        # App not in world yet — try canonical derivation
+        var name = path
+        if path.starts_with("/sys/apps/"):
+            name = path.slice(10, path.len())
+        name = _strip_smf_extension(name)
+        val short = _derive_short_name(name)
+        val fat32 = _derive_fat32_alias(name)
+        val e = g_app_loader.spawn_app(name, path, short, fat32)
+        g_app_loader.mark_on_disk(e)
+        g_app_loader.set_run_state(e, pid, "running")
+
+    serial_println("[app-loader] spawn ok path={path} pid={pid}")
+    pid
+
+pub fn list_apps() -> [AppInfo]:
+    """Return a snapshot of all known tool apps."""
+    if not g_app_loader_initialized:
+        discover_apps()
+
+    var result: [AppInfo] = []
+    var i: i32 = 0
+    val n = g_app_loader.app_count()
+    while i < n:
+        val eid = g_app_loader.identities.entity_at(i)
+        val e = Entity(id: eid, generation: 0)
+        val id_opt = g_app_loader.get_identity(e)
+        if id_opt == nil:
+            i = i + 1
+            continue
+        val identity = id_opt.unwrap()
+        val disk_opt = g_app_loader.get_disk_state(e)
+        val run_opt = g_app_loader.get_run_state(e)
+
+        var disk_on = false
+        var disk_smf = false
+        var disk_fat32 = ""
+        if disk_opt != nil:
+            val disk = disk_opt.unwrap()
+            disk_on = disk.on_disk
+            disk_smf = disk.smf_present
+            disk_fat32 = disk.fat32_alias
+
+        var run_pid: i64 = 0
+        var run_status = "unknown"
+        if run_opt != nil:
+            val run = run_opt.unwrap()
+            run_pid = run.pid
+            run_status = run.status
+
+        result = result.push(AppInfo(
+            name: identity.name,
+            path: identity.path,
+            short_name: identity.short_name,
+            on_disk: disk_on,
+            smf_present: disk_smf,
+            fat32_alias: disk_fat32,
+            pid: run_pid,
+            status: run_status
+        ))
+        i = i + 1
+    result
+
+pub fn query_app(name: text) -> AppInfo?:
+    """Look up a single tool app by canonical name."""
+    if not g_app_loader_initialized:
+        discover_apps()
+
+    val entity = g_app_loader.find_by_name(name)
+    if entity == nil:
+        return nil
+
+    val e = entity.unwrap()
+    val id_opt = g_app_loader.get_identity(e)
+    if id_opt == nil:
+        return nil
+    val identity = id_opt.unwrap()
+
+    val disk_opt = g_app_loader.get_disk_state(e)
+    val run_opt = g_app_loader.get_run_state(e)
+
+    var disk_on = false
+    var disk_smf = false
+    var disk_fat32 = ""
+    if disk_opt != nil:
+        val disk = disk_opt.unwrap()
+        disk_on = disk.on_disk
+        disk_smf = disk.smf_present
+        disk_fat32 = disk.fat32_alias
+
+    var run_pid: i64 = 0
+    var run_status = "unknown"
+    if run_opt != nil:
+        val run = run_opt.unwrap()
+        run_pid = run.pid
+        run_status = run.status
+
+    Some(AppInfo(
+        name: identity.name,
+        path: identity.path,
+        short_name: identity.short_name,
+        on_disk: disk_on,
+        smf_present: disk_smf,
+        fat32_alias: disk_fat32,
+        pid: run_pid,
+        status: run_status
+    ))
+
+pub fn get_app_loader_world() -> AppLoaderWorld:
+    """Return the global app loader world for direct ECS access."""
+    if not g_app_loader_initialized:
+        discover_apps()
+    g_app_loader
