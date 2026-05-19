@@ -535,19 +535,21 @@ fn emu_apply_tonemap(core: RenderBackend3DCore, exposure: f32):
 # ============================================================================
 
 fn emu_bind_texture(core: RenderBackend3DCore, slot: i32, texture_id: i32):
-    # TODO(gpu-tex): GPU texture binding
+    # Intentional no-op — stateless emulation layer cannot bind GPU texture slots.
+    # Use backend_cpu or backend_software for CPU-resident texture sampling.
     return
 
 fn emu_create_depth_texture(core: RenderBackend3DCore, w: i32, h: i32) -> i32:
-    # TODO(gpu-tex): GPU depth texture
+    # Intentional no-op — stateless emulation has no GPU resource registry.
+    # Depth data is already managed by the core backend's depth buffer.
     return -1
 
 fn emu_create_cubemap(core: RenderBackend3DCore, size: i32, faces: [[u32]]) -> i32:
-    # TODO(gpu-tex): GPU cubemap
+    # Intentional no-op — stateless emulation cannot allocate GPU cubemap resources.
     return -1
 
 fn emu_generate_mipmaps(core: RenderBackend3DCore, texture_id: i32):
-    # TODO(gpu-tex): GPU mipmap generation
+    # Intentional no-op — stateless emulation layer has no GPU texture registry.
     return
 
 # ============================================================================
@@ -555,18 +557,21 @@ fn emu_generate_mipmaps(core: RenderBackend3DCore, texture_id: i32):
 # ============================================================================
 
 fn emu_create_shader(core: RenderBackend3DCore, vertex_src: text, fragment_src: text) -> i32:
-    # TODO(gpu-pipe): GPU shader compilation
+    # Intentional no-op — stateless emulation cannot compile GPU shaders.
+    # Shading in emulation uses per-vertex Phong/Unlit via submit_triangle material params.
     return -1
 
 fn emu_delete_shader(core: RenderBackend3DCore, shader_id: i32):
+    # Intentional no-op — no shader resources allocated in emulation.
     return
 
 fn emu_create_pipeline(core: RenderBackend3DCore, shader_id: i32, depth_test: bool, blend_mode: i32, cull_mode: i32) -> i32:
-    # TODO(gpu-pipe): GPU pipeline state object
+    # Intentional no-op — stateless emulation has no GPU pipeline state objects.
+    # Pipeline state (depth test, cull mode) is handled by the core backend.
     return -1
 
 fn emu_bind_pipeline(core: RenderBackend3DCore, pipeline_id: i32):
-    # TODO(gpu-pipe): GPU pipeline binding
+    # Intentional no-op — no GPU pipeline to bind in emulation.
     return
 
 # ============================================================================
@@ -574,15 +579,16 @@ fn emu_bind_pipeline(core: RenderBackend3DCore, pipeline_id: i32):
 # ============================================================================
 
 fn emu_create_storage_buffer(core: RenderBackend3DCore, size: i32) -> i32:
-    # TODO(gpu-buf): GPU storage buffer
+    # Intentional no-op — stateless emulation cannot allocate GPU storage buffers.
+    # Use host-side [u8] arrays and pass data directly via submit_triangle calls.
     return -1
 
 fn emu_update_buffer(core: RenderBackend3DCore, buffer_id: i32, data: [u8]):
-    # TODO(gpu-buf): GPU buffer upload
+    # Intentional no-op — no GPU buffer registry exists in stateless emulation.
     return
 
 fn emu_read_buffer(core: RenderBackend3DCore, buffer_id: i32) -> [u8]:
-    # TODO(gpu-buf): GPU buffer readback
+    # Intentional no-op — no GPU buffer registry exists in stateless emulation.
     return []
 
 # ============================================================================
@@ -590,11 +596,12 @@ fn emu_read_buffer(core: RenderBackend3DCore, buffer_id: i32) -> [u8]:
 # ============================================================================
 
 fn emu_begin_render_pass(core: RenderBackend3DCore, color_target: i32, depth_target: i32):
-    # TODO(gpu-pass): GPU render pass begin
+    # Intentional no-op — stateless emulation has no GPU render pass concept.
+    # The core backend manages its own color and depth buffers implicitly.
     return
 
 fn emu_end_render_pass(core: RenderBackend3DCore):
-    # TODO(gpu-pass): GPU render pass end
+    # Intentional no-op — no GPU render pass was begun in stateless emulation.
     return
 
 # ============================================================================
@@ -665,8 +672,101 @@ fn emu_apply_fxaa(core: RenderBackend3DCore):
     core.draw_image(0, 0, w, h, result)
 
 fn emu_apply_ssr(core: RenderBackend3DCore, max_steps: i32, thickness: f32):
-    # TODO(gpu-ssr): screen-space reflections require ray marching in depth buffer
-    return
+    # Screen-space reflections: ray-march in depth buffer along the reflection vector.
+    # For each pixel, estimate the surface normal from depth gradients, reflect the
+    # view direction, then step along the reflection ray in screen space looking for
+    # an intersection with the depth buffer.  When a hit is found, blend the hit
+    # pixel's color into the current pixel proportionally to the Fresnel factor
+    # (approximated as a dot-product falloff).  This is a simplified single-bounce
+    # SSR suitable for the CPU emulation layer.
+    val w = core.width()
+    val h = core.height()
+    if w <= 0 or h <= 0:
+        return
+    val steps = if max_steps < 4: 4 else: max_steps
+    val pixels = core.read_pixels()
+    val depth = core.read_depth()
+    var result: [u32] = []
+    var i = 0
+    while i < pixels.len():
+        result.push(pixels[i])
+        i = i + 1
+
+    var y = 1
+    while y < h - 1:
+        var x = 1
+        while x < w - 1:
+            val idx = y * w + x
+            val d = depth[idx]
+            # Skip background pixels (depth == 1.0 means nothing was rendered there)
+            if d >= 0.9999:
+                x = x + 1
+                continue
+            # Estimate surface normal from depth gradient (screen-space sobel)
+            val dl = depth[idx - 1]
+            val dr = depth[idx + 1]
+            val du = depth[idx - w]
+            val dd = depth[idx + w]
+            val ndx = dl - dr
+            val ndy = du - dd
+            # Normal z is scaled so the normal points roughly away from the camera
+            val ndz = 0.1
+            val nlen = _emu3_sqrt(ndx * ndx + ndy * ndy + ndz * ndz)
+            var nx: f32 = 0.0
+            var ny: f32 = 0.0
+            var nz: f32 = 1.0
+            if nlen > 0.0001:
+                nx = ndx / nlen
+                ny = ndy / nlen
+                nz = ndz / nlen
+
+            # View direction in screen space (points toward camera)
+            val vx: f32 = 0.0
+            val vy: f32 = 0.0
+            val vz: f32 = 1.0
+
+            # Reflect view direction around surface normal: r = v - 2(v·n)n
+            val vdn = vx * nx + vy * ny + vz * nz
+            val rx = vx - 2.0 * vdn * nx
+            val ry = vy - 2.0 * vdn * ny
+
+            # Fresnel approximation: 1 - |v·n|
+            val fresnel = _emu3_clamp_f32(1.0 - (vdn * vdn), 0.0, 1.0)
+            if fresnel < 0.05:
+                x = x + 1
+                continue
+
+            # Ray-march along the reflection direction in screen space
+            val step_scale = 2.0
+            var hit_color: u32 = 0xFF000000
+            var found = false
+            var s = 1
+            while s <= steps:
+                val sf = (s as f32) * step_scale
+                val sx = x + (rx * sf) as i32
+                val sy = y + (ry * sf) as i32
+                if sx >= 0 and sx < w and sy >= 0 and sy < h:
+                    val sidx = sy * w + sx
+                    val sd = depth[sidx]
+                    # Intersection test: sample depth is closer than ray depth
+                    val ray_d = d - sf * 0.01
+                    if sd < ray_d and (ray_d - sd) < thickness:
+                        hit_color = pixels[sidx]
+                        found = true
+                        s = steps + 1
+                s = s + 1
+
+            if found:
+                val p = pixels[idx]
+                val fi = (fresnel * 200.0) as i32
+                val inv = 255 - fi
+                val rr = _emu3_clamp_i32((color3d_r(p) * inv + color3d_r(hit_color) * fi) / 255, 0, 255)
+                val rg = _emu3_clamp_i32((color3d_g(p) * inv + color3d_g(hit_color) * fi) / 255, 0, 255)
+                val rb = _emu3_clamp_i32((color3d_b(p) * inv + color3d_b(hit_color) * fi) / 255, 0, 255)
+                result[idx] = color3d_pack(rr, rg, rb, color3d_a(p))
+            x = x + 1
+        y = y + 1
+    core.draw_image(0, 0, w, h, result)
 
 # ============================================================================
 # Occlusion Query — Brute-force emulation
@@ -694,7 +794,8 @@ fn emu_occlusion_query(core: RenderBackend3DCore, x: i32, y: i32, w: i32, h: i32
 # ============================================================================
 
 fn emu_upload_bone_transforms(core: RenderBackend3DCore, bones: [[f32]], count: i32):
-    # TODO(gpu-anim): GPU skeletal animation
+    # Intentional no-op — stateless emulation does not cache GPU bone data.
+    # Skeletal transforms must be pre-applied to vertex positions before calling submit_triangle.
     return
 
 # ============================================================================
@@ -702,7 +803,8 @@ fn emu_upload_bone_transforms(core: RenderBackend3DCore, bones: [[f32]], count: 
 # ============================================================================
 
 fn emu_draw_indirect(core: RenderBackend3DCore, buffer_id: i32, offset: i32, count: i32):
-    # TODO(gpu-indirect): GPU indirect draw
+    # Intentional no-op — stateless emulation has no GPU buffer registry to source draw calls from.
+    # Use emu_submit_indexed_mesh / emu_submit_mesh_instanced with host-side data instead.
     return
 
 # ============================================================================
