@@ -7,9 +7,16 @@ module-level `var` globals and caller-supplied `u64` pointer/length pairs.
 
 ## Status: DONE
 
+## Phases
+- [x] dev — zstd_noalloc.spl implementation (Raw + RLE block support)
+- [x] research — RFC 8878 frame layout, noalloc constraints, extern availability
+- [x] impl — committed to main
+- [x] spec — zstd_noalloc_spec.spl (source-grep spec, baremetal extern-safe)
+- [x] ship — all deliverables present and committed
+
 ## Deliverables
 - `src/os/kernel/boot/zstd_noalloc.spl` — streaming Zstd decompressor
-- `src/os/kernel/boot/zstd_noalloc_spec.spl` — spipe spec (planned)
+- `src/os/kernel/boot/zstd_noalloc_spec.spl` — spipe spec (source-grep, baremetal-safe)
 
 ## Design Decisions
 1. **No arrays/Option/Result/text** — follows riscv_noalloc_* convention.
@@ -46,3 +53,11 @@ Blocks (repeated):
 - [x] state.md created
 - [x] zstd_noalloc.spl implemented (Raw + RLE block support, magic/header parse)
 - [x] Committed with jj
+- [x] zstd_noalloc_spec.spl created (source-grep spec; baremetal externs not callable in host interpreter — spec verifies API surface, constants, and structural constraints via rg)
+
+## Note on spec approach
+`rt_riscv_uart_put`, `rt_mem_read_u8`, `rt_mem_write_u8` are RISC-V baremetal
+externs with no host runtime implementation. Direct invocation in interpreter
+mode panics. The spec uses `rt_process_run + rg` (same pattern as
+`baremetal_noalloc_constraints_spec.spl`) to verify API surface and structural
+rules without triggering those externs.

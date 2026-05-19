@@ -586,9 +586,8 @@ fn simd_sub_i64x4(a: Vec4i64, b: Vec4i64) -> Vec4i64:
 # NOT propagate across lane boundaries (this is the core property AES /
 # AES-GCM rely on for byte-shuffle/round work).
 #
-# This is the Phase 2 SEED — type carrier + add/xor ops. simd_aes_round /
-# simd_shuffle_u8x16 / PCLMUL are deferred to follow-up waves (they require
-# AES-NI exposure / different intrinsics). simd_xor_u8x16 is now available.
+# Phase 2: add/xor/aes_round/aes_round_last wired. Phase 4: shuffle_u8x16 wired
+# (scalar fallback). PCLMUL wired (Phase 3). simd_xor_u8x16 available.
 # ============================================================================
 
 """
@@ -665,6 +664,15 @@ fn simd_xor_u8x16(a: Vec16u8, b: Vec16u8) -> Vec16u8:
     and GCM GHASH byte-level XOR steps.
     """
     rt_simd_xor_u8x16(a, b)
+
+extern fn rt_simd_shuffle_u8x16(a: Vec16u8, b: Vec16u8, mask: Vec16u8) -> Vec16u8
+
+fn simd_shuffle_u8x16(a: Vec16u8, b: Vec16u8, mask: Vec16u8) -> Vec16u8:
+    """PSHUFB-style byte shuffle. Each mask lane selects a source byte:
+    indices 0-15 draw from `a`, indices 16-31 draw from `b`. If bit 7
+    of a mask lane is set the output lane is zeroed. Used for AES ShiftRows.
+    """
+    rt_simd_shuffle_u8x16(a, b, mask)
 
 # ============================================================================
 # AES Round Intrinsics (Phase 2, matches Intel _mm_aesenc_si128 ordering)
@@ -772,6 +780,67 @@ fn simd_xor_u64x2(a: Vec2u64, b: Vec2u64) -> Vec2u64:
     GHASH/Polyval products into a running 128-bit state.
     """
     rt_simd_xor_u64x2(a, b)
+
+# ============================================================================
+# u64x4 Intrinsics (256-bit) — Phase 4 of SIMD int intrinsics
+# (prerequisite for SHA-3/Keccak and 4-wide SHA-512)
+#
+# Vec4u64 = 4 u64 lanes; scalar fallback in interpreter mode.
+# Lane order: u0 = lane 0 (lowest), u3 = lane 3 (highest).
+# Shift ops take a uniform shift count applied to all lanes.
+# ============================================================================
+
+"""
+4-lane u64 vector (256-bit register).
+Lane 0 (u0) is the lowest; lane 3 (u3) is the highest.
+"""
+struct Vec4u64:
+    u0: u64
+    u1: u64
+    u2: u64
+    u3: u64
+
+impl Vec4u64:
+    static fn new(u0: u64, u1: u64, u2: u64, u3: u64) -> Vec4u64:
+        """Create a Vec4u64 from four u64 lanes."""
+        Vec4u64(u0: u0, u1: u1, u2: u2, u3: u3)
+
+    static fn zero() -> Vec4u64:
+        """Zero vector."""
+        Vec4u64(u0: 0, u1: 0, u2: 0, u3: 0)
+
+    fn lane(index: i32) -> u64:
+        """Return the u64 value of lane `index` (0-3)."""
+        rt_simd_vec4u64_get(self, index)
+
+extern fn rt_simd_vec4u64_new(u0: u64, u1: u64, u2: u64, u3: u64) -> Vec4u64
+extern fn rt_simd_vec4u64_get(v: Vec4u64, index: i32) -> u64
+
+extern fn rt_simd_xor_u64x4(a: Vec4u64, b: Vec4u64) -> Vec4u64
+extern fn rt_simd_and_u64x4(a: Vec4u64, b: Vec4u64) -> Vec4u64
+extern fn rt_simd_or_u64x4(a: Vec4u64, b: Vec4u64) -> Vec4u64
+extern fn rt_simd_shl_u64x4(a: Vec4u64, shift: i32) -> Vec4u64
+extern fn rt_simd_shr_u64x4(a: Vec4u64, shift: i32) -> Vec4u64
+
+fn simd_xor_u64x4(a: Vec4u64, b: Vec4u64) -> Vec4u64:
+    """Lane-wise XOR of two 4-lane u64 vectors."""
+    rt_simd_xor_u64x4(a, b)
+
+fn simd_and_u64x4(a: Vec4u64, b: Vec4u64) -> Vec4u64:
+    """Lane-wise AND of two 4-lane u64 vectors."""
+    rt_simd_and_u64x4(a, b)
+
+fn simd_or_u64x4(a: Vec4u64, b: Vec4u64) -> Vec4u64:
+    """Lane-wise OR of two 4-lane u64 vectors."""
+    rt_simd_or_u64x4(a, b)
+
+fn simd_shl_u64x4(a: Vec4u64, shift: i32) -> Vec4u64:
+    """Logical left shift of all 4 u64 lanes by `shift` bits (0-63)."""
+    rt_simd_shl_u64x4(a, shift)
+
+fn simd_shr_u64x4(a: Vec4u64, shift: i32) -> Vec4u64:
+    """Logical right shift of all 4 u64 lanes by `shift` bits (0-63)."""
+    rt_simd_shr_u64x4(a, shift)
 
 # ============================================================================
 # Horizontal Operations

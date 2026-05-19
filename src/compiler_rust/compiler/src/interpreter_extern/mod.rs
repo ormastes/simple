@@ -1003,6 +1003,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_simd_aes_round_u8x16", simd::rt_simd_aes_round_u8x16 as ExternFn);
     m.insert("rt_simd_and_i32x4", simd::rt_simd_and_i32x4 as ExternFn);
     m.insert("rt_simd_and_i32x8", simd::rt_simd_and_i32x8 as ExternFn);
+    m.insert("rt_simd_and_u64x4", simd::rt_simd_and_u64x4 as ExternFn);
     m.insert("rt_simd_clmul_hi_u64", simd::rt_simd_clmul_hi_u64 as ExternFn);
     m.insert("rt_simd_clmul_lo_u64", simd::rt_simd_clmul_lo_u64 as ExternFn);
     m.insert("rt_simd_detect_profile", simd::rt_simd_detect_profile as ExternFn);
@@ -1027,11 +1028,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_simd_mul_i32x8", simd::rt_simd_mul_i32x8 as ExternFn);
     m.insert("rt_simd_or_i32x4", simd::rt_simd_or_i32x4 as ExternFn);
     m.insert("rt_simd_or_i32x8", simd::rt_simd_or_i32x8 as ExternFn);
+    m.insert("rt_simd_or_u64x4", simd::rt_simd_or_u64x4 as ExternFn);
     m.insert("rt_simd_profile_name", simd::rt_simd_profile_name as ExternFn);
     m.insert("rt_simd_shl_i32x4", simd::rt_simd_shl_i32x4 as ExternFn);
     m.insert("rt_simd_shl_i32x8", simd::rt_simd_shl_i32x8 as ExternFn);
+    m.insert("rt_simd_shl_u64x4", simd::rt_simd_shl_u64x4 as ExternFn);
+    m.insert("rt_simd_shuffle_u8x16", simd::rt_simd_shuffle_u8x16 as ExternFn);
     m.insert("rt_simd_shr_i32x4", simd::rt_simd_shr_i32x4 as ExternFn);
     m.insert("rt_simd_shr_i32x8", simd::rt_simd_shr_i32x8 as ExternFn);
+    m.insert("rt_simd_shr_u64x4", simd::rt_simd_shr_u64x4 as ExternFn);
     m.insert("rt_simd_str_equal", simd::rt_simd_str_equal as ExternFn);
     m.insert("rt_simd_str_last_index_of", simd::rt_simd_str_last_index_of as ExternFn);
     m.insert("rt_simd_str_search", simd::rt_simd_str_search as ExternFn);
@@ -1043,9 +1048,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_simd_vec2u64_hi", simd::rt_simd_vec2u64_hi as ExternFn);
     m.insert("rt_simd_vec2u64_lo", simd::rt_simd_vec2u64_lo as ExternFn);
     m.insert("rt_simd_vec2u64_new", simd::rt_simd_vec2u64_new as ExternFn);
+    m.insert("rt_simd_vec4u64_get", simd::rt_simd_vec4u64_get as ExternFn);
+    m.insert("rt_simd_vec4u64_new", simd::rt_simd_vec4u64_new as ExternFn);
     m.insert("rt_simd_xor_i32x4", simd::rt_simd_xor_i32x4 as ExternFn);
     m.insert("rt_simd_xor_i32x8", simd::rt_simd_xor_i32x8 as ExternFn);
     m.insert("rt_simd_xor_u64x2", simd::rt_simd_xor_u64x2 as ExternFn);
+    m.insert("rt_simd_xor_u64x4", simd::rt_simd_xor_u64x4 as ExternFn);
     m.insert("rt_simd_xor_u8x16", simd::rt_simd_xor_u8x16 as ExternFn);
     m.insert("rt_sleep_ms", time::rt_sleep_ms as ExternFn);
     m.insert("rt_smf_parse_relocs", file_io::rt_smf_parse_relocs as ExternFn);

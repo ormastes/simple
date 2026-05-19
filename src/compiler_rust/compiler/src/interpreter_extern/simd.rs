@@ -1191,6 +1191,165 @@ pub fn rt_simd_xor_u64x2(args: &[Value]) -> Result<Value, CompileError> {
     binop_u64x2("rt_simd_xor_u64x2", args, sffi_xor_u64x2)
 }
 
+// ---------------------------------------------------------------------------
+// SIMD Phase 4 — shuffle_u8x16 (AES ShiftRows) — scalar fallback
+// ---------------------------------------------------------------------------
+
+pub fn rt_simd_shuffle_u8x16(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "rt_simd_shuffle_u8x16 expects 3 arguments (a, b, mask)".to_string(),
+        ));
+    }
+    let a = unpack_vec16u8("rt_simd_shuffle_u8x16(a)", &args[0])?;
+    let b = unpack_vec16u8("rt_simd_shuffle_u8x16(b)", &args[1])?;
+    let mask = unpack_vec16u8("rt_simd_shuffle_u8x16(mask)", &args[2])?;
+    // PSHUFB semantics: each mask byte selects a source lane.
+    // If bit 7 of the mask byte is set, the output lane is 0.
+    // Indices 0-15 select from `a`; indices 16-31 select from `b`.
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let m = mask[i];
+        if m & 0x80 != 0 {
+            out[i] = 0;
+        } else {
+            let idx = (m & 0x1f) as usize;
+            out[i] = if idx < 16 { a[idx] } else { b[idx - 16] };
+        }
+    }
+    Ok(pack_vec16u8(out))
+}
+
+// ---------------------------------------------------------------------------
+// SIMD Phase 4 — Vec4u64 (u64×4 / 256-bit) — scalar fallback
+// ---------------------------------------------------------------------------
+
+const VEC4U64_FIELDS: [&str; 4] = ["u0", "u1", "u2", "u3"];
+
+fn unpack_vec4u64(name: &str, value: &Value) -> Result<[u64; 4], CompileError> {
+    match value {
+        Value::Object { class, fields } => {
+            if class != "Vec4u64" {
+                return Err(CompileError::runtime(format!("{name}: expected Vec4u64, got {class}")));
+            }
+            let mut lanes = [0u64; 4];
+            for (i, fname) in VEC4U64_FIELDS.iter().enumerate() {
+                lanes[i] = require_u64_field(name, fields, fname)?;
+            }
+            Ok(lanes)
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected Vec4u64 Object, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn pack_vec4u64(lanes: [u64; 4]) -> Value {
+    let mut fields = HashMap::with_capacity(4);
+    for (i, fname) in VEC4U64_FIELDS.iter().enumerate() {
+        fields.insert(
+            fname.to_string(),
+            Value::UInt { value: lanes[i], width: 64 },
+        );
+    }
+    Value::Object {
+        class: "Vec4u64".to_string(),
+        fields: Arc::new(fields),
+    }
+}
+
+fn binop_u64x4<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn([u64; 4], [u64; 4]) -> [u64; 4],
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec4u64(name, &args[0])?;
+    let b = unpack_vec4u64(name, &args[1])?;
+    Ok(pack_vec4u64(op(a, b)))
+}
+
+fn shift_op_u64x4<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn([u64; 4], u32) -> [u64; 4],
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments (vec, shift)")));
+    }
+    let a = unpack_vec4u64(name, &args[0])?;
+    let shift = match &args[1] {
+        Value::Int(n) => *n as u32,
+        Value::UInt { value, .. } => *value as u32,
+        other => return Err(CompileError::runtime(format!("{name}: shift must be integer, got {:?}", other))),
+    };
+    Ok(pack_vec4u64(op(a, shift)))
+}
+
+pub fn rt_simd_xor_u64x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u64x4("rt_simd_xor_u64x4", args, |a, b| {
+        [a[0] ^ b[0], a[1] ^ b[1], a[2] ^ b[2], a[3] ^ b[3]]
+    })
+}
+
+pub fn rt_simd_and_u64x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u64x4("rt_simd_and_u64x4", args, |a, b| {
+        [a[0] & b[0], a[1] & b[1], a[2] & b[2], a[3] & b[3]]
+    })
+}
+
+pub fn rt_simd_or_u64x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u64x4("rt_simd_or_u64x4", args, |a, b| {
+        [a[0] | b[0], a[1] | b[1], a[2] | b[2], a[3] | b[3]]
+    })
+}
+
+pub fn rt_simd_shl_u64x4(args: &[Value]) -> Result<Value, CompileError> {
+    shift_op_u64x4("rt_simd_shl_u64x4", args, |a, s| {
+        let s = s & 63;
+        [a[0] << s, a[1] << s, a[2] << s, a[3] << s]
+    })
+}
+
+pub fn rt_simd_shr_u64x4(args: &[Value]) -> Result<Value, CompileError> {
+    shift_op_u64x4("rt_simd_shr_u64x4", args, |a, s| {
+        let s = s & 63;
+        [a[0] >> s, a[1] >> s, a[2] >> s, a[3] >> s]
+    })
+}
+
+pub fn rt_simd_vec4u64_new(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_simd_vec4u64_new expects 4 arguments (u0, u1, u2, u3)".to_string(),
+        ));
+    }
+    let u0 = require_u64_value("rt_simd_vec4u64_new(u0)", &args[0])?;
+    let u1 = require_u64_value("rt_simd_vec4u64_new(u1)", &args[1])?;
+    let u2 = require_u64_value("rt_simd_vec4u64_new(u2)", &args[2])?;
+    let u3 = require_u64_value("rt_simd_vec4u64_new(u3)", &args[3])?;
+    Ok(pack_vec4u64([u0, u1, u2, u3]))
+}
+
+pub fn rt_simd_vec4u64_get(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_simd_vec4u64_get expects 2 arguments (vec, index)".to_string(),
+        ));
+    }
+    let lanes = unpack_vec4u64("rt_simd_vec4u64_get", &args[0])?;
+    let idx = match &args[1] {
+        Value::Int(n) => *n as usize,
+        Value::UInt { value, .. } => *value as usize,
+        other => return Err(CompileError::runtime(format!("rt_simd_vec4u64_get: index must be integer, got {:?}", other))),
+    };
+    if idx >= 4 {
+        return Err(CompileError::runtime(format!("rt_simd_vec4u64_get: index {idx} out of range 0..4")));
+    }
+    Ok(Value::UInt { value: lanes[idx], width: 64 })
+}
+
 pub fn rt_db_accel_bitmap_and_words(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Err(CompileError::runtime(

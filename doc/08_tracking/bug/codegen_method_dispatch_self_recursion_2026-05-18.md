@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-18
 **Severity:** High (silent stack overflow at runtime)
-**Status:** Workaround applied; root cause unfixed
+**Status:** Fixed (2026-05-19); workaround remains in place for safety
 
 ## Summary
 
@@ -74,11 +74,22 @@ Replaced method calls with direct `rt_string_*` extern calls in:
 - `src/compiler/10.frontend/core/types.spl` (6 functions)
 - `src/lib/text.spl` (1 function)
 
-## Proposed fix
+## Fix applied (2026-05-19)
 
-**Primary fix site:** `src/compiler/35.semantics/resolve_strategies.spl::try_ufcs`
-— exclude the currently-resolving function from UFCS candidates (see "Root cause"
-above for the exact change required).
+**`src/compiler/35.semantics/resolve.spl`**
+- Added `current_fn_sym: SymbolId?` field to `MethodResolver` class (nil by default)
+- All three construction paths (`new`, `with_trait_solver`, `create_method_resolver`) initialise it to `nil`
+- `resolve_function` sets `self.current_fn_sym = Some(func.symbol)` before resolving the body; the field is `nil` during constant resolution, preventing stale comparisons
+
+**`src/compiler/35.semantics/resolve_strategies.spl`**
+- In `try_ufcs`, after type-compatibility check passes, added guard:
+  ```spl
+  val resolved_id = func_sym_id.unwrap()
+  if (self.current_fn_sym.? and
+      self.current_fn_sym.unwrap().id == resolved_id.id):
+      return nil
+  ```
+  This causes a same-named free function to fall through to `Unresolved` instead of resolving to itself, breaking the self-recursion cycle.
 
 The Cranelift codegen's `else` branch (calls.rs line 2686) already has a builtin
 remap table (`"ends_with" => Some("rt_string_ends_with")`) that would catch
@@ -86,7 +97,7 @@ dotted-form calls, but by the time MIR reaches codegen the call name is already 
 free-function name (e.g., `"ends_with"`), not a dotted form — so the remap table
 is never reached for this bug. Fixing codegen alone is insufficient.
 
-Relevant files for reference:
+Relevant files:
 - `src/compiler/35.semantics/resolve_strategies.spl` — fix site
 - `src/compiler/35.semantics/resolve.spl` — `MethodResolver` struct definition
 - `src/compiler_rust/compiler/src/codegen/instr/calls.rs` — downstream (no fix needed)

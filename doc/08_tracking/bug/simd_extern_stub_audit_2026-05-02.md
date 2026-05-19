@@ -1,10 +1,10 @@
 # Bug / Audit: SIMD Extern Stub Survey — simd.spl
 # 2026-05-02  (Wave L / L5)
-# **Updated 2026-05-19** — full re-audit; float ops reclassified; hadd/hmax/hmin implemented; str_* orphan gap documented.
+# **Updated 2026-05-19 (Wave 15)** — shuffle_u8x16 + Vec4u64 + 5 u64x4 ops wired; §3.3 gaps closed.
 
 **Status:** OPEN (ongoing tracker) — all extern declarations in simd.spl are
-now wired; remaining open items are the str_* orphan gap (§3.1) and the
-uniform Cranelift gap (§4).
+now wired; remaining open items are the str_* orphan gap (§3.2, interpreter-internal),
+the uniform Cranelift gap (§4), and the missing-feature additions from Wave 15 (now done).
 
 **Purpose:** Provide a complete, cited map of every `extern fn rt_simd_*`
 declared in `src/lib/nogc_sync_mut/simd.spl` and its actual wiring status, so
@@ -75,12 +75,13 @@ and the correct Rust runtime is `src/compiler_rust/runtime/src/value/`.
 `src/lib/nogc_sync_mut/simd.spl:590-591` contains:
 
 ```
-# simd_shuffle_u8x16 / PCLMUL are deferred to follow-up waves (they require
-# AES-NI exposure / different intrinsics). simd_xor_u8x16 is now available.
+# Phase 2: add/xor/aes_round/aes_round_last wired. Phase 4: shuffle_u8x16 wired
+# (scalar fallback). PCLMUL wired (Phase 3). simd_xor_u8x16 available.
 ```
 
-This is partially accurate.  `rt_simd_xor_u8x16` is wired.  `shuffle_u8x16`
-and Vec4u64 ops remain absent from simd.spl.  PCLMUL/CLMUL is wired (see §2.B.3).
+Updated 2026-05-19 (Wave 15): comment rewritten to reflect current state.
+`shuffle_u8x16` and Vec4u64 ops are now wired (scalar fallback, Phase 4).
+PCLMUL/CLMUL is wired (§2.A.6).
 
 ---
 
@@ -257,8 +258,8 @@ string subsystem internally.
 
 | Feature | Status |
 |---------|--------|
-| `rt_simd_shuffle_u8x16` | Not declared in simd.spl, not implemented |
-| `Vec4u64` struct + u64×4 arithmetic ops | Not declared in simd.spl, not implemented; prerequisite for SHA-3 / wide SHA-512 |
+| `rt_simd_shuffle_u8x16` | **DONE 2026-05-19 Wave 15** — declared in simd.spl, scalar impl in simd.rs, wired in mod.rs |
+| `Vec4u64` struct + u64×4 arithmetic ops | **DONE 2026-05-19 Wave 15** — Vec4u64 struct declared in simd.spl; `xor/and/or/shl/shr_u64x4` + `vec4u64_new/get` declared and wired (scalar fallback) |
 
 ---
 
@@ -299,13 +300,13 @@ missing.
 | ML/signal float ops (Vec4f/Vec8f/Vec4d) | All 15 float externs | ALL wired (scalar only — no HW speedup) |
 | Vec4f reduction | `rt_simd_{hadd,hmax,hmin}_f32x4` | ALL wired (scalar only — NEW 2026-05-19) |
 
-### §5.2  Blocked until new externs added to simd.spl
+### §5.2  Previously blocked — now unblocked (Wave 15)
 
-| Task | Blocker |
-|------|---------|
-| AES ShiftRows via shuffle | `rt_simd_shuffle_u8x16` absent from simd.spl |
-| SHA-3 / Keccak | `Vec4u64` struct + `rt_simd_{xor,and,or,shl,shr}_u64x4` absent |
-| SHA-512 4-wide u64 | Same Vec4u64 absence |
+| Task | Blocker | Resolution |
+|------|---------|------------|
+| AES ShiftRows via shuffle | `rt_simd_shuffle_u8x16` absent from simd.spl | **DONE** — wired (scalar fallback) |
+| SHA-3 / Keccak | `Vec4u64` + `rt_simd_{xor,and,or,shl,shr}_u64x4` absent | **DONE** — Vec4u64 declared + all 5 ops wired (scalar fallback) |
+| SHA-512 4-wide u64 | Same Vec4u64 absence | **DONE** — same Vec4u64 fix unblocks this |
 
 ### §5.3  Blocked until Cranelift runtime_ffi.rs is updated
 
@@ -320,7 +321,7 @@ in interpreter / SMF mode or use the scalar FFI path for compiled deployments.
 |-------------------|-----------------------|
 | Rec 1: Wire AES with existing SIMD round primitive | DONE — all AES round + xor_u8x16 wired with hardware intrinsics |
 | Rec 2: Add pure-Simple ChaCha20 with Vec4i | UNBLOCKED — all Vec4i ops wired, no new externs needed |
-| Rec 3: Add Vec4u64 integer intrinsics | Still MEDIUM; prerequisite for SHA-3 and wide SHA-512 |
+| Rec 3: Add Vec4u64 integer intrinsics | DONE (Wave 15) — Vec4u64 + xor/and/or/shl/shr_u64x4 wired (scalar fallback); SHA-3/Keccak unblocked |
 
 ---
 
@@ -331,6 +332,7 @@ in interpreter / SMF mode or use the scalar FFI path for compiled deployments.
 | 2026-05-02 | Initial audit (Wave L/L5): 32 wired, 18 stub |
 | 2026-05-10 | `rt_simd_xor_u8x16` wired through full stack (runtime + interpreter + simd.spl extern decl); Vec16u8 count becomes 4 |
 | 2026-05-19 | Full re-audit: float ops (15) reclassified as interpreter-wired scalar fallback (previously miscategorised as stub); `rt_simd_hadd/hmax/hmin_f32x4` implemented in `interpreter_extern/simd.rs:921-950` and wired in mod.rs:1015-1017; str_* orphan gap documented (§3.2); total wired count = 51, stub = 0; condition 4 of §1.1 definition expanded to include scalar-only impls; line-number tables re-verified against post-edit source |
+| 2026-05-19 (Wave 15) | §3.3 gaps closed: `rt_simd_shuffle_u8x16` (scalar PSHUFB impl) + `Vec4u64` struct + `rt_simd_{xor,and,or,shl,shr}_u64x4` + `rt_simd_vec4u64_{new,get}` all declared in simd.spl and wired in interpreter_extern/simd.rs + mod.rs; total wired count = 60; §5.2 blockers resolved; Rec 3 (J2) complete |
 
 ---
 
