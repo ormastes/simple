@@ -513,6 +513,12 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
         Ok(exit_status) => {
             if !exit_status.success() {
                 eprintln!("  Compile failed (exit {:?})", exit_status.code());
+                if let Some(code) = exit_status.code() {
+                    if code == 139 {
+                        eprintln!("[LIM-010] SEGFAULT (exit 139) — likely LLVM constructor conflict");
+                        eprintln!("[LIM-010] Ensure objcopy is available and strip_llvm_constructors() succeeded");
+                    }
+                }
                 return StageResult {
                     success: false,
                     size: 0,

@@ -494,16 +494,100 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
     None
 }
 
+/// Error type for LLVM constructor stripping failures (LIM-010).
+#[derive(Debug)]
+pub(crate) enum StripError {
+    ObjcopyNotFound,
+    ObjcopyFailed { exit_code: Option<i32>, stderr: String },
+    VerificationFailed { sections: Vec<String> },
+}
+
+/// Find an objdump (or llvm-objdump) tool for archive verification.
+fn find_objdump_tool() -> Option<String> {
+    for prefix in &[
+        "/opt/homebrew/opt/llvm@18/bin",
+        "/opt/homebrew/opt/llvm/bin",
+        "/usr/local/opt/llvm@18/bin",
+        "/usr/local/opt/llvm/bin",
+    ] {
+        let path = format!("{prefix}/llvm-objdump");
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+    if std::process::Command::new("llvm-objdump")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        return Some("llvm-objdump".to_string());
+    }
+    // Fall back to readelf which is more commonly available on Linux
+    if std::process::Command::new("readelf")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        return Some("readelf".to_string());
+    }
+    if std::process::Command::new("objdump")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        return Some("objdump".to_string());
+    }
+    None
+}
+
+/// Verify that a stripped archive has no `.init_array` or `.ctors` sections remaining.
+fn verify_stripped_archive(archive_path: &Path) -> Result<(), StripError> {
+    let tool = match find_objdump_tool() {
+        Some(t) => t,
+        None => return Ok(()), // Can't verify without a tool — assume success
+    };
+
+    let output = if tool.contains("readelf") {
+        std::process::Command::new(&tool)
+            .arg("-S")
+            .arg(archive_path)
+            .output()
+    } else {
+        std::process::Command::new(&tool)
+            .arg("-h")
+            .arg(archive_path)
+            .output()
+    };
+
+    let output = match output {
+        Ok(o) => o,
+        Err(_) => return Ok(()), // Tool failed to run — assume success
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let forbidden = [".init_array", ".ctors", ".fini_array", ".dtors"];
+    let remaining: Vec<String> = forbidden
+        .iter()
+        .filter(|sec| stdout.contains(*sec))
+        .map(|sec| sec.to_string())
+        .collect();
+
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(StripError::VerificationFailed { sections: remaining })
+    }
+}
+
 /// Strip LLVM static constructors from a static archive to prevent segfaults (LIM-010).
 ///
 /// Uses `llvm-objcopy` directly on the archive file to remove constructor/destructor
 /// sections from every member, preserving duplicate-named members (e.g. multiple
 /// `Error.cpp.o`) that `ar x` would silently overwrite.
-pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<PathBuf, String> {
-    let objcopy = find_objcopy_tool();
-    let objcopy = match objcopy {
+pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<PathBuf, StripError> {
+    let objcopy = match find_objcopy_tool() {
         Some(cmd) => cmd,
-        None => return Ok(lib.to_path_buf()),
+        None => return Err(StripError::ObjcopyNotFound),
     };
 
     let archive_path = safe_canonicalize(lib);
@@ -524,10 +608,19 @@ pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<Pat
     // affects the LLVM backend, which is opt-in via `--backend=llvm-lib`.
     cmd.arg(&archive_path).arg(&filtered);
 
-    let status = cmd.status().map_err(|e| format!("llvm-objcopy on archive: {e}"))?;
-    if !status.success() {
-        return Ok(lib.to_path_buf());
+    let output = cmd.output().map_err(|e| StripError::ObjcopyFailed {
+        exit_code: None,
+        stderr: format!("failed to execute objcopy: {e}"),
+    })?;
+    if !output.status.success() {
+        return Err(StripError::ObjcopyFailed {
+            exit_code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        });
     }
+
+    verify_stripped_archive(&filtered)?;
+
     Ok(filtered)
 }
 

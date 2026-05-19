@@ -2,11 +2,19 @@
 
 use std::path::{Path, PathBuf};
 
-use super::tools::strip_llvm_constructors;
+use super::tools::{strip_llvm_constructors, StripError};
 use super::tools::{
     build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library, find_native_all_library,
     find_runtime_library, find_simple_core_runtime_library, runtime_archive_has_core_required_symbols,
 };
+
+/// Log a [LIM-010] warning when LLVM constructor stripping fails and return the
+/// original (unstripped) archive path as a fallback.
+fn warn_strip_failure(e: StripError, fallback: &Path) -> PathBuf {
+    eprintln!("[LIM-010] WARNING: LLVM constructor stripping failed: {:?}", e);
+    eprintln!("[LIM-010] Using unstripped archive — Stage 3 may SEGFAULT");
+    fallback.to_path_buf()
+}
 use super::NativeProjectBuilder;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,7 +180,8 @@ impl NativeProjectBuilder {
                         candidates.push((runtime, false));
                     }
                     if native_all.exists() {
-                        let lib = strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone());
+                        let lib = strip_llvm_constructors(&native_all, temp_dir)
+                            .unwrap_or_else(|e| warn_strip_failure(e, &native_all));
                         candidates.push((lib, true));
                     }
                 }
@@ -191,7 +200,8 @@ impl NativeProjectBuilder {
                 }
                 NativeRuntimeLane::RustHosted => {
                     if native_all.exists() {
-                        let lib = strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone());
+                        let lib = strip_llvm_constructors(&native_all, temp_dir)
+                            .unwrap_or_else(|e| warn_strip_failure(e, &native_all));
                         candidates.push((lib, true));
                     }
                 }
@@ -217,7 +227,8 @@ impl NativeProjectBuilder {
                         }
                     }
                     if let Some(native_all) = find_native_all_library() {
-                        let lib = strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone());
+                        let lib = strip_llvm_constructors(&native_all, temp_dir)
+                            .unwrap_or_else(|e| warn_strip_failure(e, &native_all));
                         if !candidates.iter().any(|(p, _)| p == &lib) {
                             candidates.push((lib, true));
                         }
@@ -225,7 +236,8 @@ impl NativeProjectBuilder {
                 }
                 NativeRuntimeLane::RustHosted => {
                     if let Some(native_all) = find_native_all_library() {
-                        let lib = strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone());
+                        let lib = strip_llvm_constructors(&native_all, temp_dir)
+                            .unwrap_or_else(|e| warn_strip_failure(e, &native_all));
                         candidates.push((lib, true));
                     }
                 }
