@@ -19,7 +19,6 @@ use os.drivers.framebuffer.fb_driver.{Color}
 use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps}
 use os.services.wm.wm_service.{WmService, WmAction}
 use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Point, Size, Rect}
-use std.nogc_async_mut_noalloc.log.{noalloc_log_debug, noalloc_log_error}
 use os.services.launcher.launcher.{
     launcher_init, launcher_launch, launcher_shortcut_dispatch, launcher_register, launcher_terminate,
     launcher_get_app_name, launcher_get_process_app_index, launcher_get_process_app_id_for_pid,
@@ -29,9 +28,6 @@ use os.services.launcher.launcher.{
     launcher_process_is_process_backed, MOD_META
 }
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
-use os.services.vfs.vfs_init.{g_vfs_read_file_text}
-
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 use os.desktop.shell_ui_builders.{_build_taskbar_tree, _build_launcher_tree, _build_app_tree, _build_remote_tree}
 use os.desktop.shell_process.{
@@ -40,6 +36,14 @@ use os.desktop.shell_process.{
     _selected_process_row, _normalized_process_selection, _process_is_live
 }
 use os.desktop.shell_baremetal.{_draw_baremetal_overlay}
+use os.desktop.shell_types.{
+    EditorResidentLaunch, _build_editor_resident_launch,
+    _fallback_app_id_for_name,
+    KeyboardShortcut, _default_shortcuts,
+    ShellProcessRow,
+    APP_ID_BROWSER_DEMO, APP_ID_HELLO_WORLD, APP_ID_FILE_MANAGER,
+    APP_ID_SHELL, APP_ID_EDITOR, APP_ID_SIMPLE_BROWSER
+}
 # ============================================================================
 # Desktop Shell Constants
 # ============================================================================
@@ -49,12 +53,6 @@ val APP_LAUNCHER_WIDTH: i32 = 200
 val APP_LAUNCHER_HEIGHT: i32 = 300
 val CLOCK_WIDTH: i32 = 80
 val SYSTEM_TRAY_WIDTH: i32 = 120
-val APP_ID_BROWSER_DEMO: text = "/sys/apps/browser_demo"
-val APP_ID_HELLO_WORLD: text = "/sys/apps/hello_world"
-val APP_ID_FILE_MANAGER: text = "/sys/apps/file_manager"
-val APP_ID_SHELL: text = "/sys/apps/shell"
-val APP_ID_EDITOR: text = "/sys/apps/editor"
-val APP_ID_SIMPLE_BROWSER: text = "/sys/apps/simple_browser"
 val EDITOR_SMOKE_PATH: text = "/EDITOR.TXT"
 val EDITOR_SMOKE_CONTENT: text = "SimpleOS editor smoke saved from GUI"
 
@@ -76,45 +74,6 @@ fn _sync_launcher_registry_with_manifests():
     val manifests = load_app_manifests()
     for manifest in manifests:
         launcher_register(manifest.name, manifest.binary, manifest.icon, 0, 0)
-
-struct EditorResidentLaunch:
-    tree: UITree
-    saved_path: text
-    content: text
-
-fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
-    val editor_smoke_path = "/EDITOR.TXT"
-    val editor_smoke_content = "SimpleOS editor smoke saved from GUI"
-    noalloc_log_debug("editor resident launch write path={editor_smoke_path}")
-    val wrote = rt_file_write_text(editor_smoke_path, editor_smoke_content)
-    val editor_tree = build_tree_with_title(column("editor_resident_main", [
-        text_widget("editor_resident_title", "Editor"),
-        text_widget("editor_resident_path", editor_smoke_path),
-        text_widget("editor_resident_body", editor_smoke_content)
-    ]), "Editor", "dark")
-    if not wrote:
-        noalloc_log_debug("editor resident launch using preview fallback path={editor_smoke_path}")
-        return Ok(EditorResidentLaunch(
-            tree: editor_tree,
-            saved_path: editor_smoke_path,
-            content: editor_smoke_content
-        ))
-
-    val cli_output = g_vfs_read_file_text(editor_smoke_path)
-    if cli_output != editor_smoke_content:
-        noalloc_log_debug("editor resident launch using preview readback path={editor_smoke_path}")
-        return Ok(EditorResidentLaunch(
-            tree: editor_tree,
-            saved_path: editor_smoke_path,
-            content: editor_smoke_content
-        ))
-    noalloc_log_debug("editor resident launch readback ok path={editor_smoke_path}")
-
-    Ok(EditorResidentLaunch(
-        tree: editor_tree,
-        saved_path: editor_smoke_path,
-        content: cli_output
-    ))
 
 fn _register_materialized_window(shell: DesktopShell, window_id: WindowId, pid: u64, app_id: text):
     log_info("[desktop] " + "[shell] materialized-window:register:start pid={pid} wid={window_id.value} app_id={app_id}")
@@ -168,17 +127,6 @@ fn _create_materialized_surface(
     _register_materialized_window(shell, window_id, pid, app_id)
     window_id
 
-fn _fallback_app_id_for_name(name: text) -> text:
-    match name:
-        case "Browser Demo": APP_ID_BROWSER_DEMO
-        case "Hello World": APP_ID_HELLO_WORLD
-        case "File Manager": APP_ID_FILE_MANAGER
-        case "Terminal": APP_ID_SHELL
-        case "Editor": APP_ID_EDITOR
-        case "Simple Browser": APP_ID_SIMPLE_BROWSER
-        case _:
-            ""
-
 fn _materialize_launch_fallback(shell: DesktopShell, name: text, pid: u64, app_id: text) -> bool:
     """Create compositor-owned fallback windows for launcher-owned processes."""
     match name:
@@ -203,33 +151,6 @@ fn _materialize_launch_fallback(shell: DesktopShell, name: text, pid: u64, app_i
             true
         case _:
             _create_materialized_surface(shell, name, 80, 80, 640, 400, pid, app_id).value != 0
-
-# ============================================================================
-# Keyboard Shortcut
-# ============================================================================
-
-struct KeyboardShortcut:
-    """A global keyboard shortcut binding."""
-    modifier: text      # e.g. "Ctrl+Alt"
-    key: text           # e.g. "h", "t"
-    action: text        # e.g. "launch_Hello World"
-
-fn _default_shortcuts() -> [KeyboardShortcut]:
-    [
-        KeyboardShortcut(modifier: "Meta", key: "h", action: "launch_Hello World"),
-        KeyboardShortcut(modifier: "Meta", key: "t", action: "launch_Terminal"),
-        KeyboardShortcut(modifier: "Meta", key: "w", action: "launch_Simple Browser")
-    ]
-
-struct ShellProcessRow:
-    """Read-only shell projection of launcher-owned process state."""
-    process_index: u64
-    name: text
-    pid: u64
-    state: text
-    windows: u64
-    headless: bool
-    app_id: text
 
 # ============================================================================
 # Desktop Shell

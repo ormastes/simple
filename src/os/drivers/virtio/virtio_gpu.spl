@@ -47,6 +47,28 @@ use os.drivers.virtio.virtio_gpu_ops.{
     virtio_gpu_put_pixel, virtio_gpu_fill_rect, virtio_gpu_clear,
     virtio_gpu_draw_hline, virtio_gpu_draw_vline, virtio_gpu_draw_rect
 }
+use os.drivers.virtio.virtio_gpu_regs.{
+    VIRTIO_PCI_HOST_FEATURES, VIRTIO_PCI_GUEST_FEATURES, VIRTIO_PCI_QUEUE_PFN,
+    VIRTIO_PCI_QUEUE_SIZE, VIRTIO_PCI_QUEUE_SEL, VIRTIO_PCI_QUEUE_NOTIFY,
+    VIRTIO_PCI_STATUS, VIRTIO_PCI_ISR,
+    PCI_CAP_ID_VENDOR_SPECIFIC, VIRTIO_PCI_CAP_COMMON_CFG,
+    VIRTIO_PCI_CAP_NOTIFY_CFG, VIRTIO_PCI_CAP_ISR_CFG,
+    MODERN_COMMON_DEVICE_FEATURE_SELECT, MODERN_COMMON_DEVICE_FEATURE,
+    MODERN_COMMON_DRIVER_FEATURE_SELECT, MODERN_COMMON_DRIVER_FEATURE,
+    MODERN_COMMON_DEVICE_STATUS, MODERN_COMMON_QUEUE_SELECT,
+    MODERN_COMMON_QUEUE_SIZE, MODERN_COMMON_QUEUE_ENABLE,
+    MODERN_COMMON_QUEUE_NOTIFY_OFF,
+    MODERN_COMMON_QUEUE_DESC_LO, MODERN_COMMON_QUEUE_DESC_HI,
+    MODERN_COMMON_QUEUE_AVAIL_LO, MODERN_COMMON_QUEUE_AVAIL_HI,
+    MODERN_COMMON_QUEUE_USED_LO, MODERN_COMMON_QUEUE_USED_HI,
+    STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
+    STATUS_FEATURES_OK, STATUS_FAILED,
+    VIRTIO_GPU_CONTROLQ,
+    virtqueue_desc_size, virtqueue_avail_size, virtqueue_used_size, virtqueue_total_size,
+    ram_read16, ram_read32, ram_read64, ram_read32_raw, ram_read64_raw, ram_read32_boxed,
+    ram_write16, ram_write32, ram_write64,
+    ram_write16_raw, ram_write32_raw, ram_write64_raw
+}
 
 extern fn rt_alloc(size: u64) -> u64
 extern fn rt_memory_barrier()
@@ -54,11 +76,6 @@ extern fn rt_mmio_read_u32(addr: u64) -> u32
 extern fn rt_mmio_read_u64(addr: u64) -> u64
 extern fn rt_mmio_write_u32(addr: u64, value: u32)
 extern fn rt_mmio_write_u64(addr: u64, value: u64)
-extern fn rt_mem_read_u32_boxed(addr: u64) -> u32
-extern fn rt_mem_write_u32_boxed(addr: u64, value: u32)
-extern fn rt_mmio_write_u16_real(addr: u64, value: u64)
-extern fn rt_mmio_write_u32_real(addr: u64, value: u64)
-extern fn rt_mmio_write_u64_real(addr: u64, value: u64)
 extern fn rt_wait_u16_change(addr: u64, old_value: u64, spins: u64) -> u64
 extern fn rt_virtq_avail_slot_addr(base: u64, idx: u64, qsize: u64) -> u64
 extern fn rt_virtio_notify_addr(base: u64, off: u64, mult: u64) -> u64
@@ -68,115 +85,6 @@ extern fn rt_virtq_desc_write(base: u64, index: u64, addr_lo: u64, addr_hi: u64,
 extern fn rt_virtq_write_req_resp_chain(base: u64, req_addr: u64, req_len: u64, resp_addr: u64, resp_len: u64) -> u64
 extern fn rt_virtio_gpu_write_ctrl_hdr(addr: u64, cmd_type: u64) -> u64
 extern fn rt_mmio_read_u32_real(addr: u64) -> u64
-extern fn rt_mmio_read_u64_real(addr: u64) -> u64
-
-# ============================================================================
-# VirtIO Legacy PCI BAR0 Register Offsets
-# ============================================================================
-
-val VIRTIO_PCI_HOST_FEATURES: u64 = 0x00
-val VIRTIO_PCI_GUEST_FEATURES: u64 = 0x04
-val VIRTIO_PCI_QUEUE_PFN: u64 = 0x08
-val VIRTIO_PCI_QUEUE_SIZE: u64 = 0x0C
-val VIRTIO_PCI_QUEUE_SEL: u64 = 0x0E
-val VIRTIO_PCI_QUEUE_NOTIFY: u64 = 0x10
-val VIRTIO_PCI_STATUS: u64 = 0x12
-val VIRTIO_PCI_ISR: u64 = 0x13
-
-# Modern virtio-pci vendor capability and common-config layout
-val PCI_CAP_ID_VENDOR_SPECIFIC: u8 = 0x09
-val VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1
-val VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2
-val VIRTIO_PCI_CAP_ISR_CFG: u8 = 3
-
-val MODERN_COMMON_DEVICE_FEATURE_SELECT: u64 = 0x00
-val MODERN_COMMON_DEVICE_FEATURE: u64 = 0x04
-val MODERN_COMMON_DRIVER_FEATURE_SELECT: u64 = 0x08
-val MODERN_COMMON_DRIVER_FEATURE: u64 = 0x0C
-val MODERN_COMMON_DEVICE_STATUS: u64 = 0x14
-val MODERN_COMMON_QUEUE_SELECT: u64 = 0x16
-val MODERN_COMMON_QUEUE_SIZE: u64 = 0x18
-val MODERN_COMMON_QUEUE_ENABLE: u64 = 0x1C
-val MODERN_COMMON_QUEUE_NOTIFY_OFF: u64 = 0x1E
-val MODERN_COMMON_QUEUE_DESC_LO: u64 = 0x20
-val MODERN_COMMON_QUEUE_DESC_HI: u64 = 0x24
-val MODERN_COMMON_QUEUE_AVAIL_LO: u64 = 0x28
-val MODERN_COMMON_QUEUE_AVAIL_HI: u64 = 0x2C
-val MODERN_COMMON_QUEUE_USED_LO: u64 = 0x30
-val MODERN_COMMON_QUEUE_USED_HI: u64 = 0x34
-
-# Device status bits
-val STATUS_ACKNOWLEDGE: u8 = 1
-val STATUS_DRIVER: u8 = 2
-val STATUS_DRIVER_OK: u8 = 4
-val STATUS_FEATURES_OK: u8 = 8
-val STATUS_FAILED: u8 = 128
-
-# Controlq index
-val VIRTIO_GPU_CONTROLQ: u16 = 0
-
-# ============================================================================
-# Virtqueue Ring Layout Helpers
-# ============================================================================
-# For a queue of size N:
-#   Descriptor table: N * 16 bytes
-#   Available ring:   4 + 2*N bytes (flags:u16, idx:u16, ring[N]:u16)
-#   Used ring:        4 + 8*N bytes (flags:u16, idx:u16, ring[N]:(id:u32,len:u32))
-# Legacy PCI virtqueue: all three placed contiguously, PFN = phys >> 12
-
-fn virtqueue_desc_size(queue_size: u64) -> u64:
-    queue_size * 16
-
-fn virtqueue_avail_size(queue_size: u64) -> u64:
-    4 + 2 * queue_size
-
-fn virtqueue_used_size(queue_size: u64) -> u64:
-    4 + 8 * queue_size
-
-fn virtqueue_total_size(queue_size: u64) -> u64:
-    val ds = virtqueue_desc_size(queue_size)
-    val avs = virtqueue_avail_size(queue_size)
-    val us = virtqueue_used_size(queue_size)
-    # Align used ring to 4096 boundary (virtio spec requirement for legacy)
-    val desc_avail = ds + avs
-    val aligned = (desc_avail + 4095) & ~4095
-    aligned + us
-
-fn ram_read32(addr: u64) -> u32:
-    mmio_read32(addr)
-
-fn ram_read16(addr: u64) -> u16:
-    mmio_read16(addr)
-
-fn ram_read64(addr: u64) -> u64:
-    mmio_read64(addr)
-
-fn ram_write16(addr: u64, value: u16):
-    mmio_write16(addr, value)
-
-fn ram_write32(addr: u64, value: u32):
-    rt_mem_write_u32_boxed(addr, value)
-
-fn ram_write64(addr: u64, value: u64):
-    rt_mmio_write_u64(addr, value)
-
-fn ram_write16_raw(addr: u64, value: u64):
-    rt_mmio_write_u16_real(addr, value)
-
-fn ram_write32_raw(addr: u64, value: u64):
-    rt_mmio_write_u32_real(addr, value)
-
-fn ram_write64_raw(addr: u64, value: u64):
-    rt_mmio_write_u64_real(addr, value)
-
-fn ram_read32_raw(addr: u64) -> u32:
-    rt_mmio_read_u32_real(addr).to_u32()
-
-fn ram_read64_raw(addr: u64) -> u64:
-    rt_mmio_read_u64_real(addr)
-
-fn ram_read32_boxed(addr: u64) -> u32:
-    rt_mem_read_u32_boxed(addr)
 
 # ============================================================================
 # DMA Allocation Result (baremetal-safe, no heap)
