@@ -21,10 +21,14 @@ use compiler.shb.shb_cache.{
     ShbCacheManager, ShbCacheConfig, ShbChangeEvent,
     compile_changed_to_shb, shb_batch_summary
 }
-use app.build.watch.{
-    FileSnapshot, FileChangeEvent,
-    build_file_snapshot, detect_changes
+use app.watch.watcher.{
+    FileSnapshot, collect_multi_snapshot, diff_snapshots
 }
+
+# Local adapter type — bridges the watcher_daemon API to app.watch.watcher
+struct FileChangeEvent:
+    path: text
+    event_type: text
 use std.daemon_sdk.daemon.{DaemonRunner, daemon_runner_start}
 use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_response_new}
 
@@ -63,8 +67,15 @@ impl WatcherDaemon:
         self.state.last_poll_time = rt_time_now_unix_micros()
 
         # Domain-specific: detect file changes
-        val current_snapshot = build_file_snapshot(["src/"], ["target/", ".git/", "*.swp", "*.tmp"])
-        val changes = detect_changes(self.file_snapshot, current_snapshot)
+        val current_snapshot = collect_multi_snapshot(["src/"], ".spl")
+        val cs = diff_snapshots(self.file_snapshot, current_snapshot)
+        var changes: [FileChangeEvent] = []
+        for f in cs.modified:
+            changes.push(FileChangeEvent(path: f, event_type: "modified"))
+        for f in cs.added:
+            changes.push(FileChangeEvent(path: f, event_type: "added"))
+        for f in cs.deleted:
+            changes.push(FileChangeEvent(path: f, event_type: "deleted"))
 
         if changes.len() > 0:
             self.state.status = WATCHER_STATE_PROCESSING
@@ -204,7 +215,7 @@ fn watcher_daemon_start(config: WatcherConfig) -> WatcherDaemon:
     val shb_config = ShbCacheConfig(cache_dir: config.shb_dir, enabled: true)
     val shb_cache = ShbCacheManager.create(shb_config)
 
-    val snapshot = build_file_snapshot(["src/"], ["target/", ".git/", "*.swp", "*.tmp"])
+    val snapshot = collect_multi_snapshot(["src/"], ".spl")
 
     WatcherDaemon(
         config: config,
