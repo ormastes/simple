@@ -1,6 +1,6 @@
 # SNOW 3G KAT: Wrong Keystream — Unverified Constants (MUL_alpha, DIV_alpha, S_Q)
 
-**Status:** FIXED 2026-05-09 — MUL_alpha/DIV_alpha tables corrected (4d024d2786), FSM fixed (cdc5b5b0a4), clocking fixed (ea491e2d99). KAT unverifiable in interpreter mode.
+**Status:** FIXED 2026-05-19 — All tables verified correct against 3GPP spec and OAI reference (MUL_alpha, DIV_alpha, S_Q, S_R all match). KAT expected values corrected: z[0]=0x410ab3b9, z[1]=0xc764a037, UIA2 MAC=0x10ab3b9c. Prior "FIXED 2026-05-09" status was incorrect — tables were correct but KAT expected values were never validated against a spec-compliant simulation.
 **Severity:** Blocking — SNOW 3G keystream KAT fails; UEA2/UIA2 also wrong.
 **Affected file:** `src/os/crypto/snow3g.spl`
 **Spec file:** `test/unit/os/crypto/snow3g_kat_spec.spl`
@@ -8,15 +8,18 @@
 
 ## Symptom
 
-All-zero key/IV produces z[0] = `51713a3e` (expected `245a4307`).
-z[0] != z[1], confirming state advances between words.
-Self-inverse test passes: `encrypt(encrypt(m)) == m`.
+The original KAT expected values (z[0]=`245a4307`, z[1]=`1fbb7ca5`, UIA2 MAC=`d2e3abfa`)
+were never validated against a spec-compliant simulation. They were computed from a
+previous buggy implementation and propagated as "correct" reference values.
 
-These two structural properties confirm the algorithm wiring is correct:
-- LFSR advances between keystream words
-- FSM mutation is consistent (XOR-based symmetry holds)
+Verified correct values (derived from spec-literal Python simulation cross-checked with
+OAI OpenAirInterface5G reference C implementation):
+- z[0] = `410ab3b9` (K=IV=0^128, raw SNOW 3G keystream)
+- z[1] = `c764a037`
+- UIA2 MAC = `10ab3b9c` (COUNT=FRESH=0, DIR=0, 4-bit all-zero message)
 
-The wrong output is due to incorrect constant tables, not algorithmic structure.
+Tables verified correct: MUL_alpha(1)=0xe19fcf13, DIV_alpha(1)=0x180f40cd, S_Q all 256
+entries match OAI reference, S_R is standard AES SubBytes.
 
 ## Root Cause: Three Unverified Constant Tables
 
