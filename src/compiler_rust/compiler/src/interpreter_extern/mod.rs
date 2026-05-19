@@ -1012,6 +1012,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_simd_fma_f32x4", simd::rt_simd_fma_f32x4 as ExternFn);
     m.insert("rt_simd_fma_f32x8", simd::rt_simd_fma_f32x8 as ExternFn);
     m.insert("rt_simd_fma_f64x4", simd::rt_simd_fma_f64x4 as ExternFn);
+    m.insert("rt_simd_hadd_f32x4", simd::rt_simd_hadd_f32x4 as ExternFn);
+    m.insert("rt_simd_hmax_f32x4", simd::rt_simd_hmax_f32x4 as ExternFn);
+    m.insert("rt_simd_hmin_f32x4", simd::rt_simd_hmin_f32x4 as ExternFn);
     m.insert("rt_simd_has_avx2", simd::rt_simd_has_avx2 as ExternFn);
     m.insert("rt_simd_has_avx", simd::rt_simd_has_avx as ExternFn);
     m.insert("rt_simd_has_neon", simd::rt_simd_has_neon as ExternFn);

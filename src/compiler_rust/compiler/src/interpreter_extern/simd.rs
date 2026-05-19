@@ -914,6 +914,39 @@ pub fn rt_simd_fma_f64x4(args: &[Value]) -> Result<Value, CompileError> {
     fma_f64x4("rt_simd_fma_f64x4", args)
 }
 
+// ---------------------------------------------------------------------------
+// Vec4f horizontal reduction ops (hadd, hmax, hmin)
+// ---------------------------------------------------------------------------
+
+pub fn rt_simd_hadd_f32x4(args: &[Value]) -> Result<Value, CompileError> {
+    let name = "rt_simd_hadd_f32x4";
+    if args.len() != 1 {
+        return Err(CompileError::runtime(format!("{name} expects 1 argument")));
+    }
+    let a = unpack_vec4f(name, &args[0])?;
+    Ok(Value::Float(f64::from(a[0] + a[1] + a[2] + a[3])))
+}
+
+pub fn rt_simd_hmax_f32x4(args: &[Value]) -> Result<Value, CompileError> {
+    let name = "rt_simd_hmax_f32x4";
+    if args.len() != 1 {
+        return Err(CompileError::runtime(format!("{name} expects 1 argument")));
+    }
+    let a = unpack_vec4f(name, &args[0])?;
+    let m = a[0].max(a[1]).max(a[2]).max(a[3]);
+    Ok(Value::Float(f64::from(m)))
+}
+
+pub fn rt_simd_hmin_f32x4(args: &[Value]) -> Result<Value, CompileError> {
+    let name = "rt_simd_hmin_f32x4";
+    if args.len() != 1 {
+        return Err(CompileError::runtime(format!("{name} expects 1 argument")));
+    }
+    let a = unpack_vec4f(name, &args[0])?;
+    let m = a[0].min(a[1]).min(a[2]).min(a[3]);
+    Ok(Value::Float(f64::from(m)))
+}
+
 // ============================================================================
 // Phase 2 SEED — Vec16u8 byte-wise SIMD ops.
 //
