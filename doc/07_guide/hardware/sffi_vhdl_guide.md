@@ -49,6 +49,46 @@ wrappers) but target different audiences:
 
 ---
 
+## ABI Layer (VHDL-PARITY-020)
+
+The ABI layer (`src/compiler/70.backend/backend/vhdl/vhdl_abi.spl`) resolves
+how MIR function signatures map to VHDL entity ports. It handles type-to-signal
+mapping, port name sanitization, and return ABI decomposition.
+
+**Key structs:**
+
+| Struct | Purpose |
+|--------|---------|
+| `VhdlAbiPort` | Single entity port (name, direction, VHDL type) |
+| `VhdlAbiReturnField` | One output port from return ABI (name, type, index) |
+| `VhdlAbiReturn` | Resolved return ABI — scalar or tuple |
+
+**Return ABI rules:**
+
+| Return Type | Port Mapping |
+|-------------|-------------|
+| `Unit` | No output ports |
+| Scalar (`i32`, `bool`, etc.) | Single `result_out` port |
+| Labeled tuple `(sum: bool, cout: bool)` | Named ports from labels (`sum`, `cout`) |
+| Anonymous tuple `(bool, bool)` | Numbered ports (`out_0`, `out_1`) |
+
+**Functions:**
+
+| Function | What it does |
+|----------|-------------|
+| `vhdl_data_width_bits(ty)` | Data width in bits (nil for unsynthesizable) |
+| `vhdl_signal_type_for(ty, mapper)` | MIR type to VHDL signal type string |
+| `vhdl_abi_sanitize_port_name(name)` | VHDL-safe port identifier |
+| `vhdl_resolve_return_abi(func, mapper)` | Return type to output port list |
+| `vhdl_resolve_input_ports(func, mapper)` | Parameters to input port list |
+| `vhdl_resolve_all_ports(func, mapper)` | Combined input + output ports |
+| `vhdl_abi_check_port_collisions(ports)` | Duplicate name diagnostics |
+| `vhdl_abi_validate_output(func)` | Unsynthesizable return type diagnostics |
+
+Test coverage: 37 cases in `test/unit/compiler/backend/vhdl_abi_spec.spl`.
+
+---
+
 ## Prerequisites
 
 Install the required EDA tools:

@@ -1,11 +1,11 @@
 # VHDL MIR Backend ABI Parity Task
 
-> Status: TODO — analysis-only; Rust implementation intentionally deferred
+> Status: Simple-side ABI layer complete (VHDL-PARITY-020); Rust MIR backend deferred
 
-Date: 2026-04-23
+Date: 2026-04-23 (updated 2026-05-19)
 Task ID: VHDL-PARITY-016
 Owner: Rust MIR backend parity agent
-Status: Pending
+Status: Simple-side complete — `src/compiler/70.backend/backend/vhdl/vhdl_abi.spl` (302 lines, 37/37 tests pass). Rust MIR backend Workers 1-6 remain pending.
 
 ## Goal
 
