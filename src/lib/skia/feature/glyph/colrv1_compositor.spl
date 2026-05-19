@@ -1,8 +1,8 @@
-# COLRv1 color emoji layer-list decoder and paint-graph compositor.
-# Decodes COLR table header (v1), layer-list structure, and composes
-# paint graphs into Bitmap output.
+# COLRv1 paint-graph compositor.
+# Recursively decodes paint-graph subtrees and rasterizes them into Bitmap output.
 
 use std.skia.feature.glyph.ot_parser.{read_u16_be, read_u32_be}
+use std.skia.feature.glyph.colrv1_parser.{PaintKind, PaintNode, decode_paint_subtable}
 use std.skia.backend.cpu.raster_prims.{Bitmap}
 use std.skia.backend.cpu.shaders.{eval_linear_gradient, eval_radial_gradient, eval_sweep_gradient, apply_blend}
 use std.skia.entity.shader.{SkShader, SkShaderKind, sk_shader_make_linear_gradient, sk_shader_make_radial_gradient}
@@ -10,370 +10,6 @@ use std.skia.entity.enums.{SkTileMode}
 use std.skia.entity.color.{SkColor4f, SkColor, sk_color_alpha, sk_color_red, sk_color_green, sk_color_blue}
 use std.skia.entity.enums.{SkBlendMode}
 use std.skia.entity.geometry.{SkRect}
-
-# ===== COLR v1 header =====
-
-class ColrV1Header:
-    version: u16
-    num_base_glyph_records: u16
-    layer_list_offset: u32
-    clip_list_offset: u32
-    var_index_map_offset: u32
-
-# parse_colr_header reads the COLR table header from a raw blob.
-# Returns None if blob is too short or version != 1.
-fn parse_colr_header(blob: [u8]) -> Option<ColrV1Header>:
-    # Minimum COLR v1 header is 20 bytes:
-    # 2  version
-    # 2  numBaseGlyphRecords
-    # 4  baseGlyphRecordsOffset
-    # 4  layersOffset  (layer_list_offset)
-    # 4  numLayers (or clip_list_offset in v1 extended form)
-    # 4  varIndexMapOffset
-    # We require at least 20 bytes for a v1 header.
-    if blob.len() < 20:
-        return None
-    val version_raw = read_u16_be(blob, 0) as u16
-    if version_raw != 1:
-        return None
-    val num_base = read_u16_be(blob, 2) as u16
-    # offset 4: baseGlyphRecordsOffset (4 bytes) — skip, not stored
-    val layer_off = read_u32_be(blob, 8)
-    val clip_off = read_u32_be(blob, 12)
-    val var_off = read_u32_be(blob, 16)
-    Some(ColrV1Header(
-        version: version_raw,
-        num_base_glyph_records: num_base,
-        layer_list_offset: layer_off,
-        clip_list_offset: clip_off,
-        var_index_map_offset: var_off
-    ))
-
-# ===== Layer list =====
-
-class ColrLayer:
-    glyph_id: u32
-    paint_offset: u32
-
-# parse_layer_list reads the layer list from the COLR blob using the header.
-# Returns [] if layer_list_offset is 0 or the region is too short.
-fn parse_layer_list(blob: [u8], header: ColrV1Header) -> [ColrLayer]:
-    val off = header.layer_list_offset as i64
-    if off == 0:
-        return []
-    # layer list starts with numLayers u32, then each record: glyphId u16, paintOffset u32
-    # record size = 6 bytes
-    if off + 4 > blob.len() as i64:
-        return []
-    val num_layers = read_u32_be(blob, off) as i64
-    val data_start = off + 4
-    if data_start + num_layers * 6 > blob.len() as i64:
-        return []
-    var layers: [ColrLayer] = []
-    var i: i64 = 0
-    while i < num_layers:
-        val rec = data_start + i * 6
-        val gid = read_u16_be(blob, rec) as u32
-        val paint_off = read_u32_be(blob, rec + 2)
-        val layer = ColrLayer(glyph_id: gid, paint_offset: paint_off)
-        layers.append(layer)
-        i = i + 1
-    layers
-
-# ===== Paint kind enum =====
-
-enum PaintKind:
-    Solid
-    LinearGradient
-    RadialGradient
-    SweepGradient
-    Glyph
-    ColrLayers
-    Transform
-    Translate
-    Rotate
-    Scale
-    Skew
-    Composite
-
-# ===== Paint node =====
-
-class PaintNode:
-    kind: PaintKind
-    palette_index: u16
-    # alpha in 2.14 fixed-point (0x4000 == 1.0)
-    alpha_fixed: i32
-
-# decode_paint_subtable reads one paint record from blob at the given offset.
-# Dispatches on the format byte; unknown formats return a safe Solid fallback.
-# Returns None if offset is out of bounds.
-fn decode_paint_subtable(blob: [u8], offset: u32) -> Option<PaintNode>:
-    val off = offset as i64
-    if off >= blob.len() as i64:
-        return None
-    val fmt = blob[off] as u32
-    # COLRv1 paint format values (OpenType spec §COLRv1)
-    # 2/3  = PaintSolid / PaintVarSolid
-    # 4/5  = PaintLinearGradient / PaintVarLinearGradient
-    # 6/7  = PaintRadialGradient / PaintVarRadialGradient
-    # 8/9  = PaintSweepGradient / PaintVarSweepGradient
-    # 10   = PaintGlyph
-    # 11   = PaintColrLayers
-    # 12/13= PaintTransform / PaintVarTransform
-    # 14/15= PaintTranslate / PaintVarTranslate
-    # 16/17= PaintRotate / PaintVarRotate
-    # 18/19= PaintScale / PaintVarScale
-    # 20/21= PaintSkew / PaintVarSkew
-    # 32   = PaintComposite
-    if fmt == 2 or fmt == 3:
-        # PaintSolid / PaintVarSolid record layout (OpenType spec §COLRv1):
-        #   [format(1)] [paletteIndex(2)] [alpha(2, F2Dot14)]
-        # F2Dot14: 0x4000 = 1.0. Minimum record length = 5 bytes.
-        if off + 5 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.Solid, palette_index: 0, alpha_fixed: 16384))
-        val pal_idx = read_u16_be(blob, off + 1) as u16
-        # alpha is a signed F2Dot14 stored as two bytes (big-endian i16)
-        val alpha_hi = blob[off + 3] as i32
-        val alpha_lo = blob[off + 4] as i32
-        val alpha_raw = (alpha_hi << 8) or alpha_lo
-        # Clamp to [0, 0x4000]
-        val alpha_clamped = if alpha_raw < 0: 0 else: if alpha_raw > 16384: 16384 else: alpha_raw
-        Some(PaintNode(kind: PaintKind.Solid, palette_index: pal_idx, alpha_fixed: alpha_clamped))
-    else if fmt == 4 or fmt == 5:
-        # PaintLinearGradient / PaintVarLinearGradient record layout:
-        #   [format(1)] [colorLineOffset(3, u24 BE)] [x0(2)] [y0(2)] [x1(2)] [y1(2)] [x2(2)] [y2(2)]
-        # We store the first palette index from the color line as palette_index.
-        # Minimum to reach colorLineOffset field: 4 bytes.
-        if off + 4 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.LinearGradient, palette_index: 0, alpha_fixed: 16384))
-        val cl_b0 = blob[off + 1] as u32
-        val cl_b1 = blob[off + 2] as u32
-        val cl_b2 = blob[off + 3] as u32
-        val color_line_off = (off + ((cl_b0 << 16) or (cl_b1 << 8) or cl_b2) as i64)
-        # Read first color stop palette index from color line (offset 2 within color line = first stop paletteIndex)
-        val first_pal = if color_line_off + 4 <= blob.len() as i64:
-            read_u16_be(blob, color_line_off + 2) as u16
-        else:
-            0 as u16
-        Some(PaintNode(kind: PaintKind.LinearGradient, palette_index: first_pal, alpha_fixed: 16384))
-    else if fmt == 6 or fmt == 7:
-        # PaintRadialGradient / PaintVarRadialGradient record layout:
-        #   [format(1)] [colorLineOffset(3, u24 BE)] [x0(2)] [y0(2)] [r0(2)] [x1(2)] [y1(2)] [r1(2)]
-        if off + 4 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.RadialGradient, palette_index: 0, alpha_fixed: 16384))
-        val cl_b0 = blob[off + 1] as u32
-        val cl_b1 = blob[off + 2] as u32
-        val cl_b2 = blob[off + 3] as u32
-        val color_line_off = (off + ((cl_b0 << 16) or (cl_b1 << 8) or cl_b2) as i64)
-        val first_pal = if color_line_off + 4 <= blob.len() as i64:
-            read_u16_be(blob, color_line_off + 2) as u16
-        else:
-            0 as u16
-        Some(PaintNode(kind: PaintKind.RadialGradient, palette_index: first_pal, alpha_fixed: 16384))
-    else if fmt == 8 or fmt == 9:
-        # PaintSweepGradient / PaintVarSweepGradient record layout:
-        #   [format(1)] [colorLineOffset(3, u24 BE)] [centerX(2)] [centerY(2)] [startAngle(2, F2Dot14)] [endAngle(2, F2Dot14)]
-        if off + 4 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.SweepGradient, palette_index: 0, alpha_fixed: 16384))
-        val cl_b0 = blob[off + 1] as u32
-        val cl_b1 = blob[off + 2] as u32
-        val cl_b2 = blob[off + 3] as u32
-        val color_line_off = (off + ((cl_b0 << 16) or (cl_b1 << 8) or cl_b2) as i64)
-        val first_pal = if color_line_off + 4 <= blob.len() as i64:
-            read_u16_be(blob, color_line_off + 2) as u16
-        else:
-            0 as u16
-        Some(PaintNode(kind: PaintKind.SweepGradient, palette_index: first_pal, alpha_fixed: 16384))
-    else if fmt == 10:
-        # PaintGlyph record layout:
-        #   [format(1)] [paintOffset(3, u24 BE)] [glyphID(2)]
-        # We store the glyph_id in palette_index (repurposed field) so the
-        # compose_paint_graph branch can read it without a schema change.
-        if off + 6 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.Glyph, palette_index: 0, alpha_fixed: 16384))
-        val glyph_id_u16 = read_u16_be(blob, off + 4) as u16
-        Some(PaintNode(kind: PaintKind.Glyph, palette_index: glyph_id_u16, alpha_fixed: 16384))
-    else if fmt == 11:
-        # PaintColrLayers record layout:
-        #   [format(1)] [numLayers(1)] [firstLayerIndex(4, u32 BE)]
-        # Minimum length: 6 bytes. No extra fields to extract into PaintNode;
-        # compose_paint_graph reads num_layers and first_layer_index directly.
-        if off + 6 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.ColrLayers, palette_index: 0, alpha_fixed: 16384))
-        Some(PaintNode(kind: PaintKind.ColrLayers, palette_index: 0, alpha_fixed: 16384))
-    else if fmt == 12 or fmt == 13:
-        # PaintTransform / PaintVarTransform record layout:
-        #   [format(1)] [paintOffset(3, u24 BE)] [transformOffset(3, u24 BE)]
-        # The 2×3 affine matrix lives at transformOffset relative to record start.
-        # No matrix fields stored in PaintNode; compose_paint_graph reads them.
-        if off + 7 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.Transform, palette_index: 0, alpha_fixed: 16384))
-        Some(PaintNode(kind: PaintKind.Transform, palette_index: 0, alpha_fixed: 16384))
-    else if fmt == 14 or fmt == 15:
-        # PaintTranslate / PaintVarTranslate record layout:
-        #   [format(1)] [paintOffset(3, u24 BE)] [dx(2, i16 BE)] [dy(2, i16 BE)]
-        if off + 8 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.Translate, palette_index: 0, alpha_fixed: 16384))
-        Some(PaintNode(kind: PaintKind.Translate, palette_index: 0, alpha_fixed: 16384))
-    else if fmt == 16 or fmt == 17:
-        # PaintRotate / PaintVarRotate record layout:
-        #   [format(1)] [paintOffset(3, u24 BE)] [angle(2, F2Dot14 BE)]
-        if off + 6 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.Rotate, palette_index: 0, alpha_fixed: 16384))
-        Some(PaintNode(kind: PaintKind.Rotate, palette_index: 0, alpha_fixed: 16384))
-    else if fmt == 18 or fmt == 19:
-        # PaintScale / PaintVarScale record layout:
-        #   [format(1)] [paintOffset(3, u24 BE)] [scaleX(2, F2Dot14)] [scaleY(2, F2Dot14)]
-        if off + 8 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.Scale, palette_index: 0, alpha_fixed: 16384))
-        Some(PaintNode(kind: PaintKind.Scale, palette_index: 0, alpha_fixed: 16384))
-    else if fmt == 20 or fmt == 21:
-        # PaintSkew / PaintVarSkew record layout:
-        #   [format(1)] [paintOffset(3, u24 BE)] [xSkewAngle(2, F2Dot14)] [ySkewAngle(2, F2Dot14)]
-        if off + 8 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.Skew, palette_index: 0, alpha_fixed: 16384))
-        Some(PaintNode(kind: PaintKind.Skew, palette_index: 0, alpha_fixed: 16384))
-    else if fmt == 32:
-        # PaintComposite record layout:
-        #   [format(1)] [sourcePaintOffset(3, u24 BE)] [compositeMode(1)] [backdropPaintOffset(3, u24 BE)]
-        # compose_paint_graph reads source/backdrop offsets and mode directly from blob.
-        if off + 8 > blob.len() as i64:
-            return Some(PaintNode(kind: PaintKind.Composite, palette_index: 0, alpha_fixed: 16384))
-        Some(PaintNode(kind: PaintKind.Composite, palette_index: 0, alpha_fixed: 16384))
-    else:
-        # Unknown format — safe Solid fallback, alpha=1.0 (0x4000)
-        Some(PaintNode(kind: PaintKind.Solid, palette_index: 0, alpha_fixed: 16384))
-
-# ===== BaseGlyph v1 record search =====
-
-# find_base_glyph_v1 scans the BaseGlyph v1 records for glyph_id.
-# BaseGlyph v1 record: glyphId (u16) + paintOffset (u32) = 6 bytes each.
-# The records start at baseGlyphRecordsOffset (bytes 4-7 in the COLR table).
-# Returns Some(paint_offset) or None if not found.
-fn find_base_glyph_v1(blob: [u8], header: ColrV1Header, glyph_id: u32) -> Option<u32>:
-    # BaseGlyphRecordsOffset is at blob offset 4 (not stored in header; re-read it)
-    if blob.len() < 8:
-        return None
-    val base_off = read_u32_be(blob, 4) as i64
-    if base_off == 0:
-        return None
-    val count = header.num_base_glyph_records as i64
-    if base_off + count * 6 > blob.len() as i64:
-        return None
-    # Linear scan (BaseGlyph records are sorted by glyph_id; binary search possible but linear is simpler)
-    var i: i64 = 0
-    while i < count:
-        val rec = base_off + i * 6
-        val gid = read_u16_be(blob, rec) as u32
-        if gid == glyph_id:
-            val paint_off = read_u32_be(blob, rec + 2)
-            return Some(paint_off)
-        i = i + 1
-    None
-
-# ===== Shaper entry point =====
-
-# route_color_glyph is called by the shaper to produce a layer breakdown
-# for a color glyph from the raw COLR table blob.
-# Returns None if the blob is empty, has no v1 header, or the glyph isn't found.
-fn route_color_glyph(shaper_glyph_id: u32, colr_blob: [u8]) -> Option<[ColrLayer]>:
-    if colr_blob.len() == 0:
-        return None
-    val maybe_header = parse_colr_header(colr_blob)
-    if maybe_header == None:
-        return None
-    val header = maybe_header.unwrap()
-    val maybe_paint_off = find_base_glyph_v1(colr_blob, header, shaper_glyph_id)
-    if maybe_paint_off == None:
-        return None
-    val paint_off = maybe_paint_off.unwrap()
-    # Walk the paint graph rooted at paint_off and collect all reachable
-    # paint nodes as a flat ColrLayer list (glyph_id=shaper_glyph_id, paint_offset=each node's offset).
-    # We perform a simple iterative BFS over paint offsets to avoid deep recursion.
-    var visited_offsets: [u32] = []
-    var work_queue: [u32] = []
-    work_queue.append(paint_off)
-    var result_layers: [ColrLayer] = []
-    var steps: i64 = 0
-    val max_steps: i64 = 512
-    while work_queue.len() > 0 and steps < max_steps:
-        val cur_off = work_queue[0]
-        # Remove first element
-        var new_queue: [u32] = []
-        var qi: i64 = 1
-        while qi < work_queue.len() as i64:
-            new_queue.append(work_queue[qi])
-            qi = qi + 1
-        work_queue = new_queue
-        # Skip if already visited
-        var already = false
-        var vi: i64 = 0
-        while vi < visited_offsets.len() as i64:
-            if visited_offsets[vi] == cur_off:
-                already = true
-            vi = vi + 1
-        if already:
-            steps = steps + 1
-            continue
-        visited_offsets.append(cur_off)
-        val layer = ColrLayer(glyph_id: shaper_glyph_id, paint_offset: cur_off)
-        result_layers.append(layer)
-        # Decode node to discover child paint offsets
-        val maybe_node = decode_paint_subtable(colr_blob, cur_off)
-        if maybe_node != None:
-            val node = maybe_node.unwrap()
-            val node_off = cur_off as i64
-            # PaintColrLayers (fmt 11): child offsets come from layer list entries
-            if node.kind == PaintKind.ColrLayers:
-                if node_off + 6 <= colr_blob.len() as i64:
-                    val num_layers = colr_blob[node_off + 1] as i64
-                    val first_idx = read_u32_be(colr_blob, node_off + 2) as i64
-                    var li: i64 = 0
-                    while li < num_layers:
-                        val entry_off = (first_idx + li) * 4
-                        if entry_off + 4 <= colr_blob.len() as i64:
-                            val child_off = read_u32_be(colr_blob, entry_off)
-                            work_queue.append(child_off)
-                        li = li + 1
-            # PaintComposite (fmt 32): source + backdrop paint offsets
-            else if node.kind == PaintKind.Composite:
-                if node_off + 8 <= colr_blob.len() as i64:
-                    val src_b0 = colr_blob[node_off + 1] as u32
-                    val src_b1 = colr_blob[node_off + 2] as u32
-                    val src_b2 = colr_blob[node_off + 3] as u32
-                    val src_off = cur_off + ((src_b0 << 16) or (src_b1 << 8) or src_b2)
-                    val bd_b0 = colr_blob[node_off + 5] as u32
-                    val bd_b1 = colr_blob[node_off + 6] as u32
-                    val bd_b2 = colr_blob[node_off + 7] as u32
-                    val bd_off = cur_off + ((bd_b0 << 16) or (bd_b1 << 8) or bd_b2)
-                    work_queue.append(src_off)
-                    work_queue.append(bd_off)
-            # PaintGlyph (fmt 10): single child paint offset (u24 BE at off+1)
-            else if node.kind == PaintKind.Glyph:
-                if node_off + 4 <= colr_blob.len() as i64:
-                    val pb0 = colr_blob[node_off + 1] as u32
-                    val pb1 = colr_blob[node_off + 2] as u32
-                    val pb2 = colr_blob[node_off + 3] as u32
-                    val child_off = cur_off + ((pb0 << 16) or (pb1 << 8) or pb2)
-                    work_queue.append(child_off)
-            # Transform-family (fmt 12-21): single child paint offset at off+1 (u24 BE)
-            else if (node.kind == PaintKind.Transform or node.kind == PaintKind.Translate
-                     or node.kind == PaintKind.Rotate or node.kind == PaintKind.Scale
-                     or node.kind == PaintKind.Skew):
-                if node_off + 4 <= colr_blob.len() as i64:
-                    val tb0 = colr_blob[node_off + 1] as u32
-                    val tb1 = colr_blob[node_off + 2] as u32
-                    val tb2 = colr_blob[node_off + 3] as u32
-                    val child_off = cur_off + ((tb0 << 16) or (tb1 << 8) or tb2)
-                    work_queue.append(child_off)
-            # Solid and gradient paints are leaf nodes — no child offsets
-        steps = steps + 1
-    if result_layers.len() == 0:
-        None
-    else:
-        Some(result_layers)
-
-# ===== Paint-graph compositor =====
 
 # PaintGraphContext carries per-glyph rendering context through the paint graph.
 class PaintGraphContext:
@@ -384,7 +20,6 @@ class PaintGraphContext:
     fn new(bounds: SkRect, palette: [SkColor], em_units: i32) -> PaintGraphContext:
         PaintGraphContext(bounds: bounds, palette: palette, em_units: em_units)
 
-# _sk_color_to_color4f converts a packed SkColor (i64 ARGB) to SkColor4f.
 fn _sk_color_to_color4f(c: SkColor) -> SkColor4f:
     val a = sk_color_alpha(c).to_f64() / 255.0
     val r = sk_color_red(c).to_f64() / 255.0
@@ -392,7 +27,6 @@ fn _sk_color_to_color4f(c: SkColor) -> SkColor4f:
     val b = sk_color_blue(c).to_f64() / 255.0
     SkColor4f(r: r, g: g, b: b, a: a)
 
-# _bitmap_blend_over composites src bitmap onto dst bitmap with SrcOver per pixel.
 fn _bitmap_blend_over(dst: Bitmap, src: Bitmap):
     val w = dst.width
     val h = dst.height
@@ -444,7 +78,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
     val out = Bitmap.zeros(bw, bh)
 
     if node.kind == PaintKind.Solid:
-        # Fill entire bounds with the palette color, alpha-scaled by alpha_fixed/0x4000
         val alpha_scale = node.alpha_fixed.to_f64() / 16384.0
         val pal_count = context.palette.len() as i64
         val pal_idx = node.palette_index as i64
@@ -472,21 +105,11 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.ColrLayers:
-        # Read num_layers (u8) and first_layer_index (u32) from the record.
-        # Format 11: [format_byte(1)] [num_layers(1)] [first_layer_index(4)]
         val off = paint_offset as i64
         if off + 6 > blob.len() as i64:
             return out
         val num_layers = blob[off + 1] as i64
         val first_layer_idx = read_u32_be(blob, off + 2) as i64
-        # Layer offsets are stored in a separate layer offsets table.
-        # For our purposes: each layer entry in blob is a 4-byte paint offset
-        # stored sequentially starting at a LayerList table.
-        # Since decode_paint_subtable already decoded the layer record,
-        # we read sequential child paint offsets from the blob at first_layer_idx.
-        # In a real COLR table the layer list index is into the LayerList array.
-        # We treat the blob entries at (first_layer_idx * 4) as sequential u32 offsets.
-        # This is a reasonable structural interpretation for the stub-advance pass.
         var layer_i = 0 as i64
         while layer_i < num_layers:
             val entry_off = (first_layer_idx + layer_i) * 4
@@ -498,7 +121,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.Composite:
-        # Format 32: [format(1)] [source_paint_offset(4)] [composite_mode(1)] [backdrop_paint_offset(4)]
         val off = paint_offset as i64
         if off + 10 > blob.len() as i64:
             return out
@@ -507,7 +129,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         val backdrop_offset = read_u32_be(blob, off + 6)
         val backdrop_bmp = compose_paint_graph(blob, backdrop_offset, context)
         val src_bmp = compose_paint_graph(blob, src_offset, context)
-        # Map COLRv1 CompositeMode byte to SkBlendMode (spec §COLRv1 CompositeMode)
         val mode = if mode_byte == 3: SkBlendMode.SrcOver
             else if mode_byte == 4: SkBlendMode.DstOver
             else if mode_byte == 5: SkBlendMode.SrcIn
@@ -529,7 +150,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
             else if mode_byte == 25: SkBlendMode.Difference
             else if mode_byte == 26: SkBlendMode.Exclusion
             else: SkBlendMode.SrcOver
-        # Merge src over backdrop using the specified blend mode
         var cy = 0 as i64
         while cy < bh:
             var cx = 0 as i64
@@ -565,30 +185,20 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.LinearGradient:
-        # PaintLinearGradient (fmt 4/5) record layout:
-        #   [format(1)] [colorLineOffset(3 u24 BE)] [x0(2 i16)] [y0(2 i16)]
-        #   [x1(2 i16)] [y1(2 i16)] [x2(2 i16)] [y2(2 i16)]
-        # x0/y0 = start point, x1/y1 = end point, x2/y2 = rotation point.
-        # Build a two-stop gradient from the first palette color to transparent,
-        # then rasterize per pixel via eval_linear_gradient.
         val lg_off = paint_offset as i64
         if lg_off + 16 > blob.len() as i64:
             return out
-        # Geometry: 16-bit signed coordinates follow the 4-byte header
         val x0_raw = read_u16_be(blob, lg_off + 4) as i64
         val y0_raw = read_u16_be(blob, lg_off + 6) as i64
         val x1_raw = read_u16_be(blob, lg_off + 8) as i64
         val y1_raw = read_u16_be(blob, lg_off + 10) as i64
-        # Convert unsigned read to signed (two's complement 16-bit)
         val x0_s = if x0_raw >= 32768: x0_raw - 65536 else: x0_raw
         val y0_s = if y0_raw >= 32768: y0_raw - 65536 else: y0_raw
         val x1_s = if x1_raw >= 32768: x1_raw - 65536 else: x1_raw
         val y1_s = if y1_raw >= 32768: y1_raw - 65536 else: y1_raw
-        # Scale from em units to pixel bounds
         val em = if context.em_units > 0: context.em_units as f64 else: 1000.0
         val pt0 = SkPoint(x: (x0_s as f64) * (bw as f64) / em, y: (y0_s as f64) * (bh as f64) / em)
         val pt1 = SkPoint(x: (x1_s as f64) * (bw as f64) / em, y: (y1_s as f64) * (bh as f64) / em)
-        # Build palette-based gradient colors from the first two palette entries
         val pal_count = context.palette.len() as i64
         val c0 = if pal_count > 0: context.palette[0] else: 0xFF000000 as SkColor
         val c1 = if pal_count > 1: context.palette[1] else: 0x00000000 as SkColor
@@ -613,12 +223,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.RadialGradient:
-        # PaintRadialGradient (fmt 6/7) record layout:
-        #   [format(1)] [colorLineOffset(3 u24 BE)]
-        #   [x0(2 i16)] [y0(2 i16)] [r0(2 u16)]
-        #   [x1(2 i16)] [y1(2 i16)] [r1(2 u16)]
-        # x0/y0/r0 = inner circle, x1/y1/r1 = outer circle.
-        # We use the outer circle center and radius and ignore the inner.
         val rg_off = paint_offset as i64
         if rg_off + 18 > blob.len() as i64:
             return out
@@ -657,11 +261,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.SweepGradient:
-        # PaintSweepGradient (fmt 8/9) record layout:
-        #   [format(1)] [colorLineOffset(3 u24 BE)]
-        #   [centerX(2 i16)] [centerY(2 i16)]
-        #   [startAngle(2 F2Dot14)] [endAngle(2 F2Dot14)]
-        # Build a sweep shader using center + start angle stored in pt0.x.
         val sg_off = paint_offset as i64
         if sg_off + 12 > blob.len() as i64:
             return out
@@ -669,12 +268,10 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         val scy_raw = read_u16_be(blob, sg_off + 6) as i64
         val scx_s = if scx_raw >= 32768: scx_raw - 65536 else: scx_raw
         val scy_s = if scy_raw >= 32768: scy_raw - 65536 else: scy_raw
-        # startAngle F2Dot14 at bytes [sg_off+8..sg_off+9]: convert to radians
         val ang_hi = blob[sg_off + 8] as i64
         val ang_lo = blob[sg_off + 9] as i64
         val ang_raw = (ang_hi << 8) or ang_lo
         val ang_signed = if ang_raw >= 32768: ang_raw - 65536 else: ang_raw
-        # F2Dot14 range: [-2.0, 2.0); multiply by pi to get radians
         val MATH_PI_LOCAL: f64 = 3.14159265358979323846
         val start_angle_rad = (ang_signed as f64) / 16384.0 * MATH_PI_LOCAL
         val em = if context.em_units > 0: context.em_units as f64 else: 1000.0
@@ -683,8 +280,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         val pal_count = context.palette.len() as i64
         val c0 = if pal_count > 0: context.palette[0] else: 0xFF000000 as SkColor
         val c1 = if pal_count > 1: context.palette[1] else: 0x00000000 as SkColor
-        # Construct sweep shader manually (no dedicated make fn):
-        # kind=SweepGradient, center for cx/cy, pt0.x for start_angle
         val sweep_shader = SkShader(
             kind: SkShaderKind.SweepGradient,
             color: 0,
@@ -712,45 +307,19 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.Glyph:
-        # COLRv1 Format 10 (PaintGlyph).
-        # Record layout after format byte:
-        #   [format(1)] [src_paint_offset(3, u24 BE)] [glyph_id(2, u16 BE)]
-        # Semantics: rasterize the glyph outline into a coverage/alpha bitmap
-        # and use it to mask the child paint's output. Alpha of the final
-        # pixel = child.a * (coverage / 255).
         val gl_off = paint_offset as i64
         if gl_off + 6 > blob.len() as i64:
             return out
-        # Decode the u24 BE src_paint_offset at bytes [off+1 .. off+3]
         val b0 = blob[gl_off + 1] as u32
         val b1 = blob[gl_off + 2] as u32
         val b2 = blob[gl_off + 3] as u32
         val src_paint_offset = (b0 << 16) or (b1 << 8) or b2
-        # glyph_id is a u16 at bytes [off+4 .. off+5]; intentionally not read
-        # here because PaintGraphContext does not yet expose a font/outline
-        # source. WHY: adding a font field would widen the public surface and
-        # cascade into the OT loader; deferred until the context grows an
-        # Option<OpenTypeFont>. When that lands, read read_u16_be(blob,
-        # gl_off + 4) and call rasterize_outline on font.lookup(glyph_id).
-        # 1. Recurse to render the child paint into its own bitmap.
         val child_bmp = compose_paint_graph(blob, src_paint_offset, context)
-        # 2. Build an alpha-mask for the glyph outline.
-        #    WHY circular placeholder: PaintGraphContext currently has no
-        #    font handle, so we cannot call rasterize_outline(outline, ...)
-        #    from std.skia.feature.glyph.rasterize. A circular mask centered
-        #    in the bounds exercises the mask-multiply pathway; when the
-        #    context grows an Option<OpenTypeFont>, swap this block for a
-        #    rasterize_outline(font.lookup(glyph_id), em_units).
-        #    The mask fades linearly from full coverage at the center to 0
-        #    at the circumscribed radius, so the test can distinguish
-        #    opaque pixels (near center) from transparent ones (corners).
         val cx_f = (bw as f64) * 0.5
         val cy_f = (bh as f64) * 0.5
         val radius = if cx_f < cy_f: cx_f else: cy_f
         val radius_safe = if radius <= 0.0: 1.0 else: radius
-        # Use squared-distance vs squared-radius; stdlib has no f64.sqrt().
         val r2 = radius_safe * radius_safe
-        # 3. Multiply each pixel's alpha by the mask coverage.
         var my2 = 0 as i64
         while my2 < bh:
             var mx2 = 0 as i64
@@ -760,8 +329,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
                     val dx = (mx2 as f64) + 0.5 - cx_f
                     val dy = (my2 as f64) + 0.5 - cy_f
                     val d2 = dx * dx + dy * dy
-                    # Coverage = 1 at center, 0 at circumscribed radius, falling
-                    # off quadratically (approximates a soft circular mask).
                     val raw_cov = 1.0 - (d2 / r2)
                     val cov = if raw_cov < 0.0: 0.0 else: if raw_cov > 1.0: 1.0 else: raw_cov
                     val child_a = child_bmp.pixels[idx + 3] as f64
@@ -775,11 +342,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.Transform:
-        # PaintTransform (fmt 12/13) record layout:
-        #   [format(1)] [paintOffset(3 u24 BE)] [transformOffset(3 u24 BE)]
-        # The 2×3 affine matrix (6 × Fixed16.16) lives at transformOffset.
-        # Read child paint offset, recurse, then apply the affine transform
-        # by inverse-mapping each output pixel to sample from the child bitmap.
         val tr_off = paint_offset as i64
         if tr_off + 7 > blob.len() as i64:
             return out
@@ -788,20 +350,16 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         val pb2 = blob[tr_off + 3] as u32
         val child_paint_off = paint_offset + ((pb0 << 16) or (pb1 << 8) or pb2)
         val child_bmp = compose_paint_graph(blob, child_paint_off, context)
-        # Read the 2×3 affine matrix: 6 × Fixed16.16 (4 bytes each, big-endian)
-        # Layout: [xx, xy, yx, yy, dx, dy] (column-major Affine2)
         val mat_b0 = blob[tr_off + 4] as u32
         val mat_b1 = blob[tr_off + 5] as u32
         val mat_b2 = blob[tr_off + 6] as u32
         val mat_abs_off = (paint_offset + ((mat_b0 << 16) or (mat_b1 << 8) or mat_b2)) as i64
-        # Decode 6 Fixed16.16 values; fallback to identity if out of bounds
         fn _read_fixed(blob: [u8], base: i64, idx2: i64) -> f64:
             val o = base + idx2 * 4
             if o + 4 > blob.len() as i64:
                 if idx2 == 0 or idx2 == 3: 1.0 else: 0.0
             else:
                 val hi = read_u32_be(blob, o) as i64
-                # Fixed16.16: signed
                 val s = if hi >= 2147483648: hi - 4294967296 else: hi
                 (s as f64) / 65536.0
         val xx = _read_fixed(blob, mat_abs_off, 0)
@@ -810,7 +368,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         val yy = _read_fixed(blob, mat_abs_off, 3)
         val dx = _read_fixed(blob, mat_abs_off, 4)
         val dy = _read_fixed(blob, mat_abs_off, 5)
-        # Compute inverse of 2×2 sub-matrix for inverse-mapping
         val det = xx * yy - xy * yx
         val det_safe = if det == 0.0: 1.0 else: det
         val ixx = yy / det_safe
@@ -822,7 +379,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
             var tx = 0 as i64
             while tx < bw:
                 val idx = (ty * bw + tx) * 4
-                # Inverse-map: src = M^-1 * (dst - translate)
                 val fx = (tx as f64) - dx
                 val fy = (ty as f64) - dy
                 val sx = ixx * fx + ixy * fy
@@ -841,8 +397,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.Translate:
-        # PaintTranslate (fmt 14/15) record layout:
-        #   [format(1)] [paintOffset(3 u24 BE)] [dx(2 i16 BE)] [dy(2 i16 BE)]
         val tl_off = paint_offset as i64
         if tl_off + 8 > blob.len() as i64:
             return out
@@ -858,7 +412,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         val dy_px = ((if dy_raw >= 32768: dy_raw - 65536 else: dy_raw) as f64) * (bh as f64) / em
         val dx_i = dx_px as i64
         val dy_i = dy_px as i64
-        # Copy child pixels shifted by (dx_i, dy_i)
         var ty = 0 as i64
         while ty < bh:
             var tx = 0 as i64
@@ -878,9 +431,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.Rotate:
-        # PaintRotate (fmt 16/17) record layout:
-        #   [format(1)] [paintOffset(3 u24 BE)] [angle(2 F2Dot14 BE)]
-        # Rotate child bitmap around its center by the given angle.
         val ro_off = paint_offset as i64
         if ro_off + 6 > blob.len() as i64:
             return out
@@ -894,10 +444,7 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         val ang_raw = (ang_hi << 8) or ang_lo
         val ang_s = if ang_raw >= 32768: ang_raw - 65536 else: ang_raw
         val MATH_PI2: f64 = 3.14159265358979323846
-        # F2Dot14 × pi → radians
         val angle_rad = (ang_s as f64) / 16384.0 * MATH_PI2
-        # Approximate cos/sin via Taylor series (no stdlib trig yet)
-        # cos(a) ≈ 1 - a²/2 + a⁴/24;  sin(a) ≈ a - a³/6 + a⁵/120
         val a2 = angle_rad * angle_rad
         val a3 = a2 * angle_rad
         val a4 = a2 * a2
@@ -911,7 +458,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
             var rx = 0 as i64
             while rx < bw:
                 val idx = (ry * bw + rx) * 4
-                # Inverse rotate: src = R^T * (dst - center) + center
                 val fx = (rx as f64) - cx_f
                 val fy = (ry as f64) - cy_f
                 val sx = cos_a * fx + sin_a * fy + cx_f
@@ -930,8 +476,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.Scale:
-        # PaintScale (fmt 18/19) record layout:
-        #   [format(1)] [paintOffset(3 u24 BE)] [scaleX(2 F2Dot14)] [scaleY(2 F2Dot14)]
         val sc_off = paint_offset as i64
         if sc_off + 8 > blob.len() as i64:
             return out
@@ -948,7 +492,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         val sy_raw = (sy_hi << 8) or sy_lo
         val sx_s = if sx_raw >= 32768: sx_raw - 65536 else: sx_raw
         val sy_s = if sy_raw >= 32768: sy_raw - 65536 else: sy_raw
-        # F2Dot14 scale factors (1.0 = 0x4000)
         val scale_x = (sx_s as f64) / 16384.0
         val scale_y = (sy_s as f64) / 16384.0
         val sx_safe = if scale_x == 0.0: 1.0 else: scale_x
@@ -960,7 +503,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
             var scx2 = 0 as i64
             while scx2 < bw:
                 val idx = (scy * bw + scx2) * 4
-                # Inverse scale around center
                 val src_x = (((scx2 as f64) - cx_f) / sx_safe + cx_f)
                 val src_y = (((scy as f64) - cy_f) / sy_safe + cy_f)
                 val si = src_y as i64
@@ -977,8 +519,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else if node.kind == PaintKind.Skew:
-        # PaintSkew (fmt 20/21) record layout:
-        #   [format(1)] [paintOffset(3 u24 BE)] [xSkewAngle(2 F2Dot14)] [ySkewAngle(2 F2Dot14)]
         val sk_off = paint_offset as i64
         if sk_off + 8 > blob.len() as i64:
             return out
@@ -996,7 +536,6 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         val skx_s = if skx_raw >= 32768: skx_raw - 65536 else: skx_raw
         val sky_s = if sky_raw >= 32768: sky_raw - 65536 else: sky_raw
         val MATH_PI3: f64 = 3.14159265358979323846
-        # F2Dot14 × pi → skew angle in radians; tan ≈ angle for small angles
         val skew_x = (skx_s as f64) / 16384.0 * MATH_PI3
         val skew_y = (sky_s as f64) / 16384.0 * MATH_PI3
         val cx_f = (bw as f64) * 0.5
@@ -1006,11 +545,8 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
             var kx = 0 as i64
             while kx < bw:
                 val idx = (ky * bw + kx) * 4
-                # Inverse skew around center
                 val fx = (kx as f64) - cx_f
                 val fy = (ky as f64) - cy_f
-                # Inverse of [[1, tan_x], [tan_y, 1]]:
-                # det = 1 - tan_x*tan_y; inv = 1/det * [[1,-tan_x],[-tan_y,1]]
                 val det = 1.0 - skew_x * skew_y
                 val det_s = if det == 0.0: 1.0 else: det
                 val src_x = (fx - skew_x * fy) / det_s + cx_f
@@ -1029,5 +565,4 @@ fn compose_paint_graph(blob: [u8], paint_offset: u32, context: PaintGraphContext
         out
 
     else:
-        # Unknown/unreachable kind — return transparent bitmap
         out

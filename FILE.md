@@ -6,580 +6,245 @@
 
 ---
 
-## 📋 Quick Reference
+## Quick Reference
 
 | File/Directory | Purpose | When to Use |
 |----------------|---------|-------------|
 | **CLAUDE.md** | Development guide | Start here for development |
+| **FILE.md** | Canonical structure definition | Check where files belong |
 | **README.md** | Project overview | Learn what Simple is |
 | **AGENTS.md** | Agent definitions | Using Task tool subagents |
 | **.sstack/** | Session state tracking | Local workflow state and phase handoff notes |
 | **bin/** | Executables & CLI | Running Simple commands |
 | **src/** | Source code | Core implementation |
 | **test/** | Test suites | Testing & verification |
-| **examples/** | Example programs | Learning Simple |
-| **doc/** | Documentation | Guides, specs, reports |
-| **config/** | Project configuration | Runtime, packaging, theme, Docker, MCP, and tooling config |
-| **scripts/** | Automation scripts | Build, test, migration |
-| **tools/** | Development tools | Seed compiler, Docker |
-| **build/** | Generated build artifacts | Compiled output, test evidence, reports |
-| **tmp/** | Local transient cache | Runtime scratch, relocated target/cache output |
+| **examples/** | Example programs (submodules) | Learning Simple |
+| **doc/** | Documentation (numbered 00-11 only) | Guides, specs, reports |
+| **config/** | Project configuration | Runtime, packaging, theme, MCP, t32 |
+| **scripts/** | Automation scripts | Build, test, bootstrap |
+| **tools/** | Development tools | Electron, Tauri, MCP registry, TLS test |
+| **build/** | Generated build artifacts | Compiled output (gitignored) |
+| **tmp/** | Local transient cache | Runtime scratch (gitignored) |
+| **target/** | Cargo/Rust build output | Rust compilation (gitignored) |
+| **bootstrap/** | Bootstrap artifacts | Bootstrap stages (gitignored) |
 
 ---
 
-## 📚 Essential Files
+## Root Files (Tracked)
 
-### CLAUDE.md (Primary Development Guide)
-**Size:** ~15KB | **Audience:** Developers
+| File | Purpose |
+|------|---------|
+| `CLAUDE.md` | Development guide and project instructions |
+| `FILE.md` | This file — canonical structure definition |
+| `README.md` | Project overview for GitHub |
+| `AGENTS.md` | Agent definitions (symlink to CLAUDE.md) |
+| `GEMINI.md` | Gemini instructions |
+| `MCP.md` | MCP documentation |
+| `CHANGELOG.md` | Version history |
+| `VERSION` | Semantic version string |
+| `LICENSE` | Apache 2.0 |
+| `THIRD_PARTY_NOTICES.md` | Third-party attributions |
+| `.gitignore` | Git ignore rules |
+| `.jjignore` | Jujutsu ignore rules |
+| `.gitmodules` | Submodule definitions |
+| `.gitattributes` | Git attributes |
+| `.envrc` | direnv configuration |
+| `.mcp.json` | MCP server definitions |
+| `.jscpd.json` | Copy-paste detector config |
+| `.dockerignore` | Docker build excludes |
 
-**Complete development reference:**
-- ✅ Agent definitions for Task tool
-- ✅ Skills reference (/versioning, /test, /coding, etc.)
-- ✅ Critical rules (jj not git, no git branches, etc.)
-- ✅ Quick commands (build, test, run)
-- ✅ Syntax essentials
-- ✅ Project structure overview
-- ✅ SFFI (Simple FFI) patterns
-- ✅ Runtime limitations
-- ✅ Container testing guide
-
-**Use CLAUDE.md as your primary reference!**
-
----
-
-### AGENTS.md (Symbolic Link)
-Points to: `CLAUDE.md`
-
-Convenience link for agent-based workflows. Same content as CLAUDE.md.
-
----
-
-### .sstack/ (Session State Tracking)
-**Audience:** Local development workflows
-
-Stores per-task state handoff files used by the repo's stacked workflow.
-
-- Contains `TASKS.md` plus per-feature `state.md` files
-- Intended to stay in the project root as workflow metadata
-- Not user-facing documentation or source code
+**No other files at root.** Temp files, build artifacts, compiler intermediates,
+and test outputs must go to `build/`, `tmp/`, or `target/`.
 
 ---
 
-### README.md (Project Overview)
-**Size:** ~8KB | **Audience:** General public
+## src/ (Source Code)
 
-**Project introduction:**
-- What is Simple Language
-- Key features (100% self-hosted, pure Simple implementation)
-- Installation instructions
-- Quick examples
-- Build status
-- License information
+All code in `.spl` (Simple) or `.shs` (shell) files.
 
-**External-facing documentation** for GitHub visitors.
+| Path | Purpose |
+|------|---------|
+| `src/app/` | Applications (cli, build, mcp, dashboard, test_runner, desugar, io) |
+| `src/compiler/` | Self-hosted compiler — numbered layers 00-99 |
+| `src/compiler_rust/` | Rust seed bootstrap compiler (vendor/ is third-party) |
+| `src/lib/` | Standard library — `use std.X` resolves here |
+| `src/std/` | Symlink to `src/lib/` |
+| `src/os/` | SimpleOS (kernel, drivers, desktop, apps, compositor, crypto, game, gui) |
+| `src/runtime/` | Native C runtime (vendor/ is third-party) |
+| `src/i18n/` | Internationalization |
+| `src/tooling/` | Build and dev tooling |
+| `src/type/` | Named primitive type facade modules |
+| `src/unit/` | Unit/measurement types |
+| `src/verification/` | Formal verification (Lean4 models and proofs) |
 
----
+### src/lib/ (Standard Library Tiers)
 
-### VERSION
-**Format:** Semantic versioning (0.5.1)
-
-Current version string used by:
-- CLI (`bin/simple --version`)
-- Build system
-- Release packaging
-- MCP server identification
-
----
-
-### CHANGELOG.md
-**Format:** Keep a Changelog standard
-
-**Version history:**
-- 0.6.1 - Current release
-- 0.6.0 - Previous release
-- 0.5.x - Earlier releases
-- Format: Added/Changed/Deprecated/Removed/Fixed/Security
-
-**Update on every release.**
+| Tier | Path | Description |
+|------|------|-------------|
+| Pure | `common/` | Pure functions (text, math, json, crypto, encoding) |
+| Sync | `nogc_sync_mut/` | Sync mutable (ffi, fs, net, http, database, mcp, spec) |
+| Sync Immutable | `nogc_sync_immut/` | Sync immutable data |
+| Async | `nogc_async_mut/` | Async mutable (actors, async, threads, generators) |
+| Async Immutable | `nogc_async_immut/` | Async immutable data |
+| GC Async | `gc_async_mut/` | GC + async (gpu, cuda, torch, ML) |
+| GC Sync | `gc_sync_mut/`, `gc_sync_immut/` | GC sync tiers |
+| Baremetal | `nogc_async_mut_noalloc/` | Baremetal, execution, memory, qemu |
+| Browser | `blink/`, `cc/`, `content/`, `skia/`, `viz/`, `web/`, `js/` | Chromium-mirrored browser engine |
+| Domain | `crypto/`, `encoding/`, `editor/`, `gui/`, `hardware/`, `log/`, `lint/`, `sdn/`, `sffi/`, `scipy/`, `scv/`, `lib/` | Domain-specific libraries |
 
 ---
 
-### install.shs
-**Automated installation script**
+## doc/ (Documentation — Numbered Only)
 
-**Purpose:** Install Simple system-wide
+**All doc subdirectories must be numbered.** No unnumbered directories allowed.
 
-**Usage:**
-```bash
-# Default installation
-./install.shs
+| Path | Purpose |
+|------|---------|
+| `doc/00_llm_process/` | LLM-assisted development process |
+| `doc/01_research/` | Research notes |
+| `doc/02_requirements/` | Requirements and feature definitions |
+| `doc/03_plan/` | Plans (including agent_tasks/) |
+| `doc/04_architecture/` | Architecture docs (file_class_structure.md, glossary.md) |
+| `doc/05_design/` | Design documents |
+| `doc/06_spec/` | Specifications, generated features, screenshot images |
+| `doc/07_guide/` | Guides, tutorials, quick references |
+| `doc/08_tracking/` | Tracking: bug/, test/, todo/, build/, perf/, baselines/, lint/ |
+| `doc/09_report/` | Reports |
+| `doc/10_metrics/` | Metrics and dashboards |
+| `doc/11_archive/` | Archived docs |
 
-# Custom prefix
-PREFIX=/usr/local ./install.shs
+### Correct Locations for Common Content
 
-# See installation options
-./install.shs --help
-```
+| Content | Correct Location | NOT |
+|---------|-----------------|-----|
+| Bug reports | `doc/08_tracking/bug/` | ~~doc/bugs/~~ |
+| Plans | `doc/03_plan/` | ~~doc/plans/~~ |
+| Test results/DB | `doc/08_tracking/test/` | ~~doc/test/~~ |
+| TODO database | `doc/08_tracking/todo/` | ~~doc/todo/~~ |
+| Spec images | `doc/06_spec/image/` | ~~doc/spec/~~ |
+| Build status | `doc/08_tracking/build/` | |
+| Feature DB | `doc/06_spec/` or `doc/02_requirements/feature/` | |
+| Guides | `doc/07_guide/` | ~~doc/guide/~~ |
+| Architecture | `doc/04_architecture/` | ~~doc/architecture/~~ |
 
-**Features:**
-- Platform detection (Linux, macOS, FreeBSD, Windows)
-- Multi-architecture support
-- Creates symlinks in /usr/local/bin
-- Installs man pages
-- Sets up shell completions
+### Auto-Generated Docs
 
-**Note:** Can also install manually by copying `bin/simple` to PATH.
-
----
-
-## 📁 Core Directories
-
-### bin/ (Executables & CLI)
-**Purpose:** Compiled binaries, CLI wrappers, MCP servers
-
-**Key files:**
-- `simple` - Main CLI (auto-detects platform)
-- `simple_mcp_server` - MCP server for Claude Code
-- `release/` - Multi-platform binaries (335MB)
-- `FILE.md` - Complete bin/ documentation
-
-**See:** [bin/FILE.md](bin/FILE.md)
-
----
-
-### src/ (Source Code)
-**Purpose:** Simple language implementation (100% self-hosted)
-
-**Structure:**
-```
-src/
-├── app/        # Applications (cli, build, mcp, test_runner, desugar)
-├── lib/        # Standard library (common, nogc_sync_mut, nogc_async_mut, gc_async_mut)
-├── compiler/   # Unified compiler (00.common → 99.loader, numbered layers)
-├── type/       # Named primitive type facade modules (logical type.simple_lang imports)
-├── verification/ # Lean proof/model sources
-├── runtime/    # Native runtime and support libraries
-└── i18n/       # Internationalization
-```
-
-**All code in `.spl` (Simple) files!**
+| What | Where | When |
+|------|-------|------|
+| Features | `doc/06_spec/generated/feature.md` | Every test run |
+| Test results | `doc/08_tracking/test/test_result.md` | Every test run |
+| Build status | `doc/08_tracking/build/recent_build.md` | Every build |
+| TODOs | `doc/TODO.md` | `bin/simple todo-scan` |
 
 ---
 
-### test/ (Test Suites)
-**Purpose:** 4,067 passing tests (100% success rate)
+## test/ (Test Suites)
 
-**Structure:**
-```
-test/
-├── unit/           # Unit tests (3,500+ tests)
-├── integration/    # Integration tests
-├── system/         # System tests (LLM, end-to-end)
-├── perf/           # Performance and benchmark tests
-└── perf/bench/     # Runnable benchmark programs and baselines
-```
+Tests named `*_spec.spl`. Structure mirrors src/ plus topic-based groupings.
 
-**Run tests:** `bin/simple test test/unit/spec.spl`
+| Path | Purpose |
+|------|---------|
+| `test/app/` | App tests |
+| `test/app_complete/` | Extended app tests |
+| `test/app_extended/` | More app tests |
+| `test/compiler/` | Compiler tests |
+| `test/compiler_complete/` | Extended compiler tests |
+| `test/compiler_deep/` | Deep compiler tests |
+| `test/core_complete/` | Core complete tests |
+| `test/core_integration/` | Core integration tests |
+| `test/core_system/` | Core system tests |
+| `test/browser_engine/` | Browser engine tests |
+| `test/bug/` | Bug regression tests |
+| `test/cli/` | CLI tests |
+| `test/code_quality/` | Quality checks |
+| `test/data/` | Test fixtures |
+| `test/baselines/` | Baseline snapshots |
 
----
-
-### examples/ (Example Programs)
-**Purpose:** 215 examples organized by topic (01-11 categories)
-
-**Structure:** Numbered learning path
-- 01_getting_started - Hello world
-- 02_language_features - Syntax demos
-- 03_concurrency - Async, actors
-- 04-11 - Data formats, stdlib, I/O, ML, GPU, embedded, tooling, advanced
-- experiments/ - WIP research
-- projects/ - Full applications (medgemma_korean)
-
-**See:** [examples/FILE.md](examples/FILE.md)
+**Run tests:** `bin/simple test` or `bin/simple test path/to/spec.spl`
 
 ---
 
-### doc/ (Documentation)
-**Purpose:** Comprehensive project documentation (2,000+ files)
+## config/
 
-**Categories (numbered):**
-- 01_research/ - Research (local impl, domain/external)
-- 02_requirements/ - Requirements (feature, nfr, ui)
-- 03_plan/ - Plans (arch, design, sys_test, agent_tasks)
-- 04_architecture/ - Architecture (ADRs, rules, formats)
-- 05_design/ - Design documents
-- 06_spec/ - SSpec-generated specs
-- 07_guide/ - User guides, tutorials
-- 08_tracking/ - Bug, test, todo, task tracking
-- 09_report/ - Implementation reports
-- 10_metrics/ - Dashboards, coverage
-
-**See:** [doc/FILE.md](doc/FILE.md)
+| Path | Purpose |
+|------|---------|
+| `config/mcp/` | MCP startup and installation helpers |
+| `config/packaging/` | Package specs (Debian, Homebrew, RPM, Windows) |
+| `config/resources/` | Runtime resources |
+| `config/t32/` | TRACE32 container and target configuration |
+| `config/themes/` | UI theme definitions |
 
 ---
 
-### scripts/ (Automation Scripts)
-**Purpose:** Build, test, and migration automation
+## tools/
 
-**Structure:**
-- build/ - Build scripts
-- test/ - Test scripts
-- migration/ - Migration tools
-- bootstrap/ - Bootstrap scripts
-- audit/ - Code auditing
-- setup/ - Environment setup
-
-**All scripts in `.spl` or `.shs` format (Pure Simple!)**
-
-**See:** [scripts/FILE.md](scripts/FILE.md)
+| Path | Purpose |
+|------|---------|
+| `tools/electron-shell/` | Electron desktop shell |
+| `tools/tauri-shell/` | Tauri desktop shell |
+| `tools/mcp-registry/` | MCP server registry and native builds |
+| `tools/tls_test_server/` | TLS test certificate server |
 
 ---
 
-### tools/ (Development Tools)
-**Purpose:** Build tools and containers
+## scripts/
 
-**Contents:**
-- `seed/` - Seed compiler (C++ bootstrap)
-- `docker/` - Docker containers for testing
-- `qemu/` - QEMU images for cross-platform testing
-- `mold/` - Mold linker for fast linking
+| Path | Purpose |
+|------|---------|
+| `scripts/bootstrap/` | Bootstrap scripts (3 allowed shell scripts) |
+| `scripts/audit/` | Code auditing scripts |
 
----
-
-### build/ (Build Artifacts)
-**Purpose:** Compiled outputs and build cache
-
-**Contents:**
-- `artifacts/` - Compiled binaries
-- `bootstrap/` - Bootstrap stages
-- `coverage/` - Coverage reports
-- `dist/` - Distribution packages
-- `test-artifacts/` - Generated non-image test evidence
-
-**Note:** Generated during build, not committed to version control.
-
-**See:** [build/FILE.md](build/FILE.md)
+All scripts in `.spl` or `.shs` format except 3 bootstrap scripts.
 
 ---
 
-### tmp/ (Transient Local Scratch)
-**Purpose:** Local-only generated output that should not be committed
+## .claude/ (Claude Code Integration)
 
-**Contents:**
-- `target/` - Relocated root-level target/test cache output from older runs
-- `test_cache/` - Compiled test cache
-- `tls_test_server/` - Generated TLS cert fixtures for hosted TLS tests
-- Other short-lived runtime scratch data
-
-**Note:** `tmp/` is ignored and may be deleted at any time.
-
----
-
-### src/verification/ (Formal Verification)
-**Purpose:** Checked-in Lean models and proofs
-
-**Contents:**
-- `formal/` - Formal models that used to live at root `formal/`
-- Feature-specific Lean verification projects
-
-These are source artifacts, not build output. Verification tests belong under
-`test/unit/compiler/verification/` or `test/system/verification/`; transient
-generated proof units belong under `build/verification/generated/`; Lean/Lake
-build outputs such as `.lake/`, `.olean`, and `.ilean` are ignored.
+| Path | Purpose |
+|------|---------|
+| `.claude/agents/` | Agent definitions (code, test, debug, explore, docs, vcs, infra, build, ml) |
+| `.claude/skills/` | Skills (/sstack, /dev, /coding, /test, /debug, etc.) |
+| `.claude/templates/` | Code templates |
+| `.claude/rules/` | Project rules (language, testing, bootstrap, commands, structure, code-style, vcs) |
+| `.claude/memory/` | Persistent memory (auto-managed) |
 
 ---
 
-## 🏗️ Build & Development
+## Vendor / Third-Party (Excluded from Code Counts)
 
-### Quick Build
-```bash
-# Debug build (fast compilation)
-bin/simple build
-
-# Release build (optimized)
-bin/simple build --release
-
-# Test
-bin/simple test
-
-# Run example
-bin/simple run examples/01_getting_started/hello_native.spl
-```
-
-### Bootstrap Build
-```bash
-# Multi-stage bootstrap from source
-scripts/bootstrap/bootstrap-from-scratch.sh
-
-# Quick bootstrap (existing binary)
-bin/simple build bootstrap-check
-```
-
-### Container Testing
-```bash
-# Isolated testing environment
-docker-compose -f config/docker-compose.yml up unit-tests
-
-# See doc/guide/container_testing.md for details
-```
+- `src/compiler_rust/vendor/**`
+- `src/runtime/vendor/**`
+- `src/runtime/miniaudio.h`
+- `src/runtime/stb_image.h`
+- `src/runtime/stb_truetype.h`
 
 ---
 
-## 📦 Installation
+## File Naming Conventions
 
-### From Release Binary
-```bash
-# Download and extract
-curl -L https://github.com/simple-lang/simple/releases/latest/download/simple-linux-x86_64.tar.gz | tar xz
-
-# Run
-./bin/simple --version
-```
-
-### From Source
-```bash
-# Clone repository (use jj, not git!)
-jj git clone https://github.com/simple-lang/simple.git
-cd simple
-
-# Build (uses pre-built runtime)
-bin/simple build --release
-
-# Install system-wide
-./install.shs
-```
-
-### Using install.shs (Recommended)
-```bash
-# Automated installation with platform detection
-./install.shs
-
-# Custom installation prefix
-PREFIX=/usr/local ./install.shs
-
-# See available options
-./install.shs --help
-```
-
-**Note:** Use `bin/simple build` commands directly (no Makefile).
+| Extension | Purpose |
+|-----------|---------|
+| `.spl` | Simple source code |
+| `.shs` | Simple shell script |
+| `.smf` | Simple module format (compiled, gitignored) |
+| `.sdn` | Simple Data Notation (config/data) |
+| `.md` | Markdown documentation |
 
 ---
 
-## 🧪 Testing
+## Version Control
 
-### Run All Tests (4,067 tests)
-```bash
-bin/simple test                    # All tests (~17 seconds)
-bin/simple test test/unit/         # Unit tests only
-bin/simple test path/to/spec.spl   # Single file
-```
-
-### Test Categories
-```bash
-bin/simple test test/unit/              # Unit tests (3,500+)
-bin/simple test test/integration/       # Integration tests
-bin/simple test test/system/            # System tests
-bin/simple run test/perf/bench/run_all.spl  # Performance benchmarks
-```
-
-### Container Testing
-```bash
-# Reproducible isolated environment
-docker-compose -f config/docker-compose.yml up all-tests
-```
-
----
-
-## 📖 Documentation
-
-### For Developers
-- **Start:** [CLAUDE.md](CLAUDE.md) - Complete development guide
-- **Skills:** `.claude/skills/` - Skill documentation (/test, /coding, etc.)
-- **Agents:** `.claude/agents/` - Agent definitions
-
-### For Users
-- **README:** [README.md](README.md) - Project overview
-- **Guides:** [doc/guide/](doc/guide/) - User guides
-- **Examples:** [examples/](examples/) - Code examples
-- **Specs:** [doc/spec/](doc/spec/) - Language specifications
-
-### For Contributors
-- **Contributing:** [doc/contributing/](doc/contributing/) - Contribution guidelines
-- **Architecture:** [doc/architecture/](doc/architecture/) - System design
-- **API Docs:** [doc/api/](doc/api/) - API documentation
-
----
-
-## 🔧 Configuration Files
-
-### .claude/ (Claude Code Integration)
-**Purpose:** Agent definitions, skills, templates
-
-**Structure:**
-```
-.claude/
-├── agents/         # Task tool agent definitions
-├── skills/         # Skill documentation
-├── templates/      # Code templates
-└── keybindings.json # Keyboard shortcuts
-```
-
-**Used by Claude Code for AI-assisted development.**
-
----
-
-### config/ (Project Configuration)
-**Purpose:** Build, runtime, packaging, and tool configurations
-
-**Contents:**
-- `docker-compose.yml` - Container orchestration
-- `bootstrap.sdn`, `di.sdn`, `traceability.sdn` - Project configuration inputs
-- `packaging/` - Package specs (Debian, Homebrew, RPM, Windows)
-- `mcp/` - MCP startup and installation helpers
-- `t32/` - TRACE32 container and target configuration
-- `themes/` - UI theme definitions
-
----
-
-### .github/ (GitHub Configuration)
-**Purpose:** CI/CD workflows, issue templates
-
-**Contents:**
-- `workflows/` - GitHub Actions
-- `ISSUE_TEMPLATE/` - Issue templates
-- `PULL_REQUEST_TEMPLATE.md` - PR template
-
----
-
-## 🎯 Common Workflows
-
-### Development Workflow
-```bash
-# 1. Make changes to src/
-vim src/app/cli/main.spl
-
-# 2. Test changes
-bin/simple test test/unit/app/cli/
-
-# 3. Build
-bin/simple build
-
-# 4. Commit (use jj, not git!)
-jj describe -m "fix: update CLI help text"
-jj bookmark set main -r @
-jj git push --bookmark main
-```
-
-### Adding Examples
-```bash
-# 1. Create example in appropriate category
-vim examples/03_concurrency/my_example.spl
-
-# 2. Test it runs
-bin/simple run examples/03_concurrency/my_example.spl
-
-# 3. Update examples/README.md if needed
-# 4. Commit
-```
-
-### Adding Tests
-```bash
-# 1. Create spec file
-vim test/unit/my_feature_spec.spl
-
-# 2. Run test
-bin/simple test test/unit/my_feature_spec.spl
-
-# 3. Verify all tests still pass
-bin/simple test
-
-# 4. Commit
-```
-
----
-
-## 🚧 Version Control
-
-**CRITICAL:** Use `jj` (Jujutsu), **NOT git!**
+Use **jj** (Jujutsu), NOT git. Work directly on `main`, never create branches.
 
 ```bash
-# See current changes
-jj status
-
-# Describe changes
-jj describe -m "commit message"
-
-# Push to remote
-jj bookmark set main -r @
-jj git push --bookmark main
-
-# Never use: git add, git commit, git push
+jj status                              # See changes
+jj commit -m "message"                 # Commit
+jj bookmark set main -r @-             # Set bookmark
+jj git push --bookmark main            # Push
+jj git fetch && jj rebase -d main@origin  # Pull
 ```
 
-**See:** `.claude/skills/versioning.md` for complete jj workflow
-
 ---
 
-## 📊 Project Statistics
-
-**Version:** 0.6.1
-**Language:** 100% Simple (self-hosted)
-**Source Files:** 623,000+ lines
-**Tests:** 4,067 tests (100% passing)
-**Examples:** 215 examples
-**Documentation:** 2,000+ files
-**Platforms:** Linux, macOS, FreeBSD, Windows (x86_64, ARM64, RISC-V)
-
----
-
-## 🔗 Important Links
-
-**Repository:** https://github.com/simple-lang/simple
-**Documentation:** https://simple-lang.org/docs
-**Releases:** https://github.com/simple-lang/simple/releases
-**Issues:** https://github.com/simple-lang/simple/issues
-**Discussions:** https://github.com/simple-lang/simple/discussions
-
----
-
-## 📄 License
-
-**License:** Apache License 2.0 (see LICENSE file)
-**Third-party notices:** See THIRD_PARTY_NOTICES.md for vendored runtime components
-**Copyright:** 2024-2026 Simple Language Contributors
-
----
-
-## 🆘 Getting Help
-
-### Quick Help
-```bash
-bin/simple --help              # CLI help
-bin/simple test --help         # Test help
-bin/simple build --help        # Build help
-```
-
-### Documentation
-- CLAUDE.md - Development guide
-- doc/guide/ - User guides
-- examples/ - Code examples
-
-### Community
-- GitHub Issues - Bug reports
-- GitHub Discussions - Questions & ideas
-- Discord - Real-time chat (link in README)
-
----
-
-## 📝 File Naming Conventions
-
-**Simple source:** `.spl`
-**Shell scripts:** `.shs` (Simple shell script)
-**Module format:** `.smf` (Simple module format - compiled)
-**Configuration:** `.sdn` (Simple Data Notation)
-**Documentation:** `.md` (Markdown)
-
----
-
-**Last Updated:** 2026-02-16
+**Last Updated:** 2026-05-19
 **Maintained By:** Simple Language Team
-**Contributors:** 50+ contributors (see CONTRIBUTORS.md)
