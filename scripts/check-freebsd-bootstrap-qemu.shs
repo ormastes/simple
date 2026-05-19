@@ -142,29 +142,30 @@ instance-id: freebsd-bootstrap-$(date +%s)
 local-hostname: freebsd-bootstrap
 EOF
 
-cat > "$CLOUDINIT_DIR/user-data" <<EOF
-#cloud-config
-disable_root: false
-ssh_pwauth: true
-ssh_authorized_keys:
-  - ${SSH_PUB_KEY_CONTENT}
-users:
-  - name: root
-    lock_passwd: false
-    ssh_authorized_keys:
-      - ${SSH_PUB_KEY_CONTENT}
-  - name: ${QEMU_USER}
-    shell: /bin/sh
-    groups: wheel
-    ssh_authorized_keys:
-      - ${SSH_PUB_KEY_CONTENT}
-runcmd:
-  - sed -i '' 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - service sshd restart
-  - env ASSUME_ALWAYS_YES=yes pkg bootstrap
-  - env ASSUME_ALWAYS_YES=yes pkg install -y sudo rsync
-  - echo "freebsd ALL=(ALL) NOPASSWD: ALL" >> /usr/local/etc/sudoers
-EOF
+cat > "$CLOUDINIT_DIR/user-data" <<USERDATA
+#!/bin/sh
+# nuageinit on FreeBSD executes non-cloud-config user-data as a root script
+# during firstboot (BEFORE networking/sshd). This sets up SSH keys and
+# enables root login so the host can SSH in as root for package installs.
+
+# Ensure freebsd user exists
+pw useradd -n ${QEMU_USER} -s /bin/sh -m -G wheel 2>/dev/null || true
+
+# SSH keys for both root and freebsd
+mkdir -p /root/.ssh /home/${QEMU_USER}/.ssh
+echo '${SSH_PUB_KEY_CONTENT}' >> /root/.ssh/authorized_keys
+echo '${SSH_PUB_KEY_CONTENT}' >> /home/${QEMU_USER}/.ssh/authorized_keys
+chmod 700 /root/.ssh /home/${QEMU_USER}/.ssh
+chmod 600 /root/.ssh/authorized_keys /home/${QEMU_USER}/.ssh/authorized_keys
+chown -R ${QEMU_USER}:${QEMU_USER} /home/${QEMU_USER}/.ssh
+
+# Enable root SSH login
+sed -i '' 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+sed -i '' 's/^PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+# Set hostname
+hostname freebsd-bootstrap
+USERDATA
 
 if command -v genisoimage >/dev/null 2>&1; then
     genisoimage -output "$QEMU_CLOUDINIT_ISO" -volid cidata -joliet -rock \
@@ -226,15 +227,9 @@ SSH_TIMEOUT=180
 ELAPSED=0
 CONNECTED=0
 
-VM_USER="root"
 info "Waiting for SSH (up to ${SSH_TIMEOUT}s)..."
 while [ "$ELAPSED" -lt "$SSH_TIMEOUT" ]; do
-    if $ROOT_SSH_CMD true 2>/dev/null; then
-        VM_USER="root"
-        CONNECTED=1
-        break
-    elif $SSH_CMD true 2>/dev/null; then
-        VM_USER="$QEMU_USER"
+    if $SSH_CMD true 2>/dev/null; then
         CONNECTED=1
         break
     fi
@@ -249,22 +244,41 @@ if [ "$CONNECTED" -eq 0 ]; then
     fi
     fail "SSH connection timed out after ${SSH_TIMEOUT}s"
 fi
-pass "SSH connected as ${VM_USER} in ${ELAPSED}s"
+pass "SSH connected as ${QEMU_USER} in ${ELAPSED}s"
 
-VM_SSH="ssh ${SSH_OPTS} ${VM_USER}@localhost"
-UNAME=$($VM_SSH "uname -sr" 2>/dev/null) || UNAME="(unknown)"
+UNAME=$($SSH_CMD "uname -sr" 2>/dev/null) || UNAME="(unknown)"
 pass "Remote: $UNAME"
 
-# Check if we have root access for pkg install
-if [ "$VM_USER" = "root" ]; then
-    PKG_CMD="$VM_SSH"
-elif $VM_SSH "command -v doas" >/dev/null 2>&1; then
-    PKG_CMD="$VM_SSH doas"
-elif $VM_SSH "command -v sudo" >/dev/null 2>&1; then
-    PKG_CMD="$VM_SSH sudo"
+# Poll for root SSH (bootcmd enables PermitRootLogin before cloud-init finishes)
+info "Waiting for root SSH (up to 120s after initial connect)..."
+ROOT_ELAPSED=0
+ROOT_OK=0
+while [ "$ROOT_ELAPSED" -lt 120 ]; do
+    if $ROOT_SSH_CMD true 2>/dev/null; then
+        ROOT_OK=1
+        break
+    fi
+    sleep 5
+    ROOT_ELAPSED=$((ROOT_ELAPSED + 5))
+done
+
+if [ "$ROOT_OK" -eq 1 ]; then
+    VM_USER="root"
+    VM_SSH="$ROOT_SSH_CMD"
+    PKG_CMD="$ROOT_SSH_CMD"
+    pass "Root SSH available (after ${ROOT_ELAPSED}s)"
+elif $SSH_CMD "command -v sudo" >/dev/null 2>&1; then
+    VM_USER="$QEMU_USER"
+    VM_SSH="$SSH_CMD"
+    PKG_CMD="$SSH_CMD sudo"
+    pass "sudo available"
+elif $SSH_CMD "command -v doas" >/dev/null 2>&1; then
+    VM_USER="$QEMU_USER"
+    VM_SSH="$SSH_CMD"
+    PKG_CMD="$SSH_CMD doas"
+    pass "doas available"
 else
-    info "No root/sudo/doas; trying su"
-    PKG_CMD="$VM_SSH su -c"
+    fail "No root/sudo/doas available (root SSH timed out, no sudo/doas)"
 fi
 
 # ── Smoke / Full ───────────────────────────────────────────────────────
