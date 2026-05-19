@@ -2,15 +2,15 @@
 # TLS 1.3 Server-side handshake crypto preparation — RFC 8446
 # ============================================================================
 #
-# Extracted from server.spl. Contains the server-side crypto preparation
-# pipeline and test-helper entry points:
-#
-#   _prepare_server_handshake_from_client_hello_record
-#   tls13_prepare_server_handshake_from_record_for_test
-#   tls13_accept_client_hello_record_with_server_material_for_test
-#   tls13_accept_client_finished_record_for_test
-#
-# These are called by tls13_accept (in server.spl) and by test specs.
+# Extracted from server.spl. Contains:
+#   - process_client_hello (RFC 8446 §4.1.2 CH body parser)
+#   - select_cipher_suite / select_named_group
+#   - prepare_server_handshake_from_client_hello_record (core crypto pipeline)
+#   - tls13_prepare_server_handshake_from_record_for_test
+#   - tls13_accept_client_hello_record_with_server_material_for_test
+#   - tls13_accept_client_finished_record_for_test
+#   - verify_client_finished_record_sh
+#   - validate_client_hello_record_sh
 #
 # Reference: RFC 8446 §4.1–§4.4.
 
@@ -43,7 +43,7 @@ val CIPHER_AES_256_GCM_SHA384_SH: u16       = 0x1302
 val CIPHER_CHACHA20_POLY1305_SHA256_SH: u16 = 0x1303
 
 # ============================================================================
-# Local byte helpers (self-contained)
+# Local byte helpers (self-contained — no import from server.spl)
 # ============================================================================
 
 fn _h_u8_at(data: [u8], offset: u64) -> u8:
@@ -89,12 +89,6 @@ fn _h_u16_list_contains(xs: [u16], v: u16) -> bool:
         i = i + 1
     false
 
-fn _h_put_u16_be(value: u16) -> [u8]:
-    var out: [u8] = []
-    out.push(((value.to_u32() >> 8) & 0xFF).to_u8())
-    out.push((value.to_u32() & 0xFF).to_u8())
-    out
-
 fn _h_append(dst: [u8], src: [u8]) -> [u8]:
     var i: u64 = 0
     while i < src.len():
@@ -102,8 +96,232 @@ fn _h_append(dst: [u8], src: [u8]) -> [u8]:
         i = i + 1
     dst
 
+fn _h_put_u16_be(value: u16) -> [u8]:
+    var out: [u8] = []
+    out.push(((value.to_u32() >> 8) & 0xFF).to_u8())
+    out.push((value.to_u32() & 0xFF).to_u8())
+    out
+
+fn _h_put_u24_be(value: u64) -> [u8]:
+    var out: [u8] = []
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push((value & 0xFF).to_u8())
+    out
+
 # ============================================================================
-# Shared validation helpers
+# Public: process_client_hello — RFC 8446 §4.1.2
+# ============================================================================
+
+fn _empty_ch() -> ClientHello13:
+    ClientHello13(
+        random: [],
+        cipher_suites: [],
+        named_groups: [],
+        key_share_groups: [],
+        x25519_key_share: [],
+        p256_key_share: [],
+        sni_host: "",
+        has_supported_versions_tls13: false
+    )
+
+fn process_client_hello(body: [u8]) -> ClientHello13:
+    """Parse a ClientHello body (i.e. `parse_handshake_header(...).body`).
+
+    Wire format (RFC 8446 §4.1.2):
+      legacy_version(2) + random(32) +
+      legacy_session_id_len(1) + legacy_session_id(<=32) +
+      cipher_suites_len(2) + cipher_suites +
+      legacy_compression_methods_len(1) + legacy_compression_methods +
+      extensions_len(2) + extensions
+
+    Returns an empty ClientHello13 if the body is malformed; the caller
+    is expected to detect this via `random.len() == 0`.
+    """
+    if body.len() < 39:
+        return _empty_ch()
+
+    # legacy_version (2 bytes) is at offset 0; we accept 0x0303 only.
+    if _h_u8_at(body, 0) != 0x03u8 or _h_u8_at(body, 1) != 0x03u8:
+        return _empty_ch()
+
+    # random (32 bytes) at offset 2..34
+    var random: [u8] = _h_slice(body, 2u64, 32u64)
+
+    # legacy_session_id at offset 34
+    val sid_len = _h_u8_at(body, 34u64).to_u64()
+    if sid_len > 32u64:
+        return _empty_ch()
+    var off: u64 = 35u64 + sid_len
+
+    # cipher_suites
+    if off + 2 > body.len():
+        return _empty_ch()
+    val cs_len = _h_u16_be_at(body, off).to_u64()
+    off = off + 2u64
+    if off + cs_len > body.len() or (cs_len & 1u64) != 0u64:
+        return _empty_ch()
+    var cipher_suites: [u16] = []
+    var ci: u64 = 0
+    while ci < cs_len:
+        cipher_suites.push(_h_u16_be_at(body, off + ci))
+        ci = ci + 2u64
+    off = off + cs_len
+
+    # legacy_compression_methods
+    if off + 1 > body.len():
+        return _empty_ch()
+    val cm_len = _h_u8_at(body, off).to_u64()
+    off = off + 1u64 + cm_len
+    if off > body.len():
+        return _empty_ch()
+
+    # extensions
+    if off + 2 > body.len():
+        return _empty_ch()
+    val ext_total = _h_u16_be_at(body, off).to_u64()
+    off = off + 2u64
+    val ext_end = off + ext_total
+    if ext_end > body.len():
+        return _empty_ch()
+
+    var named_groups: [u16] = []
+    var ks_groups: [u16] = []
+    var x25519_share: [u8] = []
+    var p256_share: [u8] = []
+    var sni: text = ""
+    var has_tls13 = false
+
+    while off + 4 <= ext_end:
+        val ext_type = _h_u16_be_at(body, off)
+        off = off + 2u64
+        val ext_len = _h_u16_be_at(body, off).to_u64()
+        off = off + 2u64
+        if off + ext_len > ext_end:
+            return _empty_ch()
+        val ext_end_inner = off + ext_len
+
+        if ext_type == 10u16:
+            # supported_groups: 2-byte list_len + u16 entries
+            if ext_len >= 2u64:
+                val gl = _h_u16_be_at(body, off).to_u64()
+                var gp = off + 2u64
+                while gp + 2 <= off + 2u64 + gl and gp + 2 <= ext_end_inner:
+                    named_groups.push(_h_u16_be_at(body, gp))
+                    gp = gp + 2u64
+
+        if ext_type == 43u16:
+            # supported_versions: 1-byte list_len + u16 entries
+            if ext_len >= 1u64:
+                val vl = _h_u8_at(body, off).to_u64()
+                var vp = off + 1u64
+                while vp + 2 <= off + 1u64 + vl and vp + 2 <= ext_end_inner:
+                    if _h_u16_be_at(body, vp) == 0x0304u16:
+                        has_tls13 = true
+                    vp = vp + 2u64
+
+        if ext_type == 51u16:
+            # key_share (CH): 2-byte client_shares_len + entries of {group(2), key_len(2), key}
+            if ext_len >= 2u64:
+                val ksl = _h_u16_be_at(body, off).to_u64()
+                var kp = off + 2u64
+                val ks_end = kp + ksl
+                while kp + 4 <= ks_end and kp + 4 <= ext_end_inner:
+                    val grp = _h_u16_be_at(body, kp)
+                    val klen = _h_u16_be_at(body, kp + 2u64).to_u64()
+                    val key_start = kp + 4u64
+                    if key_start + klen > ks_end:
+                        return _empty_ch()
+                    # Only register a group as "key_share-offered" when the
+                    # advertised key length matches the named-group spec
+                    # (RFC 8446 §4.2.8). Otherwise select_named_group could
+                    # later return a group whose share is empty/invalid.
+                    if grp == GROUP_X25519 and klen == 32u64:
+                        x25519_share = _h_slice(body, key_start, klen)
+                        ks_groups.push(grp)
+                    elif grp == GROUP_SECP256R1 and klen == 65u64:
+                        p256_share = _h_slice(body, key_start, klen)
+                        ks_groups.push(grp)
+                    kp = key_start + klen
+
+        if ext_type == 0u16:
+            # server_name: list_len(2) + (name_type(1) + name_len(2) + name)*
+            if ext_len >= 5u64:
+                var sp = off + 2u64
+                if _h_u8_at(body, sp) == 0u8:
+                    val nl = _h_u16_be_at(body, sp + 1u64).to_u64()
+                    val name_start = sp + 3u64
+                    if name_start + nl <= ext_end_inner:
+                        var name_bytes: [u8] = _h_slice(body, name_start, nl)
+                        # SNI is ASCII per RFC 6066; build a text accumulator.
+                        var bi: u64 = 0
+                        while bi < name_bytes.len():
+                            sni = sni + name_bytes[bi].to_text()
+                            bi = bi + 1u64
+
+        off = ext_end_inner
+
+    ClientHello13(
+        random: random,
+        cipher_suites: cipher_suites,
+        named_groups: named_groups,
+        key_share_groups: ks_groups,
+        x25519_key_share: x25519_share,
+        p256_key_share: p256_share,
+        sni_host: sni,
+        has_supported_versions_tls13: has_tls13
+    )
+
+# ============================================================================
+# Public: select_cipher_suite — RFC 8446 §4.1.1 server preference
+# ============================================================================
+
+fn select_cipher_suite(client_suites: [u16], supported: [u16]) -> u16:
+    """Pick the server's most-preferred suite that the client offered.
+
+    Match-key on the three TLS 1.3 mandatory cipher suites:
+      0x1301 TLS_AES_128_GCM_SHA256
+      0x1302 TLS_AES_256_GCM_SHA384
+      0x1303 TLS_CHACHA20_POLY1305_SHA256
+    Returns 0u16 if no match.
+    """
+    var i: u64 = 0
+    while i < supported.len():
+        val s = supported[i]
+        var j: u64 = 0
+        while j < client_suites.len():
+            if client_suites[j] == s:
+                if (s == CIPHER_AES_128_GCM_SHA256_SH or
+                    s == CIPHER_AES_256_GCM_SHA384_SH or
+                    s == CIPHER_CHACHA20_POLY1305_SHA256_SH):
+                    return s
+            j = j + 1u64
+        i = i + 1u64
+    0u16
+
+# ============================================================================
+# Public: select_named_group — RFC 8446 §4.2.7 / §4.2.8 server preference
+# ============================================================================
+
+fn select_named_group(client_key_share_groups: [u16], supported: [u16]) -> u16:
+    """Pick the server's most-preferred group present in CH key_shares.
+
+    `client_key_share_groups` is the list of groups for which the CH
+    actually carried a key_share entry — only those allow a single-flight
+    ServerHello (no HRR). Returns 0u16 if no overlap exists; the caller
+    should treat that as "HRR-needed", which we don't yet implement.
+    """
+    var i: u64 = 0
+    while i < supported.len():
+        val g = supported[i]
+        if g == GROUP_X25519 or g == GROUP_SECP256R1:
+            if _h_u16_list_contains(client_key_share_groups, g):
+                return g
+        i = i + 1u64
+    0u16
+
+# ============================================================================
+# Validation helpers
 # ============================================================================
 
 fn _h_validate_server_config(server_config: Tls13ServerConfig) -> text:
@@ -143,12 +361,7 @@ fn _h_build_tls13_plaintext_record(content_type: u8, payload: [u8]) -> [u8]:
         i = i + 1u64
     rec
 
-# ============================================================================
-# _validate_client_hello_record — shared by prepare + accept paths
-# ============================================================================
-
-fn validate_client_hello_record_sh(raw_record: [u8], process_ch_fn: fn([u8]) -> ClientHello13) -> Result<Tls13ClientHelloRecord, text>:
-    """Validate a raw ClientHello record. Takes process_client_hello as a fn arg to avoid circular import."""
+fn validate_client_hello_record_sh(raw_record: [u8]) -> Result<Tls13ClientHelloRecord, text>:
     val payload_result = _h_record_payload(raw_record)
     if payload_result.is_err():
         return Err(payload_result.err().unwrap())
@@ -164,7 +377,7 @@ fn validate_client_hello_record_sh(raw_record: [u8], process_ch_fn: fn([u8]) -> 
     if parsed.msg_type != HS_CLIENT_HELLO:
         return Err("expected_client_hello")
 
-    val ch = process_ch_fn(parsed.body)
+    val ch = process_client_hello(parsed.body)
     if ch.random.len() == 0:
         return Err("malformed_client_hello")
     if not ch.has_supported_versions_tls13:
@@ -172,7 +385,7 @@ fn validate_client_hello_record_sh(raw_record: [u8], process_ch_fn: fn([u8]) -> 
     Ok(Tls13ClientHelloRecord(ch: ch, handshake_msg: payload))
 
 # ============================================================================
-# _accepted_context + _verify_client_finished_record
+# Accepted context + verify client finished
 # ============================================================================
 
 fn _h_accepted_context(material: Tls13ServerHandshakeMaterial) -> Tls13ServerContext:
@@ -228,11 +441,15 @@ fn prepare_server_handshake_from_client_hello_record(
     val ch = ch_pair.ch
     val ch_msg = ch_pair.handshake_msg
 
-    val cipher = _h_select_cipher_suite_sh(ch.cipher_suites)
+    val cipher = select_cipher_suite(ch.cipher_suites, [
+        CIPHER_AES_128_GCM_SHA256_SH,
+        CIPHER_AES_256_GCM_SHA384_SH,
+        CIPHER_CHACHA20_POLY1305_SHA256_SH
+    ])
     if cipher == 0u16:
         return Tls13ServerHandshakeResult.Failed("no_shared_cipher_suite")
 
-    val group = _h_select_named_group_sh(ch.key_share_groups)
+    val group = select_named_group(ch.key_share_groups, [GROUP_X25519, GROUP_SECP256R1])
     if group == 0u16:
         return Tls13ServerHandshakeResult.Failed("hrr_not_implemented_server_side")
 
@@ -333,56 +550,9 @@ fn prepare_server_handshake_from_client_hello_record(
         server_finished_record: fin_record
     ))
 
-fn _h_select_cipher_suite_sh(client_suites: [u16]) -> u16:
-    val supported: [u16] = [
-        CIPHER_AES_128_GCM_SHA256_SH,
-        CIPHER_AES_256_GCM_SHA384_SH,
-        CIPHER_CHACHA20_POLY1305_SHA256_SH
-    ]
-    var i: u64 = 0
-    while i < supported.len():
-        val s = supported[i]
-        var j: u64 = 0
-        while j < client_suites.len():
-            if client_suites[j] == s:
-                return s
-            j = j + 1u64
-        i = i + 1u64
-    0u16
-
-fn _h_select_named_group_sh(client_key_share_groups: [u16]) -> u16:
-    val supported: [u16] = [GROUP_X25519, GROUP_SECP256R1]
-    var i: u64 = 0
-    while i < supported.len():
-        val g = supported[i]
-        if _h_u16_list_contains(client_key_share_groups, g):
-            return g
-        i = i + 1u64
-    0u16
-
 # ============================================================================
 # Public test-helper entry points
 # ============================================================================
-
-fn tls13_prepare_server_handshake_from_record_for_test(
-    raw_record: [u8],
-    server_config: Tls13ServerConfig,
-    server_scalar: [u8],
-    process_ch_fn: fn([u8]) -> ClientHello13
-) -> Tls13ServerHandshakeResult:
-    """Prepare deterministic test-only server handshake material.
-
-    `process_ch_fn` must be `process_client_hello` from server.spl (passed to
-    avoid a circular import between server.spl and server_handshake.spl).
-    """
-    val ch_result = validate_client_hello_record_sh(raw_record, process_ch_fn)
-    if ch_result.is_err():
-        return Tls13ServerHandshakeResult.Failed(ch_result.err().unwrap())
-    val ch_pair = ch_result.unwrap()
-    val server_random = _server_random_from_client_random_sh(ch_pair.ch)
-    prepare_server_handshake_from_client_hello_record(
-        ch_pair, server_config, server_random, server_scalar
-    )
 
 fn _server_random_from_client_random_sh(ch: ClientHello13) -> [u8]:
     """Deterministic test-only random surrogate (XOR with 0xA5)."""
@@ -393,15 +563,31 @@ fn _server_random_from_client_random_sh(ch: ClientHello13) -> [u8]:
         i = i + 1u64
     out
 
+fn tls13_prepare_server_handshake_from_record_for_test(
+    raw_record: [u8],
+    server_config: Tls13ServerConfig,
+    server_scalar: [u8]
+) -> Tls13ServerHandshakeResult:
+    """Prepare deterministic test-only server handshake material."""
+    val ch_result = validate_client_hello_record_sh(raw_record)
+    if ch_result.is_err():
+        return Tls13ServerHandshakeResult.Failed(ch_result.err().unwrap())
+    val ch_pair = ch_result.unwrap()
+    prepare_server_handshake_from_client_hello_record(
+        ch_pair,
+        server_config,
+        _server_random_from_client_random_sh(ch_pair.ch),
+        server_scalar
+    )
+
 fn tls13_accept_client_hello_record_with_server_material_for_test(
     raw_record: [u8],
     server_config: Tls13ServerConfig,
     server_random: [u8],
-    server_scalar: [u8],
-    process_ch_fn: fn([u8]) -> ClientHello13
+    server_scalar: [u8]
 ) -> Tls13AcceptResult:
     """Run the accept path through server crypto prep with explicit material."""
-    val ch_result = validate_client_hello_record_sh(raw_record, process_ch_fn)
+    val ch_result = validate_client_hello_record_sh(raw_record)
     if ch_result.is_err():
         return Tls13AcceptResult.Failed(ch_result.err().unwrap())
     val prep = prepare_server_handshake_from_client_hello_record(
