@@ -360,7 +360,31 @@ pub(crate) fn compile_file_to_object(
     pipeline.rewrite_hir_simd_loops(&mut hir);
 
     // MIR
-    let mir = crate::mir::lower_to_mir(&hir).map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
+    let mut mir = crate::mir::lower_to_mir(&hir).map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
+
+    // Trampoline: when the entry file has no local `main` but re-exports one
+    // via `use`, inject a synthetic MIR function that forwards to the resolved
+    // mangled name.  The mangler renames this "main" → "spl_main" while the
+    // call target (already mangled) passes through untouched.
+    if is_entry && !mir.functions.iter().any(|f| f.name == "main") {
+        if let Some(resolved_main) = use_map.get("main") {
+            let mut trampoline = crate::mir::MirFunction::new(
+                "main".to_string(),
+                crate::hir::TypeId::I64,
+                simple_parser::Visibility::Public,
+            );
+            let dest = trampoline.new_vreg();
+            let entry = trampoline.block_mut(crate::mir::BlockId(0)).unwrap();
+            entry.instructions.push(crate::mir::MirInst::Call {
+                dest: Some(dest),
+                target: crate::mir::CallTarget::from_name(resolved_main),
+                args: vec![],
+            });
+            entry.terminator = crate::mir::Terminator::Return(Some(dest));
+            mir.functions.push(trampoline);
+        }
+    }
+
     if std::env::var("SIMPLE_TRACE_MIR_FUNCTIONS").is_ok() {
         let path_text = file_path.display().to_string();
         if std::env::var("SIMPLE_TRACE_MIR_FUNCTIONS_FILTER")

@@ -8,4 +8,4 @@
 - [x] implement
 - [x] refactor
 - [x] verify
-- [ ] ship
+- [x] ship — 2026-05-19: all work on origin/main, pipeline complete

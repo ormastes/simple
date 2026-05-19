@@ -30,7 +30,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-05-11: AC-1 bridge routing + AC-6 codegen implementation complete
 - [x] 6-refactor (Tech Lead) — 2026-05-11: domain keyword contextual fix (style/schema/ui/music/bim/city/cad/rtl)
 - [x] 7-verify (QA) — 2026-05-11: bootstrap stages 2+4 pass, 77 regression specs pass, deployed binary valid
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-19
 
 ## Phase Outputs
 
@@ -300,4 +300,4 @@ Source: @driver(class = DriverClass.Block, vendor = 0x1234, ops = my_ops)\nfn in
 <pending>
 
 ### 8-ship
-<pending>
+All 7 ACs verified on origin/main. Key commits: 0af2abd08f (@packed struct→Bitfield routing), ec337e5b2a (FR-DRIVER-0003 status), 95735a3245 (custom primitive SFFI). Bootstrap stages 2+4 pass, 77 bitfield regression specs pass. Pipeline complete 2026-05-19.
