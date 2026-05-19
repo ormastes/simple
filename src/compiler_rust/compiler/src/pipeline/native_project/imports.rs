@@ -610,6 +610,28 @@ fn collect_use_imports(
                     }
                 }
             }
+            // Also resolve bare function names that belong to this module.
+            // When a module exports free functions (e.g. `use std.common.ctype` imports
+            // `is_digit`), the bare name "is_digit" is NOT keyed as "ctype.is_digit" in
+            // all_mangled, so the prefix loop above misses it.  Walk all bare (non-dotted)
+            // names and use resolve_import_name_strict with the current use-path segments
+            // to find ones that uniquely belong to this module.
+            for (raw_name, candidates) in all_mangled.iter() {
+                // Skip dotted names (already handled above) and names already resolved.
+                if raw_name.contains('.') || use_map.contains_key(raw_name) {
+                    continue;
+                }
+                // Only act when there are multiple candidates — single-candidate names
+                // are already unambiguous and don't need the module-scoped override.
+                if candidates.len() <= 1 {
+                    continue;
+                }
+                if let Some(mangled) =
+                    resolve_import_name_strict(raw_name, &segments, all_mangled, re_exports)
+                {
+                    use_map.insert(raw_name.clone(), mangled);
+                }
+            }
         }
         simple_parser::ast::ImportTarget::Aliased { name, alias } => {
             if let Some(mangled) = resolve_import_name(name, &segments, all_mangled, re_exports) {

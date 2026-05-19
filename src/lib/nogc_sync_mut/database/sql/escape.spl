@@ -34,6 +34,84 @@ fn quote_value(value: text) -> text:
     parts.join("")
 
 # ============================================================================
+# Identifier Validation
+# ============================================================================
+
+# Maximum allowed length for a SQL identifier (table/column name).
+val MAX_IDENT_LEN: i64 = 64
+
+# Validate a SQL identifier: non-empty, within length limit, safe characters only.
+# Returns Err with a descriptive message when the identifier is unsafe.
+fn validate_ident(name: text) -> Result<text, text>:
+    if name.len() == 0:
+        return Err("SQL identifier must not be empty")
+    if name.len() > MAX_IDENT_LEN:
+        return Err("SQL identifier too long (max {MAX_IDENT_LEN} chars): {name}")
+    for i in 0..name.len():
+        val ch = name[i]
+        if not _is_ident_char(ch):
+            return Err("SQL identifier contains invalid character '{ch}' in: {name}")
+    Ok(name)
+
+# Return true when a string contains patterns commonly associated with SQL injection.
+# Used as a lint/guard on raw SQL fragments — not a replacement for parameterization.
+fn is_dangerous_sql(fragment: text) -> bool:
+    val lower = fragment.to_lower()
+    if _contains(lower, "--"):
+        return true
+    if _contains(lower, ";"):
+        return true
+    if _contains(lower, "/*"):
+        return true
+    if _contains(lower, "*/"):
+        return true
+    if _contains(lower, "xp_"):
+        return true
+    if _contains(lower, "exec "):
+        return true
+    if _contains(lower, "execute "):
+        return true
+    if _contains(lower, "drop "):
+        return true
+    if _contains(lower, "truncate "):
+        return true
+    if _contains(lower, "grant "):
+        return true
+    if _contains(lower, "revoke "):
+        return true
+    false
+
+# Return true when the identifier contains only safe characters (alphanumeric + underscore).
+fn is_safe_identifier(name: text) -> bool:
+    if name.len() == 0:
+        return false
+    if name.len() > MAX_IDENT_LEN:
+        return false
+    for i in 0..name.len():
+        if not _is_ident_char(name[i]):
+            return false
+    true
+
+# Internal: check whether haystack contains needle as a substring.
+fn _contains(haystack: text, needle: text) -> bool:
+    if needle.len() == 0:
+        return true
+    if needle.len() > haystack.len():
+        return false
+    val limit = haystack.len() - needle.len()
+    var i = 0
+    while i <= limit:
+        var match_len = 0
+        while match_len < needle.len():
+            if haystack[i + match_len] != needle[match_len]:
+                break
+            match_len = match_len + 1
+        if match_len == needle.len():
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
 # Sanitization
 # ============================================================================
 
