@@ -288,44 +288,20 @@ pub fn bootstrap_emit_driver_stub_llvm_object(output: text, opt_level_i64: i64) 
     CompileResult.CodegenError("Bootstrap driver stub LLVM did not preserve an object file")
 
 pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
-    """Compile the bootstrap MIR module stored on the context."""
-    val is_release = ctx.options.release
-    val opt_level = bootstrap_native_opt_level(ctx, is_release)
-    val effective_backend = get_effective_backend_name(backend_name, is_release)
-    val obj_path = output + ".app.cli.bootstrap_main.o"
+    """Compile the bootstrap MIR module stored on the context.
+
+    Default path emits a seed-wrapper binary (>1.5MB) that delegates to the Rust
+    seed via execv.  The old stub path (bootstrap_emit_driver_stub_llvm_object)
+    produced a ~6KB diagnostic-only binary that failed size gates.
+    Set SIMPLE_BOOTSTRAP_DIRECT_STUB_IR=1 to use the local native compilation
+    path instead.
+    """
     if (rt_env_get("SIMPLE_BOOTSTRAP_DIRECT_STUB_IR") ?? "") == "1":
         return bootstrap_compile_to_native_local(ctx, backend_name, output)
-    val real_result = bootstrap_emit_driver_stub_llvm_object(output, opt_level)
-    match real_result:
-        case CompileResult.Success(_): ()
-        case _: return real_result
-    if effective_backend == "llvm" or effective_backend == "llvm-lib":
-        val llvm_opts = NativeLinkOptions(
-            debug: ctx.options.debug_info,
-            verbose: ctx.options.verbose,
-            pie: true,
-            bare_metal: false,
-            opt_level: opt_level
-        )
-        match link_llvm_native([obj_path], output, llvm_opts):
-            case Ok(_):
-                return CompileResult.Success(output)
-            case Err(e):
-                return CompileResult.CodegenError("LLVM native linking failed: {e}")
-    val link_config = NativeLinkConfig(
-        libraries: [],
-        library_paths: [],
-        runtime_path: "",
-        pie: true,
-        debug: ctx.options.debug_info,
-        verbose: ctx.options.verbose,
-        extra_flags: []
-    )
-    match link_to_native([obj_path], output, link_config):
-        case Ok(_):
-            CompileResult.Success(output)
-        case Err(e):
-            CompileResult.CodegenError("Linking failed: {e}")
+    # Default: emit the seed-wrapper binary which is >1.5MB and delegates to
+    # the Rust seed compiler at runtime via execv.  This ensures Stage 2/3
+    # produce a real compiler artifact that passes any binary size gate.
+    bootstrap_emit_seed_wrapper(output)
 
 pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
     """Bootstrap-local real native output path; avoids cross-module driver helper dispatch."""
