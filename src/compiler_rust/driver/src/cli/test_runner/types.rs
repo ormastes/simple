@@ -294,7 +294,7 @@ impl Default for TestOptions {
             no_cache: false,
             no_db: false,
             keep_artifacts: false,
-            safe_mode: false,
+            safe_mode: true,
             safe_mode_timeout: 120,
             // Default: parallel subprocess execution
             // Use --sequential to disable
