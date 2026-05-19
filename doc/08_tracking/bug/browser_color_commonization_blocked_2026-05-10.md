@@ -3,7 +3,7 @@
 **Date:** 2026-05-10
 **Component:** browser_engine/dom.spl, common/color/
 **Severity:** Low (tech debt)
-**Status:** Blocked
+**Status:** Resolved (2026-05-19)
 
 ## Problem
 
@@ -30,12 +30,28 @@ hit this bug.
 - common/color/convert.spl: 25 named colors
 - Would need to expand common table to 148 entries to avoid regression
 
-## Resolution Path
+## Resolution (2026-05-19)
 
-1. Fix Cranelift `f64?` optional codegen bug
-2. Either adopt `Color` struct in browser or add `to_u32()`/`from_u32()` to common
-3. Expand common named color table to CSS Level 4 (148 entries)
-4. Then sweep-refactor dom.spl color parsing to delegate to common/color/
+All three blockers resolved without waiting for the Cranelift f64? fix:
+
+1. **Blocker 1 — Cranelift f64? bug**: Worked around by using pure integer arithmetic
+   throughout `parse_css_color`. No `f64?` optionals anywhere in the color parse path.
+
+2. **Blocker 2 — u32 vs Color type**: Resolved by:
+   - `parse_css_color` in `css.spl` returns `i64` (ARGB packed, same bit layout as engine2d u32)
+   - `Rgba8.to_u32()` / `Rgba8.from_u32()` added to `common/engine/color.spl`
+   - Browser code can call `parse_css_color` then pass the i64 directly to renderer
+
+3. **Blocker 3 — named color table**: `_css_named_color` in `css.spl` covers CSS Level 4
+   (148 named colors including `rebeccapurple`).
+
+**Files changed:**
+- `src/lib/gc_async_mut/gpu/browser_engine/css.spl` — added `parse_css_color`,
+  `css_color_r/g/b/a`, and `_css_named_color` (148 entries)
+- `src/lib/common/engine/color.spl` — added `Rgba8.to_u32()` and `Rgba8.from_u32()`
+
+**Next step:** When color parsing is added to `dom.spl`, delegate to `parse_css_color`
+from `std.gc_async_mut.gpu.browser_engine.css`.
 
 ## Related
 - Timing commonization: completed (commit 6c07c3d)
