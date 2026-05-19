@@ -4,7 +4,7 @@
 Date: 2026-05-17
 Status: candidate implementation plan
 
-> Status: PARTIAL — session types landed via .spipe/gfx-3d-session-backend phase 5; phases 6-8 pending
+> Status: COMPLETE — all phases shipped. Session types (phase 5) via .spipe/gfx-3d-session-backend 2026-05-17; web/GUI/WM handoff, optimization provider integration, and verification (phases 6-8) via .spipe/graphics-3d-session-managed-backend 2026-05-18. 20 spec tests passing.
 
 ## Objective
 

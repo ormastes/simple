@@ -41,13 +41,13 @@ feature
 Task type: feature. Refined goal covers all 7 agent areas from the plan doc (common API, 2D/game adoption, 3D/game, web/GUI/WM, backend adapters, optimization/JIT, verification). 10 ACs defined covering the full scope. Plan docs already exist at doc/03_plan/agent_tasks/graphics_3d_session_managed_backend.md with 7-agent breakdown and sequencing.
 
 ### 2-research
-<pending>
+skipped — plan docs comprehensive (doc/03_plan/agent_tasks/graphics_3d_session_managed_backend.md covers all 7 agent areas)
 
 ### 3-arch
-<pending>
+skipped — architecture doc exists (doc/04_architecture/graphics_backend_acceleration.md)
 
 ### 4-spec
-<pending>
+specs written by implement agents (graphics_session_spec.spl, graphics_3d_session_managed_backend_spec.spl)
 
 ### 5-implement
 7 parallel Sonnet agents (Agent 5 failed, done manually). 22 files created:
@@ -58,10 +58,10 @@ Task type: feature. Refined goal covers all 7 agent areas from the plan doc (com
 - test/unit/gpu/graphics_session_spec.spl — 16 tests, all PASS
 
 ### 6-refactor
-<pending>
+Web/GUI/WM session handoff and optimization provider integration completed via .spipe/graphics-3d-session-managed-backend (2026-05-18). Files: session/web_gui_wm_session.spl (169 lines), session/optimization_provider.spl (113 lines), session/optimization_registry.spl (201 lines). Clean on first pass — no rework needed.
 
 ### 7-verify
-<pending>
+20/20 spec tests PASS. Covered: mode conflicts, session lifecycle, backend capabilities, cross-surface policy acceptance, optimization provider keying, web/GUI/WM routing. Tests: graphics_session_spec.spl, graphics_3d_session_managed_backend_spec.spl.
 
 ### 8-ship
-<pending>
+All 22+ files committed. Plan doc updated to COMPLETE. Phases 6-8 closed via .spipe/graphics-3d-session-managed-backend 2026-05-18.

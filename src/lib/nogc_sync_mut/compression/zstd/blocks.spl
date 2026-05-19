@@ -3,15 +3,19 @@
 # Block types:
 #   Raw_Block        — literal bytes, no compression (IMPLEMENTED)
 #   RLE_Block        — one byte repeated Block_Size times (IMPLEMENTED)
-#   Compressed_Block — literals section + sequences section (NOT IMPLEMENTED — returns Err)
+#   Compressed_Block — literals section + sequences section (PARTIAL)
 #
-# Compressed_Block support requires literals.spl + sequences.spl which are not
-# yet implemented.  Callers will receive Err(Unsupported) for compressed blocks.
+# Compressed_Block implementation status:
+#   - Literals_Block_Type 00 (Raw)  — fully implemented
+#   - Literals_Block_Type 01 (RLE)  — fully implemented
+#   - Literals_Block_Type 10/11 (Huffman / Treeless) — returns Err(Unsupported)
+#   - Sequences count == 0          — fully implemented (emit literals, done)
+#   - Sequences count  > 0 (FSE)    — returns Err(Unsupported)
 
 use std.common.compress.types.{CompressionError}
 use std.nogc_sync_mut.compression.zstd.bit_reader.{
     ZstdBitReader, ZstdBitsResult, ZstdBytesResult,
-    zstd_br_read, zstd_br_read_bytes
+    zstd_br_init, zstd_br_read, zstd_br_read_bytes, zstd_br_align
 }
 use std.nogc_sync_mut.compression.zstd.frame.{
     ZSTD_BLOCK_RAW, ZSTD_BLOCK_RLE, ZSTD_BLOCK_COMPRESSED,
@@ -97,7 +101,145 @@ fn zstd_decode_compressed_block(
     state: ZstdBlockState,
     r: ZstdBitReader
 ) -> Result<ZstdBlockResult, CompressionError>:
-    # Compressed block decoding (FSE + Huffman + sequences) is not yet implemented.
-    # Skip over the block bytes so the reader advances correctly.
-    val skip_res = zstd_br_read_bytes(r, block_size)?
-    Err(CompressionError.Unsupported("zstd compressed block not yet implemented"))
+    # Read the entire compressed block payload into a sub-slice.
+    # Parsing happens inside the sub-reader so the outer reader always
+    # advances by exactly block_size bytes regardless of parse errors.
+    val outer = zstd_br_read_bytes(r, block_size)?
+    val block_data = outer.bytes
+    val outer_reader = outer.reader
+
+    val sub = zstd_br_init(block_data)
+
+    # -----------------------------------------------------------------------
+    # 1. Literals_Section_Header  (RFC 8878 §3.1.1.3.2)
+    #
+    # First byte layout:
+    #   bits [1:0] = Literals_Block_Type
+    #   bits [3:2] = Size_Format  (meaning depends on block type)
+    # -----------------------------------------------------------------------
+    val h0r = zstd_br_read(sub, 8)?
+    val hdr_byte = h0r.value
+    var cur = h0r.reader
+
+    val lit_block_type = hdr_byte & 3
+    val size_fmt       = (hdr_byte >> 2) & 3
+
+    # -----------------------------------------------------------------------
+    # 1a. Decode regenerated (uncompressed) literal size and read literals.
+    #     Raw  (00): Size_Format selects 1-byte, 2-byte, or 3-byte size field.
+    #     RLE  (01): same size encoding, then a single byte to repeat.
+    #     Huffman / Treeless (10, 11): not yet implemented.
+    # -----------------------------------------------------------------------
+    var literals: [u8] = []
+
+    if lit_block_type == 0:
+        # Raw literals — regenerated_size bytes follow directly
+        val regen_size = zstd_lit_raw_rle_size(hdr_byte, size_fmt, cur)?
+        val lsr = zstd_br_read_bytes(regen_size.reader, regen_size.value)?
+        cur = lsr.reader
+        literals = lsr.bytes
+
+    else:
+        if lit_block_type == 1:
+            # RLE literals — one byte repeated regen_size times
+            val regen_size = zstd_lit_raw_rle_size(hdr_byte, size_fmt, cur)?
+            val byr = zstd_br_read(regen_size.reader, 8)?
+            cur = byr.reader
+            val fill_byte = byr.value.to_u8()
+            var li = 0
+            while li < regen_size.value:
+                literals.push(fill_byte)
+                li = li + 1
+
+        else:
+            # Huffman (10) or Treeless (11) — not yet implemented
+            return Err(CompressionError.Unsupported("zstd huffman literals not yet implemented"))
+
+    # -----------------------------------------------------------------------
+    # 2. Sequences_Section_Header  (RFC 8878 §3.1.1.4)
+    #
+    # First byte encodes the number of sequences:
+    #   0        → 0 sequences
+    #   1..127   → number_of_sequences = that byte
+    #   128..254 → number_of_sequences = ((byte - 128) << 8) | next_byte
+    #   255      → number_of_sequences = next_byte_lo | (next_byte_hi << 8) + 0x7F00
+    # -----------------------------------------------------------------------
+    # Align to byte boundary before reading sequences header
+    cur = zstd_br_align(cur)
+
+    val nsr = zstd_br_read(cur, 8)?
+    cur = nsr.reader
+    val seq_first = nsr.value
+
+    var num_sequences = 0
+    if seq_first == 0:
+        num_sequences = 0
+    else:
+        if seq_first < 128:
+            num_sequences = seq_first
+        else:
+            if seq_first < 255:
+                val seq2r = zstd_br_read(cur, 8)?
+                cur = seq2r.reader
+                num_sequences = ((seq_first - 128) << 8) | seq2r.value
+            else:
+                val sq2r = zstd_br_read(cur, 8)?
+                val sq3r = zstd_br_read(sq2r.reader, 8)?
+                cur = sq3r.reader
+                num_sequences = sq2r.value | (sq3r.value << 8) + 0x7F00
+
+    # -----------------------------------------------------------------------
+    # 3. Execute
+    # -----------------------------------------------------------------------
+    if num_sequences == 0:
+        # No back-references: literals become output directly.
+        var new_output = state.output
+        var li = 0
+        while li < literals.len():
+            new_output.push(literals[li])
+            li = li + 1
+        val new_state = ZstdBlockState(
+            output:      new_output,
+            rep_offsets: state.rep_offsets
+        )
+        return Ok(ZstdBlockResult(state: new_state, reader: outer_reader))
+
+    # FSE-decoded sequences not yet implemented.
+    Err(CompressionError.Unsupported("zstd FSE sequences not yet implemented"))
+
+# ---------------------------------------------------------------------------
+# Helper: decode Raw/RLE literal regenerated size
+#
+# RFC 8878 §3.1.1.3.2.1 and §3.1.1.3.2.2:
+#   Size_Format 00 or 10 → size = hdr_byte[7:3]  (5 bits, no extra bytes)
+#   Size_Format 01       → size = hdr_byte[7:3] | (next_byte << 5)  (13 bits)
+#   Size_Format 11       → size = hdr_byte[7:3] | (next0 << 5) | (next1 << 13)  (21 bits)
+# ---------------------------------------------------------------------------
+
+struct ZstdSizeResult:
+    value:  i64
+    reader: ZstdBitReader
+
+fn zstd_lit_raw_rle_size(
+    hdr_byte: i64,
+    size_fmt:  i64,
+    r: ZstdBitReader
+) -> Result<ZstdSizeResult, CompressionError>:
+    if size_fmt == 0:
+        # 5-bit size packed in the upper 5 bits of the header byte
+        val sz = (hdr_byte >> 3) & 31
+        return Ok(ZstdSizeResult(value: sz, reader: r))
+    if size_fmt == 2:
+        # Same as 00: 5-bit size in hdr_byte upper bits (no extra byte)
+        val sz = (hdr_byte >> 3) & 31
+        return Ok(ZstdSizeResult(value: sz, reader: r))
+    if size_fmt == 1:
+        # 13-bit size: 5 bits from header + 8 bits from next byte
+        val n1r = zstd_br_read(r, 8)?
+        val sz = ((hdr_byte >> 3) & 31) | (n1r.value << 5)
+        return Ok(ZstdSizeResult(value: sz, reader: n1r.reader))
+    # size_fmt == 3: 21-bit size: 5 + 8 + 8
+    val n1r = zstd_br_read(r, 8)?
+    val n2r = zstd_br_read(n1r.reader, 8)?
+    val sz = ((hdr_byte >> 3) & 31) | (n1r.value << 5) | (n2r.value << 13)
+    Ok(ZstdSizeResult(value: sz, reader: n2r.reader))
