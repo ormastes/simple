@@ -1,0 +1,64 @@
+"""
+Simple Web Renderer
+
+Provides simple_web_render_url_to_pixels: a one-shot URL-to-pixel-buffer
+function used by app.ui.browser.renderer for the ui.browser pipeline.
+
+Usage (from app.ui.browser.renderer):
+    val pixels = simple_web_render_url_to_pixels(url, rect_w, rect_h)
+"""
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+
+extern fn rt_bytes_alloc(n: i64) -> [u8]
+
+# ============================================================================
+# simple_web_render_url_to_pixels
+# ============================================================================
+
+fn simple_web_render_url_to_pixels(url: text, width: i64, height: i64) -> [u8]:
+    """Fetch the resource at url and render it to an RGBA pixel buffer.
+
+    For local (file://) and about: URLs, generates a placeholder page.
+    For http(s) URLs, the actual fetch must be wired by the caller via
+    the network stack — this function produces a stub white framebuffer
+    until the network layer is connected.
+
+    Returns: RGBA bytes, row-major, width * height * 4 bytes.
+    """
+    val n_bytes = width * height * 4
+    val pixels = rt_bytes_alloc(n_bytes)
+
+    if url.starts_with("about:"):
+        # About pages: white background
+        var i = 0
+        while i < n_bytes:
+            pixels[i] = 255
+            i = i + 1
+        return pixels
+
+    if url.starts_with("file://"):
+        # Try to read as HTML file and render
+        val path = url.substring(7, url.len())
+        val html = rt_file_read_text_opt(path)
+        if html != nil:
+            val html_str = html ?? ""
+            val renderer = BrowserRenderer.create(width.to_i32(), height.to_i32())
+            val result = renderer.render_html(html_str)
+            if result.ok:
+                return result.pixels
+        # Fallback: white buffer
+        var i = 0
+        while i < n_bytes:
+            pixels[i] = 255
+            i = i + 1
+        return pixels
+
+    # Default: white placeholder (network fetch not wired here)
+    var i = 0
+    while i < n_bytes:
+        pixels[i] = 255
+        i = i + 1
+    pixels
+
+extern fn rt_file_read_text_opt(path: text) -> text?

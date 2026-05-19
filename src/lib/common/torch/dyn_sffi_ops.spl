@@ -1,1 +1,104 @@
-pass_todo
+"""
+Dynamic PyTorch SFFI — Operations
+
+Runtime-optional libtorch dispatch. Unlike the static SFFI in
+std.torch.sffi (which uses direct rt_torch_* externs), these functions
+load libtorch dynamically and fail gracefully when it is absent.
+
+Consumed by:
+  - std.nogc_async_mut.linalg.backend_ops
+    (dyn_torch_available, dyn_torch_tensor_matmul, dyn_torch_tensor_dot,
+     dyn_torch_tensor_sum, dyn_torch_tensor_inverse,
+     dyn_torch_tensor_linalg_solve, dyn_torch_tensor_free)
+  - All torch variant shims via std.common.torch.dyn_sffi
+"""
+
+# ============================================================================
+# Dynamic library state
+# ============================================================================
+
+# Handle returned by rt_torch_dyn_open, or 0 if unavailable.
+# Module-level mutable; set once on first call to dyn_torch_available().
+var _dyn_torch_handle: i64 = -1   # -1 = not yet probed
+
+fn _ensure_loaded() -> bool:
+    """Load libtorch dynamically if not already attempted."""
+    if _dyn_torch_handle == -1:
+        _dyn_torch_handle = rt_torch_dyn_open()
+    _dyn_torch_handle != 0
+
+# ============================================================================
+# Availability
+# ============================================================================
+
+fn dyn_torch_available() -> bool:
+    """Return true if libtorch can be loaded at runtime."""
+    _ensure_loaded()
+
+# ============================================================================
+# Tensor lifecycle
+# ============================================================================
+
+fn dyn_torch_tensor_free(handle: i64):
+    """Free a tensor returned by a dyn_torch_* function."""
+    if _ensure_loaded():
+        rt_torch_torchtensor_free(handle)
+
+# ============================================================================
+# Linear algebra
+# ============================================================================
+
+fn dyn_torch_tensor_matmul(a: i64, b: i64) -> i64:
+    """Matrix multiply tensors a and b. Returns 0 on failure."""
+    if not _ensure_loaded():
+        return 0
+    rt_torch_torchtensor_matmul(a, b)
+
+fn dyn_torch_tensor_dot(a: i64, b: i64) -> i64:
+    """Dot product of 1-D tensors a and b. Returns 0 on failure."""
+    if not _ensure_loaded():
+        return 0
+    # Flatten to 1-D, matmul, then sum
+    val flat_a = rt_torch_torchtensor_flatten(a, 0, -1)
+    val flat_b = rt_torch_torchtensor_flatten(b, 0, -1)
+    val result = rt_torch_torchtensor_mul(flat_a, flat_b)
+    val summed = rt_torch_torchtensor_sum(result)
+    rt_torch_torchtensor_free(flat_a)
+    rt_torch_torchtensor_free(flat_b)
+    rt_torch_torchtensor_free(result)
+    summed
+
+fn dyn_torch_tensor_sum(handle: i64) -> i64:
+    """Sum all elements of a tensor. Returns 0 on failure."""
+    if not _ensure_loaded():
+        return 0
+    rt_torch_torchtensor_sum(handle)
+
+fn dyn_torch_tensor_inverse(handle: i64) -> i64:
+    """Matrix inverse. Returns 0 on failure.
+
+    Uses torch.linalg.inv semantics (square matrix required).
+    Implemented via SFFI linalg call; falls back to 0 if unavailable.
+    """
+    if not _ensure_loaded():
+        return 0
+    rt_torch_tensor_inverse(handle)
+
+fn dyn_torch_tensor_linalg_solve(a: i64, b: i64) -> i64:
+    """Solve the linear system Ax = b. Returns 0 on failure."""
+    if not _ensure_loaded():
+        return 0
+    rt_torch_tensor_linalg_solve(a, b)
+
+# ============================================================================
+# Runtime externs
+# ============================================================================
+
+extern fn rt_torch_dyn_open() -> i64
+extern fn rt_torch_torchtensor_free(handle: i64)
+extern fn rt_torch_torchtensor_matmul(a: i64, b: i64) -> i64
+extern fn rt_torch_torchtensor_mul(a: i64, b: i64) -> i64
+extern fn rt_torch_torchtensor_flatten(handle: i64, start_dim: i64, end_dim: i64) -> i64
+extern fn rt_torch_torchtensor_sum(handle: i64) -> i64
+extern fn rt_torch_tensor_inverse(handle: i64) -> i64
+extern fn rt_torch_tensor_linalg_solve(a: i64, b: i64) -> i64

@@ -872,9 +872,23 @@ fn try_compile_builtin_method_call<M: Module>(
         return Ok(Some(inline_runtime_len_value(builder, receiver_val)));
     }
 
-    // Check if runtime function exists
-    let Some(&func_id) = ctx.runtime_funcs.get(runtime_func) else {
-        return Ok(None);
+    // Check if runtime function exists; declare on-demand if missing
+    let func_id = if let Some(&fid) = ctx.runtime_funcs.get(runtime_func) {
+        fid
+    } else {
+        let call_conv = crate::codegen::shared::platform_call_conv();
+        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+        for _ in 0..(args.len() + 1) {
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        }
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        match ctx.module.declare_function(runtime_func, cranelift_module::Linkage::Import, &sig) {
+            Ok(fid) => {
+                ctx.func_ids.insert(runtime_func.to_string(), fid);
+                fid
+            }
+            Err(_) => return Ok(None),
+        }
     };
 
     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
