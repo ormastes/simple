@@ -188,7 +188,8 @@ printf '[5/7] QEMU overlay + start\n'
 
 rm -f "$OVERLAY_IMAGE"
 qemu-img create -f qcow2 -b "$QEMU_VM_PATH" -F qcow2 "$OVERLAY_IMAGE" >/dev/null 2>&1
-pass "Overlay created: $OVERLAY_IMAGE"
+qemu-img resize "$OVERLAY_IMAGE" 30G >/dev/null 2>&1
+pass "Overlay created (30G): $OVERLAY_IMAGE"
 
 # Detect KVM
 ACCEL="tcg"
@@ -322,25 +323,39 @@ else
     info "Syncing project to VM..."
     rsync -az --delete \
         --exclude='.git' \
-        --exclude='target/' \
-        --exclude='build/' \
+        --exclude='.jj/' \
+        --exclude='/build/' \
         --exclude='.simple/' \
-        --exclude='bootstrap/' \
+        --exclude='/bootstrap/' \
         --exclude='node_modules/' \
         --exclude='*.o' \
         --exclude='*.a' \
-        --exclude='examples/' \
-        --exclude='doc/' \
+        --exclude='/examples/' \
+        --exclude='/doc/' \
+        --exclude='*.qcow2' \
+        --exclude='/src/compiler_rust/target/' \
+        --exclude='/src/compiler_rust/target_*/' \
+        --exclude='/tools/' \
+        --exclude='/bin/' \
+        --exclude='**/target/debug/' \
+        --exclude='**/target/release/' \
+        --exclude='**/target/bootstrap/' \
         -e "ssh ${SSH_OPTS}" \
         "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
 
     info "Building Rust seed in VM..."
-    $VM_SSH "cd ${VM_HOME}/simple/src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" 2>&1 | tail -5
+    BUILD_OUT=$($VM_SSH "cd ${VM_HOME}/simple/src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all 2>&1; echo EXIT:\$?" 2>/dev/null)
+    BUILD_EXIT=$(printf '%s' "$BUILD_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
+    printf '%s\n' "$BUILD_OUT" | grep -v '^EXIT:' | tail -5
+    [ "$BUILD_EXIT" = "0" ] || fail "Rust seed build failed (exit $BUILD_EXIT)"
     pass "Rust seed built"
 
     info "Running 3-stage bootstrap in VM..."
-    $VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple build bootstrap --seed=src/compiler_rust/target/bootstrap/simple" 2>&1 | tail -10
+    BOOT_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple build bootstrap --seed=src/compiler_rust/target/bootstrap/simple 2>&1; echo EXIT:\$?" 2>/dev/null)
+    BOOT_EXIT=$(printf '%s' "$BOOT_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
+    printf '%s\n' "$BOOT_OUT" | grep -v '^EXIT:' | tail -10
+    [ "$BOOT_EXIT" = "0" ] || fail "3-stage bootstrap failed (exit $BOOT_EXIT)"
     pass "3-stage bootstrap completed"
 
     # Retrieve binary
@@ -348,7 +363,7 @@ else
     mkdir -p "$FREEBSD_BIN_DIR"
     scp ${SSH_OPTS} \
         "${VM_USER}@localhost:${VM_HOME}/simple/bootstrap/simple_stage3" \
-        "${FREEBSD_BIN_DIR}/simple" 2>/dev/null
+        "${FREEBSD_BIN_DIR}/simple" 2>/dev/null || fail "Failed to retrieve binary"
     pass "Binary retrieved: ${FREEBSD_BIN_DIR}/simple"
 
     SCRIPT_OK=1
