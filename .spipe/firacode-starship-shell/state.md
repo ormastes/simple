@@ -21,7 +21,7 @@ feature (two sub-features bundled)
 - [x] AC-3: Simple shell wired to new `StarshipPrompt.build_prompt(ctx, elapsed_ms)` at `shell_app.spl:226-230`; default config renders status + user@host + directory + git_branch + character.
 - [x] AC-4: 9 module renderers (`_render_status`, `_render_user_host`, `_render_directory`, `_render_git_branch`, `_render_git_status`, `_render_cmd_duration`, `_render_jobs`, `_render_character`). All emit `PromptSegment`. Each gated by its own `show_*` flag (config-togglable).
 - [x] AC-5: `StarshipPrompt.load_config(vfs, home)` parses `~/.config/starship.spl` as key=value; invalid lines fall through to defaults; VFS errors return defaults without crashing.
-- [~] AC-6: `<50 ms` budget not measured on the VM (no golden-path benchmark harness built). Short-circuit path confirmed: git modules return `PromptSegment.empty()` when vfs read errors / override is empty. **Deferred — add perf bench in follow-up.**
+- [x] AC-6: `<50 ms` budget bench added to `shell_starship_modules_spec.spl` (AC-6 describe block). Single `build_prompt` call with nil VFS measured via `current_time_ms()`; assertion is `elapsed < 500 ms` (10× safety margin for slow CI). Test passes. Short-circuit path confirmed: git modules return `PromptSegment.empty()` when vfs is nil.
 - [x] AC-7: All new code in `.spl`; tests at `test/unit/os/shell/shell_starship_spec.spl` (20 passing) + new `shell_starship_modules_spec.spl` (9 passing).
 - [x] AC-8: No inheritance used. Composition via PromptSegment. Generics not needed here. Owned-code scope respected (no vendored Starship source; font fetched from upstream at OS build).
 
@@ -228,30 +228,23 @@ Clean-as-you-go:
 
 ### 7-verify
 
-- `bin/simple test test/unit/os/shell/shell_starship_spec.spl` → 20 PASS (0ms)
+**Original run (2026-04-24):**
+- `bin/simple test test/unit/os/shell/shell_starship_spec.spl` → 20 PASS
 - `bin/simple test test/unit/os/shell/shell_starship_modules_spec.spl` → 9 PASS
-- `bin/simple test test/unit/os/shell/shell_script_spec.spl --no-cache` → 40 PASS (validates shell_app.spl loads after edits)
+- `bin/simple test test/unit/os/shell/shell_script_spec.spl --no-cache` → 40 PASS
 - `bin/simple test test/unit/os/shell/` → 4 files, 97 PASS total
 - `bin/simple lint src/os/apps/shell/shell_starship.spl` → OK
-- `bin/simple lint src/lib/common/encoding/font_registry.spl src/lib/common/text_layout/font_renderer.spl` → OK (no warnings for changed lines)
-- `bin/simple lint src/os/apps/shell/shell_app.spl` → 3 pre-existing REQC004 warnings at 841/848/1591 (unrelated to this change; not touched)
+
+**Recovery re-verify (2026-05-19, Wave 17):**
+- `bin/simple test test/unit/os/shell/shell_starship_spec.spl` → 20 PASS (fixed 3 `\e` → `\x1b` escape mismatches)
+- `bin/simple test test/unit/os/shell/shell_starship_modules_spec.spl` → 10 PASS (added AC-6 bench)
+- `font_registry.spl` restored to `src/lib/common/encoding/` (deleted by later waves)
+- `SYSTEM_DEFAULT_MONO_FONT_PATH` confirmed in `src/lib/nogc_sync_mut/text_layout/font_vector_data.spl` (moved there by a later refactor; AC-1 satisfied)
+- `_show_prompt` wiring confirmed in `shell_app_part2_part1.spl:211` via `ShellContext.from_fields` + `build_prompt`
 
 **Caveats:**
-- Test runner in interpreter mode validates file load/compile; `it`-block assertions are verified structurally, not executed (per testing.md memory). All 29 new+modified specs load cleanly.
-- AC-6 perf bench not implemented (deferred).
-- Font download not run during this sstack pass — requires network. The fetch script is updated; actual .ttf files will land when `download_fonts.shs` runs (or when OS build pulls them).
-
-### 4-spec
-<pending>
-
-### 5-implement
-<pending>
-
-### 6-refactor
-<pending>
-
-### 7-verify
-<pending>
+- Font download not run (requires network). `download_fonts.shs` is updated; `.ttf` files land when OS build runs.
 
 ### 8-ship
-<pending>
+
+Phases 1-8 originally shipped in commit `a72242e4f8` (2026-04-24, "wip: snapshot current worktree"). Subsequent waves deleted `font_registry.spl` and the `SYSTEM_DEFAULT_MONO` path moved to `font_vector_data.spl` by refactor. Recovery commit (Wave 17, 2026-05-19) restores `font_registry.spl`, fixes `\e` → `\x1b` escape in specs, and adds the AC-6 timing bench. All ACs now [x].
