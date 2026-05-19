@@ -70,6 +70,7 @@ class SqlitePool:
             writer_in_use: false,
             total_acquired: 0,
             total_released: 0,
+            leaked_connections: 0,
         ))
 
     # ------------------------------------------------------------------
@@ -88,8 +89,12 @@ class SqlitePool:
 
     me release_reader(index: i64):
         if (index >= 0 and index < self.reader_in_use.len()):
-            self.reader_in_use[index] = false
-            self.total_released = self.total_released + 1
+            if self.reader_in_use[index]:
+                self.reader_in_use[index] = false
+                self.total_released = self.total_released + 1
+            else:
+                # Double-release detected: count it so callers can audit
+                self.leaked_connections = self.leaked_connections + 1
 
     # ------------------------------------------------------------------
     # Acquire the writer connection. Returns Err if already in use.
@@ -102,8 +107,12 @@ class SqlitePool:
         Ok(())
 
     me release_writer():
-        self.writer_in_use = false
-        self.total_released = self.total_released + 1
+        if self.writer_in_use:
+            self.writer_in_use = false
+            self.total_released = self.total_released + 1
+        else:
+            # Double-release detected
+            self.leaked_connections = self.leaked_connections + 1
 
     # ------------------------------------------------------------------
     # Execute a read query on an available reader.
@@ -156,6 +165,29 @@ class SqlitePool:
             total_acquired: self.total_acquired,
             total_released: self.total_released,
         )
+
+    # ------------------------------------------------------------------
+    # Safety: force-release all connections back to the pool.
+    # Use only in shutdown or after catching a panic-equivalent error.
+    # ------------------------------------------------------------------
+    me force_release_all():
+        var i = 0
+        while i < self.reader_in_use.len():
+            if self.reader_in_use[i]:
+                self.reader_in_use[i] = false
+                self.total_released = self.total_released + 1
+            i = i + 1
+        if self.writer_in_use:
+            self.writer_in_use = false
+            self.total_released = self.total_released + 1
+
+    # Return true when at least one double-release anomaly was detected.
+    fn has_leaked_connections() -> bool:
+        self.leaked_connections > 0
+
+    # Return the accumulated double-release anomaly count.
+    fn leaked_count() -> i64:
+        self.leaked_connections
 
     # ------------------------------------------------------------------
     # Close all connections. Call when pool is no longer needed.
