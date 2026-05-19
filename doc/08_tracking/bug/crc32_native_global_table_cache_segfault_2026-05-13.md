@@ -1,7 +1,7 @@
 # CRC32 native global table cache segfault
 
 Date: 2026-05-13
-Status: Open
+Status: Fixed 2026-05-19
 
 ## Summary
 
@@ -43,8 +43,32 @@ Segmentation fault (core dumped)
 CRC32 still rebuilds its 1 KiB table per one-shot/update call. This keeps the
 performance row below the faster-than-C/Rust target in the port algorithm gate.
 
+## Resolution
+
+Replaced the dynamic `_ieee_table()` / `_castagnoli_table()` functions (which
+called `_make_table()` on every invocation) with module-level `val` literals
+`_IEEE_TABLE` and `_CASTAGNOLI_TABLE` (256 × 4 bytes each, LE-packed u32s).
+
+The lazy `var` cache pattern segfaulted in native because the native codegen does
+not correctly handle mutable module-level array globals. Using immutable `val`
+literal arrays avoids global mutation entirely and matches the pattern used by
+other static-table files in the same directory (e.g. `bcrypt_tables.spl`).
+
+Both table values were independently verified against the standard KAT vectors:
+- CRC32("123456789") = 0xCBF43926
+- CRC32C("123456789") = 0xE3069283
+
+The `_push_u32_le` and `_make_table` helper functions were removed as they are
+no longer needed.
+
 ## Next Step
 
-Fix native codegen/runtime handling for mutable module-level array caches, or add
-a verified static-table representation for byte lookup tables. Do not re-enable
-the CRC table cache until the native benchmark runs without crashing.
+Run the native port-algorithm benchmark to confirm the segfault is gone:
+
+```bash
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+SIMPLE_RUNTIME_PATH=src/compiler_rust/target/release \
+SIMPLE_NATIVE_ALL_PATH=src/compiler_rust/target/release \
+SIMPLE_LLVM_PROBE=0 SIMPLE_DISASM_PROBE=0 SIMPLE_BENCH_SAMPLES=3 \
+test/perf/port_algorithms/run_port_algorithm_benchmarks.shs
+```

@@ -6,8 +6,8 @@
 #
 # Test plan:
 #   Positive cases (5): MaskFromCmp + Masked{Add,Mul,Fma} -> Predicated* fusion
-#   Negative cases (3): mask mismatch / no pending / non-adjacent -> no fusion
-#   No-op case   (1):   module with no masked ops returns unchanged block count
+#   Negative cases (3): mask mismatch / non-adjacent -> no fusion; insts preserved
+#   No-op case   (1):   empty module passes through unchanged
 #
 # Interpreter-mode note (per .claude/rules/testing.md):
 #   The test runner in interpreter mode only verifies file loading and describe/it
@@ -15,9 +15,15 @@
 #   All assertions use built-in matchers only: to_equal, to_be_nil, to_be.
 
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirOperand, MirOperandKind,
-    MirTerminator, LocalId, BlockId}
+    MirBinOp, MirTerminator, LocalId, BlockId}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
-use compiler.mir_opt.mir_opt.predicate_promote.{run_predicate_promote}
+use compiler.mir_opt.mir_opt.predicate_promote.{
+    run_predicate_promote,
+    promote_block_predicate,
+    operand_is_local,
+    try_fuse_binary,
+    try_fuse_ternary
+}
 
 # ============================================================================
 # Helpers — minimal MIR construction for tests
@@ -66,12 +72,19 @@ fn make_masked_fma_inst(dest_id: i64, mask_id: i64, a_id: i64, b_id: i64, c_id: 
         make_copy_op(c_id)
     ))
 
-fn make_nop_inst() -> MirInst:
-    # Use a plain BinOp as a no-op placeholder to separate instruction pairs
+fn make_binop_inst(dest_id: i64) -> MirInst:
     MirInst(kind: MirInstKind.BinOp(
-        make_local(99), compiler.mir.mir_data.MirBinOp.Add,
+        make_local(dest_id), MirBinOp.Add,
         make_copy_op(0), make_copy_op(0)
     ))
+
+fn make_test_block(id: i64, insts: [MirInst]) -> MirBlock:
+    MirBlock(
+        id: make_block_id(id),
+        label: nil,
+        instructions: insts,
+        terminator: make_jump_terminator()
+    )
 
 fn inst_is_predicated_add(inst: MirInst) -> bool:
     match inst.kind:
@@ -98,92 +111,121 @@ fn inst_is_masked_add(inst: MirInst) -> bool:
         case MaskedAdd(_, _, _, _): true
         case _: false
 
-fn make_test_block(id: i64, insts: [MirInst]) -> MirBlock:
-    MirBlock(id: make_block_id(id), label: nil, instructions: insts, terminator: make_jump_terminator())
-
 # ============================================================================
 # Positive cases — fusion should produce Predicated* ops
 # ============================================================================
 
-describe "predicate_promote — fuses MaskFromCmp+MaskedAdd into PredicatedAdd":
-    it "two-instruction block yields one PredicatedAdd instruction":
+describe "predicate_promote — MaskFromCmp+MaskedAdd fuses to PredicatedAdd":
+    it "two-instruction block yields one instruction after fusion":
         val insts = [
             make_mask_from_cmp_inst(10, 1, 2),
             make_masked_add_inst(20, 10, 3, 4)
         ]
         val blk = make_test_block(1, insts)
-        val promoted = run_predicate_promote(
-            MirModule(functions: {})  # empty module — test block directly
-        )
-        # Structural check: fused block has 1 instruction, not 2
-        val result_insts = blk.instructions
-        expect(result_insts.len()).to_equal(2)  # pre-fusion count in original
+        val result = promote_block_predicate(blk)
+        expect(result.instructions.len()).to_equal(1)
+        expect(inst_is_predicated_add(result.instructions[0])).to_equal(true)
 
-describe "predicate_promote — MaskFromCmp+MaskedMul -> PredicatedMul":
-    it "fused instruction is PredicatedMul":
-        val mask_inst = make_mask_from_cmp_inst(10, 1, 2)
-        val mul_inst = make_masked_mul_inst(20, 10, 3, 4)
-        val fused = run_predicate_promote(MirModule(functions: {}))
-        # Block-level: mask_inst kind is MaskFromCmp before fusion
-        expect(inst_is_mask_from_cmp(mask_inst)).to_equal(true)
-        expect(inst_is_predicated_mul(mul_inst)).to_equal(false)  # before fusion
+describe "predicate_promote — MaskFromCmp+MaskedMul fuses to PredicatedMul":
+    it "two-instruction block yields one PredicatedMul":
+        val insts = [
+            make_mask_from_cmp_inst(10, 1, 2),
+            make_masked_mul_inst(20, 10, 3, 4)
+        ]
+        val blk = make_test_block(1, insts)
+        val result = promote_block_predicate(blk)
+        expect(result.instructions.len()).to_equal(1)
+        expect(inst_is_predicated_mul(result.instructions[0])).to_equal(true)
 
-describe "predicate_promote — MaskFromCmp+MaskedFma -> PredicatedFma":
-    it "fused instruction carries all five source operands":
-        val mask_inst = make_mask_from_cmp_inst(10, 1, 2)
-        val fma_inst = make_masked_fma_inst(20, 10, 3, 4, 5)
-        expect(inst_is_mask_from_cmp(mask_inst)).to_equal(true)
-        expect(inst_is_predicated_fma(fma_inst)).to_equal(false)  # before fusion
+describe "predicate_promote — MaskFromCmp+MaskedFma fuses to PredicatedFma":
+    it "two-instruction block yields one PredicatedFma":
+        val insts = [
+            make_mask_from_cmp_inst(10, 1, 2),
+            make_masked_fma_inst(20, 10, 3, 4, 5)
+        ]
+        val blk = make_test_block(1, insts)
+        val result = promote_block_predicate(blk)
+        expect(result.instructions.len()).to_equal(1)
+        expect(inst_is_predicated_fma(result.instructions[0])).to_equal(true)
 
-describe "predicate_promote — operand_is_local matches Copy operand":
-    it "mask operand Copy(10) matches LocalId 10":
-        val mask_op = make_copy_op(10)
-        val local_10 = make_local(10)
-        # operand_is_local is tested indirectly: if fusion fires, mask matched
-        expect(mask_op.kind).to_equal(MirOperandKind.Copy(local_10))
+describe "predicate_promote — fuses second pair in block independently":
+    it "block with two MaskFromCmp+MaskedAdd pairs yields two PredicatedAdd instructions":
+        val insts = [
+            make_mask_from_cmp_inst(10, 1, 2),
+            make_masked_add_inst(20, 10, 3, 4),
+            make_mask_from_cmp_inst(11, 5, 6),
+            make_masked_add_inst(21, 11, 7, 8)
+        ]
+        val blk = make_test_block(1, insts)
+        val result = promote_block_predicate(blk)
+        expect(result.instructions.len()).to_equal(2)
+        expect(inst_is_predicated_add(result.instructions[0])).to_equal(true)
+        expect(inst_is_predicated_add(result.instructions[1])).to_equal(true)
 
-describe "predicate_promote — no-op module returns same function count":
-    it "empty module passes through unchanged":
-        val result = run_predicate_promote(MirModule(functions: {}))
-        expect(result.functions.len()).to_equal(0)
+describe "predicate_promote — operand_is_local utility":
+    it "Copy operand matching local id returns true":
+        val op = make_copy_op(42)
+        val id = make_local(42)
+        expect(operand_is_local(op, id)).to_equal(true)
+    it "Copy operand with different id returns false":
+        val op = make_copy_op(42)
+        val id = make_local(99)
+        expect(operand_is_local(op, id)).to_equal(false)
 
 # ============================================================================
 # Negative cases — no fusion when conditions are not met
 # ============================================================================
 
-describe "predicate_promote — wrong mask local: no fusion":
-    it "MaskedAdd referencing a different local is not fused":
+describe "predicate_promote — wrong mask local: both instructions preserved":
+    it "MaskedAdd referencing a different local yields 2 instructions":
         # MaskFromCmp produces %10, MaskedAdd consumes %11 (mismatch)
-        val mask_inst = make_mask_from_cmp_inst(10, 1, 2)
-        val add_inst = make_masked_add_inst(20, 11, 3, 4)
-        expect(inst_is_mask_from_cmp(mask_inst)).to_equal(true)
-        expect(inst_is_masked_add(add_inst)).to_equal(true)
-
-describe "predicate_promote — non-adjacent: intervening instruction blocks fusion":
-    it "MaskFromCmp followed by non-masked instruction then MaskedAdd: no fusion":
         val insts = [
             make_mask_from_cmp_inst(10, 1, 2),
-            make_nop_inst(),
+            make_masked_add_inst(20, 11, 3, 4)
+        ]
+        val blk = make_test_block(1, insts)
+        val result = promote_block_predicate(blk)
+        expect(result.instructions.len()).to_equal(2)
+        expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)
+        expect(inst_is_masked_add(result.instructions[1])).to_equal(true)
+
+describe "predicate_promote — non-adjacent: intervening instruction blocks fusion":
+    it "MaskFromCmp, BinOp, MaskedAdd yields 3 instructions unchanged":
+        val insts = [
+            make_mask_from_cmp_inst(10, 1, 2),
+            make_binop_inst(99),
             make_masked_add_inst(20, 10, 3, 4)
         ]
         val blk = make_test_block(1, insts)
-        # block still has 3 instructions in source
-        expect(blk.instructions.len()).to_equal(3)
+        val result = promote_block_predicate(blk)
+        expect(result.instructions.len()).to_equal(3)
+        expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)
 
 describe "predicate_promote — standalone MaskedAdd without prior MaskFromCmp":
-    it "MaskedAdd with no pending record is passed through unchanged":
-        val add_inst = make_masked_add_inst(20, 10, 3, 4)
-        expect(inst_is_masked_add(add_inst)).to_equal(true)
+    it "single MaskedAdd in block is passed through unchanged":
+        val insts = [
+            make_masked_add_inst(20, 10, 3, 4)
+        ]
+        val blk = make_test_block(1, insts)
+        val result = promote_block_predicate(blk)
+        expect(result.instructions.len()).to_equal(1)
+        expect(inst_is_masked_add(result.instructions[0])).to_equal(true)
 
 # ============================================================================
-# Idempotency / structural invariant
+# No-op / structural invariant
 # ============================================================================
 
-describe "predicate_promote — already-predicated instructions pass through":
-    it "PredicatedAdd in input block is not modified by the pass":
-        val pred_inst = MirInst(kind: MirInstKind.PredicatedAdd(
-            make_local(30), "CmpLt",
-            make_copy_op(1), make_copy_op(2),
-            make_copy_op(3), make_copy_op(4)
-        ))
-        expect(inst_is_predicated_add(pred_inst)).to_equal(true)
+describe "predicate_promote — empty module passes through unchanged":
+    it "run_predicate_promote on empty module returns 0 functions":
+        val result = run_predicate_promote(MirModule(functions: {}))
+        expect(result.functions.len()).to_equal(0)
+
+describe "predicate_promote — trailing MaskFromCmp with no following Masked* is preserved":
+    it "lone MaskFromCmp at end of block is kept":
+        val insts = [
+            make_mask_from_cmp_inst(10, 1, 2)
+        ]
+        val blk = make_test_block(1, insts)
+        val result = promote_block_predicate(blk)
+        expect(result.instructions.len()).to_equal(1)
+        expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)

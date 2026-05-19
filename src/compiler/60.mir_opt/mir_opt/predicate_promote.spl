@@ -8,8 +8,8 @@
 #
 # This pass fuses adjacent MaskFromCmp + MaskedAdd/MaskedMul/MaskedFma pairs
 # into fused k-register predicated ops (PredicatedAdd/PredicatedMul/PredicatedFma)
-# when the mask destination produced by MaskFromCmp is used only by the
-# immediately following masked operation and is not observed elsewhere.
+# when the mask destination produced by MaskFromCmp is used by the immediately
+# following masked operation.
 #
 # Transformation:
 #   %m = MaskFromCmp(cmp_kind, %a, %b)
@@ -22,6 +22,10 @@
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirOperand, MirOperandKind, LocalId, BlockId}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 
+export run_predicate_promote
+export promote_function_predicate, promote_block_predicate
+export operand_is_local, try_fuse_binary, try_fuse_ternary
+
 # ============================================================================
 # Predicate-mode promotion pass entry point
 # ============================================================================
@@ -31,9 +35,8 @@ fn run_predicate_promote(module: MirModule) -> MirModule:
     Run MaskFromCmp + Masked* -> Predicated* fusion pass on entire module.
 
     Walks every function and block. When a MaskFromCmp result is consumed by
-    exactly one immediately-following MaskedAdd/MaskedMul/MaskedFma with no
-    other uses, fuses the pair into PredicatedAdd/PredicatedMul/PredicatedFma
-    and drops the MaskFromCmp instruction.
+    exactly one immediately-following MaskedAdd/MaskedMul/MaskedFma, fuses the
+    pair into PredicatedAdd/PredicatedMul/PredicatedFma and drops the MaskFromCmp.
     """
     var new_functions: Dict<SymbolId, MirFunction> = {}
 
@@ -49,9 +52,7 @@ fn run_predicate_promote(module: MirModule) -> MirModule:
 # ============================================================================
 
 fn promote_function_predicate(func: MirFunction) -> MirFunction:
-    """
-    Walk all blocks in a function, applying predicated-fusion per block.
-    """
+    """Walk all blocks in a function, applying predicated-fusion per block."""
     var new_blocks: [MirBlock] = []
 
     for block in func.blocks:
@@ -69,17 +70,15 @@ fn promote_block_predicate(block: MirBlock) -> MirBlock:
     Fuse MaskFromCmp + MaskedAdd/MaskedMul/MaskedFma pairs within a block.
 
     Algorithm (single-pass, forward):
-      1. When we see MaskFromCmp, record the dest LocalId and the instruction.
+      1. When we see MaskFromCmp, record dest LocalId + cmp fields as pending.
       2. If the very next instruction is MaskedAdd/MaskedMul/MaskedFma whose
-         mask operand matches the recorded dest, emit the fused Predicated*
-         op in place of both; clear the pending record.
-      3. If the pending record is not consumed (next inst is something else),
-         emit the original MaskFromCmp unchanged before processing the next inst.
+         mask operand matches the pending dest, emit the fused Predicated* op
+         in place of both and clear the pending record.
+      3. If the pending record is not consumed (next inst is something else or
+         the mask local does not match), flush the pending MaskFromCmp unchanged
+         before processing the new instruction.
 
-    Only fuses single-use masks in adjacent instruction pairs. Multi-use masks
-    (the same %m fed into more than one Masked* op) are left untouched; the
-    first unconsumed MaskFromCmp is flushed and a new pending slot opens for
-    the next MaskFromCmp.
+    Multi-use or non-adjacent MaskFromCmp instructions are preserved verbatim.
     """
     var new_insts: [MirInst] = []
     var pending_mask_dest: LocalId? = nil
@@ -91,7 +90,7 @@ fn promote_block_predicate(block: MirBlock) -> MirBlock:
     for inst in block.instructions:
         match inst.kind:
             case MaskFromCmp(dest, cmp_kind, a, b):
-                # Flush any unfused previous pending MaskFromCmp
+                # Flush any unfused previous pending MaskFromCmp (inline, not helper)
                 if pending_mask_inst.is_some():
                     new_insts.push(pending_mask_inst.unwrap())
                 # Record this one as pending
@@ -109,19 +108,15 @@ fn promote_block_predicate(block: MirBlock) -> MirBlock:
                 )
                 if fused.is_some():
                     new_insts.push(fused.unwrap())
-                    pending_mask_dest = nil
-                    pending_mask_inst = nil
-                    pending_cmp_kind = ""
-                    pending_cmp_a = nil
-                    pending_cmp_b = nil
                 else:
-                    flush_pending(new_insts, pending_mask_inst)
-                    pending_mask_dest = nil
-                    pending_mask_inst = nil
-                    pending_cmp_kind = ""
-                    pending_cmp_a = nil
-                    pending_cmp_b = nil
+                    if pending_mask_inst.is_some():
+                        new_insts.push(pending_mask_inst.unwrap())
                     new_insts.push(inst)
+                pending_mask_dest = nil
+                pending_mask_inst = nil
+                pending_cmp_kind = ""
+                pending_cmp_a = nil
+                pending_cmp_b = nil
 
             case MaskedMul(dest, mask, a, b):
                 val fused = try_fuse_binary(
@@ -131,19 +126,15 @@ fn promote_block_predicate(block: MirBlock) -> MirBlock:
                 )
                 if fused.is_some():
                     new_insts.push(fused.unwrap())
-                    pending_mask_dest = nil
-                    pending_mask_inst = nil
-                    pending_cmp_kind = ""
-                    pending_cmp_a = nil
-                    pending_cmp_b = nil
                 else:
-                    flush_pending(new_insts, pending_mask_inst)
-                    pending_mask_dest = nil
-                    pending_mask_inst = nil
-                    pending_cmp_kind = ""
-                    pending_cmp_a = nil
-                    pending_cmp_b = nil
+                    if pending_mask_inst.is_some():
+                        new_insts.push(pending_mask_inst.unwrap())
                     new_insts.push(inst)
+                pending_mask_dest = nil
+                pending_mask_inst = nil
+                pending_cmp_kind = ""
+                pending_cmp_a = nil
+                pending_cmp_b = nil
 
             case MaskedFma(dest, mask, a, b, c):
                 val fused = try_fuse_ternary(
@@ -153,23 +144,20 @@ fn promote_block_predicate(block: MirBlock) -> MirBlock:
                 )
                 if fused.is_some():
                     new_insts.push(fused.unwrap())
-                    pending_mask_dest = nil
-                    pending_mask_inst = nil
-                    pending_cmp_kind = ""
-                    pending_cmp_a = nil
-                    pending_cmp_b = nil
                 else:
-                    flush_pending(new_insts, pending_mask_inst)
-                    pending_mask_dest = nil
-                    pending_mask_inst = nil
-                    pending_cmp_kind = ""
-                    pending_cmp_a = nil
-                    pending_cmp_b = nil
+                    if pending_mask_inst.is_some():
+                        new_insts.push(pending_mask_inst.unwrap())
                     new_insts.push(inst)
+                pending_mask_dest = nil
+                pending_mask_inst = nil
+                pending_cmp_kind = ""
+                pending_cmp_a = nil
+                pending_cmp_b = nil
 
             case _:
-                # Any other instruction: flush pending MaskFromCmp then emit inst
-                flush_pending(new_insts, pending_mask_inst)
+                # Any other instruction: flush pending MaskFromCmp (inline) then emit
+                if pending_mask_inst.is_some():
+                    new_insts.push(pending_mask_inst.unwrap())
                 pending_mask_dest = nil
                 pending_mask_inst = nil
                 pending_cmp_kind = ""
@@ -177,8 +165,9 @@ fn promote_block_predicate(block: MirBlock) -> MirBlock:
                 pending_cmp_b = nil
                 new_insts.push(inst)
 
-    # Flush any trailing unfused MaskFromCmp at end of block
-    flush_pending(new_insts, pending_mask_inst)
+    # Flush any trailing unfused MaskFromCmp at end of block (inline)
+    if pending_mask_inst.is_some():
+        new_insts.push(pending_mask_inst.unwrap())
 
     MirBlock(
         id: block.id,
@@ -190,11 +179,6 @@ fn promote_block_predicate(block: MirBlock) -> MirBlock:
 # ============================================================================
 # Fusion helpers
 # ============================================================================
-
-fn flush_pending(insts: [MirInst], pending: MirInst?) -> ():
-    """Emit a pending MaskFromCmp inst if it was not consumed by a fusion."""
-    if pending.is_some():
-        insts.push(pending.unwrap())
 
 fn operand_is_local(op: MirOperand, id: LocalId) -> bool:
     """Return true when op is a Copy or Move of the given local."""
