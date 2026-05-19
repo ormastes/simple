@@ -1,6 +1,6 @@
 # Native FixedSet.add Not Reachable From Collection Benchmark
 
-Status: open
+Status: fixed (2026-05-19)
 Date: 2026-05-14
 Area: native compiler, noalloc collections
 
@@ -54,3 +54,21 @@ should be reachable in native builds that compile an entry importing those
 modules, and source-closure builds should either link the required collection
 runtime symbols or fail during build with a precise unresolved-runtime
 diagnostic instead of producing a crashing binary.
+
+## Resolution
+
+`FixedSet` was rewritten to be fully self-contained using parallel primitive
+arrays (`keys: [i64]`, `occupied: [bool]`) instead of delegating to `FixedMap`
+(which used `[FixedMapEntry]` array-of-struct). The array-of-struct codepath
+was the root cause: native codegen emitted stubs for
+`rt_typed_words_u64_raw_data_at` and `rt_array_data_ptr` when encountering
+`[FixedMapEntry]`, causing "Function 'add' not found" and a segfault at
+runtime.
+
+The rewritten `FixedSet` implements open-addressing linear probing directly
+on primitive `[i64]` and `[bool]` arrays — the same codepath used by
+`FixedArray` which works in native mode. Public API is unchanged: `add`,
+`remove`, `contains`, `size`, `is_empty`, `is_full`, `capacity`.
+
+Note: `FixedMap.put` still uses `[FixedMapEntry]` array-of-struct and will
+hit the same stub issue in native mode. That is tracked separately.

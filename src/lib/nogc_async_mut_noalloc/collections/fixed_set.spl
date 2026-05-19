@@ -1,6 +1,7 @@
 # Fixed Set - Hash Set with Fixed Capacity
 #
-# Backed by FixedMap (key-only, value=1 sentinel).
+# Open-addressing hash set using linear probing.
+# Backed by parallel primitive arrays (keys: [i64], occupied: [bool]).
 # Fixed capacity, no heap growth. Operations are O(1) average.
 #
 # Usage:
@@ -15,43 +16,104 @@
 # ============================================================================
 
 class FixedSet:
-    """Fixed-capacity hash set backed by FixedMap.
+    """Fixed-capacity hash set using linear probing.
 
-    Keys are i64. Uses FixedMap with sentinel value 1
-    for all entries. Load factor should stay below 75%
-    for good performance.
+    Keys are i64. Uses parallel primitive arrays for keys and occupied
+    flags — avoids array-of-struct so native codegen emits no stubs.
+    Load factor should stay below 75% for good performance.
     """
-    map: FixedMap
-    max_capacity: i32
+    keys: [i64]
+    occupied: [bool]
+    count: i32
+    cap: i32
 
     static fn new(capacity: i32) -> FixedSet:
         """Create a new hash set with the given capacity."""
-        FixedSet(map: FixedMap.new(capacity), max_capacity: capacity)
+        var ks: [i64] = []
+        var occ: [bool] = []
+        var i = 0
+        while i < capacity:
+            ks.push(0)
+            occ.push(false)
+            i = i + 1
+        FixedSet(keys: ks, occupied: occ, count: 0, cap: capacity)
+
+    fn hash_index(key: i64) -> i32:
+        """Compute hash index for key."""
+        var h = key * 2654435761
+        if h < 0:
+            h = 0 - h
+        h % self.cap
 
     me add(value: i64) -> bool:
         """Add value to the set. Returns false if set is full."""
-        self.map.put(value, 1)
+        var idx = self.hash_index(value)
+        var probes = 0
+        while probes < self.cap:
+            if not self.occupied[idx]:
+                self.keys[idx] = value
+                self.occupied[idx] = true
+                self.count = self.count + 1
+                return true
+            if self.keys[idx] == value:
+                return true
+            idx = (idx + 1) % self.cap
+            probes = probes + 1
+        false
 
     me remove(value: i64) -> bool:
-        """Remove value from the set. Returns false if not found."""
-        self.map.remove(value)
+        """Remove value from the set. Returns false if not found.
+
+        Uses backward-shift deletion to maintain probe chains.
+        """
+        var idx = self.hash_index(value)
+        var probes = 0
+        while probes < self.cap:
+            if not self.occupied[idx]:
+                return false
+            if self.keys[idx] == value:
+                self.occupied[idx] = false
+                self.count = self.count - 1
+                var next_idx = (idx + 1) % self.cap
+                while self.occupied[next_idx]:
+                    val nk = self.keys[next_idx]
+                    val ideal = self.hash_index(nk)
+                    if (next_idx > idx and (ideal <= idx or ideal > next_idx)) or (next_idx < idx and ideal <= idx and ideal > next_idx):
+                        self.keys[idx] = nk
+                        self.occupied[idx] = true
+                        self.occupied[next_idx] = false
+                        idx = next_idx
+                    next_idx = (next_idx + 1) % self.cap
+                return true
+            idx = (idx + 1) % self.cap
+            probes = probes + 1
+        false
 
     fn contains(value: i64) -> bool:
         """Check if value exists in the set."""
-        self.map.contains(value)
+        var idx = self.hash_index(value)
+        var probes = 0
+        while probes < self.cap:
+            if not self.occupied[idx]:
+                return false
+            if self.keys[idx] == value:
+                return true
+            idx = (idx + 1) % self.cap
+            probes = probes + 1
+        false
 
     fn size() -> i32:
         """Return number of elements in the set."""
-        self.map.size()
+        self.count
 
     fn is_empty() -> bool:
         """Check if set has no elements."""
-        self.map.is_empty()
+        self.count == 0
 
     fn is_full() -> bool:
         """Check if set is at capacity."""
-        self.map.is_full()
+        self.count >= self.cap
 
     fn capacity() -> i32:
         """Return the maximum capacity of the set."""
-        self.max_capacity
+        self.cap
