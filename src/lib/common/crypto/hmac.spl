@@ -15,3 +15,109 @@ fn hmac_sha512(key: text, data: text) -> text:
 # Default HMAC (SHA-256). Returns lowercase hex.
 fn hmac(key: text, data: text) -> text:
     hmac_sha256(key, data)
+
+# ============================================================================
+# Pure-Simple bytes-level HMAC (RFC 2104).
+# These operate on [i64] byte lists (values 0-255) and return [i64] byte lists.
+# Required for HKDF which chains HMAC over binary IKM/PRK.
+# ============================================================================
+
+# HMAC-SHA-256 of binary key + data. Returns 32-byte list.
+# Block size = 64 bytes, hash size = 32 bytes.
+fn hmac_sha256_bytes(key: [i64], data: [i64]) -> [i64]:
+    use std.common.crypto.sha256.{sha256_bytes}
+    val block_len = 64
+    # Derive K': if key > block_len, hash it; if shorter, zero-pad to block_len.
+    var kp: [i64] = []
+    var hashed_key: [i64] = []
+    if key.len() > block_len:
+        hashed_key = sha256_bytes(key)
+        var ki = 0
+        while ki < hashed_key.len():
+            kp.push(hashed_key[ki])
+            ki = ki + 1
+    else:
+        var ki = 0
+        while ki < key.len():
+            kp.push(key[ki])
+            ki = ki + 1
+    while kp.len() < block_len:
+        kp.push(0)
+    # ipad = 0x36, opad = 0x5c
+    var ikey: [i64] = []
+    var okey: [i64] = []
+    var bi = 0
+    while bi < block_len:
+        ikey.push(kp[bi] ^ 54)
+        okey.push(kp[bi] ^ 92)
+        bi = bi + 1
+    # inner = ikey || data
+    var inner: [i64] = []
+    var ii = 0
+    while ii < block_len:
+        inner.push(ikey[ii])
+        ii = ii + 1
+    var di = 0
+    while di < data.len():
+        inner.push(data[di])
+        di = di + 1
+    val inner_hash = sha256_bytes(inner)
+    # outer = okey || inner_hash
+    var outer: [i64] = []
+    var oi = 0
+    while oi < block_len:
+        outer.push(okey[oi])
+        oi = oi + 1
+    var ohi = 0
+    while ohi < inner_hash.len():
+        outer.push(inner_hash[ohi])
+        ohi = ohi + 1
+    sha256_bytes(outer)
+
+# HMAC-SHA-512/256 of binary key + data. Returns 32-byte list.
+# Block size = 128 bytes (same as SHA-512 family), hash size = 32 bytes.
+fn hmac_sha512_256_bytes(key: [i64], data: [i64]) -> [i64]:
+    use std.common.crypto.sha512.{sha512_256_bytes}
+    val block_len = 128
+    var kp: [i64] = []
+    var hashed_key: [i64] = []
+    if key.len() > block_len:
+        hashed_key = sha512_256_bytes(key)
+        var ki = 0
+        while ki < hashed_key.len():
+            kp.push(hashed_key[ki])
+            ki = ki + 1
+    else:
+        var ki = 0
+        while ki < key.len():
+            kp.push(key[ki])
+            ki = ki + 1
+    while kp.len() < block_len:
+        kp.push(0)
+    var ikey: [i64] = []
+    var okey: [i64] = []
+    var bi = 0
+    while bi < block_len:
+        ikey.push(kp[bi] ^ 54)
+        okey.push(kp[bi] ^ 92)
+        bi = bi + 1
+    var inner: [i64] = []
+    var ii = 0
+    while ii < block_len:
+        inner.push(ikey[ii])
+        ii = ii + 1
+    var di = 0
+    while di < data.len():
+        inner.push(data[di])
+        di = di + 1
+    val inner_hash = sha512_256_bytes(inner)
+    var outer: [i64] = []
+    var oi = 0
+    while oi < block_len:
+        outer.push(okey[oi])
+        oi = oi + 1
+    var ohi = 0
+    while ohi < inner_hash.len():
+        outer.push(inner_hash[ohi])
+        ohi = ohi + 1
+    sha512_256_bytes(outer)

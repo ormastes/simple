@@ -1,0 +1,301 @@
+# zstd/fse.spl — Finite State Entropy (tANS) table build and decode
+#
+# RFC 8878 §3.1.2.3 — Finite State Entropy coding
+#
+# FSE decoding overview:
+#   1. Build a decoding table from a probability distribution.
+#   2. Initialize a state by reading `accuracy_log` bits from the reverse reader.
+#   3. For each symbol: symbol = table[state].symbol
+#                       next_bits = table[state].num_bits
+#                       baseline  = table[state].baseline
+#                       state = baseline + read(next_bits)
+
+use std.common.compress.types.{CompressionError}
+use std.nogc_sync_mut.compression.zstd.bit_reader.{
+    ZstdBitReader, ZstdBitsResult,
+    ZstdRevBitReader, ZstdRevBitsResult,
+    zstd_br_init, zstd_br_read,
+    zstd_rbr_read
+}
+
+# ---------------------------------------------------------------------------
+# FSE table entry
+# ---------------------------------------------------------------------------
+
+struct FseEntry:
+    symbol:   i64
+    num_bits: i64   # number of bits to read for next state
+    baseline: i64   # add to the bits just read to get next state
+
+# A built FSE decoding table.
+struct FseTable:
+    entries:       [FseEntry]   # length = 1 << accuracy_log
+    accuracy_log:  i64
+
+# ---------------------------------------------------------------------------
+# Predefined probability distributions (RFC 8878 Appendix B)
+# ---------------------------------------------------------------------------
+
+# Predefined distribution for Literal Length (LL) codes (accuracy_log = 6)
+fn fse_predefined_ll_probs() -> [i64]:
+    [4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1,
+     2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1,
+     -1, -1, -1, -1]
+
+# Predefined distribution for Match Length (ML) codes (accuracy_log = 6)
+fn fse_predefined_ml_probs() -> [i64]:
+    [1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1,
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1,
+     -1, -1, -1, -1, -1]
+
+# Predefined distribution for Offset (OF) codes (accuracy_log = 5)
+fn fse_predefined_of_probs() -> [i64]:
+    [1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1,
+     1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1]
+
+val FSE_LL_DEFAULT_ACCURACY_LOG = 6
+val FSE_ML_DEFAULT_ACCURACY_LOG = 6
+val FSE_OF_DEFAULT_ACCURACY_LOG = 5
+
+# ---------------------------------------------------------------------------
+# Table construction (RFC 8878 §3.1.2.3.2)
+# ---------------------------------------------------------------------------
+
+# Build an FSE decoding table from a probability distribution.
+# `probs` contains probabilities; -1 means "less than 1 probability" (probability = 0.5).
+# `accuracy_log` is the table size log2.
+fn fse_build_table(probs: [i64], accuracy_log: i64) -> Result<FseTable, CompressionError>:
+    val table_size = 1 << accuracy_log
+    if table_size > 4096:
+        return Err(CompressionError.CorruptData("fse accuracy_log too large"))
+
+    # Count total weight and symbols
+    var total_prob = 0
+    var num_syms = probs.len()
+    var i = 0
+    while i < num_syms:
+        val p = probs[i]
+        if p > 0:
+            total_prob = total_prob + p
+        else:
+            if p == -1:
+                total_prob = total_prob + 1  # less-than-1 probability counts as 1 spread cell
+        i = i + 1
+
+    # Initialize table entries
+    var entries: [FseEntry] = []
+    var j = 0
+    while j < table_size:
+        entries.push(FseEntry(symbol: 0, num_bits: 0, baseline: 0))
+        j = j + 1
+
+    # Spread symbols using the interleaving step
+    # Step = (table_size >> 1) + (table_size >> 3) + 3
+    val step = (table_size >> 1) + (table_size >> 3) + 3
+    val mask = table_size - 1
+    var pos = 0
+
+    var sym = 0
+    while sym < num_syms:
+        val prob = probs[sym]
+        if prob > 0:
+            var k = 0
+            while k < prob:
+                entries[pos] = FseEntry(symbol: sym, num_bits: 0, baseline: 0)
+                pos = (pos + step) & mask
+                k = k + 1
+        sym = sym + 1
+
+    # Assign num_bits and baseline for each symbol
+    # For each symbol, count how many cells it occupies
+    var sym_counts: [i64] = []
+    var s = 0
+    while s < num_syms:
+        sym_counts.push(0)
+        s = s + 1
+
+    var c = 0
+    while c < table_size:
+        val sym_here = entries[c].symbol
+        sym_counts[sym_here] = sym_counts[sym_here] + 1
+        c = c + 1
+
+    # For each cell, set num_bits and baseline
+    # A symbol with `count` cells: sort cells by position, assign num_bits/baseline
+    # num_bits = accuracy_log - floor(log2(count)) if count is power of 2, else varies
+    # Baseline: the cells for symbol s get consecutive baselines starting from next_power_of_2(count)
+    # Simplified standard FSE construction:
+    var sym_next_state: [i64] = []
+    var ss = 0
+    while ss < num_syms:
+        val p = probs[ss]
+        if p > 0:
+            # next_state starts at the table_size / count rounded to power of 2
+            val cnt = sym_counts[ss]
+            # nb = accuracy_log - highest_bit(cnt)
+            val nb = fse_highest_bit_nb(cnt, accuracy_log)
+            sym_next_state.push(cnt << nb)
+        else:
+            if p == -1:
+                sym_next_state.push(1)
+            else:
+                sym_next_state.push(0)
+        ss = ss + 1
+
+    # Second pass: fill num_bits and baseline
+    var d = 0
+    while d < table_size:
+        val sym_d = entries[d].symbol
+        val p = probs[sym_d]
+        if p > 0 or p == -1:
+            val cnt = sym_counts[sym_d]
+            val next_st = sym_next_state[sym_d]
+            val nb = fse_highest_bit_nb(cnt, accuracy_log)
+            # num_bits for this particular cell depends on its index within sym's cells
+            # Standard: cells are sorted; first `2*cnt - table_size` cells get nb bits, rest get nb+1 bits
+            # We use sym_next_state as a running counter
+            val running = sym_next_state[sym_d]
+            val num_bits_here = accuracy_log - fse_msb(running)
+            val baseline = (running << num_bits_here) - table_size
+            entries[d] = FseEntry(symbol: sym_d, num_bits: num_bits_here, baseline: baseline)
+            sym_next_state[sym_d] = running + 1
+        d = d + 1
+
+    Ok(FseTable(entries: entries, accuracy_log: accuracy_log))
+
+# Helper: compute floor(log2(n))
+fn fse_msb(n: i64) -> i64:
+    if n <= 0:
+        return 0
+    var v = n
+    var result = 0
+    while v > 1:
+        v = v >> 1
+        result = result + 1
+    result
+
+# Helper: num_bits for a cell = accuracy_log - msb(count)
+fn fse_highest_bit_nb(count: i64, accuracy_log: i64) -> i64:
+    if count <= 0:
+        return accuracy_log
+    accuracy_log - fse_msb(count)
+
+# ---------------------------------------------------------------------------
+# Parse compressed FSE distribution from bitstream (RFC 8878 §3.1.2.3.1)
+# ---------------------------------------------------------------------------
+
+struct FseTableResult:
+    table:  FseTable
+    reader: ZstdBitReader
+
+fn fse_decode_table(r: ZstdBitReader, max_symbol_value: i64) -> Result<FseTableResult, CompressionError>:
+    # Read accuracy_log: first 4 bits are (accuracy_log - 5)
+    val r1 = zstd_br_read(r, 4)?
+    val accuracy_log = r1.value + 5
+    var cur = r1.reader
+    if accuracy_log > 12:
+        return Err(CompressionError.CorruptData("fse accuracy_log > 12"))
+
+    val table_size = 1 << accuracy_log
+    var remaining = table_size + 1
+    var probs: [i64] = []
+    var sym = 0
+
+    while remaining > 1 and sym <= max_symbol_value:
+        # Determine number of bits needed: ceil(log2(remaining + 1))
+        val nb = fse_bits_needed(remaining + 1)
+        val r2 = zstd_br_read(cur, nb)?
+        var prob = r2.value
+        cur = r2.reader
+
+        # Check if prob could be one fewer bit (probability = 0)
+        val low = (1 << (nb - 1)) - 1
+        if prob <= low:
+            # 1 fewer bit was used; back up 1 bit
+            # In RFC 8878: if <= low, prob is a "repeat" or might have used fewer bits
+            # Standard: if value < threshold, subtract table_size from remaining
+            pass_dn
+
+        # RFC 8878: if prob == 0, the next bits indicate a run of zero-probability symbols
+        if prob == 0:
+            probs.push(0)
+            sym = sym + 1
+            # Read run of zero probability symbols
+            while true:
+                val rrep = zstd_br_read(cur, 2)?
+                val rep = rrep.value
+                cur = rrep.reader
+                var r = 0
+                while r < rep:
+                    probs.push(0)
+                    sym = sym + 1
+                    r = r + 1
+                if rep != 3:
+                    break
+        else:
+            val actual_prob = prob - 1  # 0-indexed: 0 means prob=0+1-1... use raw
+            # RFC 8878 probability encoding: value 0 = less-than-1, others = count
+            val p = if prob == 1: -1 else: prob - 1
+            probs.push(p)
+            if p > 0:
+                remaining = remaining - p
+            else:
+                remaining = remaining - 1
+            sym = sym + 1
+
+    # Align to byte boundary after reading
+    val aligned = zstd_br_align_after_fse(cur)
+    val tbl = fse_build_table(probs, accuracy_log)?
+    Ok(FseTableResult(table: tbl, reader: aligned))
+
+# Align reader to byte boundary (used after FSE header).
+fn zstd_br_align_after_fse(r: ZstdBitReader) -> ZstdBitReader:
+    val discard = r.buf_bits % 8
+    if discard == 0:
+        return r
+    ZstdBitReader(
+        data: r.data,
+        byte_pos: r.byte_pos,
+        buf: r.buf >> discard,
+        buf_bits: r.buf_bits - discard
+    )
+
+fn fse_bits_needed(n: i64) -> i64:
+    if n <= 1:
+        return 1
+    var v = n - 1
+    var bits = 0
+    while v > 0:
+        v = v >> 1
+        bits = bits + 1
+    bits
+
+# ---------------------------------------------------------------------------
+# FSE decoding step
+# ---------------------------------------------------------------------------
+
+struct FseDecodeResult:
+    symbol:  i64
+    state:   i64
+    reader:  ZstdRevBitReader
+
+# Decode one symbol from the reverse bitstream.
+fn fse_decode_symbol(table: FseTable, state: i64, r: ZstdRevBitReader) -> Result<FseDecodeResult, CompressionError>:
+    if state < 0 or state >= table.entries.len():
+        return Err(CompressionError.CorruptData("fse state out of range"))
+    val entry = table.entries[state]
+    val symbol = entry.symbol
+    val nb = entry.num_bits
+    var new_state = entry.baseline
+    if nb > 0:
+        val res = zstd_rbr_read(r, nb)?
+        new_state = new_state + res.value
+        return Ok(FseDecodeResult(symbol: symbol, state: new_state, reader: res.reader))
+    Ok(FseDecodeResult(symbol: symbol, state: new_state, reader: r))
+
+# Initialize FSE state by reading accuracy_log bits.
+fn fse_init_state(table: FseTable, r: ZstdRevBitReader) -> Result<FseDecodeResult, CompressionError>:
+    val res = zstd_rbr_read(r, table.accuracy_log)?
+    val state = res.value
+    Ok(FseDecodeResult(symbol: 0, state: state, reader: res.reader))

@@ -53,12 +53,13 @@ the documented structural-placeholder contract for Wave N1.
 
 File: `src/compiler/60.mir_opt/mir_opt/auto_vectorize_codegen.spl` line ~149
 
-### L2 — trip_count is always -1 in K3 pattern matchers
-`mir_pattern_match_elementwise_loop` and `mir_pattern_match_reduction` hardcode
-`trip_count: -1`. The `rewrite_elementwise_add` refusal condition R3 only fires
-for `trip_count >= 0 && trip_count < chunk_width`, so unknown trip count passes
-through. The `detect_loop_bounds` SCEV adapter in part2 is wired but not
-called from pattern matchers yet.
+### L2 — trip_count wired in run_auto_vectorize (FIXED in this change)
+After `mir_pattern_match_elementwise_loop` returns a recipe, `run_auto_vectorize`
+now calls `is_simple_loop(cur_func, recipe.header_block)` and fills in the real
+`trip_count` from `LoopInfo.end_value` before calling `rewrite_elementwise_add`.
+The R3 guard (`trip_count < chunk_width → refuse`) now correctly fires for
+short constant-bounded loops. Dynamic bounds still produce `trip_count = -1`
+(pass-through, treated conservatively as unknown).
 
 ### L3 — Reduction rewriter not wired (N2 followup)
 `run_auto_vectorize` logs reduction recipes but does not rewrite them.
@@ -96,10 +97,7 @@ All tests run in interpreter mode (assertions not executed per testing rules).
 
 ## Recommended Next Steps
 
-1. **Wire trip_count from `detect_loop_bounds` into pattern matchers** — replace
-   hardcoded `-1` with actual SCEV extraction in `mir_pattern_match_elementwise_loop`.
-
-2. **Implement peel block scalar body clone** (L1) — emit the original scalar
+1. **Implement peel block scalar body clone** (L1) — emit the original scalar
    instructions in `create_peeling_block` with a proper `Goto` to exit.
 
 3. **Relax control flow check** (L5) — allow 3-block bodies for simple if-then.

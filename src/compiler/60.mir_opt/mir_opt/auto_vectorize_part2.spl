@@ -81,7 +81,16 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
             # Try elementwise pattern — rewrite if accepted
             val ew = mir_pattern_match_elementwise_loop(block)
             if ew.?:
-                val r = ew.unwrap()
+                var r = ew.unwrap()
+                # W-scev: fill in trip_count from loop bounds if available.
+                # is_simple_loop returns LoopInfo with end_value set for
+                # constant-bounded loops; for dynamic bounds end_value is 0
+                # and trip_count stays -1 (unknown).
+                val loop_info_opt = is_simple_loop(cur_func, r.header_block)
+                if loop_info_opt.?:
+                    val li = loop_info_opt.unwrap()
+                    if li.end_value > 0:
+                        r = VectorRecipe(..r, trip_count: li.end_value)
                 _log_recipe(cur_func.name, r)
                 val rewritten = rewrite_elementwise_add(r, cur_func)
                 # If block count changed, rewrite was applied
