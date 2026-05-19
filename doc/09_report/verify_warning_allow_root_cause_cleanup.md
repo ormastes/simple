@@ -37,3 +37,15 @@
   fixed.
 
 STATUS: PASS
+
+## Current Suppression Snapshot (2026-05-19)
+
+Repo-wide `#![allow(...)]` in `src/{compiler,lib,app}/`: **97** total.
+
+| Category | Count |
+|----------|-------|
+| `primitive_api` | 85 |
+| `unnamed_duplicate_typed_args` | 5 |
+| `REQC004` | 3 |
+| `REQC001` | 3 |
+| `unused` | 1 |

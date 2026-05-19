@@ -470,6 +470,48 @@ bin/simple lint file.spl --warn-all    # Enable all style lints
 
 ---
 
+## CI Enforcement Lanes
+
+Two strict CI lanes enforce warning-free builds:
+
+### Rust Strict Lane (`.github/workflows/rust-tests.yml`)
+
+Runs `cargo clippy --workspace --all-targets -- -D warnings` from
+`src/compiler_rust/`. All Clippy warnings are errors. Prerequisites:
+primitive-sort runtime NEON threshold constants must compile cleanly.
+
+### Simple Strict Lane (`.github/workflows/simple-strict-lints.yml`)
+
+Runs the bootstrap compiler with `--deny-all` against code-quality canary specs:
+
+```bash
+src/compiler_rust/target/bootstrap/simple lint \
+  test/code_quality/allow_suppressions_spec.spl \
+  test/code_quality/bare_bool_lint_spec.spl \
+  test/code_quality/primitive_api_lint_spec.spl \
+  test/code_quality/warning_allow_root_cause_cleanup_spec.spl \
+  --deny-all
+```
+
+Uses the bootstrap runtime directly (not `bin/simple lint`) due to the
+lint-wrapper segfault tracked in repo bug docs.
+
+### Regression Canary
+
+`test/code_quality/warning_allow_root_cause_cleanup_spec.spl` guards:
+- Rust workflow targets `src/compiler_rust` (not removed legacy `rust/` tree)
+- Simple strict workflow exists and uses `--deny-all`
+- Primitive-sort runtime defines NEON threshold constants
+
+### Suppressing Warnings
+
+File-level `#![allow(rule_name)]` is the override mechanism. When removing a
+suppression, verify the underlying issue is actually fixed — not just moved.
+`@extern(...)` is still flagged as `unknown_attribute`; those allows remain
+justified until the classifier root cause is fixed.
+
+---
+
 ## Related Commands
 
 - `simple build check` — All quality checks

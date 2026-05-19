@@ -10,11 +10,13 @@
 
 ## Rollout
 
-1. Repair the enforcement path so the strict commands actually execute on this
+> All steps completed (2026-05-19).
+
+1. [x] Repair the enforcement path so the strict commands actually execute on this
    repository layout.
-2. Fix the current Rust strict-gate blockers that prevent baseline collection.
-3. Add a targeted Simple `--deny-all` lane using existing low-noise canaries.
-4. Preserve advisory-only workflows outside the owned enforcement path.
+2. [x] Fix the current Rust strict-gate blockers that prevent baseline collection.
+3. [x] Add a targeted Simple `--deny-all` lane using existing low-noise canaries.
+4. [x] Preserve advisory-only workflows outside the owned enforcement path.
 
 ## Suppression Taxonomy For This Slice
 

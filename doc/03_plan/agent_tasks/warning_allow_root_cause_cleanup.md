@@ -1,6 +1,6 @@
 # Agent Task Breakdown: Warning/Allow Root-Cause Cleanup
 
-> Status: PARTIAL — .spipe/fix-warning-and-allow dev-implement done; refactor/verify/ship pending
+> Status: DONE — all tasks (A–E) implemented and verified (2026-05-19)
 
 - Task A: repair Rust strict workflow pathing and preserve its strict Clippy
   command.
