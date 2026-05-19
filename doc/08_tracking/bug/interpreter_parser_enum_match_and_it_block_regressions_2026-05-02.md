@@ -3,7 +3,7 @@
 **Date:** 2026-05-02
 **Severity:** High (blocks writing idiomatic encoding/decoding modules and spec tests)
 **Affected modes:** Interpreter (all three bugs); compiled mode not verified
-**Status:** FIXED 2026-05-10 — Bug 1 (named-field enum match) fixed in parser_patterns.rs; Bugs 2+3 (it-block) already fixed.
+**Status:** FIXED — Bug 1 (named-field enum match) fixed 2026-05-10 in parser_patterns.rs; Bug 3 (bitwise-AND in it block) already fixed prior to 2026-05-10; Bug 2 (FString interpolation in description strings) fixed 2026-05-19 in interpreter_call/bdd.rs (extract_desc_str helper). Verified empirically 2026-05-19 against all three minimal repros.
 
 ---
 

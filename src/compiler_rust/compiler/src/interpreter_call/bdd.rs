@@ -448,24 +448,37 @@ pub(super) fn eval_bdd_builtin(
 ) -> Result<Option<Value>, CompileError> {
     match name {
         "describe" | "context" => {
-            let first_arg = eval_arg(
-                args,
-                0,
-                Value::Str("unnamed".to_string()),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
-
-            let (name_str, ctx_def_blocks) = match &first_arg {
-                Value::Symbol(ctx_name) => {
-                    let blocks = BDD_CONTEXT_DEFS.with(|cell| cell.borrow().get(ctx_name).cloned());
-                    (format!("with {}", ctx_name), blocks)
+            // Use extract_desc_str for string/fstring literals to avoid FString interpolation
+            // errors on description text.  For non-literal first args (e.g. Symbol for
+            // `with_context`), fall back to eval_arg.
+            let (name_str, ctx_def_blocks) = {
+                use simple_parser::ast::Expr;
+                let is_literal = args.first().map_or(false, |a| {
+                    matches!(a.value, Expr::String(_) | Expr::FString { .. })
+                });
+                if is_literal {
+                    (extract_desc_str(args, "unnamed"), None)
+                } else {
+                    let first_arg = eval_arg(
+                        args,
+                        0,
+                        Value::Str("unnamed".to_string()),
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                    match &first_arg {
+                        Value::Symbol(ctx_name) => {
+                            let blocks =
+                                BDD_CONTEXT_DEFS.with(|cell| cell.borrow().get(ctx_name).cloned());
+                            (format!("with {}", ctx_name), blocks)
+                        }
+                        Value::Str(s) => (s.clone(), None),
+                        _ => ("unnamed".to_string(), None),
+                    }
                 }
-                Value::Str(s) => (s.clone(), None),
-                _ => ("unnamed".to_string(), None),
             };
 
             let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -571,20 +584,9 @@ pub(super) fn eval_bdd_builtin(
         }
         "it" | "slow_it" | "limited_it" => {
             let keyword = name;
-            let name = eval_arg(
-                args,
-                0,
-                Value::Str("unnamed".to_string()),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
-            let name_str = match &name {
-                Value::Str(s) => s.clone(),
-                _ => "unnamed".to_string(),
-            };
+            // Use extract_desc_str to avoid evaluating FString interpolations in the test
+            // description (e.g. `it "encodes {a:1} as bytes"` must not crash on `a`).
+            let name_str = extract_desc_str(args, "unnamed");
             // For limited_it, extract named resource_limits argument
             let mut resource_limits = None;
             let mut block_index = 1;
@@ -708,20 +710,7 @@ pub(super) fn eval_bdd_builtin(
             }
         }
         "pending" | "pending_it" => {
-            let name = eval_arg(
-                args,
-                0,
-                Value::Str("unnamed".to_string()),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
-            let name_str = match &name {
-                Value::Str(s) => s.clone(),
-                _ => "unnamed".to_string(),
-            };
+            let name_str = extract_desc_str(args, "unnamed");
 
             let indent = BDD_INDENT.with(|cell| *cell.borrow());
             let indent_str = "  ".repeat(indent);
