@@ -2,7 +2,10 @@
 
 **Filed:** 2026-05-03  
 **Discovered during:** COSE RFC 9052 KAT spec fix (cose_rfc9052_kat_spec.spl)
-**Status:** FIXED 2026-05-10 — verified: dual import of ed25519_sign + ecdsa_p256 no longer shadows.
+**Status:** FIXED 2026-05-19 — renamed `signature_sffi.ed25519_sign` → `ed25519_sign_pkcs8`; updated all callers.
+
+Note: the 2026-05-10 "FIXED" entry was incorrect — the root-cause rename had not been applied.
+That commit predated the `ffi → sffi` rename refactor; the shadow persisted in `signature_sffi.spl`.
 
 ## Symptom
 
@@ -29,17 +32,17 @@ File: `/tmp/ecdsa_combo_test.spl` (repro built 2026-05-03)
 
 ## Root cause
 
-`src/lib/nogc_sync_mut/io/signature_ffi.spl` line 132 defines:
+`src/lib/nogc_sync_mut/io/signature_sffi.spl` (formerly `signature_ffi.spl`) defines:
 
 ```spl
 fn ed25519_sign(pkcs8: [u8], message: [u8]) -> [u8]:
 ```
 
 This is a 2-arg variant (pkcs8 + message, no separate public key). When
-`os.crypto.ecdsa_p256` is imported, it transitively loads `signature_ffi` via:
+`os.crypto.ecdsa_p256` is imported, it transitively loads `signature_sffi` via:
 
 ```
-os.crypto.ecdsa_p256 → use std.nogc_sync_mut.io.signature_ffi
+os.crypto.ecdsa_p256 → use std.nogc_sync_mut.io.signature_sffi
 ```
 
 The interpreter's function table then has two `ed25519_sign` entries with different
@@ -60,11 +63,24 @@ Remove `os.crypto.ecdsa_p256` from the import chain when testing EdDSA Sign1 pat
 The COSE KAT spec drops the Sign1 describe block until this is resolved (see commit
 `fix(crypto): COSE spec — drop Sign1 blocked by signature_ffi shadow, expand Mac0 KAT`).
 
-## Fix options
+## Fix applied (2026-05-19)
 
-1. Rename `signature_ffi.ed25519_sign` → `_rt_ed25519_sign_pkcs8` (private, matches
-   its pkcs8-key calling convention) and update its callers. Requires bootstrap rebuild.
-2. Qualify all `ed25519_sign` call sites in the interpreter by module path when both
-   are in scope.
-3. Detect and error on duplicate function names with different arities during import
-   loading (reject shadowing rather than silently picking one).
+Option 1 was chosen: rename the 2-arg wrapper in `signature_sffi.spl` to
+`ed25519_sign_pkcs8`, making the naming consistent with its PKCS#8-key calling
+convention and eliminating the name collision.
+
+Changed files:
+- `src/lib/nogc_sync_mut/io/signature_sffi.spl` — renamed `fn ed25519_sign` → `fn ed25519_sign_pkcs8`
+- `src/lib/nogc_async_mut/io/signature_sffi.spl` — updated re-export list
+- `src/os/tls13/server.spl` — updated import + 2 call sites
+- `src/os/tls13/tls13_part3.spl` — updated 1 call site
+
+The Rust interpreter dispatch (`signatures.rs`, `mod.rs`) was not changed — it
+uses `rt_ed25519_sign` which was never part of the shadow.
+
+## Discarded fix options
+
+2. Qualify all `ed25519_sign` call sites by module path — would require changes
+   at every call site across multiple modules without fixing the underlying naming.
+3. Detect and error on duplicate names during import loading — a useful hardening
+   but does not fix the existing caller breakage.
