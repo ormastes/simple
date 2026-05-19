@@ -1,8 +1,8 @@
 # Compiler Family Enforcement
 
-## Phase: 5-implement
+## Phase: 8-ship
 ## Type: feature
-## Status: in-progress
+## Status: complete
 
 ## Goal
 Promote runtime-family GC boundary crossing from warnings to hard errors (Deny-level lint), add symmetric `@gc imports @no_gc` violation detection, and support attribute-based family detection (`@no_gc`/`@gc` on files/modules outside standard `nogc_*`/`gc_*` paths).
