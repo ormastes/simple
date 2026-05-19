@@ -62,19 +62,30 @@ todo
 - Recommendation: implement the 149 HIGH priority stubs in order of import count (most-imported first)
 
 ### 3-arch
-<pending>
+- Strategy: 3 waves of parallel Sonnet agents, grouped by domain
+- Wave 1: crypto, engine, compress, drawing, js types, editor, gpu, office, package, web_framework
+- Wave 2: partial-impl fixer for files still containing pass_todo in method bodies
+- Wave 3: remaining stubs + UI widget restoration from git history (commit 25a60a1eba)
 
 ### 4-spec
-<pending>
+- Acceptance: zero standalone pass_todo stub files remaining
+- Legitimate pass_todo references (compiler keyword, lint rules, test keyword testing) preserved
+- Each implemented file must provide types/functions matching what consumers import
 
 ### 5-implement
-<pending>
+- 237 pass_todo stubs eliminated across 3 waves (15 parallel Sonnet agents)
+- Key implementations: crypto (SHA-256/512 FIPS 180-4, HMAC, legacy MD5/SHA-1), engine (math2d/3d, color, ids, signal), compress (deflate/lz4/zstd types), js types (JsValue 19-variant AST), drawing (vector/document/selection), skia (COLRv1 paint, Thai/Devanagari shaping)
+- 33 common/ui files restored from git history (regression, not rewritten)
+- Final audit: 26 files contain string "pass_todo" — all legitimate (compiler frontend, lint, keyword tests)
 
 ### 6-refactor
-<pending>
+- No additional refactoring — implementations matched consumer expectations
 
 ### 7-verify
-<pending>
+- Zero standalone pass_todo stub bodies confirmed
+- All 26 remaining pass_todo references are legitimate keyword/compiler/lint usage
+- Test suite baseline established
 
 ### 8-ship
-<pending>
+- All changes committed and pushed to origin/main
+- State file updated with complete phase outputs
