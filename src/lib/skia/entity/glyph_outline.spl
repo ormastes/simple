@@ -1,0 +1,335 @@
+# Skia Glyph Outline
+#
+# GlyphOutline — extracts glyph outlines from TrueType font data and
+# converts them to path commands suitable for rasterization.
+#
+# Supports: MoveTo, LineTo, QuadTo, CubicTo, ClosePath
+# Parser: reads TrueType `glyf` table entries directly from raw font bytes.
+
+use std.skia.entity.geometry.{SkPoint, SkRect}
+
+# ============================================================================
+# PathCommand — a single vector drawing instruction
+# ============================================================================
+
+enum PathCommandKind:
+    MoveTo
+    LineTo
+    QuadTo
+    CubicTo
+    ClosePath
+
+class PathCommand:
+    kind: PathCommandKind
+    # pts layout by kind:
+    #   MoveTo   -> pts[0] = target
+    #   LineTo   -> pts[0] = target
+    #   QuadTo   -> pts[0] = control, pts[1] = target
+    #   CubicTo  -> pts[0] = c1, pts[1] = c2, pts[2] = target
+    #   ClosePath-> pts is empty
+    pts: [SkPoint]
+
+fn path_cmd_move_to(x: f64, y: f64) -> PathCommand:
+    PathCommand(kind: PathCommandKind.MoveTo, pts: [SkPoint(x: x, y: y)])
+
+fn path_cmd_line_to(x: f64, y: f64) -> PathCommand:
+    PathCommand(kind: PathCommandKind.LineTo, pts: [SkPoint(x: x, y: y)])
+
+fn path_cmd_quad_to(cx: f64, cy: f64, x: f64, y: f64) -> PathCommand:
+    PathCommand(kind: PathCommandKind.QuadTo, pts: [SkPoint(x: cx, y: cy), SkPoint(x: x, y: y)])
+
+fn path_cmd_cubic_to(c1x: f64, c1y: f64, c2x: f64, c2y: f64, x: f64, y: f64) -> PathCommand:
+    PathCommand(kind: PathCommandKind.CubicTo, pts: [SkPoint(x: c1x, y: c1y), SkPoint(x: c2x, y: c2y), SkPoint(x: x, y: y)])
+
+fn path_cmd_close() -> PathCommand:
+    PathCommand(kind: PathCommandKind.ClosePath, pts: [])
+
+# ============================================================================
+# GlyphContour — one closed contour within a glyph
+# ============================================================================
+
+class GlyphContour:
+    commands: [PathCommand]
+
+# ============================================================================
+# GlyphOutline — the full outline of one glyph
+# ============================================================================
+
+class GlyphOutline:
+    glyph_id: i64
+    contours: [GlyphContour]
+    # design-space bounding box from the glyf table header
+    x_min: i64
+    y_min: i64
+    x_max: i64
+    y_max: i64
+
+fn glyph_outline_empty(glyph_id: i64) -> GlyphOutline:
+    GlyphOutline(glyph_id: glyph_id, contours: [], x_min: 0, y_min: 0, x_max: 0, y_max: 0)
+
+# ============================================================================
+# SFFI externs — heavy byte-level font parsing delegated to the runtime
+# ============================================================================
+
+# Read a big-endian u16 from font_data at byte offset.
+extern fn rt_font_read_u16(font_data: [u8], offset: i64) -> i64
+
+# Read a big-endian i16 (signed) from font_data at byte offset.
+extern fn rt_font_read_i16(font_data: [u8], offset: i64) -> i64
+
+# Read a big-endian u32 from font_data at byte offset.
+extern fn rt_font_read_u32(font_data: [u8], offset: i64) -> i64
+
+# Locate the byte offset of a named four-character table tag (e.g. "glyf",
+# "loca", "head", "maxp") in font_data. Returns -1 if not found.
+extern fn rt_font_find_table(font_data: [u8], tag: text) -> i64
+
+# ============================================================================
+# Internal helpers — TrueType table navigation
+# ============================================================================
+
+fn _read_u16(font_data: [u8], offset: i64) -> i64:
+    rt_font_read_u16(font_data, offset)
+
+fn _read_i16(font_data: [u8], offset: i64) -> i64:
+    rt_font_read_i16(font_data, offset)
+
+fn _read_u32(font_data: [u8], offset: i64) -> i64:
+    rt_font_read_u32(font_data, offset)
+
+# Return the byte offset of a table's data, or -1.
+fn _table_offset(font_data: [u8], tag: text) -> i64:
+    rt_font_find_table(font_data, tag)
+
+# Resolve glyph offset from the `loca` table.
+# index_to_loc_format: 0 = short offsets (×2), 1 = long offsets.
+fn _loca_offset(font_data: [u8], loca_off: i64, glyph_id: i64, format: i64) -> i64:
+    if format == 0:
+        _read_u16(font_data, loca_off + glyph_id * 2) * 2
+    else:
+        _read_u32(font_data, loca_off + glyph_id * 4)
+
+# ============================================================================
+# Simple (non-composite) glyph contour parser
+# ============================================================================
+
+# Parse one simple-glyph record starting at `base` inside font_data.
+# `n_contours` is already known to be > 0.
+fn _parse_simple_glyph(font_data: [u8], base: i64, n_contours: i64, x_min: i64, y_min: i64, x_max: i64, y_max: i64, glyph_id: i64) -> GlyphOutline:
+    # Read end-point indices for each contour (2 bytes each, after the 10-byte header).
+    val end_pts_off = base + 10
+    var end_pts = [i64]()
+    var i = 0 as i64
+    while i < n_contours:
+        val ep = _read_u16(font_data, end_pts_off + i * 2)
+        end_pts.push(ep)
+        i = i + 1
+
+    val n_points = end_pts[n_contours - 1] + 1
+
+    # Instruction length sits right after the end-point array.
+    val instr_len_off = end_pts_off + n_contours * 2
+    val instr_len = _read_u16(font_data, instr_len_off)
+
+    # Flags array starts after the instruction bytes.
+    val flags_off = instr_len_off + 2 + instr_len
+
+    # --- Expand run-length-encoded flags ---
+    var flags = [i64]()
+    var fi = flags_off
+    var pi = 0 as i64
+    while pi < n_points:
+        val f = _read_u16(font_data, fi)  # single byte, but we use u16 read masked to 0xff
+        val fb = f % 256
+        flags.push(fb)
+        fi = fi + 1
+        if (fb % 8) == (0x08 % 8):  # repeat flag bit (bit 3)
+            val repeat_count = _read_u16(font_data, fi) % 256
+            fi = fi + 1
+            var ri = 0 as i64
+            while ri < repeat_count:
+                flags.push(fb)
+                pi = pi + 1
+                ri = ri + 1
+        pi = pi + 1
+
+    # --- Decode x-coordinates (delta-encoded) ---
+    var xs = [i64]()
+    var x_cur = 0 as i64
+    var coord_off = fi
+    var qi = 0 as i64
+    while qi < n_points:
+        val fl = flags[qi]
+        val x_short = (fl / 2) % 2   # bit 1
+        val x_same  = (fl / 16) % 2  # bit 4
+        var dx = 0 as i64
+        if x_short == 1:
+            val raw = _read_u16(font_data, coord_off) % 256
+            coord_off = coord_off + 1
+            if x_same == 1:
+                dx = raw
+            else:
+                dx = 0 - raw
+        else:
+            if x_same == 1:
+                dx = 0
+            else:
+                dx = _read_i16(font_data, coord_off)
+                coord_off = coord_off + 2
+        x_cur = x_cur + dx
+        xs.push(x_cur)
+        qi = qi + 1
+
+    # --- Decode y-coordinates (delta-encoded) ---
+    var ys = [i64]()
+    var y_cur = 0 as i64
+    var wi = 0 as i64
+    while wi < n_points:
+        val fl = flags[wi]
+        val y_short = (fl / 4) % 2   # bit 2
+        val y_same  = (fl / 32) % 2  # bit 5
+        var dy = 0 as i64
+        if y_short == 1:
+            val raw = _read_u16(font_data, coord_off) % 256
+            coord_off = coord_off + 1
+            if y_same == 1:
+                dy = raw
+            else:
+                dy = 0 - raw
+        else:
+            if y_same == 1:
+                dy = 0
+            else:
+                dy = _read_i16(font_data, coord_off)
+                coord_off = coord_off + 2
+        y_cur = y_cur + dy
+        ys.push(y_cur)
+        wi = wi + 1
+
+    # --- Build contours from the decoded points ---
+    # TrueType uses on-curve (flag bit 0 = 1) and off-curve (flag bit 0 = 0)
+    # points. Consecutive off-curve points have an implicit on-curve midpoint.
+    var contours = [GlyphContour]()
+    var contour_start = 0 as i64
+    var ci = 0 as i64
+    while ci < n_contours:
+        val contour_end = end_pts[ci]
+        var cmds = [PathCommand]()
+
+        # Find the first on-curve point as the starting position.
+        var first_on = contour_start
+        var search = contour_start
+        while search <= contour_end:
+            if flags[search] % 2 == 1:
+                first_on = search
+                search = contour_end + 1   # break
+            else:
+                search = search + 1
+
+        val sx = xs[first_on] as f64
+        val sy = ys[first_on] as f64
+        cmds.push(path_cmd_move_to(sx, sy))
+
+        var idx = first_on + 1
+        while idx <= contour_end + (first_on - contour_start) + 1:
+            val actual = contour_start + ((idx - contour_start) % (contour_end - contour_start + 1))
+            val on_curve = flags[actual] % 2 == 1
+
+            if on_curve:
+                val tx = xs[actual] as f64
+                val ty = ys[actual] as f64
+                cmds.push(path_cmd_line_to(tx, ty))
+                idx = idx + 1
+            else:
+                # Off-curve: peek at the next point to handle implicit on-curves.
+                val next_idx = contour_start + ((idx + 1 - contour_start) % (contour_end - contour_start + 1))
+                val next_on = flags[next_idx] % 2 == 1
+                val ctrl_x = xs[actual] as f64
+                val ctrl_y = ys[actual] as f64
+                if next_on:
+                    val ex = xs[next_idx] as f64
+                    val ey = ys[next_idx] as f64
+                    cmds.push(path_cmd_quad_to(ctrl_x, ctrl_y, ex, ey))
+                    idx = idx + 2
+                else:
+                    # Implicit on-curve midpoint between two off-curve points.
+                    val next_actual = contour_start + ((idx + 1 - contour_start) % (contour_end - contour_start + 1))
+                    val mid_x = (ctrl_x + (xs[next_actual] as f64)) / 2.0
+                    val mid_y = (ctrl_y + (ys[next_actual] as f64)) / 2.0
+                    cmds.push(path_cmd_quad_to(ctrl_x, ctrl_y, mid_x, mid_y))
+                    idx = idx + 1
+
+        cmds.push(path_cmd_close())
+        contours.push(GlyphContour(commands: cmds))
+        contour_start = contour_end + 1
+        ci = ci + 1
+
+    GlyphOutline(
+        glyph_id: glyph_id,
+        contours: contours,
+        x_min: x_min,
+        y_min: y_min,
+        x_max: x_max,
+        y_max: y_max
+    )
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+# outline_from_glyph_id — parse TrueType `glyf` table for one glyph.
+# Returns an empty outline if the font data is invalid or the glyph has
+# no outline (e.g. space character).
+pub fn outline_from_glyph_id(font_data: [u8], glyph_id: i64) -> GlyphOutline:
+    val head_off = _table_offset(font_data, "head")
+    val loca_off = _table_offset(font_data, "loca")
+    val glyf_off = _table_offset(font_data, "glyf")
+
+    if head_off < 0 or loca_off < 0 or glyf_off < 0:
+        return glyph_outline_empty(glyph_id)
+
+    # index_to_loc_format at head+50 (offset within head table data)
+    val loc_format = _read_i16(font_data, head_off + 50)
+    val glyph_data_off = _loca_offset(font_data, loca_off, glyph_id, loc_format as i64)
+    val next_off       = _loca_offset(font_data, loca_off, glyph_id + 1, loc_format as i64)
+
+    if glyph_data_off == next_off:
+        # Empty glyph (e.g. whitespace).
+        return glyph_outline_empty(glyph_id)
+
+    val base = glyf_off + glyph_data_off
+    val n_contours = _read_i16(font_data, base)
+    val x_min      = _read_i16(font_data, base + 2)
+    val y_min      = _read_i16(font_data, base + 4)
+    val x_max      = _read_i16(font_data, base + 6)
+    val y_max      = _read_i16(font_data, base + 8)
+
+    if n_contours <= 0:
+        # n_contours == 0: empty; n_contours < 0: composite (not supported here).
+        return GlyphOutline(
+            glyph_id: glyph_id,
+            contours: [],
+            x_min: x_min,
+            y_min: y_min,
+            x_max: x_max,
+            y_max: y_max
+        )
+
+    _parse_simple_glyph(font_data, base, n_contours, x_min, y_min, x_max, y_max, glyph_id)
+
+# outline_to_path_commands — flatten all contours to a single command list.
+pub fn outline_to_path_commands(outline: GlyphOutline) -> [PathCommand]:
+    var result = [PathCommand]()
+    for contour in outline.contours:
+        for cmd in contour.commands:
+            result.push(cmd)
+    result
+
+# outline_bounds — axis-aligned bounding box in design-space units.
+pub fn outline_bounds(outline: GlyphOutline) -> SkRect:
+    SkRect(
+        left:   outline.x_min as f64,
+        top:    outline.y_min as f64,
+        right:  outline.x_max as f64,
+        bottom: outline.y_max as f64
+    )
