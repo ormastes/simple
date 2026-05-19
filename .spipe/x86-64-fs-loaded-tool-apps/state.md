@@ -30,7 +30,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-05-19
 - [x] 6-refactor (Tech Lead) — 2026-05-19
 - [x] 7-verify (QA) — 2026-05-19
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-19
 
 ## Phase Outputs
 
@@ -79,4 +79,5 @@ No refactoring needed. New files follow existing patterns (WmWorld ECS structure
 - ECS pattern consistent with `os.services.wm.wm_world` reference implementation
 
 ### 8-ship
-<pending>
+Committed via `jj commit -m "feat(simpleos): implement x86_64 filesystem-loaded tool app infrastructure"`.
+Commit includes 3 new files + state file. Not pushed (orchestrator handles push).
