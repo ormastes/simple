@@ -113,6 +113,9 @@ class BitDiagnostic:
     me is_sign_ambiguity():
         return self.kind == "sign_ambiguity"
 
+    me is_out_of_range():
+        return self.kind == "out_of_range"
+
     me width_diff():
         return self.actual_width - self.expected_width
 
@@ -121,6 +124,221 @@ class BitDiagnostic:
 
     static fn sign_ambiguity(width: i32) -> BitDiagnostic:
         return BitDiagnostic(kind: "sign_ambiguity", expected_width: width, actual_width: width, message: "signedness ambiguous for " + width.to_text() + "-bit value", is_error: true)
+
+    static fn out_of_range(hi: i32, src_width: i32) -> BitDiagnostic:
+        return BitDiagnostic(kind: "out_of_range", expected_width: src_width, actual_width: hi, message: "bit " + hi.to_text() + " out of range for " + src_width.to_text() + "-bit value", is_error: true)
+
+
+# ============================================================================
+# BitConcat — concatenation of bit vectors
+# ============================================================================
+
+class BitConcat:
+    """Concatenation of two bit-width signals into a wider one."""
+    left_width: i32
+    right_width: i32
+    result_width: i32
+    left_signal: text
+    right_signal: text
+
+    me vhdl_expr() -> text:
+        """Generate VHDL concatenation expression."""
+        return self.left_signal + " & " + self.right_signal
+
+    me is_valid():
+        """Verify result width equals sum of operand widths."""
+        return self.result_width == (self.left_width + self.right_width)
+
+    static fn create(l_sig: text, l_w: i32, r_sig: text, r_w: i32) -> BitConcat:
+        """Create a concatenation of two signals."""
+        return BitConcat(
+            left_width: l_w,
+            right_width: r_w,
+            result_width: l_w + r_w,
+            left_signal: l_sig,
+            right_signal: r_sig
+        )
+
+
+# ============================================================================
+# BitExtension — sign/zero extension and truncation
+# ============================================================================
+
+class BitExtension:
+    """Sign or zero extension/truncation of a signal to a target width."""
+    source_width: i32
+    target_width: i32
+    is_sign_extend: bool
+    signal_name: text
+
+    me is_extension():
+        """True when target is wider than source."""
+        return self.target_width > self.source_width
+
+    me is_truncation():
+        """True when target is narrower than source."""
+        return self.target_width < self.source_width
+
+    me is_identity():
+        """True when widths match (no-op)."""
+        return self.target_width == self.source_width
+
+    me pad_bits():
+        """Number of bits to extend by (negative for truncation)."""
+        return self.target_width - self.source_width
+
+    me vhdl_expr() -> text:
+        """Generate VHDL extension/truncation expression."""
+        if self.is_identity():
+            return self.signal_name
+        if self.is_truncation():
+            return self.signal_name + "(" + (self.target_width - 1).to_text() + " downto 0)"
+        # Extension
+        var pad_w = self.target_width - self.source_width
+        if self.is_sign_extend:
+            # Replicate MSB for sign extension
+            var msb = self.signal_name + "(" + (self.source_width - 1).to_text() + ")"
+            if pad_w == 1:
+                return msb + " & " + self.signal_name
+            return "(" + (pad_w - 1).to_text() + " downto 0 => " + msb + ") & " + self.signal_name
+        # Zero extension
+        var zeros = "\"" + "0" * pad_w + "\""
+        return zeros + " & " + self.signal_name
+
+    static fn zero_extend(sig: text, src_w: i32, tgt_w: i32) -> BitExtension:
+        """Create a zero-extension operation."""
+        return BitExtension(
+            source_width: src_w,
+            target_width: tgt_w,
+            is_sign_extend: false,
+            signal_name: sig
+        )
+
+    static fn sign_extend(sig: text, src_w: i32, tgt_w: i32) -> BitExtension:
+        """Create a sign-extension operation."""
+        return BitExtension(
+            source_width: src_w,
+            target_width: tgt_w,
+            is_sign_extend: true,
+            signal_name: sig
+        )
+
+    static fn truncate(sig: text, src_w: i32, tgt_w: i32) -> BitExtension:
+        """Create a truncation operation."""
+        return BitExtension(
+            source_width: src_w,
+            target_width: tgt_w,
+            is_sign_extend: false,
+            signal_name: sig
+        )
+
+
+# ============================================================================
+# BitShift — typed shift operations
+# ============================================================================
+
+class BitShift:
+    """Typed shift operation on a fixed-width signal."""
+    signal_name: text
+    signal_width: i32
+    shift_amount: i32
+    is_left: bool
+    is_arithmetic: bool
+
+    me vhdl_expr() -> text:
+        """Generate VHDL shift expression."""
+        var fn_name = ""
+        if self.is_left:
+            fn_name = "shift_left"
+        else:
+            if self.is_arithmetic:
+                fn_name = "shift_right"
+            else:
+                fn_name = "shift_right"
+        return fn_name + "(" + self.signal_name + ", " + self.shift_amount.to_text() + ")"
+
+    me result_width():
+        """Shift preserves width."""
+        return self.signal_width
+
+    static fn sll(sig: text, width: i32, amount: i32) -> BitShift:
+        """Create a shift-left-logical."""
+        return BitShift(signal_name: sig, signal_width: width, shift_amount: amount, is_left: true, is_arithmetic: false)
+
+    static fn srl(sig: text, width: i32, amount: i32) -> BitShift:
+        """Create a shift-right-logical."""
+        return BitShift(signal_name: sig, signal_width: width, shift_amount: amount, is_left: false, is_arithmetic: false)
+
+    static fn sra(sig: text, width: i32, amount: i32) -> BitShift:
+        """Create a shift-right-arithmetic."""
+        return BitShift(signal_name: sig, signal_width: width, shift_amount: amount, is_left: false, is_arithmetic: true)
+
+
+# ============================================================================
+# BitMask — comparison and mask operations
+# ============================================================================
+
+class BitMask:
+    """Typed bit-mask and comparison for fixed-width signals."""
+    signal_name: text
+    signal_width: i32
+    mask_value: text
+    op: text
+
+    me vhdl_expr() -> text:
+        """Generate VHDL masked comparison expression."""
+        if self.op == "and":
+            return self.signal_name + " and " + self.mask_value
+        if self.op == "or":
+            return self.signal_name + " or " + self.mask_value
+        if self.op == "xor":
+            return self.signal_name + " xor " + self.mask_value
+        if self.op == "eq":
+            return self.signal_name + " = " + self.mask_value
+        if self.op == "neq":
+            return self.signal_name + " /= " + self.mask_value
+        return self.signal_name
+
+    static fn mask_and(sig: text, width: i32, mask: text) -> BitMask:
+        """Create a bitwise AND mask."""
+        return BitMask(signal_name: sig, signal_width: width, mask_value: mask, op: "and")
+
+    static fn compare_eq(sig: text, width: i32, value: text) -> BitMask:
+        """Create an equality comparison."""
+        return BitMask(signal_name: sig, signal_width: width, mask_value: value, op: "eq")
+
+    static fn compare_neq(sig: text, width: i32, value: text) -> BitMask:
+        """Create a not-equal comparison."""
+        return BitMask(signal_name: sig, signal_width: width, mask_value: value, op: "neq")
+
+
+# ============================================================================
+# Validation helpers
+# ============================================================================
+
+fn validate_bit_slice(s: BitSlice) -> BitDiagnostic:
+    """Validate a bit slice for out-of-range access."""
+    if s.high_bit >= s.source_width:
+        return BitDiagnostic.out_of_range(s.high_bit, s.source_width)
+    if s.low_bit < 0:
+        return BitDiagnostic.out_of_range(s.low_bit, s.source_width)
+    if not s.width_matches():
+        return BitDiagnostic.width_mismatch(s.result_width, s.high_bit - s.low_bit + 1)
+    return BitDiagnostic(kind: "ok", expected_width: 0, actual_width: 0, message: "", is_error: false)
+
+fn rv32i_bitwidths() -> [BitWidth]:
+    """Return the standard RV32I bit-width set: u1, u2, u3, u5, u7, u12, u20, u32, u64."""
+    var widths = []
+    widths.push(BitWidth.unsigned(1))
+    widths.push(BitWidth.unsigned(2))
+    widths.push(BitWidth.unsigned(3))
+    widths.push(BitWidth.unsigned(5))
+    widths.push(BitWidth.unsigned(7))
+    widths.push(BitWidth.unsigned(12))
+    widths.push(BitWidth.unsigned(20))
+    widths.push(BitWidth.unsigned(32))
+    widths.push(BitWidth.unsigned(64))
+    return widths
 
 
 fn main():

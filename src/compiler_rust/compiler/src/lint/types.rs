@@ -196,7 +196,7 @@ impl LintName {
             LintName::NonExhaustiveMatch => LintLevel::Warn,
             LintName::ExportOutsideInit => LintLevel::Warn,
             LintName::InitBoundaryViolation => LintLevel::Warn,
-            LintName::GcBoundaryCrossing => LintLevel::Warn,
+            LintName::GcBoundaryCrossing => LintLevel::Deny,
             LintName::BypassWithCodeFiles => LintLevel::Warn,
             LintName::UnknownDecorator => LintLevel::Warn,
             LintName::UnknownAttribute => LintLevel::Warn,

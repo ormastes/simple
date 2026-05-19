@@ -1,8 +1,8 @@
 # Error Catalog Completeness
 
 **Type:** code-quality
-**Status:** in-progress
-**Phase:** 5 (implement)
+**Status:** done
+**Phase:** 8 (ship)
 
 ## Goal
 Fix dangling error code references and wire catalog codes into uncataloged

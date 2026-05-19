@@ -65,6 +65,18 @@ impl RuntimeFamily {
         )
     }
 
+    fn is_nogc(self) -> bool {
+        matches!(
+            self,
+            Self::NogcAsyncMutNoalloc
+                | Self::NogcAsyncMut
+                | Self::NogcAsyncImmut
+                | Self::NogcSyncImmut
+                | Self::Async
+                | Self::NogcSyncMut
+        )
+    }
+
     fn is_noalloc(self) -> bool {
         matches!(self, Self::NogcAsyncMutNoalloc)
     }
@@ -528,9 +540,18 @@ impl LintChecker {
     }
 
     /// Check runtime family imports for GC/noalloc dependency boundary violations.
+    ///
+    /// Detection order:
+    /// 1. Path-based: infer family from `src/lib/<family>/...` path structure
+    /// 2. Attribute-based: fall back to `@no_gc`/`@gc` file-level attributes
+    ///    for user modules outside standard library paths
     pub fn check_gc_boundary_imports(&mut self, items: &[Node], source_file: &Path) {
-        let Some(source_family) = runtime_family_from_source_path(source_file) else {
-            return;
+        let source_family = match runtime_family_from_source_path(source_file) {
+            Some(family) => family,
+            None => match runtime_family_from_attributes(items, source_file) {
+                Some(family) => family,
+                None => return,
+            },
         };
 
         if source_family == RuntimeFamily::Common {
@@ -807,8 +828,71 @@ fn runtime_family_import_violation_reason(
         return Some("nogc_imports_gc_family");
     }
 
+    // Symmetric: GC family must not import from NoGC families
+    if source_family.is_gc() && import_family.is_nogc() {
+        return Some("gc_imports_nogc_family");
+    }
+
     if import_family.rank() > source_family.rank() {
         return Some("higher_layer_runtime_family");
+    }
+
+    None
+}
+
+/// Detect runtime family from `@no_gc` / `@gc` file-level attributes.
+///
+/// Scans:
+/// 1. AST-level `ModDecl` attributes (`@no_gc`, `@gc`)
+/// 2. Raw source text for `@no_gc` / `@gc` in the first 30 lines
+///
+/// Returns a representative `RuntimeFamily` — `NogcSyncMut` for `@no_gc`,
+/// `GcSyncMut` for `@gc` — since the exact sub-family is unknown for
+/// user modules. This is sufficient for import boundary checks.
+fn runtime_family_from_attributes(items: &[Node], source_file: &Path) -> Option<RuntimeFamily> {
+    // Check AST ModDecl attributes
+    for node in items {
+        if let Node::ModDecl(decl) = node {
+            for attr in &decl.attributes {
+                if attr.name == "no_gc" {
+                    return Some(RuntimeFamily::NogcSyncMut);
+                }
+                if attr.name == "gc" {
+                    return Some(RuntimeFamily::GcSyncMut);
+                }
+            }
+        }
+    }
+
+    // Fall back to raw source text scanning for file-level attributes
+    if let Ok(source) = std::fs::read_to_string(source_file) {
+        for line in source.lines().take(30) {
+            let trimmed = line.trim();
+            if trimmed == "@no_gc" || trimmed.starts_with("@no_gc ") || trimmed.starts_with("@no_gc\n") {
+                return Some(RuntimeFamily::NogcSyncMut);
+            }
+            if trimmed == "@gc" || trimmed.starts_with("@gc ") || trimmed.starts_with("@gc\n") {
+                return Some(RuntimeFamily::GcSyncMut);
+            }
+        }
+    }
+
+    // Also check parent __init__.spl for directory-level attribute
+    if let Some(dir) = source_file.parent() {
+        let init_file = dir.join("__init__.spl");
+        if init_file.exists() {
+            if let Ok(source) = std::fs::read_to_string(&init_file) {
+                for line in source.lines().take(30) {
+                    let trimmed = line.trim();
+                    if trimmed == "@no_gc" || trimmed.starts_with("@no_gc ") {
+                        return Some(RuntimeFamily::NogcSyncMut);
+                    }
+                    if trimmed == "@gc" || trimmed.starts_with("@gc ") {
+                        return Some(RuntimeFamily::GcSyncMut);
+                    }
+                }
+            }
+        }
     }
 
     None

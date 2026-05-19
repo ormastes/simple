@@ -1116,7 +1116,7 @@ pub use DiContainer
             Some(LintName::GcBoundaryCrossing)
         );
         assert_eq!(LintName::GcBoundaryCrossing.as_str(), "gc_boundary_crossing");
-        assert_eq!(LintName::GcBoundaryCrossing.default_level(), LintLevel::Warn);
+        assert_eq!(LintName::GcBoundaryCrossing.default_level(), LintLevel::Deny);
     }
 
     #[test]
