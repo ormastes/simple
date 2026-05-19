@@ -1,5 +1,10 @@
 # RISC-V RTL + SimpleOS Boot Plan
 
+Related hardware launch plan:
+`doc/03_plan/agent_tasks/riscv64_fpga_simpleos_launch.md` records the connected
+FPGA inventory, RV64 softcore strategy, SimpleOS bring-up gates, and current
+hardware/tool blockers.
+
 **Date:** 2026-05-11 (updated 2026-05-12)
 
 ## Goal
