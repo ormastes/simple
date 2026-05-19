@@ -42,9 +42,26 @@ impl<'a> MirLowerer<'a> {
             let left_reg = self.lower_expr(left)?;
             let right_reg = self.lower_expr(right)?;
 
+            // When both operands are ANY-typed (untyped fn params), dispatch
+            // to rt_any_add which does a runtime tag check: string operands
+            // go through rt_string_concat, integers use arithmetic addition.
+            // This matches the interpreter's BinOp::Add runtime dispatch on Value.
+            if op == BinOp::Add && left.ty == TypeId::ANY && right.ty == TypeId::ANY {
+                return self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: crate::mir::CallTarget::from_name("rt_any_add"),
+                        args: vec![left_reg, right_reg],
+                    });
+                    dest
+                });
+            }
+
             // Only use string concat when at least one operand is known STRING.
-            // ANY-typed operands (untyped fn params) default to arithmetic iadd,
-            // consistent with Sub/Mul which always emit BinOp.
+            // ANY-typed operands (untyped fn params) do not reach here for Add —
+            // they are handled above. Sub/Mul always emit BinOp.
             let is_string_add = op == BinOp::Add
                 && (left.ty == TypeId::STRING
                     || right.ty == TypeId::STRING);

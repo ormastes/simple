@@ -378,6 +378,16 @@ int64_t rt_string_concat(int64_t left, int64_t right) {
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
+/// Runtime dispatch for `any + any`: if either operand is a heap string, perform
+/// string concatenation; otherwise perform integer arithmetic addition.
+/// This matches the interpreter's BinOp::Add behaviour for ANY-typed operands.
+int64_t rt_any_add(int64_t left, int64_t right) {
+    if (rt_core_as_string(left) || rt_core_as_string(right)) {
+        return rt_string_concat(left, right);
+    }
+    return left + right;
+}
+
 int64_t rt_len(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (s) return (int64_t)s->len;

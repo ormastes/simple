@@ -178,6 +178,89 @@ mod ops;
 mod casting;
 mod units;
 
+/// Route an expression to the correct sub-evaluator in O(1) — one discriminant check.
+///
+/// The original design called all 5 sub-evaluators in sequence; each did a full `match expr`
+/// internally and returned `None` if the variant wasn't theirs. For common variants (Call,
+/// MethodCall, Binary) that meant 1–4 wasted enum-match traversals per expression node.
+///
+/// This router maps each `Expr` variant to exactly the sub-evaluator that owns it, then
+/// falls through to the residual `match` in `evaluate_expr` for variants that live there.
+/// Variants not listed here are handled by the match below.
+#[inline(always)]
+fn route_expr(
+    expr: &Expr,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<Result<Value, CompileError>> {
+    match expr {
+        // --- literals ---
+        Expr::Integer(_)
+        | Expr::TypedInteger(_, _)
+        | Expr::Float(_)
+        | Expr::TypedFloat(_, _)
+        | Expr::Bool(_)
+        | Expr::Nil
+        | Expr::String(_)
+        | Expr::TypedString(_, _)
+        | Expr::FString { .. }
+        | Expr::Symbol(_)
+        | Expr::I18nString { .. }
+        | Expr::I18nTemplate { .. }
+        | Expr::I18nRef(_)
+        | Expr::BlockExpr { .. }
+        | Expr::Identifier(_) => {
+            Some(literals::eval_literal_expr(expr, env, functions, classes, enums, impl_methods)
+                .map(|opt| opt.unwrap_or(Value::Nil)))
+        }
+        // --- ops ---
+        Expr::Binary { .. } | Expr::Unary { .. } | Expr::New { .. } | Expr::Cast { .. } => {
+            Some(ops::eval_op_expr(expr, env, functions, classes, enums, impl_methods)
+                .map(|opt| opt.unwrap_or(Value::Nil)))
+        }
+        // --- control flow ---
+        Expr::Lambda { .. } | Expr::If { .. } | Expr::Match { .. } | Expr::DoBlock(_) => {
+            Some(control::eval_control_expr(expr, env, functions, classes, enums, impl_methods)
+                .map(|opt| opt.unwrap_or(Value::Nil)))
+        }
+        // --- calls & field access ---
+        Expr::Call { .. }
+        | Expr::MethodCall { .. }
+        | Expr::FieldAccess { .. }
+        | Expr::FunctionalUpdate { .. }
+        | Expr::KernelLaunch { .. } => {
+            Some(calls::eval_call_expr(expr, env, functions, classes, enums, impl_methods)
+                .map(|opt| opt.unwrap_or(Value::Nil)))
+        }
+        // --- collections & indexing ---
+        Expr::Array(_)
+        | Expr::VecLiteral(_)
+        | Expr::ArrayRepeat { .. }
+        | Expr::Tuple(_)
+        | Expr::LabeledTuple(_)
+        | Expr::Dict(_)
+        | Expr::Range { .. }
+        | Expr::Index { .. }
+        | Expr::TupleIndex { .. }
+        | Expr::Path(_)
+        | Expr::StructInit { .. }
+        | Expr::ListComprehension { .. }
+        | Expr::DictComprehension { .. }
+        | Expr::Slice { .. }
+        | Expr::Spread(_)
+        | Expr::DictSpread(_) => {
+            Some(collections::eval_collection_expr(expr, env, functions, classes, enums, impl_methods)
+                .map(|opt| opt.unwrap_or(Value::Nil)))
+        }
+        // Remaining variants (Spawn, Await, Yield, Try, MacroInvocation, Unwrap*, etc.)
+        // are handled by the match in evaluate_expr.
+        _ => None,
+    }
+}
+
 /// Evaluate a constant expression at compile time
 pub(crate) fn evaluate_expr(
     expr: &Expr,
@@ -191,20 +274,11 @@ pub(crate) fn evaluate_expr(
     if crate::interpreter::is_timeout_exceeded() {
         return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
     }
-    if let Some(value) = literals::eval_literal_expr(expr, env, functions, classes, enums, impl_methods)? {
-        return Ok(value);
-    }
-    if let Some(value) = ops::eval_op_expr(expr, env, functions, classes, enums, impl_methods)? {
-        return Ok(value);
-    }
-    if let Some(value) = control::eval_control_expr(expr, env, functions, classes, enums, impl_methods)? {
-        return Ok(value);
-    }
-    if let Some(value) = calls::eval_call_expr(expr, env, functions, classes, enums, impl_methods)? {
-        return Ok(value);
-    }
-    if let Some(value) = collections::eval_collection_expr(expr, env, functions, classes, enums, impl_methods)? {
-        return Ok(value);
+
+    // Fast path: O(1) discriminant-based dispatch — avoids up to 4 sequential
+    // full-enum matches when the previous cascade approach returned None.
+    if let Some(result) = route_expr(expr, env, functions, classes, enums, impl_methods) {
+        return result;
     }
 
     match expr {
