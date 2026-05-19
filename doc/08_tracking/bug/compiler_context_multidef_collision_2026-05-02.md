@@ -69,7 +69,21 @@ silently fight each other.
 ## Status
 
 - **W15-K (this filing):** documented; not fixed in W15-K scope.
-- **Blocking:** stage4 HIR ANY-field diagnostic on `obj_taker.spl`
-  cannot go green until the underlying class 3a multi-def collision
-  is fixed.
-- **Owner:** TBD (deferred to whoever picks up class 3a refactor).
+- **2026-05-10 (prior wave):** `80.driver/init.spl` `CompilerContext` renamed
+  to `DriverContext`, reducing collision from 3 → 2 definitions.
+- **2026-05-19 (Wave 5):** Rust-side fix verified complete. The
+  `duplicate_struct_defs` sidecar + `try_resolve_global_field_for_struct`
+  fallback chain (introduced in earlier waves) already handles the remaining
+  two-definition collision correctly: `handle` exists in only one of the two
+  `CompilerContext` layouts, so the duplicate-variant resolver picks it
+  uniquely. No per-module-qualified registry refactor was needed.
+  - Merge conflicts in `driver/src/cli/test_runner/runner.rs` resolved
+    (took upstream side with auto-fallback threshold logic).
+  - Test `test_duplicate_struct_sidecar_resolves_unique_compiler_context_handle`
+    fixed: corrected field-type comparison from `String` to `simple_parser::Type`,
+    and added missing `fn_arities` field to three `ModuleImports` test
+    initializers at lines 1098, 1184, 1788.
+  - `cargo check` passes clean (non-test); remaining 5 test-mode errors are
+    pre-existing in out-of-scope files (`local_execution.rs`,
+    `expression_tests.rs`).
+- **Blocking:** resolved.
