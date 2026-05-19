@@ -135,6 +135,177 @@ fn lz4_decompress_frame(data: [u8]) -> Result<[u8], CompressionError>:
         pos = pos + bsize
     Err(CompressionError.TruncatedInput("lz4 missing end mark"))
 
+# ============================================================================
+# Block-level public API (no frame header)
+# ============================================================================
+
+fn lz4_decompress_block(data: [u8]) -> Result<[u8], CompressionError>:
+    """Decompress a raw LZ4 block (no frame header).
+
+    The entire `data` slice is treated as one LZ4 block.
+    """
+    _lz4_decode_block(data, 0, data.len())
+
+fn lz4_compress_block(data: [u8]) -> [u8]:
+    """Compress `data` as a raw LZ4 block (no frame header).
+
+    Uses a greedy hash-table match finder for back-references.
+    Falls back to the store path for inputs shorter than 13 bytes.
+    """
+    _lz4_encode_block_compress(data)
+
+fn lz4_compress_block_with_level(data: [u8], level: i64) -> [u8]:
+    """Compress `data` as a raw LZ4 block with a compression level hint.
+
+    Level is accepted for API compatibility but has no effect on the current
+    greedy-hash implementation; the same encoder is used for all levels.
+    """
+    _lz4_encode_block_compress(data)
+
+# ============================================================================
+# Greedy hash-table LZ4 block encoder
+# ============================================================================
+
+# Hash-table size: 4096 entries (12-bit index).  A larger table improves
+# compression ratio but slows down the interpreter path.
+val _LZ4_HASH_TABLE_SIZE: i64 = 4096
+
+fn _lz4_hash4(data: [u8], pos: i64) -> i64:
+    """Compute a 12-bit hash of the 4-byte window starting at `pos`."""
+    val b0 = data[pos] as i64
+    val b1 = data[pos + 1] as i64
+    val b2 = data[pos + 2] as i64
+    val b3 = data[pos + 3] as i64
+    val v = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    # Knuth multiplicative hash, keep lower 12 bits
+    ((v * 2654435761) >> 20) & (_LZ4_HASH_TABLE_SIZE - 1)
+
+fn _lz4_match_len(data: [u8], a: i64, b: i64, max_len: i64) -> i64:
+    """Return the number of matching bytes starting at positions `a` and `b`."""
+    var len = 0
+    while len < max_len and data[a + len] == data[b + len]:
+        len = len + 1
+    len
+
+fn _lz4_emit_sequence(out: [u8], lit_start: i64, lit_len: i64, src: [u8], match_offset: i64, match_len: i64) -> [u8]:
+    """Emit one LZ4 sequence: token + literal-length-ext + literals + offset + match-length-ext."""
+    var result = out
+    # Clamp nibbles
+    val ll_nibble = if lit_len >= 15: 15 else: lit_len
+    val ml_nibble = if match_len - 4 >= 15: 15 else: match_len - 4
+    val token = ((ll_nibble << 4) | ml_nibble) as u8
+    result = result.push(token)
+    # Extended literal length
+    if lit_len >= 15:
+        var rem = lit_len - 15
+        while rem >= 255:
+            result = result.push(255 as u8)
+            rem = rem - 255
+        result = result.push(rem as u8)
+    # Literals
+    var i = 0
+    while i < lit_len:
+        result = result.push(src[lit_start + i])
+        i = i + 1
+    # Offset (LE u16)
+    result = result.push((match_offset & 0xFF) as u8)
+    result = result.push(((match_offset >> 8) & 0xFF) as u8)
+    # Extended match length
+    if match_len - 4 >= 15:
+        var rem = match_len - 4 - 15
+        while rem >= 255:
+            result = result.push(255 as u8)
+            rem = rem - 255
+        result = result.push(rem as u8)
+    result
+
+fn _lz4_emit_last_literals(out: [u8], lit_start: i64, lit_len: i64, src: [u8]) -> [u8]:
+    """Emit the final literal-only sequence (no match section)."""
+    var result = out
+    val ll_nibble = if lit_len >= 15: 15 else: lit_len
+    val token = (ll_nibble << 4) as u8
+    result = result.push(token)
+    if lit_len >= 15:
+        var rem = lit_len - 15
+        while rem >= 255:
+            result = result.push(255 as u8)
+            rem = rem - 255
+        result = result.push(rem as u8)
+    var i = 0
+    while i < lit_len:
+        result = result.push(src[lit_start + i])
+        i = i + 1
+    result
+
+fn _lz4_encode_block_compress(src: [u8]) -> [u8]:
+    """Greedy LZ4 block encoder with hash-table match finder.
+
+    LZ4 block constraints honoured:
+    - Minimum match length: 4
+    - Last 5 bytes of input must be literals
+    - Last match must start >= 12 bytes from end of block
+    - Offset: 1..65535
+    """
+    val n = src.len()
+    # For very short inputs just store; LZ4 last-5-literal rule makes
+    # back-reference encoding impossible below 13 bytes.
+    if n < 13:
+        return _lz4_encode_block(src)
+    # Build hash table: position of last occurrence for each hash slot.
+    # We model the table as a flat [u8] pair-encoded list: too large for a
+    # struct in the Simple interpreter, so we use a parallel encoding scheme
+    # where table[2*h] and table[2*h+1] store the two bytes of the position.
+    # We skip the hash-table optimisation for now and use a simpler approach
+    # that works within the Simple interpreter constraints:
+    # store the last-seen positions in 2-byte slots.
+    var ht_lo: [u8] = []
+    var ht_hi: [u8] = []
+    var k = 0
+    while k < _LZ4_HASH_TABLE_SIZE:
+        ht_lo = ht_lo.push(0 as u8)
+        ht_hi = ht_hi.push(0 as u8)
+        k = k + 1
+    var out: [u8] = []
+    var pos = 0
+    var lit_start = 0
+    # We stop 12 bytes before the end to satisfy the last-match constraint.
+    val match_limit = n - 12
+    # Inner loop: advance pos looking for matches.
+    while pos < match_limit:
+        if pos + 4 > n:
+            pos = match_limit
+        else:
+            val h = _lz4_hash4(src, pos)
+            val ref_lo = ht_lo[h] as i64
+            val ref_hi = ht_hi[h] as i64
+            val ref_pos = ref_lo | (ref_hi << 8)
+            # Update hash table with current position
+            ht_lo[h] = (pos & 0xFF) as u8
+            ht_hi[h] = ((pos >> 8) & 0xFF) as u8
+            val offset = pos - ref_pos
+            if (ref_pos < pos and offset >= 1 and offset <= 65535 and
+                    pos + 4 <= n and
+                    src[ref_pos] == src[pos] and
+                    src[ref_pos + 1] == src[pos + 1] and
+                    src[ref_pos + 2] == src[pos + 2] and
+                    src[ref_pos + 3] == src[pos + 3]):
+                # Found a match — measure its full length
+                val max_ml = n - 5 - pos
+                val ml = _lz4_match_len(src, ref_pos, pos, max_ml)
+                if ml >= 4:
+                    val lit_len = pos - lit_start
+                    out = _lz4_emit_sequence(out, lit_start, lit_len, src, offset, ml)
+                    pos = pos + ml
+                    lit_start = pos
+                else:
+                    pos = pos + 1
+            else:
+                pos = pos + 1
+    # Emit remaining literals
+    val final_lit_len = n - lit_start
+    out = _lz4_emit_last_literals(out, lit_start, final_lit_len, src)
+    out
+
 fn _lz4_decode_block(data: [u8], start: i64, length: i64) -> Result<[u8], CompressionError>:
     """Decode one LZ4 block starting at `start` for `length` bytes."""
     var out: [u8] = []

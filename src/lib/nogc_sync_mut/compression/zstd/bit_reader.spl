@@ -1,0 +1,194 @@
+# zstd/bit_reader.spl — Bit readers for Zstd (RFC 8878)
+#
+# Zstd uses two bit-reading conventions:
+#   - LSB-first forward reader: used for frame/block headers and literal counts
+#   - Reverse-bit reader (MSB-from-end): used for FSE and Huffman decoding
+#     (the bitstream is read back-to-front, MSB of last byte first)
+
+use std.common.compress.types.{CompressionError}
+
+# ---------------------------------------------------------------------------
+# Forward LSB-first reader (same convention as DEFLATE)
+# ---------------------------------------------------------------------------
+
+struct ZstdBitReader:
+    data: [u8]
+    byte_pos: i64
+    buf: i64
+    buf_bits: i64
+
+fn zstd_br_init(data: [u8]) -> ZstdBitReader:
+    ZstdBitReader(data: data, byte_pos: 0, buf: 0, buf_bits: 0)
+
+fn zstd_br_init_at(data: [u8], pos: i64) -> ZstdBitReader:
+    ZstdBitReader(data: data, byte_pos: pos, buf: 0, buf_bits: 0)
+
+fn zstd_br_bytes_left(r: ZstdBitReader) -> i64:
+    val used_by_buf = r.buf_bits / 8
+    r.data.len() - r.byte_pos + used_by_buf
+
+fn zstd_br_byte_pos(r: ZstdBitReader) -> i64:
+    val used_by_buf = r.buf_bits / 8
+    r.byte_pos - used_by_buf
+
+struct ZstdBitsResult:
+    value: i64
+    reader: ZstdBitReader
+
+struct ZstdBytesResult:
+    bytes: [u8]
+    reader: ZstdBitReader
+
+# Read n bits (1..32) LSB-first.
+fn zstd_br_read(r: ZstdBitReader, n: i64) -> Result<ZstdBitsResult, CompressionError>:
+    if n <= 0 or n > 32:
+        return Err(CompressionError.CorruptData("zstd bit count out of range"))
+    var cur_buf = r.buf
+    var cur_bits = r.buf_bits
+    var cur_pos = r.byte_pos
+    while cur_bits < n:
+        if cur_pos >= r.data.len():
+            return Err(CompressionError.TruncatedInput("zstd bit stream"))
+        cur_buf = cur_buf | (r.data[cur_pos].to_i64() << cur_bits)
+        cur_bits = cur_bits + 8
+        cur_pos = cur_pos + 1
+    val mask = (1 << n) - 1
+    val value = cur_buf & mask
+    val new_buf = cur_buf >> n
+    val new_bits = cur_bits - n
+    val new_reader = ZstdBitReader(
+        data: r.data,
+        byte_pos: cur_pos,
+        buf: new_buf,
+        buf_bits: new_bits
+    )
+    Ok(ZstdBitsResult(value: value, reader: new_reader))
+
+# Read exactly n bytes from a byte-aligned reader.
+fn zstd_br_read_bytes(r: ZstdBitReader, n: i64) -> Result<ZstdBytesResult, CompressionError>:
+    if r.buf_bits % 8 != 0:
+        return Err(CompressionError.CorruptData("zstd read_bytes called on unaligned reader"))
+    val buffered_whole_bytes = r.buf_bits / 8
+    val actual_pos = r.byte_pos - buffered_whole_bytes
+    if actual_pos + n > r.data.len():
+        return Err(CompressionError.TruncatedInput("zstd raw bytes"))
+    var out: [u8] = []
+    var i = actual_pos
+    while i < actual_pos + n:
+        out.push(r.data[i])
+        i = i + 1
+    val new_reader = ZstdBitReader(
+        data: r.data,
+        byte_pos: actual_pos + n,
+        buf: 0,
+        buf_bits: 0
+    )
+    Ok(ZstdBytesResult(bytes: out, reader: new_reader))
+
+# Read a single byte (byte-aligned path, no buffering needed).
+fn zstd_br_read_byte(r: ZstdBitReader) -> Result<ZstdBitsResult, CompressionError>:
+    zstd_br_read(r, 8)
+
+# Align to next byte boundary (discard sub-byte bits).
+fn zstd_br_align(r: ZstdBitReader) -> ZstdBitReader:
+    val discard = r.buf_bits % 8
+    if discard == 0:
+        return r
+    ZstdBitReader(
+        data: r.data,
+        byte_pos: r.byte_pos,
+        buf: r.buf >> discard,
+        buf_bits: r.buf_bits - discard
+    )
+
+# Read a little-endian u16 (byte-aligned).
+fn zstd_br_read_u16(r: ZstdBitReader) -> Result<ZstdBitsResult, CompressionError>:
+    val r1 = zstd_br_read(r, 8)?
+    val lo = r1.value
+    val r2 = zstd_br_read(r1.reader, 8)?
+    val hi = r2.value
+    Ok(ZstdBitsResult(value: lo | (hi << 8), reader: r2.reader))
+
+# Read a little-endian u32 (byte-aligned).
+fn zstd_br_read_u32(r: ZstdBitReader) -> Result<ZstdBitsResult, CompressionError>:
+    val r1 = zstd_br_read(r, 8)?
+    val b0 = r1.value
+    val r2 = zstd_br_read(r1.reader, 8)?
+    val b1 = r2.value
+    val r3 = zstd_br_read(r2.reader, 8)?
+    val b2 = r3.value
+    val r4 = zstd_br_read(r3.reader, 8)?
+    val b3 = r4.value
+    val v = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    Ok(ZstdBitsResult(value: v, reader: r4.reader))
+
+# ---------------------------------------------------------------------------
+# Reverse-bit reader (MSB-from-end) for FSE and Huffman streams
+# ---------------------------------------------------------------------------
+# RFC 8878 §3.1.2.3: the bitstream is stored with the last byte first,
+# MSB of the last byte first.  A sentinel "1" bit marks the start.
+
+struct ZstdRevBitReader:
+    data: [u8]      # the bitstream slice (raw bytes)
+    offset: i64     # current bit position from the MSB end (counts down)
+    bits_left: i64  # number of valid bits remaining
+
+struct ZstdRevBitsResult:
+    value: i64
+    reader: ZstdRevBitReader
+
+# Initialise a reverse reader from a byte slice.
+# Finds the sentinel "1" bit in the last byte.
+fn zstd_rbr_init(data: [u8]) -> Result<ZstdRevBitReader, CompressionError>:
+    val len = data.len()
+    if len == 0:
+        return Err(CompressionError.TruncatedInput("zstd reverse bitstream empty"))
+    val last_byte = data[len - 1].to_i64()
+    if last_byte == 0:
+        return Err(CompressionError.CorruptData("zstd reverse bitstream last byte is 0"))
+    # Count leading zeros in last byte to find sentinel position
+    var sentinel_pos = 7
+    while sentinel_pos >= 0:
+        if (last_byte >> sentinel_pos) & 1 == 1:
+            break
+        sentinel_pos = sentinel_pos - 1
+    # bits_left = total bits minus sentinel bit
+    val total_bits = len * 8
+    val bits_left = total_bits - (8 - sentinel_pos)  # subtract the sentinel and its leading zeros
+    Ok(ZstdRevBitReader(data: data, offset: sentinel_pos - 1, bits_left: bits_left))
+
+# Read n bits from the reverse reader (MSB first).
+fn zstd_rbr_read(r: ZstdRevBitReader, n: i64) -> Result<ZstdRevBitsResult, CompressionError>:
+    if r.bits_left < n:
+        return Err(CompressionError.TruncatedInput("zstd reverse bitstream exhausted"))
+    var value = 0
+    var remaining = n
+    var cur_offset = r.offset
+    var cur_bits_left = r.bits_left
+    # Compute which byte and bit we are at
+    # bits_left tracks how many data bits remain; offset tracks sub-byte position
+    var total_bits = r.data.len() * 8
+    var bit_pos = total_bits - (8 - cur_offset) - (8 - 1) + cur_offset
+    # Simpler: track byte index and bit index within byte
+    val len = r.data.len()
+    var byte_idx = len - 1
+    var bit_idx = cur_offset  # 0 = LSB of byte, 7 = MSB of byte
+    var val_acc = 0
+    var i = 0
+    while i < n:
+        if byte_idx < 0:
+            return Err(CompressionError.TruncatedInput("zstd reverse bitstream underflow"))
+        val bit = (r.data[byte_idx].to_i64() >> bit_idx) & 1
+        val_acc = val_acc | (bit << (n - 1 - i))
+        if bit_idx == 0:
+            byte_idx = byte_idx - 1
+            bit_idx = 7
+        else:
+            bit_idx = bit_idx - 1
+        i = i + 1
+    val new_bits_left = cur_bits_left - n
+    val new_offset = bit_idx
+    Ok(ZstdRevBitsResult(
+        value: val_acc,
+        reader: ZstdRevBitReader(data: r.data, offset: new_offset, bits_left: new_bits_left)
+    ))

@@ -1,6 +1,6 @@
 # Web DB Hardening — Task State
 
-## Status: in-progress
+## Status: complete
 
 ## Scope
 SQL injection prevention, parameterized query enforcement, and connection pool
