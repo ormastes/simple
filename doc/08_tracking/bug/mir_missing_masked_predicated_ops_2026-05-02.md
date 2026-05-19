@@ -1,7 +1,7 @@
 # Bug: MIR missing MaskFromCmp, MaskedAdd/Mul/Fma, PredicatedAdd/Mul/Fma opcodes
 
 **Date:** 2026-05-02
-**Status:** FIXED (opcodes added 2026-05-09; fusion pass body + tests remain for Wave I2)
+**Status:** CLOSED — Option B fully implemented: opcodes (2026-05-09), fusion pass (244 lines), and 10 unit tests all landed.
 **Component:** `src/compiler/50.mir/mir_instructions.spl`, `src/compiler/60.mir_opt/mir_opt/predicate_promote.spl`
 
 ## Summary
@@ -90,3 +90,20 @@ Both options require MIR changes in a separate commit before the pass can be imp
 - `src/compiler/50.mir/mir_instructions.spl` — add missing `MirInstKind` variants
 - `src/compiler/60.mir_opt/mir_opt/predicate_promote.spl` — replace skeleton with real pass
 - `test/unit/compiler/mir_opt/predicate_promote_spec.spl` — new spec (8+ tests)
+
+## Resolution (Wave I2 / Wave 13)
+
+Option B was implemented. All three files are complete:
+
+- **`src/compiler/50.mir/mir_instructions.spl`** lines 253–273: `MaskFromCmp`, `MaskedAdd`,
+  `MaskedMul`, `MaskedFma`, `PredicatedAdd`, `PredicatedMul`, `PredicatedFma` added.
+- **`src/compiler/60.mir_opt/mir_opt/predicate_promote.spl`** (244 lines): full fusion pass
+  `run_predicate_promote` → `promote_function_predicate` → `promote_block_predicate` with
+  `try_fuse_binary` / `try_fuse_ternary` helpers. Registered in `mod.spl` at line 660.
+- **`test/unit/compiler/mir_opt/predicate_promote_spec.spl`** (232 lines, 10 tests):
+  5 positive fusion cases (Add/Mul/Fma/two-pairs), 2 operand utility tests, 3 negative
+  cases (mask mismatch, non-adjacent, no prior MaskFromCmp), 1 trailing-unfused case.
+
+Note: `simd_test_catalog.md` §3.3 lists 8 test names for Option A (`_z`→`_x` mode
+promotion) which was NOT implemented. Those test names do not match the Option B
+implementation and should be treated as a follow-up item.
