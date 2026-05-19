@@ -27,7 +27,7 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-19
 - [x] 2-research (Analyst) — 2026-05-19
-- [ ] 3-arch (Architect)
+- [x] 3-arch (Architect) — 2026-05-19
 - [ ] 4-spec (QA Lead)
 - [ ] 5-implement (Engineer)
 - [ ] 6-refactor (Tech Lead)
@@ -81,7 +81,24 @@ feature
 **Linker scripts:** `src/os/kernel/arch/riscv64/linker.ld` is QEMU-only (0x80200000). Baremetal templates at `src/compiler/70.backend/baremetal/riscv/linker.ld` and `src/lib/nogc_async_mut_noalloc/baremetal/riscv/linker.ld`.
 
 ### 3-arch
-<pending>
+**Date:** 2026-05-19
+**Output:** `.spipe/riscv64-fpga-simpleos/arch.md`
+
+**Hardware manifest SDN:** `doc/08_tracking/hardware/hardware_manifest.sdn` — 10-row SDN table with board_id, reset_pc, ram_base (0x80000000), ram_size (512MB), uart_base (0x10000000), uart_baud (115200), timer_base (0x02000000 CLINT), plic_base (0x0C000000), hart_count (1), timebase_hz (10MHz).
+
+**Platform capsule signatures (4 files under `src/os/kernel/arch/riscv64/platform/`):**
+- `fpga.spl`: `FpgaPlatform` struct + `fpga_platform_init(manifest_path)` / `fpga_platform_init_default()` — calls manifest loader + uart/timer init
+- `manifest.spl`: `BoardConfig` struct + `load_board_config_from_sdn(sdn_text)` / `default_board_config()` / `load_board_config()` — noalloc-safe
+- `uart_mmio.spl`: delegates to existing `uart16550_mmio.spl`; adds `uart_mmio_init(base, baud)`, `uart_mmio_puts(base, msg)`, `uart_mmio_puts_hex(base, label, val)`
+- `timer_mmio.spl`: `timer_read_mtime`, `timer_set_mtimecmp`, `timer_clear_mtimecmp`, `timer_polling_delay_us/ms` — CLINT register layout
+
+**Boot profile `riscv64-fpga-min`:** `riscv_fpga_target_contract()` in `riscv_target.spl` (triple `riscv64-unknown-none`, lp64 ABI, rv64imac); new `fpga_linker.ld` (RAM ORIGIN=0x80000000, BRAM at 0x00000000); feature flags: no_fs, no_net, no_fb, polling_timer, initramfs_only.
+
+**Bare-metal hello payload:** `examples/09_embedded/fpga_riscv/rv64_fpga_hello/` — `hello.S` + `linker.ld` + `build.shs`; proof string `SIMPLE-RV64-FPGA-HELLO board=zynq7020-ml-carrier hart=0 pc=0x80000000`.
+
+**Phase 5 scope partition:** Agent A=scripts+doc/tracking, Agent C=platform/ capsules, Agent D=examples/09_embedded/fpga_riscv/, Agent E=test/riscv64_fpga/, Agent F=compiler presets+linker+manifest SDN. No overlap between any two agents.
+
+**Hardware-gated ACs:** AC-1/2/3 (board connected), AC-5/7/9 (synthesis or FPGA upload) must emit `BLOCKED: <reason>` not false PASS. AC-4/6/7-build/9-QEMU are build-time verifiable.
 
 ### 4-spec
 <pending>
