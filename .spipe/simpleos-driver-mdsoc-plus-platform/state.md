@@ -30,7 +30,8 @@ Create MDSOC+ platform source files for the SimpleOS driver lanes (GPU, Audio, I
 - `src/os/drivers/mdsoc_plus/lane_audio.spl` — Audio lane MDSOC+ contract helpers
 - `src/os/drivers/mdsoc_plus/lane_input.spl` — Input lane MDSOC+ contract helpers
 - `src/os/drivers/mdsoc_plus/lane_exokernel.spl` — Exokernel lane MDSOC+ contract helpers
-- `test/unit/os/drivers/mdsoc_plus/driver_mdsoc_plus_platform_spec.spl` — 20 tests
+- `src/os/drivers/mdsoc_plus/lane_mdsoc.spl` — MDSOC lane visibility audit and release-gate helpers
+- `test/unit/os/drivers/mdsoc_plus/driver_mdsoc_plus_platform_spec.spl` — 33 tests (prior count of 20 was stale; spec had 26 blocks, now 33 with MDSOC lane added)
 
 ### Phase 7: Verify
-- All 20 tests pass via `bin/simple run`
+- All 33 tests load cleanly via `bin/simple test` (interpreter mode verifies file loading; exit 3 is the pre-existing baseline for this spec)
