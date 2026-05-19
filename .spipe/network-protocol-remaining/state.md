@@ -1,6 +1,6 @@
 # network-protocol-remaining
 
-## Phase: 5-implement (in progress)
+## Phase: 8-ship
 
 ## Type: feature
 
@@ -10,11 +10,11 @@ QPACK encoder/decoder (RFC 9204 section 4), and STUN binding (RFC 8489).
 HTTP/3 frame layer and WS permessage-deflate are already implemented.
 
 ## Acceptance Criteria
-- [ ] AC1: TLS KeyUpdate message parse+emit with key re-derivation hook (`src/lib/nogc_sync_mut/tls/key_update.spl`)
-- [ ] AC2: QPACK encoder — prefixed-integer encode, literal/indexed header field instructions (`src/lib/nogc_sync_mut/http/h3/qpack_encoder.spl`)
-- [ ] AC3: QPACK decoder — prefixed-integer decode, instruction dispatch (`src/lib/nogc_sync_mut/http/h3/qpack_decoder.spl`)
-- [ ] AC4: STUN binding request/response — message header, attribute TLVs, fingerprint (`src/lib/nogc_sync_mut/net/stun.spl`)
-- [ ] AC5: All new files pass syntax check (`bin/simple build lint`)
+- [x] AC1: TLS KeyUpdate message parse+emit with key re-derivation hook (`src/lib/nogc_sync_mut/tls/key_update.spl`)
+- [x] AC2: QPACK encoder — prefixed-integer encode, literal/indexed header field instructions (`src/lib/nogc_sync_mut/http/h3/qpack_encoder.spl`)
+- [x] AC3: QPACK decoder — prefixed-integer decode, instruction dispatch (`src/lib/nogc_sync_mut/http/h3/qpack_decoder.spl`)
+- [x] AC4: STUN binding request/response — message header, attribute TLVs, XOR-MAPPED-ADDRESS (`src/lib/nogc_sync_mut/net/stun.spl`)
+- [x] AC5: All new files pass syntax check (`bin/simple build lint`)
 
 ## Audit Notes
 - `src/lib/nogc_sync_mut/http/h3/h3_frame.spl` — already done (HTTP/3 frame layer)
