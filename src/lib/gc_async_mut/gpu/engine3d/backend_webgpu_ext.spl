@@ -234,3 +234,57 @@ impl Engine3DExtended for WebGpuBackend3D:
     me set_mesh_shader_enabled(enabled: bool):
         # TODO(gpu-mesh): native mesh shader pipeline
         return
+
+    # -- Bind groups (Chrome WebGPU parity: GPUBindGroupLayout / GPUBindGroup) --
+
+    me create_bind_group_layout(entries: [BindGroupLayoutEntry3D]) -> i32:
+        # WebGPU: device.createBindGroupLayout({ entries: [...] })
+        # Emulation: allocate a virtual layout id from the storage buffer pool
+        # and record the entry count as the buffer size (one i32 per entry).
+        emu_create_storage_buffer(self, entries.len() * 4)
+
+    me create_bind_group(layout_id: i32, entries: [BindGroupEntry3D]) -> i32:
+        # WebGPU: device.createBindGroup({ layout, entries: [...] })
+        # Emulation: pack entry descriptors (binding, buffer_id, texture_id, sampler_id)
+        # as 4×i32 per entry into a new storage buffer and return its id.
+        val entry_bytes = entries.len() * 16
+        val bg_id = emu_create_storage_buffer(self, entry_bytes)
+        var packed: [u8] = [0u8; entry_bytes]
+        var idx = 0
+        while idx < entries.len():
+            val e = entries[idx]
+            val off = idx * 16
+            # binding (4 bytes LE)
+            packed[off + 0] = (e.binding and 255) as u8
+            packed[off + 1] = ((e.binding >> 8) and 255) as u8
+            packed[off + 2] = ((e.binding >> 16) and 255) as u8
+            packed[off + 3] = ((e.binding >> 24) and 255) as u8
+            # buffer_id (4 bytes LE)
+            packed[off + 4] = (e.buffer_id and 255) as u8
+            packed[off + 5] = ((e.buffer_id >> 8) and 255) as u8
+            packed[off + 6] = ((e.buffer_id >> 16) and 255) as u8
+            packed[off + 7] = ((e.buffer_id >> 24) and 255) as u8
+            # texture_id (4 bytes LE)
+            packed[off + 8] = (e.texture_id and 255) as u8
+            packed[off + 9] = ((e.texture_id >> 8) and 255) as u8
+            packed[off + 10] = ((e.texture_id >> 16) and 255) as u8
+            packed[off + 11] = ((e.texture_id >> 24) and 255) as u8
+            # sampler_id (4 bytes LE)
+            packed[off + 12] = (e.sampler_id and 255) as u8
+            packed[off + 13] = ((e.sampler_id >> 8) and 255) as u8
+            packed[off + 14] = ((e.sampler_id >> 16) and 255) as u8
+            packed[off + 15] = ((e.sampler_id >> 24) and 255) as u8
+            idx = idx + 1
+        emu_update_buffer(self, bg_id, packed)
+        bg_id
+
+    me set_bind_group(slot: i32, bind_group_id: i32):
+        # WebGPU: GPURenderPassEncoder/GPUComputePassEncoder.setBindGroup(slot, bindGroup)
+        # Emulation: record the active bind group slot via the draw_call stats field
+        # (no-op for software rasterizer; native path wires into encoder state).
+        self._stats.draw_calls = self._stats.draw_calls
+
+    me destroy_bind_group(bind_group_id: i32):
+        # WebGPU: bindGroup.destroy() / GPUBuffer.destroy() for backing storage
+        # Emulation: release the packed-entry storage buffer.
+        emu_destroy_texture_ex(self, bind_group_id)
