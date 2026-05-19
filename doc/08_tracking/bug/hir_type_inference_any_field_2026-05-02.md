@@ -1,10 +1,11 @@
 # Bug: HIR type-inference emits `Cannot infer field type: struct 'ANY' field '<X>'` (134 errors block bootstrap stage 4)
 
 **Date:** 2026-05-02
-**Status:** RESOLVED — verified 2026-05-09. Stage 4 now passes with 0 "Cannot infer field type" errors, 0 failed files. Binary produced successfully.
-**Severity:** P1 (deploy blocker) — **no longer blocking**.
-**Wave:** filed by W11-E (doc-only). Resolved by accumulated HIR/type-resolver improvements across multiple waves (W12-W46+).
-**Resolution:** The 134 errors were eliminated by incremental improvements to `access.rs` (global enum fallback, Class 2 global field info fallback), `type_resolver.rs` (cross-module struct registration), `inference.rs` (enum short-circuit), and `lowerer.rs` (register_global_enums). No single fix -- the five root-cause classes were addressed across multiple commits between 2026-05-02 and 2026-05-09.
+**Status:** PARTIAL — 7 residual stage-4 failures as of 2026-05-15 log (down from 134). Two post-2026-05-15 commits may reduce further; stage-4 rebuild needed to confirm.
+**Severity:** P1 (deploy blocker) — partially resolved, residual failures are non-critical app/tools files.
+**Wave:** filed by W11-E (doc-only). Partially resolved by accumulated HIR/type-resolver improvements across multiple waves (W12-W46+). W13 investigation confirmed partial regression.
+**Resolution:** Classes 1+2+4+5 (~127 of 134 errors) were eliminated by incremental improvements to `access.rs` (global enum fallback, Class 2 global field info fallback), `type_resolver.rs` (cross-module struct registration), `inference.rs` (enum short-circuit), and `lowerer.rs` (register_global_enums). Class 3 (cross-module field-table not populated due to import resolution failures) persists in 7 files as of 2026-05-15.
+**Note on 2026-05-09 claim:** The 2026-05-09 "RESOLVED / 0 errors" verification was accurate for that snapshot. A 2026-05-15 stage-4 rebuild shows 7 residual failures, indicating either new source additions or that the 2026-05-09 run excluded some files.
 **Cross-link:** disproves W6-D / W7-D framing — see `doc/08_tracking/bug/w6d_vec8f_bitcast_framing_disproven_2026-05-01.md`.
 
 ## Empirical repro
@@ -175,6 +176,34 @@ Time: 10.7s compile + 48.5s link = 59.2s total
 
 Remaining non-blocking issue: 29 unresolved `_dot_` symbols in the linker preview (e.g. `HirExpr_dot_bool_lit`, `SdnValue_dot_Array`). These are enum-variant constructor symbols that resolve at runtime; the build completes and the binary links successfully.
 
+## Re-investigation (2026-05-19, W13)
+
+Stage-4 log `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.log` (dated **2026-05-15 11:16Z**) shows **7** residual "Cannot infer field type: struct 'ANY' field '<X>'" failures:
+
+| file | field |
+|------|-------|
+| `src/app/cli/theme_sync.spl` | `metadata` |
+| `src/app/io/cli_commands_part1.spl` | `applied` |
+| `src/app/llm_dashboard/main.spl` | `bytes` |
+| `src/app/web_dashboard/server.spl` | `bytes` |
+| `src/compiler/90.tools/fix/main.spl` | `replacements` |
+| `src/compiler/90.tools/lint/main_part2.spl` | `description` |
+| `src/compiler/90.tools/lint/main_part4.spl` | `replacements` |
+
+**Root cause (Class 3):** `[WARN] Failed to load imported types` from cross-module imports. The type-loader fails to resolve e.g. `lib.common.llm.output_gate`, `common.ui.glass.tokens`, `std.tooling.easy_fix` in the context of these files, so the struct fields become `ANY`-typed receivers. Example WARN:
+```
+[WARN] Failed to load imported types from ["lib", "common", "llm", "output_gate"]: ...
+"cannot resolve import: module path segment `lib` not found" (looked in src/app/llm_dashboard/lib)
+```
+
+**Post-2026-05-15 commits that may help:**
+- `f489fcffb2` (2026-05-18) `feat(hir): SMF type reader for import_loader + non-fatal re-exports` — adds `.smf` fallback and makes re-export failures non-fatal; directly addresses the WARNs above.
+- `982744b5c2` (2026-05-18?) `fix(compiler): resolve cross-module struct field collisions in Rust seed`.
+
+**Fix locus:** Rust seed import loader (`src/compiler_rust/compiler/src/hir/lower/import_loader.rs`, `resolution.rs`). The 7 residual errors are symptoms of Class 3 import-resolution failure, not a new root cause. Out of W13 scope; refer to next Rust-seed wave for full verification.
+
+**Action:** Rebuild stage-4 after `f489fcffb2` lands to confirm 0 failures. If confirmed, revert status to RESOLVED.
+
 ## Cross-link / status updates
 
-RESOLVED 2026-05-09. No single fix commit -- resolved by accumulated improvements across waves W12-W46+. The stage-4 caveat in `aes128_gcm_stub_2026-05-01.md:24` and `w6d_vec8f_bitcast_framing_disproven_2026-05-01.md:153` should be removed.
+PARTIAL as of 2026-05-15 log (7 residual). `aes128_gcm_stub_2026-05-01.md` and `w6d_vec8f_bitcast_framing_disproven_2026-05-01.md` are not present in the repo (already removed or never committed). No further cleanup needed on those cross-links.
