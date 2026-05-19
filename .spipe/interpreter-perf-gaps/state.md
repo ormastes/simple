@@ -66,3 +66,93 @@ Both changes are in git history. No separate perf commit needed — work is deli
 - The 1460x gap vs C is for fib(30) — tree-walking overhead on pure recursion. Not a
   regression. The cascade fix targets all workloads; Value::Str only matters for string-heavy.
 - Native Cranelift is 1.6x C — no bug there.
+
+---
+
+## Wave 10 Audit — Additional Bottlenecks Found (2026-05-19)
+
+Full source audit of `interpreter/` and `interpreter_extern/`. All file:line refs verified.
+
+### A. debug_state — CONFIRMED SAFE FAST PATH, one latent bug
+
+`is_debug_active_fast()` → `AtomicBool::load(Relaxed)` — cheap (1–2 ns). Not a bottleneck.
+
+**Latent bug (`node_exec.rs:47-65`):** When debugger IS attached (`DEBUG_ACTIVE == true`),
+`env.iter().take(50).map(|(k,v)| (k.clone(), format!("{:?}", v), v.type_name().to_string()))`
+fires on **every statement**, not just breakpoints. The `should_stop()` check is evaluated
+*after* the env scan. Moving the scan inside `if ds.should_stop(...)` eliminates the O(locals)
+cost on non-breakpoint statements during debug sessions.
+
+### B. Value::Str copies — HIGH IMPACT on string workloads
+
+**`interpreter/expr/ops.rs:632`:**
+```rust
+(Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}")))
+```
+Allocates a new `String` every `+`. Fix: `{ let mut s = a; s.push_str(&b); s }`.
+
+**`interpreter/node_exec.rs:109-116`:** Pattern bindings clone the identifier `name` String
+on every `let` statement bind.
+
+**`interpreter/node_exec.rs:354-391`:** Function/class literal registration does
+`Arc::new(env.clone())` — full CowEnv copy (overlay HashMap + tombstones HashSet).
+Skip when `overlay.is_empty() && tombstones.is_empty()` and base is already `Arc`.
+
+**`interpreter/expr.rs:28,34,45`:** `try_unwrap_option_or_result` calls `.as_ref().clone()`
+on Option/Result payload on every `?` and `if let Some` — avoidable with a borrow.
+
+Estimated: 5–20x on string-heavy workloads. Zero impact on fib(30).
+
+### C. diagram_sffi SeqCst on every extern call — EASY FIX
+
+**`runtime/src/value/diagram_sffi.rs:594`:**
+```rust
+pub fn is_diagram_enabled() -> bool {
+    DIAGRAM_ENABLED.load(Ordering::SeqCst)   // ← SeqCst = mfence on x86
+}
+```
+Called on **every extern function call** before the dispatch table lookup
+(`interpreter_extern/mod.rs:call_extern_function`).
+`SeqCst` on x86 serializes the store buffer (~5–10 ns vs Relaxed ~1 ns).
+Fix: change to `Ordering::Relaxed` — diagrams do not require cross-thread ordering for
+the enabled-check fast path.
+
+### D. Per-block thread-local scope counter — MEDIUM IMPACT
+
+**`interpreter/block_exec.rs:33` + `macro/state.rs:110-145`:**
+`enter_block_scope()` and `exit_block_scope()` fire on every block entry/exit.
+Each does a `RefCell<usize>` thread-local borrow (`BLOCK_DEPTH`) plus an
+`AtomicUsize::load(Relaxed)` (`PENDING_INJECTION_COUNT`).
+Thread-local access is ~5–10 ns (pthread TLS on Linux). For deeply nested expressions
+this adds up. Most programs never use `@defer`/`@inject` macros.
+
+Fix: Add a top-level `MACRO_ACTIVE: AtomicBool` flag; gate `enter/exit_block_scope`
+behind it so normal programs pay zero cost.
+
+### E. Watchdog timeout ordering — EASY FIX
+
+**`interpreter_state.rs:738`:** `TIMEOUT_EXCEEDED.store(true, Ordering::SeqCst)`
+**`interpreter/block_exec.rs:10-14` + `node_exec.rs:22-28`:** `check_timeout!()` macro
+reads this flag on every `exec_block` and `exec_node` call.
+
+If the load also uses `SeqCst` (need to verify in `simple_common`), this is ~5–10x
+more expensive than needed. `Acquire`/`Release` is sufficient for a
+watchdog-thread-writer / interpreter-thread-reader pattern.
+
+### F. Bytecode VM exists but unused
+
+**`runtime/src/bytecode/vm.rs`** (present in the runtime crate) is not connected to
+the main interpreter path. Connecting it would be the largest structural change to
+close the 1460x gap — replacing the tree-walk with a register-based bytecode dispatch
+loop. Out of scope for this audit but noted as the architectural path forward.
+
+### Summary of new findings
+
+| # | Location | Severity | Fix effort |
+|---|----------|----------|------------|
+| A | `node_exec.rs:56-60` — debug env scan outside should_stop | Low | Low |
+| B | `ops.rs:632`, `node_exec.rs:109,354` — Value::Str alloc | High (string workloads) | Medium |
+| C | `diagram_sffi.rs:594` — SeqCst on every extern | Medium | Trivial (1 word) |
+| D | `block_exec.rs:33` — per-block TLS scope counter | Medium | Low |
+| E | `interpreter_state.rs:738` — SeqCst watchdog | Medium | Trivial (1 word) |
+| F | `runtime/src/bytecode/vm.rs` — unused bytecode VM | Structural | High |
