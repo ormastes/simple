@@ -115,6 +115,43 @@ impl VulkanBackend3D:
     me read_texture(texture_id: i32, mip: i32, layer: i32) -> [u8]:
         emu_read_texture(self, texture_id, mip, layer)
 
+    # -- Tessellation --
+
+    me set_tessellation_state(patch_control_points: i32, inner_level: f32, outer_level: f32):
+        # Vulkan: VkPipelineTessellationStateCreateInfo.patchControlPoints +
+        # tess control/eval shaders via VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT /
+        # VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT + tessellationShader feature
+        self.stats.draw_calls = self.stats.draw_calls
+
+    me dispatch_tessellated_mesh(vertices: [f32], indices: [u32], model: [f32], patch_control_points: i32):
+        # Vulkan: vkCmdDraw with topology VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+        # hull/domain shader parameters set via push constants or uniform buffer
+        self.stats.draw_calls = self.stats.draw_calls + 1
+
+    # -- Geometry shader --
+
+    me set_geometry_shader_enabled(enabled: bool):
+        # Vulkan: VkPhysicalDeviceFeatures.geometryShader + VK_SHADER_STAGE_GEOMETRY_BIT
+        # in VkPipelineShaderStageCreateInfo; geometry shaders expand/cull primitives
+        self.stats.draw_calls = self.stats.draw_calls
+
+    me dispatch_geometry_shader(shader_id: i32, vertices: [f32], model: [f32]):
+        # Vulkan: bind pipeline with geometry stage, issue vkCmdDraw;
+        # geometry shader receives primitives and may emit 0..maxOutputVertices per invocation
+        self.stats.draw_calls = self.stats.draw_calls + 1
+
+    # -- Multi-draw indirect --
+
+    me multi_draw_indirect(buffer_id: i32, offset: i32, draw_count: i32, stride: i32):
+        # Vulkan: vkCmdDrawIndirect(commandBuffer, buffer, offset, drawCount, stride)
+        # VkDrawIndirectCommand{vertexCount, instanceCount, firstVertex, firstInstance}
+        self.stats.draw_calls = self.stats.draw_calls + draw_count
+
+    me multi_draw_indexed_indirect(buffer_id: i32, offset: i32, draw_count: i32, stride: i32):
+        # Vulkan: vkCmdDrawIndexedIndirect(commandBuffer, buffer, offset, drawCount, stride)
+        # VkDrawIndexedIndirectCommand{indexCount, instanceCount, firstIndex, vertexOffset, firstInstance}
+        self.stats.draw_calls = self.stats.draw_calls + draw_count
+
 # ============================================================================
 # Engine3DExtended — Vulkan Advanced 3D Features
 # ============================================================================
@@ -161,4 +198,22 @@ impl Engine3DExtended for VulkanBackend3D:
 
     me set_mesh_shader_enabled(enabled: bool):
         # TODO(gpu-mesh): native mesh shader pipeline
+        return
+
+    # -- Bind groups (Chrome WebGPU / Vulkan descriptor sets) --
+
+    me create_bind_group_layout(entries: [BindGroupLayoutEntry3D]) -> i32:
+        # Vulkan: vkCreateDescriptorSetLayout from VkDescriptorSetLayoutBinding array
+        return -1
+
+    me create_bind_group(layout_id: i32, entries: [BindGroupEntry3D]) -> i32:
+        # Vulkan: vkAllocateDescriptorSets + vkUpdateDescriptorSets
+        return -1
+
+    me set_bind_group(slot: i32, bind_group_id: i32):
+        # Vulkan: vkCmdBindDescriptorSets(... firstSet=slot, descriptorSetCount=1 ...)
+        self.stats.draw_calls = self.stats.draw_calls
+
+    me destroy_bind_group(bind_group_id: i32):
+        # Vulkan: vkFreeDescriptorSets
         return
