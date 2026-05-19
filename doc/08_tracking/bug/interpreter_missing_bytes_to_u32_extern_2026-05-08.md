@@ -45,6 +45,19 @@ fn read_u32_le(data: [u8], offset: i64) -> i64:
 
 Register `bytes_to_u32_le`, `bytes_to_u32_be`, `bytes_to_u16_le`, `bytes_to_u16_be`, `bytes_to_u64_le`, `bytes_to_u64_be` in the interpreter extern function table. Likely in `src/compiler_rust/compiler/src/interpreter_extern/`.
 
+## Resolution
+
+**Fixed in:**
+- `fe621f0056` — `perf(interp): HashMap extern dispatch — O(1) lookup for 1038 functions`: Initial HashMap dispatch table registering all six `bytes_to_u*_{le,be}` externs.
+- `fca3f29b05` — `perf(interpreter): replace 1080-arm extern dispatch match with HashMap lookup`: Consolidated slow-path, confirmed all six names remain in the table.
+
+**Implementation in** `src/compiler_rust/compiler/src/interpreter_extern/conversion.rs`:
+- `bytes_to_u32_le_fn` / `bytes_to_u32_be_fn` — accept `[u8]` array (matches `bytes_to_u32_le(bytes)` call in `binary_io.spl:196`)
+- `bytes_to_u16_le_fn` / `bytes_to_u16_be_fn` — accept two individual `u8` args (matches `bytes_to_u16_le(b0, b1)` call in `binary_io.spl:160`)
+- `bytes_to_u64_le/be` — pure-Simple implementations in `binary_io.spl` (no extern needed)
+
+All six names are registered in `init_dispatch_table()` in `mod.rs`. The `simple-compiler` crate compiles cleanly (`cargo check -p simple-compiler` passes).
+
 ## Related Bugs
 
 - `interpreter_bang_unwrap_member_access_2026-05-08.md` — discovered during same test session
