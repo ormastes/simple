@@ -144,16 +144,26 @@ EOF
 
 cat > "$CLOUDINIT_DIR/user-data" <<EOF
 #cloud-config
+disable_root: false
+ssh_pwauth: true
 ssh_authorized_keys:
   - ${SSH_PUB_KEY_CONTENT}
 users:
   - name: root
+    lock_passwd: false
     ssh_authorized_keys:
       - ${SSH_PUB_KEY_CONTENT}
   - name: ${QEMU_USER}
     shell: /bin/sh
+    groups: wheel
     ssh_authorized_keys:
       - ${SSH_PUB_KEY_CONTENT}
+runcmd:
+  - sed -i '' 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - service sshd restart
+  - env ASSUME_ALWAYS_YES=yes pkg bootstrap
+  - env ASSUME_ALWAYS_YES=yes pkg install -y sudo rsync
+  - echo "freebsd ALL=(ALL) NOPASSWD: ALL" >> /usr/local/etc/sudoers
 EOF
 
 if command -v genisoimage >/dev/null 2>&1; then
@@ -216,12 +226,15 @@ SSH_TIMEOUT=180
 ELAPSED=0
 CONNECTED=0
 
+VM_USER="root"
 info "Waiting for SSH (up to ${SSH_TIMEOUT}s)..."
 while [ "$ELAPSED" -lt "$SSH_TIMEOUT" ]; do
     if $ROOT_SSH_CMD true 2>/dev/null; then
+        VM_USER="root"
         CONNECTED=1
         break
     elif $SSH_CMD true 2>/dev/null; then
+        VM_USER="$QEMU_USER"
         CONNECTED=1
         break
     fi
@@ -236,24 +249,37 @@ if [ "$CONNECTED" -eq 0 ]; then
     fi
     fail "SSH connection timed out after ${SSH_TIMEOUT}s"
 fi
-pass "SSH connected in ${ELAPSED}s"
+pass "SSH connected as ${VM_USER} in ${ELAPSED}s"
 
-UNAME=$($ROOT_SSH_CMD "uname -sr" 2>/dev/null)
+VM_SSH="ssh ${SSH_OPTS} ${VM_USER}@localhost"
+UNAME=$($VM_SSH "uname -sr" 2>/dev/null) || UNAME="(unknown)"
 pass "Remote: $UNAME"
+
+# Check if we have root access for pkg install
+if [ "$VM_USER" = "root" ]; then
+    PKG_CMD="$VM_SSH"
+elif $VM_SSH "command -v doas" >/dev/null 2>&1; then
+    PKG_CMD="$VM_SSH doas"
+elif $VM_SSH "command -v sudo" >/dev/null 2>&1; then
+    PKG_CMD="$VM_SSH sudo"
+else
+    info "No root/sudo/doas; trying su"
+    PKG_CMD="$VM_SSH su -c"
+fi
 
 # ── Smoke / Full ───────────────────────────────────────────────────────
 printf '[7/7] Bootstrap (%s)\n' "$MODE"
 
 if [ "$MODE" = "smoke" ]; then
     # Smoke: verify clang exists and can compile a trivial C program
-    CLANG_CHECK=$($ROOT_SSH_CMD "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
+    CLANG_CHECK=$($VM_SSH "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
     if [ "$CLANG_CHECK" = "ok" ]; then
         pass "clang available in VM"
     else
         info "Installing clang..."
-        $ROOT_SSH_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>/dev/null || true
-        $ROOT_SSH_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y llvm" 2>&1 | tail -3
-        CLANG_CHECK=$($ROOT_SSH_CMD "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
+        $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>/dev/null || true
+        $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y llvm" 2>&1 | tail -3
+        CLANG_CHECK=$($VM_SSH "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
         if [ "$CLANG_CHECK" = "ok" ]; then
             pass "clang installed"
         else
@@ -262,17 +288,20 @@ if [ "$MODE" = "smoke" ]; then
     fi
 
     # Test trivial C compilation
-    $ROOT_SSH_CMD "echo 'int main(){return 0;}' > /tmp/test.c && clang -o /tmp/test /tmp/test.c && /tmp/test && echo ok" 2>/dev/null | grep -q ok
+    $VM_SSH "echo 'int main(){return 0;}' > /tmp/test.c && clang -o /tmp/test /tmp/test.c && /tmp/test && echo ok" 2>/dev/null | grep -q ok
     pass "Trivial C compilation works"
 
     SCRIPT_OK=1
     printf '\nSmoke test PASSED\n'
 else
     # Full: install deps, rsync project, build seed, run bootstrap
+    VM_HOME=$($VM_SSH "echo \$HOME" 2>/dev/null)
+    VM_HOME="${VM_HOME:-/root}"
+
     info "Installing build dependencies in VM (this may take a few minutes)..."
-    $ROOT_SSH_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>&1 | tail -3 || true
-    $ROOT_SSH_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm git gmake pkgconf" 2>&1 | tail -5
-    $ROOT_SSH_CMD "command -v rsync" 2>/dev/null || fail "rsync install failed"
+    $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>&1 | tail -3 || true
+    $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm git gmake pkgconf" 2>&1 | tail -5
+    $VM_SSH "command -v rsync" 2>/dev/null || fail "rsync install failed"
     pass "Dependencies installed"
 
     info "Syncing project to VM..."
@@ -288,22 +317,22 @@ else
         --exclude='examples/' \
         --exclude='doc/' \
         -e "ssh ${SSH_OPTS}" \
-        "${ROOT_DIR}/" "root@localhost:/root/simple/"
+        "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
 
     info "Building Rust seed in VM..."
-    $ROOT_SSH_CMD "cd /root/simple/src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" 2>&1 | tail -5
+    $VM_SSH "cd ${VM_HOME}/simple/src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" 2>&1 | tail -5
     pass "Rust seed built"
 
     info "Running 3-stage bootstrap in VM..."
-    $ROOT_SSH_CMD "cd /root/simple && SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple build bootstrap --seed=src/compiler_rust/target/bootstrap/simple" 2>&1 | tail -10
+    $VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple build bootstrap --seed=src/compiler_rust/target/bootstrap/simple" 2>&1 | tail -10
     pass "3-stage bootstrap completed"
 
     # Retrieve binary
     FREEBSD_BIN_DIR="${ROOT_DIR}/bin/release/freebsd-x86_64"
     mkdir -p "$FREEBSD_BIN_DIR"
     scp ${SSH_OPTS} \
-        "root@localhost:/root/simple/bootstrap/simple_stage3" \
+        "${VM_USER}@localhost:${VM_HOME}/simple/bootstrap/simple_stage3" \
         "${FREEBSD_BIN_DIR}/simple" 2>/dev/null
     pass "Binary retrieved: ${FREEBSD_BIN_DIR}/simple"
 
