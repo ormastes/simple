@@ -19,13 +19,13 @@ Existing `_128s` functions are thin wrappers. New public API added:
 `slh_dsa_192s_{keygen,sign,verify}` and `slh_dsa_256s_{keygen,sign,verify}`.
 `sha512_hmac` added to `src/os/crypto/sha512.spl` for 192s/256s PRF_msg.
 
-**KAT specs added 2026-05-19 (Wave 5):**
-`test/unit/lib/crypto/slh_dsa_192s_256s_spec.spl` — 12 it-blocks covering
-WOTS+, XMSS, FORS, HT, end-to-end, and public API smoke for both 192s (n=24)
-and 256s (n=32) using SHA-512 dispatch. Reduced parameters (d=2, h'=2, k=4,
-a=2, m_len=3) keep interpreter-mode runtime within budget. Full-parameter
-round-trips gated behind `SLH_DSA_FULL_KAT` env var. NIST CCTV KAT vectors
-deferred until compiled-mode runner is available.
+**Wave 5 status audit (2026-05-19):** Confirmed all deliverables present at
+HEAD. `test/unit/lib/crypto/slh_dsa_192s_256s_spec.spl` (14 it-blocks, added
+by a prior wave) covers WOTS+, XMSS, FORS, HT, end-to-end, tamper-rejection,
+and public API smoke for both 192s (n=24) and 256s (n=32). Reduced parameters
+(d=2, h'=2, k=4, a=2, m_len=3) keep interpreter-mode runtime within budget.
+Full-parameter round-trips gated behind `SLH_DSA_FULL_KAT` env var. NIST CCTV
+KAT vectors deferred until compiled-mode runner is available.
 
 ## Problem
 
