@@ -109,3 +109,49 @@ fn derive_next_traffic_secret(current_secret: [u8], hash_len: i64) -> [u8]:
     if hash_len == 48:
         return hkdf_expand_label_sha384(current_secret, "traffic upd", empty_ctx, 48u64)
     hkdf_expand_label(current_secret, "traffic upd", empty_ctx, hash_len.to_u64())
+
+# ============================================================================
+# State tracking — RFC 8446 §4.6.3
+#
+# KeyUpdateState holds the live application traffic secrets for one direction
+# (read or write) together with a monotonically increasing generation counter.
+#
+# Generation N=0 is the post-handshake application_traffic_secret_0.
+# Each successful KeyUpdate advances the generation to N+1 using
+# derive_next_traffic_secret.
+# ============================================================================
+
+class KeyUpdateState:
+    """Tracks the current application traffic secret and generation number.
+
+    Fields:
+        secret:     current application_traffic_secret_N ([u8], hash_len bytes).
+        generation: monotonically increasing counter N (starts at 0).
+        hash_len:   32 for SHA-256 suites, 48 for SHA-384 suites.
+    """
+    secret: [u8]
+    generation: i64
+    hash_len: i64
+
+fn key_update_state_new(initial_secret: [u8], hash_len: i64) -> KeyUpdateState:
+    """Construct initial KeyUpdateState from application_traffic_secret_0.
+
+    Args:
+        initial_secret: application_traffic_secret_0 (HashLen bytes).
+        hash_len:       32 (SHA-256) or 48 (SHA-384).
+
+    Returns: KeyUpdateState with generation=0.
+    """
+    KeyUpdateState(secret: initial_secret, generation: 0, hash_len: hash_len)
+
+fn key_update_state_advance(state: KeyUpdateState) -> KeyUpdateState:
+    """Derive the next traffic secret and return updated state.
+
+    Computes:
+        application_traffic_secret_{N+1} =
+            HKDF-Expand-Label(secret_N, "traffic upd", "", hash_len)
+
+    Returns: new KeyUpdateState with generation incremented by 1.
+    """
+    val next_secret = derive_next_traffic_secret(state.secret, state.hash_len)
+    KeyUpdateState(secret: next_secret, generation: state.generation + 1, hash_len: state.hash_len)
