@@ -1,7 +1,7 @@
 # Native array iteration/indexing fails in async-driver smoke
 
 Date: 2026-05-13
-Status: Open
+Status: Fixed (verified 2026-05-19 — both symptoms resolved in current HEAD)
 Area: native codegen, arrays, webserver perf validation
 
 ## Summary

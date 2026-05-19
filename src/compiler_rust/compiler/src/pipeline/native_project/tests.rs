@@ -1005,7 +1005,7 @@ fn test_duplicate_struct_sidecar_resolves_unique_compiler_context_handle() {
         .expect("expected duplicate CompilerContext layouts");
     assert!(compiler_context_variants
         .iter()
-        .any(|fields| fields == &vec![("handle".to_string(), "Simple(\"i64\")".to_string())]));
+        .any(|fields| fields == &vec![("handle".to_string(), simple_parser::Type::Simple("i64".to_string()))]));
 
     let mut field_indices: std::collections::HashMap<String, std::collections::HashSet<usize>> =
         std::collections::HashMap::new();
@@ -1104,6 +1104,7 @@ void app_call(void) { rt_used(); }
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -1190,6 +1191,7 @@ int main(int argc, char** argv) {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -1794,6 +1796,7 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
