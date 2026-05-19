@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-02
 **Wave:** L3 (MIR rewriter)
-**Status:** FIXED 2026-05-10 — all 4 infrastructure gaps filled: VectorRecipe.induction_update field, detect_loop_bounds(), splice_vectorized_block(), has_fast_math()
+**Status:** PREREQS CLOSED 2026-05-10, REWRITER CFG DEFECTS FOUND 2026-05-19 — see §6 below
 **Filed by:** L3 agent (Wave L)
 
 ## Summary
@@ -14,6 +14,13 @@ all mandatory reference files and verifying the MIR op inventory, four
 blocking gaps were identified. The MIR SIMD ops themselves are **not** the
 blocker (they exist; see §5). The blocker is the analysis infrastructure that
 any sound rewriter requires.
+
+### 2026-05-10 prereq closure
+
+All four infrastructure gaps were filled (see Gaps 1–4 below for what was
+added). However, a follow-up audit (2026-05-19, Wave 12) found that the
+`rewrite_elementwise_add` function in `auto_vectorize_part2.spl` still
+produces **broken CFG** for the majority of inputs it accepted. See §6.
 
 ## Stop-condition triggered
 
@@ -205,13 +212,96 @@ on all four.
 
 ---
 
+---
+
+## §6 — Follow-up: rewriter CFG defects found 2026-05-19 (Wave 12)
+
+The "FIXED 2026-05-10" closure was the **primitive infrastructure** landing,
+not a sound rewriter. Three defects remain in the N1-wave rewriter:
+
+### Defect A — vec_loop is non-terminating (self-loop)
+
+`create_vector_loop_block` (`auto_vectorize_codegen.spl`) emits:
+
+```
+val terminator = MirTerminator.Goto(block_id)  # loops back to itself
+```
+
+The vector body has no exit guard (`i + VF <= upper → back-edge, else → exit`).
+Any function rewritten by the current code would loop forever at the vector
+body entry.
+
+**Fix required (Wave L3b):** Replace `Goto(block_id)` with
+`If(i_lt_upper, back_edge_id, exit_block_id)`, where `upper` is the
+trip-count bound from the recipe.
+
+### Defect B — predecessor edges to original header are dangling
+
+`splice_vectorized_block` inserts the three new blocks by id-range comparison
+but does **not** patch any block in the function whose terminator branched to
+the original `recipe.header_block.id`. Those predecessors still jump into the
+hole where the original header was.
+
+**Fix required (Wave L3b):** After splice, iterate all blocks with
+`id < recipe.header_block.id` and rewrite any terminator target equal to
+`recipe.header_block.id` to point to the new alignment-check block id.
+
+### Defect C — peel_loop has no body (structural placeholder)
+
+`create_peeling_block` emits zero instructions and `Goto(vec_loop)`.
+For any `trip_count % VF != 0` case this means the remainder iterations
+are silently dropped, producing wrong output.
+
+**Fix required (Wave L3b):** Emit a counted scalar loop (clone of original
+body block) for `trip_count % VF` iterations.
+
+### Defect D — spec helpers missing `induction_update` field (compile blocker)
+
+Every `VectorRecipe(...)` constructor in `auto_vectorize_spec.spl` omitted
+the `induction_update: LocalId` field added by the W-recipe prereq closure.
+This prevented the spec from compiling in native/compiled mode.
+
+**Fixed 2026-05-19:** All 6 constructors updated to include
+`induction_update: make_local(4)` (consistent with `induction_var`; Wave K3
+comment confirms they are the same until a phi/SSA pass lands).
+
+### Mitigation applied 2026-05-19
+
+Guard R4 added to `rewrite_elementwise_add`
+(`src/compiler/60.mir_opt/mir_opt/auto_vectorize_part2.spl`):
+
+```
+# R4: refuse dynamic (trip_count=-1) and misaligned (trip_count % chunk_width != 0)
+if recipe.trip_count < 0:
+    return func
+if recipe.trip_count % recipe.chunk_width != 0:
+    return func
+```
+
+This makes the rewriter a no-op for all inputs that would produce broken CFG
+(Defects A–C) until Wave L3b lands real terminator rewiring and peel body
+cloning. Two new spec tests added to `auto_vectorize_spec.spl` verifying
+refusal for trip_count=-1 and trip_count=6 (misaligned with VF=4).
+
+### Wave L3b prerequisites
+
+- Defect A: `create_vector_loop_block` → If terminator with exit guard
+- Defect B: predecessor patching after `splice_vectorized_block`
+- Defect C: `create_peeling_block` → scalar loop body clone
+- After A+B+C: remove R4 guard in `rewrite_elementwise_add`
+
+---
+
 ## Files examined
 
 - `src/compiler/60.mir_opt/mir_opt/auto_vectorize.spl` — K3 skeleton (unchanged)
+- `src/compiler/60.mir_opt/mir_opt/auto_vectorize_part1.spl` — VectorRecipe, matchers
+- `src/compiler/60.mir_opt/mir_opt/auto_vectorize_part2.spl` — rewriter, R4 guard added
 - `src/compiler/60.mir_opt/mir_opt/auto_vectorize_types.spl` — LoopInfo struct
-- `src/compiler/60.mir_opt/mir_opt/auto_vectorize_analysis.spl` — detect_loop_bounds (nil)
-- `src/compiler/60.mir_opt/mir_opt/auto_vectorize_codegen.spl` — placeholder codegen
-- `src/compiler/60.mir_opt/mir_opt/mod.spl` — dispatch arm (already wired)
+- `src/compiler/60.mir_opt/mir_opt/auto_vectorize_analysis.spl` — detect_loop_bounds
+- `src/compiler/60.mir_opt/mir_opt/auto_vectorize_codegen.spl` — codegen helpers
+- `src/compiler/60.mir_opt/mir_opt/mod.spl` — dispatch arm (already wired, Speed+Aggressive)
+- `src/compiler/50.mir/mir_data.spl` — MirFunction.has_fast_math confirmed present
 - `src/compiler/50.mir/mir_instructions.spl` — MirInstKind enum (SIMD ops present)
 - `doc/05_design/simd_auto_vectorize_design.md` — §10 phased rollout
-- `test/unit/compiler/mir_opt/auto_vectorize_spec.spl` — K3 tests (not touched)
+- `test/unit/compiler/mir_opt/auto_vectorize_spec.spl` — induction_update added; 2 new tests
