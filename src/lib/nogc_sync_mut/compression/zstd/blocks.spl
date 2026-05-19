@@ -1,34 +1,21 @@
 # zstd/blocks.spl — Block decoding and match copy (RFC 8878 §3.1.2)
 #
 # Block types:
-#   Raw_Block        — literal bytes, no compression
-#   RLE_Block        — one byte repeated Block_Size times
-#   Compressed_Block — literals section + sequences section
+#   Raw_Block        — literal bytes, no compression (IMPLEMENTED)
+#   RLE_Block        — one byte repeated Block_Size times (IMPLEMENTED)
+#   Compressed_Block — literals section + sequences section (NOT IMPLEMENTED — returns Err)
 #
-# Compressed_Block output:
-#   For each sequence (ll, offset, match_len):
-#     1. Copy ll literal bytes from the literals buffer
-#     2. Copy match_len bytes from (output_pos - offset), with rep-offset history
-#   Then copy remaining literals
+# Compressed_Block support requires literals.spl + sequences.spl which are not
+# yet implemented.  Callers will receive Err(Unsupported) for compressed blocks.
 
 use std.common.compress.types.{CompressionError}
 use std.nogc_sync_mut.compression.zstd.bit_reader.{
     ZstdBitReader, ZstdBitsResult, ZstdBytesResult,
-    zstd_br_read, zstd_br_read_bytes, zstd_br_init_at
+    zstd_br_read, zstd_br_read_bytes
 }
 use std.nogc_sync_mut.compression.zstd.frame.{
     ZSTD_BLOCK_RAW, ZSTD_BLOCK_RLE, ZSTD_BLOCK_COMPRESSED,
     ZstdBlockHeader
-}
-use std.nogc_sync_mut.compression.zstd.literals.{
-    LiteralsResult, zstd_decode_literals,
-    huff_empty_table
-}
-use std.nogc_sync_mut.compression.zstd.sequences.{
-    Sequence, SequencesResult, zstd_decode_sequences
-}
-use std.nogc_sync_mut.compression.zstd.huffman.{
-    HuffTable
 }
 
 # ---------------------------------------------------------------------------
@@ -36,10 +23,8 @@ use std.nogc_sync_mut.compression.zstd.huffman.{
 # ---------------------------------------------------------------------------
 
 struct ZstdBlockState:
-    output:       [u8]           # accumulated decompressed output
-    rep_offsets:  [i64]          # rep1, rep2, rep3 (initial values: 1, 4, 8 per RFC 8878)
-    huff_table:   HuffTable      # last Huffman table (for Treeless blocks)
-    has_huff:     bool
+    output:       [u8]    # accumulated decompressed output
+    rep_offsets:  [i64]   # rep1, rep2, rep3 (initial values: 1, 4, 8 per RFC 8878)
 
 struct ZstdBlockResult:
     state:  ZstdBlockState
@@ -48,9 +33,7 @@ struct ZstdBlockResult:
 fn zstd_initial_block_state() -> ZstdBlockState:
     ZstdBlockState(
         output:      [],
-        rep_offsets: [1, 4, 8],
-        huff_table:  huff_empty_table(),
-        has_huff:    false
+        rep_offsets: [1, 4, 8]
     )
 
 # ---------------------------------------------------------------------------
@@ -87,9 +70,7 @@ fn zstd_decode_raw_block(
         i = i + 1
     val new_state = ZstdBlockState(
         output:      new_output,
-        rep_offsets: state.rep_offsets,
-        huff_table:  state.huff_table,
-        has_huff:    state.has_huff
+        rep_offsets: state.rep_offsets
     )
     Ok(ZstdBlockResult(state: new_state, reader: rb.reader))
 
@@ -107,9 +88,7 @@ fn zstd_decode_rle_block(
         i = i + 1
     val new_state = ZstdBlockState(
         output:      new_output,
-        rep_offsets: state.rep_offsets,
-        huff_table:  state.huff_table,
-        has_huff:    state.has_huff
+        rep_offsets: state.rep_offsets
     )
     Ok(ZstdBlockResult(state: new_state, reader: rb.reader))
 
@@ -118,95 +97,7 @@ fn zstd_decode_compressed_block(
     state: ZstdBlockState,
     r: ZstdBitReader
 ) -> Result<ZstdBlockResult, CompressionError>:
-    if block_size == 0:
-        return Err(CompressionError.CorruptData("zstd compressed block size 0"))
-
-    # Extract the block bytes
-    val block_bytes_res = zstd_br_read_bytes(r, block_size)?
-    val block_data = block_bytes_res.bytes
-    val after_reader = block_bytes_res.reader
-
-    val br_block = zstd_br_init_at(block_data, 0)
-
-    # Decode literals section
-    val lits_res = zstd_decode_literals(br_block, state.huff_table, state.has_huff)?
-    val literals = lits_res.literals
-    var new_huff = state.huff_table
-    var has_huff = state.has_huff
-    if lits_res.has_table:
-        new_huff = lits_res.table
-        has_huff = true
-
-    # Decode sequences section
-    val seq_res = zstd_decode_sequences(lits_res.reader)?
-    val sequences = seq_res.sequences
-
-    # Execute sequences: copy literals + match copy
-    var output = state.output
-    var rep_offsets = state.rep_offsets
-    var lit_pos = 0
-
-    var si = 0
-    while si < sequences.len():
-        val seq = sequences[si]
-        val ll = seq.literal_length
-        val raw_offset = seq.offset
-        val ml = seq.match_length
-
-        # Copy literal_length literal bytes
-        var li = 0
-        while li < ll:
-            if lit_pos >= literals.len():
-                return Err(CompressionError.CorruptData("zstd sequence literal overrun"))
-            output.push(literals[lit_pos])
-            lit_pos = lit_pos + 1
-            li = li + 1
-
-        # Resolve offset using rep-offset history (RFC 8878 §3.1.2.3.4)
-        var actual_offset = raw_offset
-        if raw_offset == 1:
-            actual_offset = rep_offsets[0]
-        else:
-            if raw_offset == 2:
-                val tmp = rep_offsets[0]
-                actual_offset = rep_offsets[1]
-                rep_offsets = [actual_offset, tmp, rep_offsets[2]]
-            else:
-                if raw_offset == 3:
-                    val tmp = rep_offsets[0]
-                    actual_offset = rep_offsets[2]
-                    rep_offsets = [actual_offset, tmp, rep_offsets[1]]
-                else:
-                    # Standard offset: update rep history
-                    rep_offsets = [raw_offset - 3, rep_offsets[0], rep_offsets[1]]
-                    actual_offset = raw_offset - 3
-
-        if actual_offset <= 0:
-            return Err(CompressionError.CorruptData("zstd sequence zero/negative offset"))
-
-        # Copy match bytes (may overlap — byte-by-byte)
-        val copy_from = output.len() - actual_offset
-        if copy_from < 0:
-            return Err(CompressionError.CorruptData("zstd match copy offset beyond output"))
-        var mi = 0
-        while mi < ml:
-            val src_pos = copy_from + mi
-            if src_pos >= output.len():
-                return Err(CompressionError.CorruptData("zstd match copy src out of range"))
-            output.push(output[src_pos])
-            mi = mi + 1
-
-        si = si + 1
-
-    # Copy remaining literals
-    while lit_pos < literals.len():
-        output.push(literals[lit_pos])
-        lit_pos = lit_pos + 1
-
-    val new_state = ZstdBlockState(
-        output:      output,
-        rep_offsets: rep_offsets,
-        huff_table:  new_huff,
-        has_huff:    has_huff
-    )
-    Ok(ZstdBlockResult(state: new_state, reader: after_reader))
+    # Compressed block decoding (FSE + Huffman + sequences) is not yet implemented.
+    # Skip over the block bytes so the reader advances correctly.
+    val skip_res = zstd_br_read_bytes(r, block_size)?
+    Err(CompressionError.Unsupported("zstd compressed block not yet implemented"))
