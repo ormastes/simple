@@ -185,17 +185,35 @@ complete until correctness passes and both ratio columns are above `1.00x`.
 | KDF/password | HKDF, PBKDF2, scrypt, Argon2 | TBD, target >1.00x | TBD, target >1.00x | Loop-invariant allocation removal, typed scratch buffers, memory-fill/copy intrinsics |
 | Hash | SHA-1/2/3, BLAKE2, BLAKE3, RIPEMD160, Whirlpool, Streebog, Tiger, SM3, SipHash | TBD, target >1.00x | TBD, target >1.00x | Rotate/message-schedule CSE, static IV materialization, unrolled block lowering |
 | Public-key/PQ | RSA/PSS/PKCS#1, ECDSA/ECDH, Curve25519/448, Ed25519/448, FFDHE, ML-KEM, ML-DSA, SLH-DSA | TBD, target >1.00x | TBD, target >1.00x | Big-int limb specialization, constant-time select lowering, fixed-array stack storage |
-| Compression | Deflate, Gzip, zlib, PNG inflate, LZ4, Snappy, Zstd, LZMA2/XZ, Brotli, Huffman, LZ77 | TBD, target >1.00x | TBD, target >1.00x | Bitstream batch reads, table hoisting, match-copy fusion, static Huffman/FSE tables |
+| Compression | Deflate, Gzip, zlib, PNG inflate, LZ4, Snappy, Zstd, LZMA2/XZ, Brotli, Huffman, LZ77 | TBD, target >1.00x | TBD, target >1.00x | Bitstream batch reads, table hoisting, match-copy fusion, static Huffman/FSE tables. LZ4/Zstd are now routed through `doc/03_plan/agent_tasks/pure_simple_lz4_zstd_speed_parity.md` before their rows can close. |
 | Loader/wrappers | Kernel Zstd, HTTP/WebSocket compression | TBD, target >1.00x | TBD, target >1.00x | Facade import fix, streaming buffer specialization, native fallback guard |
  
- ## First Expansion Order
+## First Expansion Order
  
- 1. Keep XXHash64 and ChaCha20 as the baseline canaries.
- 2. Add checksum/hash canaries: CRC32, Adler32, SHA-256, BLAKE2s/BLAKE2b.
- 3. Add cipher canaries: AES block/mode KATs, ChaCha20-Poly1305, Salsa20/XSalsa20.
- 4. Add compression canaries: Deflate, Gzip, LZ4, Snappy, Zstd frame/HUF/FSE.
- 5. Add broad full-suite mode and classify pre-existing failures.
- 6. Add C/Rust performance references only after Tier 1 correctness stays stable.
+1. Keep XXHash64 and ChaCha20 as the baseline canaries.
+2. Add checksum/hash canaries: CRC32, Adler32, SHA-256, BLAKE2s/BLAKE2b.
+3. Add cipher canaries: AES block/mode KATs, ChaCha20-Poly1305, Salsa20/XSalsa20.
+4. Add compression canaries: Deflate, Gzip, LZ4, Snappy, Zstd frame/HUF/FSE.
+5. Add broad full-suite mode and classify pre-existing failures.
+6. Add C/Rust performance references only after Tier 1 correctness stays stable.
+
+## 2026-05-19 LZ4/Zstd Pure Simple Plan
+
+The current LZ4 and Zstd rows are not allowed to close from store-path facades.
+They need full pure Simple implementation gates and C library comparisons:
+
+- LZ4 compares pure Simple encode/decode against `liblz4`.
+- Zstd compares pure Simple decode first, then level-1 encode, against
+  `libzstd`.
+- The benchmark row must include correctness checksum parity, median MB/s,
+  `Simple/C`, and compressed-size ratio.
+- Missing `liblz4` or `libzstd` reports `UNAVAILABLE`; it does not count as a
+  pass.
+- Compiler/JIT improvements must come through the shared optimization plugin
+  surface, not benchmark-local source rewrites.
+
+Plan of record:
+`doc/03_plan/agent_tasks/pure_simple_lz4_zstd_speed_parity.md`.
  
  ## Current Hardening Notes
  

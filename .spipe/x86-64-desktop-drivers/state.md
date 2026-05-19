@@ -10,16 +10,16 @@ feature
 > Complete x86_64 QEMU desktop driver acceptance: define mandatory driver matrix (UEFI/ACPI/PCI/NVMe/VirtIO-BLK/framebuffer/BGA/VirtIO-GPU/PS/2/virtio-net), add boot capability summary, PCI resource ownership, unified storage results, display mode reporting, network smoke contract, and verification coverage.
 
 ## Acceptance Criteria
-- [ ] AC-1: Driver acceptance matrix — mandatory device list with pass/fail/fallback status per device class
-- [ ] AC-2: Boot capability summary — single serial-emitted record: platform, storage, display, input, network, DMA, interrupt_mode
-- [ ] AC-3: False-claim rejection — resident-launch fallback, heap-copy DMA fallback, false acceleration all fail acceptance
-- [ ] AC-4: Platform discovery — UEFI/OVMF boot path, ACPI RSDP/MADT parse, PCI device count, interrupt mode logging
-- [ ] AC-5: PCI resource ownership — BAR/IRQ/DMA/device-class records before driver bind
-- [ ] AC-6: Storage unification — NVMe + VirtIO-BLK shared DMA descriptor, timeout/completion-error markers
-- [ ] AC-7: Display mode reporting — framebuffer/bga/virtio_gpu with accelerated=true/false, PS/2 acceptance, xHCI diagnostics
-- [ ] AC-8: Network contract — virtio-net init, MAC reporting, queue setup, bounded packet/TCP smoke
-- [ ] AC-9: Net capability reporting — backend capabilities with RDMA/SR-IOV/packet-IO disabled unless explicit
-- [ ] AC-10: Verification spec — capability summary tests + false-claim rejection tests
+- [x] AC-1: Driver acceptance matrix — mandatory device list with pass/fail/fallback status per device class
+- [x] AC-2: Boot capability summary — single serial-emitted record: platform, storage, display, input, network, DMA, interrupt_mode
+- [x] AC-3: False-claim rejection — resident-launch fallback, heap-copy DMA fallback, false acceleration all fail acceptance
+- [x] AC-4: Platform discovery — UEFI/OVMF boot path, ACPI RSDP/MADT parse, PCI device count, interrupt mode logging
+- [x] AC-5: PCI resource ownership — BAR/IRQ/DMA/device-class records before driver bind
+- [x] AC-6: Storage unification — NVMe + VirtIO-BLK shared DMA descriptor, timeout/completion-error markers
+- [x] AC-7: Display mode reporting — framebuffer/bga/virtio_gpu with accelerated=true/false, PS/2 acceptance, xHCI diagnostics
+- [x] AC-8: Network contract — virtio-net init, MAC reporting, queue setup, bounded packet/TCP smoke
+- [x] AC-9: Net capability reporting — backend capabilities with RDMA/SR-IOV/packet-IO disabled unless explicit
+- [x] AC-10: Verification spec — capability summary tests + false-claim rejection tests
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-17

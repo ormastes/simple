@@ -10,13 +10,13 @@ feature
 > Create system-level integration tests that verify dynamic library loading works end-to-end on each supported platform. Tests should exercise the full pipeline: compile/build a test library → load via dynlib API → resolve symbol → verify result. Cover Linux (native), SimpleOS (QEMU), macOS (cross-platform), and Windows/Wine (PE loader). Tests must use real binary fixtures, not synthetic byte arrays.
 
 ## Acceptance Criteria
-- [ ] AC-1: Linux system test — builds a minimal ELF .so fixture, registers it via dylib_registry_register, opens via dynlib_open, resolves a symbol, verifies address > 0
-- [ ] AC-2: SimpleOS system test — loads an SMF library through the full dylib_async pipeline in a SimpleOS kernel context, resolves entry symbol
-- [ ] AC-3: macOS system test — same pattern as Linux but with Mach-O awareness (or ELF cross-load), gated by platform detection
-- [ ] AC-4: Windows/Wine system test — builds a minimal PE fixture, loads via wine_dll_map_pe_image, resolves export via pe_export_lookup_by_name
-- [ ] AC-5: Platform detection helper — test runner detects current OS and skips platform-specific tests gracefully
-- [ ] AC-6: All tests pass on Linux (the dev machine)
-- [ ] AC-7: Guide updated with system test instructions
+- [x] AC-1: Linux system test — builds a minimal ELF .so fixture, registers it via dylib_registry_register, opens via dynlib_open, resolves a symbol, verifies address > 0
+- [x] AC-2: SimpleOS system test — loads an SMF library through the full dylib_async pipeline in a SimpleOS kernel context, resolves entry symbol
+- [x] AC-3: macOS system test — same pattern as Linux but with Mach-O awareness (or ELF cross-load), gated by platform detection
+- [x] AC-4: Windows/Wine system test — builds a minimal PE fixture, loads via wine_dll_map_pe_image, resolves export via pe_export_lookup_by_name
+- [x] AC-5: Platform detection helper — test runner detects current OS and skips platform-specific tests gracefully
+- [x] AC-6: All tests pass on Linux (the dev machine)
+- [x] AC-7: Guide updated with system test instructions
 
 ## Cooperative Providers
 - Codex: unavailable
@@ -30,7 +30,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-05-10
 - [x] 6-refactor (Tech Lead) — 2026-05-10
 - [x] 7-verify (QA) — 2026-05-10
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-19: pipeline complete
 
 ## Phase Outputs
 

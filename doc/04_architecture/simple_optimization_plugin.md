@@ -99,6 +99,27 @@ Lookup providers must declare how they find rules:
 - Cipher pattern provider: `src/compiler/60.mir_opt/mir_opt/pattern/rules_crypto.spl`
 - Dynamic library runtime reference: `doc/07_guide/dynlib_api.md`
 
+## Compression Provider
+
+The pure Simple LZ4/Zstd work uses this architecture through a built-in
+`CompressionPatternProvider`. The provider is behavior-preserving and targets
+compiler/JIT hot loops that are common across compression codecs:
+
+- typed `[u8]` load/store loops;
+- literal-copy loops;
+- match-copy loops with overlap semantics;
+- bitstream reader loops for Zstd FSE/HUF decode;
+- static decode-table materialization;
+- length and bounds facts for source/destination slices.
+
+The provider must not be a codec implementation. LZ4 and Zstd source remains in
+`src/lib/common/compress`; the provider only lowers proven loop and table
+patterns. Disabling it must preserve compressed bytes, decompressed bytes,
+typed errors, and checksums.
+
+The first plan using this provider is
+`doc/03_plan/agent_tasks/pure_simple_lz4_zstd_speed_parity.md`.
+
 ## Roadmap
 
 1. Keep hot built-in pattern providers on direct or indexed lookup.
@@ -106,7 +127,9 @@ Lookup providers must declare how they find rules:
 3. Add immutable indexed lookup for large rule sets.
 4. Define a dynamic provider manifest and ABI.
 5. Add benchmark counters for provider load time, lookup hits/misses, rewrite count, and compile-time overhead.
-6. Add optional LLVM pass-plugin bridging only for providers that genuinely need LLVM IR pass insertion.
+6. Add built-in compression loop/table providers for LZ4/Zstd parity before
+   allowing dynamic compression plugins.
+7. Add optional LLVM pass-plugin bridging only for providers that genuinely need LLVM IR pass insertion.
 
 ## References
 

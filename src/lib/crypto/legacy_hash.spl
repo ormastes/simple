@@ -1,10 +1,7 @@
 # Legacy hash functions (MD5, SHA-1) — provided for protocol interoperability only.
 # WARNING: MD5 and SHA-1 are cryptographically broken. Use SHA-256 or better.
 
-extern fn rt_sha1_new() -> i64
-extern fn rt_sha1_write(handle: i64, data: text) -> i64
-extern fn rt_sha1_finish_bytes(handle: i64) -> [u8]
-extern fn rt_sha1_free(handle: i64)
+# SHA-1 is implemented in pure Simple below (no externs needed).
 
 # MD5 of a byte list. Returns 16-byte list.
 # Implemented via the pure-Simple MD5 algorithm (RFC 1321).
@@ -130,18 +127,110 @@ fn md5_bytes(data: [i64]) -> [i64]:
         wi = wi + 1
     result
 
-# SHA-1 of a byte list. Returns 20-byte list.
+# SHA-1 of a byte list. Returns 20-byte list (pure Simple, RFC 3174).
 fn sha1_bytes(data: [i64]) -> [i64]:
-    use std.common.crypto.types.{bytes_to_text}
-    val input_text = bytes_to_text(data)
-    val handle = rt_sha1_new()
-    rt_sha1_write(handle, input_text)
-    val raw = rt_sha1_finish_bytes(handle)
-    rt_sha1_free(handle)
+    use std.common.crypto.types.{rotr32}
+    val mask32 = 4294967295
+
+    var h0 = 1732584193   # 0x67452301
+    var h1 = 4023233417   # 0xEFCDAB89
+    var h2 = 2562383102   # 0x98BADCFE
+    var h3 =  271733878   # 0x10325476
+    var h4 = 3285377520   # 0xC3D2E1F0
+
+    # Pad message.
+    val data_len = data.len()
+    var padded: [i64] = []
+    var pi = 0
+    while pi < data_len:
+        padded.push(data[pi] & 255)
+        pi = pi + 1
+    padded.push(128)
+    while padded.len() % 64 != 56:
+        padded.push(0)
+    val bit_len = data_len * 8
+    padded.push((bit_len >> 56) & 255)
+    padded.push((bit_len >> 48) & 255)
+    padded.push((bit_len >> 40) & 255)
+    padded.push((bit_len >> 32) & 255)
+    padded.push((bit_len >> 24) & 255)
+    padded.push((bit_len >> 16) & 255)
+    padded.push((bit_len >>  8) & 255)
+    padded.push( bit_len        & 255)
+
+    val total_len = padded.len()
+    var block_offset = 0
+    while block_offset < total_len:
+        # Load 16 big-endian 32-bit words.
+        var w: [i64] = []
+        var wi = 0
+        while wi < 16:
+            val base = block_offset + wi * 4
+            val word = (
+                ((padded[base    ] & 255) << 24) |
+                ((padded[base + 1] & 255) << 16) |
+                ((padded[base + 2] & 255) <<  8) |
+                 (padded[base + 3] & 255)
+            ) & mask32
+            w.push(word)
+            wi = wi + 1
+        # Extend to 80 words.
+        wi = 16
+        while wi < 80:
+            val xw = (w[wi-3] ^ w[wi-8] ^ w[wi-14] ^ w[wi-16]) & mask32
+            # Left-rotate by 1.
+            w.push(((xw << 1) | (xw >> 31)) & mask32)
+            wi = wi + 1
+
+        var a = h0
+        var b = h1
+        var c = h2
+        var d = h3
+        var e = h4
+
+        var ri = 0
+        while ri < 80:
+            var ff = 0
+            var kk = 0
+            if ri < 20:
+                ff = ((b & c) | ((b ^ mask32) & d)) & mask32
+                kk = 1518500249
+            elif ri < 40:
+                ff = (b ^ c ^ d) & mask32
+                kk = 1859775393
+            elif ri < 60:
+                ff = ((b & c) | (b & d) | (c & d)) & mask32
+                kk = 2400959708
+            else:
+                ff = (b ^ c ^ d) & mask32
+                kk = 3395469782
+            # Left-rotate a by 5.
+            val a5 = ((a << 5) | (a >> 27)) & mask32
+            val temp = (a5 + ff + e + kk + w[ri]) & mask32
+            e = d
+            d = c
+            # Left-rotate b by 30.
+            c = ((b << 30) | (b >> 2)) & mask32
+            b = a
+            a = temp
+            ri = ri + 1
+
+        h0 = (h0 + a) & mask32
+        h1 = (h1 + b) & mask32
+        h2 = (h2 + c) & mask32
+        h3 = (h3 + d) & mask32
+        h4 = (h4 + e) & mask32
+        block_offset = block_offset + 64
+
+    # Produce 20-byte result.
     var result: [i64] = []
-    var i = 0
-    val n = raw.len()
-    while i < n:
-        result.push(raw[i] as i64)
-        i = i + 1
+    val words = [h0, h1, h2, h3, h4]
+    var wi2 = 0
+    while wi2 < 5:
+        val wd = words[wi2]
+        result.push((wd >> 24) & 255)
+        result.push((wd >> 16) & 255)
+        result.push((wd >>  8) & 255)
+        result.push( wd        & 255)
+        wi2 = wi2 + 1
     result

@@ -10,16 +10,16 @@ feature
 > Implement RISC-V dual-arch (RV32+RV64) Linux RTL completion: shared platform contracts with dual-arch public truth, RV32GC hardware tree with QEMU virt contract, FPGA orchestration alignment, compiler/backend test alignment with shared truth, and staged verification with generated-only acceptance.
 
 ## Acceptance Criteria
-- [ ] AC-1: Shared platform contract — DualArchContract with rv32/rv64 capability records, ISA extension sets, Linux-capable flags
-- [ ] AC-2: Architecture descriptor — ArchDescriptor with xlen (32/64), ISA string, ABI, mmu_mode (Sv32/Sv39), supported extensions
-- [ ] AC-3: RV32GC hardware tree — Rv32HardwareTree with cpu/memory/peripheral nodes, QEMU virt machine contract, boot ROM entry
-- [ ] AC-4: QEMU virt contract — QemuVirtContract with machine type, cpu model, memory size, device list, kernel/dtb paths
-- [ ] AC-5: FPGA orchestration — FpgaOrchestration with board→arch mapping, readiness status, dual-arch status reporting
-- [ ] AC-6: Lane status — LaneStatus with rv32/rv64 pass/fail/skip per test category (compile, simulate, synthesize, boot)
-- [ ] AC-7: Backend test alignment — BackendTestEntry with arch, test_name, expected_result, shared_truth_ref for compiler/hardware tests
-- [ ] AC-8: Staged verification — VerificationStage with generated-only acceptance, external RTL optional diagnostics, promotion gate
-- [ ] AC-9: Acceptance matrix — AcceptanceMatrix with rv32/rv64 rows, compile/sim/synth/boot columns, all-pass gate
-- [ ] AC-10: Verification spec — 20 tests covering contracts, descriptors, hardware tree, QEMU, FPGA, lanes, tests, verification
+- [x] AC-1: Shared platform contract — DualArchContract with rv32/rv64 capability records, ISA extension sets, Linux-capable flags
+- [x] AC-2: Architecture descriptor — ArchDescriptor with xlen (32/64), ISA string, ABI, mmu_mode (Sv32/Sv39), supported extensions
+- [x] AC-3: RV32GC hardware tree — Rv32HardwareTree with cpu/memory/peripheral nodes, QEMU virt machine contract, boot ROM entry
+- [x] AC-4: QEMU virt contract — QemuVirtContract with machine type, cpu model, memory size, device list, kernel/dtb paths
+- [x] AC-5: FPGA orchestration — FpgaOrchestration with board→arch mapping, readiness status, dual-arch status reporting
+- [x] AC-6: Lane status — LaneStatus with rv32/rv64 pass/fail/skip per test category (compile, simulate, synthesize, boot)
+- [x] AC-7: Backend test alignment — BackendTestEntry with arch, test_name, expected_result, shared_truth_ref for compiler/hardware tests
+- [x] AC-8: Staged verification — VerificationStage with generated-only acceptance, external RTL optional diagnostics, promotion gate
+- [x] AC-9: Acceptance matrix — AcceptanceMatrix with rv32/rv64 rows, compile/sim/synth/boot columns, all-pass gate
+- [x] AC-10: Verification spec — 20 tests covering contracts, descriptors, hardware tree, QEMU, FPGA, lanes, tests, verification
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18

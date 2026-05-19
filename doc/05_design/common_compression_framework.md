@@ -139,3 +139,24 @@ This document records the current landed design for `std.common.compress` as ver
 - The docs can no longer claim general compressed-chunk LZMA2 decode.
 - The docs can no longer claim forced-tier scalar/AVX2/NEON requirement closure for the whole feature; focused parity tests exist, but requirement-level closure is still broader than the verified surface.
 - The docs should not claim repository `verify` PASS for this feature until the requirement docs are narrowed or the missing codec behavior lands.
+
+## Pure Simple LZ4/Zstd Completion Plan
+
+The current source-visible LZ4/Zstd behavior is treated as the implementation
+truth for planning: LZ4 is still centered on a literal/store path, and Zstd is
+still centered on a raw-block framed subset. The completion plan is
+`doc/03_plan/agent_tasks/pure_simple_lz4_zstd_speed_parity.md`.
+
+Design constraints for that plan:
+
+- keep pure Simple codec code in `src/lib/common/compress`;
+- keep C library calls only in benchmark/reference lanes or explicit optional
+  provider lanes;
+- prove correctness before speed;
+- compare pure Simple LZ4 against `liblz4`;
+- compare pure Simple Zstd against `libzstd`;
+- report median MB/s, `Simple/C`, and compressed-size ratio;
+- route compiler/JIT speedups through the shared Simple Optimization Plugin
+  `CompressionPatternProvider`;
+- preserve CPU-only behavior and typed errors when the optimization provider is
+  disabled.

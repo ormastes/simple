@@ -10,16 +10,16 @@ feature
 > Implement RISC-V FPGA Linux RTL completion infrastructure: CSR register file with privilege levels, MMU/page table walk model, interrupt/trap controller, DTB generation and firmware handoff, OpenSBI boot sequence model, Vivado board profile targeting, and Linux boot validation scaffolding.
 
 ## Acceptance Criteria
-- [ ] AC-1: CSR register file
-- [ ] AC-2: Privilege mode model
-- [ ] AC-3: MMU page table
-- [ ] AC-4: Interrupt/trap controller
-- [ ] AC-5: DTB generation model
-- [ ] AC-6: Firmware handoff
-- [ ] AC-7: OpenSBI model
-- [ ] AC-8: Vivado board profile
-- [ ] AC-9: Linux boot validation
-- [ ] AC-10: Verification spec — 20 tests
+- [x] AC-1: CSR register file
+- [x] AC-2: Privilege mode model
+- [x] AC-3: MMU page table
+- [x] AC-4: Interrupt/trap controller
+- [x] AC-5: DTB generation model
+- [x] AC-6: Firmware handoff
+- [x] AC-7: OpenSBI model
+- [x] AC-8: Vivado board profile
+- [x] AC-9: Linux boot validation
+- [x] AC-10: Verification spec — 20 tests
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18

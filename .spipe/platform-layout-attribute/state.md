@@ -10,16 +10,16 @@ feature
 > Implement platform layout attribute infrastructure: attribute parsing (@platform with key=value predicates), match filtering against compile target with specificity selection, layout variant integration for size/align/offset, diagnostic errors for missing @platform on ABI-facing types, and migration scaffolding.
 
 ## Acceptance Criteria
-- [ ] AC-1: Platform attribute parser — parse @platform, @platform(bit), @platform(key=value) forms with validation
-- [ ] AC-2: Attribute validation — reject unknown keys/values, reject duplicate predicates, reject duplicate defaults
-- [ ] AC-3: Match filtering — filter platform variants against compile target descriptor
-- [ ] AC-4: Specificity selection — select most-specific match, error on ambiguous equal-specificity
-- [ ] AC-5: Default fallback — require at most one default, use it when no specific match
-- [ ] AC-6: Layout variant integration — platform-selected size, alignment, field offset metadata
-- [ ] AC-7: Pointer width from bit — @platform(bit) resolves to target pointer width (32/64)
-- [ ] AC-8: Diagnostic: missing @platform — error on ABI-facing types with platform-varying layout but no @platform
-- [ ] AC-9: Migration scaffolding — annotator helper for SFFI/HAL/OS structs needing @platform
-- [ ] AC-10: Verification spec — 20 tests covering parsing, validation, matching, layout, diagnostics
+- [x] AC-1: Platform attribute parser — parse @platform, @platform(bit), @platform(key=value) forms with validation
+- [x] AC-2: Attribute validation — reject unknown keys/values, reject duplicate predicates, reject duplicate defaults
+- [x] AC-3: Match filtering — filter platform variants against compile target descriptor
+- [x] AC-4: Specificity selection — select most-specific match, error on ambiguous equal-specificity
+- [x] AC-5: Default fallback — require at most one default, use it when no specific match
+- [x] AC-6: Layout variant integration — platform-selected size, alignment, field offset metadata
+- [x] AC-7: Pointer width from bit — @platform(bit) resolves to target pointer width (32/64)
+- [x] AC-8: Diagnostic: missing @platform — error on ABI-facing types with platform-varying layout but no @platform
+- [x] AC-9: Migration scaffolding — annotator helper for SFFI/HAL/OS structs needing @platform
+- [x] AC-10: Verification spec — 20 tests covering parsing, validation, matching, layout, diagnostics
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-18
