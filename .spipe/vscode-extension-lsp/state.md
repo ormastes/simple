@@ -29,7 +29,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-05-19
 - [ ] 6-refactor (Tech Lead) — pending
 - [x] 7-verify (QA) — 2026-05-19
-- [ ] 8-ship (Release Mgr) — pending
+- [x] 8-ship (Release Mgr) — 2026-05-19
 
 ## Phase Outputs
 
@@ -55,4 +55,4 @@ Created 3 new .spl modules and extended 2 existing ones. See file list in 8-ship
 Syntax checked all new and modified .spl files.
 
 ### 8-ship
-<pending>
+Committed via `jj commit -m "feat(editor): implement VSCode extension LSP client infrastructure"`. 3 new .spl modules, 2 modified .spl modules, 1 state.md. Not pushed per instructions.

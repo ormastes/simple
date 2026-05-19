@@ -11,6 +11,8 @@ use app.svim.core.{
     EditorEvent, BufferId
 }
 use std.editor.core.session.{EditSession}
+use app.svim.buffer_manager.{buffer_switch_by_name, buffer_switch_by_index}
+use app.svim.split_pane_render.{render_pane_status}
 
 
 class SvimSessionAdapter:
@@ -67,6 +69,19 @@ fn svim_adapter_buffer_count(adapter: SvimSessionAdapter) -> i64:
     adapter.edit_session.document_count()
 
 
+fn svim_adapter_pane_status(adapter: SvimSessionAdapter) -> text:
+    """Status bar text: [buffer i/N] [pane x/y] [modified]."""
+    render_pane_status(adapter.edit_session)
+
+
+fn svim_adapter_pane_count(adapter: SvimSessionAdapter) -> i64:
+    adapter.edit_session.pane_count()
+
+
+fn svim_adapter_switch_buffer_by_name(adapter: SvimSessionAdapter, name: text) -> bool:
+    buffer_switch_by_name(adapter.edit_session, name)
+
+
 me svim_adapter_split_horizontal(adapter: SvimSessionAdapter):
     adapter.edit_session.split_editor_horizontal()
 
@@ -104,6 +119,30 @@ me svim_adapter_execute(adapter: SvimSessionAdapter, cmd: CommandRequest) -> Com
         "prev-buffer":
             adapter.edit_session.switch_tab(-1)
             CommandResult(ok: true, message: "prev buffer", events: [])
+        "vsplit":
+            adapter.edit_session.split_editor()
+            CommandResult(ok: true, message: "vsplit", events: [EditorEvent(kind: "window-vsplit", message: "")])
+        "close-pane":
+            adapter.edit_session.close_other_groups()
+            CommandResult(ok: true, message: "closed other panes", events: [])
+        "focus-left":
+            adapter.edit_session.focus_direction("left", [])
+            CommandResult(ok: true, message: "focus left", events: [])
+        "focus-right":
+            adapter.edit_session.focus_direction("right", [])
+            CommandResult(ok: true, message: "focus right", events: [])
+        "focus-up":
+            adapter.edit_session.focus_direction("up", [])
+            CommandResult(ok: true, message: "focus up", events: [])
+        "focus-down":
+            adapter.edit_session.focus_direction("down", [])
+            CommandResult(ok: true, message: "focus down", events: [])
+        "switch-buffer":
+            val found = buffer_switch_by_name(adapter.edit_session, cmd.payload)
+            if found:
+                CommandResult(ok: true, message: "switched to {cmd.payload}", events: [])
+            else:
+                CommandResult(ok: false, message: "buffer not found: {cmd.payload}", events: [])
         "set-mode":
             adapter.mode.mode = _svim_adapter_mode_from_text(cmd.payload)
             CommandResult(ok: true, message: cmd.payload, events: [])
@@ -129,6 +168,21 @@ fn _svim_adapter_commandline(adapter: SvimSessionAdapter, commandline: text) -> 
     if commandline == "bp" or commandline == "bprev":
         adapter.edit_session.switch_tab(-1)
         return CommandResult(ok: true, message: "prev buffer", events: [])
+    if commandline == "vsplit":
+        adapter.edit_session.split_editor()
+        return CommandResult(ok: true, message: "vsplit", events: [EditorEvent(kind: "window-vsplit", message: "")])
+    if commandline == "close" or commandline == "clo":
+        adapter.edit_session.close_tab()
+        return CommandResult(ok: true, message: "closed", events: [])
+    if commandline == "only" or commandline == "on":
+        adapter.edit_session.close_other_groups()
+        return CommandResult(ok: true, message: "only pane", events: [])
+    if commandline.starts_with("b "):
+        val name = commandline.slice(2, commandline.len()).trim()
+        val found = buffer_switch_by_name(adapter.edit_session, name)
+        if found:
+            return CommandResult(ok: true, message: "switched to {name}", events: [])
+        return CommandResult(ok: false, message: "buffer not found: {name}", events: [])
     if commandline == "q":
         return CommandResult(ok: true, message: "quit requested", events: [EditorEvent(kind: "quit-requested", message: "")])
     if commandline.starts_with("e "):
