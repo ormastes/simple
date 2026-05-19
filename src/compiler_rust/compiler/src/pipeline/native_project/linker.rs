@@ -484,8 +484,14 @@ int main(int argc, char** argv) {
         let temp_dir = object_paths[0].parent().ok_or("no parent for object path")?;
 
         let cross_target = effective_target();
-        let is_freestanding = self.config.target.is_some()
-            || cross_target.os == simple_common::target::TargetOS::None
+        // Use the OS component of the resolved target to decide freestanding routing.
+        // `self.config.target.is_some()` was previously used here but is incorrect:
+        // it routes any --target (including hosted cross-compiles like
+        // x86_64-unknown-linux-gnu) to the freestanding path, which emits
+        // -nostdlib/-ffreestanding and skips the C runtime archive. Since
+        // set_target_override() is always called alongside config.target, the
+        // effective_target() OS already reflects the right value.
+        let is_freestanding = cross_target.os == simple_common::target::TargetOS::None
             || cross_target.os == simple_common::target::TargetOS::SimpleOS;
         if is_freestanding {
             return self.link_objects_freestanding(object_paths, temp_dir, imports);

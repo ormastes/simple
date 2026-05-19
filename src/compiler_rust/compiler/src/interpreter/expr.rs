@@ -213,18 +213,15 @@ fn route_expr(
         | Expr::I18nRef(_)
         | Expr::BlockExpr { .. }
         | Expr::Identifier(_) => {
-            Some(literals::eval_literal_expr(expr, env, functions, classes, enums, impl_methods)
-                .map(|opt| opt.unwrap_or(Value::Nil)))
+            literals::eval_literal_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // --- ops ---
         Expr::Binary { .. } | Expr::Unary { .. } | Expr::New { .. } | Expr::Cast { .. } => {
-            Some(ops::eval_op_expr(expr, env, functions, classes, enums, impl_methods)
-                .map(|opt| opt.unwrap_or(Value::Nil)))
+            ops::eval_op_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // --- control flow ---
         Expr::Lambda { .. } | Expr::If { .. } | Expr::Match { .. } | Expr::DoBlock(_) => {
-            Some(control::eval_control_expr(expr, env, functions, classes, enums, impl_methods)
-                .map(|opt| opt.unwrap_or(Value::Nil)))
+            control::eval_control_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // --- calls & field access ---
         Expr::Call { .. }
@@ -232,8 +229,7 @@ fn route_expr(
         | Expr::FieldAccess { .. }
         | Expr::FunctionalUpdate { .. }
         | Expr::KernelLaunch { .. } => {
-            Some(calls::eval_call_expr(expr, env, functions, classes, enums, impl_methods)
-                .map(|opt| opt.unwrap_or(Value::Nil)))
+            calls::eval_call_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // --- collections & indexing ---
         Expr::Array(_)
@@ -252,8 +248,7 @@ fn route_expr(
         | Expr::Slice { .. }
         | Expr::Spread(_)
         | Expr::DictSpread(_) => {
-            Some(collections::eval_collection_expr(expr, env, functions, classes, enums, impl_methods)
-                .map(|opt| opt.unwrap_or(Value::Nil)))
+            collections::eval_collection_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // Remaining variants (Spawn, Await, Yield, Try, MacroInvocation, Unwrap*, etc.)
         // are handled by the match in evaluate_expr.
