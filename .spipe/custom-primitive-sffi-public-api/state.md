@@ -10,16 +10,16 @@ feature
 > Implement custom primitive wrapper infrastructure: newtype metadata queries, SFFI transparent ABI mapping, bitfield backing/field support, primitive API lint classification, domain wrappers, staged API migration scaffolding, and verification specs.
 
 ## Acceptance Criteria
-- [ ] AC-1: Custom primitive metadata — CustomPrimitiveInfo with is_custom_primitive, underlying_primitive, bit_capacity, abi_type queries
-- [ ] AC-2: Custom primitive type layout — signedness, bit width, size, alignment, source span preservation
-- [ ] AC-3: SFFI custom primitive ABI — transparent wrappers accepted in SFFI, mapped to underlying C/Rust/LLVM ABI type
-- [ ] AC-4: SFFI pass-by-value verification — custom primitives passed by value not as object handles
-- [ ] AC-5: Bitfield backing types — custom primitive integer wrappers as bitfield backing types (u8/u16/u32/u64)
-- [ ] AC-6: Bitfield field types — custom primitive integer/bool wrappers as @bits fields with error on non-integer
-- [ ] AC-7: Primitive API lint — classify each primitive as convertible/blocked/intentional/exempt
-- [ ] AC-8: Domain wrapper definitions — handles, IDs, sizes, offsets, addresses, IRQ vectors, file modes, deadlines, errno
-- [ ] AC-9: SFFI migration scaffolding — migration helper for SFFI-facing functions/structs with compatibility wrappers
-- [ ] AC-10: Verification spec — 20 tests covering metadata, ABI, bitfields, lint, domain wrappers
+- [x] AC-1: Custom primitive metadata — CustomPrimitiveInfo with is_custom_primitive, underlying_primitive, bit_capacity, abi_type queries
+- [x] AC-2: Custom primitive type layout — signedness, bit width, size, alignment, source span preservation
+- [x] AC-3: SFFI custom primitive ABI — transparent wrappers accepted in SFFI, mapped to underlying C/Rust/LLVM ABI type
+- [x] AC-4: SFFI pass-by-value verification — custom primitives passed by value not as object handles
+- [x] AC-5: Bitfield backing types — custom primitive integer wrappers as bitfield backing types (u8/u16/u32/u64)
+- [x] AC-6: Bitfield field types — custom primitive integer/bool wrappers as @bits fields with error on non-integer
+- [x] AC-7: Primitive API lint — classify each primitive as convertible/blocked/intentional/exempt
+- [x] AC-8: Domain wrapper definitions — handles, IDs, sizes, offsets, addresses, IRQ vectors, file modes, deadlines, errno
+- [x] AC-9: SFFI migration scaffolding — migration helper for SFFI-facing functions/structs with compatibility wrappers
+- [x] AC-10: Verification spec — 20 tests covering metadata, ABI, bitfields, lint, domain wrappers (20/20 pass)
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-17
