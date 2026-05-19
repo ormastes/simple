@@ -18,7 +18,7 @@ OUTPUT_FORMAT("elf64-littleriscv")
 ENTRY(_start)
 
 MEMORY {
-    BRAM (rwx) : ORIGIN = 0x00000000, LENGTH = 64K
+    BRAM (rx)  : ORIGIN = 0x00000000, LENGTH = 64K
     DDR  (rwx) : ORIGIN = 0x80000000, LENGTH = 64M
 }
 
@@ -57,17 +57,17 @@ SECTIONS {
         _bss_end = .;
     } > DDR
 
-    /* Kernel stack (per-hart, 64KB) */
+    /* Kernel stack (per-hart, 32KB — single-hart minimal) */
     .stack (NOLOAD) : ALIGN(16) {
         _stack_bottom = .;
-        . += 64K;
+        . += 32K;
         _stack_top = .;
     } > DDR
 
-    /* Kernel heap (remainder of DDR after image) */
+    /* Kernel heap (conservative for initial FPGA smoke) */
     .heap (NOLOAD) : ALIGN(4K) {
         _heap_start = .;
-        . += 16M;
+        . += 4M;
         _heap_end = .;
     } > DDR
 
