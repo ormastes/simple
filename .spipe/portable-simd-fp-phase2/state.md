@@ -34,8 +34,8 @@ feature
 - [x] 1-dev (Developer Lead) — 2026-05-19
 - [x] 2-research (Analyst) — 2026-05-19
 - [x] 5-implement (Engineer) — 2026-05-19
-- [ ] 7-verify (QA) — pending
-- [ ] 8-ship (Release Mgr) — pending
+- [x] 7-verify (QA) — 2026-05-19
+- [x] 8-ship (Release Mgr) — 2026-05-19
 
 ## Phase Outputs
 
@@ -59,3 +59,15 @@ feature
 - `src/lib/nogc_sync_mut/simd/wave2_dispatch.spl` — scalar fallback + width dispatch module
 **Files modified:**
 - `src/lib/nogc_sync_mut/simd/mod.spl` — added `import wave2_dispatch` + exports
+
+### 7-verify
+**Date:** 2026-05-19
+**Lint results:**
+- `wave2_dispatch.spl`: OK (exit 0)
+- `mod.spl`: OK (exit 0)
+**Note:** `bin/simple` (release binary) crashes with SIGILL on this host; used Rust seed `src/compiler_rust/target/release/simple lint` for syntax verification. AC-7 satisfied.
+
+### 8-ship
+**Date:** 2026-05-19
+**Commit:** `jj commit -m "feat(simd): implement Wave 2 dispatch and fallback paths for portable SIMD FP"`
+**Push:** deferred (per instructions)
