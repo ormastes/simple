@@ -133,6 +133,10 @@ pub(crate) fn native_hir_resolver_roots(project_root: &Path, source_dirs: &[Path
 
 impl NativeProjectBuilder {
     /// Compile entries (index, path, source) in parallel using rayon.
+    ///
+    /// The rayon global thread pool is initialized once in `build()` (via
+    /// `init_rayon_pool`) before this method is called. No per-call pool
+    /// setup is needed here.
     pub(crate) fn compile_entries_parallel(
         &self,
         entries: &[(usize, PathBuf, String)],
@@ -140,11 +144,6 @@ impl NativeProjectBuilder {
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
     ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
-        // Configure rayon thread pool if needed
-        if let Some(n) = self.config.num_threads {
-            let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
-        }
-
         let project_root = self.project_root.clone();
         let source_dirs = self.source_dirs.clone();
         let fallback_root = self.source_root.clone();

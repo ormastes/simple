@@ -33,6 +33,53 @@ use std::time::{Duration, Instant};
 use crate::optimizations::NativeOptimizationLevel;
 use crate::stdlib_variant::active_simd_tier_name;
 
+/// Initialize the rayon global thread pool with appropriate stack size and
+/// thread count for compilation workloads.
+///
+/// Compilation threads need large stacks (16 MiB) because monomorphization,
+/// HIR lowering, and codegen can produce deep call stacks. Without this,
+/// rayon's default 2 MiB stacks can overflow on complex modules.
+///
+/// The pool is initialized exactly once per process via `std::sync::Once`.
+/// Subsequent calls are no-ops (safe for tests and repeated builds).
+///
+/// Thread count resolution order:
+/// 1. Explicit `num_threads` from `NativeBuildConfig`
+/// 2. `SIMPLE_BOOTSTRAP_THREADS` environment variable
+/// 3. `std::thread::available_parallelism()` (all cores)
+fn init_rayon_pool(config: &NativeBuildConfig) {
+    use std::sync::Once;
+    static POOL_INIT: Once = Once::new();
+
+    let num_threads = config.num_threads
+        .or_else(|| {
+            std::env::var("SIMPLE_BOOTSTRAP_THREADS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+        })
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        });
+
+    let stack_size = config.stack_size;
+
+    POOL_INIT.call_once(|| {
+        let result = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .stack_size(stack_size)
+            .thread_name(|idx| format!("spl-compile-{}", idx))
+            .build_global();
+        if let Err(e) = result {
+            // Pool was already initialized (e.g., by a test or library user).
+            // This is not fatal — we just use whatever pool exists.
+            eprintln!("[rayon] pool already initialized, using existing: {e}");
+        }
+    });
+}
+
 /// Safe canonicalize that avoids `libc::realpath` which segfaults in
 /// self-hosted Cranelift-compiled binaries.  Falls back to manual
 /// absolute-path resolution when the stdlib call fails or when running
@@ -169,7 +216,9 @@ pub(crate) struct ModuleImports {
 pub struct NativeBuildConfig {
     /// Per-file compilation timeout in seconds.
     pub file_timeout: u64,
-    /// Stack size per compilation thread.
+    /// Stack size per compilation thread (also applied to rayon pool workers).
+    /// Monomorphization and HIR lowering can produce deep call stacks,
+    /// requiring 16 MiB or more per thread.
     pub stack_size: usize,
     /// Whether to use parallel compilation.
     pub parallel: bool,
@@ -400,6 +449,12 @@ impl NativeProjectBuilder {
     /// setup, compilation, or linking fails.
     pub fn build(self) -> Result<NativeBuildResult, String> {
         crate::codegen::inline_asm::clear_inline_asm_blocks();
+
+        // 0. Initialize rayon thread pool with compilation-appropriate stack
+        //    size and thread count. This must happen before any par_iter usage.
+        if self.config.parallel {
+            init_rayon_pool(&self.config);
+        }
 
         // 1. Discover files
         let (files, file_sources) = if self.config.entry_closure {
