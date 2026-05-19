@@ -32,6 +32,8 @@ use std.nogc_sync_mut.compression.brotli.decoder_block.{
     _MetaBlockResult, _decode_compressed_block
 }
 
+extern fn rt_bytes_alloc(len: i64) -> [u8]
+
 # Decode a brotli-compressed byte stream.
 # Returns Ok(decompressed_bytes) or Err(CompressionError).
 fn brotli_decode(input: [u8]) -> Result<[u8], CompressionError>:
@@ -164,11 +166,18 @@ fn _brotli_read_meta_block(r: BrotliBitReader, output: [u8]) -> Result<_MetaBloc
         val raw = raw_res.unwrap()
         r2 = raw.reader
 
-        var new_output = output
+        # Preallocate merged output in one shot to avoid per-byte push overhead.
+        val old_len = output.len()
+        val new_len = old_len + raw.bytes.len()
+        var new_output = rt_bytes_alloc(new_len)
         var i = 0
-        while i < raw.bytes.len():
-            new_output.push(raw.bytes[i])
+        while i < old_len:
+            new_output[i] = output[i]
             i = i + 1
+        var j = 0
+        while j < raw.bytes.len():
+            new_output[old_len + j] = raw.bytes[j]
+            j = j + 1
         return Ok(_MetaBlockResult(output: new_output, reader: r2, is_last: is_last))
 
     # Compressed meta block

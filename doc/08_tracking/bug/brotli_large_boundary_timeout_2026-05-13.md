@@ -1,7 +1,7 @@
 # Brotli large-boundary decode timeout
 
 Date: 2026-05-13
-Status: Open
+Status: Fixed (2026-05-19)
 Severity: Compression verification blocker
 
 ## Evidence
@@ -31,11 +31,20 @@ The new `std.nogc_async_mut.compression.*` and
 boundary behavior remains weakly verified until this performance issue is fixed
 or the test is split into a bounded tier.
 
-## Next Steps
+## Fix (2026-05-19)
 
-- Profile `brotli_encode_uncompressed` and `brotli_decode` on 64 KiB payloads.
-- Replace byte-at-a-time append/copy hot paths with chunked or preallocated
-  buffers where possible.
-- Keep a smaller fast unit test and move the 64 KiB case to an explicit
-  slow/perf tier if the interpreter cannot reasonably execute it under the
-  default watchdog.
+Replaced byte-at-a-time push loops with `rt_bytes_alloc` preallocated buffers
+and index-assignment in all four hot paths:
+
+- `bit_reader.spl` — `brotli_bits_read_bytes`: preallocate `n` bytes, assign
+  by index instead of `out.push(r.data[i])` per iteration.
+- `bit_writer.spl` — `brotli_bits_write_bytes`: preallocate `existing + payload`
+  bytes, copy both segments by index instead of appending one byte at a time.
+- `encoder.spl` — `_slice`: preallocate `len` bytes, assign by index instead of
+  `out.push(data[offset + i])`.
+- `decoder.spl` — uncompressed meta-block merge: preallocate `old_len + mlen`
+  output, copy both segments by index instead of `new_output.push(raw.bytes[i])`.
+
+Each of the above loops runs 65536 times for a 64 KiB payload. Preallocating
+once and writing by index eliminates the interpreter-level per-push overhead
+that caused the watchdog timeout.
