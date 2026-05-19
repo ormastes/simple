@@ -1,0 +1,116 @@
+"""
+Browser Engine DOM Accessors
+
+Mutation helpers for BeDomNode trees.
+Consumed by app.ui.chromium.engine_merge and app.ui.chromium.app.
+"""
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
+
+# ============================================================================
+# Child management
+# ============================================================================
+
+fn be_dom_add_child(parent: BeDomNode, child: BeDomNode):
+    """Append a child node to parent.children and set child.parent_id."""
+    var c = child
+    c.parent_id = parent.node_id
+    parent.children.push(c)
+
+fn be_dom_get_children(node: BeDomNode) -> [BeDomNode]:
+    """Return the direct children of a node."""
+    node.children
+
+fn be_dom_remove_child(parent: BeDomNode, child_id: i64):
+    """Remove the first child with the given node_id from parent.children."""
+    var new_children: [BeDomNode] = []
+    var i = 0
+    while i < parent.children.len():
+        if parent.children[i].node_id != child_id:
+            new_children.push(parent.children[i])
+        i = i + 1
+    parent.children = new_children
+
+fn be_dom_insert_before(parent: BeDomNode, new_child: BeDomNode, ref_id: i64):
+    """Insert new_child immediately before the child with ref_id."""
+    var new_children: [BeDomNode] = []
+    var inserted = false
+    var i = 0
+    var nc = new_child
+    nc.parent_id = parent.node_id
+    while i < parent.children.len():
+        if parent.children[i].node_id == ref_id:
+            new_children.push(nc)
+            inserted = true
+        new_children.push(parent.children[i])
+        i = i + 1
+    if not inserted:
+        new_children.push(nc)
+    parent.children = new_children
+
+# ============================================================================
+# Attribute and style accessors
+# ============================================================================
+
+fn be_dom_set_attr(node: BeDomNode, name: text, value: text):
+    """Set an attribute on a node."""
+    node.attributes[name] = value
+
+fn be_dom_get_attr(node: BeDomNode, name: text) -> text:
+    """Get an attribute value, returning "" if absent."""
+    node.attributes.get(name) ?? ""
+
+fn be_dom_set_style(node: BeDomNode, style: StyleProps):
+    """Replace the node's inline style."""
+    node.style = style
+
+fn be_dom_get_style(node: BeDomNode) -> StyleProps:
+    """Return the node's current inline style."""
+    node.style
+
+fn be_dom_set_text_content(node: BeDomNode, text_content: text):
+    """Set the text content of a node (clears children, sets data)."""
+    node.children = []
+    node.data = text_content
+
+fn be_dom_get_text_content(node: BeDomNode) -> text:
+    """Return the text content: data for text nodes, or concatenated child text."""
+    if node.is_text():
+        return node.data
+    var parts: [text] = []
+    var i = 0
+    while i < node.children.len():
+        parts.push(be_dom_get_text_content(node.children[i]))
+        i = i + 1
+    parts.join("")
+
+# ============================================================================
+# Tree traversal helpers
+# ============================================================================
+
+fn be_dom_find_by_id(root: BeDomNode, node_id: i64) -> BeDomNode?:
+    """DFS search for a node with the given node_id."""
+    if root.node_id == node_id:
+        return Some(root)
+    var i = 0
+    while i < root.children.len():
+        val found = be_dom_find_by_id(root.children[i], node_id)
+        if found != nil:
+            return found
+        i = i + 1
+    nil
+
+fn be_dom_find_by_tag(root: BeDomNode, tag_name: text) -> [BeDomNode]:
+    """Collect all descendant nodes with the given tag name."""
+    var result: [BeDomNode] = []
+    if root.tag_name == tag_name:
+        result.push(root)
+    var i = 0
+    while i < root.children.len():
+        val children_found = be_dom_find_by_tag(root.children[i], tag_name)
+        var j = 0
+        while j < children_found.len():
+            result.push(children_found[j])
+            j = j + 1
+        i = i + 1
+    result
