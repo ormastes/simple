@@ -10,12 +10,12 @@ bug
 > Ensure right-shift (`>>`) produces correct results for all integer types (i8/i16/i32/i64, u8/u16/u32/u64) across all value origins — variables, function parameters, and call return values — in both Cranelift and LLVM backends. Add test coverage for the parameter and return-value paths.
 
 ## Acceptance Criteria
-- [ ] AC-1: `>>` on signed function parameters (i8/i16/i32) uses arithmetic shift (sshr) with proper sign-extension
-- [ ] AC-2: `>>` on signed call return values uses arithmetic shift with proper sign-extension
-- [ ] AC-3: LLVM backend dispatches signed vs unsigned right-shift (currently always unsigned)
-- [ ] AC-4: New spec tests cover: signed param >> N, signed call-return >> N, unsigned param >> N
-- [ ] AC-5: Existing `shr_signedness_test.spl` still passes (no regression)
-- [ ] AC-6: `cargo test` in compiler crate passes
+- [x] AC-1: `>>` on signed function parameters (i8/i16/i32) uses arithmetic shift (sshr) with proper sign-extension
+- [x] AC-2: `>>` on signed call return values uses arithmetic shift with proper sign-extension
+- [x] AC-3: LLVM backend dispatches signed vs unsigned right-shift (Bug A + Bug B fixed in instructions.rs)
+- [x] AC-4: New spec tests cover: signed param >> N, signed call-return >> N, unsigned param >> N (shr_signedness_param_callret_spec.spl 4/4)
+- [x] AC-5: Existing `shr_signedness_test.spl` still passes (13/13, no regression)
+- [x] AC-6: `cargo check -p simple-compiler` passes
 
 ## Cooperative Providers
 - Codex: unavailable

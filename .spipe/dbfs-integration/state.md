@@ -5,10 +5,10 @@
 - [x] research
 - [x] arch
 - [x] spec
-- [ ] implement
+- [ ] implement — BLOCKED
 - [ ] refactor
 - [ ] verify
 - [ ] ship
 
 ## Blocked
-DBFS architecture design incomplete
+DBFS architecture design incomplete — cannot proceed until architecture is finalized

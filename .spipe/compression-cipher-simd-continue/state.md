@@ -2,7 +2,7 @@
 
 ## Phases
 - [x] dev
-- [ ] research
+- [ ] research — BLOCKED
 - [ ] arch
 - [ ] spec
 - [ ] implement
@@ -11,4 +11,4 @@
 - [ ] ship
 
 ## Blocked
-SIMD FFI needed
+SIMD FFI needed — cannot proceed until SIMD FFI infrastructure lands
