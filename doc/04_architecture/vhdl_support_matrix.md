@@ -122,6 +122,27 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | Generic parameters | **supported** |
 | Architecture naming (rtl) | **stable** |
 
+## ABI Layer (VHDL-PARITY-020)
+
+Simple-side ABI resolution for hardware function port mapping.
+Implementation: `src/compiler/70.backend/backend/vhdl/vhdl_abi.spl` (302 lines, 37/37 tests pass).
+Test: `test/unit/compiler/backend/vhdl_abi_spec.spl`.
+
+| Feature | Status |
+|---------|--------|
+| Data width resolution (i8–i64, u8–u64, bool, Bits, Array) | **stable** |
+| Signal type mapping (signed/unsigned/std_logic/bit) | **stable** |
+| Port name sanitization (VHDL-safe identifiers) | **stable** |
+| Scalar return ABI (`result_out` port) | **stable** |
+| Labeled tuple return ABI (named output ports from labels) | **stable** |
+| Anonymous tuple return ABI (`out_0`, `out_1`, ... ports) | **stable** |
+| Unit return ABI (no output ports) | **stable** |
+| Input port resolution (named from locals, fallback `argN`) | **stable** |
+| Full port list resolution (combined input + output) | **stable** |
+| Port collision detection (duplicate name diagnostics) | **stable** |
+| Output validation (unsynthesizable type diagnostics) | **stable** |
+| Rust MIR backend integration (Workers 1-6) | **deferred** |
+
 ## Constraint Verification (E07xx)
 
 | Code | Constraint | Detection | Status |
