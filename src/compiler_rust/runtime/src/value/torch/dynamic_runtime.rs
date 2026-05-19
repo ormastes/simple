@@ -14,17 +14,17 @@ static TORCH_RUNTIME: OnceLock<Option<DynLibrary>> = OnceLock::new();
 
 #[cfg(not(feature = "pytorch"))]
 fn default_library_name() -> &'static str {
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "windows")]
     {
-        "libsimple_runtime.so"
+        "simple_runtime.dll"
     }
     #[cfg(target_os = "macos")]
     {
         "libsimple_runtime.dylib"
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        "simple_runtime.dll"
+        "libsimple_runtime.so"
     }
 }
 

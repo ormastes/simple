@@ -97,17 +97,17 @@ fn torch_runtime_library() -> Option<&'static libloading::Library> {
                 .ok()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(target_os = "windows")]
                     {
-                        "libsimple_runtime.so".to_string()
+                        "simple_runtime.dll".to_string()
                     }
                     #[cfg(target_os = "macos")]
                     {
                         "libsimple_runtime.dylib".to_string()
                     }
-                    #[cfg(target_os = "windows")]
+                    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                     {
-                        "simple_runtime.dll".to_string()
+                        "libsimple_runtime.so".to_string()
                     }
                 });
             let lib = unsafe { libloading::Library::new(&path).ok()? };
