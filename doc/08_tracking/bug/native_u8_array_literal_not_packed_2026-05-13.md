@@ -1,7 +1,7 @@
 # Native `[u8]` array literal is not a packed byte buffer
 
 Date: 2026-05-13
-Status: Open
+Status: Fixed (2026-05-19)
 
 ## Summary
 
@@ -33,8 +33,29 @@ The run fails with:
 - Native mode is therefore not preserving the packed-byte semantics needed by
   `rt_typed_bytes_u32_le_at` when the buffer comes from a direct `[u8]` literal.
 
+## Root Cause
+
+In HIR lowering, bare integer literals default to `TypeId::I64` regardless of
+the declared array element type. So `val arr: [u8] = [0, 1, 255]` produces
+`HirExpr { kind: Array([I64, I64, I64]), ty: Array { element: I64 } }`. The
+`lower_array_expr` guard `elements.iter().all(|e| e.ty == U8)` was never true,
+so the generic `rt_array_new` + `rt_array_push` (8-byte slot) path was used
+instead of the packed `rt_byte_array_new` + `rt_typed_bytes_u8_push` path.
+`rt_typed_bytes_u32_le_at` reads as raw bytes → wrong data → wrong CRC32.
+
+## Fix
+
+`src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`: In
+`HirStmt::Let`, when `declared_ty` is `Array { element: U8 }` and the RHS
+value is a non-empty `HirExprKind::Array`, bypass `lower_array_expr` and emit
+`rt_byte_array_new(capacity)` + per-element `rt_typed_bytes_u8_push` directly,
+using `declared_ty` as the authoritative type. The empty-array case already used
+this pattern. The secondary guard in `lower_array_expr` (passing `outer_ty`)
+also catches the case when array literals are lowered outside a `Let` statement
+(e.g., as function arguments typed `[u8]`).
+
 ## Impact
 
-CRC32 cannot safely use a static literal table as a workaround for the native
-global-cache crash. Keep the generated table path until native packed byte-array
-literals or native module-level array caches are fixed.
+CRC32 cannot safely use a static literal table until native module-level array
+caches are fixed. This fix allows static literal `[u8]` tables in function-local
+declarations to work correctly in native mode.
