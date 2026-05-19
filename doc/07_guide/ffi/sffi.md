@@ -190,6 +190,61 @@ fn open_file(path: text) -> Result<i64, text>:
 
 ---
 
+## Custom Primitives at SFFI Boundaries
+
+Custom primitives (newtypes over `u8`..`u64`, `i8`..`i64`, `bool`, `f32`, `f64`) cross the SFFI boundary **by value** using the underlying primitive's ABI. No boxing or object handles are involved.
+
+### Declaring a Custom Primitive for SFFI
+
+```spl
+use std.compiler.custom_primitive_info
+
+var info = CustomPrimitiveInfo.create("FileHandle", "i32", "handle")
+// info.signedness -> "signed", info.bit_width -> 32, info.byte_size -> 4
+```
+
+Register it and query ABI names:
+
+```spl
+use std.compiler.sffi_custom_primitive
+
+var mapper = sffi_abi_mapper_new()
+sffi_abi_map_to_c("i32")    // -> "int32_t"
+sffi_abi_map_to_rust("i32")  // -> "i32"
+sffi_abi_map_to_llvm("i32")  // -> "i32"
+```
+
+### Transparency Validation
+
+Before exporting a custom primitive through SFFI, validate it:
+
+```spl
+var check = sffi_primitive_check_from_info("FileHandle", "i32")
+// check.is_transparent -> true, check.is_value_type -> true
+```
+
+### Bitfield Backing
+
+Unsigned integer custom primitives (`u8`/`u16`/`u32`/`u64`) can back bitfield layouts:
+
+```spl
+use std.compiler.custom_primitive_bitfield
+
+var layout = BitfieldLayout.create("StatusReg", 32)
+layout.add_field("ready", 1)
+layout.add_field("error", 1)
+layout.add_field("data", 16)
+// layout.remaining_bits() -> 14
+```
+
+### Domain Wrappers
+
+The `DomainWrapperCatalog` provides 12 predefined wrappers for OS/HAL patterns (`FileHandle`, `ProcessId`, `PhysAddr`, `IrqVector`, etc.). Use `PrimitiveClassification` to audit raw primitive usage at SFFI boundaries and identify candidates for migration.
+
+Full reference: [Custom Primitive SFFI Spec](../../06_spec/app/compiler/custom_primitive_sffi.md)
+
+---
+
 ## SFFI-Gen: Code Generation
 
 SFFI-gen automatically generates FFI wrappers from specification files.
