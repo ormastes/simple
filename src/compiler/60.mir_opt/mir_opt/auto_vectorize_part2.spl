@@ -176,6 +176,11 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
       R1: recipe.kind != Elementwise
       R2: recipe.op_name is not one of {add,sub,mul,xor}_elementwise
       R3: trip_count >= 0 && trip_count < recipe.chunk_width  (too short to vectorize)
+      R4: trip_count == -1 (dynamic/unknown) OR trip_count % chunk_width != 0
+          — both produce dangling-predecessor / non-terminating-vec-loop CFG until
+          Wave L3b lands real terminator rewiring and peel body cloning.
+          Wave L3b: lift this guard once splice_vectorized_block rewires predecessors
+          and create_vector_loop_block emits an If guard instead of Goto(self).
       R5: recipe.output_base is nil  (no output — not an elementwise loop)
       R6: recipe.input_bases has fewer than 2 entries (need a and b)
 
@@ -203,6 +208,18 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
 
     # R3: static trip count too short (skip if unknown, i.e. -1)
     if recipe.trip_count >= 0 and recipe.trip_count < recipe.chunk_width:
+        return func
+
+    # R4: dynamic trip count (-1) or misaligned trip count produce broken CFG:
+    #   - vec_loop emits Goto(self) — non-terminating without Wave L3b If-guard
+    #   - splice_vectorized_block does not patch predecessors of the original header
+    #   - create_peeling_block is an empty structural placeholder
+    # Refuse until Wave L3b lands real terminator rewiring and peel body cloning.
+    # Wave L3b: lift this guard when create_vector_loop_block emits If(guard, exit, back)
+    # and predecessor edges to the original header block are patched.
+    if recipe.trip_count < 0:
+        return func
+    if recipe.trip_count % recipe.chunk_width != 0:
         return func
 
     # R5: need an output base
