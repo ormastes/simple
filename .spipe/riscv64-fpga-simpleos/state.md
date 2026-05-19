@@ -121,7 +121,27 @@ feature
 <pending>
 
 ### 6-refactor
-<pending>
+**Date:** 2026-05-19
+
+**Files reviewed:** 15 (2 scripts, 5 platform capsules, 1 linker script, 4 payload files, 1 manifest, 6 test specs)
+
+**Issues found and fixed:**
+
+1. **`boot_profile.spl` — wrong syntax (CRITICAL):** File used Rust-style syntax (`module`, `///` doc comments, `struct X { }` with curly braces, `fn f() { }` curly-brace bodies). Rewritten to proper Simple `.spl` syntax (colon bodies, `#` comments, `"""` docstrings, struct with `:` field separators).
+
+2. **`manifest.spl` ram_size mismatch:** `default_board_config()` had `ram_size: 0x20000000` (512 MiB) while `hardware_manifest.sdn` had `0x04000000` (64 MiB). Fixed to `0x04000000` to match the SDN and linker script DDR `LENGTH = 64M`.
+
+3. **`hardware_manifest.sdn` wrong location:** File was at `doc/06_spec/hardware_manifest.sdn` but architecture specifies `doc/08_tracking/hardware/` (AC-2, Phase 3 arch). Moved to `doc/08_tracking/hardware/hardware_manifest.sdn` — now matches where all test specs reference it.
+
+4. **`fpga_linker.ld` stack/heap mismatch:** Architecture doc specifies 32K stack and 4M heap for riscv64-fpga-min. File had 64K stack and 16M heap. Fixed to match arch spec.
+
+5. **`fpga_linker.ld` BRAM permissions:** `BRAM (rwx)` changed to `BRAM (rx)` — BRAM is boot ROM staging, not writable kernel memory.
+
+6. **`test/riscv64_fpga/jtag_unbind_spec.spl` name mismatch:** All 4 occurrences of `jtag-ftdi-unbind-rebind.shs` corrected to `jtag-ftdi-unbind.shs` (actual file name).
+
+7. **`test/riscv64_fpga/hello_payload_spec.spl` wrong source file name:** `hello.S` corrected to `startup.S` (actual assembly file). Added missing `main.c` existence test. Fixed proof string test to use runtime PC placeholder (`0x80001234`) and add `pc=0x` check instead of hardcoding `0x80000000` (PC comes from `auipc` at runtime).
+
+**No issues found:** All files under 800 lines. No dead code or unused imports in .spl files. Scripts clean (pass/fail/info helpers are standalone by design). UART offsets consistent (THR=0x00, LSR=0x05 in both uart_mmio.spl and main.c). Memory addresses consistent (ram_base=0x80000000, uart=0x10000000, timer=0x02000000, plic=0x0C000000 across all files after fixes). build.shs march=rv64imac_zicsr matches boot_profile.spl march="rv64imac" + zicsr extension. No TODOs converted to NOTEs.
 
 ### 7-verify
 **Date:** 2026-05-19

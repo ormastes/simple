@@ -1,7 +1,7 @@
 # ComponentRegistry attach count remains zero
 
 Date: 2026-05-13
-Status: Open
+Status: Fixed (2026-05-19)
 Severity: Engine component correctness bug
 
 ## Evidence
@@ -28,10 +28,27 @@ records, enum helpers, mesh helpers, and camera/tilemap extensions. Full 2D
 registry mutation behavior remains weak until the canonical registry failure is
 fixed.
 
-## Next Steps
+## Root Cause
 
-- Debug `me attach` mutation persistence for `ComponentRegistry.entries`.
-- Add an assertion that `get_sprite` / `get_camera` actually returns `Some`
-  instead of relying on conditional assertions.
-- Re-enable facade-level attach behavior coverage after the canonical sync
-  registry spec passes.
+`fn attach(self, node_id, component)` and `fn detach_all(self, node_id)` used
+`self` as a positional value parameter. In Simple, this binds the receiver by
+value, so mutations to `self.entries` inside the function body were silently
+discarded. The read-only methods (`get_components`, `get_sprite`, etc.) correctly
+used the implicit receiver (no `self` positional param) and worked fine.
+
+## Fix
+
+Changed both mutating methods in `ComponentRegistry` (2D) and `ComponentRegistry3D`
+to use the `me fn` mutable-receiver form:
+
+```
+- fn attach(self, node_id: NodeId, component: Component2D):
++ me fn attach(node_id: NodeId, component: Component2D):
+
+- fn detach_all(self, node_id: NodeId):
++ me fn detach_all(node_id: NodeId):
+```
+
+Files changed:
+- `src/lib/nogc_sync_mut/engine/component/registry.spl`
+- `src/lib/nogc_sync_mut/engine/component/registry3d.spl`
