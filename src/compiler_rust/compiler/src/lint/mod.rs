@@ -1169,6 +1169,37 @@ pub use DiContainer
     }
 
     #[test]
+    fn test_gc_boundary_errors_for_gc_importing_nogc_family() {
+        let diagnostics = check_code_at_path("src/lib/gc_async_mut/example.spl", "use std.nogc_sync_mut.fs\n");
+
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::GcBoundaryCrossing));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.message.contains("gc_imports_nogc_family")));
+    }
+
+    #[test]
+    fn test_gc_boundary_gc_family_allows_other_gc_family() {
+        let diagnostics = check_code_at_path("src/lib/gc_async_mut/example.spl", "use std.gc_sync_mut.io\n");
+
+        assert!(!diagnostics.iter().any(|d| d.lint == LintName::GcBoundaryCrossing));
+    }
+
+    #[test]
+    fn test_gc_boundary_attribute_based_nogc_detection() {
+        // A user module with @no_gc attribute (not in standard lib path)
+        // should still be checked for gc boundary violations.
+        let code = "@no_gc\nmod my_module\nuse std.gc_async_mut.task\n";
+        let diagnostics = check_code_at_path("src/app/my_module/example.spl", code);
+
+        assert!(
+            diagnostics.iter().any(|d| d.lint == LintName::GcBoundaryCrossing),
+            "expected GcBoundaryCrossing for @no_gc attribute-based module importing gc family, got: {:?}",
+            diagnostics.iter().map(|d| format!("{:?}: {}", d.lint, d.message)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_bypass_validity_not_triggered_for_regular_files() {
         let code = r#"
 pub struct Helper:

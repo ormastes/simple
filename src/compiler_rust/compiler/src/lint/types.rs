@@ -625,11 +625,16 @@ Only after explicit user or reviewer confirmation should you add a narrowly
 scoped suppression with a concrete reason.
 "#.to_string(),
             LintName::GcBoundaryCrossing => r#"Lint: gc_boundary_crossing
-Level: warn
+Level: deny (hard error)
 
-Warns when a runtime library file imports across unsupported GC/noalloc family
-boundaries. No-GC families must not import GC families, and noalloc runtime
-files must not import allocating runtime families.
+Errors when a module imports across unsupported GC/noalloc family boundaries.
+No-GC families must not import GC families (and vice versa), and noalloc
+runtime files must not import allocating runtime families.
+
+Detection: path-based (src/lib/<family>/...) or attribute-based (@no_gc / @gc).
+Violations: nogc_imports_gc_family, gc_imports_nogc_family,
+  noalloc_imports_gc_family, noalloc_imports_allocating_family,
+  higher_layer_runtime_family.
 "#.to_string(),
             LintName::BypassWithCodeFiles => r#"Lint: bypass_with_code_files
 Level: warn (default, will become deny in v1.0)
