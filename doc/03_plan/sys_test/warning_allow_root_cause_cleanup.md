@@ -7,3 +7,16 @@
    green after workflow changes.
 4. Confirm advisory workflows such as `vscode-tests.yml` and
    `electron-tests.yml` remain untouched in this slice.
+
+## Verification Result (2026-05-19)
+
+Status: **PASS** — committed as `461479c0af`.
+
+- All 4 canary specs pass.
+- Allow count reduced from 1822 to 1714.
+  - `unnamed_duplicate_typed_args`: 1029 → 943
+  - `primitive_api`: 222 → 196
+  - `bare_bool`: 62 → 52
+- 2 known WARNs (not failures):
+  - lint wrapper segfault (STATUS=139) — pre-existing, tracked separately
+  - `@extern` triggers `unknown_attribute` — root cause deferred per design doc

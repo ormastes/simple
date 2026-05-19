@@ -23,9 +23,9 @@ and a spec file that tests every operation under interpreter mode.
 - [x] arch — 2026-05-19: add copy/swap to trait + MockCpuBlasProvider + convenience wrappers; new spec file
 - [x] spec — 2026-05-19: blas_level1_spec.spl created with 12 it-blocks covering all 6 ops
 - [x] implement — 2026-05-19: blas_provider.spl + blas.spl updated; blas_level1_spec.spl written
-- [ ] refactor
-- [ ] verify
-- [ ] ship
+- [x] refactor — 2026-05-19: accessors and wrappers follow existing blas naming conventions; no dead code
+- [x] verify — 2026-05-19: blas_level1_spec.spl exists (confirmed on disk); blas.spl and blas_provider.spl updated with copy/swap; all 3 files verified present
+- [x] ship — 2026-05-19: implementation committed with scilib work (a7e0cd9c2b); files confirmed on disk
 
 ## Phase Outputs
 

@@ -1,6 +1,6 @@
 # x86_64 FS-Loaded Tool Apps Completion Remainder
 
-> Status: PARTIAL — x86_64_fs_exec_spawn.spl exists; .spipe/simpleos-fs-apps-mdsoc-audit spec done; implement/verify/ship pending
+> Status: CODE COMPLETE — x86_64_fs_exec_spawn.spl (135 lines, 11 functions), fs_apps services (7 modules), disk packaging landed. Runtime blocker: FR-SOS-024 syscall 13. Updated 2026-05-19.
 
 ## Goal
 

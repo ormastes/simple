@@ -68,3 +68,28 @@ Repo-wide enforcement cleanup focused on:
    The `src/compiler/90.tools/header_gen/` slice no longer needed file-level
    suppressions once a few positional helper calls were converted to named
    arguments.
+
+## Implementation Outcome (DONE — 2026-05-19, commit 461479c0af)
+
+All 5 tasks completed:
+
+- **Task A** — Repaired Rust strict workflow pathing: `.github/workflows/rust-tests.yml`
+  now targets `src/compiler_rust/` with the correct Clippy command.
+- **Task B** — Added Simple strict-lint workflow: authoritative `--deny-all` lane
+  wired to `test/code_quality/` canary specs.
+- **Task C** — Fixed primitive-sort runtime/bench compile blockers:
+  `NEON_F64_RADIX_MIN_LEN` and `NEON_I64_RADIX_MIN_LEN` constants added;
+  `clippy::unnecessary_sort_by` suppression resolved in bench.
+- **Task D** — Decorator whitelist alignment: `@variant`, `@immutable`, `@no_gc`
+  added to lint recognizer; stale `unnamed_duplicate_typed_args` allows removed
+  from `src/compiler/90.tools/header_gen/`.
+- **Task E** — Regression canaries added; remaining debt documented (not hidden).
+
+**Allow count:** reduced from 1822 to 1714 (108 suppressions removed).
+
+**Spec tests:** 3 pass — gate wiring (Rust workflow), Simple strict lint, NEON threshold constants.
+
+**Verify:** PASS. 2 known WARNs carried forward as documented debt:
+- Lint wrapper segfault (not owned by this feature).
+- `@extern` reported as `unknown_attribute` — parser/lint classification bug;
+  those `allow` entries are not stale, tracked as follow-up.

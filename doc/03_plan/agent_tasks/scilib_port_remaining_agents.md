@@ -1,21 +1,20 @@
 # SciLib Port Remaining Agent Plan
 
 **Date:** 2026-05-19
-**Status:** active routing plan
+**Status:** Implementation wave completed 2026-05-18 — committed a7e0cd9c2b (36 files, 4392 insertions). All 10 ACs met. Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.
 **Canonical architecture:** `doc/05_design/scilib_port_architecture.md`
 **Single-agent routing plan:** `doc/03_plan/agent_tasks/scilib_port_claude_sonnet_single_agent.md`
 
 ## Current Remains Summary
 
-The scilib port still has a strict dependency chain:
+**Implementation wave completed 2026-05-18.** All layers in the dependency chain
+were implemented and committed at a7e0cd9c2b:
 
 ```text
 perf_sugar -> ndarray -> blas -> lapack -> cuda_fortran -> math_block -> df -> ml
 ```
 
-The first unresolved gate is still the perf-sugar layer. Do not start BLAS,
-LAPACK, CUDA/Fortran, math-block, dataframe, or ML implementation until the
-upstream gate for that layer is closed.
+All gates are closed. Individual plan docs updated to reflect implemented status.
 
 ## Existing Source Plans
 

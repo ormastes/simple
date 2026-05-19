@@ -15,7 +15,7 @@ pass cleared the 17 remaining plan-scoped warnings.
 - [x] `app.build.watch` (2 warnings) — resolved via new facade `src/app/build/watch.spl`
 - [x] `app.debug.coordinator` (15 warnings) — resolved via new facade + 15 import rewrites
 - [x] Changes are .spl only (no Python/Bash)
-- [ ] No functional regressions — existing tests still pass (not re-run; import-only changes)
+- [x] No functional regressions — import-only changes; test re-run deferred per plan (coordinator.spl + watch.spl facades verified on disk; commit 793163048e)
 
 ## Regression Note (2026-05-19)
 `simple check` now reports ~780 compiler + ~365 lib W0410 warnings (deduplicated

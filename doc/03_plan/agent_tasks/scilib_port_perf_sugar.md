@@ -1,11 +1,11 @@
 # Scilib Port — Perf-Sugar Agent Task List
 
-> Status: PARTIAL — Phase 3 arch complete; ready for Phase 5 execution
+> Status: Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.
 
 **Area:** `perf_sugar`  
 **File:** `doc/03_plan/agent_tasks/scilib_port_perf_sugar.md`  
 **Date:** 2026-04-27  
-**Status:** Phase 3 arch complete; ready for Phase 5 execution  
+**Status:** Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.  
 **Upstream:** None — this is the lowest layer; must complete before `scilib_port_ndarray.md` begins  
 **Downstream gate:** `scilib_port_ndarray.md` (PERF-SUGAR-001 must be `fixed` before any T-NDARRAY-* allocates a typed buffer)
 

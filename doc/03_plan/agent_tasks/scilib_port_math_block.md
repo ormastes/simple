@@ -1,7 +1,7 @@
 # scilib_port_math_block.md — Math Block v1 Extensions TODO
 
 **Area:** `math_block`  
-**Status:** Phase 4 (spec/impl planning)  
+**Status:** Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.  
 **Date:** 2026-04-27  
 **Depends on:** T-NDARRAY-* (NDArray core), T-BLAS-* (BLAS shim), T-LAPACK-* (LAPACK shim)  
 **Disjoint from:** ndarray, blas, lapack, cuda_fortran, df, ml, perf_sugar areas  

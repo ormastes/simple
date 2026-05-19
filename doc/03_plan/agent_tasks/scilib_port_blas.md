@@ -1,6 +1,6 @@
 # scilib-port BLAS TODO — `std.linalg` BLAS-Level Bindings
 
-**Status:** Phase 4 (spec/TODO) — ready for Phase 5 impl  
+**Status:** Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.  
 **Area:** blas  
 **Output path:** `src/lib/common/linalg/`  
 **Import:** `use std.linalg`  

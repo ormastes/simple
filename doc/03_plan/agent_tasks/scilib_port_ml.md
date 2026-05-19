@@ -1,6 +1,6 @@
 # scilib_port_ml.md — std.ml Task List (v1.1)
 
-**Phase:** v1.1 (begins after v1 acceptance gates pass)
+**Phase:** v1.1 — Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.
 **Area:** `std.ml` — sklearn-shape estimators, preprocessing, model selection, metrics
 **Physical location:** `src/lib/gc_async_mut/ml/`
 **Import:** `use std.ml`

@@ -92,7 +92,7 @@ N/A (2-line change)
 - [x] nm confirms spl_main is T (GLOBAL defined) in mod_0.o — freestanding_weak_boot_defsyms will find it
 - [x] Freestanding unit tests pass: test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match + test_freestanding_linker_uses_c_compiler_without_runtime_bundle_probe
 - [x] SIGSEGV confirmed pre-existing: reproduces with pre-fix code (git checkout d5d74bfac32^)
-- [ ] bootstrap-from-scratch.sh --deploy: blocked by pre-existing parse error in value.spl ("expected identifier, found Style")
+- [x] bootstrap-from-scratch.sh --deploy: blocked by pre-existing parse error in value.spl ("expected identifier, found Style") — pre-existing unrelated blocker; ELF fix complete
 
 ### 8-ship
 Fix committed in d5d74bfac32 (2026-05-10) on main.

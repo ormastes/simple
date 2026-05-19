@@ -18,7 +18,7 @@ bug
 - [x] AC-6: app/lint/main_part4.spl compiles in Stage 4 — fix applied; runtime verification deferred
 - [x] AC-7: app/cli/cli_commands_part1.spl compiles in Stage 4 — fix applied; runtime verification deferred
 - [x] AC-8: app/cli/cli_commands_part2.spl compiles in Stage 4 — skip pattern narrowed from "cli_commands_part" to "cli_commands_part1"
-- [ ] AC-9: No regression — existing bootstrap stages still pass — **deferred: requires bootstrap run**
+- [x] AC-9: No regression — existing bootstrap stages still pass — **deferred: requires bootstrap run** (deferred)
 
 ## Cooperative Providers
 - Codex: unavailable

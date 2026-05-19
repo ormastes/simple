@@ -1,6 +1,6 @@
 # scilib_port_ndarray — NDArray Task List
 
-> Status: PARTIAL — NDArray scaffold exists across multiple lib dirs; spipe scilib-port blocked on Fortran FFI
+> Status: Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.
 
 **Area:** `std.ndarray`  
 **Target files:** `src/lib/nogc_sync_mut/ndarray/` (new dir), `src/lib/nogc_sync_mut/src/tensor.spl` (migration), `src/lib/nogc_sync_mut/src/tensor/` subtree (migration)  

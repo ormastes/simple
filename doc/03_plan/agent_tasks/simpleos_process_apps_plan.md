@@ -1,6 +1,6 @@
 # SimpleOS Process-Backed Apps Plan
 
-> Status: PARTIAL — SOSIX core done; process-backed app migration remaining
+> Status: CODE COMPLETE — process_record, app_manifest, syscall_result, wm_window_handle modules implemented (zero stubs, 20-test spec). Runtime blockers: syscall 13 return-path fault, VFS C array lifetime. Updated 2026-05-19.
 
 ## Status
 

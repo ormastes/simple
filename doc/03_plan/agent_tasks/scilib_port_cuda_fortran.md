@@ -2,7 +2,7 @@
 
 **Area:** cuda_fortran — FFI shim crates for `libspl_cublas.so`, `libspl_openblas.so`, `libspl_cublas_mock.so`
 **Owner phase:** Phase 5 sub-agent (cuda_fortran track)
-**Status:** Ready (depends on blas + lapack task files completing symbol list)
+**Status:** Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.
 **Date drafted:** 2026-04-27
 
 ---

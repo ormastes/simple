@@ -9,3 +9,12 @@
   documented as follow-up work rather than hidden behind broken enforcement.
 - NFR-WARN-004: Regression canaries for the enforcement wiring shall run fast
   enough to fit inside normal CI checks.
+
+## Verification Outcome (DONE — 2026-05-19, commit 461479c0af)
+
+| NFR | Result |
+|-----|--------|
+| NFR-WARN-001 | PASS — both Rust and Simple lanes fail-hard on regressions |
+| NFR-WARN-002 | PASS — Simple lane scoped to 3 stable code_quality canaries; no advisory workflows required |
+| NFR-WARN-003 | PASS — `@extern unknown_attribute` and lint-wrapper segfault documented as deferred debt, not hidden |
+| NFR-WARN-004 | PASS — 3 canary specs run within normal `bin/simple test` budget |

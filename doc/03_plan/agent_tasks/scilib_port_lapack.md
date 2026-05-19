@@ -4,7 +4,7 @@
 **Phase:** 4-spec + 5-implement (parallel with `scilib_port_blas.md`)  
 **Owner:** scilib-lapack agent  
 **Date:** 2026-04-27  
-**Status:** ready (gated on T-PERFSUGAR-01 and T-NDARRAY complete)
+**Status:** Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.
 
 ---
 
