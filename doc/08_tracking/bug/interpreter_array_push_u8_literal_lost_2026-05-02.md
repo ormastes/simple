@@ -56,13 +56,71 @@ and the `psk_connect_flow_spec` test fixtures. Existing W11-B `psk.spl` and
 form; their unit-test coverage uses `_seq_n` (which routes through
 arithmetic-to-u8) and so didn't catch this.
 
+## Root Cause Analysis (W14 investigation — 2026-05-19)
+
+**The bug was in the READ path, not the WRITE/push path.** The original
+"Proposed Fix" hypothesis (push-side method-resolution or value-coercion
+mismatch) was incorrect.
+
+### Call chain
+
+1. `0x2du8` literal evaluates in the interpreter to `Value::UInt { value: 45, width: 8 }` —
+   confirmed in `src/compiler_rust/compiler/src/interpreter/expr/literals.rs` (line 49:
+   `NumericSuffix::U8 => Value::UInt { value: ..., width: 8 }`).
+
+2. `a.push(v)` — `interpreter_method/collections.rs` push arm stores the `Value` as-is into
+   `Vec<Value>`. The value `Value::UInt { value: 45, width: 8 }` is stored **correctly**. Push
+   path is NOT broken.
+
+3. `rt_bytes_u8_at(a, 0)` → `rt_bytes_u8_at_fn` in
+   `src/compiler_rust/compiler/src/interpreter_extern/sffi_array.rs` → calls
+   `interpreter_byte_at(&byte_val)` where `byte_val` is `Value::UInt { value: 45, width: 8 }`.
+
+4. **Bug site: `interpreter_byte_at` (sffi_array.rs lines 17–25).** Before the fix, this
+   function had no `Value::UInt` arm. The `Value::UInt` case fell through to the `other`
+   branch and returned 0 (either via `unwrap_or(0)` or a bare `_ => 0`).
+
+### Why the workaround worked
+
+`(0x2di64 & 0xFF).to_u8()` performs arithmetic on `Value::Int`, which returns `Value::Int(45)`.
+`interpreter_byte_at` had a `Value::Int(n) => n & 0xFF` arm, so 45 was returned correctly.
+The workaround bypassed the broken `Value::UInt` arm by producing a different Value variant.
+
+### Fix applied
+
+Added `Value::UInt { value, .. } => (value & 0xFF) as i64` arm to `interpreter_byte_at` in
+`sffi_array.rs`. The fixed function is:
+
+```rust
+fn interpreter_byte_at(value: &Value) -> i64 {
+    let normalized = value.clone().deref_pointer();
+    match normalized {
+        Value::Int(n) => n & 0xFF,
+        Value::UInt { value, .. } => (value & 0xFF) as i64,  // THE FIX
+        Value::Union { inner, .. } => interpreter_byte_at(&inner),
+        other => other.as_int().map(|n| n & 0xFF).unwrap_or(0),
+    }
+}
+```
+
+### Regression test
+
+`sffi_array.rs` line ~640:
+```rust
+fn interpreter_byte_at_reads_u8_values_through_wrappers() {
+    assert_eq!(interpreter_byte_at(&Value::UInt { value: 0x2d, width: 8 }), 0x2d);
+```
+
 ## Proposed Fix
 
-Investigate `src/compiler_rust/compiler/src/interpreter_extern/...` array-push
+~~Investigate `src/compiler_rust/compiler/src/interpreter_extern/...` array-push
 dispatch — specifically how `[u8].push(value)` resolves when `value` is
 typed `u8` vs the result of `expr.to_u8()`. Likely a method-resolution or
 value-coercion mismatch where the typed-u8 path stores 0 (default-init
-slot) instead of the argument value.
+slot) instead of the argument value.~~
+
+**Resolved** — see Root Cause Analysis above. Fix was in the READ path
+(`interpreter_byte_at`), not the push path.
 
 ## Related
 
