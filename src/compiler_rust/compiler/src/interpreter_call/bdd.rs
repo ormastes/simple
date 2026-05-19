@@ -356,6 +356,60 @@ pub(crate) fn exec_block_value(
     }
 }
 
+/// Extract the description string from the first argument of an `it`/`describe`/`context` call
+/// without evaluating FString interpolations.  `{expr}` and `{expr:spec}` parts are
+/// reconstructed as literal text so that strings like `"encodes {a:1} as bytes"` are
+/// preserved verbatim instead of crashing with "variable `a` not found".
+fn extract_desc_str(args: &[Argument], default: &str) -> String {
+    use simple_parser::ast::{Expr, FStringPart};
+    let Some(arg) = args.first() else {
+        return default.to_string();
+    };
+    match &arg.value {
+        // Plain string literal — use as-is
+        Expr::String(s) => s.clone(),
+        // FString — rebuild from parts, treating expression slots as literal text
+        Expr::FString { parts, .. } => {
+            let mut out = String::new();
+            for part in parts {
+                match part {
+                    FStringPart::Literal(lit) => out.push_str(lit),
+                    FStringPart::Expr(e) => {
+                        out.push('{');
+                        out.push_str(&expr_to_text(e));
+                        out.push('}');
+                    }
+                    FStringPart::ExprWithFormat(e, spec) => {
+                        out.push('{');
+                        out.push_str(&expr_to_text(e));
+                        out.push(':');
+                        out.push_str(spec);
+                        out.push('}');
+                    }
+                }
+            }
+            out
+        }
+        // Anything else — fall back to default (caller will use eval_arg for non-string args)
+        _ => default.to_string(),
+    }
+}
+
+/// Best-effort reconstruction of a simple expression as source text.
+/// Used only to render FString interpolation slots in description strings.
+fn expr_to_text(expr: &simple_parser::ast::Expr) -> String {
+    use simple_parser::ast::Expr;
+    match expr {
+        Expr::Identifier(name) => name.clone(),
+        Expr::Integer(n) => n.to_string(),
+        Expr::Float(f) => f.to_string(),
+        Expr::String(s) => format!("\"{}\"", s),
+        Expr::FieldAccess { receiver, field } => format!("{}.{}", expr_to_text(receiver), field),
+        Expr::Index { receiver, index } => format!("{}[{}]", expr_to_text(receiver), expr_to_text(index)),
+        _ => "...".to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 fn eval_arg(
     args: &[Argument],
