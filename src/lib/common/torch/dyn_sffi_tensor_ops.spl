@@ -12,7 +12,7 @@ Consumed by:
 """
 
 use std.common.torch.dyn_sffi_ops.{dyn_torch_available}
-use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, spl_bits_to_f64}
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i32}
 
 # ============================================================================
 # Tensor construction from Simple values
@@ -42,7 +42,10 @@ fn dyn_torch_tensor_from_values_2d(values: [f64], rows: i64, cols: i64) -> i64:
 fn dyn_torch_tensor_copy_values(handle: i64, expected_n: i64) -> [f64]:
     """Copy a tensor's data back to a Simple f64 array (1-D or flattened).
 
-    Uses rt_torch_copy_data_to_cpu to extract f64 elements via a raw buffer.
+    Uses rt_torch_copy_data_to_cpu to extract f32 elements via a raw buffer.
+    rt_torch_copy_data_to_cpu writes float32 (4 bytes/element); buffer_size is
+    the element count, not the byte count.  Each f32 value is read back via
+    rt_ptr_read_i32 + f32_from_bits and widened to f64.
     expected_n is a hint for the number of elements; the actual numel is used.
     Returns an empty array if libtorch is not available or handle is 0.
     """
@@ -51,17 +54,17 @@ fn dyn_torch_tensor_copy_values(handle: i64, expected_n: i64) -> [f64]:
     val n = rt_torch_torchtensor_numel(handle)
     if n <= 0:
         return []
-    val byte_count = n * 8
+    val byte_count = n * 4
     val buf = rt_alloc(byte_count)
     if buf == 0:
         return []
-    val copied = rt_torch_copy_data_to_cpu(handle, buf, byte_count)
+    val copied = rt_torch_copy_data_to_cpu(handle, buf, n)
     var out: [f64] = []
     if copied > 0:
         var i = 0
         while i < n:
-            val bits = rt_ptr_read_i64(buf, i * 8)
-            out.push(spl_bits_to_f64(bits))
+            val bits = rt_ptr_read_i32(buf, i * 4)
+            out.push(f32_from_bits(bits as u32) as f64)
             i = i + 1
     rt_free(buf, byte_count)
     out
@@ -72,4 +75,7 @@ fn dyn_torch_tensor_copy_values(handle: i64, expected_n: i64) -> [f64]:
 
 extern fn rt_ps_torch_tensor_from_data(data: [f64], dims: [i64]) -> i64
 extern fn rt_torch_torchtensor_numel(handle: i64) -> i64
+# buffer_size is element count; runtime writes float32 (4 bytes/element)
 extern fn rt_torch_copy_data_to_cpu(handle: i64, buffer_ptr: i64, buffer_size: i64) -> i64
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn f32_from_bits(bits: u32) -> f32
