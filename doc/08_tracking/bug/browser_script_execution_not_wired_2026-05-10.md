@@ -3,7 +3,7 @@
 **Date:** 2026-05-10
 **Component:** browser_engine/browser_renderer.spl, script/script_runner.spl
 **Severity:** Medium (feature gap)
-**Status:** Partially resolved (2026-05-10)
+**Status:** Resolved (2026-05-19)
 
 ## Problem
 

@@ -4,11 +4,11 @@
 # using the DEFLATE algorithm per RFC 7692 §7.2.
 #
 # Scope:
-#   - ws_compress_message(payload: [u8]) -> [u8]
+#   - ws_compress_message(payload: [u8]) -> Result<[u8], WsPmceError>
 #       Compress payload; strip the 4-byte sync-flush tail per RFC 7692 §7.2.1.
 #       The RSV1 bit MUST be set on the first frame of the compressed message
 #       by the frame writer (not done here — framing is a separate layer).
-#   - ws_decompress_message(compressed: [u8]) -> [u8]
+#   - ws_decompress_message(compressed: [u8]) -> Result<[u8], WsPmceError>
 #       Re-append the 4-byte sync-flush tail (0x00 0x00 0xFF 0xFF) and inflate.
 #   - ws_pmce_rsv1_required() -> bool
 #       Returns true: RSV1 must be set on compressed message first frames.
@@ -21,6 +21,7 @@
 #   - window_bits negotiation (uses defaults)
 
 use std.common.compress.deflate.{deflate_compress_sync_flush, deflate_decompress_eof}
+use std.common.compress.types.{CompressionError}
 
 # RSV1 MUST be set on the first frame of a compressed message (RFC 7692 §6.1).
 # Callers should OR this into byte 1 of the frame header when building frames.
@@ -31,8 +32,14 @@ val WS_PMCE_RSV1_BIT: i64 = 0x40
 # Bytes: 0x00 0x00 0xFF 0xFF (empty non-final stored DEFLATE block).
 val _PMCE_SYNC_TAIL_LEN: i64 = 4
 
+# Error type for permessage-deflate operations.
+enum WsPmceError:
+    """Error returned by WebSocket permessage-deflate compress/decompress."""
+    CompressError(msg: text)
+    DecompressError(msg: text)
+
 # Returns true: RSV1 must be set on compressed message first frames.
-fn ws_pmce_rsv1_required() -> bool:
+pub fn ws_pmce_rsv1_required() -> bool:
     true
 
 # Compress a WebSocket message payload per RFC 7692 §7.2.1.
@@ -42,19 +49,23 @@ fn ws_pmce_rsv1_required() -> bool:
 #   2. Remove the 4 trailing bytes (00 00 FF FF) before transmitting.
 #
 # The caller must set RSV1=1 on the first frame carrying this compressed data.
-fn ws_compress_message(payload: [u8]) -> [u8]:
-    val compressed = deflate_compress_sync_flush(payload)
-    val n = compressed.len()
-    # Strip the 4-byte sync-flush tail
-    if n < _PMCE_SYNC_TAIL_LEN:
-        # Degenerate: return as-is (should not happen with valid DEFLATE output)
-        return compressed
-    var result: [u8] = []
-    var i = 0
-    while i < n - _PMCE_SYNC_TAIL_LEN:
-        result.push(compressed[i])
-        i = i + 1
-    result
+pub fn ws_compress_message(payload: [u8]) -> Result<[u8], WsPmceError>:
+    val compress_result = deflate_compress_sync_flush(payload)
+    match compress_result:
+        case Err(e):
+            return Err(WsPmceError.CompressError(e.message()))
+        case Ok(compressed):
+            val n = compressed.len()
+            # Strip the 4-byte sync-flush tail
+            if n < _PMCE_SYNC_TAIL_LEN:
+                # Degenerate: return as-is (should not happen with valid DEFLATE output)
+                return Ok(compressed)
+            var result: [u8] = []
+            var i = 0
+            while i < n - _PMCE_SYNC_TAIL_LEN:
+                result.push(compressed[i])
+                i = i + 1
+            return Ok(result)
 
 # Decompress a WebSocket message payload per RFC 7692 §7.2.2.
 #
@@ -63,7 +74,7 @@ fn ws_compress_message(payload: [u8]) -> [u8]:
 #   2. Inflate using DEFLATE.
 #
 # Input is the raw compressed payload bytes (RSV1 was set on the first frame).
-fn ws_decompress_message(compressed: [u8]) -> [u8]:
+pub fn ws_decompress_message(compressed: [u8]) -> Result<[u8], WsPmceError>:
     var buf: [u8] = []
     var i = 0
     while i < compressed.len():
@@ -74,4 +85,9 @@ fn ws_decompress_message(compressed: [u8]) -> [u8]:
     buf.push(0x00u8)
     buf.push(0xFFu8)
     buf.push(0xFFu8)
-    deflate_decompress_eof(buf)
+    val decomp_result = deflate_decompress_eof(buf)
+    match decomp_result:
+        case Err(e):
+            return Err(WsPmceError.DecompressError(e.message()))
+        case Ok(data):
+            return Ok(data)
