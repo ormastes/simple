@@ -22,10 +22,13 @@ use super::llvm::LlvmBackend;
 /// Uses inkwell's MCJIT execution engine to compile MIR functions
 /// to native code for direct in-process execution.
 pub struct LlvmJitCompiler {
-    context: &'static Context,
+    // Fields that borrow from `context` MUST be declared before it
+    // so Rust's drop order (declaration order) destroys them first.
     execution_engine: Option<ExecutionEngine<'static>>,
     compiled_funcs: HashMap<String, u64>,
     target: simple_common::target::Target,
+    /// Owned LLVM context – dropped LAST so borrowing fields are valid.
+    context: Box<Context>,
 }
 
 // Safety: LlvmJitCompiler owns its data and function pointers are valid
@@ -59,13 +62,17 @@ impl LlvmJitCompiler {
             }
         }
 
-        let context = Box::leak(Box::new(Context::create()));
+        let context = Box::new(Context::create());
+        // Safety: the raw pointer is valid for the lifetime of the struct because
+        // `context` (Box<Context>) is the LAST field and therefore dropped LAST,
+        // after all borrowing fields (execution_engine, etc.) are already gone.
+        let _ctx_ref: &'static Context = unsafe { &*(context.as_ref() as *const Context) };
 
         Ok(Self {
-            context,
             execution_engine: None,
             compiled_funcs: HashMap::new(),
             target,
+            context,
         })
     }
 

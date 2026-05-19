@@ -102,9 +102,9 @@ impl LlvmBackend {
 
         if signed {
             let narrow_type = match bits {
-                8 => self.context.i8_type(),
-                16 => self.context.i16_type(),
-                32 => self.context.i32_type(),
+                8 => self.context_ref().i8_type(),
+                16 => self.context_ref().i16_type(),
+                32 => self.context_ref().i32_type(),
                 _ => return Ok(value),
             };
             let narrowed = builder
@@ -384,7 +384,7 @@ impl LlvmBackend {
                     BinOp::Eq | BinOp::Is => {
                         let rt_func = module.get_function("rt_native_eq").unwrap_or_else(|| {
                             let fn_type = self
-                                .context
+                                .context_ref()
                                 .i64_type()
                                 .fn_type(&[self.runtime_int_type().into(), self.runtime_int_type().into()], false);
                             module.add_function("rt_native_eq", fn_type, None)
@@ -410,7 +410,7 @@ impl LlvmBackend {
                     BinOp::NotEq => {
                         let rt_func = module.get_function("rt_native_neq").unwrap_or_else(|| {
                             let fn_type = self
-                                .context
+                                .context_ref()
                                 .i64_type()
                                 .fn_type(&[self.runtime_int_type().into(), self.runtime_int_type().into()], false);
                             module.add_function("rt_native_neq", fn_type, None)
@@ -724,7 +724,7 @@ impl LlvmBackend {
                     }
                     _ => {
                         // Fallback: create a true constant
-                        self.context.bool_type().const_int(1, false)
+                        self.context_ref().bool_type().const_int(1, false)
                     }
                 };
 
@@ -889,7 +889,7 @@ impl LlvmBackend {
             }
             // f64 → i64 (bitcast to preserve tagged-value ABI bit patterns)
             (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(it))
-                if it.get_bit_width() == 64 && fv.get_type() == self.context.f64_type() =>
+                if it.get_bit_width() == 64 && fv.get_type() == self.context_ref().f64_type() =>
             {
                 let cast = builder
                     .build_bit_cast(fv, it, "f2i")
@@ -905,7 +905,7 @@ impl LlvmBackend {
             }
             // i64 → f64 (bitcast to preserve tagged-value ABI bit patterns)
             (BasicValueEnum::IntValue(iv), BasicTypeEnum::FloatType(ft))
-                if iv.get_type().get_bit_width() == 64 && ft == self.context.f64_type() =>
+                if iv.get_type().get_bit_width() == 64 && ft == self.context_ref().f64_type() =>
             {
                 let cast = builder
                     .build_bit_cast(iv, ft, "i2f")
@@ -942,10 +942,10 @@ mod tests {
         let module = module_ref.as_ref().unwrap();
         let function = module.add_function("switch_test", backend.runtime_int_type().fn_type(&[], false), None);
 
-        let entry = backend.context.append_basic_block(function, "entry");
-        let case_one = backend.context.append_basic_block(function, "case_one");
-        let case_two = backend.context.append_basic_block(function, "case_two");
-        let default = backend.context.append_basic_block(function, "default");
+        let entry = backend.context_ref().append_basic_block(function, "entry");
+        let case_one = backend.context_ref().append_basic_block(function, "case_one");
+        let case_two = backend.context_ref().append_basic_block(function, "case_two");
+        let default = backend.context_ref().append_basic_block(function, "default");
 
         let mut blocks = HashMap::new();
         blocks.insert(BlockId(0), entry);

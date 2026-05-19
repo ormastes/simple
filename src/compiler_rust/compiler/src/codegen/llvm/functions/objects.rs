@@ -22,8 +22,8 @@ impl LlvmBackend {
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,
     ) -> Result<(), CompileError> {
-        let i8_type = self.context.i8_type();
-        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let i64_type = self.runtime_int_type();
 
         // Allocate struct on the HEAP via rt_alloc (matching Cranelift behavior).
@@ -59,7 +59,7 @@ impl LlvmBackend {
 
         for ((offset, field_type), value) in field_offsets.iter().zip(field_types.iter()).zip(field_values.iter()) {
             let field_val = self.get_vreg(value, vreg_map)?;
-            let offset_val = self.context.i32_type().const_int(*offset as u64, false);
+            let offset_val = self.context_ref().i32_type().const_int(*offset as u64, false);
             let field_ptr = unsafe { builder.build_gep(i8_type, struct_ptr, &[offset_val], "field_ptr") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
@@ -67,7 +67,7 @@ impl LlvmBackend {
             let typed_ptr = builder
                 .build_pointer_cast(
                     field_ptr,
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                    self.context_ref().ptr_type(inkwell::AddressSpace::default()),
                     "field_typed_ptr",
                 )
                 .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
@@ -100,7 +100,7 @@ impl LlvmBackend {
         let ptr = match obj_val {
             inkwell::values::BasicValueEnum::PointerValue(p) => p,
             inkwell::values::BasicValueEnum::IntValue(iv) => {
-                let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
                 builder
                     .build_int_to_ptr(iv, ptr_type, "obj_ptr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
@@ -113,19 +113,19 @@ impl LlvmBackend {
             }
         };
 
-        let i8_type = self.context.i8_type();
-        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let base_ptr = builder
             .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
             .map_err(|e| crate::error::factory::llvm_cast_failed("cast struct ptr", &e))?;
-        let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
+        let offset_val = self.context_ref().i32_type().const_int(byte_offset as u64, false);
         let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
             .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
         let llvm_field_ty = self.llvm_type(field_type)?;
         let typed_ptr = builder
             .build_pointer_cast(
                 field_ptr,
-                self.context.ptr_type(inkwell::AddressSpace::default()),
+                self.context_ref().ptr_type(inkwell::AddressSpace::default()),
                 "field_typed_ptr",
             )
             .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
@@ -154,7 +154,7 @@ impl LlvmBackend {
         let ptr = match obj_val {
             inkwell::values::BasicValueEnum::PointerValue(p) => p,
             inkwell::values::BasicValueEnum::IntValue(iv) => {
-                let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
                 builder
                     .build_int_to_ptr(iv, ptr_type, "obj_ptr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
@@ -162,12 +162,12 @@ impl LlvmBackend {
             _ => return Ok(()), // Fallback: no-op
         };
 
-        let i8_type = self.context.i8_type();
-        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let base_ptr = builder
             .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
             .map_err(|e| crate::error::factory::llvm_cast_failed("cast struct ptr", &e))?;
-        let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
+        let offset_val = self.context_ref().i32_type().const_int(byte_offset as u64, false);
         let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
             .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
         let llvm_field_ty = self.llvm_type(field_type)?;
@@ -175,7 +175,7 @@ impl LlvmBackend {
         let typed_ptr = builder
             .build_pointer_cast(
                 field_ptr,
-                self.context.ptr_type(inkwell::AddressSpace::default()),
+                self.context_ref().ptr_type(inkwell::AddressSpace::default()),
                 "field_typed_ptr",
             )
             .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
@@ -198,8 +198,8 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        let i8_type = self.context.i8_type();
-        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let array_type = i8_type.array_type(closure_size);
         let alloc = builder
             .build_alloca(array_type, "closure")
@@ -215,7 +215,7 @@ impl LlvmBackend {
         let func_ptr_cast = builder
             .build_pointer_cast(func_ptr, i8_ptr_type, "fn_ptr_cast")
             .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn ptr", &e))?;
-        let ptr_slot_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let ptr_slot_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let fn_slot = builder
             .build_pointer_cast(closure_ptr, ptr_slot_type, "fn_slot")
             .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn slot", &e))?;
@@ -225,7 +225,7 @@ impl LlvmBackend {
 
         for ((offset, field_type), value) in capture_offsets.iter().zip(capture_types.iter()).zip(captures.iter()) {
             let capture_val = self.get_vreg(value, vreg_map)?;
-            let offset_val = self.context.i32_type().const_int(*offset as u64, false);
+            let offset_val = self.context_ref().i32_type().const_int(*offset as u64, false);
             let field_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
@@ -233,7 +233,7 @@ impl LlvmBackend {
             let typed_ptr = builder
                 .build_pointer_cast(
                     field_ptr,
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                    self.context_ref().ptr_type(inkwell::AddressSpace::default()),
                     "cap_typed_ptr",
                 )
                 .map_err(|e| crate::error::factory::llvm_cast_failed("cast cap ptr", &e))?;

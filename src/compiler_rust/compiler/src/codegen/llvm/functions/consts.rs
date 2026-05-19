@@ -41,7 +41,7 @@ impl LlvmBackend {
         value: f64,
         vreg_map: &mut VRegMap,
     ) -> Result<(), CompileError> {
-        let const_val = self.context.f64_type().const_float(value);
+        let const_val = self.context_ref().f64_type().const_float(value);
         vreg_map.insert(dest, const_val.into());
         Ok(())
     }
@@ -78,7 +78,7 @@ impl LlvmBackend {
             }
         } else {
             // Create global string constant with private linkage to avoid cross-module collisions
-            let str_val = self.context.const_string(value.as_bytes(), false);
+            let str_val = self.context_ref().const_string(value.as_bytes(), false);
             let global = module.add_global(str_val.get_type(), None, "str");
             global.set_initializer(&str_val);
             global.set_constant(true);

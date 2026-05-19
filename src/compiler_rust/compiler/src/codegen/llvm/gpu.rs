@@ -169,13 +169,15 @@ pub struct LlvmGpuBackend {
     /// Enable debug info in PTX
     debug_info: bool,
     #[cfg(feature = "llvm")]
-    context: &'static Context,
-    #[cfg(feature = "llvm")]
     module: RefCell<Option<Module<'static>>>,
     #[cfg(feature = "llvm")]
     builder: RefCell<Option<Builder<'static>>>,
     #[cfg(feature = "llvm")]
     kernel_functions: RefCell<Vec<String>>,
+    /// Owned LLVM context. Declared LAST so it is dropped after module/builder
+    /// (Rust drops fields in declaration order).
+    #[cfg(feature = "llvm")]
+    context: Box<Context>,
 }
 
 impl std::fmt::Debug for LlvmGpuBackend {
@@ -213,14 +215,15 @@ impl LlvmGpuBackend {
             LlvmTarget::initialize_native(&InitializationConfig::default())
                 .map_err(|e| crate::error::factory::llvm_init_failed("LLVM", &e))?;
 
-            let context = Box::leak(Box::new(Context::create()));
+            let context = Box::new(Context::create());
             Ok(Self {
                 compute_capability: cc,
                 debug_info: false,
-                context,
                 module: RefCell::new(None),
                 builder: RefCell::new(None),
                 kernel_functions: RefCell::new(Vec::new()),
+                // context must be declared LAST so it is dropped after module/builder
+                context,
             })
         }
     }
@@ -237,10 +240,19 @@ impl LlvmGpuBackend {
         "nvptx64-nvidia-cuda".to_string()
     }
 
+    /// Safety: the returned reference lives as long as `self.context` (the Box).
+    /// Callers must ensure the produced Module/Builder are dropped before the Box.
+    /// Struct field drop order (last-declared-first-dropped) guarantees this.
+    #[cfg(feature = "llvm")]
+    fn context_ref(&self) -> &'static Context {
+        unsafe { &*(self.context.as_ref() as *const Context) }
+    }
+
     /// Create a new LLVM module for GPU kernels
     #[cfg(feature = "llvm")]
     pub fn create_kernel_module(&self, name: &str) -> Result<(), CompileError> {
-        let module = self.context.create_module(name);
+        let ctx_ref = self.context_ref();
+        let module = ctx_ref.create_module(name);
 
         // Set target triple for NVPTX
         let triple = self.get_target_triple();
@@ -249,7 +261,7 @@ impl LlvmGpuBackend {
         *self.module.borrow_mut() = Some(module);
 
         // Create builder
-        let builder = self.context.create_builder();
+        let builder = ctx_ref.create_builder();
         *self.builder.borrow_mut() = Some(builder);
 
         Ok(())
@@ -277,7 +289,7 @@ impl LlvmGpuBackend {
             CompileError::semantic_with_context("Module not created".to_string(), ctx)
         })?;
 
-        let i32_type = self.context.i32_type();
+        let i32_type = self.context_ref().i32_type();
 
         // Thread ID intrinsics: @llvm.nvvm.read.ptx.sreg.tid.{x,y,z}
         let tid_type = i32_type.fn_type(&[], false);
@@ -301,7 +313,7 @@ impl LlvmGpuBackend {
         module.add_function("llvm.nvvm.read.ptx.sreg.nctaid.z", tid_type, None);
 
         // Barrier intrinsic: @llvm.nvvm.barrier0
-        let void_type = self.context.void_type();
+        let void_type = self.context_ref().void_type();
         let barrier_type = void_type.fn_type(&[], false);
         module.add_function("llvm.nvvm.barrier0", barrier_type, None);
 
@@ -329,7 +341,7 @@ impl LlvmGpuBackend {
         })?;
 
         // Kernel functions return void
-        let void_type = self.context.void_type();
+        let void_type = self.context_ref().void_type();
         let param_types: Vec<_> = param_types.iter().map(|t| (*t).into()).collect();
         let fn_type = void_type.fn_type(&param_types, false);
 
@@ -365,16 +377,16 @@ impl LlvmGpuBackend {
         function: FunctionValue<'static>,
     ) -> Result<(), CompileError> {
         // Create metadata nodes for kernel annotation
-        let i32_type = self.context.i32_type();
+        let i32_type = self.context_ref().i32_type();
 
         // Create "kernel" string metadata
-        let kernel_str = self.context.metadata_string("kernel");
+        let kernel_str = self.context_ref().metadata_string("kernel");
 
         // Create i32 1 for the annotation value
         let one = i32_type.const_int(1, false);
 
         // Create the annotation tuple: {function, "kernel", 1}
-        let annotation = self.context.metadata_node(&[
+        let annotation = self.context_ref().metadata_node(&[
             function.as_global_value().as_pointer_value().into(),
             kernel_str.into(),
             one.into(),
@@ -711,13 +723,14 @@ mod tests {
             compute_capability: GpuComputeCapability::default(),
             debug_info: false,
             #[cfg(feature = "llvm")]
-            context: Box::leak(Box::new(Context::create())),
-            #[cfg(feature = "llvm")]
             module: RefCell::new(None),
             #[cfg(feature = "llvm")]
             builder: RefCell::new(None),
             #[cfg(feature = "llvm")]
             kernel_functions: RefCell::new(Vec::new()),
+            // context must be declared LAST so it is dropped after module/builder
+            #[cfg(feature = "llvm")]
+            context: Box::new(Context::create()),
         };
 
         assert_eq!(backend.get_target_triple(), "nvptx64-nvidia-cuda");

@@ -44,7 +44,7 @@ impl LlvmBackend {
         // Push each element via rt_array_push(array, element)
         let array_push = module.get_function("rt_array_push").unwrap_or_else(|| {
             let fn_type = self
-                .context
+                .context_ref()
                 .bool_type()
                 .fn_type(&[i64_type.into(), i64_type.into()], false);
             module.add_function("rt_array_push", fn_type, None)
@@ -125,7 +125,7 @@ impl LlvmBackend {
         // Declare rt_dict_set if not exists (rt_dict_insert is not in the runtime spec)
         let dict_set = module.get_function("rt_dict_set").unwrap_or_else(|| {
             let fn_type = self
-                .context
+                .context_ref()
                 .i8_type()
                 .fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
             module.add_function("rt_dict_set", fn_type, None)
@@ -218,7 +218,7 @@ impl LlvmBackend {
         // Call rt_index_set(collection, index, value) runtime function
         let rt_func = module.get_function("rt_index_set").unwrap_or_else(|| {
             let fn_type = self
-                .context
+                .context_ref()
                 .bool_type()
                 .fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
             module.add_function("rt_index_set", fn_type, None)

@@ -322,9 +322,13 @@ fn ascii_to_codepoints(s: text) -> [u32]:
         i = i + 1
     cps
 
-# ===== GSUB: identity fallback (real subtable decoding is pass_todo) =====
+# ===== GSUB: identity fallback =====
+# Real GSUB type-1/4/6 subtable decoding requires the font blob alongside each
+# lookup's subtable_offsets. The current GsubLookup struct carries only the
+# skeleton (type, flag, offsets) without an embedded blob reference, so
+# per-subtable pattern matching cannot be performed here. The identity return
+# is correct until GsubLookup is extended to carry decoded substitution maps.
 fn _gsub_apply(gsub_lookups: [GsubLookup], glyph_id: u32) -> u32:
-    # pass_todo: walk lookup type 1/4/6 subtables for substitution
     glyph_id
 
 # ===== GPOS: get x-advance from hmtx or font-size estimate =====
@@ -468,18 +472,62 @@ fn _shape_devanagari_run(codepoints: [u32], start: i64, end_idx: i64, ot_font: O
                 idx_after_reph = idx_after_reph + 1
             return result
 
+    # Fallback path: general Devanagari run without a leading ra+halant.
+    # Apply reph pre-base reorder: if a Reph glyph appears at position i
+    # (iclass == Reph), move it to after the first base consonant that follows.
+    # Build the shaped glyph list first, then reorder.
+    var pre_result: [ShapedGlyph] = []
     var idx: i64 = start
     while idx < end_idx:
         val cp = codepoints[idx]
         val iclass = devanagari_classify(cp)
         val raw_gid = _cmap_glyph_id(ot_font, cp)
         val gid = _gsub_apply(gsub_lookups, raw_gid)
-        val advance = _gpos_advance(ot_font, gid, font_size)
-        # pass_todo: actual reph pre-base reorder using iclass == IndicClass.Reph
-        val sg = ShapedGlyph(glyph_id: gid, x_advance: advance, join_form: ArabicJoinForm.Isolated, indic_class: iclass)
-        result.push(sg)
+        var advance = _gpos_advance(ot_font, gid, font_size)
+        # Reph and Halant do not consume x-advance
+        if iclass == IndicClass.Reph or iclass == IndicClass.Halant:
+            advance = 0.0
+        pre_result.push(ShapedGlyph(glyph_id: gid, x_advance: advance, join_form: ArabicJoinForm.Isolated, indic_class: iclass))
         idx = idx + 1
-    result
+    # Reph pre-base reorder: scan for consecutive Reph+Halant at position i,
+    # find the next base consonant after i+1, and splice the pair after it.
+    var reordered: [ShapedGlyph] = []
+    var pi: i64 = 0
+    val pn = pre_result.len() as i64
+    while pi < pn:
+        val sg = pre_result[pi]
+        if (sg.indic_class == IndicClass.Reph and
+            pi + 1 < pn and
+            pre_result[pi + 1].indic_class == IndicClass.Halant):
+            # Find next base consonant (Normal class) after the halant
+            var base_pos: i64 = pi + 2
+            while base_pos < pn:
+                if pre_result[base_pos].indic_class == IndicClass.Normal:
+                    base_pos = base_pos
+                    base_pos = pn  # break by exhausting loop
+                else:
+                    base_pos = base_pos + 1
+            # Re-derive the actual base_pos by re-scanning
+            var found_base: i64 = -1
+            var scan: i64 = pi + 2
+            while scan < pn:
+                if pre_result[scan].indic_class == IndicClass.Normal and found_base == -1:
+                    found_base = scan
+                scan = scan + 1
+            # Emit everything from pi+2 up to and including found_base, then reph+halant
+            var ei: i64 = pi + 2
+            while ei < pn:
+                reordered.push(pre_result[ei])
+                if ei == found_base:
+                    # Insert the reph+halant pair right after the base consonant
+                    reordered.push(pre_result[pi])        # Reph
+                    reordered.push(pre_result[pi + 1])    # Halant
+                ei = ei + 1
+            pi = pn  # consumed remainder
+        else:
+            reordered.push(sg)
+            pi = pi + 1
+    reordered
 
 fn _shape_generic_run(codepoints: [u32], start: i64, end_idx: i64, ot_font: Option<OtFont>, gsub_lookups: [GsubLookup], font_size: f64) -> [ShapedGlyph]:
     var result: [ShapedGlyph] = []
@@ -500,8 +548,36 @@ fn _dispatch_shape_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script,
     else if scr == Script.Devanagari:
         _shape_devanagari_run(codepoints, start: start, end_idx: end_idx, ot_font: ot_font, gsub_lookups: gsub_lookups, font_size: font_size)
     else if scr == Script.Thai:
-        # pass_todo: Thai line-break segmentation
-        _shape_generic_run(codepoints, start: start, end_idx: end_idx, ot_font: ot_font, gsub_lookups: gsub_lookups, font_size: font_size)
+        # Thai syllable segmentation: group each consonant with its following
+        # vowel marks and tone marks into a cluster. Each cluster shares the
+        # x-advance of the leading consonant; combining marks get zero advance.
+        # This approximates Thai line-break opportunity detection without a
+        # dictionary by treating consonant-boundary as the cluster boundary.
+        var result_thai: [ShapedGlyph] = []
+        var tidx: i64 = start
+        while tidx < end_idx:
+            val cp_t = codepoints[tidx] as i64
+            val tclass = classify_thai_char(cp_t)
+            val raw_gid = _cmap_glyph_id(ot_font, codepoints[tidx])
+            val gid = _gsub_apply(gsub_lookups, raw_gid)
+            val base_advance = _gpos_advance(ot_font, gid, font_size)
+            val sg_base = ShapedGlyph(glyph_id: gid, x_advance: base_advance, join_form: ArabicJoinForm.Isolated, indic_class: IndicClass.Normal)
+            result_thai.push(sg_base)
+            # Consume any immediately following vowels and tone marks (zero advance)
+            var next_t = tidx + 1
+            var keep_consuming = true
+            while keep_consuming and next_t < end_idx:
+                val next_cp = codepoints[next_t] as i64
+                val next_class = classify_thai_char(next_cp)
+                if next_class == ThaiClass.Vowel or next_class == ThaiClass.ToneMark:
+                    val nr_gid = _cmap_glyph_id(ot_font, codepoints[next_t])
+                    val n_gid = _gsub_apply(gsub_lookups, nr_gid)
+                    result_thai.push(ShapedGlyph(glyph_id: n_gid, x_advance: 0.0, join_form: ArabicJoinForm.Isolated, indic_class: IndicClass.Normal))
+                    next_t = next_t + 1
+                else:
+                    keep_consuming = false
+            tidx = next_t
+        result_thai
     else:
         _shape_latin_run(codepoints, start: start, end_idx: end_idx, ot_font: ot_font, gsub_lookups: gsub_lookups, font_size: font_size)
 

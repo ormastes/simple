@@ -204,7 +204,7 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("or", &e));
         }
 
-        let f64_type = self.context.f64_type();
+        let f64_type = self.context_ref().f64_type();
         let f64_val = match val {
             inkwell::values::BasicValueEnum::FloatValue(fv) if fv.get_type() == f64_type => fv,
             inkwell::values::BasicValueEnum::FloatValue(fv) => builder
@@ -247,7 +247,7 @@ impl LlvmBackend {
         module: &Module<'static>,
     ) -> Result<inkwell::values::FloatValue<'static>, CompileError> {
         let rv_type = self.runtime_int_type();
-        let f64_type = self.context.f64_type();
+        let f64_type = self.context_ref().f64_type();
 
         let int_val = self
             .coerce_value_to_type(val, Some(rv_type.into()), builder)?
@@ -346,7 +346,7 @@ impl LlvmBackend {
         // Create basic blocks for each MIR block
         let mut llvm_blocks = HashMap::new();
         for block in &func.blocks {
-            let bb = self.context.append_basic_block(function, &format!("bb{}", block.id.0));
+            let bb = self.context_ref().append_basic_block(function, &format!("bb{}", block.id.0));
             llvm_blocks.insert(block.id, bb);
         }
 
@@ -740,8 +740,8 @@ impl LlvmBackend {
                 self.compile_call(*dest, target, args, vreg_map, builder, module)?;
             }
             MirInst::InlineAsm { instructions, .. } => {
-                let fn_type = self.context.void_type().fn_type(&[], false);
-                let asm = self.context.create_inline_asm(
+                let fn_type = self.context_ref().void_type().fn_type(&[], false);
+                let asm = self.context_ref().create_inline_asm(
                     fn_type,
                     instructions.join("\n"),
                     String::new(),
@@ -1027,14 +1027,14 @@ impl LlvmBackend {
                         crate::mir::MirLiteral::String(s) => {
                             // Create string constant and compare with rt_string_eq
                             let bytes = s.as_bytes();
-                            let global_val = self.context.const_string(bytes, false);
+                            let global_val = self.context_ref().const_string(bytes, false);
                             let global = module.add_global(global_val.get_type(), None, "pat_str_const");
                             global.set_initializer(&global_val);
                             global.set_constant(true);
                             let str_ptr = builder
                                 .build_pointer_cast(
                                     global.as_pointer_value(),
-                                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                                    self.context_ref().ptr_type(inkwell::AddressSpace::default()),
                                     "str_ptr",
                                 )
                                 .map_err(|e| format!("pattern str ptr: {e}"))?;
@@ -1204,7 +1204,7 @@ impl LlvmBackend {
             MirInst::EnumUnit { dest, variant_name, .. } => {
                 // rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue
                 let i64_t = self.runtime_int_type();
-                let i32_t = self.context.i32_type();
+                let i32_t = self.context_ref().i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -1239,7 +1239,7 @@ impl LlvmBackend {
                 ..
             } => {
                 let i64_t = self.runtime_int_type();
-                let i32_t = self.context.i32_type();
+                let i32_t = self.context_ref().i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -1313,7 +1313,7 @@ impl LlvmBackend {
                 type_index,
             } => {
                 let i64_t = self.runtime_int_type();
-                let i32_t = self.context.i32_type();
+                let i32_t = self.context_ref().i32_type();
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)
@@ -1350,7 +1350,7 @@ impl LlvmBackend {
             // Error handling instructions — use rt_enum_new for proper enum representation
             MirInst::OptionSome { dest, value } => {
                 let i64_t = self.runtime_int_type();
-                let i32_t = self.context.i32_type();
+                let i32_t = self.context_ref().i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -1382,7 +1382,7 @@ impl LlvmBackend {
             }
             MirInst::OptionNone { dest } => {
                 let i64_t = self.runtime_int_type();
-                let i32_t = self.context.i32_type();
+                let i32_t = self.context_ref().i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -1413,7 +1413,7 @@ impl LlvmBackend {
             }
             MirInst::ResultOk { dest, value } => {
                 let i64_t = self.runtime_int_type();
-                let i32_t = self.context.i32_type();
+                let i32_t = self.context_ref().i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -1445,7 +1445,7 @@ impl LlvmBackend {
             }
             MirInst::ResultErr { dest, value } => {
                 let i64_t = self.runtime_int_type();
-                let i32_t = self.context.i32_type();
+                let i32_t = self.context_ref().i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -1683,7 +1683,7 @@ impl LlvmBackend {
                             if s.is_empty() {
                                 continue;
                             }
-                            let str_val = self.context.const_string(s.as_bytes(), false);
+                            let str_val = self.context_ref().const_string(s.as_bytes(), false);
                             let global = module.add_global(str_val.get_type(), None, "fstr");
                             global.set_initializer(&str_val);
                             global.set_constant(true);
@@ -1720,7 +1720,7 @@ impl LlvmBackend {
                             let val = self.get_vreg(vreg, vreg_map)?;
                             let coerced = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                             // Create format spec string constant
-                            let spec_val = self.context.const_string(format_spec.as_bytes(), false);
+                            let spec_val = self.context_ref().const_string(format_spec.as_bytes(), false);
                             let spec_global = module.add_global(spec_val.get_type(), None, "fmtspec");
                             spec_global.set_initializer(&spec_val);
                             spec_global.set_constant(true);
@@ -1845,10 +1845,10 @@ impl LlvmBackend {
                 ) {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let int_type = match method {
-                        "to_u8" | "to_i8" => self.context.i8_type(),
-                        "to_u16" | "to_i16" => self.context.i16_type(),
-                        "to_u32" | "to_i32" => self.context.i32_type(),
-                        _ => self.context.i64_type(),
+                        "to_u8" | "to_i8" => self.context_ref().i8_type(),
+                        "to_u16" | "to_i16" => self.context_ref().i16_type(),
+                        "to_u32" | "to_i32" => self.context_ref().i32_type(),
+                        _ => self.context_ref().i64_type(),
                     };
                     let converted = self.coerce_value_to_type(recv_val, Some(int_type.into()), builder)?;
                     if let Some(d) = dest {
@@ -2028,7 +2028,7 @@ impl LlvmBackend {
                             | "rt_array_all"
                     );
                     let fn_type = if returns_bool {
-                        self.context.bool_type().fn_type(&param_types, false)
+                        self.context_ref().bool_type().fn_type(&param_types, false)
                     } else {
                         i64_type.fn_type(&param_types, false)
                     };
@@ -2487,12 +2487,12 @@ mod tests {
             let module = module_ref.as_ref().unwrap();
             let builder_ref = backend.builder.borrow();
             let builder = builder_ref.as_ref().unwrap();
-            let fn_type = backend.context.void_type().fn_type(&[], false);
+            let fn_type = backend.context_ref().void_type().fn_type(&[], false);
             let func = module.add_function("test", fn_type, None);
-            let block = backend.context.append_basic_block(func, "entry");
+            let block = backend.context_ref().append_basic_block(func, "entry");
             builder.position_at_end(block);
 
-            let float_val = backend.context.f64_type().const_float(1.5);
+            let float_val = backend.context_ref().f64_type().const_float(1.5);
             let boxed = backend
                 .build_box_float_value(float_val.into(), builder, module)
                 .unwrap();

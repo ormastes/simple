@@ -103,7 +103,7 @@ impl LlvmEmitter<'_> {
         name: &str,
         args: &[BasicValueEnum<'static>],
     ) -> Result<BasicValueEnum<'static>, String> {
-        let result = self.call_runtime_with_return(name, args, self.backend.context.i8_type().into())?;
+        let result = self.call_runtime_with_return(name, args, self.backend.context_ref().i8_type().into())?;
         let widened = self
             .builder
             .build_int_z_extend(result.into_int_value(), self.backend.runtime_int_type(), "bool_to_rv")
@@ -118,7 +118,7 @@ impl LlvmEmitter<'_> {
         let func = self.module.get_function(name).unwrap_or_else(|| {
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                 args.iter().map(|_| i64_type.into()).collect();
-            let fn_type = self.backend.context.void_type().fn_type(&param_types, false);
+            let fn_type = self.backend.context_ref().void_type().fn_type(&param_types, false);
             self.module.add_function(name, fn_type, None)
         });
 
@@ -136,7 +136,7 @@ impl LlvmEmitter<'_> {
 
     /// Helper to create an i32 constant.
     fn i32_const(&self, value: i32) -> BasicValueEnum<'static> {
-        self.backend.context.i32_type().const_int(value as u64, true).into()
+        self.backend.context_ref().i32_type().const_int(value as u64, true).into()
     }
 
     fn method_leaf_name(func_name: &str) -> &str {
@@ -209,7 +209,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_const_float(&mut self, dest: VReg, value: f64) -> Result<(), String> {
-        let val = self.backend.context.f64_type().const_float(value);
+        let val = self.backend.context_ref().f64_type().const_float(value);
         self.set(dest, val.into());
         Ok(())
     }
@@ -222,7 +222,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_const_string(&mut self, dest: VReg, value: &str) -> Result<(), String> {
-        let str_val = self.backend.context.const_string(value.as_bytes(), false);
+        let str_val = self.backend.context_ref().const_string(value.as_bytes(), false);
         let global = self.module.add_global(str_val.get_type(), None, "str");
         global.set_initializer(&str_val);
         global.set_constant(true);
@@ -231,7 +231,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_const_symbol(&mut self, dest: VReg, value: &str) -> Result<(), String> {
-        let str_val = self.backend.context.const_string(value.as_bytes(), false);
+        let str_val = self.backend.context_ref().const_string(value.as_bytes(), false);
         let global = self
             .module
             .add_global(str_val.get_type(), None, &format!("sym_{}", value));
@@ -360,7 +360,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let base_val = self.get(base)?;
         let idx_val = self.get(index)?;
         if let (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(idx)) = (base_val, idx_val) {
-            let i8_type = self.backend.context.i8_type();
+            let i8_type = self.backend.context_ref().i8_type();
             let gep = unsafe {
                 self.builder
                     .build_gep(i8_type, ptr, &[idx], "gep")
@@ -449,8 +449,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
     fn emit_interp_call(&mut self, dest: &Option<VReg>, func_name: &str, args: &[VReg]) -> Result<(), String> {
         let i64_type = self.backend.runtime_int_type();
-        let i8_type = self.backend.context.i8_type();
-        let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.backend.context_ref().i8_type();
+        let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
         let slot_bytes = (i64_type.get_bit_width() / 8) as u64;
 
         let interp_call = self.module.get_function("rt_interp_call").unwrap_or_else(|| {
@@ -462,7 +462,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         });
 
         let name_bytes = func_name.as_bytes();
-        let name_const = self.backend.context.const_string(name_bytes, false);
+        let name_const = self.backend.context_ref().const_string(name_bytes, false);
         let name_global = self.module.add_global(name_const.get_type(), None, "func_name");
         name_global.set_initializer(&name_const);
         name_global.set_constant(true);
@@ -509,7 +509,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 };
                 let offset = self
                     .backend
-                    .context
+                    .context_ref()
                     .i32_type()
                     .const_int((index as u64) * slot_bytes, false);
                 let slot_ptr = unsafe {
@@ -521,7 +521,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                     .builder
                     .build_pointer_cast(
                         slot_ptr,
-                        self.backend.context.ptr_type(inkwell::AddressSpace::default()),
+                        self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
                         "interp_argv_typed_ptr",
                     )
                     .map_err(|e| format!("LLVM pointer cast failed: {}", e))?;
@@ -568,8 +568,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_inline_asm(&mut self, instructions: &[String], volatile: bool) -> Result<(), String> {
-        let fn_type = self.backend.context.void_type().fn_type(&[], false);
-        let asm = self.backend.context.create_inline_asm(
+        let fn_type = self.backend.context_ref().void_type().fn_type(&[], false);
+        let asm = self.backend.context_ref().create_inline_asm(
             fn_type,
             instructions.join("\n"),
             String::new(),
@@ -594,8 +594,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         _effect: Effect,
     ) -> Result<(), String> {
         let callee_val = self.get(callee)?;
-        let i8_type = self.backend.context.i8_type();
-        let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.backend.context_ref().i8_type();
+        let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
 
         if let BasicValueEnum::PointerValue(closure_ptr) = callee_val {
             // Load function pointer from closure (at offset 0)
@@ -603,7 +603,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .builder
                 .build_pointer_cast(closure_ptr, i8_ptr_type, "closure_ptr")
                 .map_err(|e| format!("cast failed: {}", e))?;
-            let offset_val = self.backend.context.i32_type().const_int(0, false);
+            let offset_val = self.backend.context_ref().i32_type().const_int(0, false);
             let fn_ptr_slot = unsafe {
                 self.builder
                     .build_gep(i8_type, base_ptr, &[offset_val], "fn_ptr_slot")
@@ -613,7 +613,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .builder
                 .build_pointer_cast(
                     fn_ptr_slot,
-                    self.backend.context.ptr_type(inkwell::AddressSpace::default()),
+                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
                     "fn_ptr_slot_cast",
                 )
                 .map_err(|e| format!("cast failed: {}", e))?;
@@ -636,7 +636,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 let llvm_param_types = llvm_param_types?;
 
                 let fn_type = if return_type == TypeId::VOID {
-                    self.backend.context.void_type().fn_type(&llvm_param_types, false)
+                    self.backend.context_ref().void_type().fn_type(&llvm_param_types, false)
                 } else {
                     let ret_llvm = self.backend.llvm_type(&return_type).map_err(|e| e.to_string())?;
                     match ret_llvm {
@@ -678,8 +678,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         for (i, elem) in elements.iter().enumerate() {
             let elem_val = self.get(*elem)?;
             let indices = [
-                self.backend.context.i32_type().const_int(0, false),
-                self.backend.context.i32_type().const_int(i as u64, false),
+                self.backend.context_ref().i32_type().const_int(0, false),
+                self.backend.context_ref().i32_type().const_int(i as u64, false),
             ];
             let gep = unsafe {
                 self.builder
@@ -697,7 +697,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     fn emit_tuple_lit(&mut self, dest: VReg, elements: &[VReg]) -> Result<(), String> {
         let i64_type = self.backend.runtime_int_type();
         let field_types: Vec<inkwell::types::BasicTypeEnum> = elements.iter().map(|_| i64_type.into()).collect();
-        let struct_type = self.backend.context.struct_type(&field_types, false);
+        let struct_type = self.backend.context_ref().struct_type(&field_types, false);
         let alloc = self
             .builder
             .build_alloca(struct_type, "tuple")
@@ -724,7 +724,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
     fn emit_dict_lit(&mut self, dest: VReg, keys: &[VReg], values: &[VReg]) -> Result<(), String> {
         let i64_type = self.backend.runtime_int_type();
-        let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
 
         let dict_new = self.module.get_function("rt_dict_new").unwrap_or_else(|| {
             let fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
@@ -734,7 +734,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let dict_insert = self.module.get_function("rt_dict_insert").unwrap_or_else(|| {
             let fn_type = self
                 .backend
-                .context
+                .context_ref()
                 .void_type()
                 .fn_type(&[i8_ptr_type.into(), i64_type.into(), i64_type.into()], false);
             self.module.add_function("rt_dict_insert", fn_type, None)
@@ -767,7 +767,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         if let (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(idx)) = (coll_val, idx_val) {
             let i64_type = self.backend.runtime_int_type();
             let arr_type = i64_type.array_type(0);
-            let indices = [self.backend.context.i32_type().const_int(0, false), idx];
+            let indices = [self.backend.context_ref().i32_type().const_int(0, false), idx];
             let gep = unsafe {
                 self.builder
                     .build_gep(arr_type, ptr, &indices, "elem_ptr")
@@ -790,7 +790,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         if let (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(idx)) = (coll_val, idx_val) {
             let i64_type = self.backend.runtime_int_type();
             let arr_type = i64_type.array_type(0);
-            let indices = [self.backend.context.i32_type().const_int(0, false), idx];
+            let indices = [self.backend.context_ref().i32_type().const_int(0, false), idx];
             let gep = unsafe {
                 self.builder
                     .build_gep(arr_type, ptr, &indices, "elem_ptr")
@@ -812,7 +812,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         step: Option<VReg>,
     ) -> Result<(), String> {
         let i64_type = self.backend.runtime_int_type();
-        let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
 
         let slice_fn = self.module.get_function("rt_slice").unwrap_or_else(|| {
             let fn_type = i8_ptr_type.fn_type(
@@ -1040,8 +1040,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         field_types: &[TypeId],
         field_values: &[VReg],
     ) -> Result<(), String> {
-        let i8_type = self.backend.context.i8_type();
-        let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.backend.context_ref().i8_type();
+        let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
         let array_type = i8_type.array_type(struct_size as u32);
         let alloc = self
             .builder
@@ -1054,7 +1054,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
         for ((offset, field_type), value) in field_offsets.iter().zip(field_types.iter()).zip(field_values.iter()) {
             let field_val = self.get(*value)?;
-            let offset_val = self.backend.context.i32_type().const_int(*offset as u64, false);
+            let offset_val = self.backend.context_ref().i32_type().const_int(*offset as u64, false);
             let field_ptr = unsafe {
                 self.builder
                     .build_gep(i8_type, struct_ptr, &[offset_val], "field_ptr")
@@ -1064,7 +1064,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .builder
                 .build_pointer_cast(
                     field_ptr,
-                    self.backend.context.ptr_type(inkwell::AddressSpace::default()),
+                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
                     "field_typed_ptr",
                 )
                 .map_err(|e| format!("cast failed: {}", e))?;
@@ -1085,13 +1085,13 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     ) -> Result<(), String> {
         let obj_val = self.get(object)?;
         if let BasicValueEnum::PointerValue(ptr) = obj_val {
-            let i8_type = self.backend.context.i8_type();
-            let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
+            let i8_type = self.backend.context_ref().i8_type();
+            let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
             let base_ptr = self
                 .builder
                 .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
                 .map_err(|e| format!("cast failed: {}", e))?;
-            let offset_val = self.backend.context.i32_type().const_int(byte_offset as u64, false);
+            let offset_val = self.backend.context_ref().i32_type().const_int(byte_offset as u64, false);
             let field_ptr = unsafe {
                 self.builder
                     .build_gep(i8_type, base_ptr, &[offset_val], "field_ptr")
@@ -1102,7 +1102,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .builder
                 .build_pointer_cast(
                     field_ptr,
-                    self.backend.context.ptr_type(inkwell::AddressSpace::default()),
+                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
                     "field_typed_ptr",
                 )
                 .map_err(|e| format!("cast failed: {}", e))?;
@@ -1127,13 +1127,13 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let obj_val = self.get(object)?;
         let val = self.get(value)?;
         if let BasicValueEnum::PointerValue(ptr) = obj_val {
-            let i8_type = self.backend.context.i8_type();
-            let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
+            let i8_type = self.backend.context_ref().i8_type();
+            let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
             let base_ptr = self
                 .builder
                 .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
                 .map_err(|e| format!("cast failed: {}", e))?;
-            let offset_val = self.backend.context.i32_type().const_int(byte_offset as u64, false);
+            let offset_val = self.backend.context_ref().i32_type().const_int(byte_offset as u64, false);
             let field_ptr = unsafe {
                 self.builder
                     .build_gep(i8_type, base_ptr, &[offset_val], "field_ptr")
@@ -1143,7 +1143,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .builder
                 .build_pointer_cast(
                     field_ptr,
-                    self.backend.context.ptr_type(inkwell::AddressSpace::default()),
+                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
                     "field_typed_ptr",
                 )
                 .map_err(|e| format!("cast failed: {}", e))?;
@@ -1167,8 +1167,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         capture_offsets: &[u32],
         captures: &[VReg],
     ) -> Result<(), String> {
-        let i8_type = self.backend.context.i8_type();
-        let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.backend.context_ref().i8_type();
+        let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
         let array_type = i8_type.array_type(closure_size as u32);
         let alloc = self
             .builder
@@ -1193,7 +1193,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .builder
             .build_pointer_cast(
                 closure_ptr,
-                self.backend.context.ptr_type(inkwell::AddressSpace::default()),
+                self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
                 "fn_slot",
             )
             .map_err(|e| format!("cast failed: {}", e))?;
@@ -1204,7 +1204,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         // Store captured values at their offsets
         for (offset, value) in capture_offsets.iter().zip(captures.iter()) {
             let capture_val = self.get(*value)?;
-            let offset_val = self.backend.context.i32_type().const_int(*offset as u64, false);
+            let offset_val = self.backend.context_ref().i32_type().const_int(*offset as u64, false);
             let field_ptr = unsafe {
                 self.builder
                     .build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr")
@@ -1214,7 +1214,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .builder
                 .build_pointer_cast(
                     field_ptr,
-                    self.backend.context.ptr_type(inkwell::AddressSpace::default()),
+                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
                     "cap_typed_ptr",
                 )
                 .map_err(|e| format!("cast failed: {}", e))?;
@@ -1244,10 +1244,10 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         ) {
             let recv = self.get(receiver)?;
             let int_type = match method {
-                "to_u8" | "to_i8" => self.backend.context.i8_type(),
-                "to_u16" | "to_i16" => self.backend.context.i16_type(),
-                "to_u32" | "to_i32" => self.backend.context.i32_type(),
-                _ => self.backend.context.i64_type(),
+                "to_u8" | "to_i8" => self.backend.context_ref().i8_type(),
+                "to_u16" | "to_i16" => self.backend.context_ref().i16_type(),
+                "to_u32" | "to_i32" => self.backend.context_ref().i32_type(),
+                _ => self.backend.context_ref().i64_type(),
             };
             let value = match recv {
                 BasicValueEnum::IntValue(v) => {

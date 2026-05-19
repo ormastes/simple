@@ -186,8 +186,8 @@ impl LlvmBackend {
             .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
 
         let i64_type = self.runtime_int_type();
-        let i8_type = self.context.i8_type();
-        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let invalid = i64_type.const_int((-1i64) as u64, true);
 
         let value = self
@@ -218,9 +218,9 @@ impl LlvmBackend {
             .build_int_compare(IntPredicate::EQ, tag, i64_type.const_int(1, false), "len_is_heap")
             .map_err(|e| crate::error::factory::llvm_build_failed("len heap check", &e))?;
 
-        let type_block = self.context.append_basic_block(function, "len_type");
-        let len_block = self.context.append_basic_block(function, "len_load");
-        let done_block = self.context.append_basic_block(function, "len_done");
+        let type_block = self.context_ref().append_basic_block(function, "len_type");
+        let len_block = self.context_ref().append_basic_block(function, "len_load");
+        let done_block = self.context_ref().append_basic_block(function, "len_done");
         builder
             .build_conditional_branch(is_heap, type_block, done_block)
             .map_err(|e| crate::error::factory::llvm_build_failed("len heap branch", &e))?;
@@ -389,8 +389,8 @@ impl LlvmBackend {
             .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
 
         let i64_type = self.runtime_int_type();
-        let i8_type = self.context.i8_type();
-        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
 
         let array = self
             .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
@@ -400,9 +400,9 @@ impl LlvmBackend {
             .into_int_value();
 
         let tag_mask = i64_type.const_int(7, false);
-        let bounds_block = self.context.append_basic_block(function, "bytes_bounds");
-        let load_block = self.context.append_basic_block(function, "bytes_load");
-        let done_block = self.context.append_basic_block(function, "bytes_done");
+        let bounds_block = self.context_ref().append_basic_block(function, "bytes_bounds");
+        let load_block = self.context_ref().append_basic_block(function, "bytes_load");
+        let done_block = self.context_ref().append_basic_block(function, "bytes_done");
         let ptr_bits = builder
             .build_and(array, i64_type.const_int(!7u64, false), "bytes_ptr_bits")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes ptr bits", &e))?;
@@ -422,7 +422,7 @@ impl LlvmBackend {
             let is_heap = builder
                 .build_int_compare(IntPredicate::EQ, tag, heap_tag, "bytes_is_heap")
                 .map_err(|e| crate::error::factory::llvm_build_failed("bytes heap check", &e))?;
-            let type_block = self.context.append_basic_block(function, "bytes_type");
+            let type_block = self.context_ref().append_basic_block(function, "bytes_type");
             builder
                 .build_conditional_branch(is_heap, type_block, done_block)
                 .map_err(|e| crate::error::factory::llvm_build_failed("bytes heap branch", &e))?;
@@ -490,8 +490,8 @@ impl LlvmBackend {
             .build_load(ptr_type, data_field_ptr, "bytes_data")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes data load", &e))?
             .into_pointer_value();
-        let packed_block = self.context.append_basic_block(function, "bytes_packed_load");
-        let slot_block = self.context.append_basic_block(function, "bytes_slot_load");
+        let packed_block = self.context_ref().append_basic_block(function, "bytes_packed_load");
+        let slot_block = self.context_ref().append_basic_block(function, "bytes_slot_load");
         let gc_flags_ptr = unsafe {
             builder
                 .build_gep(
@@ -612,8 +612,8 @@ impl LlvmBackend {
         };
 
         let i64_type = self.runtime_int_type();
-        let i8_type = self.context.i8_type();
-        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let array = self
             .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
             .into_int_value();
@@ -659,7 +659,7 @@ impl LlvmBackend {
             }
             loaded.into_int_value()
         } else if width == 1 {
-            let i8_type = self.context.i8_type();
+            let i8_type = self.context_ref().i8_type();
             let loaded = builder
                 .build_load(i8_type, ptr, "typed_bytes_unchecked_u8")
                 .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u8 load", &e))?;
@@ -667,7 +667,7 @@ impl LlvmBackend {
                 .build_int_z_extend(loaded.into_int_value(), i64_type, "typed_bytes_unchecked_u8_wide")
                 .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u8 zext", &e))?
         } else {
-            let i32_type = self.context.i32_type();
+            let i32_type = self.context_ref().i32_type();
             let loaded = builder
                 .build_load(i32_type, ptr, "typed_bytes_unchecked_u32")
                 .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u32 load", &e))?;
@@ -707,8 +707,8 @@ impl LlvmBackend {
             .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
 
         let i64_type = self.runtime_int_type();
-        let i8_type = self.context.i8_type();
-        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let zero = i64_type.const_zero();
 
         let array = self
@@ -758,8 +758,8 @@ impl LlvmBackend {
             .build_and(lower_ok, upper_ok, "typed_words_in_bounds")
             .map_err(|e| crate::error::factory::llvm_build_failed("typed words bounds and", &e))?;
 
-        let load_block = self.context.append_basic_block(function, "typed_words_load");
-        let done_block = self.context.append_basic_block(function, "typed_words_done");
+        let load_block = self.context_ref().append_basic_block(function, "typed_words_load");
+        let done_block = self.context_ref().append_basic_block(function, "typed_words_done");
         builder
             .build_conditional_branch(in_bounds, load_block, done_block)
             .map_err(|e| crate::error::factory::llvm_build_failed("typed words bounds branch", &e))?;
@@ -906,8 +906,8 @@ impl LlvmBackend {
         }
 
         let i64_type = self.runtime_int_type();
-        let i8_type = self.context.i8_type();
-        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let array = self
             .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
             .into_int_value();
@@ -947,7 +947,7 @@ impl LlvmBackend {
                 .build_store(ptr, value)
                 .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set u64 store", &e))?
         } else {
-            let i32_type = self.context.i32_type();
+            let i32_type = self.context_ref().i32_type();
             let narrowed = builder
                 .build_int_truncate(value, i32_type, "typed_bytes_set_u32")
                 .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set u32 trunc", &e))?;
@@ -959,7 +959,7 @@ impl LlvmBackend {
             .set_alignment(1)
             .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set align", &e))?;
         if let Some(dest) = dest {
-            vreg_map.insert(dest, self.context.bool_type().const_int(1, false).into());
+            vreg_map.insert(dest, self.context_ref().bool_type().const_int(1, false).into());
         }
         Ok(true)
     }
@@ -988,8 +988,8 @@ impl LlvmBackend {
             .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
 
         let i64_type = self.runtime_int_type();
-        let i8_type = self.context.i8_type();
-        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let zero = i64_type.const_zero();
 
         let array = self
@@ -1005,8 +1005,8 @@ impl LlvmBackend {
             .build_int_to_ptr(ptr_bits, ptr_type, "typed_bytes_le_array_ptr")
             .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le int_to_ptr", &e))?;
 
-        let load_block = self.context.append_basic_block(function, "typed_bytes_le_load");
-        let done_block = self.context.append_basic_block(function, "typed_bytes_le_done");
+        let load_block = self.context_ref().append_basic_block(function, "typed_bytes_le_load");
+        let done_block = self.context_ref().append_basic_block(function, "typed_bytes_le_done");
 
         let len_ptr = unsafe {
             builder
@@ -1068,7 +1068,7 @@ impl LlvmBackend {
             }
             loaded.into_int_value()
         } else {
-            let i32_type = self.context.i32_type();
+            let i32_type = self.context_ref().i32_type();
             let loaded = builder
                 .build_load(i32_type, ptr, "typed_bytes_le_u32")
                 .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u32 load", &e))?;
@@ -1120,8 +1120,8 @@ impl LlvmBackend {
             .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
 
         let i64_type = self.runtime_int_type();
-        let i8_type = self.context.i8_type();
-        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let zero = i64_type.const_zero();
         let tag_mask = i64_type.const_int(7, false);
 
@@ -1132,12 +1132,12 @@ impl LlvmBackend {
             .coerce_value_to_type(self.get_vreg(&args[1], vreg_map)?, Some(i64_type.into()), builder)?
             .into_int_value();
 
-        let type_block = self.context.append_basic_block(function, "bytes_le_type");
-        let bounds_block = self.context.append_basic_block(function, "bytes_le_bounds");
-        let load_block = self.context.append_basic_block(function, "bytes_le_load");
-        let packed_block = self.context.append_basic_block(function, "bytes_le_packed");
-        let slot_block = self.context.append_basic_block(function, "bytes_le_slots");
-        let done_block = self.context.append_basic_block(function, "bytes_le_done");
+        let type_block = self.context_ref().append_basic_block(function, "bytes_le_type");
+        let bounds_block = self.context_ref().append_basic_block(function, "bytes_le_bounds");
+        let load_block = self.context_ref().append_basic_block(function, "bytes_le_load");
+        let packed_block = self.context_ref().append_basic_block(function, "bytes_le_packed");
+        let slot_block = self.context_ref().append_basic_block(function, "bytes_le_slots");
+        let done_block = self.context_ref().append_basic_block(function, "bytes_le_done");
 
         let ptr_bits = builder
             .build_and(array, i64_type.const_int(!7u64, false), "bytes_le_ptr_bits")
@@ -1384,8 +1384,8 @@ impl LlvmBackend {
             .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
 
         let i64_type = self.runtime_int_type();
-        let i8_type = self.context.i8_type();
-        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
 
         let array = self
             .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
@@ -1398,9 +1398,9 @@ impl LlvmBackend {
             .into_int_value();
 
         let tag_mask = i64_type.const_int(7, false);
-        let bounds_block = self.context.append_basic_block(function, "bytes_set_bounds");
-        let store_block = self.context.append_basic_block(function, "bytes_set_store");
-        let done_block = self.context.append_basic_block(function, "bytes_set_done");
+        let bounds_block = self.context_ref().append_basic_block(function, "bytes_set_bounds");
+        let store_block = self.context_ref().append_basic_block(function, "bytes_set_store");
+        let done_block = self.context_ref().append_basic_block(function, "bytes_set_done");
         let ptr_bits = builder
             .build_and(array, i64_type.const_int(!7u64, false), "bytes_set_ptr_bits")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes set ptr bits", &e))?;
@@ -1420,7 +1420,7 @@ impl LlvmBackend {
             let is_heap = builder
                 .build_int_compare(IntPredicate::EQ, tag, heap_tag, "bytes_set_is_heap")
                 .map_err(|e| crate::error::factory::llvm_build_failed("bytes set heap check", &e))?;
-            let type_block = self.context.append_basic_block(function, "bytes_set_type");
+            let type_block = self.context_ref().append_basic_block(function, "bytes_set_type");
             builder
                 .build_conditional_branch(is_heap, type_block, done_block)
                 .map_err(|e| crate::error::factory::llvm_build_failed("bytes set heap branch", &e))?;
@@ -1496,8 +1496,8 @@ impl LlvmBackend {
         let byte = builder
             .build_and(value, i64_type.const_int(0xff, false), "bytes_set_byte")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes set byte mask", &e))?;
-        let packed_block = self.context.append_basic_block(function, "bytes_set_packed_store");
-        let slot_block = self.context.append_basic_block(function, "bytes_set_slot_store");
+        let packed_block = self.context_ref().append_basic_block(function, "bytes_set_packed_store");
+        let slot_block = self.context_ref().append_basic_block(function, "bytes_set_slot_store");
         let gc_flags_ptr = unsafe {
             builder
                 .build_gep(
@@ -1633,8 +1633,8 @@ impl LlvmBackend {
             ));
         }
 
-        let i8_type = self.context.i8_type();
-        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let base = self.get_vreg(&args[0], vreg_map)?;
         let base = self
             .coerce_value_to_type(base, Some(i64_type.into()), builder)?
@@ -1954,7 +1954,7 @@ impl LlvmBackend {
                 "rt_array_push" | "rt_array_clear" | "rt_array_reverse" | "rt_array_sort" | "rt_index_set"
             );
             let fn_type = if returns_bool {
-                self.context.bool_type().fn_type(&param_types, false)
+                self.context_ref().bool_type().fn_type(&param_types, false)
             } else {
                 i64_type.fn_type(&param_types, false)
             };
@@ -2089,7 +2089,7 @@ impl LlvmBackend {
                             | "rt_enum_check_discriminant"
                     );
                     let fn_type = if returns_bool {
-                        self.context.bool_type().fn_type(&param_types, false)
+                        self.context_ref().bool_type().fn_type(&param_types, false)
                     } else {
                         i64_type.fn_type(&param_types, false)
                     };
@@ -2154,7 +2154,7 @@ impl LlvmBackend {
             if matches!(method_name, "is_ok" | "is_err") && args.len() == 1 {
                 let rt_func = module.get_function("rt_enum_check_discriminant").unwrap_or_else(|| {
                     let fn_type = self
-                        .context
+                        .context_ref()
                         .bool_type()
                         .fn_type(&[i64_type.into(), i64_type.into()], false);
                     module.add_function("rt_enum_check_discriminant", fn_type, None)
@@ -2352,8 +2352,8 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         use crate::hir::TypeId;
 
-        let i8_type = self.context.i8_type();
-        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
 
         let callee_val = self.get_vreg(&callee, vreg_map)?;
 
@@ -2377,9 +2377,9 @@ impl LlvmBackend {
             let base_ptr = builder
                 .build_pointer_cast(closure_ptr, i8_ptr_type, "closure_ptr")
                 .map_err(|e| crate::error::factory::llvm_cast_failed("cast closure ptr", &e))?;
-            let ptr_slot_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let ptr_slot_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
 
-            let offset_val = self.context.i32_type().const_int(0, false);
+            let offset_val = self.context_ref().i32_type().const_int(0, false);
             let fn_ptr_slot = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "fn_ptr_slot") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
 
@@ -2416,7 +2416,7 @@ impl LlvmBackend {
 
                 // Default to i64 return (tagged value) — void is rare for indirect calls
                 let fn_type = if *return_type == TypeId::VOID {
-                    self.context.void_type().fn_type(&llvm_param_types, false)
+                    self.context_ref().void_type().fn_type(&llvm_param_types, false)
                 } else {
                     i64_type.fn_type(&llvm_param_types, false)
                 };
@@ -2451,8 +2451,8 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         // Call interpreter bridge function rt_interp_call
         let i64_type = self.runtime_int_type();
-        let i8_type = self.context.i8_type();
-        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i8_type = self.context_ref().i8_type();
+        let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let slot_bytes = (i64_type.get_bit_width() / 8) as u64;
 
         // Declare rt_interp_call if not exists
@@ -2466,7 +2466,7 @@ impl LlvmBackend {
 
         // Create string constant for function name
         let name_bytes = func_name.as_bytes();
-        let name_const = self.context.const_string(name_bytes, false);
+        let name_const = self.context_ref().const_string(name_bytes, false);
         let name_global = module.add_global(name_const.get_type(), None, "func_name");
         name_global.set_initializer(&name_const);
         name_global.set_constant(true);
@@ -2501,13 +2501,13 @@ impl LlvmBackend {
             for (index, arg) in args.iter().enumerate() {
                 let value = self.get_vreg(arg, vreg_map)?;
                 let casted = self.coerce_value_to_type(value, Some(i64_type.into()), builder)?;
-                let offset = self.context.i32_type().const_int((index as u64) * slot_bytes, false);
+                let offset = self.context_ref().i32_type().const_int((index as u64) * slot_bytes, false);
                 let slot_ptr = unsafe { builder.build_gep(i8_type, argv_ptr, &[offset], "interp_argv_slot") }
                     .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
                 let typed_ptr = builder
                     .build_pointer_cast(
                         slot_ptr,
-                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        self.context_ref().ptr_type(inkwell::AddressSpace::default()),
                         "interp_argv_typed_ptr",
                     )
                     .map_err(|e| crate::error::factory::llvm_cast_failed("cast argv ptr", &e))?;

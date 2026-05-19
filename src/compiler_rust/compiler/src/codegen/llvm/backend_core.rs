@@ -28,14 +28,18 @@ use inkwell::OptimizationLevel;
 use std::cell::RefCell;
 
 /// LLVM-based code generator
+///
+/// # Drop order
+/// Rust drops struct fields in declaration order.  `module` and `builder`
+/// borrow from `context`, so they **must** be dropped first.  We therefore
+/// declare them before `context` (which is an owned `Box<Context>`).
 pub struct LlvmBackend {
     pub(super) target: Target,
     pub(super) opt_level: NativeOptimizationLevel,
     pub(super) cpu: TargetCpu,
     /// Enable coverage instrumentation
     pub(super) coverage_enabled: bool,
-    #[cfg(feature = "llvm")]
-    pub(super) context: &'static Context,
+    // --- borrowing fields first (dropped before context) ---
     #[cfg(feature = "llvm")]
     pub(super) module: RefCell<Option<Module<'static>>>,
     #[cfg(feature = "llvm")]
@@ -43,6 +47,9 @@ pub struct LlvmBackend {
     /// Counter for coverage basic blocks
     #[cfg(feature = "llvm")]
     pub(super) coverage_counter: RefCell<u32>,
+    // --- owned context last (dropped after module/builder) ---
+    #[cfg(feature = "llvm")]
+    pub(super) context: Box<Context>,
     /// Import map: raw function name → mangled name for cross-module resolution
     pub(super) import_map: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Mangled module-level data exports, used to distinguish imported data
@@ -65,6 +72,20 @@ impl std::fmt::Debug for LlvmBackend {
 }
 
 impl LlvmBackend {
+    /// Return a `&'static Context` reference from the owned `Box<Context>`.
+    ///
+    /// # Safety
+    /// This is safe because:
+    /// - The `Box<Context>` lives as long as `self`.
+    /// - `module` and `builder` (which borrow from `Context`) are declared
+    ///   before `context` in the struct, so Rust drops them first.
+    /// - No `Module` or `Builder` escapes `self` with a `'static` lifetime
+    ///   that could outlive the struct.
+    #[cfg(feature = "llvm")]
+    pub(super) fn context_ref(&self) -> &'static Context {
+        unsafe { &*(self.context.as_ref() as *const Context) }
+    }
+
     #[cfg(feature = "llvm")]
     fn apply_function_optimization_attrs(&self, func: FunctionValue<'static>, attrs: &[String]) {
         let wants_inline = attrs
@@ -72,7 +93,7 @@ impl LlvmBackend {
             .any(|attr| attr == "inline" || attr == "always_inline" || attr == "force_inline");
         if wants_inline {
             let kind = Attribute::get_named_enum_kind_id("alwaysinline");
-            let always_inline = self.context.create_enum_attribute(kind, 0);
+            let always_inline = self.context_ref().create_enum_attribute(kind, 0);
             func.add_attribute(AttributeLoc::Function, always_inline);
         }
     }
@@ -137,16 +158,16 @@ impl LlvmBackend {
 
         #[cfg(feature = "llvm")]
         {
-            let context = Box::leak(Box::new(Context::create()));
+            let context = Box::new(Context::create());
             Ok(Self {
                 target,
                 opt_level,
                 cpu,
                 coverage_enabled: false,
-                context,
                 module: RefCell::new(None),
                 builder: RefCell::new(None),
                 coverage_counter: RefCell::new(0),
+                context,
                 import_map: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 use_map: std::collections::HashMap::new(),
@@ -321,8 +342,8 @@ impl LlvmBackend {
             let Some(target) = m.get_function(&target_name) else {
                 continue;
             };
-            let builder = self.context.create_builder();
-            let entry = self.context.append_basic_block(alias, "entry");
+            let builder = self.context_ref().create_builder();
+            let entry = self.context_ref().append_basic_block(alias, "entry");
             builder.position_at_end(entry);
             let args: Vec<BasicMetadataValueEnum<'static>> = alias.get_param_iter().map(Into::into).collect();
             let call = builder
@@ -400,9 +421,9 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     pub fn runtime_int_type(&self) -> inkwell::types::IntType<'static> {
         if self.pointer_width() == 32 {
-            self.context.i32_type()
+            self.context_ref().i32_type()
         } else {
-            self.context.i64_type()
+            self.context_ref().i64_type()
         }
     }
 
@@ -477,7 +498,7 @@ impl LlvmBackend {
         LlvmTarget::initialize_all(&InitializationConfig::default());
 
         // Create module with the context
-        let module = self.context.create_module(name);
+        let module = self.context_ref().create_module(name);
 
         // Set target triple
         let triple = self.get_target_triple();
@@ -498,7 +519,7 @@ impl LlvmBackend {
         *self.module.borrow_mut() = Some(module);
 
         // Create builder
-        let builder = self.context.create_builder();
+        let builder = self.context_ref().create_builder();
         *self.builder.borrow_mut() = Some(builder);
 
         Ok(())

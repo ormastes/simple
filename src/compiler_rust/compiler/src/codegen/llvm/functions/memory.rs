@@ -24,7 +24,7 @@ impl LlvmBackend {
         let ptr = match addr_val {
             inkwell::values::BasicValueEnum::PointerValue(p) => p,
             inkwell::values::BasicValueEnum::IntValue(iv) => {
-                let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
                 builder
                     .build_int_to_ptr(iv, ptr_type, "load_ptr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
@@ -59,7 +59,7 @@ impl LlvmBackend {
         let ptr = match addr_val {
             inkwell::values::BasicValueEnum::PointerValue(p) => p,
             inkwell::values::BasicValueEnum::IntValue(iv) => {
-                let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
                 builder
                     .build_int_to_ptr(iv, ptr_type, "store_ptr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
