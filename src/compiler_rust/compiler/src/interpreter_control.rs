@@ -186,7 +186,7 @@ pub(super) fn exec_if(
     Ok(Control::Next)
 }
 
-pub(super) fn exec_while(
+pub(crate) fn exec_while(
     while_stmt: &simple_parser::ast::WhileStmt,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
@@ -684,7 +684,7 @@ fn expr_may_mutate_var(e: &Expr, var: &str) -> bool {
     }
 }
 
-pub(super) fn exec_loop(
+pub(crate) fn exec_loop(
     loop_stmt: &simple_parser::ast::LoopStmt,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
