@@ -10,12 +10,12 @@ feature
 > Bring the scilib port to completion: (1) verify existing implementation actually works (not false-greens), (2) update all 8 plan docs from "PARTIAL/ready" to reflect committed reality, (3) create user-facing guides for std.linalg, std.ndarray, std.df, std.ml.
 
 ## Acceptance Criteria
-- [ ] AC-1: At least 5 scilib specs produce visible PASS/FAIL output proving assertions run (not silent exit 0)
-- [ ] AC-2: All 8 plan docs (perf_sugar, ndarray, blas, lapack, cuda_fortran, math_block, df, ml) have Status updated to reflect implementation state
-- [ ] AC-3: User-facing guide exists for std.ndarray + std.linalg (import, create, ops, BLAS/LAPACK usage)
-- [ ] AC-4: User-facing guide exists for std.df (DataFrame construction, column ops, groupby, merge, I/O)
-- [ ] AC-5: User-facing guide exists for std.ml (LinearRegression, Ridge, metrics, predict)
-- [ ] AC-6: Guides are in doc/07_guide/ (not plan docs or tracking)
+- [x] AC-1: 5 scilib specs produce visible PASS/FAIL output (perf_sugar 9/9, blas_axpy 8/8, ndarray_create 15/15, df_construction 18/18, ml_linear 29/29) via bin/release/linux-x86_64/simple
+- [x] AC-2: All 10 plan docs updated (8 module plans + single-agent + remaining-agents)
+- [x] AC-3: doc/07_guide/scilib_ndarray_linalg_guide.md (312 lines)
+- [x] AC-4: doc/07_guide/scilib_dataframe_guide.md (324 lines)
+- [x] AC-5: doc/07_guide/scilib_ml_guide.md (192 lines)
+- [x] AC-6: All 3 guides in doc/07_guide/
 
 ## Cooperative Providers
 - Codex: unavailable
@@ -23,13 +23,11 @@ feature
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-19
-- [ ] 2-research (Analyst)
-- [ ] 3-arch (Architect)
-- [ ] 4-spec (QA Lead)
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 2-4 skipped (research/arch/spec already complete from prior scilib-port-parallel pipeline)
+- [x] 5-implement (Engineer) — 2026-05-19: 5 parallel Sonnet agents
+- [x] 6-refactor (Tech Lead) — 2026-05-19: no refactoring needed, guides are clean first-pass
+- [x] 7-verify (QA) — 2026-05-19: all 6 ACs met
+- [x] 8-ship (Release Mgr) — 2026-05-19: files on disk, ready for commit
 
 ## Phase Outputs
 
@@ -44,23 +42,22 @@ Parallel agent plan:
 - Wave 1 (disjoint): AC-1 verification agent + AC-2 plan-doc update agent
 - Wave 2 (disjoint): AC-3 ndarray/linalg guide + AC-4 df guide + AC-5 ml guide
 
-### 2-research
-<pending>
-
-### 3-arch
-<pending>
-
-### 4-spec
-<pending>
+### 2-4 (skipped)
+Prior scilib-port-parallel pipeline completed research, arch, spec phases.
 
 ### 5-implement
-<pending>
+5 parallel Sonnet agents with disjoint file scopes:
+- AC-1 verification: confirmed specs run real assertions via bin/release/linux-x86_64/simple (bin/simple symlink broken — May 19 Rust seed regression, exits 3). Results: .spipe/scilib-port-docs/verify_results.md
+- AC-2 plan-doc updates: 10 files in doc/03_plan/agent_tasks/ updated from PARTIAL/ready to Implemented
+- AC-3 ndarray/linalg guide: doc/07_guide/scilib_ndarray_linalg_guide.md (312 lines)
+- AC-4 df guide: doc/07_guide/scilib_dataframe_guide.md (324 lines)
+- AC-5 ml guide: doc/07_guide/scilib_ml_guide.md (192 lines)
 
 ### 6-refactor
-<pending>
+No refactoring needed — guides are clean documentation, plan-doc edits were surgical.
 
 ### 7-verify
-<pending>
+All 6 ACs met. Key finding: bin/simple symlink points to broken Rust seed (known issue per project_bootstrap_deploy_pending memory). Self-hosted binary at bin/release/linux-x86_64/simple works correctly.
 
 ### 8-ship
-<pending>
+Files on disk, ready for commit. Not pushed — user did not request commit/push.
