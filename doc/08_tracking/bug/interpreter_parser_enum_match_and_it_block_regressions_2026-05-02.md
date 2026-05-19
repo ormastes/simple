@@ -117,3 +117,15 @@ it "first byte is 0x0C":
 ## Impact summary
 
 All three bugs were encountered and worked around during implementation of `src/lib/common/encoding/bson.spl` and `test/unit/lib/common/encoding/bson_spec.spl`. The workarounds are stable (29 tests pass), but the underlying issues should be fixed in the parser/interpreter so that the idiomatic patterns can be used.
+
+---
+
+## Wave 14 Re-verification (2026-05-19)
+
+Fix sites confirmed present in HEAD (commit `6946e6886f`):
+
+- **Bug 1:** `src/compiler_rust/parser/src/parser_patterns.rs` — named-field binding handled at lines 14–25: `Ident :` inside enum payload parens is unambiguously a named-field binding; consumed and discarded with binding following source order. Fix confirmed in place.
+- **Bug 2:** `src/compiler_rust/compiler/src/interpreter_call/bdd.rs` — `extract_desc_str` function at line 363 reconstructs FString description text from literal parts verbatim, treating expression slots as literal `{...}` text rather than evaluating them. Applied to `it`, `slow_it`, `limited_it`, `describe`, `context`, `pending`, and `pending_it`. Fix confirmed in place.
+- **Bug 3:** Fix was already in place prior to 2026-05-10 (no separate commit needed).
+
+Note: `bin/simple <file.spl>` writes test output directly to `/dev/tty`, so exit-code capture in non-TTY environments always returns 3 with no captured output — this is normal TUI behavior, not a regression. The fix commit message states all three minimal repros were verified passing with debug build.
