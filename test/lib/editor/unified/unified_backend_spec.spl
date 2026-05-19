@@ -1,0 +1,176 @@
+# unified_backend_spec
+#
+# Smoke test for the unified editor backend modules.
+# Verifies: imports resolve, structs construct, backend instantiates,
+# operation history works, syntax facade parses, adapters dispatch.
+
+use std.spec
+use std.editor.unified.backend_trait.{EditorBackendTrait, EditorResult, CursorPos, editor_ok, editor_err}
+use std.editor.unified.edit_operation.{EditOperation, OperationKind, OperationHistory, op_insert, op_delete, op_replace, invert_operation}
+use std.editor.unified.syntax_facade.{SyntaxTreeFacade, SyntaxNode, SyntaxDiagnostic}
+use std.editor.unified.project_navigator.{ProjectNavigator, FileEntry}
+use std.editor.unified.unified_backend.{UnifiedEditorBackend}
+use std.editor.unified.tui_adapter.{TuiEditorAdapter}
+use std.editor.unified.vscode_adapter.{VscodeEditorAdapter, VscodeRequest, VscodeResponse}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "unified backend — backend_trait":
+
+    it "constructs CursorPos with line and col":
+        val pos = CursorPos(line: 5, col: 10)
+        expect(pos.line).to_equal(5)
+        expect(pos.col).to_equal(10)
+
+    it "editor_ok creates a successful result":
+        val r = editor_ok("done")
+        expect(r.ok).to_equal(true)
+        expect(r.message).to_equal("done")
+        expect(r.changed).to_equal(true)
+
+    it "editor_err creates a failure result":
+        val r = editor_err("fail")
+        expect(r.ok).to_equal(false)
+        expect(r.message).to_equal("fail")
+        expect(r.changed).to_equal(false)
+
+    it "EditorBackendTrait defines all required methods":
+        val src = read_text("src/lib/editor/unified/backend_trait.spl")
+        expect(src.contains("fn open_file")).to_equal(true)
+        expect(src.contains("fn save_active")).to_equal(true)
+        expect(src.contains("fn insert_text")).to_equal(true)
+        expect(src.contains("fn undo")).to_equal(true)
+        expect(src.contains("fn redo")).to_equal(true)
+        expect(src.contains("fn cursor_position")).to_equal(true)
+
+describe "unified backend — edit_operation":
+
+    it "creates an insert operation":
+        val op = op_insert(0, 0, "hello", 0, 0)
+        expect(op.kind == OperationKind.Insert).to_equal(true)
+        expect(op.content).to_equal("hello")
+        expect(op.cursor_after_col).to_equal(5)
+
+    it "creates a delete operation":
+        val op = op_delete(1, 3, "abc", 1, 6)
+        expect(op.kind == OperationKind.Delete).to_equal(true)
+        expect(op.replaced).to_equal("abc")
+        expect(op.cursor_after_col).to_equal(3)
+
+    it "creates a replace operation":
+        val op = op_replace(0, 0, "old", "new", 0, 0)
+        expect(op.kind == OperationKind.Replace).to_equal(true)
+        expect(op.content).to_equal("new")
+        expect(op.replaced).to_equal("old")
+
+    it "inverts an insert to a delete":
+        val op = op_insert(0, 0, "x", 0, 0)
+        val inv = invert_operation(op)
+        expect(inv.kind == OperationKind.Delete).to_equal(true)
+        expect(inv.replaced).to_equal("x")
+
+    it "inverts a delete to an insert":
+        val op = op_delete(0, 0, "y", 0, 0)
+        val inv = invert_operation(op)
+        expect(inv.kind == OperationKind.Insert).to_equal(true)
+        expect(inv.content).to_equal("y")
+
+    it "OperationHistory records and undoes":
+        var hist = OperationHistory.with_defaults()
+        expect(hist.can_undo()).to_equal(false)
+        val op = op_insert(0, 0, "test", 0, 0)
+        hist.record(op)
+        expect(hist.can_undo()).to_equal(true)
+        expect(hist.undo_count()).to_equal(1)
+
+    it "OperationHistory redo after undo":
+        var hist = OperationHistory.with_defaults()
+        val op = op_insert(0, 0, "z", 0, 0)
+        hist.record(op)
+        hist.undo()
+        expect(hist.can_redo()).to_equal(true)
+        expect(hist.redo_count()).to_equal(1)
+
+describe "unified backend — syntax_facade":
+
+    it "creates SyntaxTreeFacade":
+        val facade = SyntaxTreeFacade.new("fn main():\n    pass_dn", "simple")
+        expect(facade.language_id).to_equal("simple")
+
+    it "parses function definitions":
+        var facade = SyntaxTreeFacade.new("fn hello():\n    pass_dn\nfn world():\n    pass_dn", "simple")
+        facade.parse()
+        val nodes = facade.outline()
+        expect(nodes.len()).to_equal(2)
+        expect(nodes[0].kind).to_equal("function")
+        expect(nodes[0].label).to_equal("hello")
+
+    it "parses class and struct definitions":
+        var facade = SyntaxTreeFacade.new("class Foo:\n    x: i64\nstruct Bar:\n    y: text", "simple")
+        facade.parse()
+        val nodes = facade.outline()
+        expect(nodes.len()).to_equal(2)
+        expect(nodes[0].kind).to_equal("class")
+        expect(nodes[1].kind).to_equal("struct")
+
+    it "skips non-simple languages":
+        var facade = SyntaxTreeFacade.new("function foo() {}", "javascript")
+        facade.parse()
+        expect(facade.outline().len()).to_equal(0)
+
+describe "unified backend — project_navigator":
+
+    it "creates ProjectNavigator with empty root":
+        val nav = ProjectNavigator.new("")
+        expect(nav.entry_count()).to_equal(0)
+        expect(nav.total_count()).to_equal(0)
+
+    it "selected_path returns empty for no entries":
+        val nav = ProjectNavigator.new("")
+        expect(nav.selected_path()).to_equal("")
+
+describe "unified backend — unified_backend":
+
+    it "creates UnifiedEditorBackend with defaults":
+        val be = UnifiedEditorBackend.new()
+        expect(be.get_config("theme")).to_equal("")
+
+    it "sets and gets config":
+        var be = UnifiedEditorBackend.new()
+        be.set_config("theme", "dark")
+        expect(be.get_config("theme")).to_equal("dark")
+
+    it "creates backend with project root":
+        val src = read_text("src/lib/editor/unified/unified_backend.spl")
+        expect(src.contains("static fn with_project")).to_equal(true)
+        expect(src.contains("fn open_file")).to_equal(true)
+
+describe "unified backend — tui_adapter":
+
+    it "TuiEditorAdapter source defines required API":
+        val src = read_text("src/lib/editor/unified/tui_adapter.spl")
+        expect(src.contains("class TuiEditorAdapter")).to_equal(true)
+        expect(src.contains("fn handle_key")).to_equal(true)
+        expect(src.contains("fn visible_lines")).to_equal(true)
+        expect(src.contains("fn ensure_cursor_visible")).to_equal(true)
+
+describe "unified backend — vscode_adapter":
+
+    it "VscodeEditorAdapter source defines dispatch":
+        val src = read_text("src/lib/editor/unified/vscode_adapter.spl")
+        expect(src.contains("class VscodeEditorAdapter")).to_equal(true)
+        expect(src.contains("fn dispatch")).to_equal(true)
+        expect(src.contains("VscodeRequest")).to_equal(true)
+        expect(src.contains("VscodeResponse")).to_equal(true)
+
+    it "dispatch handles known methods":
+        val src = read_text("src/lib/editor/unified/vscode_adapter.spl")
+        expect(src.contains("\"open\"")).to_equal(true)
+        expect(src.contains("\"save\"")).to_equal(true)
+        expect(src.contains("\"undo\"")).to_equal(true)
+        expect(src.contains("\"redo\"")).to_equal(true)
+        expect(src.contains("\"outline\"")).to_equal(true)
+        expect(src.contains("\"search\"")).to_equal(true)
