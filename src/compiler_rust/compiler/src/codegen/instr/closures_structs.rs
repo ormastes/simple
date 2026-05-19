@@ -247,11 +247,37 @@ pub(crate) fn compile_method_call_static<M: Module>(
     // 1. Exact match (func_name or sanitized variant with _dot_)
     // 2. Type-qualified name (ClassName.method) - search for functions ending with ".func_name"
     let sanitized_name = lookup_name.replace('.', "_dot_");
+
+    // Self-recursion guard: when a free function `fn foo(s: T, ...)` dispatches
+    // `s.foo(...)` as a bare MethodCallStatic with func_name == "foo", the
+    // exact-match `func_ids.get("foo")` returns the enclosing function itself,
+    // producing infinite recursion at runtime.  Skip any exact-match candidate
+    // that resolves to the currently-compiling function.
+    //
+    // Mangled keys use the form "module__name" or raw "name"; ctx.func.name
+    // holds either the raw short name or a dot-qualified "Type.method" form.
+    let current_fn_name_ex: &str = ctx.func.name.as_str();
+    let current_fn_sanitized_ex = current_fn_name_ex.replace('.', "_dot_");
+    let is_self = |name: &str| -> bool {
+        let tail_dot = format!("__{}", current_fn_name_ex);
+        let tail_san = format!("__{}", current_fn_sanitized_ex);
+        name == current_fn_name_ex
+            || name == current_fn_sanitized_ex.as_str()
+            || name.ends_with(&tail_dot)
+            || name.ends_with(&tail_san)
+    };
+
     let func_id = ctx
         .func_ids
         .get(lookup_name)
+        .filter(|_| !is_self(lookup_name))
         .copied()
-        .or_else(|| ctx.func_ids.get(&sanitized_name).copied())
+        .or_else(|| {
+            ctx.func_ids
+                .get(&sanitized_name)
+                .filter(|_| !is_self(&sanitized_name))
+                .copied()
+        })
         .or_else(|| {
             // Search for a function ending with ".func_name" or "_dot_func_name"
             // If func_name is already qualified (contains '.'), extract the method part only
