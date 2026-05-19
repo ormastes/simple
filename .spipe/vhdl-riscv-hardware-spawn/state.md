@@ -19,8 +19,8 @@
 - [x] Phase 2 (research): Found existing modules in src/compiler/70.backend/backend/vhdl/
 - [x] Phase 3 (arch): Designed typed return labels and hardware call lowering
 - [x] Phase 5 (implement): Created modules
-- [x] Phase 7 (verify): Syntax check
-- [ ] Phase 8 (ship): Commit
+- [x] Phase 7 (verify): Syntax check (passed, fixed string repeat pattern)
+- [x] Phase 8 (ship): Commit
 
 ## Key Files
 - `src/compiler/70.backend/backend/vhdl/vhdl_hardware_metadata.spl` — extended HardwareAttr, ReturnLabel, HardwareCallInstance
