@@ -28,7 +28,7 @@ The output is executable benchmarks (not just docs) tied to measurable acceptanc
 
 ## Phase Checklist
 
-- [ ] 1-intake
+- [x] 1-intake — 2026-05-19: pipeline complete
 - [x] 2-research — 2026-05-16
 - [x] 3-arch — 2026-05-16
 - [x] 4-spec — 2026-05-16
