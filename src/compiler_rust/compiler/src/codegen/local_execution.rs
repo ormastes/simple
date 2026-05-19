@@ -292,25 +292,25 @@ impl ExecutionManager for LocalExecutionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simple_common::target::{Target, TargetArch, TargetOs};
+    use simple_common::target::{Target, TargetArch, TargetOS};
 
     #[test]
     fn test_backend_selection_64bit_targets() {
-        let x86_64 = Target { arch: TargetArch::X86_64, os: TargetOs::Linux, ..Target::host() };
+        let x86_64 = Target { arch: TargetArch::X86_64, os: TargetOS::Linux, ..Target::host() };
         assert_eq!(JitBackend::for_target(&x86_64), JitBackend::Cranelift);
 
-        let aarch64 = Target { arch: TargetArch::Aarch64, os: TargetOs::Linux, ..Target::host() };
+        let aarch64 = Target { arch: TargetArch::Aarch64, os: TargetOS::Linux, ..Target::host() };
         assert_eq!(JitBackend::for_target(&aarch64), JitBackend::Cranelift);
 
-        let rv64 = Target { arch: TargetArch::Riscv64, os: TargetOs::Linux, ..Target::host() };
+        let rv64 = Target { arch: TargetArch::Riscv64, os: TargetOS::Linux, ..Target::host() };
         assert_eq!(JitBackend::for_target(&rv64), JitBackend::Cranelift);
     }
 
     #[test]
     fn test_backend_selection_32bit_targets() {
-        let x86_32 = Target { arch: TargetArch::X86, os: TargetOs::Linux, ..Target::host() };
-        let rv32 = Target { arch: TargetArch::Riscv32, os: TargetOs::Linux, ..Target::host() };
-        let arm32 = Target { arch: TargetArch::Arm, os: TargetOs::Linux, ..Target::host() };
+        let x86_32 = Target { arch: TargetArch::X86, os: TargetOS::Linux, ..Target::host() };
+        let rv32 = Target { arch: TargetArch::Riscv32, os: TargetOS::Linux, ..Target::host() };
+        let arm32 = Target { arch: TargetArch::Arm, os: TargetOS::Linux, ..Target::host() };
 
         #[cfg(feature = "llvm")]
         {
@@ -343,7 +343,7 @@ mod tests {
     #[cfg(feature = "llvm")]
     #[test]
     fn test_for_target_32bit_uses_llvm() {
-        let x86_32 = Target { arch: TargetArch::X86, os: TargetOs::Linux, ..Target::host() };
+        let x86_32 = Target { arch: TargetArch::X86, os: TargetOS::Linux, ..Target::host() };
         let em = LocalExecutionManager::for_target(x86_32);
         assert!(em.is_ok());
         assert_eq!(em.unwrap().backend_kind(), JitBackend::Llvm);

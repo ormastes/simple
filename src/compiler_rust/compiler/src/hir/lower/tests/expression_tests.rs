@@ -1,7 +1,7 @@
 use super::super::super::types::*;
 use super::super::*;
 use super::parse_and_lower;
-use simple_parser::Parser;
+use simple_parser::{Parser, Type};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -227,18 +227,18 @@ fn test_lower_ambiguous_global_field_chain_as_field_access() {
     lowerer.set_global_struct_defs(Arc::new(HashMap::from([
         (
             "Holder".to_string(),
-            vec![("suggestion".to_string(), "Suggestion".to_string())],
+            vec![("suggestion".to_string(), Type::Simple("Suggestion".to_string()))],
         ),
         (
             "Suggestion".to_string(),
             vec![
-                ("new_text".to_string(), "text".to_string()),
-                ("confidence".to_string(), "FixConfidence".to_string()),
+                ("new_text".to_string(), Type::Simple("text".to_string())),
+                ("confidence".to_string(), Type::Simple("FixConfidence".to_string())),
             ],
         ),
         (
             "Replacement".to_string(),
-            vec![("new_text".to_string(), "text".to_string())],
+            vec![("new_text".to_string(), Type::Simple("text".to_string()))],
         ),
     ])));
     lowerer.set_ambiguous_field_names(Arc::new(HashSet::from(["new_text".to_string()])));
@@ -263,20 +263,20 @@ fn test_lower_ambiguous_loop_element_field_access_with_global_array_type() {
     lowerer.set_global_struct_defs(Arc::new(HashMap::from([
         (
             "Report".to_string(),
-            vec![("suggestions".to_string(), "[Suggestion]".to_string())],
+            vec![("suggestions".to_string(), Type::Array { element: Box::new(Type::Simple("Suggestion".to_string())), size: None })],
         ),
         (
             "Suggestion".to_string(),
             vec![
-                ("message".to_string(), "text".to_string()),
-                ("location".to_string(), "SourceLocation".to_string()),
-                ("new_text".to_string(), "text".to_string()),
-                ("confidence".to_string(), "FixConfidence".to_string()),
+                ("message".to_string(), Type::Simple("text".to_string())),
+                ("location".to_string(), Type::Simple("SourceLocation".to_string())),
+                ("new_text".to_string(), Type::Simple("text".to_string())),
+                ("confidence".to_string(), Type::Simple("FixConfidence".to_string())),
             ],
         ),
         (
             "Replacement".to_string(),
-            vec![("new_text".to_string(), "text".to_string())],
+            vec![("new_text".to_string(), Type::Simple("text".to_string()))],
         ),
     ])));
     lowerer.set_ambiguous_field_names(Arc::new(HashSet::from(["new_text".to_string()])));
@@ -303,18 +303,18 @@ fn test_lower_field_access_uses_unique_duplicate_struct_variant() {
     lowerer.set_global_struct_defs(Arc::new(HashMap::from([
         (
             "ObjTaker".to_string(),
-            vec![("compiler_ctx".to_string(), "CompilerContext".to_string())],
+            vec![("compiler_ctx".to_string(), Type::Simple("CompilerContext".to_string()))],
         ),
         (
             "CompilerContext".to_string(),
-            vec![("alive".to_string(), "bool".to_string())],
+            vec![("alive".to_string(), Type::Simple("bool".to_string()))],
         ),
     ])));
     lowerer.set_duplicate_global_struct_defs(Arc::new(HashMap::from([(
         "CompilerContext".to_string(),
         vec![
-            vec![("alive".to_string(), "bool".to_string())],
-            vec![("handle".to_string(), "i64".to_string())],
+            vec![("alive".to_string(), Type::Simple("bool".to_string()))],
+            vec![("handle".to_string(), Type::Simple("i64".to_string()))],
         ],
     )])));
     lowerer.set_ambiguous_field_names(Arc::new(HashSet::new()));
