@@ -11,7 +11,8 @@ Consumed by:
   - All torch variant shims via std.common.torch.dyn_sffi
 """
 
-use std.common.torch.dyn_sffi_ops.{_ensure_loaded}
+use std.common.torch.dyn_sffi_ops.{dyn_torch_available}
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, spl_bits_to_f64}
 
 # ============================================================================
 # Tensor construction from Simple values
@@ -22,10 +23,10 @@ fn dyn_torch_tensor_from_values_1d(values: [f64]) -> i64:
 
     Returns 0 if libtorch is not available.
     """
-    if not _ensure_loaded():
+    if not dyn_torch_available():
         return 0
     val dims: [i64] = [values.len().to_i64()]
-    rt_torch_tensor_from_data(values, dims)
+    rt_ps_torch_tensor_from_data(values, dims)
 
 fn dyn_torch_tensor_from_values_2d(values: [f64], rows: i64, cols: i64) -> i64:
     """Construct a 2-D tensor from a flat row-major f64 array.
@@ -33,23 +34,42 @@ fn dyn_torch_tensor_from_values_2d(values: [f64], rows: i64, cols: i64) -> i64:
     values must have rows * cols elements.
     Returns 0 if libtorch is not available.
     """
-    if not _ensure_loaded():
+    if not dyn_torch_available():
         return 0
     val dims: [i64] = [rows, cols]
-    rt_torch_tensor_from_data(values, dims)
+    rt_ps_torch_tensor_from_data(values, dims)
 
-fn dyn_torch_tensor_copy_values(handle: i64) -> [f64]:
+fn dyn_torch_tensor_copy_values(handle: i64, expected_n: i64) -> [f64]:
     """Copy a tensor's data back to a Simple f64 array (1-D or flattened).
 
+    Uses rt_torch_copy_data_to_cpu to extract f64 elements via a raw buffer.
+    expected_n is a hint for the number of elements; the actual numel is used.
     Returns an empty array if libtorch is not available or handle is 0.
     """
-    if not _ensure_loaded() or handle == 0:
+    if not dyn_torch_available() or handle == 0:
         return []
-    rt_torch_tensor_to_values(handle)
+    val n = rt_torch_torchtensor_numel(handle)
+    if n <= 0:
+        return []
+    val byte_count = n * 8
+    val buf = rt_alloc(byte_count)
+    if buf == 0:
+        return []
+    val copied = rt_torch_copy_data_to_cpu(handle, buf, byte_count)
+    var out: [f64] = []
+    if copied > 0:
+        var i = 0
+        while i < n:
+            val bits = rt_ptr_read_i64(buf, i * 8)
+            out.push(spl_bits_to_f64(bits))
+            i = i + 1
+    rt_free(buf, byte_count)
+    out
 
 # ============================================================================
-# Runtime externs
+# Runtime externs (all confirmed in src/lib/nogc_sync_mut/torch/sffi.spl)
 # ============================================================================
 
-extern fn rt_torch_tensor_from_data(data: [f64], dims: [i64]) -> i64
-extern fn rt_torch_tensor_to_values(handle: i64) -> [f64]
+extern fn rt_ps_torch_tensor_from_data(data: [f64], dims: [i64]) -> i64
+extern fn rt_torch_torchtensor_numel(handle: i64) -> i64
+extern fn rt_torch_copy_data_to_cpu(handle: i64, buffer_ptr: i64, buffer_size: i64) -> i64
