@@ -111,9 +111,9 @@ pub(crate) use interpreter_patterns::{
 // Control flow functions (if, while, loop, for, match)
 #[path = "../interpreter_control.rs"]
 mod interpreter_control;
-use interpreter_control::{exec_context, exec_for, exec_if, exec_match};
+use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match, exec_while};
 pub(crate) use interpreter_control::{exec_if_expr, exec_match_expr};
-pub(crate) use interpreter_control::{exec_loop, exec_while, exec_with};
+pub(crate) use interpreter_control::exec_with;
 
 mod expr;
 pub(crate) use expr::evaluate_expr;

@@ -305,6 +305,64 @@ fn _gui_workspace_edit_selection_label(detail: text) -> text:
 fn gui_shell_present_frame_sdl(window: i64, frame: GuiFrame):
     gui_sdl_present_frame(window, frame)
 
+# --- Drag/docking for dock panels ---
+
+fn _drag_state_new() -> DragState:
+    DragState(active: false, source_panel_id: "", source_zone: -1, mouse_x: 0, mouse_y: 0, drop_target_zone: -1)
+
+fn gui_handle_mouse_down(state: GuiShellState, drag: DragState, x: i64, y: i64) -> DragState:
+    val dock = state.ctrl.session.dock_layout
+    val zones: [i64] = [DOCK_LEFT, DOCK_RIGHT, DOCK_BOTTOM]
+    var zi = 0
+    while zi < zones.len():
+        val zone = zones[zi]
+        val panels = dock.visible_panels_in(zone)
+        if panels.len() > 0:
+            val hit = _drag_hit_zone_tab(state, zone, x, y)
+            if hit != "":
+                return DragState(active: true, source_panel_id: hit, source_zone: zone, mouse_x: x, mouse_y: y, drop_target_zone: -1)
+        zi = zi + 1
+    drag
+
+fn gui_handle_mouse_move(state: GuiShellState, drag: DragState, x: i64, y: i64) -> DragState:
+    if not drag.active:
+        return drag
+    val target = gui_compute_drop_zone(state, x, y)
+    DragState(active: true, source_panel_id: drag.source_panel_id, source_zone: drag.source_zone, mouse_x: x, mouse_y: y, drop_target_zone: target)
+
+fn gui_handle_mouse_up(state: GuiShellState, drag: DragState) -> DragState:
+    if not drag.active:
+        return drag
+    if drag.drop_target_zone >= 0 and drag.drop_target_zone != drag.source_zone:
+        val dock = state.ctrl.session.dock_layout
+        val panels = dock.visible_panels_in(drag.source_zone)
+        var found_label = ""
+        var found_icon = ""
+        var pi = 0
+        while pi < panels.len():
+            if panels[pi].id == drag.source_panel_id:
+                found_label = panels[pi].label
+                found_icon = panels[pi].icon
+            pi = pi + 1
+        dock.remove_panel(drag.source_panel_id)
+        dock.add_panel(DockPanel(id: drag.source_panel_id, label: found_label, zone: drag.drop_target_zone, icon: found_icon, visible: true))
+        dock.set_active(drag.drop_target_zone, drag.source_panel_id)
+    _drag_state_new()
+
+fn gui_compute_drop_zone(state: GuiShellState, x: i64, y: i64) -> i64:
+    val w = state.config.initial_width
+    val h = state.config.initial_height
+    val left_edge = w / 5
+    val right_edge = w - w / 5
+    val bottom_edge = h - h / 4
+    if x < left_edge:
+        return DOCK_LEFT
+    if x > right_edge:
+        return DOCK_RIGHT
+    if y > bottom_edge:
+        return DOCK_BOTTOM
+    -1
+
 fn gui_render_drop_overlay(drag: DragState, width: i64, height: i64) -> text:
     if not drag.active:
         return ""
@@ -320,3 +378,52 @@ fn gui_render_drop_overlay(drag: DragState, width: i64, height: i64) -> text:
     else:
         return ""
     "<div class=\"drop-overlay\" style=\"position:absolute;" + zone_style + ";background:rgba(0,120,215,0.3);pointer-events:none;\"></div>"
+
+fn _drag_hit_zone_tab(state: GuiShellState, zone: i64, x: i64, y: i64) -> text:
+    val w = state.config.initial_width
+    val h = state.config.initial_height
+    val tab_h = 28
+    var zone_x = 0
+    var zone_y = 0
+    var zone_w = 0
+    if zone == DOCK_LEFT:
+        zone_x = 0
+        zone_y = 0
+        zone_w = state.ctrl.session.dock_layout.left_width * w / 100
+    elif zone == DOCK_RIGHT:
+        zone_w = state.ctrl.session.dock_layout.right_width * w / 100
+        zone_x = w - zone_w
+        zone_y = 0
+    elif zone == DOCK_BOTTOM:
+        zone_x = 0
+        zone_y = h - state.ctrl.session.dock_layout.bottom_height * h / 100
+        zone_w = w
+    if x >= zone_x and x < zone_x + zone_w and y >= zone_y and y < zone_y + tab_h:
+        val panels = state.ctrl.session.dock_layout.visible_panels_in(zone)
+        if panels.len() > 0:
+            return panels[0].id
+    ""
+
+# --- Event polling and coordinate parsing ---
+
+fn gui_shell_poll_event() -> GuiEvent:
+    GuiEvent(kind: "", data: "")
+
+fn gui_shell_poll_event_sdl() -> GuiEvent:
+    gui_sdl_poll()
+
+fn _parse_mouse_coords(data: text) -> MouseCoords:
+    val comma_idx = data.index_of(",")
+    if comma_idx < 0:
+        return MouseCoords(x: 0, y: 0)
+    val x_str = data.slice(0, comma_idx)
+    val y_str = data.slice(comma_idx + 1, data.len())
+    MouseCoords(x: x_str.to_i64(), y: y_str.to_i64())
+
+fn _gui_shell_basename_without_markdown_ext(path: text) -> text:
+    var name = _gui_shell_basename(path)
+    if name.ends_with(".markdown"):
+        name = name.slice(0, name.len() - 9)
+    elif name.ends_with(".md"):
+        name = name.slice(0, name.len() - 3)
+    name

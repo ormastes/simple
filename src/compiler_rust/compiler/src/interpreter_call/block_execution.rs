@@ -4,9 +4,9 @@ use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_w
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    evaluate_expr, exec_loop, exec_while, exec_with, get_type_name, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES,
-    CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS,
-    MODULE_GLOBALS, TRAIT_IMPLS, TRAITS, USER_MACROS,
+    evaluate_expr, exec_with, get_type_name, pattern_matches, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT,
+    CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS,
+    TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
@@ -810,25 +810,33 @@ pub(super) fn exec_block_closure(
                 last_value = Value::Nil;
             }
             Node::While(while_stmt) => {
-                use crate::interpreter::Control;
-                match exec_while(while_stmt, &mut local_env, functions, classes, enums, impl_methods)? {
-                    Control::Return(val) => {
+                loop {
+                    if crate::interpreter::is_timeout_exceeded() {
                         CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
                         IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                        return Ok(val);
+                        return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
                     }
-                    _ => last_value = Value::Nil,
+                    let cond = evaluate_expr(
+                        &while_stmt.condition, &mut local_env, functions, classes, enums, impl_methods,
+                    )?;
+                    if !cond.truthy() {
+                        break;
+                    }
+                    last_value = exec_block_closure_mut(
+                        &while_stmt.body.statements, &mut local_env, functions, classes, enums, impl_methods,
+                    )?;
                 }
             }
             Node::Loop(loop_stmt) => {
-                use crate::interpreter::Control;
-                match exec_loop(loop_stmt, &mut local_env, functions, classes, enums, impl_methods)? {
-                    Control::Return(val) => {
+                loop {
+                    if crate::interpreter::is_timeout_exceeded() {
                         CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
                         IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                        return Ok(val);
+                        return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
                     }
-                    _ => last_value = Value::Nil,
+                    last_value = exec_block_closure_mut(
+                        &loop_stmt.body.statements, &mut local_env, functions, classes, enums, impl_methods,
+                    )?;
                 }
             }
             _ => {
@@ -1321,17 +1329,29 @@ fn exec_block_closure_mut(
                 last_value = Value::Nil;
             }
             Node::While(while_stmt) => {
-                use crate::interpreter::Control;
-                match exec_while(while_stmt, local_env, functions, classes, enums, impl_methods)? {
-                    Control::Return(val) => return Ok(val),
-                    _ => last_value = Value::Nil,
+                loop {
+                    if crate::interpreter::is_timeout_exceeded() {
+                        return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+                    }
+                    let cond = evaluate_expr(
+                        &while_stmt.condition, local_env, functions, classes, enums, impl_methods,
+                    )?;
+                    if !cond.truthy() {
+                        break;
+                    }
+                    last_value = exec_block_closure_mut(
+                        &while_stmt.body.statements, local_env, functions, classes, enums, impl_methods,
+                    )?;
                 }
             }
             Node::Loop(loop_stmt) => {
-                use crate::interpreter::Control;
-                match exec_loop(loop_stmt, local_env, functions, classes, enums, impl_methods)? {
-                    Control::Return(val) => return Ok(val),
-                    _ => last_value = Value::Nil,
+                loop {
+                    if crate::interpreter::is_timeout_exceeded() {
+                        return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+                    }
+                    last_value = exec_block_closure_mut(
+                        &loop_stmt.body.statements, local_env, functions, classes, enums, impl_methods,
+                    )?;
                 }
             }
             _ => {
