@@ -29,7 +29,7 @@ bug
 - [x] 5-implement (Engineer) — 2026-05-19
 - [x] 6-refactor (Tech Lead) — 2026-05-19
 - [x] 7-verify (QA) — 2026-05-19
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-19
 
 ## Phase Outputs
 
@@ -278,7 +278,16 @@ spec-done
    - AC-3 and AC-4 require a full bootstrap run to verify end-to-end. Recommend running `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` in phase 8-ship or as a manual integration test.
 
 ### 8-ship
-<pending>
+
+**Status:** done — 2026-05-19
+
+**Actions:**
+1. Committed implementation: `fix(bootstrap): make LLVM constructor stripping failures visible and add SIGSEGV detection (LIM-010)`
+2. Completion report: `doc/09_report/stage3_segfault_fix_complete_2026-05-19.md`
+3. Push: skipped (per user request — local commit only)
+
+**Deferred:**
+- AC-3 (Stage 3 exits 0) and AC-4 (Stage 3 binary functional) require full bootstrap run: `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`
 
 ## Log
 - intake: Created state file with 6 acceptance criteria
