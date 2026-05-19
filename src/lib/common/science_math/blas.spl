@@ -16,7 +16,7 @@ Import path: use std.common.science_math.blas.*
 # v1.1 planned: fn axpy<T>(alpha: T, x: Vector<T>, y: Vector<T>) -> Result<Vector<T>, LinalgError>
 """
 
-use std.common.science_math.blas_provider.{BlasProvider, BlasProviderError}
+use std.common.science_math.blas_provider.{BlasProvider, BlasProviderError, SwapResult}
 
 # ============================================================
 # NormOrd — used by linalg.norm public API
@@ -113,6 +113,31 @@ pub class MockCpuBlasProvider:
             i = i + 1
         Ok(mock_sqrt_f64(sum_sq))
 
+    # BLAS Level-1 — copy: returns a new buffer equal to x (BLAS dcopy)
+    pub fn blas_copy(self, n: i64, x: [f64]) -> Result<[f64], BlasProviderError>:
+        if x.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var out: [f64] = []
+        var i = 0
+        while i < n:
+            out.push(x[i])
+            i = i + 1
+        Ok(out)
+
+    # BLAS Level-1 — swap: exchanges x and y element-wise; returns SwapResult{new_x, new_y}
+    # Both new_x and new_y are fresh buffers (input unchanged).
+    pub fn blas_swap(self, n: i64, x: [f64], y: [f64]) -> Result<SwapResult, BlasProviderError>:
+        if x.len() != n or y.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var new_x: [f64] = []
+        var new_y: [f64] = []
+        var i = 0
+        while i < n:
+            new_x.push(y[i])
+            new_y.push(x[i])
+            i = i + 1
+        Ok(SwapResult(new_x: new_x, new_y: new_y))
+
     # BLAS Level-2 — gemv: y_out[i] = alpha * sum_j(A[i,j]*x[j]) + beta*y[i]
     # A is row-major m×n.
     # gemv operand-swap: pass row-major A with CUBLAS_OP_T at Layer A.
@@ -200,6 +225,16 @@ pub fn blas_gemv_f64(alpha: f64, a: [f64], m: i64, n: i64, x: [f64], beta: f64, 
 pub fn blas_gemm_f64(alpha: f64, a: [f64], m: i64, k: i64, b: [f64], n: i64, beta: f64, c: [f64]) -> Result<[f64], BlasProviderError>:
     val p = _mock_provider()
     p.blas_gemm(alpha, a, m, k, b, n, beta, c)
+
+pub fn blas_copy_f64(x: [f64]) -> Result<[f64], BlasProviderError>:
+    val p = _mock_provider()
+    p.blas_copy(x.len(), x)
+
+pub fn blas_swap_f64(x: [f64], y: [f64]) -> Result<SwapResult, BlasProviderError>:
+    val p = _mock_provider()
+    if x.len() != y.len():
+        return Err(BlasProviderError.DimensionMismatch)
+    p.blas_swap(x.len(), x, y)
 
 # ============================================================
 # Internal math helpers
