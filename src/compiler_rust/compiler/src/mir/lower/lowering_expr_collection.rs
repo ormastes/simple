@@ -1,7 +1,7 @@
 //! Collection expression lowering: Tuple, Array, VecLiteral, Dict, ArrayRepeat.
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
-use crate::hir::{HirExpr, TypeId};
+use crate::hir::{HirExpr, HirType, TypeId};
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
@@ -66,8 +66,14 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
-    pub(super) fn lower_array_expr(&mut self, elements: &[HirExpr]) -> MirLowerResult<VReg> {
-        if !elements.is_empty() && elements.iter().all(|elem| elem.ty == TypeId::U8) {
+    pub(super) fn lower_array_expr(&mut self, elements: &[HirExpr], outer_ty: TypeId) -> MirLowerResult<VReg> {
+        // Detect u8 byte-array: elements typed U8, OR outer declared type is [u8] (elements may
+        // be untyped I64 integer literals even when the declaration says [u8]).
+        let outer_is_u8_array = self
+            .type_registry
+            .and_then(|tr| tr.get(outer_ty))
+            .is_some_and(|t| matches!(t, HirType::Array { element, .. } if *element == TypeId::U8));
+        if !elements.is_empty() && (elements.iter().all(|elem| elem.ty == TypeId::U8) || outer_is_u8_array) {
             let capacity = elements.len() as i64;
             let capacity_reg = self.with_func(|func, current_block| {
                 let reg = func.new_vreg();

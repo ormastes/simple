@@ -206,7 +206,7 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::ActorSpawn { body } => self.lower_actor_spawn_expr(body),
 
             HirExprKind::Tuple(elements) => self.lower_tuple_expr(elements),
-            HirExprKind::Array(elements) => self.lower_array_expr(elements),
+            HirExprKind::Array(elements) => self.lower_array_expr(elements, expr_ty),
             HirExprKind::VecLiteral(elements) => self.lower_vec_literal_expr(elements),
             HirExprKind::Dict(pairs) => self.lower_dict_expr(pairs),
             HirExprKind::ArrayRepeat { value, count } => self.lower_array_repeat_expr(value, count),

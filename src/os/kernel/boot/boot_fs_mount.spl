@@ -1,0 +1,125 @@
+# Boot filesystem freestanding-safe probe/mount slice.
+#
+# This module is the production boundary between the freestanding RISC-V kernel
+# and the hosted VFS/process-launch path.  It MUST NOT import:
+#   - os.userlib.process (spawn_binary)
+#   - os.kernel.loader.* (load_user_executable, build_user_process_image)
+#   - os.kernel.arch.arch_context (current_architecture)
+#   - os.services.vfs.vfs_init (NvfsHostedDriver, app_registry_load, Fat32Driver)
+#   - std.fs_driver.nvfs_hosted_driver
+#
+# The safe import boundary:
+#   - log_raw_println (extern, freestanding)
+#   - CNvmeBlockAdapter from vfs_block_adapters (C NVMe bridge only)
+#   - nvfs_superblock (BlockDevice-level NVFS probe, no hosted driver)
+#   - dbfs_engine.superblock (BlockDevice-level DBFS probe, no hosted driver)
+#
+# MDSOC: feature dimension, kernel boot layer.
+
+use os.kernel.log.klog_api.{log_raw_println}
+use os.services.vfs.vfs_block_adapters.{CNvmeBlockAdapter}
+use std.fs_driver.nvfs_superblock.{
+    nvfs_superblock_set_device, nvfs_superblock_probe_disk, nvfs_superblock_read_from_disk
+}
+use std.db.dbfs_engine.superblock.{
+    dbfs_superblock_set_device, dbfs_superblock_probe_disk, dbfs_superblock_read_from_disk
+}
+
+# ============================================================================
+# Mount-result enum — no spawn, no PID, no hosted state
+# ============================================================================
+
+enum FsMountType:
+    Nvfs
+    Dbfs
+    None_
+
+struct FsMountResult:
+    mounted:  bool
+    fs_type:  FsMountType
+
+var _fs_mount_done: bool = false
+var _fs_mount_type: FsMountType = FsMountType.None_
+
+fn fs_mount_done() -> bool:
+    _fs_mount_done
+
+fn fs_mount_type() -> FsMountType:
+    _fs_mount_type
+
+# ============================================================================
+# Freestanding probe/mount — entry point for os_main
+# ============================================================================
+
+fn boot_fs_mount_freestanding() -> Result<FsMountResult, text>:
+    """Probe NVFS then DBFS via the C NVMe bridge.
+    Records mount state in module-level vars.
+    Does NOT launch any user process.
+    Safe to call from os_main in a freestanding RV64 closure."""
+    log_raw_println("[boot-fs-mount] Starting freestanding filesystem probe...")
+
+    # Try NVFS first
+    val nvfs_ok = _probe_nvfs()
+    if nvfs_ok:
+        _fs_mount_done = true
+        _fs_mount_type = FsMountType.Nvfs
+        log_raw_println("[boot-fs-mount] NVFS root superblock confirmed")
+        return Ok(FsMountResult(mounted: true, fs_type: FsMountType.Nvfs))
+
+    # Try DBFS
+    val dbfs_ok = _probe_dbfs()
+    if dbfs_ok:
+        _fs_mount_done = true
+        _fs_mount_type = FsMountType.Dbfs
+        log_raw_println("[boot-fs-mount] DBFS root superblock confirmed")
+        return Ok(FsMountResult(mounted: true, fs_type: FsMountType.Dbfs))
+
+    log_raw_println("[boot-fs-mount] No NVFS or DBFS superblock found")
+    _fs_mount_done = false
+    _fs_mount_type = FsMountType.None_
+    Err("boot-fs-mount: no freestanding-safe root filesystem found")
+
+# ============================================================================
+# Internal helpers — freestanding only, no hosted symbols
+# ============================================================================
+
+fn _make_c_adapter() -> CNvmeBlockAdapter:
+    CNvmeBlockAdapter(sector_buf_addr: 0, ready: false)
+
+fn _probe_nvfs() -> bool:
+    log_raw_println("[boot-fs-mount] Probing NVMe for NVFS superblock...")
+    var adapter = _make_c_adapter()
+    val init_ok = adapter.init_c_bridge()
+    if not init_ok:
+        log_raw_println("[boot-fs-mount] NVMe adapter init failed — no NVFS")
+        return false
+
+    nvfs_superblock_set_device(adapter)
+
+    val found = nvfs_superblock_probe_disk()
+    if not found:
+        log_raw_println("[boot-fs-mount] No NVFS superblock at LBA 0")
+        return false
+
+    val sb = nvfs_superblock_read_from_disk()
+    log_raw_println("[boot-fs-mount] NVFS superblock confirmed: gen={sb.mount_generation}")
+    true
+
+fn _probe_dbfs() -> bool:
+    log_raw_println("[boot-fs-mount] Probing NVMe for DBFS superblock...")
+    var adapter = _make_c_adapter()
+    val init_ok = adapter.init_c_bridge()
+    if not init_ok:
+        log_raw_println("[boot-fs-mount] NVMe adapter init failed — no DBFS")
+        return false
+
+    dbfs_superblock_set_device(adapter)
+
+    val found = dbfs_superblock_probe_disk()
+    if not found:
+        log_raw_println("[boot-fs-mount] No DBFS superblock at LBA 2")
+        return false
+
+    val sb = dbfs_superblock_read_from_disk()
+    log_raw_println("[boot-fs-mount] DBFS superblock confirmed: gen={sb.mount_generation}")
+    true
