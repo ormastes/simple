@@ -4,10 +4,19 @@ Date: 2026-05-13
 
 ## Status
 
-Mitigated for the perf target. `static_file_server.spl` now reads the request
-limit through the native runtime bridge `rt_env_get_i64`, avoiding the fragile
-`rt_env_get` text value plus Simple-side integer parsing path that triggered
-the full-server native crash.
+**Closed** — mitigation landed 2026-05-13, root cause filed as a parsing-ergonomics follow-up.
+
+`static_file_server.spl` reads the request limit through the native runtime
+bridge `rt_env_get_i64`, avoiding the fragile `rt_env_get` text value plus
+Simple-side integer parsing path that triggered the full-server native crash.
+
+Investigation (2026-05-19) confirmed there is no codegen defect: the Cranelift
+`Branch` terminator in `codegen/instr/body.rs` already correctly coerces i64
+loop conditions to i8 via `icmp_imm(NotEqual, cond_val, 0)` before `brif`.
+The `tagged_vregs` unboxing path is never applied to `rt_env_get_i64` return
+values (correct — it returns a raw i64, not a tagged RuntimeValue). The
+`native_parse_int_loop_bound_smoke.spl` test that exercises exactly the
+`while i < limit` pattern with an i64 bound from `rt_env_get_i64` passes.
 
 ## Symptom
 
