@@ -622,7 +622,7 @@ impl NativeProjectBuilder {
             // Exclude non-essential app modules (dashboards, examples)
             let non_critical = [
                 "llm_dashboard", "web_dashboard", "obsidian", "korean_stock",
-                "theme_sync", "90.tools", "cli_commands_part",
+                "theme_sync", "90.tools", "cli_commands_part1",
             ];
             let critical_failures: Vec<_> = failures
                 .iter()
@@ -671,7 +671,7 @@ impl NativeProjectBuilder {
             // Exclude non-essential app modules (dashboards, examples)
             let non_critical = [
                 "llm_dashboard", "web_dashboard", "obsidian", "korean_stock",
-                "theme_sync", "90.tools", "cli_commands_part",
+                "theme_sync", "90.tools", "cli_commands_part1",
             ];
             let critical_failures: Vec<_> = failures
                 .iter()

@@ -147,16 +147,13 @@ cat > "$CLOUDINIT_DIR/user-data" <<EOF
 ssh_authorized_keys:
   - ${SSH_PUB_KEY_CONTENT}
 users:
+  - name: root
+    ssh_authorized_keys:
+      - ${SSH_PUB_KEY_CONTENT}
   - name: ${QEMU_USER}
-    sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/sh
     ssh_authorized_keys:
       - ${SSH_PUB_KEY_CONTENT}
-packages:
-  - git
-  - gmake
-  - llvm
-  - pkgconf
 EOF
 
 if command -v genisoimage >/dev/null 2>&1; then
@@ -212,14 +209,19 @@ fi
 # ── SSH Connectivity ───────────────────────────────────────────────────
 printf '[6/7] SSH connectivity\n'
 
-SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -p ${QEMU_PORT} ${QEMU_USER}@localhost"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -p ${QEMU_PORT}"
+SSH_CMD="ssh ${SSH_OPTS} ${QEMU_USER}@localhost"
+ROOT_SSH_CMD="ssh ${SSH_OPTS} root@localhost"
 SSH_TIMEOUT=180
 ELAPSED=0
 CONNECTED=0
 
 info "Waiting for SSH (up to ${SSH_TIMEOUT}s)..."
 while [ "$ELAPSED" -lt "$SSH_TIMEOUT" ]; do
-    if $SSH_CMD true 2>/dev/null; then
+    if $ROOT_SSH_CMD true 2>/dev/null; then
+        CONNECTED=1
+        break
+    elif $SSH_CMD true 2>/dev/null; then
         CONNECTED=1
         break
     fi
@@ -236,7 +238,7 @@ if [ "$CONNECTED" -eq 0 ]; then
 fi
 pass "SSH connected in ${ELAPSED}s"
 
-UNAME=$($SSH_CMD "uname -sr" 2>/dev/null)
+UNAME=$($ROOT_SSH_CMD "uname -sr" 2>/dev/null)
 pass "Remote: $UNAME"
 
 # ── Smoke / Full ───────────────────────────────────────────────────────
@@ -244,14 +246,14 @@ printf '[7/7] Bootstrap (%s)\n' "$MODE"
 
 if [ "$MODE" = "smoke" ]; then
     # Smoke: verify clang exists and can compile a trivial C program
-    CLANG_CHECK=$($SSH_CMD "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
+    CLANG_CHECK=$($ROOT_SSH_CMD "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
     if [ "$CLANG_CHECK" = "ok" ]; then
         pass "clang available in VM"
     else
-        info "clang not yet installed (cloud-init may still be running)"
-        # Try pkg install
-        $SSH_CMD "sudo pkg install -y llvm >/dev/null 2>&1" 2>/dev/null || true
-        CLANG_CHECK=$($SSH_CMD "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
+        info "Installing clang..."
+        $ROOT_SSH_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>/dev/null || true
+        $ROOT_SSH_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y llvm" 2>&1 | tail -3
+        CLANG_CHECK=$($ROOT_SSH_CMD "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
         if [ "$CLANG_CHECK" = "ok" ]; then
             pass "clang installed"
         else
@@ -260,13 +262,19 @@ if [ "$MODE" = "smoke" ]; then
     fi
 
     # Test trivial C compilation
-    $SSH_CMD "echo 'int main(){return 0;}' > /tmp/test.c && clang -o /tmp/test /tmp/test.c && /tmp/test && echo ok" 2>/dev/null | grep -q ok
+    $ROOT_SSH_CMD "echo 'int main(){return 0;}' > /tmp/test.c && clang -o /tmp/test /tmp/test.c && /tmp/test && echo ok" 2>/dev/null | grep -q ok
     pass "Trivial C compilation works"
 
     SCRIPT_OK=1
     printf '\nSmoke test PASSED\n'
 else
-    # Full: rsync project, build seed, run bootstrap
+    # Full: install deps, rsync project, build seed, run bootstrap
+    info "Installing build dependencies in VM (this may take a few minutes)..."
+    $ROOT_SSH_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>&1 | tail -3 || true
+    $ROOT_SSH_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm git gmake pkgconf" 2>&1 | tail -5
+    $ROOT_SSH_CMD "command -v rsync" 2>/dev/null || fail "rsync install failed"
+    pass "Dependencies installed"
+
     info "Syncing project to VM..."
     rsync -az --delete \
         --exclude='.git' \
@@ -275,24 +283,27 @@ else
         --exclude='.simple/' \
         --exclude='bootstrap/' \
         --exclude='node_modules/' \
-        -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p ${QEMU_PORT}" \
-        "${ROOT_DIR}/" "${QEMU_USER}@localhost:~/simple/" 2>/dev/null
+        --exclude='*.o' \
+        --exclude='*.a' \
+        --exclude='examples/' \
+        --exclude='doc/' \
+        -e "ssh ${SSH_OPTS}" \
+        "${ROOT_DIR}/" "root@localhost:/root/simple/"
     pass "Project synced"
 
     info "Building Rust seed in VM..."
-    $SSH_CMD "cd ~/simple/src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" 2>/dev/null
+    $ROOT_SSH_CMD "cd /root/simple/src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" 2>&1 | tail -5
     pass "Rust seed built"
 
     info "Running 3-stage bootstrap in VM..."
-    $SSH_CMD "cd ~/simple && SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple build bootstrap --seed=src/compiler_rust/target/bootstrap/simple" 2>/dev/null
+    $ROOT_SSH_CMD "cd /root/simple && SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple build bootstrap --seed=src/compiler_rust/target/bootstrap/simple" 2>&1 | tail -10
     pass "3-stage bootstrap completed"
 
     # Retrieve binary
     FREEBSD_BIN_DIR="${ROOT_DIR}/bin/release/freebsd-x86_64"
     mkdir -p "$FREEBSD_BIN_DIR"
-    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -P "${QEMU_PORT}" \
-        "${QEMU_USER}@localhost:~/simple/bootstrap/simple_stage3" \
+    scp ${SSH_OPTS} \
+        "root@localhost:/root/simple/bootstrap/simple_stage3" \
         "${FREEBSD_BIN_DIR}/simple" 2>/dev/null
     pass "Binary retrieved: ${FREEBSD_BIN_DIR}/simple"
 
