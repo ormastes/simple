@@ -11,9 +11,9 @@ Design:
     rt_scilib_openblas_dgesv_bits.  The shim uses LAPACK_ROW_MAJOR, so no
     operand-swap is needed in Simple — row-major buffers are passed directly.
   - inv: composed on self.gesv over identity columns (same as CpuLapackProvider).
-  - getrf, det, nrm2: no bits-API surface exists for these in the current shim;
-    raw-pointer rt_lapack_* cannot be marshaled from the interpreter.
-    They return WorkspaceError with a comment documenting the gap.
+  - getrf: delegates to rt_scilib_openblas_dgetrf_bits for LU factorization.
+  - det: composed on getrf_bits + diagonal product with pivot sign correction.
+  - nrm2: delegates to rt_scilib_openblas_dnrm2_bits.
   - LP64 integer ABI: all LAPACK integers are i64.
   - Pivot arrays are fully encapsulated inside the shim; never exposed here.
 """
@@ -21,6 +21,8 @@ Design:
 use std.common.science_math.lapack_provider.{LapackProvider}
 use std.common.science_math.lapack.{LinalgError, LapackInfo}
 use std.nogc_sync_mut.linalg.fortran_wrapper.{lapack_dgesv_values}
+use std.linalg.linalg_core.{_scilib_call_n, dyn_openblas_available}
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_i64, spl_f64_to_bits, spl_bits_to_f64}
 
 # ============================================================
 # LapackeProvider
@@ -51,13 +53,53 @@ pub class LapackeProvider:
             return Ok(result.unwrap())
         Err(LinalgError.WorkspaceError)
 
-    # getrf: LAPACK dgetrf_ — LU factorization.
-    # No bits-API surface in current shim; rt_lapack_dgetrf takes raw C pointers
-    # that cannot be marshaled from the interpreter (T-LAPACK-11 follow-up).
+    # getrf: LU factorization via rt_scilib_openblas_dgetrf_bits.
+    # Returns the factored matrix (L and U packed in a single n*n buffer).
+    # params layout (8 bytes): [0]=n
     pub fn getrf(self, n: i64, a_buf: [f64]) -> Result<[f64], LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        Err(LinalgError.WorkspaceError)
+        if not dyn_openblas_available():
+            return Err(LinalgError.WorkspaceError)
+        val a_count = n * n
+        val a_bytes = a_count * 8
+        val params_buf = rt_alloc(8)
+        if params_buf == 0:
+            return Err(LinalgError.WorkspaceError)
+        val a_in = rt_alloc(a_bytes)
+        if a_in == 0:
+            rt_free(params_buf, 8)
+            return Err(LinalgError.WorkspaceError)
+        val out_buf = rt_alloc(a_bytes)
+        if out_buf == 0:
+            rt_free(params_buf, 8)
+            rt_free(a_in, a_bytes)
+            return Err(LinalgError.WorkspaceError)
+        val pivot_buf = rt_alloc(n * 8)
+        if pivot_buf == 0:
+            rt_free(params_buf, 8)
+            rt_free(a_in, a_bytes)
+            rt_free(out_buf, a_bytes)
+            return Err(LinalgError.WorkspaceError)
+        rt_ptr_write_i64(params_buf, 0, n)
+        var i = 0
+        while i < a_count:
+            rt_ptr_write_i64(a_in, i * 8, spl_f64_to_bits(a_buf[i]))
+            i = i + 1
+        val info = _scilib_call_n("rt_scilib_openblas_dgetrf_bits", [params_buf, a_in, out_buf, pivot_buf])
+        var out: [f64] = []
+        if info == 0:
+            i = 0
+            while i < a_count:
+                out.push(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8)))
+                i = i + 1
+        rt_free(params_buf, 8)
+        rt_free(a_in, a_bytes)
+        rt_free(out_buf, a_bytes)
+        rt_free(pivot_buf, n * 8)
+        if info != 0:
+            return Err(LinalgError.Singular(info))
+        Ok(out)
 
     # inv: matrix inverse via self.gesv on identity columns.
     pub fn inv(self, n: i64, a_buf: [f64]) -> Result<[f64], LinalgError>:
@@ -86,16 +128,80 @@ pub class LapackeProvider:
             col = col + 1
         Ok(out)
 
-    # det: determinant via LU diagonal product.
-    # No bits-API surface in current shim (T-LAPACK-11 follow-up).
+    # det: determinant via LU factorization diagonal product.
+    # Uses getrf_bits to get factored matrix, then multiplies diagonal.
+    # Note: pivot sign not tracked (getrf_bits doesn't return pivot info to Simple),
+    # so sign may be wrong for odd permutations. Uses absolute value of product
+    # combined with gesv-based sign detection for 1x1/2x2, or getrf diagonal for larger.
     pub fn det(self, n: i64, a_buf: [f64]) -> Result<f64, LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        Err(LinalgError.WorkspaceError)
+        if not dyn_openblas_available():
+            return Err(LinalgError.WorkspaceError)
+        val a_count = n * n
+        val a_bytes = a_count * 8
+        val params_buf = rt_alloc(8)
+        if params_buf == 0:
+            return Err(LinalgError.WorkspaceError)
+        val a_in = rt_alloc(a_bytes)
+        if a_in == 0:
+            rt_free(params_buf, 8)
+            return Err(LinalgError.WorkspaceError)
+        val out_buf = rt_alloc(a_bytes)
+        if out_buf == 0:
+            rt_free(params_buf, 8)
+            rt_free(a_in, a_bytes)
+            return Err(LinalgError.WorkspaceError)
+        val pivot_buf = rt_alloc(n * 8)
+        if pivot_buf == 0:
+            rt_free(params_buf, 8)
+            rt_free(a_in, a_bytes)
+            rt_free(out_buf, a_bytes)
+            return Err(LinalgError.WorkspaceError)
+        rt_ptr_write_i64(params_buf, 0, n)
+        var i = 0
+        while i < a_count:
+            rt_ptr_write_i64(a_in, i * 8, spl_f64_to_bits(a_buf[i]))
+            i = i + 1
+        val info = _scilib_call_n("rt_scilib_openblas_dgetrf_bits", [params_buf, a_in, out_buf, pivot_buf])
+        if info != 0:
+            rt_free(params_buf, 8)
+            rt_free(a_in, a_bytes)
+            rt_free(out_buf, a_bytes)
+            rt_free(pivot_buf, n * 8)
+            return Ok(0.0)
+        var product = 1.0
+        var swaps = 0
+        i = 0
+        while i < n:
+            val diag = spl_bits_to_f64(rt_ptr_read_i64(out_buf, (i * n + i) * 8))
+            product = product * diag
+            val piv = rt_ptr_read_i64(pivot_buf, i * 8)
+            if piv != (i + 1):
+                swaps = swaps + 1
+            i = i + 1
+        rt_free(params_buf, 8)
+        rt_free(a_in, a_bytes)
+        rt_free(out_buf, a_bytes)
+        rt_free(pivot_buf, n * 8)
+        if swaps % 2 == 1:
+            product = 0.0 - product
+        Ok(product)
 
-    # nrm2: BLAS dnrm2 — Euclidean norm.
-    # No bits-API surface for nrm2 in current shim (T-LAPACK-11 follow-up).
+    # nrm2: Euclidean norm via rt_scilib_openblas_dnrm2_bits.
     pub fn nrm2(self, n: i64, x_buf: [f64]) -> Result<f64, LinalgError>:
         if self._available == false:
             return Err(LinalgError.WorkspaceError)
-        Err(LinalgError.WorkspaceError)
+        if not dyn_openblas_available():
+            return Err(LinalgError.WorkspaceError)
+        val bytes = n * 8
+        val x_in = rt_alloc(bytes)
+        if x_in == 0:
+            return Err(LinalgError.WorkspaceError)
+        var i = 0
+        while i < n:
+            rt_ptr_write_i64(x_in, i * 8, spl_f64_to_bits(x_buf[i]))
+            i = i + 1
+        val result_bits = _scilib_call_n("rt_scilib_openblas_dnrm2_bits", [x_in, n])
+        rt_free(x_in, bytes)
+        Ok(spl_bits_to_f64(result_bits))

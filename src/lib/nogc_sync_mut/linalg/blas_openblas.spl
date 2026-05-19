@@ -16,8 +16,7 @@ Shim symbols used (from src/runtime/scilib/scilib_shim.h):
   rt_scilib_openblas_daxpy_bits(params, x, y, out) -> i64 (1=ok)
   rt_scilib_openblas_dgemm_bits(params, a, b, c, out) -> i64 (1=ok)
 
-No _bits shim for dscal/dnrm2/dgemv in v1 shim; those return
-UnsupportedOperation until the shim gains the corresponding entries.
+All BLAS Level-1/2/3 ops wired: axpy, scal, dot, nrm2, gemv, gemm.
 
 Import path: use std.nogc_sync_mut.linalg.blas_openblas.*
 
@@ -34,7 +33,7 @@ use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_
 # OpenBlasProvider
 #
 # Calls rt_scilib_openblas_*_bits via _scilib_call_n when the shim is loaded.
-# dscal / dnrm2 / dgemv have no _bits entry in v1 shim — UnsupportedOperation.
+# All BLAS ops wired to _bits shim variants.
 # ============================================================
 
 pub class OpenBlasProvider:
@@ -87,9 +86,43 @@ pub class OpenBlasProvider:
             return Err(BlasProviderError.UnsupportedOperation("rt_scilib_openblas_daxpy_bits returned 0"))
         Ok(out)
 
-    # BLAS Level-1 — scal: no _bits shim variant in v1; use UnsupportedOperation.
+    # BLAS Level-1 — scal: x = alpha*x
+    # params layout (16 bytes): [0]=n, [8]=alpha_bits
     pub fn blas_scal(self, alpha: f64, n: i64, x: [f64]) -> Result<[f64], BlasProviderError>:
-        Err(BlasProviderError.UnsupportedOperation("openblas dscal: no _bits shim in v1"))
+        if not dyn_openblas_available():
+            return Err(BlasProviderError.BackendUnavailable("openblas"))
+        val bytes = n * 8
+        val params_buf = rt_alloc(16)
+        if params_buf == 0:
+            return Err(BlasProviderError.BackendUnavailable("openblas scal: params alloc failed"))
+        val x_buf = rt_alloc(bytes)
+        if x_buf == 0:
+            rt_free(params_buf, 16)
+            return Err(BlasProviderError.BackendUnavailable("openblas scal: x alloc failed"))
+        val out_buf = rt_alloc(bytes)
+        if out_buf == 0:
+            rt_free(params_buf, 16)
+            rt_free(x_buf, bytes)
+            return Err(BlasProviderError.BackendUnavailable("openblas scal: out alloc failed"))
+        rt_ptr_write_i64(params_buf, 0, n)
+        rt_ptr_write_i64(params_buf, 8, spl_f64_to_bits(alpha))
+        var i = 0
+        while i < n:
+            rt_ptr_write_i64(x_buf, i * 8, spl_f64_to_bits(x[i]))
+            i = i + 1
+        val ok = _scilib_call_n("rt_scilib_openblas_dscal_bits", [params_buf, x_buf, out_buf])
+        var out: [f64] = []
+        if ok != 0:
+            i = 0
+            while i < n:
+                out.push(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8)))
+                i = i + 1
+        rt_free(params_buf, 16)
+        rt_free(x_buf, bytes)
+        rt_free(out_buf, bytes)
+        if ok == 0:
+            return Err(BlasProviderError.UnsupportedOperation("rt_scilib_openblas_dscal_bits returned 0"))
+        Ok(out)
 
     # BLAS Level-1 — dot: sum(x[i]*y[i])
     pub fn blas_dot(self, n: i64, x: [f64], y: [f64]) -> Result<f64, BlasProviderError>:
@@ -113,13 +146,87 @@ pub class OpenBlasProvider:
         rt_free(y_buf, bytes)
         Ok(spl_bits_to_f64(result_bits))
 
-    # BLAS Level-1 — nrm2: no _bits shim variant in v1; use UnsupportedOperation.
+    # BLAS Level-1 — nrm2: sqrt(sum(x[i]^2))
     pub fn blas_nrm2(self, n: i64, x: [f64]) -> Result<f64, BlasProviderError>:
-        Err(BlasProviderError.UnsupportedOperation("openblas dnrm2: no _bits shim in v1"))
+        if not dyn_openblas_available():
+            return Err(BlasProviderError.BackendUnavailable("openblas"))
+        val bytes = n * 8
+        val x_buf = rt_alloc(bytes)
+        if x_buf == 0:
+            return Err(BlasProviderError.BackendUnavailable("openblas nrm2: x alloc failed"))
+        var i = 0
+        while i < n:
+            rt_ptr_write_i64(x_buf, i * 8, spl_f64_to_bits(x[i]))
+            i = i + 1
+        val result_bits = _scilib_call_n("rt_scilib_openblas_dnrm2_bits", [x_buf, n])
+        rt_free(x_buf, bytes)
+        Ok(spl_bits_to_f64(result_bits))
 
-    # BLAS Level-2 — gemv: no _bits shim variant in v1; use UnsupportedOperation.
+    # BLAS Level-2 — gemv: y = alpha*A*x + beta*y
+    # params layout (32 bytes): [0]=m, [8]=n, [16]=alpha_bits, [24]=beta_bits
     pub fn blas_gemv(self, alpha: f64, a: [f64], m: i64, n: i64, x: [f64], beta: f64, y: [f64]) -> Result<[f64], BlasProviderError>:
-        Err(BlasProviderError.UnsupportedOperation("openblas dgemv: no _bits shim in v1"))
+        if not dyn_openblas_available():
+            return Err(BlasProviderError.BackendUnavailable("openblas"))
+        val a_size = m * n
+        val a_bytes = a_size * 8
+        val x_bytes = n * 8
+        val y_bytes = m * 8
+        val params_buf = rt_alloc(32)
+        if params_buf == 0:
+            return Err(BlasProviderError.BackendUnavailable("openblas gemv: params alloc failed"))
+        val a_buf = rt_alloc(a_bytes)
+        if a_buf == 0:
+            rt_free(params_buf, 32)
+            return Err(BlasProviderError.BackendUnavailable("openblas gemv: a alloc failed"))
+        val x_buf = rt_alloc(x_bytes)
+        if x_buf == 0:
+            rt_free(params_buf, 32)
+            rt_free(a_buf, a_bytes)
+            return Err(BlasProviderError.BackendUnavailable("openblas gemv: x alloc failed"))
+        val y_buf = rt_alloc(y_bytes)
+        if y_buf == 0:
+            rt_free(params_buf, 32)
+            rt_free(a_buf, a_bytes)
+            rt_free(x_buf, x_bytes)
+            return Err(BlasProviderError.BackendUnavailable("openblas gemv: y alloc failed"))
+        val out_buf = rt_alloc(y_bytes)
+        if out_buf == 0:
+            rt_free(params_buf, 32)
+            rt_free(a_buf, a_bytes)
+            rt_free(x_buf, x_bytes)
+            rt_free(y_buf, y_bytes)
+            return Err(BlasProviderError.BackendUnavailable("openblas gemv: out alloc failed"))
+        rt_ptr_write_i64(params_buf, 0, m)
+        rt_ptr_write_i64(params_buf, 8, n)
+        rt_ptr_write_i64(params_buf, 16, spl_f64_to_bits(alpha))
+        rt_ptr_write_i64(params_buf, 24, spl_f64_to_bits(beta))
+        var i = 0
+        while i < a_size:
+            rt_ptr_write_i64(a_buf, i * 8, spl_f64_to_bits(a[i]))
+            i = i + 1
+        i = 0
+        while i < n:
+            rt_ptr_write_i64(x_buf, i * 8, spl_f64_to_bits(x[i]))
+            i = i + 1
+        i = 0
+        while i < m:
+            rt_ptr_write_i64(y_buf, i * 8, spl_f64_to_bits(y[i]))
+            i = i + 1
+        val ok = _scilib_call_n("rt_scilib_openblas_dgemv_bits", [params_buf, a_buf, x_buf, y_buf, out_buf])
+        var out: [f64] = []
+        if ok != 0:
+            i = 0
+            while i < m:
+                out.push(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8)))
+                i = i + 1
+        rt_free(params_buf, 32)
+        rt_free(a_buf, a_bytes)
+        rt_free(x_buf, x_bytes)
+        rt_free(y_buf, y_bytes)
+        rt_free(out_buf, y_bytes)
+        if ok == 0:
+            return Err(BlasProviderError.UnsupportedOperation("rt_scilib_openblas_dgemv_bits returned 0"))
+        Ok(out)
 
     # BLAS Level-3 — gemm: C = alpha*A*B + beta*C_in
     # params layout (40 bytes): [0]=m, [8]=n(bn), [16]=k, [24]=alpha_bits, [32]=beta_bits

@@ -218,6 +218,78 @@ int64_t rt_scilib_openblas_dgemm_bits(int64_t params_addr,
                                      c_bits_addr, out_bits_addr);
 }
 
+int64_t rt_scilib_openblas_dgemv_bits(int64_t params_addr,
+                                      int64_t a_bits_addr,
+                                      int64_t x_bits_addr,
+                                      int64_t y_bits_addr,
+                                      int64_t out_bits_addr)
+{
+    return rt_scilib_cuda_dgemv_bits(params_addr, a_bits_addr, x_bits_addr,
+                                     y_bits_addr, out_bits_addr);
+}
+
+int64_t rt_scilib_openblas_dscal_bits(int64_t params_addr,
+                                      int64_t x_bits_addr,
+                                      int64_t out_bits_addr)
+{
+    const int64_t *params = (const int64_t *)(uintptr_t)params_addr;
+    const int64_t *x_bits = (const int64_t *)(uintptr_t)x_bits_addr;
+    int64_t *out_bits = (int64_t *)(uintptr_t)out_bits_addr;
+    int64_t n = params[0];
+    double alpha = scilib_bits_to_double(params[1]);
+    if (n < 0) return 0;
+    double *x = (double *)malloc(sizeof(double) * (size_t)n);
+    if (x == NULL) return 0;
+    for (int64_t i = 0; i < n; ++i) x[i] = scilib_bits_to_double(x_bits[i]);
+    rt_blas_dscal(n, alpha, x, 1);
+    for (int64_t i = 0; i < n; ++i) out_bits[i] = scilib_double_to_bits(x[i]);
+    free(x);
+    return 1;
+}
+
+int64_t rt_scilib_openblas_dnrm2_bits(int64_t x_bits_addr, int64_t n)
+{
+    const int64_t *x_bits = (const int64_t *)(uintptr_t)x_bits_addr;
+    if (n < 0) return scilib_double_to_bits(0.0);
+    double *x = (double *)malloc(sizeof(double) * (size_t)n);
+    if (x == NULL) return scilib_double_to_bits(0.0);
+    for (int64_t i = 0; i < n; ++i) x[i] = scilib_bits_to_double(x_bits[i]);
+    double result = rt_blas_dnrm2(n, x, 1);
+    free(x);
+    return scilib_double_to_bits(result);
+}
+
+int64_t rt_scilib_openblas_dgetrf_bits(int64_t params_addr,
+                                       int64_t a_bits_addr,
+                                       int64_t out_bits_addr,
+                                       int64_t pivot_out_addr)
+{
+    const int64_t *params = (const int64_t *)(uintptr_t)params_addr;
+    const int64_t *a_bits = (const int64_t *)(uintptr_t)a_bits_addr;
+    int64_t *out_bits = (int64_t *)(uintptr_t)out_bits_addr;
+    int64_t *pivot_out = (int64_t *)(uintptr_t)pivot_out_addr;
+    int64_t n = params[0];
+    if (n < 0) return -1;
+    size_t a_count = (size_t)(n * n);
+    double *a = (double *)malloc(sizeof(double) * a_count);
+    int64_t *ipiv = (int64_t *)malloc(sizeof(int64_t) * (size_t)n);
+    if (a == NULL || ipiv == NULL) {
+        free(a);
+        free(ipiv);
+        return -1000;
+    }
+    for (size_t i = 0; i < a_count; ++i) a[i] = scilib_bits_to_double(a_bits[i]);
+    int64_t info = 0;
+    rt_lapack_dgetrf(n, n, a, n, ipiv, &info);
+    if (info == 0) {
+        for (size_t i = 0; i < a_count; ++i) out_bits[i] = scilib_double_to_bits(a[i]);
+        for (int64_t i = 0; i < n; ++i) pivot_out[i] = ipiv[i];
+    }
+    free(a);
+    free(ipiv);
+    return info;
+}
+
 int64_t rt_scilib_cuda_dgesv_bits(int64_t params_addr,
                                   int64_t a_bits_addr,
                                   int64_t b_bits_addr,

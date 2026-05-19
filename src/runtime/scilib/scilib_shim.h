@@ -94,5 +94,18 @@ int64_t rt_scilib_openblas_dgesv_bits(int64_t params_addr,
                                       int64_t a_bits_addr,
                                       int64_t b_bits_addr,
                                       int64_t out_bits_addr);
+int64_t rt_scilib_openblas_dgemv_bits(int64_t params_addr,
+                                      int64_t a_bits_addr,
+                                      int64_t x_bits_addr,
+                                      int64_t y_bits_addr,
+                                      int64_t out_bits_addr);
+int64_t rt_scilib_openblas_dscal_bits(int64_t params_addr,
+                                      int64_t x_bits_addr,
+                                      int64_t out_bits_addr);
+int64_t rt_scilib_openblas_dnrm2_bits(int64_t x_bits_addr, int64_t n);
+int64_t rt_scilib_openblas_dgetrf_bits(int64_t params_addr,
+                                       int64_t a_bits_addr,
+                                       int64_t out_bits_addr,
+                                       int64_t pivot_out_addr);
 
 #endif
