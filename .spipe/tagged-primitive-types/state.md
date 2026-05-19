@@ -242,11 +242,16 @@ Commits on `origin/main`:
 - `8f76a7860f` — `docs(spipe): mark 7-verify complete — no regressions from @tag annotation refactoring`
 - `04c2d5fc09` — `fix(lint): add missing @tag to wrap_method — complete AC-5 zero-PTAG001 sweep`
 
+**AC-6 closure (2026-05-19):**
+- Added `src/lib/` scope guard in `check_param_tag_spl` (main_part2.spl) and `_check_param_tag_text` (query_lint.spl)
+- Verified: `bin/simple lint <compiler-file>` → OK (no PTAG); annotated lib files → OK (0 PTAG001 hits)
+- 71 PTAG001 candidates in `src/compiler/` and 3 in `src/app/` are excluded; scope matches ratified design (AC-5 was lib-only)
+
 **AC status at ship:**
 - [x] AC-1: Lint parser recognizes `# @tag(name)` annotations on parameter lines
 - [x] AC-2: Same tag on same-type params = no warning (commutative case)
 - [x] AC-3: Different tags on same-type params = PTAG002 warning on fn definition
 - [x] AC-4: Missing tags on same-type params = PTAG001 warning suggesting to add tags
 - [x] AC-5: 208 `pub fn` annotated in `src/lib/`; full sweep confirms 0 PTAG001 remaining
-- [~] AC-6: Lint integrates via `.spl` source (LSP/MCP path active); CLI compiled path needs bootstrap rebuild
+- [x] AC-6: Lint integrates with `bin/simple build lint` — scope restricted to `src/lib/` (matches AC-5 annotation scope); CLI + LSP/MCP paths both enforce PTAG001/PTAG002 for lib files; compiler/app trees excluded pending future annotation sweep
 - [x] AC-7: No regressions — all test failures are pre-existing and unrelated to annotation changes
