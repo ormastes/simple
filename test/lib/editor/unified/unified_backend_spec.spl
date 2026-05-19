@@ -13,11 +13,6 @@ use std.editor.unified.unified_backend.{UnifiedEditorBackend}
 use std.editor.unified.tui_adapter.{TuiEditorAdapter}
 use std.editor.unified.vscode_adapter.{VscodeEditorAdapter, VscodeRequest, VscodeResponse}
 
-extern fn rt_file_read_text(path: text) -> text
-
-fn read_text(path: text) -> text:
-    rt_file_read_text(path) ?? ""
-
 describe "unified backend — backend_trait":
 
     it "constructs CursorPos with line and col":
@@ -36,15 +31,6 @@ describe "unified backend — backend_trait":
         expect(r.ok).to_equal(false)
         expect(r.message).to_equal("fail")
         expect(r.changed).to_equal(false)
-
-    it "EditorBackendTrait defines all required methods":
-        val src = read_text("src/lib/editor/unified/backend_trait.spl")
-        expect(src.contains("fn open_file")).to_equal(true)
-        expect(src.contains("fn save_active")).to_equal(true)
-        expect(src.contains("fn insert_text")).to_equal(true)
-        expect(src.contains("fn undo")).to_equal(true)
-        expect(src.contains("fn redo")).to_equal(true)
-        expect(src.contains("fn cursor_position")).to_equal(true)
 
 describe "unified backend — edit_operation":
 
@@ -143,34 +129,45 @@ describe "unified backend — unified_backend":
         be.set_config("theme", "dark")
         expect(be.get_config("theme")).to_equal("dark")
 
-    it "creates backend with project root":
-        val src = read_text("src/lib/editor/unified/unified_backend.spl")
-        expect(src.contains("static fn with_project")).to_equal(true)
-        expect(src.contains("fn open_file")).to_equal(true)
+    it "sets config and overwrites existing key":
+        var be = UnifiedEditorBackend.new()
+        be.set_config("indent", "4")
+        expect(be.get_config("indent")).to_equal("4")
+        be.set_config("indent", "2")
+        expect(be.get_config("indent")).to_equal("2")
 
 describe "unified backend — tui_adapter":
 
-    it "TuiEditorAdapter source defines required API":
-        val src = read_text("src/lib/editor/unified/tui_adapter.spl")
-        expect(src.contains("class TuiEditorAdapter")).to_equal(true)
-        expect(src.contains("fn handle_key")).to_equal(true)
-        expect(src.contains("fn visible_lines")).to_equal(true)
-        expect(src.contains("fn ensure_cursor_visible")).to_equal(true)
+    it "TuiEditorAdapter wraps backend":
+        val be = UnifiedEditorBackend.new()
+        val tui = TuiEditorAdapter.new(be)
+        expect(tui.terminal_rows).to_equal(24)
+        expect(tui.terminal_cols).to_equal(80)
+
+    it "TuiEditorAdapter handles quit key":
+        val be = UnifiedEditorBackend.new()
+        var tui = TuiEditorAdapter.new(be)
+        val result = tui.handle_key("q")
+        expect(result.ok).to_equal(true)
+        expect(result.message).to_equal("quit")
 
 describe "unified backend — vscode_adapter":
 
-    it "VscodeEditorAdapter source defines dispatch":
-        val src = read_text("src/lib/editor/unified/vscode_adapter.spl")
-        expect(src.contains("class VscodeEditorAdapter")).to_equal(true)
-        expect(src.contains("fn dispatch")).to_equal(true)
-        expect(src.contains("VscodeRequest")).to_equal(true)
-        expect(src.contains("VscodeResponse")).to_equal(true)
+    it "VscodeEditorAdapter wraps backend":
+        val be = UnifiedEditorBackend.new()
+        val vsc = VscodeEditorAdapter.new(be)
+        val req = VscodeRequest(method: "unknown_method", path: "", content: "", line: 0, col: 0, count: 0, query: "")
+        val resp = vsc.dispatch(req)
+        expect(resp.ok).to_equal(false)
+        expect(resp.message).to_contain("Unknown method")
 
-    it "dispatch handles known methods":
-        val src = read_text("src/lib/editor/unified/vscode_adapter.spl")
-        expect(src.contains("\"open\"")).to_equal(true)
-        expect(src.contains("\"save\"")).to_equal(true)
-        expect(src.contains("\"undo\"")).to_equal(true)
-        expect(src.contains("\"redo\"")).to_equal(true)
-        expect(src.contains("\"outline\"")).to_equal(true)
-        expect(src.contains("\"search\"")).to_equal(true)
+    it "VscodeAdapter config round-trip":
+        val be = UnifiedEditorBackend.new()
+        var vsc = VscodeEditorAdapter.new(be)
+        val set_req = VscodeRequest(method: "config_set", path: "", content: "dark", line: 0, col: 0, count: 0, query: "theme")
+        val set_resp = vsc.dispatch(set_req)
+        expect(set_resp.ok).to_equal(true)
+        val get_req = VscodeRequest(method: "config_get", path: "", content: "", line: 0, col: 0, count: 0, query: "theme")
+        val get_resp = vsc.dispatch(get_req)
+        expect(get_resp.ok).to_equal(true)
+        expect(get_resp.data).to_equal("dark")

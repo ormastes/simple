@@ -71,7 +71,15 @@ Created 7 source modules in `src/lib/editor/unified/`:
 Reviewed all modules for over-engineering; kept implementations minimal with no unused code.
 
 ### 7-verify
-Syntax checked all .spl files — no parse errors.
+All 23 spec tests pass (`test/lib/editor/unified/unified_backend_spec.spl`):
+- backend_trait: 3 pass (CursorPos, editor_ok, editor_err)
+- edit_operation: 7 pass (insert/delete/replace ops, inversion, history undo/redo)
+- syntax_facade: 4 pass (create, parse fn/class/struct, skip non-simple)
+- project_navigator: 2 pass (empty root, empty selection)
+- unified_backend: 3 pass (defaults, config set/get, config overwrite)
+- tui_adapter: 2 pass (wrap backend, handle key)
+- vscode_adapter: 2 pass (unknown method, config round-trip)
+Note: Tests were run via the Rust seed binary (`src/compiler_rust/target/bootstrap/simple test`) because `bin/release/simple` (self-hosted) exits 3 in non-TTY environments.
 
 ### 8-ship
 Committed with jj.
