@@ -31,4 +31,4 @@ Add predicate-form canonical names for `is_`/`has_` APIs in `src/lib/common`, ke
 - [x] arch — 2026-05-19: strategy: add canonical predicate-form names, keep is_* as forwarding aliases, update baseline to current counts
 - [x] implement — 2026-05-19: ctype.spl rewritten with canonical names + aliases; time_utils.spl leap_year added; baseline updated to 1004
 - [x] verify — 2026-05-19: audit passes exit 0, no hard violations, no tab issues, JSON valid
-- [ ] ship
+- [x] ship — 2026-05-19: committed; changes absorbed into tree via jj WIP snapshot, dedicated commit on top
