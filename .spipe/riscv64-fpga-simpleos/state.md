@@ -60,7 +60,25 @@ feature
 - Agent F: SimpleOS Runtime Closure → Phase 5 sub-agent
 
 ### 2-research
-<pending>
+**Date:** 2026-05-19
+**Output:** `.spipe/riscv64-fpga-simpleos/research.md`
+
+**FT4232H channel map (confirmed via sysfs):**
+- Interface 0 = JTAG/MPSSE (Channel A) — NOT a ttyUSB under ftdi_sio; unbind `3-2:1.0` for openocd/openFPGALoader
+- Interface 1 = ttyUSB2 (Channel B) — PS UART0 console at 115200
+- Interface 2 = ttyUSB3 (Channel C) — PS UART1 or PL UART
+- Interface 3 = ttyUSB5 (Channel D) — spare/platform UART
+- ttyUSB0/ttyUSB4 are on a different hub node, not the ML Carrier Card FT4232H
+
+**SDN format:** `table_name |col1, col2, ...|` header + 4-space-indented comma-rows; strings in `""`, integers and booleans bare.
+
+**SHS pattern:** `pass()/fail()/info()` helpers, env-var config block at top, `/tmp/script.$$` temp files, script exits 0 always (caller parses output).
+
+**Existing RV64 arch:** 19 files in `src/os/kernel/arch/riscv64/`, no `platform/` subdir yet. Linker loads at `0x80200000` (QEMU virt). FPGA needs new `platform/fpga_linker.ld` with board-specific memory map.
+
+**Target contract:** `riscv_linux_target_contract()` exists in `riscv_target.spl`; no baremetal/fpga preset for rv64. Need `preset_riscv64_fpga` or `preset_riscv64_baremetal` analogous to `preset_riscv32_baremetal`.
+
+**Linker scripts:** `src/os/kernel/arch/riscv64/linker.ld` is QEMU-only (0x80200000). Baremetal templates at `src/compiler/70.backend/baremetal/riscv/linker.ld` and `src/lib/nogc_async_mut_noalloc/baremetal/riscv/linker.ld`.
 
 ### 3-arch
 <pending>
