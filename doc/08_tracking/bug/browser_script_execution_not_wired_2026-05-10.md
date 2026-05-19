@@ -33,6 +33,17 @@ boundary. Scripts can validate parsing and produce console output, but cannot
 modify the rendered DOM tree. Full in-process execution requires a future
 `rt_interpret_file` runtime extern.
 
+### 4. URL Pipeline Not Calling Script Renderer — RESOLVED (2026-05-19)
+`simple_web_renderer.spl` `simple_web_render_url_to_pixels()` was calling
+`BrowserRenderer.render_html()` (no script execution) in the `file://` branch.
+Now calls `render_html_to_pixels_with_scripts()` from `browser_script_render.spl`
+so scripts in locally loaded HTML pages are collected and executed.
+
+**Remaining coverage gap:** `browser_renderer_script_spec.spl` tests
+`render_html_to_pixels_with_scripts` directly but does not cover the URL pipeline
+path (`simple_web_render_url_to_pixels` with a `file://` URL). Full URL-pipeline
+test coverage is a follow-up task.
+
 ## Test Coverage
 - `test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_script_spec.spl` — 6 tests
 
