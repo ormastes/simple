@@ -1,5 +1,7 @@
 # SStack State: firacode-starship-shell
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > let fira code nerd be default font of simple os. and starship feature in simple shell it self. and use simple codes. https://github.com/starship/starship
 

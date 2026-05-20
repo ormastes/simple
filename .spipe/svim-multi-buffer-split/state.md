@@ -1,5 +1,7 @@
 # SStack State: svim-multi-buffer-split
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Extend the SVIM TUI editor with multi-buffer editing and split pane layout support.
 

@@ -1,5 +1,7 @@
 # Compiler Family Enforcement
 
+## Status: CLOSED — 2026-05-20
+
 ## Phase: 8-ship
 ## Type: feature
 ## Status: complete

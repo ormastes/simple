@@ -454,7 +454,7 @@ pub(super) fn exec_block_closure(
                     impl_methods,
                 )?;
                 let iter_values = get_iterator_values(&iterable)?;
-                for val in iter_values {
+                'for_loop_own: for val in iter_values {
                     if let simple_parser::ast::Pattern::Identifier(ref name) = for_stmt.pattern {
                         local_env.insert(name.clone(), val);
                     } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
@@ -462,15 +462,19 @@ pub(super) fn exec_block_closure(
                     } else if let simple_parser::ast::Pattern::MoveIdentifier(ref name) = for_stmt.pattern {
                         local_env.insert(name.clone(), val);
                     }
-                    // Use mutable env version so assignments inside the loop persist
-                    last_value = exec_block_closure_mut(
+                    match exec_block_closure_mut(
                         &for_stmt.body.statements,
                         &mut local_env,
                         functions,
                         classes,
                         enums,
                         impl_methods,
-                    )?;
+                    ) {
+                        Ok(val) => last_value = val,
+                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break 'for_loop_own; }
+                        Err(CompileError::LoopContinue) => continue 'for_loop_own,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Node::Match(match_stmt) => {
@@ -822,9 +826,14 @@ pub(super) fn exec_block_closure(
                     if !cond.truthy() {
                         break;
                     }
-                    last_value = exec_block_closure_mut(
+                    match exec_block_closure_mut(
                         &while_stmt.body.statements, &mut local_env, functions, classes, enums, impl_methods,
-                    )?;
+                    ) {
+                        Ok(val) => last_value = val,
+                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break; }
+                        Err(CompileError::LoopContinue) => continue,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Node::Loop(loop_stmt) => {
@@ -834,10 +843,30 @@ pub(super) fn exec_block_closure(
                         IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
                         return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
                     }
-                    last_value = exec_block_closure_mut(
+                    match exec_block_closure_mut(
                         &loop_stmt.body.statements, &mut local_env, functions, classes, enums, impl_methods,
-                    )?;
+                    ) {
+                        Ok(val) => last_value = val,
+                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break; }
+                        Err(CompileError::LoopContinue) => continue,
+                        Err(e) => return Err(e),
+                    }
                 }
+            }
+            Node::Break(b) => {
+                let value = if let Some(expr) = &b.value {
+                    Some(evaluate_expr(expr, &mut local_env, functions, classes, enums, impl_methods)?)
+                } else {
+                    None
+                };
+                CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+                IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
+                return Err(CompileError::LoopBreak(value));
+            }
+            Node::Continue(_) => {
+                CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+                IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
+                return Err(CompileError::LoopContinue);
             }
             _ => {
                 last_value = Value::Nil;
@@ -1037,7 +1066,7 @@ fn exec_block_closure_mut(
             Node::For(for_stmt) => {
                 let iterable = evaluate_expr(&for_stmt.iterable, local_env, functions, classes, enums, impl_methods)?;
                 let iter_values = get_iterator_values(&iterable)?;
-                for val in iter_values {
+                'for_loop: for val in iter_values {
                     if let simple_parser::ast::Pattern::Identifier(ref name) = for_stmt.pattern {
                         local_env.insert(name.clone(), val);
                     } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
@@ -1045,14 +1074,19 @@ fn exec_block_closure_mut(
                     } else if let simple_parser::ast::Pattern::MoveIdentifier(ref name) = for_stmt.pattern {
                         local_env.insert(name.clone(), val);
                     }
-                    last_value = exec_block_closure_mut(
+                    match exec_block_closure_mut(
                         &for_stmt.body.statements,
                         local_env,
                         functions,
                         classes,
                         enums,
                         impl_methods,
-                    )?;
+                    ) {
+                        Ok(val) => last_value = val,
+                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break 'for_loop; }
+                        Err(CompileError::LoopContinue) => continue 'for_loop,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Node::Match(match_stmt) => {
@@ -1339,9 +1373,14 @@ fn exec_block_closure_mut(
                     if !cond.truthy() {
                         break;
                     }
-                    last_value = exec_block_closure_mut(
+                    match exec_block_closure_mut(
                         &while_stmt.body.statements, local_env, functions, classes, enums, impl_methods,
-                    )?;
+                    ) {
+                        Ok(val) => last_value = val,
+                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break; }
+                        Err(CompileError::LoopContinue) => continue,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Node::Loop(loop_stmt) => {
@@ -1349,10 +1388,26 @@ fn exec_block_closure_mut(
                     if crate::interpreter::is_timeout_exceeded() {
                         return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
                     }
-                    last_value = exec_block_closure_mut(
+                    match exec_block_closure_mut(
                         &loop_stmt.body.statements, local_env, functions, classes, enums, impl_methods,
-                    )?;
+                    ) {
+                        Ok(val) => last_value = val,
+                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break; }
+                        Err(CompileError::LoopContinue) => continue,
+                        Err(e) => return Err(e),
+                    }
                 }
+            }
+            Node::Break(b) => {
+                let value = if let Some(expr) = &b.value {
+                    Some(evaluate_expr(expr, local_env, functions, classes, enums, impl_methods)?)
+                } else {
+                    None
+                };
+                return Err(CompileError::LoopBreak(value));
+            }
+            Node::Continue(_) => {
+                return Err(CompileError::LoopContinue);
             }
             _ => {
                 last_value = Value::Nil;

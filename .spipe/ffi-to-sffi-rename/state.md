@@ -1,5 +1,7 @@
 # FFI → SFFI Full Rename — AUDIT INCOMPLETE
 
+## Status: CLOSED — 2026-05-20
+
 ## Summary
 Renamed all `ffi` references to `sffi` across the entire codebase.
 State claim was COMPLETE but audit (2026-05-20) found 2 unsatisfied ACs.
@@ -9,28 +11,21 @@ State claim was COMPLETE but audit (2026-05-20) found 2 unsatisfied ACs.
 - [x] AC-1: Zero `use std.ffi.*` imports remain (all → `use std.sffi.*`)
   — VERIFIED: rg found 0 occurrences in src/lib, src/app, src/compiler
 
-- [ ] AC-2: Zero files named `*ffi*` remain (all renamed to `*sffi*`); Rust `std::ffi` preserved
-  — PARTIALLY SATISFIED: Two files remain with `_ffi` suffix that were not renamed:
-    - `src/lib/nogc_sync_mut/io/tls_ffi.spl`
-    - `src/lib/nogc_sync_mut/io/image_ffi.spl`
-  — Note: `*_ffi.spl` suffix (meaning "FFI bindings for X") may be intentional naming
-    distinct from the namespace rename. Needs clarification from orchestrator.
+- [x] AC-2: Zero files named `*ffi*` remain (all renamed to `*sffi*`); Rust `std::ffi` preserved
+  — SATISFIED: T2b renamed `tls_ffi.spl→tls_sffi.spl` and `image_ffi.spl→image_data.spl`.
+    All remaining `*ffi*` file matches are `*sffi*` (pattern matches substring).
 
-- [ ] AC-3: Zero identifiers/variables named `*ffi*` in source (→ `*sffi*`)
-  — FAILED: Two confirmed violations:
-    1. `src/compiler/70.backend/backend/interpreter_calls.spl`: imports
-       `sffi_minimal as sffi` but call sites use `ffi.value_print()`,
-       `ffi.value_int()`, etc. (20+ call sites using old `ffi.` alias).
-       This is likely a runtime bug — the `ffi` name has no binding.
-    2. `src/app/itf/adapter_minio.spl` lines 462, 528, 582: `var ffi: [text] = []`
-       declares variable named `ffi`, then subsequent lines mutate `sffi` instead,
-       and `rt_http_request` is passed `ffi` (the empty array). Broken rename —
-       variable declaration missed but mutation lines were updated to `sffi`.
-  — Also present but likely acceptable:
-    - `@ffi(...)` annotation syntax in 107 comment lines (decorator syntax, not identifier)
-    - `ffi-gen` CLI command name (string literal, not identifier)
-    - `net/ffi.spl` references in doc comments (stale path references)
-    - `var ffi` in adapter_minio passed to rt_http_request vs sffi mutations (bug above)
+- [x] AC-3: Zero identifiers/variables named `*ffi*` in source (→ `*sffi*`)
+  — SATISFIED (2026-05-20):
+    - interpreter_calls.spl and adapter_minio.spl fixes applied by orchestrator.
+    - Remaining code hits fixed in Wave 25:
+      * `migrate/tests.spl`: `sys_ffi` → `sys_sffi`, `"test/system/ffi"` → `"test/system/sffi"`, `"ffi:test/unit/std"` → `"sffi:test/unit/std"`
+      * `generator.spl`: `path.contains("/ffi/")` → `path.contains("/sffi/")`
+      * Net `__init__.spl` (3 copies): `**ffi**` submodule doc → `**sffi**`
+      * torch_training.spl (3 copies): `torch/ffi.spl` doc string → `torch/sffi.spl`
+    — Remaining acceptable non-identifier hits:
+      * `module_loader_resolve.spl:165`: deprecation guard checking string `"ffi"` (intentional compat shim)
+      * `"ffi-gen"` in 6 CLI files: user-facing CLI command name (string literal, not identifier)
 
 - [x] AC-4: Comments/docs updated
   — PARTIALLY: Doc directory has 913 `ffi` references vs sffi, but many are
@@ -60,7 +55,7 @@ State claim was COMPLETE but audit (2026-05-20) found 2 unsatisfied ACs.
 3. `b6` — fix: resolve Rust compilation errors (std::ffi preserved, wffi→wsffi, variable refs)
 
 ## Phase
-Phase 8 (ship) — BLOCKED pending AC-3 fixes
+[x] Phase 8 (ship) — COMPLETE 2026-05-20
 
 ## Remaining Work
 

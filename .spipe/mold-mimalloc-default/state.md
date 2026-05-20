@@ -1,5 +1,7 @@
 # SStack State: mold-mimalloc-default
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > port linker mold and make default linker of simple and make it runnable from fs. and port mimolloc to simple and and make default os malloc.
 

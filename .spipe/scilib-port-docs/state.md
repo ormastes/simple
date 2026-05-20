@@ -1,5 +1,7 @@
 # SStack State: scilib-port-docs
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > check scilib_port_* plan not done or proper doc or guides. impl with sonnet agent teams with opus advisor.
 

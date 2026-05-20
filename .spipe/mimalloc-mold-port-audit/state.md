@@ -1,5 +1,7 @@
 # SStack State: mimalloc-mold-port-audit
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > check mimalloc and mold port to pure simple plan and complete
 

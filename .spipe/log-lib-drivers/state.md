@@ -1,5 +1,7 @@
 # SStack State: log-lib-drivers
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > check log lib and let simple os include driver to use log lib. if security or system problem. then make low level log lib for them. research exisiting log in system programming. let log changable
 

@@ -1,5 +1,7 @@
 # SStack State: m18-advanced-selectors-text
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > start M18
 

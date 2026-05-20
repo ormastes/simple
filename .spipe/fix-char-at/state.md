@@ -1,5 +1,7 @@
 # fix-char-at state
 
+## Status: CLOSED — 2026-05-20
+
 ## Wave 1: Pattern B migration — COMPLETE
 
 Commit: `refactor: migrate Pattern B chars()[i] callers to Sequence::get`

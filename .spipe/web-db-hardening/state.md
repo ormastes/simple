@@ -1,6 +1,6 @@
 # Web DB Hardening — Task State
 
-## Status: complete
+## Status: CLOSED — 2026-05-20
 
 ## Scope
 SQL injection prevention, parameterized query enforcement, and connection pool

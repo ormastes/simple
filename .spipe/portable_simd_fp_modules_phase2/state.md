@@ -1,5 +1,7 @@
 # SStack State: portable_simd_fp_modules_phase2
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > there was plan about apply simd and float. and multi core and cache for riscv 32 64. find them replan multi agents with opus advisor plan. and complete them. and apply mdsoc. (rtl version mdsoc = (a) Simple-source VHDL emitter; run all three features now)
 

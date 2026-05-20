@@ -1,6 +1,6 @@
 # game2d-rendering-pipeline — State
 
-## Status: complete
+## Status: CLOSED — 2026-05-20
 
 ## Goal
 Implement the Game2D rendering pipeline: sprite batch rendering, texture atlas (2D),

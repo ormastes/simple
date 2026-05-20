@@ -1,5 +1,7 @@
 # SStack State: llm-dashboard-harden
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > make llm dashboard harden on cli gui and on simple os. and with task pipeline. llm dashboard homonize the skill command set and generator. research first.
 

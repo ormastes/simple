@@ -527,6 +527,11 @@ pub enum CompileError {
     LintWithContext(Box<ContextualError>),
     #[error("runtime: {}", _0.message)]
     RuntimeWithContext(Box<ContextualError>),
+
+    #[error("loop break")]
+    LoopBreak(Option<crate::value::Value>),
+    #[error("loop continue")]
+    LoopContinue,
 }
 
 impl CompileError {
@@ -646,6 +651,8 @@ impl CompileError {
             Self::ExecutionLimitExceeded { message, .. } => message,
             Self::StackOverflow { function_name, .. } => function_name,
             Self::TimeoutExceeded { .. } => "timeout exceeded",
+            Self::LoopBreak(_) => "loop break",
+            Self::LoopContinue => "loop continue",
         }
     }
 

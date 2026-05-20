@@ -1100,8 +1100,8 @@ impl<'a> MirLowerer<'a> {
                 continue;
             }
 
-            // Only copy actual global/static/const variables
-            module.globals.push((name.clone(), *ty, true));
+            let is_mutable = !hir.immutable_globals.contains(name);
+            module.globals.push((name.clone(), *ty, is_mutable));
         }
 
         for func in &hir.functions {

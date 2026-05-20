@@ -1,5 +1,7 @@
 # Error Catalog Completeness
 
+## Status: CLOSED — 2026-05-20
+
 **Type:** code-quality
 **Status:** done
 **Phase:** 8 (ship)

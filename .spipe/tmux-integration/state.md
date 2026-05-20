@@ -1,5 +1,7 @@
 # SPipe State: tmux-integration
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 Implement TMux integration module for the Simple standard library — programmatic control of tmux sessions, windows, and panes.
 

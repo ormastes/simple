@@ -1,5 +1,7 @@
 # State: method-dispatch-recursion fix
 
+## Status: CLOSED — 2026-05-20
+
 **Status:** DONE — fix implemented, not yet bootstrap-deployed.
 
 ## Bug

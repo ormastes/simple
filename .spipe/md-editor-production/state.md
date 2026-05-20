@@ -1,5 +1,7 @@
 # SStack State: md-editor-production
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > /dev impll md editor proDuction level
 

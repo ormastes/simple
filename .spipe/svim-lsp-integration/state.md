@@ -1,5 +1,7 @@
 # SStack State: svim-lsp-integration
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 SVIM TUI: LSP Integration — Implement Language Server Protocol client integration
 for code intelligence in the SVIM TUI editor.

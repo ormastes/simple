@@ -1,5 +1,7 @@
 # SStack State: unified-editor-backend
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Unified Editor Backend — Create shared backend architecture for both SVIM TUI and VSCode Extension, providing common services like buffer management, syntax tree, undo/redo, and project navigation.
 
