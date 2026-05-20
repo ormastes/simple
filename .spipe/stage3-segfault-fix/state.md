@@ -295,3 +295,5 @@ spec-done
 - arch: Designed 4 modules (3 modified, 1 new enum in existing file), 6 decisions, no circular deps. Key: Result return type eliminates silent fallback, verify_stripped_archive adds post-condition, SIGSEGV diagnostic in compile_stage makes failures self-diagnosing.
 - spec: Created 1 spec file with 15 total specs, 100% AC coverage. AC-3/4/5 are integration-level (manual bootstrap run in phase 7). 13 specs use text-grep on Rust source; 2 pass now (.init_array/.ctors already in code), 11 will fail until implementation.
 - verify: cargo check passes (no new errors). All 3 modified files confirmed with expected changes. AC-1/2/5/6 verified. AC-3/4 require full bootstrap integration test (deferred to phase 8-ship).
+
+## Pipeline Status: CLOSED — verified Wave 16-8

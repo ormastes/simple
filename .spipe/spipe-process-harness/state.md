@@ -53,3 +53,5 @@ State artifacts updated. Tests pass. No outstanding TODOs.
 ### post-ship (Wave 16 — 2026-05-19)
 Rewrote test spec to import from the actual library (`std.nogc_async_mut.spipe_process_harness.types` + `core`) instead of inline mirrors. Removed all duplicated struct/fn definitions. Added 8 new test cases covering `provider_hook_events`, `hook_command`, and `hook_jsonl`. All 37 tests pass against the real library code.
 
+## Pipeline Status: CLOSED — verified Wave 16-5
+

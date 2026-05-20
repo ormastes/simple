@@ -1,4 +1,4 @@
-# scilib_port_math_block.md — Math Block v1 Extensions TODO
+# scilib_port_math_block.md — Math Block v1 Extensions
 
 **Area:** `math_block`  
 **Status:** Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.  

@@ -35,3 +35,5 @@
 - TextIndex layers over PrefixIndex for substring search with trigram pre-filter
 - PageSummary provides min/max/hash page-header scan helpers compatible with BRIN
 - FilterIn provides OR-semantics multi-value batch scan returning RowBitmap
+
+## Pipeline Status: CLOSED — verified Wave 16-9

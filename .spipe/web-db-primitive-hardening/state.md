@@ -23,3 +23,5 @@ fixed DB bugs exposed by the system spec.
 
 ## Spec File
 - src/lib/nogc_sync_mut/db/web_db_primitive_hardening_spec.spl
+
+## Pipeline Status: CLOSED — verified Wave 15-6

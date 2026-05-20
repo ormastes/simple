@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # Agent Tasks: portable_simd_fp_modules
 
-> Status: PARTIAL — phase 2 in flight via .spipe/portable_simd_fp_modules_phase2; Wave 2 dispatch gap being fixed
+> Status: COMPLETE — spipe 14/14 done (W16-2 closed)
 
 ## Current Status (2026-05-01)
 

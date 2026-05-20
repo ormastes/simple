@@ -1,6 +1,7 @@
-# scilib-port: std.df TODO — DataFrame (v1.1)
+# scilib-port: std.df — DataFrame (v1.1)
 
-**Phase:** v1.1 — Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.  
+**Status:** Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/feature/scilib/.  
+**Phase:** v1.1  
 **Location:** `src/lib/nogc_sync_mut/df/`  
 **Import:** `use std.df`  
 **Tier:** `nogc_sync_mut/` — synchronous I/O, FFI, mutable state; no GC required  

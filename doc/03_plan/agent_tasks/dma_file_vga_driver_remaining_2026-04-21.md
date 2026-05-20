@@ -1,6 +1,6 @@
 # DMA, File Driver, and VGA/Display Driver Remaining Plan
 
-Status: open
+Status: COMPLETE — spipe dma-file-vga-driver-remaining 16/16
 Last updated: 2026-04-21
 Scope: shared DMA ownership, SR-IOV/IOMMU isolation, file/block direct I/O,
 legacy VGA/BGA framebuffer acceleration, and VirtIO-GPU DMA transfer paths.

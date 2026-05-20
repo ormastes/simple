@@ -451,3 +451,5 @@ If `use std.log.{...}` fails to import from `src/os/services/vfs/` (the log modu
 **Ship commit:** `0515a3d0b7 feat(simpleos): harden NVFS connector with Result returns + caps + bounds`
 **Files in commit:** `src/os/services/vfs/nvfs_connector.spl` (+114 / −122 LOC).
 **Spec file (already landed via wip-snapshot `a72242e4f8`):** `test/unit/os/services/vfs/vfs_nvfs_connector_spec.spl` (217 LOC).
+
+## Pipeline Status: CLOSED — verified Wave 15-10

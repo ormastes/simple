@@ -52,3 +52,5 @@ API with explicit RX/TX buffer semantics, and stub hardware acceleration discove
 - 2026-05-18 impl: Created 4 source .spl files and 1 test spec file with 20 tests.
 - 2026-05-18 verify: All 20 tests pass in interpreter mode.
 - 2026-05-18 ship: Files committed, state closed.
+
+## Pipeline Status: CLOSED — verified Wave 16-1

@@ -52,3 +52,5 @@ Gate script runs and detects policy violations. Test spec validates behavior.
 
 ### 8-ship
 All artifacts committed via jj. State updated. No outstanding TODOs.
+
+## Pipeline Status: CLOSED — verified Wave 16-4

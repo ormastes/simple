@@ -1,8 +1,59 @@
 # Phase 4: Markdown Editor Test Specification
 **Agent:** QA Lead (Spec Agent)  
 **Date:** 2026-05-11  
-**Status:** In Progress  
+**Status:** Superseded — Implementation Complete  
 **Deliverable:** Comprehensive test matrix for Phase 5 implementation
+
+---
+
+## Pipeline Status Update (2026-05-20)
+
+**This spec pipeline (Phase 4) is complete and superseded.**
+
+The Phase 5 implementation was carried out under the `editor-ide-platform` pipeline
+(all 8 phases marked done 2026-05-19) and the `md-editor-production` pipeline
+(65/65 tests passing).
+
+### What was actually implemented
+
+The implementation uses a different but equivalent architecture to the API names
+proposed in this spec document:
+
+| Spec concept | Actual implementation |
+|---|---|
+| `MarkdownLexer` / `MarkdownParser` | `std.common.markdown.{parse,block,inline,adapter}` |
+| `MarkdownTuiRenderer` | `std.editor.render.md_renderer` |
+| `MarkdownEditor` | `std.editor.core.session` + `app.editor.editor_controller` |
+| `MarkdownPreviewPane` | `std.editor.view.preview_pane` |
+| `MarkdownDiagnostics` | `std.editor.services.md_diagnostics` |
+| Command palette | `std.editor.extensions.builtin.md_commands` + `md_edit_assist` |
+
+### Actual test coverage (system specs)
+
+| File | Tests |
+|---|---|
+| `test/system/editor_markdown_spec.spl` | 84 |
+| `test/system/editor_markdown_document_decor_spec.spl` | 6 |
+| `test/system/editor_markdown_office_layout_spec.spl` | 17 |
+| `test/tools/desktop/markdown_visual_editor_spec.spl` | 6 |
+| **Total** | **113** |
+
+### Why the spec API names differ
+
+This state.md was written as an aspirational API sketch on 2026-05-11 before
+architecture was finalized. The `editor-ide-platform` pipeline adopted a
+layered library architecture (`std.editor.*`, `std.common.markdown.*`) which
+covers the same semantic surface with different class/function names.
+
+### No further action needed
+
+- The 83 test cases listed below remain as spec documentation only.
+- Do NOT create new spec files based on the API names in this document
+  (`MarkdownLexer`, `MarkdownParser`, etc.) — they do not match the real
+  implementation and would produce false-failing tests.
+- To run the actual markdown editor tests: `bin/simple test test/system/editor_markdown_spec.spl`
+
+---
 
 ---
 

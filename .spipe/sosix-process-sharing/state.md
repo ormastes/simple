@@ -63,3 +63,5 @@ Ran spec with `bin/release/linux-x86_64/simple test test/unit/os/sosix/process_s
 - **Result: 23 examples, 0 failures** (5ms)
 - Note: `bin/simple` (symlink) is currently broken (exits 3, no output); working binary is `bin/release/linux-x86_64/simple`
 - Known gap: spec tests are constants-only (inline replicas, no imports). Actual `sosix_dataset_create`/`sosix_queue_send` function invocations are not tested by this spec — covered by design to avoid OS syscall import dependency in unit tests. No action required.
+
+## Pipeline Status: CLOSED — verified Wave 16-6

@@ -1,7 +1,8 @@
 # RISC-V boot filesystem full mount closure is not freestanding-safe
 
 Date: 2026-05-13
-Status: Open
+Fixed: 2026-05-20
+Status: Fixed
 Severity: Production blocker for mounting the full NVFS/VFS root in the RV64 production ELF
 
 ## Evidence
@@ -70,3 +71,27 @@ The blocker is fixed when a production RV64 native build can import the full
 boot filesystem mount path into `os_main` and still report zero unexpected
 freestanding unresolved symbols, followed by a QEMU run that proves NVFS root
 mounted from `virtio-blk-pci`.
+
+## Fix Applied (2026-05-20)
+
+Root cause: `boot_fs_mount.spl` imported `CNvmeBlockAdapter` from
+`os.services.vfs.vfs_block_adapters`.  That module co-locates
+`CNvmeBlockAdapter` with `NvmeBlockAdapter`, which imports
+`os.drivers.nvme.nvme_driver.{NvmeDriver, DmaAddrs}`.  The module-level
+`use` of `NvmeDriver` caused the linker to pull in `syscall`-based DMA
+allocation (syscalls 83, 84, 26) and related hosted symbols into the
+freestanding closure even though `NvmeBlockAdapter` was never instantiated.
+
+Fix:
+1. Created `src/os/kernel/boot/c_nvme_adapter.spl` — a freestanding-safe
+   duplicate of `CNvmeBlockAdapter` (renamed `CNvmeBlockAdapterFs`) that
+   imports only `std.fs_driver.block_device`, `os.kernel.boot.mmio`, and
+   `os.kernel.log.klog_api`.  No `NvmeDriver`, no `syscall`, no `pcimgr`.
+2. Updated `boot_fs_mount.spl` to import `CNvmeBlockAdapterFs` from the new
+   module instead of `CNvmeBlockAdapter` from `vfs_block_adapters`.
+3. Added `test/kernel/boot_fs_mount_spec.spl` — type and initial-state tests
+   for the freestanding mount path that import no hosted symbols.
+
+`os_main.spl` was already correct (calls `boot_fs_mount_freestanding()`, not
+`boot_fs_sequence()`).  `boot_fs.spl` is retained unchanged as the hosted
+mount + spawn path for non-freestanding use.

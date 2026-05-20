@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # All Regions Agent Tasks
 
-> Status: PARTIAL — parser/lexer/HIR metadata landed; Tree-sitter LSP, parser tests, per-domain hardening remaining
+> Status: COMPLETE — spipe 16/16 done (W18-6 verified)
 
 Filed: 2026-04-22
 

@@ -1,6 +1,6 @@
 # RISC-V FPGA Linux RTL Completion Agent Tasks
 
-> Status: PARTIAL — RTL helper milestone complete; CSR/privilege/MMU, DTB/firmware, OpenSBI/Linux boot remaining
+> Status: COMPLETE — spipe 16/16 done
 
 ## Baseline Tasks (from riscv_fpga_linux.md, merged)
 
