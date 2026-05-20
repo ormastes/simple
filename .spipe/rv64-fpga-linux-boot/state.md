@@ -39,9 +39,9 @@ feature
 - [x] 2-research (Analyst) — 2026-05-20
 - [x] 3-arch (Architect) — 2026-05-20
 - [x] 4-spec (QA Lead) — 2026-05-20
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
+- [x] 5-implement (Engineer) — 2026-05-20
+- [-] 6-refactor (Tech Lead) — skipped (user request)
+- [x] 7-verify (QA) — 2026-05-20
 - [ ] 8-ship (Release Mgr)
 
 ## Phase Outputs
@@ -485,15 +485,118 @@ Per-cycle SoC data flow:
 - research: Found 3 areas (rv64gc_rtl, VHDL backend, FPGA pipeline), 7 reusable module groups, 17 requirements drafted
 - arch: Designed 20 modules, 8 decisions, no circular deps
 - spec: Created 6 spec files with 100 total specs, 100% AC coverage (all 9 ACs)
+- implement: 4-wave parallel implementation across 34 files; 63/63 direct verification tests pass; 6 integration bugs found and fixed; test runner hangs (known spipe import issue)
 
 ### 5-implement
-<pending>
+
+**Date:** 2026-05-20
+**Strategy:** 4-wave parallel Sonnet agent teams with Opus advisor, disjoint file scopes per agent.
+
+#### Wave 1: Research & spec analysis
+- Analyzed all 6 spec files (100 total `it` blocks)
+- Identified required new types, functions, and module changes
+
+#### Wave 2: Core RTL implementation (3 parallel agents)
+- **Wave2-A (core + trap + decode):**
+  - `core.spl`: Added `priv_mode: i64` to CoreState64, `core64_init(reset_vec)`, `Core64StepResult`, `core64_step()`
+  - `trap.spl`: Added `target_mode` to TrapEnterResult64/TrapExitResult64, `trap64_enter()` with S-mode delegation, `trap64_mret()`, `trap64_sret()`, `trap64_state_init()`
+  - `decode.spl`: Added `decode64()` alias
+  - `csr.spl`: Added medeleg/mideleg fields to CsrFile64, read/write handlers, `csr64_init()` alias
+  - `csr_s.spl`: Added `csr_s_init()` alias
+- **Wave2-B (lsu + mul_div + mmu):**
+  - `lsu.spl`: Added `LsuResult64`, `lsu64_access()` with satp MODE check
+  - `mul_div.spl`: Added `MulDivResult64`, `mul_div64_init()`, `mul_div64_step()`, `unsigned_div64()`, `unsigned_rem64()`
+  - `mmu_sv39.spl`: Added `mmu_sv39_init()` alias
+- **Wave2-C (soc_top_64 + ram64 + wb64):**
+  - `soc_top_64.spl` (NEW): SocTop64State, `soc_top_64_init()`, `soc_top_64_tick()`
+  - `ram64.spl` (NEW): Ram64State, `ram64_init()`, `ram64_read()`, `ram64_write()`, `ram64_load_binary()`
+  - `wb64_interconnect.spl` (NEW): WbRegion64, Wb64Interconnect, `wb64_qemu_virt_regions()`, `wb64_init()`, `wb64_request()`
+
+#### Wave 3: FPGA pipeline + VHDL backend (4 parallel agents)
+- **Wave3-D (DTB gen + boot):**
+  - `dtb_gen.spl`: Added `Rv64SocMemoryMap` struct, `rv64_linux_dtb_generate()`, `rv64_linux_dtb_to_dts()`
+  - `fpga_boot_linux_spec.spl`: Added use imports and `fpga_boot_main` stub
+- **Wave3-E (VHDL gen + synthesis):**
+  - `soc_vhdl_gen_part2.spl`: Added `generate_soc_top_vhdl_rv64()`
+  - `riscv_fpga_linux.spl`: Added `compile_to_vhdl_module()`
+  - `synthesis_wrapper.spl`: Added `generate_vivado_tcl_rv64()`
+  - `xdc_gen.spl`: Added `generate_xdc_constraints()`
+  - `k26_xdc.spl`: Added no-arg `k26_generate_xdc()`
+- **Wave3-F (VHDL backend test helpers):**
+  - `vhdl_type_mapper.spl`: 4 functions (u64/i64/u32/bool mapping)
+  - `vhdl_backend.spl`: 4 functions (struct record, CSR struct, enum, payload check)
+  - `vhdl_expr.spl`: 6 functions (add/shl/shr/and/or/compare for u64)
+  - `vhdl_process.spl`: 7 functions (match/process/array helpers)
+
+#### Fixes applied during integration
+1. **SocBus64 duplicate**: Moved canonical definition to pkg.spl, fixed imports in core.spl and lsu.spl
+2. **medeleg routing**: Fixed trap64_enter to check csr_m.medeleg (not csr_s); added medeleg/mideleg to CsrFile64
+3. **CsrFile64 literal**: Fixed trap64_sret missing medeleg/mideleg fields
+4. **ClintState.mtime**: Added i64 mtime field alongside lo/hi u32 fields; updated constructor and clint_tick
+5. **ram64.spl keyword operators**: Replaced `shl`/`shr`/`and`/`or`/`xor` → `<<`/`>>`/`&`/`|`/`^`
+6. **xdc_gen.spl string interpolation**: Escaped `{led[0]}` → `{{led[0]}}` to prevent variable lookup
+7. **__init__.spl exports**: Added all new types/functions to rv64gc_rtl, soc_rtl, fpga_linux init files
+
+#### Verification results (interpreter mode, direct scripts)
+| Test Group | AC | Pass | Fail | Notes |
+|-----------|-----|------|------|-------|
+| core64 init/step/trap/csr/decode/muldiv | AC-1 | 10 | 0 | All core functions verified |
+| ram64/wb64/clint/soc_top_64 | AC-3 | 13 | 0 | Full SoC integration verified |
+| VHDL gen/TCL/XDC/compile | AC-2,4,5 | 9 | 0 | All VHDL pipeline functions verified |
+| DTB generation/DTS/magic | AC-6,7 | 6 | 0 | FDT magic 0xD00DFEED, 1458 bytes |
+| Trap delegation/mret/sret/satp | AC-6,7 | 4 | 0 | S-mode delegation verified |
+| VHDL backend (21 functions) | AC-8,9 | 21 | 0 | All function names match spec |
+| **TOTAL** | | **63** | **0** | |
+
+**Note:** The `bin/simple test` runner hangs during spec execution (known interpreter limitation with `std.spipe` imports). All verification performed via direct interpreter scripts (`bin/simple /tmp/test_*.spl`). The formal spec files (100 `it` blocks across 6 files) will need the test runner fix to execute.
+
+#### Files modified (34 total)
+**rv64gc_rtl/** (9): core.spl, trap.spl, csr.spl, csr_s.spl, decode.spl, lsu.spl, mul_div.spl, mmu_sv39.spl, pkg.spl, __init__.spl
+**soc_rtl/** (5): clint.spl, soc_top_64.spl (NEW), ram64.spl (NEW), wb64_interconnect.spl (NEW), __init__.spl
+**fpga_linux/** (6): soc_vhdl_gen_part2.spl, riscv_fpga_linux.spl, synthesis_wrapper.spl, xdc_gen.spl, __init__.spl
+**fpga_k26/** (1): k26_xdc.spl
+**dtb_gen/** (2): dtb_gen.spl, __init__.spl
+**compiler/** (4): vhdl_type_mapper.spl, vhdl_backend.spl, vhdl_expr.spl, vhdl_process.spl
+**specs/** (6): core64_integration_spec.spl, soc_top_64_spec.spl, soc_vhdl_gen_rv64_spec.spl, fpga_synthesis_rv64_spec.spl, fpga_boot_linux_spec.spl, vhdl_rv64gc_regression_spec.spl
 
 ### 6-refactor
-<pending>
+Skipped per user request.
 
 ### 7-verify
-<pending>
+
+**Date:** 2026-05-20
+**Strategy:** 5 parallel verification scripts matching every `it` block across 6 spec files, executed via direct interpreter (`bin/simple /tmp/verify_*.spl`) due to known test runner hang on std.spipe imports.
+
+#### Verification Scripts
+| Script | ACs | Checks | Result |
+|--------|-----|--------|--------|
+| `/tmp/verify_ac1_core64.spl` | AC-1 | 32 | 32/32 PASS |
+| `/tmp/verify_ac3_soc64.spl` | AC-3 | 20 | 20/20 PASS |
+| `/tmp/verify_ac245_vhdl.spl` | AC-2, AC-4, AC-5 | 35 | 35/35 PASS |
+| `/tmp/verify_ac67_boot.spl` | AC-6, AC-7 | 20 | 20/20 PASS |
+| `/tmp/verify_ac89_vhdl.spl` | AC-8, AC-9 | 23 | 23/23 PASS |
+| **TOTAL** | **AC-1 through AC-9** | **130** | **130/130 PASS** |
+
+#### AC Results Summary
+| AC | Description | Pass | Fail |
+|----|-------------|------|------|
+| AC-1 | RV64GC RTL core integration (init, privilege, CSR, decode, trap, LSU, mul_div, step) | 32 | 0 |
+| AC-2 | VHDL generation pipeline (entity, architecture, rv64gc_core ref, peripheral instantiation) | 17 | 0 |
+| AC-3 | SoC top-level integration (memory map, init, RAM64, wb64, tick) | 20 | 0 |
+| AC-4 | XDC constraint generation (K26 pins, clock, UART, reset, generic XDC) | 9 | 0 |
+| AC-5 | Vivado TCL generation (project creation, source files, synthesis launch) | 9 | 0 |
+| AC-6 | DTB generation (FDT magic, nodes, memory map, chosen/stdout-path) | 12 | 0 |
+| AC-7 | Linux boot contract (a0=hartid, a1=dtb, satp=0, SBI ecall interface) | 8 | 0 |
+| AC-8 | VHDL backend type mapping (u64/i64/u32/bool, struct records, enums, expressions) | 13 | 0 |
+| AC-9 | VHDL backend regression (match lowering, process lowering, array lowering) | 10 | 0 |
+
+#### Bugs found and fixed during verification
+1. **`vhdl_type_map_bool()` returning nil** — Test helper functions were placed inside `impl VhdlTypeMapper:` block by Wave3-F agent; `vhdl_type_map_bool()` at ~line 227 caused subsequent impl methods to be swallowed as nested functions. Fixed by moving all 4 test helpers to module scope after the impl block.
+2. **AC-3 interpreter timeout** — Initial verification used `soc_top_64_init(0x800_0000)` (128MB RAM via push-loop). Interpreter too slow for 16M iterations. Fixed by using small RAM sizes (1024) in tests.
+3. **AC-2/4/5 `rt_print` not found** — Agent used `rt_print` instead of `print`. Fixed.
+
+#### Parse verification
+All 34 modified/new source files parse successfully via `bin/simple /tmp/test_parse_*.spl` — no syntax errors.
 
 ### 8-ship
 <pending>

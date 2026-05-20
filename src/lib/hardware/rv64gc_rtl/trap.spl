@@ -17,6 +17,9 @@ use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MSTATUS_MPIE_MASK, MSTATUS_MP
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT}
 use std.hardware.rv64gc_rtl.csr.{MPP_M_MODE}
 use std.hardware.rv64gc_rtl.csr.{MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK}
+use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64}
+use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SPP_MASK_64, SSTATUS_SPP_BIT_64}
+use std.hardware.rv64gc_rtl.csr_s.{csr_s64_is_exception_delegated, csr_s64_is_interrupt_delegated}
 
 # ============================================================================
 # Trap phase constants
@@ -71,17 +74,19 @@ struct TrapState64:
 
 struct TrapEnterResult64:
     """Result of entering a trap."""
-    csr: CsrFile64   # Updated CSR file (mepc, mcause, mtval, mstatus saved)
-    trap_pc: i64      # Target PC (from mtvec, direct mode)
+    csr: CsrFile64    # Updated CSR file (mepc, mcause, mtval, mstatus saved)
+    trap_pc: i64       # Target PC (from mtvec, direct mode)
+    target_mode: i64   # Target privilege mode: M=3, S=1
 
 # ============================================================================
 # Trap Exit Result
 # ============================================================================
 
 struct TrapExitResult64:
-    """Result of exiting a trap via mret."""
+    """Result of exiting a trap via mret or sret."""
     csr: CsrFile64    # Updated CSR file (mstatus restored)
-    return_pc: i64     # Return PC (from mepc)
+    return_pc: i64     # Return PC (from mepc or sepc)
+    target_mode: i64   # Target privilege mode after return
 
 # ============================================================================
 # Interrupt Check Result
@@ -119,7 +124,7 @@ fn trap64_check_interrupt(csr: CsrFile64) -> InterruptCheckResult64:
 # Trap Entry
 # ============================================================================
 
-fn trap64_enter(csr: CsrFile64, pc: i64, cause: i64, tval: i64) -> TrapEnterResult64:
+fn trap64_enter_m_only(csr: CsrFile64, pc: i64, cause: i64, tval: i64) -> TrapEnterResult64:
     """Enter a trap: save context to CSRs, compute handler address."""
 
     var new_csr = csr
@@ -147,7 +152,7 @@ fn trap64_enter(csr: CsrFile64, pc: i64, cause: i64, tval: i64) -> TrapEnterResu
     # Compute trap handler PC from mtvec (direct mode)
     val trap_pc = csr.mtvec & 0xFFFFFFFFFFFFFFFC
 
-    TrapEnterResult64(csr: new_csr, trap_pc: trap_pc)
+    TrapEnterResult64(csr: new_csr, trap_pc: trap_pc, target_mode: 3)
 
 # ============================================================================
 # Trap Exit (mret)
@@ -175,4 +180,94 @@ fn trap64_exit_mret(csr: CsrFile64) -> TrapExitResult64:
 
     val return_pc = csr.mepc
 
-    TrapExitResult64(csr: new_csr, return_pc: return_pc)
+    # MPP field gives the target privilege mode after mret
+    val mpp = (new_csr.mstatus & MSTATUS_MPP_MASK) >> MSTATUS_MPP_LO_BIT
+
+    TrapExitResult64(csr: new_csr, return_pc: return_pc, target_mode: mpp)
+
+# ============================================================================
+# Trap State Init
+# ============================================================================
+
+fn trap64_state_init() -> TrapState64:
+    """Create zeroed initial trap state (TRAP_NORMAL phase)."""
+    TrapState64(phase: 0)
+
+# ============================================================================
+# Trap Entry with S-mode delegation (7-arg version)
+# ============================================================================
+
+fn trap64_enter(ts: TrapState64, cause: i64, tval: i64, pc: i64, priv_mode: i64, csr_m: CsrFile64, csr_s: CsrSMode64) -> TrapEnterResult64:
+    """Enter a trap with S-mode delegation support.
+    Checks medeleg/mideleg to route to S-mode (1) or M-mode (3).
+    The interrupt bit (bit 63) distinguishes interrupts from exceptions."""
+
+    # Check if this is an interrupt (bit 63 set) or exception
+    val int_bit: i64 = 1 << 63
+    val is_interrupt = (cause & int_bit) != 0
+
+    var delegated: bool = false
+    if is_interrupt:
+        val irq_num = cause & (int_bit ^ -1)
+        val deleg_bit = (csr_m.mideleg >> irq_num) & 1
+        delegated = deleg_bit == 1
+    else:
+        val deleg_bit = (csr_m.medeleg >> cause) & 1
+        delegated = deleg_bit == 1
+
+    if delegated:
+        # Route to S-mode: write sepc, scause, stval
+        var new_csr_s = csr_s
+        new_csr_s.sepc = pc & 0xFFFFFFFFFFFFFFFC
+        new_csr_s.scause = cause
+        new_csr_s.stval = tval
+
+        # Save SIE into SPIE, clear SIE, set SPP to current priv_mode (S=1 or U=0)
+        val old_sie = (csr_s.sstatus & 0x00000002) >> 1
+        var new_sstatus = csr_s.sstatus
+        new_sstatus = new_sstatus & (0x00000002 ^ -1)    # Clear SIE
+        new_sstatus = new_sstatus & (0x00000020 ^ -1)    # Clear SPIE
+        new_sstatus = new_sstatus & (SSTATUS_SPP_MASK_64 ^ -1)  # Clear SPP
+        new_sstatus = new_sstatus | (old_sie << 5)       # SPIE = old SIE
+        if priv_mode == 1:
+            new_sstatus = new_sstatus | SSTATUS_SPP_MASK_64  # SPP = 1 (S-mode)
+        # else SPP = 0 (U-mode)
+        new_csr_s.sstatus = new_sstatus
+
+        val trap_pc = csr_s.stvec & 0xFFFFFFFFFFFFFFFC
+        TrapEnterResult64(csr: csr_m, trap_pc: trap_pc, target_mode: 1)
+    else:
+        # Route to M-mode via existing logic
+        trap64_enter_m_only(csr_m, pc, cause, tval)
+
+# ============================================================================
+# Trap Exit Aliases
+# ============================================================================
+
+fn trap64_mret(csr_m: CsrFile64) -> TrapExitResult64:
+    """Exit M-mode trap via MRET. Alias for trap64_exit_mret."""
+    trap64_exit_mret(csr_m)
+
+fn trap64_sret(csr_s: CsrSMode64) -> TrapExitResult64:
+    """Exit S-mode trap via SRET.
+    Reads sstatus.SPP for target privilege, clears SPP and restores SIE."""
+
+    val spp = (csr_s.sstatus & SSTATUS_SPP_MASK_64) >> SSTATUS_SPP_BIT_64
+    val old_spie = (csr_s.sstatus & 0x00000020) >> 5
+
+    var new_sstatus = csr_s.sstatus
+    # Clear SIE, SPIE, SPP
+    new_sstatus = new_sstatus & (0x00000002 ^ -1)           # Clear SIE
+    new_sstatus = new_sstatus & (0x00000020 ^ -1)           # Clear SPIE
+    new_sstatus = new_sstatus & (SSTATUS_SPP_MASK_64 ^ -1)  # Clear SPP
+
+    # SIE <- SPIE, SPIE <- 1
+    new_sstatus = new_sstatus | (old_spie << 1)  # SIE = old SPIE
+    new_sstatus = new_sstatus | 0x00000020       # SPIE = 1
+
+    var new_csr_s = csr_s
+    new_csr_s.sstatus = new_sstatus
+
+    # Return a TrapExitResult64; csr field is unused for S-mode but we embed a zeroed M CSR
+    val dummy_csr_m = CsrFile64(mstatus: 0, misa: 0, mie: 0, mtvec: 0, mscratch: 0, mepc: 0, mcause: 0, mtval: 0, mip: 0, medeleg: 0, mideleg: 0, mcycle: 0, minstret: 0, mhartid: 0)
+    TrapExitResult64(csr: dummy_csr_m, return_pc: csr_s.sepc, target_mode: spp)

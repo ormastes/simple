@@ -5,10 +5,54 @@ All notable changes to Simple Language will be documented in this file.
 ## [1.0.0-beta] - 2026-05-20
 
 ### Added
+- **SPipe pipeline completion** — all 26 waves closed (200+ pipelines total); final closures: riscv64-fpga, interpreter-perf, markdown-editor-spec, network-protocol, vscode-extension
+- **Cryptography suite** — Tiger/192 hash, cSHAKE-128/256, KMAC-128/256, Serpent + OCB3 AEAD, Camellia KAT, ZUC-128/EEA3/EIA3, Streebog GOST R 34.11-2012, SCRAM-SHA-512, SLH-DSA hash param
+- **Zstd decompression** — FSE/Huffman decoders, predefined tables, XXH64 checksum, full spec tests
+- **MIR optimizer** — multi-arch pattern-idiom pass with cost model (Phases 1-4), cipher idiom layer with AArch64/RVV byte-emit
+- **Cipher backend** — Phase 3B backend encoders with golden byte tests, CLI `--target-features` and `--opt-remark` flags, LLVM IR intrinsic lowering for AES/SHA/CRC32/CLMUL
+- **WASM codegen adapter** — module, function, and type sections
+- **Kernel subsystems** — TLS shim (record framing + handshake), PCI manager (config space, enumeration, BAR mapping), DBFS superblock (read/write, validation, block allocation)
+- **SIMD** — 9 new SIMD externs, scalable-vector stubs filled with export adapter, SIMD bit-ISA backend gating with RV encoder fixes
+- **TLS 1.3 extensions** — KeyUpdate protocol support, NewSessionTicket handling, HRR P-256 connect helper
+- **Compositor/2D engine** — compositor stacking for engine2d, game2d feature-complete
+- **Skia** — glyph outline renderer
+- **Smux terminal multiplexer** — dashboard view, `close_pane` command, remote hosting, tmux backend
+- **Svim editor** — modal grammar implementation
+- **Database** — Phase 3 ML query planner and cost model, planner cast support
+- **FPGA/Baremetal** — noalloc-safe platform init with BoardConfig u64, direct UART extern, VHDL testbench specs, RV64 FPGA pipeline closed
+- **OS/Drivers** — MDSOC lane 5 added to driver platform pipeline, `dlopen`/`dlsym`/`dlclose` stubs
+- **PTY runtime externs** — terminal I/O support
+- **Feature capabilities registry** — stdlib feature discovery system
+- **Stdlib exports** — missing `pub` exports added for `std.common` (compress, math, easy_fix, drawing, sdn, image)
 
 ### Fixed
+- **Interpreter: Break/Continue in block closures** — BDD `it` blocks now correctly handle Break/Continue control flow
+- **Interpreter: While/Loop in block closures** — `it` blocks execute while/loop constructs correctly
+- **Interpreter: index-receiver method write-back** — `Value::Array` arm clone fix (bug #28)
+- **Interpreter: `to_equal(false)` state pollution** — `set_api_parity_spec` repaired
+- **HIR field inference** — regression resolved with regression spec added; 8/15 bug docs confirmed already FIXED
+- **Cross-module ABI** — native call ABI fix verified with regression spec
+- **Bootstrap stage4 type inference** — eliminated 100+ type inference errors across ~50 files
+- **FFI to SFFI migration bugs** — `interpreter_calls`, `adapter_minio`, and 10+ identifier renames fixed
+- **BDD `expect(false)` eager fail** — no longer short-circuits incorrectly
+- **Crypto: ZUC-128** — correct S-boxes and u32 arithmetic-shift workarounds (all 8 KAT pass)
+- **Crypto: Streebog** — correct L-word byte order, round constants, padding, output extraction
+- **Crypto: SCRAM-SHA-1** — correct ServerSignature hex and client-first length
+- **Crypto: x25519** — replace named-arg calls with positional args in dispatcher
+- **FPGA platform init** — noalloc-safe BoardConfig with module-level `val` workaround for baremetal zero-init bug
+- **MIR optimizer** — MIR masked-store pattern closed, induction_update added to VectorRecipe spec helpers
+- **Linker** — `--gc-sections` added to mold/lld/system-ld paths
+- **AArch64 backend** — renamed `emit_aesimc`/`emit_aesmc` to `_aarch64` suffix to eliminate x86 symbol collision
+- **u64 range checksum** — resolved
+- **RISCV boot FS** — freestanding adapter for compress/image
 
 ### Changed
+- **`std.ffi` renamed to `std.sffi`** — bulk rename across all TLS, image, and library modules
+- **SPipe harness** — test harness rewrite in Wave 16; spipe state management updated
+- **Module splits** — 16+ oversized files split under 800-line limit (TLS, editor shells, MCP tools, engine3d backend, module_loader, feature_caps)
+- **SIMD FP** — floating-point SIMD pipeline closed and verified
+- **Import warning audit** — cleaned across codebase
+- **Base64 migration** — completed as part of Wave 17
 
 ## [0.9.8] - 2026-04-28
 

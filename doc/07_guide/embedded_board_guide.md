@@ -28,6 +28,7 @@ and replay/rewind debugging.
 | STM32H7 / STM32WB via TRACE32 | `Trace32Adapter` | arm32 | Lauterbach TRACE32 | host_aware |
 | CH32V307 (RISC-V) | `Ch32V307Adapter` | riscv32 | WCH-Link (wlink CLI) | host_aware |
 | Arduino UNO R4 WiFi (RA4M1, Cortex-M4) | `ArduinoR4Adapter` | arm32 | CMSIS-DAP / SWD | in_progress |
+| Arduino UNO Q (STM32U585, Cortex-M33) | `UnoQAdapter` | arm32 | OpenOCD + ext. probe (JCTL) | in_progress |
 | ESP32 (Xtensa LX6, dual-core) | `Esp32Adapter` | xtensa | ESP-USB-Bridge / JTAG | in_progress |
 | Zynq-7020 ZedBoard (FPGA) | — | arm32 | OpenOCD + Platform Cable | excluded_public |
 
@@ -55,6 +56,7 @@ Defined in `src/lib/nogc_sync_mut/debug/remote/exec/types.spl`.
 | STM32WB | `0x20008000` | `0x20030000` | `0x20030000` | `0x20040000` | `0x20040000` | 224 KB |
 | CH32V307 | `0x20002000` | `0x20008000` | `0x20008000` | `0x2000C000` | `0x2000C000` | 40 KB |
 | Arduino R4 (RA4M1) | `0x20002000` | `0x20006000` | `0x20006000` | `0x20008000` | `0x20008000` | 24 KB |
+| Arduino UNO Q (STM32U585) | `0x20002000` | `0x20020000` | `0x20020000` | `0x2002E000` | `0x20030000` | 184 KB |
 | ESP32 (DRAM) | `0x3FFB2000` | `0x3FFD0000` | `0x3FFD0000` | `0x3FFFC000` | `0x3FFFC000` | 296 KB |
 | GHDL RV32 | `0x80010000` | `0x80100000` | `0x80100000` | `0x80200000` | `0x80200000` | 2 MB |
 
@@ -96,6 +98,7 @@ Simple source → CompilerBridge → native binary → CodeUploader → target S
 | STM32WB | 3334 | — | — |
 | Arduino R4 | 25333 | 25444 | 25666 |
 | ESP32 | 26333 | 26444 | 26666 |
+| Arduino UNO Q | 27333 | 27444 | 27666 |
 | GHDL RV32 | 3333 | — | — |
 | TRACE32 | 2331 | — | — |
 
