@@ -18,12 +18,13 @@
 ## Process
 
 1. Read `.spipe/<feature>/state.md` to get spec file paths
-2. For each failing spec file:
+2. For each failing spec file (max 5 fix-test iterations per file; if still failing after 5, document in state file and move on):
    a. Read the spec file to understand what must pass
    b. Identify or create the target source file in `src/**/<feature>.spl`
    c. Write the minimum code to make specs pass -- nothing more
-   d. Run specs: `bin/simple test <spec_file>`
-   e. If specs fail, read error output, fix, repeat
+   d. Run specs: `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` (pipefail preserves test exit code)
+   e. If specs fail and iterations < 5, read error output, fix, repeat
+   f. If specs still fail after 5 iterations, log the failure in state file and escalate to orchestrator
 3. After all specs pass, verify no `pass_todo` stubs remain in implementation
 4. Run full compile check: `bin/simple build check`
 5. Update state file with implementation status

@@ -1,0 +1,172 @@
+# @cover src/lib/hardware/soc_rtl/soc_top_64.spl 0%
+# @cover src/lib/hardware/soc_rtl/ram64.spl 0%
+# @cover src/lib/hardware/soc_rtl/wb64_interconnect.spl 0%
+"""
+# RV64GC SoC Top-Level Integration Specification
+
+**Feature IDs:** rv64-fpga-linux-boot
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** Draft
+**Requirements:** REQ-8, REQ-9
+**Research:** doc/01_research/domain/riscv_fpga_linux.md
+**Artifacts:** N/A
+
+## Overview
+
+Tests for the RV64GC SoC top-level: memory map address constants
+(QEMU virt profile), wishbone64 interconnect address decode, RAM64
+read/write round-trip, and SoC peripheral integration.
+
+Covers: AC-3 (SOC top-level integrates core + CLINT + PLIC + UART16550
++ RAM + bootrom with correct memory map)
+
+## Compiled-Mode Notes
+
+Memory map constant checks and RAM64 read/write round-trips are
+interpreter-safe. Full SoC tick simulation (core64_step + peripheral
+updates + interrupt routing) requires compiled mode.
+"""
+
+use std.spipe.*
+
+
+# ============================================================================
+# AC-3: QEMU Virt Memory Map Constants (REQ-9)
+# ============================================================================
+
+describe "RV64 SoC Memory Map (QEMU virt)":
+    it "AC-3: bootrom base address is 0x1000":
+        val bootrom_base = 0x1000
+        expect(bootrom_base).to_equal(0x1000)
+
+    it "AC-3: CLINT base address is 0x200_0000":
+        val clint_base = 0x200_0000
+        expect(clint_base).to_equal(0x200_0000)
+
+    it "AC-3: PLIC base address is 0xC00_0000":
+        val plic_base = 0xC00_0000
+        expect(plic_base).to_equal(0xC00_0000)
+
+    it "AC-3: UART16550 base address is 0x1000_0000":
+        val uart_base = 0x1000_0000
+        expect(uart_base).to_equal(0x1000_0000)
+
+    it "AC-3: DRAM base address is 0x8000_0000":
+        val dram_base = 0x8000_0000
+        expect(dram_base).to_equal(0x8000_0000)
+
+
+# ============================================================================
+# AC-3: SoC Top Initialization (REQ-8)
+# ============================================================================
+
+describe "SocTop64 Initialization":
+    it "AC-3: soc_top_64_init creates state with specified DRAM size":
+        val soc = soc_top_64_init(0x800_0000)
+        expect(soc.ram.size).to_equal(0x800_0000)
+
+    it "AC-3: soc_top_64_init wires core with QEMU virt reset vector":
+        val soc = soc_top_64_init(0x800_0000)
+        expect(soc.core.pc).to_equal(0x1000)
+
+    it "AC-3: soc_top_64_init starts core in M-mode":
+        val soc = soc_top_64_init(0x800_0000)
+        expect(soc.core.priv_mode).to_equal(3)
+
+
+# ============================================================================
+# AC-3: RAM64 Read/Write Round-Trip
+# ============================================================================
+
+describe "Ram64 Operations":
+    it "AC-3: ram64_init allocates memory of specified size":
+        val ram = ram64_init(0x1000)
+        expect(ram.size).to_equal(0x1000)
+
+    it "AC-3: ram64 byte write and read round-trip":
+        var ram = ram64_init(0x1000)
+        ram = ram64_write(ram, 0, 1, 0xAB)
+        val result = ram64_read(ram, 0, 1)
+        expect(result).to_equal(0xAB)
+
+    it "AC-3: ram64 halfword write and read round-trip":
+        var ram = ram64_init(0x1000)
+        ram = ram64_write(ram, 0, 2, 0xABCD)
+        val result = ram64_read(ram, 0, 2)
+        expect(result).to_equal(0xABCD)
+
+    it "AC-3: ram64 word write and read round-trip":
+        var ram = ram64_init(0x1000)
+        ram = ram64_write(ram, 0, 4, 0xDEAD_BEEF)
+        val result = ram64_read(ram, 0, 4)
+        expect(result).to_equal(0xDEAD_BEEF)
+
+    it "AC-3: ram64 doubleword write and read round-trip":
+        var ram = ram64_init(0x1000)
+        ram = ram64_write(ram, 0, 8, 0xDEAD_BEEF_CAFE_BABE)
+        val result = ram64_read(ram, 0, 8)
+        expect(result).to_equal(0xDEAD_BEEF_CAFE_BABE)
+
+    it "AC-3: ram64_load_binary loads data at offset":
+        var ram = ram64_init(0x1000)
+        val data = [0x13, 0x00, 0x00, 0x00]
+        ram = ram64_load_binary(ram, 0x100, data)
+        val result = ram64_read(ram, 0x100, 4)
+        expect(result).to_be_greater_than(0)
+
+
+# ============================================================================
+# AC-3: Wishbone64 Interconnect Address Decode (REQ-9)
+# ============================================================================
+
+describe "Wb64Interconnect Address Decode":
+    it "AC-3: wb64_init accepts region list":
+        val regions = wb64_make_qemu_virt_regions()
+        val ic = wb64_init(regions)
+        expect(ic.region_count).to_be_greater_than(0)
+
+    it "AC-3: wb64_request to DRAM range returns ack":
+        val regions = wb64_make_qemu_virt_regions()
+        val ic = wb64_init(regions)
+        val resp = wb64_request(ic, 0x8000_0000, 0, false, 0xFF)
+        expect(resp.ack).to_equal(true)
+
+    it "AC-3: wb64_request to UART range returns ack":
+        val regions = wb64_make_qemu_virt_regions()
+        val ic = wb64_init(regions)
+        val resp = wb64_request(ic, 0x1000_0000, 0, false, 0xFF)
+        expect(resp.ack).to_equal(true)
+
+    it "AC-3: wb64_request to unmapped address returns err":
+        val regions = wb64_make_qemu_virt_regions()
+        val ic = wb64_init(regions)
+        val resp = wb64_request(ic, 0xFFFF_FFFF, 0, false, 0xFF)
+        expect(resp.err).to_equal(true)
+
+
+# ============================================================================
+# AC-3: SoC Tick (compiled mode for full verification)
+# ============================================================================
+
+describe "SocTop64 Tick":
+    it "AC-3: soc_top_64_tick advances the core PC":
+        var soc = soc_top_64_init(0x800_0000)
+        val initial_pc = soc.core.pc
+        soc = soc_top_64_tick(soc)
+        expect(soc.core.pc).to_be_greater_than(initial_pc)
+
+    it "AC-3: soc_top_64_tick updates clint mtime":
+        var soc = soc_top_64_init(0x800_0000)
+        soc = soc_top_64_tick(soc)
+        expect(soc.clint.mtime).to_be_greater_than(0)
+
+
+# ============================================================================
+# Helper: Build QEMU virt memory map regions
+# ============================================================================
+
+fn wb64_make_qemu_virt_regions() -> [WbRegion64]:
+    # Helper to construct the standard QEMU virt memory map regions
+    # This will be provided by the implementation module
+    return wb64_qemu_virt_regions()

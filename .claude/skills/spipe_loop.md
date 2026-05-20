@@ -8,16 +8,17 @@ description: SPipe Loop — periodic check-and-implement plus daily-debug ingest
 `spipe_loop` runs SPipe orchestrator cycles. It supports two modes:
 
 1. **Default (continuous-check)** — periodic poll of in-flight tracks.
-   *TODO: define default mode semantics — Agent A/B own the orchestrator
-   wiring; this section is a stub until `doc/05_design/spipe_infra_arch.md`
-   lands.*
+   **NOT YET IMPLEMENTED.** Invoking `/spipe_loop` without `--daily-debug` must
+   print "spipe_loop: default continuous-check mode is not yet implemented.
+   Use /spipe_loop --daily-debug instead." and exit immediately. Do NOT
+   attempt to improvise behavior or loop.
 2. **`--daily-debug`** — once-a-day ingest of the engineering bug-report
    inbox (this file). Drives the 7-step pipeline below.
 
 ## Usage
 
 ```
-/spipe_loop                  # default continuous-check (TODO: stub)
+/spipe_loop                  # NOT YET IMPLEMENTED — exits with message
 /spipe_loop --daily-debug    # run the daily-debug pipeline once
 /spipe_loop --daily-debug --quiet     # suppress notify step
 /spipe_loop --daily-debug --dry-run   # plan only, no I/O writes

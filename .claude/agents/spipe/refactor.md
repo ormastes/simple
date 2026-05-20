@@ -20,14 +20,15 @@
 1. Read `.spipe/<feature>/state.md` to get implementation file paths
 2. Run duplication check: `bin/simple duplicate-check` on impl files
 3. Run linter: `bin/simple build lint` on impl files
-4. For each issue found:
+4. For each issue found (max 10 refactor-test cycles total; stop after 10 even if issues remain):
    a. **Duplication:** Extract shared logic into helper functions
    b. **Large files (>800 lines):** Split into focused modules
    c. **Naming:** Ensure consistency with project conventions
    d. **Dead code:** Remove unused functions, imports, variables
 5. After EVERY change, run specs to verify no behavior change:
-   `bin/simple test <spec_file>` for each spec from Phase 4
-6. Run final lint pass: `bin/simple build lint`
+   `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` for each spec from Phase 4
+   If a refactor breaks specs, revert that change and note it in state file — do NOT loop trying to fix it
+6. Run final lint pass: `set -o pipefail; bin/simple build lint 2>&1 | tail -30`
 7. Update state file with refactor status
 
 ## Rules

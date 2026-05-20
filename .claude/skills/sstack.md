@@ -129,8 +129,13 @@ Read the state file, perform your role, then update the state file with:
 
 6. **After agent returns**, read `.spipe/<feature>/state.md`
 7. **Verify exit criteria** for phase N (from spipe_phases.md)
-8. If exit criteria fail: re-run the agent (max 2 retries), then escalate to user
+8. If exit criteria fail: re-run the agent (max 2 retries total per phase, then **stop and escalate to user** — do NOT continue to the next phase or improvise fixes)
 9. Proceed to next phase
+
+**IMPORTANT — Session safety:**
+- Every `bin/simple test` or `bin/simple build` call in agent prompts MUST pipe through `| tail -40` to cap output
+- Agents must have explicit iteration limits on any test-fix loop (max 5 per file, max 10 total per phase)
+- If an agent runs more than 15 tool calls without progress, it must stop and report back
 
 ### Completion
 

@@ -18,22 +18,23 @@
 ## Process
 
 1. Read `.spipe/<feature>/state.md` to get all file paths
-2. Run full test suite: `bin/simple test`
-3. Run build checks: `bin/simple build check`
-4. Run doc coverage: `bin/simple doc-coverage`
-5. Check for remaining stubs:
+2. Run feature specs first: `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` for each spec from Phase 4
+3. Run full test suite with capped output: `set -o pipefail; bin/simple test 2>&1 | tail -60` (pipefail preserves test exit code; check last lines for pass/fail summary)
+4. Run build checks: `set -o pipefail; bin/simple build check 2>&1 | tail -30`
+5. Run doc coverage: `set -o pipefail; bin/simple doc-coverage 2>&1 | tail -30`
+6. Check for remaining stubs:
    - Search impl files for `pass_todo` -- must be zero
    - Search impl files for `pass_do_nothing` -- must be intentional
-6. Verify documentation exists for public API surfaces
-7. Compile verification report:
+7. Verify documentation exists for public API surfaces
+8. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
    - Doc coverage for new code
    - Any remaining issues
-8. If critical issues found:
+9. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
    a. Fix ONLY test/doc issues (not feature code)
-   b. Re-run affected checks
-9. Update state file with verification report
+   b. Re-run affected checks with `set -o pipefail; ... 2>&1 | tail -40` output cap
+10. Update state file with verification report
 
 ## Rules
 

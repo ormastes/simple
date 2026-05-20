@@ -489,3 +489,54 @@ fn _shell_command(cmd_parts: [text]) -> text:
 fn _shell_quote(value: text) -> text:
     val escaped = value.replace("'", "'\"'\"'")
     "'{escaped}'"
+
+# ===========================================================================
+# Broker-Aware Session Acquisition (AC-4, AC-5)
+# ===========================================================================
+
+use app.test_daemon.qemu_broker.{QemuBroker, QemuSessionEntry}
+
+fn acquire_or_spawn(target: OsTarget, broker: QemuBroker, use_broker: bool, qmp_socket: text, serial_log: text) -> Result<QemuGuestHandle, text>:
+    """Acquire a QEMU session from the broker if available, otherwise spawn fresh.
+
+    When use_broker is true, tries broker.acquire(arch, kernel_path) first.
+    If the returned session has a qmp_socket, wraps it in a QemuGuestHandle.
+    Otherwise falls back to spawn_guest_with_qmp.
+    When use_broker is false, spawns directly.
+    """
+    if use_broker:
+        val arch_str = _arch_to_text(target.arch)
+        val entry = broker.acquire(arch_str, target.output)
+        if entry.qmp_socket != "":
+            # Reuse existing session
+            return Ok(QemuGuestHandle.create(
+                entry.pid,
+                entry.qmp_socket,
+                serial_log,
+                serial_log + ".stderr",
+                target.qemu_system
+            ))
+    # Fall back to fresh spawn
+    spawn_guest_with_qmp(target, qmp_socket, serial_log)
+
+fn release_or_kill(handle: QemuGuestHandle, broker: QemuBroker, use_broker: bool) -> bool:
+    """Release session back to broker pool or kill the process.
+
+    When use_broker is true, finds the session by pid and releases it.
+    Otherwise kills the process directly.
+    """
+    if use_broker:
+        # Find session key by matching pid
+        var i = 0
+        while i < broker.sessions.len():
+            if broker.sessions[i].pid == handle.pid:
+                broker.release(broker.sessions[i].session_key)
+                return true
+            i = i + 1
+    # No broker or session not found — kill directly
+    rt_process_kill(handle.pid)
+
+fn _arch_to_text(arch: Architecture) -> text:
+    """Convert Architecture enum to text for broker keying."""
+    val name = arch_display_name(arch)
+    name
