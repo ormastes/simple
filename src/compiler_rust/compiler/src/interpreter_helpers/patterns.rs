@@ -307,11 +307,11 @@ pub(crate) fn handle_method_call_with_self_update(
                                     return Ok((result, Some((arr_name.clone(), new_arr_val))));
                                 }
                             }
-                            Value::Array(_) => {
+                            Value::Array(ref inner_arr) => {
                                 // Inner array (e.g. outer[0].push(x)): use a temp variable so
                                 // evaluate_method_call_with_self_update can track the mutation.
                                 let temp_var = format!("__indexed_elem_{}__", arr_name);
-                                env.insert(temp_var.clone(), elem.clone());
+                                env.insert(temp_var.clone(), Value::Array(inner_arr.clone()));
                                 let temp_receiver = Box::new(Expr::Identifier(temp_var.clone()));
                                 let temp_call = Expr::MethodCall {
                                     receiver: temp_receiver,
