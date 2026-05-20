@@ -85,13 +85,19 @@ freestanding closure even though `NvmeBlockAdapter` was never instantiated.
 Fix:
 1. Created `src/os/kernel/boot/c_nvme_adapter.spl` — a freestanding-safe
    duplicate of `CNvmeBlockAdapter` (renamed `CNvmeBlockAdapterFs`) that
-   imports only `std.fs_driver.block_device`, `os.kernel.boot.mmio`, and
-   `os.kernel.log.klog_api`.  No `NvmeDriver`, no `syscall`, no `pcimgr`.
+   imports only `os.services.block_device.{BlockDevice}`,
+   `os.kernel.boot.mmio`, and `os.kernel.log.klog_api`.
+   No `NvmeDriver`, no `syscall`, no `pcimgr`.
 2. Updated `boot_fs_mount.spl` to import `CNvmeBlockAdapterFs` from the new
    module instead of `CNvmeBlockAdapter` from `vfs_block_adapters`.
+   Also updated the comment block and `_make_c_adapter()` return type.
 3. Added `test/kernel/boot_fs_mount_spec.spl` — type and initial-state tests
    for the freestanding mount path that import no hosted symbols.
 
 `os_main.spl` was already correct (calls `boot_fs_mount_freestanding()`, not
 `boot_fs_sequence()`).  `boot_fs.spl` is retained unchanged as the hosted
 mount + spawn path for non-freestanding use.
+
+Verification (2026-05-20): confirmed all three files are present on disk and
+`boot_fs_mount.spl` no longer references `vfs_block_adapters` or
+`CNvmeBlockAdapter`.

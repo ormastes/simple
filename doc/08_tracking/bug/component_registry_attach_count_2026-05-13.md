@@ -52,3 +52,14 @@ to use the `me fn` mutable-receiver form:
 Files changed:
 - `src/lib/nogc_sync_mut/engine/component/registry.spl`
 - `src/lib/nogc_sync_mut/engine/component/registry3d.spl`
+
+## Verification (2026-05-20)
+
+Confirmed fix is present in both files:
+- `registry.spl` line 118: `me fn attach(node_id: NodeId, component: Component2D):`
+- `registry.spl` line 131: `me fn detach_all(node_id: NodeId):`
+- `registry3d.spl` line 49: `me fn attach(node_id: NodeId, component: Component3D):`
+- `registry3d.spl` line 58: `me fn detach_all(node_id: NodeId):`
+
+Commit `efbbd6008a fix(ecs): resolve component registry attach count tracking` is in git log.
+Status confirmed: Fixed.
