@@ -49,6 +49,7 @@ static EXTERN_DISPATCH: OnceLock<HashMap<&'static str, ExternFn>> = OnceLock::ne
 pub mod common;
 pub mod conversion;
 pub mod process;
+pub mod pty;
 pub mod time;
 pub mod math;
 pub mod random;
@@ -1324,6 +1325,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_tls_client_read", rt_tls_client_read_stub as ExternFn);
     m.insert("rt_tls_client_close", rt_tls_client_close_stub as ExternFn);
     m.insert("rt_tls_get_protocol_version", rt_tls_get_protocol_version_stub as ExternFn);
+    // PTY (pseudo-terminal) operations
+    m.insert("rt_pty_open", pty::rt_pty_open as ExternFn);
+    m.insert("rt_pty_spawn", pty::rt_pty_spawn as ExternFn);
     // I/O wrappers that pass empty slice or alias another function
     m.insert("rt_stdin_read_line", rt_stdin_read_line_stub as ExternFn);
     m.insert("rt_stdout_flush", io::stdout_flush as ExternFn);

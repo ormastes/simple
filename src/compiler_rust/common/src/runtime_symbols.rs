@@ -240,6 +240,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_current_dir")
         || name.starts_with("rt_set_current_dir")
         || name.starts_with("rt_process_")
+        || name.starts_with("rt_pty_")
         || name.starts_with("rt_exec")
         || name.starts_with("rt_write_file")
         || name.starts_with("rt_getpid")
@@ -532,6 +533,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_wait",
     "rt_process_kill",
     "rt_process_execute",
+    "rt_pty_open",
+    "rt_pty_spawn",
     "rt_io_tcp_bind",
     "rt_io_tcp_accept",
     "rt_io_tcp_accept_timeout",

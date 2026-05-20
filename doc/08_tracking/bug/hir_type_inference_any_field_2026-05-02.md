@@ -1,7 +1,7 @@
 # Bug: HIR type-inference emits `Cannot infer field type: struct 'ANY' field '<X>'` (134 errors block bootstrap stage 4)
 
 **Date:** 2026-05-02
-**Status:** PARTIAL — 7 residual stage-4 failures as of 2026-05-15 log (down from 134). Two post-2026-05-15 commits may reduce further; stage-4 rebuild needed to confirm.
+**Status:** PARTIAL — 7 residual stage-4 failures as of 2026-05-15 log (down from 134). Commits f489fcffb2 (SMF type reader for import_loader, 2026-05-18) and 982744b5c2 (cross-module struct field collision fix, 2026-05-18) are in HEAD; stage-4 rebuild needed to confirm count reaches 0. Manual verification spec added at `test/unit/compiler/hir/hir_stage4_field_inference_spec.spl` — passes 12/12 under `bin/simple run`; not gated by `bin/simple test` due to unconfirmed runner behavior in test/unit/compiler/ (W13, 2026-05-20).
 **Severity:** P1 (deploy blocker) — partially resolved, residual failures are non-critical app/tools files.
 **Wave:** filed by W11-E (doc-only). Partially resolved by accumulated HIR/type-resolver improvements across multiple waves (W12-W46+). W13 investigation confirmed partial regression.
 **Resolution:** Classes 1+2+4+5 (~127 of 134 errors) were eliminated by incremental improvements to `access.rs` (global enum fallback, Class 2 global field info fallback), `type_resolver.rs` (cross-module struct registration), `inference.rs` (enum short-circuit), and `lowerer.rs` (register_global_enums). Class 3 (cross-module field-table not populated due to import resolution failures) persists in 7 files as of 2026-05-15.
