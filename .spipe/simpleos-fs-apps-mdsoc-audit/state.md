@@ -1,5 +1,7 @@
 # SimpleOS FS Apps MDSOC Audit
 
+## Status: CLOSED — 2026-05-20
+
 ## Phases
 - [x] dev
 - [x] research

@@ -1,5 +1,7 @@
 # SStack State: cranelift-shr-proper-fix
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Fix Cranelift right-shift (>>) semantics for all integer widths. Current interim fix only handles narrow signed ints partially. Need full right-shift for var-load, param, and call-ret paths. See doc/03_plan/remaining_roadmap.md item 3 (C.2).
 

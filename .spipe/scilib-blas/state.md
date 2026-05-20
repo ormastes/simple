@@ -1,5 +1,7 @@
 # BLAS Level 1 — scilib-blas
 
+## Status: CLOSED — 2026-05-20
+
 ## Task Type
 feature
 

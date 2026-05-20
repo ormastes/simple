@@ -1,5 +1,7 @@
 # SStack State: vhdl-testbench-conversion
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — vhdl_testbench_conversion (testbench IR, DUT extraction, stimulus/assertions, clock/reset, rendering, GHDL runner)
 

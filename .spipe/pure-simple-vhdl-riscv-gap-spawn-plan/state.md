@@ -1,5 +1,7 @@
 # SStack State: pure-simple-vhdl-riscv-gap-spawn-plan
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — pure_simple_vhdl_riscv_gap_spawn_plan (8 agents: typed metadata, hardware call lowering, bit-width semantics, decode/control, register/ROM/RAM, clock/reset, composite ports, simulation/testbench)
 

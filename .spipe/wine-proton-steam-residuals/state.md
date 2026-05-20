@@ -1,5 +1,7 @@
 # SStack State: wine-proton-steam-residuals
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Implement all remaining Wine/Proton/Steam residuals with real tests: real Proton execution (not dry-run), broader NT/Win32 dispatch, real DXVK/VKD3D translation, and virtio Venus ICD.
 

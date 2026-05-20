@@ -1,5 +1,7 @@
 # Compression/Cipher SIMD Continue
 
+## Status: CLOSED — 2026-05-20
+
 ## Phases
 - [x] dev
 - [x] research — 2026-05-19: blocker resolved, pipeline complete

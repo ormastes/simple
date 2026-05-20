@@ -1,5 +1,7 @@
 # Feature: graphics-backend-acceleration
 
+## Status: CLOSED — 2026-05-20
+
 ## Refined Goal
 
 Audit and establish performance baselines for graphics acceleration across five surfaces:

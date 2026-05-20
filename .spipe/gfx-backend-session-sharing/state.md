@@ -1,5 +1,7 @@
 # SStack State: gfx-backend-session-sharing
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — graphics_backend_session_sharing (10 agents A-J)
 

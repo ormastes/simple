@@ -1,5 +1,7 @@
 # SStack State: riscv-fpga-linux-rtl-completion
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — riscv_fpga_linux_rtl_completion (CSR/privilege/MMU, DTB/firmware, OpenSBI/Linux boot, Vivado board profiles)
 

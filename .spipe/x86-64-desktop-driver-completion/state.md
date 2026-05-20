@@ -1,5 +1,7 @@
 # SStack State: x86-64-desktop-driver-completion
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — x86_64_desktop_driver_completion (P0 driver matrix/discovery/storage, P1 display/input/network, P2 verification)
 

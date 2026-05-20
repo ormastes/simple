@@ -1,5 +1,7 @@
 # SStack State: portable-simd-fp-modules
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Implement portable SIMD/FP module scaffolding: capability registry (derives NumericCaps from TargetPreset), lowering-module selection (scalar_fallback, x86_avx, riscv_fd, riscv_v), FP profile classification, and a comprehensive spec covering all four modules.
 

@@ -1,6 +1,7 @@
 # compression-zstd
 
-## Status: PARTIAL — Raw/RLE/Skippable/Chained frames only
+## Status: PARTIAL — Raw/RLE/Skippable/Chained frames only (NOT CLOSED)
+<!-- BLOCKED: Compressed_Block support requires FSE + Huffman — deferred, returns Err(Unsupported). See Known issues section for 6 design constraints that must be resolved before proceeding. -->
 
 ## Goal
 Implement Zstd (RFC 8878) decompression in the standard library under

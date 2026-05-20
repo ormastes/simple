@@ -1,6 +1,6 @@
 # compression-lz4 — state
 
-## Status: DONE
+## Status: CLOSED — 2026-05-20
 
 ## Research findings
 

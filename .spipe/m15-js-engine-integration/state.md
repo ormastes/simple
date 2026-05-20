@@ -1,5 +1,7 @@
 # M15: JS/Simple Script Engine (replaced by Simple-script)
 
+## Status: CLOSED — 2026-05-20
+
 ## Phases
 - [x] dev
 - [x] research

@@ -1,5 +1,7 @@
 # SStack State: simpleos-process-apps-plan
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 Implement process-backed app scaffolding for SimpleOS: process records, app manifests,
 syscall result encoding, and WM window handle IPC registration.

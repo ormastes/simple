@@ -1,5 +1,7 @@
 # SStack State: tmux-simpleos
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — tmux_simpleos (core native service, native backend, compatibility API, adapters, verification)
 

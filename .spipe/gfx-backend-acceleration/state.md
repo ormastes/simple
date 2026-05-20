@@ -1,5 +1,7 @@
 # SStack State: gfx-backend-acceleration
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > All 13 acceleration agents (A-M) from doc/03_plan/agent_tasks/graphics_backend_acceleration.md
 

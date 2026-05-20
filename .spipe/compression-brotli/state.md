@@ -1,6 +1,6 @@
 # compression-brotli — state
 
-## Status: DONE
+## Status: CLOSED — 2026-05-20
 
 ## Research findings
 - Full brotli decoder already exists at `src/lib/nogc_sync_mut/compression/brotli/`

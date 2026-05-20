@@ -1,5 +1,7 @@
 # SStack State: graphics-3d-session-managed-backend
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Implement graphics 3D session managed backend: common session types, session API, frame lifecycle, and perf counters. See doc/03_plan/agent_tasks/graphics_3d_session_managed_backend.md
 

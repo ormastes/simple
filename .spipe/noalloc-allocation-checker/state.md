@@ -1,5 +1,7 @@
 # SPipe State: noalloc-allocation-checker
 
+## Status: CLOSED — 2026-05-20
+
 ## Type
 feature
 

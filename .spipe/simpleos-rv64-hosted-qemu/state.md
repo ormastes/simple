@@ -1,5 +1,7 @@
 # SStack State: simpleos-rv64-hosted-qemu
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — simpleos_rv64_hosted_qemu (hosted scenario, preflight guest, SSH/HTTP probes, smoke lane)
 

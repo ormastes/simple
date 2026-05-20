@@ -1,5 +1,7 @@
 # SStack State: net-acceleration-remaining
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — net_acceleration_remaining (P0 TCP correctness + capabilities, P1 HTTP server capability reporting, P2 DMA/QEMU tests)
 

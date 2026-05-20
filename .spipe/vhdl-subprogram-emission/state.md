@@ -1,5 +1,7 @@
 # SStack State: vhdl-subprogram-emission
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — vhdl_subprogram_emission (function/procedure lowering, entity selection, naming/mangling, diagnostics)
 

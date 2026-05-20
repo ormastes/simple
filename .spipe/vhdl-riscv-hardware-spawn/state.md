@@ -1,5 +1,7 @@
 # SStack State: vhdl-riscv-hardware-spawn
 
+## Status: CLOSED — 2026-05-20
+
 ## Task
 - **Type:** feature
 - **Goal:** Implement typed return labels, hardware call lowering, and bit-width semantics for hardware spawn from Simple to VHDL/RTL

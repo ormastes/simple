@@ -1,5 +1,8 @@
 # SStack State: elf-symtab-weak-fix
 
+## Status: CLOSED — 2026-05-20
+
+
 ## User Request
 > impl next with agent teams and minimize duplication. 2 │ LLVM/Rust Self-Host in SimpleOS │ P0 │ Blocked (ELF SYMTAB bug)
 

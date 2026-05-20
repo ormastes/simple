@@ -1,5 +1,7 @@
 # Process Isolation — Address Space, Process Table, Context Switch
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Implement process isolation for SimpleOS scheduler: address space isolation,
 > process table with owned AddressSpace handles, context switching with

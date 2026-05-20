@@ -1,5 +1,7 @@
 # SStack State: host-cpu-runtime-variants
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — host_cpu_runtime_variants (5 tasks: CPU config, dispatch routing, loader probing, package variants, tests)
 

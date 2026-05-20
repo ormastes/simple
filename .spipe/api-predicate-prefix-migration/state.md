@@ -1,5 +1,7 @@
 # SStack State: api-predicate-prefix-migration
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 API Predicate Prefix Migration — Reduce predicate-prefix debt baseline through compatibility aliases and caller migrations.
 

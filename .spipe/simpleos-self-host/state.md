@@ -1,5 +1,7 @@
 # SStack State: simpleos-self-host
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Complete roadmap item 2: LLVM/Rust/Simple Self-Host in SimpleOS. Get clang, rustc, and the simple compiler all running as file-loadable apps inside SimpleOS, achieving closed self-host bootstrap.
 

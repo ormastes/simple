@@ -1,5 +1,7 @@
 # SStack State: riscv-fpga-linux-rtl
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > RISC-V FPGA/Linux RTL Remaining -- RTL helper is done. Implement CSR/privilege registers, MMU support, DTB generation, and OpenSBI/Linux boot modules.
 

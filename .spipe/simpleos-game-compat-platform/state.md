@@ -1,5 +1,7 @@
 # SStack State: simpleos-game-compat-platform
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — simpleos_game_compatibility_platform (5 tasks: Linux Personality, Game Device, Runtime Sandbox, Proton Host, Porting Toolkit)
 

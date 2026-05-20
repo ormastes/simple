@@ -1,5 +1,7 @@
 # SStack State: simd-auto-application
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — simd_auto_application (compiler infra, backend lowering, library adoption, matrix follow-up, verification)
 

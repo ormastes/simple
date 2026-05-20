@@ -1,5 +1,7 @@
 # SStack State: 3d-engine-gpu-webgpu
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > impl 3d engine gpu + webgpu, minimize duplication with agent teams. see doc/03_plan/remaining_roadmap.md
 

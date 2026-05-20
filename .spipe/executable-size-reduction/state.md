@@ -1,5 +1,7 @@
 # SStack State: executable-size-reduction
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — executable_size_reduction (9 tasks: symbol roots, size budget, strip/packaging, crate split, dependency audit)
 

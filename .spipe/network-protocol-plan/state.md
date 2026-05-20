@@ -1,5 +1,7 @@
 # SStack State: network-protocol-plan
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — network_protocol_plan (P1 TLS KeyUpdate/NewSessionTicket, P2 HTTP/3 frame layer/WS deflate/auth retry, P3 STUN/SCRAM-SHA-512)
 

@@ -1,5 +1,7 @@
 # SStack State: all-regions
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — all_regions (Tree-sitter LSP surfacing, parser tests, schema{} contract AST, style{} typed theme, domain hardening)
 

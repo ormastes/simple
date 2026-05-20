@@ -1,5 +1,7 @@
 # M14: HTML Parser Normal Flow
 
+## Status: CLOSED — 2026-05-20
+
 ## Phases
 - [x] dev
 - [x] research

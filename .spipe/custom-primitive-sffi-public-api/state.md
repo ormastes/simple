@@ -1,5 +1,7 @@
 # SStack State: custom-primitive-sffi-public-api
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — custom_primitive_sffi_public_api (6 phases: metadata, SFFI ABI, bitfields, audit, migration, verification)
 

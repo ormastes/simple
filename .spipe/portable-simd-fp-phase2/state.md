@@ -1,5 +1,7 @@
 # SStack State: portable-simd-fp-phase2
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Portable SIMD FP Modules Phase 2 — Fix Wave 2 dispatch gap. Phase 1 SIMD modules exist; Phase 2 needs dispatch infrastructure for wider vector widths and fallback paths.
 

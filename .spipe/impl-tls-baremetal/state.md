@@ -1,5 +1,7 @@
 # SStack State: impl-tls-baremetal
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > impl tls baremetal
 

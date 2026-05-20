@@ -1,5 +1,7 @@
 # SStack State: riscv-linux-rtl-dual-arch-completion
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — riscv_linux_rtl_dual_arch_completion (5 tasks: shared contracts, RV32 hardware tree, FPGA orchestration, backend test alignment, staged verification)
 

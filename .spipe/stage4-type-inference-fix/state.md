@@ -1,5 +1,7 @@
 # SStack State: stage4-type-inference-fix
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > fix non-critical type inference — 7 source files skipped in Stage 4 due to cross-module type inference gaps. Investigate which files are skipped, why, and fix the inference resolution.
 

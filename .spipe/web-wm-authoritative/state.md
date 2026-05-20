@@ -1,5 +1,7 @@
 # SStack State: web-wm-authoritative
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > can current simple web server support dynamic web page? can run simple windows manager in web browser? wm need to separate front and backend. between two should support local and remote connection. see next make web wm and improve web server and web ui lib. and carefull security and keep mdsoc arch.
 >

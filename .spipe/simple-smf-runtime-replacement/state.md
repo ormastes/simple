@@ -1,5 +1,7 @@
 # SStack State: simple-smf-runtime-replacement
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — simple_smf_runtime_replacement (shared header contract, hosted atomic replacement, interpreter/JIT integration, SimpleOS executable SMF, dynamic libraries)
 

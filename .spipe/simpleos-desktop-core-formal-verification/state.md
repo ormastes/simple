@@ -1,5 +1,7 @@
 # SStack State: simpleos-desktop-core-formal-verification
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — simpleos_desktop_core_formal_verification (4 lanes: kernel proof, desktop contract, tooling, reporting)
 

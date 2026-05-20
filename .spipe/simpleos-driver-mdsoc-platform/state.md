@@ -1,5 +1,7 @@
 # SStack State: simpleos-driver-mdsoc-platform
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — simpleos_driver_mdsoc_plus_platform (5 lanes: GPU, Audio, Input, Exokernel, MDSOC)
 

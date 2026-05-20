@@ -1,5 +1,7 @@
 # SStack State: jit-32bit-targets
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > 1. let use llvm for 32bit cranlift rejected. 2. complete x86 32. 3. completw riscv 64 32. 4 arm32. 5. jit to reduce binary mix 32/64 on x86. 6. riscv 32/64 mix 7. arm 32/64 mix. plan sonnet agent team with order by dependency with detail plan. with opus advisor. howabout search mix 32/64 code for efficiency. research deeply
 

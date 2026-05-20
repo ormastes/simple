@@ -1,5 +1,7 @@
 # SStack State: scheduler-process-isolation
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — scheduler_process_isolation (5 tasks: data structures, per-CPU queues, syscalls, @task parser, verification)
 

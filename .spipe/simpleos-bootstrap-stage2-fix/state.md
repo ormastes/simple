@@ -1,5 +1,7 @@
 # simpleos-bootstrap-stage2-fix
 
+## Status: CLOSED — 2026-05-20
+
 ## Phase 1: Definition
 - **Type:** bug
 - **Goal:** Fix Stage 2 bootstrap to emit a real >1MB compiler binary instead of a 6,176-byte diagnostic stub

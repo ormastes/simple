@@ -1,5 +1,7 @@
 # SStack State: riscv64-fpga-simpleos
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Complete riscv64_fpga_simpleos_launch.md — implement the full RISC-V64 FPGA SimpleOS launch plan from hardware inventory through SimpleOS kernel FPGA platform, boot payload, and test harness. Use Sonnet agent teams with Opus advisor.
 

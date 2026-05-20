@@ -1,5 +1,7 @@
 # SStack State: platform-layout-attribute
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — platform_layout_attribute (7 phases: typed model, attribute syntax, matching, layout integration, diagnostics, tests, migration)
 

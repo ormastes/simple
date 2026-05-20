@@ -1,5 +1,7 @@
 # SStack State: dma-file-vga-driver-remaining
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — dma_file_vga_driver_remaining (P0 DMA safety, P1 file direct I/O + display accel, P2 failure modes)
 

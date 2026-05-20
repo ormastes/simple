@@ -1,5 +1,7 @@
 # SStack State: gpu-session-backends
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > impl cuda vulcan, x86/riscv 64 32 about doc/03_plan/agent_tasks/graphics_backend_session_sharing.md complete plan
 

@@ -1,5 +1,7 @@
 # SStack State: loader-shared-core-refactor
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > next task from the plan — loader_shared_core_refactor (5 tracks: shared seam extraction, invariant definition, compatibility loader adoption, runtime loader adoption, verification)
 
