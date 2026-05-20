@@ -1,5 +1,6 @@
 # Bug: Native cross-module function call returns wrong values (Cranelift)
 
+**Status:** FIXED 2026-05-19
 **Date:** 2026-05-18
 **Severity:** High — blocks native-mode benchmarking of any cross-module code
 **Component:** `native-build` / Cranelift AOT codegen
