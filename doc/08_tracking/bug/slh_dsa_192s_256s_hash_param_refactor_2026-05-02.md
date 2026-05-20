@@ -27,6 +27,13 @@ and public API smoke for both 192s (n=24) and 256s (n=32). Reduced parameters
 Full-parameter round-trips gated behind `SLH_DSA_FULL_KAT` env var. NIST CCTV
 KAT vectors deferred until compiled-mode runner is available.
 
+**Re-verified 2026-05-20:** All physical deliverables confirmed present at HEAD:
+`_p` variants in `slh_dsa.spl`, `slh_dsa_wots.spl`, `slh_dsa_xmss.spl`,
+`slh_dsa_fors.spl`, `slh_dsa_hypertree.spl`; public `slh_dsa_192s_*` /
+`slh_dsa_256s_*` API in `src/os/crypto/slh_dsa.spl`; spec file
+`test/unit/lib/crypto/slh_dsa_192s_256s_spec.spl` (17 KB, last modified
+2026-05-19). Bug is **CLOSED**.
+
 ## Problem
 
 `src/os/crypto/slh_dsa*.spl` is hardcoded to the SLH-DSA-SHA2-128s

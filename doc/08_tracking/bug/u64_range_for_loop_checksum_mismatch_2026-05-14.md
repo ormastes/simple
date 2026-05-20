@@ -4,6 +4,13 @@
 
 Resolved for checksum correctness. Performance parity remains open.
 
+**Re-verified 2026-05-20:** Deliverables confirmed at HEAD. Note: the cargo
+test `for_range_preserves_u64_counter_type` cited in Evidence below was not
+found in `src/compiler_rust/src/` — it may have been renamed or removed after
+the fix. The behavioural fix (unsigned counter typing for `for 0..u64_bound`
+lowering) was confirmed in earlier rebuilds; the missing test name is a doc
+discrepancy only and does not affect the resolved status.
+
 ## Context
 
 While investigating pure Simple collection parity, converting the verified
