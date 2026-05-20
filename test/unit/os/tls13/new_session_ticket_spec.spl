@@ -27,7 +27,7 @@ use os.tls13.new_session_ticket.{
     derive_resumption_psk_from_ticket,
     stored_psk_from_new_session_ticket,
 }
-use os.tls13.key_schedule.{tls13_resumption_secret}
+use os.tls13.key_schedule.{tls13_resumption_secret, tls13_resumption_master_secret}
 use os.tls13.psk.{StoredPsk}
 
 # ============================================================================
@@ -258,8 +258,37 @@ describe("NewSessionTicket — RFC 8446 §4.6.1"):
         val rms = _seq_n(32u64, 0xCCu8)
         expect(_stored_psk_from_nst_psk_matches(nst, rms)).to_equal(true)
 
+    it("RMS derivation produces 32 bytes for SHA-256"):
+        val master = _seq_n(32u64, 0x11u8)
+        val thash = _seq_n(32u64, 0x22u8)
+        expect(_rms_sha256_len_correct(master, thash)).to_equal(true)
+
+    it("RMS derivation is deterministic"):
+        val master = _seq_n(32u64, 0xAAu8)
+        val thash = _seq_n(32u64, 0xBBu8)
+        expect(_rms_sha256_deterministic(master, thash)).to_equal(true)
+
+    it("full pipeline: master_secret → RMS → StoredPsk PSK matches direct derivation"):
+        val master = _seq_n(32u64, 0x42u8)
+        val thash = _seq_n(32u64, 0x99u8)
+        val nst = _build_nst()
+        expect(_full_pipeline_psk_matches_direct(master, thash, nst)).to_equal(true)
+
+    it("full pipeline: StoredPsk fields copied from NST"):
+        val master = _seq_n(32u64, 0x7Fu8)
+        val thash = _seq_n(32u64, 0x3Cu8)
+        val nst = _build_nst()
+        val sp = _full_pipeline_psk(master, thash, nst)
+        expect(sp.lifetime_seconds).to_equal(7200u32)
+        expect(sp.age_add).to_equal(0xDEADBEEFu32)
+        expect(sp.cipher_suite).to_equal(0x1301u16)
+
+    it("handshake-wrapped NST decode → StoredPsk end-to-end"):
+        val rms = _seq_n(32u64, 0x55u8)
+        expect(_nst_handshake_decode_to_store(rms)).to_equal(true)
+
 # ============================================================================
-# Helper used in truncation test (module-level to avoid it-block mutation issues)
+# Module-level helpers for RMS pipeline tests and truncation test
 # ============================================================================
 
 fn _nst_slice_helper(buf: [u8], off: u64, n: u64) -> [u8]:
@@ -269,3 +298,33 @@ fn _nst_slice_helper(buf: [u8], off: u64, n: u64) -> [u8]:
         out.push(buf[(off + i).to_i64()])
         i = i + 1
     out
+
+fn _rms_sha256_len_correct(master: [u8], thash: [u8]) -> bool:
+    val rms = tls13_resumption_master_secret(master, thash, 1u8)
+    rms.len() == 32
+
+fn _rms_sha256_deterministic(master: [u8], thash: [u8]) -> bool:
+    val a = tls13_resumption_master_secret(master, thash, 1u8)
+    val b = tls13_resumption_master_secret(master, thash, 1u8)
+    _bytes_eq(a, b)
+
+fn _full_pipeline_psk(master: [u8], thash: [u8], nst: NewSessionTicket) -> StoredPsk:
+    val rms = tls13_resumption_master_secret(master, thash, 1u8)
+    stored_psk_from_new_session_ticket(nst, rms, 1u8, 0x1301u16)
+
+fn _full_pipeline_psk_matches_direct(master: [u8], thash: [u8], nst: NewSessionTicket) -> bool:
+    val rms = tls13_resumption_master_secret(master, thash, 1u8)
+    val sp = stored_psk_from_new_session_ticket(nst, rms, 1u8, 0x1301u16)
+    val direct_psk = derive_resumption_psk_from_ticket(rms, nst.ticket_nonce, 1u8)
+    _bytes_eq(sp.resumption_secret, direct_psk)
+
+fn _nst_handshake_decode_to_store(rms: [u8]) -> bool:
+    val nst = _build_nst()
+    val wrapped = encode_new_session_ticket_handshake(nst)
+    val parsed = decode_new_session_ticket_handshake(wrapped)
+    if not parsed.ok:
+        return false
+    val sp = stored_psk_from_new_session_ticket(parsed.nst, rms, 1u8, 0x1301u16)
+    if not _bytes_eq(sp.ticket, nst.ticket):
+        return false
+    sp.resumption_secret.len() == 32

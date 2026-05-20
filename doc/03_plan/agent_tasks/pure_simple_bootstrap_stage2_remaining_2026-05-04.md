@@ -1,6 +1,6 @@
 # Pure-Simple Bootstrap Stage2 Remaining
 
-> Status: PARTIAL — stage2 build exists; cross-compile path still blocked
+> Status: PARTIAL — BLOCKED: stage2 is blocked by stage1 runtime/codegen corruption during type lowering; stage2 build exists but cannot emit; next step is re-capture from live run with tighter phase-2 tracing (2026-05-20 audit)
 
 Status: active
 Date: 2026-05-04

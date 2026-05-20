@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # SOSIX Process Sharing Agent Tasks
 
-> Status: PARTIAL — Implemented Slice done (process/share/io/mod); Follow-Up Slice (socket/dylib/FD ownership) TODO
+> Status: COMPLETE — All files implemented: process.spl, share.spl, io.spl, mod.spl, socket_share.spl, dylib_share.spl, fd_ownership.spl, dataset_vfs.spl, queue_notify.spl, io_compat.spl, io_rw.spl, io_state.spl, process_compat.spl all present in src/os/sosix/ (2026-05-20 audit)
 
 ## Implemented Slice
 
@@ -17,6 +17,12 @@
 
 ## Follow-Up Slice
 
-- Move socket, dylib, and remaining FD backend ownership into SOSIX.
+### Done
+- `socket_share.spl` — SCM_RIGHTS-style FD-pass handle table (netstack owns socket impl).
+- `dylib_share.spl` — cross-process dylib grant/revoke capability table.
+- `fd_ownership.spl` — FD ownership transfer (HELD → TRANSFERRING → TRANSFERRED state machine).
+- `mod.spl` wires all three `*_init()` calls at SOSIX boot.
+
+### Remaining TODO
 - Populate `dataset_create_from_file` from VFS bytes.
 - Add scheduler-aware queue blocking and notification wakeups.

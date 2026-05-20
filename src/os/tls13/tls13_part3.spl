@@ -7,6 +7,7 @@ use os.tls13.record13.*
 use os.tls13.handshake13.*
 use os.tls13.psk.*
 use os.tls13.cert_verify.*
+use os.tls13.new_session_ticket.{stored_psk_from_new_session_ticket}
 use os.crypto.curve25519.*
 use os.crypto.ecdh_p256.*
 use os.crypto.random.*
@@ -781,7 +782,26 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         return Tls13ConnectResult.Failed(reason: "client Finished send failed")
 
     # ------------------------------------------------------------------
-    # Step 14-15: Reset seq numbers, return context with app keys
+    # Step 14: Derive resumption_master_secret (RFC 8446 §7.1)
+    #
+    # RMS = HKDF-Expand-Label(master_secret, "res master",
+    #                          Hash(ClientHello..ClientFinished), HashLen)
+    #
+    # The transcript now includes client Finished, which is the correct
+    # endpoint per RFC 8446 §7.1.  hash_id 1 = SHA-256, 2 = SHA-384.
+    # The client encodes the selected cipher in sh.cipher_suite; 0x1302
+    # is TLS_AES_256_GCM_SHA384 which uses SHA-384 (hash_id=2).
+    # ------------------------------------------------------------------
+    val nst_hash_id: u8 = if sh.cipher_suite == 0x1302u16 { 2u8 } else { 1u8 }
+    val rms_thash = if io.kind == "fd" {
+        _clone_bytes(rt_tls13_sha256(transcript.buf))
+    } else {
+        transcript_hash(transcript)
+    }
+    val rms = tls13_resumption_master_secret(app_secrets.master_secret, rms_thash, nst_hash_id)
+
+    # ------------------------------------------------------------------
+    # Step 15: Reset seq numbers, return context with app keys + RMS
     # ------------------------------------------------------------------
     val ctx = Tls13Context(
         io: io,
@@ -789,6 +809,10 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         client_key: client_app_rk,
         server_seq: 0,
         client_seq: 0,
+        resumption_master_secret: rms,
+        hash_id: nst_hash_id,
+        cipher_suite: sh.cipher_suite,
+        tickets: [],
     )
     Tls13ConnectResult.Connected(ctx: ctx)
 

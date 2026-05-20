@@ -1,6 +1,6 @@
 # TLS Baremetal Verify Remaining — 2026-04-18
 
-> Status: PARTIAL — TLS dev/research/arch/spec/implement done; Ed25519 CertificateVerify deferred; blocked on TLS server for testing
+> Status: PARTIAL — BLOCKED: TLS 1.3 handshake does not reach Certificate/CertificateVerify/HANDSHAKE COMPLETE; Ed25519 verify deferred until a test TLS server is available; TLS 1.3 infrastructure (src/os/tls13/) fully landed (2026-05-20 audit)
 
 ## Scope
 

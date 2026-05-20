@@ -310,6 +310,10 @@ fn svim_parse_normal_command(raw: text) -> CommandRequest:
         return CommandRequest(name: "search-next", count: 1, register_name: "", payload: "")
     if trimmed == "N":
         return CommandRequest(name: "search-prev", count: 1, register_name: "", payload: "")
+    if trimmed == "*":
+        return CommandRequest(name: "search-word-forward", count: 1, register_name: "", payload: "")
+    if trimmed == "#":
+        return CommandRequest(name: "search-word-backward", count: 1, register_name: "", payload: "")
     if trimmed == "bn":
         return CommandRequest(name: "next-buffer", count: 1, register_name: "", payload: "")
     if trimmed == "bp":
@@ -396,7 +400,7 @@ fn _svim_parse_operator_payload(kind: text, raw_payload: text, operator_count: i
     val motion_count = if idx > 0 then raw_payload.slice(0, idx).to_int() else: 1
     val payload = raw_payload.slice(idx, raw_payload.len())
     val total = operator_count * motion_count
-    if payload == "iw" or payload == "aw":
+    if payload == "iw" or payload == "aw" or payload == "i\"" or payload == "a\"":
         val name = if kind == "delete" then "delete-text-object" else: "yank-text-object"
         return CommandRequest(name: name, count: 1, register_name: "", payload: payload)
     val motion_name = _svim_motion_name(payload)
@@ -416,6 +420,12 @@ fn _svim_motion_name(raw: text) -> text:
         return "right"
     if raw == "w":
         return "word"
+    if raw == "W":
+        return "WORD"
+    if raw == "b":
+        return "word-back"
+    if raw == "e":
+        return "word-end"
     ""
 
 fn _svim_apply_motion(content: text, line_starts: [i64], cursor: Cursor, motion: text, count: i64) -> Cursor:
@@ -429,6 +439,12 @@ fn _svim_apply_motion(content: text, line_starts: [i64], cursor: Cursor, motion:
         return Cursor(row: _svim_clamp_i64(cursor.row + count, 0, _svim_max_row(line_starts)), col: cursor.col)
     if motion == "word":
         return _svim_word_motion(content, line_starts, cursor, count)
+    if motion == "WORD":
+        return _svim_WORD_motion(content, line_starts, cursor, count)
+    if motion == "word-back":
+        return _svim_word_back_motion(content, line_starts, cursor, count)
+    if motion == "word-end":
+        return _svim_word_end_motion(content, line_starts, cursor, count)
     cursor
 
 fn _svim_word_motion(content: text, line_starts: [i64], cursor: Cursor, count: i64) -> Cursor:
@@ -451,6 +467,67 @@ fn _svim_next_word_offset(content: text, offset: i64) -> i64:
         idx = idx + 1
     idx
 
+fn _svim_WORD_motion(content: text, line_starts: [i64], cursor: Cursor, count: i64) -> Cursor:
+    var offset = _svim_row_col_to_offset(line_starts, cursor.row, cursor.col)
+    var remaining = count
+    while remaining > 0:
+        offset = _svim_next_WORD_offset(content, offset)
+        remaining = remaining - 1
+    _svim_offset_to_cursor(line_starts, offset)
+
+fn _svim_next_WORD_offset(content: text, offset: i64) -> i64:
+    val total = content.len()
+    var idx = _svim_clamp_i64(offset, 0, total)
+    if idx >= total:
+        return total
+    if not _svim_is_space_char(content.char_at(idx)):
+        while idx < total and not _svim_is_space_char(content.char_at(idx)):
+            idx = idx + 1
+    while idx < total and _svim_is_space_char(content.char_at(idx)):
+        idx = idx + 1
+    idx
+
+fn _svim_word_back_motion(content: text, line_starts: [i64], cursor: Cursor, count: i64) -> Cursor:
+    var offset = _svim_row_col_to_offset(line_starts, cursor.row, cursor.col)
+    var remaining = count
+    while remaining > 0:
+        offset = _svim_prev_word_offset(content, offset)
+        remaining = remaining - 1
+    _svim_offset_to_cursor(line_starts, offset)
+
+fn _svim_prev_word_offset(content: text, offset: i64) -> i64:
+    if offset <= 0:
+        return 0
+    var idx = offset - 1
+    while idx > 0 and _svim_is_space_char(content.char_at(idx)):
+        idx = idx - 1
+    if idx > 0 and _svim_is_word_char(content.char_at(idx)):
+        while idx > 0 and _svim_is_word_char(content.char_at(idx - 1)):
+            idx = idx - 1
+    elif idx > 0:
+        while idx > 0 and not _svim_is_word_char(content.char_at(idx - 1)) and not _svim_is_space_char(content.char_at(idx - 1)):
+            idx = idx - 1
+    idx
+
+fn _svim_word_end_motion(content: text, line_starts: [i64], cursor: Cursor, count: i64) -> Cursor:
+    var offset = _svim_row_col_to_offset(line_starts, cursor.row, cursor.col)
+    var remaining = count
+    while remaining > 0:
+        offset = _svim_word_end_offset(content, offset)
+        remaining = remaining - 1
+    _svim_offset_to_cursor(line_starts, offset)
+
+fn _svim_word_end_offset(content: text, offset: i64) -> i64:
+    val total = content.len()
+    var idx = _svim_clamp_i64(offset + 1, 0, total)
+    if idx >= total:
+        return total - 1
+    while idx < total and _svim_is_space_char(content.char_at(idx)):
+        idx = idx + 1
+    while idx + 1 < total and _svim_is_word_char(content.char_at(idx + 1)):
+        idx = idx + 1
+    idx
+
 fn _svim_find_last_before(content: text, term: text, before: i64) -> i64:
     if term == "":
         return -1
@@ -469,6 +546,8 @@ fn _svim_text_object_bounds(content: text, line_starts: [i64], cursor: Cursor, n
     val total = content.len()
     if total == 0:
         return (0, 0)
+    if name == "i\"" or name == "a\"":
+        return _svim_quote_object_bounds(content, total, _svim_clamp_i64(_svim_row_col_to_offset(line_starts, cursor.row, cursor.col), 0, total - 1), name == "a\"")
     var current = _svim_clamp_i64(_svim_row_col_to_offset(line_starts, cursor.row, cursor.col), 0, total - 1)
     if not _svim_is_word_char(content.char_at(current)):
         current = _svim_next_word_offset(content, current)
@@ -487,8 +566,40 @@ fn _svim_text_object_bounds(content: text, line_starts: [i64], cursor: Cursor, n
             end = end + 1
     (start, end)
 
+fn _svim_quote_object_bounds(content: text, total: i64, cursor_offset: i64, include_quotes: bool) -> (i64, i64):
+    """Find the nearest enclosing double-quote pair and return inner or outer bounds."""
+    var left = cursor_offset - 1
+    while left >= 0 and content.char_at(left) != "\"":
+        left = left - 1
+    if left < 0:
+        return (0, 0)
+    var right = cursor_offset
+    while right < total and content.char_at(right) != "\"":
+        right = right + 1
+    if right >= total:
+        return (0, 0)
+    if include_quotes:
+        return (left, right + 1)
+    (left + 1, right)
+
 fn _svim_is_word_char(ch: text) -> bool:
     (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
 
 fn _svim_is_space_char(ch: text) -> bool:
     ch == " " or ch == "\t" or ch == "\n"
+
+fn _svim_word_at_offset(content: text, offset: i64) -> text:
+    """Extract the word token at the given byte offset in content."""
+    val total = content.len()
+    if total == 0:
+        return ""
+    val safe = _svim_clamp_i64(offset, 0, total - 1)
+    if not _svim_is_word_char(content.char_at(safe)):
+        return ""
+    var start = safe
+    while start > 0 and _svim_is_word_char(content.char_at(start - 1)):
+        start = start - 1
+    var end = safe
+    while end < total and _svim_is_word_char(content.char_at(end)):
+        end = end + 1
+    content.slice(start, end)

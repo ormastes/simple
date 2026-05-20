@@ -1,6 +1,6 @@
 # Network & Protocol — Agent Task Plan (2026-05-03)
 
-> Status: PARTIAL — 12 modules DONE (TLS 1.3, HTTP/2, HPACK, WebSocket, etc.); HTTP/3, TLS KeyUpdate, WS deflate, STUN remaining
+> Status: PARTIAL — 12 modules DONE (TLS 1.3, HTTP/2, HPACK, WebSocket, etc.); stub files exist for remaining work: src/os/http/http3_frame.spl, src/os/http/ws_deflate_auth.spl, src/os/http/stun_scram.spl — need completion and tests (2026-05-20 audit)
 
 ## Status Summary
 
@@ -19,7 +19,7 @@
 | PASETO | v4.public/local | Done | 3 ed25519 fails |
 | HTTP Basic/Digest | RFC 7617/7616 | Truncated | needs retry |
 | TLS KeyUpdate | RFC 8446 §4.6.3 | Not started | — |
-| TLS NewSessionTicket | RFC 8446 §4.6.1 | Not started | — |
+| TLS NewSessionTicket | RFC 8446 §4.6.1 | Done | pass |
 | HTTP/3 | RFC 9114 | Not started | — |
 | WS permessage-deflate | RFC 7692 | Not started | — |
 | STUN | RFC 8489 | Not started | — |
@@ -34,6 +34,7 @@
 - 0-RTT early data framework
 - Record layer encryption/decryption
 - Key schedule (HKDF-based)
+- NewSessionTicket post-handshake: parse, store per-ticket PSK, RMS derivation (RFC 8446 §4.6.1 + §7.1)
 
 ### HTTP (`src/os/http/` area)
 - HTTP/2 connection layer + frame handling
@@ -58,7 +59,7 @@
 | Feature | Scope | Agent Time |
 |---------|-------|------------|
 | TLS 1.3 KeyUpdate | Parse+emit KeyUpdate msg, re-derive traffic keys | ~45 min |
-| TLS 1.3 NewSessionTicket | Server emits ticket, client stores for PSK | ~60 min |
+| TLS 1.3 NewSessionTicket | Done — RFC 8446 §4.6.1 fully wired | — |
 
 ### Priority 2 — HTTP Stack
 | Feature | Scope | Agent Time |
