@@ -143,6 +143,8 @@ pub struct HirModule {
     pub global_init_strings: HashMap<String, String>,
     /// Set of globals that are defined locally in this module (not imported).
     pub local_globals: HashSet<String>,
+    /// Set of globals that are immutable (val/const, not var).
+    pub immutable_globals: HashSet<String>,
     /// Type invariants: maps type name to its invariant
     pub type_invariants: HashMap<String, HirTypeInvariant>,
     /// Refined types: maps refined type name to its definition (CTR-020)
@@ -190,6 +192,7 @@ impl HirModule {
             global_init_values: HashMap::new(),
             global_init_strings: HashMap::new(),
             local_globals: HashSet::new(),
+            immutable_globals: HashSet::new(),
             type_invariants: HashMap::new(),
             refined_types: HashMap::new(),
             aop_advices: Vec::new(),

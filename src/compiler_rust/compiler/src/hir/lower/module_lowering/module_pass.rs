@@ -9,6 +9,42 @@ use crate::hir::types::{
     TypeId,
 };
 
+fn try_const_eval(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Integer(val) => Some(*val),
+        Expr::Binary { op, left, right } => {
+            let l = try_const_eval(left)?;
+            let r = try_const_eval(right)?;
+            match op {
+                ast::BinOp::Add => l.checked_add(r),
+                ast::BinOp::Sub => l.checked_sub(r),
+                ast::BinOp::Mul => l.checked_mul(r),
+                ast::BinOp::Div => {
+                    if r == 0 { None } else { l.checked_div(r) }
+                }
+                ast::BinOp::Mod => {
+                    if r == 0 { None } else { l.checked_rem(r) }
+                }
+                ast::BinOp::BitAnd => Some(l & r),
+                ast::BinOp::BitOr => Some(l | r),
+                ast::BinOp::BitXor => Some(l ^ r),
+                ast::BinOp::ShiftLeft => Some(l << (r as u32 & 63)),
+                ast::BinOp::ShiftRight => Some(l >> (r as u32 & 63)),
+                _ => None,
+            }
+        }
+        Expr::Unary { op, operand } => {
+            let v = try_const_eval(operand)?;
+            match op {
+                ast::UnaryOp::Neg => v.checked_neg(),
+                ast::UnaryOp::BitNot => Some(!v),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn is_domain_block_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -201,9 +237,12 @@ impl Lowerer {
                 };
                 self.globals.insert(s.name.clone(), ty);
                 self.local_globals.insert(s.name.clone());
+                if matches!(s.mutability, ast::Mutability::Immutable) {
+                    self.immutable_globals.insert(s.name.clone());
+                }
                 // Extract compile-time constant value from initializer
-                if let Expr::Integer(val) = &s.value {
-                    self.global_init_values.insert(s.name.clone(), *val);
+                if let Some(val) = try_const_eval(&s.value) {
+                    self.global_init_values.insert(s.name.clone(), val);
                 } else if let Expr::String(val) = &s.value {
                     self.global_init_strings.insert(s.name.clone(), val.clone());
                 } else if let Expr::FString { parts, .. } = &s.value {
@@ -229,9 +268,10 @@ impl Lowerer {
                 };
                 self.globals.insert(c.name.clone(), ty);
                 self.local_globals.insert(c.name.clone());
+                self.immutable_globals.insert(c.name.clone());
                 // Extract compile-time constant value from initializer
-                if let Expr::Integer(val) = &c.value {
-                    self.global_init_values.insert(c.name.clone(), *val);
+                if let Some(val) = try_const_eval(&c.value) {
+                    self.global_init_values.insert(c.name.clone(), val);
                 } else if let Expr::String(val) = &c.value {
                     self.global_init_strings.insert(c.name.clone(), val.clone());
                 } else if let Expr::FString { parts, .. } = &c.value {
@@ -264,9 +304,12 @@ impl Lowerer {
                     };
                     self.globals.insert(n.clone(), ty);
                     self.local_globals.insert(n.clone());
+                    if matches!(l.mutability, ast::Mutability::Immutable) {
+                        self.immutable_globals.insert(n.clone());
+                    }
                     // Extract compile-time constant value from initializer
-                    if let Some(Expr::Integer(val)) = &l.value {
-                        self.global_init_values.insert(n, *val);
+                    if let Some(val) = l.value.as_ref().and_then(try_const_eval) {
+                        self.global_init_values.insert(n, val);
                     } else if let Some(Expr::String(val)) = &l.value {
                         self.global_init_strings.insert(n.clone(), val.clone());
                     } else if let Some(Expr::FString { parts, .. }) = &l.value {
@@ -696,6 +739,7 @@ impl Lowerer {
 
         // Copy local globals set to HirModule for codegen linkage decisions
         self.module.local_globals = self.local_globals.clone();
+        self.module.immutable_globals = self.immutable_globals.clone();
 
         // Copy extern function names to HirModule for codegen
         self.module.extern_fn_names = self.extern_fn_names.clone();
@@ -969,6 +1013,7 @@ impl Lowerer {
 
         // Copy local globals set to HirModule for codegen linkage decisions
         self.module.local_globals = self.local_globals.clone();
+        self.module.immutable_globals = self.immutable_globals.clone();
 
         // Copy extern function names to HirModule for codegen
         self.module.extern_fn_names = self.extern_fn_names.clone();

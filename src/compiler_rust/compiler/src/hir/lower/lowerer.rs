@@ -25,6 +25,8 @@ pub struct Lowerer {
     pub(super) global_init_strings: HashMap<String, String>,
     /// Set of globals that are defined locally in this module (not imported).
     pub(super) local_globals: HashSet<String>,
+    /// Set of globals that are immutable (val/const, not var).
+    pub(super) immutable_globals: HashSet<String>,
     /// Set of function names that are marked with #[pure] (CTR-031)
     /// These functions can be called from contract expressions
     pub(super) pure_functions: HashSet<String>,
@@ -99,6 +101,7 @@ impl Lowerer {
             global_init_values: HashMap::new(),
             global_init_strings: HashMap::new(),
             local_globals: HashSet::new(),
+            immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
             module_resolver: None,
@@ -134,6 +137,7 @@ impl Lowerer {
             global_init_values: HashMap::new(),
             global_init_strings: HashMap::new(),
             local_globals: HashSet::new(),
+            immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
             module_resolver: Some(module_resolver),
@@ -192,6 +196,7 @@ impl Lowerer {
             global_init_values: HashMap::new(),
             global_init_strings: HashMap::new(),
             local_globals: HashSet::new(),
+            immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
             current_class_type: None,
             module_resolver: None,
