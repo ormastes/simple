@@ -13,6 +13,7 @@
 use std.test_runner.process_tracker.{tracker_register_pid, tracker_get_pids, tracker_unregister_pid, tracker_register_container, tracker_unregister_container, tracker_kill_all_children, tracker_stop_all_containers, is_docker_available, get_running_containers, tracker_enable_heartbeat, tracker_send_heartbeat, tracker_check_heartbeat_alive}
 use std.test_runner.checkpoint.{checkpoint_save}
 use std.io.{process_spawn_async, process_wait, process_kill}
+use std.io.process_governor.{proc_slot_acquire, proc_slot_release, proc_slot_reset}
 use std.io_runtime.{exit}
 use std.io.{time_now_unix_micros}
 
@@ -38,10 +39,13 @@ fn spawn_tracked_process(cmd: text, args: [text]) -> i64:
         val exit_code = process_wait(pid, 60000)  # Wait up to 60s
         untrack_process(pid)  # Cleanup after successful wait
     """
+    proc_slot_acquire()
     val pid = process_spawn_async(cmd, args)
 
     if pid > 0:
         tracker_register_pid(pid)
+    else:
+        proc_slot_release()
 
     pid
 
@@ -53,6 +57,7 @@ fn untrack_process(pid: i64):
     PID from tracking list.
     """
     tracker_unregister_pid(pid)
+    proc_slot_release()
 
 # ============================================================================
 # Enhanced Container Run with Tracking
@@ -141,6 +146,7 @@ fn cleanup_all_children():
 
     val killed = tracker_kill_all_children()
     val stopped = tracker_stop_all_containers()
+    proc_slot_reset(killed)
 
     print "[LIFECYCLE] Killed {killed} processes, stopped {stopped} containers"
 

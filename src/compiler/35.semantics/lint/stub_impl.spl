@@ -13,31 +13,19 @@
 # - extern fn declarations (no body)
 # - Single-expression constant functions returning non-default literals
 #   e.g. fn method_get() -> text: "GET"  or  fn API_KEY() -> i64: 3
-# - Functions named with _noop_ prefix (already self-documenting)
+# - Functions with a plain pass marker or _noop_ prefix (already self-documenting)
 #
 # Works with the arena-based core AST (integer-tagged nodes).
 
 use compiler.core.ast_expr.{
-    EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT,
-    EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_INDEX,
-    EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_ARRAY_LIT,
-    EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK,
-    EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_RANGE,
-    EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_DICT_LIT, EXPR_LAMBDA,
-    EXPR_STRUCT_LIT, EXPR_TUPLE, EXPR_SLICE,
-    EXPR_NULL_COALESCE, EXPR_OPTIONAL_CHAIN, EXPR_CAST,
-    EXPR_UNIT, EXPR_INTERPOLATED_STRING,
-    EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN,
-    expr_tag, expr_i_val, expr_s_val, expr_left, expr_right, expr_args, expr_stmts
+    expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right,
+    expr_get_args, expr_get_stmts
 }
 use compiler.core.ast_stmt.{
-    STMT_EXPR, STMT_RETURN, STMT_VAL_DECL, STMT_VAR_DECL,
-    STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK,
-    stmt_tag, stmt_expr, stmt_name, stmt_body
+    stmt_get_tag, stmt_get_expr, stmt_get_body
 }
 use compiler.core.ast.{
-    DECL_FN, DECL_EXTERN_FN,
-    decl_tag, decl_name, decl_param_names, decl_body_stmts
+    decl_get_tag, decl_get_name, decl_get_param_names, decl_get_body
 }
 
 # ============================================================================
@@ -52,7 +40,36 @@ struct StubImplWarning:
     fn_name: text
 
     fn fmt() -> text:
-        "[{self.code}] {self.severity}: {self.message} in '{self.fn_name}' — {self.hint}"
+        "[" + self.code + "] " + self.severity + ": " + self.message + " in '" + self.fn_name + "' — " + self.hint
+
+fn int_to_str(n: i64) -> text:
+    if n == 0:
+        return "0"
+    var neg = false
+    var v = n
+    if n < 0:
+        neg = true
+        v = 0 - n
+    var result = ""
+    for _ in 0..20:
+        if v == 0:
+            break
+        val d = v % 10
+        var ch = "0"
+        if d == 1: ch = "1"
+        if d == 2: ch = "2"
+        if d == 3: ch = "3"
+        if d == 4: ch = "4"
+        if d == 5: ch = "5"
+        if d == 6: ch = "6"
+        if d == 7: ch = "7"
+        if d == 8: ch = "8"
+        if d == 9: ch = "9"
+        result = ch + result
+        v = v / 10
+    if neg:
+        return "-" + result
+    result
 
 # ============================================================================
 # Main Entry Point
@@ -70,15 +87,15 @@ fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
     var warnings: [StubImplWarning] = []
 
     for idx in decl_indices:
-        val tag = decl_tag[idx]
+        val tag = decl_get_tag(idx)
 
         # Skip non-function and extern declarations
-        if tag != DECL_FN:
+        if tag != 1:
             continue
 
-        val fn_name = decl_name[idx]
-        val params = decl_param_names[idx]
-        val body = decl_body_stmts[idx]
+        val fn_name = decl_get_name(idx)
+        val params = decl_get_param_names(idx)
+        val body = decl_get_body(idx)
 
         # Skip _noop_ prefixed functions (self-documenting stubs)
         if fn_name.starts_with("_noop_"):
@@ -101,7 +118,7 @@ fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
             ))
             continue
 
-        # Check if body contains pass_todo/pass_do_nothing/pass_dn anywhere
+        # Check if body contains a pass marker anywhere
         if body_has_pass_marker(body):
             continue
 
@@ -119,11 +136,12 @@ fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
         if params.len() > 0:
             # Has parameters — check if any are used in body
             if not body_references_any_param(body, params):
+                val param_count = int_to_str(params.len())
                 warnings.push(StubImplWarning(
                     code: "STUB001",
                     severity: "WARNING",
-                    message: "trivial {trivial_kind} return with {params.len()} unused param(s)",
-                    hint: "body is just '{trivial_kind}' — implement or mark with pass_todo",
+                    message: "trivial " + trivial_kind + " return with " + param_count + " unused param(s)",
+                    hint: "body is just '" + trivial_kind + "' — implement or mark with pass_todo",
                     fn_name: fn_name
                 ))
         else:
@@ -132,7 +150,7 @@ fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
                 warnings.push(StubImplWarning(
                     code: "STUB002",
                     severity: "INFO",
-                    message: "trivial default {trivial_kind} return (possible stub)",
+                    message: "trivial default " + trivial_kind + " return (possible stub)",
                     hint: "if intentional, mark with pass_do_nothing; if stub, use pass_todo",
                     fn_name: fn_name
                 ))
@@ -148,9 +166,9 @@ fn get_single_trivial_expr(stmts: [i64]) -> i64:
     return that expression index. Otherwise return -1.
 
     Handles:
-    - Single STMT_EXPR with a bare literal (implicit return)
-    - Single STMT_EXPR with EXPR_RETURN wrapping a literal (explicit return)
-    - Single STMT_RETURN with a literal
+    - Single 1 with a bare literal (implicit return)
+    - Single 1 with 19 wrapping a literal (explicit return)
+    - Single 5 with a literal
     """
     if stmts.len() != 1:
         return -1
@@ -159,23 +177,23 @@ fn get_single_trivial_expr(stmts: [i64]) -> i64:
     if s < 0:
         return -1
 
-    val tag = stmt_tag[s]
+    val tag = stmt_get_tag(s)
 
-    if tag == STMT_EXPR:
-        val e = stmt_expr[s]
+    if tag == 1:
+        val e = stmt_get_expr(s)
         if e < 0:
             return -1
-        # Check for explicit return: EXPR_RETURN wrapping a literal
-        if expr_tag[e] == EXPR_RETURN:
-            val inner = expr_left[e]
+        # Check for explicit return: 19 wrapping a literal
+        if expr_get_tag(e) == 19:
+            val inner = expr_get_left(e)
             if inner >= 0:
                 return inner
             return -1
         # Bare expression (implicit return)
         return e
 
-    if tag == STMT_RETURN:
-        val e = stmt_expr[s]
+    if tag == 5:
+        val e = stmt_get_expr(s)
         if e >= 0:
             return e
         return -1
@@ -192,15 +210,15 @@ fn get_single_placeholder_expr(stmts: [i64]) -> i64:
     if s < 0:
         return -1
 
-    val tag = stmt_tag[s]
-    if tag != STMT_EXPR and tag != STMT_RETURN:
+    val tag = stmt_get_tag(s)
+    if tag != 1 and tag != 5:
         return -1
 
-    val e = stmt_expr[s]
+    val e = stmt_get_expr(s)
     if e < 0:
         return -1
 
-    if expr_tag[e] == EXPR_PASS_TODO or expr_tag[e] == EXPR_PASS_DO_NOTHING or expr_tag[e] == EXPR_PASS_DN:
+    if expr_get_tag(e) == 40 or expr_get_tag(e) == 41 or expr_get_tag(e) == 43:
         return e
 
     -1
@@ -215,61 +233,61 @@ fn classify_trivial(e: i64) -> text:
     if e < 0:
         return ""
 
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
-    if tag == EXPR_INT_LIT:
-        return "integer ({expr_i_val[e]})"
+    if tag == 1:
+        return "integer (" + int_to_str(expr_get_int(e)) + ")"
 
-    if tag == EXPR_FLOAT_LIT:
-        return "float ({expr_s_val[e]})"
+    if tag == 2:
+        return "float (" + expr_get_str(e) + ")"
 
-    if tag == EXPR_STRING_LIT:
-        val s = expr_s_val[e]
+    if tag == 3:
+        val s = expr_get_str(e)
         if s == "":
             return "empty string (\"\")"
-        return "string (\"{s}\")"
+        return "string (\"" + s + "\")"
 
-    if tag == EXPR_BOOL_LIT:
-        if expr_i_val[e] == 0:
+    if tag == 4:
+        if expr_get_int(e) == 0:
             return "false"
         return "true"
 
-    if tag == EXPR_NIL_LIT:
+    if tag == 5:
         return "nil"
 
-    if tag == EXPR_ARRAY_LIT:
-        if expr_args[e].len() == 0:
+    if tag == 13:
+        if expr_get_args(e).len() == 0:
             return "empty array ([])"
         return ""
 
-    if tag == EXPR_DICT_LIT:
-        if expr_args[e].len() == 0:
+    if tag == 25:
+        if expr_get_args(e).len() == 0:
             return "empty dict ({})"
         return ""
 
-    if tag == EXPR_UNIT:
+    if tag == 33:
         return "unit (())"
 
-    if tag == EXPR_TUPLE:
-        if expr_args[e].len() == 0:
+    if tag == 28:
+        if expr_get_args(e).len() == 0:
             return "unit (())"
         return ""
 
-    # Ok(nil) or Ok(0) pattern — EXPR_CALL with callee "Ok" and single trivial arg
-    if tag == EXPR_CALL:
-        val callee = expr_left[e]
-        if callee >= 0 and expr_tag[callee] == EXPR_IDENT:
-            if expr_s_val[callee] == "Ok":
-                val call_args = expr_args[e]
+    # Ok(nil) or Ok(0) pattern — 9 with callee "Ok" and single trivial arg
+    if tag == 9:
+        val callee = expr_get_left(e)
+        if callee >= 0 and expr_get_tag(callee) == 6:
+            if expr_get_str(callee) == "Ok":
+                val call_args = expr_get_args(e)
                 if call_args.len() == 1:
                     val inner = call_args[0]
                     if inner >= 0:
                         val inner_kind = classify_trivial(inner)
                         if inner_kind != "":
-                            return "Ok({inner_kind})"
+                            return "Ok(" + inner_kind + ")"
 
     # pass (without todo/do_nothing) — treated as trivial
-    if tag == EXPR_PASS:
+    if tag == 35:
         return "pass"
 
     ""
@@ -284,45 +302,45 @@ fn is_default_value(e: i64) -> bool:
     if e < 0:
         return false
 
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
-    if tag == EXPR_INT_LIT:
-        return expr_i_val[e] == 0
+    if tag == 1:
+        return expr_get_int(e) == 0
 
-    if tag == EXPR_FLOAT_LIT:
-        val f = expr_s_val[e]
+    if tag == 2:
+        val f = expr_get_str(e)
         return f == "0" or f == "0.0" or f == "0.00"
 
-    if tag == EXPR_STRING_LIT:
-        return expr_s_val[e] == ""
+    if tag == 3:
+        return expr_get_str(e) == ""
 
-    if tag == EXPR_BOOL_LIT:
-        return expr_i_val[e] == 0  # false
+    if tag == 4:
+        return expr_get_int(e) == 0  # false
 
-    if tag == EXPR_NIL_LIT:
+    if tag == 5:
         return true
 
-    if tag == EXPR_ARRAY_LIT:
-        return expr_args[e].len() == 0
+    if tag == 13:
+        return expr_get_args(e).len() == 0
 
-    if tag == EXPR_DICT_LIT:
-        return expr_args[e].len() == 0
+    if tag == 25:
+        return expr_get_args(e).len() == 0
 
-    if tag == EXPR_UNIT:
+    if tag == 33:
         return true
 
-    if tag == EXPR_TUPLE:
-        return expr_args[e].len() == 0
+    if tag == 28:
+        return expr_get_args(e).len() == 0
 
-    if tag == EXPR_PASS:
+    if tag == 35:
         return true
 
     # Ok(nil) or Ok(default)
-    if tag == EXPR_CALL:
-        val callee = expr_left[e]
-        if callee >= 0 and expr_tag[callee] == EXPR_IDENT:
-            if expr_s_val[callee] == "Ok":
-                val call_args = expr_args[e]
+    if tag == 9:
+        val callee = expr_get_left(e)
+        if callee >= 0 and expr_get_tag(callee) == 6:
+            if expr_get_str(callee) == "Ok":
+                val call_args = expr_get_args(e)
                 if call_args.len() == 1:
                     return is_default_value(call_args[0])
 
@@ -333,8 +351,9 @@ fn is_default_value(e: i64) -> bool:
 # ============================================================================
 
 fn body_has_pass_marker(stmts: [i64]) -> bool:
-    """Check if any statement in the body contains pass_todo, pass_do_nothing,
-    or pass_dn. If so, the function is already marked and should not be flagged."""
+    """Check if any statement in the body contains pass, pass_todo,
+    pass_do_nothing, or pass_dn. If so, the function is already marked and
+    should not be flagged by STUB001/STUB002."""
     for s in stmts:
         if s < 0:
             continue
@@ -347,16 +366,16 @@ fn stmt_has_pass_marker(s: i64) -> bool:
     if s < 0:
         return false
 
-    val tag = stmt_tag[s]
+    val tag = stmt_get_tag(s)
 
     # Check the expression in this statement
-    val e = stmt_expr[s]
+    val e = stmt_get_expr(s)
     if e >= 0:
         if expr_has_pass_marker(e):
             return true
 
     # Recurse into child statements
-    val children = stmt_body[s]
+    val children = stmt_get_body(s)
     for child in children:
         if stmt_has_pass_marker(child):
             return true
@@ -368,26 +387,28 @@ fn expr_has_pass_marker(e: i64) -> bool:
     if e < 0:
         return false
 
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
-    if tag == EXPR_PASS_TODO:
+    if tag == 35:
         return true
-    if tag == EXPR_PASS_DO_NOTHING:
+    if tag == 40:
         return true
-    if tag == EXPR_PASS_DN:
+    if tag == 41:
+        return true
+    if tag == 43:
         return true
 
     # Recurse into sub-expressions
-    if expr_has_pass_marker(expr_left[e]):
+    if expr_has_pass_marker(expr_get_left(e)):
         return true
-    if expr_has_pass_marker(expr_right[e]):
+    if expr_has_pass_marker(expr_get_right(e)):
         return true
 
-    for arg in expr_args[e]:
+    for arg in expr_get_args(e):
         if expr_has_pass_marker(arg):
             return true
 
-    for child_stmt in expr_stmts[e]:
+    for child_stmt in expr_get_stmts(e):
         if stmt_has_pass_marker(child_stmt):
             return true
 
@@ -411,10 +432,10 @@ fn stmt_references_param(s: i64, params: [text]) -> bool:
     if s < 0:
         return false
 
-    val tag = stmt_tag[s]
+    val tag = stmt_get_tag(s)
 
     # Check expression
-    val e = stmt_expr[s]
+    val e = stmt_get_expr(s)
     if e >= 0:
         if expr_references_param(e, params):
             return true
@@ -423,37 +444,37 @@ fn stmt_references_param(s: i64, params: [text]) -> bool:
     # Actually, we don't count shadowing as usage.
 
     # Recurse into child statements
-    for child in stmt_body[s]:
+    for child in stmt_get_body(s):
         if stmt_references_param(child, params):
             return true
 
     false
 
 fn expr_references_param(e: i64, params: [text]) -> bool:
-    """Check if an expression references any parameter name via EXPR_IDENT."""
+    """Check if an expression references any parameter name via 6."""
     if e < 0:
         return false
 
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
-    if tag == EXPR_IDENT:
-        val name = expr_s_val[e]
+    if tag == 6:
+        val name = expr_get_str(e)
         for p in params:
             if name == p:
                 return true
         return false
 
     # Recurse into sub-expressions
-    if expr_references_param(expr_left[e], params):
+    if expr_references_param(expr_get_left(e), params):
         return true
-    if expr_references_param(expr_right[e], params):
+    if expr_references_param(expr_get_right(e), params):
         return true
 
-    for arg in expr_args[e]:
+    for arg in expr_get_args(e):
         if expr_references_param(arg, params):
             return true
 
-    for child_stmt in expr_stmts[e]:
+    for child_stmt in expr_get_stmts(e):
         if stmt_references_param(child_stmt, params):
             return true
 

@@ -658,11 +658,27 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
         env_vars.push(("SIMPLE_TEST_SHOW_TAGS", show_tags));
     }
 
-    // Build command - run through test runner, not as direct script execution
+    // Build command - run the spec directly. Re-entering `simple test` here
+    // recursively creates more test runners for the same file.
     let mut cmd = Command::new(&simple_binary);
     cmd.args(build_safe_mode_child_args(path, options))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
 
     // Set environment variables
     for (key, val) in &env_vars {
@@ -757,7 +773,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
 }
 
 fn build_safe_mode_child_args(path: &Path, options: &super::types::TestOptions) -> Vec<String> {
-    let mut args = vec!["test".to_string(), path.display().to_string()];
+    let mut args = vec!["run".to_string(), path.display().to_string()];
 
     if let Some(mode) = options.execution_mode.cli_value() {
         args.push(format!("--mode={}", mode));
@@ -1556,12 +1572,15 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Resul
             Err(format!("Process failed: {}", e))
         }
         Err(_) => {
-            // Timeout - kill the process
-            // The thread will exit when the killed child's wait_with_output returns
+            // Timeout - kill the full process group first so subprocess trees
+            // cannot survive a timed-out isolated test.
             #[cfg(unix)]
             {
                 use std::process::Command as StdCommand;
-                let _ = StdCommand::new("kill").arg("-9").arg(child_id.to_string()).status();
+                let group_id = format!("-{}", child_id);
+                let _ = StdCommand::new("kill").arg("-TERM").arg(&group_id).status();
+                let _ = StdCommand::new("kill").arg("-KILL").arg(&group_id).status();
+                let _ = StdCommand::new("kill").arg("-KILL").arg(child_id.to_string()).status();
             }
 
             #[cfg(windows)]
@@ -2020,6 +2039,17 @@ mod tests {
         assert_eq!(strip_ansi_codes("\x1b[32mhello\x1b[0m"), "hello");
         assert_eq!(strip_ansi_codes("no codes"), "no codes");
         assert_eq!(strip_ansi_codes("\x1b[1;31mred\x1b[0m"), "red");
+    }
+
+    #[test]
+    fn test_build_safe_mode_child_args_runs_spec_directly() {
+        let options = super::super::types::TestOptions::default();
+
+        let args = build_safe_mode_child_args(Path::new("test/example_spec.spl"), &options);
+
+        assert_eq!(args.first().map(String::as_str), Some("run"));
+        assert_eq!(args.get(1).map(String::as_str), Some("test/example_spec.spl"));
+        assert!(!args.iter().any(|arg| arg == "test"));
     }
 
     #[test]
