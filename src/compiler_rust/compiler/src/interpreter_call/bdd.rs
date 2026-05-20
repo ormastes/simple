@@ -800,10 +800,12 @@ pub(super) fn eval_bdd_builtin(
                 }
                 return Ok(Some(Value::Bool(matched)));
             }
-            // General `expect <expr>` / method-form receiver path.  Only mark
-            // a failure when the value is literal Bool(false): non-Bool values
-            // are typically the receiver of a `.to_*()` matcher chain that
-            // does its own assertion in interpreter_method/mod.rs.
+            // General `expect <expr>` / method-form receiver path.
+            // Do NOT eagerly mark failure here — the `.to_*()` matcher chain
+            // in interpreter_method/mod.rs is authoritative and will set or
+            // clear BDD_EXPECT_FAILED based on the actual comparison result.
+            // Eagerly marking Bool(false) here caused `expect(false).to_equal(false)`
+            // to fail even though the assertion passes.
             let value = eval_arg(
                 args,
                 0,
@@ -814,12 +816,6 @@ pub(super) fn eval_bdd_builtin(
                 enums,
                 impl_methods,
             )?;
-            if matches!(&value, Value::Bool(false)) {
-                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-                BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() = Some("expected truthy value, got false".to_string());
-                });
-            }
             Ok(Some(value))
         }
         "shared_examples" => {

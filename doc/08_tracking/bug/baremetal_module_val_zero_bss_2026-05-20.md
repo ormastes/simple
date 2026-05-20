@@ -1,7 +1,7 @@
 # BUG: Module-level val constants are zero in baremetal LLVM targets
 
 **Date:** 2026-05-20
-**Status:** OPEN
+**Status:** FIXED (verified: val→.rodata, const-folded arithmetic, seed rebuilt 2026-05-20)
 **Severity:** High (all baremetal kernels affected)
 **Component:** LLVM backend codegen
 
@@ -16,13 +16,11 @@ val HEAP_SIZE: u64 = 8 * 1024 * 1024  # also 0
 
 This affects every `.spl` module compiled with `--target riscv64-unknown-none` (and presumably any `*-unknown-none` baremetal target).
 
-## Root cause
+## Root cause (two bugs)
 
-The Simple compiler's LLVM backend emits module-level `val` as:
-1. A global variable in .bss (zero-initialized)
-2. A static constructor function that stores the computed value
+**Bug 1: No const-folding for arithmetic.** `module_pass.rs` only recognized `Expr::Integer` literals for `global_init_values`. Expressions like `8 * 1024 * 1024` were not evaluated at compile time, leaving the global zero-initialized.
 
-Baremetal targets have no `.init_array` / `__libc_start_main` mechanism to run static constructors. The `_start` assembly clears BSS, then jumps to the kernel main — constructors never execute.
+**Bug 2: All globals hardcoded as mutable.** `lowering_core.rs` passed `is_mutable: true` for every global, so the LLVM backend never marked `val`/`const` as `constant` — they went to `.data` (mutable, zero-init in baremetal) instead of `.rodata`.
 
 ## Impact
 
@@ -30,20 +28,17 @@ Baremetal targets have no `.init_array` / `__libc_start_main` mechanism to run s
 - **uart16550_mmio.spl**: Register offsets (THR=0x00, LSR=0x05, etc.) are zero, causing `uart16550_mmio_write_byte` to infinite-loop reading the wrong register.
 - **Any baremetal driver**: Module-level MMIO addresses, bitmask constants, etc. are all zero.
 
-## Proposed fix
+## Fix applied (Option A)
 
-For `val` declarations whose initializers are compile-time constant expressions (literals, arithmetic on literals, shifts, bitwise ops):
+**Bug 1 fix:** Added `try_const_eval()` in `module_pass.rs` — recursive compile-time evaluator for `Integer`, `Binary{Add,Sub,Mul,Div,Mod,BitAnd,BitOr,BitXor,Shl,Shr}`, `Unary{Neg,BitNot}`. Now `8 * 1024 * 1024` folds to `8388608` at HIR lowering.
 
-**Option A (recommended):** Emit as LLVM `constant` in `.rodata` instead of a global with constructor:
-```llvm
-@RAM_BASE = internal constant i64 2147483648  ; 0x80000000 — in .rodata, survives BSS clear
-```
+**Bug 2 fix:** Added `immutable_globals: HashSet<String>` tracking through Lowerer → HirModule → MIR lowering. `val`/`const` declarations populate this set; `lowering_core.rs` reads it to set `is_mutable = false`; LLVM backend emits `set_constant(true)` → `.rodata`.
 
-**Option B:** Emit a `.init_array` entry AND have the baremetal `_start` template call `__init_array_start..end` after BSS clearing but before kernel main.
-
-**Option C (partial):** Document that module-level `val` is unsupported in baremetal and lint against it. Least work, most friction.
-
-Option A is cleanest — purely compile-time constants should never need runtime initialization.
+### Files changed
+- `compiler/src/hir/lower/module_lowering/module_pass.rs` — `try_const_eval()` + immutable tracking
+- `compiler/src/hir/types/module.rs` — `immutable_globals` field on HirModule
+- `compiler/src/hir/lower/lowerer.rs` — `immutable_globals` field on Lowerer
+- `compiler/src/mir/lower/lowering_core.rs` — reads `immutable_globals` for `is_mutable` flag
 
 ## Current workaround
 

@@ -18,20 +18,22 @@ None of the required opcodes exist anywhere in the codebase.
 
 ## Missing Op Names (exact)
 
-Searched with `grep -rn` across `src/` (excluding `src/compiler_rust/vendor/**`):
+**SUPERSEDED — all ops now present as of 2026-05-09 (Wave I2). See Resolution section.**
 
-| Op name | Expected location | Found? |
-|---------|------------------|--------|
-| `MaskFromCmp` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO |
-| `MaskedAdd` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO |
-| `MaskedMul` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO |
-| `MaskedFma` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO |
-| `PredicatedAdd` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO |
-| `PredicatedMul` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO |
-| `PredicatedFma` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO |
+Searched with `grep -rn` across `src/` (excluding `src/compiler_rust/vendor/**`) at time of filing:
 
-Also absent from `doc/04_architecture/simd_unified_architecture_detail.md` and
-`doc/05_design/simd_test_catalog.md` — these op names appear nowhere in design docs.
+| Op name | Expected location | Found at filing | Found 2026-05-20 |
+|---------|------------------|-----------------|-----------------|
+| `MaskFromCmp` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO | YES (line 260) |
+| `MaskedAdd` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO | YES (line 263) |
+| `MaskedMul` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO | YES (line 264) |
+| `MaskedFma` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO | YES (line 267) |
+| `PredicatedAdd` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO | YES (line 271) |
+| `PredicatedMul` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO | YES (line 272) |
+| `PredicatedFma` | `src/compiler/50.mir/mir_instructions.spl` `MirInstKind` enum | NO | YES (line 273) |
+
+2026-05-20 verification: live grep confirms all 7 variants present in `mir_instructions.spl`;
+`predicate_promote.spl` is 243 lines (full fusion pass); `predicate_promote_spec.spl` is 231 lines (10 tests).
 
 ## What Does Exist
 

@@ -1,6 +1,6 @@
 # Bug / Audit: SIMD Extern Stub Survey — simd.spl
 # 2026-05-02  (Wave L / L5)
-# **Updated 2026-05-19 (Wave 15)** — shuffle_u8x16 + Vec4u64 + 5 u64x4 ops wired; §3.3 gaps closed.
+# **Updated 2026-05-20 (status check)** — no new stubs since Wave 15; 60 wired, 0 stub, open gaps unchanged.
 
 **Status:** OPEN (ongoing tracker) — all extern declarations in simd.spl are
 now wired; remaining open items are the str_* orphan gap (§3.2, interpreter-internal),
@@ -333,6 +333,7 @@ in interpreter / SMF mode or use the scalar FFI path for compiled deployments.
 | 2026-05-10 | `rt_simd_xor_u8x16` wired through full stack (runtime + interpreter + simd.spl extern decl); Vec16u8 count becomes 4 |
 | 2026-05-19 | Full re-audit: float ops (15) reclassified as interpreter-wired scalar fallback (previously miscategorised as stub); `rt_simd_hadd/hmax/hmin_f32x4` implemented in `interpreter_extern/simd.rs:921-950` and wired in mod.rs:1015-1017; str_* orphan gap documented (§3.2); total wired count = 51, stub = 0; condition 4 of §1.1 definition expanded to include scalar-only impls; line-number tables re-verified against post-edit source |
 | 2026-05-19 (Wave 15) | §3.3 gaps closed: `rt_simd_shuffle_u8x16` (scalar PSHUFB impl) + `Vec4u64` struct + `rt_simd_{xor,and,or,shl,shr}_u64x4` + `rt_simd_vec4u64_{new,get}` all declared in simd.spl and wired in interpreter_extern/simd.rs + mod.rs; total wired count = 60; §5.2 blockers resolved; Rec 3 (J2) complete |
+| 2026-05-20 | Status check: grep confirms 60 wired, 0 stub — no new extern declarations added since Wave 15. Open items unchanged: str_* orphan gap (§3.2, interpreter-internal only), uniform Cranelift gap (§4, all 60 externs absent from runtime_ffi.rs). No doc update to wiring tables required. |
 
 ---
 
