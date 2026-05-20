@@ -275,6 +275,7 @@ adapters:
 | ArduinoR4Adapter | `create_replay_controller()` |
 | Ch32V307Adapter | `create_replay_controller()` |
 | GhdlRv32Adapter | `create_replay_controller()` |
+| UnoQAdapter | `create_replay_controller()` |
 
 ### 5.4 DAP Integration
 
@@ -332,6 +333,7 @@ of truth for all 16 remote execution lanes.
 | 14 | `qemu_rv64_semihost` | riscv64 | qemu_gdb | in_progress |
 | 15 | `arduino_r4_cmsis_dap` | arm32 | openocd_gdb | in_progress |
 | 16 | `esp32_usb_jtag` | xtensa | openocd_gdb | in_progress |
+| 17 | `uno_q_openocd` | arm32 | openocd_gdb | in_progress |
 
 ---
 
@@ -375,6 +377,17 @@ of truth for all 16 remote execution lanes.
 - **Debug:** Platform Cable USB II via OpenOCD JTAG
 - **Status:** Excluded from public builds, used for custom RV32I CPU project
 - **FPGA:** Custom RISC-V soft core, programmed via Vivado
+
+### Arduino UNO Q
+- **Board:** Arduino UNO Q (ABX00162), dual-chip: QRB2210 MPU (Linux) + STM32U585 MCU
+- **MCU:** STM32U585, Cortex-M33 @ 160 MHz, 2 MB flash, 786 KB SRAM
+- **SRAM:** SRAM1 192 KB at `0x20000000`, code region at `0x20002000` (SRAM1-only conservative layout)
+- **Debug:** External SWD/JTAG probe on JCTL header, OpenOCD with `target/stm32u5x.cfg`
+- **Connection:** OpenOCD telnet on port 27444 + GDB on port 27333
+- **Serial:** `/dev/serial/by-id/usb-Arduino_Uno_Q_-_uno-q_3655308719-if01` (CDC ACM, application-level only)
+- **Probe:** Bring-your-own ST-Link/J-Link/CMSIS-DAP probe; default config `interface/stlink.cfg`
+- **Note:** No built-in debug interface (unlike R4 WiFi); TrustZone deferred; DFU bootloader available for flash-only workflow
+- **Status:** SRAM adapter implemented, E2E gated on external probe availability
 
 ### GHDL Simulated RV32
 - **Target:** VHDL-simulated RISC-V 32-bit core

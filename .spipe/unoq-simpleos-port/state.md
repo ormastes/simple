@@ -36,7 +36,7 @@ feature
 - [x] 2-research (Analyst) — 2026-05-20
 - [x] 3-arch (Architect) — 2026-05-20
 - [x] 4-spec (QA Lead) — 2026-05-20
-- [ ] 5-implement (Engineer)
+- [x] 5-implement (Engineer) — 2026-05-20
 - [ ] 6-refactor (Tech Lead)
 - [ ] 7-verify (QA)
 - [ ] 8-ship (Release Mgr)
@@ -278,10 +278,11 @@ The UNO Q's USB interface exposes **Vendor-Specific + CDC ACM** (serial) — it 
 <pending>
 
 ## Phase
-spec-done
+implement-done
 
 ## Log
 - 1-dev: Created state file with 7 acceptance criteria, board reference, refined goal
 - 2-research: Found 8 reusable modules, 8 existing code files, 8 requirements drafted. CRITICAL: UNO Q lacks CMSIS-DAP — debug connectivity (OQ-1) must be resolved by architect. Device at /dev/ttyACM2 not ttyACM0. OpenOCD stm32u5x.cfg confirmed available.
 - 3-arch: Designed 7 modules (2 new, 5 modified), 6 decisions, no circular deps. OQ-1 resolved: external probe via JCTL + OpenOCD telnet (Lauterbach excluded — TRACE32 path only). OQ-2 deferred: no TZ modeling. Conservative SRAM1-only memory map (192 KB). E2E gate: probe required for AC-3 verification.
 - 4-spec: Created 3 spec files with 32 total specs, 100% AC coverage (AC-1/2/3 unit-tested, AC-4/5/6/7 deferred to E2E/docs/verify phases).
+- 5-implement: 2 new files, 5 modified. 35/35 specs green (direct run). Test runner timeouts on 2 specs due to module resolution overhead (known interpreter perf issue). Docs and manifest updated.

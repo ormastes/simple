@@ -42,7 +42,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-05-20
 - [-] 6-refactor (Tech Lead) — skipped (user request)
 - [x] 7-verify (QA) — 2026-05-20
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-20
 
 ## Phase Outputs
 
@@ -599,4 +599,36 @@ Skipped per user request.
 All 34 modified/new source files parse successfully via `bin/simple /tmp/test_parse_*.spl` — no syntax errors.
 
 ### 8-ship
-<pending>
+
+**Date:** 2026-05-20
+
+#### Commit Summary
+Single commit containing all rv64-fpga-linux-boot pipeline deliverables:
+
+**New files (8):**
+- `src/lib/hardware/soc_rtl/ram64.spl` — 64-bit byte-addressable RAM model
+- `src/lib/hardware/soc_rtl/soc_top_64.spl` — RV64GC SoC top-level with QEMU virt memory map
+- `src/lib/hardware/soc_rtl/wb64_interconnect.spl` — 64-bit wishbone bus with address decode
+- `test/unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl` — 18 specs for AC-1
+- `test/unit/lib/hardware/soc_rtl/soc_top_64_spec.spl` — 16 specs for AC-3
+- `test/unit/lib/hardware/fpga_linux/soc_vhdl_gen_rv64_spec.spl` — 14 specs for AC-2
+- `test/unit/lib/hardware/fpga_linux/fpga_synthesis_rv64_spec.spl` — 15 specs for AC-4/5
+- `test/unit/compiler/backend/vhdl_rv64gc_regression_spec.spl` — 20 specs for AC-8/9
+
+**Modified files (26):**
+- rv64gc_rtl: core, trap, csr, csr_s, decode, lsu, mmu_sv39, mul_div, pkg, __init__
+- soc_rtl: clint, __init__
+- fpga_linux: soc_vhdl_gen_part2, riscv_fpga_linux, synthesis_wrapper, xdc_gen, __init__
+- fpga_k26: k26_xdc
+- baremetal/riscv: dtb_gen, __init__
+- compiler: vhdl_type_mapper, vhdl_backend, vhdl_expr, vhdl_process
+- test: fpga_boot_linux_spec
+
+#### Verification Gate
+All 130 acceptance checks pass (see phase 7 for breakdown).
+
+#### Known Limitations
+1. **Test runner hang:** `bin/simple test` hangs on std.spipe imports — spec `it` blocks cannot execute via normal test runner. Verification done via direct interpreter scripts.
+2. **GHDL not run:** No GHDL binary available in CI — VHDL generation verified by string content checks, not actual GHDL analysis.
+3. **No hardware run:** FPGA bitstream generation and Linux boot require physical hardware + Vivado — validated at the RTL/generation level only.
+4. **Interpreter-only:** All verification run in interpreter mode; compiled-mode testing deferred until test runner fix.
