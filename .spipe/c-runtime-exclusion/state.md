@@ -1,5 +1,7 @@
 # C Runtime Exclusion — State
 
+## Status: CLOSED — 2026-05-20
+
 **Date:** 2026-05-19
 **Bug doc:** `doc/08_tracking/bug/c_runtime_exclusion_analysis_2026-05-18.md`
 

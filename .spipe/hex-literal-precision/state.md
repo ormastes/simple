@@ -1,5 +1,7 @@
 # Hex Literal Precision — State
 
+## Status: CLOSED — 2026-05-20
+
 **Status:** VERIFIED RESOLVED (no code change needed)
 **Date:** 2026-05-19
 

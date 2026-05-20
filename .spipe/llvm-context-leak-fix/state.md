@@ -1,5 +1,7 @@
 # SStack State: llvm-context-leak-fix
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > fix LLVM Context memory leak — Box::leak in backend_core.rs:67 prevents memory accumulation during long compilation. Fix the leaked LLVM Context to be properly dropped.
 

@@ -1,5 +1,7 @@
 # kernel-zstd-adapter — State
 
+## Status: CLOSED — 2026-05-20
+
 ## Goal
 Implement a minimal, noalloc-friendly Zstd decompressor for SimpleOS kernel
 boot and initramfs decompression. No heap allocation — all state lives in

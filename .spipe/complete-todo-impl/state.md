@@ -1,5 +1,7 @@
 # SStack State: complete-todo-impl
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > complete todo to real impl and test fail check
 

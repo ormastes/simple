@@ -1,5 +1,7 @@
 # Warning/Allow Root-Cause Cleanup
 
+## Status: CLOSED — 2026-05-20
+
 ## Phases
 - [x] 1-dev (Developer Lead) — 2026-05-18
 - [~] 2-research (skipped)

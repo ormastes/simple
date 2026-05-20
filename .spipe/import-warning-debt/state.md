@@ -1,5 +1,7 @@
 # Import Warning Debt
 
+## Status: CLOSED — 2026-05-20
+
 ## Phase
 Phase 8 — Ship
 

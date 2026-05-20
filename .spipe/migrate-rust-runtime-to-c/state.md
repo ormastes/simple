@@ -1,5 +1,7 @@
 # SStack State: migrate-rust-runtime-to-c
 
+## Status: CLOSED — 2026-05-20
+
 ## Phase 1: Dev ✓
 ## Phase 2: Research ✓  
 ## Phase 3: Arch ✓ (inline — pattern: extern decl + safe wrapper + cc in build.rs)

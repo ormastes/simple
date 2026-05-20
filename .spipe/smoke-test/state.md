@@ -1,5 +1,7 @@
 # SPipe State: smoke-test
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > verify deploy
 

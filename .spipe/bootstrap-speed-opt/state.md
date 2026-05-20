@@ -1,5 +1,7 @@
 # Bootstrap Speed Optimization — Rayon Parallelism Tuning
 
+## Status: CLOSED — 2026-05-20
+
 ## Task
 Optimize Rayon parallelism in the bootstrap pipeline to reduce per-stage compilation time.
 

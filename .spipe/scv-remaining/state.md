@@ -1,5 +1,7 @@
 # SStack State: scv-remaining
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > remains with agents teams
 

@@ -1,5 +1,7 @@
 # Cross-Module ABI Fix — State
 
+## Status: CLOSED — 2026-05-20
+
 ## Status: DONE (committed in 5d65a6a7f8)
 
 ## Bug Reference

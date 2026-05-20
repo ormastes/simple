@@ -111,6 +111,91 @@ fn search_full_text(db: Database, query: text, limit: i64) -> Result<[SearchResu
 
     Ok(results)
 
+fn search_by_name(db: Database, name: text, limit: i64) -> Result<[SearchResult], text>:
+    """Search packages by exact or prefix name match.
+
+    Args:
+        db: Database connection
+        name: Name prefix or exact name to search
+        limit: Maximum results to return
+
+    Returns:
+        Ok(results) ordered by relevance then downloads
+    """
+    if name.len() == 0:
+        return Ok([])
+
+    val sql = "SELECT * FROM packages WHERE name LIKE ? ORDER BY downloads DESC LIMIT ?"
+    val pattern = name + "%"
+    val params: [DbValue] = [
+        DbValue.Text(value: pattern),
+        DbValue.Integer(value: limit)
+    ]
+    val result = db.query(sql, params)
+
+    match result:
+        Ok(rows):
+            val codec = PackageCodec()
+            var results: [SearchResult] = []
+            for row in rows:
+                val pkg_result = codec.decode(row)
+                match pkg_result:
+                    Ok(pkg):
+                        var score = 100
+                        if pkg.name == name:
+                            score = 1000
+                        results.push(SearchResult(package: pkg, score: score))
+                    Err(e): pass_do_nothing
+            Ok(results)
+        Err(e):
+            Err("Name search query failed")
+
+fn search_by_tag(db: Database, tag: text, limit: i64) -> Result<[SearchResult], text>:
+    """Search packages whose description contains a tag keyword.
+
+    Tags are embedded in descriptions as plain words or #hashtags.
+    Searches the description field for the given tag term.
+
+    Args:
+        db: Database connection
+        tag: Tag word to search for (e.g. "json" or "#json")
+        limit: Maximum results to return
+
+    Returns:
+        Ok(results) matching the tag, ranked by downloads
+    """
+    if tag.len() == 0:
+        return Ok([])
+
+    # Normalize: strip leading '#' if present
+    var search_tag = tag
+    if tag.starts_with("#"):
+        search_tag = tag.slice(1, tag.len())
+
+    val sql = "SELECT * FROM packages WHERE description LIKE ? OR description LIKE ? ORDER BY downloads DESC LIMIT ?"
+    val pattern_word = "% " + search_tag + " %"
+    val pattern_hash = "%#" + search_tag + "%"
+    val params: [DbValue] = [
+        DbValue.Text(value: pattern_word),
+        DbValue.Text(value: pattern_hash),
+        DbValue.Integer(value: limit)
+    ]
+    val result = db.query(sql, params)
+
+    match result:
+        Ok(rows):
+            val codec = PackageCodec()
+            var results: [SearchResult] = []
+            for row in rows:
+                val pkg_result = codec.decode(row)
+                match pkg_result:
+                    Ok(pkg):
+                        results.push(SearchResult(package: pkg, score: 50))
+                    Err(e): pass_do_nothing
+            Ok(results)
+        Err(e):
+            Err("Tag search query failed")
+
 fn suggest_packages(db: Database, prefix: text, limit: i64) -> Result<[text], text>:
     """Get package name suggestions for autocomplete.
 

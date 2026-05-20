@@ -1,5 +1,7 @@
 # SStack State: tagged-primitive-types
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > refactor find all primitive type in public interface. and same types in function but caller not specify arg name. and make tag that same types on function but change place not make difference tag. check allow tagged also. with sonnet agents with opus advisor
 

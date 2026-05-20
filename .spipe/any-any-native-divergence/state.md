@@ -1,5 +1,7 @@
 # State: any+any native divergence fix
 
+## Status: CLOSED — 2026-05-20
+
 **Bug:** `any_plus_any_interpreter_native_divergence_2026-05-18.md`
 
 ## Investigation findings

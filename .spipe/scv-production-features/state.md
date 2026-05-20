@@ -1,5 +1,7 @@
 # SStack State: scv-production-features
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > impl fully doc/03_plan/agent_tasks/scv.md with spawn agents of sonnet with opus advisor
 

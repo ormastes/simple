@@ -1,5 +1,7 @@
 # Fix perf bugs — triage loop
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > fix perf bugs. run tests including long run tests. fix perf bugs. if possible fix pure simple compiler interpreter
 

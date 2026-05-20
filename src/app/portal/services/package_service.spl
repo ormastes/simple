@@ -279,6 +279,47 @@ fn publish_package(db: Database, name: text, description: text, version: text, o
         Ok(_): Ok(package_id)
         Err(e): Err("Failed to create package version (version may already exist)")
 
+fn unpublish_package(db: Database, name: text, owner_id: i64) -> Result<bool, text>:
+    """Unpublish (delete) a package and all its versions.
+
+    Only the owner can unpublish. Returns Ok(true) if deleted, Ok(false) if not found.
+
+    Args:
+        db: Database connection
+        name: Package name to remove
+        owner_id: User ID requesting the deletion
+
+    Returns:
+        Ok(true) if deleted, Ok(false) if package not found, Err on permission/DB error
+    """
+    val existing = get_package(db, name)?
+    if existing == nil:
+        return Ok(false)
+    val pkg = existing ?? return Err("Internal error")
+    if pkg.owner_id != owner_id:
+        return Err("You do not own this package")
+
+    # Delete versions first (FK constraint)
+    val del_versions_sql = "DELETE FROM package_versions WHERE package_id = ?"
+    val del_versions_params: [DbValue] = [DbValue.Integer(value: pkg.id)]
+    val dv_result = db.exec(del_versions_sql, del_versions_params)
+    match dv_result:
+        Ok(_): pass_do_nothing
+        Err(e): return Err("Failed to delete package versions")
+
+    # Delete download stats
+    val del_stats_sql = "DELETE FROM download_stats WHERE package_id = ?"
+    val del_stats_params: [DbValue] = [DbValue.Integer(value: pkg.id)]
+    val _ds = db.exec(del_stats_sql, del_stats_params)
+
+    # Delete the package itself
+    val del_sql = "DELETE FROM packages WHERE id = ?"
+    val del_params: [DbValue] = [DbValue.Integer(value: pkg.id)]
+    val del_result = db.exec(del_sql, del_params)
+    match del_result:
+        Ok(_): Ok(true)
+        Err(e): Err("Failed to delete package")
+
 fn increment_downloads(db: Database, package_id: i64, version: text):
     """Record a download for a package version.
 

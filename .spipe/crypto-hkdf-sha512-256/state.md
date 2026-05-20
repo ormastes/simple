@@ -1,5 +1,7 @@
 # crypto-hkdf-sha512-256
 
+## Status: CLOSED — 2026-05-20
+
 ## Feature
 Implement HKDF (RFC 5869) with SHA-256 and SHA-512/256 in `src/lib/common/crypto/`.
 
