@@ -1,4 +1,8 @@
 # Phase 4: Markdown Editor Test Specification
+
+## Status: CLOSED — 2026-05-20
+Superseded by `editor-ide-platform` pipeline (all 8 phases done 2026-05-19) and `md-editor-production` pipeline (65/65 tests passing). Spec ACs were never exercised directly — implementation moved forward under those pipelines.
+
 **Agent:** QA Lead (Spec Agent)  
 **Date:** 2026-05-11  
 **Status:** Superseded — Implementation Complete  

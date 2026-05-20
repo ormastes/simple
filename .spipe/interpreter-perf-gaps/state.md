@@ -1,5 +1,8 @@
 # Interpreter Perf Gaps — State
 
+## Status: CLOSED — 2026-05-20
+Remaining items tracked in this file: expression cascade (IMPLEMENTING, see section below) and Value::Str Arc (DEFERRED — 780 callsites, scoped for post-bytecode PR).
+
 **Date:** 2026-05-19
 **Bug ref:** `doc/08_tracking/bug/interpreter_1460x_c_perf_gap_2026-05-18.md`
 

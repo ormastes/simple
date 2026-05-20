@@ -1,5 +1,7 @@
 # SStack State: riscv64-fpga-mmode-boot
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > make simple os runnable on riscv64 fpga
 
@@ -16,8 +18,8 @@ feature
 - [x] AC-4: FPGA lane wired into `simpleos_multiplatform_build_part2.spl` with BareMetal firmware kind
 - [x] AC-5: 126KB ELF links successfully with LLVM backend + C stubs + supplementary stubs
 - [x] AC-6: QEMU `-bios none -m 64M` boots and prints "FPGA-RV64" banner via UART
-- [ ] AC-7: Full boot sequence prints "MEM OK" and "OS IDLE" (cross-module handoff issue)
-- [ ] AC-8: Hardware boot on Kria K26 (on hold per user request)
+- [~] AC-7: Full boot sequence prints "MEM OK" and "OS IDLE" — blocked on QEMU M-mode runtime cross-module handoff; tracked in bug doc
+- [~] AC-8: Hardware boot on Kria K26 — on hold per user request
 
 ## Phase Checklist
 - [x] 1-dev — 2026-05-20

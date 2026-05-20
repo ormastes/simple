@@ -1,5 +1,8 @@
 # network-protocol-remaining
 
+## Status: CLOSED — 2026-05-20
+All ACs complete: TLS KeyUpdate, QPACK encoder/decoder, STUN binding all implemented. Phase 8-ship delivered.
+
 ## Phase: 8-ship
 
 ## Type: feature
