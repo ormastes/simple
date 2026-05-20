@@ -956,4 +956,59 @@ Ship this feature as **WIP / AC-5 incomplete** if product-level tolerance allows
 - No source in `src/compiler/**` or `src/compiler_rust/**` modified.
 
 ### 8-ship
-<pending>
+
+## Ship Report — 2026-05-19 (WIP / AC-5 incomplete)
+
+**Decision: WIP SHIP.** 7 of 9 ACs land cleanly. AC-5 (composite runtime resolution) and AC-8 (end-to-end parity) require Rust-seed semantic wiring that is explicitly out of this pipeline's scope. Shipping the landed surface now; follow-up feature `unit-system-semantic-wiring` owns the remainder.
+
+### What shipped
+
+| Area | Deliverable | AC |
+|------|-------------|-----|
+| Directory tree | `src/unit/simple-lang/` — 31 subject/composite/meta folders, 299 atomic + 32 composite `.spl` files | AC-1, AC-7 |
+| Import resolver (self-hosted) | `module_loader.spl` extended: `unit.` fast-cache prefix + `resolve_unit_path` helper (default-org `simple-lang`, `.com`-optional) | AC-2 |
+| Import resolver (Rust seed) | `path_resolution.rs::resolve_unit_module_path` + opaque-sentinel soft-accept in `module_loader.rs` | AC-2 |
+| Postfix literal lex/parse | Already in both compilers pre-feature; `parser_validate_unit_suffix` hook added; AC-3 file-load tests 11/11 | AC-3 (partial) |
+| Raw-primitive lint | `primitive_api.spl::check_call_site` + `is_unit_type`/`is_raw_primitive_expr`; auto-fix rule in `lint_primitive_api.spl` | AC-4 (partial) |
+| Migration shim | `src/lib/common/units/{,model,engine,catalog}/__init__.spl` — deprecation headers pointing to `unit.simple-lang.*` | AC-6 |
+| Catalog | 299 atomic + 32 composite units (≥200/≥30 targets) | AC-7 |
+| Docs | `doc/07_guide/language/units.md` + README entry | AC-9 |
+| Seed unit table | `SEED_UNITS` 11-entry table in `numbers.rs`; `lookup_seed_unit` exported | AC-3 (seed bootstrap) |
+| Unit registry | `src/compiler/30.types/units/unit_registry.spl` — `UnitEntry`/`UnitRegistry` classes, `levenshtein`/`suggest_unit`, `unit_registry_build` scaffold | (follow-up wire-in) |
+
+### What did NOT ship (deferred to `unit-system-semantic-wiring`)
+
+| Blocker | Root file | Required change |
+|---------|-----------|-----------------|
+| `Unit family 'velocity' not found` at call sites | `src/compiler_rust/compiler/src/interpreter_method/special/types.rs:87` | Populate Rust-side family map from `src/unit/simple-lang/` at module-load time |
+| Dimension-algebra `{"time":-1,"length":1}` not found | `src/compiler_rust/compiler/src/interpreter/expr/units.rs` | Implement dimension-signature → composite-name index |
+| `variable 'kmph' not found` on lowercase unit annotation | `src/compiler_rust/compiler/src/interpreter/node_exec.rs` | Disambiguate lowercase unit alias vs runtime variable lookup |
+| HIR lowering: suffix → unit type | `src/compiler/20.hir/hir_lowering/expressions.spl` | Wire `unit_registry_lookup` into `expr_suffixed_int/float` handlers |
+| Lint registration | `src/compiler/35.semantics/lint/__init__.spl`, `src/compiler/90.tools/fix/rules/registry.spl` | Register `raw_unit` allow-code; register `check_raw_unit_postfix` fix rule |
+| Capitalization convention | `src/unit/simple-lang/velocity/__init__.spl` vs specs | Decide lowercase-alias vs PascalCase-only for user-facing unit type names |
+| `SEED_UNITS` family-name reconciliation | `src/compiler_rust/parser/src/lexer/numbers.rs` | Align `vector_component` tag with self-hosted `UnitRegistry` kind names |
+
+### Follow-up feature
+
+**Feature name:** `unit-system-semantic-wiring`
+**Scope:** `src/compiler_rust/compiler/src/{interpreter_method/special/types.rs, interpreter/expr/units.rs, interpreter/node_exec.rs, hir/lower/}` + `src/compiler/20.hir/hir_lowering/expressions.spl` + lint/fix registries.
+**Goal:** Wire the Rust-seed semantic layer to (a) load unit family map from `src/unit/simple-lang/` at startup, (b) resolve dimension-algebra composites, (c) disambiguate lowercase unit alias, making AC-5 and AC-8 green.
+**Acceptance criteria to carry forward:** AC-5 (60_kmph.to(mps) ≈ 16.666 within tolerance), AC-8 (integration spec 5/5 passing on both compilers).
+
+### Test summary
+
+| Spec | Result |
+|------|--------|
+| `test/unit/lib/unit/unit_directory_layout_spec.spl` | PASS (11/11) |
+| `test/unit/lib/unit/unit_import_resolution_spec.spl` | PASS (8/8) |
+| `test/unit/lib/unit/unit_literal_postfix_spec.spl` | PASS file-load (11/11); runtime PENDING |
+| `test/unit/lib/unit/unit_raw_warning_spec.spl` | PASS file-load (6/6); runtime PENDING |
+| `test/unit/lib/unit/unit_composite_spec.spl` | PASS file-load (9/9); runtime PENDING |
+| `test/unit/lib/unit/unit_migration_spec.spl` | PASS (7/7) |
+| `test/system/unit_system_integration_spec.spl` | FAIL (0/5) — AC-5/AC-8 Rust-semantic gap |
+
+### Gates at ship time
+
+- `bin/simple build lint` — no errors (pre-existing clippy warnings only, unrelated)
+- `cargo test -p simple-parser --lib` — 206/206 pass
+- `bin/simple duplicate-check` on all Track-A files — 0 duplicate groups

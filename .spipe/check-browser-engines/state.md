@@ -1,6 +1,8 @@
 ---
 name: check-browser-engines
 description: Check Simple Browser HTML/CSS/JS engines, fix any failures, sync to GitHub
+status: CLOSED
+closed: 2026-05-19
 ---
 
 # SStack State: check-browser-engines

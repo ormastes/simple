@@ -11,7 +11,7 @@ refactor
 
 ## Acceptance Criteria
 - [x] AC-1: Inventory — complete list of all C runtime modules with LOC, categorized as "convertible" vs "must-stay-native" with rationale
-- [~] AC-2: Wave-1 conversions — ctype(9/9), error(4/4), contracts(8/8), math(13/13) DONE; hash EXISTS; base64 NEEDS REWRITE; equality/value/config DEFERRED
+- [x] AC-2: Wave-1 conversions — ctype(9/9), error(4/4), contracts(8/8), math(13/13) DONE; hash EXISTS (rt_hash_text bridge added); base64 DONE (21/21, base64url_decode extern replaced); equality/value/config DEFERRED
 - [~] AC-3: Wave-2 conversions — random(21/21), time_utils(53/53), audio_effects(7/7) DONE; format/string_index/env DEFERRED
 - [~] AC-4: Perf benchmarks — ctype benchmarked (0.07-0.46x C native, see §7-verify); other modules pending
 - [~] AC-5: Compiler/JIT optimization — 2 optimizations identified: (1) function inlining (primary gap), (2) cross-module ABI fix; not yet implemented
@@ -179,3 +179,23 @@ Specs created and passing for all implemented modules:
 - AC-5 compiler inlining optimization
 - Wave-2+ module conversions (format, string_index, env)
 - C file exclusion for math/random/contracts/error/time (active Rust/codegen callers)
+
+### Wave-16 additions (2026-05-19)
+
+**base64 rewrite — DONE (21/21):**
+- `src/lib/common/base_encoding/base64.spl` — pure-Simple RFC 4648 encode/decode + base64url variants
+  - Key fixes discovered: `and`/`or` are boolean in Simple; use `&`/`|` for bitwise; `chr()` is an i64 method not a free function
+  - `_bytes_to_text` helper handles full UTF-8 decode (ASCII fast-path via `b.chr()`)
+- `test/unit/lib/common/base_encoding/base64/base64_spec.spl` — 21/21 PASS
+- `src/lib/nogc_sync_mut/oidc/id_token.spl` — replaced `extern fn rt_base64url_decode` with `use std.common.base_encoding.base64.{base64url_decode}`; call site updated to `base64url_decode(payload_b64)` (was `rt_base64url_decode`)
+- `src/lib/common/base_encoding.spl` — fixed `chr(cp)` → `cp.chr()` in `_char_from_code` helper
+
+**hash bridge — DONE:**
+- `src/lib/nogc_sync_mut/src/hash.spl` — added `pub fn rt_hash_text(s: text) -> i64: s.hash()`
+  - Satisfies `extern fn rt_hash_text` ABI for native builds; C `runtime_hash.c` stays for bootstrap seed
+  - No callsite changes needed (hashmap.spl/hashset.spl/protocol.spl still declare `extern fn`)
+
+**Remaining deferred (unchanged):**
+- equality, value, config — blocked by inlining/atomics
+- format, string_index, env — complex C deps
+- AC-5 compiler inlining — Cranelift work, separate effort

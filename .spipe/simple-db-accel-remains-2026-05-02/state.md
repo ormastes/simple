@@ -21,9 +21,12 @@
 - `src/lib/nogc_sync_mut/db/text_index.spl` — in-memory prefix+text index above trigram candidates
 - `src/lib/nogc_sync_mut/db/page_summary.spl` — reusable page-header summary scan helpers
 - `src/lib/nogc_sync_mut/db/filter_in.spl` — SDN filter_in OR-semantics batch helper
+- `src/lib/nogc_sync_mut/db/query_planner.spl` — Phase 3 query planner: predicate tree → plan candidate enumeration + best-plan selection
+- `src/lib/nogc_sync_mut/db/ml_cost_model.spl` — Phase 3 ML cost model: parametric I/O+CPU cost estimation for FullScan/IndexLookup/IndexRange/IndexPrefix/Join
 
 ### Tests
 - `test/perf/bench/db_accel_index/db_accel_index_spec.spl` — 20 regression tests for Phase 2
+- `test/perf/bench/db_accel_planner/db_accel_planner_spec.spl` — 33 regression tests for Phase 3 (CostModel, PlanCost, estimate_cost, plan_query, pick_best, choose_plan)
 
 ## Notes
 
