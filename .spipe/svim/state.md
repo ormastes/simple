@@ -1,5 +1,7 @@
 # SStack State: svim
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Complete svim shared-core modal grammar, search repeat, text-object editing, quickfix traversal, SimpleOS adapter shim, language bridge, and run targeted tests.
 

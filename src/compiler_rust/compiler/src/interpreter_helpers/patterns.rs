@@ -244,6 +244,114 @@ pub(crate) fn handle_method_call_with_self_update(
             }
         }
 
+        // Handle `arr[i].method()` — Index receiver write-back (bug #28).
+        // When the receiver is `Expr::Index { receiver: arr_expr, index }` where
+        // `arr_expr` is a plain identifier, evaluate the index, extract the element,
+        // run the method with self-update tracking, then write the element back into
+        // the array and update the binding (and MODULE_GLOBALS if present).
+        if let Expr::Index {
+            receiver: arr_expr,
+            index: idx_expr,
+        } = receiver.as_ref()
+        {
+            if let Expr::Identifier(arr_name) = arr_expr.as_ref() {
+                // Evaluate the index expression to a concrete integer.
+                let idx_val = evaluate_expr(idx_expr, env, functions, classes, enums, impl_methods)?;
+                let idx = match &idx_val {
+                    Value::Int(i) => *i,
+                    Value::UInt { value, .. } => *value as i64,
+                    _ => {
+                        // Non-integer index — fall through to regular evaluation.
+                        let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                        return Ok((result, None));
+                    }
+                };
+
+                // Get the array from the environment (or MODULE_GLOBALS).
+                let arr_val = env
+                    .get(arr_name)
+                    .cloned()
+                    .or_else(|| MODULE_GLOBALS.with(|cell| cell.borrow().get(arr_name).cloned()));
+
+                if let Some(Value::Array(arr)) = arr_val {
+                    let len = arr.len() as i64;
+                    let real_idx = if idx < 0 { len + idx } else { idx };
+                    if real_idx >= 0 && real_idx < len {
+                        let elem = arr[real_idx as usize].clone();
+                        match elem {
+                            Value::Object { class: obj_class, fields: obj_fields } => {
+                                if let Some((result, updated_elem)) = find_and_exec_method_with_self(
+                                    method,
+                                    args,
+                                    &obj_class,
+                                    &obj_fields,
+                                    env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                )? {
+                                    // Write updated element back into the array.
+                                    let mut new_arr = (*arr).clone();
+                                    new_arr[real_idx as usize] = updated_elem;
+                                    let new_arr_val = Value::Array(Arc::new(new_arr));
+                                    // Update local env.
+                                    env.insert(arr_name.clone(), new_arr_val.clone());
+                                    // Sync to MODULE_GLOBALS if this variable lives there.
+                                    MODULE_GLOBALS.with(|cell| {
+                                        let mut globals = cell.borrow_mut();
+                                        if globals.contains_key(arr_name) {
+                                            globals.insert(arr_name.clone(), new_arr_val.clone());
+                                        }
+                                    });
+                                    return Ok((result, Some((arr_name.clone(), new_arr_val))));
+                                }
+                            }
+                            Value::Array(_) => {
+                                // Inner array (e.g. outer[0].push(x)): use a temp variable so
+                                // evaluate_method_call_with_self_update can track the mutation.
+                                let temp_var = format!("__indexed_elem_{}__", arr_name);
+                                env.insert(temp_var.clone(), elem.clone());
+                                let temp_receiver = Box::new(Expr::Identifier(temp_var.clone()));
+                                let temp_call = Expr::MethodCall {
+                                    receiver: temp_receiver,
+                                    method: method.clone(),
+                                    args: args.clone(),
+                                    generic_args: vec![],
+                                };
+                                let (result, updated_elem_opt) = handle_method_call_with_self_update(
+                                    &temp_call,
+                                    env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                )?;
+                                env.remove(&temp_var);
+                                if let Some((_, updated_elem)) = updated_elem_opt {
+                                    let mut new_arr = (*arr).clone();
+                                    new_arr[real_idx as usize] = updated_elem;
+                                    let new_arr_val = Value::Array(Arc::new(new_arr));
+                                    env.insert(arr_name.clone(), new_arr_val.clone());
+                                    MODULE_GLOBALS.with(|cell| {
+                                        let mut globals = cell.borrow_mut();
+                                        if globals.contains_key(arr_name) {
+                                            globals.insert(arr_name.clone(), new_arr_val.clone());
+                                        }
+                                    });
+                                    return Ok((result, Some((arr_name.clone(), new_arr_val))));
+                                }
+                                return Ok((result, None));
+                            }
+                            _ => {
+                                // Scalar element — fall through to regular evaluation.
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
             // Handle Object mutations
             if let Some(Value::Object { .. }) = env.get(obj_name) {

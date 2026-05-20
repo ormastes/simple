@@ -1,5 +1,7 @@
 # SStack State: fpga-boardconfig-noalloc
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > fix the fpga_platform_init crash — BoardConfig text field needs heap
 

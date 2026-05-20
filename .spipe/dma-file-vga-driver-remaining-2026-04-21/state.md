@@ -1,5 +1,7 @@
 # SStack State: dma-file-vga-driver-remaining-2026-04-21
 
+## Status: CLOSED — 2026-05-20
+
 **Task:** DMA, File Driver, and VGA/Display Driver Remaining
 **Plan:** doc/03_plan/agent_tasks/dma_file_vga_driver_remaining_2026-04-21.md
 **Date:** 2026-05-18

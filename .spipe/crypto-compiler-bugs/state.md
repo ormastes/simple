@@ -1,5 +1,8 @@
 State file: .spipe/crypto-compiler-bugs/state.md
 Feature: crypto-compiler-bugs
+
+## Status: CLOSED — 2026-05-20
+
 Phase: 8-ship
 Cooperative: solo (plan already written)
 Source plan: doc/08_tracking/todo/compiler_bugs_for_crypto_2026-04-25.md (removed with todo/ dir; content preserved in git history at 4cf561567f)

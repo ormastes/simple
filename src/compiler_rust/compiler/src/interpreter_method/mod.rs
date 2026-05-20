@@ -138,6 +138,10 @@ pub(crate) fn evaluate_method_call(
                 );
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                // Clear any pre-set failure from expect(false_value) — the matcher is authoritative
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -164,6 +168,9 @@ pub(crate) fn evaluate_method_call(
                 );
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -175,6 +182,9 @@ pub(crate) fn evaluate_method_call(
                 let failure_msg = format!("expected {} to be truthy", recv_val.to_display_string());
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -186,6 +196,9 @@ pub(crate) fn evaluate_method_call(
                 let failure_msg = format!("expected {} to be falsy", recv_val.to_display_string());
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -197,6 +210,9 @@ pub(crate) fn evaluate_method_call(
                 let failure_msg = format!("expected {} to be nil", recv_val.to_display_string());
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -219,6 +235,9 @@ pub(crate) fn evaluate_method_call(
                 );
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -241,6 +260,9 @@ pub(crate) fn evaluate_method_call(
                 );
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -263,6 +285,9 @@ pub(crate) fn evaluate_method_call(
                 );
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -285,6 +310,9 @@ pub(crate) fn evaluate_method_call(
                 );
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -313,6 +341,9 @@ pub(crate) fn evaluate_method_call(
                 );
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -341,6 +372,9 @@ pub(crate) fn evaluate_method_call(
                 );
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -357,6 +391,9 @@ pub(crate) fn evaluate_method_call(
                 );
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
             return Ok(Value::Bool(matched));
         }
@@ -384,6 +421,9 @@ pub(crate) fn evaluate_method_call(
                 );
                 BDD_FAILURE_MSG
                     .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
             }
 
             return Ok(Value::Bool(passed));

@@ -1,5 +1,7 @@
 # SStack State: simpleos-shell-complete
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > complete simple os shell. let support simple shell script. shs and external support of bash script support. porting starship which terminal beutifier and let it use simple as script. add all feature bash command.
 

@@ -120,6 +120,59 @@ pub(super) fn eval_call_expr(
                     enums,
                     impl_methods,
                 )?))
+            } else if let Expr::Index {
+                receiver: arr_expr,
+                index: idx_expr,
+            } = receiver.as_ref()
+            {
+                // Handle `arr[i].method()` in expression context — write-back (bug #28).
+                if let Expr::Identifier(arr_name) = arr_expr.as_ref() {
+                    let idx_val = super::evaluate_expr(idx_expr, env, functions, classes, enums, impl_methods)?;
+                    let idx = match &idx_val {
+                        Value::Int(i) => *i,
+                        Value::UInt { value, .. } => *value as i64,
+                        _ => {
+                            return Ok(Some(evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?));
+                        }
+                    };
+                    let arr_val = env.get(arr_name).cloned().or_else(|| {
+                        super::super::MODULE_GLOBALS.with(|cell| cell.borrow().get(arr_name).cloned())
+                    });
+                    if let Some(Value::Array(arr)) = arr_val {
+                        let len = arr.len() as i64;
+                        let real_idx = if idx < 0 { len + idx } else { idx };
+                        if real_idx >= 0 && real_idx < len {
+                            let elem = arr[real_idx as usize].clone();
+                            if let Value::Object { class, fields } = elem {
+                                if let Some((result, updated_elem)) = super::super::find_and_exec_method_with_self(
+                                    method,
+                                    args,
+                                    &class,
+                                    &fields,
+                                    env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                )? {
+                                    let mut new_arr = (*arr).clone();
+                                    new_arr[real_idx as usize] = updated_elem;
+                                    let new_arr_val = Value::Array(std::sync::Arc::new(new_arr));
+                                    env.insert(arr_name.clone(), new_arr_val.clone());
+                                    super::super::MODULE_GLOBALS.with(|cell| {
+                                        let mut globals = cell.borrow_mut();
+                                        if globals.contains_key(arr_name) {
+                                            globals.insert(arr_name.clone(), new_arr_val);
+                                        }
+                                    });
+                                    return Ok(Some(result));
+                                }
+                            }
+                        }
+                    }
+                }
+                // Fall through to regular method call
+                Ok(Some(evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?))
             } else {
                 // For other expressions (like temporaries), use regular method call
                 Ok(Some(evaluate_method_call(

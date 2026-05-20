@@ -199,3 +199,12 @@ Specs created and passing for all implemented modules:
 - equality, value, config — blocked by inlining/atomics
 - format, string_index, env — complex C deps
 - AC-5 compiler inlining — Cranelift work, separate effort
+
+## Status: CLOSED — 2026-05-20
+
+All actionable items are complete. Deferred items are tracked elsewhere:
+
+- **AC-3 deferred modules** (equality, value, config, format, string_index, env) — blocked on the two bugs below; no new work needed in this pipeline
+- **AC-4 benchmarks** (math/random/time) — blocked by cross-module ABI bug; tracked in `native_cross_module_call_abi_broken_2026-05-18.md` and `.spipe/cross-module-abi-fix/`
+- **AC-5 compiler inlining** — tracked in `doc/08_tracking/bug/pure_simple_ctype_perf_gap_2026-05-18.md` (Cranelift inlining gap, 0.07–0.46x C)
+- **Broader perf parity** — tracked in `doc/08_tracking/bug/pure_simple_collection_perf_parity_gap_2026-05-14.md`

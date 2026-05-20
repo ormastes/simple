@@ -1,5 +1,7 @@
 # SStack State: target-inst-opt-32bit
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > impl and improve optimization plugin by plan - doc/01_research/local/target_instruction_optimization_32bit.md, doc/01_research/domain/target_instruction_optimization_32bit.md, doc/02_requirements/feature/target_instruction_optimization_32bit_options.md, doc/02_requirements/nfr/target_instruction_optimization_32bit_options.md, doc/04_architecture/target_instruction_optimization_32bit.md, doc/05_design/target_instruction_optimization_32bit.md, doc/03_plan/sys_test/target_instruction_optimization_32bit.md, doc/06_spec/app/compiler/feature/target_instruction_optimization_32bit_spec.spl, doc/03_plan/agent_tasks/target_instruction_optimization_32bit.md
 

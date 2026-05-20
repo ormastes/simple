@@ -7,10 +7,10 @@
 #   - Raw blocks and RLE blocks (fully)
 #   - Compressed blocks: raw literals + RLE literals + zero-sequence path
 #   - Window descriptor + FCS parsing
+#   - XXH64 content checksum verification (lower 32 bits per RFC 8878 §3.1.1)
 #
 # Not supported (returns Err(Unsupported)):
 #   - Dictionary frames (dict_id != 0)
-#   - XXH64 content checksum verification
 #   - Huffman-compressed literals (type 10/11)
 #   - FSE-encoded sequences (any compressed block with sequences > 0)
 
@@ -29,6 +29,7 @@ use std.nogc_sync_mut.compression.zstd.blocks.{
     ZstdBlockState, ZstdBlockResult,
     zstd_initial_block_state, zstd_decode_block
 }
+use std.nogc_sync_mut.compression.zstd.xxh64.{xxh64_checksum_lower32}
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -64,11 +65,18 @@ fn zstd_decode(input: [u8]) -> Result<[u8], CompressionError>:
                 r = blk_res.reader
                 if bh.last_block:
                     break
-            # Skip content checksum (4 bytes) if present
+            # Verify content checksum (4-byte lower-32 of XXH64) if present
+            # RFC 8878 §3.1.1: checksum = lower 32 bits of XXH64(content, seed=0)
             if fh.has_checksum:
                 if zstd_br_has_bytes(r, 4):
-                    val skip_cs = zstd_br_read_u32(r)?
-                    r = skip_cs.reader
+                    val cs_res = zstd_br_read_u32(r)?
+                    r = cs_res.reader
+                    val stored_cs  = cs_res.value & 0xFFFFFFFF
+                    val computed   = xxh64_checksum_lower32(block_state.output)
+                    if stored_cs != computed:
+                        return Err(CompressionError.CorruptData("zstd checksum mismatch"))
+                else:
+                    return Err(CompressionError.TruncatedInput("zstd checksum truncated"))
             # Collect output from this frame
             var fo = 0
             while fo < block_state.output.len():

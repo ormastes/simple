@@ -1,5 +1,7 @@
 # SStack State: sreplay-remaining-integration
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > replan and complete the 3 remaining SReplay items: Track 2.10 off-mode overhead benchmark, E2E QEMU record/replay tests, E2E process recording tests
 

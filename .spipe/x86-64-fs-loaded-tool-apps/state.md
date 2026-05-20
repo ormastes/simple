@@ -1,5 +1,7 @@
 # SStack State: x86-64-fs-loaded-tool-apps
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > Implement x86_64 filesystem-loaded tool applications for SimpleOS — create the infrastructure for loading and running tool apps from the filesystem on x86_64 SimpleOS, including app loader, filesystem discovery, and execution framework.
 

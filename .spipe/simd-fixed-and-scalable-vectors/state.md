@@ -1,5 +1,7 @@
 # SIMD Fixed and Scalable Vectors
 
+## Status: CLOSED — 2026-05-20
+
 ## Phases
 - [x] 1-dev (done 2026-05-18)
 - [-] 2-research (skipped)

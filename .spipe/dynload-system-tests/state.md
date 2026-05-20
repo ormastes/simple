@@ -1,5 +1,7 @@
 # SStack State: dynload-system-tests
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > improve system test sspec and test dynload on linux and simple os works. and make system tsts for other platfomr like mac and win
 

@@ -1,5 +1,7 @@
 # SStack State: gfx-3d-session-backend
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > 2d, optimization refactor, 3d optimization. gui rendering optimization. see complete plans. Changed docs: graphics_3d_session_managed_backend (research, domain, plan, sys_test, architecture, design, spec, glossary, gpu_api guide, compiler_optimization_plugin guide). Coverage: Pure Simple first, C ABI native shims, 3D/3D game plan, CUDA/Vulkan/Metal/WebGPU/CPU backend support, LegacyNoSession/ManagedShared/PerfExclusive, web renderer/GUI/WM/session adoption, persistent optimization provider keys, JIT/provider sharing, ARM/RISC-V 32/64 capability design, spec/test-plan requirements.
 

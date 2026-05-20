@@ -1,5 +1,7 @@
 # SStack State: driver-framework-compiler
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > impl with agent team and minimize duplication. Driver Framework compiler work — Cranelift >> + bitfield sugar. The big surprise is doc/05_design/ with 286 files — most were never audited.
 

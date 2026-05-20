@@ -1,5 +1,7 @@
 # SStack State: unit-system-semantic-wiring
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > continue remains — finish the unit system: wire Rust seed semantic pass to actually consult a unit registry, implement dimension-signature → composite name lookup, fix capitalization policy, re-enable deferred specs.
 

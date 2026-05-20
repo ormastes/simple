@@ -1,5 +1,7 @@
 # SStack State: unit-system-consolidation
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > research more and make only one place of custom primitive src/unit/simple-lang/ which is same as src/unit/simple-lang.com/ (.com can be omitted). User can import unit.simple-lang.XX or just import unit.XX (simple-lang is default and omittable); other company/organization can add units under their domain. Research and organize unit folder to handle all human units at least at folder level. Also add composite units like kmph. (1) First make aliases on the unit folder and files. (2) Migrate and remove old path units. (3) Using primitive itself on function call should cause warning — must use postfix form like 10_km, 0_x, 0_y, 1_w. Plan with agent team of opus. Make unit complete and update pure Simple AND Rust Simple.
 

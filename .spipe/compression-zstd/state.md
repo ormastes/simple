@@ -1,8 +1,10 @@
 # compression-zstd
 
-## Status: PARTIAL — Huffman literals implemented; FSE sequences pending team4a (NOT CLOSED)
+## Status: PARTIAL — Huffman literals + XXH64 checksum implemented; FSE sequences pending team4a (NOT CLOSED)
 <!-- Huffman decoder (direct-weights), canonical table, 1-stream + 4-stream decoding, Treeless mode
      are now implemented in zstd/huffman.spl and wired into zstd/blocks.spl.
+     XXH64 content checksum verification is now implemented (Team 5): zstd/xxh64.spl provides
+     xxh64_checksum_lower32(); decoder.spl now verifies the 4-byte checksum instead of skipping it.
      FSE-compressed weights (header >= 128) and sequence decoding still return Err(Unsupported).
      Issue 1 (ZstdRevBitReader byte_idx), Issue 3 (10+10 bit size header), Issue 6 (peek/consume)
      are all fixed. Issues 2/4/5 belong to FSE — pending team4a fse.spl. -->
@@ -27,7 +29,7 @@ Implement Zstd (RFC 8878) decompression in the standard library under
 - Frame header: FHD, window descriptor, FCS
 - Raw_Block: copy bytes directly
 - RLE_Block: one byte repeated N times
-- Content checksum skip (not verified)
+- Content checksum verification (XXH64 lower-32 per RFC 8878 §3.1.1)
 - Skippable frames (skip past, produce no output)
 - Chained frames (multiple frames concatenated)
 
@@ -57,7 +59,6 @@ Implement Zstd (RFC 8878) decompression in the standard library under
   - Sequence decoding with rep-offset history — pending team4a + Issues 2/4/5
   - Match copy with overlap handling
 - Dictionary mode (Dictionary_ID present in frame header)
-- XXH64 content checksum verification
 - Repeat-mode FSE table carry across blocks
 
 ## Known issues status
@@ -73,8 +74,9 @@ Implement Zstd (RFC 8878) decompression in the standard library under
 - `zstd/frame.spl`        — Frame/block header parsing
 - `zstd/blocks.spl`       — Raw/RLE/Huffman/Treeless block decode; FSE sequences pending
 - `zstd/huffman.spl`      — Huffman decoder: weight parsing, table build, 1/4-stream decode
-- `zstd/decoder.spl`      — Top-level `zstd_decode`
-- `zstd/mod.spl`          — Re-exports
+- `zstd/xxh64.spl`        — XXH64 hash: `xxh64_checksum_lower32(data)` → lower 32 bits of XXH64
+- `zstd/decoder.spl`      — Top-level `zstd_decode` (checksum verification wired in)
+- `zstd/mod.spl`          — Re-exports (includes `xxh64_checksum_lower32`)
 
 ## Work done
 1. Created `.spipe/compression-zstd/state.md`
@@ -90,3 +92,6 @@ Implement Zstd (RFC 8878) decompression in the standard library under
    fixed ZstdRevBitReader (Issue 1), fixed size header parsing (Issue 3),
    fixed peek/consume in huff_decode_stream (Issue 6), wired into blocks.spl,
    threaded huff_table through ZstdBlockState for Treeless support
+9. Team 5 session: implemented xxh64.spl (XXH64 hash, lower-32-bit extraction per RFC 8878);
+   updated decoder.spl to verify content checksum (returns CorruptData on mismatch,
+   TruncatedInput if bytes missing); updated mod.spl to export xxh64_checksum_lower32

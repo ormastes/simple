@@ -1,5 +1,7 @@
 # SStack State: verify-3d-engine
 
+## Status: CLOSED — 2026-05-20
+
 ## User Request
 > verify the 3d engine implementation
 
