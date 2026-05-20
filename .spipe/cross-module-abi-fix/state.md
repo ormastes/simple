@@ -51,4 +51,10 @@ This means: for `use std.common.ctype` with segments `["lib","common","ctype"]`,
 ## Verification
 
 - Bootstrap build (`cargo build --profile bootstrap`) completed successfully (4m 12s, no errors)
-- `nm .simple/native_cache/objects/*.o` confirmed: caller was importing bare `is_digit`, exporter was exporting `common__ctype__is_digit` — symbol mismatch at link time
+- `nm .simple/native_cache/objects/*.o` confirmed (2026-05-20): caller now imports `U common__ctype__is_digit` (mangled), callee exports `T common__ctype__is_digit` — symbol names match
+- Runtime repros (2026-05-20, bootstrap binary deployed to bin/release):
+  - bool repro: `chk should be 10, got: 10` ✓
+  - i64 repro: `chk should be 8960, got: 8960` ✓  (bug doc said 8256 — incorrect; correct value is 8960: sum(0..127)=8128 + 26 uppercase offsets×32=832)
+  - Interpreter mode also returns 8960, confirming 8960 is ground truth
+- Regression spec added: `test/unit/compiler/codegen/native_cross_module_abi_spec.spl` (doc-only, same pattern as baremetal_cross_module_val_spec.spl)
+- Bootstrap binary deployed to `bin/release/x86_64-unknown-linux-gnu/simple` (was stale at May 17, now May 19 build)

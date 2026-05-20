@@ -45,8 +45,11 @@ fn main():
     while ch < 128:
         chk = chk + ctype.to_lower(ch)
         ch = ch + 1
-    print "chk should be 8256, got: {chk}"
-# Native output: chk should be 8256, got: 256229713
+    print "chk should be 8960, got: {chk}"
+# Native output (before fix): chk should be 8960, got: 983245137
+# Note: original expected value 8256 in this doc was wrong.
+# Correct: sum(0..127)=8128 + 26 uppercase offsets×32=832 → 8960.
+# Interpreter mode also returns 8960 (ground truth).
 ```
 
 ## Impact
@@ -63,7 +66,31 @@ separate `.o` file in `.simple/native_cache/objects/`, then linked. The caller
 and callee may disagree on symbol name, parameter passing, or return value
 register.
 
+## Fix
+
+**Committed:** 5d65a6a7f8 (2026-05-19)
+**File:** `src/compiler_rust/compiler/src/pipeline/native_project/imports.rs`
+**Function:** `collect_use_imports` Single branch
+
+In `collect_use_imports`, after the `"module."` prefix loop, now also walks all
+bare (non-dotted) function names in `all_mangled` that are not already in
+`use_map`. For each with multiple candidates, calls
+`resolve_import_name_strict(raw_name, use_segments, ...)` which finds the
+unique candidate whose mangled prefix matches the use-path segments. Inserts
+`bare_name → correct_mangled` into `use_map`.
+
+Result: for `use std.common.ctype`, `use_map["is_digit"] = "common__ctype__is_digit"`
+so `calls.rs` declares the correct import symbol and the linker resolves correctly.
+
+**Verified 2026-05-20:**
+- `nm` shows caller now imports `U common__ctype__is_digit` (matches exporter `T`)
+- bool repro: `got: 10` ✓
+- i64 repro: `got: 8960` ✓
+- Regression spec: `test/unit/compiler/codegen/native_cross_module_abi_spec.spl`
+
 ## Workaround
 
-Use interpreter mode for correctness testing. Native benchmarks require
-same-file inlined implementations until this is fixed.
+~~Use interpreter mode for correctness testing. Native benchmarks require
+same-file inlined implementations until this is fixed.~~
+
+**Fixed.** Cross-module native calls now work correctly.
