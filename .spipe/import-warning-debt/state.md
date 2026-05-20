@@ -51,3 +51,33 @@ Out of scope for this pass; flagged for separate triage.
 - [x] Phase 5 (implement): 17 remaining plan-scoped warnings fixed
 - [x] Phase 7 (verify): Both buckets at 0 warnings confirmed
 - [x] Phase 8 (ship): Committed
+
+---
+
+## Pass 2 Verification (2026-05-20)
+
+### Scope Verified
+- `src/app/` — 0 W0410 warnings
+- `src/lib/` — 0 W0410 warnings
+- `src/os/`  — 0 W0410 warnings
+
+In-scope unused-import debt remains at zero. No fixes required.
+
+### Out-of-Scope Findings
+`simple lint src/lib` reports **193 `gc_boundary_crossing` errors** (codes:
+`gc_imports_nogc_family`, `higher_layer_runtime_family`, `nogc_imports_gc_family`).
+These are MDSOC runtime-family architectural violations — the flagged imports are
+**used** by the code and cannot be blindly removed. Fixing requires architectural
+decisions (move file, introduce hook trait, or change declared runtime family).
+Representative buckets:
+- `gc_async_mut/gpu/engine3d/backend_*.spl` — imports `std.nogc_sync_mut.gpu.engine3d.math_hooks` (30+ files)
+- `nogc_async_mut/async/*.spl` — imports `std.async.*` (future/poll/task/executor/scheduler)
+- `nogc_async_mut/io/*.spl` — imports `std.nogc_sync_mut.io.*` (file_ops, tcp, udp, etc.)
+- `nogc_async_mut/mcp/*.spl` — imports `std.nogc_sync_mut.*` (file_ops, env.variables, etc.)
+
+These should be tracked in a separate spipe pipeline (e.g. `gc-boundary-crossing-debt`)
+under `.spipe/` and are **not** addressed here per the 2026-05-19 out-of-scope note.
+
+### Pass 2 Status
+- [x] Verified 0 in-scope W0410 warnings across src/app, src/lib, src/os
+- [x] Documented 193 out-of-scope gc_boundary_crossing errors for separate triage

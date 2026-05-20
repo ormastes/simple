@@ -23,7 +23,7 @@
 | HTTP/3 | RFC 9114 | Not started | — |
 | WS permessage-deflate | RFC 7692 | Not started | — |
 | STUN | RFC 8489 | Not started | — |
-| SCRAM-SHA-512 | RFC 5802 ext | Not started | — |
+| SCRAM-SHA-512 | RFC 5802 ext | Done | load-pass (interpreter) |
 
 ## Implemented (12 modules)
 
@@ -46,6 +46,7 @@
 
 ### Auth/Identity
 - SCRAM-SHA-256 (RFC 5802)
+- SCRAM-SHA-512 (RFC 5802 SHA-512 variant) — `src/os/crypto/scram_sha512.spl`, spec `test/unit/os/crypto/scram_sha512_spec.spl`
 - JWT (RFC 7519) — HS256, RS256, ES256
 - PASETO v4 — public (Ed25519) + local (XChaCha20-Poly1305)
 - HOTP/TOTP (RFC 4226/6238)
@@ -72,7 +73,6 @@
 | Feature | Scope | Agent Time |
 |---------|-------|------------|
 | STUN | RFC 8489 binding request/response | ~45 min |
-| SCRAM-SHA-512 | Extension of existing SCRAM-SHA-256 | ~30 min |
 
 ---
 
