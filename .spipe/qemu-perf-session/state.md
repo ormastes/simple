@@ -50,10 +50,10 @@ bug + infrastructure wiring
 - [x] 2-research (Analyst) — 2026-05-20
 - [x] 3-arch (Architect) — 2026-05-20
 - [x] 4-spec (QA Lead) — 2026-05-20
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 5-implement (Engineer)
+- [x] 6-refactor (Tech Lead)
+- [x] 7-verify (QA)
+- [x] 8-ship (Release Mgr)
 
 ## Phase Outputs
 
@@ -264,9 +264,3 @@ implement-done
 - refactor: Consolidated shell-out resource checks into governor_create(75) + governor_wait_until_ready() — single reusable path.
 - verify: Broker spec 6/6 passed via direct run. Full suite blocked by pre-existing test runner hang. No regressions in changed files.
 - ship: Resource gating + session sharing infra complete. Full suite check and system spec opt-in migration remain as follow-up.
-
-## Log
-- intake: Created state file with 7 acceptance criteria
-- research: Found 5 reusable modules, 20+ system spec files, 0 actionable perf bugs, 192 skipped tests categorized
-- arch: Designed 5 modules (3 modified, 2 marker-only), 6 decisions, no circular deps. Rescoped AC-4 (loadvm cannot swap kernels). Key insight: browser specs share kernel ELF, enabling session reuse.
-- spec: Created 2 new spec files with 17 total specs + added 2 specs to existing sharing spec = 19 total specs, 100% AC coverage. No QEMU launched — all broker-level unit tests.

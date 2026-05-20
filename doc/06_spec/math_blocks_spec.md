@@ -11,7 +11,7 @@ The `m{}` math block supports torch-compatible tensor operations for numerical c
 | Difficulty | 4/5 |
 | Status | Implemented |
 | Source | `test/feature/usage/math_blocks_spec.spl` |
-| Updated | 2026-05-16 |
+| Updated | 2026-05-20 |
 | Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
@@ -34,6 +34,7 @@ Each math block is a self-contained DSL expression that returns a Block value.
 | Category | Count |
 |----------|------:|
 | Artifacts | 2 |
+| Logs | 5 |
 
 ### Artifacts
 
@@ -41,6 +42,16 @@ Each math block is a self-contained DSL expression that returns a Block value.
 |------|------|------|
 | `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_blocks/result.json` |
 | `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/math_blocks/summary.txt` |
+
+### Logs
+
+| Item | Kind | Path |
+|------|------|------|
+| `combined.log` | Log file | `build/test-artifacts/feature/usage/math_blocks/combined.log` |
+| `output.log` | Log file | `build/test-artifacts/feature/usage/math_blocks/output.log` |
+| `run.log` | Log file | `build/test-artifacts/feature/usage/math_blocks/run.log` |
+| `stderr.log` | Log file | `build/test-artifacts/feature/usage/math_blocks/stderr.log` |
+| `stdout.log` | Log file | `build/test-artifacts/feature/usage/math_blocks/stdout.log` |
 
 ## Scenarios
 

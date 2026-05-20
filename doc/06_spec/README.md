@@ -1,6 +1,6 @@
 # Test Specification Index
 
-*Generated: 2026-05-16 09:25:44*
+*Generated: 2026-05-20 12:36:26*
 
 ## Quick Stats
 
@@ -17,12 +17,6 @@
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
 | [Math Block Tensor Operations Specification](math_blocks_spec.md) | Implemented | Thin | 4/5 | 28 | The `m{}` math block supports torch-compatible tensor operations for numerical computing. Each math block is a self-con… |
-
-## Current App Feature Specs
-
-| Feature | Spec |
-|---------|------|
-| Graphics 3D session managed backend | [app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl](app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl) |
 
 ## Residual Files
 
@@ -61,3 +55,4 @@ These files are present in `doc/06_spec` but were not regenerated in this run.
 | traits.md | Legacy markdown |
 | type_inference.md | Legacy markdown |
 | types.md | Legacy markdown |
+

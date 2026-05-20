@@ -11,7 +11,7 @@ Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the same s
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/feature/usage/loss_nograd_blocks_spec.spl` |
-| Updated | 2026-05-16 |
+| Updated | 2026-05-20 |
 | Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
@@ -35,6 +35,7 @@ semantics are covered by `math_autograd_runtime_spec.spl`.
 | Category | Count |
 |----------|------:|
 | Artifacts | 2 |
+| Logs | 5 |
 
 ### Artifacts
 
@@ -42,6 +43,16 @@ semantics are covered by `math_autograd_runtime_spec.spl`.
 |------|------|------|
 | `result.json` | JSON artifact | `build/test-artifacts/feature/usage/loss_nograd_blocks/result.json` |
 | `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/loss_nograd_blocks/summary.txt` |
+
+### Logs
+
+| Item | Kind | Path |
+|------|------|------|
+| `combined.log` | Log file | `build/test-artifacts/feature/usage/loss_nograd_blocks/combined.log` |
+| `output.log` | Log file | `build/test-artifacts/feature/usage/loss_nograd_blocks/output.log` |
+| `run.log` | Log file | `build/test-artifacts/feature/usage/loss_nograd_blocks/run.log` |
+| `stderr.log` | Log file | `build/test-artifacts/feature/usage/loss_nograd_blocks/stderr.log` |
+| `stdout.log` | Log file | `build/test-artifacts/feature/usage/loss_nograd_blocks/stdout.log` |
 
 ## Scenarios
 
