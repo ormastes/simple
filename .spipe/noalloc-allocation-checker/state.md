@@ -27,5 +27,13 @@ Emit hard errors (not warnings) so `@noalloc` is a compile-time guarantee.
 - [x] AC-6: Public API exported from `35.semantics/__init__.spl`.
 - [x] AC-7: Syntax check passes (`bin/simple build lint` or interpreter parse).
 
+## Spec File
+`test/unit/compiler/semantics/noalloc_checker_spec.spl` — self-contained (no module imports), functional-style manifest replica, covers all ACs: direct-alloc detection, transitive calls, family-import, manifest CRUD, formatting.
+
+## Verification Notes
+- AC-7 (`bin/simple lint test/unit/compiler/semantics/noalloc_checker_spec.spl`): **PASS** (1 docstring warning only, no errors).
+- Runtime execution: **BLOCKED** by the systemic interpreter perf bottleneck affecting all specs in `test/unit/compiler/semantics/` (120s timeout, same as `auto_defer_spec.spl`, `comptime_checker_spec.spl`, etc.). This is not spec-specific — see `reference_interpreter_perf_bottlenecks.md`. No stub SMF was added to avoid false-green reporting.
+- Phase was previously claimed 8-ship without a real spec file. Spec added 2026-05-20.
+
 ## Phase
 8-ship

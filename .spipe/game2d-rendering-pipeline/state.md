@@ -1,6 +1,6 @@
 # game2d-rendering-pipeline — State
 
-## Status: in-progress
+## Status: complete
 
 ## Goal
 Implement the Game2D rendering pipeline: sprite batch rendering, texture atlas (2D),
@@ -34,3 +34,8 @@ and draw call batching in `src/lib/nogc_sync_mut/game2d/render/`.
 - [x] sprite_batch.spl
 - [x] draw_batcher.spl
 - [x] __init__.spl updated
+
+## Notes
+- `game2d/app/app.spl` `pass_do_nothing` bodies are intentional trait-default no-ops (per design).
+  Concrete games override only what they need. `app/run.spl` and `loop/driver.spl` provide
+  the full game loop and init/update/render cycle — no changes needed to the app layer.

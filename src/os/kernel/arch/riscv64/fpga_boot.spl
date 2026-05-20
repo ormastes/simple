@@ -1,0 +1,109 @@
+# RISC-V 64 FPGA Boot Entry — M-Mode Bare-Metal
+#
+# Direct M-mode entry for FPGA softcores (no SBI, no firmware).
+# Targeted at Kria K26 (XCZU5EV) with VexRiscv-SMP / Rocket RV64IMAC.
+# Also verifiable on QEMU virt with: -bios none -m 64M
+#
+# Key differences from S-mode boot.spl:
+#   - .text.start section (M-mode linker), not .text.entry
+#   - mtvec installed before anything else
+#   - No SBI fallback — UART MMIO is the only output path
+#   - 64MB RAM layout matching K26 board manifest
+
+use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff_with_layout, riscv_noalloc_boot_idle}
+use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
+use os.kernel.boot.riscv_noalloc_log.{riscv_noalloc_log_init, riscv_noalloc_log_boot_ok}
+use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
+use os.kernel.boot.os_main.{os_main}
+
+extern fn rt_riscv_uart_put(byte: u64)
+extern fn rt_riscv_noalloc_pmm_init(ram_base: u64, ram_size: u64, reserved_end: u64, heap_start: u64) -> bool
+
+@section(".text.start")
+@naked
+fn _start():
+    asm volatile:
+        ".balign 4"
+        "csrw    mie, zero"
+        "csrw    mip, zero"
+        "la      t0, .Lfpga_trap"
+        "csrw    mtvec, t0"
+        "csrr    t0, mhartid"
+        "bnez    t0, .Lfpga_secondary_halt"
+        "mv      s0, a0"
+        "la      sp, _stack_top"
+        "la      t0, _sbss"
+        "la      t1, _ebss"
+        ".Lfpga_bss_loop:"
+        "bgeu    t0, t1, .Lfpga_bss_done"
+        "sd      zero, 0(t0)"
+        "addi    t0, t0, 8"
+        "j       .Lfpga_bss_loop"
+        ".Lfpga_bss_done:"
+        "mv      a0, s0"
+        "call    kernel__arch__riscv64__fpga_boot__fpga_boot_main"
+        ".Lfpga_halt:"
+        "wfi"
+        "j       .Lfpga_halt"
+        ".Lfpga_secondary_halt:"
+        "wfi"
+        "j       .Lfpga_secondary_halt"
+        ".balign 4"
+        ".Lfpga_trap:"
+        "csrr    a0, mcause"
+        "csrr    a1, mepc"
+        "wfi"
+        "j       .Lfpga_trap"
+
+fn _uart_put(byte: u64):
+    rt_riscv_uart_put(byte)
+
+fn _crlf():
+    _uart_put(13)
+    _uart_put(10)
+
+fn _fpga_boot_banner():
+    _uart_put(70)   # F
+    _uart_put(80)   # P
+    _uart_put(71)   # G
+    _uart_put(65)   # A
+    _uart_put(45)   # -
+    _uart_put(82)   # R
+    _uart_put(86)   # V
+    _uart_put(54)   # 6
+    _uart_put(52)   # 4
+    _crlf()
+
+fn fpga_boot_main(hart_id: u64):
+    val ram_base: u64 = 0x80000000
+    val ram_size: u64 = 0x04000000
+    val reserved_end: u64 = 0x80100000
+    val heap_size: u64 = 0x00800000
+    val heap_start: u64 = ram_base + ram_size - heap_size
+
+    _fpga_boot_banner()
+
+    riscv_noalloc_log_init()
+
+    riscv_noalloc_handoff_with_layout(
+        hart_id, 0,
+        ram_base, ram_size,
+        heap_start, heap_size
+    )
+
+    rt_riscv_noalloc_pmm_init(
+        ram_base,
+        ram_size,
+        reserved_end,
+        heap_start
+    )
+
+    riscv_noalloc_heap_init(heap_start, heap_size)
+
+    riscv_noalloc_services_init(true)
+
+    riscv_noalloc_log_boot_ok()
+
+    os_main()
+
+    riscv_noalloc_boot_idle()

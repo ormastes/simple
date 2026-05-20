@@ -32,3 +32,7 @@ Add predicate-form canonical names for `is_`/`has_` APIs in `src/lib/common`, ke
 - [x] implement — 2026-05-19: ctype.spl rewritten with canonical names + aliases; time_utils.spl leap_year added; baseline updated to 1004
 - [x] verify — 2026-05-19: audit passes exit 0, no hard violations, no tab issues, JSON valid
 - [x] ship — 2026-05-19: committed; changes absorbed into tree via jj WIP snapshot, dedicated commit on top
+
+## Post-Ship Drift Fix (2026-05-20)
+- `src/lib/common/web/node_types.spl:Element.has_attr` was added after the baseline was set, raising lib/common count from 48→49.
+- Renamed to `attr_exists` (no callers in audited scope). Audit passes exit 0 again; lib/common back at 48.
