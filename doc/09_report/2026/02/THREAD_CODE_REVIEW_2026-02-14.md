@@ -754,3 +754,39 @@ Exit code 137  # Killed (OOM or timeout)
 - Restored the empty `doc/test/test_db_runs.sdn.lock` path after cleanup to avoid an unrelated deletion in the worktree.
 - Final process check: `active_simple=0`, `zombie_simple=0`.
 - Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
+
+**Sixth bounded crash-scope wave:**
+- Started with no active/zombie `simple` processes, no tracked running tests, and the same 17 May 20 zero-count crashed runs.
+- Native/subprocess bounded probes completed without process leaks:
+  - changed VHDL/RV64/RISC-V specs passed in native mode
+  - `native_backend_e2e_spec.spl` passed in native mode
+  - `qemu_rv32_raw_injected_regression_spec.spl` passed in native mode
+  - `spawn_integration_spec.spl` failed normally
+  - `test/unit/compiler/backend/native` failed normally in `isel_aarch64_spec.spl`
+- Target-filtered runner cleanup probes passed:
+  - `test/shared/core/minimal_spec.spl` targeted parallel pass left no matching child processes.
+  - `test/unit/compiler/r2_probe_fail_spec.spl` deliberate targeted parallel failure left no matching child processes.
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
+
+**Seventh bounded crash-scope wave:**
+- Started with no active/zombie `simple` processes, no tracked running tests, and the same 17 May 20 zero-count crashed runs.
+- Confirmed that direct multi-path `bin/simple test` is not useful as a mixed-run probe; it returned `Files: 0`.
+- Used a temporary `build/tmp/mixed_crash_probe` directory copied from existing specs to exercise real multi-file discovery in one runner invocation.
+- The mixed probe exited nonzero because of the deliberate failing spec and left no matching or global `simple` processes.
+- Removed the temporary probe directory.
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
+
+**Eighth bounded crash-scope wave:**
+- Started with no active/zombie `simple` processes, no tracked running tests, and the same 17 May 20 zero-count crashed runs.
+- Established the historical crashed-run baseline:
+  - 17 total crashed runs.
+  - 17/17 are zero-count rows (`tests=0`, `pass=0`, `fail=0`).
+  - newest row: `run_20260520_151137_097`.
+  - oldest row: `run_20260520_045841_839`.
+- Re-ran targeted runner cleanup probes:
+  - passing targeted parallel spec exited 0 and left no matching child processes.
+  - deliberate failing targeted parallel spec exited nonzero and left no matching child processes.
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.

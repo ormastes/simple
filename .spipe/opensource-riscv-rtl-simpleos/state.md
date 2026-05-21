@@ -636,5 +636,45 @@ fn litex_fpga_timer_init(map: LitexFpgaMemoryMap) -> unit
 - Final process check: `active_simple=0`, `zombie_simple=0`.
 - Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
 
+**Sixth bounded crash-scope wave:**
+- Re-checked process/run state before continuing: no active/zombie `simple` processes, no tracked running test runs, and the crashed-run list remained the same 17 May 20 zero-count runs.
+- Native/subprocess probes completed without process leaks or new crashed runs:
+  - `vhdl_rv64gc_regression_spec.spl` native: passed.
+  - `core64_integration_spec.spl` native: passed.
+  - `soc_top_64_spec.spl` native: passed.
+  - `board_memory_map_spec.spl` native: passed.
+  - `riscv_noalloc_handoff_vexriscv_spec.spl` native: passed.
+  - `native_backend_e2e_spec.spl` native: passed.
+  - `qemu_rv32_raw_injected_regression_spec.spl` native: passed.
+  - `spawn_integration_spec.spl` native: failed normally.
+  - `test/unit/compiler/backend/native` native: failed normally in `isel_aarch64_spec.spl`.
+- Target-filtered process leak regression probes:
+  - `test/shared/core/minimal_spec.spl` with targeted parallel execution exited 0 and left no matching `simple` processes.
+  - `test/unit/compiler/r2_probe_fail_spec.spl` with targeted parallel execution exited nonzero as expected and left no matching `simple` processes.
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
+
+**Seventh bounded crash-scope wave:**
+- Re-checked process/run state before continuing: no active/zombie `simple` processes, no tracked running test runs, and the crashed-run list remained the same 17 May 20 zero-count runs.
+- Verified that a direct multi-path `bin/simple test` invocation is not a valid mixed-run probe for this CLI; it reported `Files: 0` and did not exercise the targets.
+- Created a temporary `build/tmp/mixed_crash_probe` directory from existing specs to force real directory discovery in one runner invocation.
+- Mixed directory probe included a passing spec, the deliberate failing `r2_probe_fail_spec`, and the SoC spec fixture area. It exited nonzero as expected, discovered 2 files, and reported the deliberate failure without process leaks.
+- Removed the temporary mixed probe directory after the run.
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
+
+**Eighth bounded crash-scope wave:**
+- Re-checked process/run state before continuing: no active/zombie `simple` processes, no tracked running test runs, and the crashed-run list remained the same 17 May 20 zero-count runs.
+- Summarized the crashed-run baseline:
+  - total crashed runs: 17
+  - all 17 are zero-count runs (`tests=0`, `pass=0`, `fail=0`)
+  - newest: `run_20260520_151137_097`
+  - oldest: `run_20260520_045841_839`
+- Re-ran targeted cleanup probes after the baseline:
+  - `test/shared/core/minimal_spec.spl` targeted parallel run exited 0 and left no matching child processes.
+  - `test/unit/compiler/r2_probe_fail_spec.spl` deliberate targeted parallel failure exited nonzero and left no matching child processes.
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
+
 ### 8-ship
 <pending>
