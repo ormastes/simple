@@ -96,18 +96,23 @@ The K26 has no PL clock source — PS must provide FCLK_CLK0. Architecture:
 │  Zynq UltraScale+ PS (clock-only mode)      │
 │  ├─ FCLK_CLK0 = 100 MHz → PL sys_clk       │
 │  ├─ pl_resetn0 → PL sys_rst                 │
+│  ├─ All AXI bridges disabled (no PS↔PL bus) │
 │  └─ UART1 on MIO 36-37 (PS console, unused) │
 ├─────────────────────────────────────────────┤
 │  PL Fabric                                   │
-│  ├─ NaxRiscv RV64GC CPU                      │
-│  ├─ 64 KB integrated SRAM                    │
-│  ├─ JTAG UART (via BSCANE2)                  │
+│  ├─ NaxRiscv RV64 CPU (rv64i2p0_ma, sv39)   │
+│  │   ├─ L1 I/D cache: 16 KB each, 4-way     │
+│  │   └─ L2 cache: 128 KB, 8-way              │
+│  ├─ 64 KB integrated SRAM (0x10000000)       │
+│  ├─ 128 KB main RAM (0x40000000)             │
+│  ├─ Serial UART on PMOD (H12=TX, E10=RX)    │
 │  ├─ Timer                                    │
-│  └─ LiteX BIOS in SRAM                       │
+│  ├─ CSR space at 0xF0000000                  │
+│  └─ LiteX BIOS in ROM (0x00000000)           │
 └─────────────────────────────────────────────┘
 ```
 
-Target file: `build/k26_naxriscv_rv64.py` (174 lines)
+Target file: `build/k26_naxriscv_rv64.py` (190 lines)
 
 ## Build
 
@@ -157,30 +162,33 @@ vivado -mode batch -source /tmp/program_k26.tcl
 
 Expect: `End of startup status: HIGH` confirms successful programming.
 
-## UART Console — Current Status and Options
+## UART Console
 
-The SoC uses JTAG UART (BSCANE2-based), which requires openocd to stream data. Since openocd cannot talk to the K26 JTAG chain via this carrier's FT4232H, the console is not yet accessible.
+The SoC uses serial UART on PMOD pins (build default changed from `jtag_uart` to `serial` on 2026-05-21).
 
-### Option A: Vivado XVC Bridge (no extra hardware)
+The original JTAG UART (BSCANE2-based) required openocd, which is incompatible with this carrier's FT4232H. The Vivado XVC bridge (`hw_server -e "set xvc-server enable 1"`) also does not work in Vivado 2025.2 (`unknown parameter: xvc-server`). Both options are dead ends.
 
-Use Vivado's hw_server as a JTAG transport, exposing XVC (Xilinx Virtual Cable) for openocd:
+### Working Path: PMOD Serial UART
+
+The build script routes TX/RX through PMOD header pins on connector J2:
+
+| Signal | PMOD Pin | SOM240 Pin | FPGA Loc | IOStandard | Adapter Pin |
+|--------|----------|------------|----------|------------|-------------|
+| TX | 1 (HDA11) | som240_1_d18 | H12 | LVCMOS33 | adapter RX |
+| RX | 2 (HDA12) | som240_1_d20 | E10 | LVCMOS33 | adapter TX |
+| GND | 5 | — | — | — | adapter GND |
+
+**CRITICAL:** Use a 3.3V USB-UART adapter. 5V TTL will damage the K26 HD-bank FPGA I/O pins.
 
 ```bash
-hw_server -e "set xvc-server enable 1"
+litex_term /dev/ttyUSB_adapter --speed 115200
 ```
 
-Then configure openocd to use the XVC interface instead of raw FTDI. litex_term connects through that openocd instance.
+Settings: 115200 baud, 8N1, no flow control.
 
-### Option B: PMOD Serial UART (requires USB-UART adapter)
+### Why FT4232H Channels Don't Work for PL UART
 
-Rebuild SoC with `uart_name="serial"` and route TX/RX through PMOD header pins:
-
-| Signal | PMOD Pin | SOM240 Pin | FPGA Loc | IOStandard |
-|--------|----------|------------|----------|------------|
-| TX | 1 (HDA11) | som240_1_d18 | H12 | LVCMOS33 |
-| RX | 2 (HDA12) | som240_1_d20 | E10 | LVCMOS33 |
-
-Wire a USB-UART adapter (FT232/CH340/CP2102) to PMOD pins 1, 2, and GND (pin 5). Then: `litex_term /dev/ttyUSB_adapter --speed 115200`.
+The KV260 carrier card does NOT route FT4232H Ch.C/D to PL FPGA pins. Ch.A is JTAG-only (Vivado hw_server). Ch.B is PS UART1 (MIO 36-37, inactive without PMUFW/FSBL). An external USB-UART adapter on the PMOD connector is the only working path.
 
 ## openocd / openFPGALoader — Why They Fail
 
@@ -223,10 +231,18 @@ Generated VHDL files in `build/vhdl-output/`:
 
 - [x] Vivado Zynq UltraScale+ device family installed (14.16 GB)
 - [x] K26 detected via Vivado hw_server (`xck26_0` + `arm_dap_1`)
-- [x] LiteX SoC target created (`build/k26_naxriscv_rv64.py`)
-- [x] NaxRiscv RV64 bitstream built (4.1 MB, 0 errors)
-- [x] FPGA programmed via Vivado TCL batch
+- [x] LiteX SoC target created (`build/k26_naxriscv_rv64.py`, 190 lines)
+- [x] NaxRiscv RV64 bitstream built (4.3 MB, 0 errors, timing closed)
+- [x] FPGA programmed via Vivado TCL batch (`End of startup status: HIGH`)
+- [x] Build script updated: `uart_name="serial"` on PMOD H12/E10
+- [x] BIOS rebuilt with serial UART (May 21 2026 06:14:14)
+- [x] Verilog/XDC/CSR verified correct for serial UART
+- [x] OpenOCD/openFPGALoader confirmed incompatible (proprietary FT4232H JTAG)
+- [x] Vivado XVC bridge confirmed unsupported in 2025.2
+- [x] xsdb PS→PL read confirmed blocked (AXI bridges disabled, clock-only PS)
+- [x] USB device mapping verified (FT4232H Ch.A=JTAG, Ch.B=PS UART1, Ch.C/D=not routed)
 - [x] Simple RV32I → VHDL generation verified (6 files, ~17 KB)
-- [ ] UART console connected (blocked: openocd incompatibility, XVC bridge or PMOD path needed)
-- [ ] LiteX BIOS boot message observed
+- [ ] USB-UART adapter wired to PMOD J2 (3.3V, TX/RX crossed, GND)
+- [ ] LiteX BIOS boot message observed on UART
+- [ ] OpenSBI / Linux payload loaded
 - [ ] SimpleOS boot on RV64

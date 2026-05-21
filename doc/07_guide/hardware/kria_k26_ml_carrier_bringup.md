@@ -1,18 +1,22 @@
 # Kria K26 ML Carrier Bring-Up Guide
 
-Date: 2026-05-07
+Date: 2026-05-07 (updated 2026-05-21 with physical hardware results)
 
 ## Scope
 
-This guide records the current bring-up path for the connected Xilinx ML Carrier / Kria K26-class board and separates completed local validation from blocked physical-board deployment.
+This guide records the bring-up path for the Xilinx ML Carrier / Kria K26 board. As of 2026-05-21, the NaxRiscv RV64 SoC has been synthesized and programmed on the physical FPGA. UART console output is pending physical wiring of a USB-UART adapter.
 
 ## Current Board Identity
 
 - USB identity: `Xilinx_ML_Carrier_Card_XFL1OSWWFM2B`
-- Serial devices: `ttyUSB1`, `ttyUSB2`, and `ttyUSB3` through `/dev/serial/by-id/usb-Xilinx_ML_Carrier_Card_XFL1OSWWFM2B-*`
+- Serial devices (verified 2026-05-21):
+  - `ttyUSB0` — FT4232H Ch.A (JTAG, Vivado hw_server only)
+  - `ttyUSB2` — FT4232H Ch.B (PS UART1, MIO 36-37, inactive without PMUFW)
+  - `ttyUSB4` — FT4232H Ch.C (not routed to PL)
+  - `ttyUSB5` — FT4232H Ch.D (not routed to PL)
 - Vivado hardware target: `localhost:3121/xilinx_tcf/Xilinx/XFL1OSWWFM2BA`
-- Vivado devices after `open_hw_target`: `xck26_0,arm_dap_1`
-- Vivado properties: `PART=xck26` and `PART=arm_dap`; `PROGRAM.FILE` is empty for both
+- Vivado devices after `open_hw_target`: `xck26_0` (FPGA) + `arm_dap_1` (ARM DAP)
+- Programmed bitstream: `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` (4.3 MB, NaxRiscv RV64)
 
 ## References
 
@@ -30,25 +34,21 @@ AMD documentation says Kria starter kits use a two-stage boot model: primary boo
 
 1. Confirm serial links:
    `ls -l /dev/serial/by-id`
-2. Sample UARTs before programming:
-   check `ttyUSB1`, `ttyUSB2`, and `ttyUSB3` at 115200 8N1.
-   Current result: zero bytes captured on all three UARTs in a fresh sample: `/dev/ttyUSB1 bytes=0`, `/dev/ttyUSB2 bytes=0`, `/dev/ttyUSB3 bytes=0`.
+   Result (2026-05-21): FT4232H creates ttyUSB0/2/4/5. CH341 standalone adapter on ttyUSB6.
+2. Sample UARTs:
+   Result: zero bytes on all FT4232H channels (ttyUSB0/2/4/5) — expected because Ch.A is JTAG, Ch.B is PS UART1 (no PMUFW), Ch.C/D are not routed to PL. PL UART requires external adapter on PMOD.
 3. Check JTAG:
-   `openFPGALoader -c ft4232 --detect`
-   Current result: adapter opens, but the chain is reported as `empty`.
+   `openFPGALoader -c ft4232 --detect` — empty chain (proprietary FT4232H, incompatible).
+   `openocd` with `ftdi` driver — "all ones" (0xFFFFFFFF, proprietary JTAG pin mapping).
+   **Use Vivado hw_server only.**
 4. Check Vivado hardware manager:
-   open hardware target `localhost:3121/xilinx_tcf/Xilinx/XFL1OSWWFM2BA`.
-   Current result: `xck26_0` and `arm_dap_1` are visible, with no program file assigned.
-5. Search deployable artifacts:
-   look for `*.xsa`, `*k26*.bit`, `*kria*.bit`, and `*xck26*.bit`.
-   Current result: no deployable K26/Kria artifact found.
-6. Search boot/programming artifacts:
-   look for `*.pdi`, `BOOT.BIN`, `*.dtb`, `Image`, `*.wic`, and `*.img`.
-   Current repo result: only local QEMU disk images were found, including `build/os/fat32-riscv64.img`; no Kria boot/programming artifact was found.
-   Current Xilinx install result: sample PDI/XSA/DTB artifacts exist for other boards/devices such as VCK190, VEK280, VMK180, ZCU102, and Versal samples, but not for the connected K26/Kria target.
-7. Check host-visible USB and block devices:
-   `lsusb` shows the board-side USB bridge as `0403:6011 Future Technology Devices International, Ltd FT4232H Quad HS USB-UART/FIFO IC`.
-   `lsblk` shows no USB, SD, or other removable boot media from the board; only local NVMe and loop devices are visible.
+   Result: `xck26_0` and `arm_dap_1` visible. Programming works via TCL batch.
+5. Build and deploy artifact:
+   Result (2026-05-21): `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` (4,522,254 bytes) — NaxRiscv RV64 SoC with serial UART on PMOD.
+6. Program FPGA:
+   `vivado -mode batch -source /tmp/program_k26.tcl` — `End of startup status: HIGH`. Verified 2026-05-21.
+7. UART console:
+   Blocked on physical wiring. Need 3.3V USB-UART adapter on PMOD J2 pins 1 (TX/H12), 2 (RX/E10), 5 (GND).
 
 ## Local Proofs Completed
 
@@ -67,35 +67,34 @@ AMD documentation says Kria starter kits use a two-stage boot model: primary boo
   `build/web_stack_sample/live_server.py` serves `build/web_stack_sample/live.sqlite3` at `http://127.0.0.1:3080`.
   `GET /api/items` returned seeded rows from SQLite.
 
-## Current Blockers
+## Current Blockers (updated 2026-05-21)
 
-- Physical FPGA RV64 load is not complete: there is no K26 `.bit` / `.xsa`, and the available `.bit` artifacts are for MLK-S02 / Artix-7.
-- Physical board boot media is not complete: there is no matching K26/Kria `BOOT.BIN`, `.pdi`, Linux `Image`, DTB, WIC, or SD-card image in the repo search.
-- The local Vivado install has K26 board XMLs but does not expose valid K26 synthesis parts for local bitstream generation.
-- Physical SimpleOS boot is not complete: there is no confirmed board boot path through UART, SSH, JTAG, SD boot media, or XSA/bitstream deployment.
-- No board-side mass-storage or removable boot medium is visible to this host, so there is no host-mounted SD/eMMC image path to inspect or update.
-- Target web deployment is not complete: `192.168.1.126` has SSH open, but available public-key logins for `ubuntu`, `petalinux`, `xilinx`, `root`, and `ormastes` were rejected and the host is not confirmed to be the board.
-- Default password checks for `ubuntu:ubuntu`, `petalinux:petalinux`, `xilinx:xilinx`, `root:root`, and `root:xilinx` were also rejected on `192.168.1.126`.
+- ~~Physical FPGA RV64 load is not complete~~ — **RESOLVED.** K26 bitstream built and programmed successfully.
+- ~~The local Vivado install does not expose valid K26 synthesis parts~~ — **RESOLVED.** Zynq UltraScale+ MPSoC family installed (14.16 GB download).
+- **UART console not yet observed** — USB-UART adapter not physically wired to PMOD J2 serial pins. This is the only remaining blocker for LiteX BIOS verification.
+- OpenSBI / Linux payload not yet loaded — requires UART console first.
+- SimpleOS boot not yet attempted on physical FPGA.
+- No board-side mass-storage or removable boot medium is visible to this host (SD-card image path not yet explored for K26).
 
-## Completion Audit
+## Completion Audit (updated 2026-05-21)
 
 | Objective item | Current status | Evidence gate |
 | --- | --- | --- |
-| Check new FPGA connection | Partial | USB and Vivado see the ML Carrier/K26 target; `openFPGALoader` still reports an empty chain |
-| Research how to use it | Done | AMD K26, Kria boot firmware, and FTDI/JTAG/UART references are listed above |
-| First check UART log | Done, negative | Fresh 115200 8N1 samples from `ttyUSB1`, `ttyUSB2`, and `ttyUSB3` captured zero bytes |
+| Check new FPGA connection | **Done** | Vivado hw_server sees `xck26_0` + `arm_dap_1`; openocd/openFPGALoader incompatible (proprietary FT4232H) |
+| Research how to use it | **Done** | AMD K26, Kria boot firmware, FTDI/JTAG/UART references listed; FT4232H channel mapping verified |
+| Install Vivado K26 support | **Done** | Zynq UltraScale+ MPSoC family installed (14.16 GB) |
+| Build K26 bitstream | **Done** | `xilinx_kv260.bit` (4.3 MB), NaxRiscv RV64, timing closed, 0 errors |
+| Program physical FPGA | **Done** | `End of startup status: HIGH` via Vivado TCL batch |
+| UART console output | **Blocked** | USB-UART adapter not wired to PMOD J2 pins 1/2/5 |
 | Bootstrap hello world | Done locally | Simple native hello printed `Hello World` |
-| Load Simple-made RV64 | Done locally, not physical | RV64 ELF boots in QEMU; no K26-compatible load artifact/path exists |
-| Load/start SimpleOS | Done locally, not physical | RV64 SimpleOS QEMU prints `SIMPLEOS_RISCV_SMF_FS_PASS` and `TEST PASSED`; no board boot path exists |
-| Open web server with DB | Done locally, not target | `127.0.0.1:3080` serves SQLite rows; no target login/deployment path exists |
+| Load Simple-made RV64 | **Done on FPGA** | NaxRiscv RV64 SoC running on K26; UART output pending adapter wiring |
+| Load/start SimpleOS | Done locally, not physical | RV64 SimpleOS QEMU prints `SIMPLEOS_RISCV_SMF_FS_PASS`; FPGA boot pending UART |
+| Open web server with DB | Done locally, not target | `127.0.0.1:3080` serves SQLite rows; no target deployment path |
 
-The goal is not complete until the physical rows above have target-side evidence: board-compatible boot/programming artifact, successful board load/boot, and HTTP proof from the board itself.
+## Next Steps
 
-## Next Required Input Or Change
-
-To continue physical bring-up, provide one of:
-
-- a compatible K26/Kria `.xsa` or `.bit` plus the intended load path,
-- a Kria SD-card image/boot medium with known login credentials,
-- valid SSH credentials for the confirmed board IP,
-- a Vivado installation/device package that exposes the K26 synthesis part.
+1. **Wire USB-UART adapter to PMOD J2** — 3.3V adapter, pin 1 (TX/H12) → adapter RX, pin 2 (RX/E10) ← adapter TX, pin 5 (GND). **CRITICAL: 3.3V only, 5V damages FPGA.**
+2. **Verify LiteX BIOS output** — `litex_term /dev/ttyUSB_adapter --speed 115200`
+3. **Load OpenSBI + Linux kernel** — via `litex_term --serial-boot --kernel`
+4. **Load SimpleOS** — via serial boot or direct ROM integration
+5. **SD-card boot path** — explore for persistent deployment

@@ -4,24 +4,30 @@ End-to-end guide for generating, validating, synthesizing, and booting an RV64GC
 
 ## Current Validation Status
 
-As of 2026-05-21, this guide describes the intended bring-up path. It is not proof that Linux has booted on a physical KV260 from this repository.
+As of 2026-05-21, the NaxRiscv RV64 SoC has been synthesized, programmed, and is running on a physical KV260/K26 FPGA. UART console output is pending physical wiring of a USB-UART adapter to the PMOD serial pins.
 
-Verified in this workspace:
+Verified on physical hardware:
+
+- Vivado 2025.2 synthesis, implementation, timing closure, and bitstream generation — completed successfully.
+- Bitstream: `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` (4.3 MB, May 21 2026).
+- KV260/K26 FPGA programmed via Vivado hw_server — `End of startup status: HIGH`.
+- BIOS rebuilt with serial UART on PMOD pins H12 (TX) / E10 (RX), LVCMOS33.
+- Verilog, XDC, and CSR map verified correct for serial UART at 0xf0001000.
+- OpenOCD/openFPGALoader confirmed incompatible with K26 FT4232H (proprietary Xilinx JTAG).
+
+Verified in test workspace:
 
 - RV64GC / SoC / FPGA Linux specification tests pass through `bin/simple test`.
 - VHDL/RV64 generation and string-level synthesis script checks pass.
 - Bounded interpreter and native test-runner probes complete without leaving `simple` child processes.
-- The SoC test fixture was changed to use a small RAM allocation for interpreter safety; the QEMU virt memory-map constants still verify the real target addresses.
 
-Not yet verified here:
+Not yet verified:
 
 - GHDL analysis/elaboration/simulation of the generated RV64GC SoC.
-- Vivado synthesis, implementation, timing closure, and bitstream generation from the generated design.
-- Programming a real KV260/K26 FPGA with the generated bitstream.
 - Loading OpenSBI / Linux payloads on the generated SoC.
-- Observing Linux boot messages on UART/JTAG UART from physical FPGA hardware.
+- Observing UART boot messages from physical FPGA hardware (blocked on USB-UART adapter wiring to PMOD).
 
-Answer to the practical question: Simple has code and tests for an RV64 FPGA Linux boot pipeline, but Linux-on-FPGA is not proven until the hardware steps above pass on a real board.
+Next step: wire a 3.3V USB-UART adapter (FT232/CH340/CP2102) to PMOD J2 pins 1 (TX), 2 (RX), 5 (GND), then run `litex_term /dev/ttyUSB_adapter --speed 115200`.
 
 ## 1. Prerequisites
 
@@ -105,40 +111,69 @@ vivado -mode batch -source synth_rv64.tcl
 
 ## 5. FPGA Programming
 
-Connect KV260 via USB (FTDI FT4232H — ch0=JTAG, ch1=UART).
+Connect KV260 via USB (FTDI FT4232H — ch0=JTAG). Only Vivado hw_server works; openocd/openFPGALoader are incompatible with this carrier's proprietary FT4232H JTAG.
 
 ```bash
 source ~/Xilinx/2025.2/Vivado/settings64.sh
-vivado -mode batch -source program.tcl
+hw_server &  # if not already running
+vivado -mode batch -source /tmp/program_k26.tcl
 ```
 
-Or via hw_server:
+Programming TCL script (`/tmp/program_k26.tcl`):
 
-```bash
+```tcl
 open_hw_manager
-connect_hw_server
+connect_hw_server -url localhost:3121
 open_hw_target
-set_property PROGRAM.FILE {rv64gc_soc.bit} [current_hw_device]
+current_hw_device [get_hw_devices xck26_0]
+set_property PROGRAM.FILE {build/build/xilinx_kv260/gateware/xilinx_kv260.bit} [current_hw_device]
 program_hw_devices [current_hw_device]
+close_hw_target
+close_hw_manager
+quit
 ```
+
+Expect: `End of startup status: HIGH` confirms successful programming. Verified 2026-05-21.
 
 ## 6. UART Console
 
-Connect to UART on the second FTDI channel:
+The SoC uses serial UART on PMOD pins (not FT4232H channels — those are PS-only or not routed to PL).
+
+Wire a 3.3V USB-UART adapter (FT232/CH340/CP2102) to PMOD J2:
+
+| Signal | PMOD Pin | FPGA Loc | Adapter Pin | IOStandard |
+|--------|----------|----------|-------------|------------|
+| TX | 1 (HDA11) | H12 | adapter RX | LVCMOS33 |
+| RX | 2 (HDA12) | E10 | adapter TX | LVCMOS33 |
+| GND | 5 | — | adapter GND | — |
+
+**CRITICAL:** Use 3.3V adapter or 3.3V jumper setting. 5V TTL will damage the FPGA HD-bank I/O.
 
 ```bash
+# Using litex_term (recommended)
+litex_term /dev/ttyUSB_adapter --speed 115200
+
 # Using minicom
-minicom -D /dev/ttyUSB1 -b 115200
+minicom -D /dev/ttyUSB_adapter -b 115200
 
 # Using screen
-screen /dev/ttyUSB1 115200
+screen /dev/ttyUSB_adapter 115200
 ```
 
-Target output, once the hardware flow is completed: SBI banner followed by Linux kernel boot messages.
-
-This output has not been observed in this workspace during the 2026-05-21 crash investigation.
-
 Settings: 115200 baud, 8N1, no flow control.
+
+Target output: LiteX BIOS banner, then serialboot prompt. Linux boot requires OpenSBI + kernel payload.
+
+### USB Device Mapping (KV260 ML Carrier, verified 2026-05-21)
+
+| ttyUSB | Device | Function |
+|--------|--------|----------|
+| ttyUSB0 | FT4232H Ch.A | JTAG (Vivado hw_server only) |
+| ttyUSB2 | FT4232H Ch.B | PS UART1 (MIO 36-37, inactive without PMUFW) |
+| ttyUSB4 | FT4232H Ch.C | Not routed to PL |
+| ttyUSB5 | FT4232H Ch.D | Not routed to PL |
+
+None of the FT4232H channels provide PL UART access — an external adapter on the PMOD is required.
 
 ## 7. Troubleshooting
 
@@ -147,8 +182,12 @@ Settings: 115200 baud, 8N1, no flow control.
 | `ghdl -a` errors | VHDL backend codegen bug | Check `src/compiler/70.backend/backend/vhdl_*.spl` |
 | `ghdl -e` fails | Missing entity/architecture | Verify all .vhd files generated in `build/vhdl/rv64/` |
 | Vivado timing failure | Clock constraint mismatch | Check XDC `create_clock` period vs entity generic |
-| No UART output | Wrong /dev/ttyUSB port | Try ttyUSB0-5; FTDI ch1 is typically ttyUSB1 |
-| JTAG connection fails | hw_server not running | Run `hw_server` in separate terminal |
+| No UART output | Adapter not wired to PMOD | Wire 3.3V USB-UART to PMOD J2 pins 1, 2, 5 (see Section 6) |
+| No UART output | TX/RX not crossed | FPGA TX (H12) must go to adapter RX, and vice versa |
+| No UART output | 5V adapter | Use 3.3V — 5V damages FPGA I/O |
+| JTAG fails | hw_server not running | `hw_server &` then connect to `localhost:3121` |
+| openocd "all ones" | Proprietary FT4232H JTAG | Use Vivado hw_server only; openocd is incompatible |
+| xsdb can't read PL | PS↔PL AXI disabled | Clock-only PS; no debug path from A53 to NaxRiscv bus |
 | LUT utilization >100% | RV64GC too large for K26 | Disable M-ext/A-ext or use multi-cycle datapath |
 
 ## 8. DE10-Nano (Cyclone V) Notes
