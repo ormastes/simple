@@ -123,13 +123,18 @@ describe "QEMU Session Sharing":
             reset_broker()
             val entry = broker.acquire("arm64", "/bin/test")
             val key = entry.session_key
-            expect(find_session_status(key)).to_equal(QEMU_IN_USE)
+            expect(broker.sessions[0].status).to_equal(QEMU_IN_USE)
             broker.release(key)
-            expect(find_session_status(key)).to_equal(QEMU_IDLE)
+            expect(broker.sessions[0].session_key).to_equal(key)
+            expect(broker.sessions[0].status).to_equal(QEMU_IDLE)
 
         it "tracks test count across reuse cycles":
             reset_broker()
-            val key = acquire_n_and_release("arm64", "/bin/test", 4)
+            var i: i64 = 0
+            while i < 4:
+                val e = broker.acquire("arm64", "/bin/test")
+                broker.release(e.session_key)
+                i = i + 1
             # After 4 acquire+release cycles, acquiring once more gives test_count=5
             val entry = broker.acquire("arm64", "/bin/test")
             expect(entry.test_count).to_equal(5)
@@ -141,6 +146,7 @@ describe "QEMU Session Sharing":
             # Session is IN_USE, so next acquire with same key creates new one
             val e2 = broker.acquire("arm64", "/bin/test")
             expect(total_session_count()).to_equal(2)
+            expect(e2.session_key != e1.session_key).to_equal(true)
 
         it "active count tracks in-use sessions":
             reset_broker()
@@ -197,13 +203,13 @@ describe "QEMU Session Sharing":
             expect(find_session_exists(k1)).to_equal(false)
 
         it "does not evict in-use sessions":
-            reset_broker_with_max(2)
+            val local_broker = qemu_broker_new(2)
             # Two in-use sessions, can't evict either
-            val e1 = broker.acquire("a", "/bin/a1")
-            val e2 = broker.acquire("b", "/bin/b2")
+            val e1 = local_broker.acquire("a", "/bin/a1")
+            val e2 = local_broker.acquire("b", "/bin/b2")
             # Exceeds max but nothing to evict
-            val e3 = broker.acquire("c", "/bin/c3")
-            expect(total_session_count()).to_equal(3)
+            val e3 = local_broker.acquire("c", "/bin/c3")
+            expect(local_broker.sessions.len()).to_equal(3)
 
     describe "session reuse":
         it "reuses session across sequential tests":
@@ -230,7 +236,8 @@ describe "QEMU Session Sharing":
             # with timeout_ms=0, only idle sessions older than 0ms are cleaned
             broker.cleanup_idle(0)
             expect(total_session_count()).to_equal(1)
-            expect(find_session_status(entry.session_key)).to_equal(QEMU_IN_USE)
+            expect(broker.sessions[0].session_key).to_equal(entry.session_key)
+            expect(broker.sessions[0].status).to_equal(QEMU_IN_USE)
 
         it "shutdown removes all sessions":
             reset_broker()

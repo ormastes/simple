@@ -2,6 +2,27 @@
 
 End-to-end guide for generating, validating, synthesizing, and booting an RV64GC SoC on the Kria KV260 (K26 SOM, xck26-sfvc784-2LV-c).
 
+## Current Validation Status
+
+As of 2026-05-21, this guide describes the intended bring-up path. It is not proof that Linux has booted on a physical KV260 from this repository.
+
+Verified in this workspace:
+
+- RV64GC / SoC / FPGA Linux specification tests pass through `bin/simple test`.
+- VHDL/RV64 generation and string-level synthesis script checks pass.
+- Bounded interpreter and native test-runner probes complete without leaving `simple` child processes.
+- The SoC test fixture was changed to use a small RAM allocation for interpreter safety; the QEMU virt memory-map constants still verify the real target addresses.
+
+Not yet verified here:
+
+- GHDL analysis/elaboration/simulation of the generated RV64GC SoC.
+- Vivado synthesis, implementation, timing closure, and bitstream generation from the generated design.
+- Programming a real KV260/K26 FPGA with the generated bitstream.
+- Loading OpenSBI / Linux payloads on the generated SoC.
+- Observing Linux boot messages on UART/JTAG UART from physical FPGA hardware.
+
+Answer to the practical question: Simple has code and tests for an RV64 FPGA Linux boot pipeline, but Linux-on-FPGA is not proven until the hardware steps above pass on a real board.
+
 ## 1. Prerequisites
 
 | Tool | Version | Purpose |
@@ -113,7 +134,9 @@ minicom -D /dev/ttyUSB1 -b 115200
 screen /dev/ttyUSB1 115200
 ```
 
-Expected output: SBI banner followed by Linux kernel boot messages.
+Target output, once the hardware flow is completed: SBI banner followed by Linux kernel boot messages.
+
+This output has not been observed in this workspace during the 2026-05-21 crash investigation.
 
 Settings: 115200 baud, 8N1, no flow control.
 

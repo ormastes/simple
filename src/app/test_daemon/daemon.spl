@@ -22,6 +22,11 @@ use app.test_daemon.types.{
 use app.test_daemon.agent_pool.{AgentPool, agent_pool_new}
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_load}
 use app.test_daemon.qemu_broker.{QemuBroker, qemu_broker_new}
+use app.test_daemon.resource_policy.{
+    test_daemon_can_accept_client, test_daemon_can_start_qemu,
+    test_daemon_effective_qemu_limit, test_daemon_poll_sleep_ms
+}
+use app.test_daemon.resource_snapshot.{test_daemon_resource_snapshot}
 use app.test_daemon.session_broker.{SessionBroker, session_broker_new}
 use app.test_daemon.session_types.{
     TestSessionMeta, test_session_meta_default,
@@ -81,7 +86,8 @@ impl TestDaemon:
                 self.incremental_state.save()
 
             extern fn rt_sleep_ms(ms: i64)
-            rt_sleep_ms(self.config.daemon.poll_interval_ms)
+            val snap = self.current_resource_snapshot()
+            rt_sleep_ms(test_daemon_poll_sleep_ms(self.config.resource_policy, snap, 0))
 
     # --- Request handler ---
 
@@ -134,6 +140,13 @@ impl TestDaemon:
         if test_path == "":
             var resp = daemon_response_new(req.id, TRESP_ERROR)
             resp.fields["error"] = "missing test_path"
+            return resp
+
+        val admission = test_daemon_can_accept_client(self.config.resource_policy, self.current_resource_snapshot())
+        if not admission[0]:
+            var resp = daemon_response_new(req.id, TRESP_QUEUED)
+            resp.fields["reason"] = admission[1]
+            resp.fields["retry_after_ms"] = "{self.config.resource_policy.idle_poll_ms}"
             return resp
 
         # Dedup check
@@ -235,6 +248,10 @@ impl TestDaemon:
         resp.fields["cache_entries"] = "{self.incremental_state.entries.keys().len()}"
         resp.fields["qemu_active"] = "{self.qemu_broker.active_count()}"
         resp.fields["qemu_idle"] = "{self.qemu_broker.idle_count()}"
+        val snap = self.current_resource_snapshot()
+        resp.fields["resource_cpu_percent"] = "{snap.cpu_percent}"
+        resp.fields["resource_memory_percent"] = "{snap.memory_percent}"
+        resp.fields["qemu_effective_limit"] = "{test_daemon_effective_qemu_limit(self.config.resource_policy, snap)}"
         resp.fields["agents_active"] = "{self.agent_pool.active_agent_count()}"
         resp.fields["agents_pending"] = "{self.agent_pool.pending_count()}"
         resp.fields["agents_completed"] = "{self.agent_pool.completed_count()}"
@@ -310,6 +327,14 @@ impl TestDaemon:
         val reset_name = req.fields["reset"] ?? "none"
         val artifact = req.fields["artifact"] ?? ""
         val file_path = req.fields["test_path"] ?? ""
+
+        if kind_name == "qemu_vm":
+            val qemu_admission = test_daemon_can_start_qemu(self.config.resource_policy, self.current_resource_snapshot())
+            if not qemu_admission[0]:
+                var resp = daemon_response_new(req.id, TRESP_QUEUED)
+                resp.fields["reason"] = qemu_admission[1]
+                resp.fields["retry_after_ms"] = "{self.config.resource_policy.idle_poll_ms}"
+                return resp
 
         var meta = test_session_meta_default(file_path)
         meta = TestSessionMeta(
@@ -423,6 +448,23 @@ impl TestDaemon:
         resp.fields["cached"] = "false"
         resp
 
+    fn active_request_count() -> i64:
+        var count: i64 = 0
+        val keys = self.active_requests.keys()
+        var i = 0
+        while i < keys.len():
+            if self.active_requests[keys[i]] ?? "" != "":
+                count = count + 1
+            i = i + 1
+        count
+
+    fn current_resource_snapshot():
+        test_daemon_resource_snapshot(
+            self.active_request_count(),
+            self.qemu_broker.active_count() + self.session_broker.active_count(),
+            self.qemu_broker.idle_count() + self.session_broker.idle_count()
+        )
+
 # ============================================================================
 # Factory
 # ============================================================================
@@ -432,13 +474,14 @@ fn test_daemon_start(config: TestDaemonConfig) -> TestDaemon:
 
     val runner = daemon_runner_start(config.daemon)
     val incremental_state = incremental_test_state_load(config.cache_path, config.dep_graph_path, true)
-    val qemu_broker = qemu_broker_new(config.max_qemu_sessions)
+    val qemu_broker = qemu_broker_new(config.resource_policy.max_qemu_sessions)
     val pool = agent_pool_new(5)
 
     # Initialize session broker with all adapters
     var broker = session_broker_new()
     broker.idle_timeout_ms = config.session_idle_timeout_ms
     broker.startup_timeout_ms = config.session_startup_timeout_ms
+    broker.max_sessions["qemu_vm"] = config.resource_policy.max_qemu_sessions
 
     # Register adapters
     val qemu_a = qemu_adapter_new()

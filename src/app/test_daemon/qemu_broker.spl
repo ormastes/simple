@@ -45,13 +45,13 @@ impl QemuBroker:
     # Acquire a session for the given arch and binary
     me acquire(arch: text, binary_path: text) -> QemuSessionEntry:
         val binary_hash = rt_hash_text(binary_path)
-        val session_key = "{arch}_{binary_hash}"
+        val base_session_key = "{arch}_{binary_hash}"
 
         # Look for existing idle session with same key
         var i = 0
         while i < self.sessions.len():
             val session = self.sessions[i]
-            if session.session_key == session_key and session.status == QEMU_IDLE:
+            if session.session_key == base_session_key and session.status == QEMU_IDLE:
                 self.sessions[i] = QemuSessionEntry(
                     session_key: session.session_key,
                     arch: session.arch,
@@ -70,6 +70,13 @@ impl QemuBroker:
         if self.sessions.len() >= self.max_sessions:
             self.evict_oldest_idle()
 
+        var session_key = base_session_key
+        if self.session_key_exists(session_key):
+            var suffix: i64 = 2
+            while self.session_key_exists("{base_session_key}#{suffix}"):
+                suffix = suffix + 1
+            session_key = "{base_session_key}#{suffix}"
+
         val new_session = QemuSessionEntry(
             session_key: session_key,
             arch: arch,
@@ -83,6 +90,14 @@ impl QemuBroker:
         )
         self.sessions.push(new_session)
         new_session
+
+    fn session_key_exists(session_key: text) -> bool:
+        var i = 0
+        while i < self.sessions.len():
+            if self.sessions[i].session_key == session_key:
+                return true
+            i = i + 1
+        false
 
     me release(session_key: text):
         var i = 0

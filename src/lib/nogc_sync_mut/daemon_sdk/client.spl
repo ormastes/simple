@@ -8,7 +8,7 @@ use std.daemon_sdk.types.{
     DaemonConfig, DaemonRequest, DaemonResponse,
     daemon_request_new, daemon_response_new
 }
-use std.daemon_sdk.lock.{is_daemon_running}
+use std.daemon_sdk.lock.{is_daemon_running, read_daemon_pid, is_pid_alive}
 use std.daemon_sdk.protocol.{
     write_daemon_request, read_daemon_response, daemon_request_path_for
 }
@@ -17,6 +17,7 @@ extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_sleep_ms(ms: i64)
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_process_kill(pid: i64) -> bool
 
 # ============================================================================
 # Ensure Running
@@ -37,6 +38,19 @@ fn daemon_ensure_running(config: DaemonConfig, start_fn: fn() -> bool) -> bool:
         rt_sleep_ms(100)
 
     false
+
+fn daemon_ensure_responsive(config: DaemonConfig, start_fn: fn() -> bool, ping_fn: fn() -> bool) -> bool:
+    if daemon_ensure_running(config, start_fn) and ping_fn():
+        return true
+
+    val pid = read_daemon_pid(config.lock_path)
+    if pid > 0 and is_pid_alive(pid):
+        rt_process_kill(pid)
+        rt_sleep_ms(250)
+
+    if not daemon_ensure_running(config, start_fn):
+        return false
+    ping_fn()
 
 # ============================================================================
 # Submit Request
