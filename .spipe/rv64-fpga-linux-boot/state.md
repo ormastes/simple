@@ -564,39 +564,39 @@ Skipped per user request.
 
 ### 7-verify
 
-**Date:** 2026-05-20
-**Strategy:** 5 parallel verification scripts matching every `it` block across 6 spec files, executed via direct interpreter (`bin/simple /tmp/verify_*.spl`) due to known test runner hang on std.spipe imports.
+**Date:** 2026-05-20 (initial, temp scripts) → 2026-05-21 (real test runner, all specs green)
+**Strategy:** Real `bin/simple test` runner across all 9 spec files — 172/172 pass.
 
-#### Verification Scripts
-| Script | ACs | Checks | Result |
-|--------|-----|--------|--------|
-| `/tmp/verify_ac1_core64.spl` | AC-1 | 32 | 32/32 PASS |
-| `/tmp/verify_ac3_soc64.spl` | AC-3 | 20 | 20/20 PASS |
-| `/tmp/verify_ac245_vhdl.spl` | AC-2, AC-4, AC-5 | 35 | 35/35 PASS |
-| `/tmp/verify_ac67_boot.spl` | AC-6, AC-7 | 20 | 20/20 PASS |
-| `/tmp/verify_ac89_vhdl.spl` | AC-8, AC-9 | 23 | 23/23 PASS |
-| **TOTAL** | **AC-1 through AC-9** | **130** | **130/130 PASS** |
+#### Test Runner Results (2026-05-21)
+| Spec File | ACs | Pass | Duration |
+|-----------|-----|------|----------|
+| `core64_integration_spec.spl` | AC-1 | 28 | 280ms |
+| `soc_top_64_spec.spl` | AC-3 | 20 | 478ms |
+| `soc_vhdl_gen_rv64_spec.spl` | AC-2 | 17 | 476ms |
+| `fpga_synthesis_rv64_spec.spl` | AC-4, AC-5 | 18 | 468ms |
+| `fpga_boot_linux_spec.spl` | AC-6, AC-7 | 20 | 339ms |
+| `vhdl_rv64gc_regression_spec.spl` | AC-8, AC-9 | 23 | 2753ms |
+| `k26_kv260_rv64_spec.spl` | AC-4 | 24 | 369ms |
+| `board_memory_map_spec.spl` | AC-3 | 14 | 221ms |
+| `riscv_noalloc_handoff_vexriscv_spec.spl` | AC-6 | 8 | 220ms |
+| **TOTAL** | **AC-1 through AC-9** | **172** | **5.6s** |
 
-#### AC Results Summary
-| AC | Description | Pass | Fail |
-|----|-------------|------|------|
-| AC-1 | RV64GC RTL core integration (init, privilege, CSR, decode, trap, LSU, mul_div, step) | 32 | 0 |
-| AC-2 | VHDL generation pipeline (entity, architecture, rv64gc_core ref, peripheral instantiation) | 17 | 0 |
-| AC-3 | SoC top-level integration (memory map, init, RAM64, wb64, tick) | 20 | 0 |
-| AC-4 | XDC constraint generation (K26 pins, clock, UART, reset, generic XDC) | 9 | 0 |
-| AC-5 | Vivado TCL generation (project creation, source files, synthesis launch) | 9 | 0 |
-| AC-6 | DTB generation (FDT magic, nodes, memory map, chosen/stdout-path) | 12 | 0 |
-| AC-7 | Linux boot contract (a0=hartid, a1=dtb, satp=0, SBI ecall interface) | 8 | 0 |
-| AC-8 | VHDL backend type mapping (u64/i64/u32/bool, struct records, enums, expressions) | 13 | 0 |
-| AC-9 | VHDL backend regression (match lowering, process lowering, array lowering) | 10 | 0 |
+#### Crash/Process Follow-up (2026-05-21)
+- `soc_top_64_spec.spl` was reworked to use `SOC64_TEST_DRAM_SIZE = 0x1000` for fixture initialization. The QEMU virt memory-map constant checks still assert the real `0x8000_0000` DRAM base; only the interpreter RAM allocation fixture was reduced.
+- The previous `soc_top_64_init(0x800_0000)` fixture could leave a live `bin/simple test` parent, pegged `simple run` child, and defunct child during bounded crash investigation.
+- After the fixture change, all 9 rv64 feature specs were rechecked with direct bounded real `bin/simple test` commands. Each passed and left `active_simple=0`, `zombie_simple=0`.
 
-#### Bugs found and fixed during verification
-1. **`vhdl_type_map_bool()` returning nil** — Test helper functions were placed inside `impl VhdlTypeMapper:` block by Wave3-F agent; `vhdl_type_map_bool()` at ~line 227 caused subsequent impl methods to be swallowed as nested functions. Fixed by moving all 4 test helpers to module scope after the impl block.
-2. **AC-3 interpreter timeout** — Initial verification used `soc_top_64_init(0x800_0000)` (128MB RAM via push-loop). Interpreter too slow for 16M iterations. Fixed by using small RAM sizes (1024) in tests.
-3. **AC-2/4/5 `rt_print` not found** — Agent used `rt_print` instead of `print`. Fixed.
+#### Bugs found and fixed during verification (2026-05-21 pass)
+1. **Import/export missing (51 failures)** — 3 spec files had missing `use` imports; implementation functions lacked `pub` visibility or `__init__.spl` re-exports. Fixed: added `use std.hardware.rv64gc_rtl.{module}.*` per-submodule imports to core64 spec, added `use std.hardware.soc_rtl.*` to soc64 spec, added `pub` to 21 VHDL backend test helpers + 4 `use` imports to vhdl regression spec.
+2. **`DecodeResult64` missing `is_sret`/`is_sfence_vma` fields** — decode.spl struct lacked SRET/SFENCE.VMA detection fields. Fixed: added `is_sret: bool` and `is_sfence_vma: bool` to struct + population logic.
+3. **`AtomicsState` not re-exported** — soc_rtl `__init__.spl` didn't re-export `AtomicsState` from rv64gc_rtl.atomics. Fixed: added use + export.
+4. **MulDiv opcode constants wrong** — DIVU was 4 (should be 5), REMU was 5 (should be 7). Fixed.
+5. **VHDL backend `pub` visibility** — 21 test helper functions in vhdl_type_mapper/vhdl_backend/vhdl_expr/vhdl_process were `fn` not `pub fn`. Fixed.
 
-#### Parse verification
-All 34 modified/new source files parse successfully via `bin/simple /tmp/test_parse_*.spl` — no syntax errors.
+#### Earlier bugs (2026-05-20 initial pass)
+1. `vhdl_type_map_bool()` returning nil — moved test helpers to module scope.
+2. AC-3 interpreter timeout — use small RAM sizes (1024) in tests.
+3. AC-2/4/5 `rt_print` not found — use `print`.
 
 ### 8-ship
 
@@ -625,10 +625,18 @@ Single commit containing all rv64-fpga-linux-boot pipeline deliverables:
 - test: fpga_boot_linux_spec
 
 #### Verification Gate
-All 130 acceptance checks pass (see phase 7 for breakdown).
+All 172 acceptance checks pass via real `bin/simple test` runner (2026-05-21).
 
 #### Known Limitations
-1. **Test runner hang:** `bin/simple test` hangs on std.spipe imports — spec `it` blocks cannot execute via normal test runner. Verification done via direct interpreter scripts.
-2. **GHDL not run:** No GHDL binary available in CI — VHDL generation verified by string content checks, not actual GHDL analysis.
-3. **No hardware run:** FPGA bitstream generation and Linux boot require physical hardware + Vivado — validated at the RTL/generation level only.
-4. **Interpreter-only:** All verification run in interpreter mode; compiled-mode testing deferred until test runner fix.
+1. **GHDL not run:** No GHDL binary available in CI — VHDL generation verified by string content checks, not actual GHDL analysis.
+2. **No hardware run:** FPGA bitstream generation and Linux boot require physical hardware + Vivado — validated at the RTL/generation level only.
+3. **Interpreter-only:** All verification run in interpreter mode; compiled-mode testing available but not exercised.
+4. **Pre-existing older spec failures:** 3 older rv64gc specs (`rv64_decode_spec`, `rv64_muldiv_spec`, `rv64_csr_spec`) in `test/unit/hardware/rv64gc/` fail due to pre-existing issues (wrong module import paths, compiled-only tag) — confirmed unrelated to this pipeline's changes.
+
+#### Regression Check (2026-05-21)
+Verified existing rv64gc specs were not regressed by this pipeline's changes:
+- `rv64_decode_spec.spl`: pre-existing `Cannot resolve module: hardware.rv64gc.core.rv64_decode` (wrong import path, should be `std.hardware.rv64gc_rtl.decode`)
+- `rv64_muldiv_spec.spl`: pre-existing `Cannot resolve module: hardware.rv64gc.ext.rv64_muldiv.muldiv_execute` (module doesn't exist)
+- `rv64_csr_spec.spl`: 23 failures, all `expected 0 to equal <non-zero>` — tagged `only-compiled`, fails under interpreter mode (known struct mutation limitation)
+- All 3 failures confirmed via `git log` as untouched by this pipeline (last modified in commits `797bf03d01`, `01f11f1815`)
+- Our 3 fixed specs re-verified green: core64 28/28, soc64 20/20, vhdl 23/23

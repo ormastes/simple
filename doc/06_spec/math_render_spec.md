@@ -11,7 +11,7 @@ Intensive tests for the math expression rendering pipeline:
 | Difficulty | 3/5 |
 | Status | Implemented |
 | Source | `test/feature/usage/math_render_spec.spl` |
-| Updated | 2026-05-20 |
+| Updated | 2026-05-21 |
 | Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary

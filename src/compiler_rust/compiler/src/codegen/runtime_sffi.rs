@@ -599,6 +599,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_thread_id", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_thread_free", &[I64], &[]),
     RuntimeFuncSpec::new("rt_thread_available_parallelism", &[], &[I64]),
+    RuntimeFuncSpec::new("spl_thread_cpu_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_thread_sleep", &[I64], &[]),
     RuntimeFuncSpec::new("rt_thread_yield", &[], &[]),
     // =========================================================================

@@ -688,6 +688,12 @@ pub extern "C" fn rt_thread_available_parallelism() -> i64 {
         .unwrap_or(1)
 }
 
+/// Compatibility alias used by older Simple libraries.
+#[no_mangle]
+pub extern "C" fn spl_thread_cpu_count() -> i64 {
+    rt_thread_available_parallelism()
+}
+
 /// Sleep the current thread for the specified milliseconds.
 #[no_mangle]
 pub extern "C" fn rt_thread_sleep(millis: i64) {

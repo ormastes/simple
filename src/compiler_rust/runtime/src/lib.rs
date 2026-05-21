@@ -164,6 +164,7 @@ pub use executor::{
     rt_executor_shutdown,
     rt_executor_start,
     rt_thread_available_parallelism,
+    spl_thread_cpu_count,
     rt_thread_free,
     rt_thread_id,
     rt_thread_is_done,

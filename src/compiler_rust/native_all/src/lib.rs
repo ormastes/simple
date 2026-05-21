@@ -689,6 +689,16 @@ pub extern "C" fn rt_system_cpu_count() -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_thread_available_parallelism() -> i64 {
+    rt_system_cpu_count()
+}
+
+#[no_mangle]
+pub extern "C" fn spl_thread_cpu_count() -> i64 {
+    rt_system_cpu_count()
+}
+
+#[no_mangle]
 pub extern "C" fn rt_process_exists(pid: i64) -> i64 {
     // Check if /proc/<pid> exists on Linux
     let path = format!("/proc/{}", pid);

@@ -582,3 +582,175 @@ Exit code 137  # Killed (OOM or timeout)
 ---
 
 **End of Report**
+
+---
+
+## Appendix C: 2026-05-21 Simple Test Process Storm Follow-up
+
+**Scope:** Investigated current `bin/simple test` crashes/kills after repeated May 20 runs were marked `crashed` with zero test counts in `doc/test/test_db_runs.sdn`.
+
+**Cleanup performed:**
+- Initial process scan found no zombies.
+- A focused reproduction accidentally triggered recursive `simple test` spawning for:
+  - `test/unit/os/kernel/boot/riscv_noalloc_handoff_vexriscv_spec.spl`
+  - `test/unit/os/kernel/arch/riscv64/platform/board_memory_map_spec.spl`
+  - `test/unit/os/kernel/arch/riscv64/platform/litex_fpga_spec.spl`
+- Killed the active process storm. Final check: `active_simple=0`, `zombie_simple=0`.
+- Emergency containment used temporary execute-bit removal on `bin/release/x86_64-unknown-linux-gnu/simple`; permission was restored immediately.
+
+**Root cause found:**
+- The source already contains the intended recursion fix: child test execution builds `["run", file_path]` in `src/app/test_runner_new/test_executor_parsing.spl` and `src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl`.
+- The active release binary was stale (`2026-05-20 12:23:21`) and still recursively invoked `simple test <same_spec>`.
+- Rebuilt Rust bootstrap successfully with:
+  - `cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all`
+- `SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple build bootstrap --seed=src/compiler_rust/target/bootstrap/simple` produced Stage 1/2/3 binaries but ended with a bootstrap hash mismatch.
+- The Stage 1/2/3 native outputs did not support `simple test --help` (`exit=3`), so they were not used.
+- Updated the local runtime binary from the Rust bootstrap seed:
+  - backup: `bin/release/x86_64-unknown-linux-gnu/simple.pre_crashfix_20260521`
+  - active: `bin/release/x86_64-unknown-linux-gnu/simple`
+
+**Verification:**
+- `bin/simple test --help` exits 0.
+- Bounded repro: `timeout 60 bin/simple test test/unit/os/kernel/arch/riscv64/platform/litex_fpga_spec.spl --mode=interpreter --clean --timeout 15`
+- Result: no recursive process storm (`recursion_guard_tripped=0`, `active_simple=0`, `zombie_simple=0`).
+
+**Additional code fix made while following the next failing spec:**
+- Added object API wrappers required by current RISC-V FPGA specs:
+  - `KriaFpgaMemoryMap`, `kria_memory_map_new`
+  - `LitexFpgaMemoryMap`, `litex_memory_map_new`
+  - `RiscvMemoryLayout`, `riscv_noalloc_layout_from_kria`, `riscv_noalloc_layout_from_litex`
+  - LiteX compatibility wrappers: `litex_fpga_platform_init`, `litex_fpga_uart_put`, `litex_fpga_timer_init`, `litex_fpga_platform_name`
+- Corrected the LiteX PLIC expected decimal: `0xf0c00000` is `4039114752`.
+- Replaced heap range matcher checks with exact heap-start assertions because `to_be_greater_than` failed for positive integer deltas in this runtime path.
+
+**Follow-up verification:**
+- `bin/simple run test/unit/os/kernel/arch/riscv64/platform/board_memory_map_spec.spl` passes all 14 examples.
+- `bin/simple run test/unit/os/kernel/boot/riscv_noalloc_handoff_vexriscv_spec.spl` passes all 8 examples.
+- `bin/simple run test/unit/os/kernel/arch/riscv64/platform/litex_fpga_spec.spl` passes all 5 examples.
+- Bounded `bin/simple test ... --mode=interpreter --clean --timeout 20` passes for all three specs.
+- A post-test process check briefly found leftover `simple` processes (`active_simple=2`, `zombie_simple=1`); they were terminated/reaped.
+- Final process check after cleanup: `active_simple=0`, `zombie_simple=0`.
+
+**Remaining issue recorded separately:**
+- `to_be_greater_than` / numeric matcher behavior is tracked in `doc/09_bugs/test_matcher_numeric_comparison_2026-05-21.md`.
+
+**Additional 2026-05-21 targeted crash verification:**
+- `bin/simple test --list-runs --runs-status running` reported no active runs.
+- The crashed-run list still contains only the 17 May 20 zero-count crashed runs.
+- These bounded repros passed and left no active/zombie `simple` processes:
+  - `_throwaway_import_test_spec.spl`
+  - `_throwaway_broker_test_spec.spl`
+  - `test/unit/lib/test_runner` with `--parallel -j 2`
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+
+**Broader bounded verification:**
+- Passed without process leftovers:
+  - `test/unit/app/test_runner_coverage_spec.spl`
+  - `test/unit/app/cli_parser_spec.spl`
+- Failed normally, without process kill or process leftovers:
+  - `test/unit/app/test_incremental_state_shared_spec.spl` (`discover_tests`, `TestDaemon` unresolved)
+  - `test/unit/app/lifecycle_spec.spl` (`nogc_sync_mut.src.app.config` unresolved)
+  - `test/unit/app --tag cli --parallel -j 2` (35 files completed; 15 CLI-related files failed normally)
+- Final process check after this broader pass: `active_simple=0`, `zombie_simple=0`.
+
+**Integration/app bounded verification:**
+- Completed without process leaks:
+  - `test/integration/app/cli_dispatch_spec.spl`
+  - `test/integration/app/loader_run_function_spec.spl`
+  - `test/integration/app/mcp_stdio_integration_spec.spl`
+  - `test/app`
+- These runs failed normally through assertions/semantic errors, not by process kill.
+- `test/app` completed 47 files with 400 passed examples and 151 normal failures.
+- Crashed-run list remained unchanged at 17 May 20 zero-count crashed runs.
+
+**MCP/LSP bounded verification:**
+- `mcp_bugdb_spec.spl` passed without process leftovers.
+- `mcp_debug_log_tree_stdio_spec.spl` and `simple_lsp_mcp_stdio_spec.spl` failed normally on unknown extern `spl_thread_cpu_count`.
+- `query_visibility_workspace_symbols_spec.spl` and `lsp_query_visibility_symbols_spec.spl` failed normally on visibility assertion mismatches.
+- No active/zombie `simple` processes remained after the slice.
+- Crashed-run list remained unchanged at 17 May 20 zero-count crashed runs.
+
+**MCP/LSP extern follow-up:**
+- Added `spl_thread_cpu_count` as a compatibility runtime symbol:
+  - interpreter dispatch aliases it to `rt_thread_available_parallelism`
+  - Rust runtime symbol allow-list includes it
+  - Rust native codegen SFFI table includes it
+- Rebuilt `simple-driver` with `cargo build --profile bootstrap -p simple-driver`.
+- Refreshed `bin/release/x86_64-unknown-linux-gnu/simple` from the rebuilt `src/compiler_rust/target/bootstrap/simple`.
+- `bin/simple test --help` exits 0 after refresh.
+- Post-fix bounded MCP/LSP checks no longer hit unknown extern and leave no active/zombie `simple` processes:
+  - `mcp_debug_log_tree_stdio_spec.spl`: fails normally with 1 assertion (`expected false to equal true`)
+  - `simple_lsp_mcp_stdio_spec.spl`: fails normally with 2 assertions (`expected false to equal true`)
+  - `mcp_stdio_integration_spec.spl`: fails normally with 3 assertions (`expected false to equal true`)
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
+
+**Second bounded crash-scope wave:**
+- Started with no active/zombie `simple` processes and no tracked running test runs.
+- The old report paths for `test/unit/std/thread_sffi_spec.spl`, `test/unit/std/thread_pool_spec.spl`, `test/unit/lib/process_manager_spec.spl`, and `test/unit/lib/process_governor_spec.spl` are stale; each failed immediately as file-not-found and was not treated as runtime evidence.
+- Current equivalents completed without process kill or leaks:
+  - `test/os/kernel/wine/thread_sffi_extensions_spec.spl`: passed 19 examples.
+  - `test/integration/lib/thread_pool_async_spec.spl`: failed normally with 4 `Option::Some(...)` assertion mismatches.
+  - `test/app/simple_process_manager`: failed normally with existing app assertions.
+- Historical crash-regression probes completed without process kill or leaks:
+  - `test/system/stage3_segfault_fix_spec.spl`: passed.
+  - `test/code_quality/warning_allow_root_cause_cleanup_spec.spl`: passed.
+  - `test/browser_engine/js_integration_spec.spl`: failed normally on unresolved module `std.gc_async_mut.gpu.browser_engine.script.script_host`.
+  - `test/sys/wm_compare/famous_site_corpus_spec.spl`: failed normally on page-category assertion.
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
+
+**Third bounded crash-scope wave:**
+- Started with no active/zombie `simple` processes, no tracked running tests, and the same 17 May 20 zero-count crashed runs.
+- Fixed remaining `spl_thread_cpu_count` native/rust-hosted export risk:
+  - `src/compiler_rust/runtime/src/executor.rs`
+  - `src/compiler_rust/runtime/src/lib.rs`
+  - `src/compiler_rust/native_all/src/lib.rs`
+- Rebuilt `simple-driver` and `simple-native-all`, refreshed the local `bin/simple` target, and verified:
+  - interpreter probe calling `spl_thread_cpu_count()` exits 0
+  - rust-hosted native build of the same probe exits 0
+  - native probe binary exits 0
+  - native symbol table exports `spl_thread_cpu_count`
+- Fixed `src/lib/common/science_math/perf_sugar.spl` direct checker failure by removing a blank `///` separator before an extern declaration; recorded the parser bug in `doc/09_bugs/doc_comment_extern_parse_2026-05-21.md`.
+- `bin/simple check src/lib/common/science_math/perf_sugar.spl` passes and `test/feature/scilib/perf_sugar_spec.spl` passes.
+- Full `bin/simple check src/lib` still fails on unrelated library syntax/check issues; no process leaks occurred.
+- Additional bounded probes all completed without kill/leak:
+  - `llm_process_gen_spec.spl`: normal assertion failures.
+  - `spawn_via_manifest_test.spl`: passed.
+  - `direction_b_import_roundtrip_spec.spl`: normal failure.
+  - `direction_a_cpp_roundtrip_spec.spl`: normal undefined `cuModuleLoadData` link failure.
+  - `qemu_rv32_raw_injected_regression_spec.spl`: passed expected regression handling.
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
+
+**Fourth bounded crash-scope wave:**
+- Started with no active/zombie `simple` processes, no tracked running tests, and the same 17 May 20 zero-count crashed runs.
+- Probed the changed VHDL/RV64/SoC area.
+- Found and killed a leaked process tree from `soc_top_64_spec.spl`: live `bin/simple test`, pegged `simple run`, and one defunct child.
+- Root cause was the test fixture using `soc_top_64_init(0x800_0000)` repeatedly in interpreter mode, forcing huge RAM allocation in `ram64_init`.
+- Fixed `test/unit/lib/hardware/soc_rtl/soc_top_64_spec.spl` to use `SOC64_TEST_DRAM_SIZE = 0x1000` for SoC fixture tests while preserving QEMU virt memory-map constant checks.
+- Replaced affected `to_be_greater_than` assertions with exact checks to avoid the known numeric matcher bug.
+- Direct bounded verification passed with no process leftovers:
+  - `soc_top_64_spec.spl` interpreter
+  - `vhdl_rv64gc_regression_spec.spl` interpreter
+  - `core64_integration_spec.spl` interpreter
+  - `board_memory_map_spec.spl` interpreter
+  - `riscv_noalloc_handoff_vexriscv_spec.spl` interpreter
+  - `soc_top_64_spec.spl` native with `--force-rebuild`
+- Native SoC run exited 0 but still emitted a non-critical wrapped-entry compile-skip warning: `Cannot infer field type: struct 'ANY' field 'ram'`.
+- Changed VHDL/RV64 source checks passed:
+  - `vhdl_backend.spl`, `vhdl_expr.spl`, `vhdl_process.spl`, `vhdl_type_mapper.spl`, `decode.spl`
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.
+
+**Fifth bounded crash-scope wave:**
+- Started with no active/zombie `simple` processes, no tracked running tests, and the same 17 May 20 zero-count crashed runs.
+- Rechecked the remaining rv64-fpga-linux-boot specs with direct bounded real test-runner commands:
+  - `soc_vhdl_gen_rv64_spec.spl`: passed.
+  - `fpga_synthesis_rv64_spec.spl`: passed.
+  - `fpga_boot_linux_spec.spl`: passed.
+  - `k26_kv260_rv64_spec.spl`: passed.
+- Each command left `active_simple=0`, `zombie_simple=0`.
+- This completes direct bounded rechecks for all 9 rv64 feature specs after the SoC large-RAM fixture fix.
+- Restored the empty `doc/test/test_db_runs.sdn.lock` path after cleanup to avoid an unrelated deletion in the worktree.
+- Final process check: `active_simple=0`, `zombie_simple=0`.
+- Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.

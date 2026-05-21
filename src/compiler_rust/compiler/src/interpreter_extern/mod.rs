@@ -1092,6 +1092,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_text_to_upper_ascii", simd::rt_text_to_upper_ascii as ExternFn);
     m.insert("rt_text_validate_utf8", simd::rt_text_validate_utf8 as ExternFn);
     m.insert("rt_thread_available_parallelism", concurrency::rt_thread_available_parallelism as ExternFn);
+    m.insert("spl_thread_cpu_count", concurrency::rt_thread_available_parallelism as ExternFn);
     m.insert("rt_thread_free", concurrency::rt_thread_free as ExternFn);
     m.insert("rt_thread_id", concurrency::rt_thread_id as ExternFn);
     m.insert("rt_thread_is_done", concurrency::rt_thread_is_done as ExternFn);

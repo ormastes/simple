@@ -468,6 +468,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_thread_id",
     "rt_thread_free",
     "rt_thread_available_parallelism",
+    "spl_thread_cpu_count",
     "rt_thread_sleep",
     "rt_thread_yield",
     "rt_thread_spawn_limited",
