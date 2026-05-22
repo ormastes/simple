@@ -235,6 +235,18 @@ pub enum SandboxItem {
     Rule { key: String, value: String, span: Span },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapabilityPolicy {
+    pub name: String,
+    pub items: Vec<CapabilityItem>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CapabilityItem {
+    Rule { key: String, value: String, span: Span },
+}
+
 /// Architecture rule: `forbid pc{...}` or `allow pc{...}`
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArchitectureRule {

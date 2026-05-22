@@ -115,6 +115,17 @@ pub enum HirSandboxItem {
     Rule { key: String, value: String },
 }
 
+#[derive(Debug, Clone)]
+pub struct HirCapabilityPolicy {
+    pub name: String,
+    pub items: Vec<HirCapabilityItem>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HirCapabilityItem {
+    Rule { key: String, value: String },
+}
+
 /// HIR representation of an architecture rule.
 #[derive(Debug, Clone)]
 pub struct HirArchRule {

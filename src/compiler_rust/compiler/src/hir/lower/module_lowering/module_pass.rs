@@ -5,9 +5,9 @@ use simple_parser::{self as ast, Expr, Module, Node};
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    HirAopAdvice, HirArchRule, HirDiBinding, HirDomainBlock, HirImpl, HirInjectGraph, HirInjectItem, HirLeanBlock,
-    HirMockDecl, HirModule, HirSandboxItem, HirSandboxPolicy, HirSecurityGate, HirSecurityItem, HirSecurityPolicy,
-    HirType, TypeId,
+    HirAopAdvice, HirArchRule, HirCapabilityItem, HirCapabilityPolicy, HirDiBinding, HirDomainBlock, HirImpl,
+    HirInjectGraph, HirInjectItem, HirLeanBlock, HirMockDecl, HirModule, HirSandboxItem, HirSandboxPolicy,
+    HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirType, TypeId,
 };
 
 fn try_const_eval(expr: &Expr) -> Option<i64> {
@@ -448,6 +448,21 @@ impl Lowerer {
                             .collect(),
                     });
                 }
+                Node::CapabilityPolicy(policy) => {
+                    self.module.capability_policies.push(HirCapabilityPolicy {
+                        name: policy.name.clone(),
+                        items: policy
+                            .items
+                            .iter()
+                            .map(|item| match item {
+                                ast::CapabilityItem::Rule { key, value, .. } => HirCapabilityItem::Rule {
+                                    key: key.clone(),
+                                    value: value.clone(),
+                                },
+                            })
+                            .collect(),
+                    });
+                }
                 Node::ArchitectureRule(rule) => {
                     self.module.arch_rules.push(HirArchRule {
                         rule_type: match rule.rule_type {
@@ -740,6 +755,7 @@ impl Lowerer {
                 | Node::SecurityPolicy(_)
                 | Node::SecurityGate(_)
                 | Node::SandboxPolicy(_)
+                | Node::CapabilityPolicy(_)
                 | Node::ArchitectureRule(_)
                 | Node::MockDecl(_)
                 | Node::LiteralFunction(_)

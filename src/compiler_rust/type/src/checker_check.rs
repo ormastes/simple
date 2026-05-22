@@ -254,6 +254,7 @@ impl TypeChecker {
                 | Node::SecurityPolicy(_)
                 | Node::SecurityGate(_)
                 | Node::SandboxPolicy(_)
+                | Node::CapabilityPolicy(_)
                 | Node::ArchitectureRule(_)
                 | Node::MockDecl(_) => {
                     // AOP nodes are declarative and don't introduce type bindings

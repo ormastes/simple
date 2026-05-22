@@ -368,7 +368,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     }),
                 );
             }
-            Node::SecurityPolicy(_) | Node::SecurityGate(_) | Node::SandboxPolicy(_) => {}
+            Node::SecurityPolicy(_) | Node::SecurityGate(_) | Node::SandboxPolicy(_) | Node::CapabilityPolicy(_) => {}
             _ => {}
         }
     }
@@ -1379,6 +1379,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::SecurityPolicy(_)
             | Node::SecurityGate(_)
             | Node::SandboxPolicy(_)
+            | Node::CapabilityPolicy(_)
             | Node::ArchitectureRule(_)
             | Node::MockDecl(_)
             | Node::LeanBlock(_)

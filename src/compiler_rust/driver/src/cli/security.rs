@@ -59,6 +59,10 @@ pub fn run_security(args: &[String]) -> i32 {
             print!("{}", inventory.sandbox_manifest_sdn);
             0
         }
+        "capability-manifest" => {
+            print!("{}", inventory.capability_manifest_sdn);
+            0
+        }
         "aspects" => {
             print!("{}", inventory.security_aspects_spl);
             0
@@ -99,6 +103,7 @@ fn build_inventory_for_files(files: &[PathBuf]) -> Result<simple_compiler::Secur
     let mut access_matrix_sdn = String::new();
     let mut security_aspects_spl = String::new();
     let mut security_aop_sdn = String::new();
+    let mut capability_manifest_sdn = String::new();
     let mut sandbox_manifest_sdn = String::new();
     let mut violations_sdn = String::new();
     let mut source_files = Vec::new();
@@ -121,6 +126,7 @@ fn build_inventory_for_files(files: &[PathBuf]) -> Result<simple_compiler::Secur
         append_section(&mut access_matrix_sdn, file, &inventory.access_matrix_sdn);
         append_section(&mut security_aspects_spl, file, &inventory.security_aspects_spl);
         append_section(&mut security_aop_sdn, file, &inventory.security_aop_sdn);
+        append_section(&mut capability_manifest_sdn, file, &inventory.capability_manifest_sdn);
         append_section(&mut sandbox_manifest_sdn, file, &inventory.sandbox_manifest_sdn);
         append_section(&mut violations_sdn, file, &inventory.violations_sdn);
         modules.push(module);
@@ -137,6 +143,7 @@ fn build_inventory_for_files(files: &[PathBuf]) -> Result<simple_compiler::Secur
         access_matrix_sdn,
         security_aspects_spl,
         security_aop_sdn,
+        capability_manifest_sdn,
         sandbox_manifest_sdn,
         violations_sdn,
     })
@@ -161,6 +168,7 @@ fn write_inventory(output_dir: &Path, inventory: &simple_compiler::SecurityInven
         ("access_matrix.generated.sdn", &inventory.access_matrix_sdn),
         ("security_aspects.generated.spl", &inventory.security_aspects_spl),
         ("security_aop.generated.sdn", &inventory.security_aop_sdn),
+        ("capability_manifest.sdn", &inventory.capability_manifest_sdn),
         ("sandbox_manifest.sdn", &inventory.sandbox_manifest_sdn),
         ("violations.sdn", &inventory.violations_sdn),
     ];
@@ -183,6 +191,7 @@ fn print_usage() {
     eprintln!("  simple security matrix <file.spl>...");
     eprintln!("  simple security aspects <file.spl>...");
     eprintln!("  simple security aop-lowering <file.spl>...");
+    eprintln!("  simple security capability-manifest <file.spl>...");
     eprintln!("  simple security sandbox-manifest <file.spl>...");
     eprintln!("  simple security audit-gates <file.spl>...");
     eprintln!("  simple security violations <file.spl>...");

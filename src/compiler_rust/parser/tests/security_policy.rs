@@ -65,3 +65,23 @@ sandbox admin_sandbox:
     assert_eq!(sandbox.name, "admin_sandbox");
     assert!(matches!(&sandbox.items[0], SandboxItem::Backend { name, .. } if name == "auto"));
 }
+
+#[test]
+fn parses_native_capability_policy() {
+    let items = parse_items(
+        r#"capability ReadReports:
+    resource Dir
+    actions [read]
+    scope path starts_with "/reports"
+"#,
+    );
+
+    let Node::CapabilityPolicy(capability) = &items[0] else {
+        panic!("expected capability policy");
+    };
+    assert_eq!(capability.name, "ReadReports");
+    assert_eq!(capability.items.len(), 3);
+    assert!(
+        matches!(&capability.items[0], CapabilityItem::Rule { key, value, .. } if key == "resource" && value == "Dir")
+    );
+}

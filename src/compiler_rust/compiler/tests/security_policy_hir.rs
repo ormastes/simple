@@ -1,4 +1,4 @@
-use simple_compiler::hir::{self, HirSandboxItem, HirSecurityItem};
+use simple_compiler::hir::{self, HirCapabilityItem, HirSandboxItem, HirSecurityItem};
 use simple_compiler::security::{
     build_security_inventory, infer_security_coordinate, lower_security_to_aop, source_security_violations_sdn,
     security_metadata_id, source_security_violations_sdn_with_module, SecurityAdviceStep, SecuritySourceFile,
@@ -315,5 +315,51 @@ fn reports_sec401_for_raw_ambient_authority_apis() {
     let violations = source_security_violations_sdn(&files);
     assert!(violations.contains("code: SEC401"));
     assert!(violations.contains("File.open"));
-    assert!(violations.contains("object-capability handle"));
+    assert!(violations.contains("ReadFile or WriteFile"));
+    assert!(violations.contains("EnvVar"));
+}
+
+#[test]
+fn lowers_capability_policy_and_renders_manifest() {
+    let module = lower(
+        r#"capability ReadReports:
+    resource Dir
+    actions [read]
+    scope path starts_with "/reports"
+
+security gate PluginGate:
+    from trust app
+    to trust plugin
+    grant:
+        ReadReports
+"#,
+    );
+
+    assert_eq!(module.capability_policies.len(), 1);
+    assert_eq!(module.capability_policies[0].name, "ReadReports");
+    assert!(matches!(
+        &module.capability_policies[0].items[0],
+        HirCapabilityItem::Rule { key, value } if key == "resource" && value == "Dir"
+    ));
+
+    let inventory = build_security_inventory(&module);
+    assert!(inventory.capability_manifest_sdn.contains("ReadReports"));
+    assert!(inventory.capability_manifest_sdn.contains("resource: Dir"));
+    assert!(inventory.violations_sdn.contains("[]"));
+}
+
+#[test]
+fn reports_unknown_gate_capability_grant() {
+    let module = lower(
+        r#"security gate PluginGate:
+    from trust app
+    to trust plugin
+    grant:
+        RootShell
+"#,
+    );
+
+    let inventory = build_security_inventory(&module);
+    assert!(inventory.violations_sdn.contains("SEC_CAPABILITY_UNKNOWN"));
+    assert!(inventory.violations_sdn.contains("RootShell"));
 }

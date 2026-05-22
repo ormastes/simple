@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
 use crate::hir::{
-    HirAopAdvice, HirArchRule, HirModule, HirSandboxItem, HirSecurityGate, HirSecurityItem, HirSecurityPolicy,
+    HirAopAdvice, HirArchRule, HirCapabilityItem, HirModule, HirSandboxItem, HirSecurityGate, HirSecurityItem,
+    HirSecurityPolicy,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,6 +12,7 @@ pub struct SecurityInventory {
     pub access_matrix_sdn: String,
     pub security_aspects_spl: String,
     pub security_aop_sdn: String,
+    pub capability_manifest_sdn: String,
     pub sandbox_manifest_sdn: String,
     pub violations_sdn: String,
 }
@@ -112,14 +114,20 @@ pub fn build_security_inventory(module: &HirModule) -> SecurityInventory {
         .iter()
         .map(|sandbox| sandbox.name.clone())
         .collect();
+    let capability_names: BTreeSet<String> = module
+        .capability_policies
+        .iter()
+        .map(|capability| capability.name.clone())
+        .collect();
 
     SecurityInventory {
         gate_inventory_md: render_gate_inventory(&gates),
         access_matrix_sdn: render_access_matrix(&module.security_policies),
         security_aspects_spl: render_security_aspects(&module.security_policies, &gates),
         security_aop_sdn: render_security_aop_lowering(&lower_security_to_aop(module)),
+        capability_manifest_sdn: render_capability_manifest(module),
         sandbox_manifest_sdn: render_sandbox_manifest(module, &gates),
-        violations_sdn: render_violations(&gates, &gate_names, &sandbox_names),
+        violations_sdn: render_violations(&gates, &gate_names, &sandbox_names, &capability_names),
     }
 }
 
@@ -360,8 +368,11 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
                 out.push_str("    message: raw ambient authority API used without an explicit capability handle\n");
                 out.push_str(&format!("    file: {}\n", file.path));
                 out.push_str(&format!("    line: {}\n", line_no + 1));
-                out.push_str(&format!("    api: {}\n", api));
-                out.push_str("    required: inject a narrowed object-capability handle such as ReadDir, WriteDir, NetworkEndpoint, EnvVar, or AuditLog\n");
+                out.push_str(&format!("    api: {}\n", api.name));
+                out.push_str(&format!(
+                    "    required: inject narrowed capability handle {}\n",
+                    api.required
+                ));
             }
         }
     }
@@ -590,12 +601,42 @@ fn is_security_observation(source: &str, line_no: usize) -> bool {
         .any(|line| line.trim() == "@security_observation")
 }
 
-fn raw_ambient_api(line: &str) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy)]
+struct RawAmbientApi {
+    name: &'static str,
+    required: &'static str,
+}
+
+fn raw_ambient_api(line: &str) -> Option<RawAmbientApi> {
     let apis = [
-        ("File.open", "File.open"),
-        ("Network.connect", "Network.connect"),
-        ("Env.get", "Env.get"),
-        ("Process.spawn", "Process.spawn"),
+        (
+            "File.open",
+            RawAmbientApi {
+                name: "File.open",
+                required: "ReadFile or WriteFile",
+            },
+        ),
+        (
+            "Network.connect",
+            RawAmbientApi {
+                name: "Network.connect",
+                required: "NetworkEndpoint",
+            },
+        ),
+        (
+            "Env.get",
+            RawAmbientApi {
+                name: "Env.get",
+                required: "EnvVar",
+            },
+        ),
+        (
+            "Process.spawn",
+            RawAmbientApi {
+                name: "Process.spawn",
+                required: "ProcessSpawner",
+            },
+        ),
     ];
     apis.iter()
         .find_map(|(pattern, api)| line.contains(pattern).then_some(*api))
@@ -903,10 +944,34 @@ fn render_sandbox_manifest(module: &HirModule, gates: &[HirSecurityGate]) -> Str
     out
 }
 
+fn render_capability_manifest(module: &HirModule) -> String {
+    let mut out = String::from("capability_manifest:\n");
+    if module.capability_policies.is_empty() {
+        out.push_str("  builtin:\n");
+        for capability in builtin_capability_handles() {
+            out.push_str(&format!("    - {}\n", capability));
+        }
+        return out;
+    }
+    for capability in &module.capability_policies {
+        out.push_str(&format!("  {}:\n", capability.name));
+        if capability.items.is_empty() {
+            out.push_str("    rules: []\n");
+        }
+        for item in &capability.items {
+            match item {
+                HirCapabilityItem::Rule { key, value } => out.push_str(&format!("    {}: {}\n", key, value)),
+            }
+        }
+    }
+    out
+}
+
 fn render_violations(
     gates: &[HirSecurityGate],
     _gate_names: &BTreeSet<String>,
     sandbox_names: &BTreeSet<String>,
+    capability_names: &BTreeSet<String>,
 ) -> String {
     let mut out = String::from("security_violations:\n");
     let mut count = 0;
@@ -924,9 +989,43 @@ fn render_violations(
             out.push_str("  - code: SEC_GATE_INCOMPLETE_BOUNDARY\n");
             out.push_str(&format!("    gate: {}\n", gate.name));
         }
+        for grant in &gate.grants {
+            let handle = capability_handle_name(grant);
+            if !is_builtin_capability_handle(handle) && !capability_names.contains(handle) {
+                count += 1;
+                out.push_str("  - code: SEC_CAPABILITY_UNKNOWN\n");
+                out.push_str(&format!("    gate: {}\n", gate.name));
+                out.push_str(&format!("    grant: {}\n", grant));
+                out.push_str("    required: declare capability or use a built-in native capability handle\n");
+            }
+        }
     }
     if count == 0 {
         out.push_str("  []\n");
     }
     out
+}
+
+fn capability_handle_name(grant: &str) -> &str {
+    grant
+        .split_once('[')
+        .map(|(name, _)| name.trim())
+        .unwrap_or_else(|| grant.trim())
+}
+
+fn is_builtin_capability_handle(name: &str) -> bool {
+    builtin_capability_handles().contains(&name)
+}
+
+fn builtin_capability_handles() -> &'static [&'static str] {
+    &[
+        "ReadDir",
+        "WriteDir",
+        "ReadFile",
+        "WriteFile",
+        "NetworkEndpoint",
+        "EnvVar",
+        "AuditLog",
+        "ProcessSpawner",
+    ]
 }

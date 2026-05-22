@@ -766,6 +766,7 @@ Current compiler-front-end slice:
    - `access_matrix.generated.sdn`
    - `security_aspects.generated.spl`
    - `security_aop.generated.sdn`
+   - `capability_manifest.sdn`
    - `sandbox_manifest.sdn`
    - `violations.sdn`
 5. `simple security check` writes the security artifacts under `build/security/` or an explicit `--out` directory.
@@ -783,10 +784,11 @@ Current compiler-front-end slice:
 17. The runtime now has explicit policy and sandbox registries keyed by those metadata IDs. Policy lookup defaults to allowed unless a policy is explicitly denied, preserving zero-config convention behavior while still letting generated/project config harden selected gates.
 18. `SEC201` now builds a structured source import/call feature graph instead of emitting directly from line scanning. It applies declared `allow ... through` and `deny ... except` gate rules to diagnostics, reports whether the edge is an import or call, and allows cross-feature `port` imports while still rejecting direct privileged calls.
 19. The weaver no longer emits `audit_failure` as part of the normal linear success path for generated security gate advice. Failure audit remains in the advice plan, but needs MIR error-edge routing before it is materialized.
+20. `capability Name:` is parsed and lowered as a first-class native object-capability declaration. `simple security check` now writes `capability_manifest.sdn`, gate grants are validated against declared or built-in capability handles, and `SEC401` recommends the specific narrowed handle family for each raw ambient API.
 
 Remaining implementation order:
 
 1. Replace the source-level `SEC201` graph with the compiler-resolved import/call graph so gate exceptions are checked against resolved symbols instead of naming conventions.
 2. Replace heuristic `SEC301` and `SEC401` scanning with typed semantic checks over resolved calls and sandbox/plugin coordinates.
-3. Add the native object-capability handle type model and standard library replacements for raw file/network/env/process access.
+3. Add standard library replacements for raw file/network/env/process APIs and move `SEC401` from source scanning to typed capability-handle checks over resolved calls.
 4. Route real MIR failure edges to `audit_failure` and load generated project policy/sandbox registries from security artifacts during startup.

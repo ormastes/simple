@@ -429,6 +429,8 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
         let is_inject_graph_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "inject")
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
+        let is_capability_policy_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "capability")
+            && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
 
         match &self.current.kind {
             // Route @ and legacy #[...] to attributed_item.
@@ -651,6 +653,9 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Identifier { name, .. } if name == "sandbox" => {
                 self.parse_sandbox_policy().map(Node::SandboxPolicy)
+            }
+            TokenKind::Identifier { .. } if is_capability_policy_decl => {
+                self.parse_capability_policy().map(Node::CapabilityPolicy)
             }
             TokenKind::Bind => {
                 // Disambiguate between:
