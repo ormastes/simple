@@ -922,7 +922,9 @@ impl NativeProjectBuilder {
 {loader_decl}
 static const unsigned char SIMPLE_SECURITY_REGISTRY_SDN[] = R"SECURITY_SDN({escaped})SECURITY_SDN";
 extern "C" void __module_init_security_registry(void) {{
-    rt_security_load_registry_sdn(SIMPLE_SECURITY_REGISTRY_SDN, sizeof(SIMPLE_SECURITY_REGISTRY_SDN) - 1);
+    if (rt_security_load_registry_sdn) {{
+        rt_security_load_registry_sdn(SIMPLE_SECURITY_REGISTRY_SDN, sizeof(SIMPLE_SECURITY_REGISTRY_SDN) - 1);
+    }}
 }}
 "#
         );
@@ -955,7 +957,10 @@ extern "C" void __module_init_security_registry(void) {{
 }
 
 fn source_may_declare_security(source: &str) -> bool {
-    source.contains("security ") || source.contains("security gate") || source.contains("\nsandbox ")
+    source.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("security ") || trimmed.starts_with("sandbox ") || trimmed.starts_with("capability ")
+    })
 }
 
 fn cxx_raw_string_literal(value: &str) -> String {
