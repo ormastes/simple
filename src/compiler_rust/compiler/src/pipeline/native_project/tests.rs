@@ -220,6 +220,18 @@ fn test_module_prefix_from_path() {
 }
 
 #[test]
+fn test_security_registry_init_source_filters_and_escapes() {
+    assert!(source_may_declare_security(
+        "security gate UserAdminGate:\n    from feature user\n"
+    ));
+    assert!(source_may_declare_security("security AppSecurity:\n    default deny\n"));
+    assert!(!source_may_declare_security("class UserService:\n    pass\n"));
+
+    let escaped = cxx_raw_string_literal("before )SECURITY_SDN\" after");
+    assert!(!escaped.contains(")SECURITY_SDN\""));
+}
+
+#[test]
 fn test_collect_spl_files() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();

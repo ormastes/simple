@@ -30,7 +30,10 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use simple_parser::Parser;
+
 use crate::optimizations::NativeOptimizationLevel;
+use crate::security::build_security_inventory;
 use crate::stdlib_variant::active_simd_tier_name;
 
 /// Initialize the rayon global thread pool with appropriate stack size and
@@ -51,18 +54,15 @@ fn init_rayon_pool(config: &NativeBuildConfig) {
     use std::sync::Once;
     static POOL_INIT: Once = Once::new();
 
-    let num_threads = config.num_threads
+    let num_threads = config
+        .num_threads
         .or_else(|| {
             std::env::var("SIMPLE_BOOTSTRAP_THREADS")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|&n| n > 0)
         })
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        });
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
 
     let stack_size = config.stack_size;
 
@@ -676,8 +676,13 @@ impl NativeProjectBuilder {
             // Only abort if compiler-critical files failed (src/compiler/, src/app/)
             // Exclude non-essential app modules (dashboards, examples)
             let non_critical = [
-                "llm_dashboard", "web_dashboard", "obsidian", "korean_stock",
-                "theme_sync", "90.tools", "cli_commands_part1",
+                "llm_dashboard",
+                "web_dashboard",
+                "obsidian",
+                "korean_stock",
+                "theme_sync",
+                "90.tools",
+                "cli_commands_part1",
             ];
             let critical_failures: Vec<_> = failures
                 .iter()
@@ -725,8 +730,13 @@ impl NativeProjectBuilder {
             // Only abort if compiler-critical files failed (src/compiler/, src/app/)
             // Exclude non-essential app modules (dashboards, examples)
             let non_critical = [
-                "llm_dashboard", "web_dashboard", "obsidian", "korean_stock",
-                "theme_sync", "90.tools", "cli_commands_part1",
+                "llm_dashboard",
+                "web_dashboard",
+                "obsidian",
+                "korean_stock",
+                "theme_sync",
+                "90.tools",
+                "cli_commands_part1",
             ];
             let critical_failures: Vec<_> = failures
                 .iter()
@@ -760,6 +770,10 @@ impl NativeProjectBuilder {
 
         if object_paths.is_empty() {
             return Err(format!("All {0} files failed to compile", files.len()));
+        }
+
+        if let Some(security_registry_o) = self.generate_security_registry_init_object(&temp_dir_path, &file_sources)? {
+            object_paths.push(security_registry_o);
         }
 
         // 6. Cache freshly compiled objects
@@ -860,6 +874,92 @@ impl NativeProjectBuilder {
             Err(format!("archive failed ({}): {}", ar, stderr))
         }
     }
+
+    fn generate_security_registry_init_object(
+        &self,
+        temp_dir: &Path,
+        file_sources: &[(PathBuf, String)],
+    ) -> Result<Option<PathBuf>, String> {
+        if !effective_target().is_host() {
+            return Ok(None);
+        }
+        let mut registry_sdn = String::new();
+        for (path, source) in file_sources {
+            if !source_may_declare_security(source) {
+                continue;
+            }
+            let mut parser = Parser::new(source);
+            let ast = parser
+                .parse()
+                .map_err(|err| format!("parse security registry source {}: {}", path.display(), err))?;
+            let module = crate::hir::lower(&ast)
+                .map_err(|err| format!("lower security registry source {}: {}", path.display(), err))?;
+            let inventory = build_security_inventory(&module);
+            if inventory.security_aop_sdn.contains("require_policy:")
+                || inventory.security_aop_sdn.contains("enter_sandbox:")
+            {
+                registry_sdn.push_str("# source: ");
+                registry_sdn.push_str(&path.display().to_string());
+                registry_sdn.push('\n');
+                registry_sdn.push_str(&inventory.security_aop_sdn);
+                registry_sdn.push('\n');
+            }
+        }
+        if registry_sdn.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let cxx = tools::find_cxx_compiler();
+        let is_clang_cl = cxx.contains("clang-cl");
+        let escaped = cxx_raw_string_literal(&registry_sdn);
+        let loader_decl = if is_clang_cl {
+            r#"extern "C" unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long);"#
+        } else {
+            r#"extern "C" unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long) __attribute__((weak));"#
+        };
+        let source = format!(
+            r#"
+{loader_decl}
+static const unsigned char SIMPLE_SECURITY_REGISTRY_SDN[] = R"SECURITY_SDN({escaped})SECURITY_SDN";
+extern "C" void __module_init_security_registry(void) {{
+    rt_security_load_registry_sdn(SIMPLE_SECURITY_REGISTRY_SDN, sizeof(SIMPLE_SECURITY_REGISTRY_SDN) - 1);
+}}
+"#
+        );
+        let source_path = temp_dir.join("_security_registry_init.cpp");
+        std::fs::write(&source_path, source).map_err(|e| format!("write security registry init: {e}"))?;
+
+        let object_path = temp_dir.join("_security_registry_init.o");
+        let status = if is_clang_cl {
+            std::process::Command::new(&cxx)
+                .arg("/c")
+                .arg("/O2")
+                .arg("/Gy")
+                .arg(format!("/Fo{}", object_path.display()))
+                .arg(&source_path)
+                .status()
+                .map_err(|e| format!("compile security registry init: {e}"))?
+        } else {
+            std::process::Command::new(&cxx)
+                .args(["-c", "-O2", "-ffunction-sections", "-fdata-sections", "-o"])
+                .arg(&object_path)
+                .arg(&source_path)
+                .status()
+                .map_err(|e| format!("compile security registry init: {e}"))?
+        };
+        if !status.success() {
+            return Err(format!("compile security registry init failed ({})", cxx));
+        }
+        Ok(Some(object_path))
+    }
+}
+
+fn source_may_declare_security(source: &str) -> bool {
+    source.contains("security ") || source.contains("security gate") || source.contains("\nsandbox ")
+}
+
+fn cxx_raw_string_literal(value: &str) -> String {
+    value.replace(")SECURITY_SDN\"", ")SECURITY_SDN_\"")
 }
 
 /// Check if a file path matches the canonical entry file path.
