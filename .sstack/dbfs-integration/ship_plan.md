@@ -54,8 +54,8 @@ grep -nE 'arena_append.*DB_WAL|wal_handle' \
 # Checkpoint ring persists durably (R2)
 grep -nE 'arena_append.*META_DURABLE' \
   /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/db/dbfs_engine/checkpoint_ring.spl
-# spostgre coupling absent (R8)
-grep -Rn 'use .*spostgre' \
+# Simple DB coupling absent (R8)
+grep -Rn 'use .*simple_db' \
   /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/db/dbfs_engine/
 # expected: ZERO matches
 ```

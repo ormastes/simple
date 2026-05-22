@@ -279,7 +279,10 @@ pub(crate) fn handle_method_call_with_self_update(
                     if real_idx >= 0 && real_idx < len {
                         let elem = arr[real_idx as usize].clone();
                         match elem {
-                            Value::Object { class: obj_class, fields: obj_fields } => {
+                            Value::Object {
+                                class: obj_class,
+                                fields: obj_fields,
+                            } => {
                                 if let Some((result, updated_elem)) = find_and_exec_method_with_self(
                                     method,
                                     args,

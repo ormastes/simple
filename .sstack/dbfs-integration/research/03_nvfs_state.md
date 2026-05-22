@@ -8,7 +8,7 @@
 - `api.spl` — re-exports `Arena`, `ArenaHandle`, `ArenaAppendResult` from `std.storage.arena`
 - `extent_map.spl` — `ExtentMapEntry` struct + `ExtentMap` trait (lookup/insert/truncate/total_length)
 - `superblock_if.spl` — `SuperblockHeader` struct + `SuperblockReader` trait (read_header/is_mounted/last_checkpoint_generation)
-- `__init__.spl` — module docstring; note: "spostgre and other storage consumers need the SAME Arena trait"
+- `__init__.spl` — module docstring; note: "Simple DB and other storage consumers need the SAME Arena trait"
 
 **POSIX shim** (`src/lib/nogc_sync_mut/fs/nvfs_posix/`):
 - `cow_engine.spl` — `CowShadow` struct + `CowShadowOps` trait (new/splice/commit)

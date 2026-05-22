@@ -9,7 +9,8 @@ use crate::value_bridge::{runtime_to_value, value_to_runtime};
 use simple_runtime::value::aes::{
     aes128_decrypt_one_block, aes128_encrypt_one_block, aes128_gcm_decrypt_bytes, aes128_gcm_encrypt_bytes,
     aes256_encrypt_one_block, aes256_gcm_decrypt_bytes, aes256_gcm_encrypt_bytes, decrypt_block_with_expanded_bytes,
-    encrypt_block_with_expanded_bytes, rt_aes_rcon as sffi_aes_rcon, rt_aes_sbox as sffi_aes_sbox, AesGcmDecryptOutcome,
+    encrypt_block_with_expanded_bytes, rt_aes_rcon as sffi_aes_rcon, rt_aes_sbox as sffi_aes_sbox,
+    AesGcmDecryptOutcome,
 };
 use simple_runtime::value::simd::{
     rt_simd_detect_profile as sffi_detect_profile, rt_simd_has_avx as sffi_has_avx, rt_simd_has_avx2 as sffi_has_avx2,
@@ -1250,7 +1251,10 @@ fn pack_vec4u64(lanes: [u64; 4]) -> Value {
     for (i, fname) in VEC4U64_FIELDS.iter().enumerate() {
         fields.insert(
             fname.to_string(),
-            Value::UInt { value: lanes[i], width: 64 },
+            Value::UInt {
+                value: lanes[i],
+                width: 64,
+            },
         );
     }
     Value::Object {
@@ -1276,13 +1280,20 @@ where
     F: Fn([u64; 4], u32) -> [u64; 4],
 {
     if args.len() != 2 {
-        return Err(CompileError::runtime(format!("{name} expects 2 arguments (vec, shift)")));
+        return Err(CompileError::runtime(format!(
+            "{name} expects 2 arguments (vec, shift)"
+        )));
     }
     let a = unpack_vec4u64(name, &args[0])?;
     let shift = match &args[1] {
         Value::Int(n) => *n as u32,
         Value::UInt { value, .. } => *value as u32,
-        other => return Err(CompileError::runtime(format!("{name}: shift must be integer, got {:?}", other))),
+        other => {
+            return Err(CompileError::runtime(format!(
+                "{name}: shift must be integer, got {:?}",
+                other
+            )))
+        }
     };
     Ok(pack_vec4u64(op(a, shift)))
 }
@@ -1342,12 +1353,22 @@ pub fn rt_simd_vec4u64_get(args: &[Value]) -> Result<Value, CompileError> {
     let idx = match &args[1] {
         Value::Int(n) => *n as usize,
         Value::UInt { value, .. } => *value as usize,
-        other => return Err(CompileError::runtime(format!("rt_simd_vec4u64_get: index must be integer, got {:?}", other))),
+        other => {
+            return Err(CompileError::runtime(format!(
+                "rt_simd_vec4u64_get: index must be integer, got {:?}",
+                other
+            )))
+        }
     };
     if idx >= 4 {
-        return Err(CompileError::runtime(format!("rt_simd_vec4u64_get: index {idx} out of range 0..4")));
+        return Err(CompileError::runtime(format!(
+            "rt_simd_vec4u64_get: index {idx} out of range 0..4"
+        )));
     }
-    Ok(Value::UInt { value: lanes[idx], width: 64 })
+    Ok(Value::UInt {
+        value: lanes[idx],
+        width: 64,
+    })
 }
 
 pub fn rt_db_accel_bitmap_and_words(args: &[Value]) -> Result<Value, CompileError> {

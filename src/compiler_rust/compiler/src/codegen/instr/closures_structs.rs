@@ -549,7 +549,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
             } else {
                 std::borrow::Cow::Borrowed(resolved)
             };
-            let is_free_fn = ctx.fn_arities.get(resolved.as_ref())
+            let is_free_fn = ctx
+                .fn_arities
+                .get(resolved.as_ref())
                 .map(|&arity| arity == args.len())
                 .unwrap_or(false);
             let fid = ctx.func_ids.get(resolved.as_ref()).copied().unwrap_or_else(|| {
@@ -572,11 +574,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         sig2.returns.push(AbiParam::new(types::I64));
                         ctx.module.declare_function(&resolved, Linkage::Import, &sig2)
                     })
-                    .unwrap_or_else(|_| {
-                        match ctx.module.get_name(&resolved) {
-                            Some(cranelift_module::FuncOrDataId::Func(id)) => id,
-                            _ => ctx.runtime_funcs["rt_function_not_found"],
-                        }
+                    .unwrap_or_else(|_| match ctx.module.get_name(&resolved) {
+                        Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+                        _ => ctx.runtime_funcs["rt_function_not_found"],
                     });
                 ctx.func_ids.insert(resolved.to_string(), id);
                 id
@@ -908,7 +908,10 @@ fn try_compile_builtin_method_call<M: Module>(
             sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
         }
         sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        match ctx.module.declare_function(runtime_func, cranelift_module::Linkage::Import, &sig) {
+        match ctx
+            .module
+            .declare_function(runtime_func, cranelift_module::Linkage::Import, &sig)
+        {
             Ok(fid) => {
                 ctx.func_ids.insert(runtime_func.to_string(), fid);
                 fid

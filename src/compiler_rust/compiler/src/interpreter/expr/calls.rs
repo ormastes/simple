@@ -132,12 +132,22 @@ pub(super) fn eval_call_expr(
                         Value::Int(i) => *i,
                         Value::UInt { value, .. } => *value as i64,
                         _ => {
-                            return Ok(Some(evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?));
+                            return Ok(Some(evaluate_method_call(
+                                receiver,
+                                method,
+                                args,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?));
                         }
                     };
-                    let arr_val = env.get(arr_name).cloned().or_else(|| {
-                        super::super::MODULE_GLOBALS.with(|cell| cell.borrow().get(arr_name).cloned())
-                    });
+                    let arr_val = env
+                        .get(arr_name)
+                        .cloned()
+                        .or_else(|| super::super::MODULE_GLOBALS.with(|cell| cell.borrow().get(arr_name).cloned()));
                     if let Some(Value::Array(arr)) = arr_val {
                         let len = arr.len() as i64;
                         let real_idx = if idx < 0 { len + idx } else { idx };
@@ -172,7 +182,16 @@ pub(super) fn eval_call_expr(
                     }
                 }
                 // Fall through to regular method call
-                Ok(Some(evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?))
+                Ok(Some(evaluate_method_call(
+                    receiver,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?))
             } else {
                 // For other expressions (like temporaries), use regular method call
                 Ok(Some(evaluate_method_call(

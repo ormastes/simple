@@ -1374,11 +1374,12 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
 
     // Reject deprecated `std.ffi` — must use `std.sffi` instead
     if parts.len() >= 2 && parts[0] == "std" && parts[1] == "ffi" {
+        eprintln!("\x1b[31merror\x1b[0m: `use std.ffi` is deprecated — use `use std.sffi` instead");
         eprintln!(
-            "\x1b[31merror\x1b[0m: `use std.ffi` is deprecated — use `use std.sffi` instead"
+            "  hint: rename `std.ffi.{}` → `std.sffi.{}`",
+            parts[2..].join("."),
+            parts[2..].join(".")
         );
-        eprintln!("  hint: rename `std.ffi.{}` → `std.sffi.{}`",
-            parts[2..].join("."), parts[2..].join("."));
         if std::env::var("SIMPLE_STRICT_SFFI").is_ok() {
             std::process::exit(1);
         }

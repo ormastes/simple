@@ -252,10 +252,10 @@ input.
 
 **Failure scenario.** Ship-day - 2 days (during Phase 8). A reviewer runs
 `jj git push` after the parallel Phase 5 agent finishes. The push lands but
-the next CI run fails with "submodule examples/spostgre is missing". jj
+the next CI run fails with "submodule examples/simple_db is missing". jj
 re-snapshotted the gitlink as a 040000 tree on its last reconcile (per
 `feedback_jj_submodule_gitlinks`). The DBFS engine's structural copy of
-spostgre patterns now references upstream files that aren't in the tree.
+Simple DB patterns now references upstream files that aren't in the tree.
 
 **Why mitigation didn't catch it.** Arch R10 mitigation (via memory note) is
 "accept gitlinks-as-tree; commit per-phase immediately." This is a *process*
@@ -263,7 +263,7 @@ mitigation, not a structural one. If any Phase 5 commit lands during a
 parallel /dev session, the flip recurs. No automated check.
 
 **Earliest detectable signal.** A pre-push hook (or CI step) that runs
-`git ls-tree HEAD examples/spostgre` and asserts the result starts with
+`git ls-tree HEAD examples/simple_db` and asserts the result starts with
 `160000` (gitlink) or fails. Currently no such check.
 
 **Counter-mitigation (fits AC-10 doc note).** Add a new section to

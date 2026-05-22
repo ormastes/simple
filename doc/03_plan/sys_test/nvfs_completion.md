@@ -7,7 +7,7 @@ Feature set: remaining unchecked NVFS tracker criteria.
 - `examples/nvfs/test/unit/fs_driver/mount_table_test.spl`
 - `examples/nvfs/test/unit/core/compression_test.spl`
 - `examples/nvfs/test/unit/core/dedup_test.spl`
-- `examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`
+- `examples/simple_db/test/integration/storage/simple_db_nvfs_e2e_test.spl`
 
 ## Acceptance Coverage
 
@@ -15,4 +15,4 @@ Feature set: remaining unchecked NVFS tracker criteria.
 - Compression round-trip, SLO helpers, and pmap upgrade helper pass.
 - Dedup DDT metadata, stats, cache defaults, refcount GC, and DHK-keyed hash
   behavior pass.
-- spostgre WAL bytes route through MountTable + RamFsDriver.
+- Simple DB WAL bytes route through MountTable + RamFsDriver.

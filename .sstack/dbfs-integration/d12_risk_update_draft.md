@@ -46,7 +46,7 @@ when the user reads the architecture doc, otherwise the draft is stale.)
 | R5 | Large-file random overwrite COW amplification | MEDIUM | Random write rewrites one EXTENT_REF per 4K write (worst case); mitigated by extent coalescing in vacuum pass; benchmarked in random_overwrite_bench.spl |
 | R6 | Namespace B-tree key generalization mismatch | MEDIUM | pmap_btree structural copy with DentryKey; btree_spec.spl ports all 3 original tests to new key type; no runtime behavior change |
 | R7 | Power-cut harness complexity (AC-5) | MEDIUM | Harness wraps Arena with fault injection (N-write threshold); simpler than real device testing; interpreter-mode only |
-| R8 | spostgre_if Rel/BlkNo coupling leak | MEDIUM | DbFsEngine defines own Ino/DirEntryKey; never imports spostgre type definitions; enforced by no cross-module import of spostgre types |
+| R8 | simple_db_if Rel/BlkNo coupling leak | MEDIUM | DbFsEngine defines own Ino/DirEntryKey; never imports Simple DB type definitions; enforced by no cross-module import of Simple DB types |
 | R9 | Recovery bugs in orphan reclamation | MEDIUM | arena_discard is idempotent; worst case: disk space not reclaimed, not data corruption; recovery_spec verifies no false-positive discards |
 | R10 | jj submodule gitlink flip during parallel work | LOW | Per memory note: accept gitlinks-as-tree; commit per-phase immediately; no parallel /dev tracks during DBFS phase work |
 | R11 | Stage 2 rt_* extern bootstrap rebuild | LOW | Any new rt_* extern requires full bootstrap (scripts/bootstrap/bootstrap-from-scratch.sh --deploy); documented in implementation handoff |
@@ -233,7 +233,7 @@ question:
 * **R15 vs existing R10 (gitlink flip) and R13 (parallel-/dev submodule race)** —
   distinct mechanism. R10/R13 are about submodule gitlinks; R15 is about plain
   working-copy file edits. Separate memory feedback notes confirm. Do not merge.
-* **R16 vs existing R8 (spostgre coupling)** — different. R8 is about *type*
+* **R16 vs existing R8 (Simple DB coupling)** — different. R8 is about *type*
   coupling at the import boundary; R16 is about *trait conformance proof
   density* (how many impls exercise the conformance suite). Do not merge.
 * **R17 vs existing R6 (B-tree key generalization)** — different. R6 is a

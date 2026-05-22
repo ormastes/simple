@@ -742,23 +742,39 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Option<Result
             }
             9 => {
                 let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
-                f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8])
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8],
+                )
             }
             10 => {
-                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
-                f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                    std::mem::transmute(fptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9],
+                )
             }
             11 => {
-                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
-                f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10])
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                    std::mem::transmute(fptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10],
+                )
             }
             12 => {
-                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
-                f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                    std::mem::transmute(fptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10],
+                    args[11],
+                )
             }
             13 => {
-                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
-                f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12])
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                    std::mem::transmute(fptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10],
+                    args[11], args[12],
+                )
             }
             _ => {
                 return Some(Err(CompileError::runtime(format!(

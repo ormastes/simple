@@ -257,11 +257,8 @@ pub(crate) fn build_import_map(
                         // not function symbols — mark them so declare_globals uses the data path.
                         data_exports.insert(type_mangled);
                         if !c.fields.is_empty() {
-                            let fields: Vec<(String, simple_parser::Type)> = c
-                                .fields
-                                .iter()
-                                .map(|f| (f.name.clone(), f.ty.clone()))
-                                .collect();
+                            let fields: Vec<(String, simple_parser::Type)> =
+                                c.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
                             record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &c.name, fields);
                         }
                         for m in &c.methods {
@@ -315,11 +312,8 @@ pub(crate) fn build_import_map(
                             .push(type_mangled.clone());
                         data_exports.insert(type_mangled);
                         if !s.fields.is_empty() {
-                            let fields: Vec<(String, simple_parser::Type)> = s
-                                .fields
-                                .iter()
-                                .map(|f| (f.name.clone(), f.ty.clone()))
-                                .collect();
+                            let fields: Vec<(String, simple_parser::Type)> =
+                                s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
                             record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &s.name, fields);
                         }
                         for m in &s.methods {
@@ -368,9 +362,7 @@ pub(crate) fn build_import_map(
                             if let Some(ref fields) = v.fields {
                                 let named: Vec<(String, simple_parser::Type)> = fields
                                     .iter()
-                                    .filter_map(|f| {
-                                        f.name.as_ref().map(|n| (n.clone(), f.ty.clone()))
-                                    })
+                                    .filter_map(|f| f.name.as_ref().map(|n| (n.clone(), f.ty.clone())))
                                     .collect();
                                 if !named.is_empty() {
                                     record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &v.name, named);
@@ -626,9 +618,7 @@ fn collect_use_imports(
                 if candidates.len() <= 1 {
                     continue;
                 }
-                if let Some(mangled) =
-                    resolve_import_name_strict(raw_name, &segments, all_mangled, re_exports)
-                {
+                if let Some(mangled) = resolve_import_name_strict(raw_name, &segments, all_mangled, re_exports) {
                     use_map.insert(raw_name.clone(), mangled);
                 }
             }

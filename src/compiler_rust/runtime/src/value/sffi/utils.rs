@@ -81,8 +81,15 @@ mod tests {
     #[test]
     fn test_base64_encode_various() {
         unsafe {
-            let cases = [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"),
-                         ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")];
+            let cases = [
+                ("", ""),
+                ("f", "Zg=="),
+                ("fo", "Zm8="),
+                ("foo", "Zm9v"),
+                ("foob", "Zm9vYg=="),
+                ("fooba", "Zm9vYmE="),
+                ("foobar", "Zm9vYmFy"),
+            ];
             for (input, expected) in cases {
                 let (ptr, len) = str_to_ptr(input);
                 let encoded = rt_base64_encode(ptr, len);
@@ -104,8 +111,15 @@ mod tests {
     #[test]
     fn test_base64_decode_various() {
         unsafe {
-            let cases = [("", ""), ("Zg==", "f"), ("Zm8=", "fo"), ("Zm9v", "foo"),
-                         ("Zm9vYg==", "foob"), ("Zm9vYmE=", "fooba"), ("Zm9vYmFy", "foobar")];
+            let cases = [
+                ("", ""),
+                ("Zg==", "f"),
+                ("Zm8=", "fo"),
+                ("Zm9v", "foo"),
+                ("Zm9vYg==", "foob"),
+                ("Zm9vYmE=", "fooba"),
+                ("Zm9vYmFy", "foobar"),
+            ];
             for (input, expected) in cases {
                 let (ptr, len) = str_to_ptr(input);
                 let decoded = rt_base64_decode(ptr, len);

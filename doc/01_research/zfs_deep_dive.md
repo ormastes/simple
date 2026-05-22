@@ -1,7 +1,7 @@
 # ZFS Deep Dive — Feature Catalogue for NVFS Port
 
 **Status:** Phase 1 research deliverable (2026-04-17).
-**Companion docs:** `doc/01_research/spostgre_research.md`, `doc/05_design/nvfs_design.md`.
+**Companion docs:** `doc/01_research/simple_db_research.md`, `doc/05_design/nvfs_design.md`.
 **Scope:** Research only. No design doc. No code. Feature-by-feature catalogue of ZFS, with a KEEP / ADAPT / SKIP / ATTACH verdict for NVFS at the end of each section and a consolidated translation table in §16.
 
 This document is intentionally dense on primary-source citations because the ZFS literature has drifted; reproducing anything from a blog-of-a-blog is a known trap. When an empirical claim is ambiguous across sources (e.g. DDT RAM sizing, silent-corruption rates), the ambiguity is flagged inline with the word **[AMBIG]** rather than smoothed over.

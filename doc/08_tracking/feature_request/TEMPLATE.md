@@ -17,7 +17,7 @@ Copy this block under `## Open Requests` in the target tracker (e.g.
 - **Acceptance-criteria:**
   - [ ] <observable condition 1>
   - [ ] <observable condition 2>
-- **Related-upfront:** <e.g. `doc/05_design/nvfs/from_spostgre.md §S3`, or `none`>
+- **Related-upfront:** <e.g. `doc/05_design/nvfs/from_simple_db.md §S3`, or `none`>
 - **Related-design-doc:** <e.g. `doc/05_design/nvfs_design.md §4.1`, or `tbd`>
 - **Related-issue:** <github issue URL, or `none`>
 - **Notes:** <optional — blockers, alternatives considered, crash log refs>
@@ -27,7 +27,7 @@ Copy this block under `## Open Requests` in the target tracker (e.g.
 
 - `FR-NVFS-####` — requests targeting NVFS (the NVMe-aware filesystem).
 - `FR-STORAGE-####` — requests targeting the shared `src/lib/nogc_sync_mut/storage/`
-  trait surface (cross-cutting between spostgre / svllm / nvfs).
+  trait surface (cross-cutting between Simple DB / svllm / nvfs).
 - Monotonic per target; do not reuse ids even after a `Rejected`.
 
 ## Lifecycle

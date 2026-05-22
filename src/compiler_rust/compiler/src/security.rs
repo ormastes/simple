@@ -8,6 +8,9 @@ use crate::hir::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityInventory {
+    pub layer_map_sdn: String,
+    pub feature_map_sdn: String,
+    pub gate_map_sdn: String,
     pub gate_inventory_md: String,
     pub access_matrix_sdn: String,
     pub security_aspects_spl: String,
@@ -43,6 +46,7 @@ struct SecurityBoundaryGate {
 struct SecurityFeatureEdge {
     file: String,
     line: usize,
+    from_layer: Option<String>,
     from_feature: String,
     to_feature: String,
     target_layer: Option<String>,
@@ -108,6 +112,8 @@ pub enum SecurityAdviceStep {
     },
 }
 
+const DEFAULT_SECURITY_LAYERS: &[&str] = &["ui", "api", "service", "domain", "port", "infra", "driver", "kernel"];
+
 pub fn build_security_inventory(module: &HirModule) -> SecurityInventory {
     let gates = collect_gates(module);
     let gate_names: BTreeSet<String> = gates.iter().map(|gate| gate.name.clone()).collect();
@@ -123,6 +129,9 @@ pub fn build_security_inventory(module: &HirModule) -> SecurityInventory {
         .collect();
 
     SecurityInventory {
+        layer_map_sdn: String::new(),
+        feature_map_sdn: String::new(),
+        gate_map_sdn: String::new(),
         gate_inventory_md: render_gate_inventory(&gates),
         access_matrix_sdn: render_access_matrix(&module.security_policies),
         security_aspects_spl: render_security_aspects(&module.security_policies, &gates),
@@ -131,6 +140,128 @@ pub fn build_security_inventory(module: &HirModule) -> SecurityInventory {
         sandbox_manifest_sdn: render_sandbox_manifest(module, &gates),
         violations_sdn: render_violations(&gates, &gate_names, &sandbox_names, &capability_names),
     }
+}
+
+pub fn build_security_inventory_for_source(file: &SecuritySourceFile, module: &HirModule) -> SecurityInventory {
+    let gates = convention_enriched_gates(file, module);
+    let gate_names: BTreeSet<String> = gates.iter().map(|gate| gate.name.clone()).collect();
+    let sandbox_names: BTreeSet<String> = module
+        .sandbox_policies
+        .iter()
+        .map(|sandbox| sandbox.name.clone())
+        .collect();
+    let capability_names: BTreeSet<String> = module
+        .capability_policies
+        .iter()
+        .map(|capability| capability.name.clone())
+        .collect();
+
+    SecurityInventory {
+        layer_map_sdn: String::new(),
+        feature_map_sdn: String::new(),
+        gate_map_sdn: build_security_gate_map(std::slice::from_ref(file), std::slice::from_ref(module)),
+        gate_inventory_md: render_gate_inventory(&gates),
+        access_matrix_sdn: render_access_matrix(&module.security_policies),
+        security_aspects_spl: render_security_aspects(&module.security_policies, &gates),
+        security_aop_sdn: render_security_aop_lowering(&lower_security_to_aop(module)),
+        capability_manifest_sdn: render_capability_manifest(module),
+        sandbox_manifest_sdn: render_sandbox_manifest(module, &gates),
+        violations_sdn: render_violations(&gates, &gate_names, &sandbox_names, &capability_names),
+    }
+}
+
+pub fn build_security_maps(files: &[SecuritySourceFile]) -> (String, String) {
+    let mut layer_map = String::from("security_layer_map:\n");
+    let mut feature_map = String::from("security_feature_map:\n");
+    let mut layer_count = 0;
+    let mut feature_count = 0;
+
+    for file in files {
+        let coordinate = infer_security_coordinate(Path::new(&file.path));
+        if let Some(layer) = coordinate.layer.as_deref() {
+            layer_count += 1;
+            layer_map.push_str("  - file: ");
+            layer_map.push_str(&file.path);
+            layer_map.push('\n');
+            layer_map.push_str("    layer: ");
+            layer_map.push_str(layer);
+            layer_map.push('\n');
+            if let Some(feature) = coordinate.feature.as_deref() {
+                layer_map.push_str("    feature: ");
+                layer_map.push_str(feature);
+                layer_map.push('\n');
+            }
+        }
+        if let Some(feature) = coordinate.feature.as_deref() {
+            feature_count += 1;
+            feature_map.push_str("  - feature: ");
+            feature_map.push_str(feature);
+            feature_map.push('\n');
+            feature_map.push_str("    file: ");
+            feature_map.push_str(&file.path);
+            feature_map.push('\n');
+            if let Some(layer) = coordinate.layer.as_deref() {
+                feature_map.push_str("    layer: ");
+                feature_map.push_str(layer);
+                feature_map.push('\n');
+            }
+            if let Some(trust) = coordinate.trust.as_deref() {
+                feature_map.push_str("    trust: ");
+                feature_map.push_str(trust);
+                feature_map.push('\n');
+            }
+            if let Some(runtime) = coordinate.runtime.as_deref() {
+                feature_map.push_str("    runtime: ");
+                feature_map.push_str(runtime);
+                feature_map.push('\n');
+            }
+            if coordinate.security_root {
+                feature_map.push_str("    security_root: true\n");
+            }
+        }
+    }
+
+    if layer_count == 0 {
+        layer_map.push_str("  []\n");
+    }
+    if feature_count == 0 {
+        feature_map.push_str("  []\n");
+    }
+
+    (layer_map, feature_map)
+}
+
+pub fn build_security_gate_map(files: &[SecuritySourceFile], modules: &[HirModule]) -> String {
+    let mut out = String::from("security_gate_map:\n");
+    let mut count = 0;
+    for (file, module) in files.iter().zip(modules) {
+        for gate in convention_enriched_gates(file, module) {
+            count += 1;
+            out.push_str("  - gate: ");
+            out.push_str(&gate.name);
+            out.push('\n');
+            out.push_str("    file: ");
+            out.push_str(&file.path);
+            out.push('\n');
+            if let Some(from) = gate.from.as_deref() {
+                out.push_str("    from: ");
+                out.push_str(from);
+                out.push('\n');
+            }
+            if let Some(to) = gate.to.as_deref() {
+                out.push_str("    to: ");
+                out.push_str(to);
+                out.push('\n');
+            }
+            if convention_gate_boundary_from_path(&file.path).is_some() {
+                out.push_str("    inferred: true\n");
+            }
+        }
+    }
+    if count == 0 {
+        out.push_str("  []\n");
+    }
+    out
 }
 
 pub fn lower_security_to_aop(module: &HirModule) -> SecurityAopLowering {
@@ -294,6 +425,22 @@ pub fn infer_security_coordinate(path: &Path) -> SecurityCoordinate {
         }
     }
 
+    if let Some(src_index) = parts.iter().position(|part| part == "src") {
+        if let Some(layer) = parts.get(src_index + 1).filter(|part| is_conventional_layer(part)) {
+            let feature_parts = path_feature_parts(&parts[(src_index + 2)..]);
+            if !feature_parts.is_empty() {
+                let feature = feature_parts.join(".");
+                return SecurityCoordinate {
+                    trust: Some(infer_trust_dimension(&parts, &feature)),
+                    runtime: infer_runtime_dimension(&parts),
+                    feature: Some(feature),
+                    layer: Some(layer.clone()),
+                    security_root: false,
+                };
+            }
+        }
+    }
+
     SecurityCoordinate {
         feature: None,
         layer: None,
@@ -301,6 +448,19 @@ pub fn infer_security_coordinate(path: &Path) -> SecurityCoordinate {
         runtime: infer_runtime_dimension(&parts),
         security_root: false,
     }
+}
+
+fn path_feature_parts(parts: &[String]) -> Vec<String> {
+    let end = parts
+        .last()
+        .is_some_and(|part| part.rsplit_once('.').is_some())
+        .then_some(parts.len().saturating_sub(1))
+        .unwrap_or(parts.len());
+    parts[..end].to_vec()
+}
+
+fn is_conventional_layer(value: &str) -> bool {
+    DEFAULT_SECURITY_LAYERS.contains(&value)
 }
 
 fn infer_trust_dimension(parts: &[String], feature: &str) -> String {
@@ -352,13 +512,33 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
     let mut out = String::from("security_violations:\n");
     let mut count = 0;
     let known_features = known_features(files);
-    let boundary_gates = collect_boundary_gates(modules);
+    let mut boundary_gates = collect_boundary_gates(modules);
+    boundary_gates.extend(collect_convention_boundary_gates(files, modules));
     let full_lowered_workspace = has_full_lowered_workspace(files, modules);
     let feature_graph = build_security_feature_graph(files, modules, &known_features);
     let hir_authorization_uses = build_hir_authorization_uses(files, modules);
     let hir_ambient_uses = build_hir_ambient_uses(files, modules);
 
     for edge in feature_graph {
+        if edge.to_feature == edge.from_feature {
+            if let (Some(from_layer), Some(to_layer)) = (edge.from_layer.as_deref(), edge.target_layer.as_deref()) {
+                if is_layer_skip(from_layer, to_layer) {
+                    count += 1;
+                    out.push_str("  - code: SEC101\n");
+                    out.push_str("    message: layer skip denied by convention-first security rules\n");
+                    out.push_str(&format!("    file: {}\n", edge.file));
+                    out.push_str(&format!("    line: {}\n", edge.line));
+                    out.push_str(&format!("    edge: {}\n", edge.kind.as_str()));
+                    out.push_str(&format!("    from_layer: {}\n", from_layer));
+                    out.push_str(&format!("    to_layer: {}\n", to_layer));
+                    out.push_str(&format!("    feature: {}\n", edge.from_feature));
+                    out.push_str(
+                        "    required: follow the declared layer order or use an explicit gate/port exception\n",
+                    );
+                }
+            }
+            continue;
+        }
         if edge.to_feature == edge.from_feature || is_shared_feature(&edge.to_feature) {
             continue;
         }
@@ -500,6 +680,7 @@ fn build_feature_graph(files: &[SecuritySourceFile], known_features: &BTreeSet<S
         let Some(from_feature) = coordinate.feature.as_deref() else {
             continue;
         };
+        let from_layer = coordinate.layer.clone();
         if coordinate.security_root || from_feature == "security" {
             continue;
         }
@@ -515,6 +696,7 @@ fn build_feature_graph(files: &[SecuritySourceFile], known_features: &BTreeSet<S
                     edges.push(SecurityFeatureEdge {
                         file: file.path.clone(),
                         line: line_no + 1,
+                        from_layer: from_layer.clone(),
                         from_feature: from_feature.to_string(),
                         to_feature: feature,
                         target_layer: layer,
@@ -523,11 +705,24 @@ fn build_feature_graph(files: &[SecuritySourceFile], known_features: &BTreeSet<S
                     });
                 }
             }
+            if let Some((feature, layer)) = layer_first_import_details(trimmed) {
+                edges.push(SecurityFeatureEdge {
+                    file: file.path.clone(),
+                    line: line_no + 1,
+                    from_layer: from_layer.clone(),
+                    from_feature: from_feature.to_string(),
+                    to_feature: feature,
+                    target_layer: Some(layer),
+                    kind: SecurityFeatureEdgeKind::Import,
+                    text: trimmed.to_string(),
+                });
+            }
 
             for target_feature in referenced_features(trimmed, known_features) {
                 edges.push(SecurityFeatureEdge {
                     file: file.path.clone(),
                     line: line_no + 1,
+                    from_layer: from_layer.clone(),
                     from_feature: from_feature.to_string(),
                     to_feature: target_feature,
                     target_layer: None,
@@ -564,22 +759,22 @@ fn build_hir_feature_graph(files: &[SecuritySourceFile], modules: &[HirModule]) 
     let mut symbol_features = std::collections::BTreeMap::new();
     for (file, module) in files.iter().zip(modules) {
         let coordinate = infer_security_coordinate(Path::new(&file.path));
-        let Some(feature) = coordinate.feature else {
+        let Some(feature) = coordinate.feature.clone() else {
             continue;
         };
         if coordinate.security_root || feature == "security" {
             continue;
         }
         for function in &module.functions {
-            symbol_features.insert(function.name.clone(), feature.clone());
+            symbol_features.insert(function.name.clone(), (feature.clone(), coordinate.layer.clone()));
             if let Some((owner, _)) = function.name.split_once('.') {
                 symbol_features
                     .entry(owner.to_string())
-                    .or_insert_with(|| feature.clone());
+                    .or_insert_with(|| (feature.clone(), coordinate.layer.clone()));
             }
         }
         for (global, _) in &module.globals {
-            symbol_features.insert(global.clone(), feature.clone());
+            symbol_features.insert(global.clone(), (feature.clone(), coordinate.layer.clone()));
         }
     }
 
@@ -597,6 +792,7 @@ fn build_hir_feature_graph(files: &[SecuritySourceFile], modules: &[HirModule]) 
                 edges.push(SecurityFeatureEdge {
                     file: file.path.clone(),
                     line: 1,
+                    from_layer: coordinate.layer.clone(),
                     from_feature: from_feature.to_string(),
                     to_feature,
                     target_layer,
@@ -608,13 +804,14 @@ fn build_hir_feature_graph(files: &[SecuritySourceFile], modules: &[HirModule]) 
 
         for function in &module.functions {
             for symbol in referenced_hir_symbols(&function.body) {
-                if let Some(to_feature) = symbol_features.get(&symbol) {
+                if let Some((to_feature, target_layer)) = symbol_features.get(&symbol) {
                     edges.push(SecurityFeatureEdge {
                         file: file.path.clone(),
                         line: 1,
+                        from_layer: coordinate.layer.clone(),
                         from_feature: from_feature.to_string(),
                         to_feature: to_feature.clone(),
-                        target_layer: None,
+                        target_layer: target_layer.clone(),
                         kind: SecurityFeatureEdgeKind::Call,
                         text: symbol,
                     });
@@ -627,10 +824,16 @@ fn build_hir_feature_graph(files: &[SecuritySourceFile], modules: &[HirModule]) 
 }
 
 fn hir_import_feature_details(import: &HirImport) -> Option<(String, Option<String>)> {
-    let feature_index = import.from_path.iter().position(|part| part == "feature")?;
-    let feature = import.from_path.get(feature_index + 1)?.clone();
-    let layer = import.from_path.get(feature_index + 2).cloned();
-    Some((feature, layer))
+    if let Some(feature_index) = import.from_path.iter().position(|part| part == "feature") {
+        let feature = import.from_path.get(feature_index + 1)?.clone();
+        let layer = import.from_path.get(feature_index + 2).cloned();
+        return Some((feature, layer));
+    }
+    let layer_index = import.from_path.iter().position(|part| is_conventional_layer(part))?;
+    let layer = import.from_path.get(layer_index)?.clone();
+    let rest = &import.from_path[(layer_index + 1)..];
+    let feature = import_feature_path(rest)?;
+    Some((feature, Some(layer)))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -935,11 +1138,39 @@ fn collect_boundary_gates(modules: &[HirModule]) -> Vec<SecurityBoundaryGate> {
     rules
 }
 
+fn collect_convention_boundary_gates(files: &[SecuritySourceFile], modules: &[HirModule]) -> Vec<SecurityBoundaryGate> {
+    files
+        .iter()
+        .zip(modules)
+        .flat_map(|(file, module)| {
+            convention_enriched_gates(file, module).into_iter().filter_map(|gate| {
+                let from_feature = gate.from.as_deref().and_then(clause_feature)?;
+                let to_feature = gate.to.as_deref().and_then(clause_feature)?;
+                Some(SecurityBoundaryGate {
+                    from_feature,
+                    to_feature,
+                    gate: gate.name,
+                })
+            })
+        })
+        .collect()
+}
+
 fn boundary_gate_for<'a>(rules: &'a [SecurityBoundaryGate], from_feature: &str, to_feature: &str) -> Option<&'a str> {
     rules
         .iter()
-        .find(|rule| rule.from_feature == from_feature && rule.to_feature == to_feature)
+        .find(|rule| {
+            feature_matches_boundary(from_feature, &rule.from_feature)
+                && feature_matches_boundary(to_feature, &rule.to_feature)
+        })
         .map(|rule| rule.gate.as_str())
+}
+
+fn feature_matches_boundary(feature: &str, boundary_feature: &str) -> bool {
+    feature == boundary_feature
+        || feature
+            .strip_prefix(boundary_feature)
+            .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
 fn clause_feature(clause: &str) -> Option<String> {
@@ -998,6 +1229,50 @@ fn feature_import_details(line: &str, marker: &str) -> Option<(String, Option<St
     Some((feature, layer))
 }
 
+fn layer_first_import_details(line: &str) -> Option<(String, String)> {
+    for layer in DEFAULT_SECURITY_LAYERS {
+        for marker in [format!("{layer}."), format!("{layer}/")] {
+            let Some(start) = line.find(&marker).map(|index| index + marker.len()) else {
+                continue;
+            };
+            let rest = &line[start..];
+            let separator = if marker.ends_with('.') { '.' } else { '/' };
+            let segments = take_security_path_segments(rest, separator);
+            let Some(feature) = import_feature_path(&segments) else {
+                continue;
+            };
+            return Some((feature, (*layer).to_string()));
+        }
+    }
+    None
+}
+
+fn take_security_path_segments(value: &str, separator: char) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut rest = value;
+    loop {
+        let (segment, next) = take_security_ident(rest);
+        if segment.is_empty() {
+            break;
+        }
+        segments.push(segment);
+        let Some(after_separator) = next.strip_prefix(separator) else {
+            break;
+        };
+        rest = after_separator;
+    }
+    segments
+}
+
+fn import_feature_path(parts: &[String]) -> Option<String> {
+    if parts.is_empty() {
+        return None;
+    }
+    let feature_end = if parts.len() > 1 { parts.len() - 1 } else { parts.len() };
+    let feature_parts = &parts[..feature_end];
+    (!feature_parts.is_empty()).then(|| feature_parts.join("."))
+}
+
 fn take_security_ident(value: &str) -> (String, &str) {
     let end = value
         .char_indices()
@@ -1039,6 +1314,20 @@ fn security_clause_to_pattern(clause: &str) -> String {
 
 fn is_shared_feature(feature: &str) -> bool {
     matches!(feature, "common" | "auth" | "audit" | "security")
+}
+
+fn is_layer_skip(from_layer: &str, to_layer: &str) -> bool {
+    let Some(from_index) = layer_index(from_layer) else {
+        return false;
+    };
+    let Some(to_index) = layer_index(to_layer) else {
+        return false;
+    };
+    to_index > from_index + 1
+}
+
+fn layer_index(layer: &str) -> Option<usize> {
+    DEFAULT_SECURITY_LAYERS.iter().position(|candidate| *candidate == layer)
 }
 
 fn uses_authorization_predicate(line: &str) -> bool {
@@ -1261,6 +1550,53 @@ fn collect_gates(module: &HirModule) -> Vec<HirSecurityGate> {
         }
     }
     gates
+}
+
+fn convention_enriched_gates(file: &SecuritySourceFile, module: &HirModule) -> Vec<HirSecurityGate> {
+    let mut gates = collect_gates(module);
+    if let Some((from_feature, to_feature)) = convention_gate_boundary_from_path(&file.path) {
+        for gate in &mut gates {
+            apply_gate_boundary_if_missing(gate, &from_feature, &to_feature);
+        }
+    }
+    gates
+}
+
+fn apply_gate_boundary_if_missing(gate: &mut HirSecurityGate, from_feature: &str, to_feature: &str) {
+    if gate.from.is_none() {
+        gate.from = Some(format!("feature {from_feature}"));
+    }
+    if gate.to.is_none() {
+        gate.to = Some(format!("feature {to_feature}"));
+    }
+}
+
+fn convention_gate_boundary_from_path(path: &str) -> Option<(String, String)> {
+    let path = Path::new(path);
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    let gate_index = parts
+        .windows(3)
+        .position(|window| window[0] == "src" && window[1] == "security" && window[2] == "gate")
+        .map(|index| index + 2)?;
+    let file_name = parts.get(gate_index + 1)?;
+    let stem = file_name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(file_name);
+    let mut features: Vec<&str> = stem
+        .trim_end_matches("_gate")
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if features.len() < 2 {
+        return None;
+    }
+    let from_feature = features.remove(0).to_string();
+    let to_feature = features.join(".");
+    Some((from_feature, to_feature))
 }
 
 fn render_gate_inventory(gates: &[HirSecurityGate]) -> String {

@@ -22,7 +22,7 @@ the Phase 1 scan/bitmap tranche.
   repeated `StartsWith` and hierarchical-key lookups do not rescan full row or
   dentry arrays.
 - **Acceptance-criteria:**
-  - reusable across SDN query paths, DBFS namespace paths, and spostgre text/key scans
+  - reusable across SDN query paths, DBFS namespace paths, and Simple DB text/key scans
   - supports exact, prefix, and range-like descendant lookups
   - retains scalar fallback and host capability reporting
 - **Related-upfront:** none
@@ -47,15 +47,15 @@ the Phase 1 scan/bitmap tranche.
 - **Related-design-doc:** `doc/05_design/simple_db_shared_accel_simd.md`
 - **Related-issue:** none
 
-### FR-SIMPLE-DB-0003 — Add learned cardinality estimation for spostgre planning
+### FR-SIMPLE-DB-0003 — Add learned cardinality estimation for Simple DB planning
 
 - **Filed-on:** 2026-05-02
 - **Filed-by:** Codex
-- **Target:** spostgre
+- **Target:** Simple DB
 - **Priority:** P2
 - **Status:** Open
 - **Requested-semantics:**
-  Once spostgre has a real planner path, add a learned cardinality-estimation
+  Once Simple DB has a real planner path, add a learned cardinality-estimation
   experiment that can coexist with BRIN summaries and conventional statistics.
 - **Acceptance-criteria:**
   - isolated behind a planner experiment flag
@@ -77,7 +77,7 @@ the Phase 1 scan/bitmap tranche.
   actual posting-list intersection and bitmap materialization for repeated text
   search workloads.
 - **Acceptance-criteria:**
-  - shared posting-list bitmap primitives reused by SDN/spostgre consumers
+  - shared posting-list bitmap primitives reused by SDN/Simple DB consumers
   - supports token AND/OR evaluation without row-at-a-time loops
   - benchmark evidence for latency and RSS
 - **Related-upfront:** none
@@ -92,7 +92,7 @@ the Phase 1 scan/bitmap tranche.
 - **Priority:** P2
 - **Status:** Open
 - **Requested-semantics:**
-  Evaluate whether worst-case-optimal joins fit the eventual spostgre planner or
+  Evaluate whether worst-case-optimal joins fit the eventual Simple DB planner or
   any shared relational layer, rather than forcing that complexity into Phase 1.
 - **Acceptance-criteria:**
   - research note compares representative workloads against current nested/scan plans

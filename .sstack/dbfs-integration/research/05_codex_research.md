@@ -1,7 +1,7 @@
 # Stream E — Codex Research (Design Patterns)
 
 **Date:** 2026-04-28
-**Note:** Codex CLI binary is present at `/home/ormastes/.npm-global/bin/codex` but requires interactive auth not available in this session. Direct code analysis of `examples/spostgre/` and `examples/nvfs/` yielded concrete primary-source evidence that supersedes external LLM consultation. The design patterns below are derived from actual repo artifacts and are more reliable than Codex output would be for this codebase.
+**Note:** Codex CLI binary is present at `/home/ormastes/.npm-global/bin/codex` but requires interactive auth not available in this session. Direct code analysis of `examples/simple_db/` and `examples/nvfs/` yielded concrete primary-source evidence that supersedes external LLM consultation. The design patterns below are derived from actual repo artifacts and are more reliable than Codex output would be for this codebase.
 
 ## Top 3 Design Patterns to Copy (from repo evidence)
 
@@ -9,9 +9,9 @@
 
 The `Arena` trait (7 verbs: create/append/readv/seal/discard/clone_range/preferred_granule) is already the abstraction DBFS needs for its extent storage. This is the "SQLite VFS pattern" analog: instead of SQLite's file-level VFS, DBFS uses the arena-level abstraction. Recovery invariant: `arena_seal(h, gen)` freezes the arena; appends after seal fail; recovery replays only sealed generations; `arena_discard` is idempotent.
 
-### Pattern 2: SPostgre WAL-then-Publish Protocol (copy from `examples/spostgre/src/engine/wal.spl` + `checkpoint.spl`)
+### Pattern 2: Simple DB WAL-then-Publish Protocol (copy from `examples/simple_db/src/engine/wal.spl` + `checkpoint.spl`)
 
-spostgre implements the WiredTiger-style checkpoint+log pattern: WAL record appended to `DB_WAL` arena → pmap publish via atomic CAS → checkpoint seals WAL + main arenas → new checkpoint ring entry published to `META_DURABLE`. Recovery: find latest clean checkpoint ring entry → replay WAL from `intent_log_head` LSN → discard orphaned uncommitted arenas. DBFS should copy this exact sequence, substituting `Rel/BlkNo` for `Ino/DirEntryKey`.
+Simple DB implements the WiredTiger-style checkpoint+log pattern: WAL record appended to `DB_WAL` arena → pmap publish via atomic CAS → checkpoint seals WAL + main arenas → new checkpoint ring entry published to `META_DURABLE`. Recovery: find latest clean checkpoint ring entry → replay WAL from `intent_log_head` LSN → discard orphaned uncommitted arenas. DBFS should copy this exact sequence, substituting `Rel/BlkNo` for `Ino/DirEntryKey`.
 
 ### Pattern 3: NVFS pmap_btree as Namespace Index (copy from `examples/nvfs/src/core/pmap_btree.spl`)
 
@@ -34,11 +34,11 @@ The `PmapBTree` is a full node-pool B-tree with CLRS top-down proactive fix-up a
 
 | Component | Status | Gap |
 |---|---|---|
-| WAL writer (append/flush/CRC) | EXISTS in spostgre/engine/wal.spl | Needs DBFS-specific record types (INODE/DENTRY ops) |
+| WAL writer (append/flush/CRC) | EXISTS in Simple DB/engine/wal.spl | Needs DBFS-specific record types (INODE/DENTRY ops) |
 | Checkpoint ring | EXISTS in examples/nvfs/src/core/checkpoint.spl | In-memory only; needs META_DURABLE disk persistence |
 | Intent log | EXISTS in examples/nvfs/src/core/intent_log.spl | In-memory only; needs disk persistence |
 | B-tree | EXISTS in examples/nvfs/src/core/pmap_btree.spl | Key type needs generalization |
 | Arena/extent storage | EXISTS (Arena trait + concrete impl) | Need RawNvmeArena implementing Arena over BlockDevice |
-| Buffer manager | EXISTS in spostgre/engine/buffer_mgr.spl | Tied to Rel/BlkNo; needs Ino/BlkNo variant |
+| Buffer manager | EXISTS in Simple DB/engine/buffer_mgr.spl | Tied to Rel/BlkNo; needs Ino/BlkNo variant |
 | Power-cut harness | NOT EXISTS | Must build for AC-5 |
 | DBFS catalog schema | NOT EXISTS | Must design 11 table types |

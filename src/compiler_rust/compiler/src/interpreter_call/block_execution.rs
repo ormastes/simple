@@ -471,7 +471,10 @@ pub(super) fn exec_block_closure(
                         impl_methods,
                     ) {
                         Ok(val) => last_value = val,
-                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break 'for_loop_own; }
+                        Err(CompileError::LoopBreak(val)) => {
+                            last_value = val.unwrap_or(Value::Nil);
+                            break 'for_loop_own;
+                        }
                         Err(CompileError::LoopContinue) => continue 'for_loop_own,
                         Err(e) => return Err(e),
                     }
@@ -813,49 +816,73 @@ pub(super) fn exec_block_closure(
                 }
                 last_value = Value::Nil;
             }
-            Node::While(while_stmt) => {
-                loop {
-                    if crate::interpreter::is_timeout_exceeded() {
-                        CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
-                        IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                        return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
-                    }
-                    let cond = evaluate_expr(
-                        &while_stmt.condition, &mut local_env, functions, classes, enums, impl_methods,
-                    )?;
-                    if !cond.truthy() {
+            Node::While(while_stmt) => loop {
+                if crate::interpreter::is_timeout_exceeded() {
+                    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
+                    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
+                    return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+                }
+                let cond = evaluate_expr(
+                    &while_stmt.condition,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                if !cond.truthy() {
+                    break;
+                }
+                match exec_block_closure_mut(
+                    &while_stmt.body.statements,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                ) {
+                    Ok(val) => last_value = val,
+                    Err(CompileError::LoopBreak(val)) => {
+                        last_value = val.unwrap_or(Value::Nil);
                         break;
                     }
-                    match exec_block_closure_mut(
-                        &while_stmt.body.statements, &mut local_env, functions, classes, enums, impl_methods,
-                    ) {
-                        Ok(val) => last_value = val,
-                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break; }
-                        Err(CompileError::LoopContinue) => continue,
-                        Err(e) => return Err(e),
-                    }
+                    Err(CompileError::LoopContinue) => continue,
+                    Err(e) => return Err(e),
                 }
-            }
-            Node::Loop(loop_stmt) => {
-                loop {
-                    if crate::interpreter::is_timeout_exceeded() {
-                        CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
-                        IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                        return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
-                    }
-                    match exec_block_closure_mut(
-                        &loop_stmt.body.statements, &mut local_env, functions, classes, enums, impl_methods,
-                    ) {
-                        Ok(val) => last_value = val,
-                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break; }
-                        Err(CompileError::LoopContinue) => continue,
-                        Err(e) => return Err(e),
-                    }
+            },
+            Node::Loop(loop_stmt) => loop {
+                if crate::interpreter::is_timeout_exceeded() {
+                    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
+                    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
+                    return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
                 }
-            }
+                match exec_block_closure_mut(
+                    &loop_stmt.body.statements,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                ) {
+                    Ok(val) => last_value = val,
+                    Err(CompileError::LoopBreak(val)) => {
+                        last_value = val.unwrap_or(Value::Nil);
+                        break;
+                    }
+                    Err(CompileError::LoopContinue) => continue,
+                    Err(e) => return Err(e),
+                }
+            },
             Node::Break(b) => {
                 let value = if let Some(expr) = &b.value {
-                    Some(evaluate_expr(expr, &mut local_env, functions, classes, enums, impl_methods)?)
+                    Some(evaluate_expr(
+                        expr,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?)
                 } else {
                     None
                 };
@@ -1083,7 +1110,10 @@ fn exec_block_closure_mut(
                         impl_methods,
                     ) {
                         Ok(val) => last_value = val,
-                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break 'for_loop; }
+                        Err(CompileError::LoopBreak(val)) => {
+                            last_value = val.unwrap_or(Value::Nil);
+                            break 'for_loop;
+                        }
                         Err(CompileError::LoopContinue) => continue 'for_loop,
                         Err(e) => return Err(e),
                     }
@@ -1362,42 +1392,59 @@ fn exec_block_closure_mut(
                 );
                 last_value = Value::Nil;
             }
-            Node::While(while_stmt) => {
-                loop {
-                    if crate::interpreter::is_timeout_exceeded() {
-                        return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
-                    }
-                    let cond = evaluate_expr(
-                        &while_stmt.condition, local_env, functions, classes, enums, impl_methods,
-                    )?;
-                    if !cond.truthy() {
+            Node::While(while_stmt) => loop {
+                if crate::interpreter::is_timeout_exceeded() {
+                    return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+                }
+                let cond = evaluate_expr(
+                    &while_stmt.condition,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                if !cond.truthy() {
+                    break;
+                }
+                match exec_block_closure_mut(
+                    &while_stmt.body.statements,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                ) {
+                    Ok(val) => last_value = val,
+                    Err(CompileError::LoopBreak(val)) => {
+                        last_value = val.unwrap_or(Value::Nil);
                         break;
                     }
-                    match exec_block_closure_mut(
-                        &while_stmt.body.statements, local_env, functions, classes, enums, impl_methods,
-                    ) {
-                        Ok(val) => last_value = val,
-                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break; }
-                        Err(CompileError::LoopContinue) => continue,
-                        Err(e) => return Err(e),
-                    }
+                    Err(CompileError::LoopContinue) => continue,
+                    Err(e) => return Err(e),
                 }
-            }
-            Node::Loop(loop_stmt) => {
-                loop {
-                    if crate::interpreter::is_timeout_exceeded() {
-                        return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
-                    }
-                    match exec_block_closure_mut(
-                        &loop_stmt.body.statements, local_env, functions, classes, enums, impl_methods,
-                    ) {
-                        Ok(val) => last_value = val,
-                        Err(CompileError::LoopBreak(val)) => { last_value = val.unwrap_or(Value::Nil); break; }
-                        Err(CompileError::LoopContinue) => continue,
-                        Err(e) => return Err(e),
-                    }
+            },
+            Node::Loop(loop_stmt) => loop {
+                if crate::interpreter::is_timeout_exceeded() {
+                    return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
                 }
-            }
+                match exec_block_closure_mut(
+                    &loop_stmt.body.statements,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                ) {
+                    Ok(val) => last_value = val,
+                    Err(CompileError::LoopBreak(val)) => {
+                        last_value = val.unwrap_or(Value::Nil);
+                        break;
+                    }
+                    Err(CompileError::LoopContinue) => continue,
+                    Err(e) => return Err(e),
+                }
+            },
             Node::Break(b) => {
                 let value = if let Some(expr) = &b.value {
                     Some(evaluate_expr(expr, local_env, functions, classes, enums, impl_methods)?)

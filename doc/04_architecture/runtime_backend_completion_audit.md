@@ -162,8 +162,8 @@ Executed on 2026-05-14:
   - `test/unit/lib/nogc_async_mut/text_layout/text_layout_facade_spec.spl --mode=interpreter --force`: `1` passed, `0` failed
   - `test/unit/lib/gc_async_mut/ui_test/ui_test_facade_spec.spl --mode=interpreter --force`: `1` passed, `0` failed
   - `test/unit/lib/nogc_async_mut/ui_test/ui_test_facade_spec.spl --mode=interpreter --force`: `1` passed, `0` failed
-  - `test/unit/lib/gc_async_mut/spostgre_if/spostgre_if_facade_spec.spl --mode=interpreter --force`: `1` passed, `0` failed
-  - `test/unit/lib/nogc_async_mut/spostgre_if/spostgre_if_facade_spec.spl --mode=interpreter --force`: `1` passed, `0` failed
+  - `test/unit/lib/gc_async_mut/simple_db_if/simple_db_if_facade_spec.spl --mode=interpreter --force`: `1` passed, `0` failed
+  - `test/unit/lib/nogc_async_mut/simple_db_if/simple_db_if_facade_spec.spl --mode=interpreter --force`: `1` passed, `0` failed
   - `test/unit/lib/gc_async_mut/unsafe/unsafe_facade_spec.spl --mode=interpreter --force`: `1` passed, `0` failed
   - `test/unit/lib/nogc_async_mut/unsafe/unsafe_facade_spec.spl --mode=interpreter --force`: `1` passed, `0` failed
   - `test/unit/lib/gc_async_mut/testing/testing_attributes_facade_spec.spl --mode=interpreter --force`: `1` passed, `0` failed

@@ -18,7 +18,7 @@
 NVFS sits directly beneath two clients whose own correctness claims
 depend on the filesystem's integrity story:
 
-* **spostgre** (embedded SQL engine, `doc/05_design/spostgre_design.md`)
+* **Simple DB** (embedded SQL engine, `doc/05_design/simple_db_design.md`)
   — WAL-before-pmap-publish, sealed-checkpoint-arena, MVCC generation
   pinning.  A filesystem that violates any of these invariants silently
   corrupts committed data.
@@ -388,7 +388,7 @@ crash relation.  Both are ~100 lines and out of the 60-minute budget.
 - Btrfs on-disk format, `btrfs-progs` source tree.  Mirror of §2 in
   `doc/01_research/btrfs_deep_dive.md`.
 - NVFS design: `doc/05_design/nvfs_design.md` (v1).
-- spostgre requirements against NVFS: `doc/05_design/nvfs/from_spostgre.md`.
+- Simple DB requirements against NVFS: `doc/05_design/nvfs/from_simple_db.md`.
 - svllm requirements against NVFS: `doc/05_design/nvfs/svllm_requirements.md`.
 
 ---

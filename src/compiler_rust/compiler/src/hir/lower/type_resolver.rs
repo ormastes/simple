@@ -573,8 +573,7 @@ impl Lowerer {
                     // struct defs. Handles same-name structs from different
                     // modules where the locally-registered definition has
                     // different fields than the one actually in scope.
-                    if let Some((global_idx, global_field_ty)) =
-                        self.try_resolve_global_field_for_struct(&name, field)
+                    if let Some((global_idx, global_field_ty)) = self.try_resolve_global_field_for_struct(&name, field)
                     {
                         return Ok((global_idx, global_field_ty));
                     }

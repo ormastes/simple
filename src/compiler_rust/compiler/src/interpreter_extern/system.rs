@@ -79,11 +79,11 @@ lazy_static::lazy_static! {
     static ref SPAWNED_PROCESSES: Mutex<HashMap<i64, std::process::Child>> = Mutex::new(HashMap::new());
 }
 use simple_runtime::value::{
-    rt_env_all as sffi_env_all, rt_env_cwd as sffi_env_cwd, rt_env_exists as sffi_env_exists, rt_env_get as sffi_env_get,
-    rt_env_get_i64 as sffi_env_get_i64, rt_env_home as sffi_env_home, rt_env_remove as sffi_env_remove,
-    rt_env_set as sffi_env_set, rt_env_temp as sffi_env_temp, rt_set_debug_mode as sffi_set_debug_mode,
-    rt_set_macro_trace as sffi_set_macro_trace, rt_platform_name as sffi_platform_name,
-    rt_term_enable_ansi as sffi_term_enable_ansi,
+    rt_env_all as sffi_env_all, rt_env_cwd as sffi_env_cwd, rt_env_exists as sffi_env_exists,
+    rt_env_get as sffi_env_get, rt_env_get_i64 as sffi_env_get_i64, rt_env_home as sffi_env_home,
+    rt_env_remove as sffi_env_remove, rt_env_set as sffi_env_set, rt_env_temp as sffi_env_temp,
+    rt_set_debug_mode as sffi_set_debug_mode, rt_set_macro_trace as sffi_set_macro_trace,
+    rt_platform_name as sffi_platform_name, rt_term_enable_ansi as sffi_term_enable_ansi,
 };
 use simple_runtime::value::sffi::config::{
     rt_is_debug_mode_enabled as sffi_is_debug_mode_enabled, rt_is_macro_trace_enabled as sffi_is_macro_trace_enabled,

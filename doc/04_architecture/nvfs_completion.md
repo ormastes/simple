@@ -12,5 +12,5 @@ Feature set: remaining unchecked NVFS tracker criteria.
   helper.
 - `examples/nvfs/src/core/dedup.spl`: in-memory hot DDT cache, DEDUP tree
   metadata, stats, keyed hashing, and refcount consistency checks.
-- `examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`:
+- `examples/simple_db/test/integration/storage/simple_db_nvfs_e2e_test.spl`:
   MountTable/RamFs integration coverage for WAL bytes.

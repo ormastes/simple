@@ -136,7 +136,11 @@ impl LlvmEmitter<'_> {
 
     /// Helper to create an i32 constant.
     fn i32_const(&self, value: i32) -> BasicValueEnum<'static> {
-        self.backend.context_ref().i32_type().const_int(value as u64, true).into()
+        self.backend
+            .context_ref()
+            .i32_type()
+            .const_int(value as u64, true)
+            .into()
     }
 
     fn method_leaf_name(func_name: &str) -> &str {
@@ -1091,7 +1095,11 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .builder
                 .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
                 .map_err(|e| format!("cast failed: {}", e))?;
-            let offset_val = self.backend.context_ref().i32_type().const_int(byte_offset as u64, false);
+            let offset_val = self
+                .backend
+                .context_ref()
+                .i32_type()
+                .const_int(byte_offset as u64, false);
             let field_ptr = unsafe {
                 self.builder
                     .build_gep(i8_type, base_ptr, &[offset_val], "field_ptr")
@@ -1133,7 +1141,11 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .builder
                 .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
                 .map_err(|e| format!("cast failed: {}", e))?;
-            let offset_val = self.backend.context_ref().i32_type().const_int(byte_offset as u64, false);
+            let offset_val = self
+                .backend
+                .context_ref()
+                .i32_type()
+                .const_int(byte_offset as u64, false);
             let field_ptr = unsafe {
                 self.builder
                     .build_gep(i8_type, base_ptr, &[offset_val], "field_ptr")

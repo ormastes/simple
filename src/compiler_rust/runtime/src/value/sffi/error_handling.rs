@@ -7,8 +7,10 @@ mod c_sffi {
     extern "C" {
         pub(super) fn rt_function_not_found(name_ptr: *const u8, name_len: u64) -> RuntimeValue;
         pub(super) fn rt_method_not_found(
-            type_ptr: *const u8, type_len: u64,
-            method_ptr: *const u8, method_len: u64,
+            type_ptr: *const u8,
+            type_len: u64,
+            method_ptr: *const u8,
+            method_len: u64,
         ) -> RuntimeValue;
     }
 }
@@ -18,7 +20,12 @@ pub unsafe fn rt_function_not_found(name_ptr: *const u8, name_len: u64) -> Runti
     c_sffi::rt_function_not_found(name_ptr, name_len)
 }
 #[inline(always)]
-pub unsafe fn rt_method_not_found(type_ptr: *const u8, type_len: u64, method_ptr: *const u8, method_len: u64) -> RuntimeValue {
+pub unsafe fn rt_method_not_found(
+    type_ptr: *const u8,
+    type_len: u64,
+    method_ptr: *const u8,
+    method_len: u64,
+) -> RuntimeValue {
     c_sffi::rt_method_not_found(type_ptr, type_len, method_ptr, method_len)
 }
 

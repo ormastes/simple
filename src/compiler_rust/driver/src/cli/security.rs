@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use simple_compiler::{build_security_inventory, hir, source_security_violations_sdn_with_modules, SecuritySourceFile};
+use simple_compiler::{
+    build_security_gate_map, build_security_inventory_for_source, build_security_maps, hir,
+    source_security_violations_sdn_with_modules, SecuritySourceFile,
+};
 use simple_parser::Parser;
 
 pub fn run_security(args: &[String]) -> i32 {
@@ -53,6 +56,20 @@ pub fn run_security(args: &[String]) -> i32 {
         "check" => write_inventory(&output_dir, &inventory),
         "matrix" => {
             print!("{}", inventory.access_matrix_sdn);
+            0
+        }
+        "map" => {
+            print!("{}", inventory.layer_map_sdn);
+            println!();
+            print!("{}", inventory.feature_map_sdn);
+            0
+        }
+        "gates" => {
+            print!("{}", inventory.gate_inventory_md);
+            0
+        }
+        "gate-map" => {
+            print!("{}", inventory.gate_map_sdn);
             0
         }
         "sandbox-manifest" => {
@@ -120,7 +137,11 @@ fn build_inventory_for_files(files: &[PathBuf]) -> Result<simple_compiler::Secur
             .parse()
             .map_err(|err| format!("failed to parse {}: {}", file.display(), err))?;
         let module = hir::lower(&ast).map_err(|err| format!("failed to lower {}: {}", file.display(), err))?;
-        let inventory = build_security_inventory(&module);
+        let source_file = SecuritySourceFile {
+            path: file.display().to_string(),
+            source: source.clone(),
+        };
+        let inventory = build_security_inventory_for_source(&source_file, &module);
 
         append_section(&mut gate_inventory_md, file, &inventory.gate_inventory_md);
         append_section(&mut access_matrix_sdn, file, &inventory.access_matrix_sdn);
@@ -135,10 +156,15 @@ fn build_inventory_for_files(files: &[PathBuf]) -> Result<simple_compiler::Secur
     if !violations_sdn.is_empty() {
         violations_sdn.push('\n');
     }
+    let (layer_map_sdn, feature_map_sdn) = build_security_maps(&source_files);
+    let gate_map_sdn = build_security_gate_map(&source_files, &modules);
     violations_sdn.push_str("# source: convention-inferred feature graph\n");
     violations_sdn.push_str(&source_security_violations_sdn_with_modules(&source_files, &modules));
 
     Ok(simple_compiler::SecurityInventory {
+        layer_map_sdn,
+        feature_map_sdn,
+        gate_map_sdn,
         gate_inventory_md,
         access_matrix_sdn,
         security_aspects_spl,
@@ -164,6 +190,9 @@ fn write_inventory(output_dir: &Path, inventory: &simple_compiler::SecurityInven
     }
 
     let outputs = [
+        ("layer_map.sdn", &inventory.layer_map_sdn),
+        ("feature_map.sdn", &inventory.feature_map_sdn),
+        ("gate_map.sdn", &inventory.gate_map_sdn),
         ("gate_inventory.md", &inventory.gate_inventory_md),
         ("access_matrix.generated.sdn", &inventory.access_matrix_sdn),
         ("security_aspects.generated.spl", &inventory.security_aspects_spl),
@@ -188,7 +217,10 @@ fn write_inventory(output_dir: &Path, inventory: &simple_compiler::SecurityInven
 fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  simple security check <file.spl>... [--out build/security]");
+    eprintln!("  simple security map <file.spl>...");
     eprintln!("  simple security matrix <file.spl>...");
+    eprintln!("  simple security gates <file.spl>...");
+    eprintln!("  simple security gate-map <file.spl>...");
     eprintln!("  simple security aspects <file.spl>...");
     eprintln!("  simple security aop-lowering <file.spl>...");
     eprintln!("  simple security capability-manifest <file.spl>...");

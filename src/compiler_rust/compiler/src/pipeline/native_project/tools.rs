@@ -523,18 +523,10 @@ fn find_objdump_tool() -> Option<String> {
         return Some("llvm-objdump".to_string());
     }
     // Fall back to readelf which is more commonly available on Linux
-    if std::process::Command::new("readelf")
-        .arg("--version")
-        .output()
-        .is_ok()
-    {
+    if std::process::Command::new("readelf").arg("--version").output().is_ok() {
         return Some("readelf".to_string());
     }
-    if std::process::Command::new("objdump")
-        .arg("--version")
-        .output()
-        .is_ok()
-    {
+    if std::process::Command::new("objdump").arg("--version").output().is_ok() {
         return Some("objdump".to_string());
     }
     None
@@ -548,15 +540,9 @@ fn verify_stripped_archive(archive_path: &Path) -> Result<(), StripError> {
     };
 
     let output = if tool.contains("readelf") {
-        std::process::Command::new(&tool)
-            .arg("-S")
-            .arg(archive_path)
-            .output()
+        std::process::Command::new(&tool).arg("-S").arg(archive_path).output()
     } else {
-        std::process::Command::new(&tool)
-            .arg("-h")
-            .arg(archive_path)
-            .output()
+        std::process::Command::new(&tool).arg("-h").arg(archive_path).output()
     };
 
     let output = match output {

@@ -115,7 +115,25 @@ fn compile_c_runtime_sources() {
     let runtime_c_dir = manifest_dir.join("../../runtime");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
 
-    let c_sources = ["runtime_math.c", "runtime_memory.c", "runtime_time.c", "runtime_ctype.c", "runtime_random.c", "runtime_hash.c", "runtime_value.c", "runtime_equality.c", "runtime_config.c", "runtime_crypto.c", "runtime_contracts.c", "runtime_env.c", "runtime_base64.c", "runtime_format.c", "runtime_error.c", "runtime_regex_stub.c", "runtime_pty.c"];
+    let c_sources = [
+        "runtime_math.c",
+        "runtime_memory.c",
+        "runtime_time.c",
+        "runtime_ctype.c",
+        "runtime_random.c",
+        "runtime_hash.c",
+        "runtime_value.c",
+        "runtime_equality.c",
+        "runtime_config.c",
+        "runtime_crypto.c",
+        "runtime_contracts.c",
+        "runtime_env.c",
+        "runtime_base64.c",
+        "runtime_format.c",
+        "runtime_error.c",
+        "runtime_regex_stub.c",
+        "runtime_pty.c",
+    ];
     let mut objects = Vec::new();
 
     for source in &c_sources {

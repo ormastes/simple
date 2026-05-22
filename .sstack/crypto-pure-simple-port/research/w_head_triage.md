@@ -126,7 +126,7 @@ Diff stat: 18 files changed, 927 insertions(+), 33 deletions(-).
 | `worktree-agent-a3749210750ef4daa` | `f3fce25c8e` | feat(mir): wire Binding + Or-of-IntLit (B5b Phase 2a) — **= origin/main tip** |
 | `worktree-agent-a431661fd9d05bceb` | `adf5b10663` | test(log): Phase 7 verification + file Gap-3/4 bugs — **= origin/main^** |
 | `worktree-agent-a5ab3ed01a11c37e8` | `c7bca16538` | feat(mir): wire MatchCase to MIR Switch/If-chain (B5b Phase 1) — dup |
-| `worktree-agent-a6b8826e` | `c047d3dbff` | feat(storage): Phase 9 — spostgre M3b BRIN + NVFS N5b (8 days old) |
+| `worktree-agent-a6b8826e` | `c047d3dbff` | feat(storage): Phase 9 — Simple DB M3b BRIN + NVFS N5b (8 days old) |
 | `worktree-agent-ac3bca955ef32802a` | `9765bb45b5` | docs(b5): self-hosted match→MIR lowering missing — dup |
 | `worktree-agent-ac6987aa9c46a25d8` | `80cbfe9ca2` | feat(mir): wire Binding + Or-of-IntLit (B5b Phase 2a) — dup |
 | `worktree-agent-ac8c3104` | `c047d3dbff` | feat(storage): Phase 9 — duplicate of `a6b8826e` |

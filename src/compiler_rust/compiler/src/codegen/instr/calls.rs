@@ -2124,9 +2124,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "native_udp_send_to" => Some(&[1, 2]),
 
         // Regex (pattern and text)
-        "sffi_regex_is_match" | "sffi_regex_find" | "sffi_regex_find_all" | "sffi_regex_captures" | "sffi_regex_split" => {
-            Some(&[0, 1])
-        }
+        "sffi_regex_is_match"
+        | "sffi_regex_find"
+        | "sffi_regex_find_all"
+        | "sffi_regex_captures"
+        | "sffi_regex_split" => Some(&[0, 1]),
         "sffi_regex_replace" | "sffi_regex_replace_all" => Some(&[0, 1, 2]),
         "sffi_regex_split_n" => Some(&[0, 1]),
 
@@ -2392,7 +2394,8 @@ pub fn compile_call<M: Module>(
     if sffi_name == "rt_array_set_text" && compile_inline_array_set_word(ctx, builder, dest, args)? {
         return Ok(());
     }
-    if sffi_name == "rt_numeric_xor_sum_u64_data" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args, true)? {
+    if sffi_name == "rt_numeric_xor_sum_u64_data" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args, true)?
+    {
         return Ok(());
     }
     if sffi_name == "rt_numeric_xor_sum_u64" && compile_inline_numeric_xor_sum_u64(ctx, builder, dest, args, false)? {
@@ -2425,10 +2428,12 @@ pub fn compile_call<M: Module>(
     if sffi_name == "rt_bytes_u8_at" && compile_inline_bytes_u8_at(ctx, builder, dest, args, false)? {
         return Ok(());
     }
-    if sffi_name == "rt_typed_bytes_u32_le_at" && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 4)? {
+    if sffi_name == "rt_typed_bytes_u32_le_at" && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 4)?
+    {
         return Ok(());
     }
-    if sffi_name == "rt_typed_bytes_u64_le_at" && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 8)? {
+    if sffi_name == "rt_typed_bytes_u64_le_at" && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 8)?
+    {
         return Ok(());
     }
     if sffi_name == "rt_typed_bytes_u32_le_unchecked"
@@ -2474,7 +2479,8 @@ pub fn compile_call<M: Module>(
     {
         return Ok(());
     }
-    if sffi_name == "rt_typed_words_u64_raw_data_at" && compile_inline_typed_words_raw_data_at(ctx, builder, dest, args)?
+    if sffi_name == "rt_typed_words_u64_raw_data_at"
+        && compile_inline_typed_words_raw_data_at(ctx, builder, dest, args)?
     {
         return Ok(());
     }
@@ -2867,7 +2873,11 @@ pub fn compile_call<M: Module>(
         } else {
             let call_conv = crate::codegen::shared::platform_call_conv();
             let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
-            let param_count = ctx.fn_arities.get(resolved_name.as_ref()).copied().unwrap_or(arg_vals.len());
+            let param_count = ctx
+                .fn_arities
+                .get(resolved_name.as_ref())
+                .copied()
+                .unwrap_or(arg_vals.len());
             for _ in 0..param_count {
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
             }

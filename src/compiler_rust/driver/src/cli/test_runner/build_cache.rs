@@ -162,8 +162,7 @@ impl BuildCache {
         let project = ProjectContext::new(project_root)
             .map_err(|e| format!("Failed to detect project for {}: {}", source.display(), e))?;
 
-        let runtime_bundle =
-            std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").unwrap_or_else(|_| "runtime".to_string());
+        let runtime_bundle = std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").unwrap_or_else(|_| "runtime".to_string());
 
         let mut config = NativeBuildConfig {
             entry_closure: true,

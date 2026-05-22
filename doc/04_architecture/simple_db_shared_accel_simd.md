@@ -9,7 +9,7 @@ is reused by:
 
 - `src/lib/nogc_sync_mut/database/query.spl`
 - `src/lib/nogc_sync_mut/db/dbfs_engine/schema.spl`
-- `examples/spostgre/src/engine/scan.spl`
+- `examples/simple_db/src/engine/scan.spl`
 
 ## Layering
 
@@ -20,7 +20,7 @@ is reused by:
 2. Consumer adapters
    - SDN query builder converts row arrays into batch/bitmap passes
    - DBFS schema scans use summary-hash prefilter + exact-name refinement
-   - spostgre scan utilities use BRIN as a coarse filter and accel bitmaps for
+   - Simple DB scan utilities use BRIN as a coarse filter and accel bitmaps for
      tuple-level refinement
 3. Existing storage/layout code
    - remains unchanged; no constructor or pager contract changes
@@ -40,7 +40,7 @@ is reused by:
   instead of repeatedly allocating filtered row arrays.
 - DBFS: namespace scans can summary-hash filter candidates before exact name
   comparison, preserving correctness across collisions.
-- spostgre: BRIN summaries stay first-pass pruning; shared text scan helpers
+- Simple DB: BRIN summaries stay first-pass pruning; shared text scan helpers
   refine surviving tuples and provide a minimal token/trigram text-search path.
 
 ## Out of Scope

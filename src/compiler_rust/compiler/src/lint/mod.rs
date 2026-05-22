@@ -1173,9 +1173,7 @@ pub use DiContainer
         let diagnostics = check_code_at_path("src/lib/gc_async_mut/example.spl", "use std.nogc_sync_mut.fs\n");
 
         assert!(diagnostics.iter().any(|d| d.lint == LintName::GcBoundaryCrossing));
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.message.contains("gc_imports_nogc_family")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("gc_imports_nogc_family")));
     }
 
     #[test]
@@ -1195,7 +1193,10 @@ pub use DiContainer
         assert!(
             diagnostics.iter().any(|d| d.lint == LintName::GcBoundaryCrossing),
             "expected GcBoundaryCrossing for @no_gc attribute-based module importing gc family, got: {:?}",
-            diagnostics.iter().map(|d| format!("{:?}: {}", d.lint, d.message)).collect::<Vec<_>>()
+            diagnostics
+                .iter()
+                .map(|d| format!("{:?}: {}", d.lint, d.message))
+                .collect::<Vec<_>>()
         );
     }
 

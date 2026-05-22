@@ -12,7 +12,7 @@ FR-STORAGE-E2E-001.
 - `examples/nvfs/src/core/dedup.spl` had refcount semantics, but lacked the
   DEDUP tree object id, 56-byte entry contract, default hot-cache config, stats,
   encrypted DHK-keyed hash path, and check/refcount helpers.
-- `spostgre_nvfs_e2e_test.spl` mounted `/db` but documented MountTable wiring as
+- `simple_db_nvfs_e2e_test.spl` mounted `/db` but documented MountTable wiring as
   a gap.
 
 ## Implementation Direction
@@ -20,4 +20,4 @@ FR-STORAGE-E2E-001.
 Close the remaining NVFS acceptance criteria with focused production surfaces:
 real MountTable resolve coverage, an in-repo RLE compression frame with
 incompressible fallback, an offline upgrade helper, DDT metadata/stats helpers,
-and a MountTable/RamFs-backed spostgre WAL byte routing scenario.
+and a MountTable/RamFs-backed Simple DB WAL byte routing scenario.

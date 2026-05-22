@@ -1,7 +1,9 @@
 use simple_compiler::hir::{self, HirCapabilityItem, HirSandboxItem, HirSecurityItem};
 use simple_compiler::security::{
-    build_security_inventory, infer_security_coordinate, lower_security_to_aop, source_security_violations_sdn,
-    security_metadata_id, source_security_violations_sdn_with_module, SecurityAdviceStep, SecuritySourceFile,
+    build_security_gate_map, build_security_inventory, build_security_inventory_for_source, build_security_maps,
+    infer_security_coordinate, lower_security_to_aop, security_metadata_id, source_security_violations_sdn,
+    source_security_violations_sdn_with_module, source_security_violations_sdn_with_modules, SecurityAdviceStep,
+    SecuritySourceFile,
 };
 use simple_compiler::weaving::WeavingConfig;
 use simple_parser::Parser;
@@ -246,6 +248,138 @@ fn infers_security_coordinates_from_feature_folders() {
     assert_eq!(plugin.layer.as_deref(), Some("sandbox"));
     assert_eq!(plugin.trust.as_deref(), Some("plugin"));
     assert_eq!(plugin.runtime.as_deref(), Some("sandboxed"));
+}
+
+#[test]
+fn infers_security_coordinates_from_layer_first_folders() {
+    let coordinate = infer_security_coordinate(Path::new("src/service/user/profile/profile_service.spl"));
+    assert_eq!(coordinate.feature.as_deref(), Some("user.profile"));
+    assert_eq!(coordinate.layer.as_deref(), Some("service"));
+    assert_eq!(coordinate.trust.as_deref(), Some("app"));
+    assert_eq!(coordinate.runtime.as_deref(), None);
+    assert!(!coordinate.security_root);
+}
+
+#[test]
+fn reports_sec101_for_layer_skip_in_layer_first_layout() {
+    let files = vec![
+        SecuritySourceFile {
+            path: "src/ui/user/profile/view.spl".to_string(),
+            source: "use domain.user.profile.model\nclass ProfileView:\n    pass\n".to_string(),
+        },
+        SecuritySourceFile {
+            path: "src/domain/user/profile/model.spl".to_string(),
+            source: "class ProfileModel:\n    pass\n".to_string(),
+        },
+    ];
+
+    let violations = source_security_violations_sdn(&files);
+    assert!(violations.contains("code: SEC101"));
+    assert!(violations.contains("from_layer: ui"));
+    assert!(violations.contains("to_layer: domain"));
+    assert!(violations.contains("feature: user.profile"));
+}
+
+#[test]
+fn allows_adjacent_layer_access_in_layer_first_layout() {
+    let files = vec![
+        SecuritySourceFile {
+            path: "src/service/user/profile/profile_service.spl".to_string(),
+            source: "use domain.user.profile.model\nclass ProfileService:\n    pass\n".to_string(),
+        },
+        SecuritySourceFile {
+            path: "src/domain/user/profile/model.spl".to_string(),
+            source: "class ProfileModel:\n    pass\n".to_string(),
+        },
+    ];
+
+    let violations = source_security_violations_sdn(&files);
+    assert!(!violations.contains("code: SEC101"));
+    assert!(!violations.contains("code: SEC201"));
+}
+
+#[test]
+fn renders_convention_first_layer_and_feature_maps() {
+    let files = vec![
+        SecuritySourceFile {
+            path: "src/service/user/profile/profile_service.spl".to_string(),
+            source: "class ProfileService:\n    pass\n".to_string(),
+        },
+        SecuritySourceFile {
+            path: "src/security/gate/user_admin.spl".to_string(),
+            source: "security gate UserAdmin:\n    from feature user\n    to feature admin\n".to_string(),
+        },
+    ];
+
+    let (layer_map, feature_map) = build_security_maps(&files);
+    assert!(layer_map.contains("security_layer_map:"));
+    assert!(layer_map.contains("layer: service"));
+    assert!(layer_map.contains("feature: user.profile"));
+    assert!(feature_map.contains("security_feature_map:"));
+    assert!(feature_map.contains("security_root: true"));
+}
+
+#[test]
+fn infers_gate_boundaries_from_security_gate_filename() {
+    let source = "security gate UserAdmin:\n    policy CanRequestAdmin\n";
+    let file = SecuritySourceFile {
+        path: "src/security/gate/user_admin.spl".to_string(),
+        source: source.to_string(),
+    };
+    let module = lower(source);
+
+    let inventory = build_security_inventory_for_source(&file, &module);
+    assert!(inventory
+        .gate_inventory_md
+        .contains("| UserAdmin | feature user | feature admin |"));
+    assert!(!inventory.violations_sdn.contains("SEC_GATE_INCOMPLETE_BOUNDARY"));
+
+    let gate_map = build_security_gate_map(&[file], &[module]);
+    assert!(gate_map.contains("gate: UserAdmin"));
+    assert!(gate_map.contains("from: feature user"));
+    assert!(gate_map.contains("to: feature admin"));
+    assert!(gate_map.contains("inferred: true"));
+}
+
+#[test]
+fn sec201_uses_convention_gate_filename_as_required_crossing() {
+    let user_file = SecuritySourceFile {
+        path: "src/service/user/profile/profile_service.spl".to_string(),
+        source: "class ProfileService:\n    fn run():\n        AdminUser.delete(1)\n".to_string(),
+    };
+    let admin_file = SecuritySourceFile {
+        path: "src/service/admin/user/admin_user_service.spl".to_string(),
+        source: "class AdminUser:\n    fn delete(id: Int):\n        return\n".to_string(),
+    };
+    let gate_file = SecuritySourceFile {
+        path: "src/security/gate/user_admin.spl".to_string(),
+        source: "security gate UserAdmin:\n    policy CanRequestAdmin\n".to_string(),
+    };
+    let mut user_module = hir::HirModule::new();
+    user_module.functions.push(hir_function(
+        "run",
+        vec![hir::HirStmt::Expr(hir::HirExpr {
+            kind: hir::HirExprKind::Call {
+                func: Box::new(hir::HirExpr {
+                    kind: hir::HirExprKind::Global("AdminUser.delete".to_string()),
+                    ty: hir::TypeId::I64,
+                }),
+                args: vec![],
+            },
+            ty: hir::TypeId::I64,
+        })],
+    ));
+    let mut admin_module = hir::HirModule::new();
+    admin_module.functions.push(hir_function("AdminUser.delete", vec![]));
+    let gate_module = lower(&gate_file.source);
+
+    let violations = source_security_violations_sdn_with_modules(
+        &[user_file, admin_file, gate_file],
+        &[user_module, admin_module, gate_module],
+    );
+
+    assert!(violations.contains("code: SEC201"));
+    assert!(violations.contains("required: route through UserAdmin"));
 }
 
 #[test]

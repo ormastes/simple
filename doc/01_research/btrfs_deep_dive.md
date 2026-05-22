@@ -1,7 +1,7 @@
 # Btrfs Deep Dive for NVFS Porting
 
 **Status:** Phase 2 research deliverable for NVFS (2026-04-17).
-**Companion docs:** `doc/05_design/nvfs_design.md`, `doc/05_design/nvfs/from_spostgre.md`, `doc/01_research/spostgre_research.md`.
+**Companion docs:** `doc/05_design/nvfs_design.md`, `doc/05_design/nvfs/from_simple_db.md`, `doc/01_research/simple_db_research.md`.
 **Intent:** Catalogue Btrfs mechanisms precisely enough that NVFS can KEEP, ADAPT, SKIP, or ATTACH each one under the NVFS capability model.
 
 ## 1. Executive summary
@@ -1051,7 +1051,7 @@ Legend: **KEEP** = adopt directly. **ADAPT** = keep the concept, change the mech
 
 1. **Checksum algorithm default.** Btrfs ships CRC32C as default; NVFS plans blake2b-256. Confirm the CPU-cost budget on the slowest target (baremetal Simple-OS on entry-level x86_64) is acceptable, and keep a CRC32C probe fallback.
 2. **RAID1 naming.** Btrfs's "RAID1 = 2 copies" vs "RAID1C3 = 3 copies" has been a perennial support nightmare. NVFS should pick a naming scheme now (`mirror=n`?) and document it with the same care as POSIX.
-3. **Log tree vs WAL class.** NVFS has a `DB_WAL` storage class; the question is whether to reuse it for filesystem-metadata logging (fsync log) or keep the fs log in `META_DURABLE` and reserve `DB_WAL` for above-NVFS clients (spostgre). The cleanest answer is probably "both, but at separate arena-descriptor keys."
+3. **Log tree vs WAL class.** NVFS has a `DB_WAL` storage class; the question is whether to reuse it for filesystem-metadata logging (fsync log) or keep the fs log in `META_DURABLE` and reserve `DB_WAL` for above-NVFS clients (Simple DB). The cleanest answer is probably "both, but at separate arena-descriptor keys."
 4. **Subvolume objectid space.** Btrfs reserves objectids < 256 for trees. NVFS should do the same for arena descriptors so future trees can be added without collision.
 5. **Backref chain storage.** Does NVFS encode backrefs inline in the extent item (Btrfs's `EXTENT_ITEM_KEY` + inline refs) or in a separate index? Btrfs went with inline for compactness but paid in complexity; given we are starting fresh, an external index is simpler.
 6. **qgroup support.** Do we want per-subvolume accounting at all, or is arena-level usage sufficient? (Recommendation: arena-level only.)

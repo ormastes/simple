@@ -51,12 +51,12 @@ scan kernels are still scalar fallbacks.
   prefix helpers plus bitmap materialization.
 - Collision safety is preserved by exact-name refinement after the hash pass.
 
-### spostgre
+### Simple DB
 
-- `examples/spostgre/src/engine/scan.spl` adds a BRIN-aware tuple scan helper.
-- `spostgre_scan_text_with_brin()` keeps BRIN as the coarse filter and refines
+- `examples/simple_db/src/engine/scan.spl` adds a BRIN-aware tuple scan helper.
+- `simple_db_scan_text_with_brin()` keeps BRIN as the coarse filter and refines
   surviving tuples with shared text scans.
-- `spostgre_text_search()` is the minimal text-search prototype: token match
+- `simple_db_text_search()` is the minimal text-search prototype: token match
   first, trigram overlap fallback second.
 
 ## Verification Notes
@@ -65,7 +65,7 @@ scan kernels are still scalar fallbacks.
   parity expectations, and capability reporting.
 - SDN integration tests cover `filter_in` OR semantics and prefix/suffix scans.
 - DBFS integration tests cover prefix scans plus summary-hash collision safety.
-- spostgre unit tests cover plain batched scan, BRIN-assisted refinement, and
+Simple DB unit tests cover plain batched scan, BRIN-assisted refinement, and
   token/trigram search candidates.
 - `test/perf/bench/simple_db_shared_accel.spl` records current perf evidence.
   On the 2026-05-02 host run, the shared accel path remained slower than direct

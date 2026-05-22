@@ -14,7 +14,7 @@ direct analysis' and proceed without blocking."
 Codex was not called. D1+D2+D4+D5 synthesis was performed directly from research artifacts
 01_engine_survey.md through 05_codex_research.md (Phase 2 output), which already contained
 Codex-pattern research (Stream E of the batch) identifying the top 3 design patterns from the
-repo (NVFS Arena as BlobBackend, SPostgre WAL-then-Publish protocol, pmap_btree as namespace
+repo (NVFS Arena as BlobBackend, Simple DB WAL-then-Publish protocol, pmap_btree as namespace
 index) and the recovery invariants checklist.
 
 The Phase 2 `05_codex_research.md` artifact served as the design-depth input in place of a
@@ -22,7 +22,7 @@ fresh Codex invocation for these decisions.
 
 ## Decisions Made via Direct Analysis (D1, D2, D4, D5)
 
-- D1: Option B chosen — dedicated DbFsEngine. Rationale: from_spostgre.md confirms spostgre
+- D1: Option B chosen — dedicated DbFsEngine. Rationale: from_simple_db.md confirms Simple DB
   sits ABOVE NVFS; DBFS is a sibling consumer; Rel/BlkNo coupling would leak into FS layer.
 - D2: 6 gaps enumerated — catalog schema, ns-btree key generalization, RawNvmeArena, intent-log
   disk persistence, checkpoint-ring disk persistence, power-cut harness.

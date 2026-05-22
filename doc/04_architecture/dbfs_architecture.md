@@ -12,24 +12,24 @@ DBFS is a new `FsDriver` variant for Simple OS that stores all filesystem metada
 
 ## D1. Engine Choice: Option B — Dedicated DbFsEngine
 
-**Decision: Option B. Fork spostgre/nvfs patterns into a dedicated `DbFsEngine`.**
+**Decision: Option B. Fork Simple DB/nvfs patterns into a dedicated `DbFsEngine`.**
 
 Module path: `src/lib/nogc_sync_mut/db/dbfs_engine/`
 
 **Rationale:**
-- `from_spostgre.md` design notes explicitly argue against inverting the layering: spostgre sits ABOVE NVFS, consuming the `arena_*` API. DBFS is a sibling consumer of Arena+StorageClass, not a spostgre catalog extension.
-- Option A (embedding spostgre as-is) would leak `Rel/BlkNo` abstractions into the filesystem layer and make the kernel-linked single-cache discipline (D9) harder to enforce — spostgre's `BufferManager` has its own clock-sweep cache keyed on `Rel/BlkNo`.
-- Option B copies the structural patterns (WAL append/flush/CRC, clock-sweep buffer manager, CLRS B-tree, checkpoint ring) but defines filesystem-native key types (`Ino`, `DirEntryKey`). This adds ~500 LoC at the engine root but gives a clean separation with zero coupling to spostgre internals.
-- The 8 `spostgre_if` trait contracts (`BufferManager`, `WalWriter`, `PageStore`, `PageMap`, `TempStore`, `Checkpointer`, `BlobStore`, `Vacuumer`) serve as the interface specification; `DbFsEngine` implements them with DBFS-specific type parameters.
+- `from_simple_db.md` design notes explicitly argue against inverting the layering: Simple DB sits ABOVE NVFS, consuming the `arena_*` API. DBFS is a sibling consumer of Arena+StorageClass, not a Simple DB catalog extension.
+- Option A (embedding Simple DB as-is) would leak `Rel/BlkNo` abstractions into the filesystem layer and make the kernel-linked single-cache discipline (D9) harder to enforce — Simple DB's `BufferManager` has its own clock-sweep cache keyed on `Rel/BlkNo`.
+- Option B copies the structural patterns (WAL append/flush/CRC, clock-sweep buffer manager, CLRS B-tree, checkpoint ring) but defines filesystem-native key types (`Ino`, `DirEntryKey`). This adds ~500 LoC at the engine root but gives a clean separation with zero coupling to Simple DB internals.
+- The 8 `simple_db_if` trait contracts (`BufferManager`, `WalWriter`, `PageStore`, `PageMap`, `TempStore`, `Checkpointer`, `BlobStore`, `Vacuumer`) serve as the interface specification; `DbFsEngine` implements them with DBFS-specific type parameters.
 
 **Reuse sources (read-only reference; no vendored changes):**
-- `examples/spostgre/src/engine/wal.spl` — WAL writer with CRC32C, group-commit, arena-backed log
-- `examples/spostgre/src/engine/buffer_mgr.spl` — clock-sweep buffer manager
-- `examples/spostgre/src/engine/checkpoint.spl` — checkpoint sealing protocol
+- `examples/simple_db/src/engine/wal.spl` — WAL writer with CRC32C, group-commit, arena-backed log
+- `examples/simple_db/src/engine/buffer_mgr.spl` — clock-sweep buffer manager
+- `examples/simple_db/src/engine/checkpoint.spl` — checkpoint sealing protocol
 - `examples/nvfs/src/core/pmap_btree.spl` — full CLRS B-tree (delete/rebalance), key type generalized
 - `examples/nvfs/src/core/intent_log.spl` — intent log structure (must add disk persistence)
 - `examples/nvfs/src/core/checkpoint.spl` — 4096-slot ring (must add META_DURABLE persistence)
-- `src/lib/nogc_sync_mut/spostgre_if/` — 8 trait contract definitions
+- `src/lib/nogc_sync_mut/simple_db_if/` — 8 trait contract definitions
 
 ---
 
@@ -338,7 +338,7 @@ No new `Capability` enum variants needed — all 4 are already in the existing e
 ### Lock primitives (all from existing repo `src/lib/nogc_sync_mut/sync/`):
 - `Mutex<T>` — exclusive lock (used for mount lock, directory lock)
 - `RwLock<T>` — reader-writer lock (used for inode data lock; writers hold exclusive; readers hold shared)
-- `SpinLatch` — page latch for buffer manager (existing in spostgre buffer_mgr pattern)
+- `SpinLatch` — page latch for buffer manager (existing in Simple DB buffer_mgr pattern)
 - Reader gen-revalidation — readers compare `Inode.gen` at snapshot time vs. after each page read; if changed, re-read from updated root (no retry for writers — writer holds RwLock exclusive, so gen cannot change under it)
 
 ### Lock hierarchy (must always acquire in this order to prevent deadlock):
@@ -466,7 +466,7 @@ All specs are interpreter-mode only (per `feedback_compile_mode_false_greens`). 
 | R5 | Large-file random overwrite COW amplification | MEDIUM | Random write rewrites one EXTENT_REF per 4K write (worst case); mitigated by extent coalescing in vacuum pass; benchmarked in random_overwrite_bench.spl |
 | R6 | Namespace B-tree key generalization mismatch | MEDIUM | pmap_btree structural copy with DentryKey; btree_spec.spl ports all 3 original tests to new key type; no runtime behavior change |
 | R7 | Power-cut harness complexity (AC-5) | MEDIUM | Harness wraps Arena with fault injection (N-write threshold); simpler than real device testing; interpreter-mode only |
-| R8 | spostgre_if Rel/BlkNo coupling leak | MEDIUM | DbFsEngine defines own Ino/DirEntryKey; never imports spostgre type definitions; enforced by no cross-module import of spostgre types |
+| R8 | simple_db_if Rel/BlkNo coupling leak | MEDIUM | DbFsEngine defines own Ino/DirEntryKey; never imports Simple DB type definitions; enforced by no cross-module import of Simple DB types |
 | R9 | Recovery bugs in orphan reclamation | MEDIUM | arena_discard is idempotent; worst case: disk space not reclaimed, not data corruption; recovery_spec verifies no false-positive discards |
 | R10 | jj submodule gitlink flip during parallel work | LOW | Per memory note: accept gitlinks-as-tree; commit per-phase immediately; no parallel /dev tracks during DBFS phase work |
 | R11 | Stage 2 rt_* extern bootstrap rebuild | LOW | Any new rt_* extern requires full bootstrap (scripts/bootstrap/bootstrap-from-scratch.sh --deploy); documented in implementation handoff |

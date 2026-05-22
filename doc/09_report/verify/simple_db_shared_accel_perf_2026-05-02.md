@@ -2,7 +2,7 @@
 
 **Report file date:** 2026-05-02  
 **Latest verification in this update:** 2026-05-03  
-**Scope:** Phase 1 shared accel verification for SDN, DBFS, and `spostgre`
+**Scope:** Phase 1 shared accel verification for SDN, DBFS, and `simple_db`
 
 ## Status
 
@@ -59,8 +59,8 @@ Preflight scope inside the benchmark:
 - SDN shared query row count vs scalar row count
 - DBFS `find_child_accel` result vs scalar lookup
 - DBFS prefix result count vs scalar prefix count
-- `spostgre` shared fullscan count vs scalar fullscan count
-- `spostgre` BRIN-refine count vs scalar BRIN-refine count
+- `simple_db` shared fullscan count vs scalar fullscan count
+- `simple_db` BRIN-refine count vs scalar BRIN-refine count
 
 ## Startup / RSS (2026-05-03)
 
@@ -97,11 +97,11 @@ Representative p50 results from the rerun:
 | `dbfs_find_child_scalar` | `7433728 ns` |
 | `dbfs_prefix_accel` | `5213110 ns` |
 | `dbfs_prefix_scalar` | `8579786 ns` |
-| `spostgre_shared_fallback_fullscan` | `8031719 ns` |
-| `spostgre_shared_fallback_brin_refine` | `68678279 ns` |
-| `spostgre_scalar_brin_refine` | `22837608 ns` |
-| `spostgre_scalar_fullscan_count_only` | `2487618 ns` |
-| `spostgre_text_search_candidates` | `26559912 ns` |
+| `simple_db_shared_fallback_fullscan` | `8031719 ns` |
+| `simple_db_shared_fallback_brin_refine` | `68678279 ns` |
+| `simple_db_scalar_brin_refine` | `22837608 ns` |
+| `simple_db_scalar_fullscan_count_only` | `2487618 ns` |
+| `simple_db_text_search_candidates` | `26559912 ns` |
 
 ## Reading The Numbers
 
@@ -109,14 +109,14 @@ Current takeaways:
 
 1. The rerun confirms the harness is measuring shared-scalar fallback behavior,
    not active SIMD execution.
-2. The text and `spostgre` shared/fallback paths remain slower than their
+2. The text and `simple_db` shared/fallback paths remain slower than their
    leaner scalar baselines on this host.
 3. The SDN shared row-materializing path is still slower than the hand-rolled
    scalar row-materializing loop.
 4. DBFS is mixed: the current shared accel helpers beat the local scalar loops
    for `find_child` and prefix scans in this rerun.
-5. `spostgre_shared_fallback_brin_refine` must be compared against
-   `spostgre_scalar_brin_refine`, not the count-only fullscan baseline.
+5. `simple_db_shared_fallback_brin_refine` must be compared against
+   `simple_db_scalar_brin_refine`, not the count-only fullscan baseline.
 
 ## Historical Note About 2026-05-02
 
@@ -128,7 +128,7 @@ Treat the following as historical-only and superseded:
 
 - the old claim that `simd_active=true`
 - older benchmark labels such as `accel_text_scan_contains`,
-  `sdn_query_batch_filter`, and `spostgre_scan_accel`
+  `sdn_query_batch_filter`, and `simple_db_scan_accel`
 - any interpretation that the Phase 1 numbers reflected active ISA-specific
   DB kernels
 

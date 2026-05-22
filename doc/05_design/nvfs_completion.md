@@ -16,5 +16,5 @@ Dedup exposes DEDUP tree id 12, a 56-byte entry encoding contract, 256 MB
 default cache configuration, module-level stats, encrypted DHK-keyed hashing,
 and a refcount consistency check for `nvfs check --dedup`.
 
-The spostgre integration test now writes encoded WAL bytes through a
+The Simple DB integration test now writes encoded WAL bytes through a
 MountTable-resolved RamFs path under `/db/wal/segment0`.

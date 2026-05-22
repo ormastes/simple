@@ -346,7 +346,9 @@ impl LlvmBackend {
         // Create basic blocks for each MIR block
         let mut llvm_blocks = HashMap::new();
         for block in &func.blocks {
-            let bb = self.context_ref().append_basic_block(function, &format!("bb{}", block.id.0));
+            let bb = self
+                .context_ref()
+                .append_basic_block(function, &format!("bb{}", block.id.0));
             llvm_blocks.insert(block.id, bb);
         }
 

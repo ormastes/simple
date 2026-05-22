@@ -8,7 +8,11 @@ use simple_common::target::{Target, TargetArch, TargetOS};
 use simple_compiler::codegen::local_execution::{JitBackend, LocalExecutionManager};
 
 fn arm32_target() -> Target {
-    Target { arch: TargetArch::Arm, os: TargetOS::Linux, ..Target::host() }
+    Target {
+        arch: TargetArch::Arm,
+        os: TargetOS::Linux,
+        ..Target::host()
+    }
 }
 
 // --- JitBackend::for_target selection ---
@@ -42,7 +46,11 @@ fn jit_backend_for_arm32_falls_back_to_cranelift() {
 fn local_execution_manager_for_arm32_uses_llvm() {
     let arm32 = arm32_target();
     let em = LocalExecutionManager::for_target(arm32);
-    assert!(em.is_ok(), "LocalExecutionManager::for_target should succeed for ARM32 with LLVM: {:?}", em.err());
+    assert!(
+        em.is_ok(),
+        "LocalExecutionManager::for_target should succeed for ARM32 with LLVM: {:?}",
+        em.err()
+    );
     assert_eq!(
         em.unwrap().backend_kind(),
         JitBackend::Llvm,

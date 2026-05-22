@@ -216,10 +216,10 @@ pub struct CodegenBackend<M: Module> {
 /// - Unknown tokens generate a warning to stderr and are silently ignored.
 #[derive(Debug, Clone, Default)]
 pub struct CpuFeatureConfig {
-    pub neon: Option<bool>,     // aarch64 — accepted but no-op (no Cranelift flag)
-    pub sve: Option<bool>,      // aarch64 — accepted but no-op
-    pub sve2: Option<bool>,     // aarch64 — accepted but no-op
-    pub sse2: Option<bool>,     // x86_64  — accepted but no-op (unconditional baseline)
+    pub neon: Option<bool>, // aarch64 — accepted but no-op (no Cranelift flag)
+    pub sve: Option<bool>,  // aarch64 — accepted but no-op
+    pub sve2: Option<bool>, // aarch64 — accepted but no-op
+    pub sse2: Option<bool>, // x86_64  — accepted but no-op (unconditional baseline)
     pub sse3: Option<bool>,
     pub ssse3: Option<bool>,
     pub sse41: Option<bool>,
@@ -293,10 +293,7 @@ impl CpuFeatureConfig {
 ///
 /// Flags that the target ISA does not recognise are silently ignored — Cranelift
 /// returns an error for unknown flag names, which we swallow here.
-fn apply_feature_overrides(
-    isa_builder: &mut dyn cranelift_codegen::settings::Configurable,
-    cfg: &CpuFeatureConfig,
-) {
+fn apply_feature_overrides(isa_builder: &mut dyn cranelift_codegen::settings::Configurable, cfg: &CpuFeatureConfig) {
     let mut set = |key: &str, val: bool| {
         // Ignore errors: unknown flags are silently no-op across ISAs.
         let _ = isa_builder.set(key, if val { "true" } else { "false" });
@@ -510,11 +507,14 @@ pub fn create_isa_and_flags(
             .map_err(|e: target_lexicon::ParseError| BackendError::UnsupportedTarget(e.to_string()))?
     };
 
-    let (flags, isa) = create_isa_from_settings(triple, flags, &settings.target, &settings.cpu, &settings.cpu_features)?;
+    let (flags, isa) =
+        create_isa_from_settings(triple, flags, &settings.target, &settings.cpu, &settings.cpu_features)?;
 
     {
         let mut guard = ISA_CACHE.lock().unwrap();
-        guard.entry(cache_key).or_insert_with(|| (flags.clone(), Arc::clone(&isa)));
+        guard
+            .entry(cache_key)
+            .or_insert_with(|| (flags.clone(), Arc::clone(&isa)));
     }
 
     Ok((flags, isa))

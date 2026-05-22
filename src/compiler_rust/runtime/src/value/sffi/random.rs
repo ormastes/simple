@@ -15,19 +15,33 @@ mod c_sffi {
 }
 
 #[inline(always)]
-pub fn rt_random_seed(seed: i64) { unsafe { c_sffi::rt_random_seed(seed) } }
+pub fn rt_random_seed(seed: i64) {
+    unsafe { c_sffi::rt_random_seed(seed) }
+}
 #[inline(always)]
-pub fn rt_random_getstate() -> i64 { unsafe { c_sffi::rt_random_getstate() } }
+pub fn rt_random_getstate() -> i64 {
+    unsafe { c_sffi::rt_random_getstate() }
+}
 #[inline(always)]
-pub fn rt_random_setstate(new_state: i64) { unsafe { c_sffi::rt_random_setstate(new_state) } }
+pub fn rt_random_setstate(new_state: i64) {
+    unsafe { c_sffi::rt_random_setstate(new_state) }
+}
 #[inline(always)]
-pub fn rt_random_next() -> i64 { unsafe { c_sffi::rt_random_next() } }
+pub fn rt_random_next() -> i64 {
+    unsafe { c_sffi::rt_random_next() }
+}
 #[inline(always)]
-pub fn rt_random_randint(min: i64, max: i64) -> i64 { unsafe { c_sffi::rt_random_randint(min, max) } }
+pub fn rt_random_randint(min: i64, max: i64) -> i64 {
+    unsafe { c_sffi::rt_random_randint(min, max) }
+}
 #[inline(always)]
-pub fn rt_random_random() -> f64 { unsafe { c_sffi::rt_random_random() } }
+pub fn rt_random_random() -> f64 {
+    unsafe { c_sffi::rt_random_random() }
+}
 #[inline(always)]
-pub fn rt_random_uniform(min: f64, max: f64) -> f64 { unsafe { c_sffi::rt_random_uniform(min, max) } }
+pub fn rt_random_uniform(min: f64, max: f64) -> f64 {
+    unsafe { c_sffi::rt_random_uniform(min, max) }
+}
 
 #[no_mangle]
 pub extern "C" fn rt_random_hex(len: i64) -> crate::value::RuntimeValue {

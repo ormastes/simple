@@ -5,10 +5,17 @@
 //! the resulting manager is usable for compilation.
 
 use simple_common::target::{Target, TargetArch, TargetOS};
-use simple_compiler::codegen::{ExecutionManager, local_execution::{JitBackend, LocalExecutionManager}};
+use simple_compiler::codegen::{
+    ExecutionManager,
+    local_execution::{JitBackend, LocalExecutionManager},
+};
 
 fn x86_32_linux() -> Target {
-    Target { arch: TargetArch::X86, os: TargetOS::Linux, ..Target::host() }
+    Target {
+        arch: TargetArch::X86,
+        os: TargetOS::Linux,
+        ..Target::host()
+    }
 }
 
 /// Verify that `for_target` with an x86_32 target constructs successfully
@@ -17,7 +24,11 @@ fn x86_32_linux() -> Target {
 fn test_for_target_x86_32_succeeds() {
     let target = x86_32_linux();
     let em = LocalExecutionManager::for_target(target);
-    assert!(em.is_ok(), "LocalExecutionManager::for_target x86_32 should succeed: {:?}", em.err());
+    assert!(
+        em.is_ok(),
+        "LocalExecutionManager::for_target x86_32 should succeed: {:?}",
+        em.err()
+    );
 }
 
 /// When the `llvm` feature is enabled, x86_32 must select the LLVM backend.
@@ -69,9 +80,7 @@ fn test_for_target_x86_32_backend_name() {
 #[test]
 fn test_x86_32_llvm_compile_simple_function() {
     use simple_compiler::hir::{BinOp, TypeId};
-    use simple_compiler::mir::{
-        BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirModule, Terminator, VReg,
-    };
+    use simple_compiler::mir::{BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirModule, Terminator, VReg};
     use simple_parser::Visibility;
 
     // Build: fn add_b_times_2(a: i64, b: i64) -> i64 { a + b * 2 }
@@ -87,13 +96,26 @@ fn test_x86_32_llvm_compile_simple_function() {
     func.blocks.clear();
     func.entry_block = BlockId(0);
 
-    func.params.push(MirLocal { name: "a".into(), ty: TypeId::I64, kind: LocalKind::Parameter, is_ghost: false });
-    func.params.push(MirLocal { name: "b".into(), ty: TypeId::I64, kind: LocalKind::Parameter, is_ghost: false });
+    func.params.push(MirLocal {
+        name: "a".into(),
+        ty: TypeId::I64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
+    });
+    func.params.push(MirLocal {
+        name: "b".into(),
+        ty: TypeId::I64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
+    });
 
     let mut b0 = MirBlock::new(BlockId(0));
 
     // VReg(0) = a, VReg(1) = b  (parameters occupy the first VRegs by convention)
-    b0.instructions.push(MirInst::ConstInt { dest: VReg(2), value: 2 });
+    b0.instructions.push(MirInst::ConstInt {
+        dest: VReg(2),
+        value: 2,
+    });
     b0.instructions.push(MirInst::BinOp {
         dest: VReg(3),
         op: BinOp::Mul,
@@ -126,7 +148,10 @@ fn test_x86_32_llvm_compile_simple_function() {
                 "compiled symbol list should include 'add_b_times_2', got: {:?}",
                 code_info.symbol_names
             );
-            assert!(em.has_function("add_b_times_2"), "has_function should return true after successful compile");
+            assert!(
+                em.has_function("add_b_times_2"),
+                "has_function should return true after successful compile"
+            );
         }
         Err(e) => {
             // Cross-arch JIT failure is acceptable; document the reason.

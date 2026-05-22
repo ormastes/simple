@@ -18,7 +18,7 @@ code-quality
 - Hook into `src/lib/common/security/audit_log.spl`
 
 **Out-of-scope (explicit non-goals)**
-- Core NVFS engine work (arena/extent/scrub/dedup/compression/AES — tracked under `spostgre-nvfs-storage` sstack)
+- Core NVFS engine work (arena/extent/scrub/dedup/compression/AES — tracked under `simple_db-nvfs-storage` sstack)
 - NVMe driver layer (FR-NVFS-N4a, N4b, N6x, N7x remain in backlog)
 - Formal verification (`src/verification/formal/nvfs`) changes
 - svllm `nvfs_client` — separate consumer
@@ -29,7 +29,7 @@ code-quality
 - [x] AC-3: **Read-only enforced + caps propagated.** `MountOptions.want_caps` / `require_caps` are threaded from caller, no longer hard-coded `0`. `nvfs_vfs_write_text` on a `read_only: true` connection returns an explicit error without opening a handle.
 - [x] AC-4: **Bounded I/O.** Write/read helpers enforce a documented max size (configurable constant) and use a bulk extern path instead of the per-char `buf.push(str_char_at(...))` loop flagged in memory `feedback_interpreter_bulk_buffer.md`. Oversize writes fail fast with a distinguishable error.
 - [~] AC-5: **Audit-log observable.** (partial — emission implemented, spec capture deferred per Phase 4 TODO) Mount success/failure, open failure, read-only write-denied, traversal-rejected, and oversize-rejected events emit entries via `src/lib/common/security/audit_log.spl`. Spec asserts at least one audit entry is captured per failure class.
-- [x] AC-6: **Regression-safe.** Existing `test/unit/os/services/vfs/vfs_nvfs_connector_spec.spl` and `test/system/spostgre_nvfs_constants_spec.spl` still pass under `bin/simple test <spec>`; new specs covering AC-1..AC-5 are added and pass.
+- [x] AC-6: **Regression-safe.** Existing `test/unit/os/services/vfs/vfs_nvfs_connector_spec.spl` and `test/system/simple_db_nvfs_constants_spec.spl` still pass under `bin/simple test <spec>`; new specs covering AC-1..AC-5 are added and pass.
 
 ## Cooperative Providers
 - Codex: available (detected 2026-04-24)
@@ -133,7 +133,7 @@ Registered in `src/compiler_rust/common/src/runtime_symbols.rs:447-460` and `src
 **Risks (from memory):**
 - `feedback_interpreter_bulk_buffer.md` — per-char `buf.push(str_char_at(...))` in interpreter is a known timeout source → use `rt_text_to_bytes` / `rt_bytes_to_text` (AC-4).
 - `feedback_extern_bootstrap_rebuild.md` — externs used above are **already registered** → no bootstrap rebuild required. ✅
-- `feedback_svllm_drives_nvfs_design.md` — the parallel `spostgre-nvfs-storage` sstack owns the NVFS engine; our scope stays at the SimpleOS connector only. ✅
+- `feedback_svllm_drives_nvfs_design.md` — the parallel `simple_db-nvfs-storage` sstack owns the NVFS engine; our scope stays at the SimpleOS connector only. ✅
 - `feedback_submodule_race_parallel_dev.md` — Phase 8 (ship) must pause parallel /dev tracks before `jj commit` to avoid submodule gitlink flipping to a tree.
 - `feedback_test_imports.md` — new specs must `use std.io_runtime`, not `use app.io`.
 - `feedback_no_branches.md` — Phase 8 commits straight onto `main`.
@@ -387,7 +387,7 @@ If `use std.log.{...}` fails to import from `src/os/services/vfs/` (the log modu
 `test/unit/os/services/vfs/vfs_nvfs_connector_spec.spl` — **14/14 pass** (31ms)
 
 **AC-6 regression specs (explicit):**
-- `test/system/spostgre_nvfs_constants_spec.spl` — **1/1 pass** (144ms)
+- `test/system/simple_db_nvfs_constants_spec.spl` — **1/1 pass** (144ms)
 - `test/unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` — **6/6 pass** (41ms)
 
 **Wider vfs service sweep (no regression):**

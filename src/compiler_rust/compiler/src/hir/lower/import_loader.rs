@@ -851,13 +851,11 @@ impl Lowerer {
         use simple_common::smf::{SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolType};
         use std::io::{Read, Seek, SeekFrom};
 
-        let mut file = std::fs::File::open(smf_path).map_err(|e| {
-            LowerError::ModuleResolution(format!("Failed to open SMF {:?}: {}", smf_path, e))
-        })?;
+        let mut file = std::fs::File::open(smf_path)
+            .map_err(|e| LowerError::ModuleResolution(format!("Failed to open SMF {:?}: {}", smf_path, e)))?;
 
-        let header = SmfHeader::read_trailer(&mut file).map_err(|e| {
-            LowerError::ModuleResolution(format!("Failed to read SMF header {:?}: {}", smf_path, e))
-        })?;
+        let header = SmfHeader::read_trailer(&mut file)
+            .map_err(|e| LowerError::ModuleResolution(format!("Failed to read SMF header {:?}: {}", smf_path, e)))?;
 
         if header.symbol_count == 0 {
             return Ok(());
@@ -870,9 +868,8 @@ impl Lowerer {
                 let mut sec_buf = vec![0u8; sec_size * header.section_count as usize];
                 if file.read_exact(&mut sec_buf).is_ok() {
                     for i in 0..header.section_count as usize {
-                        let section: SmfSection = unsafe {
-                            std::ptr::read(sec_buf[i * sec_size..].as_ptr() as *const SmfSection)
-                        };
+                        let section: SmfSection =
+                            unsafe { std::ptr::read(sec_buf[i * sec_size..].as_ptr() as *const SmfSection) };
                         if section.section_type == SectionType::StrTab && section.size > 0 {
                             if file.seek(SeekFrom::Start(section.offset)).is_ok() {
                                 string_table.resize(section.size as usize, 0u8);
@@ -899,8 +896,7 @@ impl Lowerer {
         }
 
         for i in 0..header.symbol_count as usize {
-            let sym: SmfSymbol =
-                unsafe { std::ptr::read(sym_buf[i * sym_size..].as_ptr() as *const SmfSymbol) };
+            let sym: SmfSymbol = unsafe { std::ptr::read(sym_buf[i * sym_size..].as_ptr() as *const SmfSymbol) };
 
             let name = smf_read_string(&string_table, sym.name_offset as usize);
             if name.is_empty() || !self.should_import_symbol(&name, target) {

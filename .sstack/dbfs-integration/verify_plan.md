@@ -36,9 +36,9 @@ Two ACs (AC-1, AC-10) are document-existence ACs — they verify by `grep`/secti
 | Item | Detail |
 |---|---|
 | Pass criterion | `state.md` Phase 2 records reuse target (Option A or B chosen) AND a 6-item gap list. Architecture doc D1 records the same decision. |
-| Command | `grep -nE 'Option [AB] — Dedicated DbFsEngine\|spostgre\|gap list' /home/ormastes/dev/pub/simple/.sstack/dbfs-integration/state.md /home/ormastes/dev/pub/simple/doc/04_architecture/dbfs_architecture.md` |
+| Command | `grep -nE 'Option [AB] — Dedicated DbFsEngine\|Simple DB\|gap list' /home/ormastes/dev/pub/simple/.sstack/dbfs-integration/state.md /home/ormastes/dev/pub/simple/doc/04_architecture/dbfs_architecture.md` |
 | Expected | At least one match for `Option B — Dedicated DbFsEngine` in BOTH files; 6 numbered gaps in arch D2 |
-| Negative | If `state.md` says "build new" without surveying spostgre/nvfs, AC-1 fails |
+| Negative | If `state.md` says "build new" without surveying Simple DB/nvfs, AC-1 fails |
 
 ### AC-2 — DBFS driver lands at FsDriver seam
 
@@ -272,7 +272,7 @@ For each of the 13 risks in `doc/04_architecture/dbfs_architecture.md > D12`, Ph
 | R5 | Large-file random overwrite COW amplification | `random_overwrite_bench.spl` produces IOPS; vacuum/coalesce code path exists: `grep -Rn 'extent_coalesc\|vacuum' src/lib/nogc_sync_mut/db/dbfs_engine/` |
 | R6 | Namespace B-tree key generalization mismatch | `dbfs_engine_btree_spec.spl` 8 it-blocks pass and cover insert/lookup/delete/range with `Ino`/`DirEntryKey`; structural `pmap_btree` copy verified by `diff` against `examples/nvfs/src/core/pmap_btree.spl` (only key type changed) |
 | R7 | Power-cut harness complexity | F1–F8 of §2 all green; `power_cut_harness.spl` compiles and is referenced by `dbfs_recovery_spec.spl` |
-| R8 | spostgre_if Rel/BlkNo coupling leak | `grep -Rn 'use .*spostgre' src/lib/nogc_sync_mut/db/dbfs_engine/` ⇒ ZERO matches; DbFsEngine defines own `Ino`/`DirEntryKey` (verify via `grep -n 'Ino\b\|DirEntryKey' src/lib/nogc_sync_mut/db/dbfs_engine/schema.spl`) |
+| R8 | simple_db_if Rel/BlkNo coupling leak | `grep -Rn 'use .*simple_db' src/lib/nogc_sync_mut/db/dbfs_engine/` ⇒ ZERO matches; DbFsEngine defines own `Ino`/`DirEntryKey` (verify via `grep -n 'Ino\b\|DirEntryKey' src/lib/nogc_sync_mut/db/dbfs_engine/schema.spl`) |
 | R9 | Recovery bugs in orphan reclamation | `dbfs_recovery_spec.spl` includes "no false-positive discard" assertion; `arena_discard` idempotency test in `dbfs_engine_intent_log_spec.spl` or `dbfs_engine_pager_spec.spl` |
 | R10 | jj submodule gitlink flip | `git ls-tree HEAD -- src/lib/nogc_sync_mut/db/dbfs_engine/` shows expected mode; no `.gitmodules` regression. Verified by Phase 8 ship gate, Phase 7 records current state. |
 | R11 | rt_* extern bootstrap rebuild | If new `rt_*` extern was added (grep for it), confirm `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` was run (check `doc/08_tracking/build/recent_build.md`). If no new extern, R11 is N/A — document that. |

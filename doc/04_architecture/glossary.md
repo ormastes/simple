@@ -458,6 +458,36 @@ Unified trace format (`.sr/` directory) shared across all 6 tracks. Contains: `m
 
 Architecture-neutral address representation: `struct Address { bits: i32, value: i64 }`. The `bits` field is 32 or 64; upper bits are zero for 32-bit targets. Never use raw pointers in trace formats. Defined in `src/lib/nogc_sync_mut/replay/types.spl`.
 
+## Simple DB
+
+Two-tier database system written in Simple (formerly codenamed **spostgre**).
+
+**Simple DB Embedded** (stdlib) — lightweight embedded database for compiler metadata and app-level table storage. Ships with every Simple installation. SDN format, atomic file I/O, QueryBuilder, string interning. No server required.
+
+**Simple DB Full** (example) — PostgreSQL-compatible storage engine. Keeps PostgreSQL's conceptual model — 8 KiB pages, MVCC via `xmin`/`xmax`, HOT chains, WAL-first durability, TOAST — but replaces the physicalization layer with append-only NVFS arenas. Architecture follows MDSOC+ (capsule + internal ECS): eight systems (`sys_commit`, `sys_wal_flush`, `sys_checkpoint`, `sys_vacuum`, `sys_buffer_evict`, `sys_pmap_publish`, `sys_blob_gc`, `sys_capability_probe`) over component entities.
+
+**Shared interface** (`simple_db_if`) — trait contracts both tiers implement. Application code targets these traits and can swap between embedded and full backends.
+
+Key paths:
+
+- **Shared traits:** `src/lib/nogc_sync_mut/simple_db_if/`, `src/lib/gc_async_mut/simple_db_if/`
+- **Embedded (stdlib):** `src/lib/nogc_sync_mut/database/` — BugDB, TestDB, FeatureDB, QueryBuilder, atomic I/O
+- **Full engine (submodule):** `examples/simple_db/` → `https://github.com/ormastes/simple-spostgre.git`
+- **DBFS tests:** `test/dbfs/` — btree, pager, WAL, checkpoint, intent log, NVMe, capability, recovery
+- **Research:** `doc/01_research/simple_db_research.md`
+- **Design:** `doc/05_design/simple_db_design.md`, `doc/05_design/nvfs/from_simple_db.md`
+- **Accel / SIMD:** `doc/05_design/simple_db_shared_accel_simd.md`
+- **Feature requests:** `doc/08_tracking/feature_request/simple_db_requests.md`
+- **Guide:** `doc/07_guide/simple_db.md`
+
+## DBFS (Database Filesystem)
+
+The filesystem layer that sits beneath Simple DB. Provides B-tree indexing, WAL journaling, page-level checkpointing, intent logging, and NVMe passthrough. Backed by NVFS arenas. Tests in `test/dbfs/`. Design in `doc/03_plan/nvfs_dbfs_real_filesystem.md`.
+
+## SDN (Simple Data Notation)
+
+Human-readable, version-control-friendly data format used by all Simple database modules. Analogous to JSON but with richer type annotations. All `*.sdn` files use atomic file I/O (shared read locks, exclusive write-rename pattern) to prevent corruption. Core infrastructure: `StringInterner` (20–40% space savings), `SdnTable`/`SdnRow` (in-memory table), `QueryBuilder` (fluent filter/sort/limit API). Defined in `src/lib/nogc_sync_mut/database/core.spl`.
+
 ---
 
 # Simple RISC-V RTL Vocabulary

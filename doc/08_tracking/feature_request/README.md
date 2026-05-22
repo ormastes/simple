@@ -16,9 +16,9 @@ Per memory note `feedback_svllm_drives_nvfs_design.md` (2026) the convention
 used across this project is:
 
 - **Primary channel — upfront design contributions.** Upstream consumers
-  (spostgre, svllm, ...) produce design-doc contributions alongside their own
+  (Simple DB, svllm, ...) produce design-doc contributions alongside their own
   design work. For NVFS, these live under `doc/05_design/nvfs/`:
-  - `doc/05_design/nvfs/from_spostgre.md` — spostgre's upfront contribution
+  - `doc/05_design/nvfs/from_simple_db.md` — Simple DB's upfront contribution
     (§S1..S7 + §S-stretch-1..6).
   - `doc/05_design/nvfs/svllm_requirements.md` — svllm's upfront contribution
     (§R1..R9).
@@ -100,11 +100,11 @@ Every entry uses the fields in `TEMPLATE.md`:
 ## Cross-references
 
 - Upfront (primary) channel:
-  - `doc/05_design/nvfs/from_spostgre.md`
+  - `doc/05_design/nvfs/from_simple_db.md`
   - `doc/05_design/nvfs/svllm_requirements.md`
 - Owning design docs:
   - `doc/05_design/nvfs_design.md`
-  - `doc/05_design/spostgre_design.md`
+  - `doc/05_design/simple_db_design.md`
 - Related trackers under `doc/08_tracking/`:
   - `bug/` — defect tracking
   - `todo/` — code-level TODO scan output

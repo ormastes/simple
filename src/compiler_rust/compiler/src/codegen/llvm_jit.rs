@@ -81,8 +81,7 @@ impl LlvmJitCompiler {
         let module_name = mir.name.as_deref().unwrap_or("jit_module");
 
         // Set up the LLVM backend for compilation
-        let backend =
-            LlvmBackend::new(self.target.clone()).map_err(|e| format!("LLVM backend init: {}", e))?;
+        let backend = LlvmBackend::new(self.target.clone()).map_err(|e| format!("LLVM backend init: {}", e))?;
 
         // Initialize the backend's internal module and builder
         backend

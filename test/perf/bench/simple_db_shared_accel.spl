@@ -1,11 +1,11 @@
 # test/perf/bench/simple_db_shared_accel.spl
 #
 # Shared Simple DB accel benchmark.
-# Measures representative SDN, DBFS, and spostgre hot paths using the Phase 1
+# Measures representative SDN, DBFS, and simple_db hot paths using the Phase 1
 # shared accel layer. This is a scalar-fallback benchmark today: the runtime
 # capability report is real, but the current kernels remain behavior-identical
 # scalar implementations. Labels below distinguish shared-path fallback costs
-# from handwritten scalar baselines, and include a BRIN-aware spostgre case to
+# from handwritten scalar baselines, and include a BRIN-aware simple_db case to
 # better reflect intended use.
 #
 # Run:
@@ -57,11 +57,11 @@ fn brin_scan_range(index: BrinIndex, lo: BrinValue, hi: BrinValue) -> [u32]:
         idx = idx + 1
     ranges
 
-fn spostgre_scan_text(values: [text], predicate: ScanPredicate) -> TextScanResult:
+fn simple_db_scan_text(values: [text], predicate: ScanPredicate) -> TextScanResult:
     val (rows, _stats) = collect_text_row_indices(values, predicate)
     TextScanResult(matched_rows: rows)
 
-fn spostgre_scan_text_with_brin(range_ids: [u32],
+fn simple_db_scan_text_with_brin(range_ids: [u32],
                                 values: [text],
                                 index: BrinIndex,
                                 lo: BrinValue,
@@ -85,7 +85,7 @@ fn spostgre_scan_text_with_brin(range_ids: [u32],
         row_idx = row_idx + 1
     TextScanResult(matched_rows: matched_rows)
 
-fn spostgre_text_search(values: [text], token: text) -> [i64]:
+fn simple_db_text_search(values: [text], token: text) -> [i64]:
     var rows: [i64] = []
     var idx = 0
     while idx < values.len():
@@ -105,7 +105,7 @@ fn build_text_values(row_count: i64) -> [text]:
         idx = idx + 1
     values
 
-fn build_spostgre_ranges(row_count: i64, rows_per_range: i64) -> [u32]:
+fn build_simple_db_ranges(row_count: i64, rows_per_range: i64) -> [u32]:
     var range_ids: [u32] = []
     var idx = 0
     while idx < row_count:
@@ -113,7 +113,7 @@ fn build_spostgre_ranges(row_count: i64, rows_per_range: i64) -> [u32]:
         idx = idx + 1
     range_ids
 
-fn build_spostgre_brin(row_count: i64, rows_per_range: i64) -> BrinIndex:
+fn build_simple_db_brin(row_count: i64, rows_per_range: i64) -> BrinIndex:
     var idx = brin_new(1u32, rows_per_range as u32)
     val range_count = (row_count + rows_per_range - 1) / rows_per_range
     var range_id = 0
@@ -200,14 +200,14 @@ fn scalar_dentry_prefix_count(table: SchemaTable, prefix: text) -> i64:
             matched_rows.push(row)
     matched_rows.len()
 
-fn scalar_spostgre_count(values: [text], needle: text) -> i64:
+fn scalar_simple_db_count(values: [text], needle: text) -> i64:
     var matched_rows: [i64] = []
     for (idx, value) in values.enumerate():
         if value.contains(needle):
             matched_rows.push(idx)
     matched_rows.len()
 
-fn scalar_spostgre_brin_refine_count(values: [text], range_ids: [u32], idx: BrinIndex) -> i64:
+fn scalar_simple_db_brin_refine_count(values: [text], range_ids: [u32], idx: BrinIndex) -> i64:
     val coarse_ranges = brin_scan_range(
         idx,
         BrinValue(kind: BRIN_KIND_INT, raw: 300),
@@ -284,16 +284,16 @@ fn bench_dbfs_prefix_scalar(table: SchemaTable) -> BenchResult:
         val _count = scalar_dentry_prefix_count(table, "src_")
     )
 
-fn bench_spostgre_accel(values: [text]) -> BenchResult:
+fn bench_simple_db_accel(values: [text]) -> BenchResult:
     val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
-    bench_measure("spostgre_shared_fallback_fullscan", 32, \:
-        val _scan = spostgre_scan_text(values, predicate)
+    bench_measure("simple_db_shared_fallback_fullscan", 32, \:
+        val _scan = simple_db_scan_text(values, predicate)
     )
 
-fn bench_spostgre_brin(values: [text], range_ids: [u32], idx: BrinIndex) -> BenchResult:
+fn bench_simple_db_brin(values: [text], range_ids: [u32], idx: BrinIndex) -> BenchResult:
     val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
-    bench_measure("spostgre_shared_fallback_brin_refine", 32, \:
-        val _scan = spostgre_scan_text_with_brin(
+    bench_measure("simple_db_shared_fallback_brin_refine", 32, \:
+        val _scan = simple_db_scan_text_with_brin(
             range_ids,
             values,
             idx,
@@ -303,19 +303,19 @@ fn bench_spostgre_brin(values: [text], range_ids: [u32], idx: BrinIndex) -> Benc
         )
     )
 
-fn bench_spostgre_brin_scalar(values: [text], range_ids: [u32], idx: BrinIndex) -> BenchResult:
-    bench_measure("spostgre_scalar_brin_refine", 32, \:
-        val _count = scalar_spostgre_brin_refine_count(values, range_ids, idx)
+fn bench_simple_db_brin_scalar(values: [text], range_ids: [u32], idx: BrinIndex) -> BenchResult:
+    bench_measure("simple_db_scalar_brin_refine", 32, \:
+        val _count = scalar_simple_db_brin_refine_count(values, range_ids, idx)
     )
 
-fn bench_spostgre_scalar(values: [text]) -> BenchResult:
-    bench_measure("spostgre_scalar_fullscan_count_only", 32, \:
-        val _count = scalar_spostgre_count(values, "token=user")
+fn bench_simple_db_scalar(values: [text]) -> BenchResult:
+    bench_measure("simple_db_scalar_fullscan_count_only", 32, \:
+        val _count = scalar_simple_db_count(values, "token=user")
     )
 
-fn bench_spostgre_text_search(values: [text]) -> BenchResult:
-    bench_measure("spostgre_text_search_candidates", 32, \:
-        val _rows = spostgre_text_search(values, "user")
+fn bench_simple_db_text_search(values: [text]) -> BenchResult:
+    bench_measure("simple_db_text_search_candidates", 32, \:
+        val _rows = simple_db_text_search(values, "user")
     )
 
 fn run_correctness_preflight(values: [text],
@@ -351,12 +351,12 @@ fn run_correctness_preflight(values: [text],
     if accel_prefix_rows.len() != scalar_prefix_rows:
         panic("dbfs prefix mismatch: shared={accel_prefix_rows.len()} scalar={scalar_prefix_rows}")
 
-    val spostgre_shared = spostgre_scan_text(values, text_predicate)
-    val spostgre_scalar = scalar_spostgre_count(values, "token=user")
-    if spostgre_shared.matched_rows.len() != spostgre_scalar:
-        panic("spostgre fullscan mismatch: shared={spostgre_shared.matched_rows.len()} scalar={spostgre_scalar}")
+    val simple_db_shared = simple_db_scan_text(values, text_predicate)
+    val simple_db_scalar = scalar_simple_db_count(values, "token=user")
+    if simple_db_shared.matched_rows.len() != simple_db_scalar:
+        panic("simple_db fullscan mismatch: shared={simple_db_shared.matched_rows.len()} scalar={simple_db_scalar}")
 
-    val spostgre_brin_shared = spostgre_scan_text_with_brin(
+    val simple_db_brin_shared = simple_db_scan_text_with_brin(
         range_ids,
         values,
         brin_idx,
@@ -364,15 +364,15 @@ fn run_correctness_preflight(values: [text],
         BrinValue(kind: BRIN_KIND_INT, raw: 399),
         text_predicate
     )
-    val spostgre_brin_scalar = scalar_spostgre_brin_refine_count(values, range_ids, brin_idx)
-    if spostgre_brin_shared.matched_rows.len() != spostgre_brin_scalar:
-        panic("spostgre BRIN refine mismatch: shared={spostgre_brin_shared.matched_rows.len()} scalar={spostgre_brin_scalar}")
+    val simple_db_brin_scalar = scalar_simple_db_brin_refine_count(values, range_ids, brin_idx)
+    if simple_db_brin_shared.matched_rows.len() != simple_db_brin_scalar:
+        panic("simple_db BRIN refine mismatch: shared={simple_db_brin_shared.matched_rows.len()} scalar={simple_db_brin_scalar}")
 
 fn main():
     val capability = accel_capability_report()
     val text_values = build_text_values(1024)
-    val spostgre_range_ids = build_spostgre_ranges(1024, 128)
-    val spostgre_brin = build_spostgre_brin(1024, 128)
+    val simple_db_range_ids = build_simple_db_ranges(1024, 128)
+    val simple_db_brin = build_simple_db_brin(1024, 128)
     val sdn_table = build_sdn_table(512)
     val dentry_table = build_dentry_table(384)
     val target_name = "src_entry_381"
@@ -380,9 +380,9 @@ fn main():
     print "=== simple_db_shared_accel benchmark ==="
     print "capability tier={capability.tier_name} simd_available={capability.simd_available} simd_active={capability.simd_active} scalar_fallback={capability.scalar_fallback} width_bits={capability.simd_width_bits}"
     print "note: Phase 1 shared accel still uses scalar kernels; shared/fallback benches measure API, bitmap construction, row-id materialization, and coarse-filter behavior as much as kernel speed."
-    print "note: SDN labels now compare row-materializing QueryBuilder fallback against a row-materializing scalar loop. spostgre BRIN is now paired fairly with a scalar BRIN-refine baseline, while the scalar fullscan baseline remains count-only."
-    run_correctness_preflight(text_values, spostgre_range_ids, spostgre_brin, sdn_table, dentry_table, target_name)
-    print "preflight: shared-path counts match current scalar-oracle behavior for text, SDN, DBFS, and spostgre."
+    print "note: SDN labels now compare row-materializing QueryBuilder fallback against a row-materializing scalar loop. simple_db BRIN is now paired fairly with a scalar BRIN-refine baseline, while the scalar fullscan baseline remains count-only."
+    run_correctness_preflight(text_values, simple_db_range_ids, simple_db_brin, sdn_table, dentry_table, target_name)
+    print "preflight: shared-path counts match current scalar-oracle behavior for text, SDN, DBFS, and simple_db."
     print ""
 
     val results = [
@@ -396,11 +396,11 @@ fn main():
         bench_dbfs_find_child_scalar(dentry_table, target_name),
         bench_dbfs_prefix_accel(dentry_table),
         bench_dbfs_prefix_scalar(dentry_table),
-        bench_spostgre_accel(text_values),
-        bench_spostgre_brin(text_values, spostgre_range_ids, spostgre_brin),
-        bench_spostgre_brin_scalar(text_values, spostgre_range_ids, spostgre_brin),
-        bench_spostgre_scalar(text_values),
-        bench_spostgre_text_search(text_values)
+        bench_simple_db_accel(text_values),
+        bench_simple_db_brin(text_values, simple_db_range_ids, simple_db_brin),
+        bench_simple_db_brin_scalar(text_values, simple_db_range_ids, simple_db_brin),
+        bench_simple_db_scalar(text_values),
+        bench_simple_db_text_search(text_values)
     ]
 
     for result in results:

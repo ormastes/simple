@@ -453,9 +453,9 @@ pub(super) fn eval_bdd_builtin(
             // `with_context`), fall back to eval_arg.
             let (name_str, ctx_def_blocks) = {
                 use simple_parser::ast::Expr;
-                let is_literal = args.first().map_or(false, |a| {
-                    matches!(a.value, Expr::String(_) | Expr::FString { .. })
-                });
+                let is_literal = args
+                    .first()
+                    .map_or(false, |a| matches!(a.value, Expr::String(_) | Expr::FString { .. }));
                 if is_literal {
                     (extract_desc_str(args, "unnamed"), None)
                 } else {
@@ -471,8 +471,7 @@ pub(super) fn eval_bdd_builtin(
                     )?;
                     match &first_arg {
                         Value::Symbol(ctx_name) => {
-                            let blocks =
-                                BDD_CONTEXT_DEFS.with(|cell| cell.borrow().get(ctx_name).cloned());
+                            let blocks = BDD_CONTEXT_DEFS.with(|cell| cell.borrow().get(ctx_name).cloned());
                             (format!("with {}", ctx_name), blocks)
                         }
                         Value::Str(s) => (s.clone(), None),

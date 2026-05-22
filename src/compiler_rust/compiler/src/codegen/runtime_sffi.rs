@@ -1195,7 +1195,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cuda_memcpy_dtoh", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_module_load_data", &[I64], &[I64]), // ptx_ptr (cstr) -> module
     RuntimeFuncSpec::new("rt_cuda_module_unload", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_cuda_launch_kernel", &[I64, I64, I64, I64, I64, I64, I64, I64, I64], &[I64]), // module, name_ptr, grid_xyz, block_xyz, args_ptr
+    RuntimeFuncSpec::new(
+        "rt_cuda_launch_kernel",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ), // module, name_ptr, grid_xyz, block_xyz, args_ptr
     RuntimeFuncSpec::new("rt_cuda_sync", &[], &[I64]),
     // =========================================================================
     // Bootstrap Self-Hosting SFFI

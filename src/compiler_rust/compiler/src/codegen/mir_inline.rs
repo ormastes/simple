@@ -309,7 +309,12 @@ fn remap_inst(
             op: *op,
             operand: remap_vreg(caller, *operand, vreg_map),
         },
-        MirInst::Cast { dest, source, from_ty, to_ty } => MirInst::Cast {
+        MirInst::Cast {
+            dest,
+            source,
+            from_ty,
+            to_ty,
+        } => MirInst::Cast {
             dest: remap_vreg(caller, *dest, vreg_map),
             source: remap_vreg(caller, *source, vreg_map),
             from_ty: *from_ty,

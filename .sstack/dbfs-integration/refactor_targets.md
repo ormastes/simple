@@ -29,7 +29,7 @@ No file was unparseable in the snapshot. All 13 modules are reviewable.
 Read-only neighbours used for cross-reference:
 `src/lib/nogc_sync_mut/fs_driver/instance.spl`,
 `src/lib/nogc_sync_mut/storage/arena.spl`,
-`examples/spostgre/src/engine/{wal,checkpoint,pmap}.spl`,
+`examples/simple_db/src/engine/{wal,checkpoint,pmap}.spl`,
 `examples/nvfs/src/core/{pmap_btree,ns_tree,intent_log,checkpoint}.spl`,
 `.sstack/dbfs-integration/dbfs_architecture.md`.
 
@@ -146,7 +146,7 @@ docstring, no code change. Gain is zero LoC; clarity is positive.
 - **Orphan `var` declarations:** the loops in `pager.spl`, `wal.spl`, and
   `schema.spl` use the `while i < x.len() as i32` idiom which leaves
   `var i: i32 = 0` as a single-purpose loop counter. This is the project's
-  standard style (matched in spostgre/nvfs neighbours), not an orphan. No
+  standard style (matched in Simple DB/nvfs neighbours), not an orphan. No
   action.
 - **`fn` vs `me fn` for field-mutating methods:** automated scan
   (`self\.X =` inside a non-`me fn`) reported **0 violations**. All
@@ -196,7 +196,7 @@ no smell of inheritance. **Verdict: clean.**
 
 | Site | Existing implementation | Recommendation |
 |---|---|---|
-| `dbfs_engine/wal.spl` write/flush/durable_lsn API | `examples/spostgre/src/engine/wal.spl` has the same shape (`append`, `flush`, `durable_lsn`, `recovery_cursor`) | **Do not swap** — DBFS WAL is intentionally embedded; spostgre WAL is application-level. Keep as parallel implementations. Note in `dbfs_engine/wal.spl` header that the API mirrors spostgre intentionally. (~3 LoC docstring) |
+| `dbfs_engine/wal.spl` write/flush/durable_lsn API | `examples/simple_db/src/engine/wal.spl` has the same shape (`append`, `flush`, `durable_lsn`, `recovery_cursor`) | **Do not swap** — DBFS WAL is intentionally embedded; Simple DB WAL is application-level. Keep as parallel implementations. Note in `dbfs_engine/wal.spl` header that the API mirrors Simple DB intentionally. (~3 LoC docstring) |
 | `dbfs_engine/ns_btree.spl` whole module | `examples/nvfs/src/core/pmap_btree.spl` (CLRS B-tree) | Already noted as structural copy. **Defer to fr_dbfs_btree_unify** (see §1.3). |
 | `dbfs_engine/checkpoint.spl` `latest_clean()` | `examples/nvfs/src/core/checkpoint.spl` | Already structurally aligned; behaviours match. No change needed. |
 | `dbfs_engine/intent_log.spl` `append`/`scan_committed`/`flush` | `examples/nvfs/src/core/intent_log.spl` | Same observation as ns_btree — structurally similar but tied to its own host. Keep parallel; cross-reference in header. |
@@ -212,7 +212,7 @@ Realistic LoC totals — not aspirational.
 |---|---|---|---:|:---:|
 | 1 | Extract `_resolve_fd(inst_id, handle) -> Result<(i32,i32), FsError>` and `_resolve_path(inst_id, path) -> Result<i32, FsError>`; replace ~10 call sites | `dbfs_driver/dbfs_driver.spl` lines 156-460 | **−30 to −40** | LOW |
 | 2 | Verify `WAL_RECORD_DATA` import in `intent_log.spl` line 19 is used; drop if not | `dbfs_engine/intent_log.spl` | **−1 or 0** | LOW |
-| 3 | Add cross-reference docstring header in `dbfs_engine/__init__.spl` calling out the three module-static persistence sites (`pager`, `checkpoint_ring`, `intent_log`) and the spostgre/nvfs structural mirrors (wal, ns_btree, intent_log) | `dbfs_engine/__init__.spl` | **+5 to +10** docstring | LOW |
+| 3 | Add cross-reference docstring header in `dbfs_engine/__init__.spl` calling out the three module-static persistence sites (`pager`, `checkpoint_ring`, `intent_log`) and the Simple DB/nvfs structural mirrors (wal, ns_btree, intent_log) | `dbfs_engine/__init__.spl` | **+5 to +10** docstring | LOW |
 | 4 | Extract single-key linear-scan helper for the six single-i64-key schema tables (INODE, EXTENT, BLOCK_BLOB, TXN, WAL_RECORD, STORAGE_CLASS) — either a `_find_by_id` private fn or shared `SingleKeyTable<Row>` | `dbfs_engine/schema.spl` lines 232-535 | **−30 to −50** | LOW-MED |
 | 5 | Add a header comment in `ns_btree.spl` linking explicitly to the deferred `fr_dbfs_btree_unify` follow-up so the duplicate is intentional, not accidental | `dbfs_engine/ns_btree.spl` | **+3** | LOW |
 | 6 | (DEFERRED — file as follow-up, parallel-agent risk per `feedback_jj_uncommitted_clobbered_by_parallel`) Tighten naming consistency: rename `_pager_disk_pages` / `_dbfs_inodes` / `_dbfs_fds` / `_ring_store_slots` / `_intent_*` to a single `_dbfs_persist_<module>_*` prefix. Broad cosmetic rename across 5+ files = clobber-fodder during parallel commits. Net LoC = 0; defer until Phase 5/6 fully settle | all engine + driver `.spl` | **0 net** | MED-HIGH (parallel race) |

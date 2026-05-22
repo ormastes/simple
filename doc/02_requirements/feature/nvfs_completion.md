@@ -13,5 +13,5 @@ Feature set: remaining unchecked NVFS tracker criteria.
 - REQ-NVFS-COMPLETE-004: Dedup must expose DEDUP tree id 12, 56-byte entry
   encoding metadata, hot-cache defaults, stats, refcount checks, and
   DHK-keyed hash behavior for encrypted datasets.
-- REQ-NVFS-COMPLETE-005: spostgre E2E storage coverage must route WAL bytes
+- REQ-NVFS-COMPLETE-005: Simple DB E2E storage coverage must route WAL bytes
   through a MountTable-resolved RamFs path.

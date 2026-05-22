@@ -184,15 +184,16 @@ mod tests {
     #[test]
     fn test_target_aware_64bit_matches_original() {
         // 64-bit target-aware must match the original functions
-        for ty in [TypeId::I8, TypeId::I32, TypeId::I64, TypeId::STRING, TypeId::ANY, TypeId::F64] {
-            assert_eq!(
-                type_id_to_cranelift(ty),
-                type_id_to_cranelift_for_target(ty, 64)
-            );
-            assert_eq!(
-                type_id_size(ty),
-                type_id_size_for_target(ty, 64)
-            );
+        for ty in [
+            TypeId::I8,
+            TypeId::I32,
+            TypeId::I64,
+            TypeId::STRING,
+            TypeId::ANY,
+            TypeId::F64,
+        ] {
+            assert_eq!(type_id_to_cranelift(ty), type_id_to_cranelift_for_target(ty, 64));
+            assert_eq!(type_id_size(ty), type_id_size_for_target(ty, 64));
         }
     }
 }

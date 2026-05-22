@@ -47,7 +47,13 @@ mod c_sffi_io {
         #[link_name = "__c_rt_stderr_flush"]
         pub(super) fn rt_stderr_flush() -> i64;
         #[link_name = "__c_rt_value_format_string"]
-        pub(super) fn value_format_string(v: RuntimeValue, fmt_ptr: *const u8, fmt_len: u64, out: *mut u8, out_cap: u64) -> i64;
+        pub(super) fn value_format_string(
+            v: RuntimeValue,
+            fmt_ptr: *const u8,
+            fmt_len: u64,
+            out: *mut u8,
+            out_cap: u64,
+        ) -> i64;
         #[link_name = "__c_rt_raw_u64_to_str"]
         pub(super) fn raw_u64_to_str(raw: i64, out: *mut u8, out_cap: u64) -> i64;
         #[link_name = "__c_rt_value_to_display_str"]
@@ -280,7 +286,9 @@ pub extern "C" fn rt_value_to_string(v: RuntimeValue) -> RuntimeValue {
 pub extern "C" fn rt_raw_u64_to_string(raw: i64) -> RuntimeValue {
     let mut buf = [0u8; 32];
     let len = unsafe { c_sffi_io::raw_u64_to_str(raw, buf.as_mut_ptr(), buf.len() as u64) };
-    if len <= 0 { return RuntimeValue::NIL; }
+    if len <= 0 {
+        return RuntimeValue::NIL;
+    }
     unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), len as u64) }
 }
 
@@ -306,15 +314,12 @@ pub extern "C" fn rt_raw_u64_to_string(raw: i64) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_value_format_string(v: RuntimeValue, fmt_ptr: *const u8, fmt_len: u64) -> RuntimeValue {
     let mut buf = [0u8; 1024];
-    let written = unsafe {
-        c_sffi_io::value_format_string(v, fmt_ptr, fmt_len, buf.as_mut_ptr(), buf.len() as u64)
-    };
+    let written = unsafe { c_sffi_io::value_format_string(v, fmt_ptr, fmt_len, buf.as_mut_ptr(), buf.len() as u64) };
     if written <= 0 {
         return unsafe { crate::value::collections::rt_string_new(std::ptr::null(), 0) };
     }
     unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), written as u64) }
 }
-
 
 fn value_to_display_string(v: RuntimeValue) -> String {
     let mut buf = [0u8; 256];
@@ -584,7 +589,9 @@ mod tests {
     fn format_value_with_spec(v: RuntimeValue, spec: &str) -> String {
         let result = unsafe { rt_value_format_string(v, spec.as_ptr(), spec.len() as u64) };
         let ptr = result.as_heap_ptr();
-        if ptr.is_null() { return String::new(); }
+        if ptr.is_null() {
+            return String::new();
+        }
         unsafe {
             let base = ptr as *const u8;
             let len = *(base.add(8) as *const u64) as usize;

@@ -31,8 +31,17 @@ mod cuda_dlopen {
     type CuModuleUnload = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuModuleGetFunction = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const i8) -> i32;
     type CuLaunchKernel = unsafe extern "C" fn(
-        *mut c_void, u32, u32, u32, u32, u32, u32, u32,
-        *mut c_void, *mut *mut c_void, *mut *mut c_void,
+        *mut c_void,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        *mut c_void,
+        *mut *mut c_void,
+        *mut *mut c_void,
     ) -> i32;
 
     pub struct CudaFns {
@@ -78,7 +87,9 @@ mod cuda_dlopen {
             ($name:expr) => {{
                 let n = CString::new($name).ok()?;
                 let p = libc::dlsym(handle, n.as_ptr());
-                if p.is_null() { return None; }
+                if p.is_null() {
+                    return None;
+                }
                 std::mem::transmute(p)
             }};
         }
@@ -181,7 +192,9 @@ pub fn rt_cuda_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
         if let Some(fns) = get_cuda_dl() {
             let mut count: i32 = 0;
             let r = unsafe { (fns.init)(0) };
-            if r != 0 { return Ok(Value::Int(0)); }
+            if r != 0 {
+                return Ok(Value::Int(0));
+            }
             let r = unsafe { (fns.device_get_count)(&mut count) };
             if r == 0 && count > 0 {
                 return Ok(Value::Int(1));
@@ -216,7 +229,9 @@ pub fn rt_cuda_device_count_fn(_args: &[Value]) -> Result<Value, CompileError> {
         if let Some(fns) = get_cuda_dl() {
             let mut count: i32 = 0;
             let r = unsafe { (fns.device_get_count)(&mut count) };
-            if r == 0 { return Ok(Value::Int(count as i64)); }
+            if r == 0 {
+                return Ok(Value::Int(count as i64));
+            }
         }
         Ok(Value::Int(0))
     }
@@ -233,7 +248,9 @@ pub fn rt_cuda_device_get_fn(args: &[Value]) -> Result<Value, CompileError> {
         if let Some(fns) = get_cuda_dl() {
             let mut dev: i32 = 0;
             let r = unsafe { (fns.device_get)(&mut dev, device_id as i32) };
-            if r == 0 { return Ok(Value::Int(dev as i64)); }
+            if r == 0 {
+                return Ok(Value::Int(dev as i64));
+            }
             return Ok(Value::Int(-(r as i64)));
         }
         Ok(Value::Int(-3))
@@ -275,7 +292,9 @@ pub fn rt_cuda_ctx_create_fn(args: &[Value]) -> Result<Value, CompileError> {
         if let Some(fns) = get_cuda_dl() {
             let mut ctx: *mut std::os::raw::c_void = std::ptr::null_mut();
             let r = unsafe { (fns.ctx_create)(&mut ctx, 0, device as i32) };
-            if r == 0 { return Ok(Value::Int(ctx as i64)); }
+            if r == 0 {
+                return Ok(Value::Int(ctx as i64));
+            }
             return Ok(Value::Int(-(r as i64)));
         }
         Ok(Value::Int(-3))
@@ -320,7 +339,9 @@ pub fn rt_cuda_mem_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {
         if let Some(fns) = get_cuda_dl() {
             let mut ptr: u64 = 0;
             let r = unsafe { (fns.mem_alloc)(&mut ptr, size as usize) };
-            if r == 0 { return Ok(Value::Int(ptr as i64)); }
+            if r == 0 {
+                return Ok(Value::Int(ptr as i64));
+            }
             return Ok(Value::Int(-(r as i64)));
         }
         Ok(Value::Int(-3))
@@ -559,7 +580,9 @@ pub fn rt_cuda_module_load_data_fn(args: &[Value]) -> Result<Value, CompileError
             let c_ptx = c_string_or_error(ptx, "rt_cuda_module_load_data")?;
             let mut module: *mut std::os::raw::c_void = std::ptr::null_mut();
             let r = unsafe { (fns.module_load_data)(&mut module, c_ptx.as_ptr() as *const std::os::raw::c_void) };
-            if r == 0 { return Ok(Value::Int(module as i64)); }
+            if r == 0 {
+                return Ok(Value::Int(module as i64));
+            }
             return Ok(Value::Int(-(r as i64)));
         }
         Ok(Value::Int(-3))
@@ -595,8 +618,11 @@ pub fn rt_cuda_module_get_function_fn(args: &[Value]) -> Result<Value, CompileEr
         if let Some(fns) = get_cuda_dl() {
             let c_name = c_string_or_error(func_name, "rt_cuda_module_get_function")?;
             let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
-            let r = unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr()) };
-            if r == 0 { return Ok(Value::Int(func as i64)); }
+            let r =
+                unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr()) };
+            if r == 0 {
+                return Ok(Value::Int(func as i64));
+            }
             return Ok(Value::Int(-(r as i64)));
         }
         Ok(Value::Int(-3))
@@ -633,14 +659,21 @@ pub fn rt_cuda_launch_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
         if let Some(fns) = get_cuda_dl() {
             let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel")?;
             let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
-            let r = unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr()) };
-            if r != 0 { return Ok(Value::Int(-(r as i64))); }
+            let r =
+                unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr()) };
+            if r != 0 {
+                return Ok(Value::Int(-(r as i64)));
+            }
             let r = unsafe {
                 (fns.launch_kernel)(
                     func,
-                    grid_x as u32, grid_y as u32, grid_z as u32,
-                    block_x as u32, block_y as u32, block_z as u32,
-                    0, // shared mem
+                    grid_x as u32,
+                    grid_y as u32,
+                    grid_z as u32,
+                    block_x as u32,
+                    block_y as u32,
+                    block_z as u32,
+                    0,                    // shared mem
                     std::ptr::null_mut(), // stream
                     args_ptr as *mut *mut std::os::raw::c_void,
                     std::ptr::null_mut(), // extra
@@ -1441,8 +1474,7 @@ mod vulkan_dlopen {
     type FnVkCreateInstance =
         unsafe extern "C" fn(*const VkInstanceCreateInfo, *const c_void, *mut VkInstance) -> VkResult;
     type FnVkDestroyInstance = unsafe extern "C" fn(VkInstance, *const c_void);
-    type FnVkEnumeratePhysicalDevices =
-        unsafe extern "C" fn(VkInstance, *mut u32, *mut VkPhysicalDevice) -> VkResult;
+    type FnVkEnumeratePhysicalDevices = unsafe extern "C" fn(VkInstance, *mut u32, *mut VkPhysicalDevice) -> VkResult;
     type FnVkGetPhysicalDeviceQueueFamilyProperties =
         unsafe extern "C" fn(VkPhysicalDevice, *mut u32, *mut VkQueueFamilyProperties);
     type FnVkCreateDevice =
@@ -1452,16 +1484,14 @@ mod vulkan_dlopen {
     type FnVkCreateBuffer =
         unsafe extern "C" fn(VkDevice, *const VkBufferCreateInfo, *const c_void, *mut VkBuffer) -> VkResult;
     type FnVkDestroyBuffer = unsafe extern "C" fn(VkDevice, VkBuffer, *const c_void);
-    type FnVkGetBufferMemoryRequirements =
-        unsafe extern "C" fn(VkDevice, VkBuffer, *mut VkMemoryRequirements);
+    type FnVkGetBufferMemoryRequirements = unsafe extern "C" fn(VkDevice, VkBuffer, *mut VkMemoryRequirements);
     type FnVkGetPhysicalDeviceMemoryProperties =
         unsafe extern "C" fn(VkPhysicalDevice, *mut VkPhysicalDeviceMemoryProperties);
     type FnVkAllocateMemory =
         unsafe extern "C" fn(VkDevice, *const VkMemoryAllocateInfo, *const c_void, *mut VkDeviceMemory) -> VkResult;
     type FnVkFreeMemory = unsafe extern "C" fn(VkDevice, VkDeviceMemory, *const c_void);
     type FnVkBindBufferMemory = unsafe extern "C" fn(VkDevice, VkBuffer, VkDeviceMemory, u64) -> VkResult;
-    type FnVkMapMemory =
-        unsafe extern "C" fn(VkDevice, VkDeviceMemory, u64, u64, u32, *mut *mut c_void) -> VkResult;
+    type FnVkMapMemory = unsafe extern "C" fn(VkDevice, VkDeviceMemory, u64, u64, u32, *mut *mut c_void) -> VkResult;
     type FnVkUnmapMemory = unsafe extern "C" fn(VkDevice, VkDeviceMemory);
     type FnVkCreateShaderModule =
         unsafe extern "C" fn(VkDevice, *const VkShaderModuleCreateInfo, *const c_void, *mut VkShaderModule) -> VkResult;
@@ -1472,8 +1502,7 @@ mod vulkan_dlopen {
         *const c_void,
         *mut VkDescriptorSetLayout,
     ) -> VkResult;
-    type FnVkDestroyDescriptorSetLayout =
-        unsafe extern "C" fn(VkDevice, VkDescriptorSetLayout, *const c_void);
+    type FnVkDestroyDescriptorSetLayout = unsafe extern "C" fn(VkDevice, VkDescriptorSetLayout, *const c_void);
     type FnVkCreatePipelineLayout = unsafe extern "C" fn(
         VkDevice,
         *const VkPipelineLayoutCreateInfo,
@@ -1506,31 +1535,19 @@ mod vulkan_dlopen {
     type FnVkDestroyCommandPool = unsafe extern "C" fn(VkDevice, VkCommandPool, *const c_void);
     type FnVkAllocateCommandBuffers =
         unsafe extern "C" fn(VkDevice, *const VkCommandBufferAllocateInfo, *mut VkCommandBuffer) -> VkResult;
-    type FnVkFreeCommandBuffers =
-        unsafe extern "C" fn(VkDevice, VkCommandPool, u32, *const VkCommandBuffer);
-    type FnVkBeginCommandBuffer =
-        unsafe extern "C" fn(VkCommandBuffer, *const VkCommandBufferBeginInfo) -> VkResult;
+    type FnVkFreeCommandBuffers = unsafe extern "C" fn(VkDevice, VkCommandPool, u32, *const VkCommandBuffer);
+    type FnVkBeginCommandBuffer = unsafe extern "C" fn(VkCommandBuffer, *const VkCommandBufferBeginInfo) -> VkResult;
     type FnVkEndCommandBuffer = unsafe extern "C" fn(VkCommandBuffer) -> VkResult;
     type FnVkCmdBindPipeline = unsafe extern "C" fn(VkCommandBuffer, u32, VkPipeline);
-    type FnVkCmdBindDescriptorSets = unsafe extern "C" fn(
-        VkCommandBuffer,
-        u32,
-        VkPipelineLayout,
-        u32,
-        u32,
-        *const VkDescriptorSet,
-        u32,
-        *const u32,
-    );
-    type FnVkCmdPushConstants =
-        unsafe extern "C" fn(VkCommandBuffer, VkPipelineLayout, u32, u32, u32, *const c_void);
+    type FnVkCmdBindDescriptorSets =
+        unsafe extern "C" fn(VkCommandBuffer, u32, VkPipelineLayout, u32, u32, *const VkDescriptorSet, u32, *const u32);
+    type FnVkCmdPushConstants = unsafe extern "C" fn(VkCommandBuffer, VkPipelineLayout, u32, u32, u32, *const c_void);
     type FnVkCmdDispatch = unsafe extern "C" fn(VkCommandBuffer, u32, u32, u32);
     type FnVkQueueSubmit = unsafe extern "C" fn(VkQueue, u32, *const VkSubmitInfo, u64) -> VkResult;
     type FnVkQueueWaitIdle = unsafe extern "C" fn(VkQueue) -> VkResult;
     type FnVkDeviceWaitIdle = unsafe extern "C" fn(VkDevice) -> VkResult;
     type FnVkResetCommandBuffer = unsafe extern "C" fn(VkCommandBuffer, u32) -> VkResult;
-    type FnVkGetPhysicalDeviceProperties =
-        unsafe extern "C" fn(VkPhysicalDevice, *mut VkPhysicalDeviceProperties);
+    type FnVkGetPhysicalDeviceProperties = unsafe extern "C" fn(VkPhysicalDevice, *mut VkPhysicalDeviceProperties);
 
     #[repr(C)]
     pub(super) struct VkPhysicalDeviceProperties {
@@ -1611,12 +1628,9 @@ mod vulkan_dlopen {
         *const c_char,
         ShadercCompileOptions,
     ) -> ShadercCompilationResult;
-    type FnShadercResultGetCompilationStatus =
-        unsafe extern "C" fn(ShadercCompilationResult) -> u32;
-    type FnShadercResultGetErrorMessage =
-        unsafe extern "C" fn(ShadercCompilationResult) -> *const c_char;
-    type FnShadercResultGetBytes =
-        unsafe extern "C" fn(ShadercCompilationResult) -> *const c_char;
+    type FnShadercResultGetCompilationStatus = unsafe extern "C" fn(ShadercCompilationResult) -> u32;
+    type FnShadercResultGetErrorMessage = unsafe extern "C" fn(ShadercCompilationResult) -> *const c_char;
+    type FnShadercResultGetBytes = unsafe extern "C" fn(ShadercCompilationResult) -> *const c_char;
     type FnShadercResultGetLength = unsafe extern "C" fn(ShadercCompilationResult) -> usize;
     type FnShadercResultRelease = unsafe extern "C" fn(ShadercCompilationResult);
 
@@ -1641,7 +1655,11 @@ mod vulkan_dlopen {
             let handle = names.iter().find_map(|name| {
                 let n = CString::new(*name).ok()?;
                 let h = libc::dlopen(n.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
-                if h.is_null() { None } else { Some(h) }
+                if h.is_null() {
+                    None
+                } else {
+                    Some(h)
+                }
             })?;
             load_vk_syms(handle)
         }
@@ -1652,7 +1670,9 @@ mod vulkan_dlopen {
             ($name:expr) => {{
                 let n = CString::new($name).ok()?;
                 let p = libc::dlsym(handle, n.as_ptr());
-                if p.is_null() { return None; }
+                if p.is_null() {
+                    return None;
+                }
                 std::mem::transmute(p)
             }};
         }
@@ -1660,9 +1680,7 @@ mod vulkan_dlopen {
             create_instance: sym!("vkCreateInstance"),
             destroy_instance: sym!("vkDestroyInstance"),
             enumerate_physical_devices: sym!("vkEnumeratePhysicalDevices"),
-            get_physical_device_queue_family_properties: sym!(
-                "vkGetPhysicalDeviceQueueFamilyProperties"
-            ),
+            get_physical_device_queue_family_properties: sym!("vkGetPhysicalDeviceQueueFamilyProperties"),
             create_device: sym!("vkCreateDevice"),
             destroy_device: sym!("vkDestroyDevice"),
             get_device_queue: sym!("vkGetDeviceQueue"),
@@ -1711,13 +1729,19 @@ mod vulkan_dlopen {
             let handle = names.iter().find_map(|name| {
                 let n = CString::new(*name).ok()?;
                 let h = libc::dlopen(n.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
-                if h.is_null() { None } else { Some(h) }
+                if h.is_null() {
+                    None
+                } else {
+                    Some(h)
+                }
             })?;
             macro_rules! sym {
                 ($name:expr) => {{
                     let n = CString::new($name).ok()?;
                     let p = libc::dlsym(handle, n.as_ptr());
-                    if p.is_null() { return None; }
+                    if p.is_null() {
+                        return None;
+                    }
                     std::mem::transmute(p)
                 }};
             }
@@ -1852,13 +1876,8 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         'outer: for pd in &phys_devs {
             let mut qf_count: u32 = 0;
             (fns.get_physical_device_queue_family_properties)(*pd, &mut qf_count, ptr::null_mut());
-            let mut qf_buf: Vec<VkQueueFamilyProperties> =
-                (0..qf_count as usize).map(|_| std::mem::zeroed()).collect();
-            (fns.get_physical_device_queue_family_properties)(
-                *pd,
-                &mut qf_count,
-                qf_buf.as_mut_ptr(),
-            );
+            let mut qf_buf: Vec<VkQueueFamilyProperties> = (0..qf_count as usize).map(|_| std::mem::zeroed()).collect();
+            (fns.get_physical_device_queue_family_properties)(*pd, &mut qf_count, qf_buf.as_mut_ptr());
             for i in 0..qf_count as usize {
                 if qf_buf[i].queue_flags & 0x02 != 0 {
                     // VK_QUEUE_COMPUTE_BIT
@@ -1907,7 +1926,10 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         // Memory properties
         let mut mem_props = VkPhysicalDeviceMemoryProperties {
             memory_type_count: 0,
-            memory_types: [VkMemoryType { property_flags: 0, heap_index: 0 }; 32],
+            memory_types: [VkMemoryType {
+                property_flags: 0,
+                heap_index: 0,
+            }; 32],
             memory_heap_count: 0,
             memory_heaps: [VkMemoryHeap { size: 0, flags: 0 }; 16],
         };
@@ -2004,10 +2026,7 @@ pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vulkan_device_count_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::VK_STATE;
     let guard = VK_STATE.lock().unwrap();
-    let count = guard
-        .as_ref()
-        .map(|s| s.physical_devices.len() as i64)
-        .unwrap_or(0);
+    let count = guard.as_ref().map(|s| s.physical_devices.len() as i64).unwrap_or(0);
     Ok(Value::Int(count))
 }
 
@@ -2092,7 +2111,11 @@ pub fn rt_vulkan_alloc_buffer_fn(args: &[Value]) -> Result<Value, CompileError> 
         if (s.fns.create_buffer)(s.device, &buf_ci, ptr::null(), &mut buf) != VK_SUCCESS {
             return Ok(Value::Int(0));
         }
-        let mut reqs = VkMemoryRequirements { size: 0, alignment: 0, memory_type_bits: 0 };
+        let mut reqs = VkMemoryRequirements {
+            size: 0,
+            alignment: 0,
+            memory_type_bits: 0,
+        };
         (s.fns.get_buffer_memory_requirements)(s.device, buf, &mut reqs);
 
         // Find host-visible + host-coherent memory type
@@ -2129,7 +2152,11 @@ pub fn rt_vulkan_alloc_buffer_fn(args: &[Value]) -> Result<Value, CompileError> 
             (s.fns.destroy_buffer)(s.device, buf, ptr::null());
             return Ok(Value::Int(0));
         }
-        s.buffers.push(Some(BufferEntry { buffer: buf, memory: mem, size }));
+        s.buffers.push(Some(BufferEntry {
+            buffer: buf,
+            memory: mem,
+            size,
+        }));
         Ok(Value::Int(s.buffers.len() as i64))
     }
 }
@@ -2239,7 +2266,9 @@ pub fn rt_vulkan_destroy_shader_fn(args: &[Value]) -> Result<Value, CompileError
     if let Some(s) = guard.as_mut() {
         if h > 0 && h <= s.shaders.len() {
             if let Some(sm) = s.shaders[h - 1].take() {
-                unsafe { (s.fns.destroy_shader_module)(s.device, sm, ptr::null()); }
+                unsafe {
+                    (s.fns.destroy_shader_module)(s.device, sm, ptr::null());
+                }
             }
         }
     }
@@ -2284,14 +2313,16 @@ pub fn rt_vulkan_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Com
             p_bindings: &binding,
         };
         let mut dsl: VkDescriptorSetLayout = 0;
-        if (s.fns.create_descriptor_set_layout)(s.device, &dsl_ci, ptr::null(), &mut dsl)
-            != VK_SUCCESS
-        {
+        if (s.fns.create_descriptor_set_layout)(s.device, &dsl_ci, ptr::null(), &mut dsl) != VK_SUCCESS {
             return Ok(Value::Int(0));
         }
 
         let pc_range = if pc_size > 0 {
-            Some(VkPushConstantRange { stage_flags: 0x20, offset: 0, size: pc_size })
+            Some(VkPushConstantRange {
+                stage_flags: 0x20,
+                offset: 0,
+                size: pc_size,
+            })
         } else {
             None
         };
@@ -2302,14 +2333,10 @@ pub fn rt_vulkan_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Com
             set_layout_count: 1,
             p_set_layouts: &dsl,
             push_constant_range_count: if pc_range.is_some() { 1 } else { 0 },
-            p_push_constant_ranges: pc_range
-                .as_ref()
-                .map_or(ptr::null(), |r| r as *const _),
+            p_push_constant_ranges: pc_range.as_ref().map_or(ptr::null(), |r| r as *const _),
         };
         let mut layout: VkPipelineLayout = 0;
-        if (s.fns.create_pipeline_layout)(s.device, &layout_ci, ptr::null(), &mut layout)
-            != VK_SUCCESS
-        {
+        if (s.fns.create_pipeline_layout)(s.device, &layout_ci, ptr::null(), &mut layout) != VK_SUCCESS {
             (s.fns.destroy_descriptor_set_layout)(s.device, dsl, ptr::null());
             return Ok(Value::Int(0));
         }
@@ -2341,15 +2368,7 @@ pub fn rt_vulkan_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Com
             base_pipeline_index: -1,
         };
         let mut pipeline: VkPipeline = 0;
-        if (s.fns.create_compute_pipelines)(
-            s.device,
-            0,
-            1,
-            &pipe_ci,
-            ptr::null(),
-            &mut pipeline,
-        ) != VK_SUCCESS
-        {
+        if (s.fns.create_compute_pipelines)(s.device, 0, 1, &pipe_ci, ptr::null(), &mut pipeline) != VK_SUCCESS {
             (s.fns.destroy_pipeline_layout)(s.device, layout, ptr::null());
             (s.fns.destroy_descriptor_set_layout)(s.device, dsl, ptr::null());
             return Ok(Value::Int(0));
@@ -2407,7 +2426,10 @@ pub fn rt_vulkan_create_descriptor_set_fn(args: &[Value]) -> Result<Value, Compi
     unsafe {
         // Create a pool large enough for multiple descriptor types/bindings
         let pool_sizes = [
-            VkDescriptorPoolSize { descriptor_type: 7, descriptor_count: 16 }, // STORAGE_BUFFER
+            VkDescriptorPoolSize {
+                descriptor_type: 7,
+                descriptor_count: 16,
+            }, // STORAGE_BUFFER
         ];
         let pool_ci = VkDescriptorPoolCreateInfo {
             s_type: 33,
@@ -2418,8 +2440,7 @@ pub fn rt_vulkan_create_descriptor_set_fn(args: &[Value]) -> Result<Value, Compi
             p_pool_sizes: pool_sizes.as_ptr(),
         };
         let mut pool: VkDescriptorPool = 0;
-        if (s.fns.create_descriptor_pool)(s.device, &pool_ci, ptr::null(), &mut pool) != VK_SUCCESS
-        {
+        if (s.fns.create_descriptor_pool)(s.device, &pool_ci, ptr::null(), &mut pool) != VK_SUCCESS {
             return Ok(Value::Int(0));
         }
         let alloc_info = VkDescriptorSetAllocateInfo {
@@ -2464,7 +2485,11 @@ pub fn rt_vulkan_bind_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
         None => return Ok(Value::Int(0)),
     };
     unsafe {
-        let buf_info = VkDescriptorBufferInfo { buffer: buf, offset: 0, range: buf_size };
+        let buf_info = VkDescriptorBufferInfo {
+            buffer: buf,
+            offset: 0,
+            range: buf_size,
+        };
         let write = VkWriteDescriptorSet {
             s_type: 35,
             p_next: ptr::null(),
@@ -2491,7 +2516,9 @@ pub fn rt_vulkan_destroy_descriptor_set_fn(args: &[Value]) -> Result<Value, Comp
     if let Some(s) = guard.as_mut() {
         if h > 0 && h <= s.descriptor_sets.len() {
             if let Some(e) = s.descriptor_sets[h - 1].take() {
-                unsafe { (s.fns.destroy_descriptor_pool)(s.device, e.pool, ptr::null()); }
+                unsafe {
+                    (s.fns.destroy_descriptor_pool)(s.device, e.pool, ptr::null());
+                }
             }
         }
     }
@@ -2529,7 +2556,10 @@ pub fn rt_vulkan_begin_compute_fn(_args: &[Value]) -> Result<Value, CompileError
             (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &cmd);
             return Ok(Value::Int(0));
         }
-        s.command_buffers.push(Some(CommandBufferEntry { cmd, pipeline_handle: 0 }));
+        s.command_buffers.push(Some(CommandBufferEntry {
+            cmd,
+            pipeline_handle: 0,
+        }));
         Ok(Value::Int(s.command_buffers.len() as i64))
     }
 }
@@ -2671,7 +2701,9 @@ pub fn rt_vulkan_dispatch_fn(args: &[Value]) -> Result<Value, CompileError> {
         Some(e) => e.cmd,
         None => return Ok(Value::Int(0)),
     };
-    unsafe { (s.fns.cmd_dispatch)(cmd, x, y, z); }
+    unsafe {
+        (s.fns.cmd_dispatch)(cmd, x, y, z);
+    }
     Ok(Value::Int(1))
 }
 
@@ -2733,7 +2765,9 @@ pub fn rt_vulkan_submit_and_wait_fn(args: &[Value]) -> Result<Value, CompileErro
     };
     // Free the command buffer (one-shot semantics)
     if let Some(e) = s.command_buffers[ch - 1].take() {
-        unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd); }
+        unsafe {
+            (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd);
+        }
     }
     Ok(Value::Int(if ok == VK_SUCCESS { 1 } else { 0 }))
 }

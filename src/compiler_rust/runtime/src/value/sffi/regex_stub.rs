@@ -9,10 +9,22 @@ mod c_sffi {
         pub(super) fn sffi_regex_find(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue;
         pub(super) fn sffi_regex_find_all(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue;
         pub(super) fn sffi_regex_captures(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue;
-        pub(super) fn sffi_regex_replace(pattern: RuntimeValue, text: RuntimeValue, replacement: RuntimeValue) -> RuntimeValue;
-        pub(super) fn sffi_regex_replace_all(pattern: RuntimeValue, text: RuntimeValue, replacement: RuntimeValue) -> RuntimeValue;
+        pub(super) fn sffi_regex_replace(
+            pattern: RuntimeValue,
+            text: RuntimeValue,
+            replacement: RuntimeValue,
+        ) -> RuntimeValue;
+        pub(super) fn sffi_regex_replace_all(
+            pattern: RuntimeValue,
+            text: RuntimeValue,
+            replacement: RuntimeValue,
+        ) -> RuntimeValue;
         pub(super) fn sffi_regex_split(pattern: RuntimeValue, text: RuntimeValue) -> RuntimeValue;
-        pub(super) fn sffi_regex_split_n(pattern: RuntimeValue, text: RuntimeValue, limit: RuntimeValue) -> RuntimeValue;
+        pub(super) fn sffi_regex_split_n(
+            pattern: RuntimeValue,
+            text: RuntimeValue,
+            limit: RuntimeValue,
+        ) -> RuntimeValue;
     }
 }
 

@@ -137,11 +137,15 @@ enum PassKind:
     AutoVectorize
     PredicatePromote
     TargetNarrowForm
+    WriteCoalesce
+    ReadAheadHoist
+    SyscallBatch
 
 enum PassScope:
     """Whether a pass operates per-function or on the whole module."""
     Function   # pass runs independently on each MirFunction
     Module     # pass needs the whole MirModule (may add/remove functions)
+    FsDriver   # pass targets filesystem-driver IO patterns
 
 struct MirPassDescriptor:
     stable_name: text
@@ -186,7 +190,10 @@ fn mir_pass_descriptor_registry() -> [MirPassDescriptor]:
         mir_pass_descriptor("pattern_idiom", [], mir_pipeline_provider("pattern_idiom", true), PassKind.PatternIdiom, PassScope.Module),
         mir_pass_descriptor("auto_vectorize", ["vectorization"], mir_pipeline_provider("auto_vectorize", false), PassKind.AutoVectorize, PassScope.Module),
         mir_pass_descriptor("predicate_promote", [], mir_pipeline_provider("predicate_promote", false), PassKind.PredicatePromote, PassScope.Module),
-        mir_pass_descriptor("target_narrow_form", [], mir_pipeline_provider("target_narrow_form", false), PassKind.TargetNarrowForm, PassScope.Module)
+        mir_pass_descriptor("target_narrow_form", [], mir_pipeline_provider("target_narrow_form", false), PassKind.TargetNarrowForm, PassScope.Module),
+        mir_pass_descriptor("write_coalesce", [], mir_pipeline_provider("write_coalesce", false), PassKind.WriteCoalesce, PassScope.FsDriver),
+        mir_pass_descriptor("read_ahead_hoist", [], mir_pipeline_provider("read_ahead_hoist", false), PassKind.ReadAheadHoist, PassScope.FsDriver),
+        mir_pass_descriptor("syscall_batch", [], mir_pipeline_provider("syscall_batch", false), PassKind.SyscallBatch, PassScope.FsDriver)
     ]
 
 fn mir_pass_provider_registry() -> [OptimizationRuleProvider]:
@@ -552,6 +559,15 @@ fn run_typed_pass_on_function(kind: PassKind, func: MirFunction) -> MirFunction:
         case TargetNarrowForm:
             # Module-level pass — no-op per function
             func
+        case WriteCoalesce:
+            var wc_stats = OptimizationStats.create()
+            optimize_write_coalesce(func, wc_stats)
+        case ReadAheadHoist:
+            var rah_stats = OptimizationStats.create()
+            optimize_read_ahead_hoist(func, rah_stats)
+        case SyscallBatch:
+            var sb_stats = OptimizationStats.create()
+            optimize_syscall_batch(func, sb_stats)
 
 fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirModule:
     """Run pipeline passes on all functions in a module.

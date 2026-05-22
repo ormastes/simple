@@ -12,8 +12,8 @@
 > - `doc/05_design/fs_driver_interface.md`
 > - `doc/05_design/nvfs_posix_wrapper.md`
 > - `doc/05_design/nvfs/svllm_requirements.md`
-> - `doc/05_design/nvfs/from_spostgre.md`
-> - `doc/05_design/spostgre_design.md`
+> - `doc/05_design/nvfs/from_simple_db.md`
+> - `doc/05_design/simple_db_design.md`
 >
 > **Status:** Forward-looking design (not yet implemented). 2026-04-18.
 

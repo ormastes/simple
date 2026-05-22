@@ -143,16 +143,13 @@ mod unix_impl {
                 libc::close(master_fd);
 
                 // Reset signal handlers.
-                libc::signal(libc::SIGINT,  libc::SIG_DFL);
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
                 libc::signal(libc::SIGTERM, libc::SIG_DFL);
                 libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-                libc::signal(libc::SIGHUP,  libc::SIG_DFL);
+                libc::signal(libc::SIGHUP, libc::SIG_DFL);
 
                 // exec shell — argv = [argv0, NULL]
-                let argv: &[*const libc::c_char] = &[
-                    argv0_cstr.as_ptr(),
-                    std::ptr::null(),
-                ];
+                let argv: &[*const libc::c_char] = &[argv0_cstr.as_ptr(), std::ptr::null()];
                 libc::execvp(shell_cstr.as_ptr(), argv.as_ptr());
 
                 // exec failed.

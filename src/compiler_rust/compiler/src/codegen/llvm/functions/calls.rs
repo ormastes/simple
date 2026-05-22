@@ -137,9 +137,11 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "native_udp_send_to" => Some(&[1, 2]),
 
         // Regex (pattern and text)
-        "sffi_regex_is_match" | "sffi_regex_find" | "sffi_regex_find_all" | "sffi_regex_captures" | "sffi_regex_split" => {
-            Some(&[0, 1])
-        }
+        "sffi_regex_is_match"
+        | "sffi_regex_find"
+        | "sffi_regex_find_all"
+        | "sffi_regex_captures"
+        | "sffi_regex_split" => Some(&[0, 1]),
         "sffi_regex_replace" | "sffi_regex_replace_all" => Some(&[0, 1, 2]),
         "sffi_regex_split_n" => Some(&[0, 1]),
 
@@ -1496,7 +1498,9 @@ impl LlvmBackend {
         let byte = builder
             .build_and(value, i64_type.const_int(0xff, false), "bytes_set_byte")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes set byte mask", &e))?;
-        let packed_block = self.context_ref().append_basic_block(function, "bytes_set_packed_store");
+        let packed_block = self
+            .context_ref()
+            .append_basic_block(function, "bytes_set_packed_store");
         let slot_block = self.context_ref().append_basic_block(function, "bytes_set_slot_store");
         let gc_flags_ptr = unsafe {
             builder
@@ -1713,7 +1717,9 @@ impl LlvmBackend {
         let sffi_name = map_sffi_name(func_name_raw);
         let i64_type = self.runtime_int_type();
 
-        if sffi_name == "rt_typed_bytes_u8_at" && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, true)? {
+        if sffi_name == "rt_typed_bytes_u8_at"
+            && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, true)?
+        {
             return Ok(());
         }
         if sffi_name == "rt_bytes_u8_at" && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, false)? {
@@ -2501,7 +2507,10 @@ impl LlvmBackend {
             for (index, arg) in args.iter().enumerate() {
                 let value = self.get_vreg(arg, vreg_map)?;
                 let casted = self.coerce_value_to_type(value, Some(i64_type.into()), builder)?;
-                let offset = self.context_ref().i32_type().const_int((index as u64) * slot_bytes, false);
+                let offset = self
+                    .context_ref()
+                    .i32_type()
+                    .const_int((index as u64) * slot_bytes, false);
                 let slot_ptr = unsafe { builder.build_gep(i8_type, argv_ptr, &[offset], "interp_argv_slot") }
                     .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
                 let typed_ptr = builder

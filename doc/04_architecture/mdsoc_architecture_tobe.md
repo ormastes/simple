@@ -396,10 +396,10 @@ MDSOC organises **composition** (capsules, ports, dimensions) but does not presc
 
 Design docs under `doc/05_design/` applying this architecture:
 
-- **spostgre** (PostgreSQL-like DB engine) — `doc/05_design/spostgre_design.md`. MDSOC outer at `src/lib/nogc_sync_mut/spostgre_if/` (trait contracts) + submodule `examples/spostgre/src/engine/*` (impl). Inner ECS components: `Relation / PageDescriptor / Tuple / WalRecord / Txn / Checkpoint / BufferFrame / PageMapEntry / SegmentSummary / TempSpill / BlobRef`. Systems: `sys_commit / sys_wal_flush / sys_buffer_manager / sys_checkpoint / sys_vacuum / sys_page_compact / sys_temp_sweep / sys_stats_collector`.
+- **Simple DB** (PostgreSQL-like DB engine) — `doc/05_design/simple_db_design.md`. MDSOC outer at `src/lib/nogc_sync_mut/simple_db_if/` (trait contracts) + submodule `examples/simple_db/src/engine/*` (impl). Inner ECS components: `Relation / PageDescriptor / Tuple / WalRecord / Txn / Checkpoint / BufferFrame / PageMapEntry / SegmentSummary / TempSpill / BlobRef`. Systems: `sys_commit / sys_wal_flush / sys_buffer_manager / sys_checkpoint / sys_vacuum / sys_page_compact / sys_temp_sweep / sys_stats_collector`.
 - **NVFS** (NVMe-aware filesystem) — `doc/05_design/nvfs_design.md`. **MDSOC-only, no ECS** (kernel-adjacent per the Layer Rules table above). Trait contracts at `src/lib/nogc_sync_mut/fs/nvfs/`; impl at submodule `examples/nvfs/src/core/*`.
-- **Upfront fs-API contribution from spostgre → NVFS** — `doc/05_design/nvfs/from_spostgre.md`. Companion to the existing `doc/05_design/nvfs/svllm_requirements.md`. Primary channel per memory note `feedback_svllm_drives_nvfs_design.md`.
-- **Storage Architecture Overview** — `doc/05_design/storage_architecture_overview.md`. Top-level reader's guide linking all storage layers (NVFS, spostgre, FsDriver trait, POSIX shim, FAT32 migration, wire format) with ASCII stack diagram, feature-gate table (ZNS/FDP/CMB/PMR), and cross-doc decision rationale.
+- **Upfront fs-API contribution from Simple DB → NVFS** — `doc/05_design/nvfs/from_simple_db.md`. Companion to the existing `doc/05_design/nvfs/svllm_requirements.md`. Primary channel per memory note `feedback_svllm_drives_nvfs_design.md`.
+- **Storage Architecture Overview** — `doc/05_design/storage_architecture_overview.md`. Top-level reader's guide linking all storage layers (NVFS, Simple DB, FsDriver trait, POSIX shim, FAT32 migration, wire format) with ASCII stack diagram, feature-gate table (ZNS/FDP/CMB/PMR), and cross-doc decision rationale.
 
 ## What ECS Does NOT Replace
 

@@ -162,7 +162,6 @@ fn call_loaded_function_by_name(
     exec_function_with_values(&func, args, env, functions, classes, enums, impl_methods)
 }
 
-
 // ---------------------------------------------------------------------------
 // Stub wrappers for functions whose natural call-site passes an empty slice
 // or returns a fixed value — needed so they match `ExternFn = fn(&[Value])`.
@@ -261,9 +260,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("__mock_policy_disable", mock_policy::mock_policy_disable as ExternFn);
     m.insert("__mock_policy_get_mode", mock_policy::mock_policy_get_mode as ExternFn);
     m.insert("__mock_policy_init_all", mock_policy::mock_policy_init_all as ExternFn);
-    m.insert("__mock_policy_init_hal_only", mock_policy::mock_policy_init_hal_only as ExternFn);
-    m.insert("__mock_policy_init_patterns", mock_policy::mock_policy_init_patterns as ExternFn);
-    m.insert("__mock_policy_try_check", mock_policy::mock_policy_try_check as ExternFn);
+    m.insert(
+        "__mock_policy_init_hal_only",
+        mock_policy::mock_policy_init_hal_only as ExternFn,
+    );
+    m.insert(
+        "__mock_policy_init_patterns",
+        mock_policy::mock_policy_init_patterns as ExternFn,
+    );
+    m.insert(
+        "__mock_policy_try_check",
+        mock_policy::mock_policy_try_check as ExternFn,
+    );
     m.insert("native_disable_raw_mode", terminal::native_disable_raw_mode as ExternFn);
     m.insert("native_enable_raw_mode", terminal::native_enable_raw_mode as ExternFn);
     m.insert("native_file_close", filesystem::native_file_close as ExternFn);
@@ -296,32 +304,62 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("native_tcp_bind", network::native_tcp_bind as ExternFn);
     m.insert("native_tcp_close", network::native_tcp_close as ExternFn);
     m.insert("native_tcp_connect", network::native_tcp_connect as ExternFn);
-    m.insert("native_tcp_connect_timeout", network::native_tcp_connect_timeout as ExternFn);
+    m.insert(
+        "native_tcp_connect_timeout",
+        network::native_tcp_connect_timeout as ExternFn,
+    );
     m.insert("native_tcp_flush", network::native_tcp_flush as ExternFn);
     m.insert("native_tcp_get_nodelay", network::native_tcp_get_nodelay as ExternFn);
     m.insert("native_tcp_peek", network::native_tcp_peek as ExternFn);
     m.insert("native_tcp_read", network::native_tcp_read as ExternFn);
     m.insert("native_tcp_set_backlog", network::native_tcp_set_backlog as ExternFn);
-    m.insert("native_tcp_set_keepalive", network::native_tcp_set_keepalive as ExternFn);
+    m.insert(
+        "native_tcp_set_keepalive",
+        network::native_tcp_set_keepalive as ExternFn,
+    );
     m.insert("native_tcp_set_nodelay", network::native_tcp_set_nodelay as ExternFn);
-    m.insert("native_tcp_set_read_timeout", network::native_tcp_set_read_timeout as ExternFn);
-    m.insert("native_tcp_set_write_timeout", network::native_tcp_set_write_timeout as ExternFn);
+    m.insert(
+        "native_tcp_set_read_timeout",
+        network::native_tcp_set_read_timeout as ExternFn,
+    );
+    m.insert(
+        "native_tcp_set_write_timeout",
+        network::native_tcp_set_write_timeout as ExternFn,
+    );
     m.insert("native_tcp_shutdown", network::native_tcp_shutdown as ExternFn);
     m.insert("native_tcp_write", network::native_tcp_write as ExternFn);
     m.insert("native_term_flush", terminal::native_term_flush as ExternFn);
     m.insert("native_term_poll", terminal::native_term_poll as ExternFn);
     m.insert("native_term_read", terminal::native_term_read as ExternFn);
-    m.insert("native_term_read_timeout", terminal::native_term_read_timeout as ExternFn);
+    m.insert(
+        "native_term_read_timeout",
+        terminal::native_term_read_timeout as ExternFn,
+    );
     m.insert("native_term_write", terminal::native_term_write as ExternFn);
     m.insert("native_udp_bind", network::native_udp_bind as ExternFn);
     m.insert("native_udp_close", network::native_udp_close as ExternFn);
     m.insert("native_udp_connect", network::native_udp_connect as ExternFn);
-    m.insert("native_udp_get_broadcast", network::native_udp_get_broadcast as ExternFn);
+    m.insert(
+        "native_udp_get_broadcast",
+        network::native_udp_get_broadcast as ExternFn,
+    );
     m.insert("native_udp_get_ttl", network::native_udp_get_ttl as ExternFn);
-    m.insert("native_udp_join_multicast_v4", network::native_udp_join_multicast_v4 as ExternFn);
-    m.insert("native_udp_join_multicast_v6", network::native_udp_join_multicast_v6 as ExternFn);
-    m.insert("native_udp_leave_multicast_v4", network::native_udp_leave_multicast_v4 as ExternFn);
-    m.insert("native_udp_leave_multicast_v6", network::native_udp_leave_multicast_v6 as ExternFn);
+    m.insert(
+        "native_udp_join_multicast_v4",
+        network::native_udp_join_multicast_v4 as ExternFn,
+    );
+    m.insert(
+        "native_udp_join_multicast_v6",
+        network::native_udp_join_multicast_v6 as ExternFn,
+    );
+    m.insert(
+        "native_udp_leave_multicast_v4",
+        network::native_udp_leave_multicast_v4 as ExternFn,
+    );
+    m.insert(
+        "native_udp_leave_multicast_v6",
+        network::native_udp_leave_multicast_v6 as ExternFn,
+    );
     m.insert("native_udp_peek_from", network::native_udp_peek_from as ExternFn);
     m.insert("native_udp_peek", network::native_udp_peek as ExternFn);
     m.insert("native_udp_peer_addr", network::native_udp_peer_addr as ExternFn);
@@ -329,12 +367,27 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("native_udp_recv", network::native_udp_recv as ExternFn);
     m.insert("native_udp_send", network::native_udp_send as ExternFn);
     m.insert("native_udp_send_to", network::native_udp_send_to as ExternFn);
-    m.insert("native_udp_set_broadcast", network::native_udp_set_broadcast as ExternFn);
-    m.insert("native_udp_set_multicast_loop", network::native_udp_set_multicast_loop as ExternFn);
-    m.insert("native_udp_set_multicast_ttl", network::native_udp_set_multicast_ttl as ExternFn);
-    m.insert("native_udp_set_read_timeout", network::native_udp_set_read_timeout as ExternFn);
+    m.insert(
+        "native_udp_set_broadcast",
+        network::native_udp_set_broadcast as ExternFn,
+    );
+    m.insert(
+        "native_udp_set_multicast_loop",
+        network::native_udp_set_multicast_loop as ExternFn,
+    );
+    m.insert(
+        "native_udp_set_multicast_ttl",
+        network::native_udp_set_multicast_ttl as ExternFn,
+    );
+    m.insert(
+        "native_udp_set_read_timeout",
+        network::native_udp_set_read_timeout as ExternFn,
+    );
     m.insert("native_udp_set_ttl", network::native_udp_set_ttl as ExternFn);
-    m.insert("native_udp_set_write_timeout", network::native_udp_set_write_timeout as ExternFn);
+    m.insert(
+        "native_udp_set_write_timeout",
+        network::native_udp_set_write_timeout as ExternFn,
+    );
     m.insert("panic", process::panic as ExternFn);
     m.insert("parse_memory_size", memory::parse_memory_size as ExternFn);
     m.insert("pow", math::pow as ExternFn);
@@ -349,13 +402,34 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rc_box_size", rc::rc_box_size as ExternFn);
     m.insert("rc_box_strong_count", rc::rc_box_strong_count as ExternFn);
     m.insert("rc_box_weak_count", rc::rc_box_weak_count as ExternFn);
-    m.insert("rt_aes128_decrypt_block_pure", simd::rt_aes128_decrypt_block_pure as ExternFn);
-    m.insert("rt_aes128_encrypt_block_into", simd::rt_aes128_encrypt_block_into as ExternFn);
-    m.insert("rt_aes128_encrypt_block_pure", simd::rt_aes128_encrypt_block_pure as ExternFn);
-    m.insert("rt_aes256_encrypt_block_into", simd::rt_aes256_encrypt_block_into as ExternFn);
-    m.insert("rt_aes256_encrypt_block_pure", simd::rt_aes256_encrypt_block_pure as ExternFn);
-    m.insert("rt_aes_decrypt_block_with_expanded", simd::rt_aes_decrypt_block_with_expanded as ExternFn);
-    m.insert("rt_aes_encrypt_block_with_expanded", simd::rt_aes_encrypt_block_with_expanded as ExternFn);
+    m.insert(
+        "rt_aes128_decrypt_block_pure",
+        simd::rt_aes128_decrypt_block_pure as ExternFn,
+    );
+    m.insert(
+        "rt_aes128_encrypt_block_into",
+        simd::rt_aes128_encrypt_block_into as ExternFn,
+    );
+    m.insert(
+        "rt_aes128_encrypt_block_pure",
+        simd::rt_aes128_encrypt_block_pure as ExternFn,
+    );
+    m.insert(
+        "rt_aes256_encrypt_block_into",
+        simd::rt_aes256_encrypt_block_into as ExternFn,
+    );
+    m.insert(
+        "rt_aes256_encrypt_block_pure",
+        simd::rt_aes256_encrypt_block_pure as ExternFn,
+    );
+    m.insert(
+        "rt_aes_decrypt_block_with_expanded",
+        simd::rt_aes_decrypt_block_with_expanded as ExternFn,
+    );
+    m.insert(
+        "rt_aes_encrypt_block_with_expanded",
+        simd::rt_aes_encrypt_block_with_expanded as ExternFn,
+    );
     m.insert("rt_aes_rcon", simd::rt_aes_rcon as ExternFn);
     m.insert("rt_aes_sbox", simd::rt_aes_sbox as ExternFn);
     m.insert("rt_alloc", memory::rt_alloc as ExternFn);
@@ -365,14 +439,26 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_array_get_text", sffi_array::rt_array_get_fn as ExternFn);
     m.insert("rt_array_len", sffi_array::rt_array_len_fn as ExternFn);
     m.insert("rt_array_new", sffi_array::rt_array_new_fn as ExternFn);
-    m.insert("rt_array_new_with_cap", sffi_array::rt_array_new_with_cap_fn as ExternFn);
-    m.insert("rt_array_new_with_cap_text", sffi_array::rt_array_new_with_cap_fn as ExternFn);
+    m.insert(
+        "rt_array_new_with_cap",
+        sffi_array::rt_array_new_with_cap_fn as ExternFn,
+    );
+    m.insert(
+        "rt_array_new_with_cap_text",
+        sffi_array::rt_array_new_with_cap_fn as ExternFn,
+    );
     m.insert("rt_array_pop", sffi_array::rt_array_pop_fn as ExternFn);
     m.insert("rt_array_push", sffi_array::rt_array_push_fn as ExternFn);
     m.insert("rt_array_repeat", sffi_array::rt_array_repeat_fn as ExternFn);
     m.insert("rt_array_set", sffi_array::rt_array_set_fn as ExternFn);
-    m.insert("rt_array_set_len_known", sffi_array::rt_array_set_len_known_fn as ExternFn);
-    m.insert("rt_array_set_len_known_text", sffi_array::rt_array_set_len_known_fn as ExternFn);
+    m.insert(
+        "rt_array_set_len_known",
+        sffi_array::rt_array_set_len_known_fn as ExternFn,
+    );
+    m.insert(
+        "rt_array_set_len_known_text",
+        sffi_array::rt_array_set_len_known_fn as ExternFn,
+    );
     m.insert("rt_array_set_text", sffi_array::rt_array_set_fn as ExternFn);
     m.insert("rt_ast_arg_free", ast_sffi::rt_ast_arg_free as ExternFn);
     m.insert("rt_ast_arg_name", ast_sffi::rt_ast_arg_name as ExternFn);
@@ -381,25 +467,46 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_ast_expr_array_len", ast_sffi::rt_ast_expr_array_len as ExternFn);
     m.insert("rt_ast_expr_binary_left", ast_sffi::rt_ast_expr_binary_left as ExternFn);
     m.insert("rt_ast_expr_binary_op", ast_sffi::rt_ast_expr_binary_op as ExternFn);
-    m.insert("rt_ast_expr_binary_right", ast_sffi::rt_ast_expr_binary_right as ExternFn);
+    m.insert(
+        "rt_ast_expr_binary_right",
+        ast_sffi::rt_ast_expr_binary_right as ExternFn,
+    );
     m.insert("rt_ast_expr_bool_value", ast_sffi::rt_ast_expr_bool_value as ExternFn);
     m.insert("rt_ast_expr_call_arg", ast_sffi::rt_ast_expr_call_arg as ExternFn);
-    m.insert("rt_ast_expr_call_arg_count", ast_sffi::rt_ast_expr_call_arg_count as ExternFn);
+    m.insert(
+        "rt_ast_expr_call_arg_count",
+        ast_sffi::rt_ast_expr_call_arg_count as ExternFn,
+    );
     m.insert("rt_ast_expr_call_callee", ast_sffi::rt_ast_expr_call_callee as ExternFn);
     m.insert("rt_ast_expr_field_name", ast_sffi::rt_ast_expr_field_name as ExternFn);
-    m.insert("rt_ast_expr_field_receiver", ast_sffi::rt_ast_expr_field_receiver as ExternFn);
+    m.insert(
+        "rt_ast_expr_field_receiver",
+        ast_sffi::rt_ast_expr_field_receiver as ExternFn,
+    );
     m.insert("rt_ast_expr_float_value", ast_sffi::rt_ast_expr_float_value as ExternFn);
     m.insert("rt_ast_expr_free", ast_sffi::rt_ast_expr_free as ExternFn);
     m.insert("rt_ast_expr_ident_name", ast_sffi::rt_ast_expr_ident_name as ExternFn);
     m.insert("rt_ast_expr_int_value", ast_sffi::rt_ast_expr_int_value as ExternFn);
     m.insert("rt_ast_expr_method_arg", ast_sffi::rt_ast_expr_method_arg as ExternFn);
-    m.insert("rt_ast_expr_method_arg_count", ast_sffi::rt_ast_expr_method_arg_count as ExternFn);
+    m.insert(
+        "rt_ast_expr_method_arg_count",
+        ast_sffi::rt_ast_expr_method_arg_count as ExternFn,
+    );
     m.insert("rt_ast_expr_method_name", ast_sffi::rt_ast_expr_method_name as ExternFn);
-    m.insert("rt_ast_expr_method_receiver", ast_sffi::rt_ast_expr_method_receiver as ExternFn);
-    m.insert("rt_ast_expr_string_value", ast_sffi::rt_ast_expr_string_value as ExternFn);
+    m.insert(
+        "rt_ast_expr_method_receiver",
+        ast_sffi::rt_ast_expr_method_receiver as ExternFn,
+    );
+    m.insert(
+        "rt_ast_expr_string_value",
+        ast_sffi::rt_ast_expr_string_value as ExternFn,
+    );
     m.insert("rt_ast_expr_tag", ast_sffi::rt_ast_expr_tag as ExternFn);
     m.insert("rt_ast_expr_unary_op", ast_sffi::rt_ast_expr_unary_op as ExternFn);
-    m.insert("rt_ast_expr_unary_operand", ast_sffi::rt_ast_expr_unary_operand as ExternFn);
+    m.insert(
+        "rt_ast_expr_unary_operand",
+        ast_sffi::rt_ast_expr_unary_operand as ExternFn,
+    );
     m.insert("rt_ast_node_free", ast_sffi::rt_ast_node_free as ExternFn);
     m.insert("rt_ast_registry_clear", ast_sffi::rt_ast_registry_clear as ExternFn);
     m.insert("rt_ast_registry_count", ast_sffi::rt_ast_registry_count as ExternFn);
@@ -410,7 +517,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_atomic_bool_new", atomic::rt_atomic_bool_new as ExternFn);
     m.insert("rt_atomic_bool_store", atomic::rt_atomic_bool_store as ExternFn);
     m.insert("rt_atomic_bool_swap", atomic::rt_atomic_bool_swap as ExternFn);
-    m.insert("rt_atomic_compare_exchange", atomic::rt_atomic_compare_exchange_fn as ExternFn);
+    m.insert(
+        "rt_atomic_compare_exchange",
+        atomic::rt_atomic_compare_exchange_fn as ExternFn,
+    );
     m.insert("rt_atomic_fetch_add", atomic::rt_atomic_fetch_add_fn as ExternFn);
     m.insert("rt_atomic_fetch_add_u64", atomic::rt_atomic_fetch_add_u64 as ExternFn);
     m.insert("rt_atomic_fetch_and", atomic::rt_atomic_fetch_and_fn as ExternFn);
@@ -419,8 +529,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_atomic_flag_clear", atomic::rt_atomic_flag_clear as ExternFn);
     m.insert("rt_atomic_flag_free", atomic::rt_atomic_flag_free as ExternFn);
     m.insert("rt_atomic_flag_new", atomic::rt_atomic_flag_new as ExternFn);
-    m.insert("rt_atomic_flag_test_and_set", atomic::rt_atomic_flag_test_and_set as ExternFn);
-    m.insert("rt_atomic_int_compare_exchange", atomic::rt_atomic_int_compare_exchange as ExternFn);
+    m.insert(
+        "rt_atomic_flag_test_and_set",
+        atomic::rt_atomic_flag_test_and_set as ExternFn,
+    );
+    m.insert(
+        "rt_atomic_int_compare_exchange",
+        atomic::rt_atomic_int_compare_exchange as ExternFn,
+    );
     m.insert("rt_atomic_int_fetch_add", atomic::rt_atomic_int_fetch_add as ExternFn);
     m.insert("rt_atomic_int_fetch_and", atomic::rt_atomic_int_fetch_and as ExternFn);
     m.insert("rt_atomic_int_fetch_or", atomic::rt_atomic_int_fetch_or as ExternFn);
@@ -446,31 +562,61 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_base64url_encode", crypto::rt_base64url_encode as ExternFn);
     m.insert("rt_black_box", file_io::rt_black_box as ExternFn);
     m.insert("__rt_btreemap_clear", collections::__rt_btreemap_clear as ExternFn);
-    m.insert("__rt_btreemap_contains_key", collections::__rt_btreemap_contains_key as ExternFn);
+    m.insert(
+        "__rt_btreemap_contains_key",
+        collections::__rt_btreemap_contains_key as ExternFn,
+    );
     m.insert("__rt_btreemap_entries", collections::__rt_btreemap_entries as ExternFn);
-    m.insert("__rt_btreemap_first_key", collections::__rt_btreemap_first_key as ExternFn);
+    m.insert(
+        "__rt_btreemap_first_key",
+        collections::__rt_btreemap_first_key as ExternFn,
+    );
     m.insert("__rt_btreemap_get", collections::__rt_btreemap_get as ExternFn);
     m.insert("__rt_btreemap_insert", collections::__rt_btreemap_insert as ExternFn);
     m.insert("__rt_btreemap_keys", collections::__rt_btreemap_keys as ExternFn);
-    m.insert("__rt_btreemap_last_key", collections::__rt_btreemap_last_key as ExternFn);
+    m.insert(
+        "__rt_btreemap_last_key",
+        collections::__rt_btreemap_last_key as ExternFn,
+    );
     m.insert("__rt_btreemap_len", collections::__rt_btreemap_len as ExternFn);
     m.insert("__rt_btreemap_new", collections::__rt_btreemap_new as ExternFn);
     m.insert("__rt_btreemap_remove", collections::__rt_btreemap_remove as ExternFn);
     m.insert("__rt_btreemap_values", collections::__rt_btreemap_values as ExternFn);
     m.insert("__rt_btreeset_clear", collections::__rt_btreeset_clear as ExternFn);
-    m.insert("__rt_btreeset_contains", collections::__rt_btreeset_contains as ExternFn);
-    m.insert("__rt_btreeset_difference", collections::__rt_btreeset_difference as ExternFn);
+    m.insert(
+        "__rt_btreeset_contains",
+        collections::__rt_btreeset_contains as ExternFn,
+    );
+    m.insert(
+        "__rt_btreeset_difference",
+        collections::__rt_btreeset_difference as ExternFn,
+    );
     m.insert("__rt_btreeset_first", collections::__rt_btreeset_first as ExternFn);
     m.insert("__rt_btreeset_insert", collections::__rt_btreeset_insert as ExternFn);
-    m.insert("__rt_btreeset_intersection", collections::__rt_btreeset_intersection as ExternFn);
-    m.insert("__rt_btreeset_is_subset", collections::__rt_btreeset_is_subset as ExternFn);
-    m.insert("__rt_btreeset_is_superset", collections::__rt_btreeset_is_superset as ExternFn);
+    m.insert(
+        "__rt_btreeset_intersection",
+        collections::__rt_btreeset_intersection as ExternFn,
+    );
+    m.insert(
+        "__rt_btreeset_is_subset",
+        collections::__rt_btreeset_is_subset as ExternFn,
+    );
+    m.insert(
+        "__rt_btreeset_is_superset",
+        collections::__rt_btreeset_is_superset as ExternFn,
+    );
     m.insert("__rt_btreeset_last", collections::__rt_btreeset_last as ExternFn);
     m.insert("__rt_btreeset_len", collections::__rt_btreeset_len as ExternFn);
     m.insert("__rt_btreeset_new", collections::__rt_btreeset_new as ExternFn);
     m.insert("__rt_btreeset_remove", collections::__rt_btreeset_remove as ExternFn);
-    m.insert("__rt_btreeset_symmetric_difference", collections::__rt_btreeset_symmetric_difference as ExternFn);
-    m.insert("__rt_btreeset_to_array", collections::__rt_btreeset_to_array as ExternFn);
+    m.insert(
+        "__rt_btreeset_symmetric_difference",
+        collections::__rt_btreeset_symmetric_difference as ExternFn,
+    );
+    m.insert(
+        "__rt_btreeset_to_array",
+        collections::__rt_btreeset_to_array as ExternFn,
+    );
     m.insert("__rt_btreeset_union", collections::__rt_btreeset_union as ExternFn);
     m.insert("rt_byte_array_new", sffi_array::rt_byte_array_new_fn as ExternFn);
     m.insert("rt_byte_char", conversion::rt_byte_char_fn as ExternFn);
@@ -545,48 +691,108 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_cli_watch_file", cli::rt_cli_watch_file as ExternFn);
     m.insert("rt_compile_to_llvm_ir", native_sffi::rt_compile_to_llvm_ir as ExternFn);
     m.insert("rt_compile_to_native", native_sffi::rt_compile_to_native as ExternFn);
-    m.insert("rt_compile_to_native_with_opt", native_sffi::rt_compile_to_native as ExternFn);
+    m.insert(
+        "rt_compile_to_native_with_opt",
+        native_sffi::rt_compile_to_native as ExternFn,
+    );
     m.insert("rt_constant_time_compare", crypto::rt_constant_time_compare as ExternFn);
     m.insert("rt_context_generate", cli::rt_context_generate as ExternFn);
     m.insert("rt_context_stats", cli::rt_context_stats as ExternFn);
     m.insert("rt_coverage_clear", coverage::rt_coverage_clear as ExternFn);
-    m.insert("rt_coverage_condition_probe", coverage::rt_coverage_condition_probe_fn as ExternFn);
-    m.insert("rt_coverage_decision_probe", coverage::rt_coverage_decision_probe_fn as ExternFn);
+    m.insert(
+        "rt_coverage_condition_probe",
+        coverage::rt_coverage_condition_probe_fn as ExternFn,
+    );
+    m.insert(
+        "rt_coverage_decision_probe",
+        coverage::rt_coverage_decision_probe_fn as ExternFn,
+    );
     m.insert("rt_coverage_dump_sdn", coverage::rt_coverage_dump_sdn as ExternFn);
     m.insert("rt_coverage_enable", coverage::rt_coverage_enable_fn as ExternFn);
     m.insert("rt_coverage_enabled", coverage::rt_coverage_enabled as ExternFn);
-    m.insert("rt_coverage_enable_timed", coverage::rt_coverage_enable_timed_fn as ExternFn);
+    m.insert(
+        "rt_coverage_enable_timed",
+        coverage::rt_coverage_enable_timed_fn as ExternFn,
+    );
     m.insert("rt_coverage_free_sdn", coverage::rt_coverage_free_sdn as ExternFn);
-    m.insert("rt_cranelift_append_block_param", cranelift::rt_cranelift_append_block_param as ExternFn);
+    m.insert(
+        "rt_cranelift_append_block_param",
+        cranelift::rt_cranelift_append_block_param as ExternFn,
+    );
     m.insert("rt_cranelift_band", cranelift::rt_cranelift_band as ExternFn);
     m.insert("rt_cranelift_bconst", cranelift::rt_cranelift_bconst as ExternFn);
-    m.insert("rt_cranelift_begin_function", cranelift::rt_cranelift_begin_function as ExternFn);
+    m.insert(
+        "rt_cranelift_begin_function",
+        cranelift::rt_cranelift_begin_function as ExternFn,
+    );
     m.insert("rt_cranelift_bitcast", cranelift::rt_cranelift_bitcast as ExternFn);
-    m.insert("rt_cranelift_block_param", cranelift::rt_cranelift_block_param as ExternFn);
+    m.insert(
+        "rt_cranelift_block_param",
+        cranelift::rt_cranelift_block_param as ExternFn,
+    );
     m.insert("rt_cranelift_bnot", cranelift::rt_cranelift_bnot as ExternFn);
     m.insert("rt_cranelift_bor", cranelift::rt_cranelift_bor as ExternFn);
     m.insert("rt_cranelift_brif", cranelift::rt_cranelift_brif as ExternFn);
     m.insert("rt_cranelift_bxor", cranelift::rt_cranelift_bxor as ExternFn);
     m.insert("rt_cranelift_call", cranelift::rt_cranelift_call as ExternFn);
-    m.insert("rt_cranelift_call_function_ptr", cranelift::rt_cranelift_call_function_ptr as ExternFn);
-    m.insert("rt_cranelift_call_indirect", cranelift::rt_cranelift_call_indirect as ExternFn);
-    m.insert("rt_cranelift_create_block", cranelift::rt_cranelift_create_block as ExternFn);
-    m.insert("rt_cranelift_define_function", cranelift::rt_cranelift_define_function as ExternFn);
-    m.insert("rt_cranelift_emit_object", cranelift::rt_cranelift_emit_object as ExternFn);
-    m.insert("rt_cranelift_end_function", cranelift::rt_cranelift_end_function as ExternFn);
+    m.insert(
+        "rt_cranelift_call_function_ptr",
+        cranelift::rt_cranelift_call_function_ptr as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_call_indirect",
+        cranelift::rt_cranelift_call_indirect as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_create_block",
+        cranelift::rt_cranelift_create_block as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_define_function",
+        cranelift::rt_cranelift_define_function as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_emit_object",
+        cranelift::rt_cranelift_emit_object as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_end_function",
+        cranelift::rt_cranelift_end_function as ExternFn,
+    );
     m.insert("rt_cranelift_fadd", cranelift::rt_cranelift_fadd as ExternFn);
     m.insert("rt_cranelift_fcmp", cranelift::rt_cranelift_fcmp as ExternFn);
     m.insert("rt_cranelift_fconst", cranelift::rt_cranelift_fconst as ExternFn);
-    m.insert("rt_cranelift_fcvt_from_sint", cranelift::rt_cranelift_fcvt_from_sint as ExternFn);
-    m.insert("rt_cranelift_fcvt_from_uint", cranelift::rt_cranelift_fcvt_from_uint as ExternFn);
-    m.insert("rt_cranelift_fcvt_to_sint", cranelift::rt_cranelift_fcvt_to_sint as ExternFn);
-    m.insert("rt_cranelift_fcvt_to_uint", cranelift::rt_cranelift_fcvt_to_uint as ExternFn);
+    m.insert(
+        "rt_cranelift_fcvt_from_sint",
+        cranelift::rt_cranelift_fcvt_from_sint as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_fcvt_from_uint",
+        cranelift::rt_cranelift_fcvt_from_uint as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_fcvt_to_sint",
+        cranelift::rt_cranelift_fcvt_to_sint as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_fcvt_to_uint",
+        cranelift::rt_cranelift_fcvt_to_uint as ExternFn,
+    );
     m.insert("rt_cranelift_fdiv", cranelift::rt_cranelift_fdiv as ExternFn);
-    m.insert("rt_cranelift_finalize_module", cranelift::rt_cranelift_finalize_module as ExternFn);
+    m.insert(
+        "rt_cranelift_finalize_module",
+        cranelift::rt_cranelift_finalize_module as ExternFn,
+    );
     m.insert("rt_cranelift_fmul", cranelift::rt_cranelift_fmul as ExternFn);
-    m.insert("rt_cranelift_free_module", cranelift::rt_cranelift_free_module as ExternFn);
+    m.insert(
+        "rt_cranelift_free_module",
+        cranelift::rt_cranelift_free_module as ExternFn,
+    );
     m.insert("rt_cranelift_fsub", cranelift::rt_cranelift_fsub as ExternFn);
-    m.insert("rt_cranelift_get_function_ptr", cranelift::rt_cranelift_get_function_ptr as ExternFn);
+    m.insert(
+        "rt_cranelift_get_function_ptr",
+        cranelift::rt_cranelift_get_function_ptr as ExternFn,
+    );
     m.insert("rt_cranelift_iadd", cranelift::rt_cranelift_iadd as ExternFn);
     m.insert("rt_cranelift_icmp", cranelift::rt_cranelift_icmp as ExternFn);
     m.insert("rt_cranelift_iconst", cranelift::rt_cranelift_iconst as ExternFn);
@@ -596,24 +802,57 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_cranelift_isub", cranelift::rt_cranelift_isub as ExternFn);
     m.insert("rt_cranelift_jump", cranelift::rt_cranelift_jump as ExternFn);
     m.insert("rt_cranelift_load", cranelift::rt_cranelift_load as ExternFn);
-    m.insert("rt_cranelift_module_new", cranelift::rt_cranelift_module_new as ExternFn);
-    m.insert("rt_cranelift_new_module", cranelift::rt_cranelift_new_module as ExternFn);
-    m.insert("rt_cranelift_new_signature", cranelift::rt_cranelift_new_signature as ExternFn);
+    m.insert(
+        "rt_cranelift_module_new",
+        cranelift::rt_cranelift_module_new as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_new_module",
+        cranelift::rt_cranelift_new_module as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_new_signature",
+        cranelift::rt_cranelift_new_signature as ExternFn,
+    );
     m.insert("rt_cranelift_null", cranelift::rt_cranelift_null as ExternFn);
     m.insert("rt_cranelift_return", cranelift::rt_cranelift_return as ExternFn);
-    m.insert("rt_cranelift_return_void", cranelift::rt_cranelift_return_void as ExternFn);
+    m.insert(
+        "rt_cranelift_return_void",
+        cranelift::rt_cranelift_return_void as ExternFn,
+    );
     m.insert("rt_cranelift_sdiv", cranelift::rt_cranelift_sdiv as ExternFn);
-    m.insert("rt_cranelift_seal_all_blocks", cranelift::rt_cranelift_seal_all_blocks as ExternFn);
-    m.insert("rt_cranelift_seal_block", cranelift::rt_cranelift_seal_block as ExternFn);
+    m.insert(
+        "rt_cranelift_seal_all_blocks",
+        cranelift::rt_cranelift_seal_all_blocks as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_seal_block",
+        cranelift::rt_cranelift_seal_block as ExternFn,
+    );
     m.insert("rt_cranelift_sextend", cranelift::rt_cranelift_sextend as ExternFn);
-    m.insert("rt_cranelift_sig_add_param", cranelift::rt_cranelift_sig_add_param as ExternFn);
-    m.insert("rt_cranelift_sig_set_return", cranelift::rt_cranelift_sig_set_return as ExternFn);
+    m.insert(
+        "rt_cranelift_sig_add_param",
+        cranelift::rt_cranelift_sig_add_param as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_sig_set_return",
+        cranelift::rt_cranelift_sig_set_return as ExternFn,
+    );
     m.insert("rt_cranelift_srem", cranelift::rt_cranelift_srem as ExternFn);
     m.insert("rt_cranelift_sshr", cranelift::rt_cranelift_sshr as ExternFn);
-    m.insert("rt_cranelift_stack_addr", cranelift::rt_cranelift_stack_addr as ExternFn);
-    m.insert("rt_cranelift_stack_slot", cranelift::rt_cranelift_stack_slot as ExternFn);
+    m.insert(
+        "rt_cranelift_stack_addr",
+        cranelift::rt_cranelift_stack_addr as ExternFn,
+    );
+    m.insert(
+        "rt_cranelift_stack_slot",
+        cranelift::rt_cranelift_stack_slot as ExternFn,
+    );
     m.insert("rt_cranelift_store", cranelift::rt_cranelift_store as ExternFn);
-    m.insert("rt_cranelift_switch_to_block", cranelift::rt_cranelift_switch_to_block as ExternFn);
+    m.insert(
+        "rt_cranelift_switch_to_block",
+        cranelift::rt_cranelift_switch_to_block as ExternFn,
+    );
     m.insert("rt_cranelift_trap", cranelift::rt_cranelift_trap as ExternFn);
     m.insert("rt_cranelift_udiv", cranelift::rt_cranelift_udiv as ExternFn);
     m.insert("rt_cranelift_uextend", cranelift::rt_cranelift_uextend as ExternFn);
@@ -625,7 +864,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_cuda_ctx_create", gpu::rt_cuda_ctx_create_fn as ExternFn);
     m.insert("rt_cuda_ctx_destroy", gpu::rt_cuda_ctx_destroy_fn as ExternFn);
     m.insert("rt_cuda_ctx_synchronize", gpu::rt_cuda_ctx_synchronize_fn as ExternFn);
-    m.insert("rt_cuda_device_compute_capability", gpu::rt_cuda_device_compute_capability_fn as ExternFn);
+    m.insert(
+        "rt_cuda_device_compute_capability",
+        gpu::rt_cuda_device_compute_capability_fn as ExternFn,
+    );
     m.insert("rt_cuda_device_count", gpu::rt_cuda_device_count_fn as ExternFn);
     m.insert("rt_cuda_device_get", gpu::rt_cuda_device_get_fn as ExternFn);
     m.insert("rt_cuda_device_name", gpu::rt_cuda_device_name_fn as ExternFn);
@@ -645,26 +887,50 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_cuda_memcpy_htod", gpu::rt_cuda_memcpy_htod_fn as ExternFn);
     m.insert("rt_cuda_mem_free", gpu::rt_cuda_mem_free_fn as ExternFn);
     m.insert("rt_cuda_memset", gpu::rt_cuda_memset_fn as ExternFn);
-    m.insert("rt_cuda_module_get_function", gpu::rt_cuda_module_get_function_fn as ExternFn);
+    m.insert(
+        "rt_cuda_module_get_function",
+        gpu::rt_cuda_module_get_function_fn as ExternFn,
+    );
     m.insert("rt_cuda_module_load_data", gpu::rt_cuda_module_load_data_fn as ExternFn);
     m.insert("rt_cuda_module_load", gpu::rt_cuda_module_load_fn as ExternFn);
     m.insert("rt_cuda_module_unload", gpu::rt_cuda_module_unload_fn as ExternFn);
     m.insert("rt_cuda_sync", gpu::rt_cuda_sync_fn as ExternFn);
     m.insert("rt_current_dir", file_io::rt_current_dir as ExternFn);
     m.insert("rt_current_time_ms", time::rt_current_time_ms as ExternFn);
-    m.insert("rt_db_accel_bitmap_and_words", simd::rt_db_accel_bitmap_and_words as ExternFn);
-    m.insert("rt_db_accel_bitmap_or_words", simd::rt_db_accel_bitmap_or_words as ExternFn);
+    m.insert(
+        "rt_db_accel_bitmap_and_words",
+        simd::rt_db_accel_bitmap_and_words as ExternFn,
+    );
+    m.insert(
+        "rt_db_accel_bitmap_or_words",
+        simd::rt_db_accel_bitmap_or_words as ExternFn,
+    );
     m.insert("rt_diagram_clear", diagram::rt_diagram_clear as ExternFn);
     m.insert("rt_diagram_disable", diagram::rt_diagram_disable as ExternFn);
     m.insert("rt_diagram_enable", diagram::rt_diagram_enable as ExternFn);
     m.insert("rt_diagram_free_string", diagram::rt_diagram_free_string as ExternFn);
-    m.insert("rt_diagram_generate_arch", diagram::rt_diagram_generate_arch as ExternFn);
-    m.insert("rt_diagram_generate_class", diagram::rt_diagram_generate_class as ExternFn);
-    m.insert("rt_diagram_generate_sequence", diagram::rt_diagram_generate_sequence as ExternFn);
+    m.insert(
+        "rt_diagram_generate_arch",
+        diagram::rt_diagram_generate_arch as ExternFn,
+    );
+    m.insert(
+        "rt_diagram_generate_class",
+        diagram::rt_diagram_generate_class as ExternFn,
+    );
+    m.insert(
+        "rt_diagram_generate_sequence",
+        diagram::rt_diagram_generate_sequence as ExternFn,
+    );
     m.insert("rt_diagram_is_enabled", diagram::rt_diagram_is_enabled as ExternFn);
-    m.insert("rt_diagram_mark_architectural", diagram::rt_diagram_mark_architectural as ExternFn);
+    m.insert(
+        "rt_diagram_mark_architectural",
+        diagram::rt_diagram_mark_architectural as ExternFn,
+    );
     m.insert("rt_diagram_trace_method", diagram::rt_diagram_trace_method as ExternFn);
-    m.insert("rt_diagram_trace_method_with_args", diagram::rt_diagram_trace_method_with_args as ExternFn);
+    m.insert(
+        "rt_diagram_trace_method_with_args",
+        diagram::rt_diagram_trace_method_with_args as ExternFn,
+    );
     m.insert("rt_diagram_trace_return", diagram::rt_diagram_trace_return as ExternFn);
     m.insert("rt_dict_clear", sffi_dict::rt_dict_clear_fn as ExternFn);
     m.insert("rt_dict_get", sffi_dict::rt_dict_get_fn as ExternFn);
@@ -681,13 +947,22 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_dir_remove_all", file_io::rt_dir_remove_all as ExternFn);
     m.insert("rt_dir_remove", file_io::rt_dir_remove as ExternFn);
     m.insert("rt_dir_walk", file_io::rt_dir_walk as ExternFn);
-    m.insert("rt_dns_lookup", interpreter_native_net::rt_dns_lookup_interp as ExternFn);
-    m.insert("rt_dyn_torch_tensor_from_bits_1d", torch::rt_dyn_torch_tensor_from_bits_1d as ExternFn);
+    m.insert(
+        "rt_dns_lookup",
+        interpreter_native_net::rt_dns_lookup_interp as ExternFn,
+    );
+    m.insert(
+        "rt_dyn_torch_tensor_from_bits_1d",
+        torch::rt_dyn_torch_tensor_from_bits_1d as ExternFn,
+    );
     m.insert("rt_ecdsa_p256_sign", signatures::rt_ecdsa_p256_sign as ExternFn);
     m.insert("rt_ecdsa_p256_verify", signatures::rt_ecdsa_p256_verify as ExternFn);
     m.insert("rt_ed25519_sign", signatures::rt_ed25519_sign as ExternFn);
     m.insert("rt_ed25519_verify", signatures::rt_ed25519_verify as ExternFn);
-    m.insert("rt_entropy_hardware_ready", random::rt_entropy_hardware_ready_fn as ExternFn);
+    m.insert(
+        "rt_entropy_hardware_ready",
+        random::rt_entropy_hardware_ready_fn as ExternFn,
+    );
     m.insert("rt_env_all", system::rt_env_all as ExternFn);
     m.insert("rt_env_cwd", system::rt_env_cwd as ExternFn);
     m.insert("rt_env_define_var", env_sffi::rt_env_define as ExternFn);
@@ -710,7 +985,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_env_var_count", env_sffi::rt_env_var_count as ExternFn);
     m.insert("rt_env_var_names", env_sffi::rt_env_var_names as ExternFn);
     m.insert("rt_error_arg_count", error_sffi::rt_error_arg_count as ExternFn);
-    m.insert("rt_error_division_by_zero", error_sffi::rt_error_division_by_zero as ExternFn);
+    m.insert(
+        "rt_error_division_by_zero",
+        error_sffi::rt_error_division_by_zero as ExternFn,
+    );
     m.insert("rt_error_free", error_sffi::rt_error_free as ExternFn);
     m.insert("rt_error_index_oob", error_sffi::rt_error_index_oob as ExternFn);
     m.insert("rt_error_message", error_sffi::rt_error_message as ExternFn);
@@ -721,9 +999,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_exec", cranelift::rt_exec as ExternFn);
     m.insert("rt_execute_native", native_sffi::rt_execute_native as ExternFn);
     m.insert("rt_exit", system::rt_exit as ExternFn);
-    m.insert("rt_fault_set_execution_limit", cli::rt_fault_set_execution_limit as ExternFn);
-    m.insert("rt_fault_set_max_recursion_depth", cli::rt_fault_set_max_recursion_depth as ExternFn);
-    m.insert("rt_fault_set_stack_overflow_detection", cli::rt_fault_set_stack_overflow_detection as ExternFn);
+    m.insert(
+        "rt_fault_set_execution_limit",
+        cli::rt_fault_set_execution_limit as ExternFn,
+    );
+    m.insert(
+        "rt_fault_set_max_recursion_depth",
+        cli::rt_fault_set_max_recursion_depth as ExternFn,
+    );
+    m.insert(
+        "rt_fault_set_stack_overflow_detection",
+        cli::rt_fault_set_stack_overflow_detection as ExternFn,
+    );
     m.insert("rt_fault_set_timeout", cli::rt_fault_set_timeout as ExternFn);
     m.insert("rt_fd_close", qmp_socket::rt_fd_close as ExternFn);
     m.insert("rt_fd_read_until", qmp_socket::rt_fd_read_until as ExternFn);
@@ -767,13 +1054,25 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_file_write_text_at", file_io::rt_file_write_text_at as ExternFn);
     m.insert("rt_file_write_text", file_io::rt_file_write_text as ExternFn);
     m.insert("rt_free", memory::rt_free as ExternFn);
-    m.insert("rt_function_not_found", sffi_value::rt_function_not_found_fn as ExternFn);
-    m.insert("rt_get_concurrent_backend", concurrency::rt_get_concurrent_backend as ExternFn);
+    m.insert(
+        "rt_function_not_found",
+        sffi_value::rt_function_not_found_fn as ExternFn,
+    );
+    m.insert(
+        "rt_get_concurrent_backend",
+        concurrency::rt_get_concurrent_backend as ExternFn,
+    );
     m.insert("rt_get_cwd", file_io::rt_get_cwd as ExternFn);
     m.insert("rt_getpid", file_io::rt_getpid as ExternFn);
-    m.insert("rt_gui_get_glyph_8x16", conversion::rt_gui_get_glyph_8x16_fn as ExternFn);
+    m.insert(
+        "rt_gui_get_glyph_8x16",
+        conversion::rt_gui_get_glyph_8x16_fn as ExternFn,
+    );
     m.insert("__rt_hashmap_clear", collections::__rt_hashmap_clear as ExternFn);
-    m.insert("__rt_hashmap_contains_key", collections::__rt_hashmap_contains_key as ExternFn);
+    m.insert(
+        "__rt_hashmap_contains_key",
+        collections::__rt_hashmap_contains_key as ExternFn,
+    );
     m.insert("__rt_hashmap_entries", collections::__rt_hashmap_entries as ExternFn);
     m.insert("__rt_hashmap_get", collections::__rt_hashmap_get as ExternFn);
     m.insert("__rt_hashmap_insert", collections::__rt_hashmap_insert as ExternFn);
@@ -784,57 +1083,174 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("__rt_hashmap_values", collections::__rt_hashmap_values as ExternFn);
     m.insert("__rt_hashset_clear", collections::__rt_hashset_clear as ExternFn);
     m.insert("__rt_hashset_contains", collections::__rt_hashset_contains as ExternFn);
-    m.insert("__rt_hashset_difference", collections::__rt_hashset_difference as ExternFn);
+    m.insert(
+        "__rt_hashset_difference",
+        collections::__rt_hashset_difference as ExternFn,
+    );
     m.insert("__rt_hashset_insert", collections::__rt_hashset_insert as ExternFn);
-    m.insert("__rt_hashset_intersection", collections::__rt_hashset_intersection as ExternFn);
-    m.insert("__rt_hashset_is_subset", collections::__rt_hashset_is_subset as ExternFn);
-    m.insert("__rt_hashset_is_superset", collections::__rt_hashset_is_superset as ExternFn);
+    m.insert(
+        "__rt_hashset_intersection",
+        collections::__rt_hashset_intersection as ExternFn,
+    );
+    m.insert(
+        "__rt_hashset_is_subset",
+        collections::__rt_hashset_is_subset as ExternFn,
+    );
+    m.insert(
+        "__rt_hashset_is_superset",
+        collections::__rt_hashset_is_superset as ExternFn,
+    );
     m.insert("__rt_hashset_len", collections::__rt_hashset_len as ExternFn);
     m.insert("__rt_hashset_new", collections::__rt_hashset_new as ExternFn);
     m.insert("__rt_hashset_remove", collections::__rt_hashset_remove as ExternFn);
-    m.insert("__rt_hashset_symmetric_difference", collections::__rt_hashset_symmetric_difference as ExternFn);
+    m.insert(
+        "__rt_hashset_symmetric_difference",
+        collections::__rt_hashset_symmetric_difference as ExternFn,
+    );
     m.insert("__rt_hashset_to_array", collections::__rt_hashset_to_array as ExternFn);
     m.insert("__rt_hashset_union", collections::__rt_hashset_union as ExternFn);
     m.insert("rt_hash_text", conversion::rt_hash_text as ExternFn);
     m.insert("rt_hosted_select_surface", hosted::select_surface as ExternFn);
-    m.insert("rt_hosted_set_surface_override", hosted::set_surface_override as ExternFn);
+    m.insert(
+        "rt_hosted_set_surface_override",
+        hosted::set_surface_override as ExternFn,
+    );
     m.insert("rt_hostname", file_io::rt_hostname as ExternFn);
-    m.insert("rt_host_wm_client_connect", host_wm_bridge::rt_host_wm_client_connect as ExternFn);
-    m.insert("rt_host_wm_client_poll_event", host_wm_bridge::rt_host_wm_client_poll_event as ExternFn);
-    m.insert("rt_host_wm_client_request", host_wm_bridge::rt_host_wm_client_request as ExternFn);
-    m.insert("rt_host_wm_server_cleanup", host_wm_bridge::rt_host_wm_server_cleanup as ExternFn);
-    m.insert("rt_host_wm_server_poll", host_wm_bridge::rt_host_wm_server_poll as ExternFn);
-    m.insert("rt_host_wm_server_reply_create", host_wm_bridge::rt_host_wm_server_reply_create as ExternFn);
-    m.insert("rt_host_wm_server_reply_status", host_wm_bridge::rt_host_wm_server_reply_status as ExternFn);
-    m.insert("rt_host_wm_server_send_event", host_wm_bridge::rt_host_wm_server_send_event as ExternFn);
-    m.insert("rt_host_wm_server_start", host_wm_bridge::rt_host_wm_server_start as ExternFn);
+    m.insert(
+        "rt_host_wm_client_connect",
+        host_wm_bridge::rt_host_wm_client_connect as ExternFn,
+    );
+    m.insert(
+        "rt_host_wm_client_poll_event",
+        host_wm_bridge::rt_host_wm_client_poll_event as ExternFn,
+    );
+    m.insert(
+        "rt_host_wm_client_request",
+        host_wm_bridge::rt_host_wm_client_request as ExternFn,
+    );
+    m.insert(
+        "rt_host_wm_server_cleanup",
+        host_wm_bridge::rt_host_wm_server_cleanup as ExternFn,
+    );
+    m.insert(
+        "rt_host_wm_server_poll",
+        host_wm_bridge::rt_host_wm_server_poll as ExternFn,
+    );
+    m.insert(
+        "rt_host_wm_server_reply_create",
+        host_wm_bridge::rt_host_wm_server_reply_create as ExternFn,
+    );
+    m.insert(
+        "rt_host_wm_server_reply_status",
+        host_wm_bridge::rt_host_wm_server_reply_status as ExternFn,
+    );
+    m.insert(
+        "rt_host_wm_server_send_event",
+        host_wm_bridge::rt_host_wm_server_send_event as ExternFn,
+    );
+    m.insert(
+        "rt_host_wm_server_start",
+        host_wm_bridge::rt_host_wm_server_start as ExternFn,
+    );
     m.insert("rt_http_get", network::rt_http_get as ExternFn);
-    m.insert("rt_io_tcp_accept", interpreter_native_net::rt_io_tcp_accept_interp as ExternFn);
-    m.insert("rt_io_tcp_accept_timeout", interpreter_native_net::rt_io_tcp_accept_timeout_interp as ExternFn);
-    m.insert("rt_io_tcp_bind", interpreter_native_net::rt_io_tcp_bind_interp as ExternFn);
-    m.insert("rt_io_tcp_close", interpreter_native_net::rt_io_tcp_close_interp as ExternFn);
-    m.insert("rt_io_tcp_connect", interpreter_native_net::rt_io_tcp_connect_interp as ExternFn);
-    m.insert("rt_io_tcp_connect_timeout", interpreter_native_net::rt_io_tcp_connect_timeout_interp as ExternFn);
-    m.insert("rt_io_tcp_drain_line", interpreter_native_net::rt_io_tcp_drain_line_interp as ExternFn);
-    m.insert("rt_io_tcp_flush", interpreter_native_net::rt_io_tcp_flush_interp as ExternFn);
-    m.insert("rt_io_tcp_local_addr", interpreter_native_net::rt_io_tcp_local_addr_interp as ExternFn);
-    m.insert("rt_io_tcp_peer_addr", interpreter_native_net::rt_io_tcp_peer_addr_interp as ExternFn);
-    m.insert("rt_io_tcp_read_exact", interpreter_native_net::rt_io_tcp_read_exact_interp as ExternFn);
-    m.insert("rt_io_tcp_read_exact_len", interpreter_native_net::rt_io_tcp_read_exact_len_interp as ExternFn);
-    m.insert("rt_io_tcp_read", interpreter_native_net::rt_io_tcp_read_interp as ExternFn);
-    m.insert("rt_io_tcp_read_line", interpreter_native_net::rt_io_tcp_read_line_interp as ExternFn);
-    m.insert("rt_io_tcp_set_nodelay", interpreter_native_net::rt_io_tcp_set_nodelay_interp as ExternFn);
-    m.insert("rt_io_tcp_set_read_timeout", interpreter_native_net::rt_io_tcp_set_read_timeout_interp as ExternFn);
-    m.insert("rt_io_tcp_set_write_timeout", interpreter_native_net::rt_io_tcp_set_write_timeout_interp as ExternFn);
-    m.insert("rt_io_tcp_shutdown", interpreter_native_net::rt_io_tcp_shutdown_interp as ExternFn);
-    m.insert("rt_io_tcp_write_all", interpreter_native_net::rt_io_tcp_write_all_interp as ExternFn);
-    m.insert("rt_io_tcp_write_http", interpreter_native_net::rt_io_tcp_write_http_interp as ExternFn);
-    m.insert("rt_io_tcp_write", interpreter_native_net::rt_io_tcp_write_interp as ExternFn);
-    m.insert("rt_io_tcp_write_text", interpreter_native_net::rt_io_tcp_write_text_interp as ExternFn);
-    m.insert("rt_io_tcp_write_text_read_exact_len", interpreter_native_net::rt_io_tcp_write_text_read_exact_len_interp as ExternFn);
+    m.insert(
+        "rt_io_tcp_accept",
+        interpreter_native_net::rt_io_tcp_accept_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_accept_timeout",
+        interpreter_native_net::rt_io_tcp_accept_timeout_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_bind",
+        interpreter_native_net::rt_io_tcp_bind_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_close",
+        interpreter_native_net::rt_io_tcp_close_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_connect",
+        interpreter_native_net::rt_io_tcp_connect_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_connect_timeout",
+        interpreter_native_net::rt_io_tcp_connect_timeout_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_drain_line",
+        interpreter_native_net::rt_io_tcp_drain_line_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_flush",
+        interpreter_native_net::rt_io_tcp_flush_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_local_addr",
+        interpreter_native_net::rt_io_tcp_local_addr_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_peer_addr",
+        interpreter_native_net::rt_io_tcp_peer_addr_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_read_exact",
+        interpreter_native_net::rt_io_tcp_read_exact_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_read_exact_len",
+        interpreter_native_net::rt_io_tcp_read_exact_len_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_read",
+        interpreter_native_net::rt_io_tcp_read_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_read_line",
+        interpreter_native_net::rt_io_tcp_read_line_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_set_nodelay",
+        interpreter_native_net::rt_io_tcp_set_nodelay_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_set_read_timeout",
+        interpreter_native_net::rt_io_tcp_set_read_timeout_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_set_write_timeout",
+        interpreter_native_net::rt_io_tcp_set_write_timeout_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_shutdown",
+        interpreter_native_net::rt_io_tcp_shutdown_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_write_all",
+        interpreter_native_net::rt_io_tcp_write_all_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_write_http",
+        interpreter_native_net::rt_io_tcp_write_http_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_write",
+        interpreter_native_net::rt_io_tcp_write_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_write_text",
+        interpreter_native_net::rt_io_tcp_write_text_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_write_text_read_exact_len",
+        interpreter_native_net::rt_io_tcp_write_text_read_exact_len_interp as ExternFn,
+    );
     m.insert("rt_is_debug_mode_enabled", system::rt_is_debug_mode_enabled as ExternFn);
     m.insert("rt_is_error", sffi_value::rt_is_error_fn as ExternFn);
-    m.insert("rt_is_macro_trace_enabled", system::rt_is_macro_trace_enabled as ExternFn);
+    m.insert(
+        "rt_is_macro_trace_enabled",
+        system::rt_is_macro_trace_enabled as ExternFn,
+    );
     m.insert("rt_jit_backend_name", jit_native::rt_jit_backend_name as ExternFn);
     m.insert("rt_jit_call_i64_i64", jit_native::rt_jit_call_i64_i64 as ExternFn);
     m.insert("rt_jit_call_i64", jit_native::rt_jit_call_i64 as ExternFn);
@@ -842,7 +1258,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_jit_cleanup", jit_native::rt_jit_cleanup as ExternFn);
     m.insert("rt_jit_compile_source", jit_native::rt_jit_compile_source as ExternFn);
     m.insert("rt_jit_create", jit_native::rt_jit_create as ExternFn);
-    m.insert("rt_jit_create_for_target", jit_native::rt_jit_create_for_target as ExternFn);
+    m.insert(
+        "rt_jit_create_for_target",
+        jit_native::rt_jit_create_for_target as ExternFn,
+    );
     m.insert("rt_jit_has_function", jit_native::rt_jit_has_function as ExternFn);
     m.insert("rt_math_acos", math::rt_math_acos_fn as ExternFn);
     m.insert("rt_math_asin", math::rt_math_asin_fn as ExternFn);
@@ -908,12 +1327,24 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_process_wait", system::rt_process_wait as ExternFn);
     m.insert("rt_profiler_is_active", time::rt_profiler_is_active_fn as ExternFn);
     m.insert("rt_profiler_record_call", time::rt_profiler_record_call_fn as ExternFn);
-    m.insert("rt_profiler_record_return", time::rt_profiler_record_return_fn as ExternFn);
-    m.insert("rt_progress_get_elapsed_seconds", time::rt_progress_get_elapsed_seconds as ExternFn);
+    m.insert(
+        "rt_profiler_record_return",
+        time::rt_profiler_record_return_fn as ExternFn,
+    );
+    m.insert(
+        "rt_progress_get_elapsed_seconds",
+        time::rt_progress_get_elapsed_seconds as ExternFn,
+    );
     m.insert("rt_progress_init", time::rt_progress_init as ExternFn);
     m.insert("rt_progress_reset", time::rt_progress_reset as ExternFn);
-    m.insert("rt_ps_torch_tensor_from_bits_1d", torch::rt_ps_torch_tensor_from_bits_1d as ExternFn);
-    m.insert("rt_ps_torch_tensor_from_data", torch::rt_ps_torch_tensor_from_data as ExternFn);
+    m.insert(
+        "rt_ps_torch_tensor_from_bits_1d",
+        torch::rt_ps_torch_tensor_from_bits_1d as ExternFn,
+    );
+    m.insert(
+        "rt_ps_torch_tensor_from_data",
+        torch::rt_ps_torch_tensor_from_data as ExternFn,
+    );
     m.insert("rt_ps_torch_tensor", torch::rt_ps_torch_tensor as ExternFn);
     m.insert("rt_ps_torch_tensor_zeros", torch::rt_ps_torch_tensor_zeros as ExternFn);
     m.insert("rt_ptr_read_i32", memory::rt_ptr_read_i32 as ExternFn);
@@ -938,9 +1369,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_readdir", file_io::rt_readdir as ExternFn);
     m.insert("rt_readdir_free", file_io::rt_readdir_free as ExternFn);
     m.insert("rt_remove", file_io::rt_remove as ExternFn);
-    m.insert("rt_rsa_pss_sha256_verify", signatures::rt_rsa_pss_sha256_verify as ExternFn);
-    m.insert("rt_rsa_pss_sha384_verify", signatures::rt_rsa_pss_sha384_verify as ExternFn);
-    m.insert("rt_rsa_pss_sha512_verify", signatures::rt_rsa_pss_sha512_verify as ExternFn);
+    m.insert(
+        "rt_rsa_pss_sha256_verify",
+        signatures::rt_rsa_pss_sha256_verify as ExternFn,
+    );
+    m.insert(
+        "rt_rsa_pss_sha384_verify",
+        signatures::rt_rsa_pss_sha384_verify as ExternFn,
+    );
+    m.insert(
+        "rt_rsa_pss_sha512_verify",
+        signatures::rt_rsa_pss_sha512_verify as ExternFn,
+    );
     m.insert("rt_rsa_sha256_sign", signatures::rt_rsa_sha256_sign as ExternFn);
     m.insert("rt_rsa_sha256_verify", signatures::rt_rsa_sha256_verify as ExternFn);
     m.insert("rt_rsa_sha512_sign", signatures::rt_rsa_sha512_sign as ExternFn);
@@ -951,28 +1391,76 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_rwlock_try_read", atomic::rt_rwlock_try_read_fn as ExternFn);
     m.insert("rt_rwlock_try_write", atomic::rt_rwlock_try_write_fn as ExternFn);
     m.insert("rt_rwlock_write", atomic::rt_rwlock_write_fn as ExternFn);
-    m.insert("rt_sandbox_add_allowed_domain", sandbox::rt_sandbox_add_allowed_domain_fn as ExternFn);
-    m.insert("rt_sandbox_add_blocked_domain", sandbox::rt_sandbox_add_blocked_domain_fn as ExternFn);
-    m.insert("rt_sandbox_add_read_path", sandbox::rt_sandbox_add_read_path_fn as ExternFn);
-    m.insert("rt_sandbox_add_write_path", sandbox::rt_sandbox_add_write_path_fn as ExternFn);
+    m.insert(
+        "rt_sandbox_add_allowed_domain",
+        sandbox::rt_sandbox_add_allowed_domain_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_add_blocked_domain",
+        sandbox::rt_sandbox_add_blocked_domain_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_add_read_path",
+        sandbox::rt_sandbox_add_read_path_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_add_write_path",
+        sandbox::rt_sandbox_add_write_path_fn as ExternFn,
+    );
     m.insert("rt_sandbox_apply", sandbox::rt_sandbox_apply_fn as ExternFn);
     m.insert("rt_sandbox_cleanup", sandbox::rt_sandbox_cleanup_fn as ExternFn);
-    m.insert("rt_sandbox_disable_network", sandbox::rt_sandbox_disable_network_fn as ExternFn);
-    m.insert("rt_sandbox_get_cpu_time", sandbox::rt_sandbox_get_cpu_time_fn as ExternFn);
+    m.insert(
+        "rt_sandbox_disable_network",
+        sandbox::rt_sandbox_disable_network_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_get_cpu_time",
+        sandbox::rt_sandbox_get_cpu_time_fn as ExternFn,
+    );
     m.insert("rt_sandbox_get_fs_mode", sandbox::rt_sandbox_get_fs_mode_fn as ExternFn);
     m.insert("rt_sandbox_get_memory", sandbox::rt_sandbox_get_memory_fn as ExternFn);
-    m.insert("rt_sandbox_get_network_mode", sandbox::rt_sandbox_get_network_mode_fn as ExternFn);
-    m.insert("rt_sandbox_is_configured", sandbox::rt_sandbox_is_configured_fn as ExternFn);
+    m.insert(
+        "rt_sandbox_get_network_mode",
+        sandbox::rt_sandbox_get_network_mode_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_is_configured",
+        sandbox::rt_sandbox_is_configured_fn as ExternFn,
+    );
     m.insert("rt_sandbox_reset", sandbox::rt_sandbox_reset_fn as ExternFn);
-    m.insert("rt_sandbox_set_cpu_time", sandbox::rt_sandbox_set_cpu_time_fn as ExternFn);
-    m.insert("rt_sandbox_set_fd_limit", sandbox::rt_sandbox_set_fd_limit_fn as ExternFn);
-    m.insert("rt_sandbox_set_fs_overlay", sandbox::rt_sandbox_set_fs_overlay_fn as ExternFn);
-    m.insert("rt_sandbox_set_fs_readonly", sandbox::rt_sandbox_set_fs_readonly_fn as ExternFn);
-    m.insert("rt_sandbox_set_fs_restricted", sandbox::rt_sandbox_set_fs_restricted_fn as ExternFn);
+    m.insert(
+        "rt_sandbox_set_cpu_time",
+        sandbox::rt_sandbox_set_cpu_time_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_set_fd_limit",
+        sandbox::rt_sandbox_set_fd_limit_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_set_fs_overlay",
+        sandbox::rt_sandbox_set_fs_overlay_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_set_fs_readonly",
+        sandbox::rt_sandbox_set_fs_readonly_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_set_fs_restricted",
+        sandbox::rt_sandbox_set_fs_restricted_fn as ExternFn,
+    );
     m.insert("rt_sandbox_set_memory", sandbox::rt_sandbox_set_memory_fn as ExternFn);
-    m.insert("rt_sandbox_set_network_allowlist", sandbox::rt_sandbox_set_network_allowlist_fn as ExternFn);
-    m.insert("rt_sandbox_set_network_blocklist", sandbox::rt_sandbox_set_network_blocklist_fn as ExternFn);
-    m.insert("rt_sandbox_set_thread_limit", sandbox::rt_sandbox_set_thread_limit_fn as ExternFn);
+    m.insert(
+        "rt_sandbox_set_network_allowlist",
+        sandbox::rt_sandbox_set_network_allowlist_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_set_network_blocklist",
+        sandbox::rt_sandbox_set_network_blocklist_fn as ExternFn,
+    );
+    m.insert(
+        "rt_sandbox_set_thread_limit",
+        sandbox::rt_sandbox_set_thread_limit_fn as ExternFn,
+    );
     m.insert("rt_sdn_check", sdn::rt_sdn_check as ExternFn);
     m.insert("rt_sdn_fmt", sdn::rt_sdn_fmt as ExternFn);
     m.insert("rt_sdn_from_json", sdn::rt_sdn_from_json as ExternFn);
@@ -981,7 +1469,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_sdn_to_json", sdn::rt_sdn_to_json as ExternFn);
     m.insert("rt_sdn_version", sdn::rt_sdn_version as ExternFn);
     m.insert("rt_select_query", simd::rt_select_query as ExternFn);
-    m.insert("rt_set_concurrent_backend", concurrency::rt_set_concurrent_backend as ExternFn);
+    m.insert(
+        "rt_set_concurrent_backend",
+        concurrency::rt_set_concurrent_backend as ExternFn,
+    );
     m.insert("rt_set_current_dir", file_io::rt_set_current_dir as ExternFn);
     m.insert("rt_set_debug_mode", system::rt_set_debug_mode as ExternFn);
     m.insert("rt_set_macro_trace", system::rt_set_macro_trace as ExternFn);
@@ -1000,7 +1491,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_simd_add_i32x4", simd::rt_simd_add_i32x4 as ExternFn);
     m.insert("rt_simd_add_i32x8", simd::rt_simd_add_i32x8 as ExternFn);
     m.insert("rt_simd_add_u8x16", simd::rt_simd_add_u8x16 as ExternFn);
-    m.insert("rt_simd_aes_round_last_u8x16", simd::rt_simd_aes_round_last_u8x16 as ExternFn);
+    m.insert(
+        "rt_simd_aes_round_last_u8x16",
+        simd::rt_simd_aes_round_last_u8x16 as ExternFn,
+    );
     m.insert("rt_simd_aes_round_u8x16", simd::rt_simd_aes_round_u8x16 as ExternFn);
     m.insert("rt_simd_and_i32x4", simd::rt_simd_and_i32x4 as ExternFn);
     m.insert("rt_simd_and_i32x8", simd::rt_simd_and_i32x8 as ExternFn);
@@ -1079,11 +1573,20 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_system_cpu_count", file_io::rt_system_cpu_count as ExternFn);
     m.insert("rt_term_enable_ansi", system::rt_term_enable_ansi as ExternFn);
     m.insert("rt_term_get_size", system::rt_term_get_size as ExternFn);
-    m.insert("rt_test_db_cleanup_stale_runs", cli::rt_test_db_cleanup_stale_runs as ExternFn);
-    m.insert("rt_test_db_enable_validation", cli::rt_test_db_enable_validation as ExternFn);
+    m.insert(
+        "rt_test_db_cleanup_stale_runs",
+        cli::rt_test_db_cleanup_stale_runs as ExternFn,
+    );
+    m.insert(
+        "rt_test_db_enable_validation",
+        cli::rt_test_db_enable_validation as ExternFn,
+    );
     m.insert("rt_test_db_validate", cli::rt_test_db_validate as ExternFn);
     m.insert("rt_test_run_is_stale", cli::rt_test_run_is_stale as ExternFn);
-    m.insert("rt_text_count_codepoints_cached", simd::rt_text_count_codepoints_cached as ExternFn);
+    m.insert(
+        "rt_text_count_codepoints_cached",
+        simd::rt_text_count_codepoints_cached as ExternFn,
+    );
     m.insert("rt_text_count_codepoints", simd::rt_text_count_codepoints as ExternFn);
     m.insert("rt_text_find_invalid_utf8", simd::rt_text_find_invalid_utf8 as ExternFn);
     m.insert("rt_text_is_ascii", simd::rt_text_is_ascii as ExternFn);
@@ -1091,8 +1594,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_text_to_lower_ascii", simd::rt_text_to_lower_ascii as ExternFn);
     m.insert("rt_text_to_upper_ascii", simd::rt_text_to_upper_ascii as ExternFn);
     m.insert("rt_text_validate_utf8", simd::rt_text_validate_utf8 as ExternFn);
-    m.insert("rt_thread_available_parallelism", concurrency::rt_thread_available_parallelism as ExternFn);
-    m.insert("spl_thread_cpu_count", concurrency::rt_thread_available_parallelism as ExternFn);
+    m.insert(
+        "rt_thread_available_parallelism",
+        concurrency::rt_thread_available_parallelism as ExternFn,
+    );
+    m.insert(
+        "spl_thread_cpu_count",
+        concurrency::rt_thread_available_parallelism as ExternFn,
+    );
     m.insert("rt_thread_free", concurrency::rt_thread_free as ExternFn);
     m.insert("rt_thread_id", concurrency::rt_thread_id as ExternFn);
     m.insert("rt_thread_is_done", concurrency::rt_thread_is_done as ExternFn);
@@ -1106,7 +1615,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_time_monotonic_ns", time::rt_time_monotonic_ns as ExternFn);
     m.insert("rt_time_ms", time::rt_time_ms_fn as ExternFn);
     m.insert("rt_time_now_micros", time::rt_time_now_micros as ExternFn);
-    m.insert("rt_time_now_monotonic_ms", file_io::rt_time_now_monotonic_ms as ExternFn);
+    m.insert(
+        "rt_time_now_monotonic_ms",
+        file_io::rt_time_now_monotonic_ms as ExternFn,
+    );
     m.insert("rt_time_now_ms", time::rt_time_now_ms as ExternFn);
     m.insert("rt_time_now_nanos", time::rt_time_now_nanos as ExternFn);
     m.insert("rt_time_now_seconds", time::rt_time_now_seconds as ExternFn);
@@ -1114,37 +1626,88 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_time_now_unix_micros", time::rt_time_now_unix_micros as ExternFn);
     m.insert("rt_timestamp_add_days", time::rt_timestamp_add_days as ExternFn);
     m.insert("rt_timestamp_diff_days", time::rt_timestamp_diff_days as ExternFn);
-    m.insert("rt_timestamp_from_components", time::rt_timestamp_from_components as ExternFn);
+    m.insert(
+        "rt_timestamp_from_components",
+        time::rt_timestamp_from_components as ExternFn,
+    );
     m.insert("rt_timestamp_get_day", time::rt_timestamp_get_day as ExternFn);
     m.insert("rt_timestamp_get_hour", time::rt_timestamp_get_hour as ExternFn);
-    m.insert("rt_timestamp_get_microsecond", time::rt_timestamp_get_microsecond as ExternFn);
+    m.insert(
+        "rt_timestamp_get_microsecond",
+        time::rt_timestamp_get_microsecond as ExternFn,
+    );
     m.insert("rt_timestamp_get_minute", time::rt_timestamp_get_minute as ExternFn);
     m.insert("rt_timestamp_get_month", time::rt_timestamp_get_month as ExternFn);
     m.insert("rt_timestamp_get_second", time::rt_timestamp_get_second as ExternFn);
     m.insert("rt_timestamp_get_year", time::rt_timestamp_get_year as ExternFn);
     m.insert("rt_timestamp_iso8601", time::rt_timestamp_iso8601 as ExternFn);
-    m.insert("rt_tls13_aes128_gcm_decrypt", simd::rt_tls13_aes128_gcm_decrypt as ExternFn);
-    m.insert("rt_tls13_aes128_gcm_encrypt", simd::rt_tls13_aes128_gcm_encrypt as ExternFn);
-    m.insert("rt_tls13_aes256_gcm_decrypt", simd::rt_tls13_aes256_gcm_decrypt as ExternFn);
-    m.insert("rt_tls13_aes256_gcm_encrypt", simd::rt_tls13_aes256_gcm_encrypt as ExternFn);
+    m.insert(
+        "rt_tls13_aes128_gcm_decrypt",
+        simd::rt_tls13_aes128_gcm_decrypt as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_aes128_gcm_encrypt",
+        simd::rt_tls13_aes128_gcm_encrypt as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_aes256_gcm_decrypt",
+        simd::rt_tls13_aes256_gcm_decrypt as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_aes256_gcm_encrypt",
+        simd::rt_tls13_aes256_gcm_encrypt as ExternFn,
+    );
     m.insert("rt_tls13_ed25519_verify", signatures::rt_ed25519_verify as ExternFn);
     m.insert("rt_torch_clone", torch::rt_torch_clone as ExternFn);
-    m.insert("rt_torch_copy_data_to_cpu", torch::rt_torch_copy_data_to_cpu as ExternFn);
+    m.insert(
+        "rt_torch_copy_data_to_cpu",
+        torch::rt_torch_copy_data_to_cpu as ExternFn,
+    );
     m.insert("rt_torch_free", torch::rt_torch_free as ExternFn);
     m.insert("rt_torch_tensor", torch::rt_torch_tensor as ExternFn);
     m.insert("rt_torch_to_cpu", torch::rt_torch_to_cpu as ExternFn);
     m.insert("rt_torch_to_cuda", torch::rt_torch_to_cuda as ExternFn);
-    m.insert("rt_typed_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn as ExternFn);
-    m.insert("rt_typed_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn as ExternFn);
-    m.insert("rt_typed_bytes_u64_le_unchecked", sffi_array::rt_bytes_u64_le_at_fn as ExternFn);
-    m.insert("rt_typed_bytes_u8_push", sffi_array::rt_typed_bytes_u8_push_fn as ExternFn);
+    m.insert(
+        "rt_typed_bytes_u32_le_at",
+        sffi_array::rt_bytes_u32_le_at_fn as ExternFn,
+    );
+    m.insert(
+        "rt_typed_bytes_u64_le_at",
+        sffi_array::rt_bytes_u64_le_at_fn as ExternFn,
+    );
+    m.insert(
+        "rt_typed_bytes_u64_le_unchecked",
+        sffi_array::rt_bytes_u64_le_at_fn as ExternFn,
+    );
+    m.insert(
+        "rt_typed_bytes_u8_push",
+        sffi_array::rt_typed_bytes_u8_push_fn as ExternFn,
+    );
     m.insert("rt_typed_bytes_u8_unchecked", sffi_array::rt_bytes_u8_at_fn as ExternFn);
-    m.insert("rt_typed_words_u32_at", sffi_array::rt_typed_words_u32_at_fn as ExternFn);
-    m.insert("rt_typed_words_u32_push", sffi_array::rt_typed_words_u32_push_fn as ExternFn);
-    m.insert("rt_typed_words_u32_set", sffi_array::rt_typed_words_u32_set_fn as ExternFn);
-    m.insert("rt_typed_words_u32_unchecked", sffi_array::rt_typed_words_u32_unchecked_fn as ExternFn);
-    m.insert("rt_typed_words_u64_at", sffi_array::rt_typed_words_u64_at_fn as ExternFn);
-    m.insert("rt_typed_words_u64_unchecked", sffi_array::rt_typed_words_u64_unchecked_fn as ExternFn);
+    m.insert(
+        "rt_typed_words_u32_at",
+        sffi_array::rt_typed_words_u32_at_fn as ExternFn,
+    );
+    m.insert(
+        "rt_typed_words_u32_push",
+        sffi_array::rt_typed_words_u32_push_fn as ExternFn,
+    );
+    m.insert(
+        "rt_typed_words_u32_set",
+        sffi_array::rt_typed_words_u32_set_fn as ExternFn,
+    );
+    m.insert(
+        "rt_typed_words_u32_unchecked",
+        sffi_array::rt_typed_words_u32_unchecked_fn as ExternFn,
+    );
+    m.insert(
+        "rt_typed_words_u64_at",
+        sffi_array::rt_typed_words_u64_at_fn as ExternFn,
+    );
+    m.insert(
+        "rt_typed_words_u64_unchecked",
+        sffi_array::rt_typed_words_u64_unchecked_fn as ExternFn,
+    );
     m.insert("rt_u32_alloc_filled", file_io::rt_u32_alloc_filled as ExternFn);
     m.insert("rt_unix_socket_accept", qmp_socket::rt_unix_socket_accept as ExternFn);
     m.insert("rt_unix_socket_close", qmp_socket::rt_unix_socket_close as ExternFn);
@@ -1170,25 +1733,67 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_value_truthy", sffi_value::rt_value_truthy_fn as ExternFn);
     m.insert("rt_value_type_tag", sffi_value::rt_value_type_tag_fn as ExternFn);
     m.insert("rt_vk_available", gpu::rt_vk_available_fn as ExternFn);
-    m.insert("rt_vulkan_begin_graphics_frame", gpu::rt_vulkan_begin_graphics_frame_fn as ExternFn);
-    m.insert("rt_vulkan_begin_render_pass", gpu::rt_vulkan_begin_render_pass_fn as ExternFn);
-    m.insert("rt_vulkan_cmd_bind_index_buffer", gpu::rt_vulkan_cmd_bind_index_buffer_fn as ExternFn);
-    m.insert("rt_vulkan_cmd_bind_texture", gpu::rt_vulkan_cmd_bind_texture_fn as ExternFn);
-    m.insert("rt_vulkan_cmd_bind_uniform_buffer", gpu::rt_vulkan_cmd_bind_uniform_buffer_fn as ExternFn);
-    m.insert("rt_vulkan_cmd_bind_vertex_buffer", gpu::rt_vulkan_cmd_bind_vertex_buffer_fn as ExternFn);
-    m.insert("rt_vulkan_cmd_draw_indexed", gpu::rt_vulkan_cmd_draw_indexed_fn as ExternFn);
-    m.insert("rt_vulkan_cmd_set_pipeline", gpu::rt_vulkan_cmd_set_pipeline_fn as ExternFn);
+    m.insert(
+        "rt_vulkan_begin_graphics_frame",
+        gpu::rt_vulkan_begin_graphics_frame_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_begin_render_pass",
+        gpu::rt_vulkan_begin_render_pass_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_cmd_bind_index_buffer",
+        gpu::rt_vulkan_cmd_bind_index_buffer_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_cmd_bind_texture",
+        gpu::rt_vulkan_cmd_bind_texture_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_cmd_bind_uniform_buffer",
+        gpu::rt_vulkan_cmd_bind_uniform_buffer_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_cmd_bind_vertex_buffer",
+        gpu::rt_vulkan_cmd_bind_vertex_buffer_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_cmd_draw_indexed",
+        gpu::rt_vulkan_cmd_draw_indexed_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_cmd_set_pipeline",
+        gpu::rt_vulkan_cmd_set_pipeline_fn as ExternFn,
+    );
     m.insert("rt_vulkan_alloc_buffer", gpu::rt_vulkan_alloc_buffer_fn as ExternFn);
     m.insert("rt_vulkan_begin_compute", gpu::rt_vulkan_begin_compute_fn as ExternFn);
     m.insert("rt_vulkan_bind_buffer", gpu::rt_vulkan_bind_buffer_fn as ExternFn);
-    m.insert("rt_vulkan_bind_descriptors", gpu::rt_vulkan_bind_descriptors_fn as ExternFn);
+    m.insert(
+        "rt_vulkan_bind_descriptors",
+        gpu::rt_vulkan_bind_descriptors_fn as ExternFn,
+    );
     m.insert("rt_vulkan_bind_pipeline", gpu::rt_vulkan_bind_pipeline_fn as ExternFn);
     m.insert("rt_vulkan_compile_glsl", gpu::rt_vulkan_compile_glsl_fn as ExternFn);
-    m.insert("rt_vulkan_create_compute_pipeline", gpu::rt_vulkan_create_compute_pipeline_fn as ExternFn);
-    m.insert("rt_vulkan_create_descriptor_set", gpu::rt_vulkan_create_descriptor_set_fn as ExternFn);
-    m.insert("rt_vulkan_create_graphics_buffer", gpu::rt_vulkan_create_graphics_buffer_fn as ExternFn);
-    m.insert("rt_vulkan_destroy_descriptor_set", gpu::rt_vulkan_destroy_descriptor_set_fn as ExternFn);
-    m.insert("rt_vulkan_destroy_pipeline", gpu::rt_vulkan_destroy_pipeline_fn as ExternFn);
+    m.insert(
+        "rt_vulkan_create_compute_pipeline",
+        gpu::rt_vulkan_create_compute_pipeline_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_create_descriptor_set",
+        gpu::rt_vulkan_create_descriptor_set_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_create_graphics_buffer",
+        gpu::rt_vulkan_create_graphics_buffer_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_destroy_descriptor_set",
+        gpu::rt_vulkan_destroy_descriptor_set_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_destroy_pipeline",
+        gpu::rt_vulkan_destroy_pipeline_fn as ExternFn,
+    );
     m.insert("rt_vulkan_destroy_shader", gpu::rt_vulkan_destroy_shader_fn as ExternFn);
     m.insert("rt_vulkan_device_count", gpu::rt_vulkan_device_count_fn as ExternFn);
     m.insert("rt_vulkan_device_name", gpu::rt_vulkan_device_name_fn as ExternFn);
@@ -1202,47 +1807,107 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_vulkan_push_constants", gpu::rt_vulkan_push_constants_fn as ExternFn);
     m.insert("rt_vulkan_select_device", gpu::rt_vulkan_select_device_fn as ExternFn);
     m.insert("rt_vulkan_shutdown", gpu::rt_vulkan_shutdown_fn as ExternFn);
-    m.insert("rt_vulkan_submit_and_wait", gpu::rt_vulkan_submit_and_wait_fn as ExternFn);
+    m.insert(
+        "rt_vulkan_submit_and_wait",
+        gpu::rt_vulkan_submit_and_wait_fn as ExternFn,
+    );
     m.insert("rt_vulkan_wait_idle", gpu::rt_vulkan_wait_idle_fn as ExternFn);
-    m.insert("rt_vulkan_create_graphics_pipeline", gpu::rt_vulkan_create_graphics_pipeline_fn as ExternFn);
+    m.insert(
+        "rt_vulkan_create_graphics_pipeline",
+        gpu::rt_vulkan_create_graphics_pipeline_fn as ExternFn,
+    );
     m.insert("rt_vulkan_create_image", gpu::rt_vulkan_create_image_fn as ExternFn);
-    m.insert("rt_vulkan_end_graphics_frame", gpu::rt_vulkan_end_graphics_frame_fn as ExternFn);
-    m.insert("rt_vulkan_end_render_pass", gpu::rt_vulkan_end_render_pass_fn as ExternFn);
-    m.insert("rt_vulkan_graphics_present", gpu::rt_vulkan_graphics_present_fn as ExternFn);
+    m.insert(
+        "rt_vulkan_end_graphics_frame",
+        gpu::rt_vulkan_end_graphics_frame_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_end_render_pass",
+        gpu::rt_vulkan_end_render_pass_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_graphics_present",
+        gpu::rt_vulkan_graphics_present_fn as ExternFn,
+    );
     m.insert("rt_vulkan_init_graphics", gpu::rt_vulkan_init_graphics_fn as ExternFn);
-    m.insert("rt_vulkan_shutdown_graphics", gpu::rt_vulkan_shutdown_graphics_fn as ExternFn);
-    m.insert("rt_vulkan_upload_graphics_buffer", gpu::rt_vulkan_upload_graphics_buffer_fn as ExternFn);
+    m.insert(
+        "rt_vulkan_shutdown_graphics",
+        gpu::rt_vulkan_shutdown_graphics_fn as ExternFn,
+    );
+    m.insert(
+        "rt_vulkan_upload_graphics_buffer",
+        gpu::rt_vulkan_upload_graphics_buffer_fn as ExternFn,
+    );
     m.insert("rt_vulkan_upload_image", gpu::rt_vulkan_upload_image_fn as ExternFn);
     m.insert("rt_webgpu_compute_draw", gpu::rt_webgpu_compute_draw_fn as ExternFn);
     m.insert("rt_webgpu_create_surface", gpu::rt_webgpu_create_surface_fn as ExternFn);
-    m.insert("rt_webgpu_destroy_surface", gpu::rt_webgpu_destroy_surface_fn as ExternFn);
+    m.insert(
+        "rt_webgpu_destroy_surface",
+        gpu::rt_webgpu_destroy_surface_fn as ExternFn,
+    );
     m.insert("rt_webgpu_init", gpu::rt_webgpu_init_fn as ExternFn);
     m.insert("rt_webgpu_is_available", gpu::rt_webgpu_is_available_fn as ExternFn);
     m.insert("rt_webgpu_present", gpu::rt_webgpu_present_fn as ExternFn);
     m.insert("rt_webgpu_shutdown", gpu::rt_webgpu_shutdown_fn as ExternFn);
     m.insert("rt_webgpu_upload_pixels", gpu::rt_webgpu_upload_pixels_fn as ExternFn);
     m.insert("rt_wgpu_3d_begin_frame", gpu::rt_wgpu_3d_begin_frame_fn as ExternFn);
-    m.insert("rt_wgpu_3d_begin_render_pass", gpu::rt_wgpu_3d_begin_render_pass_fn as ExternFn);
-    m.insert("rt_wgpu_3d_cmd_bind_index_buffer", gpu::rt_wgpu_3d_cmd_bind_index_buffer_fn as ExternFn);
-    m.insert("rt_wgpu_3d_cmd_bind_texture", gpu::rt_wgpu_3d_cmd_bind_texture_fn as ExternFn);
-    m.insert("rt_wgpu_3d_cmd_bind_uniform_buffer", gpu::rt_wgpu_3d_cmd_bind_uniform_buffer_fn as ExternFn);
-    m.insert("rt_wgpu_3d_cmd_bind_vertex_buffer", gpu::rt_wgpu_3d_cmd_bind_vertex_buffer_fn as ExternFn);
-    m.insert("rt_wgpu_3d_cmd_draw_indexed", gpu::rt_wgpu_3d_cmd_draw_indexed_fn as ExternFn);
-    m.insert("rt_wgpu_3d_cmd_set_pipeline", gpu::rt_wgpu_3d_cmd_set_pipeline_fn as ExternFn);
+    m.insert(
+        "rt_wgpu_3d_begin_render_pass",
+        gpu::rt_wgpu_3d_begin_render_pass_fn as ExternFn,
+    );
+    m.insert(
+        "rt_wgpu_3d_cmd_bind_index_buffer",
+        gpu::rt_wgpu_3d_cmd_bind_index_buffer_fn as ExternFn,
+    );
+    m.insert(
+        "rt_wgpu_3d_cmd_bind_texture",
+        gpu::rt_wgpu_3d_cmd_bind_texture_fn as ExternFn,
+    );
+    m.insert(
+        "rt_wgpu_3d_cmd_bind_uniform_buffer",
+        gpu::rt_wgpu_3d_cmd_bind_uniform_buffer_fn as ExternFn,
+    );
+    m.insert(
+        "rt_wgpu_3d_cmd_bind_vertex_buffer",
+        gpu::rt_wgpu_3d_cmd_bind_vertex_buffer_fn as ExternFn,
+    );
+    m.insert(
+        "rt_wgpu_3d_cmd_draw_indexed",
+        gpu::rt_wgpu_3d_cmd_draw_indexed_fn as ExternFn,
+    );
+    m.insert(
+        "rt_wgpu_3d_cmd_set_pipeline",
+        gpu::rt_wgpu_3d_cmd_set_pipeline_fn as ExternFn,
+    );
     m.insert("rt_wgpu_3d_create_buffer", gpu::rt_wgpu_3d_create_buffer_fn as ExternFn);
-    m.insert("rt_wgpu_3d_create_pipeline", gpu::rt_wgpu_3d_create_pipeline_fn as ExternFn);
-    m.insert("rt_wgpu_3d_create_texture", gpu::rt_wgpu_3d_create_texture_fn as ExternFn);
+    m.insert(
+        "rt_wgpu_3d_create_pipeline",
+        gpu::rt_wgpu_3d_create_pipeline_fn as ExternFn,
+    );
+    m.insert(
+        "rt_wgpu_3d_create_texture",
+        gpu::rt_wgpu_3d_create_texture_fn as ExternFn,
+    );
     m.insert("rt_wgpu_3d_end_frame", gpu::rt_wgpu_3d_end_frame_fn as ExternFn);
-    m.insert("rt_wgpu_3d_end_render_pass", gpu::rt_wgpu_3d_end_render_pass_fn as ExternFn);
+    m.insert(
+        "rt_wgpu_3d_end_render_pass",
+        gpu::rt_wgpu_3d_end_render_pass_fn as ExternFn,
+    );
     m.insert("rt_wgpu_3d_init", gpu::rt_wgpu_3d_init_fn as ExternFn);
     m.insert("rt_wgpu_3d_present", gpu::rt_wgpu_3d_present_fn as ExternFn);
     m.insert("rt_wgpu_3d_shutdown", gpu::rt_wgpu_3d_shutdown_fn as ExternFn);
     m.insert("rt_wgpu_3d_upload_buffer", gpu::rt_wgpu_3d_upload_buffer_fn as ExternFn);
-    m.insert("rt_wgpu_3d_upload_texture", gpu::rt_wgpu_3d_upload_texture_fn as ExternFn);
+    m.insert(
+        "rt_wgpu_3d_upload_texture",
+        gpu::rt_wgpu_3d_upload_texture_fn as ExternFn,
+    );
     m.insert("rt_write_file", cranelift::rt_write_file as ExternFn);
     m.insert("serial_println", host_wm_bridge::serial_println as ExternFn);
     m.insert("simple_layout_mark", layout::simple_layout_mark as ExternFn);
-    m.insert("simple_repl_runner_cleanup", repl::simple_repl_runner_cleanup_fn as ExternFn);
+    m.insert(
+        "simple_repl_runner_cleanup",
+        repl::simple_repl_runner_cleanup_fn as ExternFn,
+    );
     m.insert("simple_repl_runner_init", repl::simple_repl_runner_init_fn as ExternFn);
     m.insert("spl_bits_to_f64", wsffi::spl_bits_to_f64 as ExternFn);
     m.insert("spl_dlclose", wsffi::spl_dlclose as ExternFn);
@@ -1273,9 +1938,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
         m.insert("ratatui_terminal_cleanup", tui::ratatui_terminal_cleanup_fn as ExternFn);
         m.insert("ratatui_terminal_clear", tui::ratatui_terminal_clear_fn as ExternFn);
         m.insert("ratatui_terminal_new", tui::ratatui_terminal_new_fn as ExternFn);
-        m.insert("ratatui_textbuffer_backspace", tui::ratatui_textbuffer_backspace_fn as ExternFn);
-        m.insert("ratatui_textbuffer_insert_char", tui::ratatui_textbuffer_insert_char_fn as ExternFn);
-        m.insert("ratatui_textbuffer_newline", tui::ratatui_textbuffer_newline_fn as ExternFn);
+        m.insert(
+            "ratatui_textbuffer_backspace",
+            tui::ratatui_textbuffer_backspace_fn as ExternFn,
+        );
+        m.insert(
+            "ratatui_textbuffer_insert_char",
+            tui::ratatui_textbuffer_insert_char_fn as ExternFn,
+        );
+        m.insert(
+            "ratatui_textbuffer_newline",
+            tui::ratatui_textbuffer_newline_fn as ExternFn,
+        );
         m.insert("ratatui_textbuffer_new", tui::ratatui_textbuffer_new_fn as ExternFn);
     }
 
@@ -1307,25 +1981,64 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_sha512_H", sha512::rt_sha512_h as ExternFn);
     m.insert("rt_tls13_sha256", tls13::rt_tls13_sha256 as ExternFn);
     m.insert("rt_tls13_hkdf_extract", tls13::rt_tls13_hkdf_extract as ExternFn);
-    m.insert("rt_tls13_hkdf_extract_into", tls13::rt_tls13_hkdf_extract_into as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_into", tls13::rt_tls13_hkdf_expand_into as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_label", tls13::rt_tls13_hkdf_expand_label as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_label_into", tls13::rt_tls13_hkdf_expand_label_into as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_label_derived", tls13::rt_tls13_hkdf_expand_label_derived as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_label_key", tls13::rt_tls13_hkdf_expand_label_key as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_label_iv", tls13::rt_tls13_hkdf_expand_label_iv as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_label_finished", tls13::rt_tls13_hkdf_expand_label_finished as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_label_client_hs", tls13::rt_tls13_hkdf_expand_label_client_hs as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_label_server_hs", tls13::rt_tls13_hkdf_expand_label_server_hs as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_label_client_app", tls13::rt_tls13_hkdf_expand_label_client_app as ExternFn);
-    m.insert("rt_tls13_hkdf_expand_label_server_app", tls13::rt_tls13_hkdf_expand_label_server_app as ExternFn);
+    m.insert(
+        "rt_tls13_hkdf_extract_into",
+        tls13::rt_tls13_hkdf_extract_into as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_into",
+        tls13::rt_tls13_hkdf_expand_into as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_label",
+        tls13::rt_tls13_hkdf_expand_label as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_label_into",
+        tls13::rt_tls13_hkdf_expand_label_into as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_label_derived",
+        tls13::rt_tls13_hkdf_expand_label_derived as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_label_key",
+        tls13::rt_tls13_hkdf_expand_label_key as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_label_iv",
+        tls13::rt_tls13_hkdf_expand_label_iv as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_label_finished",
+        tls13::rt_tls13_hkdf_expand_label_finished as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_label_client_hs",
+        tls13::rt_tls13_hkdf_expand_label_client_hs as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_label_server_hs",
+        tls13::rt_tls13_hkdf_expand_label_server_hs as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_label_client_app",
+        tls13::rt_tls13_hkdf_expand_label_client_app as ExternFn,
+    );
+    m.insert(
+        "rt_tls13_hkdf_expand_label_server_app",
+        tls13::rt_tls13_hkdf_expand_label_server_app as ExternFn,
+    );
     // TLS client stubs (interpreter mode — no real TLS)
     m.insert("rt_tls_client_connect", rt_tls_client_connect_stub as ExternFn);
     m.insert("rt_tls_client_connect_with_sni", rt_tls_client_connect_stub as ExternFn);
     m.insert("rt_tls_client_write", rt_tls_client_write_stub as ExternFn);
     m.insert("rt_tls_client_read", rt_tls_client_read_stub as ExternFn);
     m.insert("rt_tls_client_close", rt_tls_client_close_stub as ExternFn);
-    m.insert("rt_tls_get_protocol_version", rt_tls_get_protocol_version_stub as ExternFn);
+    m.insert(
+        "rt_tls_get_protocol_version",
+        rt_tls_get_protocol_version_stub as ExternFn,
+    );
     // PTY (pseudo-terminal) operations
     m.insert("rt_pty_open", pty::rt_pty_open as ExternFn);
     m.insert("rt_pty_spawn", pty::rt_pty_spawn as ExternFn);
@@ -1335,11 +2048,17 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_stderr_flush", io::stderr_flush as ExternFn);
     // Hosted surface selection
     m.insert("rt_hosted_select_surface", hosted::select_surface as ExternFn);
-    m.insert("rt_hosted_set_surface_override", hosted::set_surface_override as ExternFn);
+    m.insert(
+        "rt_hosted_set_surface_override",
+        hosted::set_surface_override as ExternFn,
+    );
     // Native compilation & execution
     m.insert("rt_compile_to_llvm_ir", native_sffi::rt_compile_to_llvm_ir as ExternFn);
     m.insert("rt_compile_to_native", native_sffi::rt_compile_to_native as ExternFn);
-    m.insert("rt_compile_to_native_with_opt", native_sffi::rt_compile_to_native as ExternFn);
+    m.insert(
+        "rt_compile_to_native_with_opt",
+        native_sffi::rt_compile_to_native as ExternFn,
+    );
     m.insert("rt_execute_native", native_sffi::rt_execute_native as ExternFn);
     // Package management
     m.insert("rt_package_sha256", package::sha256 as ExternFn);

@@ -8,7 +8,7 @@
   helpers (`src/lib/nogc_sync_mut/db/accel.spl`)
 - SDN query batching and `filter_in` OR semantics
 - DBFS dentry summary-hash and prefix scan helpers
-- spostgre BRIN-aware scan and minimal text-search prototype
+- Simple DB BRIN-aware scan and minimal text-search prototype
 - targeted regression tests for all three consumers
 
 ## Done — Phase 2 index structures landed (2026-05-20)
@@ -16,7 +16,7 @@
 - reusable prefix/radix index replacing DBFS summary-hash scan helpers for
   repeated namespace scans: `src/lib/nogc_sync_mut/db/prefix_index.spl`
   — `PrefixIndex`, `prefix_index_new/insert/sort/lookup_prefix/lookup_exact/size`
-- spostgre in-memory prefix+text index layered above trigram candidate extraction:
+- Simple DB in-memory prefix+text index layered above trigram candidate extraction:
   `src/lib/nogc_sync_mut/db/text_index.spl`
   — `TextIndex`, `text_index_new/insert/search_prefix/search_contains/search_exact`
 - reusable page-header summary scan helpers compatible with BRIN-style range
@@ -30,7 +30,7 @@
 ## Research — Phase 3 planner / ML work (TODO)
 
 - learned indexes for static sorted segments
-- learned cardinality estimation for spostgre planning
+- learned cardinality estimation for Simple DB planning
 - worst-case-optimal join applicability for Simple DB workloads
 - SIMD-backed posting-list execution and full inverted-index design
 
@@ -45,7 +45,7 @@
   performance win
 - `summary_text_hash` is intentionally a cheap prefilter hash; correctness
   depends on the exact-match refinement step staying in place
-- spostgre scan integration is additive utility code because the engine is still
+- Simple DB scan integration is additive utility code because the engine is still
   skeletal; broader executor wiring should wait for the engine’s execution path
   to stabilize
 
@@ -56,5 +56,5 @@
   ISA-specific SIMD speedups
 - startup/RSS evidence is now report-driven rather than enforced by a dedicated
   spec gate
-- no planner/executor surface in spostgre yet exists to consume the new scan
+- no planner/executor surface in Simple DB yet exists to consume the new scan
   helpers end-to-end

@@ -6,7 +6,7 @@ filesystem. See `README.md` for the primary vs secondary channel rule.
 - **Target:** nvfs
 - **Owning design doc:** `doc/05_design/nvfs_design.md`
 - **Upfront contributions (primary channel):**
-  - `doc/05_design/nvfs/from_spostgre.md`
+  - `doc/05_design/nvfs/from_simple_db.md`
   - `doc/05_design/nvfs/svllm_requirements.md`
 
 ## Schema
@@ -23,7 +23,7 @@ Entries use the fields in `TEMPLATE.md`:
 | Status | `Open` / `Accepted` / `Implemented` / `Rejected` |
 | Requested-semantics | one-paragraph description |
 | Acceptance-criteria | observable bullets |
-| Related-upfront | `from_spostgre.md §S#`, `svllm_requirements.md §R#`, or `none` |
+| Related-upfront | `from_simple_db.md §S#`, `svllm_requirements.md §R#`, or `none` |
 | Related-design-doc | `nvfs_design.md §#`, or `tbd` |
 | Related-issue | GH issue URL (optional) |
 
@@ -33,27 +33,27 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 ## Upfront Contributions (primary channel — do not re-file here)
 
 Listed here for cross-reference **only**. The upfront doc
-`doc/05_design/nvfs/from_spostgre.md` is the source of truth for these items —
+`doc/05_design/nvfs/from_simple_db.md` is the source of truth for these items —
 edits go there, not in this tracker.
 
 | Ref | Title | Priority | Source |
 |-----|-------|----------|--------|
-| `[UPFRONT] S1` | `arena_create` per storage class | P0 | `from_spostgre.md §S1` |
-| `[UPFRONT] S2` | `arena_append_aligned` | P0 | `from_spostgre.md §S2` |
-| `[UPFRONT] S3` | `arena_seal` + `arena_discard` with generation pinning | P0 | `from_spostgre.md §S3` |
-| `[UPFRONT] S4` | `arena_clone_range` for page-version cloning | P0 | `from_spostgre.md §S4` |
-| `[UPFRONT] S5` | Preferred I/O granule + capability query (`fs_caps`) | P0 | `from_spostgre.md §S5` |
-| `[UPFRONT] S6` | Capability-gated atomic-pointer-record publish | P0 | `from_spostgre.md §S6` |
-| `[UPFRONT] S7` | NVMe Flush / FUA pass-through tied to durability classes | P0 | `from_spostgre.md §S7` |
+| `[UPFRONT] S1` | `arena_create` per storage class | P0 | `from_simple_db.md §S1` |
+| `[UPFRONT] S2` | `arena_append_aligned` | P0 | `from_simple_db.md §S2` |
+| `[UPFRONT] S3` | `arena_seal` + `arena_discard` with generation pinning | P0 | `from_simple_db.md §S3` |
+| `[UPFRONT] S4` | `arena_clone_range` for page-version cloning | P0 | `from_simple_db.md §S4` |
+| `[UPFRONT] S5` | Preferred I/O granule + capability query (`fs_caps`) | P0 | `from_simple_db.md §S5` |
+| `[UPFRONT] S6` | Capability-gated atomic-pointer-record publish | P0 | `from_simple_db.md §S6` |
+| `[UPFRONT] S7` | NVMe Flush / FUA pass-through tied to durability classes | P0 | `from_simple_db.md §S7` |
 
 The seven `[UPFRONT]` items above are **not** open entries. They are already
 locked into the fs-API contract. Do not re-file them here. Updates to their
-wording/semantics belong in `from_spostgre.md` (and mirror into
+wording/semantics belong in `from_simple_db.md` (and mirror into
 `nvfs_design.md`).
 
 Six P1 stretch items (`S-stretch-1..6` — ZNS zone-append, FDP PIDs,
 namespace-per-class, copy offload, CMB/PMR, DSM trim) also live in
-`from_spostgre.md`; they are intentionally omitted from the table above to
+`from_simple_db.md`; they are intentionally omitted from the table above to
 keep the `[UPFRONT]` list focused on the load-bearing seven.
 
 ## Open Requests
@@ -198,11 +198,11 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 ### FR-HOT-001 — HOT: integrate pd_upper/pd_lower free-space check before chaining
 
 - **Filed-on:** 2026-04-17
-- **Filed-by:** spostgre M3a agent (session spostgre-m3a)
-- **Target:** spostgre  (examples/spostgre/src/engine/hot.spl)
+- **Filed-by:** Simple DB M3a agent (session simple_db-m3a)
+- **Target:** Simple DB  (examples/simple_db/src/engine/hot.spl)
 - **Priority:** P2
 - **Status:** Implemented — 2026-04-18
-- **Implemented-by:** 9-hot-slack agent (session spostgre-hot-001)
+- **Implemented-by:** 9-hot-slack agent (session simple_db-hot-001)
 - **Requested-semantics:**
   `HotChain.try_update` currently chains a HOT update unconditionally at the
   logical-page-group level. A real PostgreSQL HOT update is only valid when the
@@ -217,10 +217,10 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
   - [x] `hot_try_update_page` in `hot.spl` calls `page_slack` and returns Cold/no_slack
         when `slack < byte_size + LINE_POINTER_SIZE`
   - [x] Existing HOT unit tests continue to pass (hot_try_update signature unchanged)
-  - [x] 3 new tests in `examples/spostgre/test/unit/hot_slack_test.spl`:
+  - [x] 3 new tests in `examples/simple_db/test/unit/hot_slack_test.spl`:
         plenty-of-slack (HOT), too-full (Cold/no_slack), exact-boundary (HOT)
 - **Related-upfront:** none
-- **Related-design-doc:** `examples/spostgre/doc/design/hot_update.md` (M3a design)
+- **Related-design-doc:** `examples/simple_db/doc/design/hot_update.md` (M3a design)
 - **Related-issue:** none
 - **Notes:** Implemented as `hot_try_update_page` (new fn) rather than replacing
   `hot_try_update`, preserving existing caller contract. `page_slack` accepts a
@@ -236,7 +236,7 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 - **Priority:** P2
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
-- **Implemented-by:** agent a8cc4856 (completed by spostgre-nvfs-storage)
+- **Implemented-by:** agent a8cc4856 (completed by simple-db-nvfs-storage)
 - **Requested-semantics:**
   Current TSC calibration in `src/os/kernel/arch/x86_64/timer.spl` uses PIT
   channel 2 for a ~10ms measurement window. Virtualised QEMU HPET is available
@@ -266,12 +266,12 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 ### FR-SIMPLEOS-ACPI-001 — ACPI table walker (RSDP → RSDT/XSDT → FADT + HPET)
 
 - **Filed-on:** 2026-04-18
-- **Filed-by:** spostgre-nvfs-storage acpi-walker agent
+- **Filed-by:** simple-db-nvfs-storage acpi-walker agent
 - **Target:** os  (src/os/kernel/acpi/)
 - **Priority:** P1
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
-- **Implemented-by:** spostgre-nvfs-storage acpi-walker agent
+- **Implemented-by:** simple-db-nvfs-storage acpi-walker agent
 - **Requested-semantics:**
   SimpleOS needs real HPET MMIO base and PMTMR I/O port from ACPI tables so
   that TSC calibration can use sub-0.1% reference sources instead of PIT-ch2.
@@ -297,7 +297,7 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 ---
 
 Entries here are filed during Phase 5+ implementation (per SStack state file
-`.sstack/spostgre-nvfs-storage/state.md`) when an NVFS need is discovered that
+`.sstack/simple-db-nvfs-storage/state.md`) when an NVFS need is discovered that
 is not already covered by the `[UPFRONT]` items above. Use `TEMPLATE.md` and
 append under this heading.
 
@@ -463,7 +463,7 @@ append under this heading.
 ### FR-BENCH-CLOCK-001 — Add rt_time_now_ns() for hosted and baremetal targets
 
 - **Filed-on:** 2026-04-17
-- **Filed-by:** 9-bench-harness agent (session spostgre-nvfs-storage)
+- **Filed-by:** 9-bench-harness agent (session simple-db-nvfs-storage)
 - **Priority:** P1
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
@@ -493,7 +493,7 @@ append under this heading.
 ### FR-NVFS-N6a-001 — Wire real AES-128-GCM into NVFS leaf DEK encrypt/decrypt
 
 - **Filed-on:** 2026-04-17
-- **Filed-by:** N6a scaffolding agent (session spostgre-nvfs-storage)
+- **Filed-by:** N6a scaffolding agent (session simple-db-nvfs-storage)
 - **Target:** nvfs  (examples/nvfs/src/core/encryption.spl)
 - **Priority:** P1
 - **Status:** Implemented
@@ -635,7 +635,7 @@ append under this heading.
 - **Priority:** P2
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
-- **Implemented-by:** nvfs-n7a-compression agent (session spostgre-nvfs-storage)
+- **Implemented-by:** nvfs-n7a-compression agent (session simple-db-nvfs-storage)
 - **Requested-semantics:**
   Add an inline compression layer (N7a) between the logical block and the physical device.
   Compression is per-dataset, per-arena, and opt-in via mount option `compress=<algo>`
@@ -724,7 +724,7 @@ append under this heading.
   - [x] `nvfs stats --dedup` reports DDT hit rate, space savings, cold DDT miss rate
   - [x] When encryption enabled: DHK-keyed HMAC used instead of raw Blake3 (verified by
         inspecting DDT tree on-disk)
-- **Related-upfront:** `from_spostgre.md §S4` (arena_clone_range, used for reflink on DDT hit)
+- **Related-upfront:** `from_simple_db.md §S4` (arena_clone_range, used for reflink on DDT hit)
 - **Related-design-doc:** `doc/05_design/nvfs_design_v3.md §V3-3, §V3-4, §V3-6, §V3-7`
 - **Related-issue:** none
 - **Notes:** DDT reference counting is error-prone (comparable to delayed-ref queue,
@@ -737,7 +737,7 @@ append under this heading.
 ### FR-BDD-WAVE7-8-001 — BDD feature files for wave 7/8 storage work
 
 - **Filed-on:** 2026-04-18
-- **Filed-by:** bdd-wave7-8 agent (session spostgre-nvfs-storage)
+- **Filed-by:** bdd-wave7-8 agent (session simple-db-nvfs-storage)
 - **Target:** test/features/
 - **Priority:** P1
 - **Status:** Implemented
@@ -754,9 +754,9 @@ append under this heading.
   - [x] `test/features/nvfs/encryption.feature` — 5 scenarios (N6a-001/002/003)
   - [x] `test/features/nvfs/raw_send.feature` — 5 scenarios (N6b)
   - [x] `test/features/nvfs/scrub_repair.feature` — 5 scenarios (N4a/N4b)
-  - [x] `test/features/spostgre/hot_slack.feature` — 5 scenarios (FR-HOT-001)
-  - [x] `test/features/spostgre/tier_cache.feature` — 5 scenarios (M4)
-  - [x] `test/features/spostgre/vacuum.feature` — 5 scenarios (M5)
+  - [x] `test/features/simple_db/hot_slack.feature` — 5 scenarios (FR-HOT-001)
+  - [x] `test/features/simple_db/tier_cache.feature` — 5 scenarios (M4)
+  - [x] `test/features/simple_db/vacuum.feature` — 5 scenarios (M5)
   - [x] `test/features/os/vfs_cursor.feature` — 5 scenarios (FR-SIMPLEOS-M5-001)
   - [x] `test/features/bench/clock_extern.feature` — 5 scenarios (rt_time_now_ns)
   - [x] Step vocabulary consistent with existing wave 0–6 feature files
@@ -773,12 +773,12 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 ### FR-SPOSTGRE-M4-001 — L2 NVMe tier cache (Aurora Optimized Reads pattern)
 
 - **Filed-on:** 2026-04-18
-- **Filed-by:** spostgre-m4 agent (session spostgre-nvfs-storage)
-- **Target:** spostgre  (examples/spostgre/src/engine/tier_cache.spl)
+- **Filed-by:** simple_db-m4 agent (session simple-db-nvfs-storage)
+- **Target:** Simple DB  (examples/simple_db/src/engine/tier_cache.spl)
 - **Priority:** P1
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
-- **Implemented-by:** spostgre-m4 agent
+- **Implemented-by:** simple_db-m4 agent
 - **Requested-semantics:**
   When a clean DRAM page is about to be evicted from `BufferPool`, write it to a
   DB_TEMP arena on local NVMe instead of discarding it. On subsequent page fault,
@@ -795,7 +795,7 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
   - [x] `buf_get` checks `tier_cache_get` before durable path (fault hook)
   - [x] `buf_evict` writes clean pages to `tier_cache_put` (eviction hook)
   - [x] 7 unit tests in `tier_cache_test.spl` pass
-- **Related-upfront:** `from_spostgre.md §S1` (arena_create per storage class)
+- **Related-upfront:** `from_simple_db.md §S1` (arena_create per storage class)
 - **Related-design-doc:** `doc/05_design/nvfs_design.md §DB_TEMP`
 - **Related-issue:** none
 - **Notes:** `STORAGE_CLASS_DB_TEMP = 3` defined in `tier_cache.spl` (shim treats
@@ -803,23 +803,23 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 
 ---
 
-### FR-STORAGE-E2E-001 — End-to-end integration test: spostgre WAL+pmap through NVFS shim
+### FR-STORAGE-E2E-001 — End-to-end integration test: Simple DB WAL+pmap through NVFS shim
 
 - **Filed-on:** 2026-04-18
-- **Filed-by:** integration-test agent (session spostgre-nvfs-storage)
-- **Target:** spostgre + nvfs_shim
+- **Filed-by:** integration-test agent (session simple-db-nvfs-storage)
+- **Target:** Simple DB + nvfs_shim
 - **Priority:** P1
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
 - **Implemented-by:** integration-test agent
 - **Requested-semantics:**
-  A single integration test that exercises the spostgre WAL writer and pmap writer
+  A single integration test that exercises the Simple DB WAL writer and pmap writer
   through the in-process NVFS shim together with a RamFs-backed MountTable mount at
   `/db`. The test proves: arena-backed WAL append → commit_group FUA fence →
   pmap_writer_publish → remount simulation (byte-image extract + re-inject into fresh
   arenas) → wal_recover_tail and pmap_writer_lookup confirm survival → CRC fence stops
   recovery at a corrupted record. The gap between the MountTable/RamFsDriver surface
-  and the in-process shim (spostgre does not yet route through the VFS mount table)
+  and the in-process shim (Simple DB does not yet route through the VFS mount table)
   is explicitly documented in state.md §9-e2e-integration; this FR tracks that wiring
   as future work.
 - **Acceptance-criteria:**
@@ -834,45 +834,45 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
   - [x] Remount sim: `wal_recover_tail` on re-seeded arena returns all 3 records
   - [x] Remount sim: `pmap_writer_lookup` on re-seeded arena returns matching `page_lsn`
   - [x] CRC fence: corrupted payload byte stops recovery — only prefix records returned
-  - [x] Real wiring: spostgre WAL/pmap arenas routed through `MountTable` + `RamFsDriver`
-- **Related-upfront:** `from_spostgre.md §S1` (arena_create per storage class)
-- **Related-design-doc:** `spostgre_design.md §9`, `§12 (M2)`, `nvfs_design.md §3`
+  - [x] Real wiring: Simple DB WAL/pmap arenas routed through `MountTable` + `RamFsDriver`
+- **Related-upfront:** `from_simple_db.md §S1` (arena_create per storage class)
+- **Related-design-doc:** `simple_db_design.md §9`, `§12 (M2)`, `nvfs_design.md §3`
 - **Related-issue:** none
 - **Notes:** `checkpoint_begin` / `checkpoint_commit` are now fully implemented in
-  `examples/spostgre/src/engine/checkpoint.spl` using the shim arena API (FUA-append
+  `examples/simple_db/src/engine/checkpoint.spl` using the shim arena API (FUA-append
   to a META_DURABLE ring arena). The former `wal_writer_sync` workaround in scenario 7
   is replaced by the real checkpoint API. FR-STORAGE-E2E-001: fully implemented
   2026-04-18 (12-e1-checkpoint-api). Completion update 2026-04-22 added
   MountTable-resolved RamFs WAL byte routing coverage in
-  `examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`.
+  `examples/simple_db/test/integration/storage/simple_db_nvfs_e2e_test.spl`.
 
 ---
 
 ### FR-BENCH-BASELINE-001 — Run bench harness with real clock and record baseline numbers
 
 - **Filed-on:** 2026-04-18
-- **Filed-by:** 9-bench-baseline agent (session spostgre-nvfs-storage)
+- **Filed-by:** 9-bench-baseline agent (session simple-db-nvfs-storage)
 - **Priority:** P1
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
 - **Implemented-by:** 9-bench-baseline agent; extended 2026-04-18 by 9-bench-rerun agent
 - **Requested-semantics:**
   After FR-BENCH-CLOCK-001 wired `rt_time_now_nanos()`, run all 5 bench scripts
-  (`fs_driver_mount_table.spl`, `nvfs_arena_throughput.spl`, `spostgre_wal_append.spl`,
+  (`fs_driver_mount_table.spl`, `nvfs_arena_throughput.spl`, `simple_db_wal_append.spl`,
   `run_all.spl`, `test/perf/bench/lib/timing.spl`) with the bootstrap binary and record ns-level
   baseline numbers in `test/perf/bench/BASELINE.md`.
 - **Acceptance-criteria:**
   - [x] `test/perf/bench/lib/timing.spl` updated to use `extern fn rt_time_now_nanos() -> i64`
         (real CLOCK_MONOTONIC, not loop-counter proxy)
-  - [x] WAL bench (`spostgre_wal_append.spl`) ran successfully; real ns numbers recorded
+  - [x] WAL bench (`simple_db_wal_append.spl`) ran successfully; real ns numbers recorded
         in `test/perf/bench/BASELINE.md` (p50 wal_append ≈ 23 µs, wal_recover_tail ≈ 5.6 ms)
   - [x] NVFS arena bench: iter counts reduced (FR-BENCH-ARENA-ITER-001); all 4 scenarios
         completed (Wave 10 re-run, 2026-04-18). Numbers in `test/perf/bench/BASELINE.md §Wave 10`.
   - [x] fs_driver + run_all: parse now clean (namespace rename done); bench times out at
         10k×resolve iterations — interpreter-budget limit, not keyword error. Documented.
   - [x] FR-BENCH-BASELINE-001 appended to `nvfs_requests.md`
-  - [x] `#### 9-bench-baseline` appended to `.sstack/spostgre-nvfs-storage/state.md`
-  - [x] `#### 9-bench-rerun` appended to `.sstack/spostgre-nvfs-storage/state.md`
+  - [x] `#### 9-bench-baseline` appended to `.sstack/simple-db-nvfs-storage/state.md`
+  - [x] `#### 9-bench-rerun` appended to `.sstack/simple-db-nvfs-storage/state.md`
 - **Related-upfront:** FR-BENCH-CLOCK-001
 - **Related-design-doc:** `test/perf/bench/BASELINE.md`
 - **Related-issue:** FR-BENCH-ARENA-ITER-001
@@ -891,7 +891,7 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 - **id:** FR-BENCH-ARENA-ITER-001
 - **title:** Reduce nvfs_arena_throughput.spl iter counts to fit interpreter budget
 - **Filed-on:** 2026-04-18
-- **Filed-by:** 9-bench-rerun agent (session spostgre-nvfs-storage)
+- **Filed-by:** 9-bench-rerun agent (session simple-db-nvfs-storage)
 - **Priority:** P2
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
@@ -925,8 +925,8 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 ### FR-SPOSTGRE-M2-001 — Replace duplicated NVFS constants/types in nvfs_shim.spl with real cross-submodule imports
 
 - **Filed-on:** 2026-04-18
-- **Filed-by:** 12-e2-cross-submodule-imports agent (session spostgre-nvfs-storage)
-- **Target:** spostgre  (examples/spostgre/src/engine/nvfs_shim.spl)
+- **Filed-by:** 12-e2-cross-submodule-imports agent (session simple-db-nvfs-storage)
+- **Target:** Simple DB  (examples/simple_db/src/engine/nvfs_shim.spl)
 - **Priority:** P1
 - **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
@@ -938,10 +938,10 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
   - [x] All `val STORAGE_CLASS_*` in `nvfs_shim.spl` replaced by `use` imports from nvfs
   - [x] All `val DURABILITY_*` in `nvfs_shim.spl` replaced by `use` imports from nvfs
   - [x] `PmapEntry` local definition replaced by `use` import where field layouts match
-        (not applicable: no `PmapEntry` exists in `nvfs_shim.spl`; spostgre pmap entries
+        (not applicable: no `PmapEntry` exists in `nvfs_shim.spl`; Simple DB pmap entries
         have a different logical layout than NVFS core pmap entries)
   - [x] Existing unit and e2e integration tests pass after substitution
-- **Related-upfront:** `from_spostgre.md §S1`
+- **Related-upfront:** `from_simple_db.md §S1`
 - **Related-design-doc:** `doc/05_design/nvfs_design.md §4.1`
 - **Related-issue:** FR-COMPILER-003 (prerequisite, Implemented 2026-04-18)
 
@@ -953,8 +953,8 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
    The shim's 3 `val` declarations are the *only* definitions in the codebase. There is
    nothing to import.
 
-2. **PmapEntry fields diverge completely.** `examples/spostgre/src/engine/pmap.spl::PmapEntry`
-   has fields `{rel_id, blk, arena_id, offset, generation}` (spostgre logical mapping).
+2. **PmapEntry fields diverge completely.** `examples/simple_db/src/engine/pmap.spl::PmapEntry`
+   has fields `{rel_id, blk, arena_id, offset, generation}` (Simple DB logical mapping).
    `examples/nvfs/src/core/pmap.spl::PmapEntry` has fields `{logical, phys, offset, len,
    birth_gen, checksum_algo, compress_algo, compressed_len, checksum}` (physical pmap v3).
    These are structurally unrelated; import would require a rename that misrepresents semantics.
@@ -963,7 +963,7 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
    anticipatory). No action needed.
 
 **Before/after count:** 3 duplicated `val` declarations — all 3 kept (no canonical source).
-`PmapEntry` in shim: 0 (shim has no PmapEntry; spostgre/engine/pmap.spl has its own).
+`PmapEntry` in shim: 0 (shim has no PmapEntry; simple_db/engine/pmap.spl has its own).
 
 **Follow-up:** FR-SPOSTGRE-M2-002 tracks adding named StorageClass constants to NVFS.
 
@@ -971,21 +971,21 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 `examples/nvfs/src/core/constants.spl`; `nvfs_shim.spl` now imports the requested
 storage and durability constants from NVFS. The Pmap/Superblock type portions remain
 not applicable for the structural reasons above. Verification:
-`bin/simple test examples/spostgre/test/unit/engine`,
-`bin/simple test examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`.
+`bin/simple test examples/simple_db/test/unit/engine`,
+`bin/simple test examples/simple_db/test/integration/storage/simple_db_nvfs_e2e_test.spl`.
 
 ---
 
 ### FR-SPOSTGRE-M2-002 — Add named StorageClass and DurabilityClass constants to NVFS core
 
 - **Filed-on:** 2026-04-18
-- **Filed-by:** 12-e2-cross-submodule-imports agent (session spostgre-nvfs-storage)
+- **Filed-by:** 12-e2-cross-submodule-imports agent (session simple-db-nvfs-storage)
 - **Target:** nvfs  (examples/nvfs/src/core/arena.spl or new constants.spl)
 - **Priority:** P2
 - **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
   `examples/nvfs/src/core/arena.spl` uses `class_tag: i32` as an opaque ordinal with no
-  named constants. Consumers (spostgre, future callers) must either duplicate ordinal
+  named constants. Consumers (Simple DB, future callers) must either duplicate ordinal
   assignments or rely on comments that say "matching nvfs intent". Add a canonical
   `constants.spl` (or extend `arena.spl`) that exports:
   ```
@@ -1001,19 +1001,19 @@ not applicable for the structural reasons above. Verification:
   - [x] `nvfs_shim.spl` imports instead of re-declaring STORAGE_CLASS_DB_WAL and
         STORAGE_CLASS_META_DURABLE
   - [x] `tier_cache.spl` imports STORAGE_CLASS_DB_TEMP instead of re-declaring it
-  - [x] `bin/simple test examples/spostgre/test/unit/engine/*.spl` passes
-        (verified with `bin/simple test examples/spostgre/test/unit/engine`)
-  - [x] `bin/simple test examples/spostgre/test/integration/storage/spostgre_nvfs_e2e_test.spl`
+  - [x] `bin/simple test examples/simple_db/test/unit/engine/*.spl` passes
+        (verified with `bin/simple test examples/simple_db/test/unit/engine`)
+  - [x] `bin/simple test examples/simple_db/test/integration/storage/simple_db_nvfs_e2e_test.spl`
         passes
-- **Related-upfront:** `from_spostgre.md §S1` (arena_create per storage class);
-  `doc/01_research/local/spostgre_nvfs_constants.md`;
-  `doc/03_plan/sys_test/spostgre_nvfs_constants.md`
-- **Related-design-doc:** `doc/05_design/spostgre_nvfs_constants.md`;
+- **Related-upfront:** `from_simple_db.md §S1` (arena_create per storage class);
+  `doc/01_research/local/simple_db_nvfs_constants.md`;
+  `doc/03_plan/sys_test/simple_db_nvfs_constants.md`
+- **Related-design-doc:** `doc/05_design/simple_db_nvfs_constants.md`;
   background: `doc/05_design/nvfs_design.md §4.1`
 - **Related-issue:** FR-SPOSTGRE-M2-001 (parent)
 - **Notes:** Implemented in NVFS by adding the canonical constants module and updating
-  spostgre consumers to import it. Regression coverage:
-  `examples/spostgre/test/integration/storage/spostgre_nvfs_constants_spec.spl`.
+  Simple DB consumers to import it. Regression coverage:
+  `examples/simple_db/test/integration/storage/simple_db_nvfs_constants_spec.spl`.
 
 ---
 
@@ -1022,7 +1022,7 @@ not applicable for the structural reasons above. Verification:
 - **id:** FR-BENCH-NS-KEYWORD-001
 - **title:** Fix `namespace` reserved-keyword collision blocking fs_driver and run_all benches
 - **Filed-on:** 2026-04-18
-- **Filed-by:** Claude (session: spostgre-nvfs-storage namespace-kw-fix)
+- **Filed-by:** Claude (session: simple-db-nvfs-storage namespace-kw-fix)
 - **Priority:** P1
 - **Status:** Implemented
 - **Requested-semantics:** The Simple parser rejects `namespace` as both a field name and a

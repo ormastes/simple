@@ -154,10 +154,10 @@ pub use runtime_profile::{
 };
 pub use runtime_profile::profiler::clear_global_profiler;
 pub use security::{
-    build_security_inventory, infer_security_coordinate, lower_security_to_aop, security_metadata_id,
-    source_security_violations_sdn, source_security_violations_sdn_with_module,
-    source_security_violations_sdn_with_modules, SecurityAdvicePlan, SecurityAdviceStep, SecurityAopLowering,
-    SecurityCoordinate, SecurityInventory, SecuritySourceFile,
+    build_security_gate_map, build_security_inventory, build_security_inventory_for_source, build_security_maps,
+    infer_security_coordinate, lower_security_to_aop, security_metadata_id, source_security_violations_sdn,
+    source_security_violations_sdn_with_module, source_security_violations_sdn_with_modules, SecurityAdvicePlan,
+    SecurityAdviceStep, SecurityAopLowering, SecurityCoordinate, SecurityInventory, SecuritySourceFile,
 };
 pub use semantic_diff::{ChangeKind, DiffSummary, ImpactLevel, SemanticChange, SemanticDiff, SemanticDiffer};
 pub use spec_coverage::{find_spec_file, SpecCoverageReport};

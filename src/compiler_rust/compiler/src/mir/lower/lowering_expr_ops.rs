@@ -62,9 +62,7 @@ impl<'a> MirLowerer<'a> {
             // Only use string concat when at least one operand is known STRING.
             // ANY-typed operands (untyped fn params) do not reach here for Add —
             // they are handled above. Sub/Mul always emit BinOp.
-            let is_string_add = op == BinOp::Add
-                && (left.ty == TypeId::STRING
-                    || right.ty == TypeId::STRING);
+            let is_string_add = op == BinOp::Add && (left.ty == TypeId::STRING || right.ty == TypeId::STRING);
             if is_string_add {
                 // Convert non-string side to string via rt_to_string if needed
                 let left_str = if left.ty != TypeId::STRING && left.ty != TypeId::ANY {

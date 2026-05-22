@@ -263,7 +263,13 @@ fn test_lower_ambiguous_loop_element_field_access_with_global_array_type() {
     lowerer.set_global_struct_defs(Arc::new(HashMap::from([
         (
             "Report".to_string(),
-            vec![("suggestions".to_string(), Type::Array { element: Box::new(Type::Simple("Suggestion".to_string())), size: None })],
+            vec![(
+                "suggestions".to_string(),
+                Type::Array {
+                    element: Box::new(Type::Simple("Suggestion".to_string())),
+                    size: None,
+                },
+            )],
         ),
         (
             "Suggestion".to_string(),

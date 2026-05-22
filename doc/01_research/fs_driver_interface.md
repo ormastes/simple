@@ -630,7 +630,7 @@ struct ReflinkExt:
 
 ### 5a.1 Context
 
-NVFS's native API is append-oriented: the `Arena` trait (from `std.storage.arena`) supports `append`, `seal`, `discard`, and `read` operations. Consumers such as spostgre require this semantics. However, POSIX applications and the `std.fs.path` layer expect:
+NVFS's native API is append-oriented: the `Arena` trait (from `std.storage.arena`) supports `append`, `seal`, `discard`, and `read` operations. Consumers such as Simple DB require this semantics. However, POSIX applications and the `std.fs.path` layer expect:
 - Random-write at arbitrary offsets (`pwrite(fd, buf, off)`)
 - Truncation (`ftruncate(fd, len)`)
 - Atomic rename (`rename(old, new)`)
@@ -935,7 +935,7 @@ As of 2026-04-17:
 | baremetal_stubs.c syscall table | Add VFS syscall numbers; existing stubs return ENOSYS |
 | std.fs.path callers on SimpleOS | Redirect to VFS layer via #ifdef or separate import path |
 | NVFS arena tests | No breakage; arena API unchanged |
-| spostgre NVFS storage | spostgre uses Arena directly; no VFS layer involved |
+| Simple DB NVFS storage | Simple DB uses Arena directly; no VFS layer involved |
 
 ---
 
