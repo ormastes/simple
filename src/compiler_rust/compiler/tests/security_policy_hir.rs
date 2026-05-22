@@ -389,6 +389,36 @@ fn reports_sec301_for_scattered_authorization_outside_security_root() {
 }
 
 #[test]
+fn sec301_uses_hir_resolved_authorization_calls_when_modules_are_available() {
+    let files = vec![SecuritySourceFile {
+        path: "src/feature/user/service/profile.spl".to_string(),
+        source: "class Profile:\n    pass\n".to_string(),
+    }];
+    let mut module = hir::HirModule::new();
+    module.functions.push(hir_function(
+        "run",
+        vec![hir::HirStmt::Expr(hir::HirExpr {
+            kind: hir::HirExprKind::MethodCall {
+                receiver: Box::new(hir::HirExpr {
+                    kind: hir::HirExprKind::Global("current_user".to_string()),
+                    ty: hir::TypeId::I64,
+                }),
+                method: "is_admin".to_string(),
+                args: vec![],
+                dispatch: hir::DispatchMode::Static,
+            },
+            ty: hir::TypeId::BOOL,
+        })],
+    ));
+
+    let violations = simple_compiler::security::source_security_violations_sdn_with_modules(&files, &[module]);
+    assert!(violations.contains("code: SEC301"));
+    assert!(violations.contains("message: resolved authorization predicate"));
+    assert!(violations.contains("predicate: is_admin"));
+    assert!(violations.contains("edge: resolved_call"));
+}
+
+#[test]
 fn allows_security_observation_for_ui_only_hints() {
     let files = vec![SecuritySourceFile {
         path: "src/feature/user/service/profile.spl".to_string(),

@@ -309,6 +309,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
     let boundary_gates = collect_boundary_gates(modules);
     let mut feature_graph = build_feature_graph(files, &known_features);
     feature_graph.extend(build_hir_feature_graph(files, modules));
+    let hir_authorization_uses = build_hir_authorization_uses(files, modules);
     let hir_ambient_uses = build_hir_ambient_uses(files, modules);
 
     for edge in feature_graph {
@@ -341,6 +342,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
         }
     }
 
+    let mut reported_authorization_files = BTreeSet::new();
     let mut reported_ambient_apis = BTreeSet::new();
     for file in files {
         let coordinate = infer_security_coordinate(Path::new(&file.path));
@@ -357,6 +359,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
             }
 
             if uses_authorization_predicate(trimmed) && !is_security_observation(&file.source, line_no) {
+                reported_authorization_files.insert(file.path.clone());
                 count += 1;
                 out.push_str("  - code: SEC301\n");
                 out.push_str("    message: authorization predicate used outside security root\n");
@@ -379,6 +382,20 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
                 ));
             }
         }
+    }
+
+    for authorization_use in hir_authorization_uses {
+        if !reported_authorization_files.insert(authorization_use.file.to_string()) {
+            continue;
+        }
+        count += 1;
+        out.push_str("  - code: SEC301\n");
+        out.push_str("    message: resolved authorization predicate used outside security root\n");
+        out.push_str(&format!("    file: {}\n", authorization_use.file));
+        out.push_str("    line: 1\n");
+        out.push_str(&format!("    predicate: {}\n", authorization_use.predicate));
+        out.push_str("    edge: resolved_call\n");
+        out.push_str("    required: move authoritative authorization to src/security/** or mark UI-only code with @security_observation\n");
     }
 
     for ambient_use in hir_ambient_uses {
@@ -527,6 +544,44 @@ fn hir_import_feature_details(import: &HirImport) -> Option<(String, Option<Stri
     let feature = import.from_path.get(feature_index + 1)?.clone();
     let layer = import.from_path.get(feature_index + 2).cloned();
     Some((feature, layer))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SecurityAuthorizationUse<'a> {
+    file: &'a str,
+    predicate: &'a str,
+}
+
+fn build_hir_authorization_uses<'a>(
+    files: &'a [SecuritySourceFile],
+    modules: &'a [HirModule],
+) -> Vec<SecurityAuthorizationUse<'a>> {
+    if files.len() != modules.len() {
+        return Vec::new();
+    }
+
+    let mut uses = Vec::new();
+    for (file, module) in files.iter().zip(modules) {
+        let coordinate = infer_security_coordinate(Path::new(&file.path));
+        let Some(from_feature) = coordinate.feature.as_deref() else {
+            continue;
+        };
+        if coordinate.security_root || from_feature == "security" || source_has_security_observation(&file.source) {
+            continue;
+        }
+
+        for function in &module.functions {
+            for symbol in referenced_hir_symbols(&function.body) {
+                if let Some(predicate) = authorization_predicate_symbol(&symbol) {
+                    uses.push(SecurityAuthorizationUse {
+                        file: &file.path,
+                        predicate,
+                    });
+                }
+            }
+        }
+    }
+    uses
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -897,6 +952,10 @@ fn is_security_observation(source: &str, line_no: usize) -> bool {
         .any(|line| line.trim() == "@security_observation")
 }
 
+fn source_has_security_observation(source: &str) -> bool {
+    source.lines().any(|line| line.trim() == "@security_observation")
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RawAmbientApi {
     name: &'static str,
@@ -936,6 +995,23 @@ fn raw_ambient_api(line: &str) -> Option<RawAmbientApi> {
     ];
     apis.iter()
         .find_map(|(pattern, api)| line.contains(pattern).then_some(*api))
+}
+
+fn authorization_predicate_symbol(symbol: &str) -> Option<&'static str> {
+    if symbol == "authorize" || symbol == "check_permission" || symbol == "require_permission" {
+        return Some(match symbol {
+            "authorize" => "authorize",
+            "check_permission" => "check_permission",
+            _ => "require_permission",
+        });
+    }
+    if symbol == "current_user.is_admin" || symbol.ends_with(".is_admin") {
+        return Some("is_admin");
+    }
+    if symbol == "current_user.has_role" || symbol.ends_with(".has_role") {
+        return Some("has_role");
+    }
+    None
 }
 
 fn raw_ambient_api_symbol(symbol: &str) -> Option<RawAmbientApi> {
