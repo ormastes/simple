@@ -1374,6 +1374,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::HandlePool(_)
             | Node::AopAdvice(_)
             | Node::DiBinding(_)
+            | Node::InjectGraph(_)
             | Node::ArchitectureRule(_)
             | Node::MockDecl(_)
             | Node::LeanBlock(_)

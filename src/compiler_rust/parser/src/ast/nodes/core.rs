@@ -64,6 +64,7 @@ pub enum Node {
     // AOP & Unified Predicates (#1000-1050)
     AopAdvice(AopAdvice),
     DiBinding(DiBinding),
+    InjectGraph(InjectGraph),
     ArchitectureRule(ArchitectureRule),
     MockDecl(MockDecl),
 

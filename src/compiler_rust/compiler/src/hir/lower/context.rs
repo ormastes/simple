@@ -60,7 +60,18 @@ impl FunctionContext {
 
     /// Add a local variable with optional inject flag (for parameters) (#1013)
     pub fn add_local_with_inject(&mut self, name: String, ty: TypeId, mutability: Mutability, inject: bool) -> usize {
-        self.add_local_full(name, ty, mutability, inject, false)
+        self.add_local_full(name, ty, None, mutability, inject, false)
+    }
+
+    pub fn add_local_with_inject_and_type_hint(
+        &mut self,
+        name: String,
+        ty: TypeId,
+        type_name_hint: Option<String>,
+        mutability: Mutability,
+        inject: bool,
+    ) -> usize {
+        self.add_local_full(name, ty, type_name_hint, mutability, inject, false)
     }
 
     /// Add a local variable with all options (inject, ghost)
@@ -68,6 +79,7 @@ impl FunctionContext {
         &mut self,
         name: String,
         ty: TypeId,
+        type_name_hint: Option<String>,
         mutability: Mutability,
         inject: bool,
         is_ghost: bool,
@@ -76,6 +88,7 @@ impl FunctionContext {
         self.locals.push(LocalVar {
             name: name.clone(),
             ty,
+            type_name_hint,
             mutability,
             inject,
             is_ghost,

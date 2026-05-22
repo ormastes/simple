@@ -8,7 +8,10 @@
 //!
 //! See doc/research/aop.md for the complete specification.
 
-use crate::ast::{AdviceType, AopAdvice, ArchRuleType, ArchitectureRule, DiBinding, DiScope, MockDecl, PredicateExpr};
+use crate::ast::{
+    AdviceType, AopAdvice, ArchRuleType, ArchitectureRule, DiBinding, DiScope, InjectGraph, InjectItem, InjectLifetime,
+    InjectMode, MockDecl, PredicateExpr,
+};
 use crate::error::ParseError;
 use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
@@ -81,6 +84,369 @@ impl<'a> Parser<'a> {
             priority,
             span: Span::new(start.start, end.end, start.line, start.column),
         })
+    }
+
+    /// Parse a first-class DI graph declaration:
+    ///
+    /// ```simple
+    /// inject AppGraph compile:
+    ///     root App
+    ///     scan app.*
+    ///     bind UserRepo = SqlUserRepo lifetime scoped configurable
+    ///     slot PaymentProvider runtime named payments default StripePaymentProvider
+    ///     load "config/di.sdn"
+    /// ```
+    pub fn parse_inject_graph(&mut self) -> Result<InjectGraph, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("inject")?;
+        let name = self.expect_identifier()?;
+
+        let mode = if let TokenKind::Identifier { name, .. } = &self.current.kind {
+            if let Some(mode) = InjectMode::parse_str(name) {
+                self.advance();
+                Some(mode)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        let items = self.parse_inject_items()?;
+        self.expect(&TokenKind::Dedent)?;
+
+        let end = self.previous.span;
+        Ok(InjectGraph {
+            name,
+            mode,
+            items,
+            span: Span::new(start.start, end.end, start.line, start.column),
+        })
+    }
+
+    fn parse_inject_items(&mut self) -> Result<Vec<InjectItem>, ParseError> {
+        let mut items = Vec::new();
+        while !matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+            self.skip_newlines();
+            if matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                break;
+            }
+            items.push(self.parse_inject_item()?);
+            self.skip_newlines();
+        }
+        Ok(items)
+    }
+
+    fn parse_inject_item(&mut self) -> Result<InjectItem, ParseError> {
+        match &self.current.kind {
+            TokenKind::Identifier { name, .. } if name == "root" => self.parse_inject_root(),
+            TokenKind::Identifier { name, .. } if name == "scan" => self.parse_inject_scan(),
+            TokenKind::Identifier { name, .. } if name == "load" => self.parse_inject_load(),
+            TokenKind::Identifier { name, .. } if name == "slot" => self.parse_inject_slot(),
+            TokenKind::Identifier { name, .. } if name == "profile" => self.parse_inject_profile(),
+            TokenKind::Bind => self.parse_inject_bind(),
+            _ => Err(ParseError::unexpected_token(
+                "root, scan, bind, slot, load, or profile in inject graph",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            )),
+        }
+    }
+
+    fn parse_inject_root(&mut self) -> Result<InjectItem, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("root")?;
+        let type_ref = self.collect_until_line_end();
+        if type_ref.is_empty() {
+            return Err(ParseError::unexpected_token(
+                "root type",
+                "end of line".to_string(),
+                self.current.span,
+            ));
+        }
+        Ok(InjectItem::Root {
+            type_ref,
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn parse_inject_scan(&mut self) -> Result<InjectItem, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("scan")?;
+        let pattern = self.collect_until_line_end();
+        if pattern.is_empty() {
+            return Err(ParseError::unexpected_token(
+                "scan path pattern",
+                "end of line".to_string(),
+                self.current.span,
+            ));
+        }
+        Ok(InjectItem::Scan {
+            pattern,
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn parse_inject_load(&mut self) -> Result<InjectItem, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("load")?;
+        let path = match &self.current.kind {
+            TokenKind::String(path) | TokenKind::RawString(path) => {
+                let path = path.clone();
+                self.advance();
+                path
+            }
+            TokenKind::FString(parts) if parts.is_empty() || parts.len() == 1 => {
+                if parts.is_empty() {
+                    self.advance();
+                    String::new()
+                } else if let crate::token::FStringToken::Literal(path) = &parts[0] {
+                    let path = path.clone();
+                    self.advance();
+                    path
+                } else {
+                    return Err(ParseError::unexpected_token(
+                        "static string path",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    ));
+                }
+            }
+            _ => {
+                return Err(ParseError::unexpected_token(
+                    "string path",
+                    format!("{:?}", self.current.kind),
+                    self.current.span,
+                ))
+            }
+        };
+        self.ensure_line_end()?;
+        Ok(InjectItem::Load {
+            path,
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn parse_inject_bind(&mut self) -> Result<InjectItem, ParseError> {
+        let start = self.current.span;
+        self.expect(&TokenKind::Bind)?;
+        let service = self.collect_until_token(|kind| matches!(kind, TokenKind::Assign));
+        if service.is_empty() {
+            return Err(ParseError::unexpected_token(
+                "binding service type",
+                "=".to_string(),
+                self.current.span,
+            ));
+        }
+        self.expect(&TokenKind::Assign)?;
+        let target = self.collect_until_token(Self::is_inject_bind_modifier_kind);
+        if target.is_empty() {
+            return Err(ParseError::unexpected_token(
+                "binding target type",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
+        }
+
+        let mut lifetime = None;
+        let mut configurable = false;
+        let mut final_binding = false;
+        while !matches!(
+            &self.current.kind,
+            TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+        ) {
+            match &self.current.kind {
+                TokenKind::Identifier { name, .. } if name == "lifetime" => {
+                    self.advance();
+                    lifetime = Some(self.parse_inject_lifetime()?);
+                }
+                TokenKind::Identifier { name, .. } if name == "configurable" => {
+                    configurable = true;
+                    self.advance();
+                }
+                TokenKind::Identifier { name, .. } if name == "final" => {
+                    final_binding = true;
+                    self.advance();
+                }
+                _ => {
+                    return Err(ParseError::unexpected_token(
+                        "lifetime, configurable, final, or end of line",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    ))
+                }
+            }
+        }
+
+        Ok(InjectItem::Bind {
+            service,
+            target,
+            lifetime,
+            configurable,
+            final_binding,
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn parse_inject_slot(&mut self) -> Result<InjectItem, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("slot")?;
+        let service = self.collect_until_identifier("runtime");
+        if service.is_empty() {
+            return Err(ParseError::unexpected_token(
+                "runtime slot type",
+                "runtime".to_string(),
+                self.current.span,
+            ));
+        }
+        self.expect_identifier_named("runtime")?;
+
+        let mut qualifier = None;
+        let mut default_target = None;
+        while !matches!(
+            &self.current.kind,
+            TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+        ) {
+            match &self.current.kind {
+                TokenKind::Identifier { name, .. } if name == "named" => {
+                    self.advance();
+                    qualifier = Some(self.expect_identifier()?);
+                }
+                TokenKind::Default => {
+                    self.advance();
+                    default_target = Some(self.collect_until_line_end());
+                    break;
+                }
+                TokenKind::Identifier { name, .. } if name == "default" => {
+                    self.advance();
+                    default_target = Some(self.collect_until_line_end());
+                    break;
+                }
+                _ => {
+                    return Err(ParseError::unexpected_token(
+                        "named, default, or end of line",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    ))
+                }
+            }
+        }
+
+        Ok(InjectItem::Slot {
+            service,
+            qualifier,
+            default_target,
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn parse_inject_profile(&mut self) -> Result<InjectItem, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("profile")?;
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+        let items = self.parse_inject_items()?;
+        self.expect(&TokenKind::Dedent)?;
+        Ok(InjectItem::Profile {
+            name,
+            items,
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn parse_inject_lifetime(&mut self) -> Result<InjectLifetime, ParseError> {
+        match &self.current.kind {
+            TokenKind::Identifier { name, .. } => {
+                let value = name.clone();
+                let span = self.current.span;
+                self.advance();
+                InjectLifetime::parse_str(&value)
+                    .ok_or_else(|| ParseError::unexpected_token("valid DI lifetime", value, span))
+            }
+            TokenKind::Static => {
+                self.advance();
+                Ok(InjectLifetime::Static)
+            }
+            TokenKind::Extern => {
+                self.advance();
+                Ok(InjectLifetime::Extern)
+            }
+            _ => Err(ParseError::unexpected_token(
+                "DI lifetime",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            )),
+        }
+    }
+
+    fn expect_identifier_named(&mut self, expected: &str) -> Result<(), ParseError> {
+        match &self.current.kind {
+            TokenKind::Identifier { name, .. } if name == expected => {
+                self.advance();
+                Ok(())
+            }
+            _ => Err(ParseError::unexpected_token(
+                expected,
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            )),
+        }
+    }
+
+    fn collect_until_line_end(&mut self) -> String {
+        self.collect_until_token(|kind| matches!(kind, TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof))
+    }
+
+    fn collect_until_identifier(&mut self, expected: &str) -> String {
+        self.collect_until_token(|kind| matches!(kind, TokenKind::Identifier { name, .. } if name == expected))
+    }
+
+    fn collect_until_token<F>(&mut self, stop: F) -> String
+    where
+        F: Fn(&TokenKind) -> bool,
+    {
+        let mut value = String::new();
+        while !stop(&self.current.kind) {
+            if matches!(
+                &self.current.kind,
+                TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+            ) {
+                break;
+            }
+            value.push_str(&self.current.lexeme);
+            self.advance();
+        }
+        value.trim().to_string()
+    }
+
+    fn ensure_line_end(&mut self) -> Result<(), ParseError> {
+        if matches!(
+            &self.current.kind,
+            TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+        ) {
+            Ok(())
+        } else {
+            Err(ParseError::unexpected_token(
+                "end of line",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ))
+        }
+    }
+
+    fn is_inject_bind_modifier_kind(kind: &TokenKind) -> bool {
+        matches!(kind, TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof)
+            || matches!(kind, TokenKind::Identifier { name, .. } if name == "lifetime" || name == "configurable" || name == "final")
+    }
+
+    fn span_from_start(&self, start: Span) -> Span {
+        Span::new(start.start, self.previous.span.end, start.line, start.column)
     }
 
     /// Parse a DI binding: `bind on pc{...} -> <Impl> scope priority`

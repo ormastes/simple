@@ -248,7 +248,11 @@ impl TypeChecker {
                     // Module system nodes and embedded lean blocks don't introduce type bindings directly
                 }
                 // AOP nodes (declarative configuration, not type bindings)
-                Node::AopAdvice(_) | Node::DiBinding(_) | Node::ArchitectureRule(_) | Node::MockDecl(_) => {
+                Node::AopAdvice(_)
+                | Node::DiBinding(_)
+                | Node::InjectGraph(_)
+                | Node::ArchitectureRule(_)
+                | Node::MockDecl(_) => {
                     // AOP nodes are declarative and don't introduce type bindings
                 }
                 Node::InterfaceBinding(binding) => {

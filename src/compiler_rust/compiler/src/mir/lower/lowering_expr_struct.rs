@@ -67,16 +67,14 @@ impl<'a> MirLowerer<'a> {
                     let mut final_args = Vec::new();
                     let mut provided_idx = 0;
 
-                    for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
+                    for (param_idx, (param_ty, type_name_hint, is_injectable)) in param_info.iter().enumerate() {
                         if *is_injectable {
-                            // This parameter should be DI-injected
-                            if self.di_config.is_none() {
-                                return Err(MirLowerError::Unsupported(format!(
-                                    "missing DI config for @inject constructor '{}'",
-                                    constructor_name
-                                )));
-                            }
-                            let injected = self.resolve_di_arg(*param_ty, &constructor_name, param_idx)?;
+                            let injected = self.resolve_di_arg_with_hint(
+                                *param_ty,
+                                type_name_hint.as_deref(),
+                                &constructor_name,
+                                param_idx,
+                            )?;
                             final_args.push(injected);
                         } else {
                             // This parameter should be provided by caller

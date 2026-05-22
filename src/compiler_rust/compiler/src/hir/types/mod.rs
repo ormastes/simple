@@ -151,6 +151,7 @@ mod tests {
                 LocalVar {
                     name: "a".to_string(),
                     ty: TypeId::I64,
+                    type_name_hint: Some("i64".to_string()),
                     mutability: Mutability::Immutable,
                     inject: false,
                     is_ghost: false,
@@ -158,6 +159,7 @@ mod tests {
                 LocalVar {
                     name: "b".to_string(),
                     ty: TypeId::I64,
+                    type_name_hint: Some("i64".to_string()),
                     mutability: Mutability::Immutable,
                     inject: false,
                     is_ghost: false,

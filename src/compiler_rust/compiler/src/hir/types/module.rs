@@ -153,6 +153,8 @@ pub struct HirModule {
     pub aop_advices: Vec<HirAopAdvice>,
     /// DI bindings (#1009-1019)
     pub di_bindings: Vec<HirDiBinding>,
+    /// First-class DI graph declarations.
+    pub inject_graphs: Vec<HirInjectGraph>,
     /// Architecture rules (#1026-1035)
     pub arch_rules: Vec<HirArchRule>,
     /// Mock declarations (#1020-1025)
@@ -197,6 +199,7 @@ impl HirModule {
             refined_types: HashMap::new(),
             aop_advices: Vec::new(),
             di_bindings: Vec::new(),
+            inject_graphs: Vec::new(),
             arch_rules: Vec::new(),
             mock_decls: Vec::new(),
             imports: Vec::new(),

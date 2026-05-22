@@ -68,6 +68,22 @@ pub fn lower_to_mir_with_mode_and_di(
         .lower_module(hir)
 }
 
+/// Lower HIR to MIR with contract mode, DI configuration, and active DI profile.
+pub fn lower_to_mir_with_mode_di_profile(
+    hir: &HirModule,
+    contract_mode: ContractMode,
+    di_config: Option<crate::di::DiConfig>,
+    di_profile: impl Into<String>,
+) -> MirLowerResult<MirModule> {
+    MirLowerer::with_contract_mode(contract_mode)
+        .with_di_config(di_config)
+        .with_di_profile(di_profile)
+        .with_refined_types(&hir.refined_types)
+        .with_type_registry(&hir.types)
+        .with_trait_infos(&hir.trait_infos)
+        .lower_module(hir)
+}
+
 /// Lower HIR to MIR with coverage instrumentation enabled.
 pub fn lower_to_mir_with_coverage(hir: &HirModule, coverage_enabled: bool) -> MirLowerResult<MirModule> {
     MirLowerer::new()
@@ -87,6 +103,24 @@ pub fn lower_to_mir_full(
 ) -> MirLowerResult<MirModule> {
     MirLowerer::with_contract_mode(contract_mode)
         .with_di_config(di_config)
+        .with_coverage(coverage_enabled)
+        .with_refined_types(&hir.refined_types)
+        .with_type_registry(&hir.types)
+        .with_trait_infos(&hir.trait_infos)
+        .lower_module(hir)
+}
+
+/// Lower HIR to MIR with all options, including the active DI profile.
+pub fn lower_to_mir_full_with_di_profile(
+    hir: &HirModule,
+    contract_mode: ContractMode,
+    di_config: Option<crate::di::DiConfig>,
+    coverage_enabled: bool,
+    di_profile: impl Into<String>,
+) -> MirLowerResult<MirModule> {
+    MirLowerer::with_contract_mode(contract_mode)
+        .with_di_config(di_config)
+        .with_di_profile(di_profile)
         .with_coverage(coverage_enabled)
         .with_refined_types(&hir.refined_types)
         .with_type_registry(&hir.types)

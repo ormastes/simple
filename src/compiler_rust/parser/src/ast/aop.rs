@@ -4,6 +4,7 @@
 //! - Predicate expressions (`pc{...}`)
 //! - AOP advice declarations (`on pc{...} use <Interceptor>`)
 //! - DI bindings (`bind on pc{...} -> <Impl>`)
+//! - DI graph declarations (`inject AppGraph compile: ...`)
 //! - Architecture rules (`forbid pc{...}`, `allow pc{...}`)
 //!
 //! See doc/research/aop.md for the complete specification.
@@ -91,11 +92,78 @@ pub struct DiBinding {
     pub span: Span,
 }
 
+/// Source DI graph declaration: `inject AppGraph compile:`.
+///
+/// The graph grammar is intentionally line-oriented and LL(1)-friendly. Rich
+/// expressions stay behind `provide`/factory lowering in later compiler phases.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InjectGraph {
+    pub name: String,
+    pub mode: Option<InjectMode>,
+    pub items: Vec<InjectItem>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectMode {
+    Compile,
+    Runtime,
+    Mixed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InjectItem {
+    Root {
+        type_ref: String,
+        span: Span,
+    },
+    Scan {
+        pattern: String,
+        span: Span,
+    },
+    Load {
+        path: String,
+        span: Span,
+    },
+    Bind {
+        service: String,
+        target: String,
+        lifetime: Option<InjectLifetime>,
+        configurable: bool,
+        final_binding: bool,
+        span: Span,
+    },
+    Slot {
+        service: String,
+        qualifier: Option<String>,
+        default_target: Option<String>,
+        span: Span,
+    },
+    Profile {
+        name: String,
+        items: Vec<InjectItem>,
+        span: Span,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiScope {
     Singleton,
     Transient,
     Scoped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectLifetime {
+    Transient,
+    Singleton,
+    Scoped,
+    Arena,
+    Request,
+    Thread,
+    Task,
+    Static,
+    Extern,
 }
 
 /// Architecture rule: `forbid pc{...}` or `allow pc{...}`
@@ -208,6 +276,42 @@ impl DiScope {
             DiScope::Singleton => "singleton",
             DiScope::Transient => "transient",
             DiScope::Scoped => "scoped",
+        }
+    }
+}
+
+impl InjectMode {
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "compile" => Some(InjectMode::Compile),
+            "runtime" => Some(InjectMode::Runtime),
+            "mixed" => Some(InjectMode::Mixed),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InjectMode::Compile => "compile",
+            InjectMode::Runtime => "runtime",
+            InjectMode::Mixed => "mixed",
+        }
+    }
+}
+
+impl InjectLifetime {
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "transient" => Some(InjectLifetime::Transient),
+            "singleton" => Some(InjectLifetime::Singleton),
+            "scoped" => Some(InjectLifetime::Scoped),
+            "arena" => Some(InjectLifetime::Arena),
+            "request" => Some(InjectLifetime::Request),
+            "thread" => Some(InjectLifetime::Thread),
+            "task" => Some(InjectLifetime::Task),
+            "static" => Some(InjectLifetime::Static),
+            "extern" => Some(InjectLifetime::Extern),
+            _ => None,
         }
     }
 }

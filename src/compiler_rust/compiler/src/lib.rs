@@ -97,7 +97,8 @@ pub use coverage::{
     ExecutionPath, FunctionCoverage, ModuleCoverage, SourceLoc,
 };
 pub use di::{
-    create_di_match_context, parse_di_config, DependencyGraph, DiBindingRule, DiConfig, DiContainer, DiMode, DiProfile,
+    create_di_match_context, di_config_from_hir_inject_graphs, merge_di_config_with_hir_graphs, parse_di_config,
+    parse_di_sdn_config, DependencyGraph, DiBindingRule, DiConfig, DiContainer, DiConventionConfig, DiMode, DiProfile,
     DiResolveError, DiScope,
 };
 pub use error::{codes as error_codes, typo, CompileError, ErrorContext};

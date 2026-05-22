@@ -59,11 +59,10 @@ bindings = [
 
 #[test]
 fn test_di_missing_binding_error() {
-    // Test that missing DI binding produces a clear error
+    // Test that missing DI binding still fails when no convention can resolve it.
     let source = r#"
-class Logger:
-    fn new() -> Self:
-        return Self {}
+trait Logger:
+    fn info(msg: str)
 
 class Service:
     @inject

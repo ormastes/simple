@@ -6,6 +6,7 @@ use crate::predicate_parser;
 #[derive(Debug, Clone)]
 pub struct AopConfig {
     pub runtime_enabled: bool,
+    pub loads: Vec<String>,
     pub around: Vec<AopAroundRule>,
 }
 
@@ -35,6 +36,13 @@ pub fn parse_aop_config(toml: &toml::Value) -> Result<Option<AopConfig>, String>
     };
 
     let runtime_enabled = runtime_table.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let loads = parse_string_or_array(
+        runtime_table.get("load").or_else(|| runtime_table.get("loads")),
+        "aspects.runtime.load",
+    )?;
+    for path in &loads {
+        validate_local_child_config_path(path)?;
+    }
 
     let around_values = match runtime_table.get("around") {
         None => Vec::new(),
@@ -79,8 +87,55 @@ pub fn parse_aop_config(toml: &toml::Value) -> Result<Option<AopConfig>, String>
 
     Ok(Some(AopConfig {
         runtime_enabled,
+        loads,
         around,
     }))
+}
+
+fn parse_string_or_array(value: Option<&toml::Value>, field: &str) -> Result<Vec<String>, String> {
+    match value {
+        None => Ok(Vec::new()),
+        Some(v) => {
+            if let Some(s) = v.as_str() {
+                return Ok(vec![s.to_string()]);
+            }
+            let arr = v
+                .as_array()
+                .ok_or_else(|| format!("{} must be a string or array of strings", field))?;
+            arr.iter()
+                .enumerate()
+                .map(|(idx, item)| {
+                    item.as_str()
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| format!("{}[{}] must be a string", field, idx))
+                })
+                .collect()
+        }
+    }
+}
+
+pub fn validate_local_child_config_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("AOP config load path cannot be empty".to_string());
+    }
+    if path.starts_with('/') || path.starts_with('\\') || path.starts_with('~') {
+        return Err(format!("AOP config load path '{}' must be relative", path));
+    }
+    if path.contains(':') {
+        return Err(format!(
+            "AOP config load path '{}' must not contain a drive or scheme",
+            path
+        ));
+    }
+    for part in path.split(['/', '\\']) {
+        if part == ".." {
+            return Err(format!(
+                "AOP config load path '{}' cannot escape the current directory",
+                path
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -92,6 +147,7 @@ mod tests {
         let toml: toml::Value = r#"
 [aspects.runtime]
 enabled = true
+load = "config/aop.sdn"
 around = [
   { on = "pc{ init(Foo) }", use = "around_fn", priority = 10 }
 ]
@@ -101,8 +157,28 @@ around = [
         let config = parse_aop_config(&toml).expect("parse aop");
         let config = config.expect("config present");
         assert!(config.runtime_enabled);
+        assert_eq!(config.loads, vec!["config/aop.sdn"]);
         assert_eq!(config.around.len(), 1);
         let ctx = create_aop_match_context("Foo", "Foo", &[]);
         assert!(config.around[0].predicate.matches(&ctx));
+    }
+
+    #[test]
+    fn reject_aop_load_paths_outside_current_tree() {
+        for path in [
+            "/tmp/aop.sdn",
+            "../aop.sdn",
+            "config/../secret.sdn",
+            "C:\\temp\\aop.sdn",
+            "https://x/aop.sdn",
+        ] {
+            assert!(
+                validate_local_child_config_path(path).is_err(),
+                "path should be rejected: {}",
+                path
+            );
+        }
+        assert!(validate_local_child_config_path("config/aop.sdn").is_ok());
+        assert!(validate_local_child_config_path("./config/aop.sdn").is_ok());
     }
 }

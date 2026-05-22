@@ -47,6 +47,15 @@ fn is_stub_body(body: &ast::Block) -> bool {
     }
 }
 
+fn type_name_hint(ty: &ast::Type) -> Option<String> {
+    match ty {
+        ast::Type::Simple(name) => Some(name.clone()),
+        ast::Type::Generic { name, .. } => Some(name.clone()),
+        ast::Type::Capability { inner, .. } => type_name_hint(inner),
+        _ => None,
+    }
+}
+
 fn block_uses_self(body: &ast::Block) -> bool {
     body.statements.iter().any(node_uses_self)
 }
@@ -487,7 +496,13 @@ impl Lowerer {
             } else {
                 return Err(LowerError::MissingParameterType(param.name.clone()));
             };
-            ctx.add_local_with_inject(param.name.clone(), ty, param.mutability, param.inject);
+            ctx.add_local_with_inject_and_type_hint(
+                param.name.clone(),
+                ty,
+                param.ty.as_ref().and_then(type_name_hint),
+                param.mutability,
+                param.inject,
+            );
         }
 
         let params: Vec<LocalVar> = ctx.locals.clone();

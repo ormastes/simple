@@ -18,6 +18,43 @@ pub struct HirDiBinding {
     pub priority: i64,
 }
 
+/// HIR representation of a first-class DI graph declaration.
+#[derive(Debug, Clone)]
+pub struct HirInjectGraph {
+    pub name: String,
+    pub mode: Option<String>,
+    pub items: Vec<HirInjectItem>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HirInjectItem {
+    Root {
+        type_ref: String,
+    },
+    Scan {
+        pattern: String,
+    },
+    Load {
+        path: String,
+    },
+    Bind {
+        service: String,
+        target: String,
+        lifetime: Option<String>,
+        configurable: bool,
+        final_binding: bool,
+    },
+    Slot {
+        service: String,
+        qualifier: Option<String>,
+        default_target: Option<String>,
+    },
+    Profile {
+        name: String,
+        items: Vec<HirInjectItem>,
+    },
+}
+
 /// HIR representation of an architecture rule.
 #[derive(Debug, Clone)]
 pub struct HirArchRule {

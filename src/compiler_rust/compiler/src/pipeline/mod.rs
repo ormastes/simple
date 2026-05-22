@@ -542,11 +542,20 @@ main = 0
             priority: 0,
             order: 0,
             raw_predicate: "*".to_string(),
+            configurable: false,
+            final_binding: false,
+            default_instance_class: None,
         });
         profiles.insert("test".to_string(), test_profile);
 
         let di_config = DiConfig {
             mode: DiMode::Hybrid,
+            conventions: Default::default(),
+            graph: None,
+            roots: Vec::new(),
+            scans: Vec::new(),
+            loads: Vec::new(),
+            runtime_slots: Vec::new(),
             profiles,
             concurrent_backend: Default::default(),
         };
@@ -607,6 +616,7 @@ main = 0
 
         let aop_config = AopConfig {
             runtime_enabled: true,
+            loads: Vec::new(),
             around: vec![],
         };
 
@@ -632,6 +642,7 @@ main = 0
 
         let aop_config = AopConfig {
             runtime_enabled: true,
+            loads: Vec::new(),
             around: vec![],
         };
 
@@ -672,6 +683,7 @@ main = 0
 
         let aop_config = AopConfig {
             runtime_enabled: false,
+            loads: Vec::new(),
             around: vec![],
         };
 
@@ -701,6 +713,12 @@ main = 0
 
         let di_config = DiConfig {
             mode: DiMode::Hybrid,
+            conventions: Default::default(),
+            graph: None,
+            roots: Vec::new(),
+            scans: Vec::new(),
+            loads: Vec::new(),
+            runtime_slots: Vec::new(),
             profiles,
             concurrent_backend: Default::default(),
         };
@@ -1252,6 +1270,7 @@ main = 0
             locals: vec![hir::LocalVar {
                 name: "vals".to_string(),
                 ty: array_ty_id,
+                type_name_hint: None,
                 mutability: simple_parser::ast::Mutability::Immutable,
                 inject: false,
                 is_ghost: false,

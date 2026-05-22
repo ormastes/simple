@@ -5,6 +5,15 @@ use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{HirMockExpectation, LocalVar};
 
+fn type_name_hint(ty: &ast::Type) -> Option<String> {
+    match ty {
+        ast::Type::Simple(name) => Some(name.clone()),
+        ast::Type::Generic { name, .. } => Some(name.clone()),
+        ast::Type::Capability { inner, .. } => type_name_hint(inner),
+        _ => None,
+    }
+}
+
 impl Lowerer {
     pub(super) fn lower_mock_expectation(&mut self, exp: &ast::MockExpectation) -> LowerResult<HirMockExpectation> {
         // Lower parameters
@@ -18,6 +27,7 @@ impl Lowerer {
             params.push(LocalVar {
                 name: param.name.clone(),
                 ty,
+                type_name_hint: param.ty.as_ref().and_then(type_name_hint),
                 mutability: param.mutability,
                 inject: param.inject,
                 is_ghost: false,

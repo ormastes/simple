@@ -151,6 +151,38 @@ release before the surface is declared stable.
   `desugar_collections` loop added by FR-PLUG-0003) marks the exact insertion
   point for this future specialisation. No code changes in this work cycle.
 
+### FR-PLUG-0005 — DI runtime-slot plugin loader integration
+
+- **Filed-on:** 2026-05-22
+- **Filed-by:** Codex DI graph session
+- **Target:** plugin / compiler / DI
+- **Priority:** P1
+- **Status:** Open
+- **Requested-semantics:**
+  Connect first-class DI runtime slots (`slot PaymentProvider runtime`,
+  collection slots such as `slot [ToolPlugin] runtime named plugins`, and SDN
+  `runtime_slot` bindings) to the trusted plugin/SMF loader so mixed DI graphs
+  can compile the static core while loading only explicitly declared runtime
+  extension points. The DI graph must remain default-first and config-minimal:
+  static conventions still resolve ordinary services, and plugin loading is
+  only allowed for declared runtime slots.
+- **Acceptance-criteria:**
+  - [ ] A mixed DI graph can resolve a runtime slot from SDN to a plugin-backed
+        implementation without enabling global reflection.
+  - [ ] Runtime slot loading rejects undeclared slot types, path traversal,
+        absolute config/plugin paths, and final DI bindings.
+  - [ ] Collection runtime slots preserve deterministic plugin order and report
+        missing or duplicate plugin implementations with typed diagnostics.
+  - [ ] Startup and hot resolve paths are measured against the static DI graph
+        baseline, with no repeated full-tree scans in hot resolution.
+- **Related-upfront:** first-class DI graph design session, 2026-05-22
+- **Related-design-doc:** tbd
+- **Related-issue:** none
+- **Notes:** The current DI graph work implements parser/HIR/config/SDN,
+  default conventions, secure local child config loads, configurable/final
+  override rules, and runtime-slot resolution APIs. This request tracks the
+  remaining integration with external plugin module loading.
+
 ## Implemented
 
 ### FR-PLUG-0002 (structural) — `.so` block-proxy constructor

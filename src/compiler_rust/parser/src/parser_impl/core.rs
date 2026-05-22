@@ -427,6 +427,8 @@ impl<'a> Parser<'a> {
         // (mock Name implements Trait:). Otherwise treat as expression (mock.field, etc.)
         let is_mock_decl = matches!(&self.current.kind, TokenKind::Mock)
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
+        let is_inject_graph_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "inject")
+            && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
 
         match &self.current.kind {
             // Route @ and legacy #[...] to attributed_item.
@@ -638,6 +640,7 @@ impl<'a> Parser<'a> {
             TokenKind::Requires => self.parse_requires_capabilities(),
             // AOP & Unified Predicates (#1000-1050)
             TokenKind::On => self.parse_aop_advice().map(Node::AopAdvice),
+            TokenKind::Identifier { .. } if is_inject_graph_decl => self.parse_inject_graph().map(Node::InjectGraph),
             TokenKind::Bind => {
                 // Disambiguate between:
                 // - DI binding: `bind on pc{...} -> Impl`

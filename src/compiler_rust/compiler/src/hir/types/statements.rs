@@ -118,6 +118,9 @@ pub struct HirCalcStep {
 pub struct LocalVar {
     pub name: String,
     pub ty: TypeId,
+    /// Authored type name when available. This preserves trait/interface names
+    /// that may erase to `Any` in the type registry.
+    pub type_name_hint: Option<String>,
     pub mutability: Mutability,
     /// Per-parameter DI injection flag (#1013)
     pub inject: bool,

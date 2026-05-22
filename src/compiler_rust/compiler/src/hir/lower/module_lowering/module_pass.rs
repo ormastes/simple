@@ -5,8 +5,8 @@ use simple_parser::{self as ast, Expr, Module, Node};
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    HirAopAdvice, HirArchRule, HirDiBinding, HirDomainBlock, HirImpl, HirLeanBlock, HirMockDecl, HirModule, HirType,
-    TypeId,
+    HirAopAdvice, HirArchRule, HirDiBinding, HirDomainBlock, HirImpl, HirInjectGraph, HirInjectItem, HirLeanBlock,
+    HirMockDecl, HirModule, HirType, TypeId,
 };
 
 fn try_const_eval(expr: &Expr) -> Option<i64> {
@@ -20,10 +20,18 @@ fn try_const_eval(expr: &Expr) -> Option<i64> {
                 ast::BinOp::Sub => l.checked_sub(r),
                 ast::BinOp::Mul => l.checked_mul(r),
                 ast::BinOp::Div => {
-                    if r == 0 { None } else { l.checked_div(r) }
+                    if r == 0 {
+                        None
+                    } else {
+                        l.checked_div(r)
+                    }
                 }
                 ast::BinOp::Mod => {
-                    if r == 0 { None } else { l.checked_rem(r) }
+                    if r == 0 {
+                        None
+                    } else {
+                        l.checked_rem(r)
+                    }
                 }
                 ast::BinOp::BitAnd => Some(l & r),
                 ast::BinOp::BitOr => Some(l | r),
@@ -404,6 +412,13 @@ impl Lowerer {
                         priority: binding.priority.unwrap_or(0),
                     });
                 }
+                Node::InjectGraph(graph) => {
+                    self.module.inject_graphs.push(HirInjectGraph {
+                        name: graph.name.clone(),
+                        mode: graph.mode.map(|m| m.as_str().to_string()),
+                        items: self.lower_inject_items(&graph.items)?,
+                    });
+                }
                 Node::ArchitectureRule(rule) => {
                     self.module.arch_rules.push(HirArchRule {
                         rule_type: match rule.rule_type {
@@ -430,6 +445,68 @@ impl Lowerer {
             }
         }
         Ok(())
+    }
+
+    fn lower_inject_items(&self, items: &[ast::InjectItem]) -> LowerResult<Vec<HirInjectItem>> {
+        let mut lowered = Vec::new();
+        for item in items {
+            lowered.push(match item {
+                ast::InjectItem::Root { type_ref, .. } => HirInjectItem::Root {
+                    type_ref: type_ref.clone(),
+                },
+                ast::InjectItem::Scan { pattern, .. } => HirInjectItem::Scan {
+                    pattern: pattern.clone(),
+                },
+                ast::InjectItem::Load { path, .. } => {
+                    crate::di::validate_local_child_config_path(path).map_err(LowerError::Unsupported)?;
+                    HirInjectItem::Load { path: path.clone() }
+                }
+                ast::InjectItem::Bind {
+                    service,
+                    target,
+                    lifetime,
+                    configurable,
+                    final_binding,
+                    ..
+                } => HirInjectItem::Bind {
+                    service: service.clone(),
+                    target: target.clone(),
+                    lifetime: lifetime.map(|l| self.inject_lifetime_to_string(l)),
+                    configurable: *configurable,
+                    final_binding: *final_binding,
+                },
+                ast::InjectItem::Slot {
+                    service,
+                    qualifier,
+                    default_target,
+                    ..
+                } => HirInjectItem::Slot {
+                    service: service.clone(),
+                    qualifier: qualifier.clone(),
+                    default_target: default_target.clone(),
+                },
+                ast::InjectItem::Profile { name, items, .. } => HirInjectItem::Profile {
+                    name: name.clone(),
+                    items: self.lower_inject_items(items)?,
+                },
+            });
+        }
+        Ok(lowered)
+    }
+
+    fn inject_lifetime_to_string(&self, lifetime: ast::InjectLifetime) -> String {
+        match lifetime {
+            ast::InjectLifetime::Transient => "transient",
+            ast::InjectLifetime::Singleton => "singleton",
+            ast::InjectLifetime::Scoped => "scoped",
+            ast::InjectLifetime::Arena => "arena",
+            ast::InjectLifetime::Request => "request",
+            ast::InjectLifetime::Thread => "thread",
+            ast::InjectLifetime::Task => "task",
+            ast::InjectLifetime::Static => "static",
+            ast::InjectLifetime::Extern => "extern",
+        }
+        .to_string()
     }
 
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
@@ -581,6 +658,7 @@ impl Lowerer {
                 | Node::HandlePool(_)
                 | Node::AopAdvice(_)
                 | Node::DiBinding(_)
+                | Node::InjectGraph(_)
                 | Node::ArchitectureRule(_)
                 | Node::MockDecl(_)
                 | Node::LiteralFunction(_)

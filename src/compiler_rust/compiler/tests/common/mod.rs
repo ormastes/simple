@@ -42,6 +42,12 @@ pub fn parse_and_lower_with_di(source: &str, di_toml: &str) -> Result<mir::MirMo
 pub fn empty_di_config() -> di::DiConfig {
     di::DiConfig {
         mode: di::DiMode::Hybrid,
+        conventions: Default::default(),
+        graph: None,
+        roots: Vec::new(),
+        scans: Vec::new(),
+        loads: Vec::new(),
+        runtime_slots: Vec::new(),
         profiles: std::collections::HashMap::new(),
         concurrent_backend: Default::default(),
     }

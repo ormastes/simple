@@ -267,8 +267,12 @@ pub struct MirLowerer<'a> {
     pub(super) trait_infos: Option<&'a std::collections::HashMap<String, crate::hir::HirTraitInfo>>,
     /// DI configuration for constructor injection
     pub(super) di_config: Option<DiConfig>,
-    /// Map of injectable function names to parameter types and inject flags (#1013)
-    pub(super) inject_functions: HashMap<String, Vec<(TypeId, bool)>>,
+    /// Active DI profile for selecting profile-specific bindings.
+    pub(super) di_profile: String,
+    /// Map of injectable function names to parameter types, source type hints, and inject flags (#1013)
+    pub(super) inject_functions: HashMap<String, Vec<(TypeId, Option<String>, bool)>>,
+    /// All lowered function names, used by convention DI to avoid inventing constructors.
+    pub(super) available_functions: HashSet<String>,
     /// Singleton instance cache for DI (impl_type -> VReg)
     pub(super) singleton_cache: HashMap<String, super::super::instructions::VReg>,
     /// Dependency graph for cycle detection (#1009)
@@ -317,7 +321,9 @@ impl<'a> MirLowerer<'a> {
             type_registry: None,
             trait_infos: None,
             di_config: None,
+            di_profile: "default".to_string(),
             inject_functions: HashMap::new(),
+            available_functions: HashSet::new(),
             singleton_cache: HashMap::new(),
             dependency_graph: crate::di::DependencyGraph::default(),
             di_resolution_stack: Vec::new(),
@@ -348,7 +354,9 @@ impl<'a> MirLowerer<'a> {
             type_registry: None,
             trait_infos: None,
             di_config: None,
+            di_profile: "default".to_string(),
             inject_functions: HashMap::new(),
+            available_functions: HashSet::new(),
             singleton_cache: HashMap::new(),
             dependency_graph: crate::di::DependencyGraph::default(),
             di_resolution_stack: Vec::new(),
@@ -372,6 +380,11 @@ impl<'a> MirLowerer<'a> {
 
     pub fn with_di_config(mut self, di_config: Option<DiConfig>) -> Self {
         self.di_config = di_config;
+        self
+    }
+
+    pub fn with_di_profile(mut self, profile: impl Into<String>) -> Self {
+        self.di_profile = profile.into();
         self
     }
 
@@ -1038,6 +1051,9 @@ impl<'a> MirLowerer<'a> {
 
     /// Lower HIR module to MIR module (main entry point)
     pub fn lower_module(mut self, hir: &'a HirModule) -> MirLowerResult<MirModule> {
+        self.di_config = crate::di::merge_di_config_with_hir_graphs(self.di_config.take(), &hir.inject_graphs)
+            .map_err(MirLowerError::Unsupported)?;
+
         // Store reference to type registry for unit type bound checks
         self.type_registry = Some(&hir.types);
         // Store reference to trait_infos for vtable slot resolution and vtable_impls construction
@@ -1045,20 +1061,33 @@ impl<'a> MirLowerer<'a> {
             self.trait_infos = Some(&hir.trait_infos);
         }
         self.inject_functions.clear();
+        self.available_functions.clear();
         self.singleton_cache.clear(); // Clear singleton cache for each module
         self.dependency_graph = crate::di::DependencyGraph::default(); // Reset dependency graph per module (#1009)
         self.di_resolution_stack.clear(); // Clear DI resolution stack per module
 
         for func in &hir.functions {
+            self.available_functions.insert(func.name.clone());
             // For per-parameter injection (#1013), we need to track which params are injectable
             // A function is injectable if it has @inject decorator OR any parameter has @inject
             let has_any_injectable = func.inject || func.params.iter().any(|p| p.inject);
             if has_any_injectable {
                 // If function-level @inject, all params without explicit @inject are injectable
                 // If no function-level @inject, only params with @inject are injectable
-                let param_info: Vec<(TypeId, bool)> =
-                    func.params.iter().map(|p| (p.ty, func.inject || p.inject)).collect();
+                let param_info: Vec<(TypeId, Option<String>, bool)> = func
+                    .params
+                    .iter()
+                    .filter(|p| p.name != "self")
+                    .map(|p| (p.ty, p.type_name_hint.clone(), func.inject || p.inject))
+                    .collect();
                 self.inject_functions.insert(func.name.clone(), param_info);
+            }
+        }
+
+        for hir_impl in &hir.impls {
+            if let Some(trait_name) = &hir_impl.trait_name {
+                self.dependency_graph
+                    .add_implementation(trait_name.clone(), hir_impl.type_name.clone());
             }
         }
 
