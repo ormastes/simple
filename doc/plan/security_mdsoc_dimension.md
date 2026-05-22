@@ -789,10 +789,11 @@ Current compiler-front-end slice:
 22. Hosted native builds now generate a `__module_init_security_registry` object when security declarations are present. The object embeds the generated security AOP registry text and uses the existing module-init caller to invoke `rt_security_load_registry_sdn` before `spl_main`, preserving zero-config startup behavior.
 23. Static archive builds now include the generated security registry init object and `__simple_call_module_inits` caller when security declarations are present, so hosted archive consumers get the same zero-config registry startup path as direct native links.
 24. `SEC201` can now consume lowered HIR modules when available, adding compiler-resolved import edges and resolved global call edges to the existing source fallback. This keeps default convention checks useful before full-project lowering while moving gate enforcement toward resolved compiler facts.
+25. `SEC401` now also consumes lowered HIR modules when available, detecting resolved ambient authority calls such as `File.open` through HIR global/method call facts without relying only on source text scanning.
 
 Remaining implementation order:
 
 1. Finish replacing the source-level `SEC201` fallback with the compiler-resolved project import/call graph everywhere the full lowered workspace is available.
-2. Replace heuristic `SEC301` and `SEC401` scanning with typed semantic checks over resolved calls and sandbox/plugin coordinates.
+2. Replace heuristic `SEC301` scanning and finish moving `SEC401` enforcement from source fallback to typed semantic checks over resolved calls and sandbox/plugin coordinates.
 3. Add standard library replacements for raw file/network/env/process APIs and move `SEC401` from source scanning to typed capability-handle checks over resolved calls.
 4. Route real MIR failure edges to `audit_failure` and extend generated security registry startup loading beyond hosted executable/archive builds where needed.

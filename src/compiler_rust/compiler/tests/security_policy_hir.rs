@@ -400,6 +400,37 @@ fn allows_security_observation_for_ui_only_hints() {
 }
 
 #[test]
+fn sec401_uses_hir_resolved_ambient_authority_calls_when_modules_are_available() {
+    let files = vec![SecuritySourceFile {
+        path: "src/feature/plugin/service/report.spl".to_string(),
+        source: "class ReportPlugin:\n    pass\n".to_string(),
+    }];
+    let mut module = hir::HirModule::new();
+    module.functions.push(hir_function(
+        "run",
+        vec![hir::HirStmt::Expr(hir::HirExpr {
+            kind: hir::HirExprKind::MethodCall {
+                receiver: Box::new(hir::HirExpr {
+                    kind: hir::HirExprKind::Global("File".to_string()),
+                    ty: hir::TypeId::I64,
+                }),
+                method: "open".to_string(),
+                args: vec![],
+                dispatch: hir::DispatchMode::Static,
+            },
+            ty: hir::TypeId::I64,
+        })],
+    ));
+
+    let violations = simple_compiler::security::source_security_violations_sdn_with_modules(&files, &[module]);
+    assert!(violations.contains("code: SEC401"));
+    assert!(violations.contains("message: resolved raw ambient authority API"));
+    assert!(violations.contains("api: File.open"));
+    assert!(violations.contains("edge: resolved_call"));
+    assert!(violations.contains("required: inject narrowed capability handle ReadFile or WriteFile"));
+}
+
+#[test]
 fn reports_sec401_for_raw_ambient_authority_apis() {
     let files = vec![SecuritySourceFile {
         path: "src/feature/plugin/service/report.spl".to_string(),

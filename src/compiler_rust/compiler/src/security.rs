@@ -309,6 +309,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
     let boundary_gates = collect_boundary_gates(modules);
     let mut feature_graph = build_feature_graph(files, &known_features);
     feature_graph.extend(build_hir_feature_graph(files, modules));
+    let hir_ambient_uses = build_hir_ambient_uses(files, modules);
 
     for edge in feature_graph {
         if edge.to_feature == edge.from_feature || is_shared_feature(&edge.to_feature) {
@@ -340,6 +341,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
         }
     }
 
+    let mut reported_ambient_apis = BTreeSet::new();
     for file in files {
         let coordinate = infer_security_coordinate(Path::new(&file.path));
         let Some(from_feature) = coordinate.feature.as_deref() else {
@@ -364,6 +366,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
             }
 
             if let Some(api) = raw_ambient_api(trimmed) {
+                reported_ambient_apis.insert((file.path.clone(), api.name.to_string()));
                 count += 1;
                 out.push_str("  - code: SEC401\n");
                 out.push_str("    message: raw ambient authority API used without an explicit capability handle\n");
@@ -376,6 +379,23 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
                 ));
             }
         }
+    }
+
+    for ambient_use in hir_ambient_uses {
+        if !reported_ambient_apis.insert((ambient_use.file.to_string(), ambient_use.api.name.to_string())) {
+            continue;
+        }
+        count += 1;
+        out.push_str("  - code: SEC401\n");
+        out.push_str("    message: resolved raw ambient authority API used without an explicit capability handle\n");
+        out.push_str(&format!("    file: {}\n", ambient_use.file));
+        out.push_str("    line: 1\n");
+        out.push_str(&format!("    api: {}\n", ambient_use.api.name));
+        out.push_str("    edge: resolved_call\n");
+        out.push_str(&format!(
+            "    required: inject narrowed capability handle {}\n",
+            ambient_use.api.required
+        ));
     }
 
     if count == 0 {
@@ -509,6 +529,41 @@ fn hir_import_feature_details(import: &HirImport) -> Option<(String, Option<Stri
     Some((feature, layer))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SecurityAmbientUse<'a> {
+    file: &'a str,
+    api: RawAmbientApi,
+}
+
+fn build_hir_ambient_uses<'a>(
+    files: &'a [SecuritySourceFile],
+    modules: &'a [HirModule],
+) -> Vec<SecurityAmbientUse<'a>> {
+    if files.len() != modules.len() {
+        return Vec::new();
+    }
+
+    let mut uses = Vec::new();
+    for (file, module) in files.iter().zip(modules) {
+        let coordinate = infer_security_coordinate(Path::new(&file.path));
+        let Some(from_feature) = coordinate.feature.as_deref() else {
+            continue;
+        };
+        if coordinate.security_root || from_feature == "security" {
+            continue;
+        }
+
+        for function in &module.functions {
+            for symbol in referenced_hir_symbols(&function.body) {
+                if let Some(api) = raw_ambient_api_symbol(&symbol) {
+                    uses.push(SecurityAmbientUse { file: &file.path, api });
+                }
+            }
+        }
+    }
+    uses
+}
+
 fn referenced_hir_symbols(stmts: &[HirStmt]) -> BTreeSet<String> {
     let mut symbols = BTreeSet::new();
     for stmt in stmts {
@@ -588,7 +643,12 @@ fn collect_hir_expr_symbols(expr: &HirExpr, symbols: &mut BTreeSet<String>) {
                 collect_hir_expr_symbols(arg, symbols);
             }
         }
-        HirExprKind::MethodCall { receiver, args, .. } => {
+        HirExprKind::MethodCall {
+            receiver, method, args, ..
+        } => {
+            if let HirExprKind::Global(owner) = &receiver.kind {
+                symbols.insert(format!("{}.{}", owner, method));
+            }
             collect_hir_expr_symbols(receiver, symbols);
             for arg in args {
                 collect_hir_expr_symbols(arg, symbols);
@@ -876,6 +936,41 @@ fn raw_ambient_api(line: &str) -> Option<RawAmbientApi> {
     ];
     apis.iter()
         .find_map(|(pattern, api)| line.contains(pattern).then_some(*api))
+}
+
+fn raw_ambient_api_symbol(symbol: &str) -> Option<RawAmbientApi> {
+    let apis = [
+        (
+            "File.open",
+            RawAmbientApi {
+                name: "File.open",
+                required: "ReadFile or WriteFile",
+            },
+        ),
+        (
+            "Network.connect",
+            RawAmbientApi {
+                name: "Network.connect",
+                required: "NetworkEndpoint",
+            },
+        ),
+        (
+            "Env.get",
+            RawAmbientApi {
+                name: "Env.get",
+                required: "EnvVar",
+            },
+        ),
+        (
+            "Process.spawn",
+            RawAmbientApi {
+                name: "Process.spawn",
+                required: "ProcessSpawner",
+            },
+        ),
+    ];
+    apis.iter()
+        .find_map(|(pattern, api)| (symbol == *pattern).then_some(*api))
 }
 
 fn collect_gates(module: &HirModule) -> Vec<HirSecurityGate> {
