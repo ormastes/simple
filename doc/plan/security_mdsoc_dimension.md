@@ -792,10 +792,11 @@ Current compiler-front-end slice:
 25. `SEC401` now also consumes lowered HIR modules when available, detecting resolved ambient authority calls such as `File.open` through HIR global/method call facts without relying only on source text scanning.
 26. `SEC301` now also consumes lowered HIR modules when available, detecting resolved authorization predicates such as `current_user.is_admin`, `authorize`, and `check_permission` outside security roots without relying only on source text scanning.
 27. Security diagnostics now carry inferred `trust` and `runtime` coordinates from default folder conventions, including `feature=plugin`, `trust=plugin`, and `runtime=sandboxed` for sandbox/plugin paths. This starts tying `SEC301` and `SEC401` findings to the MDSOC trust/runtime dimensions instead of only feature/layer names.
+28. The HIR-resolved `SEC401` path now honors explicit narrowed capability handles on function parameters and locals. A resolved raw API call such as `File.open` is reported only when the function lacks a matching handle such as `ReadFile` or `WriteFile`, preserving the native object-capability model without requiring per-call config.
 
 Remaining implementation order:
 
 1. Finish replacing the source-level `SEC201` fallback with the compiler-resolved project import/call graph everywhere the full lowered workspace is available.
-2. Finish moving `SEC301` and `SEC401` from source fallbacks to typed semantic checks over resolved calls, explicit capability handles, and sandbox/plugin coordinates wherever lowered workspace data is available.
-3. Add standard library replacements for raw file/network/env/process APIs and move `SEC401` from source scanning to typed capability-handle checks over resolved calls.
+2. Finish moving `SEC301` and `SEC401` from source fallbacks to typed semantic checks over resolved calls and sandbox/plugin coordinates wherever lowered workspace data is available.
+3. Add standard library replacements for raw file/network/env/process APIs and extend source fallback suppression once those calls lower to typed capability-handle APIs.
 4. Route real MIR failure edges to `audit_failure` and extend generated security registry startup loading beyond hosted executable/archive builds where needed.

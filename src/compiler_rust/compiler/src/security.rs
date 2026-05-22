@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
 use crate::hir::{
-    HirAopAdvice, HirArchRule, HirCapabilityItem, HirExpr, HirExprKind, HirImport, HirModule, HirSandboxItem,
-    HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirStmt,
+    HirAopAdvice, HirArchRule, HirCapabilityItem, HirExpr, HirExprKind, HirFunction, HirImport, HirModule,
+    HirSandboxItem, HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirStmt,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -674,14 +674,37 @@ fn build_hir_ambient_uses<'a>(
         }
 
         for function in &module.functions {
+            let capability_handles = function_capability_handles(function);
             for symbol in referenced_hir_symbols(&function.body) {
                 if let Some(api) = raw_ambient_api_symbol(&symbol) {
+                    if capability_requirement_satisfied(api.required, &capability_handles) {
+                        continue;
+                    }
                     uses.push(SecurityAmbientUse { file: &file.path, api });
                 }
             }
         }
     }
     uses
+}
+
+fn function_capability_handles(function: &HirFunction) -> BTreeSet<String> {
+    function
+        .params
+        .iter()
+        .chain(function.locals.iter())
+        .filter_map(|local| local.type_name_hint.as_deref())
+        .map(capability_handle_name)
+        .filter(|handle| is_builtin_capability_handle(handle))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn capability_requirement_satisfied(required: &str, handles: &BTreeSet<String>) -> bool {
+    required
+        .split(" or ")
+        .map(str::trim)
+        .any(|required_handle| handles.contains(required_handle))
 }
 
 fn referenced_hir_symbols(stmts: &[HirStmt]) -> BTreeSet<String> {

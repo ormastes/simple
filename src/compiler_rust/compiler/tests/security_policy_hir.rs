@@ -14,10 +14,14 @@ fn lower(source: &str) -> simple_compiler::hir::HirModule {
 }
 
 fn hir_function(name: &str, body: Vec<hir::HirStmt>) -> hir::HirFunction {
+    hir_function_with_params(name, vec![], body)
+}
+
+fn hir_function_with_params(name: &str, params: Vec<hir::LocalVar>, body: Vec<hir::HirStmt>) -> hir::HirFunction {
     hir::HirFunction {
         name: name.to_string(),
         span: None,
-        params: vec![],
+        params,
         locals: vec![],
         return_type: hir::TypeId::I64,
         body,
@@ -34,6 +38,17 @@ fn hir_function(name: &str, body: Vec<hir::HirStmt>) -> hir::HirFunction {
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+    }
+}
+
+fn capability_param(name: &str, type_name: &str) -> hir::LocalVar {
+    hir::LocalVar {
+        name: name.to_string(),
+        ty: hir::TypeId::I64,
+        type_name_hint: Some(type_name.to_string()),
+        mutability: simple_parser::ast::Mutability::Immutable,
+        inject: false,
+        is_ghost: false,
     }
 }
 
@@ -469,6 +484,48 @@ fn sec401_uses_hir_resolved_ambient_authority_calls_when_modules_are_available()
     assert!(violations.contains("trust: plugin"));
     assert!(violations.contains("runtime: sandboxed"));
     assert!(violations.contains("required: inject narrowed capability handle ReadFile or WriteFile"));
+}
+
+#[test]
+fn sec401_accepts_hir_resolved_explicit_capability_handles() {
+    let files = vec![SecuritySourceFile {
+        path: "src/feature/plugin/sandbox/report.spl".to_string(),
+        source: "class ReportPlugin:\n    pass\n".to_string(),
+    }];
+    let mut module = hir::HirModule::new();
+    module.functions.push(hir_function_with_params(
+        "run",
+        vec![capability_param("file", "ReadFile"), capability_param("env", "EnvVar")],
+        vec![
+            hir::HirStmt::Expr(hir::HirExpr {
+                kind: hir::HirExprKind::MethodCall {
+                    receiver: Box::new(hir::HirExpr {
+                        kind: hir::HirExprKind::Global("File".to_string()),
+                        ty: hir::TypeId::I64,
+                    }),
+                    method: "open".to_string(),
+                    args: vec![],
+                    dispatch: hir::DispatchMode::Static,
+                },
+                ty: hir::TypeId::I64,
+            }),
+            hir::HirStmt::Expr(hir::HirExpr {
+                kind: hir::HirExprKind::MethodCall {
+                    receiver: Box::new(hir::HirExpr {
+                        kind: hir::HirExprKind::Global("Env".to_string()),
+                        ty: hir::TypeId::I64,
+                    }),
+                    method: "get".to_string(),
+                    args: vec![],
+                    dispatch: hir::DispatchMode::Static,
+                },
+                ty: hir::TypeId::I64,
+            }),
+        ],
+    ));
+
+    let violations = simple_compiler::security::source_security_violations_sdn_with_modules(&files, &[module]);
+    assert!(!violations.contains("code: SEC401"));
 }
 
 #[test]
