@@ -353,8 +353,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
     let mut count = 0;
     let known_features = known_features(files);
     let boundary_gates = collect_boundary_gates(modules);
-    let mut feature_graph = build_feature_graph(files, &known_features);
-    feature_graph.extend(build_hir_feature_graph(files, modules));
+    let feature_graph = build_security_feature_graph(files, modules, &known_features);
     let hir_authorization_uses = build_hir_authorization_uses(files, modules);
     let hir_ambient_uses = build_hir_ambient_uses(files, modules);
 
@@ -469,6 +468,24 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
         out.push_str("  []\n");
     }
     out
+}
+
+fn build_security_feature_graph(
+    files: &[SecuritySourceFile],
+    modules: &[HirModule],
+    known_features: &BTreeSet<String>,
+) -> Vec<SecurityFeatureEdge> {
+    if has_full_lowered_workspace(files, modules) {
+        return build_hir_feature_graph(files, modules);
+    }
+
+    let mut feature_graph = build_feature_graph(files, known_features);
+    feature_graph.extend(build_hir_feature_graph(files, modules));
+    feature_graph
+}
+
+fn has_full_lowered_workspace(files: &[SecuritySourceFile], modules: &[HirModule]) -> bool {
+    !files.is_empty() && files.len() == modules.len()
 }
 
 fn build_feature_graph(files: &[SecuritySourceFile], known_features: &BTreeSet<String>) -> Vec<SecurityFeatureEdge> {

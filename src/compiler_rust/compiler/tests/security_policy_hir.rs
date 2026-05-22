@@ -383,6 +383,28 @@ fn sec201_uses_hir_resolved_global_calls_when_modules_are_available() {
 }
 
 #[test]
+fn sec201_prefers_resolved_hir_graph_when_full_workspace_is_available() {
+    let files = vec![
+        SecuritySourceFile {
+            path: "src/feature/user/service/profile.spl".to_string(),
+            source: "class Profile:\n    fn run():\n        AdminUserRepo.delete(1)\n".to_string(),
+        },
+        SecuritySourceFile {
+            path: "src/feature/admin/domain/delete.spl".to_string(),
+            source: "fn admin_delete():\n    return\n".to_string(),
+        },
+    ];
+    let mut user_module = hir::HirModule::new();
+    user_module.functions.push(hir_function("run", vec![]));
+    let mut admin_module = hir::HirModule::new();
+    admin_module.functions.push(hir_function("admin_delete", vec![]));
+
+    let violations =
+        simple_compiler::security::source_security_violations_sdn_with_modules(&files, &[user_module, admin_module]);
+    assert!(!violations.contains("code: SEC201"));
+}
+
+#[test]
 fn sec201_does_not_treat_type_declarations_as_call_edges() {
     let files = vec![
         SecuritySourceFile {
