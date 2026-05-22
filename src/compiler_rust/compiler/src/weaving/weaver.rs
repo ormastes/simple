@@ -113,7 +113,7 @@ impl Weaver {
             }
             SecurityAdviceStep::Proceed => return Vec::new(),
             SecurityAdviceStep::AuditSuccess { gate_id, .. } => ("rt_security_audit_success", vec![*gate_id]),
-            SecurityAdviceStep::AuditFailure { gate_id, .. } => ("rt_security_audit_failure", vec![*gate_id]),
+            SecurityAdviceStep::AuditFailure { .. } => return Vec::new(),
             SecurityAdviceStep::ExitSandbox { sandbox_id } => ("rt_security_exit_sandbox", vec![*sandbox_id]),
             SecurityAdviceStep::ExitGate { gate_id } => ("rt_security_exit_gate", vec![*gate_id]),
         };

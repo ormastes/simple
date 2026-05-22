@@ -373,7 +373,6 @@ mod tests {
                 "rt_security_enter_sandbox",
                 "rt_security_audit_start",
                 "rt_security_audit_success",
-                "rt_security_audit_failure",
                 "rt_security_exit_sandbox",
                 "rt_security_exit_gate",
             ]
@@ -395,7 +394,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(call_args, vec![1, 1, 1, 2, 1, 1, 1, 1]);
+        assert_eq!(call_args, vec![1, 1, 1, 2, 1, 1, 1]);
         assert!(func.blocks[0]
             .instructions
             .iter()
