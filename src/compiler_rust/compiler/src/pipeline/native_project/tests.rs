@@ -1142,6 +1142,85 @@ void app_call(void) { rt_used(); }
     assert!(!roots.contains(&"rt_unused".to_string()));
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[test]
+fn test_runtime_retention_symbols_include_weak_security_registry_loader() {
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    if std::process::Command::new(&cc).arg("--version").output().is_err() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_c = temp.path().join("runtime.c");
+    let app_c = temp.path().join("app.c");
+    let init_c = temp.path().join("security_init.c");
+    let runtime_o = temp.path().join("runtime.o");
+    let app_o = temp.path().join("app.o");
+    let init_o = temp.path().join("security_init.o");
+
+    std::fs::write(
+        &runtime_c,
+        r#"
+unsigned long long rt_security_load_registry_sdn(const unsigned char* ptr, unsigned long long len) {
+    return len + (ptr != 0);
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(&app_c, "void app_call(void) {}\n").unwrap();
+    std::fs::write(
+        &init_c,
+        r#"
+extern unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long) __attribute__((weak));
+void __module_init_security_registry(void) {
+    if (rt_security_load_registry_sdn) {
+        rt_security_load_registry_sdn((const unsigned char*)"security", 8);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    for (src, obj) in [(&runtime_c, &runtime_o), (&app_c, &app_o), (&init_c, &init_o)] {
+        assert!(std::process::Command::new(&cc)
+            .args(["-c", "-ffunction-sections", "-fdata-sections"])
+            .arg(src)
+            .arg("-o")
+            .arg(obj)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
+        populate_global_struct_defs: false,
+        populate_global_enum_defs: false,
+    };
+    let roots = NativeProjectBuilder::runtime_retention_symbols(
+        std::slice::from_ref(&app_o),
+        &app_o,
+        Some(&init_o),
+        &runtime_o,
+        &imports,
+    )
+    .unwrap();
+
+    assert!(
+        roots.contains(&"rt_security_load_registry_sdn".to_string()),
+        "weak security registry loader reference must retain the hosted runtime loader: {:?}",
+        roots
+    );
+}
+
 #[test]
 fn test_compiler_rt_builtin_symbols_are_not_stub_candidates() {
     assert!(super::tools::is_compiler_rt_builtin_symbol("__adddf3"));

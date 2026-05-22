@@ -798,7 +798,8 @@ Current compiler-front-end slice:
 31. The standard security enforcement library now exports first-class native object-capability handles for raw authority replacements: `ReadFile.read_text`, `WriteFile.write_text`, `NetworkEndpoint.connect`, `EnvVar.get`, and `ProcessSpawner.run`. `SEC401` diagnostics now point directly to those replacement methods instead of only naming the handle family.
 32. The partial-workspace `SEC401` source fallback now recognizes the actual stdlib raw authority functions that those handles replace, including `file_read_text`, `file_write_text`, `tcp_stream_connect`, `env_get`, and `process_run`. Replacement-handle calls remain unreported, preserving convention-first use while still warning on ambient APIs before full HIR is available.
 33. Security AOP weaving now materializes `audit_failure` on real MIR error join points (`ResultErr` / `TryUnwrap`) instead of dropping it from the plan. Normal execution join points still emit the success path and cleanup, while error join points emit failure audit plus cleanup.
+34. Hosted native security registry startup now survives static-runtime dead stripping: the native linker retention scan treats weak undefined runtime references from the generated registry init object as roots, so `rt_security_load_registry_sdn` is retained and the generated registry is actually loaded before `spl_main`.
 
 Remaining implementation order:
 
-1. Extend generated security registry startup loading beyond hosted executable/archive builds where needed.
+1. No remaining implementation items are currently known for the feature request. Future work should start from verification failures or new platform-specific backend requirements.

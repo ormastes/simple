@@ -143,8 +143,8 @@ impl NativeProjectBuilder {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             let raw_name = match parts.as_slice() {
-                [sym_type, name] if *sym_type == "U" => Some(*name),
-                [_addr, sym_type, name] if *sym_type == "U" => Some(*name),
+                [sym_type, name] if matches!(*sym_type, "U" | "w" | "v") => Some(*name),
+                [_addr, sym_type, name] if matches!(*sym_type, "U" | "w" | "v") => Some(*name),
                 _ => None,
             };
             if let Some(raw_name) = raw_name {
