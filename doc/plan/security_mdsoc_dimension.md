@@ -794,9 +794,9 @@ Current compiler-front-end slice:
 27. Security diagnostics now carry inferred `trust` and `runtime` coordinates from default folder conventions, including `feature=plugin`, `trust=plugin`, and `runtime=sandboxed` for sandbox/plugin paths. This starts tying `SEC301` and `SEC401` findings to the MDSOC trust/runtime dimensions instead of only feature/layer names.
 28. The HIR-resolved `SEC401` path now honors explicit narrowed capability handles on function parameters and locals. A resolved raw API call such as `File.open` is reported only when the function lacks a matching handle such as `ReadFile` or `WriteFile`, preserving the native object-capability model without requiring per-call config.
 29. `SEC201` now prefers the compiler-resolved HIR import/call graph whenever a full lowered workspace is available. The source scanner remains as the zero-config fallback for partial or no HIR, but full-workspace checks no longer inherit source-level false positives from textual references.
+30. `SEC301` and `SEC401` now also prefer resolved HIR facts whenever a full lowered workspace is available. Source scanning remains the zero-config fallback for partial/no HIR, but full-workspace authorization and ambient-authority diagnostics are driven by typed resolved calls and capability-handle facts.
 
 Remaining implementation order:
 
-1. Finish moving `SEC301` and `SEC401` from source fallbacks to typed semantic checks over resolved calls and sandbox/plugin coordinates wherever lowered workspace data is available.
-2. Add standard library replacements for raw file/network/env/process APIs and extend source fallback suppression once those calls lower to typed capability-handle APIs.
-3. Route real MIR failure edges to `audit_failure` and extend generated security registry startup loading beyond hosted executable/archive builds where needed.
+1. Add standard library replacements for raw file/network/env/process APIs and extend source fallback suppression once those calls lower to typed capability-handle APIs.
+2. Route real MIR failure edges to `audit_failure` and extend generated security registry startup loading beyond hosted executable/archive builds where needed.

@@ -353,6 +353,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
     let mut count = 0;
     let known_features = known_features(files);
     let boundary_gates = collect_boundary_gates(modules);
+    let full_lowered_workspace = has_full_lowered_workspace(files, modules);
     let feature_graph = build_security_feature_graph(files, modules, &known_features);
     let hir_authorization_uses = build_hir_authorization_uses(files, modules);
     let hir_ambient_uses = build_hir_ambient_uses(files, modules);
@@ -389,44 +390,46 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
 
     let mut reported_authorization_files = BTreeSet::new();
     let mut reported_ambient_apis = BTreeSet::new();
-    for file in files {
-        let coordinate = infer_security_coordinate(Path::new(&file.path));
-        let Some(from_feature) = coordinate.feature.as_deref() else {
-            continue;
-        };
-        if coordinate.security_root || from_feature == "security" {
-            continue;
-        }
-        for (line_no, line) in file.source.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
+    if !full_lowered_workspace {
+        for file in files {
+            let coordinate = infer_security_coordinate(Path::new(&file.path));
+            let Some(from_feature) = coordinate.feature.as_deref() else {
+                continue;
+            };
+            if coordinate.security_root || from_feature == "security" {
                 continue;
             }
+            for (line_no, line) in file.source.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
 
-            if uses_authorization_predicate(trimmed) && !is_security_observation(&file.source, line_no) {
-                reported_authorization_files.insert(file.path.clone());
-                count += 1;
-                out.push_str("  - code: SEC301\n");
-                out.push_str("    message: authorization predicate used outside security root\n");
-                out.push_str(&format!("    file: {}\n", file.path));
-                out.push_str(&format!("    line: {}\n", line_no + 1));
-                render_coordinate_fields(&mut out, &coordinate);
-                out.push_str("    required: move authoritative authorization to src/security/** or mark UI-only code with @security_observation\n");
-            }
+                if uses_authorization_predicate(trimmed) && !is_security_observation(&file.source, line_no) {
+                    reported_authorization_files.insert(file.path.clone());
+                    count += 1;
+                    out.push_str("  - code: SEC301\n");
+                    out.push_str("    message: authorization predicate used outside security root\n");
+                    out.push_str(&format!("    file: {}\n", file.path));
+                    out.push_str(&format!("    line: {}\n", line_no + 1));
+                    render_coordinate_fields(&mut out, &coordinate);
+                    out.push_str("    required: move authoritative authorization to src/security/** or mark UI-only code with @security_observation\n");
+                }
 
-            if let Some(api) = raw_ambient_api(trimmed) {
-                reported_ambient_apis.insert((file.path.clone(), api.name.to_string()));
-                count += 1;
-                out.push_str("  - code: SEC401\n");
-                out.push_str("    message: raw ambient authority API used without an explicit capability handle\n");
-                out.push_str(&format!("    file: {}\n", file.path));
-                out.push_str(&format!("    line: {}\n", line_no + 1));
-                out.push_str(&format!("    api: {}\n", api.name));
-                render_coordinate_fields(&mut out, &coordinate);
-                out.push_str(&format!(
-                    "    required: inject narrowed capability handle {}\n",
-                    api.required
-                ));
+                if let Some(api) = raw_ambient_api(trimmed) {
+                    reported_ambient_apis.insert((file.path.clone(), api.name.to_string()));
+                    count += 1;
+                    out.push_str("  - code: SEC401\n");
+                    out.push_str("    message: raw ambient authority API used without an explicit capability handle\n");
+                    out.push_str(&format!("    file: {}\n", file.path));
+                    out.push_str(&format!("    line: {}\n", line_no + 1));
+                    out.push_str(&format!("    api: {}\n", api.name));
+                    render_coordinate_fields(&mut out, &coordinate);
+                    out.push_str(&format!(
+                        "    required: inject narrowed capability handle {}\n",
+                        api.required
+                    ));
+                }
             }
         }
     }

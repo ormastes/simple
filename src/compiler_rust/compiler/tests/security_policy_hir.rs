@@ -465,6 +465,19 @@ fn sec301_uses_hir_resolved_authorization_calls_when_modules_are_available() {
 }
 
 #[test]
+fn sec301_prefers_resolved_hir_when_full_workspace_is_available() {
+    let files = vec![SecuritySourceFile {
+        path: "src/feature/user/service/profile.spl".to_string(),
+        source: "class Profile:\n    fn show():\n        return current_user().is_admin\n".to_string(),
+    }];
+    let mut module = hir::HirModule::new();
+    module.functions.push(hir_function("show", vec![]));
+
+    let violations = simple_compiler::security::source_security_violations_sdn_with_modules(&files, &[module]);
+    assert!(!violations.contains("code: SEC301"));
+}
+
+#[test]
 fn allows_security_observation_for_ui_only_hints() {
     let files = vec![SecuritySourceFile {
         path: "src/feature/user/service/profile.spl".to_string(),
@@ -506,6 +519,19 @@ fn sec401_uses_hir_resolved_ambient_authority_calls_when_modules_are_available()
     assert!(violations.contains("trust: plugin"));
     assert!(violations.contains("runtime: sandboxed"));
     assert!(violations.contains("required: inject narrowed capability handle ReadFile or WriteFile"));
+}
+
+#[test]
+fn sec401_prefers_resolved_hir_when_full_workspace_is_available() {
+    let files = vec![SecuritySourceFile {
+        path: "src/feature/plugin/sandbox/report.spl".to_string(),
+        source: "class ReportPlugin:\n    fn run():\n        File.open(\"/etc/passwd\")\n".to_string(),
+    }];
+    let mut module = hir::HirModule::new();
+    module.functions.push(hir_function("run", vec![]));
+
+    let violations = simple_compiler::security::source_security_violations_sdn_with_modules(&files, &[module]);
+    assert!(!violations.contains("code: SEC401"));
 }
 
 #[test]
