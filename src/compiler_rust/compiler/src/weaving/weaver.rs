@@ -21,7 +21,7 @@ impl Weaver {
         let mut used_advice_rules: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         // Group join points by block for efficient insertion
-        let mut insertions: HashMap<BlockId, Vec<(usize, Vec<MatchedAdvice>)>> = HashMap::new();
+        let mut insertions: HashMap<BlockId, Vec<(usize, JoinPointKind, Vec<MatchedAdvice>)>> = HashMap::new();
 
         for join_point in join_points {
             let (advices, diagnostics) = self.match_advice(&join_point);
@@ -46,10 +46,11 @@ impl Weaver {
                 }
 
                 // Group by block
-                insertions
-                    .entry(join_point.block_id)
-                    .or_default()
-                    .push((join_point.instruction_index, advices));
+                insertions.entry(join_point.block_id).or_default().push((
+                    join_point.instruction_index,
+                    join_point.kind,
+                    advices,
+                ));
             }
         }
 
@@ -85,8 +86,8 @@ impl Weaver {
             block_insertions.sort_by(|a, b| b.0.cmp(&a.0));
 
             if let Some(block_index) = function.blocks.iter().position(|b| b.id == block_id) {
-                for (instruction_index, advices) in block_insertions {
-                    self.insert_advice_calls(function, block_index, instruction_index, &advices);
+                for (instruction_index, join_point_kind, advices) in block_insertions {
+                    self.insert_advice_calls(function, block_index, instruction_index, &join_point_kind, &advices);
                 }
             }
         }
@@ -113,7 +114,7 @@ impl Weaver {
             }
             SecurityAdviceStep::Proceed => return Vec::new(),
             SecurityAdviceStep::AuditSuccess { gate_id, .. } => ("rt_security_audit_success", vec![*gate_id]),
-            SecurityAdviceStep::AuditFailure { .. } => return Vec::new(),
+            SecurityAdviceStep::AuditFailure { gate_id, .. } => ("rt_security_audit_failure", vec![*gate_id]),
             SecurityAdviceStep::ExitSandbox { sandbox_id } => ("rt_security_exit_sandbox", vec![*sandbox_id]),
             SecurityAdviceStep::ExitGate { gate_id } => ("rt_security_exit_gate", vec![*gate_id]),
         };
@@ -135,6 +136,7 @@ impl Weaver {
         function: &mut MirFunction,
         block_index: usize,
         instruction_index: usize,
+        join_point_kind: &JoinPointKind,
         advices: &[MatchedAdvice],
     ) -> usize {
         let mut inserted = 0;
@@ -203,13 +205,36 @@ impl Weaver {
                 let Some(plan) = &advice.security_plan else {
                     continue;
                 };
+                let is_error_join_point = matches!(join_point_kind, JoinPointKind::Error { .. });
+                let security_insert_index = if is_error_join_point {
+                    if instruction_index == 0 && function.blocks[block_index].instructions.len() <= inserted {
+                        instruction_index + inserted
+                    } else {
+                        instruction_index + inserted + 1
+                    }
+                } else {
+                    instruction_index + inserted
+                };
                 let mut offset = 0;
                 for step in &plan.steps {
+                    let should_materialize = if is_error_join_point {
+                        matches!(
+                            step,
+                            SecurityAdviceStep::AuditFailure { .. }
+                                | SecurityAdviceStep::ExitSandbox { .. }
+                                | SecurityAdviceStep::ExitGate { .. }
+                        )
+                    } else {
+                        !matches!(step, SecurityAdviceStep::AuditFailure { .. })
+                    };
+                    if !should_materialize {
+                        continue;
+                    }
                     let insts = self.create_security_advice_insts(function, step);
                     for inst in insts {
-                        function.blocks[block_index]
-                            .instructions
-                            .insert(instruction_index + inserted + offset, inst);
+                        let insert_at =
+                            (security_insert_index + offset).min(function.blocks[block_index].instructions.len());
+                        function.blocks[block_index].instructions.insert(insert_at, inst);
                         offset += 1;
                     }
                 }

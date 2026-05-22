@@ -402,6 +402,87 @@ mod tests {
     }
 
     #[test]
+    fn test_security_around_advice_materializes_failure_steps_on_error_join_point() {
+        let rule = WeavingRule {
+            predicate_text: "pc{ init(test_fn) }".to_string(),
+            advice_function: "__simple_security_gate_UserAdminGate".to_string(),
+            form: AdviceForm::Around,
+            priority: 10_000,
+        };
+        let gate_id = security_metadata_id("UserAdminGate");
+        let sandbox_id = security_metadata_id("admin_sandbox");
+        let plan = SecurityAdvicePlan {
+            gate: "UserAdminGate".to_string(),
+            gate_id,
+            advice_function: "__simple_security_gate_UserAdminGate".to_string(),
+            steps: vec![
+                SecurityAdviceStep::EnterGate {
+                    gate: "UserAdminGate".to_string(),
+                    gate_id,
+                },
+                SecurityAdviceStep::Proceed,
+                SecurityAdviceStep::AuditSuccess {
+                    gate: "UserAdminGate".to_string(),
+                    gate_id,
+                },
+                SecurityAdviceStep::AuditFailure {
+                    gate: "UserAdminGate".to_string(),
+                    gate_id,
+                },
+                SecurityAdviceStep::ExitSandbox { sandbox_id },
+                SecurityAdviceStep::ExitGate { gate_id },
+            ],
+        };
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: Vec::new(),
+            after_success_advices: Vec::new(),
+            after_error_advices: Vec::new(),
+            around_advices: vec![rule],
+            security_advice_plans: vec![plan],
+        };
+        let weaver = Weaver::new(config);
+        let mut func = MirFunction::new("test_fn".to_string(), TypeId::I64, Visibility::Public);
+        func.entry_block = BlockId(0);
+        let mut block = MirBlock::new(BlockId(0));
+        block.instructions.push(MirInst::ConstInt {
+            dest: VReg(10),
+            value: 1,
+        });
+        block.instructions.push(MirInst::ResultErr {
+            dest: VReg(0),
+            value: VReg(1),
+        });
+        func.blocks.push(block);
+
+        let result = weaver.weave_function(&mut func);
+
+        assert_eq!(result.join_points_woven, 2);
+        let calls: Vec<String> = func.blocks[0]
+            .instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                MirInst::Call {
+                    target: CallTarget::Io(name),
+                    ..
+                } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(calls.contains(&"rt_security_audit_success".to_string()));
+        assert!(calls.contains(&"rt_security_audit_failure".to_string()));
+        let failure_pos = calls
+            .iter()
+            .position(|name| name == "rt_security_audit_failure")
+            .expect("audit failure call");
+        let success_pos = calls
+            .iter()
+            .position(|name| name == "rt_security_audit_success")
+            .expect("audit success call");
+        assert!(failure_pos > success_pos);
+    }
+
+    #[test]
     fn test_condition_join_point_detection() {
         // Create a function with a comparison operation
         let mut func = MirFunction::new("test_fn".to_string(), TypeId::I64, Visibility::Public);
