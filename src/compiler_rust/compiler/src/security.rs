@@ -27,6 +27,8 @@ pub struct SecuritySourceFile {
 pub struct SecurityCoordinate {
     pub feature: Option<String>,
     pub layer: Option<String>,
+    pub trust: Option<String>,
+    pub runtime: Option<String>,
     pub security_root: bool,
 }
 
@@ -273,14 +275,19 @@ pub fn infer_security_coordinate(path: &Path) -> SecurityCoordinate {
         return SecurityCoordinate {
             feature: Some("security".to_string()),
             layer: Some("security_gate".to_string()),
+            trust: Some("app".to_string()),
+            runtime: infer_runtime_dimension(&parts),
             security_root: true,
         };
     }
 
     for window in parts.windows(4) {
         if window[0] == "src" && window[1] == "feature" {
+            let feature = window[2].clone();
             return SecurityCoordinate {
-                feature: Some(window[2].clone()),
+                trust: Some(infer_trust_dimension(&parts, &feature)),
+                runtime: infer_runtime_dimension(&parts),
+                feature: Some(feature),
                 layer: Some(window[3].clone()),
                 security_root: false,
             };
@@ -290,7 +297,46 @@ pub fn infer_security_coordinate(path: &Path) -> SecurityCoordinate {
     SecurityCoordinate {
         feature: None,
         layer: None,
+        trust: infer_path_trust_dimension(&parts),
+        runtime: infer_runtime_dimension(&parts),
         security_root: false,
+    }
+}
+
+fn infer_trust_dimension(parts: &[String], feature: &str) -> String {
+    infer_path_trust_dimension(parts).unwrap_or_else(|| {
+        if feature == "plugin" {
+            "plugin".to_string()
+        } else {
+            "app".to_string()
+        }
+    })
+}
+
+fn infer_path_trust_dimension(parts: &[String]) -> Option<String> {
+    if parts.iter().any(|part| part == "untrusted") {
+        Some("untrusted".to_string())
+    } else if parts.iter().any(|part| part == "third_party" || part == "vendor") {
+        Some("third_party".to_string())
+    } else if parts.iter().any(|part| part == "plugin" || part == "plugins") {
+        Some("plugin".to_string())
+    } else if parts.iter().any(|part| part == "kernel") {
+        Some("kernel".to_string())
+    } else {
+        None
+    }
+}
+
+fn infer_runtime_dimension(parts: &[String]) -> Option<String> {
+    if parts
+        .iter()
+        .any(|part| part == "sandbox" || part == "sandboxed" || part.ends_with("_sandbox"))
+    {
+        Some("sandboxed".to_string())
+    } else if parts.iter().any(|part| part == "baremetal" || part == "kernel") {
+        Some("baremetal".to_string())
+    } else {
+        None
     }
 }
 
@@ -365,6 +411,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
                 out.push_str("    message: authorization predicate used outside security root\n");
                 out.push_str(&format!("    file: {}\n", file.path));
                 out.push_str(&format!("    line: {}\n", line_no + 1));
+                render_coordinate_fields(&mut out, &coordinate);
                 out.push_str("    required: move authoritative authorization to src/security/** or mark UI-only code with @security_observation\n");
             }
 
@@ -376,6 +423,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
                 out.push_str(&format!("    file: {}\n", file.path));
                 out.push_str(&format!("    line: {}\n", line_no + 1));
                 out.push_str(&format!("    api: {}\n", api.name));
+                render_coordinate_fields(&mut out, &coordinate);
                 out.push_str(&format!(
                     "    required: inject narrowed capability handle {}\n",
                     api.required
@@ -395,6 +443,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
         out.push_str("    line: 1\n");
         out.push_str(&format!("    predicate: {}\n", authorization_use.predicate));
         out.push_str("    edge: resolved_call\n");
+        render_coordinate_fields(&mut out, &infer_security_coordinate(Path::new(authorization_use.file)));
         out.push_str("    required: move authoritative authorization to src/security/** or mark UI-only code with @security_observation\n");
     }
 
@@ -409,6 +458,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
         out.push_str("    line: 1\n");
         out.push_str(&format!("    api: {}\n", ambient_use.api.name));
         out.push_str("    edge: resolved_call\n");
+        render_coordinate_fields(&mut out, &infer_security_coordinate(Path::new(ambient_use.file)));
         out.push_str(&format!(
             "    required: inject narrowed capability handle {}\n",
             ambient_use.api.required
@@ -466,6 +516,21 @@ fn build_feature_graph(files: &[SecuritySourceFile], known_features: &BTreeSet<S
         }
     }
     edges
+}
+
+fn render_coordinate_fields(out: &mut String, coordinate: &SecurityCoordinate) {
+    if let Some(feature) = &coordinate.feature {
+        out.push_str(&format!("    feature: {}\n", feature));
+    }
+    if let Some(layer) = &coordinate.layer {
+        out.push_str(&format!("    layer: {}\n", layer));
+    }
+    if let Some(trust) = &coordinate.trust {
+        out.push_str(&format!("    trust: {}\n", trust));
+    }
+    if let Some(runtime) = &coordinate.runtime {
+        out.push_str(&format!("    runtime: {}\n", runtime));
+    }
 }
 
 fn build_hir_feature_graph(files: &[SecuritySourceFile], modules: &[HirModule]) -> Vec<SecurityFeatureEdge> {

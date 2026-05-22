@@ -791,10 +791,11 @@ Current compiler-front-end slice:
 24. `SEC201` can now consume lowered HIR modules when available, adding compiler-resolved import edges and resolved global call edges to the existing source fallback. This keeps default convention checks useful before full-project lowering while moving gate enforcement toward resolved compiler facts.
 25. `SEC401` now also consumes lowered HIR modules when available, detecting resolved ambient authority calls such as `File.open` through HIR global/method call facts without relying only on source text scanning.
 26. `SEC301` now also consumes lowered HIR modules when available, detecting resolved authorization predicates such as `current_user.is_admin`, `authorize`, and `check_permission` outside security roots without relying only on source text scanning.
+27. Security diagnostics now carry inferred `trust` and `runtime` coordinates from default folder conventions, including `feature=plugin`, `trust=plugin`, and `runtime=sandboxed` for sandbox/plugin paths. This starts tying `SEC301` and `SEC401` findings to the MDSOC trust/runtime dimensions instead of only feature/layer names.
 
 Remaining implementation order:
 
 1. Finish replacing the source-level `SEC201` fallback with the compiler-resolved project import/call graph everywhere the full lowered workspace is available.
-2. Finish moving `SEC301` and `SEC401` from source fallbacks to typed semantic checks over resolved calls and sandbox/plugin coordinates wherever lowered workspace data is available.
+2. Finish moving `SEC301` and `SEC401` from source fallbacks to typed semantic checks over resolved calls, explicit capability handles, and sandbox/plugin coordinates wherever lowered workspace data is available.
 3. Add standard library replacements for raw file/network/env/process APIs and move `SEC401` from source scanning to typed capability-handle checks over resolved calls.
 4. Route real MIR failure edges to `audit_failure` and extend generated security registry startup loading beyond hosted executable/archive builds where needed.

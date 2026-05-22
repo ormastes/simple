@@ -216,12 +216,21 @@ fn infers_security_coordinates_from_feature_folders() {
     let coordinate = infer_security_coordinate(Path::new("src/feature/user/service/profile.spl"));
     assert_eq!(coordinate.feature.as_deref(), Some("user"));
     assert_eq!(coordinate.layer.as_deref(), Some("service"));
+    assert_eq!(coordinate.trust.as_deref(), Some("app"));
+    assert_eq!(coordinate.runtime.as_deref(), None);
     assert!(!coordinate.security_root);
 
     let security = infer_security_coordinate(Path::new("src/security/gate/user_admin_gate.spl"));
     assert_eq!(security.feature.as_deref(), Some("security"));
     assert_eq!(security.layer.as_deref(), Some("security_gate"));
+    assert_eq!(security.trust.as_deref(), Some("app"));
     assert!(security.security_root);
+
+    let plugin = infer_security_coordinate(Path::new("src/feature/plugin/sandbox/report.spl"));
+    assert_eq!(plugin.feature.as_deref(), Some("plugin"));
+    assert_eq!(plugin.layer.as_deref(), Some("sandbox"));
+    assert_eq!(plugin.trust.as_deref(), Some("plugin"));
+    assert_eq!(plugin.runtime.as_deref(), Some("sandboxed"));
 }
 
 #[test]
@@ -432,7 +441,7 @@ fn allows_security_observation_for_ui_only_hints() {
 #[test]
 fn sec401_uses_hir_resolved_ambient_authority_calls_when_modules_are_available() {
     let files = vec![SecuritySourceFile {
-        path: "src/feature/plugin/service/report.spl".to_string(),
+        path: "src/feature/plugin/sandbox/report.spl".to_string(),
         source: "class ReportPlugin:\n    pass\n".to_string(),
     }];
     let mut module = hir::HirModule::new();
@@ -457,6 +466,8 @@ fn sec401_uses_hir_resolved_ambient_authority_calls_when_modules_are_available()
     assert!(violations.contains("message: resolved raw ambient authority API"));
     assert!(violations.contains("api: File.open"));
     assert!(violations.contains("edge: resolved_call"));
+    assert!(violations.contains("trust: plugin"));
+    assert!(violations.contains("runtime: sandboxed"));
     assert!(violations.contains("required: inject narrowed capability handle ReadFile or WriteFile"));
 }
 
