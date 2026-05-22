@@ -13,6 +13,30 @@ fn lower(source: &str) -> simple_compiler::hir::HirModule {
     hir::lower(&ast).expect("lower to HIR")
 }
 
+fn hir_function(name: &str, body: Vec<hir::HirStmt>) -> hir::HirFunction {
+    hir::HirFunction {
+        name: name.to_string(),
+        span: None,
+        params: vec![],
+        locals: vec![],
+        return_type: hir::TypeId::I64,
+        body,
+        visibility: simple_parser::ast::Visibility::Public,
+        contract: None,
+        is_pure: false,
+        inject: false,
+        concurrency_mode: hir::ConcurrencyMode::Actor,
+        module_path: String::new(),
+        attributes: vec![],
+        effects: vec![],
+        layout_hint: None,
+        verification_mode: hir::VerificationMode::default(),
+        is_ghost: false,
+        is_sync: false,
+        has_suspension: false,
+    }
+}
+
 #[test]
 fn lowers_security_policy_with_default_conventions() {
     let module = lower(
@@ -261,6 +285,77 @@ fn sec201_allows_cross_feature_port_imports_but_not_direct_calls() {
     assert!(violations.contains("code: SEC201"));
     assert!(violations.contains("edge: call"));
     assert!(!violations.contains("edge: import"));
+}
+
+#[test]
+fn sec201_uses_hir_resolved_imports_when_modules_are_available() {
+    let files = vec![
+        SecuritySourceFile {
+            path: "src/feature/user/service/profile.spl".to_string(),
+            source: "class Profile:\n    pass\n".to_string(),
+        },
+        SecuritySourceFile {
+            path: "src/feature/admin/infra/admin_user_repo.spl".to_string(),
+            source: "class AdminUserRepo:\n    pass\n".to_string(),
+        },
+    ];
+    let mut user_module = hir::HirModule::new();
+    user_module.imports.push(hir::HirImport {
+        from_path: vec![
+            "crate".to_string(),
+            "feature".to_string(),
+            "admin".to_string(),
+            "infra".to_string(),
+            "admin_user_repo".to_string(),
+        ],
+        items: vec![],
+        is_glob: true,
+        is_type_only: false,
+        is_lazy: false,
+    });
+    let admin_module = hir::HirModule::new();
+
+    let violations =
+        simple_compiler::security::source_security_violations_sdn_with_modules(&files, &[user_module, admin_module]);
+    assert!(violations.contains("code: SEC201"));
+    assert!(violations.contains("edge: import"));
+    assert!(violations.contains("to_layer: infra"));
+}
+
+#[test]
+fn sec201_uses_hir_resolved_global_calls_when_modules_are_available() {
+    let files = vec![
+        SecuritySourceFile {
+            path: "src/feature/user/service/profile.spl".to_string(),
+            source: "class Profile:\n    pass\n".to_string(),
+        },
+        SecuritySourceFile {
+            path: "src/feature/admin/domain/delete.spl".to_string(),
+            source: "fn admin_delete():\n    return\n".to_string(),
+        },
+    ];
+    let mut user_module = hir::HirModule::new();
+    user_module.functions.push(hir_function(
+        "run",
+        vec![hir::HirStmt::Expr(hir::HirExpr {
+            kind: hir::HirExprKind::Call {
+                func: Box::new(hir::HirExpr {
+                    kind: hir::HirExprKind::Global("admin_delete".to_string()),
+                    ty: hir::TypeId::I64,
+                }),
+                args: vec![],
+            },
+            ty: hir::TypeId::I64,
+        })],
+    ));
+    let mut admin_module = hir::HirModule::new();
+    admin_module.functions.push(hir_function("admin_delete", vec![]));
+
+    let violations =
+        simple_compiler::security::source_security_violations_sdn_with_modules(&files, &[user_module, admin_module]);
+    assert!(violations.contains("code: SEC201"));
+    assert!(violations.contains("edge: call"));
+    assert!(violations.contains("to_feature: admin"));
 }
 
 #[test]

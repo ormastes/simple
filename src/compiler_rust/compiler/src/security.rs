@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
 use crate::hir::{
-    HirAopAdvice, HirArchRule, HirCapabilityItem, HirModule, HirSandboxItem, HirSecurityGate, HirSecurityItem,
-    HirSecurityPolicy,
+    HirAopAdvice, HirArchRule, HirCapabilityItem, HirExpr, HirExprKind, HirImport, HirModule, HirSandboxItem,
+    HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirStmt,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,7 +307,8 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
     let mut count = 0;
     let known_features = known_features(files);
     let boundary_gates = collect_boundary_gates(modules);
-    let feature_graph = build_feature_graph(files, &known_features);
+    let mut feature_graph = build_feature_graph(files, &known_features);
+    feature_graph.extend(build_hir_feature_graph(files, modules));
 
     for edge in feature_graph {
         if edge.to_feature == edge.from_feature || is_shared_feature(&edge.to_feature) {
@@ -428,6 +429,241 @@ fn build_feature_graph(files: &[SecuritySourceFile], known_features: &BTreeSet<S
         }
     }
     edges
+}
+
+fn build_hir_feature_graph(files: &[SecuritySourceFile], modules: &[HirModule]) -> Vec<SecurityFeatureEdge> {
+    if files.len() != modules.len() {
+        return Vec::new();
+    }
+
+    let mut edges = Vec::new();
+    let mut symbol_features = std::collections::BTreeMap::new();
+    for (file, module) in files.iter().zip(modules) {
+        let coordinate = infer_security_coordinate(Path::new(&file.path));
+        let Some(feature) = coordinate.feature else {
+            continue;
+        };
+        if coordinate.security_root || feature == "security" {
+            continue;
+        }
+        for function in &module.functions {
+            symbol_features.insert(function.name.clone(), feature.clone());
+            if let Some((owner, _)) = function.name.split_once('.') {
+                symbol_features
+                    .entry(owner.to_string())
+                    .or_insert_with(|| feature.clone());
+            }
+        }
+        for (global, _) in &module.globals {
+            symbol_features.insert(global.clone(), feature.clone());
+        }
+    }
+
+    for (file, module) in files.iter().zip(modules) {
+        let coordinate = infer_security_coordinate(Path::new(&file.path));
+        let Some(from_feature) = coordinate.feature.as_deref() else {
+            continue;
+        };
+        if coordinate.security_root || from_feature == "security" {
+            continue;
+        }
+
+        for import in &module.imports {
+            if let Some((to_feature, target_layer)) = hir_import_feature_details(import) {
+                edges.push(SecurityFeatureEdge {
+                    file: file.path.clone(),
+                    line: 1,
+                    from_feature: from_feature.to_string(),
+                    to_feature,
+                    target_layer,
+                    kind: SecurityFeatureEdgeKind::Import,
+                    text: import.from_path.join("."),
+                });
+            }
+        }
+
+        for function in &module.functions {
+            for symbol in referenced_hir_symbols(&function.body) {
+                if let Some(to_feature) = symbol_features.get(&symbol) {
+                    edges.push(SecurityFeatureEdge {
+                        file: file.path.clone(),
+                        line: 1,
+                        from_feature: from_feature.to_string(),
+                        to_feature: to_feature.clone(),
+                        target_layer: None,
+                        kind: SecurityFeatureEdgeKind::Call,
+                        text: symbol,
+                    });
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+fn hir_import_feature_details(import: &HirImport) -> Option<(String, Option<String>)> {
+    let feature_index = import.from_path.iter().position(|part| part == "feature")?;
+    let feature = import.from_path.get(feature_index + 1)?.clone();
+    let layer = import.from_path.get(feature_index + 2).cloned();
+    Some((feature, layer))
+}
+
+fn referenced_hir_symbols(stmts: &[HirStmt]) -> BTreeSet<String> {
+    let mut symbols = BTreeSet::new();
+    for stmt in stmts {
+        collect_hir_stmt_symbols(stmt, &mut symbols);
+    }
+    symbols
+}
+
+fn collect_hir_stmt_symbols(stmt: &HirStmt, symbols: &mut BTreeSet<String>) {
+    match stmt {
+        HirStmt::Let { value, .. } | HirStmt::Return(value) => {
+            if let Some(expr) = value {
+                collect_hir_expr_symbols(expr, symbols);
+            }
+        }
+        HirStmt::Assign { target, value } => {
+            collect_hir_expr_symbols(target, symbols);
+            collect_hir_expr_symbols(value, symbols);
+        }
+        HirStmt::Expr(expr) => collect_hir_expr_symbols(expr, symbols),
+        HirStmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_hir_expr_symbols(condition, symbols);
+            for stmt in then_block {
+                collect_hir_stmt_symbols(stmt, symbols);
+            }
+            if let Some(else_block) = else_block {
+                for stmt in else_block {
+                    collect_hir_stmt_symbols(stmt, symbols);
+                }
+            }
+        }
+        HirStmt::While { condition, body, .. } => {
+            collect_hir_expr_symbols(condition, symbols);
+            for stmt in body {
+                collect_hir_stmt_symbols(stmt, symbols);
+            }
+        }
+        HirStmt::For { iterable, body, .. } => {
+            collect_hir_expr_symbols(iterable, symbols);
+            for stmt in body {
+                collect_hir_stmt_symbols(stmt, symbols);
+            }
+        }
+        HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
+            for stmt in body {
+                collect_hir_stmt_symbols(stmt, symbols);
+            }
+        }
+        HirStmt::Assert { condition, .. } | HirStmt::Assume { condition, .. } | HirStmt::Admit { condition, .. } => {
+            collect_hir_expr_symbols(condition, symbols);
+        }
+        HirStmt::Break
+        | HirStmt::Continue
+        | HirStmt::ProofHint { .. }
+        | HirStmt::Calc { .. }
+        | HirStmt::InlineAsm { .. } => {}
+    }
+}
+
+fn collect_hir_expr_symbols(expr: &HirExpr, symbols: &mut BTreeSet<String>) {
+    match &expr.kind {
+        HirExprKind::Global(name) => {
+            symbols.insert(name.clone());
+        }
+        HirExprKind::Binary { left, right, .. } => {
+            collect_hir_expr_symbols(left, symbols);
+            collect_hir_expr_symbols(right, symbols);
+        }
+        HirExprKind::Unary { operand, .. } => collect_hir_expr_symbols(operand, symbols),
+        HirExprKind::Call { func, args } => {
+            collect_hir_expr_symbols(func, symbols);
+            for arg in args {
+                collect_hir_expr_symbols(arg, symbols);
+            }
+        }
+        HirExprKind::MethodCall { receiver, args, .. } => {
+            collect_hir_expr_symbols(receiver, symbols);
+            for arg in args {
+                collect_hir_expr_symbols(arg, symbols);
+            }
+        }
+        HirExprKind::FieldAccess { receiver, .. } => collect_hir_expr_symbols(receiver, symbols),
+        HirExprKind::Index { receiver, index } => {
+            collect_hir_expr_symbols(receiver, symbols);
+            collect_hir_expr_symbols(index, symbols);
+        }
+        HirExprKind::Tuple(items) | HirExprKind::Array(items) | HirExprKind::VecLiteral(items) => {
+            for item in items {
+                collect_hir_expr_symbols(item, symbols);
+            }
+        }
+        HirExprKind::ArrayRepeat { value, count } => {
+            collect_hir_expr_symbols(value, symbols);
+            collect_hir_expr_symbols(count, symbols);
+        }
+        HirExprKind::StructInit { fields, .. } => {
+            for field in fields {
+                collect_hir_expr_symbols(field, symbols);
+            }
+        }
+        HirExprKind::Dict(items) => {
+            for (key, value) in items {
+                collect_hir_expr_symbols(key, symbols);
+                collect_hir_expr_symbols(value, symbols);
+            }
+        }
+        HirExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_hir_expr_symbols(condition, symbols);
+            collect_hir_expr_symbols(then_branch, symbols);
+            if let Some(else_branch) = else_branch {
+                collect_hir_expr_symbols(else_branch, symbols);
+            }
+        }
+        HirExprKind::Block(stmts) => {
+            for stmt in stmts {
+                collect_hir_stmt_symbols(stmt, symbols);
+            }
+        }
+        HirExprKind::Ref(expr)
+        | HirExprKind::Deref(expr)
+        | HirExprKind::Yield(expr)
+        | HirExprKind::GeneratorCreate { body: expr }
+        | HirExprKind::FutureCreate { body: expr }
+        | HirExprKind::Await(expr)
+        | HirExprKind::ActorSpawn { body: expr }
+        | HirExprKind::ContractOld(expr) => collect_hir_expr_symbols(expr, symbols),
+        HirExprKind::PointerNew { value, .. } => collect_hir_expr_symbols(value, symbols),
+        HirExprKind::Cast { expr, .. } => collect_hir_expr_symbols(expr, symbols),
+        HirExprKind::Lambda { body, .. } => collect_hir_expr_symbols(body, symbols),
+        HirExprKind::BuiltinCall { args, .. } | HirExprKind::GpuIntrinsic { args, .. } => {
+            for arg in args {
+                collect_hir_expr_symbols(arg, symbols);
+            }
+        }
+        HirExprKind::LetIn { value, body, .. } => {
+            collect_hir_expr_symbols(value, symbols);
+            collect_hir_expr_symbols(body, symbols);
+        }
+        HirExprKind::NeighborAccess { array, .. } => collect_hir_expr_symbols(array, symbols),
+        HirExprKind::Local(_)
+        | HirExprKind::Integer(_)
+        | HirExprKind::Float(_)
+        | HirExprKind::String(_)
+        | HirExprKind::Bool(_)
+        | HirExprKind::Nil
+        | HirExprKind::ContractResult => {}
+    }
 }
 
 fn collect_boundary_gates(modules: &[HirModule]) -> Vec<SecurityBoundaryGate> {
