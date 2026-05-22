@@ -595,6 +595,35 @@ fn reports_sec401_for_raw_ambient_authority_apis() {
 }
 
 #[test]
+fn reports_sec401_for_raw_stdlib_authority_functions_in_source_fallback() {
+    let files = vec![SecuritySourceFile {
+        path: "src/feature/plugin/service/report.spl".to_string(),
+        source: "class ReportPlugin:\n    fn run():\n        file_read_text(\"/etc/passwd\")\n        tcp_stream_connect(\"example.com:80\")\n        process_run(\"sh\", [\"-c\", \"id\"])\n"
+            .to_string(),
+    }];
+
+    let violations = source_security_violations_sdn(&files);
+    assert!(violations.contains("api: file_read_text"));
+    assert!(violations.contains("replacement: ReadFile.read_text"));
+    assert!(violations.contains("api: tcp_stream_connect"));
+    assert!(violations.contains("replacement: NetworkEndpoint.connect"));
+    assert!(violations.contains("api: process_run"));
+    assert!(violations.contains("replacement: ProcessSpawner.run"));
+}
+
+#[test]
+fn allows_capability_replacement_methods_in_source_fallback() {
+    let files = vec![SecuritySourceFile {
+        path: "src/feature/plugin/service/report.spl".to_string(),
+        source: "class ReportPlugin:\n    init(file: ReadFile, env: EnvVar):\n        self.file = file\n        self.env = env\n    fn run():\n        self.file.read_text(\"/reports/daily.txt\")\n        self.env.get(\"REPORT_MODE\")\n"
+            .to_string(),
+    }];
+
+    let violations = source_security_violations_sdn(&files);
+    assert!(!violations.contains("code: SEC401"));
+}
+
+#[test]
 fn lowers_capability_policy_and_renders_manifest() {
     let module = lower(
         r#"capability ReadReports:

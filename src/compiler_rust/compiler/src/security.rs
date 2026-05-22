@@ -1074,7 +1074,19 @@ struct RawAmbientApi {
 }
 
 fn raw_ambient_api(line: &str) -> Option<RawAmbientApi> {
-    let apis = [
+    raw_ambient_api_patterns()
+        .iter()
+        .find_map(|(pattern, api)| line.contains(pattern).then_some(*api))
+}
+
+fn raw_ambient_api_symbol(symbol: &str) -> Option<RawAmbientApi> {
+    raw_ambient_api_patterns()
+        .iter()
+        .find_map(|(pattern, api)| (symbol == *pattern).then_some(*api))
+}
+
+fn raw_ambient_api_patterns() -> &'static [(&'static str, RawAmbientApi)] {
+    &[
         (
             "File.open",
             RawAmbientApi {
@@ -1107,9 +1119,119 @@ fn raw_ambient_api(line: &str) -> Option<RawAmbientApi> {
                 replacement: "ProcessSpawner.run",
             },
         ),
-    ];
-    apis.iter()
-        .find_map(|(pattern, api)| line.contains(pattern).then_some(*api))
+        (
+            "file_read_text",
+            RawAmbientApi {
+                name: "file_read_text",
+                required: "ReadFile",
+                replacement: "ReadFile.read_text",
+            },
+        ),
+        (
+            "rt_file_read_text",
+            RawAmbientApi {
+                name: "rt_file_read_text",
+                required: "ReadFile",
+                replacement: "ReadFile.read_text",
+            },
+        ),
+        (
+            "file_write_text",
+            RawAmbientApi {
+                name: "file_write_text",
+                required: "WriteFile",
+                replacement: "WriteFile.write_text",
+            },
+        ),
+        (
+            "file_write",
+            RawAmbientApi {
+                name: "file_write",
+                required: "WriteFile",
+                replacement: "WriteFile.write_text",
+            },
+        ),
+        (
+            "rt_file_write_text_at",
+            RawAmbientApi {
+                name: "rt_file_write_text_at",
+                required: "WriteFile",
+                replacement: "WriteFile.write_text",
+            },
+        ),
+        (
+            "rt_file_write_text",
+            RawAmbientApi {
+                name: "rt_file_write_text",
+                required: "WriteFile",
+                replacement: "WriteFile.write_text",
+            },
+        ),
+        (
+            "tcp_stream_connect",
+            RawAmbientApi {
+                name: "tcp_stream_connect",
+                required: "NetworkEndpoint",
+                replacement: "NetworkEndpoint.connect",
+            },
+        ),
+        (
+            "TcpStream.connect",
+            RawAmbientApi {
+                name: "TcpStream.connect",
+                required: "NetworkEndpoint",
+                replacement: "NetworkEndpoint.connect",
+            },
+        ),
+        (
+            "udp_socket_connect",
+            RawAmbientApi {
+                name: "udp_socket_connect",
+                required: "NetworkEndpoint",
+                replacement: "NetworkEndpoint.connect",
+            },
+        ),
+        (
+            "env_get",
+            RawAmbientApi {
+                name: "env_get",
+                required: "EnvVar",
+                replacement: "EnvVar.get",
+            },
+        ),
+        (
+            "rt_env_get",
+            RawAmbientApi {
+                name: "rt_env_get",
+                required: "EnvVar",
+                replacement: "EnvVar.get",
+            },
+        ),
+        (
+            "process_run",
+            RawAmbientApi {
+                name: "process_run",
+                required: "ProcessSpawner",
+                replacement: "ProcessSpawner.run",
+            },
+        ),
+        (
+            "rt_process_run",
+            RawAmbientApi {
+                name: "rt_process_run",
+                required: "ProcessSpawner",
+                replacement: "ProcessSpawner.run",
+            },
+        ),
+        (
+            "rt_process_spawn_async",
+            RawAmbientApi {
+                name: "rt_process_spawn_async",
+                required: "ProcessSpawner",
+                replacement: "ProcessSpawner.run",
+            },
+        ),
+    ]
 }
 
 fn authorization_predicate_symbol(symbol: &str) -> Option<&'static str> {
@@ -1127,45 +1249,6 @@ fn authorization_predicate_symbol(symbol: &str) -> Option<&'static str> {
         return Some("has_role");
     }
     None
-}
-
-fn raw_ambient_api_symbol(symbol: &str) -> Option<RawAmbientApi> {
-    let apis = [
-        (
-            "File.open",
-            RawAmbientApi {
-                name: "File.open",
-                required: "ReadFile or WriteFile",
-                replacement: "ReadFile.read_text or WriteFile.write_text",
-            },
-        ),
-        (
-            "Network.connect",
-            RawAmbientApi {
-                name: "Network.connect",
-                required: "NetworkEndpoint",
-                replacement: "NetworkEndpoint.connect",
-            },
-        ),
-        (
-            "Env.get",
-            RawAmbientApi {
-                name: "Env.get",
-                required: "EnvVar",
-                replacement: "EnvVar.get",
-            },
-        ),
-        (
-            "Process.spawn",
-            RawAmbientApi {
-                name: "Process.spawn",
-                required: "ProcessSpawner",
-                replacement: "ProcessSpawner.run",
-            },
-        ),
-    ];
-    apis.iter()
-        .find_map(|(pattern, api)| (symbol == *pattern).then_some(*api))
 }
 
 fn collect_gates(module: &HirModule) -> Vec<HirSecurityGate> {

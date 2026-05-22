@@ -796,8 +796,8 @@ Current compiler-front-end slice:
 29. `SEC201` now prefers the compiler-resolved HIR import/call graph whenever a full lowered workspace is available. The source scanner remains as the zero-config fallback for partial or no HIR, but full-workspace checks no longer inherit source-level false positives from textual references.
 30. `SEC301` and `SEC401` now also prefer resolved HIR facts whenever a full lowered workspace is available. Source scanning remains the zero-config fallback for partial/no HIR, but full-workspace authorization and ambient-authority diagnostics are driven by typed resolved calls and capability-handle facts.
 31. The standard security enforcement library now exports first-class native object-capability handles for raw authority replacements: `ReadFile.read_text`, `WriteFile.write_text`, `NetworkEndpoint.connect`, `EnvVar.get`, and `ProcessSpawner.run`. `SEC401` diagnostics now point directly to those replacement methods instead of only naming the handle family.
+32. The partial-workspace `SEC401` source fallback now recognizes the actual stdlib raw authority functions that those handles replace, including `file_read_text`, `file_write_text`, `tcp_stream_connect`, `env_get`, and `process_run`. Replacement-handle calls remain unreported, preserving convention-first use while still warning on ambient APIs before full HIR is available.
 
 Remaining implementation order:
 
-1. Extend source fallback suppression once raw file/network/env/process calls lower to typed capability-handle APIs in partial-workspace checks.
-2. Route real MIR failure edges to `audit_failure` and extend generated security registry startup loading beyond hosted executable/archive builds where needed.
+1. Route real MIR failure edges to `audit_failure` and extend generated security registry startup loading beyond hosted executable/archive builds where needed.
