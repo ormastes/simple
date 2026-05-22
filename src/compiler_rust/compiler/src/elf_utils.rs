@@ -587,6 +587,28 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
             simple_runtime::rt_io_tcp_write_text_read_exact_len as *const () as usize
         }
 
+        // Security gate AOP runtime operations
+        "rt_security_enter_gate" => simple_runtime::rt_security_enter_gate as *const () as usize,
+        "rt_security_exit_gate" => simple_runtime::rt_security_exit_gate as *const () as usize,
+        "rt_security_require_policy" => simple_runtime::rt_security_require_policy as *const () as usize,
+        "rt_security_enter_sandbox" => simple_runtime::rt_security_enter_sandbox as *const () as usize,
+        "rt_security_exit_sandbox" => simple_runtime::rt_security_exit_sandbox as *const () as usize,
+        "rt_security_audit_start" => simple_runtime::rt_security_audit_start as *const () as usize,
+        "rt_security_audit_success" => simple_runtime::rt_security_audit_success as *const () as usize,
+        "rt_security_audit_failure" => simple_runtime::rt_security_audit_failure as *const () as usize,
+        "rt_security_reset_counters" => simple_runtime::rt_security_reset_counters as *const () as usize,
+        "rt_security_gate_depth" => simple_runtime::rt_security_gate_depth as *const () as usize,
+        "rt_security_policy_checks" => simple_runtime::rt_security_policy_checks as *const () as usize,
+        "rt_security_audit_events" => simple_runtime::rt_security_audit_events as *const () as usize,
+        "rt_security_last_gate_id" => simple_runtime::rt_security_last_gate_id as *const () as usize,
+        "rt_security_last_policy_id" => simple_runtime::rt_security_last_policy_id as *const () as usize,
+        "rt_security_last_sandbox_id" => simple_runtime::rt_security_last_sandbox_id as *const () as usize,
+        "rt_security_last_audit_id" => simple_runtime::rt_security_last_audit_id as *const () as usize,
+        "rt_security_register_policy" => simple_runtime::rt_security_register_policy as *const () as usize,
+        "rt_security_policy_allowed" => simple_runtime::rt_security_policy_allowed as *const () as usize,
+        "rt_security_register_sandbox" => simple_runtime::rt_security_register_sandbox as *const () as usize,
+        "rt_security_sandbox_registered" => simple_runtime::rt_security_sandbox_registered as *const () as usize,
+
         // Doctest I/O operations (file discovery)
         "doctest_read_file" => simple_runtime::doctest_read_file as *const () as usize,
         "doctest_path_exists" => simple_runtime::doctest_path_exists as *const () as usize,
@@ -603,8 +625,12 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
             crate::codegen::cranelift_sffi::rt_cranelift_finalize_module as *const () as usize
         }
         "rt_cranelift_free_module" => crate::codegen::cranelift_sffi::rt_cranelift_free_module as *const () as usize,
-        "rt_cranelift_new_signature" => crate::codegen::cranelift_sffi::rt_cranelift_new_signature as *const () as usize,
-        "rt_cranelift_sig_add_param" => crate::codegen::cranelift_sffi::rt_cranelift_sig_add_param as *const () as usize,
+        "rt_cranelift_new_signature" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_new_signature as *const () as usize
+        }
+        "rt_cranelift_sig_add_param" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_sig_add_param as *const () as usize
+        }
         "rt_cranelift_sig_set_return" => {
             crate::codegen::cranelift_sffi::rt_cranelift_sig_set_return as *const () as usize
         }

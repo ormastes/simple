@@ -4,6 +4,7 @@ use super::diagnostics::{DiagnosticLevel, WeavingDiagnostic};
 use super::matcher::Weaver;
 use super::types::*;
 use crate::mir::{BlockId, CallTarget, MirBlock, MirFunction, MirInst, VReg};
+use crate::security::SecurityAdviceStep;
 use std::collections::HashMap;
 
 impl Weaver {
@@ -83,9 +84,9 @@ impl Weaver {
             // Sort by instruction index in descending order
             block_insertions.sort_by(|a, b| b.0.cmp(&a.0));
 
-            if let Some(block) = function.blocks.iter_mut().find(|b| b.id == block_id) {
+            if let Some(block_index) = function.blocks.iter().position(|b| b.id == block_id) {
                 for (instruction_index, advices) in block_insertions {
-                    self.insert_advice_calls(block, instruction_index, &advices);
+                    self.insert_advice_calls(function, block_index, instruction_index, &advices);
                 }
             }
         }
@@ -102,9 +103,40 @@ impl Weaver {
         }
     }
 
+    fn create_security_advice_insts(&self, function: &mut MirFunction, step: &SecurityAdviceStep) -> Vec<MirInst> {
+        let (name, ids): (&str, Vec<u64>) = match step {
+            SecurityAdviceStep::EnterGate { gate_id, .. } => ("rt_security_enter_gate", vec![*gate_id]),
+            SecurityAdviceStep::RequirePolicy { policy_id, .. } => ("rt_security_require_policy", vec![*policy_id]),
+            SecurityAdviceStep::EnterSandbox { sandbox_id, .. } => ("rt_security_enter_sandbox", vec![*sandbox_id]),
+            SecurityAdviceStep::AuditStart { gate_id, audit_id, .. } => {
+                ("rt_security_audit_start", vec![*gate_id, *audit_id])
+            }
+            SecurityAdviceStep::Proceed => return Vec::new(),
+            SecurityAdviceStep::AuditSuccess { gate_id, .. } => ("rt_security_audit_success", vec![*gate_id]),
+            SecurityAdviceStep::AuditFailure { gate_id, .. } => ("rt_security_audit_failure", vec![*gate_id]),
+            SecurityAdviceStep::ExitSandbox { sandbox_id } => ("rt_security_exit_sandbox", vec![*sandbox_id]),
+            SecurityAdviceStep::ExitGate { gate_id } => ("rt_security_exit_gate", vec![*gate_id]),
+        };
+        let mut insts = Vec::new();
+        let mut args = Vec::new();
+        for id in ids {
+            let dest = function.new_vreg();
+            insts.push(MirInst::ConstInt { dest, value: id as i64 });
+            args.push(dest);
+        }
+        insts.push(self.create_advice_call(name, args));
+        insts
+    }
+
     /// Insert advice calls into a block at a specific instruction index.
     /// Returns the number of instructions inserted.
-    fn insert_advice_calls(&self, block: &mut MirBlock, instruction_index: usize, advices: &[MatchedAdvice]) -> usize {
+    fn insert_advice_calls(
+        &self,
+        function: &mut MirFunction,
+        block_index: usize,
+        instruction_index: usize,
+        advices: &[MatchedAdvice],
+    ) -> usize {
         let mut inserted = 0;
 
         // Separate advices by form
@@ -115,14 +147,16 @@ impl Weaver {
         // Insert Before advices before the join point instruction
         for (i, advice) in before_advices.iter().enumerate() {
             let call_inst = self.create_advice_call(&advice.advice_function, Vec::new());
-            block.instructions.insert(instruction_index + i, call_inst);
+            function.blocks[block_index]
+                .instructions
+                .insert(instruction_index + i, call_inst);
             inserted += 1;
         }
 
         // Insert AfterSuccess advices after the join point instruction
         // For execution join points (index 0 with no actual instruction),
         // insert at the current end of the block
-        let after_index = if instruction_index == 0 && block.instructions.len() <= inserted {
+        let after_index = if instruction_index == 0 && function.blocks[block_index].instructions.len() <= inserted {
             // Execution join point - append after all before advices
             instruction_index + inserted
         } else {
@@ -132,14 +166,16 @@ impl Weaver {
 
         for (i, advice) in after_success_advices.iter().enumerate() {
             let call_inst = self.create_advice_call(&advice.advice_function, Vec::new());
-            block.instructions.insert(after_index + i, call_inst);
+            function.blocks[block_index]
+                .instructions
+                .insert(after_index + i, call_inst);
             inserted += 1;
         }
 
         // Insert AfterError advices at error handling points
         // For error join points (ResultErr, TryUnwrap), insert immediately after
         if !after_error_advices.is_empty() {
-            let error_index = if instruction_index == 0 && block.instructions.len() <= inserted {
+            let error_index = if instruction_index == 0 && function.blocks[block_index].instructions.len() <= inserted {
                 // Execution join point - append after all other advices
                 instruction_index + inserted
             } else {
@@ -149,7 +185,9 @@ impl Weaver {
 
             for (i, advice) in after_error_advices.iter().enumerate() {
                 let call_inst = self.create_advice_call(&advice.advice_function, Vec::new());
-                block.instructions.insert(error_index + i, call_inst);
+                function.blocks[block_index]
+                    .instructions
+                    .insert(error_index + i, call_inst);
                 inserted += 1;
             }
         }
@@ -161,6 +199,23 @@ impl Weaver {
         let around_advices: Vec<_> = advices.iter().filter(|a| a.form == AdviceForm::Around).collect();
 
         if !around_advices.is_empty() {
+            for advice in around_advices {
+                let Some(plan) = &advice.security_plan else {
+                    continue;
+                };
+                let mut offset = 0;
+                for step in &plan.steps {
+                    let insts = self.create_security_advice_insts(function, step);
+                    for inst in insts {
+                        function.blocks[block_index]
+                            .instructions
+                            .insert(instruction_index + inserted + offset, inst);
+                        offset += 1;
+                    }
+                }
+                inserted += offset;
+            }
+
             // Around advice requires wrapping the join point in a continuation
             // This is complex and requires MIR function extraction/closure creation
             // For now, around advice only works via the interpreter's runtime support

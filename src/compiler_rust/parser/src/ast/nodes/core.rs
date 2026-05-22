@@ -65,6 +65,9 @@ pub enum Node {
     AopAdvice(AopAdvice),
     DiBinding(DiBinding),
     InjectGraph(InjectGraph),
+    SecurityPolicy(SecurityPolicy),
+    SecurityGate(SecurityGate),
+    SandboxPolicy(SandboxPolicy),
     ArchitectureRule(ArchitectureRule),
     MockDecl(MockDecl),
 

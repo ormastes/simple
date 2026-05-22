@@ -60,6 +60,7 @@ fn register_static_runtime_symbols_with_abi() {
 }
 pub mod parallel;
 pub mod sandbox;
+pub mod security_runtime;
 pub mod value;
 
 // Keep a small set of dynamic-loader exports alive only when static runtime
@@ -211,6 +212,15 @@ pub fn register_static_runtime_symbols() {
     #[cfg(feature = "runtime-symbol-table")]
     let _ = simple_runtime_abi::register_static_runtime_symbols(RUNTIME_SYMBOL_ENTRIES);
 }
+
+pub use security_runtime::{
+    rt_security_audit_events, rt_security_audit_failure, rt_security_audit_start, rt_security_audit_success,
+    rt_security_enter_gate, rt_security_enter_sandbox, rt_security_exit_gate, rt_security_exit_sandbox,
+    rt_security_gate_depth, rt_security_last_audit_id, rt_security_last_gate_id, rt_security_last_policy_id,
+    rt_security_last_sandbox_id, rt_security_policy_allowed, rt_security_policy_checks, rt_security_register_policy,
+    rt_security_register_sandbox, rt_security_require_policy, rt_security_reset_counters,
+    rt_security_sandbox_registered,
+};
 
 #[no_mangle]
 pub extern "C" fn rt_sleep_ms(milliseconds: i64) {

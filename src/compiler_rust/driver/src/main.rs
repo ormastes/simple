@@ -67,7 +67,6 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-
 use std::path::PathBuf;
 
 use simple_common::target::Target;
@@ -85,6 +84,7 @@ use simple_driver::cli::migrate::run_migrate;
 use simple_driver::cli::native_build::handle_native_build;
 use simple_driver::cli::repl::run_repl;
 use simple_driver::cli::sandbox::{apply_sandbox, parse_sandbox_config};
+use simple_driver::cli::security::run_security;
 use simple_driver::cli::test_runner;
 use simple_driver::cli::verify::run_verify;
 #[cfg(feature = "tui")]
@@ -497,6 +497,13 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "src/app/spec_coverage/main.spl",
         rust_handler: Handler::Args(run_spec_coverage),
         env_override: "SIMPLE_SPEC_COVERAGE_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "security",
+        app_path: "",
+        rust_handler: Handler::Args(run_security),
+        env_override: "",
         needs_rust_flags: &[],
     },
     CommandEntry {

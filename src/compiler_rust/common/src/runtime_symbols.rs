@@ -17,7 +17,7 @@ pub struct AbiVersion {
 
 impl AbiVersion {
     /// Current ABI version of the runtime.
-    pub const CURRENT: Self = Self { major: 1, minor: 2 };
+    pub const CURRENT: Self = Self { major: 1, minor: 3 };
 
     /// Create a new ABI version.
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -250,6 +250,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("sffi_regex_")
         || name.starts_with("rt_sdn_")
         || name.starts_with("rt_sandbox_")
+        || name.starts_with("rt_security_")
         || name.starts_with("rt_coverage_")
         || name.starts_with("rt_decision_probe")
         || name.starts_with("rt_condition_probe")
@@ -869,6 +870,27 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_sandbox_get_memory",
     "rt_sandbox_get_network_mode",
     "rt_sandbox_get_fs_mode",
+    // Security gate AOP runtime operations
+    "rt_security_enter_gate",
+    "rt_security_exit_gate",
+    "rt_security_require_policy",
+    "rt_security_enter_sandbox",
+    "rt_security_exit_sandbox",
+    "rt_security_audit_start",
+    "rt_security_audit_success",
+    "rt_security_audit_failure",
+    "rt_security_reset_counters",
+    "rt_security_gate_depth",
+    "rt_security_policy_checks",
+    "rt_security_audit_events",
+    "rt_security_last_gate_id",
+    "rt_security_last_policy_id",
+    "rt_security_last_sandbox_id",
+    "rt_security_last_audit_id",
+    "rt_security_register_policy",
+    "rt_security_policy_allowed",
+    "rt_security_register_sandbox",
+    "rt_security_sandbox_registered",
     "rt_to_string",
     "rt_raw_u64_to_string",
     "rt_value_to_string",
@@ -1012,6 +1034,10 @@ mod tests {
         assert_eq!(symbol_class_of("rt_byte_array_new"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_stdout_flush"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_file_read_text"), RuntimeSymbolClass::HostedOnly);
+        assert_eq!(
+            symbol_class_of("rt_security_enter_gate"),
+            RuntimeSymbolClass::HostedOnly
+        );
         assert_eq!(symbol_class_of("rt_array_clear"), RuntimeSymbolClass::Unported);
     }
 }

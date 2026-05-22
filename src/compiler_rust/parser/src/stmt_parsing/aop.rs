@@ -10,7 +10,7 @@
 
 use crate::ast::{
     AdviceType, AopAdvice, ArchRuleType, ArchitectureRule, DiBinding, DiScope, InjectGraph, InjectItem, InjectLifetime,
-    InjectMode, MockDecl, PredicateExpr,
+    InjectMode, MockDecl, PredicateExpr, SandboxItem, SandboxPolicy, SecurityGate, SecurityItem, SecurityPolicy,
 };
 use crate::error::ParseError;
 use crate::parser_impl::core::Parser;
@@ -447,6 +447,314 @@ impl<'a> Parser<'a> {
 
     fn span_from_start(&self, start: Span) -> Span {
         Span::new(start.start, self.previous.span.end, start.line, start.column)
+    }
+
+    pub fn parse_security_policy(&mut self) -> Result<SecurityPolicy, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("security")?;
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+        let items = self.parse_security_items()?;
+        self.expect(&TokenKind::Dedent)?;
+        Ok(SecurityPolicy {
+            name,
+            items,
+            conventions_enabled: true,
+            span: self.span_from_start(start),
+        })
+    }
+
+    pub fn parse_top_level_security_gate(&mut self) -> Result<SecurityGate, ParseError> {
+        self.expect_identifier_named("security")?;
+        self.parse_security_gate_after_keyword()
+    }
+
+    fn parse_security_items(&mut self) -> Result<Vec<SecurityItem>, ParseError> {
+        let mut items = Vec::new();
+        while !matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+            self.skip_newlines();
+            if matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                break;
+            }
+            items.push(self.parse_security_item()?);
+            self.skip_newlines();
+        }
+        Ok(items)
+    }
+
+    fn parse_security_item(&mut self) -> Result<SecurityItem, ParseError> {
+        let start = self.current.span;
+        match &self.current.kind {
+            TokenKind::Identifier { name, .. } if name == "root" => {
+                self.advance();
+                Ok(SecurityItem::Root {
+                    path: self.collect_until_line_end(),
+                    span: self.span_from_start(start),
+                })
+            }
+            TokenKind::Default => {
+                self.advance();
+                Ok(SecurityItem::Default {
+                    action: self.collect_until_line_end(),
+                    span: self.span_from_start(start),
+                })
+            }
+            TokenKind::Identifier { name, .. } if name == "default" => {
+                self.advance();
+                Ok(SecurityItem::Default {
+                    action: self.collect_until_line_end(),
+                    span: self.span_from_start(start),
+                })
+            }
+            TokenKind::Identifier { name, .. } if name == "dimension" => self.parse_security_dimension(),
+            TokenKind::Allow => self.parse_security_allow(),
+            TokenKind::Identifier { name, .. } if name == "deny" => self.parse_security_deny(),
+            TokenKind::Identifier { name, .. } if name == "gate" => {
+                self.parse_security_gate_after_keyword().map(SecurityItem::Gate)
+            }
+            _ => Ok(SecurityItem::Raw {
+                text: self.collect_until_line_end(),
+                span: self.span_from_start(start),
+            }),
+        }
+    }
+
+    fn parse_security_dimension(&mut self) -> Result<SecurityItem, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("dimension")?;
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+        let mut rules = Vec::new();
+        while !matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+            self.skip_newlines();
+            if matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                break;
+            }
+            let rule = self.collect_security_clause_until_line_end();
+            if !rule.is_empty() {
+                rules.push(rule);
+            }
+            self.skip_newlines();
+        }
+        self.expect(&TokenKind::Dedent)?;
+        Ok(SecurityItem::Dimension {
+            name,
+            rules,
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn parse_security_allow(&mut self) -> Result<SecurityItem, ParseError> {
+        let start = self.current.span;
+        self.expect(&TokenKind::Allow)?;
+        let from = self.collect_security_clause_until_token(|kind| matches!(kind, TokenKind::Arrow));
+        self.expect(&TokenKind::Arrow)?;
+        let to = self.collect_security_clause_until_identifier("through");
+        let through = if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "through") {
+            self.advance();
+            Some(self.collect_until_line_end())
+        } else {
+            None
+        };
+        Ok(SecurityItem::Allow {
+            from,
+            to,
+            through,
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn parse_security_deny(&mut self) -> Result<SecurityItem, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("deny")?;
+        let from = self.collect_security_clause_until_token(|kind| matches!(kind, TokenKind::Arrow));
+        self.expect(&TokenKind::Arrow)?;
+        let to = self.collect_security_clause_until_token(|kind| {
+            matches!(kind, TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof)
+                || matches!(kind, TokenKind::Identifier { name, .. } if name == "except" || name == "direct")
+        });
+        let mut except = None;
+        let mut direct = false;
+        while !matches!(
+            &self.current.kind,
+            TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+        ) {
+            match &self.current.kind {
+                TokenKind::Identifier { name, .. } if name == "except" => {
+                    self.advance();
+                    except = Some(self.collect_until_line_end());
+                    break;
+                }
+                TokenKind::Identifier { name, .. } if name == "direct" => {
+                    direct = true;
+                    self.advance();
+                }
+                _ => self.advance(),
+            }
+        }
+        Ok(SecurityItem::Deny {
+            from,
+            to,
+            except,
+            direct,
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn parse_security_gate_after_keyword(&mut self) -> Result<SecurityGate, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("gate")?;
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+        let mut gate = SecurityGate {
+            name,
+            from: None,
+            to: None,
+            policy: None,
+            audit: None,
+            sandbox: None,
+            grants: Vec::new(),
+            body: Vec::new(),
+            span: start,
+        };
+        while !matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+            self.skip_newlines();
+            if matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                break;
+            }
+            match &self.current.kind {
+                TokenKind::From => {
+                    self.advance();
+                    gate.from = Some(self.collect_security_clause_until_line_end());
+                }
+                TokenKind::To => {
+                    self.advance();
+                    gate.to = Some(self.collect_security_clause_until_line_end());
+                }
+                TokenKind::Identifier { name, .. } if name == "policy" => {
+                    self.advance();
+                    gate.policy = Some(self.collect_until_line_end());
+                }
+                TokenKind::Identifier { name, .. } if name == "audit" => {
+                    self.advance();
+                    gate.audit = Some(self.collect_until_line_end());
+                }
+                TokenKind::Identifier { name, .. } if name == "sandbox" => {
+                    self.advance();
+                    gate.sandbox = Some(self.collect_until_line_end());
+                }
+                TokenKind::Identifier { name, .. } if name == "grant" => {
+                    self.advance();
+                    self.expect(&TokenKind::Colon)?;
+                    self.expect(&TokenKind::Newline)?;
+                    self.expect(&TokenKind::Indent)?;
+                    while !matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                        self.skip_newlines();
+                        if matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                            break;
+                        }
+                        let grant = self.collect_until_line_end();
+                        if !grant.is_empty() {
+                            gate.grants.push(grant);
+                        }
+                    }
+                    self.expect(&TokenKind::Dedent)?;
+                }
+                _ => {
+                    let line = self.collect_until_line_end();
+                    if !line.is_empty() {
+                        gate.body.push(line);
+                    }
+                }
+            }
+        }
+        self.expect(&TokenKind::Dedent)?;
+        gate.span = self.span_from_start(start);
+        Ok(gate)
+    }
+
+    pub fn parse_sandbox_policy(&mut self) -> Result<SandboxPolicy, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("sandbox")?;
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+        let mut items = Vec::new();
+        while !matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+            self.skip_newlines();
+            if matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                break;
+            }
+            let item_start = self.current.span;
+            let key = self.expect_identifier()?;
+            let value = self.collect_until_line_end();
+            if key == "backend" {
+                items.push(SandboxItem::Backend {
+                    name: value,
+                    span: self.span_from_start(item_start),
+                });
+            } else {
+                items.push(SandboxItem::Rule {
+                    key,
+                    value,
+                    span: self.span_from_start(item_start),
+                });
+            }
+        }
+        self.expect(&TokenKind::Dedent)?;
+        Ok(SandboxPolicy {
+            name,
+            items,
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn collect_security_clause_until_line_end(&mut self) -> String {
+        self.collect_security_clause_until_token(|kind| {
+            matches!(kind, TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof)
+        })
+    }
+
+    fn collect_security_clause_until_identifier(&mut self, expected: &str) -> String {
+        self.collect_security_clause_until_token(
+            |kind| matches!(kind, TokenKind::Identifier { name, .. } if name == expected),
+        )
+    }
+
+    fn collect_security_clause_until_token<F>(&mut self, stop: F) -> String
+    where
+        F: Fn(&TokenKind) -> bool,
+    {
+        let mut value = String::new();
+        let mut previous_was_word = false;
+        while !stop(&self.current.kind) {
+            if matches!(
+                &self.current.kind,
+                TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+            ) {
+                break;
+            }
+            let current_is_word = self
+                .current
+                .lexeme
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '"');
+            if previous_was_word && current_is_word && !value.is_empty() {
+                value.push(' ');
+            }
+            value.push_str(&self.current.lexeme);
+            previous_was_word = current_is_word;
+            self.advance();
+        }
+        value.trim().to_string()
     }
 
     /// Parse a DI binding: `bind on pc{...} -> <Impl> scope priority`

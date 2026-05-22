@@ -641,6 +641,17 @@ impl<'a> Parser<'a> {
             // AOP & Unified Predicates (#1000-1050)
             TokenKind::On => self.parse_aop_advice().map(Node::AopAdvice),
             TokenKind::Identifier { .. } if is_inject_graph_decl => self.parse_inject_graph().map(Node::InjectGraph),
+            TokenKind::Identifier { name, .. } if name == "security" => {
+                let next = self.peek_next();
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "gate") {
+                    self.parse_top_level_security_gate().map(Node::SecurityGate)
+                } else {
+                    self.parse_security_policy().map(Node::SecurityPolicy)
+                }
+            }
+            TokenKind::Identifier { name, .. } if name == "sandbox" => {
+                self.parse_sandbox_policy().map(Node::SandboxPolicy)
+            }
             TokenKind::Bind => {
                 // Disambiguate between:
                 // - DI binding: `bind on pc{...} -> Impl`

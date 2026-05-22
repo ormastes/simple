@@ -166,6 +166,75 @@ pub enum InjectLifetime {
     Extern,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SecurityPolicy {
+    pub name: String,
+    pub items: Vec<SecurityItem>,
+    pub conventions_enabled: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SecurityItem {
+    Root {
+        path: String,
+        span: Span,
+    },
+    Default {
+        action: String,
+        span: Span,
+    },
+    Dimension {
+        name: String,
+        rules: Vec<String>,
+        span: Span,
+    },
+    Allow {
+        from: String,
+        to: String,
+        through: Option<String>,
+        span: Span,
+    },
+    Deny {
+        from: String,
+        to: String,
+        except: Option<String>,
+        direct: bool,
+        span: Span,
+    },
+    Gate(SecurityGate),
+    Raw {
+        text: String,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SecurityGate {
+    pub name: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub policy: Option<String>,
+    pub audit: Option<String>,
+    pub sandbox: Option<String>,
+    pub grants: Vec<String>,
+    pub body: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SandboxPolicy {
+    pub name: String,
+    pub items: Vec<SandboxItem>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SandboxItem {
+    Backend { name: String, span: Span },
+    Rule { key: String, value: String, span: Span },
+}
+
 /// Architecture rule: `forbid pc{...}` or `allow pc{...}`
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArchitectureRule {

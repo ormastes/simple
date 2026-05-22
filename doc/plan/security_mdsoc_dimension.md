@@ -751,3 +751,40 @@ sandbox admin_sandbox:
     net deny all
 
 This gives Simple a security model stronger than ordinary layered architecture: it prevents layer skipping, feature boundary bypass, security logic scattering, and ambient authority leakage, while still fitting the existing Simple direction: MDSOC, SDN, compile-time AOP, runtime-family enforcement, and generated verification artifacts.
+
+---
+
+## 18. Implementation Checkpoint
+
+Current compiler-front-end slice:
+
+1. `security AppSecurity:` is parsed and lowered as first-class HIR with conventions enabled by default, so projects get folder/source-policy behavior without boilerplate config.
+2. `security gate Name:` is parsed and lowered with `from`, `to`, `policy`, `audit`, `sandbox`, and `grant` metadata for later AOP weaving and gate verification.
+3. `sandbox name:` is parsed and lowered as the common input for generated sandbox manifests.
+4. A diagnostic inventory builder now renders the planned outputs:
+   - `gate_inventory.md`
+   - `access_matrix.generated.sdn`
+   - `security_aspects.generated.spl`
+   - `security_aop.generated.sdn`
+   - `sandbox_manifest.sdn`
+   - `violations.sdn`
+5. `simple security check` writes the security artifacts under `build/security/` or an explicit `--out` directory.
+6. Default convention inference maps `src/feature/<feature>/<layer>/**` to feature/layer coordinates and treats `src/security/**` as a security root.
+7. Initial `SEC201` detection reports direct feature-boundary references such as user-service code reaching admin code without a gate.
+8. Initial `SEC301` detection reports authoritative authorization predicates outside security roots while allowing `@security_observation` for UI-only hints.
+9. Initial `SEC401` detection reports raw ambient authority calls such as `File.open`, `Network.connect`, `Env.get`, and `Process.spawn`, pointing callers toward narrowed native object-capability handles.
+10. Security policies and gates render an AOP-facing artifact: `GeneratedSecurityBoundary` for allow/forbid crossing rules and one generated around-advice aspect per gate for policy, audit, sandbox, and gate runtime entry/exit.
+11. Security gates now also lower into real HIR AOP advices (`HirAopAdvice`) with `around` form and `execution(* Gate.*(..))` predicates, so the existing compile-time weaver can consume them without runtime reflection or global config.
+12. Security deny/allow policy rules lower into HIR architecture rules (`HirArchRule`) where they can be consumed by the existing architecture-rule engine; the machine-readable lowering is emitted as `security_aop.generated.sdn`.
+13. Generated gate advice now has a concrete compiler data contract (`SecurityAdvicePlan`) with ordered steps for `enter_gate`, `require_policy`, `enter_sandbox`, `audit_start`, `proceed`, `audit_success`, `audit_failure`, `exit_sandbox`, and `exit_gate`.
+14. The compile-time weaver now accepts security advice plans through `WeavingConfig::from_hir_module` and materializes security around advice into ordered MIR runtime call targets such as `rt_security_enter_gate`, `rt_security_require_policy`, `rt_security_enter_sandbox`, audit calls, and cleanup calls.
+15. The runtime exports fixed `rt_security_*` handlers for generated gate advice, including gate entry/exit, policy checks, sandbox entry/exit, audit start/success/failure, and testable counters. These are registered in the runtime symbol list as hosted security symbols without per-gate dynamic exports.
+16. Gate, policy, sandbox, and audit names now lower to deterministic metadata IDs. The weaver emits those IDs as MIR `ConstInt` arguments to the fixed `rt_security_*` handlers, and the runtime records the last-seen IDs for verification and future policy/sandbox lookup.
+17. The runtime now has explicit policy and sandbox registries keyed by those metadata IDs. Policy lookup defaults to allowed unless a policy is explicitly denied, preserving zero-config convention behavior while still letting generated/project config harden selected gates.
+
+Remaining implementation order:
+
+1. Replace heuristic `SEC201` scanning with the full import/call graph and gate exception model.
+2. Replace heuristic `SEC301` and `SEC401` scanning with typed semantic checks over resolved calls and sandbox/plugin coordinates.
+3. Add the native object-capability handle type model and standard library replacements for raw file/network/env/process access.
+4. Route real failure edges to `audit_failure` instead of the current linear placeholder and load generated project policy/sandbox registries from security artifacts during startup.

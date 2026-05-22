@@ -6,7 +6,8 @@ use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
     HirAopAdvice, HirArchRule, HirDiBinding, HirDomainBlock, HirImpl, HirInjectGraph, HirInjectItem, HirLeanBlock,
-    HirMockDecl, HirModule, HirType, TypeId,
+    HirMockDecl, HirModule, HirSandboxItem, HirSandboxPolicy, HirSecurityGate, HirSecurityItem, HirSecurityPolicy,
+    HirType, TypeId,
 };
 
 fn try_const_eval(expr: &Expr) -> Option<i64> {
@@ -419,6 +420,34 @@ impl Lowerer {
                         items: self.lower_inject_items(&graph.items)?,
                     });
                 }
+                Node::SecurityPolicy(policy) => {
+                    self.module.security_policies.push(HirSecurityPolicy {
+                        name: policy.name.clone(),
+                        conventions_enabled: policy.conventions_enabled,
+                        items: self.lower_security_items(&policy.items),
+                    });
+                }
+                Node::SecurityGate(gate) => {
+                    self.module.security_gates.push(Self::lower_security_gate(gate));
+                }
+                Node::SandboxPolicy(policy) => {
+                    self.module.sandbox_policies.push(HirSandboxPolicy {
+                        name: policy.name.clone(),
+                        items: policy
+                            .items
+                            .iter()
+                            .map(|item| match item {
+                                ast::SandboxItem::Backend { name, .. } => {
+                                    HirSandboxItem::Backend { name: name.clone() }
+                                }
+                                ast::SandboxItem::Rule { key, value, .. } => HirSandboxItem::Rule {
+                                    key: key.clone(),
+                                    value: value.clone(),
+                                },
+                            })
+                            .collect(),
+                    });
+                }
                 Node::ArchitectureRule(rule) => {
                     self.module.arch_rules.push(HirArchRule {
                         rule_type: match rule.rule_type {
@@ -444,7 +473,56 @@ impl Lowerer {
                 _ => {}
             }
         }
+        let generated_security_aop = crate::security::lower_security_to_aop(&self.module);
+        self.module.aop_advices.extend(generated_security_aop.aop_advices);
+        self.module.arch_rules.extend(generated_security_aop.arch_rules);
         Ok(())
+    }
+
+    fn lower_security_items(&self, items: &[ast::SecurityItem]) -> Vec<HirSecurityItem> {
+        items
+            .iter()
+            .map(|item| match item {
+                ast::SecurityItem::Root { path, .. } => HirSecurityItem::Root { path: path.clone() },
+                ast::SecurityItem::Default { action, .. } => HirSecurityItem::Default { action: action.clone() },
+                ast::SecurityItem::Dimension { name, rules, .. } => HirSecurityItem::Dimension {
+                    name: name.clone(),
+                    rules: rules.clone(),
+                },
+                ast::SecurityItem::Allow { from, to, through, .. } => HirSecurityItem::Allow {
+                    from: from.clone(),
+                    to: to.clone(),
+                    through: through.clone(),
+                },
+                ast::SecurityItem::Deny {
+                    from,
+                    to,
+                    except,
+                    direct,
+                    ..
+                } => HirSecurityItem::Deny {
+                    from: from.clone(),
+                    to: to.clone(),
+                    except: except.clone(),
+                    direct: *direct,
+                },
+                ast::SecurityItem::Gate(gate) => HirSecurityItem::Gate(Self::lower_security_gate(gate)),
+                ast::SecurityItem::Raw { text, .. } => HirSecurityItem::Raw { text: text.clone() },
+            })
+            .collect()
+    }
+
+    fn lower_security_gate(gate: &ast::SecurityGate) -> HirSecurityGate {
+        HirSecurityGate {
+            name: gate.name.clone(),
+            from: gate.from.clone(),
+            to: gate.to.clone(),
+            policy: gate.policy.clone(),
+            audit: gate.audit.clone(),
+            sandbox: gate.sandbox.clone(),
+            grants: gate.grants.clone(),
+            body: gate.body.clone(),
+        }
     }
 
     fn lower_inject_items(&self, items: &[ast::InjectItem]) -> LowerResult<Vec<HirInjectItem>> {
@@ -659,6 +737,9 @@ impl Lowerer {
                 | Node::AopAdvice(_)
                 | Node::DiBinding(_)
                 | Node::InjectGraph(_)
+                | Node::SecurityPolicy(_)
+                | Node::SecurityGate(_)
+                | Node::SandboxPolicy(_)
                 | Node::ArchitectureRule(_)
                 | Node::MockDecl(_)
                 | Node::LiteralFunction(_)

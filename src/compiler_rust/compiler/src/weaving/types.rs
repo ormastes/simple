@@ -2,6 +2,7 @@
 
 use crate::mir::BlockId;
 use crate::predicate::MatchContext;
+use crate::security::SecurityAdvicePlan;
 
 /// Advice form determines when and how advice is executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +85,7 @@ pub struct MatchedAdvice {
     pub form: AdviceForm,
     pub priority: i64,
     pub specificity: i32,
+    pub security_plan: Option<SecurityAdvicePlan>,
 }
 
 /// Weaving configuration loaded from TOML.
@@ -94,6 +96,7 @@ pub struct WeavingConfig {
     pub after_success_advices: Vec<WeavingRule>,
     pub after_error_advices: Vec<WeavingRule>,
     pub around_advices: Vec<WeavingRule>,
+    pub security_advice_plans: Vec<SecurityAdvicePlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +116,7 @@ impl WeavingConfig {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         }
     }
 
@@ -137,6 +141,7 @@ impl WeavingConfig {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices,
+            security_advice_plans: Vec::new(),
         }
     }
 
@@ -170,7 +175,19 @@ impl WeavingConfig {
             after_success_advices,
             after_error_advices,
             around_advices,
+            security_advice_plans: Vec::new(),
         }
+    }
+
+    pub fn from_hir_module(module: &crate::hir::HirModule) -> Self {
+        let security_lowering = crate::security::lower_security_to_aop(module);
+        Self::from_hir_advices(&module.aop_advices).with_security_advice_plans(security_lowering.advice_plans)
+    }
+
+    pub fn with_security_advice_plans(mut self, plans: Vec<SecurityAdvicePlan>) -> Self {
+        self.security_advice_plans = plans;
+        self.enabled = self.enabled || !self.security_advice_plans.is_empty();
+        self
     }
 
     /// Get all advice rules.

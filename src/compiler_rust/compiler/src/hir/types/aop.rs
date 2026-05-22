@@ -55,6 +55,66 @@ pub enum HirInjectItem {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct HirSecurityPolicy {
+    pub name: String,
+    pub conventions_enabled: bool,
+    pub items: Vec<HirSecurityItem>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HirSecurityItem {
+    Root {
+        path: String,
+    },
+    Default {
+        action: String,
+    },
+    Dimension {
+        name: String,
+        rules: Vec<String>,
+    },
+    Allow {
+        from: String,
+        to: String,
+        through: Option<String>,
+    },
+    Deny {
+        from: String,
+        to: String,
+        except: Option<String>,
+        direct: bool,
+    },
+    Gate(HirSecurityGate),
+    Raw {
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct HirSecurityGate {
+    pub name: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub policy: Option<String>,
+    pub audit: Option<String>,
+    pub sandbox: Option<String>,
+    pub grants: Vec<String>,
+    pub body: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirSandboxPolicy {
+    pub name: String,
+    pub items: Vec<HirSandboxItem>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HirSandboxItem {
+    Backend { name: String },
+    Rule { key: String, value: String },
+}
+
 /// HIR representation of an architecture rule.
 #[derive(Debug, Clone)]
 pub struct HirArchRule {

@@ -25,6 +25,7 @@ mod tests {
     use crate::hir::{BinOp, TypeId};
     use crate::mir::{BlockId, CallTarget, MirBlock, MirFunction, MirInst, VReg};
     use crate::predicate::Predicate;
+    use crate::security::{security_metadata_id, SecurityAdvicePlan, SecurityAdviceStep};
     use simple_parser::Visibility;
 
     #[test]
@@ -47,6 +48,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
         let weaver = Weaver::new(config);
 
@@ -69,6 +71,7 @@ mod tests {
 
         let aop_config = AopConfig {
             runtime_enabled: true,
+            loads: Vec::new(),
             around: vec![AopAroundRule {
                 predicate,
                 advice: "log_advice".to_string(),
@@ -97,6 +100,7 @@ mod tests {
 
         let aop_config = AopConfig {
             runtime_enabled: true,
+            loads: Vec::new(),
             around: vec![AopAroundRule {
                 predicate,
                 advice: "trace_fn".to_string(),
@@ -139,6 +143,7 @@ mod tests {
 
         let aop_config = AopConfig {
             runtime_enabled: true,
+            loads: Vec::new(),
             around: vec![
                 AopAroundRule {
                     predicate: pred1,
@@ -199,6 +204,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -249,6 +255,7 @@ mod tests {
             after_success_advices: vec![after_rule],
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -285,6 +292,117 @@ mod tests {
     }
 
     #[test]
+    fn test_security_around_advice_materializes_runtime_steps() {
+        let rule = WeavingRule {
+            predicate_text: "pc{ init(test_fn) }".to_string(),
+            advice_function: "__simple_security_gate_UserAdminGate".to_string(),
+            form: AdviceForm::Around,
+            priority: 10_000,
+        };
+        let gate_id = security_metadata_id("UserAdminGate");
+        let policy_id = security_metadata_id("CanRequestAdminAction");
+        let sandbox_id = security_metadata_id("admin_sandbox");
+        let audit_id = security_metadata_id("all");
+        let plan = SecurityAdvicePlan {
+            gate: "UserAdminGate".to_string(),
+            gate_id,
+            advice_function: "__simple_security_gate_UserAdminGate".to_string(),
+            steps: vec![
+                SecurityAdviceStep::EnterGate {
+                    gate: "UserAdminGate".to_string(),
+                    gate_id,
+                },
+                SecurityAdviceStep::RequirePolicy {
+                    policy: "CanRequestAdminAction".to_string(),
+                    policy_id,
+                },
+                SecurityAdviceStep::EnterSandbox {
+                    sandbox: "admin_sandbox".to_string(),
+                    sandbox_id,
+                },
+                SecurityAdviceStep::AuditStart {
+                    gate: "UserAdminGate".to_string(),
+                    gate_id,
+                    audit: "all".to_string(),
+                    audit_id,
+                },
+                SecurityAdviceStep::Proceed,
+                SecurityAdviceStep::AuditSuccess {
+                    gate: "UserAdminGate".to_string(),
+                    gate_id,
+                },
+                SecurityAdviceStep::AuditFailure {
+                    gate: "UserAdminGate".to_string(),
+                    gate_id,
+                },
+                SecurityAdviceStep::ExitSandbox { sandbox_id },
+                SecurityAdviceStep::ExitGate { gate_id },
+            ],
+        };
+
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: Vec::new(),
+            after_success_advices: Vec::new(),
+            after_error_advices: Vec::new(),
+            around_advices: vec![rule],
+            security_advice_plans: vec![plan],
+        };
+
+        let weaver = Weaver::new(config);
+        let mut func = create_test_function("test_fn");
+        let result = weaver.weave_function(&mut func);
+
+        assert_eq!(result.join_points_woven, 1);
+        let calls: Vec<String> = func.blocks[0]
+            .instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                MirInst::Call {
+                    target: CallTarget::Io(name),
+                    ..
+                } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                "rt_security_enter_gate",
+                "rt_security_require_policy",
+                "rt_security_enter_sandbox",
+                "rt_security_audit_start",
+                "rt_security_audit_success",
+                "rt_security_audit_failure",
+                "rt_security_exit_sandbox",
+                "rt_security_exit_gate",
+            ]
+        );
+        let call_args: Vec<usize> = func.blocks[0]
+            .instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                MirInst::Call {
+                    target: CallTarget::Io(name),
+                    args,
+                    ..
+                } if name == "rt_security_audit_start" => Some(args.len()),
+                MirInst::Call {
+                    target: CallTarget::Io(name),
+                    args,
+                    ..
+                } if name.starts_with("rt_security_") => Some(args.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(call_args, vec![1, 1, 1, 2, 1, 1, 1, 1]);
+        assert!(func.blocks[0]
+            .instructions
+            .iter()
+            .any(|inst| { matches!(inst, MirInst::ConstInt { value, .. } if *value == gate_id as i64) }));
+    }
+
+    #[test]
     fn test_condition_join_point_detection() {
         // Create a function with a comparison operation
         let mut func = MirFunction::new("test_fn".to_string(), TypeId::I64, Visibility::Public);
@@ -307,6 +425,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -329,6 +448,7 @@ mod tests {
 
         let aop_config = AopConfig {
             runtime_enabled: true,
+            loads: Vec::new(),
             around: vec![AopAroundRule {
                 predicate,
                 advice: "wildcard_advice".to_string(),
@@ -381,6 +501,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -411,6 +532,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: vec![error_rule],
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -462,6 +584,7 @@ mod tests {
             after_success_advices: vec![success_rule],
             after_error_advices: vec![error_rule],
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -489,6 +612,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -519,6 +643,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -547,6 +672,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -582,6 +708,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -610,6 +737,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);
@@ -642,6 +770,7 @@ mod tests {
             after_success_advices: Vec::new(),
             after_error_advices: Vec::new(),
             around_advices: Vec::new(),
+            security_advice_plans: Vec::new(),
         };
 
         let weaver = Weaver::new(config);

@@ -143,6 +143,12 @@ impl Weaver {
                                     form: rule.form,
                                     priority: rule.priority,
                                     specificity: predicate.specificity(),
+                                    security_plan: self
+                                        .config
+                                        .security_advice_plans
+                                        .iter()
+                                        .find(|plan| plan.advice_function == rule.advice_function)
+                                        .cloned(),
                                 });
                             }
                         }

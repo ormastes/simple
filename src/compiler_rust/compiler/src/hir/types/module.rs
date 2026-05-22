@@ -155,6 +155,12 @@ pub struct HirModule {
     pub di_bindings: Vec<HirDiBinding>,
     /// First-class DI graph declarations.
     pub inject_graphs: Vec<HirInjectGraph>,
+    /// First-class security policy declarations.
+    pub security_policies: Vec<HirSecurityPolicy>,
+    /// Top-level security gate declarations.
+    pub security_gates: Vec<HirSecurityGate>,
+    /// Sandbox policy declarations.
+    pub sandbox_policies: Vec<HirSandboxPolicy>,
     /// Architecture rules (#1026-1035)
     pub arch_rules: Vec<HirArchRule>,
     /// Mock declarations (#1020-1025)
@@ -200,6 +206,9 @@ impl HirModule {
             aop_advices: Vec::new(),
             di_bindings: Vec::new(),
             inject_graphs: Vec::new(),
+            security_policies: Vec::new(),
+            security_gates: Vec::new(),
+            sandbox_policies: Vec::new(),
             arch_rules: Vec::new(),
             mock_decls: Vec::new(),
             imports: Vec::new(),

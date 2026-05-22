@@ -64,6 +64,7 @@ pub mod runtime_bridge;
 pub mod runtime_profile;
 pub mod semantic_diff;
 pub mod semantics;
+pub mod security;
 pub mod smf_builder;
 pub mod smf_writer;
 pub mod spec_coverage;
@@ -152,6 +153,11 @@ pub use runtime_profile::{
     FunctionStats, LayoutFeedback, ProfileConfig, RuntimeMetrics, RuntimeProfiler,
 };
 pub use runtime_profile::profiler::clear_global_profiler;
+pub use security::{
+    build_security_inventory, infer_security_coordinate, lower_security_to_aop, source_security_violations_sdn,
+    security_metadata_id, SecurityAdvicePlan, SecurityAdviceStep, SecurityAopLowering, SecurityCoordinate,
+    SecurityInventory, SecuritySourceFile,
+};
 pub use semantic_diff::{ChangeKind, DiffSummary, ImpactLevel, SemanticChange, SemanticDiff, SemanticDiffer};
 pub use spec_coverage::{find_spec_file, SpecCoverageReport};
 pub use text_diff::{DiffHunk, DiffLine, TextDiff};
