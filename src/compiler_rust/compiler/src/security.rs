@@ -429,6 +429,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
                         "    required: inject narrowed capability handle {}\n",
                         api.required
                     ));
+                    out.push_str(&format!("    replacement: {}\n", api.replacement));
                 }
             }
         }
@@ -465,6 +466,7 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
             "    required: inject narrowed capability handle {}\n",
             ambient_use.api.required
         ));
+        out.push_str(&format!("    replacement: {}\n", ambient_use.api.replacement));
     }
 
     if count == 0 {
@@ -1068,6 +1070,7 @@ fn source_has_security_observation(source: &str) -> bool {
 struct RawAmbientApi {
     name: &'static str,
     required: &'static str,
+    replacement: &'static str,
 }
 
 fn raw_ambient_api(line: &str) -> Option<RawAmbientApi> {
@@ -1077,6 +1080,7 @@ fn raw_ambient_api(line: &str) -> Option<RawAmbientApi> {
             RawAmbientApi {
                 name: "File.open",
                 required: "ReadFile or WriteFile",
+                replacement: "ReadFile.read_text or WriteFile.write_text",
             },
         ),
         (
@@ -1084,6 +1088,7 @@ fn raw_ambient_api(line: &str) -> Option<RawAmbientApi> {
             RawAmbientApi {
                 name: "Network.connect",
                 required: "NetworkEndpoint",
+                replacement: "NetworkEndpoint.connect",
             },
         ),
         (
@@ -1091,6 +1096,7 @@ fn raw_ambient_api(line: &str) -> Option<RawAmbientApi> {
             RawAmbientApi {
                 name: "Env.get",
                 required: "EnvVar",
+                replacement: "EnvVar.get",
             },
         ),
         (
@@ -1098,6 +1104,7 @@ fn raw_ambient_api(line: &str) -> Option<RawAmbientApi> {
             RawAmbientApi {
                 name: "Process.spawn",
                 required: "ProcessSpawner",
+                replacement: "ProcessSpawner.run",
             },
         ),
     ];
@@ -1129,6 +1136,7 @@ fn raw_ambient_api_symbol(symbol: &str) -> Option<RawAmbientApi> {
             RawAmbientApi {
                 name: "File.open",
                 required: "ReadFile or WriteFile",
+                replacement: "ReadFile.read_text or WriteFile.write_text",
             },
         ),
         (
@@ -1136,6 +1144,7 @@ fn raw_ambient_api_symbol(symbol: &str) -> Option<RawAmbientApi> {
             RawAmbientApi {
                 name: "Network.connect",
                 required: "NetworkEndpoint",
+                replacement: "NetworkEndpoint.connect",
             },
         ),
         (
@@ -1143,6 +1152,7 @@ fn raw_ambient_api_symbol(symbol: &str) -> Option<RawAmbientApi> {
             RawAmbientApi {
                 name: "Env.get",
                 required: "EnvVar",
+                replacement: "EnvVar.get",
             },
         ),
         (
@@ -1150,6 +1160,7 @@ fn raw_ambient_api_symbol(symbol: &str) -> Option<RawAmbientApi> {
             RawAmbientApi {
                 name: "Process.spawn",
                 required: "ProcessSpawner",
+                replacement: "ProcessSpawner.run",
             },
         ),
     ];

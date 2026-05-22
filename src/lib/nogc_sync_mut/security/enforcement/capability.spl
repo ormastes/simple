@@ -4,6 +4,12 @@
 # All grants are time-bounded (mandatory expiry_ms) and optionally delegatable.
 # Delegation depth is limited to 2: delegatable -> non-delegatable -> no further.
 
+use std.error.{SimpleError, error}
+use std.net.tcp.{TcpStream}
+use std.net.sffi.{tcp_stream_connect}
+use std.nogc_sync_mut.env.variables.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 # Typed capability representing a permission scope.
@@ -250,3 +256,58 @@ fn parse_capability(s: text) -> Capability:
             else:
                 Capability.Custom(name: resource, scope: "*")
         _: Capability.Custom(name: kind, scope: resource)
+
+fn _capability_path_allowed(scope: text, path: text) -> bool:
+    scope == "*" or path == scope or path.starts_with(scope)
+
+# Narrowed read handle for sandboxed or plugin code.
+#
+# Code with this handle can read only paths inside its scoped root.
+class ReadFile:
+    root: text
+
+    fn read_text(path: text) -> text?:
+        if not _capability_path_allowed(self.root, path):
+            return nil
+        Some(file_read_text(path))
+
+# Narrowed write handle for sandboxed or plugin code.
+#
+# Code with this handle can write only paths inside its scoped root.
+class WriteFile:
+    root: text
+
+    fn write_text(path: text, content: text) -> bool:
+        if not _capability_path_allowed(self.root, path):
+            return false
+        file_write(path, content)
+
+# Narrowed network handle for one endpoint or an explicitly wildcarded endpoint.
+class NetworkEndpoint:
+    endpoint: text
+
+    fn connect(addr: text) -> Result<TcpStream, SimpleError>:
+        if self.endpoint != "*" and addr != self.endpoint:
+            return Err(error("network endpoint capability denied"))
+        tcp_stream_connect(addr)
+
+# Narrowed environment handle for one variable or an explicitly wildcarded variable.
+class EnvVar:
+    name: text
+
+    fn get(key: text) -> text?:
+        if self.name != "*" and key != self.name:
+            return nil
+        val value = env_get(key)
+        if value == "":
+            return nil
+        Some(value)
+
+# Narrowed process handle for one executable or an explicitly wildcarded command.
+class ProcessSpawner:
+    command: text
+
+    fn run(cmd: text, args: [text]) -> (text, text, i64)?:
+        if self.command != "*" and cmd != self.command:
+            return nil
+        Some(process_run(cmd, args))

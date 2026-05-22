@@ -519,6 +519,7 @@ fn sec401_uses_hir_resolved_ambient_authority_calls_when_modules_are_available()
     assert!(violations.contains("trust: plugin"));
     assert!(violations.contains("runtime: sandboxed"));
     assert!(violations.contains("required: inject narrowed capability handle ReadFile or WriteFile"));
+    assert!(violations.contains("replacement: ReadFile.read_text or WriteFile.write_text"));
 }
 
 #[test]
@@ -588,7 +589,9 @@ fn reports_sec401_for_raw_ambient_authority_apis() {
     assert!(violations.contains("code: SEC401"));
     assert!(violations.contains("File.open"));
     assert!(violations.contains("ReadFile or WriteFile"));
+    assert!(violations.contains("ReadFile.read_text or WriteFile.write_text"));
     assert!(violations.contains("EnvVar"));
+    assert!(violations.contains("EnvVar.get"));
 }
 
 #[test]
