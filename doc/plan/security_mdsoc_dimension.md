@@ -787,10 +787,11 @@ Current compiler-front-end slice:
 20. `capability Name:` is parsed and lowered as a first-class native object-capability declaration. `simple security check` now writes `capability_manifest.sdn`, gate grants are validated against declared or built-in capability handles, and `SEC401` recommends the specific narrowed handle family for each raw ambient API.
 21. The runtime can now load generated `security_aop.generated.sdn` text through `rt_security_load_registry_sdn`, registering policy IDs and sandbox IDs into the fixed `rt_security_*` registry without reflection or per-gate dynamic exports.
 22. Hosted native builds now generate a `__module_init_security_registry` object when security declarations are present. The object embeds the generated security AOP registry text and uses the existing module-init caller to invoke `rt_security_load_registry_sdn` before `spl_main`, preserving zero-config startup behavior.
+23. Static archive builds now include the generated security registry init object and `__simple_call_module_inits` caller when security declarations are present, so hosted archive consumers get the same zero-config registry startup path as direct native links.
 
 Remaining implementation order:
 
 1. Replace the source-level `SEC201` graph with the compiler-resolved import/call graph so gate exceptions are checked against resolved symbols instead of naming conventions.
 2. Replace heuristic `SEC301` and `SEC401` scanning with typed semantic checks over resolved calls and sandbox/plugin coordinates.
 3. Add standard library replacements for raw file/network/env/process APIs and move `SEC401` from source scanning to typed capability-handle checks over resolved calls.
-4. Route real MIR failure edges to `audit_failure` and extend generated security registry startup loading beyond hosted native builds where needed.
+4. Route real MIR failure edges to `audit_failure` and extend generated security registry startup loading beyond hosted executable/archive builds where needed.

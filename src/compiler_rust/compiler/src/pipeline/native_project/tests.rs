@@ -1315,6 +1315,16 @@ fn rt_archive_param_probe(value: i64) -> i64:
 
 fn rt_value_int(value: i64) -> i64:
     return value << 3
+
+security gate ArchiveSecurityGate:
+    from feature user
+    to feature admin
+    policy ArchivePolicy
+    audit all
+    sandbox archive_sandbox
+
+sandbox archive_sandbox:
+    backend auto
 "#,
     )
     .unwrap();
@@ -1372,6 +1382,16 @@ fn rt_value_int(value: i64) -> i64:
     assert!(
         stdout.contains("rt_value_int"),
         "archive symbols did not include known runtime-SFFI parameterized function:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("__module_init_security_registry"),
+        "archive symbols did not include generated security registry module init:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("__simple_call_module_inits"),
+        "archive symbols did not include generated module-init caller:\n{}",
         stdout
     );
 }

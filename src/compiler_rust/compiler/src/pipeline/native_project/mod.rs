@@ -798,10 +798,16 @@ impl NativeProjectBuilder {
 
         // 7. Link or archive
         let link_start = Instant::now();
+        let mut final_object_paths = object_paths;
+        if self.config.emit_archive {
+            if let Some(init_o) = self.generate_init_caller(&temp_dir_path, &final_object_paths, None)? {
+                final_object_paths.push(init_o);
+            }
+        }
         let link_result = if self.config.emit_archive {
-            self.archive_objects(&object_paths)
+            self.archive_objects(&final_object_paths)
         } else {
-            self.link_objects(&object_paths, &imports)
+            self.link_objects(&final_object_paths, &imports)
         };
         let link_time = link_start.elapsed();
 
