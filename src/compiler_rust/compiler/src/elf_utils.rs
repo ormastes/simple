@@ -604,6 +604,10 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_security_last_policy_id" => simple_runtime::rt_security_last_policy_id as *const () as usize,
         "rt_security_last_sandbox_id" => simple_runtime::rt_security_last_sandbox_id as *const () as usize,
         "rt_security_last_audit_id" => simple_runtime::rt_security_last_audit_id as *const () as usize,
+        "rt_security_load_registry_sdn" => simple_runtime::rt_security_load_registry_sdn as *const () as usize,
+        "rt_security_loaded_registry_entries" => {
+            simple_runtime::rt_security_loaded_registry_entries as *const () as usize
+        }
         "rt_security_register_policy" => simple_runtime::rt_security_register_policy as *const () as usize,
         "rt_security_policy_allowed" => simple_runtime::rt_security_policy_allowed as *const () as usize,
         "rt_security_register_sandbox" => simple_runtime::rt_security_register_sandbox as *const () as usize,

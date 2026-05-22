@@ -887,6 +887,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_security_last_policy_id",
     "rt_security_last_sandbox_id",
     "rt_security_last_audit_id",
+    "rt_security_load_registry_sdn",
+    "rt_security_loaded_registry_entries",
     "rt_security_register_policy",
     "rt_security_policy_allowed",
     "rt_security_register_sandbox",
