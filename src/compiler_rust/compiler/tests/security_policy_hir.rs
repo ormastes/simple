@@ -1,7 +1,7 @@
 use simple_compiler::hir::{self, HirSandboxItem, HirSecurityItem};
 use simple_compiler::security::{
     build_security_inventory, infer_security_coordinate, lower_security_to_aop, source_security_violations_sdn,
-    security_metadata_id, SecurityAdviceStep, SecuritySourceFile,
+    security_metadata_id, source_security_violations_sdn_with_module, SecurityAdviceStep, SecuritySourceFile,
 };
 use simple_compiler::weaving::WeavingConfig;
 use simple_parser::Parser;
@@ -217,6 +217,67 @@ fn reports_sec201_for_direct_feature_boundary_import() {
     assert!(violations.contains("code: SEC201"));
     assert!(violations.contains("from_feature: user"));
     assert!(violations.contains("to_feature: admin"));
+}
+
+#[test]
+fn sec201_uses_declared_gate_as_required_crossing() {
+    let module = lower(
+        r#"security AppSecurity:
+    deny feature user -> feature admin except UserAdminGate
+"#,
+    );
+    let files = vec![
+        SecuritySourceFile {
+            path: "src/feature/user/service/profile.spl".to_string(),
+            source: "class Profile:\n    fn run():\n        AdminUserRepo.delete(1)\n".to_string(),
+        },
+        SecuritySourceFile {
+            path: "src/feature/admin/infra/admin_user_repo.spl".to_string(),
+            source: "class AdminUserRepo:\n    fn delete(id: Int):\n        return\n".to_string(),
+        },
+    ];
+
+    let violations = source_security_violations_sdn_with_module(&files, &module);
+    assert!(violations.contains("code: SEC201"));
+    assert!(violations.contains("edge: call"));
+    assert!(violations.contains("required: route through UserAdminGate"));
+}
+
+#[test]
+fn sec201_allows_cross_feature_port_imports_but_not_direct_calls() {
+    let files = vec![
+        SecuritySourceFile {
+            path: "src/feature/user/service/profile.spl".to_string(),
+            source: "use feature.admin.port.admin_user_port\nclass Profile:\n    fn run():\n        AdminUserRepo.delete(1)\n"
+                .to_string(),
+        },
+        SecuritySourceFile {
+            path: "src/feature/admin/infra/admin_user_repo.spl".to_string(),
+            source: "class AdminUserRepo:\n    fn delete(id: Int):\n        return\n".to_string(),
+        },
+    ];
+
+    let violations = source_security_violations_sdn(&files);
+    assert!(violations.contains("code: SEC201"));
+    assert!(violations.contains("edge: call"));
+    assert!(!violations.contains("edge: import"));
+}
+
+#[test]
+fn sec201_does_not_treat_type_declarations_as_call_edges() {
+    let files = vec![
+        SecuritySourceFile {
+            path: "src/feature/admin/infra/admin_user_repo.spl".to_string(),
+            source: "class AdminUserRepo:\n    fn delete():\n        return\n".to_string(),
+        },
+        SecuritySourceFile {
+            path: "src/feature/user/domain/user.spl".to_string(),
+            source: "class User:\n    pass\n".to_string(),
+        },
+    ];
+
+    let violations = source_security_violations_sdn(&files);
+    assert!(!violations.contains("code: SEC201"));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use simple_compiler::{build_security_inventory, hir, source_security_violations_sdn, SecuritySourceFile};
+use simple_compiler::{build_security_inventory, hir, source_security_violations_sdn_with_modules, SecuritySourceFile};
 use simple_parser::Parser;
 
 pub fn run_security(args: &[String]) -> i32 {
@@ -102,6 +102,7 @@ fn build_inventory_for_files(files: &[PathBuf]) -> Result<simple_compiler::Secur
     let mut sandbox_manifest_sdn = String::new();
     let mut violations_sdn = String::new();
     let mut source_files = Vec::new();
+    let mut modules = Vec::new();
 
     for file in files {
         let source = fs::read_to_string(file).map_err(|err| format!("failed to read {}: {}", file.display(), err))?;
@@ -122,13 +123,14 @@ fn build_inventory_for_files(files: &[PathBuf]) -> Result<simple_compiler::Secur
         append_section(&mut security_aop_sdn, file, &inventory.security_aop_sdn);
         append_section(&mut sandbox_manifest_sdn, file, &inventory.sandbox_manifest_sdn);
         append_section(&mut violations_sdn, file, &inventory.violations_sdn);
+        modules.push(module);
     }
 
     if !violations_sdn.is_empty() {
         violations_sdn.push('\n');
     }
     violations_sdn.push_str("# source: convention-inferred feature graph\n");
-    violations_sdn.push_str(&source_security_violations_sdn(&source_files));
+    violations_sdn.push_str(&source_security_violations_sdn_with_modules(&source_files, &modules));
 
     Ok(simple_compiler::SecurityInventory {
         gate_inventory_md,

@@ -28,6 +28,30 @@ pub struct SecurityCoordinate {
     pub security_root: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecurityBoundaryGate {
+    from_feature: String,
+    to_feature: String,
+    gate: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecurityFeatureEdge {
+    file: String,
+    line: usize,
+    from_feature: String,
+    to_feature: String,
+    target_layer: Option<String>,
+    kind: SecurityFeatureEdgeKind,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecurityFeatureEdgeKind {
+    Import,
+    Call,
+}
+
 #[derive(Debug, Clone)]
 pub struct SecurityAopLowering {
     pub aop_advices: Vec<HirAopAdvice>,
@@ -263,9 +287,49 @@ pub fn infer_security_coordinate(path: &Path) -> SecurityCoordinate {
 }
 
 pub fn source_security_violations_sdn(files: &[SecuritySourceFile]) -> String {
+    source_security_violations_sdn_with_modules(files, &[])
+}
+
+pub fn source_security_violations_sdn_with_module(files: &[SecuritySourceFile], module: &HirModule) -> String {
+    source_security_violations_sdn_with_modules(files, std::slice::from_ref(module))
+}
+
+pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile], modules: &[HirModule]) -> String {
     let mut out = String::from("security_violations:\n");
     let mut count = 0;
     let known_features = known_features(files);
+    let boundary_gates = collect_boundary_gates(modules);
+    let feature_graph = build_feature_graph(files, &known_features);
+
+    for edge in feature_graph {
+        if edge.to_feature == edge.from_feature || is_shared_feature(&edge.to_feature) {
+            continue;
+        }
+        if matches!(edge.kind, SecurityFeatureEdgeKind::Import) && edge.target_layer.as_deref() == Some("port") {
+            continue;
+        }
+
+        let configured_gate = boundary_gate_for(&boundary_gates, &edge.from_feature, &edge.to_feature);
+        if configured_gate.as_deref().is_some_and(|gate| edge.text.contains(gate)) {
+            continue;
+        }
+
+        count += 1;
+        out.push_str("  - code: SEC201\n");
+        out.push_str("    message: forbidden feature crossing without security gate\n");
+        out.push_str(&format!("    file: {}\n", edge.file));
+        out.push_str(&format!("    line: {}\n", edge.line));
+        out.push_str(&format!("    edge: {}\n", edge.kind.as_str()));
+        out.push_str(&format!("    from_feature: {}\n", edge.from_feature));
+        out.push_str(&format!("    to_feature: {}\n", edge.to_feature));
+        if let Some(layer) = &edge.target_layer {
+            out.push_str(&format!("    to_layer: {}\n", layer));
+        }
+        match configured_gate {
+            Some(gate) => out.push_str(&format!("    required: route through {}\n", gate)),
+            None => out.push_str("    required: route through declared security gate\n"),
+        }
+    }
 
     for file in files {
         let coordinate = infer_security_coordinate(Path::new(&file.path));
@@ -275,28 +339,10 @@ pub fn source_security_violations_sdn(files: &[SecuritySourceFile]) -> String {
         if coordinate.security_root || from_feature == "security" {
             continue;
         }
-
         for (line_no, line) in file.source.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
-            }
-            for target_feature in referenced_features(trimmed, &known_features) {
-                if target_feature == from_feature || is_shared_feature(&target_feature) {
-                    continue;
-                }
-                count += 1;
-                out.push_str("  - code: SEC201\n");
-                out.push_str("    message: forbidden feature crossing without security gate\n");
-                out.push_str(&format!("    file: {}\n", file.path));
-                out.push_str(&format!("    line: {}\n", line_no + 1));
-                out.push_str(&format!("    from_feature: {}\n", from_feature));
-                out.push_str(&format!("    to_feature: {}\n", target_feature));
-                out.push_str(&format!(
-                    "    layer: {}\n",
-                    coordinate.layer.as_deref().unwrap_or("unknown")
-                ));
-                out.push_str("    required: route through declared security gate\n");
             }
 
             if uses_authorization_predicate(trimmed) && !is_security_observation(&file.source, line_no) {
@@ -326,6 +372,112 @@ pub fn source_security_violations_sdn(files: &[SecuritySourceFile]) -> String {
     out
 }
 
+fn build_feature_graph(files: &[SecuritySourceFile], known_features: &BTreeSet<String>) -> Vec<SecurityFeatureEdge> {
+    let mut edges = Vec::new();
+    for file in files {
+        let coordinate = infer_security_coordinate(Path::new(&file.path));
+        let Some(from_feature) = coordinate.feature.as_deref() else {
+            continue;
+        };
+        if coordinate.security_root || from_feature == "security" {
+            continue;
+        }
+
+        for (line_no, line) in file.source.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            for marker in ["feature.", "feature/"] {
+                if let Some((feature, layer)) = feature_import_details(trimmed, marker) {
+                    edges.push(SecurityFeatureEdge {
+                        file: file.path.clone(),
+                        line: line_no + 1,
+                        from_feature: from_feature.to_string(),
+                        to_feature: feature,
+                        target_layer: layer,
+                        kind: SecurityFeatureEdgeKind::Import,
+                        text: trimmed.to_string(),
+                    });
+                }
+            }
+
+            for target_feature in referenced_features(trimmed, known_features) {
+                edges.push(SecurityFeatureEdge {
+                    file: file.path.clone(),
+                    line: line_no + 1,
+                    from_feature: from_feature.to_string(),
+                    to_feature: target_feature,
+                    target_layer: None,
+                    kind: SecurityFeatureEdgeKind::Call,
+                    text: trimmed.to_string(),
+                });
+            }
+        }
+    }
+    edges
+}
+
+fn collect_boundary_gates(modules: &[HirModule]) -> Vec<SecurityBoundaryGate> {
+    let mut rules = Vec::new();
+    for module in modules {
+        for gate in collect_gates(module) {
+            if let (Some(from), Some(to)) = (gate.from.as_deref(), gate.to.as_deref()) {
+                if let (Some(from_feature), Some(to_feature)) = (clause_feature(from), clause_feature(to)) {
+                    rules.push(SecurityBoundaryGate {
+                        from_feature,
+                        to_feature,
+                        gate: gate.name,
+                    });
+                }
+            }
+        }
+        for policy in &module.security_policies {
+            for item in &policy.items {
+                match item {
+                    HirSecurityItem::Allow {
+                        from,
+                        to,
+                        through: Some(gate),
+                    }
+                    | HirSecurityItem::Deny {
+                        from,
+                        to,
+                        except: Some(gate),
+                        ..
+                    } => {
+                        if let (Some(from_feature), Some(to_feature)) = (clause_feature(from), clause_feature(to)) {
+                            rules.push(SecurityBoundaryGate {
+                                from_feature,
+                                to_feature,
+                                gate: gate.clone(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    rules
+}
+
+fn boundary_gate_for<'a>(rules: &'a [SecurityBoundaryGate], from_feature: &str, to_feature: &str) -> Option<&'a str> {
+    rules
+        .iter()
+        .find(|rule| rule.from_feature == from_feature && rule.to_feature == to_feature)
+        .map(|rule| rule.gate.as_str())
+}
+
+fn clause_feature(clause: &str) -> Option<String> {
+    let mut parts = clause.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some("feature"), Some(feature)) => Some(feature.to_string()),
+        _ => None,
+    }
+}
+
 fn known_features(files: &[SecuritySourceFile]) -> BTreeSet<String> {
     let mut features = BTreeSet::new();
     for file in files {
@@ -340,11 +492,8 @@ fn known_features(files: &[SecuritySourceFile]) -> BTreeSet<String> {
 
 fn referenced_features(line: &str, known_features: &BTreeSet<String>) -> BTreeSet<String> {
     let mut features = BTreeSet::new();
-    if let Some(feature) = feature_from_import(line, "feature.") {
-        features.insert(feature);
-    }
-    if let Some(feature) = feature_from_import(line, "feature/") {
-        features.insert(feature);
+    if !looks_like_call_reference(line) {
+        return features;
     }
 
     for feature in known_features {
@@ -357,17 +506,40 @@ fn referenced_features(line: &str, known_features: &BTreeSet<String>) -> BTreeSe
     features
 }
 
-fn feature_from_import(line: &str, marker: &str) -> Option<String> {
+fn looks_like_call_reference(line: &str) -> bool {
+    line.contains('(') || line.contains('.')
+}
+
+fn feature_import_details(line: &str, marker: &str) -> Option<(String, Option<String>)> {
     let start = line.find(marker)? + marker.len();
     let rest = &line[start..];
-    let feature: String = rest
-        .chars()
-        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-        .collect();
+    let (feature, rest) = take_security_ident(rest);
     if feature.is_empty() {
-        None
-    } else {
-        Some(feature)
+        return None;
+    }
+    let layer = rest
+        .strip_prefix('.')
+        .or_else(|| rest.strip_prefix('/'))
+        .map(take_security_ident)
+        .map(|(layer, _)| layer)
+        .filter(|layer| !layer.is_empty());
+    Some((feature, layer))
+}
+
+fn take_security_ident(value: &str) -> (String, &str) {
+    let end = value
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_ascii_alphanumeric() && ch != '_').then_some(index))
+        .unwrap_or(value.len());
+    (value[..end].to_string(), &value[end..])
+}
+
+impl SecurityFeatureEdgeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            SecurityFeatureEdgeKind::Import => "import",
+            SecurityFeatureEdgeKind::Call => "call",
+        }
     }
 }
 
