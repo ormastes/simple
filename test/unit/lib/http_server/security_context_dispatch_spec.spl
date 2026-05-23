@@ -1,9 +1,9 @@
 # HTTP transport security context dispatch coverage.
 
 use std.http_server.types.{HttpRequestData, HttpResponseData, LocationConfig, default_response_data}
-use std.http_server.security_context.{dispatch_handler_with_remote_security_context, dispatch_handler_with_task_security_context, dispatch_handler_with_validated_remote_security_context}
+use std.http_server.security_context.{dispatch_handler_with_adapter_validated_remote_security_context, dispatch_handler_with_key_ring_validated_remote_security_context, dispatch_handler_with_remote_security_context, dispatch_handler_with_task_security_context, dispatch_handler_with_validated_remote_security_context}
 use std.security.auth.context_propagation.{current_security_context, current_task_security_context}
-use std.security.types.{sign_remote_security_token}
+use std.security.types.{RemoteSecurityKeyRolloutProvider, RemoteSecuritySessionStore, RemoteSecuritySessionStoreAdapter, RemoteSecuritySigningKeyRing, remote_security_token_payload_v2, remote_security_token_with_external_signature, sign_remote_security_token, sign_remote_security_token_with_key_ring}
 
 fn observed_security_context_handler(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
     val ctx = current_security_context()
@@ -80,6 +80,60 @@ describe "http security context dispatch":
         val response = dispatch_handler_with_validated_remote_security_context(observed_security_context_handler, test_location(), request, "server-secret", 1999)
         expect(response.status).to_equal(200)
         expect(response.body).to_equal("198.51.100.30|session-transport|false")
+
+    it "authenticates handler dispatch through external key and session adapters":
+        var sessions = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:session")
+        sessions.create_session("session-transport", "user-1", ["user.profile.write"], 3000)
+        var key_provider = RemoteSecurityKeyRolloutProvider.with_active_key("kms-key-1", "kms://security/kms-key-1")
+        val payload = remote_security_token_payload_v2("kms-key-1", "session-transport", "user-1", 2500, ["user.profile.write"])
+        key_provider.allow_external_signature("kms-key-1", payload, "external-sig")
+        val token = remote_security_token_with_external_signature("kms-key-1", "session-transport", "user-1", 2500, ["user.profile.write"], "external-sig")
+        val request = HttpRequestData(
+            method: "GET",
+            path: "/secure",
+            query: "",
+            version: "HTTP/1.1",
+            headers: [
+                ("Authorization", "Bearer {token}"),
+                ("X-Simple-Session-Id", "session-transport")
+            ],
+            body: "",
+            params: {},
+            peer_addr: "198.51.100.30"
+        )
+
+        val response = dispatch_handler_with_adapter_validated_remote_security_context(observed_security_context_handler, test_location(), request, key_provider, sessions, 1999)
+        expect(response.status).to_equal(200)
+        expect(response.body).to_equal("198.51.100.30|session-transport|true")
+        expect(current_security_context().is_authenticated()).to_equal(false)
+
+    it "authenticates handler dispatch through v2 key ring and session store":
+        var key_ring = RemoteSecuritySigningKeyRing.new("k1", "old-secret")
+        key_ring.rotate_key("k2", "new-secret")
+        var sessions = RemoteSecuritySessionStore.new()
+        sessions.create_session("session-transport", "user-1", ["user.profile.write"], 3000)
+        val token = sign_remote_security_token_with_key_ring(key_ring, "session-transport", "user-1", 2500, ["user.profile.write"])
+        val request = HttpRequestData(
+            method: "GET",
+            path: "/secure",
+            query: "",
+            version: "HTTP/1.1",
+            headers: [
+                ("Authorization", "Bearer {token}"),
+                ("X-Simple-Session-Id", "session-transport")
+            ],
+            body: "",
+            params: {},
+            peer_addr: "198.51.100.30"
+        )
+
+        val response = dispatch_handler_with_key_ring_validated_remote_security_context(observed_security_context_handler, test_location(), request, key_ring, sessions, 1999)
+        expect(response.status).to_equal(200)
+        expect(response.body).to_equal("198.51.100.30|session-transport|true")
+
+        sessions.revoke_session("session-transport")
+        val revoked_response = dispatch_handler_with_key_ring_validated_remote_security_context(observed_security_context_handler, test_location(), request, key_ring, sessions, 1999)
+        expect(revoked_response.body).to_equal("198.51.100.30|session-transport|false")
 
     it "scopes remote context to an explicit HTTP task id":
         val response = dispatch_handler_with_task_security_context("task-http", observed_task_security_context_handler, test_location(), test_request())

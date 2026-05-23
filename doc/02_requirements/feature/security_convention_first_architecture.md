@@ -67,8 +67,10 @@ REQ-030: The WASI runtime shall support an explicit capability table that can be
 
 REQ-031: Baremetal sandbox lowering shall emit deterministic MPU/linker metadata, baremetal linker scripts shall keep the generated static capability/MPU sections with start/end symbols, and kernel sandbox install shall fail closed when baremetal lowering is present without the static section.
 
+REQ-032: Remote `SecurityContext` validation shall expose hosted adapter seams for replicated session storage and opaque key rollout providers, and HTTP dispatch shall support validating v2 remote tokens through those adapters without requiring raw signing keys in request handling.
+
 ## Deferred Requirements
 
-DEF-001: Production adapters for external replicated session storage and KMS/HSM-backed signing key rollout remain future work beyond SDN persistence, merge, rotation, and retirement primitives.
+DEF-001: Concrete deployment clients for Redis/quorum session stores and specific KMS/HSM vendors remain future work beyond the hosted adapter seams, SDN persistence, merge, rotation, and retirement primitives.
 
 DEF-002: Hardware-specific baremetal MPU/PMP register programming remains future work beyond deterministic linker-section metadata, fail-closed static-section installation, hosted runtime checks, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, Simple VM host-import filtering, and SimpleOS kernel capability installation.

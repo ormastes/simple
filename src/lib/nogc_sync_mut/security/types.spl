@@ -393,6 +393,136 @@ class RemoteSecuritySessionStore:
             return true
         false
 
+class RemoteSecuritySessionStoreAdapter:
+    """Adapter boundary for replicated remote SecurityContext session storage.
+
+    The local store remains useful for tests and single-process tools. Hosted
+    production adapters should keep the same operation surface while backing it
+    with Redis, quorum storage, or another replicated service.
+    """
+    backend: text
+    namespace: text
+    store: RemoteSecuritySessionStore
+
+    static fn memory() -> RemoteSecuritySessionStoreAdapter:
+        RemoteSecuritySessionStoreAdapter(
+            backend: "memory",
+            namespace: "remote_security",
+            store: RemoteSecuritySessionStore.new()
+        )
+
+    static fn replicated(backend: text, namespace: text) -> RemoteSecuritySessionStoreAdapter:
+        RemoteSecuritySessionStoreAdapter(
+            backend: backend,
+            namespace: namespace,
+            store: RemoteSecuritySessionStore.new()
+        )
+
+    me save_session(session: RemoteSecuritySession):
+        self.store.save_session(session)
+
+    me create_session(session_id: text, user_id: text, capabilities: List<text>, expires_at_ms: i64):
+        self.store.create_session(session_id, user_id, capabilities, expires_at_ms)
+
+    fn lookup_session(session_id: text) -> RemoteSecuritySession?:
+        self.store.lookup_session(session_id)
+
+    fn lookup_active_session(session_id: text, now_ms: i64) -> RemoteSecuritySession?:
+        self.store.lookup_active_session(session_id, now_ms)
+
+    me refresh_session(session_id: text, expires_at_ms: i64) -> bool:
+        self.store.refresh_session(session_id, expires_at_ms)
+
+    me revoke_session(session_id: text) -> bool:
+        self.store.revoke_session(session_id)
+
+    me merge_from(peer: RemoteSecuritySessionStoreAdapter):
+        self.store.merge_from(peer.store)
+
+    fn export_sdn() -> text:
+        var lines: [text] = [
+            "remote_security_session_adapter:",
+            "  backend: {self.backend}",
+            "  namespace: {self.namespace}",
+            self.store.export_sdn()
+        ]
+        lines.join("\n")
+
+    static fn from_sdn(sdn: text) -> RemoteSecuritySessionStoreAdapter:
+        var adapter = RemoteSecuritySessionStoreAdapter.memory()
+        adapter.load_sdn(sdn)
+        adapter
+
+    me load_sdn(sdn: text):
+        for raw_line in sdn.split("\n"):
+            val line = raw_line.trim()
+            if line.starts_with("backend:"):
+                self.backend = line[8:].trim()
+            elif line.starts_with("namespace:"):
+                self.namespace = line[10:].trim()
+        self.store.load_sdn(sdn)
+
+class RemoteSecurityKeyRolloutProvider:
+    """Opaque key rollout adapter for KMS/HSM-backed signing.
+
+    The provider stores key ids and opaque handles, not raw signing keys. Tests
+    and external adapters register accepted signatures for a payload; hosted
+    production wiring should delegate the verification check to KMS/HSM.
+    """
+    active_key_id: text
+    key_handles: Dict<text, text>
+    accepted_signatures: Dict<text, bool>
+
+    static fn empty() -> RemoteSecurityKeyRolloutProvider:
+        val handles: Dict<text, text> = {}
+        val signatures: Dict<text, bool> = {}
+        RemoteSecurityKeyRolloutProvider(
+            active_key_id: "",
+            key_handles: handles,
+            accepted_signatures: signatures
+        )
+
+    static fn with_active_key(key_id: text, key_handle: text) -> RemoteSecurityKeyRolloutProvider:
+        var provider = RemoteSecurityKeyRolloutProvider.empty()
+        provider.add_key(key_id, key_handle)
+        provider.active_key_id = key_id
+        provider
+
+    me add_key(key_id: text, key_handle: text):
+        self.key_handles = self.key_handles.set(key_id, key_handle)
+
+    me rotate_key(key_id: text, key_handle: text):
+        self.add_key(key_id, key_handle)
+        self.active_key_id = key_id
+
+    me retire_key(key_id: text):
+        if self.key_handles.has(key_id):
+            self.key_handles = self.key_handles.set(key_id, "")
+        if self.active_key_id == key_id:
+            self.active_key_id = ""
+
+    fn key_handle_for(key_id: text) -> text:
+        if self.key_handles.has(key_id):
+            return self.key_handles[key_id]
+        ""
+
+    fn signature_key(key_id: text, payload: text, signature: text) -> text:
+        "{key_id}|{payload}|{signature}"
+
+    me allow_external_signature(key_id: text, payload: text, signature: text):
+        self.accepted_signatures = self.accepted_signatures.set(self.signature_key(key_id, payload, signature), true)
+
+    fn verify_external_signature(key_id: text, payload: text, signature: text) -> bool:
+        if self.key_handle_for(key_id) == "":
+            return false
+        self.accepted_signatures.get(self.signature_key(key_id, payload, signature)) ?? false
+
+    fn export_sdn() -> text:
+        var lines: [text] = ["remote_security_key_rollout_provider:", "  active: {self.active_key_id}"]
+        for key_id in self.key_handles.keys():
+            lines.push("  key_handle|{key_id}|{self.key_handles[key_id]}")
+        lines.join("\n")
+
 fn remote_security_bearer_token(headers: RemoteSecurityContextHeaders) -> text:
     val authorization = headers.authorization.trim()
     if authorization.starts_with("Bearer "):
@@ -435,6 +565,15 @@ fn sign_remote_security_token_with_key_ring(key_ring: RemoteSecuritySigningKeyRi
                                             expires_at_ms: i64,
                                             capabilities: List<text>) -> text:
     sign_remote_security_token_with_key_id(key_ring.active_key_id, key_ring.active_key(), session_id, user_id, expires_at_ms, capabilities)
+
+fn remote_security_token_with_external_signature(key_id: text,
+                                                 session_id: text,
+                                                 user_id: text,
+                                                 expires_at_ms: i64,
+                                                 capabilities: List<text>,
+                                                 signature: text) -> text:
+    val payload = remote_security_token_payload_v2(key_id, session_id, user_id, expires_at_ms, capabilities)
+    "simple-v2|{payload}|{signature}"
 
 fn validate_remote_security_token(headers: RemoteSecurityContextHeaders,
                                   session_id: text,
@@ -527,6 +666,51 @@ fn validate_remote_security_token_with_key_ring(headers: RemoteSecurityContextHe
 
     RemoteSecurityValidatedIdentity.invalid()
 
+fn validate_remote_security_token_with_adapters(headers: RemoteSecurityContextHeaders,
+                                                session_id: text,
+                                                key_provider: RemoteSecurityKeyRolloutProvider,
+                                                session_adapter: RemoteSecuritySessionStoreAdapter,
+                                                now_ms: i64) -> RemoteSecurityValidatedIdentity:
+    val bearer = remote_security_bearer_token(headers)
+    if bearer == "":
+        return RemoteSecurityValidatedIdentity.invalid()
+    val parts = bearer.split("|")
+    if parts.len() != 7:
+        return RemoteSecurityValidatedIdentity.invalid()
+    if parts[0] != "simple-v2":
+        return RemoteSecurityValidatedIdentity.invalid()
+
+    val key_id = parts[1]
+    val token_session_id = parts[2]
+    val user_id = parts[3]
+    val expires_at_ms = parts[4].to_i64() ?? 0
+    val scopes = parts[5]
+    val signature = parts[6]
+    if key_id == "" or token_session_id == "" or user_id == "":
+        return RemoteSecurityValidatedIdentity.invalid()
+    if session_id != "" and session_id != token_session_id:
+        return RemoteSecurityValidatedIdentity.invalid()
+
+    val capabilities = if scopes == "": [] else: scopes.split(",")
+    val payload = remote_security_token_payload_v2(key_id, token_session_id, user_id, expires_at_ms, capabilities)
+    if not key_provider.verify_external_signature(key_id, payload, signature):
+        return RemoteSecurityValidatedIdentity.invalid()
+    if expires_at_ms <= now_ms:
+        return RemoteSecurityValidatedIdentity.invalid()
+
+    val session = session_adapter.lookup_active_session(token_session_id, now_ms)
+    if session == nil:
+        return RemoteSecurityValidatedIdentity.invalid()
+    val active = session
+    if active.user_id != user_id:
+        return RemoteSecurityValidatedIdentity.invalid()
+    RemoteSecurityValidatedIdentity(
+        session_id: token_session_id,
+        user_id: user_id,
+        capabilities: active.capabilities,
+        expires_at_ms: expires_at_ms
+    )
+
 ## Validate a remote bearer token against the server signing key. Invalid,
 ## missing, expired, tampered, or session-mismatched tokens reconstruct an
 ## anonymous context while preserving peer/session transport metadata.
@@ -548,6 +732,18 @@ fn validate_remote_security_context_with_key_ring(headers: RemoteSecurityContext
                                                  session_store: RemoteSecuritySessionStore,
                                                  now_ms: i64) -> SecurityContext:
     val identity = validate_remote_security_token_with_key_ring(headers, session_id, key_ring, session_store, now_ms)
+    if identity.is_valid():
+        return reconstruct_remote_security_context(headers, peer_addr, identity.session_id, identity.user_id, identity.capabilities)
+
+    reconstruct_remote_security_context(headers, peer_addr, session_id, "", [])
+
+fn validate_remote_security_context_with_adapters(headers: RemoteSecurityContextHeaders,
+                                                 peer_addr: text,
+                                                 session_id: text,
+                                                 key_provider: RemoteSecurityKeyRolloutProvider,
+                                                 session_adapter: RemoteSecuritySessionStoreAdapter,
+                                                 now_ms: i64) -> SecurityContext:
+    val identity = validate_remote_security_token_with_adapters(headers, session_id, key_provider, session_adapter, now_ms)
     if identity.is_valid():
         return reconstruct_remote_security_context(headers, peer_addr, identity.session_id, identity.user_id, identity.capabilities)
 

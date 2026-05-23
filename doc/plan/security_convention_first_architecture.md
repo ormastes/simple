@@ -1221,6 +1221,7 @@ Sandbox:
 DI:
     inject gates and SecurityContext like normal dependencies
     enforce lifetime + security rules together
+    wire remote SecurityContext validation through replicated session and opaque key rollout adapters
 
 Output:
     access matrix
@@ -1232,7 +1233,7 @@ Output:
 
 Remaining implementation after generated lowering:
     add hardware-specific baremetal MPU/PMP register programming from generated metadata
-    add production adapters for external replicated remote SecurityContext session storage and KMS/HSM-backed key rollout
+    add concrete Redis/quorum session-store and vendor KMS/HSM clients behind the hosted adapter seams
 
 The minimal example should look like this:
 
