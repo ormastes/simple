@@ -3,6 +3,7 @@ use os.kernel.arch.arch_context.{Architecture}
 use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes, g_vfs_read_fat32_path_bytes}
 use os.kernel.loader.smf.{smf_extract_executable_stub_for_arch, smf_extract_executable_stub_unchecked, smf_executable_entry_point_for_arch}
 use os.kernel.loader.app_registry.{app_registry_cached_bytes, app_registry_fat32_alias, app_registry_root_alias}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check}
 
 extern fn serial_println(msg: text)
 
@@ -101,6 +102,19 @@ fn _x86_64_read_spawn_bytes(path: text) -> [u8]:
     g_vfs_read_executable_bytes(path)
 
 pub fn x86_64_fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
+    """Spawn an x86_64 executable from the filesystem (kernel-origin caller)."""
+    x86_64_fs_exec_spawn_as(0, path, argv, envp)
+
+pub fn x86_64_fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [text]) -> i64:
+    """Capability-gated x86_64 spawn.
+
+    caller == 0 is the kernel-origin sentinel (bypasses capability check).
+    Returns the new PID on success, or a negative errno on failure.
+    """
+    val gate = exec_cap_check(caller, path)
+    if gate != 0:
+        serial_println("[fs-exec] x86_64:denied caller={caller} path={path} err={gate}")
+        return gate as i64
     serial_println("[fs-exec] spawn:resolve path={path}")
     val static_pid = _x86_64_spawn_static_seeded(path, argv, envp)
     if static_pid > 0:

@@ -7,6 +7,7 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.process_image.{build_user_process_image_unchecked}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check}
 use os.kernel.scheduler.scheduler_types.{
     Scheduler, SchedulerBootstrapUserTaskResult,
     TaskControlBlock, ReadyQueue, CpuRunQueue,
@@ -188,9 +189,20 @@ pub fn fs_exec_prepare_spawn(path: text, argv: [text], envp: [text]) -> FsExecPr
 
 pub fn fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     """Load a filesystem executable, register it, and perform the arch handoff."""
+    fs_exec_spawn_as(0, path, argv, envp)
+
+pub fn fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [text]) -> i64:
+    """Capability-gated spawn: checks FileExec + ProcessSpawn before loading.
+
+    caller == 0 is the kernel-origin sentinel (bypasses capability check).
+    Returns the new PID on success, or a negative errno on failure.
+    """
+    val gate = exec_cap_check(caller, path)
+    if gate != 0:
+        serial_println("[fs-exec] spawn:denied caller={caller} path={path} err={gate}")
+        return gate as i64
     val prepared = fs_exec_prepare_spawn(path, argv, envp)
     if prepared.pid <= 0:
         return prepared.pid
-
     serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
     prepared.pid

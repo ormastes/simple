@@ -8,11 +8,12 @@
 # NOTE: do NOT import os.apps.* or os.services.vfs.vfs_init here.  Those
 # imports drag the entire userspace closure (shell, vfs_service, netstack,
 # fat32, UI session, …) into the freestanding kernel ELF and produce hundreds
-# of unresolved class-metadata symbols at link time.  All entries use the
-# resident-task placeholder from builtin_binary_registry until real ELF-exec
-# lands via `kernel/loader/elf_loader.spl`.
-
-use os.kernel.loader.builtin_binary_registry.{_resident_binary_entry}
+# of unresolved class-metadata symbols at link time.
+#
+# All entries now return None — callers fall through to loader_exec (VFS-free)
+# from loader_api.spl which reads bytes via rt_file_read_bytes and dispatches
+# through elf64_load / smf_load.  The builtin_binary_registry resident-task
+# placeholder is no longer used here.
 
 fn disk_manifest_filename_for_path(path: text) -> text:
     """Map canonical app paths to the packaged FAT32 manifest filename."""
@@ -47,15 +48,18 @@ fn parse_disk_launch_entry_name(content: text) -> text:
             current = "{current}{ch}"
     ""
 
-fn resolve_disk_launch_entry(path: text) -> u64?:
-    """Resolve a disk-backed resident app entry from the FAT32 image.
+pub fn resolve_disk_launch_entry(path: text) -> u64?:
+    """Resolve a disk-backed app entry for a known FAT32 manifest path.
 
-    Until real ELF-exec lands, all known app paths resolve to the resident-task
-    placeholder.  The manifest filename check is preserved so callers can
-    distinguish known vs unknown paths; VFS reads are deferred to the ELF exec
-    path and are not performed here.
+    Returns None for all paths so the caller falls through to loader_exec
+    (from loader_api.spl), which reads bytes via rt_file_read_bytes and
+    dispatches through elf64_load / smf_load.  The manifest filename check
+    is preserved to distinguish known vs unknown paths for future use.
     """
     val manifest_name = disk_manifest_filename_for_path(path)
     if manifest_name == "":
         return nil
-    Some(_resident_binary_entry as u64)
+    # Known path — fall through to loader_exec (ELF/SMF dispatch).
+    # Do NOT return a resident-task placeholder here; that would bypass
+    # real ELF loading.
+    nil
