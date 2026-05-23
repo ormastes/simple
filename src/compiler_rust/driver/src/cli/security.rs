@@ -89,6 +89,10 @@ pub fn run_security(args: &[String]) -> i32 {
             print!("{}", inventory.sandbox_manifest_sdn);
             0
         }
+        "sandbox-lowering" => {
+            print!("{}", inventory.sandbox_lowering_sdn);
+            0
+        }
         "ui-policy" => {
             print!("{}", inventory.ui_policy_sdn);
             0
@@ -146,6 +150,7 @@ fn build_inventory_for_files(
     let mut security_aop_sdn = String::new();
     let mut capability_manifest_sdn = String::new();
     let mut sandbox_manifest_sdn = String::new();
+    let mut sandbox_lowering_sdn = String::new();
     let mut ui_policy_sdn = String::new();
     let mut violations_sdn = String::new();
     let mut report_md = String::new();
@@ -176,6 +181,7 @@ fn build_inventory_for_files(
         append_section(&mut security_aop_sdn, file, &inventory.security_aop_sdn);
         append_section(&mut capability_manifest_sdn, file, &inventory.capability_manifest_sdn);
         append_section(&mut sandbox_manifest_sdn, file, &inventory.sandbox_manifest_sdn);
+        append_section(&mut sandbox_lowering_sdn, file, &inventory.sandbox_lowering_sdn);
         append_section(&mut ui_policy_sdn, file, &inventory.ui_policy_sdn);
         append_section(&mut violations_sdn, file, &inventory.violations_sdn);
         append_section(&mut report_md, file, &inventory.report_md);
@@ -213,6 +219,7 @@ fn build_inventory_for_files(
         security_aop_sdn,
         capability_manifest_sdn,
         sandbox_manifest_sdn,
+        sandbox_lowering_sdn,
         ui_policy_sdn,
         violations_sdn,
         report_md,
@@ -244,6 +251,7 @@ fn write_inventory(output_dir: &Path, inventory: &simple_compiler::SecurityInven
         ("security_aop.generated.sdn", &inventory.security_aop_sdn),
         ("capability_manifest.sdn", &inventory.capability_manifest_sdn),
         ("sandbox_manifest.sdn", &inventory.sandbox_manifest_sdn),
+        ("sandbox_lowering.sdn", &inventory.sandbox_lowering_sdn),
         ("ui_policy.sdn", &inventory.ui_policy_sdn),
         ("violations.sdn", &inventory.violations_sdn),
         ("report.md", &inventory.report_md),
@@ -272,6 +280,7 @@ fn print_usage() {
     eprintln!("  simple security aop-lowering <file.spl>...");
     eprintln!("  simple security capability-manifest <file.spl>...");
     eprintln!("  simple security sandbox-manifest <file.spl>...");
+    eprintln!("  simple security sandbox-lowering <file.spl>...");
     eprintln!("  simple security ui-policy <file.spl>...");
     eprintln!("  simple security audit-gates <file.spl>...");
     eprintln!("  simple security audit <file.spl>...");

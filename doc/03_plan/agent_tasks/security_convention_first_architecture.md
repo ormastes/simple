@@ -16,9 +16,10 @@
 - Main agent: implement minimal `security:` grammar with `layers ...` and `isolate ...` convention sugar.
 - Main agent: implement explicit task-scoped `SecurityContext` propagation helpers.
 - Main agent: implement async HTTP handler dispatch scoping for reconstructed remote `SecurityContext`.
+- Main agent: implement generated backend-specific `sandbox_lowering.sdn`, including Simple OS native object-capability handles.
 - Main agent: add focused compiler tests.
 
 ## Next Candidate Tasks
 
 - Integrate remote `SecurityContext` transport/reconstruction with real client/server transports.
-- Lower sandbox manifests to concrete backends.
+- Install lowered sandbox plans into runtime/kernel/VM backends.

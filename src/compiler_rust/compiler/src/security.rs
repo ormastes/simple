@@ -19,6 +19,7 @@ pub struct SecurityInventory {
     pub security_aop_sdn: String,
     pub capability_manifest_sdn: String,
     pub sandbox_manifest_sdn: String,
+    pub sandbox_lowering_sdn: String,
     pub ui_policy_sdn: String,
     pub violations_sdn: String,
     pub report_md: String,
@@ -149,6 +150,7 @@ pub fn build_security_inventory(module: &HirModule) -> SecurityInventory {
         security_aop_sdn: render_security_aop_lowering(&lower_security_to_aop(module)),
         capability_manifest_sdn: render_capability_manifest(module),
         sandbox_manifest_sdn: render_sandbox_manifest(module, &gates),
+        sandbox_lowering_sdn: render_sandbox_lowering(module, &gates),
         ui_policy_sdn: render_ui_policy(&[], module),
         report_md: render_security_report(
             gates.len(),
@@ -186,6 +188,7 @@ pub fn build_security_inventory_for_source(file: &SecuritySourceFile, module: &H
         security_aop_sdn: render_security_aop_lowering(&lower_security_to_aop(module)),
         capability_manifest_sdn: render_capability_manifest(module),
         sandbox_manifest_sdn: render_sandbox_manifest(module, &gates),
+        sandbox_lowering_sdn: render_sandbox_lowering(module, &gates),
         ui_policy_sdn: render_ui_policy(std::slice::from_ref(file), module),
         report_md: render_security_report(
             gates.len(),
@@ -2247,6 +2250,94 @@ fn render_sandbox_manifest(module: &HirModule, gates: &[HirSecurityGate]) -> Str
         }
     }
     out
+}
+
+fn render_sandbox_lowering(module: &HirModule, gates: &[HirSecurityGate]) -> String {
+    let mut out = String::from("sandbox_lowering:\n");
+    for sandbox in &module.sandbox_policies {
+        let source_backend = sandbox_source_backend(&sandbox.items);
+        let lowered_backend = lowered_sandbox_backend(&source_backend);
+        out.push_str(&format!("  {}:\n", sandbox.name));
+        out.push_str(&format!("    source_backend: {}\n", source_backend));
+        out.push_str(&format!("    lowered_backend: {}\n", lowered_backend));
+        out.push_str("    enforcement:\n");
+        for step in sandbox_enforcement_steps(lowered_backend) {
+            out.push_str(&format!("      - {}\n", step));
+        }
+        let grants = sandbox_grants(gates, &sandbox.name);
+        if !grants.is_empty() {
+            out.push_str("    capability_handles:\n");
+            for grant in grants {
+                out.push_str(&format!("      - {}\n", grant));
+            }
+        }
+        let rules: Vec<(&str, &str)> = sandbox
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                HirSandboxItem::Rule { key, value } => Some((key.as_str(), value.as_str())),
+                HirSandboxItem::Backend { .. } => None,
+            })
+            .collect();
+        if !rules.is_empty() {
+            out.push_str("    policy_rules:\n");
+            for (key, value) in rules {
+                out.push_str(&format!("      {}: {}\n", key, value));
+            }
+        }
+    }
+    out
+}
+
+fn sandbox_source_backend(items: &[HirSandboxItem]) -> String {
+    items
+        .iter()
+        .find_map(|item| match item {
+            HirSandboxItem::Backend { name } => Some(name.clone()),
+            HirSandboxItem::Rule { .. } => None,
+        })
+        .unwrap_or_else(|| "auto".to_string())
+}
+
+fn lowered_sandbox_backend(source_backend: &str) -> &'static str {
+    match source_backend {
+        "auto" => "linux_landlock_seccomp_namespaces",
+        "landlock" | "linux_landlock" => "linux_landlock",
+        "wasi" | "wasm" => "wasi_capabilities",
+        "simple_vm" | "simplevm" => "simple_vm_capability_table",
+        "simple_os" | "simpleos" => "simple_os_native_object_capability_handles",
+        "baremetal" => "baremetal_mpu_linker_regions",
+        _ => "custom_sandbox_backend",
+    }
+}
+
+fn sandbox_enforcement_steps(lowered_backend: &str) -> &'static [&'static str] {
+    match lowered_backend {
+        "linux_landlock_seccomp_namespaces" => &[
+            "landlock_ruleset",
+            "seccomp_profile",
+            "namespace_scope",
+            "capability_handle_table",
+        ],
+        "linux_landlock" => &["landlock_ruleset", "capability_handle_table"],
+        "wasi_capabilities" => &["preopened_dirs", "wasi_capability_table"],
+        "simple_vm_capability_table" => &["module_capability_table", "host_import_filter"],
+        "simple_os_native_object_capability_handles" => &[
+            "native_object_capability_handles",
+            "handle_transfer_table",
+            "kernel_rights_mask",
+        ],
+        "baremetal_mpu_linker_regions" => &["linker_sections", "mpu_regions", "static_capability_table"],
+        _ => &["external_backend_contract", "capability_handle_table"],
+    }
+}
+
+fn sandbox_grants(gates: &[HirSecurityGate], sandbox_name: &str) -> Vec<String> {
+    gates
+        .iter()
+        .filter(|gate| gate.sandbox.as_deref() == Some(sandbox_name))
+        .flat_map(|gate| gate.grants.clone())
+        .collect()
 }
 
 fn render_capability_manifest(module: &HirModule) -> String {

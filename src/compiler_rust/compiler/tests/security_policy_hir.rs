@@ -206,11 +206,45 @@ sandbox admin_sandbox:
     assert!(inventory.security_aop_sdn.contains("audit_success: UserAdminGate"));
     assert!(inventory.security_aop_sdn.contains(&format!("gate_id: {}", gate_id)));
     assert!(inventory.sandbox_manifest_sdn.contains("- ReadDir[\"/reports\"]"));
+    assert!(inventory
+        .sandbox_lowering_sdn
+        .contains("lowered_backend: linux_landlock_seccomp_namespaces"));
+    assert!(inventory.sandbox_lowering_sdn.contains("landlock_ruleset"));
+    assert!(inventory.sandbox_lowering_sdn.contains("- ReadDir[\"/reports\"]"));
     assert!(inventory.violations_sdn.contains("[]"));
 
     let weaving_config = WeavingConfig::from_hir_module(&module);
     assert!(weaving_config.enabled);
     assert_eq!(weaving_config.security_advice_plans.len(), 1);
+}
+
+#[test]
+fn lowers_simple_os_sandbox_to_native_object_capability_handles() {
+    let module = lower(
+        r#"security gate PluginGate:
+    sandbox plugin_sandbox
+    grant:
+        ReadDir["/reports"]
+        AuditLog
+
+sandbox plugin_sandbox:
+    backend simple_os
+    net deny all
+"#,
+    );
+
+    let inventory = build_security_inventory(&module);
+    assert!(inventory
+        .sandbox_lowering_sdn
+        .contains("lowered_backend: simple_os_native_object_capability_handles"));
+    assert!(inventory
+        .sandbox_lowering_sdn
+        .contains("native_object_capability_handles"));
+    assert!(inventory.sandbox_lowering_sdn.contains("handle_transfer_table"));
+    assert!(inventory.sandbox_lowering_sdn.contains("kernel_rights_mask"));
+    assert!(inventory.sandbox_lowering_sdn.contains("- ReadDir[\"/reports\"]"));
+    assert!(inventory.sandbox_lowering_sdn.contains("policy_rules:"));
+    assert!(inventory.sandbox_lowering_sdn.contains("net:"));
 }
 
 #[test]

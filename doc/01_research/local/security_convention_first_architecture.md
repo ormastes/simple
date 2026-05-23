@@ -60,9 +60,10 @@ This pass added the first convention-first architecture slice:
 - Minimal source `security:` policy blocks now work without a required policy name, and `layers ...` / `isolate ...` sugar lowers into layer and feature dimension rules.
 - Security context propagation now includes explicit task-scoped helpers so async runtimes can isolate contexts by task id instead of treating thread-local state as authoritative.
 - Async HTTP handler dispatch now reconstructs a server-side `SecurityContext` from safe request metadata and scopes it around content handler execution.
+- Sandbox inventory now emits backend-specific `sandbox_lowering.sdn` plans for Linux, WASI, Simple VM, baremetal, and Simple OS native object-capability handles.
 
 ## Remaining Gaps
 
 - Remote `SecurityContext` transport/reconstruction has an HTTP handler-dispatch bridge; full token/session validation remains future work.
 - Task-local context helpers exist, but deeper scheduler/runtime integration remains future work.
-- Sandbox manifest generation exists for declared sandboxes/gates, but backend lowering remains future work.
+- Sandbox manifest generation and backend lowering artifacts exist for declared sandboxes/gates, but runtime installation into kernel/VM/backend enforcement remains future work.

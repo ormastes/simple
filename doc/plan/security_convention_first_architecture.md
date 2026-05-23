@@ -1212,7 +1212,7 @@ Sandbox:
     compile to sandbox manifest
     lower to Landlock/seccomp/namespaces on Linux
     lower to WASI/capability model for plugins
-    lower to native capability handles in Simple OS later
+    lower to native object-capability handles in Simple OS
 
 DI:
     inject gates and SecurityContext like normal dependencies
@@ -1222,8 +1222,14 @@ Output:
     access matrix
     gate inventory
     sandbox manifest
+    sandbox lowering
     UI policy snapshot
     audit/security report
+
+Remaining implementation after generated lowering:
+    install lowered sandbox plans into runtime/kernel/VM backends
+    validate remote SecurityContext tokens/sessions beyond safe header reconstruction
+    connect task-scoped SecurityContext helpers to the deeper scheduler/runtime
 
 The minimal example should look like this:
 

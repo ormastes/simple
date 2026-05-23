@@ -39,8 +39,10 @@ REQ-016: Security context propagation shall expose explicit task-scoped context 
 
 REQ-017: HTTP transport dispatch shall reconstruct a server-side `SecurityContext` from safe request metadata and scope it around handler execution, while keeping unauthenticated remote requests anonymous and server-authoritative.
 
+REQ-018: The security inventory shall emit a backend-specific `sandbox_lowering.sdn` artifact that maps abstract sandbox policies to concrete enforcement plans for Linux Landlock/seccomp/namespaces, WASI, Simple VM, baremetal MPU/linker regions, and Simple OS native object-capability handles.
+
 ## Deferred Requirements
 
 DEF-001: Full remote `SecurityContext` token/session validation remains future work beyond the HTTP handler-dispatch bridge.
 
-DEF-002: Backend sandbox lowering remains future work beyond manifest generation.
+DEF-002: Runtime installation and kernel/VM enforcement of lowered sandbox plans remains future work beyond generated backend lowering artifacts.
