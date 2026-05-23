@@ -65,9 +65,10 @@ This pass added the first convention-first architecture slice:
 - Remote HTTP dispatch now has an opt-in HMAC signed bearer token path that authenticates only validated session/user/capability claims and keeps unvalidated dispatch anonymous.
 - Remote security lifecycle primitives now include key-id based signing key rotation, session lookup, refresh, and revocation before remote authority reconstruction.
 - Hosted native security registry initialization now embeds sandbox lowering metadata and the runtime records backend IDs plus capability-handle counts when a generated sandbox is entered.
+- Hosted runtime sandbox entry now activates lowered capability-handle policy so runtime-managed privileged APIs can reject ungranted capability IDs while a sandbox is active.
 
 ## Remaining Gaps
 
 - Remote `SecurityContext` transport/reconstruction has safe HTTP dispatch, HMAC token validation, local key-ring rotation, session lookup, refresh, and revocation; durable/distributed session storage and operational key rollout remain future work.
 - Task-local context helpers, HostScheduler task identity, Rust cooperative async current-task-id exposure, FutureExecutor current-task-id exposure, native `rt_current_task_id` selection across Rust runtime identities, and Simple `current_unified_task_key` selection exist; future fiber runtime integration remains future work.
-- Sandbox manifest generation, backend lowering artifacts, and hosted runtime registry installation exist for declared sandboxes/gates, but kernel/VM/backend enforcement remains future work.
+- Sandbox manifest generation, backend lowering artifacts, hosted runtime registry installation, and hosted capability-handle enforcement exist for declared sandboxes/gates; concrete kernel/VM/backend syscall isolation remains future work.

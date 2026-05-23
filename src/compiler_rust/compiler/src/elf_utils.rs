@@ -603,6 +603,12 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_security_last_gate_id" => simple_runtime::rt_security_last_gate_id as *const () as usize,
         "rt_security_last_policy_id" => simple_runtime::rt_security_last_policy_id as *const () as usize,
         "rt_security_last_sandbox_id" => simple_runtime::rt_security_last_sandbox_id as *const () as usize,
+        "rt_security_last_sandbox_backend_id" => {
+            simple_runtime::rt_security_last_sandbox_backend_id as *const () as usize
+        }
+        "rt_security_last_sandbox_capability_handles" => {
+            simple_runtime::rt_security_last_sandbox_capability_handles as *const () as usize
+        }
         "rt_security_last_audit_id" => simple_runtime::rt_security_last_audit_id as *const () as usize,
         "rt_security_load_registry_sdn" => simple_runtime::rt_security_load_registry_sdn as *const () as usize,
         "rt_security_loaded_registry_entries" => {
@@ -612,6 +618,15 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_security_policy_allowed" => simple_runtime::rt_security_policy_allowed as *const () as usize,
         "rt_security_register_sandbox" => simple_runtime::rt_security_register_sandbox as *const () as usize,
         "rt_security_sandbox_registered" => simple_runtime::rt_security_sandbox_registered as *const () as usize,
+        "rt_security_sandbox_capability_allowed" => {
+            simple_runtime::rt_security_sandbox_capability_allowed as *const () as usize
+        }
+        "rt_security_last_sandbox_capability_allowed" => {
+            simple_runtime::rt_security_last_sandbox_capability_allowed as *const () as usize
+        }
+        "rt_security_sandbox_capability_denials" => {
+            simple_runtime::rt_security_sandbox_capability_denials as *const () as usize
+        }
 
         // Doctest I/O operations (file discovery)
         "doctest_read_file" => simple_runtime::doctest_read_file as *const () as usize,
@@ -662,4 +677,22 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
     };
 
     Some(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_security_sandbox_capability_runtime_symbols() {
+        for symbol in [
+            "rt_security_last_sandbox_backend_id",
+            "rt_security_last_sandbox_capability_handles",
+            "rt_security_sandbox_capability_allowed",
+            "rt_security_last_sandbox_capability_allowed",
+            "rt_security_sandbox_capability_denials",
+        ] {
+            assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
+        }
+    }
 }

@@ -20,6 +20,8 @@ static LAST_POLICY_ALLOWED: AtomicU64 = AtomicU64::new(1);
 static LAST_SANDBOX_REGISTERED: AtomicU64 = AtomicU64::new(0);
 static LAST_SANDBOX_BACKEND_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_SANDBOX_CAPABILITY_HANDLES: AtomicU64 = AtomicU64::new(0);
+static LAST_SANDBOX_CAPABILITY_ALLOWED: AtomicU64 = AtomicU64::new(1);
+static SANDBOX_CAPABILITY_DENIAL_COUNT: AtomicU64 = AtomicU64::new(0);
 static LOADED_REGISTRY_ENTRIES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
@@ -27,12 +29,15 @@ struct SecurityRegistry {
     denied_policies: HashSet<u64>,
     registered_sandboxes: HashSet<u64>,
     sandbox_lowerings: HashMap<u64, SandboxLoweringRecord>,
+    active_sandboxes: Vec<u64>,
 }
 
 #[derive(Default)]
 struct SandboxLoweringRecord {
     backend_id: u64,
     capability_handles: u64,
+    capability_handle_ids: HashSet<u64>,
+    denied_capability_ids: HashSet<u64>,
 }
 
 fn registry() -> &'static Mutex<SecurityRegistry> {
@@ -47,6 +52,29 @@ fn security_metadata_id(value: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn capability_alias_ids(name: &str) -> Vec<u64> {
+    let normalized = name.trim();
+    let mut aliases = vec![security_metadata_id(normalized)];
+    let expanded = match normalized {
+        "net" | "network" => Some("Network"),
+        "fs" | "filesystem" => Some("Filesystem"),
+        "env" | "environment" => Some("Env"),
+        "process" | "proc" => Some("Process"),
+        "syscall" => Some("Syscall"),
+        _ => None,
+    };
+    if let Some(alias) = expanded {
+        aliases.push(security_metadata_id(alias));
+    }
+    aliases
+}
+
+fn capability_handle_id(handle: &str) -> u64 {
+    let trimmed = handle.trim();
+    let name = trimmed.split(['[', '(', '<', ' ']).next().unwrap_or(trimmed);
+    security_metadata_id(name)
 }
 
 #[no_mangle]
@@ -77,15 +105,19 @@ pub extern "C" fn rt_security_enter_sandbox(sandbox_id: u64) {
     LAST_SANDBOX_ID.store(sandbox_id, Ordering::Relaxed);
     let (registered, backend_id, capability_handles) = registry()
         .lock()
-        .map(|registry| {
+        .map(|mut registry| {
             let registered = registry.registered_sandboxes.contains(&sandbox_id)
                 || registry.sandbox_lowerings.contains_key(&sandbox_id);
             let lowering = registry.sandbox_lowerings.get(&sandbox_id);
-            (
+            let result = (
                 registered,
                 lowering.map(|record| record.backend_id).unwrap_or(0),
                 lowering.map(|record| record.capability_handles).unwrap_or(0),
-            )
+            );
+            if registered {
+                registry.active_sandboxes.push(sandbox_id);
+            }
+            result
         })
         .unwrap_or((false, 0, 0));
     LAST_SANDBOX_REGISTERED.store(u64::from(registered), Ordering::Relaxed);
@@ -97,6 +129,11 @@ pub extern "C" fn rt_security_enter_sandbox(sandbox_id: u64) {
 #[no_mangle]
 pub extern "C" fn rt_security_exit_sandbox(sandbox_id: u64) {
     LAST_SANDBOX_ID.store(sandbox_id, Ordering::Relaxed);
+    if let Ok(mut registry) = registry().lock() {
+        if let Some(index) = registry.active_sandboxes.iter().rposition(|id| *id == sandbox_id) {
+            registry.active_sandboxes.remove(index);
+        }
+    }
     EXIT_SANDBOX_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -137,6 +174,8 @@ pub extern "C" fn rt_security_reset_counters() {
     LAST_SANDBOX_REGISTERED.store(0, Ordering::Relaxed);
     LAST_SANDBOX_BACKEND_ID.store(0, Ordering::Relaxed);
     LAST_SANDBOX_CAPABILITY_HANDLES.store(0, Ordering::Relaxed);
+    LAST_SANDBOX_CAPABILITY_ALLOWED.store(1, Ordering::Relaxed);
+    SANDBOX_CAPABILITY_DENIAL_COUNT.store(0, Ordering::Relaxed);
     LOADED_REGISTRY_ENTRIES.store(0, Ordering::Relaxed);
     if let Ok(mut registry) = registry().lock() {
         *registry = SecurityRegistry::default();
@@ -221,6 +260,40 @@ pub extern "C" fn rt_security_last_sandbox_capability_handles() -> u64 {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_security_sandbox_capability_allowed(capability_id: u64) -> bool {
+    let allowed = registry()
+        .lock()
+        .map(|registry| {
+            let Some(sandbox_id) = registry.active_sandboxes.last() else {
+                return true;
+            };
+            let Some(lowering) = registry.sandbox_lowerings.get(sandbox_id) else {
+                return true;
+            };
+            if lowering.denied_capability_ids.contains(&capability_id) {
+                return false;
+            }
+            lowering.capability_handle_ids.is_empty() || lowering.capability_handle_ids.contains(&capability_id)
+        })
+        .unwrap_or(true);
+    LAST_SANDBOX_CAPABILITY_ALLOWED.store(u64::from(allowed), Ordering::Relaxed);
+    if !allowed {
+        SANDBOX_CAPABILITY_DENIAL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    allowed
+}
+
+#[no_mangle]
+pub extern "C" fn rt_security_last_sandbox_capability_allowed() -> bool {
+    LAST_SANDBOX_CAPABILITY_ALLOWED.load(Ordering::Relaxed) != 0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_security_sandbox_capability_denials() -> u64 {
+    SANDBOX_CAPABILITY_DENIAL_COUNT.load(Ordering::Relaxed)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_security_loaded_registry_entries() -> u64 {
     LOADED_REGISTRY_ENTRIES.load(Ordering::Relaxed)
 }
@@ -247,14 +320,24 @@ fn load_registry_sdn_text(text: &str) -> u64 {
     let mut current_sandbox: Option<&str> = None;
     let mut current_backend: Option<&str> = None;
     let mut capability_handles = 0_u64;
+    let mut capability_handle_ids = HashSet::new();
+    let mut denied_capability_ids = HashSet::new();
     let mut in_capability_handles = false;
+    let mut in_policy_rules = false;
 
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed == "sandbox_lowering:" {
-            loaded += flush_sandbox_lowering(current_sandbox.take(), current_backend.take(), capability_handles);
+            loaded += flush_sandbox_lowering(
+                current_sandbox.take(),
+                current_backend.take(),
+                capability_handles,
+                std::mem::take(&mut capability_handle_ids),
+                std::mem::take(&mut denied_capability_ids),
+            );
             capability_handles = 0;
             in_capability_handles = false;
+            in_policy_rules = false;
             in_sandbox_lowering = true;
             pending_kind = None;
             pending_name = None;
@@ -265,29 +348,61 @@ fn load_registry_sdn_text(text: &str) -> u64 {
                 continue;
             }
             if line.starts_with("  ") && !line.starts_with("    ") && trimmed.ends_with(':') {
-                loaded += flush_sandbox_lowering(current_sandbox.take(), current_backend.take(), capability_handles);
+                loaded += flush_sandbox_lowering(
+                    current_sandbox.take(),
+                    current_backend.take(),
+                    capability_handles,
+                    std::mem::take(&mut capability_handle_ids),
+                    std::mem::take(&mut denied_capability_ids),
+                );
                 capability_handles = 0;
                 in_capability_handles = false;
+                in_policy_rules = false;
                 current_sandbox = Some(trimmed.trim_end_matches(':'));
                 continue;
             }
             if let Some(backend) = trimmed.strip_prefix("lowered_backend:") {
                 current_backend = Some(backend.trim());
                 in_capability_handles = false;
+                in_policy_rules = false;
                 continue;
             }
             if trimmed == "capability_handles:" {
                 in_capability_handles = true;
+                in_policy_rules = false;
+                continue;
+            }
+            if trimmed == "policy_rules:" {
+                in_policy_rules = true;
+                in_capability_handles = false;
                 continue;
             }
             if in_capability_handles && trimmed.starts_with("- ") && current_sandbox.is_some() {
                 capability_handles += 1;
+                capability_handle_ids.insert(capability_handle_id(trimmed.trim_start_matches("- ")));
+                continue;
+            }
+            if in_policy_rules && current_sandbox.is_some() {
+                if let Some((key, value)) = trimmed.split_once(':') {
+                    if value.trim().starts_with("deny") {
+                        for alias_id in capability_alias_ids(key) {
+                            denied_capability_ids.insert(alias_id);
+                        }
+                    }
+                }
                 continue;
             }
             if !line.starts_with(' ') {
-                loaded += flush_sandbox_lowering(current_sandbox.take(), current_backend.take(), capability_handles);
+                loaded += flush_sandbox_lowering(
+                    current_sandbox.take(),
+                    current_backend.take(),
+                    capability_handles,
+                    std::mem::take(&mut capability_handle_ids),
+                    std::mem::take(&mut denied_capability_ids),
+                );
                 capability_handles = 0;
                 in_capability_handles = false;
+                in_policy_rules = false;
                 in_sandbox_lowering = false;
             }
         }
@@ -330,11 +445,23 @@ fn load_registry_sdn_text(text: &str) -> u64 {
         pending_name = None;
     }
 
-    loaded += flush_sandbox_lowering(current_sandbox, current_backend, capability_handles);
+    loaded += flush_sandbox_lowering(
+        current_sandbox,
+        current_backend,
+        capability_handles,
+        capability_handle_ids,
+        denied_capability_ids,
+    );
     loaded
 }
 
-fn flush_sandbox_lowering(sandbox_name: Option<&str>, backend_name: Option<&str>, capability_handles: u64) -> u64 {
+fn flush_sandbox_lowering(
+    sandbox_name: Option<&str>,
+    backend_name: Option<&str>,
+    capability_handles: u64,
+    capability_handle_ids: HashSet<u64>,
+    denied_capability_ids: HashSet<u64>,
+) -> u64 {
     let Some(sandbox_name) = sandbox_name else {
         return 0;
     };
@@ -350,6 +477,8 @@ fn flush_sandbox_lowering(sandbox_name: Option<&str>, backend_name: Option<&str>
             SandboxLoweringRecord {
                 backend_id,
                 capability_handles,
+                capability_handle_ids,
+                denied_capability_ids,
             },
         );
     }
@@ -436,5 +565,41 @@ sandbox_lowering:
         assert!(rt_security_sandbox_registered());
         assert_eq!(rt_security_last_sandbox_backend_id(), backend_id);
         assert_eq!(rt_security_last_sandbox_capability_handles(), 2);
+    }
+
+    #[test]
+    fn active_sandbox_enforces_lowered_capability_handles() {
+        rt_security_reset_counters();
+        let sandbox_id = security_metadata_id("plugin_sandbox");
+        let read_dir_id = security_metadata_id("ReadDir");
+        let network_id = security_metadata_id("Network");
+        let manifest = "\
+sandbox_lowering:
+  plugin_sandbox:
+    source_backend: simple_os
+    lowered_backend: simple_os_native_object_capability_handles
+    enforcement:
+      - native_object_capability_handles
+      - handle_transfer_table
+      - kernel_rights_mask
+    capability_handles:
+      - ReadDir[\"/reports\"]
+      - AuditLog
+    policy_rules:
+      net: deny all
+";
+
+        assert_eq!(
+            rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64),
+            1
+        );
+        assert!(rt_security_sandbox_capability_allowed(network_id));
+        rt_security_enter_sandbox(sandbox_id);
+        assert!(rt_security_sandbox_capability_allowed(read_dir_id));
+        assert!(!rt_security_sandbox_capability_allowed(network_id));
+        assert!(!rt_security_last_sandbox_capability_allowed());
+        assert_eq!(rt_security_sandbox_capability_denials(), 1);
+        rt_security_exit_sandbox(sandbox_id);
+        assert!(rt_security_sandbox_capability_allowed(network_id));
     }
 }

@@ -49,10 +49,12 @@ REQ-021: HTTP handler dispatch shall route reconstructed remote `SecurityContext
 
 REQ-022: Remote `SecurityContext` lifecycle support shall provide key-id based signing key rotation, server-side session lookup, refresh, and revocation primitives for validating remote bearer tokens before reconstructing authority.
 
+REQ-023: Hosted runtime sandbox entry shall activate lowered capability-handle policy so runtime-managed privileged APIs can reject ambient capability use that is not granted to the active sandbox.
+
 ## Deferred Requirements
 
 DEF-001: Durable/distributed remote `SecurityContext` session storage and operational key rollout remain future work beyond local key-ring and session-store lifecycle primitives.
 
-DEF-002: Runtime installation and kernel/VM enforcement of lowered sandbox plans remains future work beyond generated backend lowering artifacts.
+DEF-002: Kernel/VM/backend syscall isolation for lowered sandbox plans remains future work beyond hosted runtime capability-handle enforcement and generated backend lowering artifacts.
 
 DEF-003: Future fiber runtime integration with the unified task identity selector remains future work beyond HostScheduler, FutureExecutor, and Rust cooperative async identity selection.

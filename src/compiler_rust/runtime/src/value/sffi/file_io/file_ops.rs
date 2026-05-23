@@ -26,6 +26,9 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+const READ_FILE_CAPABILITY_ID: u64 = 0x2e97_865a_b851_28c3;
+const WRITE_FILE_CAPABILITY_ID: u64 = 0x2fa1_6c1d_95e4_306a;
+
 struct WriteAtCache {
     path: String,
     file: File,
@@ -62,6 +65,20 @@ fn read_text_cache() -> &'static Mutex<Option<ReadTextCache>> {
 fn mmap_len_cache() -> &'static Mutex<Option<MmapLenCache>> {
     static CACHE: OnceLock<Mutex<Option<MmapLenCache>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn security_metadata_id(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn runtime_capability_allowed(capability_id: u64) -> bool {
+    crate::security_runtime::rt_security_sandbox_capability_allowed(capability_id)
 }
 
 fn file_stamp(path: &Path) -> Option<FileStamp> {
@@ -220,6 +237,9 @@ pub unsafe extern "C" fn rt_file_canonicalize(path_ptr: *const u8, path_len: u64
 /// Read entire file as text
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) {
+        return RuntimeValue::NIL;
+    }
     if path_ptr.is_null() {
         return RuntimeValue::NIL;
     }
@@ -307,6 +327,9 @@ pub unsafe extern "C" fn rt_file_write_text(
     content_ptr: *const u8,
     content_len: u64,
 ) -> bool {
+    if !runtime_capability_allowed(WRITE_FILE_CAPABILITY_ID) {
+        return false;
+    }
     if path_ptr.is_null() || content_ptr.is_null() {
         return false;
     }
@@ -1007,6 +1030,68 @@ mod tests {
             let result = rt_file_read_text(path_ptr, path_len);
             let read_content = extract_string(result);
             assert_eq!(read_content, content);
+        }
+    }
+
+    #[test]
+    fn sandbox_capability_table_gates_file_text_io() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("sandboxed.txt");
+        fs::write(&file_path, "allowed").unwrap();
+        let path_str = file_path.to_str().unwrap();
+        let (path_ptr, path_len) = str_to_ptr(path_str);
+        let read_only_sandbox_id = security_metadata_id("read_only_sandbox");
+        let write_only_sandbox_id = security_metadata_id("write_only_sandbox");
+        let read_only_manifest = "\
+sandbox_lowering:
+  read_only_sandbox:
+    source_backend: simple_vm
+    lowered_backend: simple_vm_capability_table
+    capability_handles:
+      - ReadFile
+";
+        let write_only_manifest = "\
+sandbox_lowering:
+  write_only_sandbox:
+    source_backend: simple_vm
+    lowered_backend: simple_vm_capability_table
+    capability_handles:
+      - WriteFile
+";
+
+        unsafe {
+            crate::security_runtime::rt_security_reset_counters();
+            crate::security_runtime::rt_security_load_registry_sdn(
+                read_only_manifest.as_ptr(),
+                read_only_manifest.len() as u64,
+            );
+            crate::security_runtime::rt_security_load_registry_sdn(
+                write_only_manifest.as_ptr(),
+                write_only_manifest.len() as u64,
+            );
+
+            crate::security_runtime::rt_security_enter_sandbox(read_only_sandbox_id);
+            let read_result = rt_file_read_text(path_ptr, path_len);
+            assert_eq!(extract_string(read_result), "allowed");
+            let (denied_content_ptr, denied_content_len) = str_to_ptr("denied");
+            assert!(!rt_file_write_text(
+                path_ptr,
+                path_len,
+                denied_content_ptr,
+                denied_content_len
+            ));
+            crate::security_runtime::rt_security_exit_sandbox(read_only_sandbox_id);
+
+            crate::security_runtime::rt_security_enter_sandbox(write_only_sandbox_id);
+            assert_eq!(rt_file_read_text(path_ptr, path_len), RuntimeValue::NIL);
+            let (allowed_content_ptr, allowed_content_len) = str_to_ptr("written");
+            assert!(rt_file_write_text(
+                path_ptr,
+                path_len,
+                allowed_content_ptr,
+                allowed_content_len
+            ));
+            crate::security_runtime::rt_security_exit_sandbox(write_only_sandbox_id);
         }
     }
 

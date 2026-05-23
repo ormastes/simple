@@ -1229,7 +1229,7 @@ Output:
     audit/security report
 
 Remaining implementation after generated lowering:
-    enforce lowered sandbox plans in runtime/kernel/VM backends
+    enforce lowered sandbox plans in kernel/VM backends beyond hosted runtime capability checks
     add durable/distributed remote SecurityContext session storage and operational key rollout
     integrate future fiber runtimes with the unified task identity selector
 
