@@ -186,6 +186,23 @@ Task type: code-quality. Refined the user's broad "harden simple db" request int
 | AC-5 | all 5 spec files | all 50 it blocks | Failing (no impl) |
 | AC-7 | all 5 spec files | all 50 it blocks — these ARE the new tests | Failing (no impl) |
 
+#### Test Run Results (2026-05-23)
+
+| Spec | Passed | Failed | Duration | Red-Phase Status |
+|------|--------|--------|----------|------------------|
+| F1 (wal_replay_row_materialization) | 2 | 17 | 162ms | Correct |
+| F2 (atomic_lock_excl) | 3 | 5 | 661ms | Correct (uses try_acquire(500) to avoid 5min timeout) |
+| F3 (atomic_fsync) | 1 | 6 | 197ms | Correct |
+| F4 (btree_delete_rebalance) | 8 | 3 | 172ms | Correct |
+| F5 (storage_api_surface) | 5 | 0 | 176ms | Structural only (interpreter verifies loading, not it-block execution; trait-typed dispatch helpers ensure compiled-mode failure) |
+
+#### Design Notes
+- F2 uses `FileLock.for_file(path)` static constructor (correct 3-field struct), `try_acquire(500)` for contention tests to avoid 5-minute timeout
+- F2 checks `path + ".lock"` (not `path`) for lock file existence assertions
+- F4 uses `BTree<text>.new(3)`, `BTreeKey(a: n, b: 0)`, `tree.lookup(k(n))`, `tree.delete(k(n))` -- verified against actual btree.spl API
+- F5 uses trait-typed dispatch helpers (`fn require_wal_group_commit(w: WalWriter, ...) -> Lsn`) to force trait-level method resolution, not inherent method calls
+- All specs use `extern fn` declarations for runtime functions instead of `use std.io_runtime` to avoid import issues
+
 #### Coverage Markers
 - F1: `# @cover src/lib/nogc_sync_mut/database/wal.spl`, `# @cover src/lib/nogc_sync_mut/database/core.spl`
 - F2: `# @cover src/lib/nogc_sync_mut/database/atomic.spl`, `# @cover src/runtime/rt_file.c`
