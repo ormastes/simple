@@ -10,6 +10,7 @@ use super::{limits, FilesystemMode, NetworkMode, SandboxConfig, SandboxError, Sa
 use nix::mount::{mount, MsFlags};
 use nix::unistd::{Gid, Uid};
 use std::collections::HashSet;
+use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,6 +31,38 @@ impl LinuxSeccompProfile {
     }
 }
 
+#[repr(C)]
+struct LandlockRulesetAttr {
+    handled_access_fs: u64,
+    handled_access_net: u64,
+    scoped: u64,
+}
+
+#[repr(C)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: i32,
+}
+
+const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
+const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
+const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
+const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
+const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
+const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
+const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
+
 /// Apply sandbox configuration to the current process (Linux).
 ///
 /// This uses Linux namespaces, cgroups, and seccomp for comprehensive isolation.
@@ -42,11 +75,14 @@ pub fn apply_sandbox(config: &SandboxConfig) -> SandboxResult<()> {
     apply_network_isolation(&config.network.mode, &config.network)?;
 
     // Apply filesystem isolation
-    apply_filesystem_isolation(
-        &config.filesystem.mode,
-        &config.filesystem.read_paths,
-        &config.filesystem.write_paths,
-    )?;
+    let landlock_applied = install_landlock_filesystem_rules(config)?;
+    if !landlock_applied {
+        apply_filesystem_isolation(
+            &config.filesystem.mode,
+            &config.filesystem.read_paths,
+            &config.filesystem.write_paths,
+        )?;
+    }
 
     // Try to apply advanced Linux features (namespaces, seccomp)
     // These may fail if running without CAP_SYS_ADMIN or in restricted environments
@@ -135,6 +171,232 @@ pub fn install_seccomp_profile(profile: LinuxSeccompProfile) -> SandboxResult<()
     }
 
     Ok(())
+}
+
+/// Install Linux Landlock filesystem rules for this process.
+///
+/// Landlock is also irreversible for a process tree, so callers should install
+/// it only in a child/process that is about to run sandboxed code.
+pub fn install_landlock_filesystem_rules(config: &SandboxConfig) -> SandboxResult<bool> {
+    match config.filesystem.mode {
+        FilesystemMode::Full | FilesystemMode::Overlay => return Ok(false),
+        FilesystemMode::ReadOnly | FilesystemMode::Restricted => {}
+    }
+
+    let abi = landlock_abi_version()?;
+    if abi == 0 {
+        return Ok(false);
+    }
+
+    let handled_access = landlock_handled_fs_access(abi);
+    let ruleset_attr = LandlockRulesetAttr {
+        handled_access_fs: handled_access,
+        handled_access_net: 0,
+        scoped: 0,
+    };
+    let ruleset_fd = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &ruleset_attr as *const LandlockRulesetAttr,
+            std::mem::size_of::<LandlockRulesetAttr>(),
+            0,
+        )
+    };
+    if ruleset_fd < 0 {
+        return Err(SandboxError::FilesystemIsolation(format!(
+            "Failed to create Landlock ruleset: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let ruleset = LandlockRulesetFd(ruleset_fd as i32);
+    let read_access = landlock_read_fs_access(abi);
+    let write_access = landlock_write_fs_access(abi);
+    let mut added_rules = 0usize;
+
+    for path in &config.filesystem.read_paths {
+        if path.exists() {
+            add_landlock_path_rule(ruleset.as_raw_fd(), path, read_access)?;
+            added_rules += 1;
+        }
+    }
+    for path in &config.filesystem.write_paths {
+        if path.exists() {
+            add_landlock_path_rule(ruleset.as_raw_fd(), path, write_access)?;
+            added_rules += 1;
+        }
+    }
+    if added_rules == 0 {
+        return Err(SandboxError::FilesystemIsolation(
+            "Landlock filesystem isolation requires at least one existing allowed path".to_string(),
+        ));
+    }
+
+    let no_new_privs = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if no_new_privs != 0 {
+        return Err(SandboxError::Config(format!(
+            "Failed to set no_new_privs before Landlock: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let restrict = unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset.as_raw_fd(), 0) };
+    if restrict != 0 {
+        return Err(SandboxError::FilesystemIsolation(format!(
+            "Failed to restrict process with Landlock: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(true)
+}
+
+struct LandlockRulesetFd(i32);
+
+impl LandlockRulesetFd {
+    fn as_raw_fd(&self) -> i32 {
+        self.0
+    }
+}
+
+impl Drop for LandlockRulesetFd {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.0);
+        }
+    }
+}
+
+fn landlock_abi_version() -> SandboxResult<u32> {
+    let abi = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if abi < 0 {
+        let err = std::io::Error::last_os_error();
+        if matches!(err.raw_os_error(), Some(libc::ENOSYS | libc::EOPNOTSUPP)) {
+            return Ok(0);
+        }
+        return Err(SandboxError::FilesystemIsolation(format!(
+            "Failed to query Landlock ABI: {err}"
+        )));
+    }
+    Ok(abi as u32)
+}
+
+fn add_landlock_path_rule(ruleset_fd: i32, path: &Path, access: u64) -> SandboxResult<()> {
+    let path_text = path.as_os_str().to_string_lossy();
+    let c_path = CString::new(path_text.as_bytes()).map_err(|_| {
+        SandboxError::FilesystemIsolation(format!("Landlock path contains an interior NUL: {}", path.display()))
+    })?;
+    let parent_fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if parent_fd < 0 {
+        return Err(SandboxError::FilesystemIsolation(format!(
+            "Failed to open Landlock path {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    let file = LandlockRulesetFd(parent_fd);
+    let rule = LandlockPathBeneathAttr {
+        allowed_access: access,
+        parent_fd: file.as_raw_fd(),
+    };
+    let added = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset_fd,
+            LANDLOCK_RULE_PATH_BENEATH,
+            &rule as *const LandlockPathBeneathAttr,
+            0,
+        )
+    };
+    if added != 0 {
+        return Err(SandboxError::FilesystemIsolation(format!(
+            "Failed to add Landlock rule for {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+fn landlock_read_fs_access(abi: u32) -> u64 {
+    landlock_filter_fs_access(
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
+        abi,
+    )
+}
+
+fn landlock_write_fs_access(abi: u32) -> u64 {
+    landlock_filter_fs_access(
+        landlock_read_fs_access(abi)
+            | LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_REMOVE_DIR
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_MAKE_CHAR
+            | LANDLOCK_ACCESS_FS_MAKE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_MAKE_SOCK
+            | LANDLOCK_ACCESS_FS_MAKE_FIFO
+            | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+            | LANDLOCK_ACCESS_FS_MAKE_SYM
+            | LANDLOCK_ACCESS_FS_REFER
+            | LANDLOCK_ACCESS_FS_TRUNCATE,
+        abi,
+    )
+}
+
+fn landlock_handled_fs_access(abi: u32) -> u64 {
+    landlock_filter_fs_access(
+        LANDLOCK_ACCESS_FS_EXECUTE
+            | LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR
+            | LANDLOCK_ACCESS_FS_REMOVE_DIR
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_MAKE_CHAR
+            | LANDLOCK_ACCESS_FS_MAKE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_MAKE_SOCK
+            | LANDLOCK_ACCESS_FS_MAKE_FIFO
+            | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+            | LANDLOCK_ACCESS_FS_MAKE_SYM
+            | LANDLOCK_ACCESS_FS_REFER
+            | LANDLOCK_ACCESS_FS_TRUNCATE
+            | LANDLOCK_ACCESS_FS_IOCTL_DEV,
+        abi,
+    )
+}
+
+fn landlock_filter_fs_access(access: u64, abi: u32) -> u64 {
+    let mut allowed = LANDLOCK_ACCESS_FS_EXECUTE
+        | LANDLOCK_ACCESS_FS_WRITE_FILE
+        | LANDLOCK_ACCESS_FS_READ_FILE
+        | LANDLOCK_ACCESS_FS_READ_DIR
+        | LANDLOCK_ACCESS_FS_REMOVE_DIR
+        | LANDLOCK_ACCESS_FS_REMOVE_FILE
+        | LANDLOCK_ACCESS_FS_MAKE_CHAR
+        | LANDLOCK_ACCESS_FS_MAKE_DIR
+        | LANDLOCK_ACCESS_FS_MAKE_REG
+        | LANDLOCK_ACCESS_FS_MAKE_SOCK
+        | LANDLOCK_ACCESS_FS_MAKE_FIFO
+        | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+        | LANDLOCK_ACCESS_FS_MAKE_SYM;
+    if abi >= 2 {
+        allowed |= LANDLOCK_ACCESS_FS_REFER;
+    }
+    if abi >= 3 {
+        allowed |= LANDLOCK_ACCESS_FS_TRUNCATE;
+    }
+    if abi >= 5 {
+        allowed |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
+    }
+    access & allowed
 }
 
 fn deny_syscalls(filter: &mut Vec<libc::sock_filter>, syscalls: &[libc::c_long]) {
@@ -965,11 +1227,85 @@ mod tests {
         assert_eq!(config.filesystem.read_paths.len(), 2);
     }
 
-    fn run_seccomp_child(check: unsafe fn() -> bool) {
+    #[test]
+    fn landlock_filters_filesystem_rights_by_abi() {
+        assert_eq!(
+            landlock_filter_fs_access(LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE, 1),
+            0
+        );
+        assert_eq!(
+            landlock_filter_fs_access(LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE, 2),
+            LANDLOCK_ACCESS_FS_REFER
+        );
+        assert_eq!(
+            landlock_filter_fs_access(LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE, 3),
+            LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE
+        );
+        assert_eq!(landlock_filter_fs_access(LANDLOCK_ACCESS_FS_IOCTL_DEV, 4), 0);
+        assert_eq!(
+            landlock_filter_fs_access(LANDLOCK_ACCESS_FS_IOCTL_DEV, 5),
+            LANDLOCK_ACCESS_FS_IOCTL_DEV
+        );
+    }
+
+    unsafe fn landlock_denies_unlisted_read_path_in_child(
+        allowed_dir: PathBuf,
+        allowed_file: PathBuf,
+        denied_file: PathBuf,
+    ) -> bool {
+        let Ok(abi) = landlock_abi_version() else {
+            return true;
+        };
+        if abi == 0 {
+            return true;
+        }
+
+        let config = SandboxConfig::new().with_read_paths(vec![allowed_dir]);
+        match install_landlock_filesystem_rules(&config) {
+            Ok(true) => {}
+            _ => return false,
+        }
+
+        let Ok(allowed_text) = std::fs::read_to_string(&allowed_file) else {
+            return false;
+        };
+        if allowed_text != "ok" {
+            return false;
+        }
+
+        let denied = std::fs::read_to_string(denied_file);
+        denied.is_err()
+    }
+
+    #[test]
+    fn linux_landlock_denies_unlisted_read_path_in_child() {
+        let root = std::env::temp_dir().join(format!("simple-landlock-test-{}", std::process::id()));
+        let allowed_dir = root.join("allowed");
+        let denied_dir = root.join("denied");
+        std::fs::create_dir_all(&allowed_dir).unwrap();
+        std::fs::create_dir_all(&denied_dir).unwrap();
+        let allowed_file = allowed_dir.join("file.txt");
+        let denied_file = denied_dir.join("file.txt");
+        std::fs::write(&allowed_file, "ok").unwrap();
+        std::fs::write(&denied_file, "secret").unwrap();
+
+        run_irreversible_sandbox_child(|| unsafe {
+            landlock_denies_unlisted_read_path_in_child(allowed_dir.clone(), allowed_file.clone(), denied_file.clone())
+        });
+
+        assert_eq!(std::fs::read_to_string(&allowed_file).unwrap(), "ok");
+        assert_eq!(std::fs::read_to_string(&denied_file).unwrap(), "secret");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn run_irreversible_sandbox_child<F>(check: F)
+    where
+        F: FnOnce() -> bool,
+    {
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
         if pid == 0 {
-            let ok = unsafe { check() };
+            let ok = check();
             unsafe { libc::_exit(if ok { 0 } else { 1 }) };
         }
 
@@ -977,7 +1313,7 @@ mod tests {
         let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
         assert_eq!(waited, pid, "waitpid failed: {}", std::io::Error::last_os_error());
         assert!(libc::WIFEXITED(status), "child did not exit normally: {status}");
-        assert_eq!(libc::WEXITSTATUS(status), 0, "child seccomp check failed");
+        assert_eq!(libc::WEXITSTATUS(status), 0, "child sandbox check failed");
     }
 
     unsafe fn seccomp_denies_network_socket_in_child() -> bool {
@@ -1013,11 +1349,11 @@ mod tests {
 
     #[test]
     fn linux_seccomp_filter_denies_network_socket_in_child() {
-        run_seccomp_child(seccomp_denies_network_socket_in_child);
+        run_irreversible_sandbox_child(|| unsafe { seccomp_denies_network_socket_in_child() });
     }
 
     #[test]
     fn linux_seccomp_filter_denies_process_exec_in_child() {
-        run_seccomp_child(seccomp_denies_process_exec_in_child);
+        run_irreversible_sandbox_child(|| unsafe { seccomp_denies_process_exec_in_child() });
     }
 }

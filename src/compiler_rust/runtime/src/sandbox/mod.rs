@@ -231,7 +231,10 @@ pub enum SandboxError {
 
 // Re-export platform-specific functions
 #[cfg(target_os = "linux")]
-pub use linux::{apply_sandbox, cleanup_network_rules, install_seccomp_profile, LinuxSeccompProfile};
+pub use linux::{
+    apply_sandbox, cleanup_network_rules, install_landlock_filesystem_rules, install_seccomp_profile,
+    LinuxSeccompProfile,
+};
 
 #[cfg(target_os = "macos")]
 pub use macos::apply_sandbox;
