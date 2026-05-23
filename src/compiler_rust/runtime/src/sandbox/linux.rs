@@ -14,6 +14,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Seccomp deny-list profile for Linux sandbox lowering.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LinuxSeccompProfile {
+    pub deny_network: bool,
+    pub deny_process_spawn: bool,
+}
+
+impl LinuxSeccompProfile {
+    pub fn deny_network_and_process_spawn() -> Self {
+        Self {
+            deny_network: true,
+            deny_process_spawn: true,
+        }
+    }
+}
+
 /// Apply sandbox configuration to the current process (Linux).
 ///
 /// This uses Linux namespaces, cgroups, and seccomp for comprehensive isolation.
@@ -40,6 +56,108 @@ pub fn apply_sandbox(config: &SandboxConfig) -> SandboxResult<()> {
     }
 
     Ok(())
+}
+
+/// Install an irreversible seccomp-BPF filter for the current Linux process.
+///
+/// This intentionally covers syscall classes that Simple's sandbox lowering can
+/// express without requiring Landlock or namespace privileges. Callers should
+/// install it only after all required host setup is complete.
+pub fn install_seccomp_profile(profile: LinuxSeccompProfile) -> SandboxResult<()> {
+    if !profile.deny_network && !profile.deny_process_spawn {
+        return Ok(());
+    }
+
+    let mut filter = Vec::new();
+    filter.push(bpf_stmt((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0));
+
+    if profile.deny_network {
+        deny_syscalls(
+            &mut filter,
+            &[
+                libc::SYS_socket,
+                libc::SYS_connect,
+                libc::SYS_bind,
+                libc::SYS_listen,
+                libc::SYS_accept,
+                libc::SYS_accept4,
+                libc::SYS_sendto,
+                libc::SYS_recvfrom,
+                libc::SYS_sendmsg,
+                libc::SYS_recvmsg,
+            ],
+        );
+    }
+
+    if profile.deny_process_spawn {
+        deny_syscalls(
+            &mut filter,
+            &[
+                libc::SYS_execve,
+                libc::SYS_execveat,
+                libc::SYS_clone,
+                libc::SYS_clone3,
+                libc::SYS_fork,
+                libc::SYS_vfork,
+            ],
+        );
+    }
+
+    filter.push(bpf_stmt((libc::BPF_RET | libc::BPF_K) as u16, libc::SECCOMP_RET_ALLOW));
+
+    let mut program = libc::sock_fprog {
+        len: filter.len() as libc::c_ushort,
+        filter: filter.as_mut_ptr(),
+    };
+
+    let no_new_privs = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if no_new_privs != 0 {
+        return Err(SandboxError::Config(format!(
+            "Failed to set no_new_privs before seccomp: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let seccomp = unsafe {
+        libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &mut program as *mut libc::sock_fprog,
+            0,
+            0,
+        )
+    };
+    if seccomp != 0 {
+        return Err(SandboxError::Config(format!(
+            "Failed to install seccomp filter: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(())
+}
+
+fn deny_syscalls(filter: &mut Vec<libc::sock_filter>, syscalls: &[libc::c_long]) {
+    for syscall in syscalls {
+        filter.push(bpf_jump(
+            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            *syscall as u32,
+            0,
+            1,
+        ));
+        filter.push(bpf_stmt(
+            (libc::BPF_RET | libc::BPF_K) as u16,
+            libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32),
+        ));
+    }
+}
+
+fn bpf_stmt(code: u16, k: u32) -> libc::sock_filter {
+    libc::sock_filter { code, jt: 0, jf: 0, k }
+}
+
+fn bpf_jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+    libc::sock_filter { code, jt, jf, k }
 }
 
 /// Apply network isolation using Linux network namespaces.
@@ -845,5 +963,61 @@ mod tests {
 
         // Should have 2 unique paths
         assert_eq!(config.filesystem.read_paths.len(), 2);
+    }
+
+    fn run_seccomp_child(check: unsafe fn() -> bool) {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            let ok = unsafe { check() };
+            unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+        }
+
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert_eq!(waited, pid, "waitpid failed: {}", std::io::Error::last_os_error());
+        assert!(libc::WIFEXITED(status), "child did not exit normally: {status}");
+        assert_eq!(libc::WEXITSTATUS(status), 0, "child seccomp check failed");
+    }
+
+    unsafe fn seccomp_denies_network_socket_in_child() -> bool {
+        if install_seccomp_profile(LinuxSeccompProfile {
+            deny_network: true,
+            deny_process_spawn: false,
+        })
+        .is_err()
+        {
+            return false;
+        }
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        fd == -1 && *libc::__errno_location() == libc::EPERM
+    }
+
+    unsafe fn seccomp_denies_process_exec_in_child() -> bool {
+        if install_seccomp_profile(LinuxSeccompProfile {
+            deny_network: false,
+            deny_process_spawn: true,
+        })
+        .is_err()
+        {
+            return false;
+        }
+        let result = libc::syscall(
+            libc::SYS_execve,
+            std::ptr::null::<libc::c_char>(),
+            std::ptr::null::<*const libc::c_char>(),
+            std::ptr::null::<*const libc::c_char>(),
+        );
+        result == -1 && *libc::__errno_location() == libc::EPERM
+    }
+
+    #[test]
+    fn linux_seccomp_filter_denies_network_socket_in_child() {
+        run_seccomp_child(seccomp_denies_network_socket_in_child);
+    }
+
+    #[test]
+    fn linux_seccomp_filter_denies_process_exec_in_child() {
+        run_seccomp_child(seccomp_denies_process_exec_in_child);
     }
 }

@@ -28,3 +28,9 @@ Capsicum provides a Unix capability/sandbox model using capability mode and capa
 - UI permission checks should be treated as observations only; server-side gates remain authoritative.
 - Sandboxed code should receive explicit handles and manifests, not global filesystem/network/env authority.
 - Generated artifacts should be auditable because authorization errors are often structural and architectural, not just local runtime bugs.
+
+## 2026-05-23 Backend Isolation Follow-up
+
+- Current Linux Landlock userspace documentation describes Landlock as an unprivileged access-control API that requires ABI detection and rights filtering for older kernels. This supports keeping Landlock filesystem enforcement as a backend-specific installer rather than assuming every Linux host supports the newest rights set.
+- Current Linux seccomp filter documentation requires either `no_new_privs` or sufficient privilege before installing a BPF syscall filter. This supports Simple's Linux backend installing seccomp only after host setup, and testing it in forked children because the filter is irreversible for the current process.
+- Current WASI documentation continues to frame runtime authority around explicit capabilities such as preopened directories and environment/stdio capabilities. This supports keeping WASI lowering tied to explicit host import/preopen tables rather than ambient module authority.
