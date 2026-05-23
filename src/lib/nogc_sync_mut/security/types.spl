@@ -203,6 +203,17 @@ class RemoteSecurityValidatedIdentity:
     capabilities: List<text>
     expires_at_ms: i64
 
+    static fn invalid() -> RemoteSecurityValidatedIdentity:
+        RemoteSecurityValidatedIdentity(
+            session_id: "",
+            user_id: "",
+            capabilities: [],
+            expires_at_ms: 0
+        )
+
+    fn is_valid() -> bool:
+        self.session_id != "" and self.user_id != ""
+
     fn is_expired(now_ms: i64) -> bool:
         self.expires_at_ms <= now_ms
 
@@ -231,31 +242,31 @@ fn sign_remote_security_token(signing_key: text,
 fn validate_remote_security_token(headers: RemoteSecurityContextHeaders,
                                   session_id: text,
                                   signing_key: text,
-                                  now_ms: i64) -> RemoteSecurityValidatedIdentity?:
+                                  now_ms: i64) -> RemoteSecurityValidatedIdentity:
     if signing_key == "":
-        return nil
+        return RemoteSecurityValidatedIdentity.invalid()
     val bearer = remote_security_bearer_token(headers)
     if bearer == "":
-        return nil
+        return RemoteSecurityValidatedIdentity.invalid()
     val parts = bearer.split("|")
     if parts.len() != 6:
-        return nil
+        return RemoteSecurityValidatedIdentity.invalid()
     if parts[0] != "simple-v1":
-        return nil
+        return RemoteSecurityValidatedIdentity.invalid()
     val token_session_id = parts[1]
     val user_id = parts[2]
     val expires_at_ms = parts[3].to_i64() ?? 0
     val scopes = parts[4]
     val signature = parts[5]
     if token_session_id == "" or user_id == "":
-        return nil
+        return RemoteSecurityValidatedIdentity.invalid()
     if session_id != "" and session_id != token_session_id:
-        return nil
+        return RemoteSecurityValidatedIdentity.invalid()
     val capabilities = if scopes == "": [] else: scopes.split(",")
     val payload = remote_security_token_payload(token_session_id, user_id, expires_at_ms, capabilities)
     val expected = remote_security_hmac_sha256_hex(signing_key, payload)
     if not constant_time_compare(expected, signature):
-        return nil
+        return RemoteSecurityValidatedIdentity.invalid()
     val identity = RemoteSecurityValidatedIdentity(
         session_id: token_session_id,
         user_id: user_id,
@@ -263,7 +274,7 @@ fn validate_remote_security_token(headers: RemoteSecurityContextHeaders,
         expires_at_ms: expires_at_ms
     )
     if identity.is_expired(now_ms):
-        return nil
+        return RemoteSecurityValidatedIdentity.invalid()
     identity
 
 ## Validate a remote bearer token against the server signing key. Invalid,
@@ -274,7 +285,8 @@ fn validate_remote_security_context(headers: RemoteSecurityContextHeaders,
                                     session_id: text,
                                     signing_key: text,
                                     now_ms: i64) -> SecurityContext:
-    if val identity = validate_remote_security_token(headers, session_id, signing_key, now_ms):
+    val identity = validate_remote_security_token(headers, session_id, signing_key, now_ms)
+    if identity.is_valid():
         return reconstruct_remote_security_context(headers, peer_addr, identity.session_id, identity.user_id, identity.capabilities)
 
     reconstruct_remote_security_context(headers, peer_addr, session_id, "", [])
