@@ -1,6 +1,9 @@
 use std.nogc_async_mut_noalloc.baremetal.riscv_common.pmp.{PmpCsrWrite, pmp_write_plan_from_sandbox_lowering}
 use os.kernel.arch.arm64.paging.{arm64_sandbox_pte_bits_from_lowering}
 
+val SIMPLE_SANDBOX_SECTION_START_SYMBOL: text = "__simple_sandbox_start"
+val SIMPLE_SANDBOX_SECTION_END_SYMBOL: text = "__simple_sandbox_end"
+
 struct SandboxBootApplyPlan:
     """Architecture-specific boot protection operations from sandbox lowering."""
     riscv_pmp_writes: [PmpCsrWrite]
@@ -21,8 +24,29 @@ fn sandbox_boot_apply_arm64_count(sandbox_lowering_sdn: text) -> i64:
     """Return how many ARM64 protection rows the boot hook would apply."""
     arm64_sandbox_pte_bits_from_lowering(sandbox_lowering_sdn).len()
 
+fn embedded_sandbox_section_bounds_valid(start_addr: u64, end_addr: u64) -> bool:
+    """Validate linker-provided .simple.sandbox section bounds."""
+    start_addr > 0 and end_addr > start_addr
+
+fn embedded_sandbox_section_text_valid(section_text: text) -> bool:
+    """Recognize generated sandbox lowering payloads embedded in .simple.sandbox."""
+    section_text.contains("sandbox_lowering:") or section_text.contains("pmp_region|") or section_text.contains("baremetal_mpu_linker_regions")
+
+fn embedded_sandbox_lowering_sdn_from_section(start_addr: u64, end_addr: u64, section_text: text) -> text:
+    """Decode already-read linker section text after bounds and payload checks."""
+    if embedded_sandbox_section_bounds_valid(start_addr, end_addr) == false:
+        return ""
+    if embedded_sandbox_section_text_valid(section_text) == false:
+        return ""
+    section_text
+
 fn embedded_sandbox_lowering_sdn() -> text:
-    """Placeholder for generated .simple.sandbox lowering embedded by the linker."""
+    """Boot-time lookup seam for .simple.sandbox between linker section symbols.
+
+    The arch linker scripts expose __simple_sandbox_start/end. The unsafe byte
+    reader that turns those raw addresses into section_text is intentionally
+    left behind this function so boot code depends on one narrow hook.
+    """
     ""
 
 fn sandbox_boot_apply_embedded_riscv64() -> i64:

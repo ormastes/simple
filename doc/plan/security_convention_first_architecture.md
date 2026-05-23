@@ -1239,7 +1239,7 @@ Output:
 Remaining implementation after generated lowering:
     add live non-RISC-V MPU programming backends beyond ARM64 PTE policy derivation
     add hardware CSR/MMIO apply backends beyond the RISC-V boot PMP plan hook
-    add boot-time embedded sandbox metadata lookup behind __simple_sandbox_start/end
+    wire the boot-time unsafe byte reader behind the embedded __simple_sandbox_start/end lookup seam
     add real credentialed cloud/HSM CI lanes for the opt-in live KMS integration gates
 
 The minimal example should look like this:
