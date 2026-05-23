@@ -2,7 +2,7 @@
 
 use std.http_server.handler.{HandlerRegistry}
 use std.http_server.types.{HttpRequestData, HttpResponseData, LocationConfig, default_response_data}
-use std.security.auth.context_propagation.{enter_security_context, exit_security_context}
+use std.security.auth.context_propagation.{enter_security_context, exit_security_context, enter_task_security_context, exit_task_security_context}
 use std.security.types.{SecurityContext, reconstruct_remote_security_context, remote_security_headers_from_pairs, remote_security_session_id_from_pairs, validate_remote_security_context}
 
 fn security_context_from_request(request: HttpRequestData) -> SecurityContext:
@@ -26,6 +26,16 @@ fn dispatch_with_remote_security_context(registry: HandlerRegistry,
     exit_security_context(ctx, prev_id)
     return response
 
+fn dispatch_with_task_remote_security_context(registry: HandlerRegistry,
+                                              task_id: text,
+                                              location: LocationConfig,
+                                              request: HttpRequestData) -> HttpResponseData:
+    val ctx = security_context_from_request(request)
+    val previous = enter_task_security_context(task_id, ctx)
+    val response = registry.dispatch(location.handler_type, request, location)
+    exit_task_security_context(task_id, previous)
+    return response
+
 fn dispatch_handler_with_remote_security_context(handler: fn(HttpRequestData, LocationConfig) -> HttpResponseData,
                                                  location: LocationConfig,
                                                  request: HttpRequestData) -> HttpResponseData:
@@ -44,4 +54,26 @@ fn dispatch_handler_with_validated_remote_security_context(handler: fn(HttpReque
     val prev_id = enter_security_context(ctx)
     val response = handler(request, location)
     exit_security_context(ctx, prev_id)
+    return response
+
+fn dispatch_handler_with_task_security_context(task_id: text,
+                                               handler: fn(HttpRequestData, LocationConfig) -> HttpResponseData,
+                                               location: LocationConfig,
+                                               request: HttpRequestData) -> HttpResponseData:
+    val ctx = security_context_from_request(request)
+    val previous = enter_task_security_context(task_id, ctx)
+    val response = handler(request, location)
+    exit_task_security_context(task_id, previous)
+    return response
+
+fn dispatch_handler_with_validated_task_security_context(task_id: text,
+                                                         handler: fn(HttpRequestData, LocationConfig) -> HttpResponseData,
+                                                         location: LocationConfig,
+                                                         request: HttpRequestData,
+                                                         signing_key: text,
+                                                         now_ms: i64) -> HttpResponseData:
+    val ctx = validated_security_context_from_request(request, signing_key, now_ms)
+    val previous = enter_task_security_context(task_id, ctx)
+    val response = handler(request, location)
+    exit_task_security_context(task_id, previous)
     return response

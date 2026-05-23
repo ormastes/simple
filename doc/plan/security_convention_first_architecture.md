@@ -1231,7 +1231,7 @@ Output:
 Remaining implementation after generated lowering:
     enforce lowered sandbox plans in runtime/kernel/VM backends
     add remote SecurityContext key rotation, persistent session lookup, refresh, and revocation
-    connect task-scoped SecurityContext helpers to the deeper scheduler/runtime
+    replace the HTTP worker/fd SecurityContext task-id bridge with scheduler/fiber-owned task ids
 
 The minimal example should look like this:
 

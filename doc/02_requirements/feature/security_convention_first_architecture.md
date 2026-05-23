@@ -45,8 +45,12 @@ REQ-019: Remote HTTP security context reconstruction shall support opt-in HMAC-s
 
 REQ-020: Hosted native builds shall embed generated `sandbox_lowering.sdn` metadata into the runtime security registry, and the runtime shall retain sandbox backend and capability-handle metadata for observational backend installation checks.
 
+REQ-021: HTTP handler dispatch shall route reconstructed remote `SecurityContext` through an explicit task-scoped context id, with worker/fd-derived ids as the current bridge until scheduler-owned task ids are available.
+
 ## Deferred Requirements
 
 DEF-001: Remote `SecurityContext` key rotation, persistent session lookup, refresh flows, and distributed revocation remain future work beyond HMAC token validation.
 
 DEF-002: Runtime installation and kernel/VM enforcement of lowered sandbox plans remains future work beyond generated backend lowering artifacts.
+
+DEF-003: Scheduler/fiber-owned task id propagation for `SecurityContext` remains future work beyond the current HTTP worker/fd task-id bridge.

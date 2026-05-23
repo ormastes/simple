@@ -87,6 +87,11 @@ var _global_store = SecurityContextStore.new()
 
 # Module-level task context store for async runtimes that pass a task id.
 var _task_store = TaskSecurityContextStore.new()
+var _task_contexts: Dict<text, SecurityContext> = {}
+
+class TaskSecurityContextPrevious:
+    var had_context: bool
+    var ctx: SecurityContext
 
 # Module-level correlation ID for the current request scope.
 var _current_correlation_id: text = ""
@@ -121,13 +126,9 @@ fn current_task_security_context(task_id: text) -> SecurityContext:
     if task_id == "":
         return current_security_context()
 
-    if _current_correlation_id != "":
-        return current_security_context()
-
-    val maybe_ctx = _global_store.get_context(task_id)
-    if maybe_ctx.is_none():
-        return SecurityContext.anonymous("unknown")
-    return maybe_ctx.unwrap()
+    if _task_contexts.has(task_id):
+        return _task_contexts[task_id]
+    return SecurityContext.anonymous("unknown")
 
 # Execute a block with a specific SecurityContext in scope.
 #
@@ -148,18 +149,25 @@ fn with_security_context(ctx: SecurityContext, block: fn()):
     block()
     exit_security_context(ctx, prev_id)
 
+fn enter_task_security_context(task_id: text, ctx: SecurityContext) -> TaskSecurityContextPrevious:
+    val previous = TaskSecurityContextPrevious(
+        had_context: _task_contexts.has(task_id),
+        ctx: current_task_security_context(task_id)
+    )
+    _task_contexts = _task_contexts.set(task_id, ctx)
+    return previous
+
+fn exit_task_security_context(task_id: text, previous: TaskSecurityContextPrevious):
+    if previous.had_context:
+        _task_contexts = _task_contexts.set(task_id, previous.ctx)
+        return
+    _task_contexts = _task_contexts.remove(task_id)
+
 # Execute a block with a SecurityContext isolated to one async task id.
 #
 # Any prior task context is restored after the block. Other task ids are not
 # affected, which keeps request identity out of thread-local semantics.
 fn with_task_security_context(task_id: text, ctx: SecurityContext, block: fn()):
-    val key = task_id
-    val previous = _global_store.get_context(key)
-    _global_store.set_context(key, ctx)
-
-    with_security_context(ctx, block)
-
-    if val prev_ctx = previous:
-        _global_store.set_context(key, prev_ctx)
-    else:
-        _global_store.clear_context(key)
+    val previous = enter_task_security_context(task_id, ctx)
+    block()
+    exit_task_security_context(task_id, previous)

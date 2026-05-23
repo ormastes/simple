@@ -25,3 +25,4 @@
 
 - Add remote `SecurityContext` key rotation, persistent session lookup, refresh, and revocation.
 - Enforce lowered sandbox plans in runtime/kernel/VM backends.
+- Replace the HTTP worker/fd task-id bridge with scheduler/fiber-owned task id propagation.

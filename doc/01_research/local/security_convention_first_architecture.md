@@ -60,6 +60,7 @@ This pass added the first convention-first architecture slice:
 - Minimal source `security:` policy blocks now work without a required policy name, and `layers ...` / `isolate ...` sugar lowers into layer and feature dimension rules.
 - Security context propagation now includes explicit task-scoped helpers so async runtimes can isolate contexts by task id instead of treating thread-local state as authoritative.
 - Async HTTP handler dispatch now reconstructs a server-side `SecurityContext` from safe request metadata and scopes it around content handler execution.
+- HTTP dispatch now routes reconstructed remote `SecurityContext` through an explicit task id; workers currently derive that id from worker/fd until scheduler-owned task ids are available.
 - Sandbox inventory now emits backend-specific `sandbox_lowering.sdn` plans for Linux, WASI, Simple VM, baremetal, and Simple OS native object-capability handles.
 - Remote HTTP dispatch now has an opt-in HMAC signed bearer token path that authenticates only validated session/user/capability claims and keeps unvalidated dispatch anonymous.
 - Hosted native security registry initialization now embeds sandbox lowering metadata and the runtime records backend IDs plus capability-handle counts when a generated sandbox is entered.
@@ -67,5 +68,5 @@ This pass added the first convention-first architecture slice:
 ## Remaining Gaps
 
 - Remote `SecurityContext` transport/reconstruction has safe HTTP dispatch and HMAC token validation; key rotation, persistent session lookup, refresh, and revocation remain future work.
-- Task-local context helpers exist, but deeper scheduler/runtime integration remains future work.
+- Task-local context helpers and an HTTP worker/fd bridge exist, but deeper scheduler/fiber runtime task-id integration remains future work.
 - Sandbox manifest generation, backend lowering artifacts, and hosted runtime registry installation exist for declared sandboxes/gates, but kernel/VM/backend enforcement remains future work.

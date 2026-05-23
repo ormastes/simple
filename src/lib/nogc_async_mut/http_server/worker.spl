@@ -59,7 +59,7 @@ use std.http_server.response.{
 }
 use std.http_server.handler.{HandlerRegistry}
 use std.http_server.error.{HttpServerError}
-use std.http_server.security_context.{dispatch_with_remote_security_context}
+use std.http_server.security_context.{dispatch_with_task_remote_security_context}
 use std.nogc_async_mut.io.tls.{AsyncTlsListener, AsyncTlsStream, TlsConfig}
 use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
@@ -437,7 +437,7 @@ class Worker:
                     params: params,
                     peer_addr: request.peer_addr
                 )
-                val resp = self.execute_handler_with_remote_security_context(location, req)
+                val resp = self.execute_handler_with_remote_security_context(fd, location, req)
                 self.send_response(fd, resp, now)
 
             Err(e):
@@ -455,7 +455,11 @@ class Worker:
         """
         self.handler_registry.dispatch(location.handler_type, request, location)
 
-    me execute_handler_with_remote_security_context(location: LocationConfig,
+    me security_task_id(fd: i64) -> text:
+        "http-worker-{self.worker_id}-fd-{fd}"
+
+    me execute_handler_with_remote_security_context(fd: i64,
+                                                    location: LocationConfig,
                                                     request: HttpRequestData) -> HttpResponseData:
         """Execute handler under a server-side SecurityContext.
 
@@ -463,7 +467,7 @@ class Worker:
         transport boundary only propagates safe headers and establishes an
         anonymous context unless an upstream auth layer has validated identity.
         """
-        dispatch_with_remote_security_context(self.handler_registry, location, request)
+        dispatch_with_task_remote_security_context(self.handler_registry, self.security_task_id(fd), location, request)
 
     # ========================================================================
     # Response Sending
