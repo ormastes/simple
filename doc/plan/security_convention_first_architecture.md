@@ -1237,7 +1237,7 @@ Output:
     audit/security report
 
 Remaining implementation after generated lowering:
-    add real credentialed cloud/HSM CI lanes for the opt-in live KMS integration gates
+    none; live cloud/HSM KMS remains opt-in through the manual Live KMS Security Gates workflow
 
 The minimal example should look like this:
 

@@ -1,0 +1,62 @@
+"""
+# Live KMS Security Workflow Canary
+
+Guards the manually-triggered credentialed live KMS CI lane.
+"""
+
+use std.spipe.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+val WORKFLOW: text = ".github/workflows/live-kms-security.yml"
+
+describe "live KMS security workflow":
+    it "is manual-only and exposes provider selection":
+        val workflow = rt_file_read_text(WORKFLOW)
+        expect(workflow.contains("workflow_dispatch:")).to_equal(true)
+        expect(workflow.contains("contents: read")).to_equal(true)
+        expect(workflow.contains("provider:")).to_equal(true)
+        expect(workflow.contains("- aws")).to_equal(true)
+        expect(workflow.contains("- gcp")).to_equal(true)
+        expect(workflow.contains("- azure")).to_equal(true)
+        expect(workflow.contains("- hsm")).to_equal(true)
+        expect(workflow.contains("- all")).to_equal(true)
+        expect(workflow.contains("pull_request:")).to_equal(false)
+
+    it "runs the live KMS integration spec for every provider job":
+        val workflow = rt_file_read_text(WORKFLOW)
+        expect(workflow.contains("aws-live-kms:")).to_equal(true)
+        expect(workflow.contains("gcp-live-kms:")).to_equal(true)
+        expect(workflow.contains("azure-live-kms:")).to_equal(true)
+        expect(workflow.contains("hsm-live-kms:")).to_equal(true)
+        expect(workflow.contains("environment: live-kms-aws")).to_equal(true)
+        expect(workflow.contains("environment: live-kms-gcp")).to_equal(true)
+        expect(workflow.contains("environment: live-kms-azure")).to_equal(true)
+        expect(workflow.contains("environment: live-kms-hsm")).to_equal(true)
+        expect(workflow.contains("test/integration/lib/security/live_kms_transport_spec.spl")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIB=src")).to_equal(true)
+
+    it "wires the credential secrets required by the live KMS spec":
+        val workflow = rt_file_read_text(WORKFLOW)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_AWS_ENDPOINT")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_AWS_KEY_ID")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_AWS_AUTHORIZATION")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_GCP_ENDPOINT")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_GCP_KEY_VERSION")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_GCP_BEARER")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_AZURE_VAULT")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_AZURE_KEY")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_AZURE_BEARER")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_HSM_ENDPOINT")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_HSM_SLOT")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_HSM_KEY")).to_equal(true)
+        expect(workflow.contains("SIMPLE_LIVE_KMS_HSM_AUTHORIZATION")).to_equal(true)
+
+    it "fails selected provider jobs before the spec can skip missing credentials":
+        val workflow = rt_file_read_text(WORKFLOW)
+        expect(workflow.contains("Require AWS live KMS credentials")).to_equal(true)
+        expect(workflow.contains("Require GCP live KMS credentials")).to_equal(true)
+        expect(workflow.contains("Require Azure live KMS credentials")).to_equal(true)
+        expect(workflow.contains("Require HSM live KMS credentials")).to_equal(true)
+        expect(workflow.contains("::error::$name is required")).to_equal(true)
+        expect(workflow.contains("exit \"$missing\"")).to_equal(true)
