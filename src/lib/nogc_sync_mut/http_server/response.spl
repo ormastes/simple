@@ -1,149 +1,79 @@
-# HTTP Server Response Module
-# Response building and formatting
+# HTTP Response Writer — Lightweight Embedded Web Server
+#
+# Part of std.nogc_sync_mut.http_server
+# Full standalone example: examples/simple_web_server/
+# Design: doc/05_design/simple_web_server_lib_api.md
 
-# =============================================================================
-# Response Building
-# =============================================================================
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.http_server.types.{
+    HttpResponse, HttpStatus, http_status_code, http_status_reason
+}
 
-# Create basic response tuple: (status, reason, headers, body)
-fn create_response(status: i64, body: text) -> (i64, text, list, text):
-    var reason = status_reason(status)
-    var headers = []
-    (status, reason, headers, body)
+fn write_response(stream: TcpStream, resp: HttpResponse):
+    val wire = serialize_response(resp)
+    val _ = stream.write_text(wire)
 
-# Add header to response
-fn add_response_header(response: (i64, text, list, text), name: text, value: text) -> (i64, text, list, text):
-    var status = response.at(0)
-    var reason = response.at(1)
-    var headers = response.at(2)
-    var body = response.at(3)
+fn serialize_response(resp: HttpResponse) -> text:
+    val status_code = http_status_code(resp.status)
+    val reason = http_status_reason(resp.status)
+    val body_len = resp.body.len()
 
-    var new_headers = headers
-    new_headers.append((name, value))
+    var wire = "HTTP/1.1 {status_code} {reason}\r\n"
+    wire = "{wire}Content-Length: {body_len}\r\n"
+    wire = "{wire}Connection: close\r\n"
 
-    (status, reason, new_headers, body)
+    var has_content_type = false
+    for pair in resp.headers:
+        wire = "{wire}{pair.0}: {pair.1}\r\n"
+        if pair.0.to_lower() == "content-type":
+            has_content_type = true
 
-# Set Content-Type header
-fn set_content_type(response: (i64, text, list, text), mime_type: text) -> (i64, text, list, text):
-    add_response_header(response: response, name: "Content-Type", value: mime_type)
+    if not has_content_type:
+        wire = "{wire}Content-Type: text/plain; charset=utf-8\r\n"
 
-# Set Content-Length header
-fn set_content_length(response: (i64, text, list, text), length: i64) -> (i64, text, list, text):
-    var length_str = length.to_string()
-    add_response_header(response: response, name: "Content-Length", value: length_str)
+    wire = "{wire}\r\n"
+    wire = "{wire}{resp.body}"
+    return wire
 
-# Create JSON response
-fn json_response(status: i64, json_body: text) -> (i64, text, list, text):
-    var resp = create_response(status: status, body: json_body)
-    var resp2 = set_content_type(response: resp, mime_type: "application/json")
-    var body_len = json_body.length()
-    var resp3 = set_content_length(response: resp2, length: body_len)
-    resp3
-
-# Create HTML response
-fn html_response(status: i64, html_body: text) -> (i64, text, list, text):
-    var resp = create_response(status: status, body: html_body)
-    var resp2 = set_content_type(response: resp, mime_type: "text/html")
-    var body_len = html_body.length()
-    var resp3 = set_content_length(response: resp2, length: body_len)
-    resp3
-
-# Create plain text response
-fn text_response(status: i64, text_body: text) -> (i64, text, list, text):
-    var resp = create_response(status: status, body: text_body)
-    var resp2 = set_content_type(response: resp, mime_type: "text/plain")
-    var body_len = text_body.length()
-    var resp3 = set_content_length(response: resp2, length: body_len)
-    resp3
-
-# Create redirect response
-fn redirect_response(location: text, permanent: bool) -> (i64, text, list, text):
-    var status = 302
-    if permanent:
-        status = 301
-
-    var resp = create_response(status: status, body: "")
-    var resp2 = add_response_header(response: resp, name: "Location", value: location)
-    resp2
-
-# Create error response
-fn error_response(status: i64, message: text) -> (i64, text, list, text):
-    var body = "{\"error\": \"{message}\"}"
-    json_response(status, body)
-
-# Create 404 Not Found response
-fn not_found_response(path: text) -> (i64, text, list, text):
-    var message = "Resource not found: {path}"
-    error_response(404, message)
-
-# Create 500 Internal Server Error response
-fn internal_error_response(message: text) -> (i64, text, list, text):
-    error_response(500, message)
-
-# Serialize response to HTTP format
-fn serialize_response(response: (i64, text, list, text)) -> text:
-    var status = response.at(0)
-    var reason = response.at(1)
-    var headers = response.at(2)
-    var body = response.at(3)
-
-    var parts = []
-    parts.append("HTTP/1.1 {status} {reason}\r\n")
-
-    var i = 0
-    while i < headers.length():
-        var header = headers.at(i)
-        var name = header.at(0)
-        var value = header.at(1)
-        parts.append("{name}: {value}\r\n")
-        i = i + 1
-
-    parts.append("\r\n")
-    parts.append(body)
-    parts.join("")
+fn write_error(stream: TcpStream, status: HttpStatus, message: text):
+    val resp = HttpResponse.error(status, message)
+    write_response(stream, resp)
 
 # =============================================================================
 # Error Page Generation
 # =============================================================================
 
-# Generate HTML error page
-fn generate_error_page(status: i64, message: text) -> text:
-    var reason = status_reason(status)
-    var parts = []
-    parts.append("<!DOCTYPE html>\n")
-    parts.append("<html>\n")
-    parts.append("<head><title>{status} {reason}</title></head>\n")
-    parts.append("<body>\n")
-    parts.append("<h1>{status} {reason}</h1>\n")
-    parts.append("<p>{message}</p>\n")
-    parts.append("</body>\n")
-    parts.append("</html>")
-    parts.join("")
+fn generate_error_page(status_code: i32, reason: text, message: text) -> text:
+    var html = "<!DOCTYPE html>\n<html>\n<head>\n"
+    html = "{html}<title>{status_code} {reason}</title>\n"
+    html = "{html}<style>body{open_brace()}font-family:sans-serif;margin:40px;color:#333{close_brace()}"
+    html = "{html}h1{open_brace()}color:#c00{close_brace()}</style>\n"
+    html = "{html}</head>\n<body>\n"
+    html = "{html}<h1>{status_code} {reason}</h1>\n"
+    html = "{html}<p>{message}</p>\n"
+    html = "{html}</body>\n</html>"
+    return html
 
-# Generate 404 error page
-fn generate_404_page(path: text) -> text:
-    var message = "The requested resource '{path}' was not found on this server."
-    generate_error_page(404, message)
+fn open_brace() -> text:
+    return "{"
 
-# Generate 500 error page
-fn generate_500_page(error: text) -> text:
-    var message = "An internal server error occurred: {error}"
-    generate_error_page(500, message)
+fn close_brace() -> text:
+    return "}"
 
-# =============================================================================
-# Content Negotiation
-# =============================================================================
+fn html_not_found_page(path: text) -> HttpResponse:
+    val body = generate_error_page(404, "Not Found", "The requested path '{path}' was not found.")
+    HttpResponse(
+        status: HttpStatus.NotFound,
+        headers: [("Content-Type", "text/html; charset=utf-8")],
+        body: body
+    )
 
-# Select best content type from Accept header
-fn negotiate_content_type(accept_header: text, available_types: list) -> text:
-    var accepted = parse_accept_header(accept_header)
-    var result = "text/plain"
-
-    if accepted.length() == 0:
-        if available_types.length() > 0:
-            result = available_types.at(0)
-        return result
-
-    var first_accept = accepted.at(0)
-    result = first_accept.at(0)
-    result
+fn html_error_page(status: HttpStatus, message: text) -> HttpResponse:
+    val code = http_status_code(status)
+    val reason = http_status_reason(status)
+    val body = generate_error_page(code, reason, message)
+    HttpResponse(
+        status: status,
+        headers: [("Content-Type", "text/html; charset=utf-8")],
+        body: body
+    )

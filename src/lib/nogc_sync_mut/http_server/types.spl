@@ -1,221 +1,334 @@
-# HTTP Server Types Module
-# Core type definitions and status codes
+# HTTP Types — Lightweight Embedded Web Server
+#
+# Part of std.nogc_sync_mut.http_server
+# Full standalone example: examples/simple_web_server/
+# Design: doc/05_design/simple_web_server_lib_api.md
 
 # =============================================================================
-# Core Type Definitions (using tuples, no generics)
+# HTTP Method
 # =============================================================================
 
-# Request: (method, path, headers, body, params, query)
-# Response: (status, reason, headers, body)
-# Route: (pattern, method, handler_name)
-# Session: (id, data, expires)
-# Middleware: (name, handler_name, priority)
+enum HttpMethod:
+    Get
+    Post
+    Put
+    Delete
+    Patch
+    Head
+    Options
+
+fn http_method_from_text(s: text) -> HttpMethod:
+    match s:
+        "GET": HttpMethod.Get
+        "POST": HttpMethod.Post
+        "PUT": HttpMethod.Put
+        "DELETE": HttpMethod.Delete
+        "PATCH": HttpMethod.Patch
+        "HEAD": HttpMethod.Head
+        "OPTIONS": HttpMethod.Options
+        _: HttpMethod.Get
+
+fn http_method_to_text(m: HttpMethod) -> text:
+    match m:
+        HttpMethod.Get: "GET"
+        HttpMethod.Post: "POST"
+        HttpMethod.Put: "PUT"
+        HttpMethod.Delete: "DELETE"
+        HttpMethod.Patch: "PATCH"
+        HttpMethod.Head: "HEAD"
+        HttpMethod.Options: "OPTIONS"
+
+fn is_method_safe(method: HttpMethod) -> bool:
+    match method:
+        HttpMethod.Get: true
+        HttpMethod.Head: true
+        HttpMethod.Options: true
+        _: false
+
+fn is_method_idempotent(method: HttpMethod) -> bool:
+    match method:
+        HttpMethod.Get: true
+        HttpMethod.Head: true
+        HttpMethod.Put: true
+        HttpMethod.Delete: true
+        HttpMethod.Options: true
+        _: false
 
 # =============================================================================
-# HTTP Status Codes
+# HTTP Status
 # =============================================================================
 
-fn status_ok() -> i64: 200
-fn status_created() -> i64: 201
-fn status_accepted() -> i64: 202
-fn status_no_content() -> i64: 204
+enum HttpStatus:
+    Ok
+    Created
+    Accepted
+    NoContent
+    MovedPermanently
+    Found
+    SeeOther
+    NotModified
+    TemporaryRedirect
+    BadRequest
+    Unauthorized
+    Forbidden
+    NotFound
+    MethodNotAllowed
+    Conflict
+    Gone
+    PayloadTooLarge
+    TooManyRequests
+    InternalError
+    NotImplemented
+    BadGateway
+    ServiceUnavailable
+    GatewayTimeout
 
-fn status_moved_permanently() -> i64: 301
-fn status_found() -> i64: 302
-fn status_see_other() -> i64: 303
-fn status_not_modified() -> i64: 304
-fn status_temporary_redirect() -> i64: 307
-fn status_permanent_redirect() -> i64: 308
+fn http_status_code(s: HttpStatus) -> i32:
+    match s:
+        HttpStatus.Ok: 200
+        HttpStatus.Created: 201
+        HttpStatus.Accepted: 202
+        HttpStatus.NoContent: 204
+        HttpStatus.MovedPermanently: 301
+        HttpStatus.Found: 302
+        HttpStatus.SeeOther: 303
+        HttpStatus.NotModified: 304
+        HttpStatus.TemporaryRedirect: 307
+        HttpStatus.BadRequest: 400
+        HttpStatus.Unauthorized: 401
+        HttpStatus.Forbidden: 403
+        HttpStatus.NotFound: 404
+        HttpStatus.MethodNotAllowed: 405
+        HttpStatus.Conflict: 409
+        HttpStatus.Gone: 410
+        HttpStatus.PayloadTooLarge: 413
+        HttpStatus.TooManyRequests: 429
+        HttpStatus.InternalError: 500
+        HttpStatus.NotImplemented: 501
+        HttpStatus.BadGateway: 502
+        HttpStatus.ServiceUnavailable: 503
+        HttpStatus.GatewayTimeout: 504
 
-fn status_bad_request() -> i64: 400
-fn status_unauthorized() -> i64: 401
-fn status_forbidden() -> i64: 403
-fn status_not_found() -> i64: 404
-fn status_method_not_allowed() -> i64: 405
-fn status_not_acceptable() -> i64: 406
-fn status_request_timeout() -> i64: 408
-fn status_conflict() -> i64: 409
-fn status_gone() -> i64: 410
-fn status_payload_too_large() -> i64: 413
-fn status_uri_too_long() -> i64: 414
-fn status_unsupported_media_type() -> i64: 415
-fn status_too_many_requests() -> i64: 429
+fn http_status_reason(s: HttpStatus) -> text:
+    match s:
+        HttpStatus.Ok: "OK"
+        HttpStatus.Created: "Created"
+        HttpStatus.Accepted: "Accepted"
+        HttpStatus.NoContent: "No Content"
+        HttpStatus.MovedPermanently: "Moved Permanently"
+        HttpStatus.Found: "Found"
+        HttpStatus.SeeOther: "See Other"
+        HttpStatus.NotModified: "Not Modified"
+        HttpStatus.TemporaryRedirect: "Temporary Redirect"
+        HttpStatus.BadRequest: "Bad Request"
+        HttpStatus.Unauthorized: "Unauthorized"
+        HttpStatus.Forbidden: "Forbidden"
+        HttpStatus.NotFound: "Not Found"
+        HttpStatus.MethodNotAllowed: "Method Not Allowed"
+        HttpStatus.Conflict: "Conflict"
+        HttpStatus.Gone: "Gone"
+        HttpStatus.PayloadTooLarge: "Payload Too Large"
+        HttpStatus.TooManyRequests: "Too Many Requests"
+        HttpStatus.InternalError: "Internal Server Error"
+        HttpStatus.NotImplemented: "Not Implemented"
+        HttpStatus.BadGateway: "Bad Gateway"
+        HttpStatus.ServiceUnavailable: "Service Unavailable"
+        HttpStatus.GatewayTimeout: "Gateway Timeout"
 
-fn status_internal_server_error() -> i64: 500
-fn status_not_implemented() -> i64: 501
-fn status_bad_gateway() -> i64: 502
-fn status_service_unavailable() -> i64: 503
-fn status_gateway_timeout() -> i64: 504
-fn status_http_version_not_supported() -> i64: 505
-
-# Status code to reason phrase mapping
-fn status_reason(code: i64) -> text:
-    var result = "Unknown"
-    if code == 200:
-        result = "OK"
-    if code == 201:
-        result = "Created"
-    if code == 202:
-        result = "Accepted"
-    if code == 204:
-        result = "No Content"
-    if code == 301:
-        result = "Moved Permanently"
-    if code == 302:
-        result = "Found"
-    if code == 303:
-        result = "See Other"
-    if code == 304:
-        result = "Not Modified"
-    if code == 307:
-        result = "Temporary Redirect"
-    if code == 308:
-        result = "Permanent Redirect"
-    if code == 400:
-        result = "Bad Request"
-    if code == 401:
-        result = "Unauthorized"
-    if code == 403:
-        result = "Forbidden"
-    if code == 404:
-        result = "Not Found"
-    if code == 405:
-        result = "Method Not Allowed"
-    if code == 406:
-        result = "Not Acceptable"
-    if code == 408:
-        result = "Request Timeout"
-    if code == 409:
-        result = "Conflict"
-    if code == 410:
-        result = "Gone"
-    if code == 413:
-        result = "Payload Too Large"
-    if code == 414:
-        result = "URI Too Long"
-    if code == 415:
-        result = "Unsupported Media Type"
-    if code == 429:
-        result = "Too Many Requests"
-    if code == 500:
-        result = "Internal Server Error"
-    if code == 501:
-        result = "Not Implemented"
-    if code == 502:
-        result = "Bad Gateway"
-    if code == 503:
-        result = "Service Unavailable"
-    if code == 504:
-        result = "Gateway Timeout"
-    if code == 505:
-        result = "HTTP Version Not Supported"
-    result
-
-# =============================================================================
-# HTTP Methods
-# =============================================================================
-
-fn method_get() -> text: "GET"
-fn method_post() -> text: "POST"
-fn method_put() -> text: "PUT"
-fn method_delete() -> text: "DELETE"
-fn method_patch() -> text: "PATCH"
-fn method_head() -> text: "HEAD"
-fn method_options() -> text: "OPTIONS"
-fn method_trace() -> text: "TRACE"
-fn method_connect() -> text: "CONNECT"
-
-fn is_method_safe(method: text) -> bool:
-    var safe = false
-    if method == "GET":
-        safe = true
-    if method == "HEAD":
-        safe = true
-    if method == "OPTIONS":
-        safe = true
-    if method == "TRACE":
-        safe = true
-    safe
-
-fn is_method_idempotent(method: text) -> bool:
-    var idempotent = false
-    if method == "GET":
-        idempotent = true
-    if method == "HEAD":
-        idempotent = true
-    if method == "PUT":
-        idempotent = true
-    if method == "DELETE":
-        idempotent = true
-    if method == "OPTIONS":
-        idempotent = true
-    if method == "TRACE":
-        idempotent = true
-    idempotent
+fn http_status_from_code(code: i32) -> HttpStatus:
+    match code:
+        200: HttpStatus.Ok
+        201: HttpStatus.Created
+        202: HttpStatus.Accepted
+        204: HttpStatus.NoContent
+        301: HttpStatus.MovedPermanently
+        302: HttpStatus.Found
+        303: HttpStatus.SeeOther
+        304: HttpStatus.NotModified
+        307: HttpStatus.TemporaryRedirect
+        400: HttpStatus.BadRequest
+        401: HttpStatus.Unauthorized
+        403: HttpStatus.Forbidden
+        404: HttpStatus.NotFound
+        405: HttpStatus.MethodNotAllowed
+        409: HttpStatus.Conflict
+        410: HttpStatus.Gone
+        413: HttpStatus.PayloadTooLarge
+        429: HttpStatus.TooManyRequests
+        500: HttpStatus.InternalError
+        501: HttpStatus.NotImplemented
+        502: HttpStatus.BadGateway
+        503: HttpStatus.ServiceUnavailable
+        504: HttpStatus.GatewayTimeout
+        _: HttpStatus.InternalError
 
 # =============================================================================
 # MIME Types
 # =============================================================================
 
-fn mime_text_plain() -> text: "text/plain"
-fn mime_text_html() -> text: "text/html"
-fn mime_text_css() -> text: "text/css"
-fn mime_text_javascript() -> text: "text/javascript"
-fn mime_application_json() -> text: "application/json"
-fn mime_application_xml() -> text: "application/xml"
-fn mime_application_pdf() -> text: "application/pdf"
-fn mime_application_octet_stream() -> text: "application/octet-stream"
-fn mime_image_png() -> text: "image/png"
-fn mime_image_jpeg() -> text: "image/jpeg"
-fn mime_image_gif() -> text: "image/gif"
-fn mime_image_svg() -> text: "image/svg+xml"
-fn mime_image_webp() -> text: "image/webp"
-fn mime_audio_mpeg() -> text: "audio/mpeg"
-fn mime_audio_wav() -> text: "audio/wav"
-fn mime_video_mp4() -> text: "video/mp4"
-fn mime_video_webm() -> text: "video/webm"
-fn mime_multipart_form_data() -> text: "multipart/form-data"
-fn mime_application_form_urlencoded() -> text: "application/x-www-form-urlencoded"
-
-# Detect MIME type from file extension
-fn mime_from_extension(path: text) -> text:
-    var mime_type = "application/octet-stream"
-
-    if path.ends_with(".html"):
-        mime_type = "text/html"
-    if path.ends_with(".htm"):
-        mime_type = "text/html"
+fn mime_type_for_extension(path: text) -> text:
+    if path.ends_with(".html") or path.ends_with(".htm"):
+        return "text/html; charset=utf-8"
     if path.ends_with(".css"):
-        mime_type = "text/css"
+        return "text/css; charset=utf-8"
     if path.ends_with(".js"):
-        mime_type = "text/javascript"
+        return "application/javascript; charset=utf-8"
     if path.ends_with(".json"):
-        mime_type = "application/json"
+        return "application/json; charset=utf-8"
     if path.ends_with(".xml"):
-        mime_type = "application/xml"
-    if path.ends_with(".pdf"):
-        mime_type = "application/pdf"
+        return "application/xml; charset=utf-8"
     if path.ends_with(".txt"):
-        mime_type = "text/plain"
+        return "text/plain; charset=utf-8"
+    if path.ends_with(".csv"):
+        return "text/csv; charset=utf-8"
     if path.ends_with(".png"):
-        mime_type = "image/png"
-    if path.ends_with(".jpg"):
-        mime_type = "image/jpeg"
-    if path.ends_with(".jpeg"):
-        mime_type = "image/jpeg"
+        return "image/png"
+    if path.ends_with(".jpg") or path.ends_with(".jpeg"):
+        return "image/jpeg"
     if path.ends_with(".gif"):
-        mime_type = "image/gif"
+        return "image/gif"
     if path.ends_with(".svg"):
-        mime_type = "image/svg+xml"
+        return "image/svg+xml"
+    if path.ends_with(".ico"):
+        return "image/x-icon"
     if path.ends_with(".webp"):
-        mime_type = "image/webp"
-    if path.ends_with(".mp3"):
-        mime_type = "audio/mpeg"
-    if path.ends_with(".wav"):
-        mime_type = "audio/wav"
-    if path.ends_with(".mp4"):
-        mime_type = "video/mp4"
-    if path.ends_with(".webm"):
-        mime_type = "video/webm"
+        return "image/webp"
+    if path.ends_with(".woff2"):
+        return "font/woff2"
+    if path.ends_with(".woff"):
+        return "font/woff"
+    if path.ends_with(".pdf"):
+        return "application/pdf"
+    if path.ends_with(".zip"):
+        return "application/zip"
+    if path.ends_with(".wasm"):
+        return "application/wasm"
+    return "application/octet-stream"
 
-    mime_type
+# =============================================================================
+# HTTP Request
+# =============================================================================
+
+extern fn rt_text_to_i64(s: text) -> i64
+
+class HttpRequest:
+    method: HttpMethod
+    path: text
+    query: text
+    version: text
+    headers: [(text, text)]
+    body: text
+    remote_addr: text
+
+    static fn new(method: HttpMethod, path: text) -> HttpRequest:
+        HttpRequest(
+            method: method,
+            path: path,
+            query: "",
+            version: "HTTP/1.1",
+            headers: [],
+            body: "",
+            remote_addr: ""
+        )
+
+    fn header(name: text) -> text:
+        val lower_name = name.to_lower()
+        for pair in self.headers:
+            if pair.0.to_lower() == lower_name:
+                return pair.1
+        return ""
+
+    fn has_header(name: text) -> bool:
+        val lower_name = name.to_lower()
+        for pair in self.headers:
+            if pair.0.to_lower() == lower_name:
+                return true
+        return false
+
+    fn content_type() -> text:
+        self.header("Content-Type")
+
+    fn content_length() -> i32:
+        val val_str = self.header("Content-Length")
+        if val_str == "":
+            return 0
+        val v = rt_text_to_i64(val_str.trim())
+        if v == 0 and val_str.trim() != "0":
+            return 0
+        return v.to_i32()
+
+    fn query_param(name: text) -> text:
+        if self.query == "":
+            return ""
+        for part in self.query.split("&"):
+            val kv = part.split("=")
+            if kv.len() >= 2 and kv[0] == name:
+                return kv[1]
+        return ""
+
+# =============================================================================
+# HTTP Response
+# =============================================================================
+
+class HttpResponse:
+    status: HttpStatus
+    headers: [(text, text)]
+    body: text
+
+    static fn ok(body: text) -> HttpResponse:
+        HttpResponse(
+            status: HttpStatus.Ok,
+            headers: [("Content-Type", "text/plain; charset=utf-8")],
+            body: body
+        )
+
+    static fn json(body: text) -> HttpResponse:
+        HttpResponse(
+            status: HttpStatus.Ok,
+            headers: [("Content-Type", "application/json; charset=utf-8")],
+            body: body
+        )
+
+    static fn html(body: text) -> HttpResponse:
+        HttpResponse(
+            status: HttpStatus.Ok,
+            headers: [("Content-Type", "text/html; charset=utf-8")],
+            body: body
+        )
+
+    static fn redirect(url: text) -> HttpResponse:
+        HttpResponse(
+            status: HttpStatus.Found,
+            headers: [("Location", url)],
+            body: ""
+        )
+
+    static fn not_found() -> HttpResponse:
+        HttpResponse(
+            status: HttpStatus.NotFound,
+            headers: [("Content-Type", "text/plain; charset=utf-8")],
+            body: "404 Not Found"
+        )
+
+    static fn error(status: HttpStatus, message: text) -> HttpResponse:
+        HttpResponse(
+            status: status,
+            headers: [("Content-Type", "text/plain; charset=utf-8")],
+            body: message
+        )
+
+    fn with_header(name: text, value: text) -> HttpResponse:
+        self.headers.push((name, value))
+        return self
+
+    fn with_content_type(ct: text) -> HttpResponse:
+        var new_headers: [(text, text)] = []
+        for pair in self.headers:
+            if pair.0.to_lower() != "content-type":
+                new_headers.push(pair)
+        new_headers.push(("Content-Type", ct))
+        self.headers = new_headers
+        return self
+
+    fn status_code() -> i32:
+        http_status_code(self.status)

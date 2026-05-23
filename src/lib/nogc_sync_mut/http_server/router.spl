@@ -1,85 +1,141 @@
-# HTTP Server Router Module
-# Route matching and parameter extraction
+# HTTP Router — Lightweight Embedded Web Server
+#
+# Part of std.nogc_sync_mut.http_server
+# Full standalone example: examples/simple_web_server/
+# Design: doc/05_design/simple_web_server_lib_api.md
+
+use std.nogc_sync_mut.http_server.types.{
+    HttpRequest, HttpResponse, HttpMethod, http_method_to_text
+}
 
 # =============================================================================
-# Route Matching
+# Route Definition
 # =============================================================================
 
-# Match path against route pattern: "/users/:id" matches "/users/123"
+class Route:
+    method: HttpMethod
+    pattern: text
+    is_prefix: bool
+    handler: fn(HttpRequest) -> HttpResponse
+
+# =============================================================================
+# Router
+# =============================================================================
+
+class Router:
+    routes: [Route]
+    prefix_routes: [Route]
+    not_found_handler: fn(HttpRequest) -> HttpResponse
+
+    static fn new() -> Router:
+        Router(
+            routes: [],
+            prefix_routes: [],
+            not_found_handler: default_not_found
+        )
+
+    fn get(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Get, path, handler)
+
+    fn post(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Post, path, handler)
+
+    fn put(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Put, path, handler)
+
+    fn delete(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Delete, path, handler)
+
+    fn head(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Head, path, handler)
+
+    fn options(path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.route(HttpMethod.Options, path, handler)
+
+    fn route(method: HttpMethod, path: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.routes.push(Route(
+            method: method,
+            pattern: path,
+            is_prefix: false,
+            handler: handler
+        ))
+
+    fn mount(prefix: text, handler: fn(HttpRequest) -> HttpResponse):
+        self.prefix_routes.push(Route(
+            method: HttpMethod.Get,
+            pattern: prefix,
+            is_prefix: true,
+            handler: handler
+        ))
+
+    fn set_not_found(handler: fn(HttpRequest) -> HttpResponse):
+        self.not_found_handler = handler
+
+    fn dispatch(req: HttpRequest) -> HttpResponse:
+        for r in self.routes:
+            if method_matches(r.method, req.method) and match_route_pattern(r.pattern, req.path):
+                return r.handler(req)
+
+        for r in self.prefix_routes:
+            if req.path.starts_with(r.pattern):
+                return r.handler(req)
+
+        return self.not_found_handler(req)
+
+# =============================================================================
+# Route Pattern Matching
+# =============================================================================
+
+fn method_matches(route_method: HttpMethod, req_method: HttpMethod) -> bool:
+    return http_method_to_text(route_method) == http_method_to_text(req_method)
+
 fn match_route_pattern(pattern: text, path: text) -> bool:
-    var pattern_parts = pattern.split("/")
-    var path_parts = path.split("/")
+    if pattern == path:
+        return true
 
-    if pattern_parts.length() != path_parts.length():
+    val pattern_parts = pattern.split("/")
+    val path_parts = path.split("/")
+
+    if pattern_parts.len() != path_parts.len():
         return false
 
     var i = 0
-    var matches = true
-    while i < pattern_parts.length():
-        var pattern_part = pattern_parts.at(i)
-        var path_part = path_parts.at(i)
+    while i < pattern_parts.len():
+        val pp = pattern_parts[i]
+        val rp = path_parts[i]
 
-        var is_param = pattern_part.starts_with(":")
-        var is_wildcard = pattern_part == "*"
-
-        if is_param:
+        if pp.starts_with(":"):
             i = i + 1
             continue
-
-        if is_wildcard:
+        if pp == "*":
             i = i + 1
             continue
-
-        if pattern_part != path_part:
-            matches = false
-            break
-
+        if pp != rp:
+            return false
         i = i + 1
 
-    matches
+    return true
 
-# Extract route parameters from path: "/users/:id" + "/users/123" -> [("id", "123")]
-fn extract_route_params(pattern: text, path: text) -> list:
-    var params = []
-    var pattern_parts = pattern.split("/")
-    var path_parts = path.split("/")
+fn extract_route_params(pattern: text, path: text) -> [(text, text)]:
+    var params: [(text, text)] = []
+    val pattern_parts = pattern.split("/")
+    val path_parts = path.split("/")
 
-    if pattern_parts.length() != path_parts.length():
+    if pattern_parts.len() != path_parts.len():
         return params
 
     var i = 0
-    while i < pattern_parts.length():
-        var pattern_part = pattern_parts.at(i)
-        var path_part = path_parts.at(i)
+    while i < pattern_parts.len():
+        val pp = pattern_parts[i]
+        val rp = path_parts[i]
 
-        if pattern_part.starts_with(":"):
-            var param_start = 1
-            var param_name = pattern_part.substring(param_start, pattern_part.length())
-            params.append((param_name, path_part))
-
-        i = i + 1
-
-    params
-
-# Find matching route from route list: [(pattern, method, handler)]
-fn find_matching_route(routes: list, method: text, path: text) -> (text, text, text):
-    var i = 0
-    var found_route = ("", "", "")
-
-    while i < routes.length():
-        var route = routes.at(i)
-        var pattern = route.at(0)
-        var route_method = route.at(1)
-        var handler = route.at(2)
-
-        var method_matches = route_method == method
-        var path_matches = match_route_pattern(pattern, path)
-
-        if method_matches:
-            if path_matches:
-                found_route = route
-                break
+        if pp.starts_with(":"):
+            val param_name = pp.slice(1, pp.len())
+            params.push((param_name, rp))
 
         i = i + 1
 
-    found_route
+    return params
+
+fn default_not_found(req: HttpRequest) -> HttpResponse:
+    HttpResponse.not_found()

@@ -1,0 +1,77 @@
+# HTTP Server — Lightweight Embedded Web Server
+#
+# Part of std.nogc_sync_mut.http_server
+# Full standalone example: examples/simple_web_server/
+# Design: doc/05_design/simple_web_server_lib_api.md
+
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus}
+use std.nogc_sync_mut.http_server.parser.{parse_request}
+use std.nogc_sync_mut.http_server.response.{write_response, write_error}
+use std.nogc_sync_mut.http_server.router.{Router}
+
+extern fn thread_spawn2<A, B>(a: A, b: B, f: fn(A, B)) -> Thread
+
+class SimpleHttpServer:
+    host: text
+    port: i32
+    router: Router
+    running: bool
+
+    static fn new(host: text, port: i32, router: Router) -> SimpleHttpServer:
+        SimpleHttpServer(
+            host: host,
+            port: port,
+            router: router,
+            running: false
+        )
+
+    fn start():
+        self.running = true
+        val addr = "{self.host}:{self.port}"
+        match TcpListener.bind(addr):
+            Err(e):
+                print "Error: Failed to bind to {addr}: {e}"
+                return
+            Ok(listener):
+                print "SimpleHttpServer listening on {addr}"
+                self.serve_loop(listener)
+
+    fn start_with_callback(on_ready: fn(text, i32)):
+        self.running = true
+        val addr = "{self.host}:{self.port}"
+        match TcpListener.bind(addr):
+            Err(e):
+                print "Error: Failed to bind to {addr}: {e}"
+                return
+            Ok(listener):
+                on_ready(self.host, self.port)
+                self.serve_loop(listener)
+
+    fn stop():
+        self.running = false
+
+    fn serve_loop(listener: TcpListener):
+        while self.running:
+            match listener.accept():
+                Ok(stream):
+                    val handler = thread_spawn2(stream, self, \conn_stream, server:
+                        val srv: SimpleHttpServer = server
+                        SimpleHttpServer.handle_connection_static(srv, conn_stream)
+                    )
+                    handler.free()
+                Err(e):
+                    if self.running:
+                        print "Accept error: {e}"
+
+    static fn handle_connection_static(server: SimpleHttpServer, stream: TcpStream):
+        server.handle_connection(stream)
+
+    me handle_connection(stream: TcpStream):
+        match parse_request(stream):
+            Ok(req):
+                val resp = self.router.dispatch(req)
+                write_response(stream, resp)
+            Err(e):
+                write_error(stream, HttpStatus.BadRequest, e)
+        val _ = stream.close()
