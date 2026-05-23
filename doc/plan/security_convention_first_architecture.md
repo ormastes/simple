@@ -1205,11 +1205,13 @@ SecurityContext:
     task-local default runtime
     thread-local only as optimization
     remote propagation via signed token + safe headers
+    HMAC token validation before remote headers can authenticate a request
     UI receives permission snapshot only
 
 Sandbox:
     attach to app/lib/layer/feature/folder/gate/plugin
     compile to sandbox manifest
+    install lowered metadata in the hosted runtime security registry
     lower to Landlock/seccomp/namespaces on Linux
     lower to WASI/capability model for plugins
     lower to native object-capability handles in Simple OS
@@ -1227,8 +1229,8 @@ Output:
     audit/security report
 
 Remaining implementation after generated lowering:
-    install lowered sandbox plans into runtime/kernel/VM backends
-    validate remote SecurityContext tokens/sessions beyond safe header reconstruction
+    enforce lowered sandbox plans in runtime/kernel/VM backends
+    add remote SecurityContext key rotation, persistent session lookup, refresh, and revocation
     connect task-scoped SecurityContext helpers to the deeper scheduler/runtime
 
 The minimal example should look like this:

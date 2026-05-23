@@ -1,6 +1,6 @@
 //! Runtime entry points for compiler-generated security gate advice.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -18,12 +18,21 @@ static LAST_SANDBOX_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_AUDIT_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_POLICY_ALLOWED: AtomicU64 = AtomicU64::new(1);
 static LAST_SANDBOX_REGISTERED: AtomicU64 = AtomicU64::new(0);
+static LAST_SANDBOX_BACKEND_ID: AtomicU64 = AtomicU64::new(0);
+static LAST_SANDBOX_CAPABILITY_HANDLES: AtomicU64 = AtomicU64::new(0);
 static LOADED_REGISTRY_ENTRIES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 struct SecurityRegistry {
     denied_policies: HashSet<u64>,
     registered_sandboxes: HashSet<u64>,
+    sandbox_lowerings: HashMap<u64, SandboxLoweringRecord>,
+}
+
+#[derive(Default)]
+struct SandboxLoweringRecord {
+    backend_id: u64,
+    capability_handles: u64,
 }
 
 fn registry() -> &'static Mutex<SecurityRegistry> {
@@ -66,11 +75,22 @@ pub extern "C" fn rt_security_require_policy(policy_id: u64) {
 #[no_mangle]
 pub extern "C" fn rt_security_enter_sandbox(sandbox_id: u64) {
     LAST_SANDBOX_ID.store(sandbox_id, Ordering::Relaxed);
-    let registered = registry()
+    let (registered, backend_id, capability_handles) = registry()
         .lock()
-        .map(|registry| registry.registered_sandboxes.contains(&sandbox_id))
-        .unwrap_or(false);
+        .map(|registry| {
+            let registered = registry.registered_sandboxes.contains(&sandbox_id)
+                || registry.sandbox_lowerings.contains_key(&sandbox_id);
+            let lowering = registry.sandbox_lowerings.get(&sandbox_id);
+            (
+                registered,
+                lowering.map(|record| record.backend_id).unwrap_or(0),
+                lowering.map(|record| record.capability_handles).unwrap_or(0),
+            )
+        })
+        .unwrap_or((false, 0, 0));
     LAST_SANDBOX_REGISTERED.store(u64::from(registered), Ordering::Relaxed);
+    LAST_SANDBOX_BACKEND_ID.store(backend_id, Ordering::Relaxed);
+    LAST_SANDBOX_CAPABILITY_HANDLES.store(capability_handles, Ordering::Relaxed);
     ENTER_SANDBOX_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -115,6 +135,8 @@ pub extern "C" fn rt_security_reset_counters() {
     LAST_AUDIT_ID.store(0, Ordering::Relaxed);
     LAST_POLICY_ALLOWED.store(1, Ordering::Relaxed);
     LAST_SANDBOX_REGISTERED.store(0, Ordering::Relaxed);
+    LAST_SANDBOX_BACKEND_ID.store(0, Ordering::Relaxed);
+    LAST_SANDBOX_CAPABILITY_HANDLES.store(0, Ordering::Relaxed);
     LOADED_REGISTRY_ENTRIES.store(0, Ordering::Relaxed);
     if let Ok(mut registry) = registry().lock() {
         *registry = SecurityRegistry::default();
@@ -189,6 +211,16 @@ pub extern "C" fn rt_security_sandbox_registered() -> bool {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_security_last_sandbox_backend_id() -> u64 {
+    LAST_SANDBOX_BACKEND_ID.load(Ordering::Relaxed)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_security_last_sandbox_capability_handles() -> u64 {
+    LAST_SANDBOX_CAPABILITY_HANDLES.load(Ordering::Relaxed)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_security_loaded_registry_entries() -> u64 {
     LOADED_REGISTRY_ENTRIES.load(Ordering::Relaxed)
 }
@@ -211,9 +243,54 @@ fn load_registry_sdn_text(text: &str) -> u64 {
     let mut loaded = 0_u64;
     let mut pending_kind = None;
     let mut pending_name: Option<&str> = None;
+    let mut in_sandbox_lowering = false;
+    let mut current_sandbox: Option<&str> = None;
+    let mut current_backend: Option<&str> = None;
+    let mut capability_handles = 0_u64;
+    let mut in_capability_handles = false;
 
     for line in text.lines() {
         let trimmed = line.trim();
+        if trimmed == "sandbox_lowering:" {
+            loaded += flush_sandbox_lowering(current_sandbox.take(), current_backend.take(), capability_handles);
+            capability_handles = 0;
+            in_capability_handles = false;
+            in_sandbox_lowering = true;
+            pending_kind = None;
+            pending_name = None;
+            continue;
+        }
+        if in_sandbox_lowering {
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if line.starts_with("  ") && !line.starts_with("    ") && trimmed.ends_with(':') {
+                loaded += flush_sandbox_lowering(current_sandbox.take(), current_backend.take(), capability_handles);
+                capability_handles = 0;
+                in_capability_handles = false;
+                current_sandbox = Some(trimmed.trim_end_matches(':'));
+                continue;
+            }
+            if let Some(backend) = trimmed.strip_prefix("lowered_backend:") {
+                current_backend = Some(backend.trim());
+                in_capability_handles = false;
+                continue;
+            }
+            if trimmed == "capability_handles:" {
+                in_capability_handles = true;
+                continue;
+            }
+            if in_capability_handles && trimmed.starts_with("- ") && current_sandbox.is_some() {
+                capability_handles += 1;
+                continue;
+            }
+            if !line.starts_with(' ') {
+                loaded += flush_sandbox_lowering(current_sandbox.take(), current_backend.take(), capability_handles);
+                capability_handles = 0;
+                in_capability_handles = false;
+                in_sandbox_lowering = false;
+            }
+        }
         if let Some(name) = trimmed.strip_prefix("- require_policy:") {
             pending_kind = Some("policy");
             pending_name = Some(name.trim());
@@ -253,7 +330,30 @@ fn load_registry_sdn_text(text: &str) -> u64 {
         pending_name = None;
     }
 
+    loaded += flush_sandbox_lowering(current_sandbox, current_backend, capability_handles);
     loaded
+}
+
+fn flush_sandbox_lowering(sandbox_name: Option<&str>, backend_name: Option<&str>, capability_handles: u64) -> u64 {
+    let Some(sandbox_name) = sandbox_name else {
+        return 0;
+    };
+    let Some(backend_name) = backend_name else {
+        return 0;
+    };
+    let sandbox_id = security_metadata_id(sandbox_name);
+    let backend_id = security_metadata_id(backend_name);
+    if let Ok(mut registry) = registry().lock() {
+        registry.registered_sandboxes.insert(sandbox_id);
+        registry.sandbox_lowerings.insert(
+            sandbox_id,
+            SandboxLoweringRecord {
+                backend_id,
+                capability_handles,
+            },
+        );
+    }
+    1
 }
 
 #[cfg(test)]
@@ -310,5 +410,31 @@ mod tests {
         assert!(rt_security_policy_allowed());
         rt_security_enter_sandbox(sandbox_id);
         assert!(rt_security_sandbox_registered());
+    }
+
+    #[test]
+    fn loads_sandbox_lowering_metadata_into_runtime_registry() {
+        rt_security_reset_counters();
+        let sandbox_id = security_metadata_id("admin_sandbox");
+        let backend_id = security_metadata_id("linux_landlock_seccomp_namespaces");
+        let manifest = "\
+sandbox_lowering:
+  admin_sandbox:
+    source_backend: auto
+    lowered_backend: linux_landlock_seccomp_namespaces
+    enforcement:
+      - landlock_ruleset
+    capability_handles:
+      - ReadDir[\"/reports\"]
+      - AuditLog
+";
+
+        let loaded = rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64);
+        assert_eq!(loaded, 1);
+        assert_eq!(rt_security_loaded_registry_entries(), 1);
+        rt_security_enter_sandbox(sandbox_id);
+        assert!(rt_security_sandbox_registered());
+        assert_eq!(rt_security_last_sandbox_backend_id(), backend_id);
+        assert_eq!(rt_security_last_sandbox_capability_handles(), 2);
     }
 }

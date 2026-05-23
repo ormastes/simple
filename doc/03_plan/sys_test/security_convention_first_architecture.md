@@ -25,6 +25,8 @@ This slice covers compiler security grammar, diagnostics, generated artifacts, a
 - REQ-016: Simple unit tests `keeps explicit task security contexts isolated` and `restores previous task security context after scoped block` in `test/unit/lib/security/security_support_spec.spl`.
 - REQ-017: Simple unit test `test/unit/lib/http_server/security_context_dispatch_spec.spl` plus remote header tests in `security_support_spec.spl`.
 - REQ-018: HIR tests `lowers_gate_sandbox_and_inventory` and `lowers_simple_os_sandbox_to_native_object_capability_handles`; CLI check writes `sandbox_lowering.sdn`.
+- REQ-019: `security_support_spec.spl` covers HMAC signed token acceptance, tamper/expiry/session-mismatch rejection, and malformed token rejection; `security_context_dispatch_spec.spl` covers validated HTTP dispatch while preserving anonymous default dispatch.
+- REQ-020: runtime test `loads_sandbox_lowering_metadata_into_runtime_registry` and native project test `test_security_registry_embeds_sandbox_lowering_metadata`.
 
 ## Verification Command
 

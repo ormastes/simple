@@ -17,9 +17,11 @@
 - Main agent: implement explicit task-scoped `SecurityContext` propagation helpers.
 - Main agent: implement async HTTP handler dispatch scoping for reconstructed remote `SecurityContext`.
 - Main agent: implement generated backend-specific `sandbox_lowering.sdn`, including Simple OS native object-capability handles.
+- Main agent: implement opt-in HMAC-signed remote bearer token validation for HTTP `SecurityContext` dispatch.
+- Main agent: install generated sandbox lowering metadata into the hosted runtime security registry for backend/capability observability.
 - Main agent: add focused compiler tests.
 
 ## Next Candidate Tasks
 
-- Integrate remote `SecurityContext` transport/reconstruction with real client/server transports.
-- Install lowered sandbox plans into runtime/kernel/VM backends.
+- Add remote `SecurityContext` key rotation, persistent session lookup, refresh, and revocation.
+- Enforce lowered sandbox plans in runtime/kernel/VM backends.

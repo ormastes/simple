@@ -889,31 +889,9 @@ impl NativeProjectBuilder {
         if !effective_target().is_host() {
             return Ok(None);
         }
-        let mut registry_sdn = String::new();
-        for (path, source) in file_sources {
-            if !source_may_declare_security(source) {
-                continue;
-            }
-            let mut parser = Parser::new(source);
-            let ast = parser
-                .parse()
-                .map_err(|err| format!("parse security registry source {}: {}", path.display(), err))?;
-            let module = crate::hir::lower(&ast)
-                .map_err(|err| format!("lower security registry source {}: {}", path.display(), err))?;
-            let inventory = build_security_inventory(&module);
-            if inventory.security_aop_sdn.contains("require_policy:")
-                || inventory.security_aop_sdn.contains("enter_sandbox:")
-            {
-                registry_sdn.push_str("# source: ");
-                registry_sdn.push_str(&path.display().to_string());
-                registry_sdn.push('\n');
-                registry_sdn.push_str(&inventory.security_aop_sdn);
-                registry_sdn.push('\n');
-            }
-        }
-        if registry_sdn.trim().is_empty() {
+        let Some(registry_sdn) = security_registry_sdn_from_sources(file_sources)? else {
             return Ok(None);
-        }
+        };
 
         let cxx = tools::find_cxx_compiler();
         let is_clang_cl = cxx.contains("clang-cl");
@@ -959,6 +937,39 @@ extern "C" void __module_init_security_registry(void) {{
             return Err(format!("compile security registry init failed ({})", cxx));
         }
         Ok(Some(object_path))
+    }
+}
+
+fn security_registry_sdn_from_sources(file_sources: &[(PathBuf, String)]) -> Result<Option<String>, String> {
+    let mut registry_sdn = String::new();
+    for (path, source) in file_sources {
+        if !source_may_declare_security(source) {
+            continue;
+        }
+        let mut parser = Parser::new(source);
+        let ast = parser
+            .parse()
+            .map_err(|err| format!("parse security registry source {}: {}", path.display(), err))?;
+        let module = crate::hir::lower(&ast)
+            .map_err(|err| format!("lower security registry source {}: {}", path.display(), err))?;
+        let inventory = build_security_inventory(&module);
+        if inventory.security_aop_sdn.contains("require_policy:")
+            || inventory.security_aop_sdn.contains("enter_sandbox:")
+            || inventory.sandbox_lowering_sdn.contains("lowered_backend:")
+        {
+            registry_sdn.push_str("# source: ");
+            registry_sdn.push_str(&path.display().to_string());
+            registry_sdn.push('\n');
+            registry_sdn.push_str(&inventory.security_aop_sdn);
+            registry_sdn.push('\n');
+            registry_sdn.push_str(&inventory.sandbox_lowering_sdn);
+            registry_sdn.push('\n');
+        }
+    }
+    if registry_sdn.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(registry_sdn))
     }
 }
 

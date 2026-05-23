@@ -41,8 +41,12 @@ REQ-017: HTTP transport dispatch shall reconstruct a server-side `SecurityContex
 
 REQ-018: The security inventory shall emit a backend-specific `sandbox_lowering.sdn` artifact that maps abstract sandbox policies to concrete enforcement plans for Linux Landlock/seccomp/namespaces, WASI, Simple VM, baremetal MPU/linker regions, and Simple OS native object-capability handles.
 
+REQ-019: Remote HTTP security context reconstruction shall support opt-in HMAC-signed bearer token validation, require session-token agreement, reject malformed/tampered/expired tokens, and keep the default unvalidated dispatch path anonymous.
+
+REQ-020: Hosted native builds shall embed generated `sandbox_lowering.sdn` metadata into the runtime security registry, and the runtime shall retain sandbox backend and capability-handle metadata for observational backend installation checks.
+
 ## Deferred Requirements
 
-DEF-001: Full remote `SecurityContext` token/session validation remains future work beyond the HTTP handler-dispatch bridge.
+DEF-001: Remote `SecurityContext` key rotation, persistent session lookup, refresh flows, and distributed revocation remain future work beyond HMAC token validation.
 
 DEF-002: Runtime installation and kernel/VM enforcement of lowered sandbox plans remains future work beyond generated backend lowering artifacts.

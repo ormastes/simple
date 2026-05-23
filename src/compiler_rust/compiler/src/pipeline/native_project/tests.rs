@@ -273,6 +273,28 @@ fn test_security_registry_init_source_filters_and_escapes() {
 }
 
 #[test]
+fn test_security_registry_embeds_sandbox_lowering_metadata() {
+    let source = r#"security gate PluginGate:
+    sandbox plugin_sandbox
+    grant:
+        ReadDir["/reports"]
+
+sandbox plugin_sandbox:
+    backend simple_os
+    net deny all
+"#;
+    let file_sources = vec![(PathBuf::from("src/security/gate/plugin_gate.spl"), source.to_string())];
+    let registry = security_registry_sdn_from_sources(&file_sources)
+        .expect("security registry generation should parse")
+        .expect("security source should produce a registry");
+    assert!(registry.contains("security_aop_lowering:"));
+    assert!(registry.contains("sandbox_lowering:"));
+    assert!(registry.contains("plugin_sandbox:"));
+    assert!(registry.contains("lowered_backend: simple_os_native_object_capability_handles"));
+    assert!(registry.contains("- ReadDir[\"/reports\"]"));
+}
+
+#[test]
 fn test_object_cache_key_separates_simd_tiers() {
     let scalar = with_simd_tier_env("scalar", || {
         object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
