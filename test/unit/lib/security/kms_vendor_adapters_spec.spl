@@ -1,0 +1,51 @@
+use std.security.kms_vendor_adapters.{aws_kms_sign_request, aws_kms_verify_request, gcp_kms_asymmetric_sign_request, azure_key_vault_sign_request, azure_key_vault_verify_request, pkcs11_hsm_sign_request, pkcs11_hsm_verify_request}
+
+describe "KMS vendor transport adapters":
+    it "builds AWS KMS Sign and Verify JSON RPC requests":
+        val sign = aws_kms_sign_request("https://kms.us-east-1.amazonaws.com", "arn:aws:kms:us-east-1:111122223333:key/key-1", "payload", "RSASSA_PSS_SHA_256", "AWS4-HMAC-SHA256 signed", 3000, "system")
+        val verify = aws_kms_verify_request("https://kms.us-east-1.amazonaws.com", "arn:aws:kms:us-east-1:111122223333:key/key-1", "payload", "sig", "RSASSA_PSS_SHA_256", "AWS4-HMAC-SHA256 signed", 3000, "system")
+
+        expect(sign.method).to_equal("POST")
+        expect(sign.headers["x-amz-target"]).to_equal("TrentService.Sign")
+        expect(sign.body).to_contain("RSASSA_PSS_SHA_256")
+        expect(verify.method).to_equal("POST")
+        expect(verify.headers["x-amz-target"]).to_equal("TrentService.Verify")
+        expect(verify.body).to_contain("sig")
+
+    it "builds Google Cloud KMS asymmetricSign requests":
+        val request = gcp_kms_asymmetric_sign_request("https://cloudkms.googleapis.com", "projects/p/locations/global/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", "sha256-digest", "oauth-token", 3000, "system")
+
+        expect(request.method).to_equal("POST")
+        expect(request.url).to_contain("asymmetricSign")
+        expect(request.headers["authorization"]).to_equal("Bearer oauth-token")
+        expect(request.body).to_contain("sha256-digest")
+
+    it "builds Azure Key Vault sign and verify requests":
+        val sign = azure_key_vault_sign_request("https://vault.vault.azure.net", "token-key/version-1", "digest-b64u", "PS256", "aad-token", 3000, "system")
+        val verify = azure_key_vault_verify_request("https://vault.vault.azure.net", "token-key/version-1", "digest-b64u", "sig-b64u", "PS256", "aad-token", 3000, "system")
+
+        expect(sign.method).to_equal("POST")
+        expect(sign.url).to_contain("sign")
+        expect(sign.body).to_contain("PS256")
+        expect(verify.method).to_equal("POST")
+        expect(verify.url).to_contain("verify")
+        expect(verify.body).to_contain("sig-b64u")
+        expect(verify.headers["authorization"]).to_equal("Bearer aad-token")
+
+    it "builds PKCS11 HSM gateway requests":
+        val sign = pkcs11_hsm_sign_request("https://hsm.internal", "slot-0", "hsm://slot-0/key-1", "payload", "CKM_ECDSA_SHA256", "Bearer hsm-token", 3000, "mtls:hsm")
+        val verify = pkcs11_hsm_verify_request("https://hsm.internal", "slot-0", "hsm://slot-0/key-1", "payload", "sig", "CKM_ECDSA_SHA256", "Bearer hsm-token", 3000, "mtls:hsm")
+
+        expect(sign.method).to_equal("POST")
+        expect(sign.tls_profile).to_equal("mtls:hsm")
+        expect(sign.body).to_contain("hsm://slot-0/key-1")
+        expect(verify.method).to_equal("POST")
+        expect(verify.body).to_contain("sig")
+        expect(verify.headers["authorization"]).to_equal("Bearer hsm-token")
+
+    it "does not include raw signing key fields":
+        val request = aws_kms_sign_request("https://kms.us-east-1.amazonaws.com", "alias/simple-token", "payload", "RSASSA_PKCS1_V1_5_SHA_256", "", 3000, "system")
+
+        expect(request.body.index_of("signing_key") < 0).to_equal(true)
+        expect(request.body.index_of("private_key") < 0).to_equal(true)
+        expect(request.body.index_of("secret") < 0).to_equal(true)

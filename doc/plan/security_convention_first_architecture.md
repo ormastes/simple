@@ -1233,7 +1233,7 @@ Output:
 
 Remaining implementation after generated lowering:
     add non-RISC-V MPU backends and boot-time PMP/MPU apply hooks
-    add vendor-specific AWS/GCP/Azure/HSM transport adapters behind the generic hosted KMS provider seam
+    add live authenticated AWS/GCP/Azure/HSM transport execution behind the vendor KMS request builders
 
 The minimal example should look like this:
 

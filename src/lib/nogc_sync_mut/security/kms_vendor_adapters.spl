@@ -1,0 +1,98 @@
+"""
+# Vendor KMS/HSM Transport Adapters
+
+Request builders for common hosted KMS/HSM transports. They produce
+`HostedKmsHttpRequest` values for the generic hosted KMS provider seam and
+carry only opaque key handles, algorithms, transport auth metadata, and TLS
+profile names.
+"""
+
+use std.security.kms_provider.{HostedKmsHttpRequest}
+
+fn kms_vendor_headers(vendor: text, auth_header: text) -> Dict<text, text>:
+    var headers: Dict<text, text> = {
+        "content-type": "application/json",
+        "x-simple-kms-vendor": vendor
+    }
+    if auth_header != "":
+        return headers.set("authorization", auth_header)
+    headers
+
+fn aws_kms_sign_request(endpoint: text, key_handle: text, payload: text, signing_algorithm: text, auth_header: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    var headers = kms_vendor_headers("aws-kms", auth_header)
+    headers = headers.set("x-amz-target", "TrentService.Sign")
+    headers = headers.set("content-type", "application/x-amz-json-1.1")
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: endpoint,
+        headers: headers,
+        body: "{\"KeyId\":\"{key_handle}\",\"Message\":\"{payload}\",\"MessageType\":\"RAW\",\"SigningAlgorithm\":\"{signing_algorithm}\"}",
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )
+
+fn aws_kms_verify_request(endpoint: text, key_handle: text, payload: text, signature: text, signing_algorithm: text, auth_header: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    var headers = kms_vendor_headers("aws-kms", auth_header)
+    headers = headers.set("x-amz-target", "TrentService.Verify")
+    headers = headers.set("content-type", "application/x-amz-json-1.1")
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: endpoint,
+        headers: headers,
+        body: "{\"KeyId\":\"{key_handle}\",\"Message\":\"{payload}\",\"MessageType\":\"RAW\",\"Signature\":\"{signature}\",\"SigningAlgorithm\":\"{signing_algorithm}\"}",
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )
+
+fn gcp_kms_asymmetric_sign_request(endpoint: text, key_handle: text, digest_sha256: text, bearer_token: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    val auth_header = if bearer_token == "": "" else: "Bearer {bearer_token}"
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: "{endpoint}/v1/{key_handle}:asymmetricSign",
+        headers: kms_vendor_headers("gcp-cloud-kms", auth_header),
+        body: "{\"digest\":{\"sha256\":\"{digest_sha256}\"}}",
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )
+
+fn azure_key_vault_sign_request(vault_base_url: text, key_handle: text, value_base64url: text, algorithm: text, bearer_token: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    val auth_header = if bearer_token == "": "" else: "Bearer {bearer_token}"
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: "{vault_base_url}/keys/{key_handle}/sign?api-version=2025-07-01",
+        headers: kms_vendor_headers("azure-key-vault", auth_header),
+        body: "{\"alg\":\"{algorithm}\",\"value\":\"{value_base64url}\"}",
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )
+
+fn azure_key_vault_verify_request(vault_base_url: text, key_handle: text, value_base64url: text, signature_base64url: text, algorithm: text, bearer_token: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    val auth_header = if bearer_token == "": "" else: "Bearer {bearer_token}"
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: "{vault_base_url}/keys/{key_handle}/verify?api-version=2025-07-01",
+        headers: kms_vendor_headers("azure-key-vault", auth_header),
+        body: "{\"alg\":\"{algorithm}\",\"digest\":\"{value_base64url}\",\"value\":\"{signature_base64url}\"}",
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )
+
+fn pkcs11_hsm_sign_request(endpoint: text, slot: text, key_handle: text, payload: text, mechanism: text, auth_header: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: "{endpoint}/pkcs11/{slot}/sign",
+        headers: kms_vendor_headers("pkcs11-hsm", auth_header),
+        body: "{\"key_handle\":\"{key_handle}\",\"mechanism\":\"{mechanism}\",\"payload\":\"{payload}\"}",
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )
+
+fn pkcs11_hsm_verify_request(endpoint: text, slot: text, key_handle: text, payload: text, signature: text, mechanism: text, auth_header: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: "{endpoint}/pkcs11/{slot}/verify",
+        headers: kms_vendor_headers("pkcs11-hsm", auth_header),
+        body: "{\"key_handle\":\"{key_handle}\",\"mechanism\":\"{mechanism}\",\"payload\":\"{payload}\",\"signature\":\"{signature}\"}",
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )

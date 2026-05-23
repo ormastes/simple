@@ -77,8 +77,10 @@ REQ-035: Hosted remote `SecurityContext` session storage shall provide concrete 
 
 REQ-036: Hosted KMS/HSM-backed remote `SecurityContext` signing shall provide a generic JSON-over-HTTPS provider contract that stores opaque key handles, attaches bearer/TLS transport metadata, signs payloads through external KMS responses, verifies external signatures through fail-closed KMS responses, and validates resulting tokens through the existing adapter seam without raw signing keys in request handling.
 
+REQ-037: Hosted KMS/HSM-backed remote `SecurityContext` signing shall provide vendor transport request builders for AWS KMS Sign/Verify, Google Cloud KMS asymmetricSign, Azure Key Vault sign/verify, and PKCS#11 HSM gateway sign/verify using opaque key handles and transport credentials instead of raw signing keys.
+
 ## Deferred Requirements
 
-DEF-001: Specific AWS/GCP/Azure/HSM vendor transport adapters remain future work beyond the hosted adapter seams, generic HTTP KMS/HSM provider contract, Redis session deployment store, quorum session-store behavior, SDN persistence, merge, rotation, and retirement primitives.
+DEF-001: Live authenticated AWS/GCP/Azure/HSM transport execution remains future work beyond the hosted adapter seams, generic HTTP KMS/HSM provider contract, vendor request builders, Redis session deployment store, quorum session-store behavior, SDN persistence, merge, rotation, and retirement primitives.
 
 DEF-002: Non-RISC-V MPU backends and boot-time CSR/MMIO apply hooks remain future work beyond deterministic linker-section metadata, fail-closed static-section installation, hosted runtime checks, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, Simple VM host-import filtering, SimpleOS kernel capability installation, and RISC-V PMP CSR write-plan generation.
