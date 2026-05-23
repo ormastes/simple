@@ -1020,6 +1020,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_file_canonicalize", file_io::rt_file_canonicalize as ExternFn);
     m.insert("rt_file_close", file_io::rt_file_close as ExternFn);
     m.insert("rt_file_copy", file_io::rt_file_copy as ExternFn);
+    m.insert("rt_crc32_text", file_io::rt_crc32_text as ExternFn);
     m.insert("rt_file_create_excl", file_io::rt_file_create_excl as ExternFn);
     m.insert("rt_file_delete", native_sffi::rt_file_delete as ExternFn);
     m.insert("rt_file_exists", file_io::rt_file_exists as ExternFn);

@@ -208,6 +208,19 @@ pub fn rt_file_fsync_cached(args: &[Value]) -> Result<Value, CompileError> {
     rt_file_fsync(args)
 }
 
+/// CRC32 checksum of a text string. Returns the checksum as i64.
+pub fn rt_crc32_text(args: &[Value]) -> Result<Value, CompileError> {
+    let text = extract_content(args, 0)?;
+    let mut crc: u32 = 0xFFFFFFFF;
+    for &b in text.as_bytes() {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xEDB88320 & (0u32.wrapping_sub(crc & 1)));
+        }
+    }
+    Ok(Value::Int((crc ^ 0xFFFFFFFF) as i64))
+}
+
 /// Atomically create a file (O_EXCL semantics). Returns false if the file already exists.
 pub fn rt_file_create_excl(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;

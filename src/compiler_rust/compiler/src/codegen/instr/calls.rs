@@ -2052,7 +2052,8 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_env_set" | "rt_set_env" => Some(&[0, 1]),
 
         // File I/O (single path)
-        "rt_file_exists"
+        "rt_crc32_text"
+        | "rt_file_exists"
         | "rt_file_canonicalize"
         | "rt_file_read_text"
         | "rt_file_size"

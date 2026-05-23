@@ -286,6 +286,7 @@ const RT_KEEP: &[&str] = &[
     "rt_debug_enable",
     "rt_debug_disable",
     "rt_file_rename",
+    "rt_crc32_text",
     "rt_file_sync",
     "rt_file_create_excl",
     "rt_file_write",
@@ -481,6 +482,7 @@ int main(int argc, char** argv) {
 {w}int64_t get_global_GLOBAL_LOG_LEVEL(void) {{ return 0; }}
 {w}void set_global_GLOBAL_LOG_LEVEL(int64_t v) {{ (void)v; }}
 {w}bool rt_file_rename(const char* a, const char* b) {{ (void)a; (void)b; return true; }}
+{w}int64_t rt_crc32_text(const char* a) {{ (void)a; return 0; }}
 {w}bool rt_file_sync(const char* a) {{ (void)a; return true; }}
 {w}bool rt_file_create_excl(const char* a, const char* b) {{ (void)a; (void)b; return true; }}
 {w}void rt_fault_set_stack_overflow_detection(int64_t v) {{ (void)v; }}

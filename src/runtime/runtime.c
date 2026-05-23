@@ -1377,6 +1377,18 @@ int         rt_file_fsync_cached(const char* path) {
 int         rt_file_sync(const char* path) {
     return rt_file_fsync(path);
 }
+int64_t     rt_crc32_text(const char* text) {
+    if (!text) return 0;
+    uint32_t crc = 0xFFFFFFFF;
+    const uint8_t* p = (const uint8_t*)text;
+    while (*p) {
+        crc ^= *p++;
+        for (int i = 0; i < 8; i++)
+            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+    }
+    return (int64_t)(crc ^ 0xFFFFFFFF);
+}
+
 int         rt_file_create_excl(const char* path, const char* content) {
     if (!path) return 0;
     int fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0644);

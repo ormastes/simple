@@ -5,6 +5,7 @@ use nogc_sync_mut.database.atomic (atomic_write, atomic_read, atomic_append, get
 use nogc_sync_mut.database.core (SdnRow, split_sdn_row)
 
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_crc32_text(content: text) -> i64
 
 enum WalEntryType:
     Insert
@@ -44,11 +45,26 @@ fn wal_entry_type_from_text(s: text) -> WalEntryType?:
 
 fn wal_entry_to_line(entry: WalEntry) -> text:
     val type_str = wal_entry_type_to_text(entry.entry_type)
-    "{entry.sequence}|{type_str}|{entry.table_name}|{entry.row_key}|{entry.data}|{entry.timestamp}\n"
+    val payload = "{entry.sequence}|{type_str}|{entry.table_name}|{entry.row_key}|{entry.data}|{entry.timestamp}"
+    val crc = rt_crc32_text(payload)
+    "{payload}|{crc}\n"
 
 fn wal_entry_from_line(line: text) -> WalEntry?:
     val parts = line.split("|")
-    if parts.len() < 6:
+    if parts.len() < 7:
+        if parts.len() == 6:
+            return wal_entry_from_line_v1(parts)
+        return nil
+    val stored_crc_str = parts[parts.len() - 1].trim()
+    val stored_crc = stored_crc_str.to_int() ?? -1
+    var payload_parts: [text] = []
+    var j = 0
+    while j < parts.len() - 1:
+        payload_parts.push(parts[j])
+        j = j + 1
+    val payload = payload_parts.join("|")
+    val computed_crc = rt_crc32_text(payload)
+    if stored_crc != computed_crc:
         return nil
     val seq = parts[0].trim().to_int() ?? 0
     val etype = wal_entry_type_from_text(parts[1].trim())
@@ -56,14 +72,31 @@ fn wal_entry_from_line(line: text) -> WalEntry?:
         return nil
     val table_name = parts[2].trim()
     val row_key = parts[3].trim()
-    # data may contain pipes — rejoin remaining parts except last
     var data_parts: [text] = []
     var i = 4
-    while i < parts.len() - 1:
+    while i < parts.len() - 2:
         data_parts.push(parts[i])
         i = i + 1
     val data = data_parts.join("|")
-    val ts = parts[parts.len() - 1].trim().to_int() ?? 0
+    val ts = parts[parts.len() - 2].trim().to_int() ?? 0
+    Some(WalEntry(
+        sequence: seq,
+        entry_type: etype.unwrap(),
+        table_name: table_name,
+        row_key: row_key,
+        data: data,
+        timestamp: ts
+    ))
+
+fn wal_entry_from_line_v1(parts: [text]) -> WalEntry?:
+    val seq = parts[0].trim().to_int() ?? 0
+    val etype = wal_entry_type_from_text(parts[1].trim())
+    if not etype.?:
+        return nil
+    val table_name = parts[2].trim()
+    val row_key = parts[3].trim()
+    val data = parts[4]
+    val ts = parts[5].trim().to_int() ?? 0
     Some(WalEntry(
         sequence: seq,
         entry_type: etype.unwrap(),

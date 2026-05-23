@@ -20,6 +20,8 @@
 #   file_write("doc/08_tracking/bug/bug_db.sdn", content)  // ❌ Race condition!
 
 use nogc_sync_mut.database.atomic (atomic_write, atomic_read)
+
+extern fn rt_crc32_text(content: text) -> i64
 use nogc_sync_mut.database.wal (WriteAheadLog, WalEntry, WalEntryType, wal_payload_to_row)
 use nogc_sync_mut.database.db_metrics (DbMetrics)
 # Minimal StringId definition (avoids external dependency during bootstrap)
@@ -370,14 +372,25 @@ class SdnDatabase:
         if not file_exists(path):
             return nil
 
-        val content = file_read(path)
-        if content == "":
+        val raw_content = file_read(path)
+        if raw_content == "":
             return nil
+
+        var content = raw_content
+        if content.starts_with("#sdn-crc32:"):
+            val newline_idx = content.index_of("\n") ?? -1
+            if newline_idx > 0:
+                val header = content.slice(0, newline_idx)
+                val stored_crc_str = header.slice(11, header.len())
+                val stored_crc = stored_crc_str.to_int() ?? -1
+                val body = content.slice(newline_idx + 1, content.len())
+                val computed_crc = rt_crc32_text(body)
+                if stored_crc != computed_crc:
+                    return nil
+                content = body
 
         val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false, wal: nil, metrics: nil)
 
-        # Parse all tables from file
-        # Format: multiple tables separated by blank lines
         val sections = content.split("\n\n")
         for section in sections:
             if section.trim() == "":
@@ -439,10 +452,10 @@ class SdnDatabase:
             val typed_table: SdnTable = table
             sections.push(typed_table.to_sdn())
 
-        val content = sections.join("\n\n") + "\n\n"
+        val body = sections.join("\n\n") + "\n\n"
+        val crc = rt_crc32_text(body)
+        val content = "#sdn-crc32:{crc}\n" + body
 
-        # Use atomic_write with FileLock to prevent race conditions
-        # This acquires lock, writes temp file, renames, then releases lock
         if not atomic_write(self.path, content):
             return false
 
