@@ -1,8 +1,146 @@
 //! WASI environment configuration and setup
 
 use crate::error::{WasmError, WasmResult};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+
+/// Explicit capability grants for a WASI instance.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasiCapabilityTable {
+    /// Environment variable names that may be passed to the module.
+    pub env_keys: HashSet<String>,
+
+    /// Allows all environment variables when a manifest grants broad Env.
+    pub allow_all_env: bool,
+
+    /// Directory paths that may be preopened for read-oriented capabilities.
+    pub read_dirs: HashSet<String>,
+
+    /// Directory paths that may be preopened for write-oriented capabilities.
+    pub write_dirs: HashSet<String>,
+
+    /// Whether stdin may be connected.
+    pub allow_stdin: bool,
+
+    /// Whether stdout may be connected.
+    pub allow_stdout: bool,
+
+    /// Whether stderr may be connected.
+    pub allow_stderr: bool,
+}
+
+impl WasiCapabilityTable {
+    /// Create an empty fail-closed capability table.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Grant one environment variable.
+    pub fn grant_env(mut self, key: &str) -> Self {
+        self.env_keys.insert(key.to_string());
+        self
+    }
+
+    /// Grant all environment variables.
+    pub fn grant_all_env(mut self) -> Self {
+        self.allow_all_env = true;
+        self
+    }
+
+    /// Grant a read directory preopen.
+    pub fn grant_read_dir(mut self, path: &str) -> Self {
+        self.read_dirs.insert(normalize_capability_path(path));
+        self
+    }
+
+    /// Grant a write directory preopen.
+    pub fn grant_write_dir(mut self, path: &str) -> Self {
+        self.write_dirs.insert(normalize_capability_path(path));
+        self
+    }
+
+    /// Grant stdin connection.
+    pub fn grant_stdin(mut self) -> Self {
+        self.allow_stdin = true;
+        self
+    }
+
+    /// Grant stdout connection.
+    pub fn grant_stdout(mut self) -> Self {
+        self.allow_stdout = true;
+        self
+    }
+
+    /// Grant stderr connection.
+    pub fn grant_stderr(mut self) -> Self {
+        self.allow_stderr = true;
+        self
+    }
+
+    /// Parse the lowered sandbox manifest subset used by WASI backends.
+    pub fn from_sandbox_lowering_sdn(sandbox_name: &str, text: &str) -> WasmResult<Self> {
+        let mut table = Self::new();
+        let mut in_target_sandbox = sandbox_name.is_empty();
+
+        for raw_line in text.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            if line.ends_with(':') {
+                let label = line.trim_end_matches(':').trim();
+                if !label.is_empty() && !matches!(label, "capabilities" | "deny" | "allow") {
+                    in_target_sandbox = label == sandbox_name;
+                }
+            }
+
+            if !in_target_sandbox {
+                continue;
+            }
+
+            if line.contains("ReadDir") {
+                if let Some(path) = extract_capability_argument(line) {
+                    table = table.grant_read_dir(&path);
+                }
+            } else if line.contains("WriteDir") {
+                if let Some(path) = extract_capability_argument(line) {
+                    table = table.grant_write_dir(&path);
+                }
+            } else if line.contains("Env") {
+                if let Some(key) = extract_capability_argument(line) {
+                    table = table.grant_env(&key);
+                } else {
+                    table = table.grant_all_env();
+                }
+            } else if line.contains("Stdin") {
+                table = table.grant_stdin();
+            } else if line.contains("Stdout") {
+                table = table.grant_stdout();
+            } else if line.contains("Stderr") {
+                table = table.grant_stderr();
+            }
+        }
+
+        Ok(table)
+    }
+
+    fn allows_env(&self, key: &str) -> bool {
+        self.allow_all_env || self.env_keys.contains(key)
+    }
+
+    fn allows_preopen(&self, host_path: &str, guest_path: &str) -> bool {
+        self.path_allowed(host_path) || self.path_allowed(guest_path)
+    }
+
+    fn path_allowed(&self, path: &str) -> bool {
+        let path = normalize_capability_path(path);
+        self.read_dirs
+            .iter()
+            .chain(self.write_dirs.iter())
+            .any(|granted| capability_path_matches(granted, &path))
+    }
+}
 
 /// Configuration for WASI environment
 #[derive(Debug, Clone)]
@@ -15,6 +153,9 @@ pub struct WasiConfig {
 
     /// Pre-opened directories (path -> virtual path)
     pub preopened_dirs: Vec<(String, String)>,
+
+    /// Optional fail-closed capability table for env and preopen grants.
+    pub capability_table: Option<WasiCapabilityTable>,
 
     /// Captured stdout
     pub stdout: Arc<Mutex<Vec<u8>>>,
@@ -39,6 +180,7 @@ impl WasiConfig {
             args: vec!["wasm_module".to_string()],
             env: HashMap::new(),
             preopened_dirs: Vec::new(),
+            capability_table: None,
             stdout: Arc::new(Mutex::new(Vec::new())),
             stderr: Arc::new(Mutex::new(Vec::new())),
             stdin: Arc::new(Mutex::new(Vec::new())),
@@ -75,6 +217,12 @@ impl WasiConfig {
     pub fn with_preopen_dir(mut self, host_path: &str, guest_path: &str) -> Self {
         self.preopened_dirs
             .push((host_path.to_string(), guest_path.to_string()));
+        self
+    }
+
+    /// Attach an explicit WASI capability table.
+    pub fn with_capability_table(mut self, table: WasiCapabilityTable) -> Self {
+        self.capability_table = Some(table);
         self
     }
 
@@ -115,6 +263,56 @@ impl WasiConfig {
     pub fn clear_stderr(&self) {
         self.stderr.lock().unwrap().clear();
     }
+
+    /// Validate env and preopen grants against the optional capability table.
+    pub fn validate_capabilities(&self) -> WasmResult<()> {
+        let Some(table) = &self.capability_table else {
+            return Ok(());
+        };
+
+        for key in self.env.keys() {
+            if !table.allows_env(key) {
+                return Err(WasmError::WasiError(format!(
+                    "WASI capability denied environment variable '{}'",
+                    key
+                )));
+            }
+        }
+
+        for (host_path, guest_path) in &self.preopened_dirs {
+            if !table.allows_preopen(host_path, guest_path) {
+                return Err(WasmError::WasiError(format!(
+                    "WASI capability denied preopen host '{}' as '{}'",
+                    host_path, guest_path
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn normalize_capability_path(path: &str) -> String {
+    let trimmed = path.trim().trim_matches('"').trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn capability_path_matches(granted: &str, requested: &str) -> bool {
+    requested == granted
+        || requested
+            .strip_prefix(granted)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn extract_capability_argument(line: &str) -> Option<String> {
+    let open = line.find('"')?;
+    let rest = &line[open + 1..];
+    let close = rest.find('"')?;
+    Some(rest[..close].to_string())
 }
 
 #[cfg(feature = "wasm")]
@@ -153,6 +351,8 @@ impl WasiConfig {
 
         // Build WASI state
         let mut wasi_state = WasiState::new("simple_wasm");
+
+        self.validate_capabilities()?;
 
         // Add arguments
         for arg in &self.args {
@@ -225,6 +425,7 @@ mod tests {
         assert_eq!(config.args, vec!["wasm_module"]);
         assert!(config.env.is_empty());
         assert!(config.preopened_dirs.is_empty());
+        assert!(config.capability_table.is_none());
     }
 
     #[test]
@@ -251,5 +452,71 @@ mod tests {
         let config = WasiConfig::new();
         *config.stdout.lock().unwrap() = b"test output".to_vec();
         assert_eq!(config.get_stdout_string().unwrap(), "test output");
+    }
+
+    #[test]
+    fn test_wasi_capability_table_allows_declared_env() {
+        let table = WasiCapabilityTable::new().grant_env("SIMPLE_ENV");
+        let config = WasiConfig::new()
+            .with_capability_table(table)
+            .with_env("SIMPLE_ENV", "dev");
+
+        assert!(config.validate_capabilities().is_ok());
+    }
+
+    #[test]
+    fn test_wasi_capability_table_denies_undeclared_env() {
+        let table = WasiCapabilityTable::new().grant_env("SIMPLE_ENV");
+        let config = WasiConfig::new()
+            .with_capability_table(table)
+            .with_env("SECRET", "token");
+
+        let err = config.validate_capabilities().unwrap_err().to_string();
+        assert!(err.contains("denied environment variable 'SECRET'"));
+    }
+
+    #[test]
+    fn test_wasi_capability_table_allows_declared_preopen() {
+        let table = WasiCapabilityTable::new().grant_read_dir("/reports");
+        let config = WasiConfig::new()
+            .with_capability_table(table)
+            .with_preopen_dir("/srv/reports", "/reports");
+
+        assert!(config.validate_capabilities().is_ok());
+    }
+
+    #[test]
+    fn test_wasi_capability_table_denies_undeclared_preopen() {
+        let table = WasiCapabilityTable::new().grant_read_dir("/reports");
+        let config = WasiConfig::new()
+            .with_capability_table(table)
+            .with_preopen_dir("/etc", "/host-etc");
+
+        let err = config.validate_capabilities().unwrap_err().to_string();
+        assert!(err.contains("denied preopen host '/etc' as '/host-etc'"));
+    }
+
+    #[test]
+    fn test_wasi_capability_table_parses_lowered_wasi_manifest() {
+        let manifest = r#"
+sandbox_manifest:
+    PluginSandbox:
+        capabilities:
+            - ReadDir("/reports")
+            - WriteDir("/tmp/plugin")
+            - Env("SIMPLE_ENV")
+            - Stdout
+    OtherSandbox:
+        capabilities:
+            - Env("SECRET")
+"#;
+
+        let table = WasiCapabilityTable::from_sandbox_lowering_sdn("PluginSandbox", manifest).unwrap();
+
+        assert!(table.read_dirs.contains("/reports"));
+        assert!(table.write_dirs.contains("/tmp/plugin"));
+        assert!(table.env_keys.contains("SIMPLE_ENV"));
+        assert!(!table.env_keys.contains("SECRET"));
+        assert!(table.allow_stdout);
     }
 }

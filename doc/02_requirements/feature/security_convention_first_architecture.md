@@ -63,8 +63,10 @@ REQ-028: The Linux sandbox backend shall provide an installable seccomp-BPF prof
 
 REQ-029: The Linux sandbox backend shall provide an installable Landlock filesystem ruleset that detects the kernel ABI, filters filesystem access rights by ABI version, grants configured read/write path-beneath rules, sets `no_new_privs`, and restricts the current process.
 
+REQ-030: The WASI runtime shall support an explicit capability table that can be populated from lowered sandbox manifests and shall deny undeclared environment variables and preopened directories when the table is attached.
+
 ## Deferred Requirements
 
 DEF-001: Production adapters for external replicated session storage and KMS/HSM-backed signing key rollout remain future work beyond SDN persistence, merge, rotation, and retirement primitives.
 
-DEF-002: Full backend syscall isolation for WASI capability tables and baremetal MPU remains future work beyond hosted runtime checks, Linux Landlock/seccomp filters, Simple VM host-import filtering, and SimpleOS kernel capability installation.
+DEF-002: Full baremetal MPU backend isolation remains future work beyond hosted runtime checks, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, Simple VM host-import filtering, and SimpleOS kernel capability installation.
