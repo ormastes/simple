@@ -482,7 +482,7 @@ Key paths:
 
 ## DBFS (Database Filesystem)
 
-The filesystem layer that sits beneath Simple DB. Provides B-tree indexing, WAL journaling, page-level checkpointing, intent logging, and NVMe passthrough. Backed by NVFS arenas. Tests in `test/dbfs/`. Design in `doc/03_plan/nvfs_dbfs_real_filesystem.md`.
+A filesystem that uses database techniques (B-tree indexing, WAL journaling, page-level checkpointing, intent logging) to manage metadata and file nodes. Similar to how btrfs uses B-trees for filesystem metadata. Backed by NVFS arenas with NVMe passthrough support. DBFS is primarily a filesystem component — it applies DB logic to file/inode management. Because it uses DB-like data structures internally, it also provides a DB-optimized storage path that Simple DB Full can leverage for its page/WAL/index operations, sharing primitives rather than duplicating them. Tests in `test/dbfs/`. Design in `doc/03_plan/nvfs_dbfs_real_filesystem.md`.
 
 ## SDN (Simple Data Notation)
 

@@ -51,10 +51,10 @@ REQ-022: Remote `SecurityContext` lifecycle support shall provide key-id based s
 
 REQ-023: Hosted runtime sandbox entry shall activate lowered capability-handle policy so runtime-managed privileged APIs can reject ambient capability use that is not granted to the active sandbox.
 
+REQ-024: Future fiber runtimes shall have an explicit current-task identity bridge that participates in the unified runtime task selector used by task-scoped `SecurityContext`.
+
 ## Deferred Requirements
 
 DEF-001: Durable/distributed remote `SecurityContext` session storage and operational key rollout remain future work beyond local key-ring and session-store lifecycle primitives.
 
 DEF-002: Kernel/VM/backend syscall isolation for lowered sandbox plans remains future work beyond hosted runtime capability-handle enforcement and generated backend lowering artifacts.
-
-DEF-003: Future fiber runtime integration with the unified task identity selector remains future work beyond HostScheduler, FutureExecutor, and Rust cooperative async identity selection.

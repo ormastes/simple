@@ -222,9 +222,9 @@ Simple Data Notation (SDN) is the storage format — human-readable and version-
 - **Timestamps**: ISO 8601 format (YYYY-MM-DD HH:MM:SS)
 - **Keys**: String-based (human readable, no integer IDs)
 
-## DBFS Layer
+## DBFS (Database Filesystem)
 
-The database filesystem layer beneath Simple DB provides:
+DBFS is a filesystem that uses database techniques to manage metadata and file nodes (like btrfs uses B-trees). Because it uses DB-like data structures internally (B-tree, WAL, pager), it also provides a DB-optimized storage path that Simple DB Full can leverage — sharing primitives rather than duplicating them. Key components:
 
 - B-tree indexing (`test/dbfs/dbfs_engine_btree_spec.spl`)
 - WAL journaling (`test/dbfs/dbfs_engine_wal_spec.spl`)

@@ -392,3 +392,127 @@ fn colopt_operand_invariant(op: MirOperand, loop_defs: Dict<i64, bool>, hoisted:
             val was_hoisted = hoisted.has(local.id)
             (not in_loop) or was_hoisted
         case Const(_, _): true
+
+# ============================================================================
+# Improvement B — Linear-scan early-return pattern (pattern annotation)
+# ============================================================================
+#
+# Recognizes the shape:
+#   loop_cond: i < arr.len()
+#   loop_body:
+#     BoundsCheck(i, arr.len())
+#     val tmp = arr[i]
+#     if tmp.field == target: return tmp   // or return i / Some(tmp)
+#     i = i + 1
+#
+# This pattern appears in inode lookups, directory-entry scans, route-table
+# lookups, and symbol-table searches — anywhere Simple code linearly scans [T].
+#
+# The recognizer returns a LinearScanMatch describing the detected shape.
+# The backend can lower this to an efficient loop with no per-iteration overhead;
+# in interpreter mode the instructions are left unchanged (safe fallback).
+
+class LinearScanMatch:
+    """Records a recognized linear-scan-with-early-return loop shape."""
+    arr_local_id: i64
+    index_var_id: i64
+    field_name: text
+    has_early_return: bool
+
+fn colopt_match_linear_scan_early_return(self: CollectionOptimization, loop: LoopInfo, blocks: [MirBlock]) -> LinearScanMatch?:
+    # Build loop membership set
+    var loop_set: Dict<i64, bool> = {}
+    loop_set[loop.header.id] = true
+    for bid in loop.body:
+        loop_set[bid.id] = true
+
+    # Step 1: Detect i < arr.len() loop guard in header
+    val guard = colopt_detect_linear_scan_guard(loop.header)
+    if not guard.?:
+        return nil
+    val g = guard.unwrap()
+
+    # Step 2: Verify monotone increment of index var in body blocks
+    var has_increment = false
+    for block in blocks:
+        if loop_set.has(block.id.id):
+            if colopt_block_increments_index(block, g.index_var_id):
+                has_increment = true
+
+    if not has_increment:
+        return nil
+
+    # Step 3: Look for an early-return branch in a body block
+    var found_return = false
+    var field_name = ""
+    for block in blocks:
+        if loop_set.has(block.id.id) and block.id.id != loop.header.id:
+            val ret = colopt_block_has_conditional_return(block)
+            if ret.?:
+                found_return = true
+                field_name = ret.unwrap()
+
+    LinearScanMatch(
+        arr_local_id: g.arr_local_id,
+        index_var_id: g.index_var_id,
+        field_name: field_name,
+        has_early_return: found_return
+    )
+
+class ColoptLinearScanGuard:
+    """Recognized i < arr.len() guard."""
+    index_var_id: i64
+    arr_local_id: i64
+
+fn colopt_detect_linear_scan_guard(header: MirBlock) -> ColoptLinearScanGuard?:
+    for inst in header.instructions:
+        match inst.kind:
+            case BinOp(_, op, left, right):
+                match op:
+                    case Lt:
+                        val idx = colopt_operand_to_local_id(left)
+                        val arr = colopt_operand_to_local_id(right)
+                        if idx.? and arr.?:
+                            return ColoptLinearScanGuard(
+                                index_var_id: idx.unwrap(),
+                                arr_local_id: arr.unwrap()
+                            )
+                        nil
+                    case _: nil
+            case _: nil
+    nil
+
+fn colopt_block_increments_index(block: MirBlock, index_var_id: i64) -> bool:
+    for inst in block.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, _):
+                match op:
+                    case Add:
+                        if dest.id == index_var_id:
+                            val src = colopt_operand_to_local_id(left)
+                            if src.?:
+                                if src.unwrap() == index_var_id:
+                                    return true
+                        nil
+                    case _: nil
+            case _: nil
+    false
+
+fn colopt_block_has_conditional_return(block: MirBlock) -> text?:
+    # Look for a BinOp(Eq) followed by a conditional branch that is the
+    # loop's early-exit path. Returns the field name comparison target if found.
+    # Conservative: returns a sentinel "field" if any Eq comparison is detected.
+    for inst in block.instructions:
+        match inst.kind:
+            case BinOp(_, op, _, _):
+                match op:
+                    case Eq: return Some("field")
+                    case _: nil
+            case _: nil
+    nil
+
+fn colopt_operand_to_local_id(op: MirOperand) -> i64?:
+    match op.kind:
+        case Copy(local): Some(local.id)
+        case Move(local): Some(local.id)
+        case _: nil

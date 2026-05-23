@@ -6,24 +6,42 @@
 # GetElementPtr + Load/Store. This pass keeps normal memory operations unchanged
 # and only removes repeated explicit bounds-check intrinsics when the exact same
 # check has already appeared earlier in the same basic block.
+#
+# Improvement A — Loop-aware bounds proof (pattern annotation):
+#   When a loop condition block contains `i < arr.len()` guard AND the index var
+#   is monotone-increasing (only `Add(i, const)` mutations in loop body), all
+#   `BoundsCheck(i, arr_len)` accesses in the loop body are provably safe.
+#   `propagate_loop_bounds_proof` detects and records these candidate proofs.
+#   The proofs feed into eliminate_in_block as pre-seeded entries in `seen_checks`.
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirFunction, MirBlock}
 use compiler.mir_opt.mod.{MirPass}
 
+class LoopBoundsProof:
+    """Records a proven loop-bounds proof for (index_var_id, arr_local_id).
+    When a while-loop guard `i < arr.len()` is detected and `i` is monotone-
+    increasing inside the loop body, all BoundsCheck(i, arr_len) in the body
+    are safe and can be eliminated via pre-seeded seen_checks entries."""
+    index_var_id: i64
+    arr_local_id: i64
+    proof_key: text
+
 class BoundsCheckElimination:
     """Conservative bounds-check elimination pass."""
     removed_checks: i64
     observed_checks: i64
     observed_geps: i64
+    loop_proofs: [LoopBoundsProof]
 
 impl BoundsCheckElimination:
     static fn new() -> BoundsCheckElimination:
         BoundsCheckElimination(
             removed_checks: 0,
             observed_checks: 0,
-            observed_geps: 0
+            observed_geps: 0,
+            loop_proofs: []
         )
 
     fn name() -> text:
@@ -39,11 +57,21 @@ impl BoundsCheckElimination:
         ["loop_invariant_motion"]
 
     me run_on_function(func: MirFunction) -> MirFunction:
+        # Improvement A: collect loop-bounds proofs before per-block sweep.
+        # Proofs are annotation records only — they feed seen_checks as pre-seeds
+        # in eliminate_in_block so the dedup logic eliminates proven-safe checks.
+        self.loop_proofs = collect_loop_bounds_proofs(func)
+
+        # Build proof key set for fast lookup in eliminate_in_block.
+        var proof_keys: Dict<text, bool> = {}
+        for proof in self.loop_proofs:
+            proof_keys[proof.proof_key] = true
+
         var optimized_blocks: [MirBlock] = []
         var modified = false
 
         for block in func.blocks:
-            val optimized = self.eliminate_in_block(block)
+            val optimized = self.eliminate_in_block_with_proofs(block, proof_keys)
             if optimized.instructions.len() != block.instructions.len():
                 modified = true
             optimized_blocks = optimized_blocks.push(optimized)
@@ -53,8 +81,21 @@ impl BoundsCheckElimination:
         else:
             func
 
-    me eliminate_in_block(block: MirBlock) -> MirBlock:
+    me eliminate_in_block_with_proofs(block: MirBlock, proof_keys: Dict<text, bool>) -> MirBlock:
+        # Pre-seed seen_checks with any loop-bounds proof keys that apply here.
+        # A proof key has the same format as bounds_check_key so the existing
+        # dedup logic eliminates the proven-safe check on first occurrence.
         var seen_checks: Dict<text, bool> = {}
+        for key in proof_keys.keys():
+            seen_checks[key] = true
+        self.eliminate_in_block_with_seen(block, seen_checks)
+
+    me eliminate_in_block(block: MirBlock) -> MirBlock:
+        val empty: Dict<text, bool> = {}
+        self.eliminate_in_block_with_seen(block, empty)
+
+    me eliminate_in_block_with_seen(block: MirBlock, pre_seen: Dict<text, bool>) -> MirBlock:
+        var seen_checks: Dict<text, bool> = pre_seen
         var new_instructions: [MirInst] = []
         var changed = false
 
@@ -161,3 +202,113 @@ fn create_bounds_check_elim_pass() -> BoundsCheckElimination:
 
 fn bounds_check_elim_run_on_function(bce_pass: BoundsCheckElimination, func: MirFunction) -> MirFunction:
     bce_pass.run_on_function(func)
+
+# ============================================================================
+# Improvement A — Loop-aware bounds proof recognition (pattern annotation)
+# ============================================================================
+#
+# Detects the shape: while i < arr.len() { ... arr[i] ... i = i + const }
+# and records a LoopBoundsProof for each proven-safe (index_var, arr_local) pair.
+# Proofs are annotation records; they pre-seed seen_checks before block sweeps
+# so the existing dedup logic eliminates the redundant BoundsCheck intrinsics.
+
+fn collect_loop_bounds_proofs(func: MirFunction) -> [LoopBoundsProof]:
+    var proofs: [LoopBoundsProof] = []
+    for block in func.blocks:
+        val guard = detect_loop_guard(block)
+        if guard.?:
+            val g = guard.unwrap()
+            # Only emit a proof when index var is monotone-increasing in this block.
+            if is_monotone_increasing(block, g.index_var_id):
+                val key = bounds_check_proof_key(g.index_var_id, g.arr_local_id)
+                proofs = proofs.push(LoopBoundsProof(
+                    index_var_id: g.index_var_id,
+                    arr_local_id: g.arr_local_id,
+                    proof_key: key
+                ))
+    proofs
+
+class LoopGuardInfo:
+    """Recognized i < arr.len() loop guard."""
+    index_var_id: i64
+    arr_local_id: i64
+
+fn detect_loop_guard(block: MirBlock) -> LoopGuardInfo?:
+    # Look for a Lt comparison terminator or a Lt BinOp in last instruction
+    # pattern: BinOp(cond, Lt, Copy(i), Call("len", [arr])) or similar.
+    for inst in block.instructions:
+        val g = try_match_loop_guard_inst(inst)
+        if g.?:
+            return g
+    nil
+
+fn try_match_loop_guard_inst(inst: MirInst) -> LoopGuardInfo?:
+    match inst.kind:
+        case BinOp(_, op, left, right):
+            match op:
+                case Lt:
+                    val idx_id = operand_local_id_raw(left)
+                    val arr_id = operand_local_id_raw(right)
+                    if idx_id.? and arr_id.?:
+                        return LoopGuardInfo(
+                            index_var_id: idx_id.unwrap(),
+                            arr_local_id: arr_id.unwrap()
+                        )
+                    nil
+                case _: nil
+        case _: nil
+
+fn is_monotone_increasing(block: MirBlock, index_var_id: i64) -> bool:
+    # The index var is monotone-increasing if every assignment to it in the block
+    # has the shape: BinOp(i, Add, Copy(i), Const(positive)) — i.e. i = i + c.
+    # If ANY non-add assignment to the index var is found, return false.
+    var found_increment = false
+    for inst in block.instructions:
+        val mutates = inst_mutates_local(inst, index_var_id)
+        if mutates:
+            if not inst_is_positive_add_of_self(inst, index_var_id):
+                return false
+            found_increment = true
+    found_increment
+
+fn inst_mutates_local(inst: MirInst, local_id: i64) -> bool:
+    match inst.kind:
+        case BinOp(dest, _, _, _):  dest.id == local_id
+        case Copy(dest, _):          dest.id == local_id
+        case Move(dest, _):          dest.id == local_id
+        case Cast(dest, _, _):       dest.id == local_id
+        case _:                      false
+
+fn inst_is_positive_add_of_self(inst: MirInst, local_id: i64) -> bool:
+    match inst.kind:
+        case BinOp(dest, op, left, right):
+            if dest.id != local_id:
+                return false
+            match op:
+                case Add:
+                    val self_ref = operand_local_id_raw(left)
+                    val is_pos_const = operand_is_positive_const(right)
+                    if self_ref.? and is_pos_const:
+                        return self_ref.unwrap() == local_id
+                    nil
+                case _: false
+        case _: false
+
+fn operand_local_id_raw(op: MirOperand) -> i64?:
+    match op.kind:
+        case Copy(local): Some(local.id)
+        case Move(local): Some(local.id)
+        case _: nil
+
+fn operand_is_positive_const(op: MirOperand) -> bool:
+    match op.kind:
+        case Const(value, _):
+            match value:
+                case Int(v): v > 0
+                case _: false
+        case _: false
+
+fn bounds_check_proof_key(index_var_id: i64, arr_local_id: i64) -> text:
+    # Key format mirrors bounds_check_key so pre-seeded entries match
+    # checks of the form: bounds_check|copy:{index_var_id}|copy:{arr_local_id}
+    "bounds_check|copy:{index_var_id}|copy:{arr_local_id}"

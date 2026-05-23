@@ -20,6 +20,38 @@
 | P2 (medium) | 0 | 0 | 0 | 0 |
 | P3 (low) | 0 | 0 | 0 | 0 |
 
+## Feature Requests
+
+### FR-INTERP-001: `me fn` nested mutation loss
+
+**ID:** FR-INTERP-001
+**Area:** compiler (interpreter)
+**Priority:** P1 (high)
+**Status:** Open
+
+When a method on `self` calls another method on `self` (nested `me fn` calls), the outer method's mutations to `self` fields are lost. The inner call snapshots and restores `self`, overwriting the caller's in-progress mutations. This blocks full RamFS/NVFS API benchmarking — inode push operations inside driver methods are silently discarded.
+
+**Workaround:** Extract mutations to module-level helper functions that take the struct by value and return the updated copy.
+
+**Blocks:** Full FS driver API benchmarking (AC-1 of fs-opt-general).
+
+---
+
+### FR-INTERP-002: Deeply nested field assignment (3+ levels)
+
+**ID:** FR-INTERP-002
+**Area:** compiler (interpreter)
+**Priority:** P1 (high)
+**Status:** Open
+
+Assignment to deeply nested fields (`self.arr[i].field.subfield = x`) is rejected or silently discarded by the interpreter. The pattern appears in inode and extent-map struct updates across NVFS, DBFS, and RamFS. The interpreter handles 1-level field assignment (`self.field = x`) but fails on 2+ levels through an indexed element.
+
+**Workaround:** Use intermediate variables: `var tmp = self.arr[i]; tmp.field.subfield = x; self.arr[i] = tmp` — but this pattern itself may also trigger the me-fn mutation loss (FR-INTERP-001).
+
+**Blocks:** Full FS driver struct-of-struct mutation in interpreter mode.
+
+---
+
 ## Appendix
 
 ### Legend

@@ -23,6 +23,7 @@ pub mod coverage;
 pub mod cuda_runtime;
 pub mod debug;
 pub mod executor;
+pub mod fiber_identity;
 pub mod memory;
 #[cfg(feature = "monoio-net")]
 pub mod monoio_runtime;
@@ -225,6 +226,8 @@ pub use security_runtime::{
     rt_security_sandbox_capability_denials, rt_security_sandbox_registered,
 };
 
+pub use fiber_identity::{rt_fiber_current_task_id, rt_fiber_enter_task_id, rt_fiber_exit_task_id};
+
 #[no_mangle]
 pub extern "C" fn rt_sleep_ms(milliseconds: i64) {
     rt_thread_sleep(milliseconds);
@@ -244,14 +247,20 @@ pub use async_runtime::{
 
 /// Return the active runtime task id for the current thread.
 ///
-/// FutureExecutor task identity is preferred over cooperative async scheduler
-/// identity because executor tasks can host scheduler polling. A value of 0
-/// means no runtime task identity is active on this thread.
+/// FutureExecutor task identity is preferred over fiber identity because
+/// executor tasks can host fiber runtimes. Fiber identity is preferred over
+/// cooperative async scheduler identity because fibers can host scheduler
+/// polling. A value of 0 means no runtime task identity is active on this
+/// thread.
 #[no_mangle]
 pub extern "C" fn rt_current_task_id() -> i64 {
     let executor_task_id = executor::rt_executor_current_task_id();
     if executor_task_id != 0 {
         return executor_task_id;
+    }
+    let fiber_task_id = fiber_identity::rt_fiber_current_task_id();
+    if fiber_task_id != 0 {
+        return fiber_task_id;
     }
     async_runtime::rt_async_current_task_id()
 }
@@ -265,6 +274,15 @@ mod task_identity_tests {
 
     #[test]
     fn unified_current_task_id_defaults_to_zero() {
+        assert_eq!(rt_current_task_id(), 0);
+    }
+
+    #[test]
+    fn unified_current_task_id_uses_fiber_identity() {
+        let previous = rt_fiber_enter_task_id(123);
+        assert_eq!(previous, 0);
+        assert_eq!(rt_current_task_id(), 123);
+        rt_fiber_exit_task_id(previous);
         assert_eq!(rt_current_task_id(), 0);
     }
 }

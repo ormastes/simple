@@ -50,6 +50,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_actor_")
         || name.starts_with("rt_channel_")
         || name.starts_with("rt_executor_")
+        || name.starts_with("rt_fiber_")
         || name.starts_with("rt_thread_")
         || name.starts_with("rt_generator_")
         || name == "rt_current_task_id"
@@ -583,6 +584,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_executor_shutdown", &[], &[]),
     RuntimeFuncSpec::new("rt_executor_is_manual", &[], &[I64]),
     RuntimeFuncSpec::new("rt_executor_current_task_id", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_fiber_enter_task_id", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_fiber_exit_task_id", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_fiber_current_task_id", &[], &[I64]),
     RuntimeFuncSpec::new("rt_current_task_id", &[], &[I64]),
     // =========================================================================
     // Async runtime scheduler (cooperative scheduling)
@@ -1430,6 +1434,33 @@ mod tests {
         assert!(spec.params.is_empty());
         assert_eq!(spec.returns, [I64]);
         assert_eq!(tier_of(spec.name), RuntimeFuncTier::Async);
+    }
+
+    #[test]
+    fn fiber_task_identity_functions_are_registered() {
+        let enter = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_fiber_enter_task_id")
+            .expect("rt_fiber_enter_task_id must be registered for native codegen");
+        assert_eq!(enter.params, [I64]);
+        assert_eq!(enter.returns, [I64]);
+        assert_eq!(tier_of(enter.name), RuntimeFuncTier::Async);
+
+        let exit = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_fiber_exit_task_id")
+            .expect("rt_fiber_exit_task_id must be registered for native codegen");
+        assert_eq!(exit.params, [I64]);
+        assert!(exit.returns.is_empty());
+        assert_eq!(tier_of(exit.name), RuntimeFuncTier::Async);
+
+        let current = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_fiber_current_task_id")
+            .expect("rt_fiber_current_task_id must be registered for native codegen");
+        assert!(current.params.is_empty());
+        assert_eq!(current.returns, [I64]);
+        assert_eq!(tier_of(current.name), RuntimeFuncTier::Async);
     }
 
     #[test]

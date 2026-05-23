@@ -30,7 +30,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-05-23
 - [x] 6-refactor (Tech Lead) — 2026-05-23
 - [x] 7-verify (QA) — 2026-05-23
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-23
 
 ## Phase Outputs
 
