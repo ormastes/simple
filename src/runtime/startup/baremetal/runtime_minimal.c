@@ -17,8 +17,12 @@
  * primitives defined here.
  */
 
+#include <stdint.h>
+
 extern char __bss_start[];
 extern char __bss_end[];
+extern char __simple_sandbox_start[] __attribute__((weak));
+extern char __simple_sandbox_end[] __attribute__((weak));
 
 /* ========================================================================
  * Wave 3 Blocker A: FFI primitives mirroring the .spl entry points
@@ -34,6 +38,20 @@ void rt_zero_bss(void) {
     for (char *p = __bss_start; p < __bss_end; p++) {
         *p = 0;
     }
+}
+
+uint64_t rt_simple_sandbox_section_start(void) {
+    if (!__simple_sandbox_start) {
+        return 0;
+    }
+    return (uint64_t)(uintptr_t)__simple_sandbox_start;
+}
+
+uint64_t rt_simple_sandbox_section_end(void) {
+    if (!__simple_sandbox_end) {
+        return 0;
+    }
+    return (uint64_t)(uintptr_t)__simple_sandbox_end;
 }
 
 void rt_halt_exit(int status) {
@@ -72,8 +90,6 @@ void rt_halt_exit(int status) {
  * Volatile MMIO — used by Simple baremetal code for hardware register access.
  * These MUST NOT be optimized away by the compiler.
  * ======================================================================== */
-
-#include <stdint.h>
 
 uint32_t rt_mmio_read_u32(uint64_t addr) {
     return *(volatile uint32_t *)(uintptr_t)addr;

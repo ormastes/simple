@@ -1237,7 +1237,6 @@ Output:
     audit/security report
 
 Remaining implementation after generated lowering:
-    wire architecture-specific __simple_sandbox_start/end address providers into the boot-time raw byte reader
     add real credentialed cloud/HSM CI lanes for the opt-in live KMS integration gates
 
 The minimal example should look like this:

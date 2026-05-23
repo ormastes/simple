@@ -701,6 +701,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_write_text_at_cached",
     "rt_file_write_text_at_cached_repeat",
     "rt_bytes_from_raw",
+    "rt_simple_sandbox_section_start",
+    "rt_simple_sandbox_section_end",
     "rt_bytes_to_text",
     "rt_text_to_bytes",
     "rt_file_write_bytes",
