@@ -86,3 +86,22 @@ This pass added the first convention-first architecture slice:
 - Remote `SecurityContext` transport/reconstruction has safe HTTP dispatch, HMAC token validation, local key-ring rotation, SDN persistence, session lookup, refresh, revocation, merge, key retirement, replicated session adapter seams, a concrete Redis session deployment store, concrete quorum behavior, opaque key rollout adapter seams, a generic hosted KMS/HSM provider contract, and vendor KMS/HSM request builders; live authenticated AWS/GCP/Azure/HSM transport execution remains deployment work.
 - Task-local context helpers, HostScheduler task identity, Rust cooperative async current-task-id exposure, FutureExecutor current-task-id exposure, fiber identity hooks, native `rt_current_task_id` selection across Rust runtime identities, and Simple `current_unified_task_key` selection exist.
 - Sandbox manifest generation, backend lowering artifacts, hosted runtime registry installation, hosted capability-handle enforcement, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, baremetal static MPU/linker-section metadata enforcement, RISC-V PMP CSR write-plan generation, Simple VM host-import filtering, and SimpleOS kernel capability installation exist for declared sandboxes/gates; non-RISC-V MPU backends and boot-time PMP/MPU apply hooks remain future work.
+
+## 2026-05-23 Live KMS CI Hardening Follow-up
+
+The live KMS workflow exists at `.github/workflows/live-kms-security.yml` and is covered by `test/code_quality/live_kms_security_workflow_spec.spl`. The local repo had no existing `actionlint` integration, and the shared `repo-hygiene` workflow only called `scripts/check-repo-hygiene.shs`.
+
+Local improvement target:
+
+- Keep the credentialed workflow manual-only and environment-scoped.
+- Add a pure shell invariant checker so repo hygiene can guard the workflow without requiring cloud credentials or network setup.
+- Run `actionlint` opportunistically when it is installed, but do not make repo hygiene depend on a new external binary.
+- Add an operator guide for the required GitHub environments, secrets, manual run flow, and OIDC migration direction.
+- Extend the existing Simple canary to require the guide.
+
+Implemented files:
+
+- `scripts/check-live-kms-security-workflow.shs`
+- `scripts/check-repo-hygiene.shs`
+- `doc/07_guide/security/live_kms_security_gates.md`
+- `test/code_quality/live_kms_security_workflow_spec.spl`

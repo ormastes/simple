@@ -84,3 +84,12 @@ REQ-037: Hosted KMS/HSM-backed remote `SecurityContext` signing shall provide ve
 DEF-001: Live authenticated AWS/GCP/Azure/HSM transport execution remains future work beyond the hosted adapter seams, generic HTTP KMS/HSM provider contract, vendor request builders, Redis session deployment store, quorum session-store behavior, SDN persistence, merge, rotation, and retirement primitives.
 
 DEF-002: Non-RISC-V MPU backends and boot-time CSR/MMIO apply hooks remain future work beyond deterministic linker-section metadata, fail-closed static-section installation, hosted runtime checks, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, Simple VM host-import filtering, SimpleOS kernel capability installation, and RISC-V PMP CSR write-plan generation.
+## 2026-05-23 Live KMS CI Hardening Addendum
+
+REQ-LKMS-CI-001: The live KMS workflow must remain manual-only and must not run on `push`, `pull_request`, or `schedule`.
+
+REQ-LKMS-CI-002: Each provider lane must use a dedicated protected GitHub environment: `live-kms-aws`, `live-kms-gcp`, `live-kms-azure`, and `live-kms-hsm`.
+
+REQ-LKMS-CI-003: Repo hygiene must fail if the live KMS workflow loses provider jobs, environment gates, required credential preflight, or the live integration spec invocation.
+
+REQ-LKMS-CI-004: The repository must document the required environments, secrets, manual run flow, local checks, and OIDC migration direction.

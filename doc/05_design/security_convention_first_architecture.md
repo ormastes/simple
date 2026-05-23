@@ -32,3 +32,23 @@ Compiler tests cover:
 - Convention-first coordinate inference.
 - `ui -> domain` same-feature import reports `SEC101`.
 - `service -> domain` same-feature import does not report `SEC101` or `SEC201`.
+## 2026-05-23 Live KMS CI Hardening Detail Design Addendum
+
+Files:
+
+- `scripts/check-live-kms-security-workflow.shs`: validates workflow invariants and runs `actionlint` if available.
+- `scripts/check-repo-hygiene.shs`: invokes the live KMS checker as part of the existing hygiene gate.
+- `doc/07_guide/security/live_kms_security_gates.md`: operator guide for environments, secrets, manual execution, and OIDC direction.
+- `test/code_quality/live_kms_security_workflow_spec.spl`: guards the workflow and guide from the Simple test side.
+
+Checker behavior:
+
+- Fail if the workflow file is missing.
+- Fail if `push`, `pull_request`, or `schedule` triggers appear at top-level workflow trigger indentation.
+- Require `workflow_dispatch`, `choice` provider input, `permissions: contents: read`, concurrency, four provider jobs, four protected environments, credential preflight, and the live KMS integration spec command.
+- Run `actionlint` only when present on `PATH`.
+
+Error handling:
+
+- Structural violations print `VIOLATION: live KMS workflow: ...` and exit non-zero.
+- Repo hygiene converts that failure into a normal hygiene violation.

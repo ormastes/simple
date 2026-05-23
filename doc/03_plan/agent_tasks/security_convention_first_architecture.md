@@ -26,3 +26,20 @@
 - Add remote `SecurityContext` key rotation, persistent session lookup, refresh, and revocation.
 - Enforce lowered sandbox plans in runtime/kernel/VM backends.
 - Run all HTTP/event-loop handler execution under scheduler/fiber-owned task id propagation rather than relying on worker/fd fallback paths.
+## 2026-05-23 Live KMS CI Hardening Tasks
+
+Done:
+
+- Add local research and domain research addenda for live KMS CI hardening.
+- Add feature and NFR addenda for manual-only workflow, protected environments, hygiene coverage, and operator docs.
+- Add architecture and detail design addenda for the workflow checker.
+- Implement `scripts/check-live-kms-security-workflow.shs`.
+- Wire the checker into `scripts/check-repo-hygiene.shs`.
+- Add `doc/07_guide/security/live_kms_security_gates.md`.
+- Extend `test/code_quality/live_kms_security_workflow_spec.spl` to require the operator guide.
+
+Verification:
+
+- `sh scripts/check-live-kms-security-workflow.shs`
+- `sh scripts/check-repo-hygiene.shs`
+- `bin/simple test test/code_quality/live_kms_security_workflow_spec.spl --mode=interpreter`
