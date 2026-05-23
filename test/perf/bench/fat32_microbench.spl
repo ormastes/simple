@@ -1,0 +1,211 @@
+# test/perf/bench/fat32_microbench.spl — FAT32 core microbenchmarks.
+# Measures CPU cost of in-memory FAT32 ops. No real block I/O.
+# Run: bin/simple run test/perf/bench/fat32_microbench.spl
+
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.fat32_core.{Fat32Core}
+use std.fs_driver.types.{FileHandle}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# ── Mock block device (4096 sectors x 512 B) ────────────────────────────────
+var __bench_banks: [[[u8]]] = []
+
+fn _alloc_bank() -> i32:
+    var sectors: [[u8]] = []
+    var s: i32 = 0
+    while s < 4096:
+        var sec: [u8] = []
+        var b: i32 = 0
+        while b < 512:
+            sec.push(0)
+            b = b + 1
+        sectors.push(sec)
+        s = s + 1
+    __bench_banks.push(sectors)
+    __bench_banks.len() - 1
+
+fn _set_sec(bid: i32, sec: i32, data: [u8]):
+    var bk = __bench_banks[bid]
+    bk[sec] = data
+    __bench_banks[bid] = bk
+
+fn _get_sec(bid: i32, sec: i32) -> [u8]:
+    var bk = __bench_banks[bid]
+    bk[sec]
+
+fn _w32(buf: [u8], off: i64, v: u32):
+    buf[off] = (v & 0xFF).to_u8()
+    buf[off + 1] = ((v >> 8) & 0xFF).to_u8()
+    buf[off + 2] = ((v >> 16) & 0xFF).to_u8()
+    buf[off + 3] = ((v >> 24) & 0xFF).to_u8()
+
+fn _init_image(bid: i32):
+    var bpb = _get_sec(bid, 0)
+    bpb[11] = 0x00
+    bpb[12] = 0x02
+    bpb[13] = 0x01
+    bpb[14] = 0x20
+    bpb[15] = 0x00
+    bpb[16] = 0x02
+    _w32(bpb, 32, 4096u32)
+    _w32(bpb, 36, 1u32)
+    _w32(bpb, 44, 2u32)
+    bpb[510] = 0x55
+    bpb[511] = 0xAA
+    _set_sec(bid, 0, bpb)
+    var fat = _get_sec(bid, 32)
+    _w32(fat, 0, 0x0FFFFFF8u32)
+    _w32(fat, 4, 0x0FFFFFFFu32)
+    _w32(fat, 8, 0x0FFFFFF8u32)
+    _set_sec(bid, 32, fat)
+
+class BenchBlockDevice:
+    bank_id: i32
+
+impl BenchBlockDevice:
+    static fn new() -> BenchBlockDevice:
+        val bid = _alloc_bank()
+        _init_image(bid)
+        BenchBlockDevice(bank_id: bid)
+
+impl BlockDevice for BenchBlockDevice:
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        val idx = lba.to_i32()
+        if idx < 0 or idx >= 4096:
+            return Result.Ok(true)
+        val src = _get_sec(self.bank_id, idx)
+        var i = 0
+        while i < buffer.len() and i < src.len():
+            buffer[i] = src[i]
+            i = i + 1
+        Result.Ok(true)
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        val idx = lba.to_i32()
+        if idx < 0 or idx >= 4096:
+            return Result.Err("sector out of range")
+        _set_sec(self.bank_id, idx, data)
+        Result.Ok(true)
+    fn sector_size() -> u32:
+        512
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+fn _make_core() -> Fat32Core:
+    var core = Fat32Core.new(BenchBlockDevice.new())
+    val rc = core.mount()
+    if rc.is_err():
+        print "FATAL: mount failed"
+    core
+
+fn _fill_buf(n: i64) -> [u8]:
+    var buf: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        buf.push(0x41)
+        i = i + 1
+    buf
+
+fn _report(label: text, iters: i64, us: i64):
+    val ops: i64 = if us > 0: (iters * 1000000) / us else: 0
+    val us_op: i64 = if iters > 0: us / iters else: 0
+    print "  " + label + ": " + iters.to_text() + " ops in " + (us / 1000).to_text() + " ms (" + ops.to_text() + " ops/s, " + us_op.to_text() + " us/op)"
+
+fn _report_bw(label: text, bytes: i64, us: i64):
+    val kbs: i64 = if us > 0: (bytes * 1000) / us else: 0
+    print "  " + label + ": " + bytes.to_text() + " B in " + (us / 1000).to_text() + " ms (" + kbs.to_text() + " KB/s)"
+
+# ── 1. Sequential file create ───────────────────────────────────────────────
+fn bench_create(n: i64):
+    var core = _make_core()
+    val t0 = rt_time_now_unix_micros()
+    var i: i64 = 0
+    while i < n:
+        val fh = core.create_file("/F" + i.to_text() + ".TXT")
+        if fh.is_ok():
+            val _c = core.close(fh.unwrap())
+        i = i + 1
+    _report("file_create", n, rt_time_now_unix_micros() - t0)
+
+# ── 2. Sequential write ─────────────────────────────────────────────────────
+fn bench_write(chunk: i64, chunks: i64):
+    var core = _make_core()
+    val fh = core.create_file("/WRITE.TXT").unwrap()
+    val buf = _fill_buf(chunk)
+    val t0 = rt_time_now_unix_micros()
+    var i: i64 = 0
+    while i < chunks:
+        val _w = core.write(fh, buf, chunk)
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    val _c = core.close(fh)
+    _report_bw("seq_write_" + chunk.to_text() + "B", chunk * chunks, elapsed)
+
+# ── 3. Sequential read ──────────────────────────────────────────────────────
+fn bench_read(chunk: i64, chunks: i64):
+    var core = _make_core()
+    val fh_w = core.create_file("/READ.TXT").unwrap()
+    val buf = _fill_buf(chunk)
+    var i: i64 = 0
+    while i < chunks:
+        val _w = core.write(fh_w, buf, chunk)
+        i = i + 1
+    val _c = core.close(fh_w)
+    val fh_r = core.open("/READ.TXT").unwrap()
+    val t0 = rt_time_now_unix_micros()
+    var j: i64 = 0
+    while j < chunks:
+        val _r = core.read_bytes(fh_r, chunk)
+        j = j + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    val _c2 = core.close(fh_r)
+    _report_bw("seq_read_" + chunk.to_text() + "B", chunk * chunks, elapsed)
+
+# ── 4. Directory listing ────────────────────────────────────────────────────
+fn bench_readdir(file_count: i64, iters: i64):
+    var core = _make_core()
+    var i: i64 = 0
+    while i < file_count:
+        val fh = core.create_file("/D" + i.to_text() + ".TXT")
+        if fh.is_ok():
+            val _c = core.close(fh.unwrap())
+        i = i + 1
+    val t0 = rt_time_now_unix_micros()
+    var j: i64 = 0
+    while j < iters:
+        val _e = core.readdir("/")
+        j = j + 1
+    _report("readdir_" + file_count.to_text() + "files", iters, rt_time_now_unix_micros() - t0)
+
+# ── 5. Cluster chain traversal ──────────────────────────────────────────────
+fn bench_follow_chain(chain_len: i64):
+    var core = _make_core()
+    val fh = core.create_file("/CHAIN.TXT").unwrap()
+    val buf = _fill_buf(512)
+    var i: i64 = 0
+    while i < chain_len:
+        val _w = core.write(fh, buf, 512)
+        i = i + 1
+    val _c = core.close(fh)
+    val entry = core.resolve_path("/CHAIN.TXT").unwrap()
+    val cl = entry.start_cluster
+    val iters: i64 = 100
+    val t0 = rt_time_now_unix_micros()
+    var j: i64 = 0
+    while j < iters:
+        core.invalidate_chain(cl)
+        val _ch = core.follow_chain(cl)
+        j = j + 1
+    _report("follow_chain_" + chain_len.to_text() + "cl", iters, rt_time_now_unix_micros() - t0)
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+fn main():
+    print "=== FAT32 microbenchmark ==="
+    print "DISCLAIMER: in-memory mock device. No real block I/O."
+    print ""
+    bench_create(10)
+    bench_write(128, 50)
+    bench_read(128, 50)
+    bench_readdir(10, 100)
+    bench_follow_chain(20)
+    print ""
+    print "=== done ==="

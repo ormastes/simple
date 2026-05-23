@@ -757,28 +757,353 @@ impl OptimizationEngine:
 # ============================================================================
 
 fn optimize_write_coalesce(func: MirFunction, stats: OptimizationStats) -> MirFunction:
-    """Detect adjacent write calls with contiguous offsets; merge into single write.
+    """Detect adjacent stores to contiguous buffer offsets; count coalesce candidates.
 
-    D-5: Conservative stub — recognizes the pattern, counts candidates.
-    Actual merge is deferred until provably-safe alias analysis lands.
+    Scans each basic block for Store instructions whose pointer operands
+    derive from GetElementPtr with the same base array.  Groups of 2+
+    stores to the same base are coalesce candidates — future lowering
+    can merge them into bulk memcpy/memset operations.
+
+    Applies to FAT32 dir-entry writes, nvfs arena fills, dbfs page inits,
+    and any byte-buffer manipulation pattern.
     """
+    var bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        var gep_base: Dict<i64, i64> = {}
+        var base_store_count: Dict<i64, i64> = {}
+        var ii = 0
+        while ii < block.instructions.len():
+            val inst = block.instructions[ii]
+            match inst.kind:
+                case GetElementPtr(dest, base, indices):
+                    match base.kind:
+                        case Copy(local) | Move(local):
+                            gep_base[dest.id] = local.id
+                        case _:
+                            pass
+                case Store(ptr, value):
+                    match ptr.kind:
+                        case Copy(local) | Move(local):
+                            if gep_base.has(local.id):
+                                val base_id = gep_base[local.id]
+                                val prev = base_store_count[base_id] ?? 0
+                                base_store_count[base_id] = prev + 1
+                        case _:
+                            pass
+                case _:
+                    pass
+            ii = ii + 1
+        val ks = base_store_count.keys()
+        var ki = 0
+        while ki < ks.len():
+            if base_store_count[ks[ki]] >= 2:
+                stats.write_coalesce_count = stats.write_coalesce_count + 1
+            ki = ki + 1
+        bi = bi + 1
     func
 
 fn optimize_read_ahead_hoist(func: MirFunction, stats: OptimizationStats) -> MirFunction:
-    """Detect read calls inside loops; hoist before loop entry when safe.
+    """Detect loop-invariant Load/Call instructions; count hoist candidates.
 
-    D-5: Conservative stub — recognizes the pattern, counts candidates.
-    Actual hoist is deferred until loop-carried dependency analysis lands.
+    Identifies basic blocks inside loops (targeted by back-edges from Goto
+    or If terminators) and scans for Load/Call instructions whose operands
+    are all defined before the loop.  These are candidates for hoisting to
+    the loop preheader — applicable to sector reads in FAT32 follow_chain,
+    nvfs btree traversals, and any repeated IO inside a loop.
     """
+    if func.blocks.len() < 2:
+        return func
+    var loop_body: Dict<i64, bool> = {}
+    var bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        match block.terminator:
+            case Goto(target):
+                if target.id <= block.id.id:
+                    var li = target.id
+                    while li <= block.id.id:
+                        loop_body[li] = true
+                        li = li + 1
+            case If(cond, then_, else_):
+                if then_.id <= block.id.id:
+                    var li = then_.id
+                    while li <= block.id.id:
+                        loop_body[li] = true
+                        li = li + 1
+                if else_.id <= block.id.id:
+                    var li = else_.id
+                    while li <= block.id.id:
+                        loop_body[li] = true
+                        li = li + 1
+            case _:
+                pass
+        bi = bi + 1
+    var pre_loop_defs: Dict<i64, bool> = {}
+    bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        if not loop_body.has(block.id.id):
+            var ii = 0
+            while ii < block.instructions.len():
+                val inst = block.instructions[ii]
+                match inst.kind:
+                    case Const(dest, _, _) | Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Cast(dest, _, _) | Load(dest, _) | Alloc(dest, _) | GetElementPtr(dest, _, _) | GetField(dest, _, _) | Aggregate(dest, _, _):
+                        pre_loop_defs[dest.id] = true
+                    case Call(dest, _, _):
+                        if dest.?:
+                            pre_loop_defs[dest.unwrap().id] = true
+                    case _:
+                        pass
+                ii = ii + 1
+        bi = bi + 1
+    bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        if loop_body.has(block.id.id):
+            var ii = 0
+            while ii < block.instructions.len():
+                val inst = block.instructions[ii]
+                match inst.kind:
+                    case Load(dest, ptr):
+                        match ptr.kind:
+                            case Copy(local) | Move(local):
+                                if pre_loop_defs.has(local.id):
+                                    stats.read_ahead_hoist_count = stats.read_ahead_hoist_count + 1
+                            case Const(_, _):
+                                stats.read_ahead_hoist_count = stats.read_ahead_hoist_count + 1
+                            case _:
+                                pass
+                    case Call(dest, func_op, args):
+                        var all_invariant = true
+                        match func_op.kind:
+                            case Copy(local) | Move(local):
+                                if not pre_loop_defs.has(local.id):
+                                    all_invariant = false
+                            case _:
+                                pass
+                        var ai = 0
+                        while ai < args.len() and all_invariant:
+                            match args[ai].kind:
+                                case Copy(local) | Move(local):
+                                    if not pre_loop_defs.has(local.id):
+                                        all_invariant = false
+                                case _:
+                                    pass
+                            ai = ai + 1
+                        if all_invariant:
+                            stats.read_ahead_hoist_count = stats.read_ahead_hoist_count + 1
+                    case _:
+                        pass
+                ii = ii + 1
+        bi = bi + 1
     func
 
 fn optimize_syscall_batch(func: MirFunction, stats: OptimizationStats) -> MirFunction:
-    """Detect sequential open+op+close patterns; batch into single combined operation.
+    """Detect consecutive calls to the same function; count batch candidates.
 
-    D-5: Conservative stub — recognizes the pattern, counts candidates.
-    Actual batching is deferred until syscall-effect analysis lands.
+    Scans each basic block for runs of 2+ Call instructions targeting
+    the same function operand without intervening non-call instructions.
+    These sequences are candidates for batching into a single vectorized
+    call — applicable to sequential sector reads, DB row fetches, and
+    any repeated same-target call pattern.
     """
+    var bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        var prev_func_id: i64 = -1
+        var run_length: i64 = 0
+        var ii = 0
+        while ii < block.instructions.len():
+            val inst = block.instructions[ii]
+            match inst.kind:
+                case Call(dest, func_op, args):
+                    var fid: i64 = -1
+                    match func_op.kind:
+                        case Copy(local) | Move(local):
+                            fid = local.id
+                        case _:
+                            pass
+                    if fid >= 0 and fid == prev_func_id:
+                        run_length = run_length + 1
+                    else:
+                        if run_length >= 2:
+                            stats.syscall_batch_count = stats.syscall_batch_count + 1
+                        prev_func_id = fid
+                        run_length = 1
+                case _:
+                    if run_length >= 2:
+                        stats.syscall_batch_count = stats.syscall_batch_count + 1
+                    prev_func_id = -1
+                    run_length = 0
+            ii = ii + 1
+        if run_length >= 2:
+            stats.syscall_batch_count = stats.syscall_batch_count + 1
+        bi = bi + 1
     func
+
+fn count_write_coalesce(func: MirFunction) -> i64:
+    var count = 0
+    var bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        var gep_base: Dict<i64, i64> = {}
+        var base_store_count: Dict<i64, i64> = {}
+        var ii = 0
+        while ii < block.instructions.len():
+            val inst = block.instructions[ii]
+            match inst.kind:
+                case GetElementPtr(dest, base, indices):
+                    match base.kind:
+                        case Copy(local) | Move(local):
+                            gep_base[dest.id] = local.id
+                        case _:
+                            pass
+                case Store(ptr, value):
+                    match ptr.kind:
+                        case Copy(local) | Move(local):
+                            if gep_base.has(local.id):
+                                val base_id = gep_base[local.id]
+                                val prev = base_store_count[base_id] ?? 0
+                                base_store_count[base_id] = prev + 1
+                        case _:
+                            pass
+                case _:
+                    pass
+            ii = ii + 1
+        val ks = base_store_count.keys()
+        var ki = 0
+        while ki < ks.len():
+            if base_store_count[ks[ki]] >= 2:
+                count = count + 1
+            ki = ki + 1
+        bi = bi + 1
+    count
+
+fn count_read_ahead_hoist(func: MirFunction) -> i64:
+    if func.blocks.len() < 2:
+        return 0
+    var count = 0
+    var loop_body: Dict<i64, bool> = {}
+    var bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        match block.terminator:
+            case Goto(tgt):
+                if tgt.id <= block.id.id:
+                    var li = tgt.id
+                    while li <= block.id.id:
+                        loop_body[li] = true
+                        li = li + 1
+            case If(cond, tb, eb):
+                if tb.id <= block.id.id:
+                    var li = tb.id
+                    while li <= block.id.id:
+                        loop_body[li] = true
+                        li = li + 1
+                if eb.id <= block.id.id:
+                    var li = eb.id
+                    while li <= block.id.id:
+                        loop_body[li] = true
+                        li = li + 1
+            case _:
+                pass
+        bi = bi + 1
+    var pre_loop_defs: Dict<i64, bool> = {}
+    bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        if not loop_body.has(block.id.id):
+            var ii = 0
+            while ii < block.instructions.len():
+                val inst = block.instructions[ii]
+                match inst.kind:
+                    case Const(dest, _, _) | Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Cast(dest, _, _) | Load(dest, _) | Alloc(dest, _) | GetElementPtr(dest, _, _) | GetField(dest, _, _) | Aggregate(dest, _, _):
+                        pre_loop_defs[dest.id] = true
+                    case Call(dest, _, _):
+                        if dest.?:
+                            pre_loop_defs[dest.unwrap().id] = true
+                    case _:
+                        pass
+                ii = ii + 1
+        bi = bi + 1
+    bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        if loop_body.has(block.id.id):
+            var ii = 0
+            while ii < block.instructions.len():
+                val inst = block.instructions[ii]
+                match inst.kind:
+                    case Load(dest, ptr):
+                        match ptr.kind:
+                            case Copy(local) | Move(local):
+                                if pre_loop_defs.has(local.id):
+                                    count = count + 1
+                            case Const(_, _):
+                                count = count + 1
+                            case _:
+                                pass
+                    case Call(dest, func_op, args):
+                        var all_invariant = true
+                        match func_op.kind:
+                            case Copy(local) | Move(local):
+                                if not pre_loop_defs.has(local.id):
+                                    all_invariant = false
+                            case _:
+                                pass
+                        var ai = 0
+                        while ai < args.len() and all_invariant:
+                            match args[ai].kind:
+                                case Copy(local) | Move(local):
+                                    if not pre_loop_defs.has(local.id):
+                                        all_invariant = false
+                                case _:
+                                    pass
+                            ai = ai + 1
+                        if all_invariant:
+                            count = count + 1
+                    case _:
+                        pass
+                ii = ii + 1
+        bi = bi + 1
+    count
+
+fn count_syscall_batch(func: MirFunction) -> i64:
+    var count = 0
+    var bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        var prev_func_id: i64 = -1
+        var run_len: i64 = 0
+        var ii = 0
+        while ii < block.instructions.len():
+            val inst = block.instructions[ii]
+            match inst.kind:
+                case Call(dest, func_op, args):
+                    var fid: i64 = -1
+                    match func_op.kind:
+                        case Copy(local) | Move(local):
+                            fid = local.id
+                        case _:
+                            pass
+                    if fid >= 0 and fid == prev_func_id:
+                        run_len = run_len + 1
+                    else:
+                        if run_len >= 2:
+                            count = count + 1
+                        prev_func_id = fid
+                        run_len = 1
+                case _:
+                    if run_len >= 2:
+                        count = count + 1
+                    prev_func_id = -1
+                    run_len = 0
+            ii = ii + 1
+        if run_len >= 2:
+            count = count + 1
+        bi = bi + 1
+    count
 
 # ============================================================================
 # Exports
@@ -788,3 +1113,4 @@ export OptimizationLevel
 export OptimizationStats
 export OptimizationEngine
 export optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch
+export count_write_coalesce, count_read_ahead_hoist, count_syscall_batch
