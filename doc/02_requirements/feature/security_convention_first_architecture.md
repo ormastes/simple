@@ -100,4 +100,4 @@ REQ-LKMS-CI-006: In `oidc` mode, the GCP lane shall mint a short-lived access to
 
 REQ-LKMS-CI-007: In `oidc` mode, the Azure lane shall mint a short-lived Key Vault access token and export it as `SIMPLE_LIVE_KMS_AZURE_BEARER` before running the live KMS spec.
 
-REQ-LKMS-CI-008: In `oidc` mode, the AWS lane shall bootstrap OIDC credentials and fail clearly that the existing raw HTTP live spec still requires `SIMPLE_LIVE_KMS_AWS_AUTHORIZATION` until SigV4 runtime signing is implemented.
+REQ-LKMS-CI-008: In `oidc` mode, the AWS lane shall bootstrap OIDC credentials and run the live KMS spec through SigV4 signing with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.

@@ -52,10 +52,10 @@ Done:
 - Add job-scoped OIDC token permission for AWS/GCP/Azure lanes.
 - Add GCP OIDC login and bearer export.
 - Add Azure OIDC login and Key Vault bearer export.
-- Add AWS OIDC bootstrap and explicit SigV4 bridge limitation.
+- Add AWS OIDC bootstrap and temporary-credential SigV4 request signing.
 - Extend shell workflow checker and Simple canary for OIDC invariants.
 - Extend operator guide and design/research addenda.
 
 Pending:
 
-- Implement Simple-side AWS SigV4 signing from short-lived AWS OIDC credentials so AWS can run fully without `SIMPLE_LIVE_KMS_AWS_AUTHORIZATION`.
+- Provider-side GitHub environment/OIDC trust setup remains deployment-specific.

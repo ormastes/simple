@@ -60,4 +60,4 @@ The live KMS workflow now has two auth modes:
 
 GCP and Azure OIDC are complete at the workflow layer because their live adapter inputs already accept bearer tokens. The workflow mints those bearer tokens after provider login and before running the Simple live KMS integration spec.
 
-AWS OIDC is split into two layers. The workflow authenticates to AWS with `aws-actions/configure-aws-credentials@v4` and verifies the identity with STS. The Simple live adapter still accepts a raw SigV4 authorization header, so full AWS OIDC replacement requires a future Simple SigV4 signing bridge that signs the generated AWS KMS HTTP request with the short-lived AWS credentials.
+AWS OIDC is split into two layers. The workflow authenticates to AWS with `aws-actions/configure-aws-credentials@v4` and verifies the identity with STS. The Simple live adapter then signs the generated AWS KMS HTTP request with the short-lived access key, secret key, and session token, including `x-amz-security-token` in the signed header set.

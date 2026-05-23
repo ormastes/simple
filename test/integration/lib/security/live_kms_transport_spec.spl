@@ -1,9 +1,12 @@
 use std.sys.env
 use std.security.kms_provider.{HostedKmsHttpRequest, hosted_kms_execute_runtime_http}
-use std.security.kms_vendor_adapters.{aws_kms_sign_request, gcp_kms_asymmetric_sign_request, azure_key_vault_sign_request, pkcs11_hsm_sign_request}
+use std.security.kms_vendor_adapters.{aws_kms_sign_request, aws_kms_sigv4_sign_request_with_session_token, gcp_kms_asymmetric_sign_request, azure_key_vault_sign_request, pkcs11_hsm_sign_request}
 
 fn _live_provider() -> text:
     env.get("SIMPLE_LIVE_KMS_PROVIDER")
+
+fn _live_auth() -> text:
+    env.get_or("SIMPLE_LIVE_KMS_AUTH", "secret")
 
 fn _missing(name: text) -> bool:
     env.get(name) == ""
@@ -17,6 +20,23 @@ fn _execute_live(request: HostedKmsHttpRequest) -> text:
 fn _aws_live_sign_status() -> text:
     if _live_provider() != "aws":
         return "skip:aws-disabled"
+    if _live_auth() == "oidc":
+        if _missing("SIMPLE_LIVE_KMS_AWS_ENDPOINT") or _missing("SIMPLE_LIVE_KMS_AWS_KEY_ID") or _missing("SIMPLE_LIVE_KMS_AWS_REGION") or _missing("SIMPLE_LIVE_KMS_AWS_AMZ_DATETIME") or _missing("AWS_ACCESS_KEY_ID") or _missing("AWS_SECRET_ACCESS_KEY") or _missing("AWS_SESSION_TOKEN"):
+            return "skip:aws-oidc-missing-env"
+        val request = aws_kms_sigv4_sign_request_with_session_token(
+            env.get("SIMPLE_LIVE_KMS_AWS_ENDPOINT"),
+            env.get("SIMPLE_LIVE_KMS_AWS_KEY_ID"),
+            env.get("SIMPLE_LIVE_KMS_PAYLOAD"),
+            env.get_or("SIMPLE_LIVE_KMS_AWS_ALGORITHM", "RSASSA_PSS_SHA_256"),
+            env.get("AWS_ACCESS_KEY_ID"),
+            env.get("AWS_SECRET_ACCESS_KEY"),
+            env.get("AWS_SESSION_TOKEN"),
+            env.get("SIMPLE_LIVE_KMS_AWS_REGION"),
+            env.get("SIMPLE_LIVE_KMS_AWS_AMZ_DATETIME"),
+            10000,
+            "system"
+        )
+        return _execute_live(request)
     if _missing("SIMPLE_LIVE_KMS_AWS_ENDPOINT") or _missing("SIMPLE_LIVE_KMS_AWS_KEY_ID") or _missing("SIMPLE_LIVE_KMS_AWS_AUTHORIZATION"):
         return "skip:aws-missing-env"
     val request = aws_kms_sign_request(

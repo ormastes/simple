@@ -63,8 +63,12 @@ Workflow changes:
 - Add OIDC setup preflight steps before provider auth actions.
 - For GCP, use `google-github-actions/auth@v2` with `token_format: access_token`, then write `SIMPLE_LIVE_KMS_GCP_BEARER` to `GITHUB_ENV`.
 - For Azure, use `azure/login@v2`, then write `SIMPLE_LIVE_KMS_AZURE_BEARER` from a Key Vault access-token query to `GITHUB_ENV`.
-- For AWS, use `aws-actions/configure-aws-credentials@v4` and `aws sts get-caller-identity`, then fail clearly if `SIMPLE_LIVE_KMS_AWS_AUTHORIZATION` is absent because the Simple spec still needs SigV4 signing.
+- For AWS, use `aws-actions/configure-aws-credentials@v4`, probe `aws sts get-caller-identity`, export `SIMPLE_LIVE_KMS_AWS_AMZ_DATETIME`, and let the Simple live spec sign the AWS KMS request from temporary AWS credentials.
 
 Checker changes:
 
 - Require `auth`, `id-token: write`, OIDC setup variables, official provider auth actions, and bearer export steps.
+
+Adapter changes:
+
+- Add AWS SigV4 temporary-credential request builders that include `x-amz-security-token` in both emitted headers and the signed header list.

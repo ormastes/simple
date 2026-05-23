@@ -86,7 +86,7 @@ AWS:
 - Configure an IAM OIDC provider and role for this repository and the `live-kms-aws` environment.
 - Store the role ARN and region in the AWS OIDC variables listed above.
 - The workflow uses `aws-actions/configure-aws-credentials@v4` and probes `aws sts get-caller-identity`.
-- The current Simple raw HTTP AWS live spec still requires `SIMPLE_LIVE_KMS_AWS_AUTHORIZATION`. Full AWS OIDC replacement requires a Simple-side SigV4 signing bridge that can turn the short-lived AWS credentials into the request authorization header.
+- The workflow exports `SIMPLE_LIVE_KMS_AWS_AMZ_DATETIME`, and the Simple live spec signs the AWS KMS HTTP request with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
 
 ## Verification
 

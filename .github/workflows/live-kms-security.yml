@@ -42,6 +42,7 @@ jobs:
       id-token: write
     env:
       SIMPLE_LIVE_KMS_PROVIDER: aws
+      SIMPLE_LIVE_KMS_AUTH: ${{ inputs.auth }}
       SIMPLE_LIVE_KMS_AWS_ENDPOINT: ${{ secrets.SIMPLE_LIVE_KMS_AWS_ENDPOINT }}
       SIMPLE_LIVE_KMS_AWS_KEY_ID: ${{ secrets.SIMPLE_LIVE_KMS_AWS_KEY_ID }}
       SIMPLE_LIVE_KMS_AWS_AUTHORIZATION: ${{ secrets.SIMPLE_LIVE_KMS_AWS_AUTHORIZATION }}
@@ -70,29 +71,32 @@ jobs:
           aws-region: ${{ env.SIMPLE_LIVE_KMS_AWS_REGION }}
       - name: Probe AWS OIDC identity
         if: ${{ inputs.auth == 'oidc' }}
-        run: aws sts get-caller-identity
+        run: |
+          aws sts get-caller-identity
+          echo "SIMPLE_LIVE_KMS_AWS_AMZ_DATETIME=$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_ENV"
       - name: Build bootstrap runtime
         run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
       - name: Require AWS live KMS credentials
         run: |
           missing=0
-          for name in SIMPLE_LIVE_KMS_AWS_ENDPOINT SIMPLE_LIVE_KMS_AWS_KEY_ID SIMPLE_LIVE_KMS_AWS_AUTHORIZATION; do
+          for name in SIMPLE_LIVE_KMS_AWS_ENDPOINT SIMPLE_LIVE_KMS_AWS_KEY_ID; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is required for AWS live KMS"
               missing=1
             fi
           done
-          if [ "${{ inputs.auth }}" = "oidc" ]; then
-            for name in SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN SIMPLE_LIVE_KMS_AWS_REGION; do
+          if [ "${{ inputs.auth }}" = "secret" ]; then
+            if [ -z "$SIMPLE_LIVE_KMS_AWS_AUTHORIZATION" ]; then
+              echo "::error::SIMPLE_LIVE_KMS_AWS_AUTHORIZATION is required for AWS secret auth"
+              missing=1
+            fi
+          else
+            for name in SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN SIMPLE_LIVE_KMS_AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN SIMPLE_LIVE_KMS_AWS_AMZ_DATETIME; do
               if [ -z "${!name}" ]; then
-                echo "::error::$name is required for AWS OIDC bootstrap"
+                echo "::error::$name is required for AWS OIDC live KMS"
                 missing=1
               fi
             done
-            if [ -z "$SIMPLE_LIVE_KMS_AWS_AUTHORIZATION" ]; then
-              echo "::error::AWS OIDC bootstrap is configured, but the Simple raw HTTP live spec still requires SIMPLE_LIVE_KMS_AWS_AUTHORIZATION until SigV4 runtime signing lands"
-              missing=1
-            fi
           fi
           exit "$missing"
       - name: Run AWS live KMS gate
@@ -109,6 +113,7 @@ jobs:
       id-token: write
     env:
       SIMPLE_LIVE_KMS_PROVIDER: gcp
+      SIMPLE_LIVE_KMS_AUTH: ${{ inputs.auth }}
       SIMPLE_LIVE_KMS_GCP_ENDPOINT: ${{ secrets.SIMPLE_LIVE_KMS_GCP_ENDPOINT }}
       SIMPLE_LIVE_KMS_GCP_KEY_VERSION: ${{ secrets.SIMPLE_LIVE_KMS_GCP_KEY_VERSION }}
       SIMPLE_LIVE_KMS_GCP_BEARER: ${{ secrets.SIMPLE_LIVE_KMS_GCP_BEARER }}
@@ -138,7 +143,11 @@ jobs:
           service_account: ${{ env.SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT }}
       - name: Export GCP OIDC bearer
         if: ${{ inputs.auth == 'oidc' }}
-        run: echo "SIMPLE_LIVE_KMS_GCP_BEARER=${{ steps.gcp-auth.outputs.access_token }}" >> "$GITHUB_ENV"
+        env:
+          GCP_ACCESS_TOKEN: ${{ steps.gcp-auth.outputs.access_token }}
+        run: |
+          echo "::add-mask::$GCP_ACCESS_TOKEN"
+          echo "SIMPLE_LIVE_KMS_GCP_BEARER=$GCP_ACCESS_TOKEN" >> "$GITHUB_ENV"
       - name: Build bootstrap runtime
         run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
       - name: Require GCP live KMS credentials
@@ -173,6 +182,7 @@ jobs:
       id-token: write
     env:
       SIMPLE_LIVE_KMS_PROVIDER: azure
+      SIMPLE_LIVE_KMS_AUTH: ${{ inputs.auth }}
       SIMPLE_LIVE_KMS_AZURE_VAULT: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_VAULT }}
       SIMPLE_LIVE_KMS_AZURE_KEY: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_KEY }}
       SIMPLE_LIVE_KMS_AZURE_BEARER: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_BEARER }}
@@ -203,7 +213,10 @@ jobs:
           subscription-id: ${{ env.SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID }}
       - name: Export Azure OIDC bearer
         if: ${{ inputs.auth == 'oidc' }}
-        run: echo "SIMPLE_LIVE_KMS_AZURE_BEARER=$(az account get-access-token --resource https://vault.azure.net --query accessToken -o tsv)" >> "$GITHUB_ENV"
+        run: |
+          token=$(az account get-access-token --resource https://vault.azure.net --query accessToken -o tsv)
+          echo "::add-mask::$token"
+          echo "SIMPLE_LIVE_KMS_AZURE_BEARER=$token" >> "$GITHUB_ENV"
       - name: Build bootstrap runtime
         run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
       - name: Require Azure live KMS credentials
@@ -235,6 +248,7 @@ jobs:
     timeout-minutes: 20
     env:
       SIMPLE_LIVE_KMS_PROVIDER: hsm
+      SIMPLE_LIVE_KMS_AUTH: secret
       SIMPLE_LIVE_KMS_HSM_ENDPOINT: ${{ secrets.SIMPLE_LIVE_KMS_HSM_ENDPOINT }}
       SIMPLE_LIVE_KMS_HSM_SLOT: ${{ secrets.SIMPLE_LIVE_KMS_HSM_SLOT }}
       SIMPLE_LIVE_KMS_HSM_KEY: ${{ secrets.SIMPLE_LIVE_KMS_HSM_KEY }}
