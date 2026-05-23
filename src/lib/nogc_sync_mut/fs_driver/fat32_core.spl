@@ -74,6 +74,8 @@ class Fat32Core:
     dirty_fat_sectors: Dict<u64, bool>
     dirty_clusters: Dict<u32, bool>
     cached_free_count: i64
+    dir_name_index: Dict<u32, Dict<text, DirEntry>>
+    sector_buffer_pool: [[u8]]
 
 impl Fat32Core:
     static fn new(device: BlockDevice) -> Fat32Core:
@@ -98,7 +100,9 @@ impl Fat32Core:
             file_size_cache: {},
             dirty_fat_sectors: {},
             dirty_clusters: {},
-            cached_free_count: -1
+            cached_free_count: -1,
+            dir_name_index: {},
+            sector_buffer_pool: []
         )
 
     fn _zero_sector(size: u32) -> [u8]:
@@ -192,10 +196,31 @@ impl Fat32Core:
 
         self.total_clusters = (total_sectors - self.data_start_sector) / self.sectors_per_cluster
         self.mounted = true
+        self._init_buffer_pool(16)
         self._preload_fat()
         self._preload_root_dir()
         self.cached_free_count = self._scan_free_clusters().to_i64()
         Result.Ok(())
+
+    me fn _init_buffer_pool(count: i32):
+        var i = 0
+        while i < count:
+            self.sector_buffer_pool.push(self._zero_sector(self.bytes_per_sector))
+            i = i + 1
+
+    me fn _get_sector_buffer() -> [u8]:
+        if self.sector_buffer_pool.len() > 0:
+            val buf = self.sector_buffer_pool[self.sector_buffer_pool.len() - 1]
+            self.sector_buffer_pool.pop()
+            var j: i32 = 0
+            while j < buf.len():
+                buf[j] = 0
+                j = j + 1
+            return buf
+        self._zero_sector(self.bytes_per_sector)
+
+    me fn _return_sector_buffer(buf: [u8]):
+        self.sector_buffer_pool.push(buf)
 
     me fn _preload_fat():
         val fat_sectors_needed = (self.total_clusters * 4 + self.bytes_per_sector - 1) / self.bytes_per_sector
@@ -203,7 +228,7 @@ impl Fat32Core:
         var i: u32 = 0
         while i < max_preload:
             val sector = self.reserved_sectors.to_u64() + i.to_u64()
-            var buf = self._zero_sector(self.device.sector_size())
+            var buf = self._get_sector_buffer()
             val rc = self.device.read_sector(sector, buf)
             if rc.is_ok():
                 self.fat_sector_cache.put(sector, buf)
@@ -307,7 +332,7 @@ impl Fat32Core:
                          (buffer[entry_offset + 1].to_u32() << 8) |
                          buffer[entry_offset].to_u32())
             return Result.Ok(entry & 0x0FFFFFFF)
-        var buffer = self._zero_sector(self.device.sector_size())
+        var buffer = self._get_sector_buffer()
         val rc = self.device.read_sector(fat_sector, buffer)
         if rc.is_err():
             return Result.Err("failed to read FAT")
@@ -362,7 +387,7 @@ impl Fat32Core:
         val start_sector = self.cluster_to_sector(cluster)
         var sec: u32 = 0
         while sec < self.sectors_per_cluster:
-            var sector_buf = self._zero_sector(self.bytes_per_sector)
+            var sector_buf = self._get_sector_buffer()
             val rc = self.device.read_sector(start_sector + sec.to_u64(), sector_buf)
             if rc.is_err():
                 return Result.Err("failed to read cluster data")
@@ -426,7 +451,7 @@ impl Fat32Core:
         if cached != nil:
             buffer = cached.unwrap()
         else:
-            buffer = self._zero_sector(self.device.sector_size())
+            buffer = self._get_sector_buffer()
             val read_rc = self.device.read_sector(fat_sector, buffer)
             if read_rc.is_err():
                 return Result.Err("failed to read FAT for write")
@@ -481,6 +506,9 @@ impl Fat32Core:
         var dc = self.dir_cache
         dc.delete(dir_cluster)
         self.dir_cache = dc
+        var dni = self.dir_name_index
+        dni.delete(dir_cluster)
+        self.dir_name_index = dni
 
     me fn read_dir_entries(dir_cluster: u32) -> Result<[DirEntry], text>:
         if not self.mounted:
@@ -508,6 +536,7 @@ impl Fat32Core:
                     var dc = self.dir_cache
                     dc.set(dir_cluster, entries)
                     self.dir_cache = dc
+                    self._build_name_index(dir_cluster, entries)
                     return Result.Ok(entries)
                 if first_byte == 0xE5:
                     ei = ei + 1
@@ -539,9 +568,27 @@ impl Fat32Core:
         var dc2 = self.dir_cache
         dc2.set(dir_cluster, entries)
         self.dir_cache = dc2
+        self._build_name_index(dir_cluster, entries)
         Result.Ok(entries)
 
+    me fn _build_name_index(dir_cluster: u32, entries: [DirEntry]):
+        var idx: Dict<text, DirEntry> = {}
+        var i = 0
+        while i < entries.len():
+            idx.set(entries[i].name, entries[i])
+            i = i + 1
+        var dni = self.dir_name_index
+        dni.set(dir_cluster, idx)
+        self.dir_name_index = dni
+
     me fn find_entry_in_dir(dir_cluster: u32, target_name: text) -> Result<DirEntry, text>:
+        val cached_idx = self.dir_name_index.get(dir_cluster)
+        if cached_idx != nil:
+            val idx = cached_idx.unwrap()
+            val found = idx.get(target_name)
+            if found != nil:
+                return Result.Ok(found.unwrap())
+            return Result.Err("file not found")
         val entries_rc = self.read_dir_entries(dir_cluster)
         if entries_rc.is_err():
             return Result.Err(entries_rc.unwrap_err())
