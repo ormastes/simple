@@ -3,7 +3,7 @@
 
 ## Scope
 
-This slice is compiler diagnostic behavior, covered by Rust compiler tests rather than SPipe app specs.
+This slice covers compiler security grammar, diagnostics, generated artifacts, and small runtime support helpers. Compiler-facing behavior is covered by Rust compiler/parser tests; runtime helper behavior is covered by focused Simple unit tests.
 
 ## Coverage
 
@@ -21,6 +21,7 @@ This slice is compiler diagnostic behavior, covered by Rust compiler tests rathe
 - REQ-012: parser test `parses_security_policy_configurable_and_final_markers`; HIR tests `records_security_rule_configurable_and_final_metadata`, `reports_sdn_override_that_weakens_final_source_policy`, `reports_sdn_override_that_weakens_non_configurable_source_policy`, `allows_sdn_override_for_configurable_source_policy`, and `reports_malformed_security_sdn_merge_config`.
 - REQ-013: `renders_ui_policy_and_report_artifacts` and `renders_permission_snapshot_entries_for_ui_can_observations`.
 - REQ-014: parser test `parses_ui_policy_snapshot_rules`; HIR test `renders_first_class_ui_policy_snapshot_rules`.
+- REQ-015: parser test `parses_minimal_security_policy_with_layer_and_isolate_sugar`; HIR test `lowers_minimal_security_policy_sugar_into_dimensions`.
 
 ## Verification Command
 

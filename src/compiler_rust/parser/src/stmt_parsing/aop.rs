@@ -453,7 +453,11 @@ impl<'a> Parser<'a> {
     pub fn parse_security_policy(&mut self) -> Result<SecurityPolicy, ParseError> {
         let start = self.current.span;
         self.expect_identifier_named("security")?;
-        let name = self.expect_identifier()?;
+        let name = if matches!(&self.current.kind, TokenKind::Colon) {
+            "default".to_string()
+        } else {
+            self.expect_identifier()?
+        };
         self.expect(&TokenKind::Colon)?;
         self.expect(&TokenKind::Newline)?;
         self.expect(&TokenKind::Indent)?;
@@ -510,6 +514,8 @@ impl<'a> Parser<'a> {
                 })
             }
             TokenKind::Identifier { name, .. } if name == "dimension" => self.parse_security_dimension(),
+            TokenKind::Identifier { name, .. } if name == "layers" => self.parse_security_layers(),
+            TokenKind::Identifier { name, .. } if name == "isolate" => self.parse_security_isolate(),
             TokenKind::Allow => self.parse_security_allow(),
             TokenKind::Identifier { name, .. } if name == "deny" => self.parse_security_deny(),
             TokenKind::Identifier { name, .. } if name == "gate" => {
@@ -520,6 +526,28 @@ impl<'a> Parser<'a> {
                 span: self.span_from_start(start),
             }),
         }
+    }
+
+    fn parse_security_layers(&mut self) -> Result<SecurityItem, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("layers")?;
+        let order = self.collect_security_clause_until_line_end();
+        Ok(SecurityItem::Dimension {
+            name: "layer".to_string(),
+            rules: vec![format!("order {}", order)],
+            span: self.span_from_start(start),
+        })
+    }
+
+    fn parse_security_isolate(&mut self) -> Result<SecurityItem, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("isolate")?;
+        let features = self.collect_security_clause_until_line_end();
+        Ok(SecurityItem::Dimension {
+            name: "feature".to_string(),
+            rules: vec![format!("isolate {}", features)],
+            span: self.span_from_start(start),
+        })
     }
 
     fn parse_security_dimension(&mut self) -> Result<SecurityItem, ParseError> {

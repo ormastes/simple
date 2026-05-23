@@ -33,6 +33,8 @@ REQ-013: Generated `ui_policy.sdn` shall describe client permission snapshots as
 
 REQ-014: Source files shall support first-class `ui_policy` declarations whose `show <key> when <condition>` rules lower into `ui_policy.sdn` permission snapshot entries without requiring annotation-only discovery.
 
+REQ-015: Source security policy grammar shall accept the convention-first minimal form `security:` with `layers ...` and `isolate ...` sugar, lowering it into layer and feature dimension rules.
+
 ## Deferred Requirements
 
 DEF-001: Remote `SecurityContext` transport/reconstruction integration with real client/server transports remains future work.

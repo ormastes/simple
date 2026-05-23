@@ -34,6 +34,32 @@ fn parses_security_policy_with_convention_defaults() {
 }
 
 #[test]
+fn parses_minimal_security_policy_with_layer_and_isolate_sugar() {
+    let items = parse_items(
+        r#"security:
+    layers ui -> api -> service -> domain -> port -> infra
+    isolate user, admin, billing
+"#,
+    );
+
+    let Node::SecurityPolicy(policy) = &items[0] else {
+        panic!("expected security policy");
+    };
+    assert_eq!(policy.name, "default");
+    assert!(policy.conventions_enabled);
+    assert!(matches!(
+        &policy.items[0],
+        SecurityItem::Dimension { name, rules, .. }
+            if name == "layer" && rules == &vec!["order ui->api->service->domain->port->infra".to_string()]
+    ));
+    assert!(matches!(
+        &policy.items[1],
+        SecurityItem::Dimension { name, rules, .. }
+            if name == "feature" && rules == &vec!["isolate user,admin,billing".to_string()]
+    ));
+}
+
+#[test]
 fn parses_security_policy_configurable_and_final_markers() {
     let items = parse_items(
         r#"security AppSecurity:

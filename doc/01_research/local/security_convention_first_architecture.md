@@ -57,6 +57,7 @@ This pass added the first convention-first architecture slice:
 - `ui_policy.sdn` now renders a permission snapshot manifest with display-only authority, server-gate-required semantics, policy-version requirement, stable observation keys, extracted conditions, and inferred scopes.
 - First-class source `ui_policy` declarations now parse, lower into HIR, and render `show <key> when <condition>` rules into permission snapshot entries.
 - Convention-first gate naming now handles `src/security/gate/user_admin.spl` -> `feature user` to `feature admin`.
+- Minimal source `security:` policy blocks now work without a required policy name, and `layers ...` / `isolate ...` sugar lowers into layer and feature dimension rules.
 
 ## Remaining Gaps
 

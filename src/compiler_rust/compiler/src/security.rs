@@ -1958,6 +1958,18 @@ fn render_access_matrix(policies: &[HirSecurityPolicy]) -> String {
         for item in &policy.items {
             match item {
                 HirSecurityItem::Default { action } => out.push_str(&format!("  default: {}\n", action)),
+                HirSecurityItem::Dimension { name, rules } => {
+                    out.push_str("  dimension:\n");
+                    out.push_str(&format!("    name: {}\n", name));
+                    if rules.is_empty() {
+                        out.push_str("    rules: []\n");
+                    } else {
+                        out.push_str("    rules:\n");
+                        for rule in rules {
+                            out.push_str(&format!("      - {}\n", rule));
+                        }
+                    }
+                }
                 HirSecurityItem::Allow {
                     from,
                     to,

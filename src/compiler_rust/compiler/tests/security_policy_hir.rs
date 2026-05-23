@@ -80,6 +80,37 @@ fn lowers_security_policy_with_default_conventions() {
 }
 
 #[test]
+fn lowers_minimal_security_policy_sugar_into_dimensions() {
+    let module = lower(
+        r#"security:
+    layers ui -> api -> service -> domain -> port -> infra
+    isolate user, admin, billing
+"#,
+    );
+    let policy = &module.security_policies[0];
+    assert_eq!(policy.name, "default");
+    assert!(policy.conventions_enabled);
+    assert!(matches!(
+        &policy.items[0],
+        HirSecurityItem::Dimension { name, rules }
+            if name == "layer" && rules == &vec!["order ui->api->service->domain->port->infra".to_string()]
+    ));
+    assert!(matches!(
+        &policy.items[1],
+        HirSecurityItem::Dimension { name, rules }
+            if name == "feature" && rules == &vec!["isolate user,admin,billing".to_string()]
+    ));
+
+    let inventory = build_security_inventory(&module);
+    assert!(inventory.access_matrix_sdn.contains("policy: default"));
+    assert!(inventory.access_matrix_sdn.contains("name: layer"));
+    assert!(inventory
+        .access_matrix_sdn
+        .contains("order ui->api->service->domain->port->infra"));
+    assert!(inventory.access_matrix_sdn.contains("isolate user,admin,billing"));
+}
+
+#[test]
 fn lowers_gate_sandbox_and_inventory() {
     let module = lower(
         r#"security gate UserAdminGate:
