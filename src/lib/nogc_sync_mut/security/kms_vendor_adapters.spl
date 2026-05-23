@@ -9,6 +9,7 @@ profile names.
 
 use std.security.kms_provider.{HostedKmsHttpRequest}
 use std.nogc_sync_mut.aws_sigv4.{SigV4Header, sigv4_sha256_hex, sigv4_authorization_header}
+use std.security.auth.credential_store.{CredentialStore, credential_store_aws_sigv4_authorization}
 
 fn kms_vendor_headers(vendor: text, auth_header: text) -> Dict<text, text>:
     var headers: Dict<text, text> = {
@@ -96,6 +97,40 @@ fn aws_kms_sigv4_headers(endpoint: text, target: text, body: text, access_key: t
         "x-simple-kms-vendor": "aws-kms"
     }
 
+fn aws_kms_sigv4_headers_from_credentials(endpoint: text, target: text, body: text, store: CredentialStore, access_key_name: text, secret_key_name: text, region: text, amz_datetime: text) -> Dict<text, text>:
+    val host = aws_kms_host_from_endpoint(endpoint)
+    val payload_hash = sigv4_sha256_hex(body)
+    var signed: [SigV4Header] = []
+    signed = signed + [SigV4Header(name: "content-type", value: "application/x-amz-json-1.1")]
+    signed = signed + [SigV4Header(name: "host", value: host)]
+    signed = signed + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
+    signed = signed + [SigV4Header(name: "x-amz-date", value: amz_datetime)]
+    signed = signed + [SigV4Header(name: "x-amz-target", value: target)]
+    val auth = credential_store_aws_sigv4_authorization(
+        store,
+        access_key_name,
+        secret_key_name,
+        "POST",
+        aws_kms_canonical_uri_from_endpoint(endpoint),
+        "",
+        signed,
+        payload_hash,
+        region,
+        "kms",
+        amz_datetime
+    )
+    var headers: Dict<text, text> = {
+        "content-type": "application/x-amz-json-1.1",
+        "host": host,
+        "x-amz-content-sha256": payload_hash,
+        "x-amz-date": amz_datetime,
+        "x-amz-target": target,
+        "x-simple-kms-vendor": "aws-kms"
+    }
+    if auth != "":
+        headers = headers.set("authorization", auth)
+    headers
+
 fn aws_kms_sigv4_sign_request(endpoint: text, key_handle: text, payload: text, signing_algorithm: text, access_key: text, secret_key: text, region: text, amz_datetime: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
     val body = "{\"KeyId\":\"{key_handle}\",\"Message\":\"{payload}\",\"MessageType\":\"RAW\",\"SigningAlgorithm\":\"{signing_algorithm}\"}"
     HostedKmsHttpRequest(
@@ -107,12 +142,34 @@ fn aws_kms_sigv4_sign_request(endpoint: text, key_handle: text, payload: text, s
         tls_profile: tls_profile
     )
 
+fn aws_kms_sigv4_sign_request_from_credentials(endpoint: text, key_handle: text, payload: text, signing_algorithm: text, store: CredentialStore, access_key_name: text, secret_key_name: text, region: text, amz_datetime: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    val body = "{\"KeyId\":\"{key_handle}\",\"Message\":\"{payload}\",\"MessageType\":\"RAW\",\"SigningAlgorithm\":\"{signing_algorithm}\"}"
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: endpoint,
+        headers: aws_kms_sigv4_headers_from_credentials(endpoint, "TrentService.Sign", body, store, access_key_name, secret_key_name, region, amz_datetime),
+        body: body,
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )
+
 fn aws_kms_sigv4_verify_request(endpoint: text, key_handle: text, payload: text, signature: text, signing_algorithm: text, access_key: text, secret_key: text, region: text, amz_datetime: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
     val body = "{\"KeyId\":\"{key_handle}\",\"Message\":\"{payload}\",\"MessageType\":\"RAW\",\"Signature\":\"{signature}\",\"SigningAlgorithm\":\"{signing_algorithm}\"}"
     HostedKmsHttpRequest(
         method: "POST",
         url: endpoint,
         headers: aws_kms_sigv4_headers(endpoint, "TrentService.Verify", body, access_key, secret_key, region, amz_datetime),
+        body: body,
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )
+
+fn aws_kms_sigv4_verify_request_from_credentials(endpoint: text, key_handle: text, payload: text, signature: text, signing_algorithm: text, store: CredentialStore, access_key_name: text, secret_key_name: text, region: text, amz_datetime: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    val body = "{\"KeyId\":\"{key_handle}\",\"Message\":\"{payload}\",\"MessageType\":\"RAW\",\"Signature\":\"{signature}\",\"SigningAlgorithm\":\"{signing_algorithm}\"}"
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: endpoint,
+        headers: aws_kms_sigv4_headers_from_credentials(endpoint, "TrentService.Verify", body, store, access_key_name, secret_key_name, region, amz_datetime),
         body: body,
         timeout_ms: timeout_ms,
         tls_profile: tls_profile
