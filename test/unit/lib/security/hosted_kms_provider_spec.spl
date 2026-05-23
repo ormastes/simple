@@ -1,0 +1,74 @@
+use std.security.kms_provider.{HostedKmsHttpConfig, HostedKmsHttpResponse, HostedKmsKeyProvider, hosted_kms_default_config}
+use std.security.types.{RemoteSecurityContextHeaders, RemoteSecuritySessionStoreAdapter, remote_security_token_payload_v2, validate_remote_security_context_with_adapters}
+
+fn bearer_headers(token: text) -> RemoteSecurityContextHeaders:
+    RemoteSecurityContextHeaders(
+        authorization: "Bearer {token}",
+        traceparent: "",
+        tenant_id: "",
+        policy_version: "",
+        request_class: ""
+    )
+
+describe "hosted KMS key provider":
+    it "builds outbound requests with bearer auth and TLS profile":
+        var config = hosted_kms_default_config("https://kms.internal/simple")
+        config.bearer_token = "transport-token"
+        config.tls_profile = "mtls:kms-client"
+        var kms = HostedKmsKeyProvider.with_active_key(config, "key-1", "kms://cluster/key-1")
+
+        val request = kms.sign_request("key-1", "payload-1")
+
+        expect(request.method).to_equal("POST")
+        expect(request.url).to_equal("https://kms.internal/simple/sign")
+        expect(request.headers["authorization"]).to_equal("Bearer transport-token")
+        expect(request.tls_profile).to_equal("mtls:kms-client")
+        expect(request.body).to_contain("\"key_handle\":\"kms://cluster/key-1\"")
+
+    it "refuses unknown keys without contacting transport":
+        var kms = HostedKmsKeyProvider.with_active_key(hosted_kms_default_config("https://kms.internal/simple"), "key-1", "kms://cluster/key-1")
+
+        expect(kms.sign_payload("missing-key", "payload-1")).to_equal("")
+        expect(kms.verify_external_signature("missing-key", "payload-1", "sig")).to_equal(false)
+
+    it "signs with an external KMS response":
+        var kms = HostedKmsKeyProvider.with_active_key(hosted_kms_default_config("https://kms.internal/simple"), "key-1", "kms://cluster/key-1")
+        val request = kms.sign_request("key-1", "payload-1")
+        kms.register_response(request, HostedKmsHttpResponse(status_code: 200, body: "{\"signature\":\"external-sig\"}", error: ""))
+
+        expect(kms.sign_payload("key-1", "payload-1")).to_equal("external-sig")
+
+    it "fails closed on malformed or rejected KMS responses":
+        var kms = HostedKmsKeyProvider.with_active_key(hosted_kms_default_config("https://kms.internal/simple"), "key-1", "kms://cluster/key-1")
+        val malformed = kms.sign_request("key-1", "payload-1")
+        kms.register_response(malformed, HostedKmsHttpResponse(status_code: 200, body: "{\"ok\":true}", error: ""))
+        val rejected = kms.verify_request("key-1", "payload-1", "sig")
+        kms.register_response(rejected, HostedKmsHttpResponse(status_code: 503, body: "{\"valid\":true}", error: ""))
+
+        expect(kms.sign_payload("key-1", "payload-1")).to_equal("")
+        expect(kms.verify_external_signature("key-1", "payload-1", "sig")).to_equal(false)
+
+    it "validates remote SecurityContext through the existing adapter seam":
+        var sessions = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:kms")
+        sessions.create_session("kms-session", "user-14", ["billing.read", "billing.write"], 9000)
+        var kms = HostedKmsKeyProvider.with_active_key(hosted_kms_default_config("https://kms.internal/simple"), "key-1", "kms://cluster/key-1")
+        val payload = remote_security_token_payload_v2("key-1", "kms-session", "user-14", 8000, ["billing.read"])
+        val sign_request = kms.sign_request("key-1", payload)
+        kms.register_response(sign_request, HostedKmsHttpResponse(status_code: 200, body: "{\"signature\":\"external-sig\"}", error: ""))
+        val request = kms.verify_request("key-1", payload, "external-sig")
+        kms.register_response(request, HostedKmsHttpResponse(status_code: 200, body: "{\"valid\":true}", error: ""))
+        val token = kms.token_with_kms_signature("key-1", "kms-session", "user-14", 8000, ["billing.read"])
+        val provider = kms.rollout_provider_for_verified_signature("key-1", payload, "external-sig")
+        val ctx = validate_remote_security_context_with_adapters(bearer_headers(token), "198.51.100.50", "kms-session", provider, sessions, 2000)
+
+        expect(token).to_contain("simple-v2|key-1|kms-session")
+        expect(ctx.is_authenticated()).to_equal(true)
+        expect(ctx.has_capability("billing.write")).to_equal(true)
+
+    it "exports only opaque key handles, not raw signing keys":
+        var kms = HostedKmsKeyProvider.with_active_key(hosted_kms_default_config("https://kms.internal/simple"), "key-1", "hsm://slot/key-1")
+        val sdn = kms.export_sdn()
+
+        expect(sdn).to_contain("key_handle|key-1|hsm://slot/key-1")
+        expect(sdn.contains("signing_key")).to_equal(false)
+        expect(sdn.contains("raw")).to_equal(false)

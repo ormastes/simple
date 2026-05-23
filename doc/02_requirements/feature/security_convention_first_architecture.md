@@ -75,8 +75,10 @@ REQ-034: Hosted remote `SecurityContext` session storage shall provide a concret
 
 REQ-035: Hosted remote `SecurityContext` session storage shall provide concrete quorum behavior over replicated session adapters, including configurable read/write quorum counts, topology export, revocation-wins merge semantics, and latest-active-expiry merge semantics.
 
+REQ-036: Hosted KMS/HSM-backed remote `SecurityContext` signing shall provide a generic JSON-over-HTTPS provider contract that stores opaque key handles, attaches bearer/TLS transport metadata, signs payloads through external KMS responses, verifies external signatures through fail-closed KMS responses, and validates resulting tokens through the existing adapter seam without raw signing keys in request handling.
+
 ## Deferred Requirements
 
-DEF-001: Specific KMS/HSM vendor clients remain future work beyond the hosted adapter seams, Redis session deployment store, quorum session-store behavior, SDN persistence, merge, rotation, and retirement primitives.
+DEF-001: Specific AWS/GCP/Azure/HSM vendor transport adapters remain future work beyond the hosted adapter seams, generic HTTP KMS/HSM provider contract, Redis session deployment store, quorum session-store behavior, SDN persistence, merge, rotation, and retirement primitives.
 
 DEF-002: Non-RISC-V MPU backends and boot-time CSR/MMIO apply hooks remain future work beyond deterministic linker-section metadata, fail-closed static-section installation, hosted runtime checks, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, Simple VM host-import filtering, SimpleOS kernel capability installation, and RISC-V PMP CSR write-plan generation.
