@@ -504,22 +504,35 @@ impl Lowerer {
                     name: name.clone(),
                     rules: rules.clone(),
                 },
-                ast::SecurityItem::Allow { from, to, through, .. } => HirSecurityItem::Allow {
+                ast::SecurityItem::Allow {
+                    from,
+                    to,
+                    through,
+                    configurable,
+                    final_rule,
+                    ..
+                } => HirSecurityItem::Allow {
                     from: from.clone(),
                     to: to.clone(),
                     through: through.clone(),
+                    configurable: *configurable,
+                    final_rule: *final_rule,
                 },
                 ast::SecurityItem::Deny {
                     from,
                     to,
                     except,
                     direct,
+                    configurable,
+                    final_rule,
                     ..
                 } => HirSecurityItem::Deny {
                     from: from.clone(),
                     to: to.clone(),
                     except: except.clone(),
                     direct: *direct,
+                    configurable: *configurable,
+                    final_rule: *final_rule,
                 },
                 ast::SecurityItem::Gate(gate) => HirSecurityItem::Gate(Self::lower_security_gate(gate)),
                 ast::SecurityItem::Raw { text, .. } => HirSecurityItem::Raw { text: text.clone() },

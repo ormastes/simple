@@ -27,10 +27,10 @@ REQ-010: The compiler shall emit `SEC501` when an async function uses `thread_lo
 
 REQ-011: The security CLI `check` command shall emit the planned generated artifact set, including `access_matrix.sdn`, `ui_policy.sdn`, and `report.md`.
 
+REQ-012: Source security policy rules shall support `configurable` and `final` metadata; SDN config may relax source deny rules only when the source rule is configurable, and shall report violations for final or non-configurable weakening.
+
 ## Deferred Requirements
 
-DEF-001: Source + SDN merge with `configurable` and `final` remains future work.
+DEF-001: Remote `SecurityContext` and permission snapshots remain future work.
 
-DEF-002: Remote `SecurityContext` and permission snapshots remain future work.
-
-DEF-003: Backend sandbox lowering remains future work beyond manifest generation.
+DEF-002: Backend sandbox lowering remains future work beyond manifest generation.

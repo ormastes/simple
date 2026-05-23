@@ -554,17 +554,42 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Allow)?;
         let from = self.collect_security_clause_until_token(|kind| matches!(kind, TokenKind::Arrow));
         self.expect(&TokenKind::Arrow)?;
-        let to = self.collect_security_clause_until_identifier("through");
-        let through = if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "through") {
-            self.advance();
-            Some(self.collect_until_line_end())
-        } else {
-            None
-        };
+        let to = self.collect_security_clause_until_token(|kind| {
+            matches!(kind, TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof)
+                || matches!(kind, TokenKind::Identifier { name, .. } if name == "through" || name == "configurable" || name == "final")
+        });
+        let mut through = None;
+        let mut configurable = false;
+        let mut final_rule = false;
+        while !matches!(
+            &self.current.kind,
+            TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+        ) {
+            match &self.current.kind {
+                TokenKind::Identifier { name, .. } if name == "through" => {
+                    self.advance();
+                    through = Some(self.collect_security_clause_until_token(|kind| {
+                        matches!(kind, TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof)
+                            || matches!(kind, TokenKind::Identifier { name, .. } if name == "configurable" || name == "final")
+                    }));
+                }
+                TokenKind::Identifier { name, .. } if name == "configurable" => {
+                    configurable = true;
+                    self.advance();
+                }
+                TokenKind::Identifier { name, .. } if name == "final" => {
+                    final_rule = true;
+                    self.advance();
+                }
+                _ => self.advance(),
+            }
+        }
         Ok(SecurityItem::Allow {
             from,
             to,
             through,
+            configurable,
+            final_rule,
             span: self.span_from_start(start),
         })
     }
@@ -576,10 +601,12 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Arrow)?;
         let to = self.collect_security_clause_until_token(|kind| {
             matches!(kind, TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof)
-                || matches!(kind, TokenKind::Identifier { name, .. } if name == "except" || name == "direct")
+                || matches!(kind, TokenKind::Identifier { name, .. } if name == "except" || name == "direct" || name == "configurable" || name == "final")
         });
         let mut except = None;
         let mut direct = false;
+        let mut configurable = false;
+        let mut final_rule = false;
         while !matches!(
             &self.current.kind,
             TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
@@ -587,11 +614,21 @@ impl<'a> Parser<'a> {
             match &self.current.kind {
                 TokenKind::Identifier { name, .. } if name == "except" => {
                     self.advance();
-                    except = Some(self.collect_until_line_end());
-                    break;
+                    except = Some(self.collect_security_clause_until_token(|kind| {
+                        matches!(kind, TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof)
+                            || matches!(kind, TokenKind::Identifier { name, .. } if name == "direct" || name == "configurable" || name == "final")
+                    }));
                 }
                 TokenKind::Identifier { name, .. } if name == "direct" => {
                     direct = true;
+                    self.advance();
+                }
+                TokenKind::Identifier { name, .. } if name == "configurable" => {
+                    configurable = true;
+                    self.advance();
+                }
+                TokenKind::Identifier { name, .. } if name == "final" => {
+                    final_rule = true;
                     self.advance();
                 }
                 _ => self.advance(),
@@ -602,6 +639,8 @@ impl<'a> Parser<'a> {
             to,
             except,
             direct,
+            configurable,
+            final_rule,
             span: self.span_from_start(start),
         })
     }

@@ -78,12 +78,16 @@ pub enum HirSecurityItem {
         from: String,
         to: String,
         through: Option<String>,
+        configurable: bool,
+        final_rule: bool,
     },
     Deny {
         from: String,
         to: String,
         except: Option<String>,
         direct: bool,
+        configurable: bool,
+        final_rule: bool,
     },
     Gate(HirSecurityGate),
     Raw {

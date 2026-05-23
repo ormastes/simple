@@ -193,6 +193,8 @@ pub enum SecurityItem {
         from: String,
         to: String,
         through: Option<String>,
+        configurable: bool,
+        final_rule: bool,
         span: Span,
     },
     Deny {
@@ -200,6 +202,8 @@ pub enum SecurityItem {
         to: String,
         except: Option<String>,
         direct: bool,
+        configurable: bool,
+        final_rule: bool,
         span: Span,
     },
     Gate(SecurityGate),

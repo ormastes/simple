@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
+use simple_sdn::SdnValue;
+
 use crate::hir::{
     HirAopAdvice, HirArchRule, HirCapabilityItem, HirExpr, HirExprKind, HirFunction, HirImport, HirModule,
     HirSandboxItem, HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirStmt,
@@ -24,6 +26,12 @@ pub struct SecurityInventory {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecuritySourceFile {
+    pub path: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecuritySdnConfig {
     pub path: String,
     pub source: String,
 }
@@ -314,6 +322,7 @@ pub fn lower_security_to_aop(module: &HirModule) -> SecurityAopLowering {
                     to,
                     except,
                     direct,
+                    ..
                 } => {
                     arch_rules.push(HirArchRule {
                         rule_type: "forbid".to_string(),
@@ -334,6 +343,7 @@ pub fn lower_security_to_aop(module: &HirModule) -> SecurityAopLowering {
                     from,
                     to,
                     through: None,
+                    ..
                 } => {
                     arch_rules.push(HirArchRule {
                         rule_type: "allow".to_string(),
@@ -695,6 +705,261 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
         out.push_str("  []\n");
     }
     out
+}
+
+pub fn security_sdn_merge_violations_sdn(modules: &[HirModule], configs: &[SecuritySdnConfig]) -> String {
+    let source_rules = collect_source_policy_rules(modules);
+    let mut out = String::from("security_sdn_merge_violations:\n");
+    let mut count = 0;
+    let mut overrides = Vec::new();
+
+    for config in configs {
+        match parse_security_sdn_config(config) {
+            Ok(mut parsed) => overrides.append(&mut parsed),
+            Err(error) => {
+                count += 1;
+                out.push_str("  - code: SEC603\n");
+                out.push_str("    message: invalid security SDN config\n");
+                out.push_str(&format!("    config: {}\n", config.path));
+                out.push_str(&format!("    error: {}\n", error));
+                out.push_str("    required: use documented security.allow/security.deny SDN entries\n");
+            }
+        }
+    }
+
+    for override_rule in overrides {
+        if override_rule.action != "allow" {
+            continue;
+        }
+        for source_rule in &source_rules {
+            if source_rule.action != "deny" {
+                continue;
+            }
+            if source_rule.from != override_rule.from || source_rule.to != override_rule.to {
+                continue;
+            }
+            if source_rule.final_rule {
+                count += 1;
+                out.push_str("  - code: SEC601\n");
+                out.push_str("    message: SDN override attempts to weaken final source security policy\n");
+                out.push_str(&format!("    config: {}\n", override_rule.path));
+                out.push_str(&format!("    line: {}\n", override_rule.line));
+                out.push_str(&format!("    from: {}\n", override_rule.from));
+                out.push_str(&format!("    to: {}\n", override_rule.to));
+                out.push_str("    required: remove the override or change the source policy; final policies cannot be relaxed by config\n");
+            } else if !source_rule.configurable {
+                count += 1;
+                out.push_str("  - code: SEC602\n");
+                out.push_str("    message: SDN override attempts to weaken non-configurable source security policy\n");
+                out.push_str(&format!("    config: {}\n", override_rule.path));
+                out.push_str(&format!("    line: {}\n", override_rule.line));
+                out.push_str(&format!("    from: {}\n", override_rule.from));
+                out.push_str(&format!("    to: {}\n", override_rule.to));
+                out.push_str("    required: mark the source rule configurable before SDN can relax it\n");
+            }
+        }
+    }
+
+    if count == 0 {
+        out.push_str("  []\n");
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecurityPolicyRule {
+    action: &'static str,
+    from: String,
+    to: String,
+    configurable: bool,
+    final_rule: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecuritySdnOverride {
+    action: String,
+    from: String,
+    to: String,
+    path: String,
+    line: usize,
+}
+
+fn collect_source_policy_rules(modules: &[HirModule]) -> Vec<SecurityPolicyRule> {
+    let mut rules = Vec::new();
+    for module in modules {
+        for policy in &module.security_policies {
+            for item in &policy.items {
+                match item {
+                    HirSecurityItem::Allow {
+                        from,
+                        to,
+                        configurable,
+                        final_rule,
+                        ..
+                    } => rules.push(SecurityPolicyRule {
+                        action: "allow",
+                        from: security_clause_key(from),
+                        to: security_clause_key(to),
+                        configurable: *configurable,
+                        final_rule: *final_rule,
+                    }),
+                    HirSecurityItem::Deny {
+                        from,
+                        to,
+                        configurable,
+                        final_rule,
+                        ..
+                    } => rules.push(SecurityPolicyRule {
+                        action: "deny",
+                        from: security_clause_key(from),
+                        to: security_clause_key(to),
+                        configurable: *configurable,
+                        final_rule: *final_rule,
+                    }),
+                    _ => {}
+                }
+            }
+        }
+    }
+    rules
+}
+
+fn collect_text_policy_overrides(configs: &[SecuritySdnConfig]) -> Vec<SecuritySdnOverride> {
+    let mut overrides = Vec::new();
+    for config in configs {
+        for (line_no, line) in config.source.lines().enumerate() {
+            if let Some((action, from, to)) = parse_sdn_policy_override_line(line) {
+                overrides.push(SecuritySdnOverride {
+                    action,
+                    from,
+                    to,
+                    path: config.path.clone(),
+                    line: line_no + 1,
+                });
+            }
+        }
+    }
+    overrides
+}
+
+fn parse_security_sdn_config(config: &SecuritySdnConfig) -> Result<Vec<SecuritySdnOverride>, String> {
+    let value = simple_sdn::parse(&config.source).map_err(|error| error.to_string())?;
+    let Some(root) = value.as_dict() else {
+        return Err("security SDN config root must be a dictionary".to_string());
+    };
+    let Some(security) = root.get("security").and_then(SdnValue::as_dict) else {
+        return Ok(collect_text_policy_overrides(std::slice::from_ref(config)));
+    };
+
+    let mut overrides = Vec::new();
+    for action in ["allow", "deny"] {
+        if let Some(value) = security.get(action) {
+            collect_structured_sdn_overrides(action, value, config, &mut overrides)?;
+        }
+    }
+
+    if overrides.is_empty() {
+        overrides.extend(collect_text_policy_overrides(std::slice::from_ref(config)));
+    }
+    Ok(overrides)
+}
+
+fn collect_structured_sdn_overrides(
+    action: &str,
+    value: &SdnValue,
+    config: &SecuritySdnConfig,
+    overrides: &mut Vec<SecuritySdnOverride>,
+) -> Result<(), String> {
+    if let Some(entries) = value.as_array() {
+        for entry in entries {
+            collect_structured_sdn_overrides(action, entry, config, overrides)?;
+        }
+        return Ok(());
+    }
+    if let Some(line) = value.as_str() {
+        if let Some((parsed_action, from, to)) = parse_sdn_policy_override_line(&format!("{} {}", action, line)) {
+            overrides.push(SecuritySdnOverride {
+                action: parsed_action,
+                from,
+                to,
+                path: config.path.clone(),
+                line: 1,
+            });
+        }
+        return Ok(());
+    }
+    let Some(entry) = value.as_dict() else {
+        return Err(format!(
+            "security.{} entries must be dictionaries, strings, or arrays",
+            action
+        ));
+    };
+    let from = entry
+        .get("from")
+        .and_then(sdn_security_clause_key)
+        .ok_or_else(|| format!("security.{} entry missing from", action))?;
+    let to = entry
+        .get("to")
+        .and_then(sdn_security_clause_key)
+        .ok_or_else(|| format!("security.{} entry missing to", action))?;
+    overrides.push(SecuritySdnOverride {
+        action: action.to_string(),
+        from,
+        to,
+        path: config.path.clone(),
+        line: 1,
+    });
+    Ok(())
+}
+
+fn sdn_security_clause_key(value: &SdnValue) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(security_clause_key(text));
+    }
+    let dict = value.as_dict()?;
+    for key in ["feature", "security", "layer", "trust"] {
+        if let Some(value) = dict.get(key).and_then(SdnValue::as_str) {
+            return Some(security_clause_key(&format!("{} {}", key, value)));
+        }
+    }
+    None
+}
+
+fn parse_sdn_policy_override_line(line: &str) -> Option<(String, String, String)> {
+    let trimmed = line.trim().trim_start_matches('-').trim();
+    let action = if let Some(rest) = trimmed.strip_prefix("allow ") {
+        ("allow", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("deny ") {
+        ("deny", rest)
+    } else {
+        return None;
+    };
+    let (from, rest) = action.1.split_once("->")?;
+    let to = rest
+        .split_whitespace()
+        .take_while(|part| *part != "through" && *part != "except" && *part != "direct")
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some((
+        action.0.to_string(),
+        security_clause_key(from),
+        security_clause_key(&to),
+    ))
+}
+
+fn security_clause_key(clause: &str) -> String {
+    let normalized = clause
+        .trim()
+        .trim_matches('{')
+        .trim_matches('}')
+        .replace(':', " ")
+        .replace(',', " ");
+    let parts: Vec<&str> = normalized.split_whitespace().collect();
+    if parts.len() >= 2 && (parts[0] == "feature" || parts[0] == "security") {
+        parts[1..].join(".")
+    } else {
+        parts.join(".")
+    }
 }
 
 fn build_security_feature_graph(
@@ -1157,6 +1422,7 @@ fn collect_boundary_gates(modules: &[HirModule]) -> Vec<SecurityBoundaryGate> {
                         from,
                         to,
                         through: Some(gate),
+                        ..
                     }
                     | HirSecurityItem::Deny {
                         from,
@@ -1692,19 +1958,28 @@ fn render_access_matrix(policies: &[HirSecurityPolicy]) -> String {
         for item in &policy.items {
             match item {
                 HirSecurityItem::Default { action } => out.push_str(&format!("  default: {}\n", action)),
-                HirSecurityItem::Allow { from, to, through } => {
+                HirSecurityItem::Allow {
+                    from,
+                    to,
+                    through,
+                    configurable,
+                    final_rule,
+                } => {
                     out.push_str("  allow:\n");
                     out.push_str(&format!("    from: {}\n", from));
                     out.push_str(&format!("    to: {}\n", to));
                     if let Some(gate) = through {
                         out.push_str(&format!("    through: {}\n", gate));
                     }
+                    render_policy_mutability(&mut out, *configurable, *final_rule);
                 }
                 HirSecurityItem::Deny {
                     from,
                     to,
                     except,
                     direct,
+                    configurable,
+                    final_rule,
                 } => {
                     out.push_str("  deny:\n");
                     out.push_str(&format!("    from: {}\n", from));
@@ -1715,12 +1990,22 @@ fn render_access_matrix(policies: &[HirSecurityPolicy]) -> String {
                     if *direct {
                         out.push_str("    direct: true\n");
                     }
+                    render_policy_mutability(&mut out, *configurable, *final_rule);
                 }
                 _ => {}
             }
         }
     }
     out
+}
+
+fn render_policy_mutability(out: &mut String, configurable: bool, final_rule: bool) {
+    if configurable {
+        out.push_str("    configurable: true\n");
+    }
+    if final_rule {
+        out.push_str("    final: true\n");
+    }
 }
 
 fn render_security_aspects(policies: &[HirSecurityPolicy], gates: &[HirSecurityGate]) -> String {
@@ -1734,6 +2019,7 @@ fn render_security_aspects(policies: &[HirSecurityPolicy], gates: &[HirSecurityG
                     from,
                     to,
                     through: Some(gate),
+                    ..
                 } => {
                     boundary_count += 1;
                     out.push_str("    allow call:\n");

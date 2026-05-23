@@ -51,10 +51,12 @@ This pass added the first convention-first architecture slice:
 - `build_security_gate_map` now exposes convention-derived gates from `src/security/gate/*.spl`, and `SEC201` can use those inferred gates as the required crossing for feature-group boundaries.
 - `SEC501` now flags source-level `thread_local SecurityContext` access inside async functions and requires task-local context or an explicit context parameter.
 - The security inventory now carries `ui_policy.sdn` and `report.md`; `simple security check` writes those files and the planned `access_matrix.sdn` name while retaining `access_matrix.generated.sdn`.
+- Source `allow` and `deny` security rules now carry `configurable` and `final` metadata through parser AST and HIR.
+- `security_sdn_merge_violations_sdn` parses structured `security.allow` / `security.deny` SDN config with `simple_sdn` and reports `SEC601` when config weakens a final source deny rule, `SEC602` when config weakens a non-configurable source deny rule, and `SEC603` for malformed security SDN.
+- `simple security check --config security.sdn` appends the source/SDN merge validation to `violations.sdn`.
 
 ## Remaining Gaps
 
-- Source/SDN merge with `configurable` and `final` policy relaxation rules is documented but not yet implemented for security policy.
 - Remote `SecurityContext`, permission snapshots, and UI policy DSL remain design-level.
 - Sandbox manifest generation exists for declared sandboxes/gates, but backend lowering remains future work.
-- Convention-first gate naming now handles `src/security/gate/user_admin.spl` -> `feature user` to `feature admin`; future work should broaden this into the full source/SDN policy merge.
+- Convention-first gate naming now handles `src/security/gate/user_admin.spl` -> `feature user` to `feature admin`.

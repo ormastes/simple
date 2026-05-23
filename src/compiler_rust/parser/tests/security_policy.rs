@@ -34,6 +34,36 @@ fn parses_security_policy_with_convention_defaults() {
 }
 
 #[test]
+fn parses_security_policy_configurable_and_final_markers() {
+    let items = parse_items(
+        r#"security AppSecurity:
+    allow feature admin -> feature user through AdminUserGate configurable
+    deny feature user -> feature admin final
+"#,
+    );
+
+    let Node::SecurityPolicy(policy) = &items[0] else {
+        panic!("expected security policy");
+    };
+    assert!(matches!(
+        &policy.items[0],
+        SecurityItem::Allow {
+            configurable: true,
+            final_rule: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &policy.items[1],
+        SecurityItem::Deny {
+            configurable: false,
+            final_rule: true,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn parses_security_gate_and_sandbox_policy() {
     let items = parse_items(
         r#"security gate UserAdminGate:

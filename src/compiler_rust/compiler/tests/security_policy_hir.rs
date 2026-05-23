@@ -1,9 +1,9 @@
 use simple_compiler::hir::{self, HirCapabilityItem, HirSandboxItem, HirSecurityItem};
 use simple_compiler::security::{
     build_security_gate_map, build_security_inventory, build_security_inventory_for_source, build_security_maps,
-    infer_security_coordinate, lower_security_to_aop, security_metadata_id, source_security_violations_sdn,
-    source_security_violations_sdn_with_module, source_security_violations_sdn_with_modules, SecurityAdviceStep,
-    SecuritySourceFile,
+    infer_security_coordinate, lower_security_to_aop, security_metadata_id, security_sdn_merge_violations_sdn,
+    source_security_violations_sdn, source_security_violations_sdn_with_module,
+    source_security_violations_sdn_with_modules, SecurityAdviceStep, SecuritySdnConfig, SecuritySourceFile,
 };
 use simple_compiler::weaving::WeavingConfig;
 use simple_parser::Parser;
@@ -69,7 +69,12 @@ fn lowers_security_policy_with_default_conventions() {
     assert!(matches!(&policy.items[0], HirSecurityItem::Root { path } if path == "src/security"));
     assert!(matches!(
         &policy.items[2],
-        HirSecurityItem::Allow { from, to, through: Some(gate) }
+        HirSecurityItem::Allow {
+            from,
+            to,
+            through: Some(gate),
+            ..
+        }
             if from == "feature user" && to == "feature admin" && gate == "UserAdminGate"
     ));
 }
@@ -409,6 +414,110 @@ fn renders_ui_policy_and_report_artifacts() {
     assert!(inventory.ui_policy_sdn.contains("authority: display_only"));
     assert!(inventory.report_md.contains("# Security Report"));
     assert!(inventory.report_md.contains("- Violations: 0"));
+}
+
+#[test]
+fn records_security_rule_configurable_and_final_metadata() {
+    let module = lower(
+        r#"security AppSecurity:
+    allow feature admin -> feature user through AdminUserGate configurable
+    deny feature user -> feature admin final
+"#,
+    );
+
+    let policy = &module.security_policies[0];
+    assert!(matches!(
+        &policy.items[0],
+        HirSecurityItem::Allow {
+            configurable: true,
+            final_rule: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &policy.items[1],
+        HirSecurityItem::Deny {
+            configurable: false,
+            final_rule: true,
+            ..
+        }
+    ));
+
+    let inventory = build_security_inventory(&module);
+    assert!(inventory.access_matrix_sdn.contains("configurable: true"));
+    assert!(inventory.access_matrix_sdn.contains("final: true"));
+}
+
+#[test]
+fn reports_sdn_override_that_weakens_final_source_policy() {
+    let module = lower(
+        r#"security AppSecurity:
+    deny feature user -> feature admin final
+"#,
+    );
+    let config = SecuritySdnConfig {
+        path: "config/security.sdn".to_string(),
+        source: "security:\n    allow: [{from: {feature: user}, to: {feature: admin}, through: UserAdminGate}]\n"
+            .to_string(),
+    };
+
+    let violations = security_sdn_merge_violations_sdn(&[module], &[config]);
+    assert!(violations.contains("code: SEC601"));
+    assert!(violations.contains("final source security policy"));
+}
+
+#[test]
+fn allows_sdn_override_for_configurable_source_policy() {
+    let module = lower(
+        r#"security AppSecurity:
+    deny feature user -> feature admin configurable
+"#,
+    );
+    let config = SecuritySdnConfig {
+        path: "config/security.sdn".to_string(),
+        source: "security:\n    allow: [{from: {feature: user}, to: {feature: admin}, through: UserAdminGate}]\n"
+            .to_string(),
+    };
+
+    let violations = security_sdn_merge_violations_sdn(&[module], &[config]);
+    assert!(violations.contains("[]"));
+    assert!(!violations.contains("SEC601"));
+    assert!(!violations.contains("SEC602"));
+}
+
+#[test]
+fn reports_sdn_override_that_weakens_non_configurable_source_policy() {
+    let module = lower(
+        r#"security AppSecurity:
+    deny feature user -> feature admin
+"#,
+    );
+    let config = SecuritySdnConfig {
+        path: "config/security.sdn".to_string(),
+        source: "security:\n    allow: [{from: {feature: user}, to: {feature: admin}, through: UserAdminGate}]\n"
+            .to_string(),
+    };
+
+    let violations = security_sdn_merge_violations_sdn(&[module], &[config]);
+    assert!(violations.contains("code: SEC602"));
+    assert!(violations.contains("non-configurable source security policy"));
+}
+
+#[test]
+fn reports_malformed_security_sdn_merge_config() {
+    let module = lower(
+        r#"security AppSecurity:
+    deny feature user -> feature admin configurable
+"#,
+    );
+    let config = SecuritySdnConfig {
+        path: "config/security.sdn".to_string(),
+        source: "security:\n    allow: [{from: {feature: user}}]\n".to_string(),
+    };
+
+    let violations = security_sdn_merge_violations_sdn(&[module], &[config]);
+    assert!(violations.contains("code: SEC603"));
+    assert!(violations.contains("invalid security SDN config"));
 }
 
 #[test]
