@@ -1225,6 +1225,7 @@ DI:
     execute hosted KMS requests through an explicit runtime HTTP opt-in
     build AWS KMS Sign/Verify requests with SigV4 authorization headers
     resolve AWS SigV4 request credentials through opaque CredentialStore handles
+    resolve GCP/Azure/HSM bearer transport auth through opaque CredentialStore handles
 
 Output:
     access matrix
@@ -1238,7 +1239,7 @@ Remaining implementation after generated lowering:
     add live non-RISC-V MPU programming backends beyond ARM64 PTE policy derivation
     add hardware CSR/MMIO apply backends beyond the RISC-V boot PMP plan hook
     add boot-time embedded sandbox metadata lookup behind __simple_sandbox_start/end
-    add live GCP/Azure/HSM transport authentication behind the vendor KMS request builders
+    add live GCP/Azure/HSM cloud integration coverage
     add live opt-in AWS cloud integration coverage
 
 The minimal example should look like this:
