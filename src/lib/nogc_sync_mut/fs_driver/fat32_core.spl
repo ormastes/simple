@@ -67,6 +67,7 @@ class Fat32Core:
     fat_sector_cache: FatSectorCache
     chain_cache: ChainCache
     path_cache: PathCache
+    dir_cache: Dict<u32, [DirEntry]>
 
 impl Fat32Core:
     static fn new(device: BlockDevice) -> Fat32Core:
@@ -82,9 +83,10 @@ impl Fat32Core:
             total_clusters: 0,
             mounted: false,
             open_files: [],
-            fat_sector_cache: FatSectorCache.new(8),
+            fat_sector_cache: FatSectorCache.new(256),
             chain_cache: ChainCache.new(),
-            path_cache: PathCache.new()
+            path_cache: PathCache.new(),
+            dir_cache: {}
         )
 
     fn _zero_sector(size: u32) -> [u8]:
@@ -178,7 +180,20 @@ impl Fat32Core:
 
         self.total_clusters = (total_sectors - self.data_start_sector) / self.sectors_per_cluster
         self.mounted = true
+        self._preload_fat()
         Result.Ok(())
+
+    me fn _preload_fat():
+        val fat_sectors_needed = (self.total_clusters * 4 + self.bytes_per_sector - 1) / self.bytes_per_sector
+        val max_preload: u32 = if fat_sectors_needed < 64: fat_sectors_needed else: 64
+        var i: u32 = 0
+        while i < max_preload:
+            val sector = self.reserved_sectors.to_u64() + i.to_u64()
+            var buf = self._zero_sector(self.device.sector_size())
+            val rc = self.device.read_sector(sector, buf)
+            if rc.is_ok():
+                self.fat_sector_cache.put(sector, buf)
+            i = i + 1
 
     me fn unmount() -> Result<(), text>:
         self.mounted = false
@@ -193,6 +208,9 @@ impl Fat32Core:
         self.fat_sector_cache.clear()
         self.chain_cache.clear()
         self.path_cache.clear()
+        var dc = self.dir_cache
+        dc = {}
+        self.dir_cache = dc
         Result.Ok(())
 
     me fn read_fat_entry(cluster: u32) -> Result<u32, text>:
@@ -201,15 +219,21 @@ impl Fat32Core:
         val fat_offset = cluster * 4
         val fat_sector = self.reserved_sectors.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
         val entry_offset = (fat_offset % self.bytes_per_sector).to_i32()
-        var buffer = self._zero_sector(self.device.sector_size())
         val cached = self.fat_sector_cache.get(fat_sector)
         if cached != nil:
-            buffer = cached.unwrap()
-        else:
-            val rc = self.device.read_sector(fat_sector, buffer)
-            if rc.is_err():
-                return Result.Err("failed to read FAT")
-            self.fat_sector_cache.put(fat_sector, buffer)
+            val buffer = cached.unwrap()
+            if entry_offset < 0 or (entry_offset + 3) >= buffer.len():
+                return Result.Err("invalid FAT offset")
+            val entry = ((buffer[entry_offset + 3].to_u32() << 24) |
+                         (buffer[entry_offset + 2].to_u32() << 16) |
+                         (buffer[entry_offset + 1].to_u32() << 8) |
+                         buffer[entry_offset].to_u32())
+            return Result.Ok(entry & 0x0FFFFFFF)
+        var buffer = self._zero_sector(self.device.sector_size())
+        val rc = self.device.read_sector(fat_sector, buffer)
+        if rc.is_err():
+            return Result.Err("failed to read FAT")
+        self.fat_sector_cache.put(fat_sector, buffer)
         if entry_offset < 0 or (entry_offset + 3) >= buffer.len():
             return Result.Err("invalid FAT offset")
         val entry = ((buffer[entry_offset + 3].to_u32() << 24) |
@@ -346,9 +370,17 @@ impl Fat32Core:
 
     # --- Directory entry scanning ---
 
+    me fn invalidate_dir_cache(dir_cluster: u32):
+        var dc = self.dir_cache
+        dc.delete(dir_cluster)
+        self.dir_cache = dc
+
     me fn read_dir_entries(dir_cluster: u32) -> Result<[DirEntry], text>:
         if not self.mounted:
             return Result.Err("filesystem not mounted")
+        val cached_dir = self.dir_cache.get(dir_cluster)
+        if cached_dir != nil:
+            return Result.Ok(cached_dir.unwrap())
         val chain_rc = self.follow_chain(dir_cluster)
         if chain_rc.is_err():
             return Result.Err(chain_rc.unwrap_err())
@@ -366,6 +398,9 @@ impl Fat32Core:
                 val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
                 val first_byte = cluster_data[off]
                 if first_byte == 0x00:
+                    var dc = self.dir_cache
+                    dc.set(dir_cluster, entries)
+                    self.dir_cache = dc
                     return Result.Ok(entries)
                 if first_byte == 0xE5:
                     ei = ei + 1
@@ -390,6 +425,9 @@ impl Fat32Core:
                 ))
                 ei = ei + 1
             ci = ci + 1
+        var dc2 = self.dir_cache
+        dc2.set(dir_cluster, entries)
+        self.dir_cache = dc2
         Result.Ok(entries)
 
     me fn find_entry_in_dir(dir_cluster: u32, target_name: text) -> Result<DirEntry, text>:
