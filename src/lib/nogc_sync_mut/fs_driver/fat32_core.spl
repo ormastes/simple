@@ -72,6 +72,8 @@ class Fat32Core:
     next_free_hint: u32
     file_size_cache: Dict<u64, i64>
     dirty_fat_sectors: Dict<u64, bool>
+    dirty_clusters: Dict<u32, bool>
+    cached_free_count: i64
 
 impl Fat32Core:
     static fn new(device: BlockDevice) -> Fat32Core:
@@ -94,7 +96,9 @@ impl Fat32Core:
             cluster_data_cache: ClusterDataCache.new(128),
             next_free_hint: 2,
             file_size_cache: {},
-            dirty_fat_sectors: {}
+            dirty_fat_sectors: {},
+            dirty_clusters: {},
+            cached_free_count: -1
         )
 
     fn _zero_sector(size: u32) -> [u8]:
@@ -219,13 +223,46 @@ impl Fat32Core:
         self.dirty_fat_sectors = dfs
         Result.Ok(())
 
+    me fn flush_clusters() -> Result<(), text>:
+        val keys = self.dirty_clusters.keys()
+        var i = 0
+        while i < keys.len():
+            val cluster = keys[i]
+            val cached = self.cluster_data_cache.get(cluster)
+            if cached != nil:
+                val data = cached.unwrap()
+                val start_sector = self.cluster_to_sector(cluster)
+                var sec: u32 = 0
+                while sec < self.sectors_per_cluster:
+                    var sector_buf: [u8] = []
+                    var j: u32 = 0
+                    while j < self.bytes_per_sector:
+                        val idx = sec * self.bytes_per_sector + j
+                        if idx.to_i32() < data.len():
+                            sector_buf.push(data[idx.to_i32()])
+                        else:
+                            sector_buf.push(0)
+                        j = j + 1
+                    val rc = self.device.write_sector(start_sector + sec.to_u64(), sector_buf)
+                    if rc.is_err():
+                        return Result.Err("failed to flush cluster data")
+                    sec = sec + 1
+            i = i + 1
+        var dcl = self.dirty_clusters
+        dcl = {}
+        self.dirty_clusters = dcl
+        Result.Ok(())
+
     me fn sync() -> Result<(), text>:
-        self.flush_fat()
+        val fat_rc = self.flush_fat()
+        if fat_rc.is_err():
+            return Result.Err(fat_rc.unwrap_err())
+        self.flush_clusters()
 
     me fn unmount() -> Result<(), text>:
-        val flush_rc = self.flush_fat()
-        if flush_rc.is_err():
-            return Result.Err(flush_rc.unwrap_err())
+        val sync_rc = self.sync()
+        if sync_rc.is_err():
+            return Result.Err(sync_rc.unwrap_err())
         self.mounted = false
         self.bytes_per_sector = 512
         self.sectors_per_cluster = 0
@@ -243,6 +280,7 @@ impl Fat32Core:
         self.dir_cache = dc
         self.cluster_data_cache.clear()
         self.next_free_hint = 2
+        self.cached_free_count = -1
         var fsc = self.file_size_cache
         fsc = {}
         self.file_size_cache = fsc
@@ -277,22 +315,29 @@ impl Fat32Core:
                      buffer[entry_offset].to_u32())
         Result.Ok(entry & 0x0FFFFFFF)
 
-    me fn count_free_clusters() -> Result<u32, text>:
-        if not self.mounted:
-            return Result.Err("filesystem not mounted")
-        if self.total_clusters == 0:
-            return Result.Ok(0)
+    me fn _scan_free_clusters() -> u32:
         var free_count: u32 = 0
         var cluster: u32 = 2
         val limit = self.total_clusters + 2
         while cluster < limit:
             val entry_rc = self.read_fat_entry(cluster)
             if entry_rc.is_err():
-                return Result.Ok(free_count)
+                return free_count
             if entry_rc.unwrap() == FAT32_FREE:
                 free_count = free_count + 1
             cluster = cluster + 1
-        Result.Ok(free_count)
+        free_count
+
+    me fn count_free_clusters() -> Result<u32, text>:
+        if not self.mounted:
+            return Result.Err("filesystem not mounted")
+        if self.total_clusters == 0:
+            return Result.Ok(0)
+        if self.cached_free_count >= 0:
+            return Result.Ok(self.cached_free_count.to_u32())
+        val count = self._scan_free_clusters()
+        self.cached_free_count = count.to_i64()
+        Result.Ok(count)
 
     # --- Cluster chain helpers ---
 
@@ -326,23 +371,10 @@ impl Fat32Core:
         Result.Ok(data)
 
     me fn write_cluster(cluster: u32, data: [u8]) -> Result<(), text>:
-        val start_sector = self.cluster_to_sector(cluster)
-        var sec: u32 = 0
-        while sec < self.sectors_per_cluster:
-            var sector_buf: [u8] = []
-            var j: u32 = 0
-            while j < self.bytes_per_sector:
-                val idx = sec * self.bytes_per_sector + j
-                if idx.to_i32() < data.len():
-                    sector_buf.push(data[idx.to_i32()])
-                else:
-                    sector_buf.push(0)
-                j = j + 1
-            val rc = self.device.write_sector(start_sector + sec.to_u64(), sector_buf)
-            if rc.is_err():
-                return Result.Err("failed to write cluster data")
-            sec = sec + 1
         self.cluster_data_cache.put(cluster, data)
+        var dcl = self.dirty_clusters
+        dcl.set(cluster, true)
+        self.dirty_clusters = dcl
         Result.Ok(())
 
     me fn follow_chain(start_cluster: u32) -> Result<[u32], text>:
@@ -418,6 +450,8 @@ impl Fat32Core:
                 if mark_rc.is_err():
                     return Result.Err(mark_rc.unwrap_err())
                 self.next_free_hint = cluster + 1
+                if self.cached_free_count > 0:
+                    self.cached_free_count = self.cached_free_count - 1
                 return Result.Ok(cluster)
             cluster = cluster + 1
         var wrap: u32 = 2
@@ -430,6 +464,8 @@ impl Fat32Core:
                 if mark_rc.is_err():
                     return Result.Err(mark_rc.unwrap_err())
                 self.next_free_hint = wrap + 1
+                if self.cached_free_count > 0:
+                    self.cached_free_count = self.cached_free_count - 1
                 return Result.Ok(wrap)
             wrap = wrap + 1
         Result.Err("no free clusters")
