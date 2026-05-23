@@ -1,0 +1,45 @@
+# Scheduler task identity for host async execution.
+#
+# Security and tracing code should key task-local state by scheduler-owned task
+# ids when a HostScheduler is polling work. Callers outside a scheduler may
+# provide a fallback key, but the fallback is not the semantic owner.
+
+var _has_current_scheduler_task_id: bool = false
+var _current_scheduler_task_id: usize = 0
+var _next_scheduler_task_id: usize = 1
+
+class SchedulerTaskIdentityPrevious:
+    var had_task: bool
+    var task_id: usize
+
+fn current_scheduler_task_id() -> Option<usize>:
+    if _has_current_scheduler_task_id:
+        return Some(_current_scheduler_task_id)
+    nil
+
+fn current_scheduler_task_key(fallback: text) -> text:
+    if _has_current_scheduler_task_id:
+        return "scheduler-task-{_current_scheduler_task_id}"
+    fallback
+
+fn allocate_scheduler_task_id() -> usize:
+    val id = _next_scheduler_task_id
+    _next_scheduler_task_id = _next_scheduler_task_id + 1
+    id
+
+fn enter_scheduler_task_id(task_id: usize) -> SchedulerTaskIdentityPrevious:
+    val previous = SchedulerTaskIdentityPrevious(
+        had_task: _has_current_scheduler_task_id,
+        task_id: _current_scheduler_task_id
+    )
+    _has_current_scheduler_task_id = true
+    _current_scheduler_task_id = task_id
+    previous
+
+fn exit_scheduler_task_id(previous: SchedulerTaskIdentityPrevious):
+    if previous.had_task:
+        _has_current_scheduler_task_id = true
+        _current_scheduler_task_id = previous.task_id
+        return
+    _has_current_scheduler_task_id = false
+    _current_scheduler_task_id = 0
