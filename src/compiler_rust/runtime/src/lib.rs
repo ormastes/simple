@@ -241,8 +241,32 @@ pub use async_runtime::{
     rt_async_spawn, rt_async_spawn_task, AsyncScheduler,
 };
 
+/// Return the active runtime task id for the current thread.
+///
+/// FutureExecutor task identity is preferred over cooperative async scheduler
+/// identity because executor tasks can host scheduler polling. A value of 0
+/// means no runtime task identity is active on this thread.
+#[no_mangle]
+pub extern "C" fn rt_current_task_id() -> i64 {
+    let executor_task_id = executor::rt_executor_current_task_id();
+    if executor_task_id != 0 {
+        return executor_task_id;
+    }
+    async_runtime::rt_async_current_task_id()
+}
+
 // Re-export AOP runtime SFFI functions
 pub use aop::{rt_aop_invoke_around, rt_aop_proceed, AopAroundFn, AopTargetFn, ProceedContext};
+
+#[cfg(test)]
+mod task_identity_tests {
+    use super::*;
+
+    #[test]
+    fn unified_current_task_id_defaults_to_zero() {
+        assert_eq!(rt_current_task_id(), 0);
+    }
+}
 
 // Re-export runtime SFFI functions for codegen
 pub use value::{

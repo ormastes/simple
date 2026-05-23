@@ -52,6 +52,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_executor_")
         || name.starts_with("rt_thread_")
         || name.starts_with("rt_generator_")
+        || name == "rt_current_task_id"
         || name == "rt_wait"
     {
         return Async;
@@ -582,6 +583,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_executor_shutdown", &[], &[]),
     RuntimeFuncSpec::new("rt_executor_is_manual", &[], &[I64]),
     RuntimeFuncSpec::new("rt_executor_current_task_id", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_current_task_id", &[], &[I64]),
     // =========================================================================
     // Async runtime scheduler (cooperative scheduling)
     // =========================================================================
@@ -1425,6 +1427,17 @@ mod tests {
             .iter()
             .find(|spec| spec.name == "rt_executor_current_task_id")
             .expect("rt_executor_current_task_id must be registered for native codegen");
+        assert!(spec.params.is_empty());
+        assert_eq!(spec.returns, [I64]);
+        assert_eq!(tier_of(spec.name), RuntimeFuncTier::Async);
+    }
+
+    #[test]
+    fn unified_current_task_id_is_registered() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_current_task_id")
+            .expect("rt_current_task_id must be registered for native codegen");
         assert!(spec.params.is_empty());
         assert_eq!(spec.returns, [I64]);
         assert_eq!(tier_of(spec.name), RuntimeFuncTier::Async);
