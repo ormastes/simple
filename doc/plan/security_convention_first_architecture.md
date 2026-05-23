@@ -1237,7 +1237,6 @@ Output:
     audit/security report
 
 Remaining implementation after generated lowering:
-    wire architecture boot hooks to call the ARM MPU MMIO apply backend in addition to the RISC-V PMP hook
     wire the boot-time unsafe byte reader behind the embedded __simple_sandbox_start/end lookup seam
     add real credentialed cloud/HSM CI lanes for the opt-in live KMS integration gates
 
