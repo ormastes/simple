@@ -65,8 +65,10 @@ REQ-029: The Linux sandbox backend shall provide an installable Landlock filesys
 
 REQ-030: The WASI runtime shall support an explicit capability table that can be populated from lowered sandbox manifests and shall deny undeclared environment variables and preopened directories when the table is attached.
 
+REQ-031: Baremetal sandbox lowering shall emit deterministic MPU/linker metadata, baremetal linker scripts shall keep the generated static capability/MPU sections with start/end symbols, and kernel sandbox install shall fail closed when baremetal lowering is present without the static section.
+
 ## Deferred Requirements
 
 DEF-001: Production adapters for external replicated session storage and KMS/HSM-backed signing key rollout remain future work beyond SDN persistence, merge, rotation, and retirement primitives.
 
-DEF-002: Full baremetal MPU backend isolation remains future work beyond hosted runtime checks, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, Simple VM host-import filtering, and SimpleOS kernel capability installation.
+DEF-002: Hardware-specific baremetal MPU/PMP register programming remains future work beyond deterministic linker-section metadata, fail-closed static-section installation, hosted runtime checks, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, Simple VM host-import filtering, and SimpleOS kernel capability installation.

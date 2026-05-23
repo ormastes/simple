@@ -47,6 +47,14 @@ SECTIONS
         *(.rodata .rodata.*)
     }
 
+    .simple_sandbox ALIGN(4K) :
+    {
+        __simple_sandbox_start = .;
+        KEEP(*(.simple.sandbox*))
+        KEEP(*(.simple.mpu*))
+        __simple_sandbox_end = .;
+    }
+
     /* Initialized data */
     .data ALIGN(4K) :
     {

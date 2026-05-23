@@ -2281,12 +2281,55 @@ fn render_sandbox_lowering(module: &HirModule, gates: &[HirSecurityGate]) -> Str
             .collect();
         if !rules.is_empty() {
             out.push_str("    policy_rules:\n");
-            for (key, value) in rules {
+            for (key, value) in &rules {
                 out.push_str(&format!("      {}: {}\n", key, value));
             }
         }
+        if lowered_backend == "baremetal_mpu_linker_regions" {
+            render_baremetal_sandbox_lowering(&mut out, &sandbox.name, &rules);
+        }
     }
     out
+}
+
+fn render_baremetal_sandbox_lowering(out: &mut String, sandbox_name: &str, rules: &[(&str, &str)]) {
+    let section_suffix = security_section_suffix(sandbox_name);
+    out.push_str("    baremetal:\n");
+    out.push_str(&format!("      sandbox_id: {}\n", security_metadata_id(sandbox_name)));
+    out.push_str(&format!(
+        "      static_capability_section: .simple.sandbox.{}\n",
+        section_suffix
+    ));
+    out.push_str(&format!("      mpu_section: .simple.mpu.{}\n", section_suffix));
+    out.push_str("      linker_start: __simple_sandbox_start\n");
+    out.push_str("      linker_end: __simple_sandbox_end\n");
+    out.push_str("      mpu_attributes:\n");
+    let mut emitted = false;
+    for (key, value) in rules {
+        if matches!(*key, "memory" | "region" | "mmio" | "fs" | "net" | "cpu") {
+            out.push_str(&format!("        {}: {}\n", key, value));
+            emitted = true;
+        }
+    }
+    if !emitted {
+        out.push_str("        default: deny_ambient\n");
+    }
+}
+
+fn security_section_suffix(value: &str) -> String {
+    let mut suffix = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            suffix.push(ch);
+        } else {
+            suffix.push('_');
+        }
+    }
+    if suffix.is_empty() {
+        "sandbox".to_string()
+    } else {
+        suffix
+    }
 }
 
 fn sandbox_source_backend(items: &[HirSandboxItem]) -> String {

@@ -248,6 +248,90 @@ sandbox plugin_sandbox:
 }
 
 #[test]
+fn lowers_baremetal_sandbox_to_mpu_linker_sections() {
+    let module = lower(
+        r#"security gate DriverGate:
+    sandbox driver_sandbox
+    grant:
+        ReadDir["/drivers"]
+
+sandbox driver_sandbox:
+    backend baremetal
+    memory kernel_driver rw
+    mmio uart0 rw
+"#,
+    );
+
+    let inventory = build_security_inventory(&module);
+    assert!(inventory
+        .sandbox_lowering_sdn
+        .contains("lowered_backend: baremetal_mpu_linker_regions"));
+    assert!(inventory.sandbox_lowering_sdn.contains("linker_sections"));
+    assert!(inventory.sandbox_lowering_sdn.contains("mpu_regions"));
+    assert!(inventory.sandbox_lowering_sdn.contains("static_capability_table"));
+    assert!(inventory.sandbox_lowering_sdn.contains("baremetal:"));
+    assert!(inventory.sandbox_lowering_sdn.contains("sandbox_id:"));
+    assert!(inventory
+        .sandbox_lowering_sdn
+        .contains("static_capability_section: .simple.sandbox.driver_sandbox"));
+    assert!(inventory
+        .sandbox_lowering_sdn
+        .contains("mpu_section: .simple.mpu.driver_sandbox"));
+    assert!(inventory
+        .sandbox_lowering_sdn
+        .contains("linker_start: __simple_sandbox_start"));
+    assert!(inventory
+        .sandbox_lowering_sdn
+        .contains("linker_end: __simple_sandbox_end"));
+    assert!(inventory.sandbox_lowering_sdn.contains("memory:"));
+    assert!(inventory.sandbox_lowering_sdn.contains("mmio:"));
+}
+
+#[test]
+fn baremetal_linker_scripts_keep_sandbox_metadata_sections() {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .expect("compiler crate is under src/compiler_rust/compiler");
+    let scripts = [
+        "src/os/kernel/arch/riscv64/fpga_linker.ld",
+        "src/os/kernel/arch/riscv64/platform/fpga_linker.ld",
+        "src/os/kernel/arch/riscv64/linker.ld",
+        "src/os/kernel/arch/riscv32/linker.ld",
+        "src/os/kernel/arch/arm64/linker.ld",
+        "src/os/kernel/arch/arm32/linker.ld",
+        "src/os/kernel/arch/x86_64/linker.ld",
+        "src/os/kernel/arch/x86_32/linker.ld",
+    ];
+
+    for script in scripts {
+        let text = std::fs::read_to_string(repo_root.join(script)).expect(script);
+        assert!(
+            text.contains("__simple_sandbox_start"),
+            "{} missing sandbox start symbol",
+            script
+        );
+        assert!(
+            text.contains("__simple_sandbox_end"),
+            "{} missing sandbox end symbol",
+            script
+        );
+        assert!(
+            text.contains("KEEP(*(.simple.sandbox*))"),
+            "{} missing sandbox KEEP section",
+            script
+        );
+        assert!(
+            text.contains("KEEP(*(.simple.mpu*))"),
+            "{} missing MPU KEEP section",
+            script
+        );
+    }
+}
+
+#[test]
 fn renders_security_boundary_aspect_from_policy_rules() {
     let module = lower(
         r#"security AppSecurity:

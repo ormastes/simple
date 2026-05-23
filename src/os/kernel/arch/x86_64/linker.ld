@@ -56,6 +56,14 @@ SECTIONS
         *(.rodata.*)
     } :rodata
 
+    .simple_sandbox ALIGN(4096) : AT(ADDR(.simple_sandbox) - 0xFFFFFFFF80000000)
+    {
+        __simple_sandbox_start = .;
+        KEEP(*(.simple.sandbox*))
+        KEEP(*(.simple.mpu*))
+        __simple_sandbox_end = .;
+    } :rodata
+
     /* Initialized data */
     .data ALIGN(4096) : AT(ADDR(.data) - 0xFFFFFFFF80000000)
     {

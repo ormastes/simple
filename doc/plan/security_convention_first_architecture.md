@@ -1216,6 +1216,7 @@ Sandbox:
     lower to WASI/capability model for plugins
     lower to native object-capability handles in Simple OS
     enforce WASI env/preopen grants with explicit capability tables
+    keep baremetal .simple.sandbox* and .simple.mpu* sections and fail closed when metadata is missing
 
 DI:
     inject gates and SecurityContext like normal dependencies
@@ -1230,7 +1231,7 @@ Output:
     audit/security report
 
 Remaining implementation after generated lowering:
-    enforce lowered sandbox plans in baremetal MPU backends
+    add hardware-specific baremetal MPU/PMP register programming from generated metadata
     add production adapters for external replicated remote SecurityContext session storage and KMS/HSM-backed key rollout
 
 The minimal example should look like this:

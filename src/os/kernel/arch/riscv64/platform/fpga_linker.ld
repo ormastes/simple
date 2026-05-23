@@ -41,6 +41,13 @@ SECTIONS {
         *(.srodata*)
     } > DDR
 
+    .simple_sandbox : ALIGN(4K) {
+        __simple_sandbox_start = .;
+        KEEP(*(.simple.sandbox*))
+        KEEP(*(.simple.mpu*))
+        __simple_sandbox_end = .;
+    } > DDR
+
     /* Initialized read-write data */
     .data : ALIGN(4K) {
         *(.data*)
