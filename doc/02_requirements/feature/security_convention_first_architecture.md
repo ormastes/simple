@@ -71,8 +71,10 @@ REQ-032: Remote `SecurityContext` validation shall expose hosted adapter seams f
 
 REQ-033: RISC-V baremetal sandbox support shall convert generated `pmp_region|base|size|permissions|locked` lowering metadata into concrete `pmpaddrN` and `pmpcfgN` CSR write plans, including NAPOT address encoding and locked read/write/execute PMP config bytes.
 
+REQ-034: Hosted remote `SecurityContext` session storage shall provide a concrete Redis-backed deployment store using the existing Redis client, preserve the SDN session row format, use Redis TTLs for active expiry, and write revoked sessions as bounded tombstones instead of deleting them.
+
 ## Deferred Requirements
 
-DEF-001: Concrete deployment clients for Redis/quorum session stores and specific KMS/HSM vendors remain future work beyond the hosted adapter seams, SDN persistence, merge, rotation, and retirement primitives.
+DEF-001: Concrete quorum session-store behavior and specific KMS/HSM vendor clients remain future work beyond the hosted adapter seams, Redis session deployment store, SDN persistence, merge, rotation, and retirement primitives.
 
 DEF-002: Non-RISC-V MPU backends and boot-time CSR/MMIO apply hooks remain future work beyond deterministic linker-section metadata, fail-closed static-section installation, hosted runtime checks, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, Simple VM host-import filtering, SimpleOS kernel capability installation, and RISC-V PMP CSR write-plan generation.

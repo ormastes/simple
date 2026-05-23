@@ -6,7 +6,7 @@ Concrete Redis-backed deployment store for remote `SecurityContext` sessions.
 
 use std.common.io.types.{IoError}
 use std.nogc_sync_mut.redis.client.{RedisClient}
-use std.security.types.{RemoteSecuritySession, RemoteSecuritySessionStore, time_now_ms}
+use std.security.types.{RemoteSecuritySession, time_now_ms}
 
 class RemoteSecurityRedisSessionStore:
     """Redis-backed remote security session store.
@@ -94,11 +94,16 @@ fn remote_security_redis_encode_session(session: RemoteSecuritySession) -> text:
     "session|{session.session_id}|{session.user_id}|{session.expires_at_ms}|{revoked}|{session.capabilities.join(\",\")}"
 
 fn remote_security_redis_decode_session(payload: text) -> RemoteSecuritySession?:
-    var store = RemoteSecuritySessionStore.new()
-    store.load_sdn(payload)
     val parts = payload.split("|")
-    if parts.len() >= 2:
-        return store.lookup_session(parts[1])
+    if parts.len() >= 6 and parts[0] == "session":
+        val capabilities = if parts[5] == "": [] else: parts[5].split(",")
+        return Some(RemoteSecuritySession(
+            session_id: parts[1],
+            user_id: parts[2],
+            capabilities: capabilities,
+            expires_at_ms: parts[3].to_i64() ?? 0,
+            revoked: parts[4] == "true"
+        ))
     nil
 
 fn remote_security_redis_session_ttl_seconds(session: RemoteSecuritySession, now_ms: i64, tombstone_ttl_seconds: i64) -> i64:
