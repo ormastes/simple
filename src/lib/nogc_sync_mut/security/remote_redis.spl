@@ -1,0 +1,112 @@
+"""
+# Remote Security Redis Session Store
+
+Concrete Redis-backed deployment store for remote `SecurityContext` sessions.
+"""
+
+use std.common.io.types.{IoError}
+use std.nogc_sync_mut.redis.client.{RedisClient}
+use std.security.types.{RemoteSecuritySession, RemoteSecuritySessionStore, time_now_ms}
+
+class RemoteSecurityRedisSessionStore:
+    """Redis-backed remote security session store.
+
+    Revocation writes a tombstone payload with a bounded TTL instead of deleting
+    the key, so replicas do not accidentally resurrect a revoked session.
+    """
+    client: RedisClient
+    namespace: text
+    tombstone_ttl_seconds: i64
+
+    static fn with_client(client: RedisClient, namespace: text) -> RemoteSecurityRedisSessionStore:
+        RemoteSecurityRedisSessionStore(
+            client: client,
+            namespace: namespace,
+            tombstone_ttl_seconds: 86400
+        )
+
+    static fn with_tombstone_ttl(client: RedisClient, namespace: text, tombstone_ttl_seconds: i64) -> RemoteSecurityRedisSessionStore:
+        RemoteSecurityRedisSessionStore(
+            client: client,
+            namespace: namespace,
+            tombstone_ttl_seconds: tombstone_ttl_seconds
+        )
+
+impl RemoteSecurityRedisSessionStore:
+    fn make_key(session_id: text) -> text:
+        "{self.namespace}:{session_id}"
+
+    me save_session(session: RemoteSecuritySession) -> Result<(), IoError>:
+        val key = self.make_key(session.session_id)
+        val payload = remote_security_redis_encode_session(session)
+        val ttl = remote_security_redis_session_ttl_seconds(session, time_now_ms(), self.tombstone_ttl_seconds)
+        self.client.set_ex(key, payload, ttl)
+
+    me create_session(session_id: text, user_id: text, capabilities: List<text>, expires_at_ms: i64) -> Result<(), IoError>:
+        self.save_session(RemoteSecuritySession(
+            session_id: session_id,
+            user_id: user_id,
+            capabilities: capabilities,
+            expires_at_ms: expires_at_ms,
+            revoked: false
+        ))
+
+    me lookup_session(session_id: text) -> Result<RemoteSecuritySession?, IoError>:
+        val raw = self.client.get(self.make_key(session_id))?
+        if not raw.?:
+            return Ok(nil)
+        Ok(remote_security_redis_decode_session(raw.unwrap()))
+
+    me lookup_active_session(session_id: text, now_ms: i64) -> Result<RemoteSecuritySession?, IoError>:
+        val session = self.lookup_session(session_id)?
+        if session.?:
+            val loaded = session.unwrap()
+            if loaded.is_active(now_ms):
+                return Ok(Some(loaded))
+        Ok(nil)
+
+    me refresh_session(session_id: text, expires_at_ms: i64) -> Result<bool, IoError>:
+        val session = self.lookup_session(session_id)?
+        if not session.?:
+            return Ok(false)
+        val loaded = session.unwrap()
+        if loaded.revoked:
+            return Ok(false)
+        self.save_session(loaded.refreshed(expires_at_ms))?
+        Ok(true)
+
+    me revoke_session(session_id: text) -> Result<bool, IoError>:
+        val session = self.lookup_session(session_id)?
+        if not session.?:
+            return Ok(false)
+        val loaded = session.unwrap()
+        self.save_session(RemoteSecuritySession(
+            session_id: loaded.session_id,
+            user_id: loaded.user_id,
+            capabilities: loaded.capabilities,
+            expires_at_ms: loaded.expires_at_ms,
+            revoked: true
+        ))?
+        Ok(true)
+
+fn remote_security_redis_encode_session(session: RemoteSecuritySession) -> text:
+    val revoked = if session.revoked: "true" else: "false"
+    "session|{session.session_id}|{session.user_id}|{session.expires_at_ms}|{revoked}|{session.capabilities.join(\",\")}"
+
+fn remote_security_redis_decode_session(payload: text) -> RemoteSecuritySession?:
+    var store = RemoteSecuritySessionStore.new()
+    store.load_sdn(payload)
+    val parts = payload.split("|")
+    if parts.len() >= 2:
+        return store.lookup_session(parts[1])
+    nil
+
+fn remote_security_redis_session_ttl_seconds(session: RemoteSecuritySession, now_ms: i64, tombstone_ttl_seconds: i64) -> i64:
+    if session.revoked:
+        if tombstone_ttl_seconds > 0:
+            return tombstone_ttl_seconds
+        return 1
+    val remaining_ms = session.expires_at_ms - now_ms
+    if remaining_ms <= 0:
+        return 1
+    ((remaining_ms + 999) / 1000)

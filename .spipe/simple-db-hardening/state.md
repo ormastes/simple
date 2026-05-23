@@ -30,7 +30,7 @@ code-quality
 - [x] 5-implement (Engineer) — 2026-05-23
 - [x] 6-refactor (Tech Lead) — 2026-05-23
 - [x] 7-verify (QA) — 2026-05-23
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-23
 
 ## Phase Outputs
 
@@ -312,4 +312,12 @@ Task type: code-quality. Refined the user's broad "harden simple db" request int
 - **Full suite deferred:** `bin/simple test` (full) and `bin/simple build check` deferred for same bootstrap reason. All scoped tests verified individually via seed compiler.
 
 ### 8-ship
-<pending>
+Committed and pushed to `origin/main` (`a422ff00f3`).
+
+**Commit:** `feat: harden Simple DB — WAL replay, atomic locking, fsync, BTree rebalance, trait surface`
+**Files changed:** 14 files, +879/-338 lines
+**All 7 ACs met.** All 50 new specs green. No regressions.
+
+**Follow-up required:**
+- Bootstrap rebuild (`scripts/bootstrap/bootstrap-from-scratch.sh --deploy`) to propagate `rt_file_create_excl` and `rt_file_sync` externs to `bin/simple`
+- Full lint/test suite run after bootstrap

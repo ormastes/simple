@@ -28,7 +28,7 @@ and replay/rewind debugging.
 | STM32H7 / STM32WB via TRACE32 | `Trace32Adapter` | arm32 | Lauterbach TRACE32 | host_aware |
 | CH32V307 (RISC-V) | `Ch32V307Adapter` | riscv32 | WCH-Link (wlink CLI) | host_aware |
 | Arduino UNO R4 WiFi (RA4M1, Cortex-M4) | `ArduinoR4Adapter` | arm32 | CMSIS-DAP / SWD | in_progress |
-| Arduino UNO Q (STM32U585, Cortex-M33) | `UnoQAdapter` | arm32 | OpenOCD + ext. probe (JCTL) | in_progress |
+| Arduino UNO Q (STM32U585, Cortex-M33 + QRB2210 MPU) | `UnoQAdapter` | arm32 | OpenOCD + FT4232H/Lauterbach on JCTL | in_progress |
 | ESP32 (Xtensa LX6, dual-core) | `Esp32Adapter` | xtensa | ESP-USB-Bridge / JTAG | in_progress |
 | Zynq-7020 ZedBoard (FPGA) | — | arm32 | OpenOCD + Platform Cable | excluded_public |
 
@@ -379,15 +379,20 @@ of truth for all 16 remote execution lanes.
 - **FPGA:** Custom RISC-V soft core, programmed via Vivado
 
 ### Arduino UNO Q
-- **Board:** Arduino UNO Q (ABX00162), dual-chip: QRB2210 MPU (Linux) + STM32U585 MCU
-- **MCU:** STM32U585, Cortex-M33 @ 160 MHz, 2 MB flash, 786 KB SRAM
+- **Board:** Arduino UNO Q (ABX00162), dual-chip: QRB2210 MPU (Linux/Android) + STM32U585 MCU
+- **USB ID:** `2341:0078` (Arduino SA), firmware `6.16`, bus-powered 120 mA
+- **MCU:** STM32U585, Cortex-M33 (ARMv8-M) @ 160 MHz, 2 MB flash, 786 KB SRAM
+- **MPU:** Qualcomm QRB2210 (aarch64), runs Linux/Android, accessible via ADB
 - **SRAM:** SRAM1 192 KB at `0x20000000`, code region at `0x20002000` (SRAM1-only conservative layout)
-- **Debug:** External SWD/JTAG probe on JCTL header, OpenOCD with `target/stm32u5x.cfg`
+- **USB Interfaces:** IF0 = ADB (vendor-specific class 255/66/1), IF1 = CDC ACM serial, IF2 = CDC data
+- **Serial:** `/dev/ttyACM1` → `/dev/serial/by-id/usb-Arduino_Uno_Q_-_uno-q_3655308719-if01`
+- **ADB:** Serial `3655308719`, requires udev rule: `SUBSYSTEM=="usb", ATTR{idVendor}=="2341", ATTR{idProduct}=="0078", MODE="0666", GROUP="plugdev"` in `/etc/udev/rules.d/51-arduino-uno-q.rules`
+- **Debug (MCU):** External SWD/JTAG probe on JCTL header, OpenOCD 0.12+ with `target/stm32u5x.cfg`
 - **Connection:** OpenOCD telnet on port 27444 + GDB on port 27333
-- **Serial:** `/dev/serial/by-id/usb-Arduino_Uno_Q_-_uno-q_3655308719-if01` (CDC ACM, application-level only)
-- **Probe:** Bring-your-own ST-Link/J-Link/CMSIS-DAP probe; default config `interface/stlink.cfg`
-- **Note:** No built-in debug interface (unlike R4 WiFi); TrustZone deferred; DFU bootloader available for flash-only workflow
-- **Status:** SRAM adapter implemented, E2E gated on external probe availability
+- **Available Probes:** FT4232H (FTDI, `interface/ftdi/ft4232h-swd.cfg`) or Lauterbach Power Debug II; no ST-Link present on host
+- **Note:** No built-in debug interface for MCU (unlike R4 WiFi which has CMSIS-DAP); TrustZone deferred; DFU bootloader available
+- **Verified:** 2026-05-23 — board connected, ttyACM1 confirmed, ADB visible but needs udev rules
+- **Status:** SRAM adapter implemented (`adapter_uno_q.spl`), ADB access pending udev fix, MCU debug gated on SWD probe wiring to JCTL
 
 ### GHDL Simulated RV32
 - **Target:** VHDL-simulated RISC-V 32-bit core
@@ -416,3 +421,46 @@ of truth for all 16 remote execution lanes.
 | Embedded Examples | `examples/09_embedded/` |
 | QEMU OS Tests | `test/qemu/os/` |
 | Integration Specs | `test/integration/remote_jit/` |
+
+---
+
+## 9. Host Environment (Verified 2026-05-23)
+
+Development host: Linux 6.8.0-117-generic, x86_64.
+
+### 9.1 Connected Boards
+
+| Device | USB ID | Serial Port | Serial # | Status |
+|--------|--------|-------------|----------|--------|
+| Arduino Uno Q (ABX00162) | `2341:0078` | `/dev/ttyACM1` | `3655308719` | Connected, ADB needs udev rule |
+| Arduino UNO WiFi R4 CMSIS-DAP | `2341:1002` | `/dev/ttyACM0` | `9C139E9B4B9C` | Connected, CMSIS-DAP ready |
+| Espressif USB JTAG | — | `/dev/ttyACM2` | `88:56:A6:7C:2C:88` | Connected |
+| Xilinx ML Carrier (KV260) | — | `/dev/ttyUSB2,4,5` | `XFL1OSWWFM2B` | Connected |
+
+### 9.2 Debug Probes
+
+| Probe | USB ID | Status |
+|-------|--------|--------|
+| FTDI FT4232H Quad HS | `0403:6011` | Connected (usable as SWD via OpenOCD) |
+| Lauterbach Power Debug II | `0897:0002` | Connected |
+| Arduino R4 CMSIS-DAP (built-in) | `2341:1002` | Connected |
+
+### 9.3 Uno Q ADB Setup
+
+The QRB2210 MPU side requires a udev rule for ADB access:
+
+```bash
+sudo sh -c 'echo "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"2341\", ATTR{idProduct}==\"0078\", MODE=\"0666\", GROUP=\"plugdev\"" > /etc/udev/rules.d/51-arduino-uno-q.rules'
+sudo udevadm control --reload-rules && sudo udevadm trigger
+adb kill-server && adb devices
+```
+
+### 9.4 Installed Tools
+
+| Tool | Version | Path |
+|------|---------|------|
+| OpenOCD | 0.12.0 | system |
+| gdb-multiarch | installed | system |
+| clang (ARM target) | installed | system |
+| llvm-objcopy | installed | system |
+| adb | installed | system |

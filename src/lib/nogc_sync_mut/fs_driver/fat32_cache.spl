@@ -1,0 +1,106 @@
+# FAT32 cache layer — three caches used by Fat32Core.
+#
+# FatSectorCache: caches raw sector buffers keyed on sector number (u64).
+# ChainCache:     caches full cluster chains keyed on start_cluster (u32).
+# PathCache:      caches resolved DirEntry values keyed on canonical path (text).
+#
+# All three are held as fields on Fat32Core (one instance per mount).
+# Invalidation helpers are called by fat32_dir_ops on mutation ops.
+
+use std.fs_driver.types.{DirEntry}
+
+# ============================================================================
+# FatSectorCache
+# ============================================================================
+
+class FatSectorCache:
+    sectors: Dict<u64, [u8]>
+    max_size: i32
+
+    static fn new(max_size: i32) -> FatSectorCache:
+        FatSectorCache(
+            sectors: {},
+            max_size: max_size
+        )
+
+    me fn get(sector: u64) -> [u8]?:
+        self.sectors.get(sector)
+
+    me fn put(sector: u64, data: [u8]):
+        # Evict all when full (D-2: simple evict-all policy).
+        var s = self.sectors
+        if s.keys().len() as i32 >= self.max_size:
+            s = {}
+        s.set(sector, data)
+        self.sectors = s
+
+    me fn update(sector: u64, data: [u8]):
+        var s = self.sectors
+        s.set(sector, data)
+        self.sectors = s
+
+    me fn invalidate(sector: u64):
+        var s = self.sectors
+        s.delete(sector)
+        self.sectors = s
+
+    me fn clear():
+        self.sectors = {}
+
+# ============================================================================
+# ChainCache
+# ============================================================================
+
+class ChainCache:
+    chains: Dict<u32, [u32]>
+
+    static fn new() -> ChainCache:
+        ChainCache(chains: {})
+
+    me fn get_chain(start_cluster: u32) -> [u32]?:
+        self.chains.get(start_cluster)
+
+    me fn put_chain(start_cluster: u32, chain: [u32]):
+        var c = self.chains
+        c.set(start_cluster, chain)
+        self.chains = c
+
+    me fn invalidate(start_cluster: u32):
+        var c = self.chains
+        c.delete(start_cluster)
+        self.chains = c
+
+    me fn clear():
+        self.chains = {}
+
+# ============================================================================
+# PathCache
+# ============================================================================
+
+class PathCache:
+    entries: Dict<text, DirEntry>
+
+    static fn new() -> PathCache:
+        PathCache(entries: {})
+
+    me fn get(path: text) -> DirEntry?:
+        self.entries.get(path)
+
+    me fn put(path: text, entry: DirEntry):
+        var e = self.entries
+        e.set(path, entry)
+        self.entries = e
+
+    me fn invalidate_prefix(prefix: text):
+        var e = self.entries
+        val ks = e.keys()
+        var i = 0
+        while i < ks.len():
+            val k = ks[i]
+            if k.starts_with(prefix):
+                e.delete(k)
+            i = i + 1
+        self.entries = e
+
+    me fn clear():
+        self.entries = {}
