@@ -221,6 +221,13 @@ class RemoteSecuritySigningKeyRing:
     active_key_id: text
     keys: Dict<text, text>
 
+    static fn empty() -> RemoteSecuritySigningKeyRing:
+        val empty_keys: Dict<text, text> = {}
+        var ring = RemoteSecuritySigningKeyRing.new("__empty__", "")
+        ring.active_key_id = ""
+        ring.keys = empty_keys
+        ring
+
     static fn new(active_key_id: text, signing_key: text) -> RemoteSecuritySigningKeyRing:
         RemoteSecuritySigningKeyRing(
             active_key_id: active_key_id,
@@ -233,6 +240,39 @@ class RemoteSecuritySigningKeyRing:
     me rotate_key(key_id: text, signing_key: text):
         self.keys = self.keys.set(key_id, signing_key)
         self.active_key_id = key_id
+
+    me retire_key(key_id: text):
+        if self.keys.has(key_id):
+            self.keys = self.keys.set(key_id, "")
+        if self.active_key_id == key_id:
+            self.active_key_id = ""
+
+    me merge_from(peer: RemoteSecuritySigningKeyRing):
+        for key_id in peer.keys.keys():
+            self.keys = self.keys.set(key_id, peer.keys[key_id])
+        if peer.active_key_id != "":
+            self.active_key_id = peer.active_key_id
+
+    fn export_sdn() -> text:
+        var lines: [text] = ["remote_security_key_ring:", "  active: {self.active_key_id}"]
+        for key_id in self.keys.keys():
+            lines.push("  key|{key_id}|{self.keys[key_id]}")
+        lines.join("\n")
+
+    static fn from_sdn(sdn: text) -> RemoteSecuritySigningKeyRing:
+        var ring = RemoteSecuritySigningKeyRing.empty()
+        ring.load_sdn(sdn)
+        ring
+
+    me load_sdn(sdn: text):
+        for raw_line in sdn.split("\n"):
+            val line = raw_line.trim()
+            if line.starts_with("active:"):
+                self.active_key_id = line[7:].trim()
+            elif line.starts_with("key|"):
+                val parts = line.split("|")
+                if parts.len() >= 3:
+                    self.keys = self.keys.set(parts[1], parts[2])
 
     fn active_key() -> text:
         if self.keys.has(self.active_key_id):
@@ -267,7 +307,8 @@ class RemoteSecuritySessionStore:
     sessions: Dict<text, RemoteSecuritySession>
 
     static fn new() -> RemoteSecuritySessionStore:
-        RemoteSecuritySessionStore(sessions: {})
+        val empty_sessions: Dict<text, RemoteSecuritySession> = {}
+        RemoteSecuritySessionStore(sessions: empty_sessions)
 
     me create_session(session_id: text, user_id: text, capabilities: List<text>, expires_at_ms: i64):
         self.sessions = self.sessions.set(session_id, RemoteSecuritySession(
@@ -280,6 +321,46 @@ class RemoteSecuritySessionStore:
 
     me save_session(session: RemoteSecuritySession):
         self.sessions = self.sessions.set(session.session_id, session)
+
+    fn export_sdn() -> text:
+        var lines: [text] = ["remote_security_sessions:"]
+        for session_id in self.sessions.keys():
+            val session = self.sessions[session_id]
+            val revoked = if session.revoked: "true" else: "false"
+            lines.push("  session|{session.session_id}|{session.user_id}|{session.expires_at_ms}|{revoked}|{session.capabilities.join(\",\")}")
+        lines.join("\n")
+
+    static fn from_sdn(sdn: text) -> RemoteSecuritySessionStore:
+        var store = RemoteSecuritySessionStore.new()
+        store.load_sdn(sdn)
+        store
+
+    me load_sdn(sdn: text):
+        for raw_line in sdn.split("\n"):
+            val line = raw_line.trim()
+            if line.starts_with("session|"):
+                val parts = line.split("|")
+                if parts.len() >= 6:
+                    val capabilities = if parts[5] == "": [] else: parts[5].split(",")
+                    self.save_session(RemoteSecuritySession(
+                        session_id: parts[1],
+                        user_id: parts[2],
+                        capabilities: capabilities,
+                        expires_at_ms: parts[3].to_i64() ?? 0,
+                        revoked: parts[4] == "true"
+                    ))
+
+    me merge_from(peer: RemoteSecuritySessionStore):
+        for session_id in peer.sessions.keys():
+            val incoming = peer.sessions[session_id]
+            if not self.sessions.has(session_id):
+                self.save_session(incoming)
+            else:
+                val local = self.sessions[session_id]
+                if incoming.revoked:
+                    self.save_session(incoming)
+                elif not local.revoked and incoming.expires_at_ms > local.expires_at_ms:
+                    self.save_session(incoming)
 
     fn lookup_session(session_id: text) -> RemoteSecuritySession?:
         self.sessions.get(session_id)

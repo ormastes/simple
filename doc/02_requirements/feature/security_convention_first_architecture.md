@@ -55,8 +55,10 @@ REQ-024: Future fiber runtimes shall have an explicit current-task identity brid
 
 REQ-025: SimpleOS kernel capability management shall install generated `sandbox_lowering.sdn` capability handles as pledged per-task `CapabilitySet` records so syscall capability checks deny ungranted authority.
 
+REQ-026: Remote `SecurityContext` lifecycle state shall support SDN export/import for signing key rings and session stores, distributed merge of later session refreshes and revocations, and explicit key retirement for operational rollout.
+
 ## Deferred Requirements
 
-DEF-001: Durable/distributed remote `SecurityContext` session storage and operational key rollout remain future work beyond local key-ring and session-store lifecycle primitives.
+DEF-001: Production adapters for external replicated session storage and KMS/HSM-backed signing key rollout remain future work beyond SDN persistence, merge, rotation, and retirement primitives.
 
 DEF-002: Full backend syscall isolation for Landlock/seccomp, WASI, baremetal MPU, and broader VM host-import filters remains future work beyond hosted runtime checks and SimpleOS kernel capability installation.

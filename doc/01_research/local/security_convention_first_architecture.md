@@ -68,9 +68,10 @@ This pass added the first convention-first architecture slice:
 - Hosted runtime sandbox entry now activates lowered capability-handle policy so runtime-managed privileged APIs can reject ungranted capability IDs while a sandbox is active.
 - Runtime fiber identity hooks now let future fiber schedulers enter/restore a current task id that participates in native `rt_current_task_id` selection for task-scoped `SecurityContext`.
 - SimpleOS kernel capability management now installs generated sandbox lowering capability handles as pledged per-task `CapabilitySet` records, so existing syscall checks deny ungranted authority.
+- Remote `SecurityContext` session stores and signing key rings now support SDN export/import, distributed merge of later session refreshes and revocations, and explicit key retirement for operational rollout.
 
 ## Remaining Gaps
 
-- Remote `SecurityContext` transport/reconstruction has safe HTTP dispatch, HMAC token validation, local key-ring rotation, session lookup, refresh, and revocation; durable/distributed session storage and operational key rollout remain future work.
+- Remote `SecurityContext` transport/reconstruction has safe HTTP dispatch, HMAC token validation, local key-ring rotation, SDN persistence, session lookup, refresh, revocation, merge, and key retirement; production external replicated storage and KMS/HSM adapters remain future work.
 - Task-local context helpers, HostScheduler task identity, Rust cooperative async current-task-id exposure, FutureExecutor current-task-id exposure, fiber identity hooks, native `rt_current_task_id` selection across Rust runtime identities, and Simple `current_unified_task_key` selection exist.
 - Sandbox manifest generation, backend lowering artifacts, hosted runtime registry installation, hosted capability-handle enforcement, and SimpleOS kernel capability installation exist for declared sandboxes/gates; broader Landlock/seccomp, WASI, baremetal MPU, and VM host-import isolation remains future work.

@@ -1230,7 +1230,7 @@ Output:
 
 Remaining implementation after generated lowering:
     enforce lowered sandbox plans in Landlock/seccomp, WASI, baremetal MPU, and broader VM host-import backends
-    add durable/distributed remote SecurityContext session storage and operational key rollout
+    add production adapters for external replicated remote SecurityContext session storage and KMS/HSM-backed key rollout
 
 The minimal example should look like this:
 
