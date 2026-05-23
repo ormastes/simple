@@ -208,6 +208,23 @@ pub fn rt_file_fsync_cached(args: &[Value]) -> Result<Value, CompileError> {
     rt_file_fsync(args)
 }
 
+/// Atomically create a file (O_EXCL semantics). Returns false if the file already exists.
+pub fn rt_file_create_excl(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let content = extract_content(args, 1)?;
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true) // O_CREAT | O_EXCL
+        .open(&path)
+    {
+        Ok(mut file) => {
+            let ok = file.write_all(content.as_bytes()).is_ok();
+            Ok(Value::Bool(ok))
+        }
+        Err(_) => Ok(Value::Bool(false)),
+    }
+}
+
 /// Write text at an absolute byte offset without rewriting the full file.
 pub fn rt_file_write_text_at(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;

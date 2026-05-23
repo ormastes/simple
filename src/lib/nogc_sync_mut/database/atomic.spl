@@ -25,6 +25,8 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_rename(from: text, to: text) -> bool
+extern fn rt_file_create_excl(path: text, content: text) -> bool
+extern fn rt_file_sync(path: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
@@ -126,7 +128,7 @@ class FileLock:
 
         false
 
-    # Try to create lock file
+    # Try to create lock file (atomic via O_EXCL)
     me try_create_lock() -> bool:
         # Check if lock file exists and is stale
         if file_exists(self.lock_path):
@@ -136,10 +138,10 @@ class FileLock:
             else:
                 return false
 
-        # Create lock file with PID
+        # Atomically create lock file with PID (O_EXCL prevents TOCTOU race)
         val pid = rt_getpid()
         val lock_content = "{pid}\n{get_timestamp()}"
-        file_write(self.lock_path, lock_content)
+        rt_file_create_excl(self.lock_path, lock_content)
 
     # Check if lock is stale (>2 hours old or process dead)
     fn is_stale_lock() -> bool:
@@ -219,6 +221,9 @@ fn atomic_write(path: text, content: text) -> bool:
         lock.release()
         return false
 
+    # Flush to durable storage before rename (crash safety)
+    rt_file_sync(temp_path)
+
     # Rename temp to actual (atomic on Unix)
     val success = rt_file_rename(temp_path, path)
 
@@ -279,6 +284,11 @@ fn atomic_write_batch(paths: [text], contents: [text]) -> bool:
             return false
         wrote = wrote + 1
 
+    # Flush all temp files to durable storage before rename (crash safety)
+    for idx in sorted_indices:
+        val temp_path = paths[idx] + ".tmp"
+        rt_file_sync(temp_path)
+
     # Rename all temp files to final paths
     var renamed: i64 = 0
     var all_ok = true
@@ -316,6 +326,9 @@ fn atomic_append(path: text, content: text) -> bool:
     if not file_write(temp_path, new_content):
         lock.release()
         return false
+
+    # Flush to durable storage before rename (crash safety)
+    rt_file_sync(temp_path)
 
     # Rename temp to actual
     val success = rt_file_rename(temp_path, path)

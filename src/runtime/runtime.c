@@ -1374,6 +1374,26 @@ int         rt_file_fsync(const char* path) {
 int         rt_file_fsync_cached(const char* path) {
     return rt_file_fsync(path);
 }
+int         rt_file_sync(const char* path) {
+    return rt_file_fsync(path);
+}
+int         rt_file_create_excl(const char* path, const char* content) {
+    if (!path) return 0;
+    int fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0644);
+    if (fd < 0) return 0;
+    if (content) {
+        size_t len = strlen(content);
+        if (len > 0) {
+            ssize_t w = write(fd, content, len);
+            if (w < 0 || (size_t)w != len) {
+                close(fd);
+                return 0;
+            }
+        }
+    }
+    close(fd);
+    return 1;
+}
 
 int64_t rt_file_stat(const char* path) {
     struct stat st;

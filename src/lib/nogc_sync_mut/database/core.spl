@@ -20,7 +20,7 @@
 #   file_write("doc/08_tracking/bug/bug_db.sdn", content)  // ❌ Race condition!
 
 use nogc_sync_mut.database.atomic (atomic_write, atomic_read)
-use nogc_sync_mut.database.wal (WriteAheadLog, WalEntry, WalEntryType)
+use nogc_sync_mut.database.wal (WriteAheadLog, WalEntry, WalEntryType, wal_payload_to_row)
 use nogc_sync_mut.database.db_metrics (DbMetrics)
 # Minimal StringId definition (avoids external dependency during bootstrap)
 struct StringId:
@@ -408,9 +408,14 @@ class SdnDatabase:
                 if entry.entry_type == WalEntryType.Insert or entry.entry_type == WalEntryType.Update:
                     if db.tables.contains_key(entry.table_name):
                         var t = db.tables[entry.table_name]
-                        val replayed_row = SdnRow(fields: {}, _version: 0)
-                        t.add_row(replayed_row)
-                        db.tables[entry.table_name] = t
+                        val row_opt = wal_payload_to_row(entry.data, t.columns)
+                        if row_opt.?:
+                            val replayed_row = row_opt.unwrap()
+                            if entry.entry_type == WalEntryType.Update:
+                                t.update_row(entry.row_key, replayed_row)
+                            else:
+                                t.add_row(replayed_row)
+                            db.tables[entry.table_name] = t
                 elif entry.entry_type == WalEntryType.Delete:
                     if db.tables.contains_key(entry.table_name):
                         var t = db.tables[entry.table_name]

@@ -2,6 +2,9 @@
 # Format: one entry per line, pipe-separated: seq|type|table|key|data|timestamp
 
 use nogc_sync_mut.database.atomic (atomic_write, atomic_read, atomic_append, get_timestamp)
+use nogc_sync_mut.database.core (SdnRow, split_sdn_row)
+
+extern fn rt_file_exists(path: text) -> bool
 
 enum WalEntryType:
     Insert
@@ -86,6 +89,9 @@ class WriteAheadLog:
         )
 
     me append(entry: WalEntry) -> bool:
+        # Write version header on first append to a new WAL file
+        if not rt_file_exists(self.path):
+            atomic_write(self.path, "#wal-version:2\n")
         self.sequence_counter = self.sequence_counter + 1
         val e = WalEntry(
             sequence: self.sequence_counter,
@@ -117,7 +123,7 @@ class WriteAheadLog:
         )
         self.sequence_counter = self.sequence_counter + 1
         val line = wal_entry_to_line(cp)
-        val ok = atomic_write(self.path, line)
+        val ok = atomic_write(self.path, "#wal-version:2\n" + line)
         if ok:
             self.flushed_up_to = self.sequence_counter
             self.entries = []
@@ -137,10 +143,21 @@ class WriteAheadLog:
         val content = content_opt.unwrap()
         val lines = content.split("\n")
         var result: [WalEntry] = []
+        # Check for version header; v1 WAL files (no header) are silently skipped
+        var found_header = false
         for line in lines:
             val trimmed = line.trim()
             if trimmed == "":
                 continue
+            if trimmed == "#wal-version:2":
+                found_header = true
+                continue
+            # Skip comment/header lines
+            if trimmed.starts_with("#"):
+                continue
+            if not found_header:
+                # v1 WAL file without version header — no recoverable data
+                return []
             val entry_opt = wal_entry_from_line(trimmed)
             if entry_opt.?:
                 val entry = entry_opt.unwrap()
@@ -152,3 +169,49 @@ class WriteAheadLog:
         self.entries = []
         self.flushed_up_to = self.sequence_counter
         atomic_write(self.path, "")
+
+# ============================================================================
+# WAL payload codec — serialize/deserialize SdnRow fields for WAL entries
+# ============================================================================
+
+# Quote a value for WAL payload if it contains special characters (comma, pipe, newline, or double quote).
+# WAL quoting is stricter than SDN table quoting to survive the pipe-delimited WAL line format.
+fn wal_quote_if_needed(value: text) -> text:
+    if value.contains(",") or value.contains("|") or value.contains("\n") or value.contains("\""):
+        # Escape existing double quotes by doubling them
+        var escaped = value.replace("\"", "\"\"")
+        return "\"" + escaped + "\""
+    value
+
+# Strip surrounding double quotes and unescape doubled quotes.
+fn strip_wal_quotes(value: text) -> text:
+    if value.len() >= 2 and value.starts_with('"') and value.ends_with('"'):
+        val inner = value[1..(value.len() - 1)]
+        return inner.replace("\"\"", "\"")
+    value
+
+# Serialize an SdnRow's fields into a WAL CSV payload string.
+# Columns are serialized in the given column order, values quoted if needed.
+fn row_to_wal_payload(row: SdnRow, columns: [text]) -> text:
+    var values: [text] = []
+    for col in columns:
+        val value = row.get(col) ?? ""
+        values.push(wal_quote_if_needed(value))
+    values.join(",")
+
+# Deserialize a WAL CSV payload back into an SdnRow.
+# Returns nil if the column count doesn't match.
+fn wal_payload_to_row(payload: text, columns: [text]) -> SdnRow?:
+    if payload == "" and columns.len() > 0:
+        return nil
+    val parts = split_sdn_row(payload)
+    if parts.len() != columns.len():
+        return nil
+    val row = SdnRow(fields: {}, _version: 0)
+    var i = 0
+    for col in columns:
+        val value = parts[i].trim()
+        val unquoted = strip_wal_quotes(value)
+        row.set(col, unquoted)
+        i = i + 1
+    Some(row)

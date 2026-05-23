@@ -457,6 +457,8 @@ int         rt_file_copy(const char* src, const char* dst);
 int64_t     rt_file_size(const char* path);
 int         rt_file_fsync(const char* path);
 int         rt_file_fsync_cached(const char* path);
+int         rt_file_sync(const char* path);
+int         rt_file_create_excl(const char* path, const char* content);
 int64_t     rt_file_stat(const char* path);
 const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);

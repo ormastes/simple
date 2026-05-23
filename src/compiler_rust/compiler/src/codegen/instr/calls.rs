@@ -2059,6 +2059,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_hash_sha256"
         | "rt_file_fsync"
         | "rt_file_fsync_cached"
+        | "rt_file_sync"
         | "rt_file_delete"
         | "rt_file_remove"
         | "rt_file_read_lines"
@@ -2072,7 +2073,8 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_rename"
         | "rt_file_append_text"
         | "rt_file_write_bytes"
-        | "rt_file_move" => Some(&[0, 1]),
+        | "rt_file_move"
+        | "rt_file_create_excl" => Some(&[0, 1]),
 
         // Directory operations
         "rt_dir_create" | "rt_dir_create_all" | "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all"
