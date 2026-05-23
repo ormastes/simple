@@ -1,0 +1,29 @@
+# HTTP transport bridge for SecurityContext propagation.
+
+use std.http_server.handler.{HandlerRegistry}
+use std.http_server.types.{HttpRequestData, HttpResponseData, LocationConfig, default_response_data}
+use std.security.auth.context_propagation.{enter_security_context, exit_security_context}
+use std.security.types.{SecurityContext, reconstruct_remote_security_context, remote_security_headers_from_pairs, remote_security_session_id_from_pairs}
+
+fn security_context_from_request(request: HttpRequestData) -> SecurityContext:
+    val remote_headers = remote_security_headers_from_pairs(request.headers)
+    val session_id = remote_security_session_id_from_pairs(request.headers)
+    reconstruct_remote_security_context(remote_headers, request.peer_addr, session_id, "", [])
+
+fn dispatch_with_remote_security_context(registry: HandlerRegistry,
+                                         location: LocationConfig,
+                                         request: HttpRequestData) -> HttpResponseData:
+    val ctx = security_context_from_request(request)
+    val prev_id = enter_security_context(ctx)
+    val response = registry.dispatch(location.handler_type, request, location)
+    exit_security_context(ctx, prev_id)
+    return response
+
+fn dispatch_handler_with_remote_security_context(handler: fn(HttpRequestData, LocationConfig) -> HttpResponseData,
+                                                 location: LocationConfig,
+                                                 request: HttpRequestData) -> HttpResponseData:
+    val ctx = security_context_from_request(request)
+    val prev_id = enter_security_context(ctx)
+    val response = handler(request, location)
+    exit_security_context(ctx, prev_id)
+    return response

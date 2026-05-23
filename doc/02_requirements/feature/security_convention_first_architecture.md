@@ -37,8 +37,10 @@ REQ-015: Source security policy grammar shall accept the convention-first minima
 
 REQ-016: Security context propagation shall expose explicit task-scoped context helpers so async code can isolate request identity by task id without relying on thread-local state as the semantic model.
 
+REQ-017: HTTP transport dispatch shall reconstruct a server-side `SecurityContext` from safe request metadata and scope it around handler execution, while keeping unauthenticated remote requests anonymous and server-authoritative.
+
 ## Deferred Requirements
 
-DEF-001: Remote `SecurityContext` transport/reconstruction integration with real client/server transports remains future work.
+DEF-001: Full remote `SecurityContext` token/session validation remains future work beyond the HTTP handler-dispatch bridge.
 
 DEF-002: Backend sandbox lowering remains future work beyond manifest generation.

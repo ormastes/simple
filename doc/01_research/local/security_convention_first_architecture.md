@@ -59,9 +59,10 @@ This pass added the first convention-first architecture slice:
 - Convention-first gate naming now handles `src/security/gate/user_admin.spl` -> `feature user` to `feature admin`.
 - Minimal source `security:` policy blocks now work without a required policy name, and `layers ...` / `isolate ...` sugar lowers into layer and feature dimension rules.
 - Security context propagation now includes explicit task-scoped helpers so async runtimes can isolate contexts by task id instead of treating thread-local state as authoritative.
+- Async HTTP handler dispatch now reconstructs a server-side `SecurityContext` from safe request metadata and scopes it around content handler execution.
 
 ## Remaining Gaps
 
-- Remote `SecurityContext` transport/reconstruction integration with real client/server transports remains design-level.
+- Remote `SecurityContext` transport/reconstruction has an HTTP handler-dispatch bridge; full token/session validation remains future work.
 - Task-local context helpers exist, but deeper scheduler/runtime integration remains future work.
 - Sandbox manifest generation exists for declared sandboxes/gates, but backend lowering remains future work.
