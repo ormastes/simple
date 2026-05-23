@@ -1,7 +1,7 @@
 # Security support module regression coverage.
 
 use std.security.types.{PermissionSnapshot, RemoteSecurityContext, RemoteSecurityContextHeaders, SecurityContext, reconstruct_remote_security_context}
-use std.security.auth.context_propagation.{SecurityContextStore, current_security_context, with_security_context}
+use std.security.auth.context_propagation.{SecurityContextStore, TaskSecurityContextStore, current_security_context, current_task_security_context, with_security_context, with_task_security_context}
 use std.security.auth.credential_store.{CredentialHandle, CredentialStore}
 use std.security.auth.env_config.{EnvVar, SecureEnvConfig, validate_env_at_startup}
 use std.security.validation.prompt_sanitizer.{PromptSanitizer, check_canary_leaked, inject_canary, sanitize_prompt_input}
@@ -37,6 +37,57 @@ describe "security auth context propagation":
             expect(active.is_authenticated()).to_equal(true)
         )
         expect(current_security_context().is_authenticated()).to_equal(false)
+
+    it "keeps explicit task security contexts isolated":
+        val alice = SecurityContext(
+            peer_addr: "203.0.113.10",
+            session_id: "session-a",
+            user_id: "alice",
+            correlation_id: "corr-a",
+            capabilities: ["profile.read"]
+        )
+        val bob = SecurityContext(
+            peer_addr: "203.0.113.11",
+            session_id: "session-b",
+            user_id: "bob",
+            correlation_id: "corr-b",
+            capabilities: ["admin.read"]
+        )
+        var store = TaskSecurityContextStore.new()
+        store.set_task_context("task-a", alice)
+        store.set_task_context("task-b", bob)
+        if val task_a = store.get_task_context("task-a"):
+            expect(task_a.user_id).to_equal("alice")
+        else:
+            expect(false).to_equal(true)
+        if val task_b = store.get_task_context("task-b"):
+            expect(task_b.user_id).to_equal("bob")
+        else:
+            expect(false).to_equal(true)
+
+    it "restores previous task security context after scoped block":
+        val outer = SecurityContext(
+            peer_addr: "203.0.113.12",
+            session_id: "session-outer",
+            user_id: "outer",
+            correlation_id: "corr-outer",
+            capabilities: ["outer"]
+        )
+        val inner = SecurityContext(
+            peer_addr: "203.0.113.13",
+            session_id: "session-inner",
+            user_id: "inner",
+            correlation_id: "corr-inner",
+            capabilities: ["inner"]
+        )
+        with_task_security_context("task-restore", outer, fn():
+            expect(current_task_security_context("task-restore").user_id).to_equal("outer")
+            with_task_security_context("task-restore", inner, fn():
+                expect(current_task_security_context("task-restore").user_id).to_equal("inner")
+            )
+            expect(current_task_security_context("task-restore").user_id).to_equal("outer")
+        )
+        expect(current_task_security_context("task-restore").is_authenticated()).to_equal(false)
 
 describe "security remote permission snapshots":
     it "treats permission snapshots as display only UI hints":

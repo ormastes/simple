@@ -58,8 +58,10 @@ This pass added the first convention-first architecture slice:
 - First-class source `ui_policy` declarations now parse, lower into HIR, and render `show <key> when <condition>` rules into permission snapshot entries.
 - Convention-first gate naming now handles `src/security/gate/user_admin.spl` -> `feature user` to `feature admin`.
 - Minimal source `security:` policy blocks now work without a required policy name, and `layers ...` / `isolate ...` sugar lowers into layer and feature dimension rules.
+- Security context propagation now includes explicit task-scoped helpers so async runtimes can isolate contexts by task id instead of treating thread-local state as authoritative.
 
 ## Remaining Gaps
 
 - Remote `SecurityContext` transport/reconstruction integration with real client/server transports remains design-level.
+- Task-local context helpers exist, but deeper scheduler/runtime integration remains future work.
 - Sandbox manifest generation exists for declared sandboxes/gates, but backend lowering remains future work.

@@ -14,6 +14,7 @@
 - Main agent: extend `ui_policy.sdn` into a display-only permission snapshot manifest with stable observation keys and server-gate-required semantics.
 - Main agent: implement first-class source `ui_policy` declarations for permission snapshot rules.
 - Main agent: implement minimal `security:` grammar with `layers ...` and `isolate ...` convention sugar.
+- Main agent: implement explicit task-scoped `SecurityContext` propagation helpers.
 - Main agent: add focused compiler tests.
 
 ## Next Candidate Tasks

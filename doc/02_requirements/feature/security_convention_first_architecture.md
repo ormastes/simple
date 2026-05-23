@@ -35,6 +35,8 @@ REQ-014: Source files shall support first-class `ui_policy` declarations whose `
 
 REQ-015: Source security policy grammar shall accept the convention-first minimal form `security:` with `layers ...` and `isolate ...` sugar, lowering it into layer and feature dimension rules.
 
+REQ-016: Security context propagation shall expose explicit task-scoped context helpers so async code can isolate request identity by task id without relying on thread-local state as the semantic model.
+
 ## Deferred Requirements
 
 DEF-001: Remote `SecurityContext` transport/reconstruction integration with real client/server transports remains future work.

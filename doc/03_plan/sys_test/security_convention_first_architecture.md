@@ -22,6 +22,7 @@ This slice covers compiler security grammar, diagnostics, generated artifacts, a
 - REQ-013: `renders_ui_policy_and_report_artifacts` and `renders_permission_snapshot_entries_for_ui_can_observations`.
 - REQ-014: parser test `parses_ui_policy_snapshot_rules`; HIR test `renders_first_class_ui_policy_snapshot_rules`.
 - REQ-015: parser test `parses_minimal_security_policy_with_layer_and_isolate_sugar`; HIR test `lowers_minimal_security_policy_sugar_into_dimensions`.
+- REQ-016: Simple unit tests `keeps explicit task security contexts isolated` and `restores previous task security context after scoped block` in `test/unit/lib/security/security_support_spec.spl`.
 
 ## Verification Command
 
