@@ -950,7 +950,7 @@ fn security_registry_sdn_from_sources(file_sources: &[(PathBuf, String)]) -> Res
         let ast = parser
             .parse()
             .map_err(|err| format!("parse security registry source {}: {}", path.display(), err))?;
-        let module = crate::hir::lower(&ast)
+        let module = crate::hir::lower_with_context_lenient(&ast, path)
             .map_err(|err| format!("lower security registry source {}: {}", path.display(), err))?;
         let inventory = build_security_inventory(&module);
         if inventory.security_aop_sdn.contains("require_policy:")
