@@ -203,7 +203,29 @@ impl Fat32Core:
                 self.fat_sector_cache.put(sector, buf)
             i = i + 1
 
+    me fn flush_fat() -> Result<(), text>:
+        val keys = self.dirty_fat_sectors.keys()
+        var i = 0
+        while i < keys.len():
+            val sector = keys[i]
+            val cached = self.fat_sector_cache.get(sector)
+            if cached != nil:
+                val write_rc = self.device.write_sector(sector, cached.unwrap())
+                if write_rc.is_err():
+                    return Result.Err("failed to flush FAT sector")
+            i = i + 1
+        var dfs = self.dirty_fat_sectors
+        dfs = {}
+        self.dirty_fat_sectors = dfs
+        Result.Ok(())
+
+    me fn sync() -> Result<(), text>:
+        self.flush_fat()
+
     me fn unmount() -> Result<(), text>:
+        val flush_rc = self.flush_fat()
+        if flush_rc.is_err():
+            return Result.Err(flush_rc.unwrap_err())
         self.mounted = false
         self.bytes_per_sector = 512
         self.sectors_per_cluster = 0
@@ -376,10 +398,10 @@ impl Fat32Core:
         buffer[entry_offset + 1] = ((masked >> 8) & 0xFF).to_u8()
         buffer[entry_offset + 2] = ((masked >> 16) & 0xFF).to_u8()
         buffer[entry_offset + 3] = ((masked >> 24) & 0xFF).to_u8()
-        val write_rc = self.device.write_sector(fat_sector, buffer)
-        if write_rc.is_err():
-            return Result.Err("failed to write FAT entry")
         self.fat_sector_cache.update(fat_sector, buffer)
+        var dfs = self.dirty_fat_sectors
+        dfs.set(fat_sector, true)
+        self.dirty_fat_sectors = dfs
         Result.Ok(())
 
     me fn alloc_cluster() -> Result<u32, text>:
