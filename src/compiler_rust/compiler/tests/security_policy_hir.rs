@@ -443,6 +443,29 @@ fn renders_permission_snapshot_entries_for_ui_can_observations() {
 }
 
 #[test]
+fn renders_first_class_ui_policy_snapshot_rules() {
+    let module = lower(
+        r#"ui_policy UserProfileUi:
+    show EditProfileButton when can(UserProfileWrite(self.user_id))
+    show AdminPanelLink when can(AdminPanelView)
+"#,
+    );
+
+    assert_eq!(module.ui_policies.len(), 1);
+    assert_eq!(module.ui_policies[0].name, "UserProfileUi");
+
+    let inventory = build_security_inventory(&module);
+    assert!(inventory.ui_policy_sdn.contains("permission_snapshot:"));
+    assert!(inventory.ui_policy_sdn.contains("key: EditProfileButton"));
+    assert!(inventory
+        .ui_policy_sdn
+        .contains("condition: can(UserProfileWrite(self.user_id))"));
+    assert!(inventory.ui_policy_sdn.contains("scope: UserProfileWrite(self.user_id"));
+    assert!(inventory.ui_policy_sdn.contains("key: AdminPanelLink"));
+    assert!(inventory.ui_policy_sdn.contains("server_gate_required: true"));
+}
+
+#[test]
 fn records_security_rule_configurable_and_final_metadata() {
     let module = lower(
         r#"security AppSecurity:

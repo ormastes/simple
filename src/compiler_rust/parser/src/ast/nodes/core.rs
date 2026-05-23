@@ -69,6 +69,7 @@ pub enum Node {
     SecurityGate(SecurityGate),
     SandboxPolicy(SandboxPolicy),
     CapabilityPolicy(CapabilityPolicy),
+    UiPolicy(UiPolicy),
     ArchitectureRule(ArchitectureRule),
     MockDecl(MockDecl),
 

@@ -163,6 +163,8 @@ pub struct HirModule {
     pub sandbox_policies: Vec<HirSandboxPolicy>,
     /// Native object-capability declarations.
     pub capability_policies: Vec<HirCapabilityPolicy>,
+    /// UI permission snapshot policy declarations.
+    pub ui_policies: Vec<HirUiPolicy>,
     /// Architecture rules (#1026-1035)
     pub arch_rules: Vec<HirArchRule>,
     /// Mock declarations (#1020-1025)
@@ -212,6 +214,7 @@ impl HirModule {
             security_gates: Vec::new(),
             sandbox_policies: Vec::new(),
             capability_policies: Vec::new(),
+            ui_policies: Vec::new(),
             arch_rules: Vec::new(),
             mock_decls: Vec::new(),
             imports: Vec::new(),

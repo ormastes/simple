@@ -251,6 +251,19 @@ pub enum CapabilityItem {
     Rule { key: String, value: String, span: Span },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiPolicy {
+    pub name: String,
+    pub items: Vec<UiPolicyItem>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UiPolicyItem {
+    Show { key: String, condition: String, span: Span },
+    Raw { text: String, span: Span },
+}
+
 /// Architecture rule: `forbid pc{...}` or `allow pc{...}`
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArchitectureRule {

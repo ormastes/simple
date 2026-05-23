@@ -11,7 +11,7 @@
 use crate::ast::{
     AdviceType, AopAdvice, ArchRuleType, ArchitectureRule, CapabilityItem, CapabilityPolicy, DiBinding, DiScope,
     InjectGraph, InjectItem, InjectLifetime, InjectMode, MockDecl, PredicateExpr, SandboxItem, SandboxPolicy,
-    SecurityGate, SecurityItem, SecurityPolicy,
+    SecurityGate, SecurityItem, SecurityPolicy, UiPolicy, UiPolicyItem,
 };
 use crate::error::ParseError;
 use crate::parser_impl::core::Parser;
@@ -780,6 +780,55 @@ impl<'a> Parser<'a> {
         }
         self.expect(&TokenKind::Dedent)?;
         Ok(CapabilityPolicy {
+            name,
+            items,
+            span: self.span_from_start(start),
+        })
+    }
+
+    pub fn parse_ui_policy(&mut self) -> Result<UiPolicy, ParseError> {
+        let start = self.current.span;
+        self.expect_identifier_named("ui_policy")?;
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+        let mut items = Vec::new();
+        while !matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+            self.skip_newlines();
+            if matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                break;
+            }
+            let item_start = self.current.span;
+            if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "show") {
+                self.advance();
+                let key = self.collect_security_clause_until_token(|kind| {
+                    matches!(kind, TokenKind::When)
+                        || matches!(kind, TokenKind::Identifier { name, .. } if name == "when")
+                });
+                let condition = if matches!(&self.current.kind, TokenKind::When)
+                    || matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "when")
+                {
+                    self.advance();
+                    self.collect_until_line_end()
+                } else {
+                    String::new()
+                };
+                items.push(UiPolicyItem::Show {
+                    key,
+                    condition,
+                    span: self.span_from_start(item_start),
+                });
+            } else {
+                items.push(UiPolicyItem::Raw {
+                    text: self.collect_until_line_end(),
+                    span: self.span_from_start(item_start),
+                });
+            }
+            self.skip_newlines();
+        }
+        self.expect(&TokenKind::Dedent)?;
+        Ok(UiPolicy {
             name,
             items,
             span: self.span_from_start(start),

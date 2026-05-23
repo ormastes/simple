@@ -20,6 +20,7 @@ This slice is compiler diagnostic behavior, covered by Rust compiler tests rathe
 - REQ-011: `renders_ui_policy_and_report_artifacts`; driver `check` writes `access_matrix.sdn`, `ui_policy.sdn`, and `report.md`.
 - REQ-012: parser test `parses_security_policy_configurable_and_final_markers`; HIR tests `records_security_rule_configurable_and_final_metadata`, `reports_sdn_override_that_weakens_final_source_policy`, `reports_sdn_override_that_weakens_non_configurable_source_policy`, `allows_sdn_override_for_configurable_source_policy`, and `reports_malformed_security_sdn_merge_config`.
 - REQ-013: `renders_ui_policy_and_report_artifacts` and `renders_permission_snapshot_entries_for_ui_can_observations`.
+- REQ-014: parser test `parses_ui_policy_snapshot_rules`; HIR test `renders_first_class_ui_policy_snapshot_rules`.
 
 ## Verification Command
 

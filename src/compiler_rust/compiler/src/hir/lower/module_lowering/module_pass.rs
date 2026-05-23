@@ -7,7 +7,7 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
     HirAopAdvice, HirArchRule, HirCapabilityItem, HirCapabilityPolicy, HirDiBinding, HirDomainBlock, HirImpl,
     HirInjectGraph, HirInjectItem, HirLeanBlock, HirMockDecl, HirModule, HirSandboxItem, HirSandboxPolicy,
-    HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirType, TypeId,
+    HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirType, HirUiPolicy, HirUiPolicyItem, TypeId,
 };
 
 fn try_const_eval(expr: &Expr) -> Option<i64> {
@@ -463,6 +463,22 @@ impl Lowerer {
                             .collect(),
                     });
                 }
+                Node::UiPolicy(policy) => {
+                    self.module.ui_policies.push(HirUiPolicy {
+                        name: policy.name.clone(),
+                        items: policy
+                            .items
+                            .iter()
+                            .map(|item| match item {
+                                ast::UiPolicyItem::Show { key, condition, .. } => HirUiPolicyItem::Show {
+                                    key: key.clone(),
+                                    condition: condition.clone(),
+                                },
+                                ast::UiPolicyItem::Raw { text, .. } => HirUiPolicyItem::Raw { text: text.clone() },
+                            })
+                            .collect(),
+                    });
+                }
                 Node::ArchitectureRule(rule) => {
                     self.module.arch_rules.push(HirArchRule {
                         rule_type: match rule.rule_type {
@@ -769,6 +785,7 @@ impl Lowerer {
                 | Node::SecurityGate(_)
                 | Node::SandboxPolicy(_)
                 | Node::CapabilityPolicy(_)
+                | Node::UiPolicy(_)
                 | Node::ArchitectureRule(_)
                 | Node::MockDecl(_)
                 | Node::LiteralFunction(_)

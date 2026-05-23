@@ -5,7 +5,7 @@ use simple_sdn::SdnValue;
 
 use crate::hir::{
     HirAopAdvice, HirArchRule, HirCapabilityItem, HirExpr, HirExprKind, HirFunction, HirImport, HirModule,
-    HirSandboxItem, HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirStmt,
+    HirSandboxItem, HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirStmt, HirUiPolicyItem,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +149,7 @@ pub fn build_security_inventory(module: &HirModule) -> SecurityInventory {
         security_aop_sdn: render_security_aop_lowering(&lower_security_to_aop(module)),
         capability_manifest_sdn: render_capability_manifest(module),
         sandbox_manifest_sdn: render_sandbox_manifest(module, &gates),
-        ui_policy_sdn: render_ui_policy(&[]),
+        ui_policy_sdn: render_ui_policy(&[], module),
         report_md: render_security_report(
             gates.len(),
             module.security_policies.len(),
@@ -186,7 +186,7 @@ pub fn build_security_inventory_for_source(file: &SecuritySourceFile, module: &H
         security_aop_sdn: render_security_aop_lowering(&lower_security_to_aop(module)),
         capability_manifest_sdn: render_capability_manifest(module),
         sandbox_manifest_sdn: render_sandbox_manifest(module, &gates),
-        ui_policy_sdn: render_ui_policy(std::slice::from_ref(file)),
+        ui_policy_sdn: render_ui_policy(std::slice::from_ref(file), module),
         report_md: render_security_report(
             gates.len(),
             module.security_policies.len(),
@@ -2260,7 +2260,7 @@ fn render_capability_manifest(module: &HirModule) -> String {
     out
 }
 
-fn render_ui_policy(files: &[SecuritySourceFile]) -> String {
+fn render_ui_policy(files: &[SecuritySourceFile], module: &HirModule) -> String {
     let mut out = String::from("ui_policy:\n");
     out.push_str("  permission_snapshot:\n");
     out.push_str("    authority: display_only\n");
@@ -2269,25 +2269,28 @@ fn render_ui_policy(files: &[SecuritySourceFile]) -> String {
     out.push_str("    policy_version_required: true\n");
     out.push_str("    entries:\n");
     let mut count = 0;
+    for policy in &module.ui_policies {
+        for item in &policy.items {
+            match item {
+                HirUiPolicyItem::Show { key, condition } => {
+                    count += 1;
+                    render_ui_policy_entry(&mut out, key, None, None, condition);
+                }
+                HirUiPolicyItem::Raw { text } => {
+                    count += 1;
+                    render_ui_policy_entry(&mut out, text, None, None, "");
+                }
+            }
+        }
+    }
     for file in files {
         for (line_no, line) in file.source.lines().enumerate() {
             if line.trim() == "@security_observation" {
                 count += 1;
                 let key = security_observation_key(&file.source, line_no)
                     .unwrap_or_else(|| format!("{}:{}", file.path, line_no + 1));
-                out.push_str("      - key: ");
-                out.push_str(&key);
-                out.push('\n');
-                out.push_str(&format!("      file: {}\n", file.path));
-                out.push_str(&format!("      line: {}\n", line_no + 1));
-                out.push_str("        authority: display_only\n");
-                out.push_str("        server_gate_required: true\n");
-                if let Some(condition) = security_observation_condition(&file.source, line_no) {
-                    out.push_str(&format!("        condition: {}\n", condition));
-                    if let Some(scope) = permission_scope_from_condition(&condition) {
-                        out.push_str(&format!("        scope: {}\n", scope));
-                    }
-                }
+                let condition = security_observation_condition(&file.source, line_no).unwrap_or_default();
+                render_ui_policy_entry(&mut out, &key, Some(&file.path), Some(line_no + 1), &condition);
             }
         }
     }
@@ -2295,6 +2298,26 @@ fn render_ui_policy(files: &[SecuritySourceFile]) -> String {
         out.push_str("      []\n");
     }
     out
+}
+
+fn render_ui_policy_entry(out: &mut String, key: &str, file: Option<&str>, line: Option<usize>, condition: &str) {
+    out.push_str("      - key: ");
+    out.push_str(key);
+    out.push('\n');
+    if let Some(file) = file {
+        out.push_str(&format!("        file: {}\n", file));
+    }
+    if let Some(line) = line {
+        out.push_str(&format!("        line: {}\n", line));
+    }
+    out.push_str("        authority: display_only\n");
+    out.push_str("        server_gate_required: true\n");
+    if !condition.is_empty() {
+        out.push_str(&format!("        condition: {}\n", condition));
+        if let Some(scope) = permission_scope_from_condition(condition) {
+            out.push_str(&format!("        scope: {}\n", scope));
+        }
+    }
 }
 
 fn security_observation_key(source: &str, annotation_line: usize) -> Option<String> {

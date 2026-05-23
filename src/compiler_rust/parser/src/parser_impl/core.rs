@@ -654,6 +654,7 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier { name, .. } if name == "sandbox" => {
                 self.parse_sandbox_policy().map(Node::SandboxPolicy)
             }
+            TokenKind::Identifier { name, .. } if name == "ui_policy" => self.parse_ui_policy().map(Node::UiPolicy),
             TokenKind::Identifier { .. } if is_capability_policy_decl => {
                 self.parse_capability_policy().map(Node::CapabilityPolicy)
             }

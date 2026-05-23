@@ -115,3 +115,23 @@ fn parses_native_capability_policy() {
         matches!(&capability.items[0], CapabilityItem::Rule { key, value, .. } if key == "resource" && value == "Dir")
     );
 }
+
+#[test]
+fn parses_ui_policy_snapshot_rules() {
+    let items = parse_items(
+        r#"ui_policy UserProfileUi:
+    show EditProfileButton when can(UserProfileWrite(self.user_id))
+    show AdminPanelLink when can(AdminPanelView)
+"#,
+    );
+
+    let Node::UiPolicy(policy) = &items[0] else {
+        panic!("expected ui policy");
+    };
+    assert_eq!(policy.name, "UserProfileUi");
+    assert!(matches!(
+        &policy.items[0],
+        UiPolicyItem::Show { key, condition, .. }
+            if key == "EditProfileButton" && condition == "can(UserProfileWrite(self.user_id))"
+    ));
+}

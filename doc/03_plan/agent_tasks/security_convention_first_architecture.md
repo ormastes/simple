@@ -12,9 +12,10 @@
 - Main agent: add `ui_policy.sdn`, `report.md`, `access_matrix.sdn`, `simple security ui-policy`, and `simple security audit`.
 - Main agent: implement source security `configurable` / `final` metadata and structured SDN merge validation.
 - Main agent: extend `ui_policy.sdn` into a display-only permission snapshot manifest with stable observation keys and server-gate-required semantics.
+- Main agent: implement first-class source `ui_policy` declarations for permission snapshot rules.
 - Main agent: add focused compiler tests.
 
 ## Next Candidate Tasks
 
-- Design remote `SecurityContext` transport/reconstruction.
-- Design a first-class source `ui_policy` DSL.
+- Integrate remote `SecurityContext` transport/reconstruction with real client/server transports.
+- Lower sandbox manifests to concrete backends.

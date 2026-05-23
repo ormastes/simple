@@ -130,6 +130,18 @@ pub enum HirCapabilityItem {
     Rule { key: String, value: String },
 }
 
+#[derive(Debug, Clone)]
+pub struct HirUiPolicy {
+    pub name: String,
+    pub items: Vec<HirUiPolicyItem>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HirUiPolicyItem {
+    Show { key: String, condition: String },
+    Raw { text: String },
+}
+
 /// HIR representation of an architecture rule.
 #[derive(Debug, Clone)]
 pub struct HirArchRule {

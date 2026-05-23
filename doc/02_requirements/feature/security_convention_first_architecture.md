@@ -31,8 +31,10 @@ REQ-012: Source security policy rules shall support `configurable` and `final` m
 
 REQ-013: Generated `ui_policy.sdn` shall describe client permission snapshots as display-only hints, include stable observation keys and conditions, require a policy version, and state that server gates remain authoritative.
 
+REQ-014: Source files shall support first-class `ui_policy` declarations whose `show <key> when <condition>` rules lower into `ui_policy.sdn` permission snapshot entries without requiring annotation-only discovery.
+
 ## Deferred Requirements
 
-DEF-001: Remote `SecurityContext` transport/reconstruction remains future work.
+DEF-001: Remote `SecurityContext` transport/reconstruction integration with real client/server transports remains future work.
 
 DEF-002: Backend sandbox lowering remains future work beyond manifest generation.
