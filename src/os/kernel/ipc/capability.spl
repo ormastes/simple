@@ -283,6 +283,38 @@ impl CapabilityManager:
         )
         self.records.push(record)
 
+    me install_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text) -> bool:
+        """Install lowered sandbox capabilities for a task.
+
+        This is the SimpleOS handoff for generated `sandbox_lowering.sdn`.
+        The generated backend plan remains textual, but the kernel immediately
+        converts its explicit capability handles into a pledged CapabilitySet
+        so normal syscall capability checks deny ambient authority.
+        """
+        val caps = capability_set_from_sandbox_lowering(task, sandbox_lowering_sdn)
+        self.install_sandbox_capability_set(task, caps)
+
+    me install_sandbox_capability_set(task: TaskId, caps: CapabilitySet) -> bool:
+        """Replace or initialize a task with a pledged sandbox capability set."""
+        var pledged = caps
+        pledged.is_pledged = true
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id.id == task.id:
+                rec.caps = pledged
+                self.records[idx] = rec
+                return true
+            idx = idx + 1
+        val record = TaskCapRecord(
+            task_id: task,
+            caps: pledged,
+            unveil_paths: [],
+            is_unveiled: false
+        )
+        self.records.push(record)
+        true
+
     me destroy_task(task: TaskId):
         """Remove all capability records for a destroyed task."""
         var new_records: [TaskCapRecord] = []
@@ -312,6 +344,24 @@ impl CapabilityManager:
             is_unveiled: false
         )
         self.records.push(record)
+
+fn capability_set_from_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text) -> CapabilitySet:
+    """Map generated sandbox capability handles into kernel capabilities."""
+    var caps: [CapabilityToken] = []
+    var generation = 1u64
+    if sandbox_lowering_sdn.contains("ReadFile") or sandbox_lowering_sdn.contains("ReadDir"):
+        caps.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: "/"), generation: generation, owner: task.id))
+        generation = generation + 1
+    if sandbox_lowering_sdn.contains("WriteFile") or sandbox_lowering_sdn.contains("WriteDir"):
+        caps.push(CapabilityToken(kind: CapabilityKind.FileWrite(path_prefix: "/"), generation: generation, owner: task.id))
+        generation = generation + 1
+    if sandbox_lowering_sdn.contains("ProcessSpawner") or sandbox_lowering_sdn.contains("ProcessSpawn"):
+        caps.push(CapabilityToken(kind: CapabilityKind.ProcessSpawn, generation: generation, owner: task.id))
+        generation = generation + 1
+    if sandbox_lowering_sdn.contains("NetworkEndpoint"):
+        caps.push(CapabilityToken(kind: CapabilityKind.NetConnect(port: 0u16), generation: generation, owner: task.id))
+        generation = generation + 1
+    CapabilitySet(caps: caps, is_pledged: true)
 
 # ============================================================================
 # Path Matching Helpers

@@ -1229,7 +1229,7 @@ Output:
     audit/security report
 
 Remaining implementation after generated lowering:
-    enforce lowered sandbox plans in kernel/VM backends beyond hosted runtime capability checks
+    enforce lowered sandbox plans in Landlock/seccomp, WASI, baremetal MPU, and broader VM host-import backends
     add durable/distributed remote SecurityContext session storage and operational key rollout
 
 The minimal example should look like this:

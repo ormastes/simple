@@ -53,8 +53,10 @@ REQ-023: Hosted runtime sandbox entry shall activate lowered capability-handle p
 
 REQ-024: Future fiber runtimes shall have an explicit current-task identity bridge that participates in the unified runtime task selector used by task-scoped `SecurityContext`.
 
+REQ-025: SimpleOS kernel capability management shall install generated `sandbox_lowering.sdn` capability handles as pledged per-task `CapabilitySet` records so syscall capability checks deny ungranted authority.
+
 ## Deferred Requirements
 
 DEF-001: Durable/distributed remote `SecurityContext` session storage and operational key rollout remain future work beyond local key-ring and session-store lifecycle primitives.
 
-DEF-002: Kernel/VM/backend syscall isolation for lowered sandbox plans remains future work beyond hosted runtime capability-handle enforcement and generated backend lowering artifacts.
+DEF-002: Full backend syscall isolation for Landlock/seccomp, WASI, baremetal MPU, and broader VM host-import filters remains future work beyond hosted runtime checks and SimpleOS kernel capability installation.
