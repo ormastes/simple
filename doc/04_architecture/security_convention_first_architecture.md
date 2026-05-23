@@ -50,3 +50,14 @@ The live KMS gate remains outside normal CI execution. The architecture is:
 The local checker is intentionally shell-only with an optional `actionlint` branch. This avoids making basic repository hygiene dependent on downloading a third-party binary while still allowing stricter validation on developer machines or CI images that already provide `actionlint`.
 
 OIDC is the preferred future credential-delivery pattern for cloud providers, but it should be introduced provider-by-provider because it changes environment permissions and provider setup. The current bearer/authorization variables remain the compatibility path for existing KMS gateway tests and the HSM lane.
+
+## 2026-05-23 Live KMS OIDC Architecture Addendum
+
+The live KMS workflow now has two auth modes:
+
+- `secret`: existing environment-secret behavior.
+- `oidc`: GitHub OIDC federation for cloud-provider lanes.
+
+GCP and Azure OIDC are complete at the workflow layer because their live adapter inputs already accept bearer tokens. The workflow mints those bearer tokens after provider login and before running the Simple live KMS integration spec.
+
+AWS OIDC is split into two layers. The workflow authenticates to AWS with `aws-actions/configure-aws-credentials@v4` and verifies the identity with STS. The Simple live adapter still accepts a raw SigV4 authorization header, so full AWS OIDC replacement requires a future Simple SigV4 signing bridge that signs the generated AWS KMS HTTP request with the short-lived AWS credentials.

@@ -14,6 +14,14 @@ on:
           - azure
           - hsm
           - all
+      auth:
+        description: 'Cloud authentication mode for AWS/GCP/Azure lanes'
+        required: true
+        default: 'secret'
+        type: choice
+        options:
+          - secret
+          - oidc
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.provider }}
@@ -29,15 +37,40 @@ jobs:
     runs-on: ubuntu-latest
     environment: live-kms-aws
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     env:
       SIMPLE_LIVE_KMS_PROVIDER: aws
       SIMPLE_LIVE_KMS_AWS_ENDPOINT: ${{ secrets.SIMPLE_LIVE_KMS_AWS_ENDPOINT }}
       SIMPLE_LIVE_KMS_AWS_KEY_ID: ${{ secrets.SIMPLE_LIVE_KMS_AWS_KEY_ID }}
       SIMPLE_LIVE_KMS_AWS_AUTHORIZATION: ${{ secrets.SIMPLE_LIVE_KMS_AWS_AUTHORIZATION }}
       SIMPLE_LIVE_KMS_AWS_ALGORITHM: ${{ secrets.SIMPLE_LIVE_KMS_AWS_ALGORITHM || 'RSASSA_PSS_SHA_256' }}
+      SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN: ${{ secrets.SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN }}
+      SIMPLE_LIVE_KMS_AWS_REGION: ${{ secrets.SIMPLE_LIVE_KMS_AWS_REGION }}
       SIMPLE_LIVE_KMS_PAYLOAD: ${{ secrets.SIMPLE_LIVE_KMS_PAYLOAD || 'simple-live-kms-ci' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Require AWS OIDC setup
+        if: ${{ inputs.auth == 'oidc' }}
+        run: |
+          missing=0
+          for name in SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN SIMPLE_LIVE_KMS_AWS_REGION; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for AWS OIDC bootstrap"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Configure AWS OIDC credentials
+        if: ${{ inputs.auth == 'oidc' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.SIMPLE_LIVE_KMS_AWS_REGION }}
+      - name: Probe AWS OIDC identity
+        if: ${{ inputs.auth == 'oidc' }}
+        run: aws sts get-caller-identity
       - name: Build bootstrap runtime
         run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
       - name: Require AWS live KMS credentials
@@ -49,6 +82,18 @@ jobs:
               missing=1
             fi
           done
+          if [ "${{ inputs.auth }}" = "oidc" ]; then
+            for name in SIMPLE_LIVE_KMS_AWS_OIDC_ROLE_ARN SIMPLE_LIVE_KMS_AWS_REGION; do
+              if [ -z "${!name}" ]; then
+                echo "::error::$name is required for AWS OIDC bootstrap"
+                missing=1
+              fi
+            done
+            if [ -z "$SIMPLE_LIVE_KMS_AWS_AUTHORIZATION" ]; then
+              echo "::error::AWS OIDC bootstrap is configured, but the Simple raw HTTP live spec still requires SIMPLE_LIVE_KMS_AWS_AUTHORIZATION until SigV4 runtime signing lands"
+              missing=1
+            fi
+          fi
           exit "$missing"
       - name: Run AWS live KMS gate
         run: SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple test test/integration/lib/security/live_kms_transport_spec.spl --mode=interpreter
@@ -59,19 +104,54 @@ jobs:
     runs-on: ubuntu-latest
     environment: live-kms-gcp
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     env:
       SIMPLE_LIVE_KMS_PROVIDER: gcp
       SIMPLE_LIVE_KMS_GCP_ENDPOINT: ${{ secrets.SIMPLE_LIVE_KMS_GCP_ENDPOINT }}
       SIMPLE_LIVE_KMS_GCP_KEY_VERSION: ${{ secrets.SIMPLE_LIVE_KMS_GCP_KEY_VERSION }}
       SIMPLE_LIVE_KMS_GCP_BEARER: ${{ secrets.SIMPLE_LIVE_KMS_GCP_BEARER }}
       SIMPLE_LIVE_KMS_DIGEST_SHA256: ${{ secrets.SIMPLE_LIVE_KMS_DIGEST_SHA256 }}
+      SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT: ${{ secrets.SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT }}
     steps:
       - uses: actions/checkout@v4
+      - name: Require GCP OIDC setup
+        if: ${{ inputs.auth == 'oidc' }}
+        run: |
+          missing=0
+          for name in SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for GCP OIDC"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Authenticate to GCP with OIDC
+        id: gcp-auth
+        if: ${{ inputs.auth == 'oidc' }}
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ env.SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT }}
+      - name: Export GCP OIDC bearer
+        if: ${{ inputs.auth == 'oidc' }}
+        run: echo "SIMPLE_LIVE_KMS_GCP_BEARER=${{ steps.gcp-auth.outputs.access_token }}" >> "$GITHUB_ENV"
       - name: Build bootstrap runtime
         run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
       - name: Require GCP live KMS credentials
         run: |
           missing=0
+          if [ "${{ inputs.auth }}" = "oidc" ]; then
+            for name in SIMPLE_LIVE_KMS_GCP_WORKLOAD_IDENTITY_PROVIDER SIMPLE_LIVE_KMS_GCP_SERVICE_ACCOUNT; do
+              if [ -z "${!name}" ]; then
+                echo "::error::$name is required for GCP OIDC"
+                missing=1
+              fi
+            done
+          fi
           for name in SIMPLE_LIVE_KMS_GCP_ENDPOINT SIMPLE_LIVE_KMS_GCP_KEY_VERSION SIMPLE_LIVE_KMS_GCP_BEARER SIMPLE_LIVE_KMS_DIGEST_SHA256; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is required for GCP live KMS"
@@ -88,6 +168,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: live-kms-azure
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     env:
       SIMPLE_LIVE_KMS_PROVIDER: azure
       SIMPLE_LIVE_KMS_AZURE_VAULT: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_VAULT }}
@@ -95,13 +178,45 @@ jobs:
       SIMPLE_LIVE_KMS_AZURE_BEARER: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_BEARER }}
       SIMPLE_LIVE_KMS_AZURE_ALGORITHM: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_ALGORITHM || 'PS256' }}
       SIMPLE_LIVE_KMS_DIGEST_BASE64URL: ${{ secrets.SIMPLE_LIVE_KMS_DIGEST_BASE64URL }}
+      SIMPLE_LIVE_KMS_AZURE_CLIENT_ID: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_CLIENT_ID }}
+      SIMPLE_LIVE_KMS_AZURE_TENANT_ID: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_TENANT_ID }}
+      SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID: ${{ secrets.SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID }}
     steps:
       - uses: actions/checkout@v4
+      - name: Require Azure OIDC setup
+        if: ${{ inputs.auth == 'oidc' }}
+        run: |
+          missing=0
+          for name in SIMPLE_LIVE_KMS_AZURE_CLIENT_ID SIMPLE_LIVE_KMS_AZURE_TENANT_ID SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for Azure OIDC"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Authenticate to Azure with OIDC
+        if: ${{ inputs.auth == 'oidc' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.SIMPLE_LIVE_KMS_AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.SIMPLE_LIVE_KMS_AZURE_TENANT_ID }}
+          subscription-id: ${{ env.SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID }}
+      - name: Export Azure OIDC bearer
+        if: ${{ inputs.auth == 'oidc' }}
+        run: echo "SIMPLE_LIVE_KMS_AZURE_BEARER=$(az account get-access-token --resource https://vault.azure.net --query accessToken -o tsv)" >> "$GITHUB_ENV"
       - name: Build bootstrap runtime
         run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
       - name: Require Azure live KMS credentials
         run: |
           missing=0
+          if [ "${{ inputs.auth }}" = "oidc" ]; then
+            for name in SIMPLE_LIVE_KMS_AZURE_CLIENT_ID SIMPLE_LIVE_KMS_AZURE_TENANT_ID SIMPLE_LIVE_KMS_AZURE_SUBSCRIPTION_ID; do
+              if [ -z "${!name}" ]; then
+                echo "::error::$name is required for Azure OIDC"
+                missing=1
+              fi
+            done
+          fi
           for name in SIMPLE_LIVE_KMS_AZURE_VAULT SIMPLE_LIVE_KMS_AZURE_KEY SIMPLE_LIVE_KMS_AZURE_BEARER SIMPLE_LIVE_KMS_DIGEST_BASE64URL; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is required for Azure live KMS"

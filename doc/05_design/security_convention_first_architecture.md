@@ -52,3 +52,19 @@ Error handling:
 
 - Structural violations print `VIOLATION: live KMS workflow: ...` and exit non-zero.
 - Repo hygiene converts that failure into a normal hygiene violation.
+
+## 2026-05-23 Live KMS OIDC Detail Design Addendum
+
+Workflow changes:
+
+- Add `auth` input with `secret` and `oidc`.
+- Keep top-level `permissions: contents: read`.
+- Add job-scoped `permissions: contents: read, id-token: write` for AWS/GCP/Azure jobs.
+- Add OIDC setup preflight steps before provider auth actions.
+- For GCP, use `google-github-actions/auth@v2` with `token_format: access_token`, then write `SIMPLE_LIVE_KMS_GCP_BEARER` to `GITHUB_ENV`.
+- For Azure, use `azure/login@v2`, then write `SIMPLE_LIVE_KMS_AZURE_BEARER` from a Key Vault access-token query to `GITHUB_ENV`.
+- For AWS, use `aws-actions/configure-aws-credentials@v4` and `aws sts get-caller-identity`, then fail clearly if `SIMPLE_LIVE_KMS_AWS_AUTHORIZATION` is absent because the Simple spec still needs SigV4 signing.
+
+Checker changes:
+
+- Require `auth`, `id-token: write`, OIDC setup variables, official provider auth actions, and bearer export steps.

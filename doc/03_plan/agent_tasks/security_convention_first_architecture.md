@@ -43,3 +43,19 @@ Verification:
 - `sh scripts/check-live-kms-security-workflow.shs`
 - `sh scripts/check-repo-hygiene.shs`
 - `bin/simple test test/code_quality/live_kms_security_workflow_spec.spl --mode=interpreter`
+
+## 2026-05-23 Live KMS OIDC Tasks
+
+Done:
+
+- Add `auth` workflow input with `secret` and `oidc`.
+- Add job-scoped OIDC token permission for AWS/GCP/Azure lanes.
+- Add GCP OIDC login and bearer export.
+- Add Azure OIDC login and Key Vault bearer export.
+- Add AWS OIDC bootstrap and explicit SigV4 bridge limitation.
+- Extend shell workflow checker and Simple canary for OIDC invariants.
+- Extend operator guide and design/research addenda.
+
+Pending:
+
+- Implement Simple-side AWS SigV4 signing from short-lived AWS OIDC credentials so AWS can run fully without `SIMPLE_LIVE_KMS_AWS_AUTHORIZATION`.

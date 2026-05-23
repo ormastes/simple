@@ -76,6 +76,7 @@ class Fat32Core:
     cached_free_count: i64
     dir_name_index: Dict<u32, Dict<text, DirEntry>>
     sector_buffer_pool: [[u8]]
+    cluster_buffer_pool: [[u8]]
 
 impl Fat32Core:
     static fn new(device: BlockDevice) -> Fat32Core:
@@ -102,7 +103,8 @@ impl Fat32Core:
             dirty_clusters: {},
             cached_free_count: -1,
             dir_name_index: {},
-            sector_buffer_pool: []
+            sector_buffer_pool: [],
+            cluster_buffer_pool: []
         )
 
     fn _zero_sector(size: u32) -> [u8]:
@@ -117,7 +119,7 @@ impl Fat32Core:
         val sector_size = self.device.sector_size()
         if sector_size < 512:
             return Result.Err("FAT32 boot sector must be at least 512 bytes")
-        var buffer = self._zero_sector(sector_size)
+        var buffer = self._get_sector_buffer()
         val rc = self.device.read_sector(0, buffer)
         if rc.is_err():
             return Result.Err("failed to read FAT32 boot sector")
@@ -197,6 +199,7 @@ impl Fat32Core:
         self.total_clusters = (total_sectors - self.data_start_sector) / self.sectors_per_cluster
         self.mounted = true
         self._init_buffer_pool(16)
+        self._init_cluster_buffer_pool(8)
         self._preload_fat()
         self._preload_root_dir()
         self.cached_free_count = self._scan_free_clusters().to_i64()
@@ -221,6 +224,24 @@ impl Fat32Core:
 
     me fn _return_sector_buffer(buf: [u8]):
         self.sector_buffer_pool.push(buf)
+
+    me fn _get_cluster_buffer() -> [u8]:
+        if self.cluster_buffer_pool.len() > 0:
+            val buf = self.cluster_buffer_pool[self.cluster_buffer_pool.len() - 1]
+            self.cluster_buffer_pool.pop()
+            var j: i32 = 0
+            while j < buf.len():
+                buf[j] = 0
+                j = j + 1
+            return buf
+        self._zero_sector(self.bytes_per_sector * self.sectors_per_cluster)
+
+    me fn _init_cluster_buffer_pool(count: i32):
+        val cluster_bytes = self.bytes_per_sector * self.sectors_per_cluster
+        var i = 0
+        while i < count:
+            self.cluster_buffer_pool.push(self._zero_sector(cluster_bytes))
+            i = i + 1
 
     me fn _preload_fat():
         val fat_sectors_needed = (self.total_clusters * 4 + self.bytes_per_sector - 1) / self.bytes_per_sector
@@ -374,16 +395,9 @@ impl Fat32Core:
     me fn cluster_to_sector(cluster: u32) -> u64:
         (self.data_start_sector + (cluster - 2) * self.sectors_per_cluster).to_u64()
 
-    me fn read_cluster(cluster: u32) -> Result<[u8], text>:
-        val cached_cluster = self.cluster_data_cache.get(cluster)
-        if cached_cluster != nil:
-            return Result.Ok(cached_cluster.unwrap())
+    me fn _read_cluster_uncached(cluster: u32) -> Result<[u8], text>:
         val cluster_bytes = self.bytes_per_sector * self.sectors_per_cluster
-        var data: [u8] = []
-        var i: u32 = 0
-        while i < cluster_bytes:
-            data.push(0)
-            i = i + 1
+        var data = self._get_cluster_buffer()
         val start_sector = self.cluster_to_sector(cluster)
         var sec: u32 = 0
         while sec < self.sectors_per_cluster:
@@ -392,11 +406,21 @@ impl Fat32Core:
             if rc.is_err():
                 return Result.Err("failed to read cluster data")
             var j: u32 = 0
+            val base = sec * self.bytes_per_sector
             while j < self.bytes_per_sector:
-                val idx = sec * self.bytes_per_sector + j
-                data[idx.to_i32()] = sector_buf[j.to_i32()]
+                data[(base + j).to_i32()] = sector_buf[j.to_i32()]
                 j = j + 1
             sec = sec + 1
+        Result.Ok(data)
+
+    me fn read_cluster(cluster: u32) -> Result<[u8], text>:
+        val cached_cluster = self.cluster_data_cache.get(cluster)
+        if cached_cluster != nil:
+            return Result.Ok(cached_cluster.unwrap())
+        val rc = self._read_cluster_uncached(cluster)
+        if rc.is_err():
+            return rc
+        val data = rc.unwrap()
         self.cluster_data_cache.put(cluster, data)
         Result.Ok(data)
 
@@ -432,6 +456,15 @@ impl Fat32Core:
                     return Result.Err(next_rc.unwrap_err())
                 current = next_rc.unwrap()
         self.chain_cache.put_chain(start_cluster, chain)
+        # Prefetch: warm cluster_data_cache for entire chain
+        var pi = 0
+        while pi < chain.len():
+            val pc = chain[pi]
+            if self.cluster_data_cache.get(pc) == nil:
+                val prc = self._read_cluster_uncached(pc)
+                if prc.is_ok():
+                    self.cluster_data_cache.put(pc, prc.unwrap())
+            pi = pi + 1
         Result.Ok(chain)
 
     me fn invalidate_chain(start_cluster: u32):
@@ -895,6 +928,33 @@ impl Fat32Core:
             start = alloc_rc.unwrap()
             of.start_cluster = start
             of.current_cluster = start
+        # Single-cluster fast path: skip chain walk for small writes
+        if of.position + len <= cluster_bytes:
+            val cdata_rc = self.read_cluster(start)
+            if cdata_rc.is_err():
+                return Result.Err(cdata_rc.unwrap_err())
+            var cdata = cdata_rc.unwrap()
+            var bytes_written: i64 = 0
+            var pos = of.position
+            var bi = pos.to_i32()
+            while bytes_written < len:
+                if bytes_written.to_i32() < buf.len():
+                    cdata[bi] = buf[bytes_written.to_i32()]
+                else:
+                    cdata[bi] = 0
+                bytes_written = bytes_written + 1
+                pos = pos + 1
+                bi = bi + 1
+            val wrc = self.write_cluster(start, cdata)
+            if wrc.is_err():
+                of.position = pos
+                self._save_open_file(idx, of)
+                return Result.Err(wrc.unwrap_err())
+            of.position = pos
+            if pos > of.size:
+                of.size = pos
+            self._save_open_file(idx, of)
+            return Result.Ok(bytes_written)
         val chain_rc = self.follow_chain(start)
         if chain_rc.is_err():
             return Result.Err(chain_rc.unwrap_err())

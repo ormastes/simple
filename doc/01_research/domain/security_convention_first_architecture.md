@@ -57,3 +57,21 @@ Findings:
 Implication:
 
 The best near-term hardening is to keep static live credentials environment-scoped and fail-fast, while documenting OIDC as the preferred future provider-auth path. Repo hygiene should validate the workflow shape so a later edit cannot accidentally add PR/push triggers or remove environment gates.
+
+## 2026-05-23 Live KMS OIDC Follow-up
+
+Additional references:
+
+- AWS configure credentials action: https://github.com/aws-actions/configure-aws-credentials
+- Google GitHub Actions auth action: https://github.com/google-github-actions/auth
+- Azure login action: https://github.com/Azure/login
+
+Findings:
+
+- AWS OIDC setup yields short-lived AWS credentials through `aws-actions/configure-aws-credentials`, but the current Simple live adapter test still expects a precomputed SigV4 `Authorization` header. Repo-side OIDC can prove identity bootstrap now; complete AWS replacement needs a Simple SigV4 signing bridge.
+- Google OIDC setup can mint an access token through `google-github-actions/auth` with `token_format: access_token`, which maps directly to the existing `SIMPLE_LIVE_KMS_GCP_BEARER` input.
+- Azure OIDC setup can authenticate through `azure/login`; `az account get-access-token --resource https://vault.azure.net` maps directly to the existing `SIMPLE_LIVE_KMS_AZURE_BEARER` input.
+
+Implementation implication:
+
+Add an `auth` workflow input with `secret` and `oidc`. Keep secret mode as the compatibility default. In OIDC mode, fully wire GCP/Azure bearer generation, add AWS OIDC identity bootstrap, and keep AWS SigV4 runtime signing as the next pending feature.

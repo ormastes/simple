@@ -19,3 +19,7 @@ NFR-LKMS-CI-002: The checker may use `actionlint` when available, but the defaul
 NFR-LKMS-CI-003: The manual live KMS workflow must keep minimum default GitHub token permissions.
 
 NFR-LKMS-CI-004: Documentation must distinguish hermetic CI from manually approved credentialed live-provider validation.
+
+NFR-LKMS-CI-005: OIDC support must use job-scoped `id-token: write` permissions rather than broadening the top-level workflow token beyond `contents: read`.
+
+NFR-LKMS-CI-006: OIDC support must preserve the existing `secret` mode so current deployments are not forced to migrate provider credentials immediately.

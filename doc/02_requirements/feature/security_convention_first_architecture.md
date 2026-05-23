@@ -93,3 +93,11 @@ REQ-LKMS-CI-002: Each provider lane must use a dedicated protected GitHub enviro
 REQ-LKMS-CI-003: Repo hygiene must fail if the live KMS workflow loses provider jobs, environment gates, required credential preflight, or the live integration spec invocation.
 
 REQ-LKMS-CI-004: The repository must document the required environments, secrets, manual run flow, local checks, and OIDC migration direction.
+
+REQ-LKMS-CI-005: The live KMS workflow shall expose an `auth` selector with `secret` and `oidc` modes.
+
+REQ-LKMS-CI-006: In `oidc` mode, the GCP lane shall mint a short-lived access token and export it as `SIMPLE_LIVE_KMS_GCP_BEARER` before running the live KMS spec.
+
+REQ-LKMS-CI-007: In `oidc` mode, the Azure lane shall mint a short-lived Key Vault access token and export it as `SIMPLE_LIVE_KMS_AZURE_BEARER` before running the live KMS spec.
+
+REQ-LKMS-CI-008: In `oidc` mode, the AWS lane shall bootstrap OIDC credentials and fail clearly that the existing raw HTTP live spec still requires `SIMPLE_LIVE_KMS_AWS_AUTHORIZATION` until SigV4 runtime signing is implemented.
