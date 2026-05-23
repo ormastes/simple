@@ -54,9 +54,11 @@ This pass added the first convention-first architecture slice:
 - Source `allow` and `deny` security rules now carry `configurable` and `final` metadata through parser AST and HIR.
 - `security_sdn_merge_violations_sdn` parses structured `security.allow` / `security.deny` SDN config with `simple_sdn` and reports `SEC601` when config weakens a final source deny rule, `SEC602` when config weakens a non-configurable source deny rule, and `SEC603` for malformed security SDN.
 - `simple security check --config security.sdn` appends the source/SDN merge validation to `violations.sdn`.
+- `ui_policy.sdn` now renders a permission snapshot manifest with display-only authority, server-gate-required semantics, policy-version requirement, stable observation keys, extracted conditions, and inferred scopes.
 
 ## Remaining Gaps
 
-- Remote `SecurityContext`, permission snapshots, and UI policy DSL remain design-level.
+- Remote `SecurityContext` transport/reconstruction remains design-level.
+- A first-class source `ui_policy` DSL remains design-level; current snapshots are generated from `@security_observation`.
 - Sandbox manifest generation exists for declared sandboxes/gates, but backend lowering remains future work.
 - Convention-first gate naming now handles `src/security/gate/user_admin.spl` -> `feature user` to `feature admin`.

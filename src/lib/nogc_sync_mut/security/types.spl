@@ -84,6 +84,101 @@ class SecurityContext:
     fn has_capability(cap: text) -> bool:
         self.capabilities.contains(cap)
 
+## Display-only permission snapshot sent to remote UI clients.
+##
+## This is never an authorization token. Clients may use it to hide or disable
+## UI, but every privileged action must still call a server-side gate that
+## reconstructs and checks a SecurityContext.
+class PermissionSnapshot:
+    subject: text
+    scopes: List<text>
+    ui_hints: Dict<text, bool>
+    policy_version: i64
+    expires_at_ms: i64
+    authority: text
+    server_gate_required: bool
+
+    static fn display_only(subject: text, scopes: List<text>, ui_hints: Dict<text, bool>, policy_version: i64, expires_at_ms: i64) -> PermissionSnapshot:
+        PermissionSnapshot(
+            subject: subject,
+            scopes: scopes,
+            ui_hints: ui_hints,
+            policy_version: policy_version,
+            expires_at_ms: expires_at_ms,
+            authority: "display_only",
+            server_gate_required: true
+        )
+
+    fn is_display_only() -> bool:
+        self.authority == "display_only" and self.server_gate_required
+
+    fn is_expired(now_ms: i64) -> bool:
+        self.expires_at_ms <= now_ms
+
+    fn has_scope(scope: text) -> bool:
+        self.scopes.contains(scope)
+
+    fn can_show(key: text) -> bool:
+        val maybe_allowed = self.ui_hints.get(key)
+        if val allowed = maybe_allowed:
+            allowed
+        else:
+            false
+
+## Remote request headers that are safe to propagate into context assembly.
+##
+## Raw authorization remains an input to server-side reconstruction; baggage is
+## limited to non-authoritative metadata and must not contain roles or secrets.
+class RemoteSecurityContextHeaders:
+    authorization: text
+    traceparent: text
+    tenant_id: text
+    policy_version: text
+    request_class: text
+
+    static fn empty() -> RemoteSecurityContextHeaders:
+        RemoteSecurityContextHeaders(
+            authorization: "",
+            traceparent: "",
+            tenant_id: "",
+            policy_version: "",
+            request_class: ""
+        )
+
+    fn has_authorization() -> bool:
+        self.authorization != ""
+
+    fn safe_baggage() -> Dict<text, text>:
+        {
+            "tenant_id": self.tenant_id,
+            "policy_version": self.policy_version,
+            "request_class": self.request_class
+        }
+
+## Reconstructed remote context plus its display-only client snapshot.
+class RemoteSecurityContext:
+    ctx: SecurityContext
+    headers: RemoteSecurityContextHeaders
+    snapshot: PermissionSnapshot
+
+    fn server_authoritative() -> bool:
+        self.snapshot.is_display_only()
+
+## Reconstruct a server SecurityContext from already-validated identity data.
+##
+## The client snapshot is deliberately not used as an authority source.
+fn reconstruct_remote_security_context(headers: RemoteSecurityContextHeaders, peer_addr: text, session_id: text, user_id: text, capabilities: List<text>) -> SecurityContext:
+    if user_id == "":
+        return SecurityContext.anonymous(peer_addr)
+
+    SecurityContext(
+        peer_addr: peer_addr,
+        session_id: session_id,
+        user_id: user_id,
+        correlation_id: generate_correlation_id(),
+        capabilities: capabilities
+    )
+
 ## Configuration for audit logging behavior.
 class AuditConfig:
     enabled: bool

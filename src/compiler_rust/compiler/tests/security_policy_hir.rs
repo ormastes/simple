@@ -411,9 +411,35 @@ fn renders_ui_policy_and_report_artifacts() {
 
     let inventory = build_security_inventory_for_source(&file, &module);
     assert!(inventory.ui_policy_sdn.contains("ui_policy:"));
+    assert!(inventory.ui_policy_sdn.contains("permission_snapshot:"));
     assert!(inventory.ui_policy_sdn.contains("authority: display_only"));
+    assert!(inventory.ui_policy_sdn.contains("server_gate_required: true"));
+    assert!(inventory.ui_policy_sdn.contains("policy_version_required: true"));
+    assert!(inventory.ui_policy_sdn.contains("key: can_show_admin_button"));
+    assert!(inventory
+        .ui_policy_sdn
+        .contains("condition: current_user().has_role(\"admin\")"));
+    assert!(inventory.ui_policy_sdn.contains("scope: admin"));
     assert!(inventory.report_md.contains("# Security Report"));
     assert!(inventory.report_md.contains("- Violations: 0"));
+}
+
+#[test]
+fn renders_permission_snapshot_entries_for_ui_can_observations() {
+    let file = SecuritySourceFile {
+        path: "src/ui/user/profile/profile_view.spl".to_string(),
+        source: "@security_observation\nfn can_edit_profile():\n    return can(UserProfileWrite(self.user_id))\n"
+            .to_string(),
+    };
+    let module = hir::HirModule::new();
+
+    let inventory = build_security_inventory_for_source(&file, &module);
+    assert!(inventory.ui_policy_sdn.contains("key: can_edit_profile"));
+    assert!(inventory
+        .ui_policy_sdn
+        .contains("condition: can(UserProfileWrite(self.user_id))"));
+    assert!(inventory.ui_policy_sdn.contains("scope: UserProfileWrite(self.user_id"));
+    assert!(inventory.ui_policy_sdn.contains("authority: display_only"));
 }
 
 #[test]

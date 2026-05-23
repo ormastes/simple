@@ -2262,22 +2262,86 @@ fn render_capability_manifest(module: &HirModule) -> String {
 
 fn render_ui_policy(files: &[SecuritySourceFile]) -> String {
     let mut out = String::from("ui_policy:\n");
+    out.push_str("  permission_snapshot:\n");
+    out.push_str("    authority: display_only\n");
+    out.push_str("    source: server_signed_snapshot\n");
+    out.push_str("    server_gate_required: true\n");
+    out.push_str("    policy_version_required: true\n");
+    out.push_str("    entries:\n");
     let mut count = 0;
     for file in files {
         for (line_no, line) in file.source.lines().enumerate() {
             if line.trim() == "@security_observation" {
                 count += 1;
-                out.push_str("  - observation:\n");
+                let key = security_observation_key(&file.source, line_no)
+                    .unwrap_or_else(|| format!("{}:{}", file.path, line_no + 1));
+                out.push_str("      - key: ");
+                out.push_str(&key);
+                out.push('\n');
                 out.push_str(&format!("      file: {}\n", file.path));
                 out.push_str(&format!("      line: {}\n", line_no + 1));
-                out.push_str("      authority: display_only\n");
+                out.push_str("        authority: display_only\n");
+                out.push_str("        server_gate_required: true\n");
+                if let Some(condition) = security_observation_condition(&file.source, line_no) {
+                    out.push_str(&format!("        condition: {}\n", condition));
+                    if let Some(scope) = permission_scope_from_condition(&condition) {
+                        out.push_str(&format!("        scope: {}\n", scope));
+                    }
+                }
             }
         }
     }
     if count == 0 {
-        out.push_str("  observations: []\n");
+        out.push_str("      []\n");
     }
     out
+}
+
+fn security_observation_key(source: &str, annotation_line: usize) -> Option<String> {
+    source
+        .lines()
+        .skip(annotation_line + 1)
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .and_then(|line| {
+            line.strip_prefix("fn ")
+                .or_else(|| line.strip_prefix("async fn "))
+                .and_then(|rest| rest.split(['(', ':']).next())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+fn security_observation_condition(source: &str, annotation_line: usize) -> Option<String> {
+    source
+        .lines()
+        .skip(annotation_line + 1)
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty() && !line.starts_with('#') && !line.starts_with("fn ") && !line.starts_with("async fn ")
+        })
+        .map(|line| line.strip_prefix("return ").unwrap_or(line).to_string())
+}
+
+fn permission_scope_from_condition(condition: &str) -> Option<String> {
+    if condition.contains(".is_admin") || condition.contains("has_role(\"admin\")") {
+        Some("admin".to_string())
+    } else if condition.contains("current_user()") {
+        Some("authenticated".to_string())
+    } else if condition.contains("can(") {
+        Some(
+            condition
+                .split("can(")
+                .nth(1)
+                .and_then(|rest| rest.split(')').next())
+                .unwrap_or("capability")
+                .trim()
+                .to_string(),
+        )
+    } else {
+        None
+    }
 }
 
 fn render_security_report(

@@ -1,6 +1,6 @@
 # Security support module regression coverage.
 
-use std.security.types.{SecurityContext}
+use std.security.types.{PermissionSnapshot, RemoteSecurityContext, RemoteSecurityContextHeaders, SecurityContext, reconstruct_remote_security_context}
 use std.security.auth.context_propagation.{SecurityContextStore, current_security_context, with_security_context}
 use std.security.auth.credential_store.{CredentialHandle, CredentialStore}
 use std.security.auth.env_config.{EnvVar, SecureEnvConfig, validate_env_at_startup}
@@ -37,6 +37,57 @@ describe "security auth context propagation":
             expect(active.is_authenticated()).to_equal(true)
         )
         expect(current_security_context().is_authenticated()).to_equal(false)
+
+describe "security remote permission snapshots":
+    it "treats permission snapshots as display only UI hints":
+        val snapshot = PermissionSnapshot.display_only(
+            "user-1",
+            ["user.profile.write"],
+            {"profile.edit": true, "admin.panel.view": false},
+            42,
+            2000
+        )
+        expect(snapshot.is_display_only()).to_equal(true)
+        expect(snapshot.server_gate_required).to_equal(true)
+        expect(snapshot.has_scope("user.profile.write")).to_equal(true)
+        expect(snapshot.can_show("profile.edit")).to_equal(true)
+        expect(snapshot.can_show("admin.panel.view")).to_equal(false)
+        expect(snapshot.can_show("missing")).to_equal(false)
+        expect(snapshot.is_expired(1999)).to_equal(false)
+        expect(snapshot.is_expired(2000)).to_equal(true)
+
+    it "keeps propagated headers to safe baggage fields":
+        val headers = RemoteSecurityContextHeaders(
+            authorization: "Bearer token",
+            traceparent: "00-trace-parent",
+            tenant_id: "tenant-1",
+            policy_version: "42",
+            request_class: "interactive"
+        )
+        val baggage = headers.safe_baggage()
+        expect(headers.has_authorization()).to_equal(true)
+        if val tenant_id = baggage.get("tenant_id"):
+            expect(tenant_id).to_equal("tenant-1")
+        else:
+            expect(false).to_equal(true)
+        if val policy_version = baggage.get("policy_version"):
+            expect(policy_version).to_equal("42")
+        else:
+            expect(false).to_equal(true)
+        if val request_class = baggage.get("request_class"):
+            expect(request_class).to_equal("interactive")
+        else:
+            expect(false).to_equal(true)
+        expect(baggage.get("user_role")).to_be_nil()
+
+    it "reconstructs server SecurityContext without trusting snapshot authority":
+        val headers = RemoteSecurityContextHeaders.empty()
+        val ctx = reconstruct_remote_security_context(headers, "198.51.100.10", "session-1", "user-1", ["user.profile.write"])
+        val snapshot = PermissionSnapshot.display_only("user-1", ["user.profile.write"], {"profile.edit": true}, 42, 2000)
+        val remote = RemoteSecurityContext(ctx: ctx, headers: headers, snapshot: snapshot)
+        expect(remote.server_authoritative()).to_equal(true)
+        expect(remote.ctx.user_id).to_equal("user-1")
+        expect(remote.ctx.has_capability("user.profile.write")).to_equal(true)
 
 describe "security credential store":
     it "rejects invalid handles and missing credentials":

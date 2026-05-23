@@ -29,8 +29,10 @@ REQ-011: The security CLI `check` command shall emit the planned generated artif
 
 REQ-012: Source security policy rules shall support `configurable` and `final` metadata; SDN config may relax source deny rules only when the source rule is configurable, and shall report violations for final or non-configurable weakening.
 
+REQ-013: Generated `ui_policy.sdn` shall describe client permission snapshots as display-only hints, include stable observation keys and conditions, require a policy version, and state that server gates remain authoritative.
+
 ## Deferred Requirements
 
-DEF-001: Remote `SecurityContext` and permission snapshots remain future work.
+DEF-001: Remote `SecurityContext` transport/reconstruction remains future work.
 
 DEF-002: Backend sandbox lowering remains future work beyond manifest generation.
