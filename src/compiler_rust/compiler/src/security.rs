@@ -17,7 +17,9 @@ pub struct SecurityInventory {
     pub security_aop_sdn: String,
     pub capability_manifest_sdn: String,
     pub sandbox_manifest_sdn: String,
+    pub ui_policy_sdn: String,
     pub violations_sdn: String,
+    pub report_md: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +130,7 @@ pub fn build_security_inventory(module: &HirModule) -> SecurityInventory {
         .map(|capability| capability.name.clone())
         .collect();
 
+    let violations_sdn = render_violations(&gates, &gate_names, &sandbox_names, &capability_names);
     SecurityInventory {
         layer_map_sdn: String::new(),
         feature_map_sdn: String::new(),
@@ -138,7 +141,15 @@ pub fn build_security_inventory(module: &HirModule) -> SecurityInventory {
         security_aop_sdn: render_security_aop_lowering(&lower_security_to_aop(module)),
         capability_manifest_sdn: render_capability_manifest(module),
         sandbox_manifest_sdn: render_sandbox_manifest(module, &gates),
-        violations_sdn: render_violations(&gates, &gate_names, &sandbox_names, &capability_names),
+        ui_policy_sdn: render_ui_policy(&[]),
+        report_md: render_security_report(
+            gates.len(),
+            module.security_policies.len(),
+            sandbox_names.len(),
+            capability_names.len(),
+            &violations_sdn,
+        ),
+        violations_sdn,
     }
 }
 
@@ -156,6 +167,7 @@ pub fn build_security_inventory_for_source(file: &SecuritySourceFile, module: &H
         .map(|capability| capability.name.clone())
         .collect();
 
+    let violations_sdn = render_violations(&gates, &gate_names, &sandbox_names, &capability_names);
     SecurityInventory {
         layer_map_sdn: String::new(),
         feature_map_sdn: String::new(),
@@ -166,7 +178,15 @@ pub fn build_security_inventory_for_source(file: &SecuritySourceFile, module: &H
         security_aop_sdn: render_security_aop_lowering(&lower_security_to_aop(module)),
         capability_manifest_sdn: render_capability_manifest(module),
         sandbox_manifest_sdn: render_sandbox_manifest(module, &gates),
-        violations_sdn: render_violations(&gates, &gate_names, &sandbox_names, &capability_names),
+        ui_policy_sdn: render_ui_policy(std::slice::from_ref(file)),
+        report_md: render_security_report(
+            gates.len(),
+            module.security_policies.len(),
+            sandbox_names.len(),
+            capability_names.len(),
+            &violations_sdn,
+        ),
+        violations_sdn,
     }
 }
 
@@ -579,8 +599,18 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
             if coordinate.security_root || from_feature == "security" {
                 continue;
             }
+            let mut in_async_function = false;
+            let mut async_function_indent = 0usize;
             for (line_no, line) in file.source.lines().enumerate() {
                 let trimmed = line.trim();
+                let indent = line.len().saturating_sub(line.trim_start().len());
+                if leaves_async_function(trimmed, indent, in_async_function, async_function_indent) {
+                    in_async_function = false;
+                }
+                if is_async_function_header(trimmed) {
+                    in_async_function = true;
+                    async_function_indent = indent;
+                }
                 if trimmed.is_empty() || trimmed.starts_with('#') {
                     continue;
                 }
@@ -610,6 +640,18 @@ pub fn source_security_violations_sdn_with_modules(files: &[SecuritySourceFile],
                         api.required
                     ));
                     out.push_str(&format!("    replacement: {}\n", api.replacement));
+                }
+
+                if in_async_function && uses_thread_local_security_context(trimmed) {
+                    count += 1;
+                    out.push_str("  - code: SEC501\n");
+                    out.push_str("    message: unsafe SecurityContext access inside async function\n");
+                    out.push_str(&format!("    file: {}\n", file.path));
+                    out.push_str(&format!("    line: {}\n", line_no + 1));
+                    render_coordinate_fields(&mut out, &coordinate);
+                    out.push_str(
+                        "    required: use task-local SecurityContext or pass an explicit context parameter\n",
+                    );
                 }
             }
         }
@@ -1343,6 +1385,26 @@ fn uses_authorization_predicate(line: &str) -> bool {
     patterns.iter().any(|pattern| line.contains(pattern))
 }
 
+fn is_async_function_header(line: &str) -> bool {
+    line.starts_with("async fn ") || line.starts_with("async fn(")
+}
+
+fn leaves_async_function(line: &str, indent: usize, in_async_function: bool, async_function_indent: usize) -> bool {
+    in_async_function
+        && indent <= async_function_indent
+        && (line.starts_with("fn ")
+            || line.starts_with("async fn ")
+            || line.starts_with("class ")
+            || line.starts_with("interface ")
+            || line.starts_with("security ")
+            || line.starts_with("sandbox ")
+            || line.starts_with("capability "))
+}
+
+fn uses_thread_local_security_context(line: &str) -> bool {
+    line.contains("thread_local") && line.contains("SecurityContext")
+}
+
 fn is_security_observation(source: &str, line_no: usize) -> bool {
     let lines: Vec<&str> = source.lines().collect();
     let start = line_no.saturating_sub(3);
@@ -1909,6 +1971,44 @@ fn render_capability_manifest(module: &HirModule) -> String {
             }
         }
     }
+    out
+}
+
+fn render_ui_policy(files: &[SecuritySourceFile]) -> String {
+    let mut out = String::from("ui_policy:\n");
+    let mut count = 0;
+    for file in files {
+        for (line_no, line) in file.source.lines().enumerate() {
+            if line.trim() == "@security_observation" {
+                count += 1;
+                out.push_str("  - observation:\n");
+                out.push_str(&format!("      file: {}\n", file.path));
+                out.push_str(&format!("      line: {}\n", line_no + 1));
+                out.push_str("      authority: display_only\n");
+            }
+        }
+    }
+    if count == 0 {
+        out.push_str("  observations: []\n");
+    }
+    out
+}
+
+fn render_security_report(
+    gate_count: usize,
+    policy_count: usize,
+    sandbox_count: usize,
+    capability_count: usize,
+    violations_sdn: &str,
+) -> String {
+    let violation_count = violations_sdn.matches("  - code:").count();
+    let mut out = String::from("# Security Report\n\n");
+    out.push_str("## Summary\n\n");
+    out.push_str(&format!("- Gates: {}\n", gate_count));
+    out.push_str(&format!("- Policies: {}\n", policy_count));
+    out.push_str(&format!("- Sandboxes: {}\n", sandbox_count));
+    out.push_str(&format!("- Capabilities: {}\n", capability_count));
+    out.push_str(&format!("- Violations: {}\n", violation_count));
     out
 }
 

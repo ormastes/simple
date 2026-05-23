@@ -23,10 +23,14 @@ REQ-008: The compiler shall infer gate boundaries from `src/security/gate/<from>
 
 REQ-009: The security CLI shall expose generated `gate_map.sdn` artifacts.
 
+REQ-010: The compiler shall emit `SEC501` when an async function uses `thread_local SecurityContext`; code must use task-local context or pass an explicit context parameter.
+
+REQ-011: The security CLI `check` command shall emit the planned generated artifact set, including `access_matrix.sdn`, `ui_policy.sdn`, and `report.md`.
+
 ## Deferred Requirements
 
 DEF-001: Source + SDN merge with `configurable` and `final` remains future work.
 
-DEF-002: Remote `SecurityContext`, UI policy snapshots, and dedicated UI policy artifacts remain future work.
+DEF-002: Remote `SecurityContext` and permission snapshots remain future work.
 
 DEF-003: Backend sandbox lowering remains future work beyond manifest generation.

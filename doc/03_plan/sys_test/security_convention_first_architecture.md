@@ -16,6 +16,8 @@ This slice is compiler diagnostic behavior, covered by Rust compiler tests rathe
 - REQ-007: `renders_convention_first_layer_and_feature_maps`.
 - REQ-008: `infers_gate_boundaries_from_security_gate_filename` and `sec201_uses_convention_gate_filename_as_required_crossing`.
 - REQ-009: `infers_gate_boundaries_from_security_gate_filename`.
+- REQ-010: `reports_sec501_for_thread_local_security_context_in_async_function`.
+- REQ-011: `renders_ui_policy_and_report_artifacts`; driver `check` writes `access_matrix.sdn`, `ui_policy.sdn`, and `report.md`.
 
 ## Verification Command
 

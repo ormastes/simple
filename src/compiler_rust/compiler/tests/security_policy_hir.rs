@@ -383,6 +383,35 @@ fn sec201_uses_convention_gate_filename_as_required_crossing() {
 }
 
 #[test]
+fn reports_sec501_for_thread_local_security_context_in_async_function() {
+    let files = vec![SecuritySourceFile {
+        path: "src/service/user/profile/profile_service.spl".to_string(),
+        source: "async fn load_profile():\n    ctx = thread_local SecurityContext\n".to_string(),
+    }];
+
+    let violations = source_security_violations_sdn(&files);
+    assert!(violations.contains("code: SEC501"));
+    assert!(violations.contains("unsafe SecurityContext access inside async function"));
+    assert!(violations.contains("required: use task-local SecurityContext"));
+}
+
+#[test]
+fn renders_ui_policy_and_report_artifacts() {
+    let file = SecuritySourceFile {
+        path: "src/ui/user/profile/profile_view.spl".to_string(),
+        source: "@security_observation\nfn can_show_admin_button():\n    current_user().has_role(\"admin\")\n"
+            .to_string(),
+    };
+    let module = hir::HirModule::new();
+
+    let inventory = build_security_inventory_for_source(&file, &module);
+    assert!(inventory.ui_policy_sdn.contains("ui_policy:"));
+    assert!(inventory.ui_policy_sdn.contains("authority: display_only"));
+    assert!(inventory.report_md.contains("# Security Report"));
+    assert!(inventory.report_md.contains("- Violations: 0"));
+}
+
+#[test]
 fn reports_sec201_for_direct_feature_boundary_import() {
     let files = vec![
         SecuritySourceFile {
