@@ -63,10 +63,11 @@ This pass added the first convention-first architecture slice:
 - Host scheduler polling now exposes scheduler-owned task identity, and HTTP dispatch allocates/enters scheduler task identity for reconstructed remote `SecurityContext` instead of keying security state by worker/fd.
 - Sandbox inventory now emits backend-specific `sandbox_lowering.sdn` plans for Linux, WASI, Simple VM, baremetal, and Simple OS native object-capability handles.
 - Remote HTTP dispatch now has an opt-in HMAC signed bearer token path that authenticates only validated session/user/capability claims and keeps unvalidated dispatch anonymous.
+- Remote security lifecycle primitives now include key-id based signing key rotation, session lookup, refresh, and revocation before remote authority reconstruction.
 - Hosted native security registry initialization now embeds sandbox lowering metadata and the runtime records backend IDs plus capability-handle counts when a generated sandbox is entered.
 
 ## Remaining Gaps
 
-- Remote `SecurityContext` transport/reconstruction has safe HTTP dispatch and HMAC token validation; key rotation, persistent session lookup, refresh, and revocation remain future work.
+- Remote `SecurityContext` transport/reconstruction has safe HTTP dispatch, HMAC token validation, local key-ring rotation, session lookup, refresh, and revocation; durable/distributed session storage and operational key rollout remain future work.
 - Task-local context helpers, HostScheduler task identity, Rust cooperative async current-task-id exposure, FutureExecutor current-task-id exposure, native `rt_current_task_id` selection across Rust runtime identities, and Simple `current_unified_task_key` selection exist; future fiber runtime integration remains future work.
 - Sandbox manifest generation, backend lowering artifacts, and hosted runtime registry installation exist for declared sandboxes/gates, but kernel/VM/backend enforcement remains future work.

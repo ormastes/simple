@@ -28,6 +28,7 @@ This slice covers compiler security grammar, diagnostics, generated artifacts, a
 - REQ-019: `security_support_spec.spl` covers HMAC signed token acceptance, tamper/expiry/session-mismatch rejection, and malformed token rejection; `security_context_dispatch_spec.spl` covers validated HTTP dispatch while preserving anonymous default dispatch.
 - REQ-020: runtime test `loads_sandbox_lowering_metadata_into_runtime_registry` and native project test `test_security_registry_embeds_sandbox_lowering_metadata`.
 - REQ-021: `security_support_spec.spl` covers independence from legacy current context, `security_context_dispatch_spec.spl` covers explicit task-id HTTP dispatch, `async_host_task_identity_spec.spl` covers scheduler-owned and unified task key scoping/restoration, Rust `async_runtime` and `executor` tests cover current-task-id restoration and unified default behavior, and `runtime_sffi` tests cover native codegen registration.
+- REQ-022: `remote_security_lifecycle_spec.spl` covers key rotation with key-id tokens, session lookup, refresh, and revocation.
 
 ## Verification Command
 

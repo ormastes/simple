@@ -1230,7 +1230,7 @@ Output:
 
 Remaining implementation after generated lowering:
     enforce lowered sandbox plans in runtime/kernel/VM backends
-    add remote SecurityContext key rotation, persistent session lookup, refresh, and revocation
+    add durable/distributed remote SecurityContext session storage and operational key rollout
     integrate future fiber runtimes with the unified task identity selector
 
 The minimal example should look like this:

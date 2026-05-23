@@ -47,9 +47,11 @@ REQ-020: Hosted native builds shall embed generated `sandbox_lowering.sdn` metad
 
 REQ-021: HTTP handler dispatch shall route reconstructed remote `SecurityContext` through scheduler-owned task identity rather than worker/fd identity, including scheduler polling scopes and HTTP request handler scopes.
 
+REQ-022: Remote `SecurityContext` lifecycle support shall provide key-id based signing key rotation, server-side session lookup, refresh, and revocation primitives for validating remote bearer tokens before reconstructing authority.
+
 ## Deferred Requirements
 
-DEF-001: Remote `SecurityContext` key rotation, persistent session lookup, refresh flows, and distributed revocation remain future work beyond HMAC token validation.
+DEF-001: Durable/distributed remote `SecurityContext` session storage and operational key rollout remain future work beyond local key-ring and session-store lifecycle primitives.
 
 DEF-002: Runtime installation and kernel/VM enforcement of lowered sandbox plans remains future work beyond generated backend lowering artifacts.
 
