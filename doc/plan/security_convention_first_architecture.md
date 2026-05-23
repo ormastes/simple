@@ -1231,7 +1231,7 @@ Output:
 Remaining implementation after generated lowering:
     enforce lowered sandbox plans in runtime/kernel/VM backends
     add remote SecurityContext key rotation, persistent session lookup, refresh, and revocation
-    make scheduler task identity thread/fiber-local and expose Rust runtime current-task ids
+    add FutureExecutor current-task identity and full thread/fiber-local propagation across all execution modes
 
 The minimal example should look like this:
 

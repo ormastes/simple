@@ -22,6 +22,7 @@
 //! └────────────────────────────────────────────────────┘
 //! ```
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -30,6 +31,10 @@ use crate::value::RuntimeValue;
 
 /// Unique task identifier.
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static CURRENT_ASYNC_TASK_ID: Cell<u64> = const { Cell::new(0) };
+}
 
 // Use the public SFFI functions for future operations.
 use crate::value::{rt_future_await, rt_future_get_result, rt_future_is_ready};
@@ -42,6 +47,29 @@ struct AsyncTask {
     future: RuntimeValue,
     /// Tasks waiting for this task to complete.
     dependents: Vec<u64>,
+}
+
+struct CurrentAsyncTaskGuard {
+    previous: u64,
+}
+
+impl Drop for CurrentAsyncTaskGuard {
+    fn drop(&mut self) {
+        CURRENT_ASYNC_TASK_ID.with(|cell| cell.set(self.previous));
+    }
+}
+
+fn enter_current_async_task(task_id: u64) -> CurrentAsyncTaskGuard {
+    let previous = CURRENT_ASYNC_TASK_ID.with(|cell| {
+        let previous = cell.get();
+        cell.set(task_id);
+        previous
+    });
+    CurrentAsyncTaskGuard { previous }
+}
+
+fn current_async_task_id() -> u64 {
+    CURRENT_ASYNC_TASK_ID.with(Cell::get)
 }
 
 /// The cooperative async scheduler.
@@ -88,7 +116,9 @@ impl AsyncScheduler {
     /// Poll a single future: if already ready return true,
     /// otherwise try to execute it via rt_future_await (which calls
     /// the body_func and blocks until ready).
-    fn poll_future(future: RuntimeValue) -> bool {
+    fn poll_future(task_id: u64, future: RuntimeValue) -> bool {
+        let _task_scope = enter_current_async_task(task_id);
+
         // Already ready?
         if rt_future_is_ready(future) == 1 {
             return true;
@@ -110,7 +140,7 @@ impl AsyncScheduler {
             let ready_count = self.ready.len();
             for _ in 0..ready_count {
                 if let Some(task) = self.ready.pop_front() {
-                    let is_ready = Self::poll_future(task.future);
+                    let is_ready = Self::poll_future(task.id, task.future);
 
                     if is_ready {
                         let result = rt_future_get_result(task.future);
@@ -230,7 +260,7 @@ pub extern "C" fn rt_async_poll_tasks() -> i64 {
 
     for _ in 0..ready_count {
         if let Some(task) = sched.ready.pop_front() {
-            let is_ready = AsyncScheduler::poll_future(task.future);
+            let is_ready = AsyncScheduler::poll_future(task.id, task.future);
             if is_ready {
                 let result = rt_future_get_result(task.future);
                 completed.push((task.id, result, task.dependents));
@@ -245,6 +275,14 @@ pub extern "C" fn rt_async_poll_tasks() -> i64 {
     }
 
     (sched.results.len() - before) as i64
+}
+
+/// Return the scheduler-owned async task id currently being polled.
+///
+/// A value of 0 means no Rust async scheduler task is active on this thread.
+#[no_mangle]
+pub extern "C" fn rt_async_current_task_id() -> i64 {
+    current_async_task_id() as i64
 }
 
 #[cfg(test)]
@@ -286,5 +324,25 @@ mod tests {
         let future = rt_future_resolve(RuntimeValue::from_int(7));
         let result = rt_async_run_until_complete(future);
         assert_eq!(result.as_int(), 7);
+    }
+
+    #[test]
+    fn current_task_id_defaults_to_zero() {
+        assert_eq!(rt_async_current_task_id(), 0);
+    }
+
+    #[test]
+    fn current_task_id_is_thread_local_and_restored() {
+        assert_eq!(rt_async_current_task_id(), 0);
+        {
+            let _outer = enter_current_async_task(42);
+            assert_eq!(rt_async_current_task_id(), 42);
+            {
+                let _inner = enter_current_async_task(7);
+                assert_eq!(rt_async_current_task_id(), 7);
+            }
+            assert_eq!(rt_async_current_task_id(), 42);
+        }
+        assert_eq!(rt_async_current_task_id(), 0);
     }
 }

@@ -236,8 +236,8 @@ pub use value::{
 
 // Re-export async runtime scheduler SFFI functions
 pub use async_runtime::{
-    rt_async_poll_tasks, rt_async_run_until_complete, rt_async_schedule_await, rt_async_spawn, rt_async_spawn_task,
-    AsyncScheduler,
+    rt_async_current_task_id, rt_async_poll_tasks, rt_async_run_until_complete, rt_async_schedule_await,
+    rt_async_spawn, rt_async_spawn_task, AsyncScheduler,
 };
 
 // Re-export AOP runtime SFFI functions

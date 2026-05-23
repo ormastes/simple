@@ -27,7 +27,7 @@ This slice covers compiler security grammar, diagnostics, generated artifacts, a
 - REQ-018: HIR tests `lowers_gate_sandbox_and_inventory` and `lowers_simple_os_sandbox_to_native_object_capability_handles`; CLI check writes `sandbox_lowering.sdn`.
 - REQ-019: `security_support_spec.spl` covers HMAC signed token acceptance, tamper/expiry/session-mismatch rejection, and malformed token rejection; `security_context_dispatch_spec.spl` covers validated HTTP dispatch while preserving anonymous default dispatch.
 - REQ-020: runtime test `loads_sandbox_lowering_metadata_into_runtime_registry` and native project test `test_security_registry_embeds_sandbox_lowering_metadata`.
-- REQ-021: `security_support_spec.spl` covers independence from legacy current context, `security_context_dispatch_spec.spl` covers explicit task-id HTTP dispatch, and `async_host_task_identity_spec.spl` covers scheduler-owned task key scoping and restoration.
+- REQ-021: `security_support_spec.spl` covers independence from legacy current context, `security_context_dispatch_spec.spl` covers explicit task-id HTTP dispatch, `async_host_task_identity_spec.spl` covers scheduler-owned task key scoping and restoration, Rust `async_runtime` tests cover cooperative current-task-id restoration, and `runtime_sffi` tests cover native codegen registration.
 
 ## Verification Command
 

@@ -68,5 +68,5 @@ This pass added the first convention-first architecture slice:
 ## Remaining Gaps
 
 - Remote `SecurityContext` transport/reconstruction has safe HTTP dispatch and HMAC token validation; key rotation, persistent session lookup, refresh, and revocation remain future work.
-- Task-local context helpers and HostScheduler task identity exist, but thread/fiber-local identity storage and Rust runtime current-task-id exposure remain future work.
+- Task-local context helpers, HostScheduler task identity, and Rust cooperative async current-task-id exposure exist; FutureExecutor identity and full thread/fiber-local propagation across all execution modes remain future work.
 - Sandbox manifest generation, backend lowering artifacts, and hosted runtime registry installation exist for declared sandboxes/gates, but kernel/VM/backend enforcement remains future work.

@@ -589,6 +589,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_async_run_until_complete", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_async_spawn_task", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_async_poll_tasks", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_async_current_task_id", &[], &[I64]),
     // =========================================================================
     // Isolated Thread operations
     // =========================================================================
@@ -1404,6 +1405,17 @@ mod tests {
             let _tier = tier_of(spec.name);
             // Just ensure it doesn't panic
         }
+    }
+
+    #[test]
+    fn async_current_task_id_is_registered() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_async_current_task_id")
+            .expect("rt_async_current_task_id must be registered for native codegen");
+        assert!(spec.params.is_empty());
+        assert_eq!(spec.returns, [I64]);
+        assert_eq!(tier_of(spec.name), RuntimeFuncTier::Async);
     }
 
     #[test]
