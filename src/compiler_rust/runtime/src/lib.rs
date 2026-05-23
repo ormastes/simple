@@ -223,7 +223,8 @@ pub use security_runtime::{
     rt_security_last_sandbox_capability_allowed, rt_security_load_registry_sdn, rt_security_loaded_registry_entries,
     rt_security_policy_allowed, rt_security_policy_checks, rt_security_register_policy, rt_security_register_sandbox,
     rt_security_require_policy, rt_security_reset_counters, rt_security_sandbox_capability_allowed,
-    rt_security_sandbox_capability_denials, rt_security_sandbox_registered,
+    rt_security_sandbox_capability_denials, rt_security_sandbox_registered, rt_security_host_import_allowed,
+    rt_security_last_host_import_allowed, rt_security_host_import_denials,
 };
 
 pub use fiber_identity::{rt_fiber_current_task_id, rt_fiber_enter_task_id, rt_fiber_exit_task_id};

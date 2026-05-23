@@ -57,8 +57,10 @@ REQ-025: SimpleOS kernel capability management shall install generated `sandbox_
 
 REQ-026: Remote `SecurityContext` lifecycle state shall support SDN export/import for signing key rings and session stores, distributed merge of later session refreshes and revocations, and explicit key retirement for operational rollout.
 
+REQ-027: Simple VM host-import filtering shall enforce active `sandbox_lowering.sdn` capability classes before interpreter extern dispatch, deny unmapped host imports by default under `simple_vm_capability_table`, and preserve explicit `rt_security_*` control-plane imports.
+
 ## Deferred Requirements
 
 DEF-001: Production adapters for external replicated session storage and KMS/HSM-backed signing key rollout remain future work beyond SDN persistence, merge, rotation, and retirement primitives.
 
-DEF-002: Full backend syscall isolation for Landlock/seccomp, WASI, baremetal MPU, and broader VM host-import filters remains future work beyond hosted runtime checks and SimpleOS kernel capability installation.
+DEF-002: Full backend syscall isolation for Landlock/seccomp, WASI, and baremetal MPU remains future work beyond hosted runtime checks, Simple VM host-import filtering, and SimpleOS kernel capability installation.

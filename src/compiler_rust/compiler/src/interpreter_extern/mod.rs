@@ -1020,12 +1020,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_file_canonicalize", file_io::rt_file_canonicalize as ExternFn);
     m.insert("rt_file_close", file_io::rt_file_close as ExternFn);
     m.insert("rt_file_copy", file_io::rt_file_copy as ExternFn);
+    m.insert("rt_file_create_excl", file_io::rt_file_create_excl as ExternFn);
     m.insert("rt_file_delete", native_sffi::rt_file_delete as ExternFn);
     m.insert("rt_file_exists", file_io::rt_file_exists as ExternFn);
     m.insert("rt_file_exists_str", file_io::rt_file_exists as ExternFn);
     m.insert("rt_file_find", file_io::rt_file_find as ExternFn);
     m.insert("rt_file_fsync_cached", file_io::rt_file_fsync_cached as ExternFn);
     m.insert("rt_file_fsync", file_io::rt_file_fsync as ExternFn);
+    m.insert("rt_file_sync", file_io::rt_file_fsync as ExternFn);
     m.insert("rt_file_get_size", file_io::rt_file_get_size as ExternFn);
     m.insert("rt_file_hash", cranelift::rt_file_hash as ExternFn);
     m.insert("rt_file_hash_sha256", file_io::rt_file_hash_sha256 as ExternFn);
@@ -2117,6 +2119,12 @@ pub(crate) fn call_extern_function(
     // Diagram tracing for extern function calls
     if diagram_sffi::is_diagram_enabled() {
         diagram_sffi::trace_call(name);
+    }
+
+    if !simple_runtime::rt_security_host_import_allowed(name.as_ptr(), name.len() as u64) {
+        return Err(CompileError::runtime(format!(
+            "host import '{name}' denied by active sandbox"
+        )));
     }
 
     // Evaluate all arguments upfront

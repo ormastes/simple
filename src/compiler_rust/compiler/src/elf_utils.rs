@@ -627,6 +627,11 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_security_sandbox_capability_denials" => {
             simple_runtime::rt_security_sandbox_capability_denials as *const () as usize
         }
+        "rt_security_host_import_allowed" => simple_runtime::rt_security_host_import_allowed as *const () as usize,
+        "rt_security_last_host_import_allowed" => {
+            simple_runtime::rt_security_last_host_import_allowed as *const () as usize
+        }
+        "rt_security_host_import_denials" => simple_runtime::rt_security_host_import_denials as *const () as usize,
 
         // Doctest I/O operations (file discovery)
         "doctest_read_file" => simple_runtime::doctest_read_file as *const () as usize,
@@ -691,6 +696,9 @@ mod tests {
             "rt_security_sandbox_capability_allowed",
             "rt_security_last_sandbox_capability_allowed",
             "rt_security_sandbox_capability_denials",
+            "rt_security_host_import_allowed",
+            "rt_security_last_host_import_allowed",
+            "rt_security_host_import_denials",
         ] {
             assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
         }

@@ -22,6 +22,8 @@ static LAST_SANDBOX_BACKEND_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_SANDBOX_CAPABILITY_HANDLES: AtomicU64 = AtomicU64::new(0);
 static LAST_SANDBOX_CAPABILITY_ALLOWED: AtomicU64 = AtomicU64::new(1);
 static SANDBOX_CAPABILITY_DENIAL_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_HOST_IMPORT_ALLOWED: AtomicU64 = AtomicU64::new(1);
+static HOST_IMPORT_DENIAL_COUNT: AtomicU64 = AtomicU64::new(0);
 static LOADED_REGISTRY_ENTRIES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
@@ -75,6 +77,104 @@ fn capability_handle_id(handle: &str) -> u64 {
     let trimmed = handle.trim();
     let name = trimmed.split(['[', '(', '<', ' ']).next().unwrap_or(trimmed);
     security_metadata_id(name)
+}
+
+fn host_import_capability_id(name: &str) -> Option<u64> {
+    match name {
+        "rt_file_read_text"
+        | "rt_file_read_text_rv"
+        | "rt_file_canonicalize"
+        | "rt_file_exists"
+        | "rt_file_size"
+        | "rt_file_mtime"
+        | "rt_file_read_bytes"
+        | "rt_file_read_lines"
+        | "rt_file_hash_sha256"
+        | "rt_file_mmap_read_text"
+        | "rt_file_mmap_read_text_rv"
+        | "rt_file_mmap_read_bytes"
+        | "rt_file_mmap_read_bytes_rv"
+        | "rt_file_mmap_len"
+        | "rt_file_read_text_at"
+        | "rt_read_file"
+        | "doctest_read_file"
+        | "doctest_path_exists"
+        | "doctest_is_file"
+        | "doctest_is_dir"
+        | "doctest_walk_directory"
+        | "doctest_path_has_extension"
+        | "doctest_path_contains" => Some(security_metadata_id("ReadFile")),
+        "rt_file_write_text"
+        | "rt_file_write_text_rv"
+        | "rt_file_append_text"
+        | "rt_file_fsync"
+        | "rt_file_fsync_cached"
+        | "rt_file_copy"
+        | "rt_file_move"
+        | "rt_file_remove"
+        | "rt_file_rename"
+        | "rt_file_write_bytes"
+        | "rt_file_write_text_at"
+        | "rt_file_write_text_at_cached"
+        | "rt_file_write_text_at_cached_repeat"
+        | "rt_write_file"
+        | "rt_remove_file"
+        | "rt_create_dir"
+        | "rt_remove_dir"
+        | "rt_rename"
+        | "rt_package_create_tarball"
+        | "rt_package_extract_tarball"
+        | "rt_package_copy_file"
+        | "rt_package_mkdir_all"
+        | "rt_package_remove_dir_all"
+        | "rt_package_create_symlink"
+        | "rt_package_chmod" => Some(security_metadata_id("WriteFile")),
+        _ if name.starts_with("rt_env_") || name == "env_get" || name == "rt_env_get" => {
+            Some(security_metadata_id("Env"))
+        }
+        _ if name.starts_with("rt_process_")
+            || name.starts_with("rt_pty_")
+            || name == "process_run"
+            || name == "rt_exec"
+            || name == "rt_execute_native" =>
+        {
+            Some(security_metadata_id("Process"))
+        }
+        _ if name.starts_with("native_tcp_")
+            || name.starts_with("native_udp_")
+            || name.starts_with("rt_io_tcp_")
+            || name.starts_with("rt_http_")
+            || name.starts_with("rt_dns_")
+            || name.starts_with("rt_tls_")
+            || name.starts_with("rt_monoio_tcp_")
+            || name.starts_with("rt_monoio_udp_")
+            || name.starts_with("monoio_tcp_")
+            || name.starts_with("monoio_udp_")
+            || name.starts_with("rt_unix_socket_")
+            || name == "rt_host_wm_client_connect" =>
+        {
+            Some(security_metadata_id("Network"))
+        }
+        _ => None,
+    }
+}
+
+fn is_security_control_plane_import(name: &str) -> bool {
+    name.starts_with("rt_security_")
+}
+
+fn active_sandbox_backend_id() -> Option<u64> {
+    registry().lock().ok().and_then(|registry| {
+        let sandbox_id = registry.active_sandboxes.last()?;
+        registry
+            .sandbox_lowerings
+            .get(sandbox_id)
+            .map(|record| record.backend_id)
+    })
+}
+
+fn active_sandbox_is_simple_vm() -> bool {
+    active_sandbox_backend_id() == Some(security_metadata_id("simple_vm_capability_table"))
 }
 
 #[no_mangle]
@@ -176,6 +276,8 @@ pub extern "C" fn rt_security_reset_counters() {
     LAST_SANDBOX_CAPABILITY_HANDLES.store(0, Ordering::Relaxed);
     LAST_SANDBOX_CAPABILITY_ALLOWED.store(1, Ordering::Relaxed);
     SANDBOX_CAPABILITY_DENIAL_COUNT.store(0, Ordering::Relaxed);
+    LAST_HOST_IMPORT_ALLOWED.store(1, Ordering::Relaxed);
+    HOST_IMPORT_DENIAL_COUNT.store(0, Ordering::Relaxed);
     LOADED_REGISTRY_ENTRIES.store(0, Ordering::Relaxed);
     if let Ok(mut registry) = registry().lock() {
         *registry = SecurityRegistry::default();
@@ -291,6 +393,41 @@ pub extern "C" fn rt_security_last_sandbox_capability_allowed() -> bool {
 #[no_mangle]
 pub extern "C" fn rt_security_sandbox_capability_denials() -> u64 {
     SANDBOX_CAPABILITY_DENIAL_COUNT.load(Ordering::Relaxed)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_security_host_import_allowed(name_ptr: *const u8, name_len: u64) -> bool {
+    if name_ptr.is_null() {
+        LAST_HOST_IMPORT_ALLOWED.store(0, Ordering::Relaxed);
+        HOST_IMPORT_DENIAL_COUNT.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(name_ptr, name_len as usize) };
+    let Ok(name) = std::str::from_utf8(bytes) else {
+        LAST_HOST_IMPORT_ALLOWED.store(0, Ordering::Relaxed);
+        HOST_IMPORT_DENIAL_COUNT.fetch_add(1, Ordering::Relaxed);
+        return false;
+    };
+    let allowed = match host_import_capability_id(name) {
+        Some(capability_id) => rt_security_sandbox_capability_allowed(capability_id),
+        None if active_sandbox_is_simple_vm() => is_security_control_plane_import(name),
+        None => true,
+    };
+    LAST_HOST_IMPORT_ALLOWED.store(u64::from(allowed), Ordering::Relaxed);
+    if !allowed {
+        HOST_IMPORT_DENIAL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    allowed
+}
+
+#[no_mangle]
+pub extern "C" fn rt_security_last_host_import_allowed() -> bool {
+    LAST_HOST_IMPORT_ALLOWED.load(Ordering::Relaxed) != 0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_security_host_import_denials() -> u64 {
+    HOST_IMPORT_DENIAL_COUNT.load(Ordering::Relaxed)
 }
 
 #[no_mangle]
@@ -601,5 +738,95 @@ sandbox_lowering:
         assert_eq!(rt_security_sandbox_capability_denials(), 1);
         rt_security_exit_sandbox(sandbox_id);
         assert!(rt_security_sandbox_capability_allowed(network_id));
+    }
+
+    #[test]
+    fn active_sandbox_filters_vm_host_imports_by_capability_class() {
+        rt_security_reset_counters();
+        let sandbox_id = security_metadata_id("vm_plugin");
+        let manifest = "\
+sandbox_lowering:
+  vm_plugin:
+    source_backend: simple_vm
+    lowered_backend: simple_vm_capability_table
+    enforcement:
+      - module_capability_table
+      - host_import_filter
+    capability_handles:
+      - ReadFile[\"/reports/input.txt\"]
+      - AuditLog
+    policy_rules:
+      net: deny all
+      process: deny all
+      env: deny all
+";
+
+        assert_eq!(
+            rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64),
+            1
+        );
+        rt_security_enter_sandbox(sandbox_id);
+
+        assert!(rt_security_host_import_allowed(
+            b"rt_file_read_text".as_ptr(),
+            "rt_file_read_text".len() as u64
+        ));
+        assert!(!rt_security_host_import_allowed(
+            b"rt_file_write_text".as_ptr(),
+            "rt_file_write_text".len() as u64
+        ));
+        assert!(!rt_security_host_import_allowed(
+            b"rt_http_get".as_ptr(),
+            "rt_http_get".len() as u64
+        ));
+        assert!(!rt_security_host_import_allowed(
+            b"rt_process_run".as_ptr(),
+            "rt_process_run".len() as u64
+        ));
+        assert!(!rt_security_host_import_allowed(
+            b"rt_env_get".as_ptr(),
+            "rt_env_get".len() as u64
+        ));
+        assert!(!rt_security_last_host_import_allowed());
+        assert!(!rt_security_host_import_allowed(
+            b"rt_plugin_custom_host_call".as_ptr(),
+            "rt_plugin_custom_host_call".len() as u64
+        ));
+        assert!(rt_security_host_import_allowed(
+            b"rt_security_enter_gate".as_ptr(),
+            "rt_security_enter_gate".len() as u64
+        ));
+        assert_eq!(rt_security_host_import_denials(), 5);
+    }
+
+    #[test]
+    fn write_only_vm_host_import_filter_denies_read_imports() {
+        rt_security_reset_counters();
+        let sandbox_id = security_metadata_id("writer_plugin");
+        let manifest = "\
+sandbox_lowering:
+  writer_plugin:
+    source_backend: simple_vm
+    lowered_backend: simple_vm_capability_table
+    enforcement:
+      - module_capability_table
+      - host_import_filter
+    capability_handles:
+      - WriteFile[\"/reports/output.txt\"]
+";
+
+        assert_eq!(
+            rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64),
+            1
+        );
+        rt_security_enter_sandbox(sandbox_id);
+        assert!(rt_security_host_import_allowed(
+            b"rt_file_write_text".as_ptr(),
+            "rt_file_write_text".len() as u64
+        ));
+        assert!(!rt_security_host_import_allowed(
+            b"rt_file_read_text".as_ptr(),
+            "rt_file_read_text".len() as u64
+        ));
     }
 }
