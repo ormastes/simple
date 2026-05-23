@@ -1233,7 +1233,7 @@ Output:
 
 Remaining implementation after generated lowering:
     add non-RISC-V MPU backends and boot-time PMP/MPU apply hooks
-    add concrete quorum session-store behavior and vendor KMS/HSM clients behind the hosted adapter seams
+    add vendor KMS/HSM clients behind the hosted adapter seams
 
 The minimal example should look like this:
 
