@@ -1237,7 +1237,7 @@ Output:
     audit/security report
 
 Remaining implementation after generated lowering:
-    wire the boot-time unsafe byte reader behind the embedded __simple_sandbox_start/end lookup seam
+    wire architecture-specific __simple_sandbox_start/end address providers into the boot-time raw byte reader
     add real credentialed cloud/HSM CI lanes for the opt-in live KMS integration gates
 
 The minimal example should look like this:

@@ -2,6 +2,9 @@ use std.nogc_async_mut_noalloc.baremetal.riscv_common.pmp.{PmpCsrWrite, pmp_regi
 use os.kernel.arch.arm64.paging.{arm64_sandbox_pte_bits_from_lowering}
 use os.kernel.boot.mmio.{mmio_write32}
 
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+
 val SIMPLE_SANDBOX_SECTION_START_SYMBOL: text = "__simple_sandbox_start"
 val SIMPLE_SANDBOX_SECTION_END_SYMBOL: text = "__simple_sandbox_end"
 
@@ -117,12 +120,21 @@ fn embedded_sandbox_lowering_sdn_from_section(start_addr: u64, end_addr: u64, se
         return ""
     section_text
 
+fn embedded_sandbox_lowering_sdn_from_raw_bounds(start_addr: u64, end_addr: u64) -> text:
+    """Unsafely read embedded .simple.sandbox bytes from linker section bounds."""
+    if embedded_sandbox_section_bounds_valid(start_addr, end_addr) == false:
+        return ""
+    val section_len = (end_addr - start_addr) as i64
+    val section_text = rt_bytes_to_text(rt_bytes_from_raw(start_addr as i64, section_len))
+    embedded_sandbox_lowering_sdn_from_section(start_addr, end_addr, section_text)
+
 fn embedded_sandbox_lowering_sdn() -> text:
     """Boot-time lookup seam for .simple.sandbox between linker section symbols.
 
-    The arch linker scripts expose __simple_sandbox_start/end. The unsafe byte
-    reader that turns those raw addresses into section_text is intentionally
-    left behind this function so boot code depends on one narrow hook.
+    The arch linker scripts expose __simple_sandbox_start/end. Architecture
+    startup code must pass those symbol addresses into
+    embedded_sandbox_lowering_sdn_from_raw_bounds so all unsafe reads remain
+    behind the validation gate in this module.
     """
     ""
 
