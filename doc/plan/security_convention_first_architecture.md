@@ -1222,6 +1222,8 @@ DI:
     inject gates and SecurityContext like normal dependencies
     enforce lifetime + security rules together
     wire remote SecurityContext validation through replicated session and opaque key rollout adapters
+    execute hosted KMS requests through an explicit runtime HTTP opt-in
+    build AWS KMS Sign/Verify requests with SigV4 authorization headers
 
 Output:
     access matrix
@@ -1235,7 +1237,8 @@ Remaining implementation after generated lowering:
     add live non-RISC-V MPU programming backends beyond ARM64 PTE policy derivation
     add hardware CSR/MMIO apply backends beyond the RISC-V boot PMP plan hook
     add boot-time embedded sandbox metadata lookup behind __simple_sandbox_start/end
-    add live authenticated AWS/GCP/Azure/HSM transport execution behind the vendor KMS request builders
+    add live GCP/Azure/HSM transport authentication behind the vendor KMS request builders
+    add AWS credential-store resolution and live opt-in cloud integration coverage
 
 The minimal example should look like this:
 

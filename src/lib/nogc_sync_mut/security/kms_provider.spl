@@ -7,6 +7,7 @@ never raw signing keys.
 """
 
 use std.security.types.{RemoteSecurityKeyRolloutProvider, remote_security_token_with_external_signature}
+use std.nogc_sync_mut.io.http_sffi.{rt_http_request}
 
 struct HostedKmsHttpConfig:
     vendor: text
@@ -84,6 +85,8 @@ impl HostedKmsKeyProvider:
         val key = hosted_kms_request_key(request)
         if self.simulated_responses.has(key):
             return self.simulated_responses[key]
+        if hosted_kms_runtime_http_enabled(self.config):
+            return hosted_kms_execute_runtime_http(request)
         HostedKmsHttpResponse(status_code: 599, body: "", error: "kms transport unavailable")
 
     fn sign_payload(key_id: text, payload: text) -> text:
@@ -134,6 +137,34 @@ fn hosted_kms_default_config(endpoint: text) -> HostedKmsHttpConfig:
         tls_profile: "system",
         timeout_ms: 3000
     )
+
+fn hosted_kms_runtime_http_config(endpoint: text) -> HostedKmsHttpConfig:
+    HostedKmsHttpConfig(
+        vendor: "generic-http-kms",
+        endpoint: endpoint,
+        auth_mode: "runtime-http",
+        bearer_token: "",
+        tls_profile: "system",
+        timeout_ms: 3000
+    )
+
+fn hosted_kms_runtime_http_enabled(config: HostedKmsHttpConfig) -> bool:
+    config.auth_mode == "runtime-http" or config.auth_mode == "aws-sigv4"
+
+fn hosted_kms_headers_for_runtime(headers: Dict<text, text>) -> [text]:
+    var out: [text] = []
+    for name in headers.keys():
+        out.push("{name}: {headers[name]}")
+    out
+
+fn hosted_kms_execute_runtime_http(request: HostedKmsHttpRequest) -> HostedKmsHttpResponse:
+    val (status, body, error) = rt_http_request(
+        request.method,
+        request.url,
+        hosted_kms_headers_for_runtime(request.headers),
+        request.body
+    )
+    HostedKmsHttpResponse(status_code: status, body: body, error: error)
 
 fn hosted_kms_build_request(config: HostedKmsHttpConfig, operation: text, key_id: text, key_handle: text, payload: text, signature: text) -> HostedKmsHttpRequest:
     val headers: Dict<text, text> = {

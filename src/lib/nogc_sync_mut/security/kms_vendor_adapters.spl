@@ -8,6 +8,7 @@ profile names.
 """
 
 use std.security.kms_provider.{HostedKmsHttpRequest}
+use std.nogc_sync_mut.aws_sigv4.{SigV4Header, sigv4_sha256_hex, sigv4_authorization_header}
 
 fn kms_vendor_headers(vendor: text, auth_header: text) -> Dict<text, text>:
     var headers: Dict<text, text> = {
@@ -40,6 +41,79 @@ fn aws_kms_verify_request(endpoint: text, key_handle: text, payload: text, signa
         url: endpoint,
         headers: headers,
         body: "{\"KeyId\":\"{key_handle}\",\"Message\":\"{payload}\",\"MessageType\":\"RAW\",\"Signature\":\"{signature}\",\"SigningAlgorithm\":\"{signing_algorithm}\"}",
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )
+
+fn aws_kms_host_from_endpoint(endpoint: text) -> text:
+    var rest = endpoint
+    val scheme_end = rest.find("://").unwrap_or(-1)
+    if scheme_end >= 0:
+        rest = rest[scheme_end + 3:]
+    val slash = rest.find("/").unwrap_or(-1)
+    if slash >= 0:
+        return rest[0:slash]
+    rest
+
+fn aws_kms_canonical_uri_from_endpoint(endpoint: text) -> text:
+    var rest = endpoint
+    val scheme_end = rest.find("://").unwrap_or(-1)
+    if scheme_end >= 0:
+        rest = rest[scheme_end + 3:]
+    val slash = rest.find("/").unwrap_or(-1)
+    if slash >= 0:
+        return rest[slash:]
+    "/"
+
+fn aws_kms_sigv4_headers(endpoint: text, target: text, body: text, access_key: text, secret_key: text, region: text, amz_datetime: text) -> Dict<text, text>:
+    val host = aws_kms_host_from_endpoint(endpoint)
+    val payload_hash = sigv4_sha256_hex(body)
+    var signed: [SigV4Header] = []
+    signed = signed + [SigV4Header(name: "content-type", value: "application/x-amz-json-1.1")]
+    signed = signed + [SigV4Header(name: "host", value: host)]
+    signed = signed + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
+    signed = signed + [SigV4Header(name: "x-amz-date", value: amz_datetime)]
+    signed = signed + [SigV4Header(name: "x-amz-target", value: target)]
+    val auth = sigv4_authorization_header(
+        "POST",
+        aws_kms_canonical_uri_from_endpoint(endpoint),
+        "",
+        signed,
+        payload_hash,
+        access_key,
+        secret_key,
+        region,
+        "kms",
+        amz_datetime
+    )
+    {
+        "authorization": auth,
+        "content-type": "application/x-amz-json-1.1",
+        "host": host,
+        "x-amz-content-sha256": payload_hash,
+        "x-amz-date": amz_datetime,
+        "x-amz-target": target,
+        "x-simple-kms-vendor": "aws-kms"
+    }
+
+fn aws_kms_sigv4_sign_request(endpoint: text, key_handle: text, payload: text, signing_algorithm: text, access_key: text, secret_key: text, region: text, amz_datetime: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    val body = "{\"KeyId\":\"{key_handle}\",\"Message\":\"{payload}\",\"MessageType\":\"RAW\",\"SigningAlgorithm\":\"{signing_algorithm}\"}"
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: endpoint,
+        headers: aws_kms_sigv4_headers(endpoint, "TrentService.Sign", body, access_key, secret_key, region, amz_datetime),
+        body: body,
+        timeout_ms: timeout_ms,
+        tls_profile: tls_profile
+    )
+
+fn aws_kms_sigv4_verify_request(endpoint: text, key_handle: text, payload: text, signature: text, signing_algorithm: text, access_key: text, secret_key: text, region: text, amz_datetime: text, timeout_ms: i64, tls_profile: text) -> HostedKmsHttpRequest:
+    val body = "{\"KeyId\":\"{key_handle}\",\"Message\":\"{payload}\",\"MessageType\":\"RAW\",\"Signature\":\"{signature}\",\"SigningAlgorithm\":\"{signing_algorithm}\"}"
+    HostedKmsHttpRequest(
+        method: "POST",
+        url: endpoint,
+        headers: aws_kms_sigv4_headers(endpoint, "TrentService.Verify", body, access_key, secret_key, region, amz_datetime),
+        body: body,
         timeout_ms: timeout_ms,
         tls_profile: tls_profile
     )

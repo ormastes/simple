@@ -1,4 +1,4 @@
-use std.security.kms_provider.{HostedKmsHttpConfig, HostedKmsHttpResponse, HostedKmsKeyProvider, hosted_kms_default_config}
+use std.security.kms_provider.{HostedKmsHttpConfig, HostedKmsHttpResponse, HostedKmsKeyProvider, hosted_kms_default_config, hosted_kms_runtime_http_config, hosted_kms_runtime_http_enabled, hosted_kms_headers_for_runtime}
 use std.security.types.{RemoteSecurityContextHeaders, RemoteSecuritySessionStoreAdapter, remote_security_token_payload_v2, validate_remote_security_context_with_adapters}
 
 fn bearer_headers(token: text) -> RemoteSecurityContextHeaders:
@@ -30,6 +30,20 @@ describe "hosted KMS key provider":
 
         expect(kms.sign_payload("missing-key", "payload-1")).to_equal("")
         expect(kms.verify_external_signature("missing-key", "payload-1", "sig")).to_equal(false)
+
+    it "keeps live runtime HTTP transport explicitly opt-in":
+        val default_config = hosted_kms_default_config("https://kms.internal/simple")
+        val live_config = hosted_kms_runtime_http_config("https://kms.internal/simple")
+
+        expect(hosted_kms_runtime_http_enabled(default_config)).to_equal(false)
+        expect(hosted_kms_runtime_http_enabled(live_config)).to_equal(true)
+
+    it "converts hosted KMS headers to runtime HTTP header lines":
+        val request = HostedKmsKeyProvider.with_active_key(hosted_kms_default_config("https://kms.internal/simple"), "key-1", "kms://cluster/key-1").sign_request("key-1", "payload-1")
+        val lines = hosted_kms_headers_for_runtime(request.headers)
+
+        expect(lines.join("\n")).to_contain("content-type: application/json")
+        expect(lines.join("\n")).to_contain("x-simple-kms-vendor: generic-http-kms")
 
     it "signs with an external KMS response":
         var kms = HostedKmsKeyProvider.with_active_key(hosted_kms_default_config("https://kms.internal/simple"), "key-1", "kms://cluster/key-1")
