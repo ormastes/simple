@@ -44,6 +44,16 @@ SECTIONS
         _etext = .;
     } > FLASH
 
+    .simple_sandbox :
+    {
+        . = ALIGN(4);
+        __simple_sandbox_start = .;
+        KEEP(*(.simple.sandbox*))
+        KEEP(*(.simple.mpu*))
+        . = ALIGN(4);
+        __simple_sandbox_end = .;
+    } > FLASH
+
     /* ARM EABI sections */
     .ARM.extab :
     {

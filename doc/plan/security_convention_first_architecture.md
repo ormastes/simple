@@ -1216,7 +1216,7 @@ Sandbox:
     lower to WASI/capability model for plugins
     lower to native object-capability handles in Simple OS
     enforce WASI env/preopen grants with explicit capability tables
-    keep baremetal .simple.sandbox* and .simple.mpu* sections and fail closed when metadata is missing
+    keep ARM/baremetal .simple.sandbox* and .simple.mpu* sections and fail closed when metadata is missing
 
 DI:
     inject gates and SecurityContext like normal dependencies
@@ -1234,6 +1234,7 @@ Output:
 Remaining implementation after generated lowering:
     add live non-RISC-V MPU programming backends beyond ARM64 PTE policy derivation
     add hardware CSR/MMIO apply backends beyond the RISC-V boot PMP plan hook
+    add boot-time embedded sandbox metadata lookup behind __simple_sandbox_start/end
     add live authenticated AWS/GCP/Azure/HSM transport execution behind the vendor KMS request builders
 
 The minimal example should look like this:
