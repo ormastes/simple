@@ -199,6 +199,7 @@ Task type: code-quality. Refined the user's broad "harden simple db" request int
 #### Design Notes
 - F2 uses `FileLock.for_file(path)` static constructor (correct 3-field struct), `try_acquire(500)` for contention tests to avoid 5-minute timeout
 - F2 checks `path + ".lock"` (not `path`) for lock file existence assertions
+- F2 TOCTOU caveat: the 3 FileLock integration tests pass even without the O_EXCL fix because single-process tests cannot observe the file_exists+file_write race window; the real red-phase signal for F2 comes from the 5 `rt_file_create_excl` extern tests, which fail because the extern does not exist yet
 - F4 uses `BTree<text>.new(3)`, `BTreeKey(a: n, b: 0)`, `tree.lookup(k(n))`, `tree.delete(k(n))` -- verified against actual btree.spl API
 - F5 uses trait-typed dispatch helpers (`fn require_wal_group_commit(w: WalWriter, ...) -> Lsn`) to force trait-level method resolution, not inherent method calls
 - All specs use `extern fn` declarations for runtime functions instead of `use std.io_runtime` to avoid import issues
