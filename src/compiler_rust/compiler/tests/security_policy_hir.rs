@@ -259,6 +259,7 @@ sandbox driver_sandbox:
     backend baremetal
     memory kernel_driver rw
     mmio uart0 rw
+    pmp_region 2147483648|4096|rw|locked
 "#,
     );
 
@@ -285,6 +286,10 @@ sandbox driver_sandbox:
         .contains("linker_end: __simple_sandbox_end"));
     assert!(inventory.sandbox_lowering_sdn.contains("memory:"));
     assert!(inventory.sandbox_lowering_sdn.contains("mmio:"));
+    assert!(inventory.sandbox_lowering_sdn.contains("pmp_program:"));
+    assert!(inventory
+        .sandbox_lowering_sdn
+        .contains("- pmp_region|2147483648|4096|rw|locked"));
 }
 
 #[test]

@@ -69,8 +69,10 @@ REQ-031: Baremetal sandbox lowering shall emit deterministic MPU/linker metadata
 
 REQ-032: Remote `SecurityContext` validation shall expose hosted adapter seams for replicated session storage and opaque key rollout providers, and HTTP dispatch shall support validating v2 remote tokens through those adapters without requiring raw signing keys in request handling.
 
+REQ-033: RISC-V baremetal sandbox support shall convert generated `pmp_region|base|size|permissions|locked` lowering metadata into concrete `pmpaddrN` and `pmpcfgN` CSR write plans, including NAPOT address encoding and locked read/write/execute PMP config bytes.
+
 ## Deferred Requirements
 
 DEF-001: Concrete deployment clients for Redis/quorum session stores and specific KMS/HSM vendors remain future work beyond the hosted adapter seams, SDN persistence, merge, rotation, and retirement primitives.
 
-DEF-002: Hardware-specific baremetal MPU/PMP register programming remains future work beyond deterministic linker-section metadata, fail-closed static-section installation, hosted runtime checks, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, Simple VM host-import filtering, and SimpleOS kernel capability installation.
+DEF-002: Non-RISC-V MPU backends and boot-time CSR/MMIO apply hooks remain future work beyond deterministic linker-section metadata, fail-closed static-section installation, hosted runtime checks, WASI env/preopen capability-table enforcement, Linux Landlock/seccomp filters, Simple VM host-import filtering, SimpleOS kernel capability installation, and RISC-V PMP CSR write-plan generation.

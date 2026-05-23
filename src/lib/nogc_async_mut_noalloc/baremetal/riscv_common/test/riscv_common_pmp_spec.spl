@@ -1,0 +1,39 @@
+use std.nogc_async_mut_noalloc.baremetal.riscv_common.pmp.{CSR_PMPCFG0, CSR_PMPADDR0, PMP_A_NAPOT, PMP_L, PmpRegion, pmp_config_byte, pmp_napot_addr, pmp_write_plan, pmp_regions_from_sandbox_lowering, pmp_write_plan_from_sandbox_lowering}
+
+describe "RISC-V PMP programming":
+    it "builds locked read-write NAPOT config":
+        expect pmp_config_byte("rw", true) == (PMP_A_NAPOT | 0x01 | 0x02 | PMP_L)
+
+    it "encodes naturally aligned NAPOT addresses":
+        expect pmp_napot_addr(2147483648, 4096) == 536871423
+
+    it "builds RV64 CSR writes for a region":
+        val writes = pmp_write_plan(PmpRegion(base: 2147483648, size: 4096, permissions: "rx", locked: true), 1, 64)
+        expect writes.len() == 2
+        expect writes[0].csr == CSR_PMPADDR0 + 1
+        expect writes[0].value == 536871423
+        expect writes[1].csr == CSR_PMPCFG0
+        expect writes[1].value == ((PMP_A_NAPOT | 0x01 | 0x04 | PMP_L) << 8)
+
+    it "parses a compact PMP row":
+        val regions = pmp_regions_from_sandbox_lowering("pmp_region|2147483648|4096|rw|locked")
+        expect regions.len() == 1
+        expect regions[0].base == 2147483648
+
+    it "parses generated sandbox lowering rows":
+        val lowering = """
+sandbox_lowering:
+  driver_sandbox:
+    lowered_backend: baremetal_mpu_linker_regions
+    baremetal:
+      pmp_program:
+        - pmp_region|2147483648|4096|rw|locked
+"""
+        val regions = pmp_regions_from_sandbox_lowering(lowering)
+        expect regions.len() == 1
+        expect regions[0].base == 2147483648
+        expect regions[0].size == 4096
+        val writes = pmp_write_plan_from_sandbox_lowering(lowering, 64)
+        expect writes.len() == 2
+        expect writes[0].csr == CSR_PMPADDR0
+        expect writes[0].value == 536871423

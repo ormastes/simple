@@ -2314,6 +2314,16 @@ fn render_baremetal_sandbox_lowering(out: &mut String, sandbox_name: &str, rules
     if !emitted {
         out.push_str("        default: deny_ambient\n");
     }
+    let mut pmp_emitted = false;
+    for (key, value) in rules {
+        if *key == "pmp_region" {
+            if !pmp_emitted {
+                out.push_str("      pmp_program:\n");
+                pmp_emitted = true;
+            }
+            out.push_str(&format!("        - pmp_region|{}\n", value));
+        }
+    }
 }
 
 fn security_section_suffix(value: &str) -> String {

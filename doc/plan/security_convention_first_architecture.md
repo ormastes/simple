@@ -1232,7 +1232,7 @@ Output:
     audit/security report
 
 Remaining implementation after generated lowering:
-    add hardware-specific baremetal MPU/PMP register programming from generated metadata
+    add non-RISC-V MPU backends and boot-time PMP/MPU apply hooks
     add concrete Redis/quorum session-store and vendor KMS/HSM clients behind the hosted adapter seams
 
 The minimal example should look like this:
