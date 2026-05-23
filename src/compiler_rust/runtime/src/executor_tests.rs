@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicI32, AtomicI64};
 use std::time::Duration;
 
 #[test]
@@ -23,6 +23,29 @@ fn test_threaded_mode() {
 }
 
 #[test]
+fn test_threaded_mode_current_task_id() {
+    let executor = FutureExecutor::new(AsyncMode::Threaded);
+    executor.set_worker_count(1);
+    executor.start();
+
+    let observed = Arc::new(AtomicI64::new(0));
+    let observed_clone = observed.clone();
+
+    let task_id = executor.submit(move || {
+        observed_clone.store(rt_executor_current_task_id(), Ordering::SeqCst);
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    while observed.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    assert_eq!(observed.load(Ordering::SeqCst), task_id as i64);
+    assert_eq!(rt_executor_current_task_id(), 0);
+    executor.shutdown();
+}
+
+#[test]
 fn test_manual_mode() {
     let executor = FutureExecutor::new(AsyncMode::Manual);
 
@@ -41,6 +64,23 @@ fn test_manual_mode() {
     assert!(executor.poll_one());
     assert_eq!(counter.load(Ordering::SeqCst), 1);
     assert_eq!(executor.pending_count(), 0);
+}
+
+#[test]
+fn test_manual_mode_current_task_id() {
+    let executor = FutureExecutor::new(AsyncMode::Manual);
+
+    let observed = Arc::new(AtomicI64::new(0));
+    let observed_clone = observed.clone();
+
+    let task_id = executor.submit(move || {
+        observed_clone.store(rt_executor_current_task_id(), Ordering::SeqCst);
+    });
+
+    assert_eq!(rt_executor_current_task_id(), 0);
+    assert!(executor.poll_one());
+    assert_eq!(observed.load(Ordering::SeqCst), task_id as i64);
+    assert_eq!(rt_executor_current_task_id(), 0);
 }
 
 #[test]

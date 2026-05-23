@@ -53,4 +53,4 @@ DEF-001: Remote `SecurityContext` key rotation, persistent session lookup, refre
 
 DEF-002: Runtime installation and kernel/VM enforcement of lowered sandbox plans remains future work beyond generated backend lowering artifacts.
 
-DEF-003: FutureExecutor current-task identity and full thread/fiber-local propagation across all execution modes remain future work beyond HostScheduler identity and Rust cooperative async current-task-id exposure.
+DEF-003: Unified task identity selection across HostScheduler, FutureExecutor, Rust cooperative async, and future fiber runtimes remains future work beyond exposing each runtime's current-task id.

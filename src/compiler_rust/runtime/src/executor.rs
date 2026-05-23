@@ -23,6 +23,7 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -45,6 +46,33 @@ pub struct Task {
     work: Box<dyn FnOnce() + Send + 'static>,
 }
 
+thread_local! {
+    static CURRENT_EXECUTOR_TASK_ID: Cell<u64> = const { Cell::new(0) };
+}
+
+struct CurrentExecutorTaskGuard {
+    previous: u64,
+}
+
+impl Drop for CurrentExecutorTaskGuard {
+    fn drop(&mut self) {
+        CURRENT_EXECUTOR_TASK_ID.with(|cell| cell.set(self.previous));
+    }
+}
+
+fn enter_current_executor_task(task_id: u64) -> CurrentExecutorTaskGuard {
+    let previous = CURRENT_EXECUTOR_TASK_ID.with(|cell| {
+        let previous = cell.get();
+        cell.set(task_id);
+        previous
+    });
+    CurrentExecutorTaskGuard { previous }
+}
+
+fn current_executor_task_id() -> u64 {
+    CURRENT_EXECUTOR_TASK_ID.with(Cell::get)
+}
+
 impl Task {
     fn new(id: u64, work: impl FnOnce() + Send + 'static) -> Self {
         Task {
@@ -54,6 +82,7 @@ impl Task {
     }
 
     fn execute(self) {
+        let _task_scope = enter_current_executor_task(self.id);
         (self.work)();
     }
 }
@@ -496,6 +525,14 @@ pub extern "C" fn rt_executor_is_manual() -> i64 {
     } else {
         0
     }
+}
+
+/// Return the FutureExecutor task id currently executing on this thread.
+///
+/// A value of 0 means no FutureExecutor task is active on this thread.
+#[no_mangle]
+pub extern "C" fn rt_executor_current_task_id() -> i64 {
+    current_executor_task_id() as i64
 }
 
 // ============================================================================

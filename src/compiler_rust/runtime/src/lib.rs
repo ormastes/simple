@@ -156,6 +156,7 @@ pub use executor::{
     poll_one,
     // Executor SFFI functions
     rt_executor_get_mode,
+    rt_executor_current_task_id,
     rt_executor_is_manual,
     rt_executor_pending_count,
     rt_executor_poll,
