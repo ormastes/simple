@@ -1,8 +1,9 @@
 # HTTP transport security context dispatch coverage.
 
 use std.http_server.types.{HttpRequestData, HttpResponseData, LocationConfig, default_response_data}
-use std.http_server.security_context.{dispatch_handler_with_remote_security_context}
+use std.http_server.security_context.{dispatch_handler_with_remote_security_context, dispatch_handler_with_validated_remote_security_context}
 use std.security.auth.context_propagation.{current_security_context}
+use std.security.types.{sign_remote_security_token}
 
 fn observed_security_context_handler(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
     val ctx = current_security_context()
@@ -45,3 +46,29 @@ describe "http security context dispatch":
         expect(response.status).to_equal(200)
         expect(response.body).to_equal("198.51.100.30|session-transport|false")
         expect(current_security_context().is_authenticated()).to_equal(false)
+
+    it "authenticates handler dispatch only with a validated remote token":
+        val token = sign_remote_security_token("server-secret", "session-transport", "user-1", 2000, ["user.profile.write"])
+        val request = HttpRequestData(
+            method: "GET",
+            path: "/secure",
+            query: "",
+            version: "HTTP/1.1",
+            headers: [
+                ("Authorization", "Bearer {token}"),
+                ("X-Simple-Session-Id", "session-transport")
+            ],
+            body: "",
+            params: {},
+            peer_addr: "198.51.100.30"
+        )
+        val response = dispatch_handler_with_validated_remote_security_context(observed_security_context_handler, test_location(), request, "server-secret", 1999)
+        expect(response.status).to_equal(200)
+        expect(response.body).to_equal("198.51.100.30|session-transport|true")
+        expect(current_security_context().is_authenticated()).to_equal(false)
+
+    it "keeps validated dispatch anonymous when token validation fails":
+        val request = test_request()
+        val response = dispatch_handler_with_validated_remote_security_context(observed_security_context_handler, test_location(), request, "server-secret", 1999)
+        expect(response.status).to_equal(200)
+        expect(response.body).to_equal("198.51.100.30|session-transport|false")

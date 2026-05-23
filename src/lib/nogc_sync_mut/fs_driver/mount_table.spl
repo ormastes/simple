@@ -10,17 +10,8 @@ use std.fs_driver.types.{Path, MountOptions, StatInfo, FileHandle, DirHandle, Di
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.capability.{CapabilitySet}
-use common.string_core.{str_char_at}
-
 fn _text_has_prefix(source: text, prefix: text) -> bool:
-    if prefix.len() > source.len():
-        return false
-    var idx: i64 = 0
-    while idx < prefix.len():
-        if str_char_at(source, idx) != str_char_at(prefix, idx):
-            return false
-        idx = idx + 1
-    true
+    source.starts_with(prefix)
 
 fn _driver_name(driver: DriverInstance) -> text:
     match driver:
@@ -95,8 +86,9 @@ fn _driver_pread_text_handle(driver: DriverInstance, handle: FileHandle, offset:
 
 fn _driver_close_handle(driver: DriverInstance, handle: FileHandle) -> Result<(), FsError>:
     match driver:
-        case DriverInstance.DbFs(d): d.close_handle(handle)
-        case _:                      Ok(())
+        case DriverInstance.DbFs(d):   d.close_handle(handle)
+        case DriverInstance.RamFs(d):  d.close_handle(handle)
+        case _:                        Ok(())
 
 fn _driver_unlink_path_text(driver: DriverInstance, path: text) -> Result<(), FsError>:
     match driver:
@@ -247,16 +239,16 @@ impl MountTable:
             case nil:
                 Err(FsError.NotFound)
             case Some(entry):
-                val mp_len = entry.mount_point.len()
-                # FR-STORAGE-0004: do NOT use path.raw.slice() — broken in baremetal
-                # Cranelift codegen. Build relpath by indexed char-copy instead.
+                val full_parts = path.raw.split("/")
+                val mp_parts = entry.mount_point.split("/")
                 var rel_raw: text = ""
-                var ci: i64 = mp_len
-                if ci < path.raw.len() and str_char_at(path.raw, ci) == "/":
-                    ci = ci + 1
-                while ci < path.raw.len():
-                    rel_raw = rel_raw + str_char_at(path.raw, ci)
-                    ci = ci + 1
+                var pi: i64 = mp_parts.len()
+                while pi < full_parts.len():
+                    if full_parts[pi].len() > 0:
+                        if rel_raw.len() > 0:
+                            rel_raw = rel_raw + "/"
+                        rel_raw = rel_raw + full_parts[pi]
+                    pi = pi + 1
                 val relpath: Path = Path(raw: rel_raw)
                 Ok(MountResolution(mount_id: entry.id, relpath: relpath))
 

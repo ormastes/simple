@@ -1,6 +1,9 @@
 # Security core types for audit logging, events, and security context.
 
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.crypto.hmac.{hmac_sha256_bytes}
+use std.common.crypto.constant_time.{constant_time_compare}
+use std.common.crypto.types.{bytes_to_hex, text_to_bytes}
 
 extern fn rt_random_hex(length: i64) -> text
 
@@ -192,6 +195,89 @@ fn remote_security_session_id_from_pairs(headers: [(text, text)]) -> text:
 
 fn anonymous_remote_security_context(headers: RemoteSecurityContextHeaders, peer_addr: text) -> SecurityContext:
     reconstruct_remote_security_context(headers, peer_addr, "", "", [])
+
+## Validated identity extracted from a server-signed remote token.
+class RemoteSecurityValidatedIdentity:
+    session_id: text
+    user_id: text
+    capabilities: List<text>
+    expires_at_ms: i64
+
+    fn is_expired(now_ms: i64) -> bool:
+        self.expires_at_ms <= now_ms
+
+fn remote_security_bearer_token(headers: RemoteSecurityContextHeaders) -> text:
+    val authorization = headers.authorization.trim()
+    if authorization.starts_with("Bearer "):
+        return authorization[7:].trim()
+    return ""
+
+fn remote_security_token_payload(session_id: text, user_id: text, expires_at_ms: i64, capabilities: List<text>) -> text:
+    val scopes = capabilities.join(",")
+    "{session_id}|{user_id}|{expires_at_ms}|{scopes}"
+
+fn remote_security_hmac_sha256_hex(signing_key: text, payload: text) -> text:
+    bytes_to_hex(hmac_sha256_bytes(text_to_bytes(signing_key), text_to_bytes(payload)))
+
+fn sign_remote_security_token(signing_key: text,
+                              session_id: text,
+                              user_id: text,
+                              expires_at_ms: i64,
+                              capabilities: List<text>) -> text:
+    val payload = remote_security_token_payload(session_id, user_id, expires_at_ms, capabilities)
+    val signature = remote_security_hmac_sha256_hex(signing_key, payload)
+    "simple-v1|{payload}|{signature}"
+
+fn validate_remote_security_token(headers: RemoteSecurityContextHeaders,
+                                  session_id: text,
+                                  signing_key: text,
+                                  now_ms: i64) -> RemoteSecurityValidatedIdentity?:
+    if signing_key == "":
+        return nil
+    val bearer = remote_security_bearer_token(headers)
+    if bearer == "":
+        return nil
+    val parts = bearer.split("|")
+    if parts.len() != 6:
+        return nil
+    if parts[0] != "simple-v1":
+        return nil
+    val token_session_id = parts[1]
+    val user_id = parts[2]
+    val expires_at_ms = parts[3].to_i64() ?? 0
+    val scopes = parts[4]
+    val signature = parts[5]
+    if token_session_id == "" or user_id == "":
+        return nil
+    if session_id != "" and session_id != token_session_id:
+        return nil
+    val capabilities = if scopes == "": [] else: scopes.split(",")
+    val payload = remote_security_token_payload(token_session_id, user_id, expires_at_ms, capabilities)
+    val expected = remote_security_hmac_sha256_hex(signing_key, payload)
+    if not constant_time_compare(expected, signature):
+        return nil
+    val identity = RemoteSecurityValidatedIdentity(
+        session_id: token_session_id,
+        user_id: user_id,
+        capabilities: capabilities,
+        expires_at_ms: expires_at_ms
+    )
+    if identity.is_expired(now_ms):
+        return nil
+    identity
+
+## Validate a remote bearer token against the server signing key. Invalid,
+## missing, expired, tampered, or session-mismatched tokens reconstruct an
+## anonymous context while preserving peer/session transport metadata.
+fn validate_remote_security_context(headers: RemoteSecurityContextHeaders,
+                                    peer_addr: text,
+                                    session_id: text,
+                                    signing_key: text,
+                                    now_ms: i64) -> SecurityContext:
+    if val identity = validate_remote_security_token(headers, session_id, signing_key, now_ms):
+        return reconstruct_remote_security_context(headers, peer_addr, identity.session_id, identity.user_id, identity.capabilities)
+
+    reconstruct_remote_security_context(headers, peer_addr, session_id, "", [])
 
 ## Reconstructed remote context plus its display-only client snapshot.
 class RemoteSecurityContext:

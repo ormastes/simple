@@ -112,7 +112,7 @@ struct OptimizerManifest:
 # ============================================================================
 
 struct DynamicPassDescriptor:
-    stable_name: text
+    name: text
     aliases: [text]
     scope: PassScope
     capability_requires: [text]
@@ -132,7 +132,7 @@ fn dynamic_pass_provider(entry: ManifestPassEntry, plugin_name: text) -> Optimiz
 
 fn dynamic_pass_descriptor_from_entry(entry: ManifestPassEntry, plugin_name: text) -> DynamicPassDescriptor:
     DynamicPassDescriptor(
-        stable_name: entry.stable_name,
+        name: entry.stable_name,
         aliases: entry.aliases,
         scope: entry.scope,
         capability_requires: entry.capability_requires,
@@ -148,13 +148,24 @@ struct DynamicPassRegistry:
     """Holds dynamic pass descriptors loaded from manifests for this session."""
     descriptors: [DynamicPassDescriptor]
 
+impl DynamicPassRegistry:
+    static fn new() -> DynamicPassRegistry:
+        DynamicPassRegistry(descriptors: [])
+
+    fn register(desc: DynamicPassDescriptor) -> Result<DynamicPassRegistry, ManifestError>:
+        """Register a single descriptor, checking for name conflicts."""
+        for existing in self.descriptors:
+            if existing.name == desc.name:
+                return Err(ManifestError.StableNameConflict(desc.name))
+        Ok(DynamicPassRegistry(descriptors: self.descriptors.push(desc)))
+
 fn dynamic_pass_registry_new() -> DynamicPassRegistry:
     DynamicPassRegistry(descriptors: [])
 
 fn dynamic_pass_registry_lookup(registry: DynamicPassRegistry, name: text) -> DynamicPassDescriptor?:
-    """Look up a dynamic pass by stable_name or alias."""
+    """Look up a dynamic pass by name or alias."""
     for desc in registry.descriptors:
-        if desc.stable_name == name:
+        if desc.name == name:
             return Some(desc)
         for alias in desc.aliases:
             if alias == name:
@@ -225,6 +236,8 @@ fn validate_manifest(manifest: OptimizerManifest) -> ManifestError?:
 fn parse_scope(scope_text: text) -> PassScope:
     if scope_text == "module":
         PassScope.Module
+    elif scope_text == "fs_driver":
+        PassScope.FsDriver
     else:
         PassScope.Function
 
@@ -297,7 +310,7 @@ fn dynamic_pass_registry_register(
     for entry in manifest.passes:
         # Check conflicts against already-registered dynamic passes
         for existing in updated.descriptors:
-            if existing.stable_name == entry.stable_name:
+            if existing.name == entry.stable_name:
                 return Err(ManifestError.StableNameConflict(entry.stable_name))
         val desc = dynamic_pass_descriptor_from_entry(entry, manifest.name)
         updated = DynamicPassRegistry(descriptors: updated.descriptors.push(desc))

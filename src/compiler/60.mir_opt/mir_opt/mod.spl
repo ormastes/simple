@@ -39,6 +39,7 @@ use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     optimization_rule_provider_is_pipeline_pass
 }
 use compiler.backend.feature_caps.{X86Caps, TargetCapsKind}
+use compiler.mir_opt.optimization_passes.{OptimizationStats, optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch}
 
 # ============================================================================
 # Target Optimization Context
@@ -245,6 +246,12 @@ fn mir_pass_descriptor_for_name(pass_name: text) -> MirPassDescriptor?:
         return Some(mir_pass_descriptor("predicate_promote", [], mir_pipeline_provider("predicate_promote", false), PassKind.PredicatePromote, PassScope.Module))
     if pass_name == "target_narrow_form":
         return Some(mir_pass_descriptor("target_narrow_form", [], mir_pipeline_provider("target_narrow_form", false), PassKind.TargetNarrowForm, PassScope.Module))
+    if pass_name == "write_coalesce":
+        return Some(mir_pass_descriptor("write_coalesce", [], mir_pipeline_provider("write_coalesce", false), PassKind.WriteCoalesce, PassScope.FsDriver))
+    if pass_name == "read_ahead_hoist":
+        return Some(mir_pass_descriptor("read_ahead_hoist", [], mir_pipeline_provider("read_ahead_hoist", false), PassKind.ReadAheadHoist, PassScope.FsDriver))
+    if pass_name == "syscall_batch":
+        return Some(mir_pass_descriptor("syscall_batch", [], mir_pipeline_provider("syscall_batch", false), PassKind.SyscallBatch, PassScope.FsDriver))
     nil
 
 fn mir_pass_provider_name(pass_name: text) -> text:
@@ -686,6 +693,18 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
             # target_narrow_form is dispatched by pipeline_optimize with target context;
             # bare run_pass_on_module callers without context get a no-op.
             pass_do_nothing
+        case WriteCoalesce:
+            for sym in module.functions.keys():
+                var wc_stats = OptimizationStats.create()
+                result_module.functions[sym] = optimize_write_coalesce(result_module.functions[sym], wc_stats)
+        case ReadAheadHoist:
+            for sym in module.functions.keys():
+                var rah_stats = OptimizationStats.create()
+                result_module.functions[sym] = optimize_read_ahead_hoist(result_module.functions[sym], rah_stats)
+        case SyscallBatch:
+            for sym in module.functions.keys():
+                var sb_stats = OptimizationStats.create()
+                result_module.functions[sym] = optimize_syscall_batch(result_module.functions[sym], sb_stats)
     result_module
 
 # ============================================================================

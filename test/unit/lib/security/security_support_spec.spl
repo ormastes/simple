@@ -1,6 +1,6 @@
 # Security support module regression coverage.
 
-use std.security.types.{PermissionSnapshot, RemoteSecurityContext, RemoteSecurityContextHeaders, SecurityContext, reconstruct_remote_security_context}
+use std.security.types.{PermissionSnapshot, RemoteSecurityContext, RemoteSecurityContextHeaders, SecurityContext, reconstruct_remote_security_context, sign_remote_security_token, validate_remote_security_context, validate_remote_security_token}
 use std.security.auth.context_propagation.{SecurityContextStore, TaskSecurityContextStore, current_security_context, current_task_security_context, with_security_context, with_task_security_context}
 use std.security.auth.credential_store.{CredentialHandle, CredentialStore}
 use std.security.auth.env_config.{EnvVar, SecureEnvConfig, validate_env_at_startup}
@@ -139,6 +139,63 @@ describe "security remote permission snapshots":
         expect(remote.server_authoritative()).to_equal(true)
         expect(remote.ctx.user_id).to_equal("user-1")
         expect(remote.ctx.has_capability("user.profile.write")).to_equal(true)
+
+    it "validates HMAC signed remote bearer tokens before authenticating":
+        val token = sign_remote_security_token("server-secret", "session-1", "user-1", 2000, ["user.profile.write", "audit.read"])
+        val headers = RemoteSecurityContextHeaders(
+            authorization: "Bearer {token}",
+            traceparent: "00-trace-parent",
+            tenant_id: "tenant-1",
+            policy_version: "42",
+            request_class: "interactive"
+        )
+        val ctx = validate_remote_security_context(headers, "198.51.100.10", "session-1", "server-secret", 1999)
+        expect(ctx.is_authenticated()).to_equal(true)
+        expect(ctx.session_id).to_equal("session-1")
+        expect(ctx.user_id).to_equal("user-1")
+        expect(ctx.has_capability("user.profile.write")).to_equal(true)
+        expect(ctx.has_capability("audit.read")).to_equal(true)
+
+    it "rejects tampered expired and session mismatched remote bearer tokens":
+        val token = sign_remote_security_token("server-secret", "session-1", "user-1", 2000, ["user.profile.write"])
+        val tampered = token.replace("user-1", "admin")
+        val tampered_headers = RemoteSecurityContextHeaders(
+            authorization: "Bearer {tampered}",
+            traceparent: "",
+            tenant_id: "",
+            policy_version: "",
+            request_class: ""
+        )
+        val tampered_ctx = validate_remote_security_context(tampered_headers, "198.51.100.10", "session-1", "server-secret", 1999)
+        expect(tampered_ctx.is_authenticated()).to_equal(false)
+        expect(tampered_ctx.session_id).to_equal("session-1")
+
+        val expired_headers = RemoteSecurityContextHeaders(
+            authorization: "Bearer {token}",
+            traceparent: "",
+            tenant_id: "",
+            policy_version: "",
+            request_class: ""
+        )
+        val expired_ctx = validate_remote_security_context(expired_headers, "198.51.100.10", "session-1", "server-secret", 2000)
+        expect(expired_ctx.is_authenticated()).to_equal(false)
+
+        val mismatched_ctx = validate_remote_security_context(expired_headers, "198.51.100.10", "session-2", "server-secret", 1999)
+        expect(mismatched_ctx.is_authenticated()).to_equal(false)
+        expect(mismatched_ctx.session_id).to_equal("session-2")
+
+    it "returns no validated identity for malformed or missing remote tokens":
+        val missing = RemoteSecurityContextHeaders.empty()
+        expect(validate_remote_security_token(missing, "session-1", "server-secret", 1999)).to_be_nil()
+
+        val malformed = RemoteSecurityContextHeaders(
+            authorization: "Bearer not-a-simple-token",
+            traceparent: "",
+            tenant_id: "",
+            policy_version: "",
+            request_class: ""
+        )
+        expect(validate_remote_security_token(malformed, "session-1", "server-secret", 1999)).to_be_nil()
 
 describe "security credential store":
     it "rejects invalid handles and missing credentials":

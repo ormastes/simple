@@ -4,6 +4,7 @@
 # of importing examples/nvfs core modules.
 
 use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.error.{FsError}
 
 extern fn rt_bytes_alloc(len: i64) -> [u8]
 
@@ -196,3 +197,21 @@ pub fn nvfs_superblock_format_disk(uuid_hi: u64, uuid_lo: u64) -> bool:
     if not nvfs_raw_write_sector(0u64, _nvfs_sb_to_bytes(replica_a)):
         return false
     nvfs_raw_write_sector(1u64, _nvfs_sb_to_bytes(replica_b))
+
+pub fn nvfs_superblock_read_from_bytes(buf: [u8]) -> Result<NvfsSuperblock, FsError>:
+    """Parse and validate a superblock from a raw byte buffer.
+
+    Returns Err(FsError.Corrupt) if:
+      - buf is shorter than 54 bytes (minimum superblock size)
+      - magic field does not match NVFS_MAGIC
+      - stored checksum does not match computed checksum
+    """
+    if buf.len() < 54:
+        return Err(FsError.Corrupt)
+    val sb = _nvfs_sb_from_bytes(buf)
+    if sb.magic != NVFS_MAGIC:
+        return Err(FsError.Corrupt)
+    val expected_checksum = _nvfs_checksum(sb)
+    if sb.checksum != expected_checksum:
+        return Err(FsError.Corrupt)
+    Ok(sb)
