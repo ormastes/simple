@@ -36,7 +36,7 @@
 #   ORGN0 = 0b01 (Write-Back Write-Allocate for Outer)
 #   IRGN0 = 0b01 (Write-Back Write-Allocate for Inner)
 
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_PRESENT, VM_NO_EXECUTE}
 use os.kernel.boot.mmio.{mmio_read64, mmio_write64}
 use os.kernel.boot.ports.{BootOutputPort}
 use os.kernel.arch.arm64.cpu.{msr_mair_el1, msr_tcr_el1, msr_ttbr0_el1, msr_sctlr_el1, mrs_sctlr_el1, dsb, isb, tlbi_alle1, tlbi_vae1}
@@ -203,6 +203,31 @@ fn _flags_to_pte_bits(flags: VmFlags) -> u64:
     if flags.no_execute():
         bits = bits | PTE_PXN | PTE_UXN
 
+    bits
+
+fn arm64_sandbox_permissions_to_vm_flags(permissions: text) -> VmFlags:
+    """Map lowered sandbox permission text to kernel ARM64 page flags."""
+    if permissions.contains("x"):
+        return VmFlags.kernel_rx()
+    if permissions.contains("w"):
+        return VmFlags.kernel_rw()
+    VmFlags(bits: VM_PRESENT | VM_NO_EXECUTE)
+
+fn arm64_sandbox_pte_bits_for_permissions(permissions: text) -> u64:
+    """Return ARM64 PTE bits for one lowered sandbox permission string."""
+    _flags_to_pte_bits(arm64_sandbox_permissions_to_vm_flags(permissions))
+
+fn arm64_sandbox_pte_bits_from_lowering(sandbox_lowering_sdn: text) -> [u64]:
+    """Read pmp_region-style rows and return equivalent ARM64 PTE policy bits."""
+    var bits: [u64] = []
+    for raw_line in sandbox_lowering_sdn.split("\n"):
+        var line = raw_line.trim()
+        if line.starts_with("- "):
+            line = line.substring(2)
+        if line.starts_with("pmp_region|"):
+            val parts = line.split("|")
+            if parts.len() >= 4:
+                bits.push(arm64_sandbox_pte_bits_for_permissions(parts[3]))
     bits
 
 # ============================================================================

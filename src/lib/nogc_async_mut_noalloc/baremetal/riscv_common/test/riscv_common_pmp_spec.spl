@@ -15,6 +15,29 @@ describe "RISC-V PMP programming":
         expect writes[1].csr == CSR_PMPCFG0
         expect writes[1].value == ((PMP_A_NAPOT | 0x01 | 0x04 | PMP_L) << 8)
 
+    it "packs RV32 PMP config bytes four entries per config CSR":
+        val writes = pmp_write_plan(PmpRegion(base: 2147483648, size: 4096, permissions: "r", locked: true), 4, 32)
+        expect writes.len() == 2
+        expect writes[0].csr == CSR_PMPADDR0 + 4
+        expect writes[1].csr == CSR_PMPCFG0 + 1
+        expect writes[1].value == (PMP_A_NAPOT | 0x01 | PMP_L)
+
+    it "keeps multi-region lowering order stable":
+        val lowering = """
+sandbox_lowering:
+  first:
+    baremetal:
+      pmp_program:
+        - pmp_region|2147483648|4096|r|locked
+        - pmp_region|2147487744|4096|rx|locked
+"""
+        val writes = pmp_write_plan_from_sandbox_lowering(lowering, 64)
+        expect writes.len() == 4
+        expect writes[0].csr == CSR_PMPADDR0
+        expect writes[2].csr == CSR_PMPADDR0 + 1
+        expect writes[1].csr == CSR_PMPCFG0
+        expect writes[3].csr == CSR_PMPCFG0
+
     it "parses a compact PMP row":
         val regions = pmp_regions_from_sandbox_lowering("pmp_region|2147483648|4096|rw|locked")
         expect regions.len() == 1

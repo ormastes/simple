@@ -1232,7 +1232,8 @@ Output:
     audit/security report
 
 Remaining implementation after generated lowering:
-    add non-RISC-V MPU backends and boot-time PMP/MPU apply hooks
+    add live non-RISC-V MPU programming backends beyond ARM64 PTE policy derivation
+    add hardware CSR/MMIO apply backends beyond the RISC-V boot PMP plan hook
     add live authenticated AWS/GCP/Azure/HSM transport execution behind the vendor KMS request builders
 
 The minimal example should look like this:
