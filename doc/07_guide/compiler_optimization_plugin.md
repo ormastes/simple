@@ -12,6 +12,7 @@ The plugin contract is for Simple's own optimization layers first:
 ```text
 source -> shared frontend -> HIR -> MIR -> Simple Optimization Plugin passes
        -> interpreter/native lowering -> LLVM IR/backend, bytecode, or runtime execution
+       -> JIT hotspot specialization when runtime profile facts prove a site is hot
 ```
 
 LLVM pass plugins are a separate backend mechanism. Simple Optimization Plugins may improve the LLVM path by producing better MIR or better LLVM IR facts, but they are not required to be LLVM plugins.
@@ -34,6 +35,7 @@ Good examples:
 - Search/match indexing for repeated exact-symbol rule lookup.
 - Bounds-check elimination when range facts prove safety.
 - Interpreter dispatch caching for repeated stable call or pattern sites.
+- JIT hotspot specialization for repeatedly executed MIR/function regions when profile counts, type facts, and deoptimization safety are available.
 
 Bad examples:
 
@@ -51,6 +53,7 @@ Bad examples:
 | `mir` | MIR | general compiler optimizations and semantic rewrites |
 | `pattern` | MIR pattern engine | idiom recognition, exact-symbol lookup, intrinsic replacement |
 | `interpreter` | interpreter runtime | dispatch caches and evaluated-form specialization |
+| `jit-hotspot` | JIT runtime planning | hot-loop/function specialization using profile facts and safe deopt guards |
 | `backend-metadata` | backend boundary | target-independent facts that help LLVM or native lowering |
 
 Graphics and rendering providers use the same plugin contract. Examples include
@@ -148,7 +151,7 @@ Start with the smallest built-in provider that proves the optimization is genera
 
 2. Pick the stage.
 
-   Use `mir` for general arithmetic, data-flow, and control-flow rewrites. Use `pattern` for recognized call/idiom replacement. Use `interpreter` only when the optimization changes dispatch or evaluated-form caching without changing language semantics.
+   Use `mir` for general arithmetic, data-flow, and control-flow rewrites. Use `pattern` for recognized call/idiom replacement. Use `interpreter` only when the optimization changes dispatch or evaluated-form caching without changing language semantics. Use `jit-hotspot` only for runtime-selected hot regions where profiling proves the site is worth compiling or specializing.
 
 3. Add provider metadata.
 
@@ -156,7 +159,7 @@ Start with the smallest built-in provider that proves the optimization is genera
 
    ```text
    name: simple.opt.<domain>.<rule_set>
-   kind: mir | pattern | interpreter
+   kind: mir | pattern | interpreter | jit-hotspot
    load_mode: builtin
    lookup_kind: direct-exact | indexed-exact | pipeline-pass
    hot_path: true
@@ -185,6 +188,8 @@ Start with the smallest built-in provider that proves the optimization is genera
 6. Preserve semantics.
 
    Do not rewrite unless the required facts are present. Do not attach stronger LLVM or MIR facts than Simple semantics prove. In particular, do not invent `noalias`, `nonnull`, `noundef`, `nsw`, `nuw`, or fast-math behavior to get a benchmark win.
+
+   JIT hotspot providers also need runtime guard facts. A hotspot provider must require facts such as `profile.hot_count`, `typed_mir`, and `safe_deopt`; it may produce a plan such as `jit.hotspot_plan`, but it must preserve the interpreter/native fallback path and invalidate the plan when guards fail.
 
 7. Test enabled, disabled, and unsafe cases.
 

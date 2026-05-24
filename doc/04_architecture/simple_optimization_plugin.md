@@ -30,6 +30,7 @@ CompilerOptions
            -> MIR passes
            -> Pattern providers
            -> Interpreter providers
+           -> JIT hotspot providers
            -> Backend metadata providers
 ```
 
@@ -97,7 +98,23 @@ Lookup providers must declare how they find rules:
 - Pattern engine: `src/compiler/60.mir_opt/mir_opt/pattern/`
 - Rule provider primitives: `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl`
 - Cipher pattern provider: `src/compiler/60.mir_opt/mir_opt/pattern/rules_crypto.spl`
+- JIT integration docs: `doc/04_architecture/jit_interpreter_integration.md`
 - Dynamic library runtime reference: `doc/07_guide/dynlib_api.md`
+
+## JIT Hotspot Providers
+
+`jit-hotspot` providers use the same metadata contract as compiler optimization
+providers, but their required facts come from runtime profiling and guard
+analysis rather than compile-only analysis. A hotspot provider is eligible only
+when facts such as `profile.hot_count`, `typed_mir`, and `safe_deopt` are
+available.
+
+The provider output is a plan, not an unconditional rewrite. The JIT execution
+manager may compile or specialize the hot region, while the interpreter/native
+fallback remains authoritative if guards fail, profile data ages out, or the
+provider is disabled by optimization level. Dynamic hotspot providers must be
+loaded outside the dispatch hot path and cached before they can participate in
+runtime planning.
 
 ## Compression Provider
 

@@ -6,7 +6,7 @@
 
 ## Summary
 
-Simple Optimization Plugin defines the common contract for reusable compiler and interpreter optimization providers. It covers built-in and dynamic load modes, metadata, lookup strategies, safety rules, validation, and performance evidence.
+Simple Optimization Plugin defines the common contract for reusable compiler, interpreter, and JIT hotspot optimization providers. It covers built-in and dynamic load modes, metadata, lookup strategies, safety rules, validation, and performance evidence.
 
 ## Feature IDs
 
@@ -22,6 +22,8 @@ Simple Optimization Plugin defines the common contract for reusable compiler and
 | SOP-008 | Providers shall emit stats for hits, misses, rewrites, and compile-time cost where applicable. |
 | SOP-009 | Providers shall be disabled by optimization level or feature gate without changing observable behavior. |
 | SOP-010 | Providers that affect LLVM output shall preserve valid IR and target facts. |
+| SOP-011 | JIT hotspot providers shall require runtime profile and safe-deoptimization facts before producing a hotspot plan. |
+| SOP-012 | Disabling or invalidating a JIT hotspot provider shall preserve interpreter/native fallback behavior. |
 
 ## Provider Kinds
 
@@ -32,6 +34,7 @@ Simple Optimization Plugin defines the common contract for reusable compiler and
 | `mir` | backend-independent optimization |
 | `pattern` | idiom and exact-symbol rewrite rules |
 | `interpreter` | interpreter dispatch and evaluated-form optimization |
+| `jit-hotspot` | runtime hotspot planning from profile facts and safe deopt guards |
 | `backend-metadata` | target-independent facts for backend lowering |
 
 ## Load Modes
@@ -60,8 +63,9 @@ Dynamic providers are loaded through a manifest and stable ABI. They are not par
 - AC-SOP-003: Architecture doc defines registry, provider, plan, and lookup responsibilities.
 - AC-SOP-004: Spec lists safety and validation requirements.
 - AC-SOP-005: Existing optimization-level docs cross-link the guide.
-- AC-SOP-006: A provider implementation shall have tests for enabled behavior, disabled behavior, unsafe negative cases, and lookup stats.
+- AC-SOP-006: A provider implementation shall have tests for enabled behavior, disabled behavior, unsafe negative cases, lookup stats, and required-fact rejection.
 - AC-SOP-007: Performance claims shall include representative benchmark evidence.
+- AC-SOP-008: JIT hotspot providers shall document guard facts, fallback behavior, and invalidation semantics.
 
 ## Non-Goals
 
