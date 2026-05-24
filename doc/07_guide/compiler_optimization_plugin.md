@@ -205,7 +205,7 @@ Start with the smallest built-in provider that proves the optimization is genera
 
 8. Prove performance only after parity.
 
-   First prove output/checksum parity. Then benchmark the representative workload and record compile-time or runtime impact. A plugin is accepted as a general optimization only when the evidence applies beyond one local fixture.
+   First prove output/checksum parity. Then benchmark the representative workload and record compile-time or runtime impact. For JIT hotspot providers, benchmark planning separately from native code emission so `profile.hot_count` fact extraction, plan invalidation, and backend specialization costs do not get collapsed into one number. A plugin is accepted as a general optimization only when the evidence applies beyond one local fixture.
 
 ## Built-in Plugin Skeleton
 

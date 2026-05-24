@@ -10,3 +10,5 @@ NFR-OPJH-003: Runtime hotspot planning shall require explicit guard facts such a
 NFR-OPJH-004: Documentation shall distinguish compiler optimization rewrites from JIT hotspot plans.
 
 NFR-OPJH-005: Hotspot fact extraction and planning shall be deterministic pure Simple logic so it can run in unit tests without native JIT handles.
+
+NFR-OPJH-006: Performance evidence for hotspot planning shall record command, mode, checksum-bearing rows, and scope limits so interpreter planning costs are not confused with native JIT speedups.

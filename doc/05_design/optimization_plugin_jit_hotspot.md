@@ -40,6 +40,13 @@ The plan helper maps tiered JIT call counts to `profile.hot_count`, preserves `t
 - Missing `safe_deopt` rejects planning without dropping hot-count facts.
 - Invalidation disables a previously eligible plan.
 
+`test/perf/compiler/jit_hotspot_plan_bench.spl` adds benchmark coverage:
+
+- Cold profile planning below the hot-count threshold.
+- Ready profile planning with all runtime facts.
+- Ready profile planning followed by explicit invalidation.
+- Checksum-bearing CSV output for repeatable evidence reports.
+
 ## Documentation
 
 Update:
@@ -47,5 +54,6 @@ Update:
 - `doc/07_guide/compiler_optimization_plugin.md`
 - `doc/04_architecture/simple_optimization_plugin.md`
 - `doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md`
+- `doc/09_report/verify/optimization_plugin_jit_hotspot_perf_evidence_2026-05-24.md`
 
 The docs distinguish compiler rewrites from JIT hotspot plans.

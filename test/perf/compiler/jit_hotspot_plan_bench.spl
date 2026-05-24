@@ -1,0 +1,102 @@
+# JIT hotspot plan microbenchmark.
+#
+# Measures the pure Simple planning boundary before native code emission:
+# profile fact extraction, eligibility checks, and invalidation bookkeeping.
+
+use test.perf.bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_header, bench_now_ns}
+use compiler.interp.execution.tiered_jit.{
+    FunctionProfile, JitTier, TieredJitConfig,
+    jit_hotspot_plan_from_profile,
+    jit_hotspot_plan_invalidate
+}
+
+fn hotspot_bench_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 64, tier2_threshold: 1024, debug_mode: false)
+
+fn hotspot_bench_profile(name: text, count: i64) -> FunctionProfile:
+    FunctionProfile(
+        name: name,
+        call_count: count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn " + name + "(x: i64) -> i64: x + 1"
+    )
+
+fn hotspot_bench_result(label: text, iters: i64, total_ns: i64, checksum: i64) -> BenchResult:
+    val avg = if iters > 0: total_ns / iters else: 0
+    val tput = if total_ns > 0: (iters * 1000000) / total_ns else: 0
+    BenchResult(
+        label: label + "_checksum_" + checksum.to_text(),
+        iters: iters,
+        p50_ns: avg,
+        p99_ns: avg,
+        p99_9_ns: avg,
+        min_ns: avg,
+        max_ns: avg,
+        total_ns: total_ns,
+        throughput_ops_per_s: tput
+    )
+
+fn bench_hotspot_cold_plan(iters: i64) -> BenchResult:
+    val config = hotspot_bench_config()
+    val profile = hotspot_bench_profile("cold_loop", 8)
+    var checksum: i64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val plan = jit_hotspot_plan_from_profile(profile, config, true, true)
+        if plan.eligible:
+            checksum = checksum + 1
+        checksum = checksum + plan.facts.len() as i64
+        i = i + 1
+    hotspot_bench_result("jit_hotspot_cold_plan", iters, bench_now_ns() - t0, checksum)
+
+fn bench_hotspot_ready_plan(iters: i64) -> BenchResult:
+    val config = hotspot_bench_config()
+    val profile = hotspot_bench_profile("hot_loop", 4096)
+    var checksum: i64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val plan = jit_hotspot_plan_from_profile(profile, config, true, true)
+        if plan.eligible:
+            checksum = checksum + 1
+        checksum = checksum + plan.facts.len() as i64
+        i = i + 1
+    hotspot_bench_result("jit_hotspot_ready_plan", iters, bench_now_ns() - t0, checksum)
+
+fn bench_hotspot_invalidated_plan(iters: i64) -> BenchResult:
+    val config = hotspot_bench_config()
+    val profile = hotspot_bench_profile("guarded_loop", 4096)
+    var checksum: i64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val plan = jit_hotspot_plan_from_profile(profile, config, true, true)
+        val invalidated = jit_hotspot_plan_invalidate(plan, "guard changed")
+        if invalidated.invalidated:
+            checksum = checksum + 1
+        if invalidated.eligible:
+            checksum = checksum + 100
+        checksum = checksum + invalidated.facts.len() as i64
+        i = i + 1
+    hotspot_bench_result("jit_hotspot_invalidated_plan", iters, bench_now_ns() - t0, checksum)
+
+fn main():
+    val iters: i64 = 50000
+    print "=== JIT hotspot plan benchmark ==="
+    print "note: pure planning only; no native JIT compilation is invoked."
+
+    val cold = bench_hotspot_cold_plan(iters)
+    val ready = bench_hotspot_ready_plan(iters)
+    val invalidated = bench_hotspot_invalidated_plan(iters)
+
+    bench_print(cold)
+    bench_print(ready)
+    bench_print(invalidated)
+
+    print ""
+    print bench_csv_header()
+    print bench_csv(cold)
+    print bench_csv(ready)
+    print bench_csv(invalidated)

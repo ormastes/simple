@@ -14,8 +14,9 @@ Done in this slice:
 - Connect tiered JIT profile counts to `profile.hot_count` facts.
 - Add data-only hotspot plan and invalidation helpers.
 - Add unit coverage for hotspot fact extraction, eligibility, and invalidation.
+- Add representative hotspot planning benchmark and first measured evidence report.
 
 Next implementation candidates:
 
-- Add representative benchmarks before making performance claims.
 - Thread `JitHotspotPlan` into the native execution manager once a concrete specialization provider consumes it.
+- Add native backend specialization benchmarks after a concrete JIT hotspot provider consumes `JitHotspotPlan`.

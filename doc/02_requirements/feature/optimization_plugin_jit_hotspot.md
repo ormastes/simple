@@ -18,3 +18,5 @@ REQ-OPJH-007: Tiered JIT profiling shall expose optimizer-facing hotspot facts f
 REQ-OPJH-008: Hotspot planning shall be testable without invoking native JIT compilation or runtime externs.
 
 REQ-OPJH-009: Hotspot plans shall support explicit invalidation while preserving fallback execution.
+
+REQ-OPJH-010: JIT hotspot planning shall have a representative benchmark covering cold, ready, and invalidated plans before documentation makes performance claims.
