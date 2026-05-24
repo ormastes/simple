@@ -12,3 +12,9 @@ REQ-OPJH-004: A JIT hotspot provider shall run only when required runtime facts 
 REQ-OPJH-005: The guide, architecture doc, and spec shall document JIT hotspot provider behavior, fallback, and safety rules.
 
 REQ-OPJH-006: Tests shall cover provider metadata and missing-fact rejection for JIT hotspot providers.
+
+REQ-OPJH-007: Tiered JIT profiling shall expose optimizer-facing hotspot facts from function call counts and tier thresholds.
+
+REQ-OPJH-008: Hotspot planning shall be testable without invoking native JIT compilation or runtime externs.
+
+REQ-OPJH-009: Hotspot plans shall support explicit invalidation while preserving fallback execution.

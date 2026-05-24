@@ -24,6 +24,7 @@ Simple Optimization Plugin defines the common contract for reusable compiler, in
 | SOP-010 | Providers that affect LLVM output shall preserve valid IR and target facts. |
 | SOP-011 | JIT hotspot providers shall require runtime profile and safe-deoptimization facts before producing a hotspot plan. |
 | SOP-012 | Disabling or invalidating a JIT hotspot provider shall preserve interpreter/native fallback behavior. |
+| SOP-013 | Tiered JIT profile data shall expose `profile.hot_count` through a testable hotspot planning API. |
 
 ## Provider Kinds
 
@@ -89,6 +90,7 @@ Implementation validation for providers:
 
 ```bash
 bin/simple test test/unit/compiler/mir_opt/cipher/pattern_engine_spec.spl --mode=interpreter
+bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter
 bin/simple check src/compiler/60.mir_opt
 ```
 

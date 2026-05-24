@@ -191,6 +191,8 @@ Start with the smallest built-in provider that proves the optimization is genera
 
    JIT hotspot providers also need runtime guard facts. A hotspot provider must require facts such as `profile.hot_count`, `typed_mir`, and `safe_deopt`; it may produce a plan such as `jit.hotspot_plan`, but it must preserve the interpreter/native fallback path and invalidate the plan when guards fail.
 
+   In the tiered JIT path, call counts and thresholds produce `profile.hot_count`; typed MIR availability produces `typed_mir`; safe deoptimization analysis produces `safe_deopt`. The resulting hotspot plan is data until a runtime backend compiles or specializes it.
+
 7. Test enabled, disabled, and unsafe cases.
 
    Add unit tests for:

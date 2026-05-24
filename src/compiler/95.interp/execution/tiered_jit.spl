@@ -47,6 +47,79 @@ struct JitStats:
     tier2_compilations: i64
     total_compile_time_ms: f64
 
+struct JitHotspotPlan:
+    function_name: text
+    call_count: i64
+    threshold: i64
+    eligible: bool
+    invalidated: bool
+    reason: text
+    facts: [text]
+
+# ============================================================================
+# Hotspot optimization facts
+# ============================================================================
+
+fn jit_hotspot_profile_facts(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> [text]:
+    var facts: [text] = []
+    if profile.call_count >= config.tier1_threshold:
+        facts = facts.push("profile.hot_count")
+    if typed_mir:
+        facts = facts.push("typed_mir")
+    if safe_deopt:
+        facts = facts.push("safe_deopt")
+    facts
+
+fn jit_hotspot_plan_reason(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> text:
+    if profile.source == "":
+        return "missing source"
+    if profile.call_count < config.tier1_threshold:
+        return "missing profile.hot_count"
+    if not typed_mir:
+        return "missing typed_mir"
+    if not safe_deopt:
+        return "missing safe_deopt"
+    "ready"
+
+fn jit_hotspot_plan_from_profile(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> JitHotspotPlan:
+    val facts = jit_hotspot_profile_facts(profile, config, typed_mir, safe_deopt)
+    val reason = jit_hotspot_plan_reason(profile, config, typed_mir, safe_deopt)
+    JitHotspotPlan(
+        function_name: profile.name,
+        call_count: profile.call_count,
+        threshold: config.tier1_threshold,
+        eligible: reason == "ready",
+        invalidated: false,
+        reason: reason,
+        facts: facts
+    )
+
+fn jit_hotspot_plan_invalidate(plan: JitHotspotPlan, reason: text) -> JitHotspotPlan:
+    JitHotspotPlan(
+        function_name: plan.function_name,
+        call_count: plan.call_count,
+        threshold: plan.threshold,
+        eligible: false,
+        invalidated: true,
+        reason: reason,
+        facts: plan.facts
+    )
+
 # ============================================================================
 # TieredJitManager
 # ============================================================================
@@ -132,6 +205,13 @@ class TieredJitManager:
     fn is_compiled(name: text) -> bool:
         var tier = self.get_tier(name)
         tier != JitTier.Interpreted
+
+    fn get_hotspot_plan(name: text, typed_mir: bool, safe_deopt: bool) -> JitHotspotPlan:
+        if self.profiles.has(name):
+            jit_hotspot_plan_from_profile(self.profiles[name], self.config, typed_mir, safe_deopt)
+        else:
+            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "")
+            jit_hotspot_plan_from_profile(profile, self.config, typed_mir, safe_deopt)
 
     fn get_stats() -> JitStats:
         JitStats(tier1_compilations: self.tier1_compilations, tier2_compilations: self.tier2_compilations, total_compile_time_ms: self.total_compile_time_ms)

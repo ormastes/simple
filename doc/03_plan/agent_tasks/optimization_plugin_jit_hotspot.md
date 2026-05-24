@@ -11,9 +11,11 @@ Done in this slice:
 - Add built-in JIT hotspot provider helper and runtime-hotspot predicate.
 - Add unit coverage for required runtime facts and safe-deopt gating.
 - Update guide, architecture, and spec docs.
+- Connect tiered JIT profile counts to `profile.hot_count` facts.
+- Add data-only hotspot plan and invalidation helpers.
+- Add unit coverage for hotspot fact extraction, eligibility, and invalidation.
 
 Next implementation candidates:
 
-- Connect JIT execution-manager profile counters to `profile.hot_count` facts.
-- Add hotspot-plan invalidation tests.
 - Add representative benchmarks before making performance claims.
+- Thread `JitHotspotPlan` into the native execution manager once a concrete specialization provider consumes it.

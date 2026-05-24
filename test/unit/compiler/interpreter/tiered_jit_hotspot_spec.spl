@@ -1,0 +1,54 @@
+# Tiered JIT hotspot optimization facts
+
+use compiler.interp.execution.tiered_jit.{
+    FunctionProfile, JitTier, TieredJitConfig,
+    jit_hotspot_profile_facts,
+    jit_hotspot_plan_from_profile,
+    jit_hotspot_plan_invalidate
+}
+
+fn hot_profile(call_count: i64) -> FunctionProfile:
+    FunctionProfile(
+        name: "hot_loop",
+        call_count: call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn hot_loop(x: i64) -> i64: x + 1"
+    )
+
+fn hotspot_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: false)
+
+describe "Tiered JIT hotspot facts":
+    it "does not emit profile.hot_count below threshold":
+        val facts = jit_hotspot_profile_facts(hot_profile(7), hotspot_config(), true, true)
+        expect(facts.contains("profile.hot_count")).to_equal(false)
+        expect(facts.contains("typed_mir")).to_equal(true)
+        expect(facts.contains("safe_deopt")).to_equal(true)
+
+    it "emits optimizer facts for hot typed code with safe deopt":
+        val facts = jit_hotspot_profile_facts(hot_profile(8), hotspot_config(), true, true)
+        expect(facts.contains("profile.hot_count")).to_equal(true)
+        expect(facts.contains("typed_mir")).to_equal(true)
+        expect(facts.contains("safe_deopt")).to_equal(true)
+
+    it "creates an eligible plan only when all runtime facts exist":
+        val plan = jit_hotspot_plan_from_profile(hot_profile(64), hotspot_config(), true, true)
+        expect(plan.function_name).to_equal("hot_loop")
+        expect(plan.eligible).to_equal(true)
+        expect(plan.invalidated).to_equal(false)
+        expect(plan.reason).to_equal("ready")
+
+    it "rejects missing safe deopt without losing profile facts":
+        val plan = jit_hotspot_plan_from_profile(hot_profile(64), hotspot_config(), true, false)
+        expect(plan.eligible).to_equal(false)
+        expect(plan.reason).to_equal("missing safe_deopt")
+        expect(plan.facts.contains("profile.hot_count")).to_equal(true)
+        expect(plan.facts.contains("safe_deopt")).to_equal(false)
+
+    it "invalidates an existing hotspot plan explicitly":
+        val plan = jit_hotspot_plan_from_profile(hot_profile(64), hotspot_config(), true, true)
+        val invalidated = jit_hotspot_plan_invalidate(plan, "guard changed")
+        expect(invalidated.eligible).to_equal(false)
+        expect(invalidated.invalidated).to_equal(true)
+        expect(invalidated.reason).to_equal("guard changed")

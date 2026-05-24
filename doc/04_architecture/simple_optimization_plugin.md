@@ -116,6 +116,12 @@ provider is disabled by optimization level. Dynamic hotspot providers must be
 loaded outside the dispatch hot path and cached before they can participate in
 runtime planning.
 
+The tiered JIT manager derives the initial runtime facts from function profiles:
+when a function reaches its tier threshold it may emit `profile.hot_count`; type
+lowering contributes `typed_mir`; deoptimization analysis contributes
+`safe_deopt`. These facts form a `JitHotspotPlan`, which is pure planning data
+until a runtime backend chooses to compile or specialize the function.
+
 ## Compression Provider
 
 The pure Simple LZ4/Zstd work uses this architecture through a built-in

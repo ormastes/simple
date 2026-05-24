@@ -11,6 +11,16 @@
 
 The helper constructs a built-in, hot, pipeline-pass provider so runtime hotspot providers do not accidentally use dynamic lookup or per-site table construction.
 
+`src/compiler/95.interp/execution/tiered_jit.spl`:
+
+- Add `JitHotspotPlan`.
+- Add `jit_hotspot_profile_facts`.
+- Add `jit_hotspot_plan_from_profile`.
+- Add `jit_hotspot_plan_invalidate`.
+- Add `TieredJitManager.get_hotspot_plan`.
+
+The plan helper maps tiered JIT call counts to `profile.hot_count`, preserves `typed_mir` and `safe_deopt` as explicit guard facts, and reports why a plan is not eligible. This is intentionally pure Simple logic so unit tests do not need native JIT handles.
+
 ## Tests
 
 `test/unit/compiler/mir_opt/cipher/pattern_engine_spec.spl` adds a provider-contract test:
@@ -21,6 +31,14 @@ The helper constructs a built-in, hot, pipeline-pass provider so runtime hotspot
 - Runtime hotspot predicate is true.
 - Missing `safe_deopt` rejects execution.
 - Providing all required facts allows execution.
+
+`test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl` adds plan coverage:
+
+- Cold profiles do not emit `profile.hot_count`.
+- Hot typed profiles with safe deopt emit all required facts.
+- Eligible plans require all runtime facts.
+- Missing `safe_deopt` rejects planning without dropping hot-count facts.
+- Invalidation disables a previously eligible plan.
 
 ## Documentation
 

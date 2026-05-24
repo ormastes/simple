@@ -8,3 +8,5 @@ NFR-OPJH-002: Disabling a JIT hotspot provider shall preserve interpreter/native
 NFR-OPJH-003: Runtime hotspot planning shall require explicit guard facts such as `safe_deopt`; no provider may specialize from hot-count data alone.
 
 NFR-OPJH-004: Documentation shall distinguish compiler optimization rewrites from JIT hotspot plans.
+
+NFR-OPJH-005: Hotspot fact extraction and planning shall be deterministic pure Simple logic so it can run in unit tests without native JIT handles.
