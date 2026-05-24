@@ -121,6 +121,9 @@ static volatile uint32_t app_running;
 static volatile uint32_t app_ticks;
 static volatile uint32_t app_was_killed;
 static volatile uint32_t exec_return_addr;
+static volatile uint32_t fault_expected;
+static volatile uint32_t fault_caught;
+static volatile uint32_t fault_recovery_pc;
 #define APP_TIMEOUT_TICKS 500
 
 #define STACK_CANARY 0xDEADBEEF
@@ -238,7 +241,29 @@ void HardFault_Handler_C(uint32_t *frame);
 void HardFault_Handler_C(uint32_t *frame) { fault_dump("HARD FAULT", frame); }
 
 void MemManage_Handler_C(uint32_t *frame);
-void MemManage_Handler_C(uint32_t *frame) { fault_dump("MEMMANAGE FAULT", frame); }
+void MemManage_Handler_C(uint32_t *frame) {
+    if (fault_expected) {
+        fault_caught = SCB_CFSR & 0xFF;
+        SCB_CFSR = SCB_CFSR;
+        fault_expected = 0;
+        frame[6] = fault_recovery_pc;
+        frame[7] |= (1 << 24);
+        return;
+    }
+    if (app_running) {
+        uart_puts("[FAULT] App memory violation (CFSR=0x");
+        write_hex32(SCB_CFSR);
+        uart_putln(") — killed");
+        SCB_CFSR = SCB_CFSR;
+        app_running = 0;
+        app_was_killed = 1;
+        frame[6] = exec_return_addr;
+        frame[7] |= (1 << 24);
+        __asm volatile("movs r0, #0\nmsr control, r0" ::: "r0", "memory");
+        return;
+    }
+    fault_dump("MEMMANAGE FAULT", frame);
+}
 
 void BusFault_Handler_C(uint32_t *frame);
 void BusFault_Handler_C(uint32_t *frame) { fault_dump("BUS FAULT", frame); }
@@ -300,6 +325,7 @@ void SysTick_Handler_C(uint32_t *frame) {
             app_was_killed = 1;
             frame[6] = exec_return_addr;
             frame[7] |= (1 << 24);
+            __asm volatile("movs r0, #0\nmsr control, r0" ::: "r0", "memory");
         }
     }
 }
@@ -330,6 +356,7 @@ void SVCall_Handler_C(uint32_t *frame) {
         app_running = 0;
         frame[6] = exec_return_addr;
         frame[7] |= (1 << 24);
+        __asm volatile("movs r0, #0\nmsr control, r0" ::: "r0", "memory");
         break;
     default:
         uart_puts("[SVC] Unknown: ");
@@ -426,53 +453,47 @@ static void mpu_restore_after_app(void) {
     __asm volatile("cpsie i" ::: "memory");
 }
 
-/* Thumb-2 binary: prints "Hello from app!\r\n" via UART, returns */
+/* Prints "Hello from app!\r\n" via SVC#0 (putchar syscall), returns */
 static const uint8_t hello_app[] = {
-    /* ldr r4, =0x40200000 */
-    0x4f, 0xf0, 0x00, 0x04,  /* mov.w r4, #0 */
-    0xc4, 0xf2, 0x20, 0x04,  /* movt  r4, #0x4020 */
-
-    /* 'H' */  0x48, 0x21, 0x21, 0x60,  /* movs r1, #0x48; str r1,[r4] */
-    /* 'e' */  0x65, 0x21, 0x21, 0x60,
-    /* 'l' */  0x6c, 0x21, 0x21, 0x60,
-    /* 'l' */  0x6c, 0x21, 0x21, 0x60,
-    /* 'o' */  0x6f, 0x21, 0x21, 0x60,
-    /* ' ' */  0x20, 0x21, 0x21, 0x60,
-    /* 'f' */  0x66, 0x21, 0x21, 0x60,
-    /* 'r' */  0x72, 0x21, 0x21, 0x60,
-    /* 'o' */  0x6f, 0x21, 0x21, 0x60,
-    /* 'm' */  0x6d, 0x21, 0x21, 0x60,
-    /* ' ' */  0x20, 0x21, 0x21, 0x60,
-    /* 'a' */  0x61, 0x21, 0x21, 0x60,
-    /* 'p' */  0x70, 0x21, 0x21, 0x60,
-    /* 'p' */  0x70, 0x21, 0x21, 0x60,
-    /* '!' */  0x21, 0x21, 0x21, 0x60,
-    /* '\r' */ 0x0d, 0x21, 0x21, 0x60,
-    /* '\n' */ 0x0a, 0x21, 0x21, 0x60,
-
+    /* 'H' */ 0x48, 0x20, 0x00, 0xdf,  /* movs r0, #'H'; svc #0 */
+    /* 'e' */ 0x65, 0x20, 0x00, 0xdf,
+    /* 'l' */ 0x6c, 0x20, 0x00, 0xdf,
+    /* 'l' */ 0x6c, 0x20, 0x00, 0xdf,
+    /* 'o' */ 0x6f, 0x20, 0x00, 0xdf,
+    /* ' ' */ 0x20, 0x20, 0x00, 0xdf,
+    /* 'f' */ 0x66, 0x20, 0x00, 0xdf,
+    /* 'r' */ 0x72, 0x20, 0x00, 0xdf,
+    /* 'o' */ 0x6f, 0x20, 0x00, 0xdf,
+    /* 'm' */ 0x6d, 0x20, 0x00, 0xdf,
+    /* ' ' */ 0x20, 0x20, 0x00, 0xdf,
+    /* 'a' */ 0x61, 0x20, 0x00, 0xdf,
+    /* 'p' */ 0x70, 0x20, 0x00, 0xdf,
+    /* 'p' */ 0x70, 0x20, 0x00, 0xdf,
+    /* '!' */ 0x21, 0x20, 0x00, 0xdf,
+    /* '\r' */ 0x0d, 0x20, 0x00, 0xdf,
+    /* '\n' */ 0x0a, 0x20, 0x00, 0xdf,
     /* bx lr */
     0x70, 0x47,
 };
 
-/* Simple counter app: counts 1-5, prints each, returns */
+/* Counter app: prints 1-5 via SVC#0, returns */
 static const uint8_t count_app[] = {
-    /* ldr r4, =0x40200000 */
-    0x4f, 0xf0, 0x00, 0x04,
-    0xc4, 0xf2, 0x20, 0x04,
-    /* movs r5, #0x31 ('1') */
-    0x31, 0x25,
-    /* loop: str r5, [r4] */
-    0x25, 0x60,
-    /* adds r5, #1 */
-    0x01, 0x35,
-    /* cmp r5, #0x36 ('6') */
-    0x36, 0x2d,
-    /* bne loop (-6 = 0xFA) */
-    0xfb, 0xd1,
-    /* movs r1, #'\r'; str r1,[r4] */
-    0x0d, 0x21, 0x21, 0x60,
-    /* movs r1, #'\n'; str r1,[r4] */
-    0x0a, 0x21, 0x21, 0x60,
+    /* movs r4, #'1' */
+    0x31, 0x24,
+    /* loop: mov r0, r4 */
+    0x20, 0x46,
+    /* svc #0 */
+    0x00, 0xdf,
+    /* adds r4, #1 */
+    0x01, 0x34,
+    /* cmp r4, #'6' */
+    0x36, 0x2c,
+    /* bne loop */
+    0xfa, 0xd1,
+    /* movs r0, #'\r'; svc #0 */
+    0x0d, 0x20, 0x00, 0xdf,
+    /* movs r0, #'\n'; svc #0 */
+    0x0a, 0x20, 0x00, 0xdf,
     /* bx lr */
     0x70, 0x47,
 };
@@ -481,6 +502,17 @@ static const uint8_t count_app[] = {
 static const uint8_t spin_app[] = {
     /* b . (branch to self) */
     0xfe, 0xe7,
+};
+
+/* Rogue app: tries to read kernel data at 0x20000000 — should DACCVIOL */
+static const uint8_t rogue_app[] = {
+    /* ldr r0, =0x20000000 */
+    0x4f, 0xf0, 0x00, 0x00,  /* mov.w r0, #0 */
+    0xc0, 0xf2, 0x00, 0x00,  /* movt  r0, #0x2000 */
+    /* ldr r1, [r0] — read kernel data */
+    0x01, 0x68,
+    /* bx lr */
+    0x70, 0x47,
 };
 
 /* SVC-based hello: uses syscall 0 (putchar) instead of direct UART */
@@ -511,9 +543,9 @@ static void fs_add_file(const char *name, const uint8_t *src, uint32_t size, uin
 }
 
 static const char readme_text[] =
-    "SimpleOS Lite v0.4 (hardened)\r\n"
+    "SimpleOS Lite v0.5 (hardened)\r\n"
     "A minimal OS for Cortex-M33.\r\n"
-    "Features: non-overlapping MPU, PSP-isolated apps, SVC syscalls,\r\n"
+    "Features: non-overlapping MPU, unprivileged apps, SVC syscalls,\r\n"
     "  fault decode, SysTick timeout, stack canary, flash CRC\r\n"
     "Commands: help, ls, cat, exec, peek, poke, mpu, faults, uptime, stack\r\n";
 
@@ -525,6 +557,7 @@ static void fs_init(void) {
     fs_add_file("count.bin", count_app, sizeof(count_app), 1);
     fs_add_file("spin.bin", spin_app, sizeof(spin_app), 1);
     fs_add_file("svc_hi.bin", svc_hello_app, sizeof(svc_hello_app), 1);
+    fs_add_file("rogue.bin", rogue_app, sizeof(rogue_app), 1);
     uart_puts("[FS] In-memory filesystem: ");
     write_dec(fs_count);
     uart_puts(" files, ");
@@ -559,7 +592,7 @@ static void cmd_help(void) {
 }
 
 static void cmd_info(void) {
-    uart_putln("SimpleOS Lite v0.4 (hardened)");
+    uart_putln("SimpleOS Lite v0.5 (hardened)");
     uart_putln("  CPU:      ARM Cortex-M33 (ARMv8-M Mainline)");
     uart_putln("  Platform: MPS2-AN505 (QEMU)");
     uart_putln("  Flash:    0x10000000 (4 MB)");
@@ -601,10 +634,16 @@ static void cmd_cat(const char *name) {
     }
 }
 
-/* PSP-isolated exec: privileged + PSP for stack isolation, MPU for memory.
- * Uses CONTROL=#2 (SPSEL only) because CONTROL.SPSEL writes from Handler
- * mode aren't honored on exception return (ARMv8-M requires modifying
- * EXC_RETURN to change stack selection, not CONTROL).
+/* Exit trampoline in Flash: apps return here via bx lr → SVC#1 → clean exit */
+static void __attribute__((naked, used)) app_exit_trampoline(void) {
+    __asm volatile("svc #1\nb .\n");
+}
+
+/* Unprivileged PSP-isolated exec: CONTROL=#3 (nPRIV=1 + SPSEL=1).
+ * Apps run unprivileged on PSP, MPU AP=00 regions block data access,
+ * XN=1 prevents code execution from kernel regions.
+ * LR is set to app_exit_trampoline so app's bx lr triggers SVC#1 exit.
+ * Handlers clear CONTROL before returning to kernel Thread mode.
  */
 static void __attribute__((naked, used)) exec_with_psp(uint32_t entry_thumb, uint32_t psp_top) {
     __asm volatile(
@@ -614,10 +653,13 @@ static void __attribute__((naked, used)) exec_with_psp(uint32_t entry_thumb, uin
         "adr r5, 1f\n"
         "str r5, [r4]\n"
         "msr psp, r1\n"
-        "movs r2, #2\n"
+        "movs r2, #3\n"
         "msr control, r2\n"
         "isb\n"
-        "blx r0\n"
+        "movw lr, :lower16:app_exit_trampoline\n"
+        "movt lr, :upper16:app_exit_trampoline\n"
+        "orr lr, lr, #1\n"
+        "bx r0\n"
         "1:\n"
         "movs r2, #0\n"
         "msr control, r2\n"
@@ -659,7 +701,7 @@ static void cmd_exec(const char *name) {
     uint32_t entry_addr = (uint32_t)app_region | 1;
     uint32_t app_sp = (uint32_t)app_stack + sizeof(app_stack);
 
-    uart_putln("[EXEC] Running (PSP-isolated, MPU locked)...");
+    uart_putln("[EXEC] Running (unprivileged, PSP, MPU locked)...");
     mpu_lockdown_for_app();
     exec_with_psp(entry_addr, app_sp);
     mpu_restore_after_app();
@@ -792,6 +834,19 @@ static uint32_t compute_flash_crc(void) {
     return crc ^ 0xFFFFFFFF;
 }
 
+static void __attribute__((naked, used)) try_fault_call(uint32_t target_thumb_addr) {
+    __asm volatile(
+        "push {r4, lr}\n"
+        "movw r4, :lower16:fault_recovery_pc\n"
+        "movt r4, :upper16:fault_recovery_pc\n"
+        "adr r1, 1f\n"
+        "str r1, [r4]\n"
+        "blx r0\n"
+        "1:\n"
+        "pop {r4, pc}\n"
+    );
+}
+
 static void cmd_selftest(void) {
     int pass = 0, fail = 0;
 
@@ -830,6 +885,23 @@ static void cmd_selftest(void) {
     if (tick_count > 0) { uart_putln("PASS"); pass++; }
     else { uart_putln("FAIL"); fail++; }
 
+    /* 7. XN enforcement (kernel BSS not executable during lockdown) */
+    uart_puts("  [7] XN enforce:   ");
+    fault_expected = 1;
+    fault_caught = 0;
+    mpu_lockdown_for_app();
+    try_fault_call((uint32_t)&_sbss | 1);
+    mpu_restore_after_app();
+    if (fault_caught & 0x01) { uart_putln("PASS"); pass++; }
+    else { uart_putln("FAIL (XN not enforced)"); fail++; }
+
+    /* 8. AP-deny (rogue app reading kernel data gets DACCVIOL) */
+    uart_puts("  [8] AP-deny:      ");
+    app_was_killed = 0;
+    cmd_exec("rogue.bin");
+    if (app_was_killed) { uart_putln("PASS"); pass++; }
+    else { uart_putln("FAIL (kernel read not blocked)"); fail++; }
+
     uart_puts("  Result: ");
     write_dec(pass);
     uart_puts("/");
@@ -842,7 +914,7 @@ static char shell_buf[128];
 static int shell_pos;
 
 static void shell(void) {
-    uart_putln("SimpleOS Lite v0.4 (hardened) - Cortex-M33");
+    uart_putln("SimpleOS Lite v0.5 (hardened) - Cortex-M33");
     uart_putln("Type 'help' for commands.");
     uart_putln("");
     uart_puts("simpleos> ");
@@ -926,7 +998,7 @@ void _c_main(void) {
 
     uart_init();
     uart_putln("");
-    uart_putln("[BOOT] SimpleOS Lite v0.4 - Cortex-M33 (ARMv8-M)");
+    uart_putln("[BOOT] SimpleOS Lite v0.5 - Cortex-M33 (ARMv8-M)");
     uart_putln("[BOOT] Platform: MPS2-AN505 (QEMU)");
     uart_putln("[BOOT] UART0 initialized at 0x40200000");
 
