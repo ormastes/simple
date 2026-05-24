@@ -35,3 +35,5 @@ Runtime hotspot facts are exposed from `src/compiler/95.interp/execution/tiered_
 The tiered JIT exposes a data-only `JitHotspotPlan`. This keeps planning separate from native code emission: unit tests can verify eligibility, missing facts, and invalidation without calling `rt_jit_*` externs, while the runtime can later use the same plan to choose a specialized native path.
 
 `TieredJitManager.record_call` consumes the plan at the tier-1 promotion boundary. The consumer currently selects the compile source and records whether a hotspot plan was accepted; original-source compilation remains the fallback when the provider is disabled or required facts are missing. Rust `ExecutionManager` stays unchanged until a backend needs specialization-specific plan fields.
+
+Specialized source replacement is opt-in through `JitHotspotSpecializationProvider`. A provider may replace the compile source only when the plan is eligible, the provider is enabled, a non-empty specialized source is present, and the provider declares a semantic proof. This makes the first concrete hotspot optimization path useful without letting arbitrary runtime profile data rewrite code by itself.

@@ -18,12 +18,16 @@ The helper constructs a built-in, hot, pipeline-pass provider so runtime hotspot
 - Add `jit_hotspot_plan_from_profile`.
 - Add `jit_hotspot_plan_invalidate`.
 - Add `jit_hotspot_consume_plan`.
+- Add `JitHotspotSpecializationProvider`.
+- Add `jit_hotspot_specialization_provider`.
+- Add `jit_hotspot_consume_plan_with_provider`.
 - Add `TieredJitManager.get_hotspot_plan`.
 - Add `TieredJitManager.register_function_with_hotspot_facts`.
+- Add `TieredJitManager.register_function_with_hotspot_specialization`.
 
 The plan helper maps tiered JIT call counts to `profile.hot_count`, preserves `typed_mir` and `safe_deopt` as explicit guard facts, and reports why a plan is not eligible. This is intentionally pure Simple logic so unit tests do not need native JIT handles.
 
-The compile-decision consumer runs before tier-1 native compilation. It accepts eligible plans, keeps the original source as the fallback compile input, and leaves Rust JIT execution APIs untouched.
+The compile-decision consumer runs before tier-1 native compilation. It accepts eligible plans, keeps the original source as the fallback compile input, and leaves Rust JIT execution APIs untouched. A specialization provider may replace the compile source only when it carries a non-empty specialized source and declares a semantic proof.
 
 ## Tests
 
@@ -45,6 +49,8 @@ The compile-decision consumer runs before tier-1 native compilation. It accepts 
 - Invalidation disables a previously eligible plan.
 - Disabled providers do not consume plans and preserve fallback source.
 - Eligible plans are consumed into compile decisions.
+- Specialized source is selected only when semantic proof is present.
+- Missing semantic proof preserves original-source compilation.
 
 `test/perf/compiler/jit_hotspot_plan_bench.spl` adds benchmark coverage:
 

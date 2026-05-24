@@ -195,6 +195,8 @@ Start with the smallest built-in provider that proves the optimization is genera
 
    Tiered JIT promotion consumes eligible plans before native compilation. The first consumer is deliberately conservative: it records that the plan was accepted and selects the compile input, but falls back to the original source when the provider is disabled or facts are incomplete.
 
+   Hotspot specialization providers may replace the compile source only when they carry a non-empty specialized source and an explicit semantic proof. Missing proof or missing specialized source is not an error; it is a no-op optimization that preserves the original source path.
+
 7. Test enabled, disabled, and unsafe cases.
 
    Add unit tests for:

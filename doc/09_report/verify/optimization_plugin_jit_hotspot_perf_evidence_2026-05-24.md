@@ -21,9 +21,9 @@ Status: PASS
 
 ```text
 label,iters,p50_ns,p99_ns,p99_9_ns,min_ns,max_ns,total_ns,kops_per_s
-jit_hotspot_cold_plan_checksum_100000,50000,59013,59013,59013,59013,59013,2950653776,16
-jit_hotspot_ready_plan_checksum_200000,50000,62554,62554,62554,62554,62554,3127737425,15
-jit_hotspot_invalidated_plan_checksum_200000,50000,81131,81131,81131,81131,81131,4056599026,12
+jit_hotspot_cold_plan_checksum_100000,50000,56035,56035,56035,56035,56035,2801777875,17
+jit_hotspot_ready_plan_checksum_200000,50000,62994,62994,62994,62994,62994,3149748866,15
+jit_hotspot_invalidated_plan_checksum_200000,50000,75629,75629,75629,75629,75629,3781468267,13
 ```
 
 ## Interpretation

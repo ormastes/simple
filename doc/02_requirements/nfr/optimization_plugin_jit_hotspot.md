@@ -14,3 +14,5 @@ NFR-OPJH-005: Hotspot fact extraction and planning shall be deterministic pure S
 NFR-OPJH-006: Performance evidence for hotspot planning shall record command, mode, checksum-bearing rows, and scope limits so interpreter planning costs are not confused with native JIT speedups.
 
 NFR-OPJH-007: Runtime hotspot plan consumption shall not require Rust `ExecutionManager` trait changes until a native backend consumes specialization-specific plan fields.
+
+NFR-OPJH-008: Missing semantic proof or missing specialized source shall degrade to original-source compilation without changing observable behavior.

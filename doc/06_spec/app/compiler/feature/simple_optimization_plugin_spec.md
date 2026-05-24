@@ -27,6 +27,7 @@ Simple Optimization Plugin defines the common contract for reusable compiler, in
 | SOP-013 | Tiered JIT profile data shall expose `profile.hot_count` through a testable hotspot planning API. |
 | SOP-014 | JIT hotspot planning performance evidence shall use a benchmark that covers cold, ready, and invalidated plans. |
 | SOP-015 | Tiered JIT promotion shall consume eligible hotspot plans without requiring Rust execution-manager API changes. |
+| SOP-016 | JIT hotspot specialization shall require eligible plans, specialized source, and declared semantic proof before replacing compile input. |
 
 ## Provider Kinds
 
