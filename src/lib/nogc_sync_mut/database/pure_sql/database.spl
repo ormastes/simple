@@ -4,6 +4,7 @@
 # sql_parser + MVCC in-process storage.
 
 use std.io_runtime
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write}
 use std.database.sql.types.{DbValue, DbRow, DbError}
 use nogc_sync_mut.db.dbfs_engine.sql_parser.{
     sql_parse, SqlStmtKind, SqlExprKind, SqlExpr,
@@ -333,6 +334,20 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
     if expr.kind == SqlExprKind.IsNotNull:
         val inner = _eval_expr(expr.left, cols, vals, params)
         return DbValue.Bool(value: not inner.is_null())
+    if expr.kind == SqlExprKind.UnaryOp:
+        val uval = _eval_expr(expr.left, cols, vals, params)
+        val uop = expr.value.to_upper()
+        if uop == "NOT":
+            return DbValue.Bool(value: not _dbval_truthy(uval))
+        if uop == "-":
+            match uval:
+                DbValue.Integer(value):
+                    return DbValue.Integer(value: 0 - value)
+                DbValue.Real(value):
+                    return DbValue.Real(value: 0.0 - value)
+                _:
+                    return DbValue.Null
+        return DbValue.Null
     if expr.kind == SqlExprKind.BinaryOp:
         val lv = _eval_expr(expr.left, cols, vals, params)
         val rv = _eval_expr(expr.right, cols, vals, params)
@@ -624,9 +639,25 @@ fn _parse_drop_table(sql: text) -> text:
         rest = rest.slice(0, rest.len() - 1).trim()
     rest
 
+fn _join_text(values: [text], sep: text) -> text:
+    var result = ""
+    var i: i32 = 0
+    while i < values.len() as i32:
+        if i > 0:
+            result = result + sep
+        result = result + values[i]
+        i = i + 1
+    result
+
+fn _split_csv(value: text) -> [text]:
+    if value == "":
+        return []
+    value.split(",")
+
 # ── PureDatabase ─────────────────────────────────────────────────────────────
 
 class PureDatabase:
+    _path: text
     _tbl_names: [text]
     _tbl_cols: [[text]]
     _tbl_data: [MvccTable]
@@ -641,6 +672,7 @@ class PureDatabase:
 
     static fn memory() -> Result<PureDatabase, DbError>:
         Ok(PureDatabase(
+            _path: "",
             _tbl_names: [],
             _tbl_cols: [],
             _tbl_data: [],
@@ -655,13 +687,97 @@ class PureDatabase:
         ))
 
     static fn open(path: text) -> Result<PureDatabase, DbError>:
-        PureDatabase.memory()
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db._path = path
+        if file_exists(path):
+            val loaded = db._load_from_disk()
+            if loaded.is_err():
+                return loaded
+        else:
+            val saved = db._persist()
+            if saved.is_err():
+                return saved
+        Ok(db)
 
     me close() -> Result<(), DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
+        val saved = self._persist()
+        if saved.is_err():
+            return saved
         self.is_open = false
         Ok(())
+
+    me _serialize_disk() -> text:
+        var lines: [text] = ["simple-pure-db-v1"]
+        var ti: i32 = 0
+        while ti < self._tbl_names.len() as i32:
+            val table_name = self._tbl_names[ti]
+            lines.push("table|" + table_name + "|" + _join_text(self._tbl_cols[ti], ","))
+            if self._fts_columns[ti].len() > 0:
+                lines.push("fts|" + table_name + "|" + _join_text(self._fts_columns[ti], ","))
+            val snap = self._txn.snapshot()
+            var tbl = self._tbl_data[ti]
+            val visible = tbl.scan(snap)
+            self._tbl_data[ti] = tbl
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                lines.push("row|" + table_name + "|" + visible[ri])
+                ri = ri + 1
+            ti = ti + 1
+        lines.join("\n")
+
+    me _persist() -> Result<(), DbError>:
+        if self._path == "":
+            return Ok(())
+        if file_write(self._path, self._serialize_disk()):
+            return Ok(())
+        Err(DbError.ConnectionFailed(path: self._path, message: "failed to persist pure database"))
+
+    me _load_from_disk() -> Result<PureDatabase, DbError>:
+        val content = file_read(self._path)
+        if content == "":
+            return Ok(self)
+        val lines = content.split("\n")
+        if lines.len() == 0 or lines[0].trim() != "simple-pure-db-v1":
+            return Err(DbError.ConnectionFailed(path: self._path, message: "unsupported pure database format"))
+        var i: i32 = 1
+        while i < lines.len() as i32:
+            val line = lines[i].trim()
+            if line == "":
+                i = i + 1
+                continue
+            val parts = line.split("|")
+            if parts.len() >= 3:
+                val kind = parts[0]
+                val table_name = parts[1]
+                if kind == "table":
+                    self._tbl_names.push(table_name)
+                    self._tbl_cols.push(_split_csv(parts[2]))
+                    self._tbl_data.push(MvccTable.new())
+                    self._tbl_rowids.push(0)
+                    self._fts_indexes.push(FtsEngine.new())
+                    self._fts_valid.push(false)
+                    self._fts_columns.push([])
+                elif kind == "fts":
+                    val ti = _find_idx(self._tbl_names, table_name)
+                    if ti >= 0:
+                        self._fts_columns[ti] = _split_csv(parts[2])
+                        self._fts_valid[ti] = false
+                elif kind == "row":
+                    val ti = _find_idx(self._tbl_names, table_name)
+                    if ti >= 0:
+                        val handle = self._txn.begin()
+                        val tid = handle.txn_id
+                        var tbl = self._tbl_data[ti]
+                        tbl.insert(tid, parts[2])
+                        self._tbl_data[ti] = tbl
+                        self._txn.commit(tid)
+                        self._tbl_rowids[ti] = self._tbl_rowids[ti] + 1
+                        self._last_rowid = self._tbl_rowids[ti]
+            i = i + 1
+        Ok(self)
 
     me exec(sql: text, params: [DbValue]) -> Result<i64, DbError>:
         if not self.is_open:
@@ -837,6 +953,7 @@ class PureDatabase:
         self._fts_valid.push(false)
         self._fts_columns.push([])
         self._last_changes = 0
+        self._persist()?
         Ok(0)
 
     # ── Internal: DROP TABLE ────────────────────────────────────────────
@@ -875,6 +992,7 @@ class PureDatabase:
         self._fts_valid = new_fts_valid
         self._fts_columns = new_fts_columns
         self._last_changes = 0
+        self._persist()?
         Ok(0)
 
     # ── Internal: INSERT ─────────────────────────────────────────────────
@@ -918,6 +1036,7 @@ class PureDatabase:
         if inserted > 0:
             self._invalidate_fts(ti)
         self._last_changes = inserted
+        self._persist()?
         Ok(inserted)
 
     # ── Internal: SELECT ─────────────────────────────────────────────────
@@ -1209,6 +1328,7 @@ class PureDatabase:
         if updated > 0:
             self._invalidate_fts(ti)
         self._last_changes = updated
+        self._persist()?
         Ok(updated)
 
     # ── Internal: DELETE ─────────────────────────────────────────────────
@@ -1240,6 +1360,7 @@ class PureDatabase:
         if deleted > 0:
             self._invalidate_fts(ti)
         self._last_changes = deleted
+        self._persist()?
         Ok(deleted)
 
 # ── Column projection ────────────────────────────────────────────────────────
@@ -1254,15 +1375,25 @@ fn _project_row(sel: SqlSelect, col_names: [text], row_vals: [DbValue]) -> DbRow
     var ci: i32 = 0
     while ci < sel.columns.len() as i32:
         val expr = sel.columns[ci]
-        if expr.kind == SqlExprKind.Column:
-            val idx = _find_idx(col_names, expr.value)
+        val inner = _unwrap_as_expr(expr)
+        val col_alias = _get_as_alias(expr)
+        if inner.kind == SqlExprKind.Column:
+            val idx = _find_idx(col_names, inner.value)
+            if col_alias != "":
+                proj_cols.push(col_alias)
+            else:
+                proj_cols.push(inner.value)
             if idx >= 0:
-                proj_cols.push(expr.value)
                 proj_vals.push(row_vals[idx])
-        elif expr.kind == SqlExprKind.Star:
+            else:
+                proj_vals.push(DbValue.Null)
+        elif inner.kind == SqlExprKind.Star:
             return DbRow(columns: col_names, values: row_vals)
         else:
-            proj_cols.push(expr.value)
-            proj_vals.push(_eval_expr(expr, col_names, row_vals, []))
+            if col_alias != "":
+                proj_cols.push(col_alias)
+            else:
+                proj_cols.push(inner.value)
+            proj_vals.push(_eval_expr(inner, col_names, row_vals, []))
         ci = ci + 1
     DbRow(columns: proj_cols, values: proj_vals)
