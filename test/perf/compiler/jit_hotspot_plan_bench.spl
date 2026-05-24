@@ -7,7 +7,9 @@ use test.perf.bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_h
 use compiler.interp.execution.tiered_jit.{
     FunctionProfile, JitTier, TieredJitConfig,
     jit_hotspot_plan_from_profile,
-    jit_hotspot_plan_invalidate
+    jit_hotspot_plan_invalidate,
+    jit_hotspot_specialization_provider,
+    jit_hotspot_consume_plan_with_provider
 }
 
 fn hotspot_bench_config() -> TieredJitConfig:
@@ -86,6 +88,22 @@ fn bench_hotspot_invalidated_plan(iters: i64) -> BenchResult:
         i = i + 1
     hotspot_bench_result("jit_hotspot_invalidated_plan", iters, bench_now_ns() - t0, checksum)
 
+fn bench_hotspot_specialized_decision(iters: i64) -> BenchResult:
+    val config = hotspot_bench_config()
+    val profile = hotspot_bench_profile("specialized_loop", 4096)
+    val provider = jit_hotspot_specialization_provider("bench.hotspot.specialized", "fn specialized_loop(x: i64) -> i64: x + 1", true)
+    var checksum: i64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val plan = jit_hotspot_plan_from_profile(profile, config, true, true)
+        val decision = jit_hotspot_consume_plan_with_provider(plan, profile.source, provider)
+        if decision.provider_used:
+            checksum = checksum + 1
+        checksum = checksum + decision.compile_source.len() as i64
+        i = i + 1
+    hotspot_bench_result("jit_hotspot_specialized_decision", iters, bench_now_ns() - t0, checksum)
+
 fn main():
     val iters: i64 = 50000
     print "=== JIT hotspot plan benchmark ==="
@@ -94,13 +112,16 @@ fn main():
     val cold = bench_hotspot_cold_plan(iters)
     val ready = bench_hotspot_ready_plan(iters)
     val invalidated = bench_hotspot_invalidated_plan(iters)
+    val specialized = bench_hotspot_specialized_decision(iters)
 
     bench_print(cold)
     bench_print(ready)
     bench_print(invalidated)
+    bench_print(specialized)
 
     print ""
     print bench_csv_header()
     print bench_csv(cold)
     print bench_csv(ready)
     print bench_csv(invalidated)
+    print bench_csv(specialized)
