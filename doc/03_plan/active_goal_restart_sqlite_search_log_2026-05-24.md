@@ -73,7 +73,6 @@ Additional progress on 2026-05-24:
 - Added `LOG001` print-to-log lint for production roots while allowing script/test/example `print`.
 - Added logging guidance to `.codex/skills/coding/SKILL.md` and `doc/07_guide/tooling/logging.md`.
 - Routed `PureDatabase` BM25/FTS5 facade search through the shared `FtsEngine` and added update/delete visibility coverage.
-- Added per-table in-memory FTS engine caching for `PureDatabase` BM25/FTS5 facade search, with insert/update/delete/drop invalidation and coverage for cache refresh after writes.
 - Added compiler-core AOP logging policy for hardware, external access, trace, and debug joins with release-mode no-debug-weaving coverage.
 - Added shared `std.cli.log_modes` parser and `render_progress` helper for `--log-mode`, `--stdout`/`--tui`, and summary/count/dot/no-progress modes.
 - Added debug log tree duplicate-reduction metadata: `package_path_delta` and `repeated_package`.
@@ -108,9 +107,6 @@ Passed:
 - `bin/simple test test/unit/app/cli/query_lint_print_to_log_spec.spl --mode=interpreter --clean --force-rebuild` (3 passed)
 - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_spec.spl` (passed)
 - `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (22 passed)
-- `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_spec.spl` (passed after per-table FTS cache/invalidation change)
-- `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (23 passed after cache invalidation coverage)
-- `bin/simple test test/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed after cache integration)
 - `bin/simple check src/compiler/10.frontend/core/aop_log_policy.spl test/unit/compiler/frontend/aop_log_policy_spec.spl` (passed)
 - `bin/simple test test/unit/compiler/frontend/aop_log_policy_spec.spl --mode=interpreter --clean --force-rebuild` (5 passed)
 - `bin/simple check src/compiler` (exit 0, 1521 warnings)
@@ -125,7 +121,6 @@ Passed:
 - `bin/simple check src/lib/nogc_async_mut/cli/log_modes.spl src/lib/nogc_async_mut/cli/__init__.spl test/unit/lib/cli_log_modes_spec.spl` (passed)
 - `bin/simple test test/unit/lib/cli_log_modes_spec.spl --mode=interpreter --clean --force-rebuild` (8 passed)
 - `bin/simple check src/lib` (exit 0, 327 warnings; 5669 files after new CLI log module)
-- `bin/simple check src/lib` (exit 0, 327 warnings; 5669 files after per-table FTS cache/invalidation change)
 - `bin/simple check src/app/mcp` (26 passed)
 - `bin/simple check src/app/simple_lsp_mcp` (5 passed)
 - `SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --clean` (3 passed)
@@ -145,8 +140,7 @@ Search/DB explorer:
 - Existing focused FTS shared module coverage now passes in `test/dbfs/fts_engine_spec.spl`.
 - SQL `MATCH` and `fts_match(...)` WHERE expressions now work in `PureDatabase`.
 - `PureDatabase` BM25/FTS5 facade search now uses the shared `FtsEngine`.
-- `PureDatabase` now keeps per-table in-memory FTS engine caches for facade search and invalidates them after insert/update/delete/drop.
-- Update/delete/cache-refresh visibility for facade search is covered by `test/dbfs/pure_db_spec.spl`; disk-persisted SQLite-style FTS indexes are still not implemented if that remains required.
+- Update/delete visibility for facade search is covered by `test/dbfs/pure_db_spec.spl`; persisted SQLite-style FTS indexes are still not implemented.
 
 Logging/AOP explorer:
 
@@ -166,8 +160,8 @@ Logging/AOP explorer:
 ## Immediate Next Steps
 
 1. Fix the native-build lane so the default `x86_64-unknown-linux-gnu` MCP/LSP MCP artifacts respond directly instead of relying on wrapper aliasing.
-2. Decide whether disk-persisted SQLite-style FTS indexes are in scope beyond the current per-table in-memory FTS cache.
-3. Add persisted-index invalidation coverage if disk-persisted FTS indexes remain in scope.
+2. Decide whether SQLite-style persisted FTS indexes are in scope beyond the current transient facade integration.
+3. Add index invalidation coverage if persisted FTS indexes remain in scope.
 4. Continue logging scope:
    - Continue shared CLI log option rollout beyond `simple brief`.
    - replace broader skipped app-level log specs.
@@ -178,7 +172,7 @@ Logging/AOP explorer:
 
 ## Completion Criteria Still Missing
 
-- Embedded DB BM25/FTS5 search verified at facade level; SQL `MATCH`/`fts_match(...)` verified; update/delete/cache-refresh search visibility is covered; disk-persisted auto-indexing remains missing if still required.
+- Embedded DB BM25/FTS5 search verified at facade level; SQL `MATCH`/`fts_match(...)` verified; update/delete search visibility is covered; persisted auto-indexing remains missing if still required.
 - Other search algorithms verified for term-frequency and reusable FTS engine components.
 - Logging enhancement verified across Simple libraries/apps.
 - Shared CLI option parser for app/TUI/stdout log modes; `simple brief` app wiring verified.
