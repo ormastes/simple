@@ -4,9 +4,33 @@
 # Used by debug_log_tools.spl for MCP tool responses.
 
 use compiler.frontend.core.aop_debug_log.{DebugLogEntry}
-use std.nogc_async_mut.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, escape_json}
-use common.text.{NL}
-use common.string_builder.{StringBuilder}
+use std.nogc_async_mut.mcp.helpers.{LB, RB, Q, jp}
+
+fn _nl() -> text:
+    "\n"
+
+fn _escape_json_local(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        elif ch == "\t":
+            out = out + "\\t"
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _json_string(value: text) -> text:
+    Q() + _escape_json_local(value) + Q()
 
 
 # ============================================================================
@@ -14,57 +38,60 @@ use common.string_builder.{StringBuilder}
 # ============================================================================
 
 fn log_entry_to_json(entry: DebugLogEntry) -> text:
-    val sb = StringBuilder(parts: [])
-    sb.push(LB())
-    sb.push(jp("entry_id", entry.entry_id.to_string()))
-    sb.push(",")
-    sb.push(jp("group_id", entry.group_id.to_string()))
-    sb.push(",")
-    sb.push(jp("parent_group_id", entry.parent_group_id.to_string()))
-    sb.push(",")
-    sb.push(jp("depth", entry.depth.to_string()))
-    sb.push(",")
-    sb.push(jp("entry_type", js(entry.entry_type)))
-    sb.push(",")
-    sb.push(jp("package_path", js(escape_json(entry.package_path))))
-    sb.push(",")
-    sb.push(jp("class_name", js(escape_json(entry.class_name))))
-    sb.push(",")
-    sb.push(jp("function_name", js(escape_json(entry.function_name))))
-    sb.push(",")
-    sb.push(jp("line_number", entry.line_number.to_string()))
-    sb.push(",")
-    sb.push(jp("timestamp_ms", entry.timestamp_ms.to_string()))
-    sb.push(",")
-    sb.push(jp("duration_ms", entry.duration_ms.to_string()))
-    sb.push(",")
-    sb.push(jp("params_text", js(escape_json(entry.params_text))))
-    sb.push(",")
-    sb.push(jp("message", js(escape_json(entry.message))))
-    sb.push(RB())
-    sb.to_text()
+    var parts: [text] = []
+    parts.push(LB())
+    parts.push(jp("entry_id", entry.entry_id.to_string()))
+    parts.push(",")
+    parts.push(jp("group_id", entry.group_id.to_string()))
+    parts.push(",")
+    parts.push(jp("parent_group_id", entry.parent_group_id.to_string()))
+    parts.push(",")
+    parts.push(jp("depth", entry.depth.to_string()))
+    parts.push(",")
+    parts.push(jp("entry_type", _json_string(entry.entry_type)))
+    parts.push(",")
+    parts.push(jp("package_path", _json_string(entry.package_path)))
+    parts.push(",")
+    parts.push(jp("class_name", _json_string(entry.class_name)))
+    parts.push(",")
+    parts.push(jp("function_name", _json_string(entry.function_name)))
+    parts.push(",")
+    parts.push(jp("line_number", entry.line_number.to_string()))
+    parts.push(",")
+    parts.push(jp("timestamp_ms", entry.timestamp_ms.to_string()))
+    parts.push(",")
+    parts.push(jp("duration_ms", entry.duration_ms.to_string()))
+    parts.push(",")
+    parts.push(jp("params_text", _json_string(entry.params_text)))
+    parts.push(",")
+    parts.push(jp("message", _json_string(entry.message)))
+    parts.push(RB())
+    parts.join("")
 
 # ============================================================================
 # Entry Array JSON
 # ============================================================================
 
 fn log_entries_to_json(entries: [DebugLogEntry]) -> text:
-    val sb = StringBuilder(parts: [])
-    sb.push("[")
+    var parts: [text] = []
+    parts.push("[")
     var first = true
     for entry in entries:
         if not first:
-            sb.push(",")
+            parts.push(",")
         first = false
-        sb.push(log_entry_to_json(entry))
-    sb.push("]")
-    sb.to_text()
+        parts.push(log_entry_to_json(entry))
+    parts.push("]")
+    parts.join("")
 
 # ============================================================================
 # Tree JSON - Hierarchical by group_id/parent
 # ============================================================================
 
 fn log_tree_to_json(entries: [DebugLogEntry]) -> text:
+    log_tree_to_json_mode(entries, "human")
+
+fn log_tree_to_json_mode(entries: [DebugLogEntry], mode: text) -> text:
     # Build tree nodes from enter entries, attach exit data
     # Root nodes have parent_group_id == 0
 
@@ -92,115 +119,181 @@ fn log_tree_to_json(entries: [DebugLogEntry]) -> text:
             duration_by_gid[entry.group_id] = entry.duration_ms
 
     # Build JSON tree recursively via pre-built lookups
-    val sb = StringBuilder(parts: [])
-    sb.push("[")
+    var parts: [text] = []
+    parts.push("[")
     var first_root = true
     for e in root_entries:
         if not first_root:
-            sb.push(",")
+            parts.push(",")
         first_root = false
-        _build_tree_node_sb(sb, e, children_by_parent, duration_by_gid)
-    sb.push("]")
-    sb.to_text()
+        parts.push(_build_tree_node_json(e, children_by_parent, duration_by_gid, mode))
+    parts.push("]")
+    parts.join("")
 
-fn _build_tree_node_sb(sb: StringBuilder, entry: DebugLogEntry, children_by_parent: {i64: [DebugLogEntry]}, duration_by_gid: {i64: i64}):
+fn _build_tree_node_json(entry: DebugLogEntry, children_by_parent: {i64: [DebugLogEntry]}, duration_by_gid: {i64: i64}, mode: text) -> text:
     # Find duration for this group - O(1) lookup
     var dur = 0
     if duration_by_gid.has(entry.group_id):
         dur = duration_by_gid[entry.group_id]
 
     # Find children - O(1) lookup
-    val children_sb = StringBuilder(parts: [])
-    children_sb.push("[")
+    var child_parts: [text] = []
+    child_parts.push("[")
     var first_child = true
+    var child_count = 0
     if children_by_parent.has(entry.group_id):
         val kids = children_by_parent[entry.group_id]
+        child_count = kids.len()
         for child in kids:
             if not first_child:
-                children_sb.push(",")
+                child_parts.push(",")
             first_child = false
-            _build_tree_node_sb(children_sb, child, children_by_parent, duration_by_gid)
-    children_sb.push("]")
-    val children = children_sb.to_text()
+            child_parts.push(_build_tree_node_json(child, children_by_parent, duration_by_gid, mode))
+    child_parts.push("]")
+    val children = child_parts.join("")
+    val default_open = _entry_default_open(entry)
+    var fold_state = "collapsed"
+    if default_open:
+        fold_state = "open"
+    var has_children = "false"
+    if child_count > 0:
+        has_children = "true"
+    var default_open_json = "false"
+    if default_open:
+        default_open_json = "true"
 
-    sb.push(LB())
-    sb.push(jp("group_id", entry.group_id.to_string()))
-    sb.push(",")
-    sb.push(jp("parent_group_id", entry.parent_group_id.to_string()))
-    sb.push(",")
-    sb.push(jp("function_name", js(escape_json(entry.function_name))))
-    sb.push(",")
-    sb.push(jp("package_path", js(escape_json(entry.package_path))))
-    sb.push(",")
-    sb.push(jp("class_name", js(escape_json(entry.class_name))))
-    sb.push(",")
-    sb.push(jp("line_number", entry.line_number.to_string()))
-    sb.push(",")
-    sb.push(jp("params_text", js(escape_json(entry.params_text))))
-    sb.push(",")
-    sb.push(jp("depth", entry.depth.to_string()))
-    sb.push(",")
-    sb.push(jp("duration_ms", dur.to_string()))
-    sb.push(",")
-    sb.push(jp("children", children))
-    sb.push(RB())
+    var parts: [text] = []
+    parts.push(LB())
+    parts.push(jp("mode", _json_string(mode)))
+    parts.push(",")
+    parts.push(jp("group_id", entry.group_id.to_string()))
+    parts.push(",")
+    parts.push(jp("parent_group_id", entry.parent_group_id.to_string()))
+    parts.push(",")
+    parts.push(jp("function_name", _json_string(entry.function_name)))
+    parts.push(",")
+    parts.push(jp("package_path", _json_string(entry.package_path)))
+    parts.push(",")
+    parts.push(jp("class_name", _json_string(entry.class_name)))
+    parts.push(",")
+    parts.push(jp("line_number", entry.line_number.to_string()))
+    parts.push(",")
+    parts.push(jp("params_text", _json_string(entry.params_text)))
+    parts.push(",")
+    parts.push(jp("depth", entry.depth.to_string()))
+    parts.push(",")
+    parts.push(jp("duration_ms", dur.to_string()))
+    parts.push(",")
+    parts.push(jp("has_children", has_children))
+    parts.push(",")
+    parts.push(jp("child_count", child_count.to_string()))
+    parts.push(",")
+    parts.push(jp("collapsed_count", child_count.to_string()))
+    parts.push(",")
+    parts.push(jp("fold_state", _json_string(fold_state)))
+    parts.push(",")
+    parts.push(jp("default_open", default_open_json))
+    parts.push(",")
+    parts.push(jp("children", children))
+    parts.push(RB())
+    parts.join("")
+
+fn _entry_default_open(entry: DebugLogEntry) -> bool:
+    val msg = entry.message.to_lower()
+    val fn_name = entry.function_name.to_lower()
+    if msg.contains("error") or msg.contains("fail") or msg.contains("panic"):
+        return true
+    if fn_name.contains("error") or fn_name.contains("fail"):
+        return true
+    false
 
 # ============================================================================
 # Text Tree - Indented with folding markers
 # ============================================================================
 
 fn format_log_tree_text(entries: [DebugLogEntry], expanded_groups: [i64]) -> text:
-    val sb = StringBuilder(parts: [])
+    format_log_tree_text_mode(entries, expanded_groups, "human")
+
+fn format_log_tree_text_mode(entries: [DebugLogEntry], expanded_groups: [i64], mode: text) -> text:
+    if mode == "llm":
+        return _format_log_tree_llm_text(entries, expanded_groups)
+    var parts: [text] = []
     for entry in entries:
         val indent = _make_indent(entry.depth)
         if entry.entry_type == "enter":
             val is_expanded = _is_group_expanded(entry.group_id, expanded_groups)
-            val label_sb = StringBuilder(parts: [])
-            label_sb.push(entry.package_path)
+            var label_parts: [text] = []
+            label_parts.push(entry.package_path)
             if entry.class_name != "":
-                label_sb.push("::")
-                label_sb.push(entry.class_name)
-            label_sb.push("::")
-            label_sb.push(entry.function_name)
-            val label = label_sb.to_text()
+                label_parts.push("::")
+                label_parts.push(entry.class_name)
+            label_parts.push("::")
+            label_parts.push(entry.function_name)
+            val label = label_parts.join("")
             val line_info = " (line {entry.line_number})"
 
             if is_expanded:
-                sb.push(indent)
-                sb.push("v> ")
-                sb.push(label)
-                sb.push(line_info)
-                sb.push(NL)
+                parts.push(indent)
+                parts.push("v> ")
+                parts.push(label)
+                parts.push(line_info)
+                parts.push(_nl())
                 if entry.params_text != "":
-                    sb.push(indent)
-                    sb.push("    params: ")
-                    sb.push(entry.params_text)
-                    sb.push(NL)
+                    parts.push(indent)
+                    parts.push("    params: ")
+                    parts.push(entry.params_text)
+                    parts.push(_nl())
             else:
-                sb.push(indent)
-                sb.push(">> ")
-                sb.push(label)
-                sb.push(line_info)
+                parts.push(indent)
+                parts.push(">> ")
+                parts.push(label)
+                parts.push(line_info)
                 if entry.params_text != "":
-                    sb.push(" > (...)")
-                sb.push(NL)
+                    parts.push(" > (...)")
+                parts.push(_nl())
         elif entry.entry_type == "exit":
-            sb.push(indent)
-            sb.push("<< ")
-            sb.push(entry.package_path)
-            sb.push("::")
-            sb.push(entry.function_name)
-            sb.push(" [")
-            sb.push(entry.duration_ms.to_string())
-            sb.push("ms]")
-            sb.push(NL)
-    sb.to_text()
+            parts.push(indent)
+            parts.push("<< ")
+            parts.push(entry.package_path)
+            parts.push("::")
+            parts.push(entry.function_name)
+            parts.push(" [")
+            parts.push(entry.duration_ms.to_string())
+            parts.push("ms]")
+            parts.push(_nl())
+    parts.join("")
+
+fn _format_log_tree_llm_text(entries: [DebugLogEntry], expanded_groups: [i64]) -> text:
+    var parts: [text] = []
+    parts.push("log_tree mode=llm entries=")
+    parts.push(entries.len().to_string())
+    parts.push(_nl())
+    for entry in entries:
+        if entry.entry_type == "enter":
+            val indent = _make_indent(entry.depth)
+            parts.push(indent)
+            parts.push("- gid=")
+            parts.push(entry.group_id.to_string())
+            parts.push(" depth=")
+            parts.push(entry.depth.to_string())
+            parts.push(" fn=")
+            parts.push(entry.package_path)
+            if entry.class_name != "":
+                parts.push("::")
+                parts.push(entry.class_name)
+            parts.push("::")
+            parts.push(entry.function_name)
+            if _is_group_expanded(entry.group_id, expanded_groups) and entry.params_text != "":
+                parts.push(" params=")
+                parts.push(entry.params_text)
+            parts.push(_nl())
+    parts.join("")
 
 fn _make_indent(depth: i64) -> text:
-    val sb = StringBuilder(parts: [])
+    var parts: [text] = []
     for i in range(0, depth):
-        sb.push("  ")
-    sb.to_text()
+        parts.push("  ")
+    parts.join("")
 
 fn _is_group_expanded(group_id: i64, expanded_groups: [i64]) -> bool:
     for gid in expanded_groups:
@@ -216,14 +309,14 @@ fn log_status_to_json(enabled: bool, filter_pattern: text, entry_count: i64, cur
     var en_str = "false"
     if enabled:
         en_str = "true"
-    val sb = StringBuilder(parts: [])
-    sb.push(LB())
-    sb.push(jp("enabled", en_str))
-    sb.push(",")
-    sb.push(jp("filter_pattern", js(escape_json(filter_pattern))))
-    sb.push(",")
-    sb.push(jp("entry_count", entry_count.to_string()))
-    sb.push(",")
-    sb.push(jp("current_depth", current_depth.to_string()))
-    sb.push(RB())
-    sb.to_text()
+    var parts: [text] = []
+    parts.push(LB())
+    parts.push(jp("enabled", en_str))
+    parts.push(",")
+    parts.push(jp("filter_pattern", _json_string(filter_pattern)))
+    parts.push(",")
+    parts.push(jp("entry_count", entry_count.to_string()))
+    parts.push(",")
+    parts.push(jp("current_depth", current_depth.to_string()))
+    parts.push(RB())
+    parts.join("")

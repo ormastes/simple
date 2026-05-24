@@ -3,7 +3,7 @@
  *
  * Memory Layout:
  *   FLASH (SSRAM1 secure): 0x10000000 - 0x10400000 (4 MB)
- *   RAM   (SSRAM2):        0x20000000 - 0x20400000 (4 MB)
+ *   RAM   (SRAM):           0x20000000 - 0x20008000 (32 KB)
  *
  * For STM32U585 (Arduino UNO Q), change to:
  *   FLASH: 0x08000000, LENGTH = 2M
@@ -15,7 +15,7 @@ ENTRY(Reset_Handler)
 MEMORY
 {
     FLASH (rx)  : ORIGIN = 0x10000000, LENGTH = 4M
-    RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = 4M
+    RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = 32K
 }
 
 SECTIONS
