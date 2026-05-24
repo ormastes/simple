@@ -13,7 +13,7 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, BlockId, MirTerminator, SwitchCase}
 use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo, LoopDetector}
 
 # ============================================================================
@@ -58,7 +58,7 @@ impl LoopInvariantMotion:
         for loop in self.detector.loops:
             optimized_blocks = self.hoist_invariants(optimized_blocks, loop)
 
-        MirFunction(..func, blocks: optimized_blocks)
+        MirFunction.with_blocks(func, optimized_blocks)
 
     me hoist_invariants(blocks: [MirBlock], loop: LoopInfo) -> [MirBlock]:
         """Hoist loop-invariant instructions out of loop."""
@@ -115,24 +115,33 @@ impl LoopInvariantMotion:
                     key = "{inv_dest.unwrap().id}:{inv_span.start}:{inv_span.end}"
                 invariant_set[key] = true
 
-        # Build new blocks: add hoisted insts before header, remove from body
+        # Generate preheader block ID
+        var max_id: i64 = 0
+        for block in blocks:
+            if block.id.id > max_id:
+                max_id = block.id.id
+        val preheader_id = BlockId.new(max_id + 1)
+
+        val preheader = MirBlock(
+            id: preheader_id, label: nil,
+            instructions: invariant_insts,
+            terminator: MirTerminator.Goto(loop.header)
+        )
+
         var new_blocks: [MirBlock] = []
-        var hoisted_to_preheader = false
 
         for block in blocks:
-            if block.id.id == loop.header.id and not hoisted_to_preheader:
-                # Insert hoisted instructions at start of header block
-                var new_insts: [MirInst] = []
-                for hinst in invariant_insts:
-                    new_insts = new_insts.push(hinst)
+            if block.id.id == loop.header.id:
+                # Insert preheader before header, remove hoisted from header
+                new_blocks = new_blocks.push(preheader)
+                var kept: [MirInst] = []
                 for inst in block.instructions:
                     if not self.is_in_invariant_set(inst, invariant_set):
-                        new_insts = new_insts.push(inst)
+                        kept = kept.push(inst)
                 new_blocks = new_blocks.push(MirBlock(
                     id: block.id, label: block.label,
-                    instructions: new_insts, terminator: block.terminator
+                    instructions: kept, terminator: block.terminator
                 ))
-                hoisted_to_preheader = true
             elif loop_block_set.has(block.id.id):
                 # Remove hoisted instructions from loop body
                 var kept: [MirInst] = []
@@ -144,7 +153,12 @@ impl LoopInvariantMotion:
                     instructions: kept, terminator: block.terminator
                 ))
             else:
-                new_blocks = new_blocks.push(block)
+                # Redirect non-loop predecessors to preheader
+                val new_term = self.redirect_to_preheader(block.terminator, loop.header, preheader_id)
+                new_blocks = new_blocks.push(MirBlock(
+                    id: block.id, label: block.label,
+                    instructions: block.instructions, terminator: new_term
+                ))
 
         new_blocks
 
@@ -214,6 +228,44 @@ impl LoopInvariantMotion:
         match inst.kind:
             case Store(ptr, _): self.operand_local(ptr)
             case _: nil
+
+    fn redirect_to_preheader(term: MirTerminator, header: BlockId, preheader: BlockId) -> MirTerminator:
+        match term:
+            case Goto(target):
+                if target.id == header.id:
+                    return MirTerminator.Goto(preheader)
+                term
+            case If(cond, then_, else_):
+                var new_then = then_
+                var new_else = else_
+                if then_.id == header.id:
+                    new_then = preheader
+                if else_.id == header.id:
+                    new_else = preheader
+                if new_then.id != then_.id or new_else.id != else_.id:
+                    return MirTerminator.If(cond, new_then, new_else)
+                term
+            case Switch(value, targets, default_):
+                var new_targets: [SwitchCase] = []
+                var changed = false
+                for sc in targets:
+                    if sc.target.id == header.id:
+                        new_targets = new_targets.push(SwitchCase(value: sc.value, target: preheader))
+                        changed = true
+                    else:
+                        new_targets = new_targets.push(sc)
+                var new_default = default_
+                if default_.id == header.id:
+                    new_default = preheader
+                    changed = true
+                if changed:
+                    return MirTerminator.Switch(value, new_targets, new_default)
+                term
+            case CallTerminator(dest, func_op, args, normal, unwind):
+                if normal.id == header.id:
+                    return MirTerminator.CallTerminator(dest, func_op, args, preheader, unwind)
+                term
+            case _: term
 
     fn is_in_invariant_set(inst: MirInst, invariant_set: {text: bool}) -> bool:
         val dest = self.inst_dest(inst)
