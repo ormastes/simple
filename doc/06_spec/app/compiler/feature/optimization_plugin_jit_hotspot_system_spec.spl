@@ -1,0 +1,85 @@
+# codex-system-test
+# System verification for optimization plugin JIT hotspot application.
+
+use compiler.mir_opt.pattern.rule_engine.{
+    OptimizerProviderKind,
+    optimization_rule_provider_builtin_jit_hotspot,
+    optimization_rule_provider_can_run,
+    optimization_rule_provider_is_runtime_hotspot
+}
+use compiler.interp.execution.tiered_jit.{
+    FunctionProfile, JitTier, TieredJitConfig,
+    jit_hotspot_plan_from_profile,
+    jit_hotspot_specialization_provider,
+    jit_hotspot_consume_plan_with_provider
+}
+
+fn system_hotspot_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: false)
+
+fn system_hotspot_profile(call_count: i64) -> FunctionProfile:
+    FunctionProfile(
+        name: "system_hot_loop",
+        call_count: call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn system_hot_loop(x: i64) -> i64: x + 1",
+        typed_mir: true,
+        safe_deopt: true,
+        hotspot_specialized_source: "fn system_hot_loop(x: i64) -> i64: x + 1 # jit specialized",
+        hotspot_semantic_proof: true
+    )
+
+describe "Optimization Plugin JIT Hotspot System":
+    describe "REQ-OPJH-001 REQ-OPJH-002 REQ-OPJH-003":
+        it "should expose JIT hotspot as a first-class built-in provider":
+            val provider = optimization_rule_provider_builtin_jit_hotspot(
+                "simple.opt.jit.hotspot.system",
+                ["profile.hot_count", "typed_mir", "safe_deopt"],
+                ["jit.hotspot_plan"],
+                "runtime-guarded"
+            )
+            expect(provider.kind).to_equal(OptimizerProviderKind.JitHotspot)
+            expect(provider.hot_path).to_equal(true)
+            expect(optimization_rule_provider_is_runtime_hotspot(provider)).to_equal(true)
+
+    describe "REQ-OPJH-004 REQ-OPJH-007 REQ-OPJH-011":
+        it "should apply the provider only after runtime hotspot facts are available":
+            val provider = optimization_rule_provider_builtin_jit_hotspot(
+                "simple.opt.jit.hotspot.system",
+                ["profile.hot_count", "typed_mir", "safe_deopt"],
+                ["jit.hotspot_plan"],
+                "runtime-guarded"
+            )
+            val profile = system_hotspot_profile(8)
+            val plan = jit_hotspot_plan_from_profile(profile, system_hotspot_config(), true, true)
+            expect(optimization_rule_provider_can_run(provider, plan.facts)).to_equal(true)
+            expect(plan.eligible).to_equal(true)
+            expect(plan.facts).to_contain("profile.hot_count")
+
+    describe "REQ-OPJH-009 REQ-OPJH-012 NFR-OPJH-008":
+        it "should replace compile source only when semantic proof exists":
+            val profile = system_hotspot_profile(64)
+            val plan = jit_hotspot_plan_from_profile(profile, system_hotspot_config(), true, true)
+            val provider = jit_hotspot_specialization_provider(
+                "simple.opt.jit.hotspot.system.specialized",
+                profile.hotspot_specialized_source,
+                profile.hotspot_semantic_proof
+            )
+            val decision = jit_hotspot_consume_plan_with_provider(plan, profile.source, provider)
+            expect(decision.provider_used).to_equal(true)
+            expect(decision.compile_source).to_equal(profile.hotspot_specialized_source)
+            expect(decision.reason).to_equal("jit.hotspot_specialized_source accepted")
+
+        it "should preserve original source when semantic proof is missing":
+            val profile = system_hotspot_profile(64)
+            val plan = jit_hotspot_plan_from_profile(profile, system_hotspot_config(), true, true)
+            val provider = jit_hotspot_specialization_provider(
+                "simple.opt.jit.hotspot.system.specialized",
+                profile.hotspot_specialized_source,
+                false
+            )
+            val decision = jit_hotspot_consume_plan_with_provider(plan, profile.source, provider)
+            expect(decision.provider_used).to_equal(false)
+            expect(decision.compile_source).to_equal(profile.source)
+            expect(decision.reason).to_equal("missing semantic proof")
