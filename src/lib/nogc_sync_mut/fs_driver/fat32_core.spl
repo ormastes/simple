@@ -93,8 +93,8 @@ impl Fat32Core:
             mounted: false,
             open_files: [],
             fat_sector_cache: FatSectorCache.new(4096),
-            chain_cache: ChainCache.new(),
-            path_cache: PathCache.new(),
+            chain_cache: ChainCache.new(256),
+            path_cache: PathCache.new(512),
             dir_cache: {},
             cluster_data_cache: ClusterDataCache.new(512),
             next_free_hint: 2,
@@ -272,6 +272,7 @@ impl Fat32Core:
         var dfs = self.dirty_fat_sectors
         dfs = {}
         self.dirty_fat_sectors = dfs
+        self.fat_sector_cache.mark_all_clean()
         Result.Ok(())
 
     me fn flush_clusters() -> Result<(), text>:
@@ -301,6 +302,7 @@ impl Fat32Core:
         var dcl = self.dirty_clusters
         dcl = {}
         self.dirty_clusters = dcl
+        self.cluster_data_cache.mark_all_clean()
         Result.Ok(())
 
     me fn sync() -> Result<(), text>:
@@ -425,6 +427,7 @@ impl Fat32Core:
 
     me fn write_cluster(cluster: u32, data: [u8]) -> Result<(), text>:
         self.cluster_data_cache.put(cluster, data)
+        self.cluster_data_cache.mark_dirty(cluster)
         var dcl = self.dirty_clusters
         dcl.set(cluster, true)
         self.dirty_clusters = dcl
@@ -493,6 +496,7 @@ impl Fat32Core:
         buffer[entry_offset + 2] = ((masked >> 16) & 0xFF).to_u8()
         buffer[entry_offset + 3] = ((masked >> 24) & 0xFF).to_u8()
         self.fat_sector_cache.update(fat_sector, buffer)
+        self.fat_sector_cache.mark_dirty(fat_sector)
         var dfs = self.dirty_fat_sectors
         dfs.set(fat_sector, true)
         self.dirty_fat_sectors = dfs
@@ -601,6 +605,9 @@ impl Fat32Core:
                 val first_byte = cluster_data[off]
                 if first_byte == 0x00:
                     var dc = self.dir_cache
+                    if dc.keys().len() >= 128:
+                        dc = {}
+                        self.dir_name_index = {}
                     dc.set(dir_cluster, entries)
                     self.dir_cache = dc
                     self._build_name_index(dir_cluster, entries)
@@ -623,6 +630,8 @@ impl Fat32Core:
                 val is_dir = (attr & FAT32_ATTR_DIRECTORY) != 0
                 if not is_dir:
                     var fsc = self.file_size_cache
+                    if fsc.keys().len() >= 4096:
+                        fsc = {}
                     fsc.set(entry_cluster.to_u64(), entry_size.to_i64())
                     self.file_size_cache = fsc
                 entries.push(DirEntry(
