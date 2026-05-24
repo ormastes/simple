@@ -1,0 +1,112 @@
+# FTS Trigram Index — 3-character substring index for LIKE/substring queries.
+#
+# Exports: FtsTrigramIndex, fts_generate_trigrams
+
+use std.io_runtime
+
+# ── Trigram generation ─────────────────────────────────────────────────────────
+
+fn fts_generate_trigrams(s: text) -> [text]:
+    val lowered = s.to_lower()
+    var trigrams: [text] = []
+    if lowered.len() < 3:
+        return trigrams
+    var i: i32 = 0
+    val limit = (lowered.len() as i32) - 2
+    while i < limit:
+        val tri = lowered.slice(i, i + 3)
+        # Deduplicate: only add if not already present
+        var found = false
+        var j: i32 = 0
+        while j < trigrams.len() as i32:
+            if trigrams[j] == tri:
+                found = true
+                j = trigrams.len() as i32  # break
+            j = j + 1
+        if not found:
+            trigrams.push(tri)
+        i = i + 1
+    trigrams
+
+# ── Trigram Index ──────────────────────────────────────────────────────────────
+
+struct FtsTrigramIndex:
+    _trigrams: Dict<text, [i64]>
+
+impl FtsTrigramIndex:
+    static fn new() -> FtsTrigramIndex:
+        FtsTrigramIndex(_trigrams: Dict.new())
+
+    me fn index_document(doc_id: i64, content: text):
+        val tris = fts_generate_trigrams(content)
+        var ti: i32 = 0
+        while ti < tris.len() as i32:
+            val tri = tris[ti]
+            if self._trigrams.contains_key(tri):
+                # Check if doc_id already present
+                var ids = self._trigrams[tri]
+                var dup = false
+                var di: i32 = 0
+                while di < ids.len() as i32:
+                    if ids[di] == doc_id:
+                        dup = true
+                        di = ids.len() as i32  # break
+                    di = di + 1
+                if not dup:
+                    ids.push(doc_id)
+                    self._trigrams[tri] = ids
+            else:
+                self._trigrams[tri] = [doc_id]
+            ti = ti + 1
+
+    me fn remove_document(doc_id: i64):
+        for tri in self._trigrams.keys():
+            var ids = self._trigrams[tri]
+            var new_ids: [i64] = []
+            var ri: i32 = 0
+            while ri < ids.len() as i32:
+                if ids[ri] != doc_id:
+                    new_ids.push(ids[ri])
+                ri = ri + 1
+            self._trigrams[tri] = new_ids
+
+    me fn search(query: text) -> [i64]:
+        val tris = fts_generate_trigrams(query)
+        if tris.len() == 0:
+            var empty: [i64] = []
+            return empty
+
+        # Start with doc_ids from first trigram
+        val first_tri = tris[0]
+        if not self._trigrams.contains_key(first_tri):
+            var empty: [i64] = []
+            return empty
+
+        var candidates = self._trigrams[first_tri]
+
+        # Intersect with remaining trigrams
+        var ti: i32 = 1
+        while ti < tris.len() as i32:
+            val tri = tris[ti]
+            if not self._trigrams.contains_key(tri):
+                var empty: [i64] = []
+                return empty
+            val tri_ids = self._trigrams[tri]
+            var intersected: [i64] = []
+            var ci: i32 = 0
+            while ci < candidates.len() as i32:
+                val cid = candidates[ci]
+                var present = false
+                var di: i32 = 0
+                while di < tri_ids.len() as i32:
+                    if tri_ids[di] == cid:
+                        present = true
+                        di = tri_ids.len() as i32  # break
+                    di = di + 1
+                if present:
+                    intersected.push(cid)
+                ci = ci + 1
+            candidates = intersected
+            ti = ti + 1
+
+        candidates

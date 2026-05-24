@@ -1,0 +1,177 @@
+use std.io_runtime
+use std.spec.{describe, it, expect}
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use nogc_sync_mut.database.pure_sql.database.{PureDatabase, PureSearchAlgorithm}
+
+describe "PureDatabase":
+    it "creates in-memory database":
+        val r = PureDatabase.memory()
+        expect r.is_ok() == true
+
+    it "creates table":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val cr = db.exec_sql("CREATE TABLE users (id INTEGER, name TEXT)")
+        expect cr.is_ok() == true
+        expect db.table_exists("users") == true
+
+    it "rejects duplicate table":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val c1 = db.exec_sql("CREATE TABLE t (id INTEGER)")
+        expect c1.is_ok() == true
+        val c2 = db.exec_sql("CREATE TABLE t (id INTEGER)")
+        expect c2.is_err() == true
+
+    it "allows CREATE TABLE IF NOT EXISTS":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val c1 = db.exec_sql("CREATE TABLE IF NOT EXISTS t (id INTEGER)")
+        expect c1.is_ok() == true
+        val c2 = db.exec_sql("CREATE TABLE IF NOT EXISTS t (id INTEGER)")
+        expect c2.is_ok() == true
+
+    it "inserts and selects rows":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val cr = db.exec_sql("CREATE TABLE t (id INTEGER, name TEXT)")
+        cr.unwrap()
+        val i1 = db.exec_sql("INSERT INTO t (id, name) VALUES (1, 'Alice')")
+        i1.unwrap()
+        val i2 = db.exec_sql("INSERT INTO t (id, name) VALUES (2, 'Bob')")
+        i2.unwrap()
+        val qr = db.query("SELECT * FROM t", [])
+        expect qr.is_ok() == true
+        val rows = qr.unwrap()
+        expect rows.len() == 2
+
+    it "selects with WHERE clause":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val cr = db.exec_sql("CREATE TABLE t (id INTEGER, name TEXT)")
+        cr.unwrap()
+        val i1 = db.exec_sql("INSERT INTO t (id, name) VALUES (1, 'Alice')")
+        i1.unwrap()
+        val i2 = db.exec_sql("INSERT INTO t (id, name) VALUES (2, 'Bob')")
+        i2.unwrap()
+        val qr = db.query("SELECT * FROM t WHERE id = 1", [])
+        val rows = qr.unwrap()
+        expect rows.len() == 1
+
+    it "selects specific columns":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val cr = db.exec_sql("CREATE TABLE t (id INTEGER, name TEXT, age INTEGER)")
+        cr.unwrap()
+        val i1 = db.exec_sql("INSERT INTO t (id, name, age) VALUES (1, 'Alice', 30)")
+        i1.unwrap()
+        val qr = db.query("SELECT name FROM t", [])
+        val rows = qr.unwrap()
+        expect rows.len() == 1
+        expect rows[0].columns.len() == 1
+
+    it "deletes with WHERE clause":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val cr = db.exec_sql("CREATE TABLE t (id INTEGER, name TEXT)")
+        cr.unwrap()
+        val i1 = db.exec_sql("INSERT INTO t (id, name) VALUES (1, 'Alice')")
+        i1.unwrap()
+        val i2 = db.exec_sql("INSERT INTO t (id, name) VALUES (2, 'Bob')")
+        i2.unwrap()
+        val dr = db.exec_sql("DELETE FROM t WHERE id = 1")
+        dr.unwrap()
+        val qr = db.query("SELECT * FROM t", [])
+        val rows = qr.unwrap()
+        expect rows.len() == 1
+
+    it "updates rows":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val cr = db.exec_sql("CREATE TABLE t (id INTEGER, name TEXT)")
+        cr.unwrap()
+        val ir = db.exec_sql("INSERT INTO t (id, name) VALUES (1, 'Alice')")
+        ir.unwrap()
+        val ur = db.exec_sql("UPDATE t SET name = 'Bob' WHERE id = 1")
+        ur.unwrap()
+        val qr = db.query("SELECT * FROM t WHERE name = 'Bob'", [])
+        val rows = qr.unwrap()
+        expect rows.len() == 1
+
+    it "round-trip create-insert-select-delete":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val cr = db.exec_sql("CREATE TABLE items (id INTEGER, val TEXT)")
+        cr.unwrap()
+        val i1 = db.exec_sql("INSERT INTO items (id, val) VALUES (1, 'a')")
+        i1.unwrap()
+        val i2 = db.exec_sql("INSERT INTO items (id, val) VALUES (2, 'b')")
+        i2.unwrap()
+        val i3 = db.exec_sql("INSERT INTO items (id, val) VALUES (3, 'c')")
+        i3.unwrap()
+        expect db.table_exists("items") == true
+        val all_r = db.query("SELECT * FROM items", [])
+        val all_rows = all_r.unwrap()
+        expect all_rows.len() == 3
+        val dr = db.exec_sql("DELETE FROM items WHERE id = 2")
+        dr.unwrap()
+        val after_r = db.query("SELECT * FROM items", [])
+        val after = after_r.unwrap()
+        expect after.len() == 2
+
+    it "reports table_exists correctly":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        expect db.table_exists("nope") == false
+        val cr = db.exec_sql("CREATE TABLE yes_tbl (id INTEGER)")
+        cr.unwrap()
+        expect db.table_exists("yes_tbl") == true
+
+    it "rejects query on closed database":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val cl = db.close()
+        cl.unwrap()
+        val qr = db.query("SELECT 1 FROM t", [])
+        expect qr.is_err() == true
+
+    it "searches text columns with BM25 ranking":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE docs (id INTEGER, title TEXT, body TEXT)").unwrap()
+        db.exec_sql("INSERT INTO docs (id, title, body) VALUES (1, 'SQLite FTS5', 'embedded search engine bm25 ranking')").unwrap()
+        db.exec_sql("INSERT INTO docs (id, title, body) VALUES (2, 'Other Storage', 'plain key value storage')").unwrap()
+        db.exec_sql("INSERT INTO docs (id, title, body) VALUES (3, 'BM25 Search', 'bm25 bm25 search ranking support')").unwrap()
+
+        val sr = db.bm25_search("docs", ["title", "body"], "bm25 search", 10)
+        expect sr.is_ok() == true
+        val rows = sr.unwrap()
+        expect rows.len() == 2
+        expect rows[0].score > rows[1].score
+        expect rows[0].row.get_int("id").unwrap() == 3
+
+    it "supports FTS5-compatible search alias":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE docs (id INTEGER, body TEXT)").unwrap()
+        db.exec_sql("INSERT INTO docs (id, body) VALUES (1, 'alpha beta beta')").unwrap()
+        db.exec_sql("INSERT INTO docs (id, body) VALUES (2, 'gamma delta')").unwrap()
+
+        val sr = db.fts5_search("docs", ["body"], "beta", 5)
+        expect sr.is_ok() == true
+        val rows = sr.unwrap()
+        expect rows.len() == 1
+        expect rows[0].row.get_int("id").unwrap() == 1
+
+    it "supports alternate lightweight search algorithms":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE docs (id INTEGER, body TEXT)").unwrap()
+        db.exec_sql("INSERT INTO docs (id, body) VALUES (1, 'trace trace hardware')").unwrap()
+        db.exec_sql("INSERT INTO docs (id, body) VALUES (2, 'trace external access')").unwrap()
+
+        val sr = db.search("docs", ["body"], "trace", PureSearchAlgorithm.TermFrequency, 5)
+        expect sr.is_ok() == true
+        val rows = sr.unwrap()
+        expect rows.len() == 2
+        expect rows[0].row.get_int("id").unwrap() == 1

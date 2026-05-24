@@ -1,0 +1,213 @@
+"""
+FTS Engine Specification
+
+Verifies full-text search engine components:
+  - Tokenizer: tokenization, stop words, positions
+  - Inverted index: indexing, search, removal
+  - BM25: scoring and ranking
+  - Trigram: trigram generation, substring search
+  - Fuzzy: Levenshtein distance, fuzzy matching
+  - FtsEngine: unified search API
+"""
+
+use std.io_runtime
+use std.spipe.*
+use std.db.dbfs_engine.fts.tokenizer.{FtsToken, fts_tokenize, fts_tokenize_raw}
+use std.db.dbfs_engine.fts.inverted_index.{FtsInvertedIndex, FtsPosting}
+use std.db.dbfs_engine.fts.bm25.{fts_bm25_search, fts_bm25_score, FtsSearchResult}
+use std.db.dbfs_engine.fts.trigram.{FtsTrigramIndex, fts_generate_trigrams}
+use std.db.dbfs_engine.fts.fuzzy.{fts_levenshtein, fts_fuzzy_match}
+use std.db.dbfs_engine.fts.search.{FtsEngine}
+
+# ── Tokenizer ──────────────────────────────────────────────────────────────────
+
+describe "FTS Tokenizer":
+    it "tokenizes simple text into lowercase terms":
+        val tokens = fts_tokenize("Hello World")
+        expect(tokens.len()).to_equal(2)
+        expect(tokens[0].term).to_equal("hello")
+        expect(tokens[1].term).to_equal("world")
+
+    it "filters stop words":
+        val tokens = fts_tokenize("the quick brown fox is in the house")
+        # "the", "is", "in", "the" are stop words -> removed
+        # remaining: quick, brown, fox, house
+        expect(tokens.len()).to_equal(4)
+        expect(tokens[0].term).to_equal("quick")
+        expect(tokens[1].term).to_equal("brown")
+        expect(tokens[2].term).to_equal("fox")
+        expect(tokens[3].term).to_equal("house")
+
+    it "tracks positions after stop word removal":
+        val tokens = fts_tokenize("Hello World")
+        expect(tokens[0].position).to_equal(0)
+        expect(tokens[1].position).to_equal(1)
+
+    it "raw tokenize preserves stop words":
+        val raw = fts_tokenize_raw("the quick fox")
+        expect(raw.len()).to_equal(3)
+        expect(raw[0]).to_equal("the")
+
+    it "splits on punctuation":
+        val tokens = fts_tokenize_raw("hello,world.test")
+        expect(tokens.len()).to_equal(3)
+        expect(tokens[0]).to_equal("hello")
+        expect(tokens[1]).to_equal("world")
+        expect(tokens[2]).to_equal("test")
+
+# ── Inverted Index ─────────────────────────────────────────────────────────────
+
+describe "FTS Inverted Index":
+    it "indexes a document and finds terms":
+        var idx = FtsInvertedIndex.new()
+        idx.index_document(1, "hello world hello")
+        val results = idx.search("hello")
+        expect(results.len()).to_equal(1)
+        expect(results[0].doc_id).to_equal(1)
+        expect(results[0].term_freq).to_equal(2)
+
+    it "tracks document count":
+        var idx = FtsInvertedIndex.new()
+        idx.index_document(1, "hello world")
+        idx.index_document(2, "world test")
+        expect(idx.doc_count()).to_equal(2)
+
+    it "returns empty for unknown terms":
+        var idx = FtsInvertedIndex.new()
+        idx.index_document(1, "hello world")
+        val results = idx.search("unknown")
+        expect(results.len()).to_equal(0)
+
+    it "removes a document":
+        var idx = FtsInvertedIndex.new()
+        idx.index_document(1, "hello world")
+        idx.index_document(2, "hello test")
+        idx.remove_document(1)
+        expect(idx.doc_count()).to_equal(1)
+        val results = idx.search("hello")
+        expect(results.len()).to_equal(1)
+        expect(results[0].doc_id).to_equal(2)
+
+    it "reports doc_freq correctly":
+        var idx = FtsInvertedIndex.new()
+        idx.index_document(1, "hello world")
+        idx.index_document(2, "hello test")
+        expect(idx.doc_freq("hello")).to_equal(2)
+        expect(idx.doc_freq("world")).to_equal(1)
+
+# ── BM25 Scoring ──────────────────────────────────────────────────────────────
+
+describe "FTS BM25 Scoring":
+    it "produces non-zero score for matching terms":
+        val sc = fts_bm25_score(2, 1, 5, 5, 10)
+        expect(sc > 0).to_equal(true)
+
+    it "scores zero when tf is zero":
+        val sc = fts_bm25_score(0, 1, 5, 5, 10)
+        expect(sc).to_equal(0)
+
+    it "ranks documents correctly":
+        var idx = FtsInvertedIndex.new()
+        idx.index_document(1, "simple simple simple database")
+        idx.index_document(2, "simple query")
+        idx.index_document(3, "complex database system")
+        val results = fts_bm25_search(idx, "simple")
+        expect(results.len() > 0).to_equal(true)
+        # Doc 1 has higher tf for "simple" -> should rank first
+        expect(results[0].doc_id).to_equal(1)
+
+# ── Trigram Index ──────────────────────────────────────────────────────────────
+
+describe "FTS Trigram Index":
+    it "generates trigrams from text":
+        val tris = fts_generate_trigrams("hello")
+        # "hel", "ell", "llo"
+        expect(tris.len()).to_equal(3)
+        expect(tris[0]).to_equal("hel")
+        expect(tris[1]).to_equal("ell")
+        expect(tris[2]).to_equal("llo")
+
+    it "returns empty for short text":
+        val tris = fts_generate_trigrams("ab")
+        expect(tris.len()).to_equal(0)
+
+    it "finds documents by substring":
+        var tri = FtsTrigramIndex.new()
+        tri.index_document(1, "hello world")
+        tri.index_document(2, "goodbye world")
+        val results = tri.search("hello")
+        expect(results.len()).to_equal(1)
+        expect(results[0]).to_equal(1)
+
+    it "finds documents matching all trigrams":
+        var tri = FtsTrigramIndex.new()
+        tri.index_document(1, "hello world")
+        tri.index_document(2, "hello there")
+        val results = tri.search("world")
+        expect(results.len()).to_equal(1)
+        expect(results[0]).to_equal(1)
+
+    it "removes a document from trigram index":
+        var tri = FtsTrigramIndex.new()
+        tri.index_document(1, "hello world")
+        tri.remove_document(1)
+        val results = tri.search("hello")
+        expect(results.len()).to_equal(0)
+
+# ── Fuzzy Search ───────────────────────────────────────────────────────────────
+
+describe "FTS Fuzzy Search":
+    it "computes zero distance for identical strings":
+        expect(fts_levenshtein("hello", "hello")).to_equal(0)
+
+    it "computes distance 1 for single edit":
+        expect(fts_levenshtein("hello", "helo")).to_equal(1)
+
+    it "computes distance for substitution":
+        expect(fts_levenshtein("cat", "bat")).to_equal(1)
+
+    it "computes distance for insertion":
+        expect(fts_levenshtein("cat", "cats")).to_equal(1)
+
+    it "handles empty strings":
+        expect(fts_levenshtein("", "abc")).to_equal(3)
+        expect(fts_levenshtein("abc", "")).to_equal(3)
+
+    it "fuzzy matches within distance threshold":
+        val candidates: [text] = ["hello", "helo", "world", "help", "hallo"]
+        val matches = fts_fuzzy_match("hello", candidates, 1)
+        expect(matches.len()).to_equal(3)
+
+# ── FtsEngine Unified ──────────────────────────────────────────────────────────
+
+describe "FTS Engine":
+    it "adds documents and searches by keyword":
+        var engine = FtsEngine.new()
+        engine.add_document(1, "quick brown fox jumps over lazy dog")
+        engine.add_document(2, "slow red fox sleeps under tree")
+        val results = engine.search_keyword("fox")
+        expect(results.len()).to_equal(2)
+
+    it "searches by substring":
+        var engine = FtsEngine.new()
+        engine.add_document(1, "hello world testing")
+        engine.add_document(2, "goodbye world testing")
+        val results = engine.search_substring("hello")
+        expect(results.len()).to_equal(1)
+        expect(results[0]).to_equal(1)
+
+    it "combined search returns BM25 results first":
+        var engine = FtsEngine.new()
+        engine.add_document(1, "database query engine search")
+        engine.add_document(2, "simple text search tool")
+        val results = engine.search("search")
+        expect(results.len() > 0).to_equal(true)
+
+    it "removes document from all indexes":
+        var engine = FtsEngine.new()
+        engine.add_document(1, "hello world")
+        engine.add_document(2, "hello test")
+        engine.remove_document(1)
+        val kw_results = engine.search_keyword("hello")
+        expect(kw_results.len()).to_equal(1)
+        expect(kw_results[0].doc_id).to_equal(2)

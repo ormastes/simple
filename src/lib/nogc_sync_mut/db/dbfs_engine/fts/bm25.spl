@@ -1,0 +1,139 @@
+# FTS BM25 Scoring — integer-approximated BM25 ranking.
+#
+# Uses fixed-point arithmetic (score * 1000) to avoid f64 issues.
+# Exports: FtsSearchResult, fts_bm25_score, fts_bm25_search
+
+use std.io_runtime
+use std.db.dbfs_engine.fts.tokenizer.{fts_tokenize, FtsToken}
+use std.db.dbfs_engine.fts.inverted_index.{FtsInvertedIndex, FtsPosting}
+
+# ── Search result ──────────────────────────────────────────────────────────────
+
+struct FtsSearchResult:
+    doc_id: i64
+    score: i64
+
+# ── BM25 score (integer approximation) ────────────────────────────────────────
+#
+# k1 = 1.2  -> k1_scaled = 1200 (scaled by 1000)
+# b  = 0.75 -> b_scaled  = 750  (scaled by 1000)
+#
+# IDF = (N - df + 1) * 1000 / (df + 1)     -- simplified ratio
+# TF_component = tf * (k1_scaled + 1000)
+#              / (tf * 1000 + k1_scaled * (1000 - b_scaled + b_scaled * doc_len / avg_dl))
+# score = idf * tf_component / 1000
+
+fn fts_bm25_score(tf: i64, df: i64, doc_len: i64, avg_dl: i64, total_docs: i64) -> i64:
+    if tf == 0 or df == 0 or avg_dl == 0:
+        return 0
+
+    # IDF: (N - df + 1) * 1000 / (df + 1)
+    val idf = (total_docs - df + 1) * 1000 / (df + 1)
+    if idf <= 0:
+        return 0
+
+    # k1 and b scaled by 1000
+    val k1 = 1200
+    val b = 750
+
+    # Normalized doc length: doc_len * 1000 / avg_dl
+    val norm_dl = doc_len * 1000 / avg_dl
+
+    # Denominator: tf * 1000 + k1 * (1000 - b + b * doc_len / avg_dl)
+    #            = tf * 1000 + k1 * (1000 - 750 + 750 * doc_len / avg_dl)
+    #            = tf * 1000 + k1 * (250 + norm_dl * 750 / 1000)
+    val len_factor = 250 + norm_dl * 750 / 1000
+    val denom = tf * 1000 + k1 * len_factor / 1000
+
+    if denom == 0:
+        return 0
+
+    # Numerator: tf * (k1 + 1000) = tf * 2200
+    val numer = tf * 2200
+
+    # score = idf * numer / denom
+    val sc = idf * numer / denom
+    sc
+
+# ── BM25 multi-term search ────────────────────────────────────────────────────
+
+fn fts_bm25_search(index: FtsInvertedIndex, query: text) -> [FtsSearchResult]:
+    val tokens = fts_tokenize(query)
+    val total_docs = index.doc_count()
+    val avg_dl = index.avg_doc_length()
+
+    # Accumulate scores per doc_id
+    var scores: Dict<text, i64> = Dict.new()
+
+    var ti: i32 = 0
+    while ti < tokens.len() as i32:
+        val term = tokens[ti].term
+        val postings = index.search(term)
+        val df = index.doc_freq(term)
+        var pi: i32 = 0
+        while pi < postings.len() as i32:
+            val posting = postings[pi]
+            val doc_key = "{posting.doc_id}"
+            val doc_len = avg_dl  # approximate: use avg if exact not accessible
+            val sc = fts_bm25_score(posting.term_freq, df, doc_len, avg_dl, total_docs)
+            if scores.contains_key(doc_key):
+                scores[doc_key] = scores[doc_key] + sc
+            else:
+                scores[doc_key] = sc
+            pi = pi + 1
+        ti = ti + 1
+
+    # Collect results
+    var results: [FtsSearchResult] = []
+    for doc_key in scores.keys():
+        # Parse doc_id from key — simple integer parse
+        results.push(FtsSearchResult(doc_id: _parse_i64(doc_key), score: scores[doc_key]))
+
+    # Sort by score descending (insertion sort)
+    var si: i64 = 1
+    while si < results.len():
+        val key_result = results[si as i32]
+        var sj: i64 = si - 1
+        while sj >= 0 and results[sj as i32].score < key_result.score:
+            results[(sj + 1) as i32] = results[sj as i32]
+            sj = sj - 1
+        results[(sj + 1) as i32] = key_result
+        si = si + 1
+
+    results
+
+# ── Helper: parse i64 from text ────────────────────────────────────────────────
+
+fn _parse_i64(s: text) -> i64:
+    var result: i64 = 0
+    var neg = false
+    var idx: i32 = 0
+    if s.len() > 0 and s.char_at(0) == "-":
+        neg = true
+        idx = 1
+    while idx < s.len() as i32:
+        val ch = s.char_at(idx)
+        if ch == "0":
+            result = result * 10
+        elif ch == "1":
+            result = result * 10 + 1
+        elif ch == "2":
+            result = result * 10 + 2
+        elif ch == "3":
+            result = result * 10 + 3
+        elif ch == "4":
+            result = result * 10 + 4
+        elif ch == "5":
+            result = result * 10 + 5
+        elif ch == "6":
+            result = result * 10 + 6
+        elif ch == "7":
+            result = result * 10 + 7
+        elif ch == "8":
+            result = result * 10 + 8
+        elif ch == "9":
+            result = result * 10 + 9
+        idx = idx + 1
+    if neg:
+        result = 0 - result
+    result
