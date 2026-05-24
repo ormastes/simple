@@ -20,3 +20,5 @@ REQ-OPJH-008: Hotspot planning shall be testable without invoking native JIT com
 REQ-OPJH-009: Hotspot plans shall support explicit invalidation while preserving fallback execution.
 
 REQ-OPJH-010: JIT hotspot planning shall have a representative benchmark covering cold, ready, and invalidated plans before documentation makes performance claims.
+
+REQ-OPJH-011: Tiered JIT tier-1 promotion shall consume eligible hotspot plans before native compilation while preserving original-source compilation when the provider is disabled or facts are missing.

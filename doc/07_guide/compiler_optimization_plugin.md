@@ -193,6 +193,8 @@ Start with the smallest built-in provider that proves the optimization is genera
 
    In the tiered JIT path, call counts and thresholds produce `profile.hot_count`; typed MIR availability produces `typed_mir`; safe deoptimization analysis produces `safe_deopt`. The resulting hotspot plan is data until a runtime backend compiles or specializes it.
 
+   Tiered JIT promotion consumes eligible plans before native compilation. The first consumer is deliberately conservative: it records that the plan was accepted and selects the compile input, but falls back to the original source when the provider is disabled or facts are incomplete.
+
 7. Test enabled, disabled, and unsafe cases.
 
    Add unit tests for:

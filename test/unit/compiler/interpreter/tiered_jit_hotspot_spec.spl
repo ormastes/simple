@@ -4,7 +4,8 @@ use compiler.interp.execution.tiered_jit.{
     FunctionProfile, JitTier, TieredJitConfig,
     jit_hotspot_profile_facts,
     jit_hotspot_plan_from_profile,
-    jit_hotspot_plan_invalidate
+    jit_hotspot_plan_invalidate,
+    jit_hotspot_consume_plan
 }
 
 fn hot_profile(call_count: i64) -> FunctionProfile:
@@ -13,7 +14,9 @@ fn hot_profile(call_count: i64) -> FunctionProfile:
         call_count: call_count,
         tier: JitTier.Interpreted,
         compile_time_ms: 0.0,
-        source: "fn hot_loop(x: i64) -> i64: x + 1"
+        source: "fn hot_loop(x: i64) -> i64: x + 1",
+        typed_mir: true,
+        safe_deopt: true
     )
 
 fn hotspot_config() -> TieredJitConfig:
@@ -52,3 +55,19 @@ describe "Tiered JIT hotspot facts":
         expect(invalidated.eligible).to_equal(false)
         expect(invalidated.invalidated).to_equal(true)
         expect(invalidated.reason).to_equal("guard changed")
+
+    it "consumes eligible plans without changing fallback source":
+        val source = "fn hot_loop(x: i64) -> i64: x + 1"
+        val plan = jit_hotspot_plan_from_profile(hot_profile(64), hotspot_config(), true, true)
+        val decision = jit_hotspot_consume_plan(plan, source, true)
+        expect(decision.provider_used).to_equal(true)
+        expect(decision.compile_source).to_equal(source)
+        expect(decision.reason).to_equal("jit.hotspot_plan accepted")
+
+    it "does not consume plans when provider is disabled":
+        val source = "fn hot_loop(x: i64) -> i64: x + 1"
+        val plan = jit_hotspot_plan_from_profile(hot_profile(64), hotspot_config(), true, true)
+        val decision = jit_hotspot_consume_plan(plan, source, false)
+        expect(decision.provider_used).to_equal(false)
+        expect(decision.compile_source).to_equal(source)
+        expect(decision.reason).to_equal("provider disabled")

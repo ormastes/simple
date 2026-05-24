@@ -41,11 +41,14 @@ struct FunctionProfile:
     tier: JitTier
     compile_time_ms: f64
     source: text
+    typed_mir: bool
+    safe_deopt: bool
 
 struct JitStats:
     tier1_compilations: i64
     tier2_compilations: i64
     total_compile_time_ms: f64
+    hotspot_plans: i64
 
 struct JitHotspotPlan:
     function_name: text
@@ -55,6 +58,12 @@ struct JitHotspotPlan:
     invalidated: bool
     reason: text
     facts: [text]
+
+struct JitHotspotCompileDecision:
+    plan: JitHotspotPlan
+    compile_source: text
+    provider_used: bool
+    reason: text
 
 # ============================================================================
 # Hotspot optimization facts
@@ -120,6 +129,32 @@ fn jit_hotspot_plan_invalidate(plan: JitHotspotPlan, reason: text) -> JitHotspot
         facts: plan.facts
     )
 
+fn jit_hotspot_consume_plan(
+    plan: JitHotspotPlan,
+    source: text,
+    provider_enabled: bool
+) -> JitHotspotCompileDecision:
+    if not provider_enabled:
+        return JitHotspotCompileDecision(
+            plan: plan,
+            compile_source: source,
+            provider_used: false,
+            reason: "provider disabled"
+        )
+    if not plan.eligible:
+        return JitHotspotCompileDecision(
+            plan: plan,
+            compile_source: source,
+            provider_used: false,
+            reason: plan.reason
+        )
+    JitHotspotCompileDecision(
+        plan: plan,
+        compile_source: source,
+        provider_used: true,
+        reason: "jit.hotspot_plan accepted"
+    )
+
 # ============================================================================
 # TieredJitManager
 # ============================================================================
@@ -131,14 +166,20 @@ class TieredJitManager:
     tier1_compilations: i64
     tier2_compilations: i64
     total_compile_time_ms: f64
+    hotspot_plans: i64
 
     static fn create(config: TieredJitConfig) -> TieredJitManager:
         var handle = rt_jit_create()
-        TieredJitManager(config: config, profiles: {}, jit_handle: handle, tier1_compilations: 0, tier2_compilations: 0, total_compile_time_ms: 0.0)
+        TieredJitManager(config: config, profiles: {}, jit_handle: handle, tier1_compilations: 0, tier2_compilations: 0, total_compile_time_ms: 0.0, hotspot_plans: 0)
 
     me register_function(name: text, source: text):
         if not self.profiles.has(name):
-            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source)
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: false, safe_deopt: false)
+            self.profiles[name] = p
+
+    me register_function_with_hotspot_facts(name: text, source: text, typed_mir: bool, safe_deopt: bool):
+        if not self.profiles.has(name):
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: typed_mir, safe_deopt: safe_deopt)
             self.profiles[name] = p
 
     me record_call(name: text) -> JitTier:
@@ -147,9 +188,14 @@ class TieredJitManager:
             var new_count = p.call_count + 1
             var new_tier = p.tier
             var compile_ms = p.compile_time_ms
+            var updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source, typed_mir: p.typed_mir, safe_deopt: p.safe_deopt)
             if p.tier == JitTier.Interpreted:
                 if new_count >= self.config.tier1_threshold:
-                    compile_ms = self._compile_function(p.source)
+                    val plan = jit_hotspot_plan_from_profile(updated, self.config, p.typed_mir, p.safe_deopt)
+                    val decision = jit_hotspot_consume_plan(plan, p.source, true)
+                    if decision.provider_used:
+                        self.hotspot_plans = self.hotspot_plans + 1
+                    compile_ms = self._compile_function(decision.compile_source)
                     if rt_jit_has_function(self.jit_handle, p.name):
                         new_tier = JitTier.Fast
                         self.tier1_compilations = self.tier1_compilations + 1
@@ -157,11 +203,11 @@ class TieredJitManager:
                 if new_count >= self.config.tier2_threshold:
                     new_tier = JitTier.Optimized
                     self.tier2_compilations = self.tier2_compilations + 1
-            var updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source)
+            updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source, typed_mir: p.typed_mir, safe_deopt: p.safe_deopt)
             self.profiles[name] = updated
             new_tier
         else:
-            var p = FunctionProfile(name: name, call_count: 1, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "")
+            var p = FunctionProfile(name: name, call_count: 1, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: false, safe_deopt: false)
             self.profiles[name] = p
             JitTier.Interpreted
 
@@ -210,17 +256,18 @@ class TieredJitManager:
         if self.profiles.has(name):
             jit_hotspot_plan_from_profile(self.profiles[name], self.config, typed_mir, safe_deopt)
         else:
-            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "")
+            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: false, safe_deopt: false)
             jit_hotspot_plan_from_profile(profile, self.config, typed_mir, safe_deopt)
 
     fn get_stats() -> JitStats:
-        JitStats(tier1_compilations: self.tier1_compilations, tier2_compilations: self.tier2_compilations, total_compile_time_ms: self.total_compile_time_ms)
+        JitStats(tier1_compilations: self.tier1_compilations, tier2_compilations: self.tier2_compilations, total_compile_time_ms: self.total_compile_time_ms, hotspot_plans: self.hotspot_plans)
 
     fn print_stats():
         print("=== Tiered JIT Statistics ===")
         print("  Functions tracked: " + self.profiles.keys().len().to_string())
         print("  Tier 1 (Cranelift) compilations: " + self.tier1_compilations.to_string())
         print("  Tier 2 (LLVM) compilations: " + self.tier2_compilations.to_string())
+        print("  Hotspot plans accepted: " + self.hotspot_plans.to_string())
         print("  Total compile time: " + self.total_compile_time_ms.to_string() + " ms")
         var interpreted = 0
         var fast = 0

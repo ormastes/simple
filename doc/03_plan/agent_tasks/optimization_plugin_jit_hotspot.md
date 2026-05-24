@@ -15,8 +15,9 @@ Done in this slice:
 - Add data-only hotspot plan and invalidation helpers.
 - Add unit coverage for hotspot fact extraction, eligibility, and invalidation.
 - Add representative hotspot planning benchmark and first measured evidence report.
+- Add a tiered JIT compile-decision consumer for eligible hotspot plans.
 
 Next implementation candidates:
 
-- Thread `JitHotspotPlan` into the native execution manager once a concrete specialization provider consumes it.
 - Add native backend specialization benchmarks after a concrete JIT hotspot provider consumes `JitHotspotPlan`.
+- Add specialization-specific source/MIR rewriting behind `JitHotspotCompileDecision` once a concrete provider has semantic proof and native benchmark evidence.

@@ -33,3 +33,5 @@ The contract lives in `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl` 
 Runtime hotspot facts are exposed from `src/compiler/95.interp/execution/tiered_jit.spl`. The tiered JIT owns function call counts and tier thresholds, so it is the correct boundary for deriving `profile.hot_count` before optimizer providers consume the fact.
 
 The tiered JIT exposes a data-only `JitHotspotPlan`. This keeps planning separate from native code emission: unit tests can verify eligibility, missing facts, and invalidation without calling `rt_jit_*` externs, while the runtime can later use the same plan to choose a specialized native path.
+
+`TieredJitManager.record_call` consumes the plan at the tier-1 promotion boundary. The consumer currently selects the compile source and records whether a hotspot plan was accepted; original-source compilation remains the fallback when the provider is disabled or required facts are missing. Rust `ExecutionManager` stays unchanged until a backend needs specialization-specific plan fields.
