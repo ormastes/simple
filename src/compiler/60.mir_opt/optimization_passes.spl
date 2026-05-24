@@ -757,16 +757,8 @@ impl OptimizationEngine:
 # ============================================================================
 
 fn optimize_write_coalesce(func: MirFunction, stats: OptimizationStats) -> MirFunction:
-    """Detect adjacent stores to contiguous buffer offsets; count coalesce candidates.
-
-    Scans each basic block for Store instructions whose pointer operands
-    derive from GetElementPtr with the same base array.  Groups of 2+
-    stores to the same base are coalesce candidates — future lowering
-    can merge them into bulk memcpy/memset operations.
-
-    Applies to FAT32 dir-entry writes, nvfs arena fills, dbfs page inits,
-    and any byte-buffer manipulation pattern.
-    """
+    var new_blocks: [MirBlock] = []
+    var modified = false
     var bi = 0
     while bi < func.blocks.len():
         val block = func.blocks[bi]
@@ -794,14 +786,65 @@ fn optimize_write_coalesce(func: MirFunction, stats: OptimizationStats) -> MirFu
                 case _:
                     pass
             ii = ii + 1
+        var any_coalesce = false
         val ks = base_store_count.keys()
         var ki = 0
         while ki < ks.len():
             if base_store_count[ks[ki]] >= 2:
-                stats.write_coalesce_count = stats.write_coalesce_count + 1
+                any_coalesce = true
             ki = ki + 1
+        if any_coalesce:
+            modified = true
+            var new_insts: [MirInst] = []
+            var hint_emitted: Dict<i64, bool> = {}
+            var gep_base2: Dict<i64, i64> = {}
+            var jj = 0
+            while jj < block.instructions.len():
+                val inst = block.instructions[jj]
+                match inst.kind:
+                    case GetElementPtr(dest, base, indices):
+                        match base.kind:
+                            case Copy(local) | Move(local):
+                                gep_base2[dest.id] = local.id
+                            case _:
+                                pass
+                        new_insts = new_insts.push(inst)
+                    case Store(ptr, value):
+                        match ptr.kind:
+                            case Copy(local) | Move(local):
+                                if gep_base2.has(local.id):
+                                    val base_id: i64 = gep_base2[local.id] ?? 0
+                                    val sc: i64 = base_store_count[base_id] ?? 0
+                                    if sc >= 2 and not hint_emitted.has(base_id):
+                                        val base_lid = LocalId(id: base_id)
+                                        val base_op = MirOperand(kind: MirOperandKind.Copy(base_lid))
+                                        val cnt_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(sc), MirType.i64()))
+                                        var hint_args: [MirOperand] = []
+                                        hint_args = hint_args.push(base_op)
+                                        hint_args = hint_args.push(cnt_op)
+                                        val hint = MirInst(
+                                            kind: MirInstKind.Intrinsic(nil, "bulk_store_hint", hint_args),
+                                            span: nil
+                                        )
+                                        new_insts = new_insts.push(hint)
+                                        hint_emitted[base_id] = true
+                            case _:
+                                pass
+                        new_insts = new_insts.push(inst)
+                    case _:
+                        new_insts = new_insts.push(inst)
+                jj = jj + 1
+            new_blocks = new_blocks.push(MirBlock(
+                id: block.id, label: block.label,
+                instructions: new_insts, terminator: block.terminator
+            ))
+        else:
+            new_blocks = new_blocks.push(block)
         bi = bi + 1
-    func
+    if modified:
+        MirFunction.with_blocks(func, new_blocks)
+    else:
+        func
 
 fn optimize_read_ahead_hoist(func: MirFunction, stats: OptimizationStats) -> MirFunction:
     """Detect loop-invariant Load/Call instructions; count hoist candidates.
@@ -869,7 +912,7 @@ fn optimize_read_ahead_hoist(func: MirFunction, stats: OptimizationStats) -> Mir
                         match ptr.kind:
                             case Copy(local) | Move(local):
                                 if pre_loop_defs.has(local.id):
-                                    stats.read_ahead_hoist_count = stats.read_ahead_hoist_count + 1
+                                    pass
                             case Const(_, _):
                                 stats.read_ahead_hoist_count = stats.read_ahead_hoist_count + 1
                             case _:
@@ -900,19 +943,16 @@ fn optimize_read_ahead_hoist(func: MirFunction, stats: OptimizationStats) -> Mir
     func
 
 fn optimize_syscall_batch(func: MirFunction, stats: OptimizationStats) -> MirFunction:
-    """Detect consecutive calls to the same function; count batch candidates.
-
-    Scans each basic block for runs of 2+ Call instructions targeting
-    the same function operand without intervening non-call instructions.
-    These sequences are candidates for batching into a single vectorized
-    call — applicable to sequential sector reads, DB row fetches, and
-    any repeated same-target call pattern.
-    """
+    var new_blocks: [MirBlock] = []
+    var modified = false
     var bi = 0
     while bi < func.blocks.len():
         val block = func.blocks[bi]
+        var batch_starts: Dict<i64, i64> = {}
+        var batch_fids: Dict<i64, i64> = {}
         var prev_func_id: i64 = -1
         var run_length: i64 = 0
+        var run_start: i64 = 0
         var ii = 0
         while ii < block.instructions.len():
             val inst = block.instructions[ii]
@@ -928,19 +968,53 @@ fn optimize_syscall_batch(func: MirFunction, stats: OptimizationStats) -> MirFun
                         run_length = run_length + 1
                     else:
                         if run_length >= 2:
-                            stats.syscall_batch_count = stats.syscall_batch_count + 1
+                            batch_starts[run_start] = run_length
+                            batch_fids[run_start] = prev_func_id
                         prev_func_id = fid
+                        run_start = ii
                         run_length = 1
                 case _:
                     if run_length >= 2:
-                        stats.syscall_batch_count = stats.syscall_batch_count + 1
+                        batch_starts[run_start] = run_length
+                        batch_fids[run_start] = prev_func_id
                     prev_func_id = -1
                     run_length = 0
             ii = ii + 1
         if run_length >= 2:
-            stats.syscall_batch_count = stats.syscall_batch_count + 1
+            batch_starts[run_start] = run_length
+            batch_fids[run_start] = prev_func_id
+        val bk = batch_starts.keys()
+        if bk.len() > 0:
+            modified = true
+            var new_insts: [MirInst] = []
+            ii = 0
+            while ii < block.instructions.len():
+                if batch_starts.has(ii):
+                    val fid_val: i64 = batch_fids[ii] ?? 0
+                    val run_val: i64 = batch_starts[ii] ?? 0
+                    val func_op = MirOperand(kind: MirOperandKind.Copy(LocalId(id: fid_val)))
+                    val cnt_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(run_val), MirType.i64()))
+                    var hint_args: [MirOperand] = []
+                    hint_args = hint_args.push(func_op)
+                    hint_args = hint_args.push(cnt_op)
+                    val hint = MirInst(
+                        kind: MirInstKind.Intrinsic(nil, "call_batch_hint", hint_args),
+                        span: nil
+                    )
+                    new_insts = new_insts.push(hint)
+                new_insts = new_insts.push(block.instructions[ii])
+                ii = ii + 1
+            new_blocks = new_blocks.push(MirBlock(
+                id: block.id, label: block.label,
+                instructions: new_insts, terminator: block.terminator
+            ))
+        else:
+            new_blocks = new_blocks.push(block)
         bi = bi + 1
-    func
+    if modified:
+        MirFunction.with_blocks(func, new_blocks)
+    else:
+        func
 
 fn count_write_coalesce(func: MirFunction) -> i64:
     var count = 0
