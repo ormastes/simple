@@ -9,7 +9,7 @@ use nogc_sync_mut.db.dbfs_engine.sql_parser.{
     sql_parse, SqlStmtKind, SqlExprKind, SqlExpr,
     SqlColumnType, SqlColumnDef, SqlSelect, SqlInsert,
     SqlUpdate, SqlDelete, SqlCreateTable, SqlStatement,
-    SqlJoin
+    SqlJoin, JoinKind, SqlOrderDir
 }
 use nogc_sync_mut.db.dbfs_engine.mvcc.{
     MvccTable, MvccTxnManager, MvccSnapshot
@@ -102,9 +102,28 @@ fn _deserialize_row(data: text) -> [DbValue]:
 fn _parse_literal(v: text) -> DbValue:
     if v == "NULL" or v == "null":
         return DbValue.Null
-    if val Some(n) = v.to_int():
+    # Check if the value looks numeric before calling to_int
+    # (to_int returns Some(0) for non-numeric strings in interpreter mode)
+    if _is_numeric_text(v):
+        val n = v.to_int() ?? 0
         return DbValue.Integer(value: n)
     DbValue.Text(value: v)
+
+fn _is_numeric_text(v: text) -> bool:
+    if v.len() == 0:
+        return false
+    var i: i64 = 0
+    # Allow leading minus sign
+    if v.char_at(0) == "-":
+        if v.len() == 1:
+            return false
+        i = 1
+    while i < v.len():
+        val c = v.char_at(i)
+        if c < "0" or c > "9":
+            return false
+        i = i + 1
+    true
 
 fn _dbval_eq(a: DbValue, b: DbValue) -> bool:
     if a.is_null() and b.is_null():
@@ -295,6 +314,23 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
         val lv = _eval_expr(expr.left, cols, vals, params)
         val rv = _eval_expr(expr.right, cols, vals, params)
         return _apply_binop(expr.value, lv, rv)
+    if expr.kind == SqlExprKind.Between:
+        val bval = _eval_expr(expr.left, cols, vals, params)
+        val lo = _eval_expr(expr.args[0], cols, vals, params)
+        val hi = _eval_expr(expr.args[1], cols, vals, params)
+        val ge_lo = _dbval_cmp(lo, bval) <= 0
+        val le_hi = _dbval_cmp(bval, hi) <= 0
+        return DbValue.Bool(value: ge_lo and le_hi)
+    if expr.kind == SqlExprKind.InList:
+        val target = _eval_expr(expr.left, cols, vals, params)
+        var found = false
+        var ini: i32 = 0
+        while ini < expr.args.len() as i32:
+            val item = _eval_expr(expr.args[ini], cols, vals, params)
+            if _dbval_eq(target, item):
+                found = true
+            ini = ini + 1
+        return DbValue.Bool(value: found)
     if expr.kind == SqlExprKind.FunctionCall:
         # Aggregate functions are evaluated in _do_select, not here.
         # Return Null as placeholder — real eval happens in aggregate path.
@@ -496,7 +532,7 @@ fn _eval_agg_col(expr: SqlExpr, col_names: [text], all_rows: [[DbValue]]) -> DbV
     var col_vals: [DbValue] = []
     if inner.args.len() > 0:
         val arg0 = inner.args[0]
-        if arg0.kind == SqlExprKind.Column:
+        if arg0.kind != SqlExprKind.Star:
             val cidx = _find_idx(col_names, arg0.value)
             if cidx >= 0:
                 var ri: i32 = 0
@@ -847,6 +883,7 @@ class PureDatabase:
                 var li: i32 = 0
                 while li < base_rows.len() as i32:
                     val left_vals = base_rows[li]
+                    var any_match = false
                     var rri: i32 = 0
                     while rri < jvisible.len() as i32:
                         val right_vals = _deserialize_row(jvisible[rri])
@@ -863,7 +900,20 @@ class PureDatabase:
                         # Evaluate ON condition
                         if _check_where(jn.on_expr, combined_cols, combo, params):
                             joined_rows.push(combo)
+                            any_match = true
                         rri = rri + 1
+                    # LEFT JOIN: emit left row padded with NULLs if no match
+                    if not any_match and jn.kind == JoinKind.Left:
+                        var null_combo: [DbValue] = []
+                        var nli: i32 = 0
+                        while nli < left_vals.len() as i32:
+                            null_combo.push(left_vals[nli])
+                            nli = nli + 1
+                        var nri: i32 = 0
+                        while nri < jcols.len() as i32:
+                            null_combo.push(DbValue.Null)
+                            nri = nri + 1
+                        joined_rows.push(null_combo)
                     li = li + 1
                 base_rows = joined_rows
                 col_names = combined_cols
@@ -978,6 +1028,40 @@ class PureDatabase:
                     unique.push(rows[di])
                 di = di + 1
             rows = unique
+
+        # ── ORDER BY ─────────────────────────────────────────────────
+        if sel.order_by.len() > 0:
+            # Insertion sort by order_by keys
+            var oi: i32 = 1
+            while oi < rows.len() as i32:
+                val cur = rows[oi]
+                var pos = oi
+                var should_move = true
+                while pos > 0 and should_move:
+                    val prev = rows[pos - 1]
+                    # Compare using first order_by key (multi-key: first wins)
+                    var cmp_result: i64 = 0
+                    var oki: i32 = 0
+                    while oki < sel.order_by.len() as i32:
+                        val ob = sel.order_by[oki]
+                        val cur_key = _eval_expr(ob.expr, cur.columns, cur.values, params)
+                        val prev_key = _eval_expr(ob.expr, prev.columns, prev.values, params)
+                        val c = _dbval_cmp(cur_key, prev_key)
+                        if c != 0:
+                            if ob.dir == SqlOrderDir.Desc:
+                                cmp_result = 0 - c
+                            else:
+                                cmp_result = c
+                            oki = sel.order_by.len() as i32
+                        else:
+                            oki = oki + 1
+                    if cmp_result < 0:
+                        rows[pos] = prev
+                        pos = pos - 1
+                    else:
+                        should_move = false
+                rows[pos] = cur
+                oi = oi + 1
 
         # ── LIMIT / OFFSET ───────────────────────────────────────────
         if sel.offset > 0 or sel.limit > 0:
