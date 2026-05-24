@@ -377,6 +377,123 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
             val target = _eval_expr(expr.args[0], cols, vals, params)
             val query = _eval_expr(expr.args[1], cols, vals, params)
             return DbValue.Bool(value: _fts_match_value(target.to_text(), query.to_text()))
+        # ── String functions ─────────────────────────────────────────
+        if fname == "length":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val lv = _eval_expr(expr.args[0], cols, vals, params)
+            if lv.is_null():
+                return DbValue.Null
+            val lt = lv.to_text()
+            return DbValue.Integer(value: lt.len())
+        if fname == "upper":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val uv = _eval_expr(expr.args[0], cols, vals, params)
+            if uv.is_null():
+                return DbValue.Null
+            val ut = uv.to_text()
+            return DbValue.Text(value: ut.to_upper())
+        if fname == "lower":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val lwv = _eval_expr(expr.args[0], cols, vals, params)
+            if lwv.is_null():
+                return DbValue.Null
+            val lwt = lwv.to_text()
+            return DbValue.Text(value: lwt.to_lower())
+        if fname == "trim":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val trv = _eval_expr(expr.args[0], cols, vals, params)
+            if trv.is_null():
+                return DbValue.Null
+            val trt = trv.to_text()
+            return DbValue.Text(value: trt.trim())
+        if fname == "substr" or fname == "substring":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val sv = _eval_expr(expr.args[0], cols, vals, params)
+            if sv.is_null():
+                return DbValue.Null
+            val st = sv.to_text()
+            val start_v = _eval_expr(expr.args[1], cols, vals, params)
+            val start_i = _dbval_as_i64(start_v) - 1
+            if start_i < 0:
+                return DbValue.Text(value: st)
+            if expr.args.len() >= 3:
+                val len_v = _eval_expr(expr.args[2], cols, vals, params)
+                val slen = _dbval_as_i64(len_v)
+                var end_i = start_i + slen
+                if end_i > st.len():
+                    end_i = st.len()
+                return DbValue.Text(value: st.slice(start_i, end_i))
+            return DbValue.Text(value: st.slice(start_i, st.len()))
+        if fname == "replace":
+            if expr.args.len() < 3:
+                return DbValue.Null
+            val rpv = _eval_expr(expr.args[0], cols, vals, params)
+            if rpv.is_null():
+                return DbValue.Null
+            val rpt = rpv.to_text()
+            val from_v = _eval_expr(expr.args[1], cols, vals, params)
+            val to_v = _eval_expr(expr.args[2], cols, vals, params)
+            val from_t = from_v.to_text()
+            val to_t = to_v.to_text()
+            return DbValue.Text(value: rpt.replace(from_t, to_t))
+        # ── Math functions ───────────────────────────────────────────
+        if fname == "abs":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val abv = _eval_expr(expr.args[0], cols, vals, params)
+            if abv.is_null():
+                return DbValue.Null
+            if _dbval_is_int(abv):
+                val ai = _dbval_as_i64(abv)
+                if ai < 0:
+                    return DbValue.Integer(value: 0 - ai)
+                return abv
+            return abv
+        if fname == "max":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val mxa = _eval_expr(expr.args[0], cols, vals, params)
+            val mxb = _eval_expr(expr.args[1], cols, vals, params)
+            if mxa.is_null():
+                return mxb
+            if mxb.is_null():
+                return mxa
+            if _dbval_cmp(mxa, mxb) >= 0:
+                return mxa
+            return mxb
+        if fname == "min":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val mna = _eval_expr(expr.args[0], cols, vals, params)
+            val mnb = _eval_expr(expr.args[1], cols, vals, params)
+            if mna.is_null():
+                return mnb
+            if mnb.is_null():
+                return mna
+            if _dbval_cmp(mna, mnb) <= 0:
+                return mna
+            return mnb
+        # ── NULL handling functions ──────────────────────────────────
+        if fname == "coalesce":
+            var ci: i32 = 0
+            while ci < expr.args.len() as i32:
+                val cv = _eval_expr(expr.args[ci], cols, vals, params)
+                if not cv.is_null():
+                    return cv
+                ci = ci + 1
+            return DbValue.Null
+        if fname == "ifnull":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val ifv = _eval_expr(expr.args[0], cols, vals, params)
+            if not ifv.is_null():
+                return ifv
+            return _eval_expr(expr.args[1], cols, vals, params)
         # Aggregate functions are evaluated in _do_select, not here.
         # Return Null as placeholder — real eval happens in aggregate path.
         return DbValue.Null
