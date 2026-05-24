@@ -1,289 +1,223 @@
-# Terminal CLI Subcommand
-#
-# Provides terminal management from the command line:
-#   simple terminal connect <name>     - Connect to a terminal from config
-#   simple terminal exec <name> <cmd>  - Execute command on terminal
-#   simple terminal list               - List configured terminals
-#   simple terminal disconnect <name>  - Disconnect active terminal
-#
-# Loads terminal configuration from config/t32/t32_terminal.sdn by default.
-#
-# Depends on:
-#   - std.terminal.types (TerminalConfig, TerminalConnection, etc.)
-#   - std.terminal.connection (terminal_connect, terminal_execute, etc.)
-#   - std.terminal.credential.config_parser (parse_terminal_config, find_terminal_by_name)
+# Terminal CLI entrypoint.
+# Startup-light command planner for source-mode help and readiness probes.
 
-use std.terminal.types.{TerminalConfig, TerminalConnection, TerminalExecResult, term_kind_name}
-use std.terminal.connection.{terminal_connect, terminal_execute, terminal_close, terminal_is_connected}
-use std.terminal.credential.config_parser.{parse_terminal_config, find_terminal_by_name}
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
-extern fn rt_cli_get_args() -> [text]
-
-# ============================================================================
-# Constants
-# ============================================================================
-
-val DEFAULT_CONFIG_PATH: text = "config/t32/t32_terminal.sdn"
-
-# ============================================================================
-# Main Entry Point
-# ============================================================================
+val TOOL_NAME = "Simple Terminal"
+val TOOL_VERSION = "0.1.0"
+val DEFAULT_CONFIG_PATH = "config/t32/t32_terminal.sdn"
 
 fn main() -> i64:
-    """Terminal CLI entry point.
-
-    Parses command-line arguments and dispatches to the appropriate
-    terminal subcommand handler.
-
-    Returns:
-        0 on success, 1 on error
-    """
-    val args = rt_cli_get_args()
-
-    if args.len() < 2:
-        print_terminal_usage()
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("terminal", log_opts.error)
         return 1
 
-    # args[0] = "simple", args[1] = "terminal", args[2] = subcommand
-    val subcmd = args[1]
-
-    if subcmd == "connect":
-        return cmd_connect(args)
-    if subcmd == "exec":
-        return cmd_exec(args)
-    if subcmd == "list":
-        return cmd_list(args)
-    if subcmd == "disconnect":
-        return cmd_disconnect(args)
-
-    print "error: unknown terminal subcommand '{subcmd}'"
-    print_terminal_usage()
-    1
-
-# ============================================================================
-# Subcommand: connect
-# ============================================================================
-
-fn cmd_connect(args: [text]) -> i64:
-    """Connect to a terminal by name.
-
-    Usage: simple terminal connect <name>
-
-    Loads the terminal config from SDN, looks up the named entry,
-    and attempts a connection. Prints connection status.
-
-    Args:
-        args: CLI argument list
-
-    Returns:
-        0 on success, 1 on failure
-    """
-    if args.len() < 3:
-        print "usage: simple terminal connect <name>"
-        return 1
-
-    val name = args[2]
-    val configs = parse_terminal_config(DEFAULT_CONFIG_PATH)
-    val found = find_terminal_by_name(configs, name)
-
-    if not found.?:
-        print "error: terminal '{name}' not found in {DEFAULT_CONFIG_PATH}"
-        return 1
-
-    val config = found
-    print "Connecting to '{name}' ({term_kind_name(config.kind)})..."
-    val conn = terminal_connect(config)
-
-    if conn.connected:
-        print "Connected successfully (id={conn.id})"
+    val args = terminal_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        print_help_with_progress(log_opts.progress)
         return 0
-
-    print "error: failed to connect to '{name}'"
-    1
-
-# ============================================================================
-# Subcommand: exec
-# ============================================================================
-
-fn cmd_exec(args: [text]) -> i64:
-    """Execute a command on a terminal.
-
-    Usage: simple terminal exec <name> <command...>
-
-    Connects to the named terminal, executes the command, prints
-    stdout/stderr, then disconnects.
-
-    Args:
-        args: CLI argument list
-
-    Returns:
-        The remote command's exit code, or 1 on connection failure
-    """
-    if args.len() < 4:
-        print "usage: simple terminal exec <name> <command...>"
-        return 1
-
-    val name = args[2]
-
-    # Join remaining args as the command
-    var command = ""
-    var i = 3
-    while i < args.len():
-        if command != "":
-            command = "{command} {args[i]}"
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"terminal\",\"status\":\"ok\",\"version\":\"{TOOL_VERSION}\"}"
         else:
-            command = args[i]
-        i = i + 1
-
-    val configs = parse_terminal_config(DEFAULT_CONFIG_PATH)
-    val found = find_terminal_by_name(configs, name)
-
-    if not found.?:
-        print "error: terminal '{name}' not found in {DEFAULT_CONFIG_PATH}"
-        return 1
-
-    val config = found
-    print "Connecting to '{name}'..."
-    val conn = terminal_connect(config)
-
-    if not conn.connected:
-        print "error: failed to connect to '{name}'"
-        return 1
-
-    print "Executing: {command}"
-    val result = terminal_execute(conn, command)
-
-    if result.stdout.len() > 0:
-        print result.stdout
-
-    if result.stderr.len() > 0:
-        print "STDERR: {result.stderr}"
-
-    print "Exit code: {result.exit_code} (duration: {result.duration_ms}ms)"
-
-    terminal_close(conn)
-    result.exit_code
-
-# ============================================================================
-# Subcommand: list
-# ============================================================================
-
-fn cmd_list(args: [text]) -> i64:
-    """List all configured terminals.
-
-    Usage: simple terminal list
-
-    Parses the SDN config and prints each terminal entry with its
-    kind, host, and port information.
-
-    Args:
-        args: CLI argument list (unused beyond validation)
-
-    Returns:
-        0 always
-    """
-    val configs = parse_terminal_config(DEFAULT_CONFIG_PATH)
-
-    if configs.len() == 0:
-        print "No terminals configured in {DEFAULT_CONFIG_PATH}"
+            print "{TOOL_NAME} v{TOOL_VERSION}"
         return 0
 
-    print "Configured terminals ({configs.len()}):"
-    print "---"
+    val unknown = terminal_first_unknown_option(args)
+    if unknown != "":
+        val message = "Unknown terminal option: {unknown}"
+        terminal_print_error(log_opts.log_mode, message)
+        return 1
 
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"terminal\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            val progress = render_progress(log_opts.progress, 1, 1, "terminal")
+            if progress != "":
+                print progress
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+            print "Ready for terminal command planning."
+        return 0
+
+    val op = terminal_operation_arg(args)
+    if not terminal_is_command(op):
+        val message = "Unknown terminal command: {op}"
+        terminal_print_error(log_opts.log_mode, message)
+        return 1
+
+    val target = terminal_positional_after_operation(args, 0)
+    val command_text = terminal_command_text(args)
+    if op != "list" and target == "":
+        val message = "Terminal command {op} requires a target"
+        terminal_print_error(log_opts.log_mode, message)
+        return 1
+    if op == "exec" and command_text == "":
+        terminal_print_error(log_opts.log_mode, "Terminal command exec requires a command")
+        return 1
+
+    val config_path = terminal_option_value(args, "--config", DEFAULT_CONFIG_PATH)
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"terminal\",\"status\":\"planned\",\"operation\":\"{op}\",\"target\":\"{target}\",\"exec\":\"{command_text}\",\"config\":\"{config_path}\"}"
+    else:
+        val progress = render_progress(log_opts.progress, 1, 1, "terminal-plan")
+        if progress != "":
+            print progress
+        print "Terminal operation: {op}"
+        if target != "":
+            print "Target: {target}"
+        if command_text != "":
+            print "Exec: {command_text}"
+        print "Config: {config_path}"
+    0
+
+fn print_help():
+    print "{TOOL_NAME}"
+    print ""
+    print "Usage: simple terminal <command> [target] [args...] [options]"
+    print ""
+    print "Commands:"
+    print "  connect <name>              Connect to a configured terminal"
+    print "  exec <name> <command...>    Execute command on terminal"
+    print "  list                        List configured terminals"
+    print "  disconnect <name>           Disconnect active terminal"
+    print ""
+    print "Options:"
+    print "  -h, --help          Show this help message"
+    print "  -v, --version       Show version information"
+    print "  --config <PATH>     Terminal config path (default: {DEFAULT_CONFIG_PATH})"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn terminal_print_error(log_mode: text, message: text):
+    if log_mode == "json":
+        print "{\"command\":\"terminal\",\"status\":\"error\",\"message\":\"{message}\"}"
+    else:
+        error("terminal", message)
+
+fn terminal_is_command(op: text) -> bool:
+    op == "connect" or op == "exec" or op == "list" or op == "disconnect"
+
+fn terminal_operation_arg(args: [text]) -> text:
     var i = 0
-    while i < configs.len():
-        val config = configs[i]
-        val kind = term_kind_name(config.kind)
-        val host = format_terminal_host(config)
-        print "  {config.name}  [{kind}]  {host}"
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--config":
+            i = i + 2
+        elif arg.starts_with("--config="):
+            i = i + 1
+        elif arg.starts_with("-"):
+            i = i + 1
+        else:
+            return arg
+    ""
+
+fn terminal_positional_after_operation(args: [text], index: i64) -> text:
+    var found_op = false
+    var seen = 0
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--config":
+            i = i + 2
+        elif arg.starts_with("--config="):
+            i = i + 1
+        elif arg.starts_with("-"):
+            i = i + 1
+        elif not found_op:
+            found_op = true
+            i = i + 1
+        else:
+            if seen == index:
+                return arg
+            seen = seen + 1
+            i = i + 1
+    ""
+
+fn terminal_command_text(args: [text]) -> text:
+    val op = terminal_operation_arg(args)
+    if op != "exec":
+        return ""
+    var command = ""
+    var found_op = false
+    var skipped_target = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--config":
+            i = i + 2
+        elif arg.starts_with("--config="):
+            i = i + 1
+        elif arg.starts_with("-"):
+            i = i + 1
+        elif not found_op:
+            found_op = true
+            i = i + 1
+        elif not skipped_target:
+            skipped_target = true
+            i = i + 1
+        else:
+            if command == "":
+                command = arg
+            else:
+                command = "{command} {arg}"
+            i = i + 1
+    command
+
+fn terminal_option_value(args: [text], name: text, fallback: text) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == name and i + 1 < args.len():
+            return args[i + 1]
+        if arg.starts_with(name + "="):
+            return arg.substring(name.len() + 1)
         i = i + 1
+    fallback
 
-    0
+fn terminal_first_unknown_option(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--config":
+            i = i + 2
+        elif arg.starts_with("--config="):
+            i = i + 1
+        elif arg.starts_with("-"):
+            return arg
+        else:
+            i = i + 1
+    ""
 
-# ============================================================================
-# Subcommand: disconnect
-# ============================================================================
+fn terminal_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
-fn cmd_disconnect(args: [text]) -> i64:
-    """Disconnect an active terminal.
-
-    Usage: simple terminal disconnect <name>
-
-    Note: In the current implementation, connections are not persisted
-    between CLI invocations. This command connects and immediately
-    closes the terminal to verify connectivity.
-
-    Args:
-        args: CLI argument list
-
-    Returns:
-        0 on success, 1 on failure
-    """
-    if args.len() < 3:
-        print "usage: simple terminal disconnect <name>"
-        return 1
-
-    val name = args[2]
-    val configs = parse_terminal_config(DEFAULT_CONFIG_PATH)
-    val found = find_terminal_by_name(configs, name)
-
-    if not found.?:
-        print "error: terminal '{name}' not found in {DEFAULT_CONFIG_PATH}"
-        return 1
-
-    val config = found
-    print "Connecting to '{name}' for disconnect..."
-    val conn = terminal_connect(config)
-
-    if conn.connected:
-        val closed = terminal_close(conn)
-        if closed:
-            print "Disconnected '{name}' successfully"
-            return 0
-        print "error: failed to close connection to '{name}'"
-        return 1
-
-    print "Terminal '{name}' was not connected"
-    0
-
-# ============================================================================
-# Helpers
-# ============================================================================
-
-fn format_terminal_host(config: TerminalConfig) -> text:
-    """Format the host information for display.
-
-    Shows the relevant host/port for the terminal kind:
-    - SSH/Telnet: host:port
-    - T32 SWD: t32_host:t32_port (channel)
-    - Relay: script_path
-
-    Args:
-        config: Terminal configuration
-
-    Returns:
-        Formatted host string
-    """
-    if config.kind == 0 or config.kind == 1:
-        # SSH or Telnet
-        return "{config.host}:{config.port}"
-    if config.kind == 2:
-        # T32 SWD
-        return "{config.t32_host}:{config.t32_port} ({config.channel})"
-    if config.kind == 3:
-        # Relay
-        return config.script_path
-    "unknown"
-
-fn print_terminal_usage():
-    """Print terminal subcommand usage information."""
-    print "Usage: simple terminal <subcommand> [args...]"
-    print ""
-    print "Subcommands:"
-    print "  connect <name>           Connect to a configured terminal"
-    print "  exec <name> <command>    Execute command on terminal"
-    print "  list                     List configured terminals"
-    print "  disconnect <name>        Disconnect active terminal"
-    print ""
-    print "Config: {DEFAULT_CONFIG_PATH}"
+fn terminal_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if terminal_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

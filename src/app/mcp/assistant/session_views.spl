@@ -3,14 +3,12 @@
 # Reads the file-backed assistant store and exposes small reusable views for
 # session detail, compact briefs, and timeline/notification collection.
 
-use std.common.json.parser.{json_parse}
-use std.common.json.types.{json_get_type, json_to_string, json_to_number}
-use std.common.json.object_ops.{json_object_get}
+use ..main_lazy_json.{extract_field}
 use .types.{
     AssistantSessionRecord, AssistantTimelineRecord, assistant_first_non_empty,
     assistant_timeline_severity, assistant_timeline_title, assistant_timeline_detail
 }
-use .session_store.{assistant_store_load_session}
+use .session_store.{assistant_store_load_session, assistant_store_timeline_record_from_json_text}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -82,10 +80,7 @@ fn assistant_store_collect_stream(path: text, limit: i64, since_ts: i64) -> [Ass
         val line = raw.trim()
         if line == "":
             continue
-        val record = json_parse(line)
-        if record == nil:
-            continue
-        val event = assistant_store_timeline_record_from_json(record)
+        val event = assistant_store_timeline_record_from_json_text(line)
         if since_ts > 0 and event.timestamp_ms <= since_ts:
             continue
         events.push(event)
@@ -104,51 +99,3 @@ fn assistant_store_count_jsonl_entries(path: text) -> i64:
         if raw.trim() != "":
             count = count + 1
     count
-
-fn assistant_store_timeline_record_from_json(value: any) -> AssistantTimelineRecord:
-    val kind = assistant_first_non_empty([assistant_store_json_text_any(value, ["kind", "event_type"]), "note"])
-    val message = assistant_store_json_text_any(value, ["message", "summary", "detail"])
-    val signal = assistant_store_json_text_any(value, ["signal", "wake_reason"])
-    AssistantTimelineRecord(
-        event_id: assistant_store_json_text_any(value, ["id", "event_id"]),
-        session_id: assistant_store_json_text_any(value, ["session_id"]),
-        parent_session_id: assistant_store_json_text_any(value, ["parent_session_id"]),
-        child_task_id: assistant_store_json_text_any(value, ["child_task_id"]),
-        timestamp_ms: assistant_store_json_number_any(value, ["timestamp_ms", "timestamp", "created_at_ms", "created_at"]),
-        kind: kind,
-        severity: assistant_first_non_empty([assistant_store_json_text_any(value, ["severity"]), assistant_timeline_severity(kind)]),
-        title: assistant_first_non_empty([assistant_store_json_text_any(value, ["title"]), assistant_timeline_title(kind, message, signal)]),
-        detail: assistant_first_non_empty([assistant_store_json_text_any(value, ["detail", "summary"]), assistant_timeline_detail(kind, message, signal)]),
-        message: message,
-        signal: signal,
-        source: assistant_first_non_empty([assistant_store_json_text_any(value, ["source"]), "assistant"]),
-        correlation_id: assistant_store_json_text_any(value, ["correlation_id"])
-    )
-
-fn assistant_store_json_text_any(value: any, keys: [text]) -> text:
-    for key in keys:
-        val target = json_object_get(value, key)
-        if target == nil:
-            continue
-        val kind = json_get_type(target)
-        if kind == "string":
-            val s = json_to_string(target)
-            if s != nil and s.trim() != "":
-                return s
-        elif kind == "number":
-            val n = json_to_number(target)
-            if n != nil:
-                return "{n as i64}"
-    ""
-
-fn assistant_store_json_number_any(value: any, keys: [text]) -> i64:
-    for key in keys:
-        val target = json_object_get(value, key)
-        if target == nil:
-            continue
-        if json_get_type(target) != "number":
-            continue
-        val n = json_to_number(target)
-        if n != nil:
-            return n as i64
-    0

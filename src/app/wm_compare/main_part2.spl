@@ -20,6 +20,8 @@ use app.wm_compare.main.*
 #       [--width=320 --height=240]
 
 use std.cli.cli_util.{get_cli_args}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_write_text, file_write_bytes, dir_create_all, file_exists}
 
 use os.compositor.wm_scene.{WmSceneSpec, SceneElement}
@@ -429,11 +431,25 @@ fn sources_for_option(source_opt: text) -> [text]:
     [source_opt]
 
 fn main() -> i64:
-    val args = get_cli_args()
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("wm-compare", log_opts.error)
+        return 1
+
+    val args = wm_compare_clean_args(raw_args)
     val opts = parse_opts(args)
 
     if opts.help:
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
         print_help()
+        print_wm_compare_shared_log_options()
+        return 0
+
+    if log_opts.log_mode == "json" and opts.mode == "" and opts.source == "":
+        print "{\"command\":\"wm-compare\",\"status\":\"usage\"}"
         return 0
 
     # Phase 5 bit-compare mode is a separate branch that only needs two PPM
@@ -448,11 +464,17 @@ fn main() -> i64:
         return run_live_bd_compare_mode(opts)
 
     if opts.source == "":
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"wm-compare\",\"status\":\"error\",\"error\":\"missing source\"}"
+            return 1
         print "Error: --source=A|B|D|all is required"
         print_help()
         return 1
 
     if opts.scene == "":
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"wm-compare\",\"status\":\"error\",\"error\":\"missing scene\"}"
+            return 1
         print "Error: --scene=<name> is required"
         print_help()
         return 1
@@ -541,3 +563,30 @@ fn main() -> i64:
                 all_ok = false
 
     if all_ok: 0 else: 1
+
+fn wm_compare_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn wm_compare_clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if wm_compare_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn print_wm_compare_shared_log_options():
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"

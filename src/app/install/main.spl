@@ -2,7 +2,9 @@
 # Installs all dependencies from simple.sdn/simple.lock
 
 use std.cli.cli_util (get_cli_args, find_manifest_path, parse_deps_section)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (file_exists, file_read, file_write, dir_create, cwd)
+use std.log.{error}
 
 fn print_help():
     print "Usage: simple install [options]"
@@ -11,24 +13,60 @@ fn print_help():
     print "Uses simple.lock if available, otherwise resolves from manifest."
     print ""
     print "Options:"
+    print "  --json       Output as JSON"
     print "  --frozen     Only install from lockfile, fail if missing"
     print "  --dry-run    Show what would be installed without changes"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help   Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _json_array(names: [text]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < names.len():
+        parts.push("\"{names[i]}\"")
+        i = i + 1
+    "[" + parts.join(",") + "]"
 
 fn main() -> i64:
     val args = get_cli_args()
 
     var frozen = false
     var dry_run = false
+    var as_json = false
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("install", log_opts.error)
+        return 1
 
-    for arg in args:
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
         elif arg == "--frozen":
             frozen = true
         elif arg == "--dry-run":
             dry_run = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
+
+    if log_opts.log_mode == "json":
+        as_json = true
 
     val manifest_path = find_manifest_path()
     if manifest_path == "":
@@ -48,8 +86,20 @@ fn main() -> i64:
     val deps = parse_deps_section(content, "dependencies") + parse_deps_section(content, "dev_dependencies")
 
     if deps.len() == 0:
+        if as_json:
+            print "{\"dry_run\":{dry_run},\"frozen\":{frozen},\"count\":0,\"dependencies\":[]}"
+            return 0
         print "No dependencies to install."
         return 0
+
+    if as_json:
+        print "{\"dry_run\":{dry_run},\"frozen\":{frozen},\"count\":{deps.len()},\"dependencies\":" + _json_array(deps) + "}"
+        return 0
+
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, deps.len(), deps.len(), "install")
+        if progress_line != "":
+            print progress_line
 
     if dry_run:
         print "Would install {deps.len()} dependencies:"

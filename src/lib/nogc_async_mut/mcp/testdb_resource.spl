@@ -3,41 +3,57 @@
 # Provides MCP access to the unified test database
 # Supports both read and write operations via JSON API
 
-use std.database.test.{create_test_database, TestDatabase, TestRun, TestResult, RunStatus, TestStatus}
+use std.database.test.{create_test_database, load_test_database, TestDatabase, TestRun, TestResult, RunStatus, TestStatus}
 use std.nogc_async_mut.mcp.resource_utils.{
-    JsonBuilder, JsonArrayBuilder, escape_json,
+    escape_json,
     extract_json_string, extract_json_float,
     current_timestamp, error_json, success_json, items_to_json
 }
+use std.nogc_sync_mut.io.file_ops.{file_exists as file_exists_backend}
+
+fn file_exists(path: text) -> bool:
+    file_exists_backend(path)
 
 
 # ============================================================================
 # Read Operations
 # ============================================================================
 
+fn open_or_create_test_database(db_path: text) -> TestDatabase:
+    if file_exists(db_path):
+        val existing = load_test_database(db_path)
+        if existing.?:
+            return existing.unwrap()
+    create_test_database(db_path)
+
+fn resolve_run_id(testdb: TestDatabase, run_id: text) -> text:
+    if run_id != "":
+        return run_id
+    testdb.first_run_id()
+
 # Get all test runs
 fn get_all_runs(db_path: text) -> text:
-    var testdb = create_test_database(db_path)
+    var testdb = open_or_create_test_database(db_path)
     val runs = testdb.all_runs()
     runs_to_json(runs)
 
+fn get_all_tests(db_path: text) -> text:
+    get_all_runs(db_path)
+
 # Get recent test runs (last N)
 fn get_recent_runs(db_path: text, count: i64) -> text:
-    var testdb = create_test_database(db_path)
+    var testdb = open_or_create_test_database(db_path)
     val runs = testdb.recent_runs(count)
 
-    val arr = JsonArrayBuilder.new()
+    var raw_items: [text] = []
     for run in runs:
-        arr.item_raw(run_to_json(run))
+        raw_items.push(run_to_json(run))
 
-    JsonBuilder.object()
-        .field_int("count", runs.len())
-        .field_array_raw("runs", arr)
-        .build()
+    "{\"count\":" + str(runs.len()) + ",\"runs\":[" + raw_items.join(",") + "]}"
 
 # Get test run by ID
 fn get_run_by_id(db_path: text, run_id: text) -> text:
-    var testdb = create_test_database(db_path)
+    var testdb = open_or_create_test_database(db_path)
     val run_opt = testdb.get_run(run_id)
 
     if not run_opt.?:
@@ -48,61 +64,41 @@ fn get_run_by_id(db_path: text, run_id: text) -> text:
 
 # Get test results for a run
 fn get_test_results(db_path: text, run_id: text) -> text:
-    var testdb = create_test_database(db_path)
-    val results = testdb.results_for_run(run_id)
+    var testdb = open_or_create_test_database(db_path)
+    val resolved_run_id = resolve_run_id(testdb, run_id)
+    val results = testdb.results_for_run(resolved_run_id)
 
-    val arr = JsonArrayBuilder.new()
+    var raw_items: [text] = []
     for result in results:
-        arr.item_raw(result_to_json(result))
+        raw_items.push(result_to_json(result))
 
-    JsonBuilder.object()
-        .field("run_id", run_id)
-        .field_int("total", results.len())
-        .field_array_raw("results", arr)
-        .build()
+    "{\"run_id\":\"" + escape_json(resolved_run_id) + "\",\"total\":" + str(results.len()) + ",\"results\":[" + raw_items.join(",") + "]}"
 
 # Get test statistics
 fn get_test_stats(db_path: text) -> text:
-    var testdb = create_test_database(db_path)
+    var testdb = open_or_create_test_database(db_path)
     val stats = testdb.stats()
 
-    JsonBuilder.object()
-        .field_int("total_runs", stats.total_runs)
-        .field_int("total_tests", stats.total_tests)
-        .field_int("passed", stats.passed)
-        .field_int("failed", stats.failed)
-        .field_float("pass_rate", stats.pass_rate)
-        .field_float("avg_duration_ms", stats.avg_duration_ms)
-        .build()
+    "{\"total_runs\":" + str(stats.total_runs) + ",\"total_tests\":" + str(stats.total_tests) + ",\"passed\":" + str(stats.passed) + ",\"failed\":" + str(stats.failed) + ",\"pass_rate\":" + str(stats.pass_rate) + ",\"avg_duration_ms\":" + str(stats.avg_duration_ms) + "}"
 
 # Get flaky tests (tests that sometimes pass, sometimes fail)
 fn get_flaky_tests(db_path: text) -> text:
-    var testdb = create_test_database(db_path)
+    var testdb = open_or_create_test_database(db_path)
     val flaky = testdb.flaky_tests()
 
-    JsonBuilder.object()
-        .field_int("count", flaky.len())
-        .field_array("tests", flaky)
-        .build()
+    "{\"count\":" + str(flaky.len()) + ",\"tests\":" + test_text_array_json(flaky) + "}"
 
 # Get slow tests (above threshold)
 fn get_slow_tests(db_path: text, threshold_ms: f64) -> text:
-    var testdb = create_test_database(db_path)
+    var testdb = open_or_create_test_database(db_path)
     val slow = testdb.slow_tests(threshold_ms)
 
-    val arr = JsonArrayBuilder.new()
+    var raw_items: [text] = []
     for (test_name, duration) in slow:
-        val item = JsonBuilder.object()
-            .field("name", test_name)
-            .field_float("duration_ms", duration)
-            .build()
-        arr.item_raw(item)
+        val item = "{\"name\":\"" + escape_json(test_name) + "\",\"duration_ms\":" + str(duration) + "}"
+        raw_items.push(item)
 
-    JsonBuilder.object()
-        .field_float("threshold_ms", threshold_ms)
-        .field_int("count", slow.len())
-        .field_array_raw("tests", arr)
-        .build()
+    "{\"threshold_ms\":" + str(threshold_ms) + ",\"count\":" + str(slow.len()) + ",\"tests\":[" + raw_items.join(",") + "]}"
 
 # ============================================================================
 # Write Operations
@@ -110,7 +106,7 @@ fn get_slow_tests(db_path: text, threshold_ms: f64) -> text:
 
 # Start a new test run
 fn start_test_run(db_path: text) -> text:
-    var testdb = create_test_database(db_path)
+    var testdb = open_or_create_test_database(db_path)
 
     val run_id = testdb.start_run()
     val saved = testdb.save()
@@ -118,33 +114,29 @@ fn start_test_run(db_path: text) -> text:
     if not saved:
         return error_json("Failed to save database")
 
-    JsonBuilder.object()
-        .field_bool("success", true)
-        .field("run_id", run_id)
-        .build()
+    "{\"success\":true,\"run_id\":\"" + escape_json(run_id) + "\"}"
 
 # End a test run
 fn end_test_run(db_path: text, run_id: text, status: text) -> text:
-    var testdb = create_test_database(db_path)
+    var testdb = open_or_create_test_database(db_path)
+    val resolved_run_id = resolve_run_id(testdb, run_id)
 
     val parsed_status = parse_run_status(status)
-    val ended = testdb.end_run(run_id, parsed_status)
+    val ended = testdb.end_run(resolved_run_id, parsed_status)
 
     if not ended:
-        return error_json("Failed to end run: {run_id}")
+        return error_json("Failed to end run: {resolved_run_id}")
 
     val saved = testdb.save()
     if not saved:
         return error_json("Failed to save database")
 
-    JsonBuilder.object()
-        .field_bool("success", true)
-        .field("run_id", run_id)
-        .build()
+    "{\"success\":true,\"run_id\":\"" + escape_json(resolved_run_id) + "\"}"
 
 # Record a test result
 fn record_test_result(db_path: text, run_id: text, json: text) -> text:
-    var testdb = create_test_database(db_path)
+    var testdb = open_or_create_test_database(db_path)
+    val resolved_run_id = resolve_run_id(testdb, run_id)
 
     val test_name = extract_json_string(json, "test_name")
     val status = extract_json_string(json, "status")
@@ -156,7 +148,7 @@ fn record_test_result(db_path: text, run_id: text, json: text) -> text:
 
     val result = TestResult(
         test_name: test_name,
-        run_id: run_id,
+        run_id: resolved_run_id,
         status: parse_test_status(status),
         duration_ms: duration_ms,
         error_message: if error_message != "": Some(error_message) else: nil,
@@ -171,10 +163,7 @@ fn record_test_result(db_path: text, run_id: text, json: text) -> text:
     if not saved:
         return error_json("Failed to save database")
 
-    JsonBuilder.object()
-        .field_bool("success", true)
-        .field("test_name", test_name)
-        .build()
+    "{\"success\":true,\"test_name\":\"" + escape_json(test_name) + "\"}"
 
 # ============================================================================
 # JSON Conversion Helpers
@@ -186,44 +175,31 @@ fn runs_to_json(runs: [TestRun]) -> text:
 
 # Convert single run to JSON
 fn run_to_json(run: TestRun) -> text:
-    val builder = JsonBuilder.object()
-        .field("run_id", run.run_id)
-        .field("start_time", run.start_time)
-
+    var end_json = "null"
     match run.end_time:
         case Some(t):
-            builder.field("end_time", t)
+            end_json = "\"" + escape_json(t) + "\""
         case nil:
-            builder.field_null("end_time")
+            end_json = "null"
 
-    builder
-        .field_int("pid", run.pid)
-        .field("hostname", run.hostname)
-        .field("status", run_status_to_string(run.status))
-        .field_int("test_count", run.test_count)
-        .field_int("passed", run.passed)
-        .field_int("failed", run.failed)
-        .field_int("crashed", run.crashed)
-        .field_int("timed_out", run.timed_out)
-        .build()
+    "{\"run_id\":\"" + escape_json(run.run_id) + "\",\"start_time\":\"" + escape_json(run.start_time) + "\",\"end_time\":" + end_json + ",\"pid\":" + str(run.pid) + ",\"hostname\":\"" + escape_json(run.hostname) + "\",\"status\":\"" + escape_json(run_status_to_string(run.status)) + "\",\"test_count\":" + str(run.test_count) + ",\"passed\":" + str(run.passed) + ",\"failed\":" + str(run.failed) + ",\"crashed\":" + str(run.crashed) + ",\"timed_out\":" + str(run.timed_out) + "}"
 
 # Convert single result to JSON
 fn result_to_json(result: TestResult) -> text:
-    val builder = JsonBuilder.object()
-        .field("test_name", result.test_name)
-        .field("run_id", result.run_id)
-        .field("status", test_status_to_string(result.status))
-        .field_float("duration_ms", result.duration_ms)
-
+    var error_json_value = "null"
     match result.error_message:
         case Some(e):
-            builder.field("error_message", e)
+            error_json_value = "\"" + escape_json(e) + "\""
         case nil:
-            builder.field_null("error_message")
+            error_json_value = "null"
 
-    builder
-        .field("timestamp", result.timestamp)
-        .build()
+    "{\"test_name\":\"" + escape_json(result.test_name) + "\",\"run_id\":\"" + escape_json(result.run_id) + "\",\"status\":\"" + escape_json(test_status_to_string(result.status)) + "\",\"duration_ms\":" + str(result.duration_ms) + ",\"error_message\":" + error_json_value + ",\"timestamp\":\"" + escape_json(result.timestamp) + "\"}"
+
+fn test_text_array_json(values: [text]) -> text:
+    var items: [text] = []
+    for value in values:
+        items.push("\"" + escape_json(value) + "\"")
+    "[" + items.join(",") + "]"
 
 # ============================================================================
 # Status Conversion Helpers

@@ -6,7 +6,7 @@
 use std.database.bug.{create_bug_database, load_bug_database, BugDatabase, Bug, BugSeverity, BugStatus, parse_severity, parse_status}
 use std.cli.cli_util (parse_csv_fields)
 use std.nogc_async_mut.mcp.resource_utils.{
-    JsonBuilder, JsonArrayBuilder, escape_json,
+    escape_json,
     extract_json_string, extract_json_int, extract_json_array,
     current_timestamp, error_json, success_json, items_to_json
 }
@@ -52,7 +52,7 @@ fn parse_split_table_bugs(content: text) -> [Bug]:
         if not in_bug_table:
             continue
 
-        val fields = parse_csv_fields(trimmed)
+        val fields = parse_sdn_row_fields(trimmed)
         if fields.len() < 8:
             continue
 
@@ -62,8 +62,11 @@ fn parse_split_table_bugs(content: text) -> [Bug]:
         val title = fields[3]
         val file = fields[4]
         val line_num = fields[5].to_i64() ?? 0
-        val description = if fields[6] != "": [fields[6]] else: []
-        val reproducible_by = fields[7]
+        val description = parse_split_multiline_field(content, "bug_descriptions", id)
+        val reproducible_by = if fields.len() > 6: fields[6] else: ""
+        val created_at = if fields.len() > 7: fields[7] else: ""
+        val updated_at = if fields.len() > 8: fields[8] else: ""
+        val valid = if fields.len() > 9: fields[9].lower() != "false" else: true
 
         bugs.push(Bug(
             id: id,
@@ -76,14 +79,63 @@ fn parse_split_table_bugs(content: text) -> [Bug]:
             reproducible_by: reproducible_by,
             fix_strategy: [],
             investigation_log: [],
-            created_at: "",
-            updated_at: "",
-            valid: true
+            created_at: created_at,
+            updated_at: updated_at,
+            valid: valid
         ))
 
     bugs
 
+fn parse_split_multiline_field(content: text, table_name: text, bug_id: text) -> [text]:
+    val lines = content.split("\n")
+    var values: [text] = []
+    var in_table = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with(table_name + " |"):
+            in_table = true
+            continue
+        if trimmed == "" or trimmed.starts_with("#"):
+            if in_table and trimmed == "":
+                in_table = false
+            continue
+        if trimmed.contains("|"):
+            in_table = false
+            continue
+        if not in_table:
+            continue
+
+        val fields = parse_sdn_row_fields(trimmed)
+        if fields.len() < 3:
+            continue
+        if fields[0] == bug_id:
+            values.push(fields[2])
+
+    values
+
+fn parse_sdn_row_fields(line: text) -> [text]:
+    var fields: [text] = []
+    var current = ""
+    var in_quotes = false
+
+    for ch in line:
+        if ch == "\"":
+            in_quotes = not in_quotes
+            current = current + ch
+        elif ch == "," and not in_quotes:
+            fields.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+
+    fields.push(current.trim())
+    fields
+
 fn load_bugs_for_read(db_path: text) -> Result<[Bug], text>:
+    if not file_exists(db_path):
+        return Err("Database not found: {db_path}")
+
     val content = file_read(db_path)
     if content == "":
         return Ok([])
@@ -97,6 +149,13 @@ fn load_bugs_for_read(db_path: text) -> Result<[Bug], text>:
 
     val bugdb = bugdb_opt.unwrap()
     Ok(bugdb.all_bugs())
+
+fn open_or_create_bug_database(db_path: text) -> BugDatabase:
+    if file_exists(db_path):
+        val existing = load_bug_database(db_path)
+        if existing.?:
+            return existing.unwrap()
+    create_bug_database(db_path)
 
 # Get all bugs from database
 fn get_all_bugs(db_path: String) -> String:
@@ -150,15 +209,7 @@ fn get_bug_stats(db_path: String) -> String:
             else:
                 "good"
 
-            JsonBuilder.object()
-                .field_int("total", total)
-                .field_int("open", open)
-                .field_int("fixed", fixed)
-                .field_int("p0", p0)
-                .field_int("p1", p1)
-                .field_int("important", important)
-                .field("health", health)
-                .build()
+            "{\"total\":" + str(total) + ",\"open\":" + str(open) + ",\"fixed\":" + str(fixed) + ",\"p0\":" + str(p0) + ",\"p1\":" + str(p1) + ",\"important\":" + str(important) + ",\"health\":\"" + escape_json(health) + "\"}"
 
 # Get bug by ID
 fn get_bug_by_id(db_path: text, bug_id: String) -> String:
@@ -176,7 +227,7 @@ fn get_bug_by_id(db_path: text, bug_id: String) -> String:
 
 # Add a new bug from JSON
 fn add_bug_from_json(db_path: text, json: String) -> String:
-    var bugdb = create_bug_database(db_path)
+    var bugdb = open_or_create_bug_database(db_path)
 
     val id = extract_json_string(json, "id")
     val severity_str = extract_json_string(json, "severity")
@@ -220,7 +271,7 @@ fn add_bug_from_json(db_path: text, json: String) -> String:
 
 # Update an existing bug from JSON
 fn update_bug_from_json(db_path: text, bug_id: text, json: String) -> String:
-    var bugdb = create_bug_database(db_path)
+    var bugdb = open_or_create_bug_database(db_path)
 
     val existing_opt = bugdb.get_bug(bug_id)
     if not existing_opt.?:
@@ -271,16 +322,13 @@ fn bugs_to_json(bugs: [Bug]) -> String:
 
 # Convert single bug to JSON
 fn bug_to_json(bug: Bug) -> String:
-    JsonBuilder.object()
-        .field("id", bug.id)
-        .field("severity", severity_to_string(bug.severity))
-        .field("status", status_to_string(bug.status))
-        .field("title", bug.title)
-        .field("file", bug.file)
-        .field_int("line", bug.line)
-        .field("reproducible_by", bug.reproducible_by)
-        .field_array("description", bug.description)
-        .build()
+    "{\"id\":\"" + escape_json(bug.id) + "\",\"severity\":\"" + escape_json(severity_to_string(bug.severity)) + "\",\"status\":\"" + escape_json(status_to_string(bug.status)) + "\",\"title\":\"" + escape_json(bug.title) + "\",\"file\":\"" + escape_json(bug.file) + "\",\"line\":" + str(bug.line) + ",\"reproducible_by\":\"" + escape_json(bug.reproducible_by) + "\",\"description\":" + bug_text_array_json(bug.description) + "}"
+
+fn bug_text_array_json(values: [text]) -> text:
+    var items: [text] = []
+    for value in values:
+        items.push("\"" + escape_json(value) + "\"")
+    "[" + items.join(",") + "]"
 
 # Convert severity to string
 fn severity_to_string(severity: BugSeverity) -> String:

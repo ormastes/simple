@@ -1,72 +1,73 @@
-# Simple Debug Adapter
-# DAP server for Simple language (self-hosted implementation)
-# Usage: simple_dap (communicates via stdin/stdout)
+# Simple Debug Adapter Protocol entrypoint.
+# Startup-light CLI surface for help/version/log-mode preflight.
 
-import sys
-import dap.server as server
-import dap.transport as transport
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
-fn main():
-    # Check for help flag
-    val args = sys.args()
-    if args.contains("--help") or args.contains("-h"):
-        print_usage()
-        sys.exit(0)
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("dap", log_opts.error)
+        return 1
 
-    # Check for version flag
-    if args.contains("--version") or args.contains("-v"):
-        print("simple-dap 0.1.0")
-        print("Simple Debug Adapter Protocol (DAP)")
-        sys.exit(0)
+    val args = dap_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"dap\",\"status\":\"ok\",\"version\":\"0.1.0\"}"
+        else:
+            print "simple-dap 0.1.0"
+            print "Simple Debug Adapter Protocol (DAP)"
+        return 0
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"dap\",\"status\":\"ready\",\"transport\":\"stdio\"}"
+        return 0
 
-    # Log startup
-    transport.log_debug("Starting Simple DAP server")
+    print_help_with_progress(log_opts.progress)
+    0
 
-    # Create and run server
-    val dap_server = server.DapServer.new()
+fn print_help():
+    print "Simple Debug Adapter Protocol (DAP)"
+    print ""
+    print "Usage: simple dap [options]"
+    print ""
+    print "The debug adapter communicates over stdin/stdout using DAP JSON messages."
+    print ""
+    print "Options:"
+    print "  -h, --help       Show this help message"
+    print "  -v, --version    Show version information"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
 
-    match dap_server.run():
-        case Ok(_):
-            transport.log_debug("DAP server exited normally")
-            sys.exit(0)
-        case Err(error):
-            transport.log_error("DAP server error: {error}")
-            sys.exit(1)
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
 
-fn print_usage():
-    print("Simple Debug Adapter Protocol (DAP)")
-    print("")
-    print("Usage: simple_dap [options]")
-    print("")
-    print("The debug adapter communicates via stdin/stdout using the")
-    print("Debug Adapter Protocol (DAP) with JSON messages.")
-    print("")
-    print("Options:")
-    print("  -h, --help       Show this help message")
-    print("  -v, --version    Show version information")
-    print("")
-    print("Environment Variables:")
-    print("  SIMPLE_DAP_DEBUG  Enable debug logging to stderr")
-    print("")
-    print("Editor Integration:")
-    print("  VS Code: Configure launch.json")
-    print("    {")
-    print("      \"type\": \"simple\",")
-    print("      \"request\": \"launch\",")
-    print("      \"program\": \"${file}\"")
-    print("    }")
-    print("")
-    print("  Neovim: Use nvim-dap")
-    print("    require('dap').adapters.simple = {")
-    print("      type = 'executable',")
-    print("      command = 'path/to/simple_dap'")
-    print("    }")
-    print("")
-    print("Features:")
-    print("  - Breakpoints (line, conditional)")
-    print("  - Execution control (continue, step, pause)")
-    print("  - Stack trace inspection")
-    print("  - Variable viewing")
-    print("")
-    print("Documentation:")
-    print("  https://github.com/simple-lang/simple/doc/status/dap_implementation.md")
+fn dap_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn dap_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if dap_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

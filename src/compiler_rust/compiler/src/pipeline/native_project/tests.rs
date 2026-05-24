@@ -25,6 +25,11 @@ fn runtime_bundle_env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn no_stub_fallback_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
     let _guard = simd_tier_env_lock().lock().unwrap();
     let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
@@ -597,7 +602,7 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         "core-c runtime archive must include runtime_simd_utf8.c because runtime_native.c calls simd_text_init"
     );
 
-    if let Some(simple_core) = find_simple_core_runtime_library() {
+    if let Some(simple_core) = find_abi_complete_simple_core_runtime_library() {
         assert!(
             runtime_archive_has_core_required_symbols(&simple_core),
             "discovered simple-core runtime archive is not ABI-complete: {}",
@@ -1327,6 +1332,68 @@ int main(int argc, char** argv) {
     assert!(!stdout.contains("__simple_runtime_init"));
     assert!(!stdout.contains("__simple_runtime_shutdown"));
     assert!(!stdout.contains("__simple_call_module_inits"));
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_no_stub_fallback_rejects_unresolved_host_symbols() {
+    let _guard = no_stub_fallback_env_lock().lock().unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    if std::process::Command::new(&cc).arg("--version").output().is_err() {
+        return;
+    }
+
+    let previous = std::env::var("SIMPLE_NO_STUB_FALLBACK").ok();
+    std::env::set_var("SIMPLE_NO_STUB_FALLBACK", "1");
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_c = temp.path().join("main.c");
+    let main_o = temp.path().join("main.o");
+
+    std::fs::write(
+        &main_c,
+        r#"
+extern long missing_simple_symbol(void);
+int main(void) {
+    return (int)missing_simple_symbol();
+}
+"#,
+    )
+    .unwrap();
+
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&main_c)
+        .arg("-o")
+        .arg(&main_o)
+        .status()
+        .unwrap()
+        .success());
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
+        populate_global_struct_defs: false,
+        populate_global_enum_defs: false,
+    };
+
+    let result = super::stubs::generate_stub_object(temp.path(), &[], &main_o, None, &imports);
+
+    match previous.as_deref() {
+        Some(value) => std::env::set_var("SIMPLE_NO_STUB_FALLBACK", value),
+        None => std::env::remove_var("SIMPLE_NO_STUB_FALLBACK"),
+    }
+
+    let err = result.expect_err("SIMPLE_NO_STUB_FALLBACK=1 must reject unresolved stubs");
+    assert!(err.contains("SIMPLE_NO_STUB_FALLBACK=1"));
+    assert!(err.contains("missing_simple_symbol"));
 }
 
 #[cfg(target_os = "linux")]

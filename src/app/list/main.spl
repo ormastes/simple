@@ -2,7 +2,9 @@
 # Lists installed dependencies from manifest and lockfile
 
 use std.cli.cli_util (get_cli_args, find_manifest_path, parse_deps_section)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (file_exists, file_read, cwd)
+use std.log.{error}
 
 fn print_help():
     print "Usage: simple list [options]"
@@ -12,22 +14,54 @@ fn print_help():
     print "Options:"
     print "  --json       Output as JSON"
     print "  --installed  Show only installed packages"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help   Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _json_names(names: [text]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < names.len():
+        parts.push("\"{names[i]}\":\"*\"")
+        i = i + 1
+    parts.join(",")
 
 fn main() -> i64:
     val args = get_cli_args()
 
     var as_json = false
     var installed_only = false
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("list", log_opts.error)
+        return 1
 
-    for arg in args:
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
-        elif arg == "--json":
+        elif arg == "--json" or arg == "--log-mode=json":
             as_json = true
         elif arg == "--installed":
             installed_only = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
+
+    if log_opts.log_mode == "json":
+        as_json = true
 
     val manifest_path = find_manifest_path()
     if manifest_path == "":
@@ -41,23 +75,13 @@ fn main() -> i64:
     val modules_dir = "{current_dir}/simple_modules"
 
     if as_json:
-        print "\"dependencies\":"
-        var i = 0
-        for name in deps:
-            var comma = ""
-            if i < deps.len() - 1:
-                comma = ","
-            print "    \"{name}\": \"*\"{comma}"
-            i = i + 1
-        print "\"dev_dependencies\":"
-        var j = 0
-        for name in dev_deps:
-            var comma = ""
-            if j < dev_deps.len() - 1:
-                comma = ","
-            print "    \"{name}\": \"*\"{comma}"
-            j = j + 1
+        print "{\"dependencies\":{" + _json_names(deps) + "},\"dev_dependencies\":{" + _json_names(dev_deps) + "}}"
         return 0
+
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, deps.len() + dev_deps.len(), deps.len() + dev_deps.len(), "list")
+        if progress_line != "":
+            print progress_line
 
     # Parse project name/version from manifest
     var project_name = "unknown"

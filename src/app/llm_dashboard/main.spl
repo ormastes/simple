@@ -7,6 +7,8 @@ use app.llm_dashboard.data.store.{AgentDashboardStore}
 use app.web_dashboard.server.{DashboardServer}
 use std.text.{to_int_or}
 use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 use app.dashboard.framework_policy.{strip_framework_flags}
 use lib.common.llm.output_gate.{OutputGate, filter_response_body}
 use lib.common.privilege.authority_token.{AuthorityToken}
@@ -48,7 +50,17 @@ fn run_llm_dashboard(args: [text]) -> i64:
     Returns:
         Exit code (0 = success)
     """
-    val clean_args = strip_framework_flags(args)
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("llm-dashboard", log_opts.error)
+        return 1
+
+    val log_clean_args = llm_dashboard_clean_log_args(args)
+    val clean_args = strip_framework_flags(log_clean_args)
+    if clean_args.len() == 0 and log_opts.log_mode == "json":
+        print "{\"command\":\"llm-dashboard\",\"status\":\"usage\"}"
+        return 0
+
     var mode = "tui"
     var port = 3001
     var watch_dir = ""
@@ -78,10 +90,10 @@ fn run_llm_dashboard(args: [text]) -> i64:
                     watch_dir = clean_args[i + 1]
                     i = i + 1
             "--help" =>
-                print_agents_help()
+                print_agents_help_with_progress(log_opts.progress)
                 return 0
             "-h" =>
-                print_agents_help()
+                print_agents_help_with_progress(log_opts.progress)
                 return 0
             _ => pass_dn
         i = i + 1
@@ -175,3 +187,34 @@ fn print_agents_help():
     print "  r       Force refresh"
     print "  c       Clear filters"
     print "  q       Quit"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_agents_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_agents_help()
+
+fn llm_dashboard_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn llm_dashboard_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if llm_dashboard_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

@@ -11,15 +11,26 @@ Hardware and external-access joins are audit signals and remain weaveable in
 release builds. Debug and trace joins are optional instrumentation; release
 builds omit them unless debug logging is explicitly enabled.
 
-Shared CLI log option parsing lives in `std.cli.log_modes`. Apps should accept
-`--log-mode <human|llm|json>`, `--stdout`, `--tui`, and
-`--progress <summary|count|dot|none>` where they expose structured output.
-Use `render_progress` for consistent summary, count, dot, and quiet/no-progress
-output.
+Shared CLI log option parsing lives in `std.cli.log_modes`. App entrypoints
+that expose structured startup, status, dry-run, or planning output should
+accept `--log-mode <human|llm|json>`, `--stdout`, `--tui`, and
+`--progress <summary|count|dot|none>`. The parser also accepts shorthand
+`--human`, `--llm`, `--json`, `--dots`, `--count`, `--quiet`, and
+`--verbose`. Use `render_progress` for consistent summary, count, dot, and
+quiet/no-progress output.
 
-`simple brief` is the first wired app entrypoint. It accepts the shared help
-text, rejects invalid log modes, treats `--log-mode=json` as JSON output, and
-uses `render_progress` for non-default progress modes.
+Log-mode preflight paths must be startup-light. Help, version, JSON readiness,
+invalid-option, and dry-run planning paths should avoid importing broad
+compiler, UI, network, terminal, or subprocess graphs before the preflight can
+return. Real execution paths may still delegate to their heavier implementation
+after shared log options are parsed and stripped.
+
+The current app rollout covers the main `src/app/*/main.spl` command surface,
+including MCP/LSP wrappers and grouped commands such as add/remove, bug
+add/resolve, session-plan, UI browser/chromium, and Wine hello. Each wired app
+has a `test/integration/app/*_log_modes_spec.spl` source-mode spec covering the
+shared help or readiness path, invalid mode rejection, and at least one
+command-specific JSON or progress path.
 
 For human TUI progress, use `SimpleProgressGroup` with
 `render_tui_grouped_counts`. The renderer emits a stable grouped count view with

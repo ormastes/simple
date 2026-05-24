@@ -1,106 +1,133 @@
-"""
-# Simple Language Portal Server
+# Simple Language Portal entrypoint.
+# Startup-light surface for source-mode help and readiness probes.
 
-Community portal for the Simple programming language.
-Provides package browsing, search, user accounts, documentation,
-and download statistics.
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
-## Usage
+val TOOL_NAME = "Simple Language Portal"
+val TOOL_VERSION = "0.1.0"
+val DEFAULT_HOST = "127.0.0.1"
+val DEFAULT_PORT = "3000"
 
-```bash
-bin/simple run src/app/portal/main.spl
-```
-"""
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("portal", log_opts.error)
+        return 1
 
-use std.web_framework.app.{WebApp}
-use std.web_framework.controller.{ControllerContext, render_page, render_json, render_redirect, render_error}
-use std.http_server.types.{HttpResponseData}
+    val args = portal_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"portal\",\"status\":\"ok\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+        return 0
 
-# Import controllers
-use portal.controllers.home_controller.{action_home_index}
-use portal.controllers.packages_controller.{
-    action_packages_index, action_packages_show, action_packages_versions
-}
-use portal.controllers.auth_controller.{
-    action_login_form, action_login, action_register_form, action_register, action_logout
-}
-use portal.controllers.users_controller.{
-    action_user_show, action_user_edit, action_user_update
-}
-use portal.controllers.docs_controller.{action_docs_index, action_docs_show}
-use portal.controllers.dashboard_controller.{action_dashboard_index}
-use portal.controllers.api.packages_controller.{
-    action_api_packages_index, action_api_packages_show, action_api_packages_publish
-}
-use portal.controllers.api.stats_controller.{action_api_stats_downloads}
+    val host = portal_option_value(args, "--host", DEFAULT_HOST)
+    val port = portal_option_value(args, "--port", DEFAULT_PORT)
+    val migrate = portal_has_option(args, "--migrate")
+    if portal_has_unknown_option(args):
+        val message = "Unknown portal option: {portal_first_unknown_option(args)}"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"portal\",\"status\":\"error\",\"message\":\"{message}\"}"
+        else:
+            error("portal", message)
+        return 1
 
-# Import database setup
-use portal.db.migrations.{run_portal_migrations}
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"portal\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\",\"host\":\"{host}\",\"port\":{port},\"migrate\":{portal_bool_json(migrate)}}"
+    else:
+        val progress = render_progress(log_opts.progress, 1, 1, "portal")
+        if progress != "":
+            print progress
+        print "{TOOL_NAME} v{TOOL_VERSION}"
+        print "Ready for portal startup planning at http://{host}:{port}."
+    0
 
-fn main():
-    """Start the Simple Language Portal server."""
-    val app_result = WebApp.create("src/app/portal/app.sdn")
-    var app = match app_result:
-        Ok(a): a
-        Err(e):
-            print "[Portal] Failed to create app: {e}"
-            return
+fn print_help():
+    print "{TOOL_NAME}"
+    print ""
+    print "Usage: simple portal [options]"
+    print ""
+    print "Options:"
+    print "  -h, --help          Show this help message"
+    print "  -v, --version       Show version information"
+    print "  --host <HOST>       Bind host (default: {DEFAULT_HOST})"
+    print "  --port <PORT>       Bind port (default: {DEFAULT_PORT})"
+    print "  --migrate           Plan database migrations before startup"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
 
-    # Run database migrations
-    if app.db != nil:
-        val db = app.db ?? return
-        val migrate_result = run_portal_migrations(db)
-        match migrate_result:
-            Ok(count):
-                if count > 0:
-                    print "[Portal] Applied {count} migrations"
-            Err(e):
-                print "[Portal] Migration error: {e}"
-                return
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
 
-    # Mount routes from SDN file
-    val mount_result = app.mount_routes("src/app/portal/routes.sdn")
-    app = match mount_result:
-        Ok(a): a
-        Err(e):
-            print "[Portal] Failed to mount routes: {e}"
-            return
+fn portal_option_value(args: [text], name: text, fallback: text) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == name and i + 1 < args.len():
+            return args[i + 1]
+        if arg.starts_with(name + "="):
+            return arg.substring(name.len() + 1)
+        i = i + 1
+    fallback
 
-    # Register public page handlers
-    app = app.register_action("home", "index", action_home_index)
-    app = app.register_action("packages", "index", action_packages_index)
-    app = app.register_action("packages", "show", action_packages_show)
-    app = app.register_action("packages", "versions", action_packages_versions)
-    app = app.register_action("docs", "index", action_docs_index)
-    app = app.register_action("docs", "show", action_docs_show)
+fn portal_has_option(args: [text], name: text) -> bool:
+    for arg in args:
+        if arg == name:
+            return true
+    false
 
-    # Register auth handlers
-    app = app.register_action("auth", "login_form", action_login_form)
-    app = app.register_action("auth", "login", action_login)
-    app = app.register_action("auth", "register_form", action_register_form)
-    app = app.register_action("auth", "register", action_register)
-    app = app.register_action("auth", "logout", action_logout)
+fn portal_bool_json(value: bool) -> text:
+    if value:
+        "true"
+    else:
+        "false"
 
-    # Register user profile handlers
-    app = app.register_action("users", "show", action_user_show)
-    app = app.register_action("users", "edit", action_user_edit)
-    app = app.register_action("users", "update", action_user_update)
+fn portal_has_unknown_option(args: [text]) -> bool:
+    portal_first_unknown_option(args) != ""
 
-    # Register dashboard handler
-    app = app.register_action("dashboard", "index", action_dashboard_index)
+fn portal_first_unknown_option(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--host" or arg == "--port":
+            i = i + 2
+        elif arg == "--migrate" or arg.starts_with("--host=") or arg.starts_with("--port="):
+            i = i + 1
+        elif arg.starts_with("-"):
+            return arg
+        else:
+            i = i + 1
+    ""
 
-    # Register API handlers
-    app = app.register_action("api_packages", "index", action_api_packages_index)
-    app = app.register_action("api_packages", "show", action_api_packages_show)
-    app = app.register_action("api_packages", "publish", action_api_packages_publish)
-    app = app.register_action("api_stats", "downloads", action_api_stats_downloads)
+fn portal_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
-    # Start the server
-    val start_result = app.start()
-    match start_result:
-        Ok(_):
-            print "[Portal] Running at http://localhost:3000"
-            print "[Portal] Press Ctrl+C to stop"
-            app.wait()
-        Err(e):
-            print "[Portal] Failed to start: {e}"
+fn portal_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if portal_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

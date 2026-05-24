@@ -11,6 +11,8 @@
 #   simple watch --no-deps            - Disable dependency tracking
 
 use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 use app.watch.runner.{WatchConfig, watch_config_default, watch_loop}
 
 extern fn rt_file_exists(path: text) -> bool
@@ -33,7 +35,30 @@ fn print_help():
     print "  --ext=<ext>      File extension filter (default: .spl)"
     print "  --clear          Clear screen between rebuilds"
     print "  --no-deps        Disable dependency tracking"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help       Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if _is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
 
 fn parse_watch_args(args: [text]) -> WatchConfig:
     var config = watch_config_default()
@@ -89,7 +114,13 @@ fn parse_watch_args(args: [text]) -> WatchConfig:
     config
 
 fn main() -> i64:
-    val args = get_cli_args()
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("watch", log_opts.error)
+        return 1
+
+    val args = clean_args(raw_args)
 
     val config = parse_watch_args(args)
 
@@ -100,6 +131,12 @@ fn main() -> i64:
     # Validate watch paths exist
     for path in config.watch_paths:
         if not rt_file_exists(path):
+            if log_opts.log_mode == "json":
+                print "{\"command\":\"watch\",\"status\":\"error\",\"error\":\"watch path not found\",\"path\":\"{path}\"}"
+                return 1
+            val progress = render_progress(log_opts.progress, 0, 1, "watch")
+            if progress != "":
+                print progress
             print "Error: watch path not found: {path}"
             return 1
 

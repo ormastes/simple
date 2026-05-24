@@ -1,7 +1,8 @@
 # LLM process generator.
 
 use std.cli.cli_util (get_cli_args)
-use common.text_advanced.{escape_json}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -35,8 +36,47 @@ struct ResultSummary:
     records: i64
     failures: [text]
 
+fn escape_json(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        elif ch == "\t":
+            out = out + "\\t"
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
 fn main() -> i64:
-    val opts = parse_options(clean_args())
+    val raw_args = clean_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("llm-process-gen", log_opts.error)
+        return 1
+    val args = clean_log_args(raw_args)
+    if args.len() == 0 and log_opts.log_mode == "json":
+        print "{\"command\":\"llm-process-gen\",\"status\":\"usage\"}"
+        return 0
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h"):
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
+        print_usage()
+        return 0
+    if args.len() > 0 and args[0].starts_with("-"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"llm-process-gen\",\"status\":\"error\",\"error\":\"unknown option\"}"
+            return 1
+    val opts = parse_options(args)
     if opts.usage_error:
         print_usage()
         return 2
@@ -68,6 +108,10 @@ fn print_usage():
     print "  --dry-run        For generate, report changes without writing"
     print "  --force          For generate, overwrite manually edited managed outputs"
     print "  -h, --help       Show this help"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
 
 fn clean_args() -> [text]:
     val raw = get_cli_args()
@@ -79,6 +123,27 @@ fn clean_args() -> [text]:
         out.push(raw[i])
         i = i + 1
     out
+
+fn is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
 
 fn parse_options(args: [text]) -> Options:
     var opts = Options(action: "", root: ".", owner_filter: "", mode_filter: "", stage_filter: "", json: false, dry_run: false, force: false, usage_error: false)

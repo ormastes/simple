@@ -3,23 +3,47 @@
 # This is a thin entrypoint that exposes shared RISC-V machine profile data
 # and delegates simulator-oracle runs to the existing `simple os` path.
 
-use app.io.cli_ops.{cli_get_args}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
 use app.sim.profile.{print_sim_help, print_targets, show_profile_by_arch, run_oracle_by_arch, boot_linux_by_arch}
 
+extern fn rt_cli_get_args() -> [text]
+
 fn get_cli_args() -> [text]:
-    val all_args = cli_get_args()
-    var args = []
-    var start_idx = 1
-    if all_args.len() > 1 and all_args[1].ends_with("main.spl"):
-        start_idx = 2
-    elif all_args.len() > 1 and all_args[1] == "sim":
-        start_idx = 2
-    var i = start_idx
+    val all_args = rt_cli_get_args()
+    var args: [text] = []
+    var start_idx = 0
+    var i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("main.spl") or all_args[i] == "sim":
+            start_idx = i + 1
+        i = i + 1
+    i = start_idx
     while i < all_args.len():
         args.push(all_args[i])
         i = i + 1
     args
+
+fn is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
 
 fn parse_arch_arg(args: [text]) -> text:
     for arg in args:
@@ -36,6 +60,16 @@ fn parse_arch_arg(args: [text]) -> text:
 
 fn print_help():
     print_sim_help()
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
 
 fn handle_show(args: [text]) -> i64:
     val arch_name = parse_arch_arg(args)
@@ -55,9 +89,18 @@ fn handle_boot_linux(args: [text]) -> i64:
     boot_linux_by_arch(arch_name)
 
 fn main() -> i64:
-    val args = get_cli_args()
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("sim", log_opts.error)
+        return 1
+
+    val args = clean_log_args(raw_args)
 
     if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"sim\",\"status\":\"usage\"}"
+            return 0
         print_help()
         return 0
 
@@ -75,15 +118,18 @@ fn main() -> i64:
         case "boot-linux":
             handle_boot_linux(rest)
         case "-h":
-            print_help()
+            print_help_with_progress(log_opts.progress)
             0
         case "--help":
-            print_help()
+            print_help_with_progress(log_opts.progress)
             0
         case "help":
-            print_help()
+            print_help_with_progress(log_opts.progress)
             0
         case _:
+            if log_opts.log_mode == "json":
+                print "{\"command\":\"sim\",\"status\":\"error\",\"error\":\"unknown command\"}"
+                return 1
             error("sim", "unknown subcommand '{subcommand}'")
             print ""
             print_help()

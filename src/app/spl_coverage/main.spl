@@ -3,6 +3,8 @@
 # Analyzes branch/decision coverage for Simple language (.spl) source files
 
 use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 # Coverage imports from io module
 use app.io.mod (coverage_dump_sdn, coverage_enabled, coverage_clear)
@@ -19,6 +21,32 @@ fn print_help():
     print "  clear     Clear coverage data"
     print ""
     print "Note: Set SIMPLE_COVERAGE=1 before running tests to enable coverage tracking"
+    print ""
+    print "Log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _filtered_args(args: [text]) -> [text]:
+    var filtered: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            i = i + 1
+        elif _is_log_option(arg):
+            pass
+        else:
+            filtered.push(arg)
+        i = i + 1
+    filtered
 
 fn get_arg(args: [text], flag: text, default_val: text) -> text:
     var i = 0
@@ -66,24 +94,59 @@ fn cmd_clear() -> i64:
 
 fn main() -> i64:
     val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("spl-coverage", log_opts.error)
+        return 1
 
-    if args.len() < 1:
+    val filtered_args = _filtered_args(args)
+    val as_json = log_opts.log_mode == "json"
+
+    if filtered_args.len() < 1:
+        if log_opts.progress != "summary" and not as_json:
+            val progress_line = render_progress(log_opts.progress, 0, 1, "spl-coverage")
+            if progress_line != "":
+                print progress_line
+        if as_json:
+            print "{\"command\":\"spl-coverage\",\"status\":\"error\",\"enabled\":false}"
+            return 1
         print_help()
         return 0
 
-    val command = args[0]
+    val command = filtered_args[0]
 
     match command:
         case "dump":
-            return cmd_dump(args)
+            return cmd_dump(filtered_args)
         case "status":
+            if log_opts.progress != "summary" and not as_json:
+                val progress_line = render_progress(log_opts.progress, 1, 1, "spl-coverage")
+                if progress_line != "":
+                    print progress_line
+            if as_json:
+                val enabled = if coverage_enabled(): "true" else: "false"
+                val status = if coverage_enabled(): "ok" else: "error"
+                print "{\"command\":\"spl-coverage status\",\"status\":\"{status}\",\"enabled\":{enabled}}"
+                if coverage_enabled():
+                    return 0
+                return 1
             return cmd_status()
         case "clear":
+            if log_opts.progress != "summary" and not as_json:
+                val progress_line = render_progress(log_opts.progress, 1, 1, "spl-coverage")
+                if progress_line != "":
+                    print progress_line
+            if as_json and not coverage_enabled():
+                print "{\"command\":\"spl-coverage clear\",\"status\":\"error\",\"enabled\":false}"
+                return 1
             return cmd_clear()
         case "--help" | "-h" | "help":
             print_help()
             return 0
         case _:
+            if as_json:
+                print "{\"command\":\"spl-coverage\",\"status\":\"error\",\"enabled\":false}"
+                return 1
             print "Unknown command: {command}"
             print_help()
             return 1

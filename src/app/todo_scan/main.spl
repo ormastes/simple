@@ -5,7 +5,34 @@
 #   Formatted:   # TODO: [area][priority] description [#issue]
 #   Unformatted: # TODO: description (assigned area=general, priority=P3)
 
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (dir_walk, file_read, file_exists, file_write, dir_create_all, cwd, is_dir)
+use std.log.{error}
+
+fn print_help():
+    print "Usage: simple todo-scan [options]"
+    print ""
+    print "Scan source files for TODO/FIXME comments and update TODO tracking files."
+    print ""
+    print "Options:"
+    print "  --json       Output summary as JSON"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help   Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _json_escape(value: text) -> text:
+    val slashes = value.replace("\\", "\\\\")
+    val quotes = slashes.replace("\"", "\\\"")
+    quotes.replace("\n", "\\n")
 
 # ============================================================================
 # Data Types
@@ -325,12 +352,35 @@ fn write_todo_md(entries: [TodoEntry], output_path: text):
 # ============================================================================
 
 fn main() -> i64:
+    val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("todo-scan", log_opts.error)
+        return 1
+
+    var as_json = log_opts.log_mode == "json"
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
+
     val root = cwd()
-    print "Scanning TODOs from {root}"
+    if not as_json:
+        print "Scanning TODOs from {root}"
 
     # Collect source files
     val files = collect_source_files(root)
-    print "Found {files.len()} source files to scan"
+    if not as_json:
+        print "Found {files.len()} source files to scan"
 
     # Scan all files
     var entries: [TodoEntry] = []
@@ -359,17 +409,30 @@ fn main() -> i64:
             ))
         next_id = next_id + file_entries.len()
 
-    print "Scan complete: {entries.len()} TODOs found"
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, files.len(), files.len(), "todo-scan")
+        if progress_line != "":
+            print progress_line
+
+    if not as_json:
+        print "Scan complete: {entries.len()} TODOs found"
 
     # Write outputs
     dir_create_all("{root}/doc/08_tracking/todo")
 
     val db_path = "{root}/doc/08_tracking/todo/todo_db.sdn"
     write_todo_db(entries, db_path)
-    print "Database saved to {db_path}"
+    if not as_json:
+        print "Database saved to {db_path}"
 
     val md_path = "{root}/doc/TODO.md"
     write_todo_md(entries, md_path)
-    print "Generated docs to {md_path}"
+    if as_json:
+        val root_json = _json_escape(root)
+        val db_json = _json_escape(db_path)
+        val md_json = _json_escape(md_path)
+        print "{\"command\":\"todo-scan\",\"status\":\"ok\",\"root\":\"{root_json}\",\"files\":{files.len()},\"todos\":{entries.len()},\"db\":\"{db_json}\",\"markdown\":\"{md_json}\"}"
+    else:
+        print "Generated docs to {md_path}"
 
     0

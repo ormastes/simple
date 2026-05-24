@@ -1160,6 +1160,7 @@ static SplRuntimeEnum* spl_enum_from_handle(int64_t handle) {
     return (SplRuntimeEnum*)(intptr_t)handle;
 }
 
+__attribute__((weak))
 int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     SplRuntimeEnum* value = (SplRuntimeEnum*)SPL_MALLOC(sizeof(SplRuntimeEnum), "enum");
     if (!value) return 0;
@@ -1169,11 +1170,13 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     return (int64_t)(intptr_t)value;
 }
 
+__attribute__((weak))
 int64_t rt_enum_discriminant(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value ? enum_value->discriminant : -1;
 }
 
+__attribute__((weak))
 int64_t rt_enum_payload(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value ? enum_value->payload : 0;
@@ -1515,7 +1518,7 @@ int64_t rt_remove(const char* p) { (void)p; return -1; }
 
 const char* rt_shell_output(const char* cmd) { return spl_shell_output(cmd); }
 
-SplArray* rt_cli_get_args(void) {
+__attribute__((weak)) SplArray* rt_cli_get_args(void) {
     SplArray* arr = spl_array_new();
     for (int i = 0; i < g_argc; i++) {
         spl_array_push(arr, spl_str(g_argv && g_argv[i] ? g_argv[i] : ""));

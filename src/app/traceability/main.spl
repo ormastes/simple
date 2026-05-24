@@ -1,6 +1,8 @@
 # Traceability Checker CLI
 
 use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 use app.traceability.core.{load_traceability_config, analyze_repo_traceability, format_traceability_warning, traceability_report_to_json}
 
 fn print_help():
@@ -11,12 +13,27 @@ fn print_help():
     print "Options:"
     print "  --scope=<name>    all (default), src, spec, doc"
     print "  --format=<name>   text (default), json"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help        Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 fn main() -> i64:
     val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("traceability", log_opts.error)
+        return 1
+
     var scope = "all"
-    var format = "text"
+    var format = if log_opts.log_mode == "json": "json" else: "text"
     var paths: [text] = []
 
     var i = 0
@@ -35,11 +52,21 @@ fn main() -> i64:
         elif arg == "--format" and i + 1 < args.len():
             i = i + 1
             format = args[i]
+        elif arg == "--json" or arg == "--log-mode=json":
+            format = "json"
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            i = i + 1
+        elif _is_log_option(arg):
+            pass
         elif not arg.starts_with("-"):
             paths.push(arg)
         i = i + 1
 
     val warnings = analyze_repo_traceability(paths, scope, load_traceability_config(), true)
+    if log_opts.progress != "summary" and format != "json":
+        val progress_line = render_progress(log_opts.progress, paths.len(), if paths.len() > 0: paths.len() else: 1, "traceability")
+        if progress_line != "":
+            print progress_line
     if format == "json":
         print traceability_report_to_json(warnings)
     else:

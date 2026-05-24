@@ -1,9 +1,12 @@
 # Simple CLI - replay command
-# Dispatches to native SReplay for .srr traces, or SFFI for legacy replay.
+# Startup-light dispatcher for SReplay traces and Rust log replay.
 
 use std.cli.cli_util (get_cli_args)
-use app.io.cli_commands (cli_replay)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 use app.replay.replay_session (run_replay)
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn has_srr_arg(args: [text]) -> bool:
     for arg in args:
@@ -11,10 +14,80 @@ fn has_srr_arg(args: [text]) -> bool:
             return true
     false
 
+fn print_help():
+    print "Usage: simple replay [options] <trace.srr|build.json>"
+    print ""
+    print "Replay a recorded process trace or inspect a build replay log."
+    print ""
+    print "SReplay options:"
+    print "  -a, --all            Show all events"
+    print "  -n, --steps <N>      Step through N events"
+    print ""
+    print "Build log options:"
+    print "  --compare <a> <b>    Compare two build replay logs"
+    print "  --extract-errors     Extract errors from a build replay log"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
 fn main() -> i64:
-    val args = get_cli_args()
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("replay", log_opts.error)
+        return 1
+
+    val args = replay_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"replay\",\"status\":\"error\",\"error\":\"replay requires a log file\"}"
+            return 1
+        print_help_with_progress(log_opts.progress)
+        return 1
     if has_srr_arg(args):
         run_replay(args)
         0
     else:
-        cli_replay(args)
+        delegate_replay(args)
+
+fn delegate_replay(args: [text]) -> i64:
+    var forwarded: [text] = ["replay"]
+    for arg in args:
+        forwarded.push(arg)
+    val (stdout, stderr, code) = rt_process_run("./bin/simple", forwarded)
+    if stdout != "":
+        print stdout
+    if stderr != "":
+        print stderr
+    code
+
+fn replay_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn replay_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if replay_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

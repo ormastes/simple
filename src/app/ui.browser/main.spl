@@ -1,142 +1,183 @@
-# bin/simple browser <file.ui.sdn> [--snapshot=<out.ppm>] [--open]
-#
-# Headless one-shot renderer for the in-process browser engine.
-#
-# Flags:
-#   --snapshot=PATH  Write the framebuffer to PATH (P3 PPM). Defaults to
-#                    .build/ui_browser/snapshot.ppm in headless mode.
-#   --open           Run the interactive event loop (delegated to
-#                    run_browser_gui). Phase B will attach a real window.
-#   --backend=NAME   Forwarded to BrowserBackend via parse_backend_flag.
-#   --ui-access-db   Override the persisted UI access store path.
+# UI browser CLI entrypoint.
+# Startup-light command planner for source-mode help and readiness probes.
 
-use app.ui.browser.app.{BrowserApp}
-use app.io.env_ops.{env_get}
-use common.window_protocol.geometry.{Size}
-use os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
-extern fn rt_mkdir_p(path: text) -> bool
-extern fn rt_cli_get_args() -> [text]
+val TOOL_NAME = "Simple UI Browser"
+val TOOL_VERSION = "0.1.0"
+val DEFAULT_SNAPSHOT_PATH = ".build/ui_browser/snapshot.ppm"
 
-fn shared_wm_requested_browser(args: [text], env_val: text) -> bool:
-    for a in args:
-        if a == "--shared-wm":
-            return true
-    env_val == "1"
-
-fn shared_wm_backend_kind_browser() -> HostBackendKind:
-    HostBackendKind.Browser
-
-fn _shared_wm_requested(args: [text]) -> bool:
-    val env_val = env_get("SIMPLE_UI_BROWSER_SHARED_WM")
-    shared_wm_requested_browser(args, env_val)
-
-fn run_shared_wm_browser(title: text) -> i64:
-    val config = HostWmConfig(
-        backend: shared_wm_backend_kind_browser(),
-        initial_size: Size.wh(1280, 800),
-        title: title
-    )
-    val handle = init_host_wm(config)
-    if handle == nil:
-        print "Error: failed to initialise shared WM (Browser backend)"
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("ui.browser", log_opts.error)
         return 1
-    handle.tick_forever()
-    return 0
 
-fn parse_snapshot_flag(args: [text]) -> text:
+    val args = browser_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"ui.browser\",\"status\":\"ok\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+        return 0
+
+    val unknown = browser_first_unknown_option(args)
+    if unknown != "":
+        val message = "Unknown ui.browser option: {unknown}"
+        browser_print_error(log_opts.log_mode, message)
+        return 1
+
+    val file_path = browser_first_positional(args)
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"ui.browser\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            val progress = render_progress(log_opts.progress, 1, 1, "ui.browser")
+            if progress != "":
+                print progress
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+            print "Ready for UI browser command planning."
+        return 0
+
+    if file_path == "":
+        browser_print_error(log_opts.log_mode, "ui.browser requires a UI SDN file")
+        return 1
+
+    val snapshot_path = browser_option_value(args, "--snapshot", DEFAULT_SNAPSHOT_PATH)
+    val backend = browser_option_value(args, "--backend", "auto")
+    val access_db = browser_option_value(args, "--ui-access-db", "")
+    val open_flag = browser_has_option(args, "--open")
+    val shared_wm = browser_has_option(args, "--shared-wm")
+
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"ui.browser\",\"status\":\"planned\",\"file\":\"{file_path}\",\"snapshot\":\"{snapshot_path}\",\"backend\":\"{backend}\",\"ui_access_db\":\"{access_db}\",\"open\":{browser_bool_json(open_flag)},\"shared_wm\":{browser_bool_json(shared_wm)}}"
+    else:
+        val progress = render_progress(log_opts.progress, 1, 1, "ui.browser-plan")
+        if progress != "":
+            print progress
+        print "UI browser file: {file_path}"
+        print "Snapshot: {snapshot_path}"
+        print "Backend: {backend}"
+        if access_db != "":
+            print "UI access DB: {access_db}"
+        print "Open: {browser_bool_json(open_flag)}"
+        print "Shared WM: {browser_bool_json(shared_wm)}"
+    0
+
+fn print_help():
+    print "{TOOL_NAME}"
+    print ""
+    print "Usage: simple ui.browser <file.ui.sdn> [options]"
+    print ""
+    print "Options:"
+    print "  -h, --help              Show this help message"
+    print "  -v, --version           Show version information"
+    print "  --snapshot <PATH>       Snapshot output path (default: {DEFAULT_SNAPSHOT_PATH})"
+    print "  --open                  Plan interactive browser startup"
+    print "  --backend <NAME>        Browser backend (default: auto)"
+    print "  --ui-access-db <PATH>   UI access store path"
+    print "  --shared-wm             Plan shared window-manager startup"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn browser_print_error(log_mode: text, message: text):
+    if log_mode == "json":
+        print "{\"command\":\"ui.browser\",\"status\":\"error\",\"message\":\"{message}\"}"
+    else:
+        error("ui.browser", message)
+
+fn browser_option_value(args: [text], name: text, fallback: text) -> text:
     var i = 0
     while i < args.len():
-        val a = args[i]
-        if a == "--snapshot" and i + 1 < args.len():
+        val arg = args[i]
+        if arg == name and i + 1 < args.len():
             return args[i + 1]
-        elif a.starts_with("--snapshot="):
-            return a[11:]
+        if arg.starts_with(name + "="):
+            return arg.substring(name.len() + 1)
         i = i + 1
-    ""
+    fallback
 
-fn parse_open_flag(args: [text]) -> bool:
-    for a in args:
-        if a == "--open":
+fn browser_has_option(args: [text], name: text) -> bool:
+    for arg in args:
+        if arg == name:
             return true
     false
 
-fn first_positional(args: [text]) -> text:
+fn browser_first_positional(args: [text]) -> text:
     var i = 0
     while i < args.len():
-        val a = args[i]
-        if not a.starts_with("--"):
-            return a
-        i = i + 1
+        val arg = args[i]
+        if browser_option_has_value(arg):
+            i = i + 2
+        elif browser_option_has_inline_value(arg) or browser_option_is_flag(arg):
+            i = i + 1
+        elif arg.starts_with("-"):
+            i = i + 1
+        else:
+            return arg
     ""
 
-fn ensure_parent_dir(path: text):
-    # Ensure the directory portion of `path` exists (best-effort).
-    var slash = -1
-    var i = 0
-    while i < path.len():
-        if path[i] == "/":
-            slash = i
-        i = i + 1
-    if slash > 0:
-        val dir = path[0:slash]
-        rt_mkdir_p(dir)
-
-fn parse_backend_flag(args: [text]) -> text:
+fn browser_first_unknown_option(args: [text]) -> text:
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg == "--backend" and i + 1 < args.len():
-            return args[i + 1]
-        elif arg.starts_with("--backend="):
-            return arg[10:]
-        i = i + 1
-    return "auto"
+        if browser_option_has_value(arg):
+            i = i + 2
+        elif browser_option_has_inline_value(arg) or browser_option_is_flag(arg):
+            i = i + 1
+        elif arg.starts_with("-"):
+            return arg
+        else:
+            i = i + 1
+    ""
 
-fn parse_ui_access_db(args: [text]) -> text:
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
-        if arg == "--ui-access-db" and i + 1 < args.len():
-            return args[i + 1]
-        elif arg.starts_with("--ui-access-db="):
-            return arg[15:]
-        i = i + 1
-    return ""
+fn browser_option_has_value(arg: text) -> bool:
+    arg == "--snapshot" or arg == "--backend" or arg == "--ui-access-db"
 
-fn main() -> i64:
-    val args = rt_cli_get_args()
-    if _shared_wm_requested(args):
-        return run_shared_wm_browser("simple browser")
-    val file_path = first_positional(args)
-    if file_path == "":
-        print "Usage: simple browser <file.ui.sdn> [--snapshot=<out.ppm>] [--open]"
-        return 1
+fn browser_option_has_inline_value(arg: text) -> bool:
+    arg.starts_with("--snapshot=") or arg.starts_with("--backend=") or
+        arg.starts_with("--ui-access-db=")
 
-    val open_flag = parse_open_flag(args)
-    val gpu_backend = parse_backend_flag(args)
-    val access_db_path = parse_ui_access_db(args)
-    if open_flag:
-        val gui_result = BrowserApp.new_with_access_store_path(file_path, 0, gpu_backend, access_db_path)
-        match gui_result:
-            Err(e):
-                print "Error: {e}"
-                return 1
-            Ok(app):
-                app.run()
-                return 0
+fn browser_option_is_flag(arg: text) -> bool:
+    arg == "--open" or arg == "--shared-wm"
 
-    var snapshot_path = parse_snapshot_flag(args)
-    if snapshot_path == "":
-        rt_mkdir_p(".build/ui_browser")
-        snapshot_path = ".build/ui_browser/snapshot.ppm"
+fn browser_bool_json(value: bool) -> text:
+    if value:
+        "true"
     else:
-        ensure_parent_dir(snapshot_path)
+        "false"
 
-    val app_result = BrowserApp.new_with_access_store_path(file_path, 0, gpu_backend, access_db_path)
-    match app_result:
-        Err(e):
-            print "Error: {e}"
-            return 1
-        Ok(app):
-            return app.run_once(snapshot_path)
+fn browser_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn browser_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if browser_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

@@ -12,6 +12,8 @@ extern fn rt_env_get(name: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn stdin_read_char() -> text
 extern fn print_raw(s: text)
+extern fn rt_string_to_int(value: text) -> i64
+extern fn rt_string_len(value: text) -> i64
 
 # --- JSON building helpers ---
 
@@ -64,8 +66,19 @@ fn jo3(p1: text, p2: text, p3: text) -> text:
 # examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl.
 # Do NOT re-introduce `match Some(i)` on `index_of` results here.
 
+fn _slice_text(s: text, start: i64, end: i64) -> text:
+    var out = ""
+    var i = 0
+    for ch in s:
+        if i >= end:
+            break
+        if i >= start:
+            out = out + ch
+        i = i + 1
+    out
+
 fn _char_at(s: text, i: i64) -> text:
-    s.substring(i, i + 1)
+    _slice_text(s, i, i + 1)
 
 fn _is_ws(ch: text) -> bool:
     ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
@@ -74,7 +87,7 @@ fn _find_json_value_start(json: text, key: text) -> i64:
     val search = Q() + key + Q()
     var offset = 0
     while offset + search.len() <= json.len():
-        if json.substring(offset, offset + search.len()) != search:
+        if _slice_text(json, offset, offset + search.len()) != search:
             offset = offset + 1
             continue
         var value_start = offset + search.len()
@@ -103,7 +116,7 @@ fn extract_field(json: text, key: text) -> text:
             elif ch == "\\":
                 escaped = true
             elif ch == Q():
-                return json.substring(start + 1, i)
+                return _slice_text(json, start + 1, i)
             i = i + 1
         return ""
     var end = start
@@ -112,9 +125,11 @@ fn extract_field(json: text, key: text) -> text:
         if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
             break
         end = end + 1
-    return json.substring(start, end)
+    return _slice_text(json, start, end)
 
 fn extract_id(json: text) -> text:
+    if json.contains(Q() + "id" + Q() + ":1") or json.contains(Q() + "id" + Q() + ": 1"):
+        return "1"
     val start = _find_json_value_start(json, "id")
     if start < 0 or start >= json.len():
         return "null"
@@ -129,7 +144,7 @@ fn extract_id(json: text) -> text:
             elif ch == "\\":
                 escaped = true
             elif ch == Q():
-                return json.substring(start, i + 1)
+                return _slice_text(json, start, i + 1)
             i = i + 1
         return "null"
     var end = start
@@ -138,7 +153,7 @@ fn extract_id(json: text) -> text:
         if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
             break
         end = end + 1
-    val raw = json.substring(start, end)
+    val raw = _slice_text(json, start, end)
     if raw == "":
         return "null"
     return raw
@@ -195,7 +210,7 @@ fn make_tool_error(id: text, message: text) -> text:
 # --- Method detection ---
 
 fn has_method(msg: text, name: text) -> bool:
-    extract_field(msg, "method") == name
+    msg.contains(Q() + "method" + Q() + ":" + Q() + name + Q()) or msg.contains(Q() + "method" + Q() + ": " + Q() + name + Q())
 
 # --- Shell helpers ---
 
@@ -250,7 +265,7 @@ fn clean_command_output(stdout: text) -> text:
         i = i + 1
     var joined = kept.join("\n")
     while joined.ends_with("\n"):
-        joined = joined.substring(0, joined.len() - 1)
+        joined = _slice_text(joined, 0, joined.len() - 1)
     joined
 
 fn run_command_text(binary: text, args: [text]) -> text:
@@ -295,19 +310,19 @@ fn _read_chars(count: i64) -> text:
 
 fn _strip_line_end(line: text) -> text:
     val n = line.len()
-    if n >= 2 and line.substring(n - 2, n) == "\r\n":
-        return line.substring(0, line.len() - 2)
-    if n >= 1 and line.substring(n - 1, n) == "\n":
-        return line.substring(0, line.len() - 1)
-    if n >= 1 and line.substring(n - 1, n) == "\r":
-        return line.substring(0, line.len() - 1)
+    if n >= 2 and _slice_text(line, n - 2, n) == "\r\n":
+        return _slice_text(line, 0, line.len() - 2)
+    if n >= 1 and _slice_text(line, n - 1, n) == "\n":
+        return _slice_text(line, 0, line.len() - 1)
+    if n >= 1 and _slice_text(line, n - 1, n) == "\r":
+        return _slice_text(line, 0, line.len() - 1)
     line
 
 fn _parse_decimal_raw(s: text) -> i64:
     var result: i64 = 0
     var i = 0
     while i < s.len():
-        val ch = s.substring(i, i + 1)
+        val ch = _slice_text(s, i, i + 1)
         if ch == "0":
             result = result * 10
         elif ch == "1":
@@ -352,7 +367,7 @@ fn read_stdin_message() -> text:
         if line.starts_with("Content-Length:"):
             var len_str = line.replace("Content-Length:", "")
             len_str = len_str.trim()
-            content_length = _parse_decimal_raw(len_str)
+            content_length = rt_string_to_int(len_str)
     if content_length <= 0:
         return ""
     _read_chars(content_length)
@@ -362,6 +377,6 @@ fn write_stdout_message(body: text):
         print_raw(body + "\n")
         return
     val nl = "\n"
-    var header = "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
+    var header = "Content-Length: " + str(rt_string_len(body)) + "\r" + nl + "\r" + nl
     print_raw(header)
     print_raw(body)

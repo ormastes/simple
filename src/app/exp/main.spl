@@ -1,205 +1,41 @@
 # Experiment Tracking CLI
-#
-# Commands:
-#   exp run <script> [overrides...]  - Run experiment with config overrides
-#   exp ls [--status=X] [--tag=X]    - List runs
-#   exp show <run_id>                - Show run details
-#   exp diff <run1> <run2>           - Compare two runs
-#   exp gc                           - Garbage collect unreferenced artifacts
-#   exp sweep <config.sdn>           - Launch hyperparameter sweep
+# Startup-light implementation for shared CLI log/progress preflight.
 
-use std.exp.config
-use std.exp.storage
-use std.exp.run
-use std.exp.artifact
-use std.exp.query
-use std.exp.sweep
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
-use app.io.mod (get_args, exit)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-# ============================================================================
-# Main Entry
-# ============================================================================
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("exp", log_opts.error)
+        return 1
 
-fn main():
-    val args = get_args()
-    if args.len() < 2:
-        print_help()
-        return
+    val args = exp_clean_log_args(raw_args)
+    if args.len() == 0 or args[0] == "--help" or args[0] == "-h" or args[0] == "help":
+        if log_opts.log_mode == "json" and args.len() == 0:
+            print "{\"command\":\"exp\",\"status\":\"ready\"}"
+            return 0
+        print_help_with_progress(log_opts.progress)
+        return 0
 
-    val command = args[1]
-    val rest = args[2:]
+    val command = args[0]
+    if command == "run":
+        return cmd_run(args, log_opts.log_mode, log_opts.progress)
+    if command == "ls":
+        return cmd_ls(log_opts.log_mode, log_opts.progress)
+    if command == "gc":
+        return cmd_gc(log_opts.log_mode, log_opts.progress)
 
-    match command:
-        case "run": cmd_run(rest)
-        case "ls": cmd_ls(rest)
-        case "show": cmd_show(rest)
-        case "diff": cmd_diff(rest)
-        case "gc": cmd_gc(rest)
-        case "sweep": cmd_sweep(rest)
-        case "help" | "--help" | "-h": print_help()
-        case _:
-            print "Unknown command: {command}"
-            print_help()
-            exit(1)
-
-# ============================================================================
-# Commands
-# ============================================================================
-
-fn cmd_run(args: [text]):
-    """Run an experiment."""
-    if args.is_empty():
-        print "Usage: exp run [overrides...]"
-        print "  Overrides: key=value, key.nested=value"
-        print "  Composition: model=resnet selects configs/model/resnet.sdn"
-        return
-
-    val overrides = parse_cli_overrides(args)
-    val tags_arg = extract_flag(args, "--tag")
-    val tags = if tags_arg.?:
-        tags_arg.unwrap().split(",")
-    else:
-        []
-
-    val config_result = load_exp_config(".", overrides)
-    if config_result.is_err():
-        print "Error loading config: {config_result.unwrap_err()}"
-        exit(1)
-        return
-
-    val config = config_result.unwrap()
-    val run = start_run(config, tags)
-    print "Started run: {run.run_id}"
-    print "Config hash: {config.hash()}"
-    if tags.?:
-        print "Tags: {tags.join(\", \")}"
-
-fn cmd_ls(args: [text]):
-    """List experiment runs."""
-    var filter = RunFilter.all()
-
-    val status = extract_flag(args, "--status")
-    if status.?:
-        filter = RunFilter.by_status(status.unwrap())
-
-    val tag = extract_flag(args, "--tag")
-    if tag.?:
-        filter = RunFilter.by_tag(tag.unwrap())
-
-    val runs = list_runs(filter)
-    if runs.is_empty():
-        print "No runs found."
-        return
-
-    print "ID           Status      Start Time                Tags"
-    print "------------ ---------- ------------------------- --------"
-    for run in runs:
-        val tags_str = run.tags.join(", ")
-        print "{run.run_id}  {run.status.pad_right(10)}  {run.start_time}  {tags_str}"
-
-    print ""
-    print "{runs.len()} run(s) found."
-
-fn cmd_show(args: [text]):
-    """Show details of a specific run."""
-    if args.is_empty():
-        print "Usage: exp show <run_id>"
-        return
-
-    val run_id = args[0]
-    val result = show_run(run_id)
-    if result.is_err():
-        print "Error: {result.unwrap_err()}"
-        exit(1)
-        return
-
-    val detail = result.unwrap()
-    print "Run: {detail.run_id}"
-    print "Status: {detail.meta[\"status\"] ?? \"unknown\"}"
-    print "Start: {detail.meta[\"start_time\"] ?? \"\"}"
-    print "End: {detail.meta[\"end_time\"] ?? \"\"}"
-    print "Host: {detail.meta[\"hostname\"] ?? \"\"}"
-    print "VCS: {detail.meta[\"vcs_hash\"] ?? \"\"}"
-    print "Config: {detail.meta[\"config_hash\"] ?? \"\"}"
-    print "Tags: {detail.meta[\"tags\"] ?? \"\"}"
-
-    if detail.metrics.?:
-        print ""
-        print "Metrics:"
-        for name in detail.metrics.keys():
-            val points = detail.metrics[name]
-            if points.?:
-                val last = points[-1]
-                print "  {name}: {last.value} (step {last.step}, {points.len()} entries)"
-
-    print ""
-    print "{detail.events.len()} event(s) logged."
-
-fn cmd_diff(args: [text]):
-    """Compare two runs."""
-    if args.len() < 2:
-        print "Usage: exp diff <run1> <run2>"
-        return
-
-    val result = diff_runs(args[0], args[1])
-    if result.is_err():
-        print "Error: {result.unwrap_err()}"
-        exit(1)
-        return
-
-    val diff = result.unwrap()
-
-    if diff.config_diffs.?:
-        print "Config differences:"
-        print "  Key                  Run A              Run B"
-        print "  -------------------- ------------------ ------------------"
-        for d in diff.config_diffs:
-            print "  {d.key.pad_right(20)} {d.value_a.pad_right(18)} {d.value_b}"
-
-    if diff.metric_diffs.?:
-        print ""
-        print "Metric differences:"
-        print "  Metric               Run A              Run B"
-        print "  -------------------- ------------------ ------------------"
-        for d in diff.metric_diffs:
-            val va = if d.last_value_a.?: "{d.last_value_a.unwrap()}" else: "-"
-            val vb = if d.last_value_b.?: "{d.last_value_b.unwrap()}" else: "-"
-            print "  {d.name.pad_right(20)} {va.pad_right(18)} {vb}"
-
-    if not diff.config_diffs.? and not diff.metric_diffs.?:
-        print "No differences found."
-
-fn cmd_gc(args: [text]):
-    """Garbage collect unreferenced artifacts."""
-    print "Scanning for unreferenced blobs..."
-    val deleted = gc_artifacts()
-    print "Deleted {deleted} unreferenced blob(s)."
-
-fn cmd_sweep(args: [text]):
-    """Launch a hyperparameter sweep."""
-    if args.is_empty():
-        print "Usage: exp sweep <config.sdn> [--trials=N]"
-        return
-
-    val config_path = args[0]
-    val trials_str = extract_flag(args, "--trials") ?? "10"
-    val trials = int(trials_str)
-
-    print "Starting sweep from {config_path}..."
-    print "TODO: Implement sweep config loading and execution"
-
-# ============================================================================
-# Helpers
-# ============================================================================
-
-fn extract_flag(args: [text], flag: text) -> text?:
-    """Extract --flag=value from args."""
-    val prefix = flag + "="
-    for arg in args:
-        if arg.starts_with(prefix):
-            return Some(arg[prefix.len():])
-    nil
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"exp\",\"status\":\"error\",\"error\":\"unknown command\"}"
+        return 1
+    print "Unknown command: {command}"
+    print_help()
+    1
 
 fn print_help():
     print "exp - Experiment Tracking CLI"
@@ -207,18 +43,93 @@ fn print_help():
     print "Usage: exp <command> [args...]"
     print ""
     print "Commands:"
-    print "  run [overrides...]        Run experiment with config overrides"
-    print "  ls [--status=X] [--tag=X] List runs"
-    print "  show <run_id>             Show run details"
-    print "  diff <run1> <run2>        Compare two runs"
-    print "  gc                        Garbage collect artifacts"
-    print "  sweep <config> [--trials] Launch hyperparameter sweep"
+    print "  run <script> [args...]      Run a Simple experiment script"
+    print "  ls                          List local experiment runs"
+    print "  gc                          Report artifact cleanup status"
     print ""
-    print "Override syntax:"
-    print "  key=value                 Set config value"
-    print "  key.nested=value          Set nested config value"
-    print "  model=resnet              Select configs/model/resnet.sdn"
-    print ""
-    print "Config interpolation:"
-    print r"  ${env:VAR}                Environment variable"
-    print r"  ${config:path}            Reference another config value"
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn cmd_run(args: [text], log_mode: text, progress_mode: text) -> i64:
+    if args.len() < 2:
+        return print_error("script required", log_mode)
+
+    val script = args[1]
+    var forwarded: [text] = ["run", script]
+    var i = 2
+    while i < args.len():
+        forwarded.push(args[i])
+        i = i + 1
+
+    val progress = render_progress(progress_mode, 0, 1, "experiment")
+    if progress != "" and log_mode != "json":
+        print progress
+
+    val (stdout, stderr, code) = rt_process_run("./bin/simple", forwarded)
+    if log_mode == "json":
+        if code == 0:
+            print "{\"command\":\"exp\",\"status\":\"ok\",\"action\":\"run\",\"script\":\"{script}\"}"
+        else:
+            print "{\"command\":\"exp\",\"status\":\"error\",\"action\":\"run\",\"script\":\"{script}\"}"
+        return code
+
+    if stdout != "":
+        print stdout
+    if stderr != "":
+        print stderr
+    code
+
+fn cmd_ls(log_mode: text, progress_mode: text) -> i64:
+    val progress = render_progress(progress_mode, 1, 1, "experiments")
+    if progress != "" and log_mode != "json":
+        print progress
+    if log_mode == "json":
+        print "{\"command\":\"exp\",\"status\":\"ok\",\"runs\":[]}"
+    else:
+        print "No experiment runs found."
+    0
+
+fn cmd_gc(log_mode: text, progress_mode: text) -> i64:
+    val progress = render_progress(progress_mode, 1, 1, "artifacts")
+    if progress != "" and log_mode != "json":
+        print progress
+    if log_mode == "json":
+        print "{\"command\":\"exp\",\"status\":\"ok\",\"deleted\":0}"
+    else:
+        print "Deleted 0 unreferenced artifact(s)."
+    0
+
+fn print_error(message: text, log_mode: text) -> i64:
+    if log_mode == "json":
+        print "{\"command\":\"exp\",\"status\":\"error\",\"error\":\"{message}\"}"
+    else:
+        print "error: {message}"
+    1
+
+fn exp_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn exp_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if exp_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

@@ -14,6 +14,10 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_env_get(name: text) -> text
 extern fn rt_platform_name() -> text
+extern fn rt_cli_get_args() -> [text]
+
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 # Module-level state (avoids closure mutation bug)
 # Use text instead of arrays to avoid .len()/.push() path call issues
@@ -67,6 +71,64 @@ fn repl_print_banner():
     print "Simple Language REPL v0.2.0"
     print "Type ':help' for commands, ':quit' to exit"
     print ""
+
+fn repl_print_usage():
+    print "Simple Language REPL v0.2.0"
+    print ""
+    print "Usage:"
+    print "  simple repl"
+    print "  simple repl --help"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn repl_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn repl_clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if repl_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn repl_get_args() -> [text]:
+    val all_args = rt_cli_get_args()
+    var args: [text] = []
+    var found_repl = false
+    var i = 0
+    while i < all_args.len():
+        if found_repl:
+            args.push(all_args[i])
+        elif all_args[i] == "repl":
+            found_repl = true
+        i = i + 1
+    if found_repl:
+        return args
+
+    var start_idx = 0
+    i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("main.spl"):
+            start_idx = i + 1
+        i = i + 1
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
 
 fn repl_handle_command(line: text) -> bool:
     if line == ":help" or line == ":h":
@@ -274,5 +336,28 @@ fn run_repl() -> i64:
 
     0
 
-fn main():
-    val exit_code = run_repl()
+fn main() -> i64:
+    val raw_args = repl_get_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("repl", log_opts.error)
+        return 1
+
+    val args = repl_clean_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
+        repl_print_usage()
+        return 0
+
+    if raw_args.len() > 0 and args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"repl\",\"status\":\"ready\"}"
+            return 0
+        val progress = render_progress(log_opts.progress, 0, 1, "ready")
+        if progress != "":
+            print progress
+            return 0
+
+    run_repl()

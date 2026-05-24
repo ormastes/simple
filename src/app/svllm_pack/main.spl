@@ -18,6 +18,8 @@ use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, 
 use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{serialize_manifest}
 use std.gc_async_mut.svllm.nvfs_client.{ObjClass, CreateFlags, OpenMode}
 use std.gc_async_mut.svllm.nvfs_client.std_fs.{StdFsNvfsClient, publish_staged}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 # Exit codes (kept as named constants for readability; see module-header docs).
 val EXIT_OK: i32 = 0
@@ -41,6 +43,10 @@ fn _usage() -> ():
     print("")
     print("usage:")
     print("  svllm-pack <in.safetensors> <out-dir>")
+    print("")
+    print("Shared log options:")
+    for line in log_options_help():
+        print("  " + line)
 
 # Copy a byte range [start, start+len) out of `src` into a fresh [u8].
 fn _slice_bytes(src: [u8], start: i64, len: i64) -> [u8]:
@@ -195,6 +201,9 @@ fn _do_pack(in_path: text, out_dir: text) -> Result<(), text>:
 # argv[0] is the program name. The test passes ["svllm-pack"] (no args) and
 # expects exit code 2.
 fn run(argv: [text]) -> i32:
+    if argv.len() >= 2 and (argv[1] == "--help" or argv[1] == "-h"):
+        _usage()
+        return EXIT_OK
     if argv.len() < 3:
         _usage()
         return EXIT_USAGE
@@ -207,9 +216,30 @@ fn run(argv: [text]) -> i32:
     print("svllm-pack: wrote pack to " + out_dir)
     EXIT_OK
 
-# Strip runtime-injected prefix ("bin/simple", "run", "<script>.spl") so that
-# downstream argv looks like the argv a compiled binary would see.
-fn _normalize_argv(raw: [text]) -> [text]:
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if _is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+# Strip runtime-injected prefix ("bin/simple", "run", "<script>.spl") so the
+# shared preflight sees only command arguments.
+fn _command_args(raw: [text]) -> [text]:
     var out: [text] = []
     var skip_spl = true
     var i = 0
@@ -223,16 +253,37 @@ fn _normalize_argv(raw: [text]) -> [text]:
         else:
             out.push(a)
             i = i + 1
-    # Prepend a synthetic program name so argv[0] is always the binary name.
+    out
+
+fn _argv_from_args(args: [text]) -> [text]:
     var final: [text] = ["svllm-pack"]
     var j = 0
-    while j < out.len():
-        final.push(out[j])
+    while j < args.len():
+        final.push(args[j])
         j = j + 1
     final
 
-fn main() -> ():
-    val argv = _normalize_argv(rt_cli_get_args())
+fn main() -> i64:
+    val args = _command_args(rt_cli_get_args())
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("svllm-pack", log_opts.error)
+        return 1
+    val clean_args = _clean_log_args(args)
+    if clean_args.len() == 0:
+        if log_opts.log_mode == "json":
+            print("{\"command\":\"svllm-pack\",\"status\":\"usage\"}")
+            return 0
+    elif clean_args[0] == "--help" or clean_args[0] == "-h":
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print(progress)
+        _usage()
+        return 0
+    elif clean_args[0].starts_with("-"):
+        if log_opts.log_mode == "json":
+            print("{\"command\":\"svllm-pack\",\"status\":\"error\",\"error\":\"unknown option\"}")
+            return 1
+    val argv = _argv_from_args(clean_args)
     val code = run(argv)
-    if code != EXIT_OK:
-        print("(exit " + (code as i64).to_text() + ")")
+    code as i64

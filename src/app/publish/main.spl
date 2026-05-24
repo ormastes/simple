@@ -2,6 +2,7 @@
 # Build package and push to GHCR registry
 
 use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.package.registry.types (PublishResult, RegistryConfig)
 use app.package.registry.config (default_config, config_with_overrides, oci_ref_for)
 use app.package.registry.auth (has_credentials, print_auth_error, get_token)
@@ -17,10 +18,13 @@ fn print_help():
     print "Publish current package to the Simple registry (GHCR)."
     print ""
     print "Options:"
+    print "  --json            Output as JSON"
     print "  --dry-run         Show what would be published"
     print "  --token=TOKEN     Override auth token"
     print "  --registry=URL    Override registry URL"
     print "  --allow-dirty     Allow uncommitted changes"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help        Show this help"
     print ""
     print "The command reads simple.sdn in the current directory,"
@@ -28,6 +32,14 @@ fn print_help():
 
 fn print_error(msg: text):
     error("publish", msg)
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 # Parse name and version from simple.sdn
 fn parse_manifest(content: text) -> [text]:
@@ -65,11 +77,20 @@ fn main() -> i64:
     var token_override = ""
     var registry_override = ""
     var allow_dirty = false
+    var as_json = false
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        print_error(log_opts.error)
+        return 1
 
-    for arg in args:
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
         elif arg == "--dry-run":
             dry_run = true
         elif arg == "--allow-dirty":
@@ -78,6 +99,14 @@ fn main() -> i64:
             token_override = arg[8:]
         elif arg.starts_with("--registry="):
             registry_override = arg[11:]
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
+
+    if log_opts.log_mode == "json":
+        as_json = true
 
     val cwd = cwd()
 
@@ -104,6 +133,15 @@ fn main() -> i64:
 
     val config = config_with_overrides(registry_override, "")
     val oci_ref = oci_ref_for(config, name, version)
+
+    if as_json:
+        print "{\"command\":\"publish\",\"dry_run\":{dry_run},\"name\":\"{name}\",\"version\":\"{version}\",\"registry\":\"{config.registry_url}\",\"oci_ref\":\"{oci_ref}\"}"
+        return 0
+
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, 1, 1, "publish")
+        if progress_line != "":
+            print progress_line
 
     print "Publishing {name}@{version}"
     print "  Registry: {config.registry_url}"

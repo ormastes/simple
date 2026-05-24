@@ -1,211 +1,152 @@
-# VSCode Extension Build CLI
-# Compile Simple code to WASM for VSCode extensions
-#
-# Usage:
-#   simple vscode build [options]
-#   simple vscode build --watch
-#   simple vscode build --release
+# VSCode Extension Build CLI.
+# Startup-light surface for the legacy extension builder.
 
-# Build options
-struct BuildOptions:
-    source_dir: text
-    output_dir: text
-    release: bool
-    watch: bool
-    generate_manifest: bool
-    extension_name: text
-    version: text
-    lsp_wasm: bool
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
-fn default_build_options() -> BuildOptions:
-    BuildOptions(
-        source_dir: "src",
-        output_dir: "out",
-        release: false,
-        watch: false,
-        generate_manifest: true,
-        extension_name: "",
-        version: "1.0.0",
-        lsp_wasm: false
-    )
+val TOOL_NAME = "VSCode Extension Builder"
+val TOOL_VERSION = "1.0.0"
 
-# Build result
-struct BuildResult:
-    success: bool
-    wasm_path: text
-    manifest_path: text
-    errors: [text]
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("vscode-extension-old", log_opts.error)
+        return 1
 
-fn default_build_result() -> BuildResult:
-    BuildResult(
-        success: false,
-        wasm_path: "",
-        manifest_path: "",
-        errors: []
-    )
+    val args = vscode_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"vscode-extension-old\",\"status\":\"ok\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+        return 0
 
-# Compile result
-struct CompileResult:
-    success: bool
-    path: text
-    errors: [text]
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"vscode-extension-old\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            val progress = render_progress(log_opts.progress, 1, 1, "vscode-extension-old")
+            if progress != "":
+                print progress
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+            print "Ready for extension build planning."
+        return 0
 
-# VSCode extension builder
-fn build_extension(options: BuildOptions) -> BuildResult:
-    """Build VSCode extension."""
-    var result = default_build_result()
+    if args[0] == "build":
+        print_build_plan(args, log_opts.log_mode, log_opts.progress)
+        return 0
 
-    # Step 0: Build LSP WASM if requested
-    if options.lsp_wasm:
-        print "Compiling LSP server to WASM..."
-        val lsp_result = compile_lsp_to_wasm(options)
-        if not lsp_result.success:
-            result = BuildResult(success: false, wasm_path: "", manifest_path: "", errors: lsp_result.errors)
-            return result
-        print "  LSP WASM: {lsp_result.path}"
-
-    # Step 1: Compile Simple to WASM
-    print "Compiling Simple to WASM..."
-    val wasm_result = compile_to_wasm(options)
-
-    if not wasm_result.success:
-        result = BuildResult(success: false, wasm_path: "", manifest_path: "", errors: wasm_result.errors)
-        return result
-
-    var manifest_path = ""
-
-    # Step 2: Generate manifest
-    if options.generate_manifest:
-        print "Generating package.json..."
-        manifest_path = "package.json"
-
-    # Step 3: Generate JS wrapper
-    print "Generating JavaScript wrapper..."
-    val wrapper_path = "{options.output_dir}/extension.js"
-
-    # Step 4: Copy assets
-    print "Copying assets..."
-    copy_assets(options)
-
-    BuildResult(success: true, wasm_path: wasm_result.path, manifest_path: manifest_path, errors: [])
-
-fn compile_to_wasm(options: BuildOptions) -> CompileResult:
-    """Compile Simple code to WASM."""
-    val wasm_path = "{options.output_dir}/extension.wasm"
-
-    var args = ["build", "--target", "wasm32-unknown-unknown"]
-
-    if options.release:
-        args.push("--release")
-
-    args.push("--output")
-    args.push(wasm_path)
-    args.push("{options.source_dir}/extension.spl")
-
-    # Execute simple compiler
-    val run_result = process_run("simple", args)
-    val exit_code = run_result[2]
-
-    if exit_code == 0:
-        CompileResult(success: true, path: wasm_path, errors: [])
+    val message = "Unknown command: {args[0]}"
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"vscode-extension-old\",\"status\":\"error\",\"message\":\"{message}\"}"
     else:
-        val stderr = run_result[1]
-        CompileResult(success: false, path: "", errors: [stderr])
+        error("vscode-extension-old", message)
+    1
 
-fn compile_lsp_to_wasm(options: BuildOptions) -> CompileResult:
-    """Compile Simple LSP server to WASM for VSCode Web."""
-    val wasm_dir = "{options.output_dir}/wasm"
-    val lsp_wasm_path = "{wasm_dir}/simple-lsp.wasm"
+fn print_help():
+    print "{TOOL_NAME}"
+    print ""
+    print "Usage: simple vscode-extension-old [command] [options]"
+    print ""
+    print "Commands:"
+    print "  build             Plan a VSCode extension build"
+    print ""
+    print "Options:"
+    print "  -h, --help        Show this help message"
+    print "  -v, --version     Show version information"
+    print "  --release         Use release build settings"
+    print "  --watch           Enable watch mode"
+    print "  --lsp-wasm        Include LSP WASM output"
+    print "  --no-manifest     Skip manifest generation"
+    print "  --source <DIR>    Source directory (default: src)"
+    print "  --output <DIR>    Output directory (default: out)"
+    print "  --name <NAME>     Extension package name"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
 
-    var args = ["build", "--target", "wasm32-wasi"]
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
 
-    if options.release:
-        args.push("--release")
+fn print_build_plan(args: [text], log_mode: text, progress_mode: text):
+    val source_dir = vscode_option_value(args, "--source", "src")
+    val output_dir = vscode_option_value(args, "--output", "out")
+    val extension_name = vscode_option_value(args, "--name", "")
+    val release = vscode_has_option(args, "--release")
+    val watch = vscode_has_option(args, "--watch")
+    val lsp_wasm = vscode_has_option(args, "--lsp-wasm")
+    val manifest = not vscode_has_option(args, "--no-manifest")
 
-    args.push("--output")
-    args.push(lsp_wasm_path)
-    args.push("src/lib/nogc_sync_mut/lsp/main.spl")
+    if log_mode == "json":
+        print "{\"command\":\"vscode-extension-old\",\"status\":\"planned\",\"source\":\"{source_dir}\",\"output\":\"{output_dir}\",\"release\":{vscode_bool_json(release)},\"watch\":{vscode_bool_json(watch)},\"lspWasm\":{vscode_bool_json(lsp_wasm)},\"manifest\":{vscode_bool_json(manifest)}}"
+        return
 
-    val run_result = process_run("simple", args)
-    val exit_code = run_result[2]
+    val progress = render_progress(progress_mode, 1, 1, "build-plan")
+    if progress != "":
+        print progress
+    print "{TOOL_NAME} build plan"
+    print "  source: {source_dir}"
+    print "  output: {output_dir}"
+    if extension_name != "":
+        print "  name: {extension_name}"
+    if release:
+        print "  mode: release"
+    if watch:
+        print "  watch: enabled"
+    if lsp_wasm:
+        print "  lsp wasm: enabled"
+    if not manifest:
+        print "  manifest: disabled"
 
-    if exit_code == 0:
-        CompileResult(success: true, path: lsp_wasm_path, errors: [])
+fn vscode_bool_json(value: bool) -> text:
+    if value:
+        "true"
     else:
-        val stderr = run_result[1]
-        CompileResult(success: false, path: "", errors: [stderr])
+        "false"
 
-fn copy_assets(options: BuildOptions):
-    """Copy assets to output directory."""
-    val assets = ["README.md", "CHANGELOG.md", "LICENSE", "LICENSE.md", "icon.png"]
-
-    for asset in assets:
-        if file_exists(asset):
-            print "  Copied {asset}"
-
-# Parse command-line arguments
-fn parse_args() -> BuildOptions:
-    """Parse command-line arguments."""
-    var options = default_build_options()
-    val args = get_args()
-
+fn vscode_option_value(args: [text], name: text, fallback: text) -> text:
     var i = 0
     while i < args.len():
         val arg = args[i]
-
-        if arg == "--release":
-            options = BuildOptions(source_dir: options.source_dir, output_dir: options.output_dir, release: true, watch: options.watch, generate_manifest: options.generate_manifest, extension_name: options.extension_name, version: options.version, lsp_wasm: options.lsp_wasm)
-        elif arg == "--watch":
-            options = BuildOptions(source_dir: options.source_dir, output_dir: options.output_dir, release: options.release, watch: true, generate_manifest: options.generate_manifest, extension_name: options.extension_name, version: options.version, lsp_wasm: options.lsp_wasm)
-        elif arg == "--lsp-wasm":
-            options = BuildOptions(source_dir: options.source_dir, output_dir: options.output_dir, release: options.release, watch: options.watch, generate_manifest: options.generate_manifest, extension_name: options.extension_name, version: options.version, lsp_wasm: true)
-        elif arg == "--no-manifest":
-            options = BuildOptions(source_dir: options.source_dir, output_dir: options.output_dir, release: options.release, watch: options.watch, generate_manifest: false, extension_name: options.extension_name, version: options.version, lsp_wasm: options.lsp_wasm)
-        elif arg == "--source":
-            i = i + 1
-            if i < args.len():
-                options = BuildOptions(source_dir: args[i], output_dir: options.output_dir, release: options.release, watch: options.watch, generate_manifest: options.generate_manifest, extension_name: options.extension_name, version: options.version, lsp_wasm: options.lsp_wasm)
-        elif arg == "--output":
-            i = i + 1
-            if i < args.len():
-                options = BuildOptions(source_dir: options.source_dir, output_dir: args[i], release: options.release, watch: options.watch, generate_manifest: options.generate_manifest, extension_name: options.extension_name, version: options.version, lsp_wasm: options.lsp_wasm)
-        elif arg == "--name":
-            i = i + 1
-            if i < args.len():
-                options = BuildOptions(source_dir: options.source_dir, output_dir: options.output_dir, release: options.release, watch: options.watch, generate_manifest: options.generate_manifest, extension_name: args[i], version: options.version, lsp_wasm: options.lsp_wasm)
-        elif arg == "--version":
-            i = i + 1
-            if i < args.len():
-                options = BuildOptions(source_dir: options.source_dir, output_dir: options.output_dir, release: options.release, watch: options.watch, generate_manifest: options.generate_manifest, extension_name: options.extension_name, version: args[i], lsp_wasm: options.lsp_wasm)
-
+        if arg == name and i + 1 < args.len():
+            return args[i + 1]
+        if arg.starts_with(name + "="):
+            return arg.substring(name.len() + 1)
         i = i + 1
+    fallback
 
-    options
+fn vscode_has_option(args: [text], name: text) -> bool:
+    for arg in args:
+        if arg == name:
+            return true
+    false
 
-# Main entry point
-fn main():
-    """VSCode extension build CLI entry point."""
-    print "VSCode Extension Builder"
-    print "========================"
-    print ""
+fn vscode_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
-    # Parse arguments
-    val options = parse_args()
-
-    # Build
-    val result = build_extension(options)
-
-    # Report results
-    if result.success:
-        print ""
-        print "Build succeeded"
-        print "  WASM: {result.wasm_path}"
-        if result.manifest_path != "":
-            print "  Manifest: {result.manifest_path}"
-        print ""
-        print "Run 'simple vscode package' to create .vsix file"
-    else:
-        print ""
-        print "Build failed:"
-        for err in result.errors:
-            print "  {err}"
+fn vscode_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if vscode_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

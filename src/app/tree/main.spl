@@ -2,7 +2,9 @@
 # Shows dependency tree
 
 use std.cli.cli_util (get_cli_args, find_manifest_path, parse_deps_section)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (file_exists, file_read, cwd)
+use std.log.{error}
 
 fn print_help():
     print "Usage: simple tree [options]"
@@ -10,9 +12,28 @@ fn print_help():
     print "Display the dependency tree for the current project."
     print ""
     print "Options:"
+    print "  --json       Output as JSON"
     print "  --depth=N    Maximum tree depth (default: unlimited)"
     print "  --dev        Include dev dependencies"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help   Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _json_array(names: [text]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < names.len():
+        parts.push("\"{names[i]}\"")
+        i = i + 1
+    "[" + parts.join(",") + "]"
 
 fn print_tree_node(name: text, prefix: text, is_last: bool, modules_dir: text, max_depth: i64, current_depth: i64):
     val connector = if is_last then "└── " else "├── "
@@ -37,15 +58,32 @@ fn main() -> i64:
 
     var max_depth = 99
     var include_dev = false
+    var as_json = false
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("tree", log_opts.error)
+        return 1
 
-    for arg in args:
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
         elif arg.starts_with("--depth="):
             max_depth = arg[8:].to_int()
         elif arg == "--dev":
             include_dev = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
+
+    if log_opts.log_mode == "json":
+        as_json = true
 
     val manifest_path = find_manifest_path()
     if manifest_path == "":
@@ -69,13 +107,23 @@ fn main() -> i64:
     val current_dir = cwd()
     val modules_dir = "{current_dir}/simple_modules"
 
-    print "{project_name} v{project_version}"
-
     var all_deps = []
     for name in deps:
         all_deps.push(name)
     for name in dev_deps:
         all_deps.push(name)
+
+    if as_json:
+        print "{\"name\":\"{project_name}\",\"version\":\"{project_version}\",\"dependencies\":" + _json_array(deps) + ",\"dev_dependencies\":" + _json_array(dev_deps) + ",\"root_count\":{all_deps.len()}}"
+        return 0
+
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, all_deps.len(), all_deps.len(), "tree")
+        if progress_line != "":
+            print progress_line
+
+    print "{project_name} v{project_version}"
+
     if all_deps.len() == 0:
         print "└── (no dependencies)"
         return 0

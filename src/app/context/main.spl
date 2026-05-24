@@ -14,6 +14,8 @@
 use app.io.cli_ops (context_generate, context_stats, cli_get_args, cli_file_exists)
 use app.io.mod (file_write)
 use std.cli.cli_util (has_flag)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 fn print_help():
     print "Simple Context Pack Generator"
@@ -31,6 +33,8 @@ fn print_help():
     print "  --text          Shorthand for --format=text"
     print "  -o <file>       Output to file instead of stdout"
     print "  --stats         Show context reduction statistics"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help      Show this help"
     print ""
     print "Examples:"
@@ -42,6 +46,28 @@ fn print_help():
     print "  - 90% reduction in LLM context tokens"
     print "  - Extracts only symbols used by target"
     print "  - Multiple export formats (JSON, Markdown, Text)"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _get_context_args(all_args: [text]) -> [text]:
+    var args: [text] = []
+    var start_idx = 1
+    var scan_idx = 0
+    while scan_idx < all_args.len():
+        if all_args[scan_idx].ends_with("main.spl"):
+            start_idx = scan_idx + 1
+        scan_idx = scan_idx + 1
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
 
 fn get_file_stem(path: text) -> text:
     # Extract filename without extension
@@ -55,13 +81,11 @@ fn get_file_stem(path: text) -> text:
 
 fn main() -> i64:
     val all_args = cli_get_args()
-
-    # Skip program name and script name
-    var args = []
-    var i = 2
-    while i < all_args.len():
-        args.push(all_args[i])
-        i = i + 1
+    val args = _get_context_args(all_args)
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("context", log_opts.error)
+        return 1
 
     # Check for help
     if args.len() == 0 or has_flag(args, "-h") or has_flag(args, "--help"):
@@ -72,11 +96,34 @@ fn main() -> i64:
             return 0
 
     # Parse arguments
-    val source_path = args[0]
+    var source_path = ""
+    var source_idx = 0
+    var scan_arg_idx = 0
+    while scan_arg_idx < args.len():
+        val arg = args[scan_arg_idx]
+        if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            scan_arg_idx = scan_arg_idx + 1
+        elif _is_log_option(arg):
+            val _unused = 0
+        elif not arg.starts_with("-"):
+            source_path = arg
+            source_idx = scan_arg_idx
+            break
+        scan_arg_idx = scan_arg_idx + 1
+    if source_path == "":
+        print_help()
+        return 1
 
     # Check file exists
     if not cli_file_exists(source_path):
-        print "context: cannot read {source_path}: file not found"
+        if log_opts.progress != "summary" and log_opts.log_mode != "json":
+            val progress_line = render_progress(log_opts.progress, 0, 1, "context")
+            if progress_line != "":
+                print progress_line
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"context\",\"status\":\"error\",\"source\":\"{source_path}\"}"
+        else:
+            print "context: cannot read {source_path}: file not found"
         return 1
 
     # Default target is file stem
@@ -86,7 +133,7 @@ fn main() -> i64:
     var show_stats = false
 
     # Parse remaining arguments
-    var j = 1
+    var j = source_idx + 1
     while j < args.len():
         val arg = args[j]
         if arg == "--json":
@@ -101,6 +148,10 @@ fn main() -> i64:
                 j = j + 1
         elif arg.starts_with("--format="):
             format = arg[9:]
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            j = j + 1
+        elif _is_log_option(arg):
+            val _unused = 0
         elif not arg.starts_with("-"):
             target = arg
         j = j + 1
@@ -116,7 +167,10 @@ fn main() -> i64:
     # Generate context
     val output = context_generate(source_path, target, format)
     if output == "":
-        print "context: failed to generate context for {source_path}"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"context\",\"status\":\"error\",\"source\":\"{source_path}\"}"
+        else:
+            print "context: failed to generate context for {source_path}"
         return 1
 
     # Write output
@@ -124,8 +178,16 @@ fn main() -> i64:
         if not file_write(output_file, output):
             print "context: cannot write {output_file}"
             return 1
+        if log_opts.progress != "summary":
+            val progress_line = render_progress(log_opts.progress, 1, 1, "context")
+            if progress_line != "":
+                print progress_line
         print "Context written to {output_file}"
         return 0
 
+    if log_opts.progress != "summary" and log_opts.log_mode != "json":
+        val progress_line = render_progress(log_opts.progress, 1, 1, "context")
+        if progress_line != "":
+            print progress_line
     print output
     return 0

@@ -1,6 +1,8 @@
 # SPipe process harness CLI.
 
 use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 use std.nogc_async_mut.llm_diagnostics.hook_handler.{read_hook_stdin, extract_str}
 use std.nogc_async_mut.llm_diagnostics.exporters.file_exporter.{append_raw_jsonl}
 use std.nogc_async_mut.spipe_process_harness.core.{
@@ -17,13 +19,18 @@ extern fn rt_env_get(name: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn main() -> i64:
-    val args = clean_args()
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("spipe-process-harness", log_opts.error)
+        return 1
+    val args = clean_args(raw_args)
     if args.len() == 0 or args[0] == "help" or args[0] == "--help":
         print_usage()
         return 0
     val action = args[0]
     if action == "state":
-        return write_state(args)
+        return write_state(args, log_opts.log_mode == "json", log_opts.progress)
     if action == "hook":
         return run_hook(args)
     if action == "gate":
@@ -35,16 +42,33 @@ fn main() -> i64:
     print_usage()
     2
 
-fn clean_args() -> [text]:
-    val raw = get_cli_args()
+fn clean_args(raw: [text]) -> [text]:
     var out: [text] = []
-    var i = 0
-    if raw.len() > 0 and raw[0] == "spipe-process-harness":
-        i = 1
+    var i = 1
+    var scan_idx = 0
+    while scan_idx < raw.len():
+        if raw[scan_idx].ends_with("main.spl"):
+            i = scan_idx + 1
+        scan_idx = scan_idx + 1
     while i < raw.len():
-        out.push(raw[i])
+        val arg = raw[i]
+        if arg == "spipe-process-harness":
+            pass
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            i = i + 1
+        elif is_log_option(arg):
+            pass
+        else:
+            out.push(arg)
         i = i + 1
     out
+
+fn is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 fn option(args: [text], name: text, default_value: text) -> text:
     var i = 0
@@ -62,7 +86,7 @@ fn has_flag(args: [text], name: text) -> bool:
             return true
     false
 
-fn write_state(args: [text]) -> i64:
+fn write_state(args: [text], as_json: bool, progress: text) -> i64:
     val feature = option(args, "--feature", "spipe-process-harness")
     val request = option(args, "--request", "SPipe production-level process harness")
     val goal = option(args, "--goal", "Common hook, deploy, HUD, and prevention infra for Codex, Claude, and Gemini")
@@ -71,7 +95,14 @@ fn write_state(args: [text]) -> i64:
     rt_dir_create(".spipe", true)
     rt_dir_create(".spipe/{feature}", true)
     if rt_file_write_text(path, render_state(feature, request, goal, approved)):
-        print path
+        if progress != "summary" and not as_json:
+            val progress_line = render_progress(progress, 1, 1, "spipe-process-harness")
+            if progress_line != "":
+                print progress_line
+        if as_json:
+            print "{\"command\":\"spipe-process-harness state\",\"status\":\"ok\",\"path\":\"{path}\"}"
+        else:
+            print path
         return 0
     1
 
@@ -155,3 +186,7 @@ fn print_usage():
     print "  gate --feature <slug>"
     print "  hud [--model M] [--hr N] [--week N] [--goal text]"
     print "  deploy"
+    print ""
+    print "Log options:"
+    for line in log_options_help():
+        print "  {line}"

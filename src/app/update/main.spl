@@ -2,7 +2,9 @@
 # Updates dependencies in simple.sdn and simple.lock
 
 use std.cli.cli_util (get_cli_args, find_manifest_path, parse_deps_section)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (file_exists, file_read, file_write, cwd)
+use std.log.{error}
 
 fn print_help():
     print "Usage: simple update [package] [options]"
@@ -11,23 +13,59 @@ fn print_help():
     print "If no package is specified, updates all dependencies."
     print ""
     print "Options:"
+    print "  --json       Output as JSON"
     print "  --dry-run    Show what would be updated without changes"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help   Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _json_array(names: [text]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < names.len():
+        parts.push("\"{names[i]}\"")
+        i = i + 1
+    "[" + parts.join(",") + "]"
 
 fn main() -> i64:
     val args = get_cli_args()
 
     var dry_run = false
     var target_pkg = ""
+    var as_json = false
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("update", log_opts.error)
+        return 1
 
-    for arg in args:
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
         elif arg == "--dry-run":
             dry_run = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
         elif not arg.starts_with("-"):
             target_pkg = arg
+        ai = ai + 1
+
+    if log_opts.log_mode == "json":
+        as_json = true
 
     val manifest_path = find_manifest_path()
     if manifest_path == "":
@@ -37,6 +75,9 @@ fn main() -> i64:
     val deps = parse_deps_section(content, "dependencies")
 
     if deps.len() == 0:
+        if as_json:
+            print "{\"dry_run\":{dry_run},\"target\":\"{target_pkg}\",\"count\":0,\"dependencies\":[]}"
+            return 0
         print "No dependencies found in manifest."
         return 0
 
@@ -49,7 +90,10 @@ fn main() -> i64:
         for name in deps:
             if name == target_pkg:
                 found = true
-                if dry_run:
+                if as_json:
+                    print "{\"dry_run\":{dry_run},\"target\":\"{target_pkg}\",\"count\":1,\"dependencies\":[\"{name}\"]}"
+                    return 0
+                elif dry_run:
                     print "Would update '{name}'"
                 else:
                     print "Updated '{name}'"
@@ -58,6 +102,13 @@ fn main() -> i64:
             return 1
     else:
         # Update all
+        if as_json:
+            print "{\"dry_run\":{dry_run},\"target\":\"\",\"count\":{deps.len()},\"dependencies\":" + _json_array(deps) + "}"
+            return 0
+        if log_opts.progress != "summary":
+            val progress_line = render_progress(log_opts.progress, deps.len(), deps.len(), "update")
+            if progress_line != "":
+                print progress_line
         if dry_run:
             print "Would update {deps.len()} dependencies:"
         else:

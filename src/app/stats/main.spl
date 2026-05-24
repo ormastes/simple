@@ -1,42 +1,77 @@
-# Project statistics aggregation and reporting
+# Project statistics aggregation and reporting.
+# Startup-light entrypoint for shared CLI log/progress preflight.
 
-use compiler.tools.stats.types (ProjectStats, LineCount, TestStats, CoverageStats, FeatureStats, BugStats, FileStats)
-use compiler.tools.stats.file_scanner (scan_project_files)
-use compiler.tools.stats.line_counter (count_project_lines)
-use compiler.tools.stats.db_aggregator (collect_test_stats, collect_coverage_stats,
-    collect_feature_stats, collect_bug_stats)
-use compiler.tools.stats.formatter (format_stats_table)
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
-# Main entry point for stats command
-fn run_stats(args: [text]):
-    print "Collecting statistics..."
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("stats", log_opts.error)
+        return 1
+
+    val args = stats_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+
+    val file_count = count_project_files()
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"stats\",\"status\":\"ok\",\"files\":{file_count}}"
+        return 0
+
+    val progress = render_progress(log_opts.progress, 1, 1, "stats")
+    if progress != "":
+        print progress
+    print "Project statistics"
+    print "Files scanned: {file_count}"
+    0
+
+fn print_help():
+    print "Usage: simple stats [options]"
     print ""
-    print "About to scan files..."
+    print "Show project statistics without loading the compiler tooling graph."
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
 
-    val file_stats = scan_project_files()
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
 
-    print "Files scanned: {file_stats.total_files}"
-    # val file_stats = FileStats(total_files: 0, app_files: 0, lib_files: 0, std_files: 0, test_files: 0, doc_files: 0)
-    # val line_stats = count_project_lines()
-    val line_stats = LineCount(code: 0, blank: 0, comment: 0, total: 0)
-    # val test_stats = collect_test_stats()
-    val test_stats = TestStats(total: 0, passed: 0, failed: 0, skipped: 0,
-        spipe_count: 0, sdoc_count: 0, system_count: 0, integration_count: 0, unit_count: 0)
-    # val coverage_stats = collect_coverage_stats()
-    val coverage_stats = CoverageStats(percent: 0.0, lines_covered: 0, lines_total: 0)
-    # val feature_stats = collect_feature_stats()
-    val feature_stats = FeatureStats(total: 0, complete: 0, in_progress: 0, planned: 0)
-    # val bug_stats = collect_bug_stats()
-    val bug_stats = BugStats(total: 0, open: 0, critical: 0, fixed: 0)
+fn count_project_files() -> text:
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", [
+        "-c",
+        "find src test doc -type f 2>/dev/null | wc -l | tr -d ' '"
+    ])
+    if code != 0:
+        return "0"
+    stdout.trim()
 
-    val stats = ProjectStats(
-        file_stats: file_stats,
-        line_stats: line_stats,
-        test_stats: test_stats,
-        coverage_stats: coverage_stats,
-        feature_stats: feature_stats,
-        bug_stats: bug_stats
-    )
+fn stats_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
-    print format_stats_table(stats)
-
+fn stats_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if stats_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

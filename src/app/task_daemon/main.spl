@@ -19,13 +19,15 @@
 #   start_time=1234567890
 
 use std.fs.{file_read_text, file_write_text, file_exists, mkdir_p, list_dir}
-use std.cli.cli_util.{get_cli_args}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_cli_get_args() -> [text]
 
 val TASK_DIR = ".build/task_daemon/tasks"
 val OUTPUT_DIR = ".build/task_daemon/outputs"
@@ -206,8 +208,17 @@ fn cmd_list():
     print "[" + tasks.join(",") + "]"
 
 fn main() -> i64:
-    val args = get_cli_args()
+    val raw_args = _task_daemon_get_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("task-daemon", log_opts.error)
+        return 1
+
+    val args = _task_daemon_clean_args(raw_args)
     if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"task-daemon\",\"status\":\"usage\"}"
+            return 0
         cmd_list()
         return 0
 
@@ -215,6 +226,12 @@ fn main() -> i64:
     val rest = if args.len() > 1: args[1:] else: []
 
     match subcmd:
+        case "--help":
+            print_task_daemon_help_with_progress(log_opts.progress)
+        case "-h":
+            print_task_daemon_help_with_progress(log_opts.progress)
+        case "help":
+            print_task_daemon_help_with_progress(log_opts.progress)
         case "submit":
             cmd_submit(rest)
         case "status":
@@ -224,7 +241,78 @@ fn main() -> i64:
         case "list":
             cmd_list()
         case _:
+            if log_opts.log_mode == "json":
+                print "{\"command\":\"task-daemon\",\"status\":\"error\",\"error\":\"unknown command\"}"
+                return 1
             print "Unknown task-daemon subcommand: {subcmd}"
             print "Usage: simple task-daemon [submit|status|cancel|list]"
             return 1
     0
+
+fn print_task_daemon_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_task_daemon_help()
+
+fn print_task_daemon_help():
+    print "Simple Task Daemon"
+    print ""
+    print "Usage: simple task-daemon [submit|status|cancel|list] [args...]"
+    print ""
+    print "Commands:"
+    print "  submit <command>   Spawn command in background"
+    print "  status <task_id>   Get task status and partial output"
+    print "  cancel <task_id>   Kill a running task"
+    print "  list               List all tracked tasks"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn _task_daemon_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _task_daemon_clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if _task_daemon_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn _task_daemon_get_args() -> [text]:
+    val all_args = rt_cli_get_args()
+    var args: [text] = []
+    var found = false
+    var i = 0
+    while i < all_args.len():
+        if found:
+            args.push(all_args[i])
+        elif all_args[i] == "task-daemon":
+            found = true
+        i = i + 1
+    if found:
+        return args
+
+    var start_idx = 0
+    i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("main.spl"):
+            start_idx = i + 1
+        i = i + 1
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args

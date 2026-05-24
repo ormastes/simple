@@ -1,6 +1,7 @@
 # Simple-native release tooling.
 
 use std.cli.cli_util.{get_cli_args}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.log.{error}
 
@@ -26,6 +27,22 @@ fn print_help():
     print "  --files-dir=DIR      Directory of assets to upload"
     print "  --draft              Create draft release"
     print "  --prerelease         Mark as prerelease"
+    print "  --json               Output as JSON"
+    for line in log_options_help():
+        print "  {line}"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _json_escape(value: text) -> text:
+    val slashes = value.replace("\\", "\\\\")
+    val quotes = slashes.replace("\"", "\\\"")
+    quotes.replace("\n", "\\n")
 
 fn print_plan():
     print "Release/Deploy Migration Plan"
@@ -41,6 +58,9 @@ fn print_plan():
     print "3. Installer/download path"
     print "   Add `simple release install` to download the correct bootstrap package and install it without `install.shs`."
     print "   Status: pending."
+
+fn print_plan_json():
+    print "{\"command\":\"release plan\",\"status\":\"ok\",\"steps\":5,\"implemented\":1,\"partial\":1,\"pending\":3}"
     print ""
     print "4. Bootstrap entrypoint"
     print "   Replace shell bootstrap wrappers with a Simple-native orchestrator where feasible."
@@ -64,7 +84,7 @@ fn has_flag(args: [text], key: text) -> bool:
             return true
     false
 
-fn run_github(args: [text]) -> i64:
+fn run_github(args: [text], as_json: bool) -> i64:
     var repo = arg_value(args, "repo")
     if repo == "":
         repo = default_repo()
@@ -111,7 +131,13 @@ fn run_github(args: [text]) -> i64:
             )
             match release_result:
                 Ok(url):
-                    print "Release published: {url}"
+                    if as_json:
+                        val repo_json = _json_escape(repo)
+                        val tag_json = _json_escape(tag)
+                        val url_json = _json_escape(url)
+                        print "{\"command\":\"release github\",\"status\":\"ok\",\"repo\":\"{repo_json}\",\"tag\":\"{tag_json}\",\"url\":\"{url_json}\"}"
+                    else:
+                        print "Release published: {url}"
                     return 0
                 Err(err_msg):
                     error("release", err_msg)
@@ -119,19 +145,42 @@ fn run_github(args: [text]) -> i64:
 
 fn main() -> i64:
     val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("release", log_opts.error)
+        return 1
     if args.len() == 0:
         print_help()
         return 0
 
     val subcommand = if args[0] == "release" and args.len() > 1: args[1] else: args[0]
     val sub_args = if args[0] == "release" and args.len() > 1: args[2:] else: args[1:]
+    var as_json = log_opts.log_mode == "json"
+    var ai = 0
+    while ai < sub_args.len():
+        val arg = sub_args[ai]
+        if arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
+
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, 1, 1, "release {subcommand}")
+        if progress_line != "":
+            print progress_line
 
     match subcommand:
         case "plan":
-            print_plan()
+            if as_json:
+                print_plan_json()
+            else:
+                print_plan()
             return 0
         case "github":
-            return run_github(sub_args)
+            return run_github(sub_args, as_json)
         case "-h" | "--help" | "help":
             print_help()
             return 0

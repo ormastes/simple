@@ -9,8 +9,24 @@
 #       current_timestamp, items_to_json
 #   }
 
-use std.json.builder.{JsonBuilder, JsonArrayBuilder, escape_json}
 use std.io.{rt_timestamp_now}
+
+fn escape_json(s: text) -> text:
+    var out = ""
+    for ch in s:
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\t":
+            out = out + "\\t"
+        elif ch == "\r":
+            out = out + "\\r"
+        else:
+            out = out + ch
+    out
 
 
 # ============================================================================
@@ -19,26 +35,52 @@ use std.io.{rt_timestamp_now}
 
 # Extract a string value from JSON by key
 fn extract_json_string(json: text, key: text) -> text:
-    val pattern = "\"{key}\": \""
+    val pattern = "\"{key}\""
     val start = json.find(pattern)
     if start < 0:
         return ""
 
-    val value_start = start + pattern.len()
-    val value_end = json.find("\"", value_start)
-    if value_end < 0:
+    var pos = start + pattern.len()
+    while pos < json.len() and json.char_at(pos) != ':':
+        pos = pos + 1
+    if pos >= json.len():
+        return ""
+    pos = pos + 1
+    while pos < json.len() and (json.char_at(pos) == ' ' or json.char_at(pos) == '\t'):
+        pos = pos + 1
+    if pos >= json.len() or json.char_at(pos) != '"':
         return ""
 
-    json.substring(value_start, value_end)
+    val value_start = pos + 1
+    pos = value_start
+    var escaped = false
+    while pos < json.len():
+        val ch = json.char_at(pos)
+        if ch == '"' and not escaped:
+            return json.substring(value_start, pos)
+        escaped = ch == '\\' and not escaped
+        if ch != '\\':
+            escaped = false
+        pos = pos + 1
+
+    ""
 
 # Extract an integer value from JSON by key
 fn extract_json_int(json: text, key: text) -> i64:
-    val pattern = "\"{key}\": "
+    val pattern = "\"{key}\""
     val start = json.find(pattern)
     if start < 0:
         return 0
 
-    val value_start = start + pattern.len()
+    var value_start = start + pattern.len()
+    while value_start < json.len() and json.char_at(value_start) != ':':
+        value_start = value_start + 1
+    if value_start >= json.len():
+        return 0
+    value_start = value_start + 1
+    while value_start < json.len() and (json.char_at(value_start) == ' ' or json.char_at(value_start) == '\t'):
+        value_start = value_start + 1
+
     var value_end = value_start
     while value_end < json.len():
         val ch = json.char_at(value_end)
@@ -55,12 +97,20 @@ fn extract_json_int(json: text, key: text) -> i64:
 
 # Extract a float value from JSON by key
 fn extract_json_float(json: text, key: text) -> f64:
-    val pattern = "\"{key}\": "
+    val pattern = "\"{key}\""
     val start = json.find(pattern)
     if start < 0:
         return 0.0
 
-    val value_start = start + pattern.len()
+    var value_start = start + pattern.len()
+    while value_start < json.len() and json.char_at(value_start) != ':':
+        value_start = value_start + 1
+    if value_start >= json.len():
+        return 0.0
+    value_start = value_start + 1
+    while value_start < json.len() and (json.char_at(value_start) == ' ' or json.char_at(value_start) == '\t'):
+        value_start = value_start + 1
+
     var value_end = value_start
     while value_end < json.len():
         val ch = json.char_at(value_end)
@@ -76,12 +126,23 @@ fn extract_json_float(json: text, key: text) -> f64:
 
 # Extract a string array from JSON by key
 fn extract_json_array(json: text, key: text) -> [text]:
-    val pattern = "\"{key}\": ["
+    val pattern = "\"{key}\""
     val start = json.find(pattern)
     if start < 0:
         return []
 
-    val array_start = start + pattern.len()
+    var array_start = start + pattern.len()
+    while array_start < json.len() and json.char_at(array_start) != ':':
+        array_start = array_start + 1
+    if array_start >= json.len():
+        return []
+    array_start = array_start + 1
+    while array_start < json.len() and (json.char_at(array_start) == ' ' or json.char_at(array_start) == '\t'):
+        array_start = array_start + 1
+    if array_start >= json.len() or json.char_at(array_start) != '[':
+        return []
+    array_start = array_start + 1
+
     val array_end = json.find("]", array_start)
     if array_end < 0:
         return []
@@ -122,31 +183,20 @@ fn timestamp_to_iso(micros: i64) -> text:
 
 # Convert a list of items to JSON array using a converter function
 fn items_to_json<T>(items: [T], item_key: text, converter: fn(T) -> text) -> text:
-    val arr = JsonArrayBuilder.new()
+    var raw_items: [text] = []
     for item in items:
-        arr.item_raw(converter(item))
+        raw_items.push(converter(item))
 
-    JsonBuilder.object()
-        .field_int("total", items.len())
-        .field_array_raw(item_key, arr)
-        .build()
+    "{\"total\":" + str(items.len()) + ",\"" + escape_json(item_key) + "\":[" + raw_items.join(",") + "]}"
 
 # Create an error response
 fn error_json(message: text) -> text:
-    JsonBuilder.object()
-        .field("error", message)
-        .build()
+    "{\"error\":\"" + escape_json(message) + "\"}"
 
 # Create a success response
 fn success_json(id: text) -> text:
-    JsonBuilder.object()
-        .field_bool("success", true)
-        .field("id", id)
-        .build()
+    "{\"success\":true,\"id\":\"" + escape_json(id) + "\"}"
 
 # Create a success response with custom key
 fn success_json_with_key(key: text, value: text) -> text:
-    JsonBuilder.object()
-        .field_bool("success", true)
-        .field(key, value)
-        .build()
+    "{\"success\":true,\"" + escape_json(key) + "\":\"" + escape_json(value) + "\"}"

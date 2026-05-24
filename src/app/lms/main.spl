@@ -1,239 +1,118 @@
-# Language Model Server (LMS) - Main Entry Point
-# Provides MCP (Model Context Protocol) server for AI assistants
+# Language Model Server entrypoint.
+# Startup-light CLI surface for source-mode help and readiness probes.
 
-import std.args
-import web.http.server.{HttpServer, HttpRequest, HttpResponse, HttpHandler}
-import core.json.{Json, JsonValue}
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
-# Server configuration
-val DEFAULT_PORT: u16 = 8765
-val SERVER_NAME = "Simple LMS"
+val SERVER_NAME = "Simple Language Model Server"
+val SERVER_SHORT_NAME = "Simple LMS"
 val SERVER_VERSION = "0.1.0"
+val DEFAULT_PORT = "8765"
+
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("lms", log_opts.error)
+        return 1
+
+    val args = lms_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"lms\",\"status\":\"ok\",\"version\":\"{SERVER_VERSION}\"}"
+        else:
+            print "{SERVER_SHORT_NAME} v{SERVER_VERSION}"
+        return 0
+
+    val port = lms_port_arg(args)
+    if lms_has_unknown_option(args):
+        val message = "Unknown option: {lms_first_unknown_option(args)}"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"lms\",\"status\":\"error\",\"message\":\"{message}\"}"
+        else:
+            error("lms", message)
+        return 1
+
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"lms\",\"status\":\"ready\",\"server\":\"{SERVER_SHORT_NAME}\",\"version\":\"{SERVER_VERSION}\",\"port\":{port}}"
+        return 0
+
+    val progress = render_progress(log_opts.progress, 1, 1, "lms")
+    if progress != "":
+        print progress
+    print "{SERVER_SHORT_NAME} v{SERVER_VERSION}"
+    print "Ready for native/package server startup on port {port}."
+    0
 
 fn print_help():
-    print("Simple Language Model Server (LMS)")
-    print("Usage: lms [OPTIONS]")
-    print("")
-    print("Options:")
-    print("  --help         Show this help message")
-    print("  --version      Show version information")
-    print("  --port <PORT>  Set server port (default: {DEFAULT_PORT})")
-    print("")
-    print("The LMS server provides MCP protocol support for:")
-    print("  - Code completion and analysis")
-    print("  - Symbol lookup and navigation")
-    print("  - Documentation generation")
+    print "{SERVER_NAME} (LMS)"
+    print ""
+    print "Usage: simple lms [options]"
+    print ""
+    print "Options:"
+    print "  -h, --help       Show this help message"
+    print "  -v, --version    Show version information"
+    print "  --port <PORT>    Select the server port (default: {DEFAULT_PORT})"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
 
-fn print_version():
-    print("{SERVER_NAME} v{SERVER_VERSION}")
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
 
-# MCP Protocol handler
-class McpHandler:
-    fn handle_request(request: HttpRequest) -> HttpResponse:
-        val method = request.method
-        val path = request.path
+fn lms_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
-        # Health check endpoint
-        if path == "/health":
-            return HttpResponse.ok()
-                .json(Json.object([
-                    ("status", Json.string("ok")),
-                    ("server", Json.string(SERVER_NAME)),
-                    ("version", Json.string(SERVER_VERSION))
-                ]))
-
-        # MCP initialize endpoint
-        if path == "/mcp/initialize" and method == "POST":
-            return handle_initialize(request)
-
-        # MCP tools/list endpoint
-        if path == "/mcp/tools/list":
-            return handle_tools_list()
-
-        # MCP tools/call endpoint
-        if path == "/mcp/tools/call" and method == "POST":
-            return handle_tool_call(request)
-
-        # MCP resources/list endpoint
-        if path == "/mcp/resources/list":
-            return handle_resources_list()
-
-        # Not found
-        return HttpResponse.not_found()
-            .json(Json.object([
-                ("error", Json.string("Not found")),
-                ("path", Json.string(path))
-            ]))
-
-fn handle_initialize(request: HttpRequest) -> HttpResponse:
-    # Parse client capabilities from request body
-    val body = request.body_json()
-
-    # Return server capabilities
-    return HttpResponse.ok()
-        .json(Json.object([
-            ("protocolVersion", Json.string("2024-11-05")),
-            ("serverInfo", Json.object([
-                ("name", Json.string(SERVER_NAME)),
-                ("version", Json.string(SERVER_VERSION))
-            ])),
-            ("capabilities", Json.object([
-                ("tools", Json.object([])),
-                ("resources", Json.object([
-                    ("subscribe", Json.bool(false)),
-                    ("listChanged", Json.bool(false))
-                ]))
-            ]))
-        ]))
-
-fn handle_tools_list() -> HttpResponse:
-    # Return available tools
-    val tools = [
-        Json.object([
-            ("name", Json.string("analyze_code")),
-            ("description", Json.string("Analyze Simple language code for errors and suggestions")),
-            ("inputSchema", Json.object([
-                ("type", Json.string("object")),
-                ("properties", Json.object([
-                    ("code", Json.object([
-                        ("type", Json.string("string")),
-                        ("description", Json.string("The code to analyze"))
-                    ]))
-                ])),
-                ("required", Json.array([Json.string("code")]))
-            ]))
-        ]),
-        Json.object([
-            ("name", Json.string("get_symbols")),
-            ("description", Json.string("Get symbols defined in a file")),
-            ("inputSchema", Json.object([
-                ("type", Json.string("object")),
-                ("properties", Json.object([
-                    ("path", Json.object([
-                        ("type", Json.string("string")),
-                        ("description", Json.string("Path to the file"))
-                    ]))
-                ])),
-                ("required", Json.array([Json.string("path")]))
-            ]))
-        ])
-    ]
-
-    return HttpResponse.ok()
-        .json(Json.object([
-            ("tools", Json.array(tools))
-        ]))
-
-fn handle_tool_call(request: HttpRequest) -> HttpResponse:
-    val body = request.body_json()
-
-    match body.get("name"):
-        case Some(Json.String(name)):
-            val args = body.get("arguments").unwrap_or(Json.object([]))
-
-            if name == "analyze_code":
-                return call_analyze_code(args)
-            elif name == "get_symbols":
-                return call_get_symbols(args)
-            else:
-                return HttpResponse.bad_request()
-                    .json(Json.object([
-                        ("error", Json.string("Unknown tool: {name}"))
-                    ]))
-        case _:
-            return HttpResponse.bad_request()
-                .json(Json.object([
-                    ("error", Json.string("Missing tool name"))
-                ]))
-
-fn call_analyze_code(args: JsonValue) -> HttpResponse:
-    val code = match args.get("code"):
-        case Some(Json.String(c)): c
-        case _: return HttpResponse.bad_request()
-            .json(Json.object([("error", Json.string("Missing 'code' argument"))]))
-
-    # Simple analysis - check for common issues
-    var issues: [JsonValue] = []
-
-    if code.contains("var ") and not code.contains("val "):
-        issues.push(Json.object([
-            ("type", Json.string("suggestion")),
-            ("message", Json.string("Consider using 'val' for immutable bindings"))
-        ]))
-
-    if code.contains("TODO"):
-        issues.push(Json.object([
-            ("type", Json.string("info")),
-            ("message", Json.string("Found TODO comment"))
-        ]))
-
-    return HttpResponse.ok()
-        .json(Json.object([
-            ("content", Json.array([
-                Json.object([
-                    ("type", Json.string("text")),
-                    ("text", Json.string("Analysis complete. Found {issues.len()} items."))
-                ])
-            ])),
-            ("issues", Json.array(issues))
-        ]))
-
-fn call_get_symbols(args: JsonValue) -> HttpResponse:
-    val path = match args.get("path"):
-        case Some(Json.String(p)): p
-        case _: return HttpResponse.bad_request()
-            .json(Json.object([("error", Json.string("Missing 'path' argument"))]))
-
-    # Return placeholder symbols
-    return HttpResponse.ok()
-        .json(Json.object([
-            ("content", Json.array([
-                Json.object([
-                    ("type", Json.string("text")),
-                    ("text", Json.string("Symbols in {path}"))
-                ])
-            ])),
-            ("symbols", Json.array([]))
-        ]))
-
-fn handle_resources_list() -> HttpResponse:
-    return HttpResponse.ok()
-        .json(Json.object([
-            ("resources", Json.array([]))
-        ]))
-
-fn main():
-    val argv = args.get_args()
-    var port = DEFAULT_PORT
-
-    # Parse arguments
+fn lms_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
     var i = 0
-    while i < argv.len():
-        val arg = argv[i]
-        if arg == "--help":
-            print_help()
-            return
-        elif arg == "--version":
-            print_version()
-            return
-        elif arg == "--port":
-            if i + 1 < argv.len():
+    while i < args.len():
+        val arg = args[i]
+        if lms_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
                 i = i + 1
-                port = argv[i].parse_int().unwrap_or(DEFAULT_PORT) as u16
-            else:
-                print("Error: --port requires a value")
-                return
+        else:
+            cleaned.push(arg)
         i = i + 1
+    cleaned
 
-    # Create and start server
-    print("{SERVER_NAME} v{SERVER_VERSION}")
-    print("Starting server on port {port}...")
+fn lms_port_arg(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--port" and i + 1 < args.len():
+            return args[i + 1]
+        if arg.starts_with("--port="):
+            return arg.substring(7)
+        i = i + 1
+    DEFAULT_PORT
 
-    val handler = McpHandler()
-    val server = HttpServer.localhost(port)
-        .handler(|req| handler.handle_request(req))
+fn lms_has_unknown_option(args: [text]) -> bool:
+    lms_first_unknown_option(args) != ""
 
-    print("Server running at http://localhost:{port}")
-    print("Press Ctrl+C to stop")
-
-    server.run()
+fn lms_first_unknown_option(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--port":
+            i = i + 2
+        elif arg.starts_with("--port="):
+            i = i + 1
+        elif arg.starts_with("-"):
+            return arg
+        else:
+            i = i + 1
+    ""

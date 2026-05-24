@@ -2,6 +2,7 @@
 # Adds a dependency to simple.sdn manifest
 
 use std.cli.cli_util (get_cli_args, find_manifest_path)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 
 use app.io.mod (file_exists, file_read, file_write, cwd)
 use std.log.{error, warn, info, debug}
@@ -16,12 +17,23 @@ fn print_help():
     print "  <package>@<version>  Package with version constraint (e.g., http@^1.0.0)"
     print ""
     print "Options:"
+    print "  --json               Output as JSON"
     print "  --dev                Add as dev dependency"
     print "  --path=<dir>         Add as path dependency"
     print "  --git=<url>          Add as git dependency"
     print "  --branch=<name>      Git branch (default: main)"
     print "  --tag=<name>         Git tag"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help           Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 fn add_dependency_to_sdn(content: text, name: text, constraint: text, is_dev: bool, path_dep: text, git_dep: text, git_branch: text, git_tag: text) -> text:
     # Build the dependency entry
@@ -88,11 +100,20 @@ fn main() -> i64:
     var git_branch = "main"
     var git_tag = ""
     var package_spec = ""
+    var as_json = false
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("add", log_opts.error)
+        return 1
 
-    for arg in args:
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
         elif arg == "--dev":
             is_dev = true
         elif arg.starts_with("--path="):
@@ -103,8 +124,16 @@ fn main() -> i64:
             git_branch = arg[9:]
         elif arg.starts_with("--tag="):
             git_tag = arg[6:]
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
         elif not arg.starts_with("-"):
             package_spec = arg
+        ai = ai + 1
+
+    if log_opts.log_mode == "json":
+        as_json = true
 
     if package_spec == "":
         print "add: missing package name"
@@ -140,6 +169,14 @@ fn main() -> i64:
         return 1
 
     val section = if is_dev then "dev dependency" else "dependency"
+    val section_json = if is_dev then "dev_dependencies" else "dependencies"
+    if as_json:
+        print "{\"command\":\"add\",\"status\":\"ok\",\"name\":\"{name}\",\"constraint\":\"{constraint}\",\"section\":\"{section_json}\"}"
+        return 0
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, 1, 1, "add")
+        if progress_line != "":
+            print progress_line
     if path_dep != "":
         print "Added {section} '{name}' (path: {path_dep})"
     elif git_dep != "":

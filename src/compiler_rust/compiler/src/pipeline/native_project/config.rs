@@ -213,7 +213,7 @@ impl NativeProjectBuilder {
         } else {
             match lane {
                 NativeRuntimeLane::SimpleCore => {
-                    if let Some(runtime) = find_simple_core_runtime_library() {
+                    if let Some(runtime) = find_abi_complete_simple_core_runtime_library() {
                         candidates.push((runtime, false));
                     }
                 }

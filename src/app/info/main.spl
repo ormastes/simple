@@ -6,12 +6,15 @@
 #   simple info <package>    - Show registry package metadata
 
 use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.package.registry.config (default_config)
 use app.package.registry.index (fetch_index_entry, latest_version, deps_for_version)
 use app.package.registry.types (RegistryConfig, IndexEntry)
 
-use app.io.cli_commands (cli_info)
 use std.log.{error}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 fn print_help():
     print "Usage: simple info [options]"
@@ -21,9 +24,25 @@ fn print_help():
     print "With package name: show registry package metadata"
     print ""
     print "Registry Options:"
+    print "  --json        Output as JSON"
     print "  --versions    Show all available versions"
+    for line in log_options_help():
+        print "  {line}"
     print ""
     print "Run 'simple info --help' for Rust-level help."
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _json_escape(value: text) -> text:
+    val slashes = value.replace("\\", "\\\\")
+    val quotes = slashes.replace("\"", "\\\"")
+    quotes.replace("\n", "\\n")
 
 fn show_package_info(config: RegistryConfig, name: text, show_versions: bool) -> i64:
     val entry = fetch_index_entry(config, name)
@@ -62,22 +81,103 @@ fn show_package_info(config: RegistryConfig, name: text, show_versions: bool) ->
 
     return 0
 
+fn show_package_info_json(config: RegistryConfig, name: text, show_versions: bool) -> i64:
+    val entry = fetch_index_entry(config, name)
+
+    if entry.package.name == "":
+        error("info", "package '{name}' not found in registry")
+        return 1
+
+    val pkg = entry.package
+    val latest = latest_version(entry)
+    val name_json = _json_escape(pkg.name)
+    val latest_json = _json_escape(latest)
+    val desc_json = _json_escape(pkg.description)
+    val versions_count = if show_versions: entry.versions.len() else: 0
+    print "{\"command\":\"info\",\"kind\":\"package\",\"name\":\"{name_json}\",\"latest\":\"{latest_json}\",\"description\":\"{desc_json}\",\"versions\":{versions_count}}"
+    0
+
+fn _field_from_manifest(content: text, key: text) -> text:
+    var in_package = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if not line.starts_with(" ") and not line.starts_with("\t"):
+            in_package = trimmed == "package:"
+            continue
+        if in_package and trimmed.starts_with("{key}:"):
+            val raw = trimmed[(key.len() + 1):]
+            val cleaned = raw.trim()
+            return cleaned.replace("\"", "")
+    ""
+
+fn show_project_info(as_json: bool) -> i64:
+    val sdn_path = "simple.sdn"
+    if not rt_file_exists(sdn_path):
+        error("info", "No simple.sdn found in current directory.")
+        return 1
+    val content = rt_file_read_text(sdn_path)
+    if content == "":
+        error("info", "Could not read simple.sdn")
+        return 1
+
+    val name = _field_from_manifest(content, "name")
+    val version = _field_from_manifest(content, "version")
+    val license = _field_from_manifest(content, "license")
+    val main_file = _field_from_manifest(content, "main")
+    if as_json:
+        val name_json = _json_escape(name)
+        val version_json = _json_escape(version)
+        val license_json = _json_escape(license)
+        val main_json = _json_escape(main_file)
+        print "{\"command\":\"info\",\"kind\":\"project\",\"name\":\"{name_json}\",\"version\":\"{version_json}\",\"license\":\"{license_json}\",\"main\":\"{main_json}\"}"
+        return 0
+
+    print "Project Info"
+    print "============"
+    if name != "":
+        print "  Name:        {name}"
+    if version != "":
+        print "  Version:     {version}"
+    if license != "":
+        print "  License:     {license}"
+    if main_file != "":
+        print "  Entry:       {main_file}"
+    print ""
+    print "  Manifest:    {sdn_path}"
+    0
+
 fn main() -> i64:
     val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("info", log_opts.error)
+        return 1
 
     # Check if a package name is given (non-flag argument after "info")
     var pkg_name = ""
     var show_versions = false
     var has_pkg_arg = false
+    var as_json = log_opts.log_mode == "json"
 
     var i = 0
     while i < args.len():
         val arg = args[i]
         if arg == "info":
             pass
+        elif arg == "-h" or arg == "--help":
+            print_help()
+            return 0
         elif arg == "--versions":
             show_versions = true
             has_pkg_arg = true
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            i = i + 1
+        elif _is_log_option(arg):
+            pass
         elif not arg.starts_with("-") and pkg_name == "":
             pkg_name = arg
             has_pkg_arg = true
@@ -86,7 +186,16 @@ fn main() -> i64:
     # If a package name is given, show registry info
     if pkg_name != "":
         val config = default_config()
+        if log_opts.progress != "summary":
+            val progress_line = render_progress(log_opts.progress, 1, 1, "info")
+            if progress_line != "":
+                print progress_line
+        if as_json:
+            return show_package_info_json(config, pkg_name, show_versions)
         return show_package_info(config, pkg_name, show_versions)
 
-    # Otherwise delegate to Rust runtime for project/system info
-    cli_info(args)
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, 1, 1, "info")
+        if progress_line != "":
+            print progress_line
+    show_project_info(as_json)

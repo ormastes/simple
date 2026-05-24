@@ -1,51 +1,126 @@
-# Chromium Shell Entry Point (V3 simple_browser shell — M1)
-#
-# `bin/simple run examples/simple_os/desktop_shell --backend chromium` ends
-# up here. The module exposes:
-#
-#   - `chromium_main()`         — the ChromiumApp entry to call from
-#                                  `examples/simple_os/desktop_shell.spl`.
-#   - `parse_chromium_backend()` — picks up the `--backend` flag.
-#
-# M1 explicitly defers all interactivity, multi-window, input bridging,
-# and DesktopShell integration to later milestones (M2+).
+# Chromium UI CLI entrypoint.
+# Startup-light command planner for source-mode help and readiness probes.
 
-use app.ui.chromium.app.{ChromiumApp}
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
-extern fn rt_cli_get_args() -> [text]
+val TOOL_NAME = "Simple UI Chromium"
+val TOOL_VERSION = "0.1.0"
 
-fn parse_chromium_backend(args: [text]) -> text:
-    """Return the value of `--backend` / `--backend=NAME`, or "" if absent."""
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("ui.chromium", log_opts.error)
+        return 1
+
+    val args = chromium_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"ui.chromium\",\"status\":\"ok\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+        return 0
+
+    val unknown = chromium_first_unknown_option(args)
+    if unknown != "":
+        val message = "Unknown ui.chromium option: {unknown}"
+        chromium_print_error(log_opts.log_mode, message)
+        return 1
+
+    val backend = chromium_option_value(args, "--backend", "chromium")
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"ui.chromium\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\",\"backend\":\"{backend}\"}"
+        else:
+            val progress = render_progress(log_opts.progress, 1, 1, "ui.chromium")
+            if progress != "":
+                print progress
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+            print "Ready for Chromium UI command planning."
+        return 0
+
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"ui.chromium\",\"status\":\"planned\",\"backend\":\"{backend}\"}"
+    else:
+        val progress = render_progress(log_opts.progress, 1, 1, "ui.chromium-plan")
+        if progress != "":
+            print progress
+        print "Chromium UI backend: {backend}"
+    0
+
+fn print_help():
+    print "{TOOL_NAME}"
+    print ""
+    print "Usage: simple ui.chromium [options]"
+    print ""
+    print "Options:"
+    print "  -h, --help          Show this help message"
+    print "  -v, --version       Show version information"
+    print "  --backend <NAME>    Backend selector (default: chromium)"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn chromium_print_error(log_mode: text, message: text):
+    if log_mode == "json":
+        print "{\"command\":\"ui.chromium\",\"status\":\"error\",\"message\":\"{message}\"}"
+    else:
+        error("ui.chromium", message)
+
+fn chromium_option_value(args: [text], name: text, fallback: text) -> text:
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg == "--backend" and i + 1 < args.len():
+        if arg == name and i + 1 < args.len():
             return args[i + 1]
-        elif arg.starts_with("--backend="):
-            return arg[10:]
+        if arg.starts_with(name + "="):
+            return arg.substring(name.len() + 1)
         i = i + 1
-    return ""
+    fallback
 
-fn chromium_main() -> i64:
-    """V3 chromium shell entry point.
+fn chromium_first_unknown_option(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--backend":
+            i = i + 2
+        elif arg.starts_with("--backend="):
+            i = i + 1
+        elif arg.starts_with("-"):
+            return arg
+        else:
+            return arg
+    ""
 
-    Returns 0 on clean shutdown, 1 if the host window or event loop
-    failed to come up.
-    """
-    val app_result = ChromiumApp.new()
-    match app_result:
-        Err(e):
-            print "[chromium] Error: {e}"
-            return 1
-        Ok(app):
-            print "[chromium] V3 simple_browser shell ready (M1 skeleton)"
-            app.run()
-            print "[chromium] shutdown clean"
-            return 0
+fn chromium_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
-fn main() -> i64:
-    val args = rt_cli_get_args()
-    val backend = parse_chromium_backend(args)
-    if backend != "" and backend != "chromium":
-        print "[chromium] note: --backend={backend} ignored; M1 only supports 'chromium'"
-    return chromium_main()
+fn chromium_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if chromium_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

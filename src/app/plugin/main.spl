@@ -4,6 +4,8 @@ use app.plugin.registry.{
 }
 use app.plugin.loader.{plugin_library_exists}
 use std.cli.cli_util.{get_cli_args}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -34,9 +36,38 @@ fn print_plugin_help():
     print "  simple plugin list"
     print "  simple plugin install <manifest.sdn>"
     print "  simple plugin remove <name>"
+    for line in log_options_help():
+        print "  {line}"
 
-fn handle_list(path: text):
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if _is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn handle_list(path: text, as_json: bool, progress_mode: text):
     val entries = load_plugin_manifest(path)
+    if as_json:
+        print "{\"command\":\"plugin list\",\"status\":\"ok\",\"count\":{entries.len()}}"
+        return
+    val progress = render_progress(progress_mode, entries.len(), entries.len(), "plugins")
+    if progress != "":
+        print progress
     if entries.len() == 0:
         print "no plugins registered"
         return
@@ -72,15 +103,27 @@ fn handle_remove(path: text, name: text) -> i64:
     0
 
 fn main() -> i64:
-    val args = actual_args()
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("plugin", log_opts.error)
+        return 1
+
+    val args = clean_args(actual_args())
     if args.len() < 2 or args[0] != "plugin":
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"plugin\",\"status\":\"usage\"}"
+            return 1
         print_plugin_help()
         return 1
 
     val manifest_path = plugin_manifest_path()
     val subcommand = args[1]
+    if subcommand == "-h" or subcommand == "--help" or subcommand == "help":
+        print_plugin_help()
+        return 0
     if subcommand == "list":
-        handle_list(manifest_path)
+        handle_list(manifest_path, log_opts.log_mode == "json", log_opts.progress)
         return 0
     if subcommand == "install" and args.len() >= 3:
         return handle_install(path: manifest_path, manifest_path: args[2])

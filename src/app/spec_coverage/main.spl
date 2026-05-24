@@ -2,6 +2,7 @@
 # Compare spec features against test results for coverage analysis
 
 use std.cli.cli_util (get_cli_args, parse_csv_fields)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (file_exists, file_read, file_write)
 use std.log.{error}
 
@@ -17,7 +18,17 @@ fn print_help():
     print "  --by-category    Show coverage by category"
     print "  --missing        Show incomplete features"
     print "  --report=<fmt>   Output format: text (default), markdown"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help       Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 struct FeatureInfo:
     id: text
@@ -131,14 +142,51 @@ fn display_missing(features: [FeatureInfo]):
             print "  - {f.name} (ID: {f.id}, Category: {f.category})"
             print "    Status: {status_label}"
 
+fn _coverage_counts(features: [FeatureInfo]) -> (i64, i64, i64, i64, i64):
+    var total: i64 = 0
+    var complete: i64 = 0
+    var in_progress: i64 = 0
+    var planned: i64 = 0
+    var failed: i64 = 0
+
+    for f in features:
+        if not f.valid:
+            continue
+        total = total + 1
+        match f.status:
+            case "complete":
+                complete = complete + 1
+            case "in_progress":
+                in_progress = in_progress + 1
+            case "planned":
+                planned = planned + 1
+            case "failed":
+                failed = failed + 1
+            case _:
+                pass
+
+    (total, complete, in_progress, planned, failed)
+
+fn render_json(features: [FeatureInfo]):
+    val (total, complete, in_progress, planned, failed) = _coverage_counts(features)
+    val pct = if total > 0: (complete * 100) / total else: 0
+    print "{\"command\":\"spec-coverage\",\"status\":\"ok\",\"total\":{total},\"complete\":{complete},\"in_progress\":{in_progress},\"planned\":{planned},\"failed\":{failed},\"coverage\":{pct}}"
+
 fn main() -> i64:
     val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("spec-coverage", log_opts.error)
+        return 1
 
     var by_category = false
     var show_missing = false
     var report_format = "text"
+    var as_json = log_opts.log_mode == "json"
 
-    for arg in args:
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
@@ -146,13 +194,32 @@ fn main() -> i64:
             by_category = true
         elif arg == "--missing":
             show_missing = true
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
         elif arg.starts_with("--report="):
             report_format = arg[9:]
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
 
     val features = load_features()
     if features.len() == 0:
-        error("spec_coverage", "no features found in {FEATURE_DB_PATH}")
+        if as_json:
+            print "{\"command\":\"spec-coverage\",\"status\":\"error\",\"total\":0,\"complete\":0,\"in_progress\":0,\"planned\":0,\"failed\":0,\"coverage\":0}"
+        else:
+            error("spec_coverage", "no features found in {FEATURE_DB_PATH}")
         return 1
+
+    if log_opts.progress != "summary" and not as_json:
+        val progress_line = render_progress(log_opts.progress, features.len(), features.len(), "spec-coverage")
+        if progress_line != "":
+            print progress_line
+
+    if as_json:
+        render_json(features)
+        return 0
 
     display_summary(features)
 

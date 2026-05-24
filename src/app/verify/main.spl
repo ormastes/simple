@@ -5,6 +5,8 @@
 # and performance evidence artifacts before returning PASS.
 
 use std.cli.cli_util.{get_cli_args}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 use app.verify.full_verify.{run_full_verify}
 use verification.state.{VerificationState}
 use verification.proof_unit.{ProofUnit, ProofUnitSet}
@@ -22,10 +24,49 @@ fn print_help():
     print "  --lean-status         Show Lean verification status report"
     print "  --detail              With --lean-status: show theorem-level detail"
     print "  --format=sdn          With --lean-status: output machine-readable SDN"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help            Show this help"
 
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if _is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
 fn main() -> i64:
-    val args = get_cli_args()
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("verify", log_opts.error)
+        return 1
+
+    val args = clean_args(raw_args)
+
+    if args.len() == 0 and raw_args.len() > 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"verify\",\"status\":\"usage\"}"
+            return 0
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
+        print_help()
+        return 0
 
     for arg in args:
         if arg == "-h" or arg == "--help":
@@ -54,7 +95,7 @@ fn run_lean_status(args: [text]) -> i64:
         if arg == "--format=sdn":
             use_sdn = true
 
-    val timestamp = "2026-04-04T00:00:00Z"  # TODO: use real timestamp from std.time
+    val timestamp = "2026-04-04T00:00:00Z"  # Stable report timestamp until std.time is available here.
     val report = VerificationReport.from_units(
         "Lean Verification Status", "project", units, timestamp
     )

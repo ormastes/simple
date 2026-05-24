@@ -12,6 +12,10 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_cli_get_args() -> [text]
+
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 # ============================================================================
 # JSON Helpers (inlined to avoid cross-module issues)
@@ -303,5 +307,92 @@ fn kernel_main():
         elif msg_type == "comm_info_request":
             handle_comm_info(msg_id)
 
-fn main():
+fn print_usage():
+    print "Simple Jupyter Kernel"
+    print ""
+    print "Usage: simple jupyter-kernel [options]"
+    print ""
+    print "Runs the Simple JSON-lines Jupyter kernel over stdin/stdout."
+    print ""
+    print "Options:"
+    print "  -h, --help            Show this help"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn jupyter_kernel_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn jupyter_kernel_clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if jupyter_kernel_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn jupyter_kernel_get_args() -> [text]:
+    val all_args = rt_cli_get_args()
+    var args: [text] = []
+    var found = false
+    var i = 0
+    while i < all_args.len():
+        if found:
+            args.push(all_args[i])
+        elif all_args[i] == "jupyter-kernel" or all_args[i] == "jupyter_kernel":
+            found = true
+        i = i + 1
+    if found:
+        return args
+
+    var start_idx = 0
+    i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("main.spl"):
+            start_idx = i + 1
+        i = i + 1
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
+
+fn main() -> i64:
+    val raw_args = jupyter_kernel_get_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("jupyter-kernel", log_opts.error)
+        return 1
+
+    val args = jupyter_kernel_clean_args(raw_args)
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"jupyter-kernel\",\"status\":\"ready\"}"
+            return 0
+    elif args[0] == "--help" or args[0] == "-h":
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
+        print_usage()
+        return 0
+    elif args[0].starts_with("-"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"jupyter-kernel\",\"status\":\"error\",\"error\":\"unknown option\"}"
+            return 1
+        print "Error: Unknown option: {args[0]}"
+        print_usage()
+        return 1
+
     kernel_main()
+    0

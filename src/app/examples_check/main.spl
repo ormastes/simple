@@ -8,7 +8,9 @@
 #   simple examples-check [path] --limit 10
 
 use std.cli.cli_util.{get_cli_args, get_flag_value, has_flag}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod.{dir_walk, file_exists, file_write, file_append, process_run_timeout}
+use std.log.{error}
 
 struct ExampleCheckConfig:
     binary: text
@@ -49,7 +51,17 @@ fn print_help():
     print "  --fail-fast         Stop on first non-pass result"
     print "  --binary <path>     Binary to invoke (default: bin/simple)"
     print "  --report <path>     Markdown report path"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help          Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 fn parse_args(args: [text]) -> ExampleCheckConfig:
     var root = "examples"
@@ -91,6 +103,10 @@ fn parse_args(args: [text]) -> ExampleCheckConfig:
             report_path = args[i]
         elif arg.starts_with("--report="):
             report_path = arg.slice(9, arg.len())
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            i = i + 1
+        elif _is_log_option(arg):
+            val _unused = 0
         elif not arg.starts_with("-"):
             root = arg
         i = i + 1
@@ -206,14 +222,27 @@ fn write_summary(report_path: text, stats: ExampleCheckStats):
 
 fn main() -> i64:
     val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("examples-check", log_opts.error)
+        return 1
+
     if has_flag(args, "-h") or has_flag(args, "--help"):
         print_help()
         return 0
 
     val config = parse_args(args)
+    val as_json = log_opts.log_mode == "json"
     val files = collect_example_files(config.root)
     if files.len() == 0:
-        print "No .spl files found under {config.root}"
+        if log_opts.progress != "summary" and not as_json:
+            val progress_line = render_progress(log_opts.progress, 0, 1, "examples-check")
+            if progress_line != "":
+                print progress_line
+        if as_json:
+            print "{\"command\":\"examples-check\",\"status\":\"error\",\"total\":0,\"passed\":0,\"failed\":0,\"crashed\":0,\"timed_out\":0}"
+        else:
+            print "No .spl files found under {config.root}"
         return 1
 
     write_report_header(config, files)
@@ -237,9 +266,15 @@ fn main() -> i64:
             case "CRASH":
                 stats.crashed = stats.crashed + 1
             case _:
-                stats.failed = stats.failed + 1
+        stats.failed = stats.failed + 1
 
-        print_result(result)
+        if log_opts.progress != "summary" and not as_json:
+            val progress_line = render_progress(log_opts.progress, checked, files.len(), "examples-check")
+            if progress_line != "":
+                print progress_line
+
+        if not as_json:
+            print_result(result)
         append_result_report(config.report_path, result)
 
         if config.fail_fast and result.result_type != "PASS":
@@ -247,9 +282,13 @@ fn main() -> i64:
 
     write_summary(config.report_path, stats)
 
-    print ""
-    print "Summary: total={stats.total} pass={stats.passed} fail={stats.failed} crash={stats.crashed} timeout={stats.timed_out}"
-    print "Report: {config.report_path}"
+    if as_json:
+        val status = if stats.failed > 0 or stats.crashed > 0 or stats.timed_out > 0: "error" else: "ok"
+        print "{\"command\":\"examples-check\",\"status\":\"{status}\",\"total\":{stats.total},\"passed\":{stats.passed},\"failed\":{stats.failed},\"crashed\":{stats.crashed},\"timed_out\":{stats.timed_out}}"
+    else:
+        print ""
+        print "Summary: total={stats.total} pass={stats.passed} fail={stats.failed} crash={stats.crashed} timeout={stats.timed_out}"
+        print "Report: {config.report_path}"
 
     if stats.failed > 0 or stats.crashed > 0 or stats.timed_out > 0:
         return 1

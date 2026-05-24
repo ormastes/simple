@@ -2,6 +2,7 @@
 # Generates feature documentation from feature_db.sdn
 
 use std.cli.cli_util.{get_cli_args, parse_csv_fields}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod.{file_exists, file_read, file_write, dir_create}
 use std.log.{error}
 
@@ -21,7 +22,18 @@ fn print_help():
     print "  doc/02_requirements/feature/category/*.md        Per-category pages"
     print ""
     print "Options:"
+    print "  --json       Output summary as JSON"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help   Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 struct Feature:
     id: text
@@ -273,26 +285,46 @@ fn generate_category_md(features: [Feature], category: text) -> text:
 
 fn main() -> i64:
     val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("feature-gen", log_opts.error)
+        return 1
 
-    for arg in args:
+    var as_json = log_opts.log_mode == "json"
+
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
 
     val features = load_features()
     if features.len() == 0:
-        print "No features found in {FEATURE_DB_PATH}"
+        if as_json:
+            print "{\"command\":\"feature-gen\",\"status\":\"error\",\"features\":0,\"categories\":0}"
+        else:
+            print "No features found in {FEATURE_DB_PATH}"
         return 1
 
     # Generate feature.md
     val feature_md = generate_feature_md(features)
     file_write(FEATURE_MD_PATH, feature_md)
-    print "Generated {FEATURE_MD_PATH}"
+    if not as_json:
+        print "Generated {FEATURE_MD_PATH}"
 
     # Generate pending_feature.md
     val pending_md = generate_pending_md(features)
     file_write(PENDING_MD_PATH, pending_md)
-    print "Generated {PENDING_MD_PATH}"
+    if not as_json:
+        print "Generated {PENDING_MD_PATH}"
 
     # Generate category pages
     dir_create(CATEGORY_DIR, true)
@@ -302,7 +334,15 @@ fn main() -> i64:
         val path = "{CATEGORY_DIR}/{safe_cat}.md"
         val cat_md = generate_category_md(features, cat)
         file_write(path, cat_md)
-        print "Generated {path}"
+        if not as_json:
+            print "Generated {path}"
 
-    print "Done. Generated docs for {features.len()} features in {cats.len()} categories."
+    if log_opts.progress != "summary" and not as_json:
+        val progress_line = render_progress(log_opts.progress, features.len(), features.len(), "feature-gen")
+        if progress_line != "":
+            print progress_line
+    if as_json:
+        print "{\"command\":\"feature-gen\",\"status\":\"ok\",\"features\":{features.len()},\"categories\":{cats.len()}}"
+    else:
+        print "Done. Generated docs for {features.len()} features in {cats.len()} categories."
     0

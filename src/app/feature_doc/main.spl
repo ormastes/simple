@@ -8,16 +8,26 @@
 
 use app.io.mod (file_read, file_exists, dir_walk, dir_create)
 use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.feature_doc.types.*
 use app.feature_doc.parser (parse_feature_file)
 use app.feature_doc.usage_docgen (generate_usage_doc)
 use app.feature_doc.usage_index (generate_usage_index)
 use app.feature_doc.app_docgen (generate_app_doc)
 use app.feature_doc.app_index (generate_app_index)
+use std.log.{error}
 
 val FEATURE_DIR = "test/feature"
 val DOC_APP_DIR = "doc/02_requirements/feature/app"
 val DOC_USAGE_DIR = "doc/02_requirements/feature/usage"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 # ============================================================================
 # File Discovery
@@ -158,6 +168,18 @@ fn cmd_list() -> i64:
     print "Total: {app_count} app + {usage_count} usage = {app_count + usage_count} feature tests"
     0
 
+fn cmd_list_json() -> i64:
+    val all_files = discover_spec_files(FEATURE_DIR)
+    var app_count = 0
+    var usage_count = 0
+    for f in all_files:
+        if classify_file(f) == "app":
+            app_count = app_count + 1
+        else:
+            usage_count = usage_count + 1
+    print "{\"command\":\"feature-doc\",\"status\":\"ok\",\"mode\":\"list\",\"app\":{app_count},\"usage\":{usage_count},\"total\":{app_count + usage_count}}"
+    0
+
 # ============================================================================
 # Help
 # ============================================================================
@@ -174,6 +196,9 @@ fn print_help():
     print ""
     print "Options:"
     print "  --list     List tests with app/usage classification"
+    print "  --json     Output summary as JSON for --list"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help Show this help"
     print ""
     print "Output:"
@@ -186,6 +211,10 @@ fn print_help():
 
 fn main() -> i64:
     val all_args = get_cli_args()
+    val log_opts = parse_log_options(all_args)
+    if not log_opts.valid:
+        error("feature-doc", log_opts.error)
+        return 1
 
     # Use all_args directly - runtime already strips program/script name
     var args = all_args
@@ -193,21 +222,39 @@ fn main() -> i64:
     # Check for flags and subcommand
     var want_help = false
     var want_list = false
+    var as_json = log_opts.log_mode == "json"
     var subcmd_arg = ""
-    for arg in args:
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "--help" or arg == "-h":
             want_help = true
         elif arg == "--list":
             want_list = true
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
         elif not arg.starts_with("-"):
             if subcmd_arg == "":
                 subcmd_arg = arg
+        ai = ai + 1
 
     if want_help:
         print_help()
         return 0
 
+    if log_opts.progress != "summary":
+        val label = if want_list: "feature-doc list" else: "feature-doc"
+        val progress_line = render_progress(log_opts.progress, 1, 1, label)
+        if progress_line != "":
+            print progress_line
+
     if want_list:
+        if as_json:
+            return cmd_list_json()
         return cmd_list()
 
     # Determine subcommand

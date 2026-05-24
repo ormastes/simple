@@ -1,6 +1,7 @@
 # SCV CLI.
 
 use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (cwd)
 use std.scv.store.{scv_init_repo, scv_restore_op, scv_mark_current_state}
 use std.scv.working_copy.{scv_snapshot, scv_auto_snapshot, scv_watch, scv_status, scv_log, scv_log_branch, scv_op_log}
@@ -21,7 +22,34 @@ use std.scv.refs.{scv_bookmarks, scv_bookmark_set, scv_tag_list, scv_tag_set}
 extern fn rt_stdout_write(data: [u8]) -> i64
 
 fn scv_help() -> text:
-    "Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set>\n"
+    var lines: [text] = []
+    lines.push("Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set>")
+    lines.push("")
+    lines.push("Shared log options:")
+    for line in log_options_help():
+        lines.push("  {line}")
+    lines.join("\n") + "\n"
+
+fn scv_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn scv_clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if scv_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
 
 fn scv_cli_result(result: text) -> i64:
     print result
@@ -57,9 +85,20 @@ fn scv_cli_watch(root: text, args: [text]) -> i64:
     scv_cli_result(scv_watch(root, iterations, poll_ms))
 
 fn main() -> i64:
-    val args = get_cli_args()
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        print "ERROR scv {log_opts.error}"
+        return 1
+    val args = scv_clean_args(raw_args)
     val root = cwd()
     if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"scv\",\"status\":\"usage\"}"
+            return 0
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
         print scv_help()
         return 0
     val cmd = args[0]

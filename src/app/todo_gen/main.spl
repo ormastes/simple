@@ -2,7 +2,9 @@
 # Generates TODO.md from todo_db.sdn
 
 use std.cli.cli_util (get_cli_args, parse_csv_fields)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (file_exists, file_read, file_write)
+use std.log.{error}
 
 val TODO_DB_PATH = "doc/08_tracking/todo/todo_db.sdn"
 val TODO_MD_PATH = "doc/TODO.md"
@@ -13,7 +15,18 @@ fn print_help():
     print "Generate TODO report from todo_db.sdn."
     print ""
     print "Options:"
+    print "  --json       Output summary as JSON"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help   Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 struct TodoItem:
     id: text
@@ -224,14 +237,35 @@ fn generate_todo_md(todos: [TodoItem]) -> text:
 
 fn main() -> i64:
     val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("todo-gen", log_opts.error)
+        return 1
 
-    for arg in args:
+    var as_json = log_opts.log_mode == "json"
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
 
     val todos = load_todos()
     val md = generate_todo_md(todos)
     file_write(TODO_MD_PATH, md)
-    print "Generated {TODO_MD_PATH} ({todos.len()} items)"
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, todos.len(), todos.len(), "todo-gen")
+        if progress_line != "":
+            print progress_line
+    if as_json:
+        print "{\"command\":\"todo-gen\",\"status\":\"ok\",\"todos\":{todos.len()},\"output\":\"{TODO_MD_PATH}\"}"
+    else:
+        print "Generated {TODO_MD_PATH} ({todos.len()} items)"
     0

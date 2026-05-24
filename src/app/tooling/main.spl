@@ -8,6 +8,8 @@
 #   simple tooling watch [options]
 
 use std.cli.cli_util (has_flag, get_flag_value)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 fn get_flag_or(args: [text], flag: text, default_val: text) -> text:
     val v = get_flag_value(args, flag)
@@ -22,28 +24,58 @@ fn get_flag_int(args: [text], flag: text, default_val: i64) -> i64:
     default_val
 
 # Main entry point
-fn main():
-    val args = get_args()
+fn main() -> i64:
+    val raw_args = normalize_args(get_args())
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("tooling", log_opts.error)
+        return 1
 
-    if args.len() < 2:
+    val args = clean_log_args(raw_args)
+
+    if args.len() < 1:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"usage\"}"
+            return 0
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
         print_usage()
-        return
+        return 0
 
-    val command = args[1]
+    val command = args[0]
 
     if command == "build":
-        handle_build(args)
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"ok\",\"action\":\"build\"}"
+        else:
+            handle_build(args)
     elif command == "test":
-        handle_test(args)
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"ok\",\"action\":\"test\"}"
+        else:
+            handle_test(args)
     elif command == "deploy":
-        handle_deploy(args)
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"ok\",\"action\":\"deploy\"}"
+        else:
+            handle_deploy(args)
     elif command == "watch":
-        handle_watch(args)
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"ok\",\"action\":\"watch\"}"
+        else:
+            handle_watch(args)
     elif command == "help":
         print_usage()
     else:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"error\",\"error\":\"unknown command\"}"
+            return 1
         print "Unknown command: {command}"
         print_usage()
+        return 1
+
+    0
 
 # Handle build command
 fn handle_build(args: [text]):
@@ -159,3 +191,53 @@ fn print_usage():
     print "    --hot-reload        Enable hot module replacement"
     print "    --port PORT         HMR server port (default: 5173)"
     print "    --verbose           Verbose output"
+    print ""
+    print "SHARED LOG OPTIONS:"
+    for line in log_options_help():
+        print "    {line}"
+
+fn is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn normalize_args(all_args: [text]) -> [text]:
+    var args: [text] = []
+    var found_tooling = false
+    var i = 0
+    while i < all_args.len():
+        if found_tooling:
+            args.push(all_args[i])
+        elif all_args[i] == "tooling":
+            found_tooling = true
+        i = i + 1
+    if found_tooling:
+        return args
+
+    var start_idx = 0
+    i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("main.spl"):
+            start_idx = i + 1
+        i = i + 1
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args

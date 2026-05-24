@@ -2,7 +2,9 @@
 # Adds a new open bug to doc/08_tracking/bug/bug_db.sdn
 
 use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use nogc_sync_mut.database.bug.{Bug, BugSeverity, BugStatus, load_bug_database}
+use std.log.{error}
 
 val BUG_DB_PATH = "doc/08_tracking/bug/bug_db.sdn"
 
@@ -18,7 +20,18 @@ fn print_help():
     print "  --file=<path>       Source file path where bug occurs"
     print "  --line=<n>          Line number (default: 0)"
     print "  --repro=<test>      Reproducible-by test (default: N/A)"
+    print "  --json              Output as JSON"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help          Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 fn parse_flag(args: [text], prefix: text) -> text:
     for arg in args:
@@ -42,11 +55,25 @@ fn parse_severity(s: text) -> BugSeverity:
 
 fn main() -> i64:
     val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("bug-add", log_opts.error)
+        return 1
 
-    for arg in args:
+    var as_json = log_opts.log_mode == "json"
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
 
     val id = parse_flag(args, "--id=")
     val severity_str = parse_flag(args, "--severity=")
@@ -100,5 +127,12 @@ fn main() -> i64:
         print "Error: failed to save bug database"
         return 1
 
-    print "Added bug {id} to {BUG_DB_PATH}"
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, 1, 1, "bug-add")
+        if progress_line != "":
+            print progress_line
+    if as_json:
+        print "{\"command\":\"bug-add\",\"status\":\"ok\",\"id\":\"{id}\"}"
+    else:
+        print "Added bug {id} to {BUG_DB_PATH}"
     0

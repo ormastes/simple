@@ -236,6 +236,183 @@ char* rt_stdin_read_line(void) {
     return NULL; /* EOF */
 }
 
+int64_t rt_stdin_read_line_text(void) {
+    char buf[4096];
+    if (!fgets(buf, sizeof(buf), stdin)) {
+        return rt_string_new(NULL, 0);
+    }
+    return rt_string_new((const uint8_t*)buf, (int64_t)strlen(buf));
+}
+
+int64_t rt_stdin_read_chars_text(int64_t count) {
+    if (count <= 0) {
+        return rt_string_new(NULL, 0);
+    }
+    char* buf = (char*)malloc((size_t)count);
+    if (!buf) {
+        return rt_string_new(NULL, 0);
+    }
+    size_t n = fread(buf, 1, (size_t)count, stdin);
+    int64_t value = rt_string_new((const uint8_t*)buf, (int64_t)n);
+    free(buf);
+    return value;
+}
+
+int64_t rt_stdin_read_mcp_message_text(void) {
+    char line[4096];
+    int64_t content_length = 0;
+
+    while (fgets(line, sizeof(line), stdin)) {
+        if (line[0] == '{') {
+            size_t len = strlen(line);
+            while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+                len--;
+            }
+            return rt_string_new((const uint8_t*)line, (int64_t)len);
+        }
+
+        if (line[0] == '\r' || line[0] == '\n') {
+            if (content_length > 0) {
+                break;
+            }
+            continue;
+        }
+
+        const char* prefix = "Content-Length:";
+        size_t prefix_len = strlen(prefix);
+        if (strncmp(line, prefix, prefix_len) == 0) {
+            const char* p = line + prefix_len;
+            while (*p == ' ' || *p == '\t') {
+                p++;
+            }
+            content_length = strtoll(p, NULL, 10);
+        }
+    }
+
+    if (content_length <= 0) {
+        return rt_string_new(NULL, 0);
+    }
+
+    char* body = (char*)malloc((size_t)content_length);
+    if (!body) {
+        return rt_string_new(NULL, 0);
+    }
+    size_t n = fread(body, 1, (size_t)content_length, stdin);
+    int64_t value = rt_string_new((const uint8_t*)body, (int64_t)n);
+    free(body);
+    return value;
+}
+
+int64_t rt_mcp_initialize_response_text(int64_t message) {
+    int64_t len = rt_string_len(message);
+    if (len <= 0) {
+        return rt_string_new(NULL, 0);
+    }
+    const char* raw = (const char*)rt_string_data(message);
+    if (!raw) {
+        return rt_string_new(NULL, 0);
+    }
+    char* data = (char*)malloc((size_t)len + 1);
+    if (!data) {
+        return rt_string_new(NULL, 0);
+    }
+    memcpy(data, raw, (size_t)len);
+    data[len] = '\0';
+    int is_initialize = strstr(data, "\"method\":\"initialize\"") || strstr(data, "\"method\": \"initialize\"");
+    int is_tools_list = strstr(data, "\"method\":\"tools/list\"") || strstr(data, "\"method\": \"tools/list\"");
+    if (!is_initialize && !is_tools_list) {
+        free(data);
+        return rt_string_new(NULL, 0);
+    }
+
+    char id_buf[128];
+    strcpy(id_buf, "null");
+    const char* id_key = strstr(data, "\"id\"");
+    if (id_key) {
+        const char* p = id_key + 4;
+        const char* end = data + len;
+        while (p < end && (*p == ' ' || *p == '\t' || *p == ':')) {
+            p++;
+        }
+        size_t id_len = 0;
+        if (p < end && *p == '"') {
+            const char* start = p;
+            p++;
+            while (p < end && *p != '"' && id_len + 2 < sizeof(id_buf)) {
+                p++;
+                id_len++;
+            }
+            if (p < end && *p == '"') {
+                size_t total = (size_t)(p - start + 1);
+                if (total >= sizeof(id_buf)) total = sizeof(id_buf) - 1;
+                memcpy(id_buf, start, total);
+                id_buf[total] = '\0';
+            }
+        } else {
+            const char* start = p;
+            while (p < end && *p != ',' && *p != '}' && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') {
+                p++;
+            }
+            size_t total = (size_t)(p - start);
+            if (total > 0) {
+                if (total >= sizeof(id_buf)) total = sizeof(id_buf) - 1;
+                memcpy(id_buf, start, total);
+                id_buf[total] = '\0';
+            }
+        }
+    }
+
+    const char* prefix = "{\"jsonrpc\":\"2.0\",\"id\":";
+    const char* init_suffix = ",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":true},\"resources\":{\"subscribe\":true,\"listChanged\":true},\"prompts\":{\"listChanged\":true},\"logging\":{},\"completions\":{},\"roots\":{\"listChanged\":false}},\"instructions\":\"Full-featured MCP server with table-driven tool dispatch. ~100 tools available (CLI passthrough + in-process handlers). Long-running tools return task handles for async polling.\",\"serverInfo\":{\"name\":\"simple-mcp-full\",\"version\":\"4.0.0\"}}}";
+    const char* tools_suffix = ",\"result\":{\"tools\":["
+        "{\"name\":\"debug_create_session\",\"description\":\"debug_create_session\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"debug_set_data_breakpoint\",\"description\":\"debug_set_data_breakpoint\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_read\",\"description\":\"simple_read\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_check\",\"description\":\"simple_check\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_symbols\",\"description\":\"simple_symbols\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_status\",\"description\":\"simple_status\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_diagnostics\",\"description\":\"simple_diagnostics\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_edit\",\"description\":\"simple_edit\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_multi_edit\",\"description\":\"simple_multi_edit\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_run\",\"description\":\"simple_run\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_test\",\"description\":\"simple_test\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_build\",\"description\":\"simple_build\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_format\",\"description\":\"simple_format\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_lint\",\"description\":\"simple_lint\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_fix\",\"description\":\"simple_fix\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "{\"name\":\"simple_search\",\"description\":\"simple_search\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}"
+        "]}}";
+    const char* suffix = is_initialize ? init_suffix : tools_suffix;
+    size_t out_len = strlen(prefix) + strlen(id_buf) + strlen(suffix);
+    char* out = (char*)malloc(out_len + 1);
+    if (!out) {
+        free(data);
+        return rt_string_new(NULL, 0);
+    }
+    memcpy(out, prefix, strlen(prefix));
+    memcpy(out + strlen(prefix), id_buf, strlen(id_buf));
+    memcpy(out + strlen(prefix) + strlen(id_buf), suffix, strlen(suffix));
+    out[out_len] = '\0';
+    int64_t value = rt_string_new((const uint8_t*)out, (int64_t)out_len);
+    free(out);
+    free(data);
+    return value;
+}
+
+void rt_mcp_write_framed_text(int64_t body) {
+    int64_t len = rt_string_len(body);
+    const char* data = (const char*)rt_string_data(body);
+    if (len < 0 || !data) {
+        len = 0;
+        data = "";
+    }
+    fprintf(stdout, "Content-Length: %lld\r\n\r\n", (long long)len);
+    if (len > 0) {
+        fwrite(data, 1, (size_t)len, stdout);
+    }
+    fflush(stdout);
+}
+
 int64_t stdin_read_char(void) {
     int ch = fgetc(stdin);
     if (ch == EOF) {
@@ -348,6 +525,12 @@ int64_t rt_string_char_code_at(int64_t string, int64_t index) {
     RtCoreString* s = rt_core_as_string(string);
     if (!s || index < 0 || (uint64_t)index >= s->len) return 0;
     return (int64_t)(uint8_t)s->data[index];
+}
+
+int64_t rt_string_char_at(int64_t string, int64_t index) {
+    RtCoreString* s = rt_core_as_string(string);
+    if (!s || index < 0 || (uint64_t)index >= s->len) return rt_core_nil();
+    return rt_string_new((const uint8_t*)s->data + index, 1);
 }
 
 int64_t rt_string_concat(int64_t left, int64_t right) {
@@ -507,6 +690,158 @@ int64_t rt_string_ends_with(int64_t value, int64_t suffix) {
     return p->len == 0 || memcmp(s->data + (s->len - p->len), p->data, (size_t)p->len) == 0;
 }
 
+int64_t rt_string_find(int64_t value, int64_t needle) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* n = rt_core_as_string(needle);
+    if (!s || !n) return -1;
+    if (n->len == 0) return 0;
+    if (n->len > s->len) return -1;
+    for (uint64_t i = 0; i + n->len <= s->len; i++) {
+        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
+    }
+    return -1;
+}
+
+static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return rt_core_nil();
+    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)s->len + 1);
+    if (!out) return rt_core_nil();
+    out->kind = RT_VALUE_HEAP_STRING;
+    out->reserved = 0;
+    out->len = s->len;
+    for (uint64_t i = 0; i < s->len; i++) {
+        char ch = s->data[i];
+        if (to_lower && ch >= 'A' && ch <= 'Z') {
+            ch = (char)(ch + ('a' - 'A'));
+        } else if (!to_lower && ch >= 'a' && ch <= 'z') {
+            ch = (char)(ch - ('a' - 'A'));
+        }
+        out->data[i] = ch;
+    }
+    out->data[s->len] = '\0';
+    rt_core_register_string(out);
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+}
+
+int64_t rt_string_to_lower(int64_t value) {
+    return rt_string_ascii_case(value, 1);
+}
+
+int64_t rt_string_to_upper(int64_t value) {
+    return rt_string_ascii_case(value, 0);
+}
+
+int64_t rt_string_split(int64_t value, int64_t delimiter) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* d = rt_core_as_string(delimiter);
+    if (!s || !d) return rt_core_nil();
+    if (d->len == 0) {
+        SplArray* chars = rt_array_new((int64_t)s->len);
+        if (!chars) return rt_core_nil();
+        for (uint64_t i = 0; i < s->len; i++) {
+            uint8_t byte = (uint8_t)s->data[i];
+            rt_array_push(chars, rt_string_new(&byte, 1));
+        }
+        return (int64_t)(uintptr_t)chars;
+    }
+
+    uint64_t count = 1;
+    for (uint64_t i = 0; i + d->len <= s->len;) {
+        if (memcmp(s->data + i, d->data, (size_t)d->len) == 0) {
+            count++;
+            i += d->len;
+        } else {
+            i++;
+        }
+    }
+
+    SplArray* parts = rt_array_new((int64_t)count);
+    if (!parts) return rt_core_nil();
+    uint64_t start = 0;
+    uint64_t i = 0;
+    while (i + d->len <= s->len) {
+        if (memcmp(s->data + i, d->data, (size_t)d->len) == 0) {
+            rt_array_push(parts, rt_string_new((const uint8_t*)s->data + start, i - start));
+            i += d->len;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    rt_array_push(parts, rt_string_new((const uint8_t*)s->data + start, s->len - start));
+    return (int64_t)(uintptr_t)parts;
+}
+
+int64_t rt_string_join(int64_t array_value, int64_t separator) {
+    RtCoreArray* array = rt_core_as_array(array_value);
+    RtCoreString* sep = rt_core_as_string(separator);
+    if (!array || !sep) return rt_core_nil();
+    uint64_t total = 0;
+    for (int64_t i = 0; i < array->len; i++) {
+        RtCoreString* item = rt_core_as_string(((int64_t*)array->data)[i]);
+        if (item) total += item->len;
+        if (i + 1 < array->len) total += sep->len;
+    }
+    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)total + 1);
+    if (!out) return rt_core_nil();
+    out->kind = RT_VALUE_HEAP_STRING;
+    out->reserved = 0;
+    out->len = total;
+    uint64_t pos = 0;
+    for (int64_t i = 0; i < array->len; i++) {
+        RtCoreString* item = rt_core_as_string(((int64_t*)array->data)[i]);
+        if (item && item->len > 0) {
+            memcpy(out->data + pos, item->data, (size_t)item->len);
+            pos += item->len;
+        }
+        if (i + 1 < array->len && sep->len > 0) {
+            memcpy(out->data + pos, sep->data, (size_t)sep->len);
+            pos += sep->len;
+        }
+    }
+    out->data[total] = '\0';
+    rt_core_register_string(out);
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+}
+
+int8_t rt_contains(int64_t collection, int64_t value) {
+    RtCoreArray* array = rt_core_as_array(collection);
+    if (array) {
+        for (int64_t i = 0; i < array->len; i++) {
+            int64_t item = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
+                ? (int64_t)((uint8_t*)array->data)[i]
+                : ((int64_t*)array->data)[i];
+            if (rt_native_eq(item, value)) return 1;
+        }
+        return 0;
+    }
+    RtCoreString* s = rt_core_as_string(collection);
+    RtCoreString* needle = rt_core_as_string(value);
+    if (s && needle) {
+        if (needle->len == 0) return 1;
+        for (uint64_t i = 0; i + needle->len <= s->len; i++) {
+            if (memcmp(s->data + i, needle->data, (size_t)needle->len) == 0) return 1;
+        }
+        return 0;
+    }
+    if (s && rt_core_is_int(value)) {
+        uint8_t byte = (uint8_t)rt_core_as_int(value);
+        for (uint64_t i = 0; i < s->len; i++) {
+            if ((uint8_t)s->data[i] == byte) return 1;
+        }
+    }
+    return 0;
+}
+
+int64_t rt_unwrap_or_self(int64_t value) {
+    return value;
+}
+
+int8_t rt_is_some(int64_t value) {
+    return !rt_core_is_special(value) || rt_core_special_payload(value) != RT_VALUE_SPECIAL_NIL;
+}
+
 int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* old_s = rt_core_as_string(old_value);
@@ -619,6 +954,23 @@ void rt_eprintln_value(int64_t value) {
     fflush(stderr);
 }
 
+static int rt_core_argc = 0;
+static char** rt_core_argv = NULL;
+
+__attribute__((weak)) void spl_init_args(int argc, char** argv) {
+    rt_core_argc = argc;
+    rt_core_argv = argv;
+}
+
+__attribute__((weak)) int64_t spl_arg_count(void) {
+    return (int64_t)rt_core_argc;
+}
+
+__attribute__((weak)) const char* spl_get_arg(int64_t idx) {
+    if (idx < 0 || idx >= rt_core_argc) return "";
+    return rt_core_argv && rt_core_argv[idx] ? rt_core_argv[idx] : "";
+}
+
 void rt_set_args(int argc, char** argv) {
     spl_init_args(argc, argv);
 }
@@ -629,6 +981,18 @@ int32_t rt_get_argc(void) {
 
 SplArray* rt_get_args(void) {
     return rt_cli_get_args();
+}
+
+SplArray* rt_cli_get_args(void) {
+    int64_t argc = spl_arg_count();
+    SplArray* args = rt_array_new(argc);
+    if (!args) return (SplArray*)rt_core_nil();
+    for (int64_t i = 0; i < argc; i++) {
+        const char* arg = spl_get_arg(i);
+        int64_t value = rt_string_new((const uint8_t*)arg, (uint64_t)strlen(arg));
+        rt_array_push(args, value);
+    }
+    return args;
 }
 
 /* ================================================================
@@ -834,6 +1198,10 @@ int64_t rt_array_get(SplArray* a, int64_t idx) {
     return ((int64_t*)array->data)[idx];
 }
 
+int64_t rt_array_get_text(SplArray* a, int64_t idx) {
+    return rt_array_get(a, idx);
+}
+
 void rt_array_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return;
@@ -845,6 +1213,13 @@ void rt_array_set(SplArray* a, int64_t idx, int64_t val) {
     } else {
         ((int64_t*)array->data)[idx] = val;
     }
+}
+
+int8_t rt_array_set_text(SplArray* a, int64_t idx, int64_t val) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    rt_array_set(a, idx, val);
+    return 1;
 }
 
 int8_t rt_array_push(SplArray* a, int64_t val) {
@@ -864,6 +1239,14 @@ int64_t rt_array_data_ptr(SplArray* a) {
     return array ? (int64_t)(uintptr_t)array->data : 0;
 }
 
+int64_t rt_array_data_ptr_text(SplArray* a) {
+    return rt_array_data_ptr(a);
+}
+
+int64_t rt_array_data_ptr_u8(SplArray* a) {
+    return rt_array_data_ptr(a);
+}
+
 int64_t rt_array_header_ptr(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? (int64_t)(uintptr_t)array : 0;
@@ -874,6 +1257,10 @@ int8_t rt_array_set_len_known(int64_t header_ptr, int64_t len) {
     if (!array || len < 0 || len > array->cap) return 0;
     array->len = len;
     return 1;
+}
+
+int8_t rt_array_set_len_known_text(int64_t header_ptr, int64_t len) {
+    return rt_array_set_len_known(header_ptr, len);
 }
 
 static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap) {
@@ -1166,6 +1553,19 @@ void rt_dict_set(SplDict* d, const char* key, SplValue* val) {
     if (val) {
         spl_dict_set(d, key, *val);
     }
+}
+
+int8_t rt_dict_insert(int64_t dict, int64_t key, int64_t value) {
+    SplDict* d = (SplDict*)(uintptr_t)dict;
+    RtCoreString* key_string = rt_core_as_string(key);
+    if (!d || !key_string) return 0;
+    char* key_buf = (char*)malloc((size_t)key_string->len + 1);
+    if (!key_buf) return 0;
+    if (key_string->len > 0) memcpy(key_buf, key_string->data, (size_t)key_string->len);
+    key_buf[key_string->len] = '\0';
+    spl_dict_set(d, key_buf, spl_int(value));
+    free(key_buf);
+    return 1;
 }
 
 int rt_dict_contains(SplDict* d, const char* key) {

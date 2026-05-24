@@ -232,6 +232,11 @@ int64_t  rt_time_now_micros(void);  /* Microsecond precision monotonic time */
 /* ===== Stdin/Stdout I/O ===== */
 
 char*    rt_stdin_read_line(void);         /* reads line from stdin, NULL on EOF */
+int64_t  rt_stdin_read_line_text(void);    /* reads line from stdin as tagged text, empty on EOF */
+int64_t  rt_stdin_read_chars_text(int64_t count); /* reads up to count bytes from stdin as tagged text */
+int64_t  rt_stdin_read_mcp_message_text(void); /* reads one MCP framed or JSON-lines message body */
+int64_t  rt_mcp_initialize_response_text(int64_t message); /* native fast path for MCP initialize */
+void     rt_mcp_write_framed_text(int64_t body); /* writes Content-Length framed tagged text */
 int64_t  stdin_read_char(void);            /* reads one byte from stdin as tagged text */
 int64_t  rt_stdout_write_text(const char* s); /* writes text without newline, returns len */
 int64_t  print_raw(int64_t value);         /* writes tagged RuntimeValue to stdout */
@@ -262,6 +267,7 @@ int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
 int64_t  rt_string_char_code_at(int64_t string, int64_t index);
+int64_t  rt_string_char_at(int64_t string, int64_t index);
 int64_t  rt_string_concat(int64_t left, int64_t right);
 int64_t  rt_any_add(int64_t left, int64_t right);
 int64_t  rt_len(int64_t value);
@@ -275,11 +281,16 @@ SplArray* rt_array_new_with_cap_u64(int64_t cap);
 SplArray* rt_byte_array_new(uint64_t cap);
 int64_t  rt_array_len(SplArray* array);
 int64_t  rt_array_get(SplArray* array, int64_t idx);
+int64_t  rt_array_get_text(SplArray* array, int64_t idx);
 void     rt_array_set(SplArray* array, int64_t idx, int64_t value);
+int8_t   rt_array_set_text(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_push(SplArray* array, int64_t value);
 int64_t  rt_array_data_ptr(SplArray* array);
+int64_t  rt_array_data_ptr_text(SplArray* array);
+int64_t  rt_array_data_ptr_u8(SplArray* array);
 int64_t  rt_array_header_ptr(SplArray* array);
 int8_t   rt_array_set_len_known(int64_t header_ptr, int64_t len);
+int8_t   rt_array_set_len_known_text(int64_t header_ptr, int64_t len);
 int64_t  rt_bytes_u8_at(SplArray* array, int64_t idx);
 int64_t  rt_bytes_u32_le_at(SplArray* array, int64_t idx);
 int64_t  rt_bytes_u64_le_at(SplArray* array, int64_t idx);
@@ -321,6 +332,15 @@ int64_t  rt_native_neq(int64_t left, int64_t right);
 int64_t  rt_slice(int64_t value, int64_t start, int64_t end, int64_t step);
 int64_t  rt_string_starts_with(int64_t value, int64_t prefix);
 int64_t  rt_string_ends_with(int64_t value, int64_t suffix);
+int64_t  rt_string_find(int64_t value, int64_t needle);
+int64_t  rt_string_to_lower(int64_t value);
+int64_t  rt_string_to_upper(int64_t value);
+int64_t  rt_string_split(int64_t value, int64_t delimiter);
+int64_t  rt_string_join(int64_t array, int64_t separator);
+int8_t   rt_contains(int64_t collection, int64_t value);
+int64_t  rt_unwrap_or_self(int64_t value);
+int8_t   rt_is_some(int64_t value);
+int8_t   rt_dict_insert(int64_t dict, int64_t key, int64_t value);
 int64_t  rt_string_replace(int64_t value, int64_t old_value, int64_t new_value);
 int64_t  rt_string_trim(int64_t value);
 int64_t  rt_string_to_int(int64_t value);

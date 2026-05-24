@@ -1,21 +1,81 @@
 # Simple CLI - linkers command
-# Delegates to Rust runtime via SFFI
+# Lists available native linkers with a startup-light wrapper.
 
 use std.cli.cli_util (get_cli_args)
-use app.io.cli_commands (cli_handle_linkers)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn print_help():
     print "Usage: simple linkers"
     print "Lists available native linkers"
     print ""
-    print "Run 'simple linkers --help' for Rust-level help."
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
 
 fn main() -> i64:
-    val all_args = get_cli_args()
-    var i = 0
-    while i < all_args.len():
-        if all_args[i] == "--help" or all_args[i] == "-h":
-            print_help()
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("linkers", log_opts.error)
+        return 1
+
+    val args = linkers_clean_log_args(raw_args)
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"linkers\",\"status\":\"ready\"}"
             return 0
+        return print_linkers()
+    if args[0] == "--help" or args[0] == "-h" or args[0] == "help":
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"linkers\",\"status\":\"error\",\"error\":\"unknown option\"}"
+        return 1
+    print "error: unknown option: {args[0]}"
+    print_help()
+    1
+
+fn print_linkers() -> i64:
+    print "Available native linkers:"
+    print ""
+    print_linker_status("mold", "Modern linker (fastest, recommended)", "which mold 2>/dev/null")
+    print_linker_status("lld", "LLVM linker (fast, widely available)", "which lld 2>/dev/null || which ld.lld 2>/dev/null")
+    print_linker_status("ld", "GNU linker (default, always available)", "which ld 2>/dev/null")
+    print ""
+    print "Auto-detection preference: mold > lld > ld"
+    0
+
+fn print_linker_status(name: text, description: text, probe: text):
+    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", probe])
+    val status = if code == 0: "installed" else: "not found"
+    print "  {name}      {description}  [{status}]"
+
+fn linkers_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn linkers_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if linkers_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
         i = i + 1
-    cli_handle_linkers()
+    cleaned

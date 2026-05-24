@@ -613,6 +613,13 @@ pub(crate) fn generate_stub_object(
         if needs_stub.len() > 80 { " ..." } else { "" }
     );
 
+    if std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1") {
+        return Err(format!(
+            "unresolved native symbols require stubs while SIMPLE_NO_STUB_FALLBACK=1: {}",
+            preview
+        ));
+    }
+
     let forbidden_enum_ctors: Vec<&str> = needs_stub
         .iter()
         .map(|s| s.as_str())

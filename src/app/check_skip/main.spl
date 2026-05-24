@@ -12,6 +12,8 @@ use std.nogc_sync_mut.io.file_ops.{file_read}
 use std.nogc_sync_mut.io.env_ops.{cwd}
 use std.nogc_sync_mut.io.sysinfo_ops.{path_basename}
 use std.nogc_sync_mut.io_runtime.{get_args}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 # ============================================================================
 # Data Types
@@ -52,7 +54,18 @@ fn print_help():
     print "  --format=md      Output as markdown (default: terminal)"
     print "  --by-category    Group results by directory category"
     print "  --summary        Show only summary, no file listing"
+    print "  --json           Output summary as JSON"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help       Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
 # ============================================================================
 # File Discovery
@@ -290,36 +303,60 @@ fn render_markdown(report: CheckSkipReport, by_category: bool, summary_only: boo
         for entry in report.entries:
             print "| {entry.status} | `{entry.file_path}` | {entry.reason} |"
 
+fn render_json(report: CheckSkipReport):
+    print "{\"command\":\"check-skip\",\"status\":\"ok\",\"total\":{report.total_files},\"active\":{report.active_count},\"skipped\":{report.skipped_count},\"pending\":{report.pending_count},\"skip_percentage\":{report.skip_percentage}}"
+
 # ============================================================================
 # Main
 # ============================================================================
 
 fn main() -> i64:
     val args = get_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("check-skip", log_opts.error)
+        return 1
 
     var format = "text"
     var by_category = false
     var summary_only = false
+    var as_json = log_opts.log_mode == "json"
 
-    for arg in args:
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
         if arg == "-h" or arg == "--help":
             print_help()
             return 0
-        if arg == "--format=md" or arg == "--format=markdown":
+        elif arg == "--format=md" or arg == "--format=markdown":
             format = "md"
-        if arg == "--by-category":
+        elif arg == "--by-category":
             by_category = true
-        if arg == "--summary":
+        elif arg == "--summary":
             summary_only = true
+        elif arg == "--json" or arg == "--log-mode=json":
+            as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        ai = ai + 1
 
     val root = cwd()
 
     val files = collect_test_files(root)
-    print "Found {files.len()} test files"
+    if not as_json:
+        print "Found {files.len()} test files"
 
     val report = build_report(files, root)
+    if log_opts.progress != "summary":
+        val progress_line = render_progress(log_opts.progress, files.len(), files.len(), "check-skip")
+        if progress_line != "":
+            print progress_line
 
-    if format == "md":
+    if as_json:
+        render_json(report)
+    elif format == "md":
         render_markdown(report, by_category, summary_only)
     else:
         render_terminal(report, by_category, summary_only)

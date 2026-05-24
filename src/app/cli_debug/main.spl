@@ -23,6 +23,8 @@ use app.cli_debug.commands.{
     SDB_TARGET_PROGRAM, SDB_BACKEND
 }
 use app.cli_debug.format.{fmt_bold, fmt_dim, fmt_cyan}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
 
 # ============================================================================
 # State
@@ -40,6 +42,19 @@ fn print_banner():
     print "Backends: gdb, lldb, interpreter (.spl), smf (.smf), native"
     print "Type " + fmt_bold("help") + " for commands, " + fmt_bold("backend") + " to switch backend, " + fmt_bold("quit") + " to exit."
     print ""
+
+fn print_usage():
+    print "Simple Debugger (sdb) 0.1.0"
+    print ""
+    print "Usage:"
+    print "  simple debug [--backend TYPE] [program] [args...]"
+    print "  simple debug --help"
+    print ""
+    print "Backends: gdb, lldb, interpreter, smf, native"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
 
 # ============================================================================
 # REPL Loop
@@ -116,5 +131,75 @@ fn run_debug_repl() -> i64:
 
     0
 
-fn main():
-    val exit_code = run_debug_repl()
+fn main() -> i64:
+    val raw_args = debug_get_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("debug", log_opts.error)
+        return 1
+
+    val args = debug_clean_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
+        print_usage()
+        return 0
+
+    if raw_args.len() > 0 and args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"debug\",\"status\":\"ready\"}"
+            return 0
+        val progress = render_progress(log_opts.progress, 0, 1, "ready")
+        if progress != "":
+            print progress
+            return 0
+
+    run_debug_repl()
+
+fn debug_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn debug_clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if debug_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn debug_get_args() -> [text]:
+    val all_args = rt_cli_get_args()
+    var args: [text] = []
+    var found_debug = false
+    var i = 0
+    while i < all_args.len():
+        if found_debug:
+            args.push(all_args[i])
+        elif all_args[i] == "debug" or all_args[i] == "cli-debug":
+            found_debug = true
+        i = i + 1
+    if found_debug:
+        return args
+
+    var start_idx = 0
+    i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("main.spl"):
+            start_idx = i + 1
+        i = i + 1
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
