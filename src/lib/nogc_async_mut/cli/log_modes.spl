@@ -1,0 +1,171 @@
+# Shared CLI log/output mode options.
+#
+# Apps can parse these flags before command-specific options and then choose
+# renderer/log sinks consistently across stdout, TUI, human, and LLM flows.
+
+class SimpleLogOptions:
+    log_mode: text      # "human" | "llm" | "json"
+    surface: text       # "stdout" | "tui"
+    progress: text      # "summary" | "count" | "dot" | "none"
+    quiet: bool
+    verbose: bool
+    valid: bool
+    error: text
+
+    static fn defaults() -> SimpleLogOptions:
+        SimpleLogOptions(
+            log_mode: "human",
+            surface: "stdout",
+            progress: "summary",
+            quiet: false,
+            verbose: false,
+            valid: true,
+            error: ""
+        )
+
+class SimpleProgressGroup:
+    name: text
+    done: i64
+    total: i64
+    status: text
+
+    static fn new(name: text, done: i64, total: i64, status: text) -> SimpleProgressGroup:
+        SimpleProgressGroup(name: name, done: done, total: total, status: status)
+
+fn _is_log_mode(value: text) -> bool:
+    value == "human" or value == "llm" or value == "json"
+
+fn _is_surface(value: text) -> bool:
+    value == "stdout" or value == "tui"
+
+fn _is_progress(value: text) -> bool:
+    value == "summary" or value == "count" or value == "dot" or value == "none"
+
+fn _next_value(args: [text], index: i32) -> text:
+    if index + 1 < args.len() as i32:
+        return args[index + 1]
+    ""
+
+fn parse_log_options(args: [text]) -> SimpleLogOptions:
+    var opts = SimpleLogOptions.defaults()
+    var i: i32 = 0
+    while i < args.len() as i32:
+        val arg = args[i]
+        if arg == "--human":
+            opts.log_mode = "human"
+        elif arg == "--llm":
+            opts.log_mode = "llm"
+        elif arg == "--json":
+            opts.log_mode = "json"
+        elif arg == "--tui":
+            opts.surface = "tui"
+        elif arg == "--stdout":
+            opts.surface = "stdout"
+        elif arg == "--quiet":
+            opts.quiet = true
+            opts.progress = "none"
+        elif arg == "--verbose":
+            opts.verbose = true
+        elif arg == "--dots":
+            opts.progress = "dot"
+        elif arg == "--count":
+            opts.progress = "count"
+        elif arg == "--no-progress":
+            opts.progress = "none"
+        elif arg.starts_with("--log-mode="):
+            val value = arg.slice(11, arg.len())
+            if _is_log_mode(value):
+                opts.log_mode = value
+            else:
+                opts.valid = false
+                opts.error = "invalid --log-mode: {value}"
+        elif arg == "--log-mode":
+            val value = _next_value(args, i)
+            if _is_log_mode(value):
+                opts.log_mode = value
+                i = i + 1
+            else:
+                opts.valid = false
+                opts.error = "invalid --log-mode: {value}"
+        elif arg.starts_with("--surface="):
+            val value = arg.slice(10, arg.len())
+            if _is_surface(value):
+                opts.surface = value
+            else:
+                opts.valid = false
+                opts.error = "invalid --surface: {value}"
+        elif arg.starts_with("--progress="):
+            val value = arg.slice(11, arg.len())
+            if _is_progress(value):
+                opts.progress = value
+            else:
+                opts.valid = false
+                opts.error = "invalid --progress: {value}"
+        elif arg == "--progress":
+            val value = _next_value(args, i)
+            if _is_progress(value):
+                opts.progress = value
+                i = i + 1
+            else:
+                opts.valid = false
+                opts.error = "invalid --progress: {value}"
+        i = i + 1
+    opts
+
+fn log_options_help() -> [text]:
+    [
+        "--log-mode <human|llm|json>  Select log rendering mode",
+        "--human | --llm | --json     Shorthand log modes",
+        "--stdout | --tui             Select output surface",
+        "--progress <summary|count|dot|none>",
+        "--dots | --count | --no-progress",
+        "--quiet | --verbose"
+    ]
+
+fn render_progress(mode: text, done: i64, total: i64, label: text) -> text:
+    if mode == "none":
+        return ""
+    if mode == "dot":
+        return "."
+    var safe_total = total
+    if safe_total <= 0:
+        safe_total = 1
+    if mode == "count":
+        if label == "":
+            return "{done}/{safe_total}"
+        return "{done}/{safe_total} {label}"
+    var pct = done * 100 / safe_total
+    if label == "":
+        return "{done}/{safe_total} ({pct}%)"
+    "{label}: {done}/{safe_total} ({pct}%)"
+
+fn render_tui_grouped_counts(title: text, groups: [SimpleProgressGroup]) -> text:
+    var parts: [text] = []
+    if title != "":
+        parts.push(title)
+        parts.push("\n")
+    parts.push("groups: ")
+    parts.push(groups.len().to_string())
+    parts.push("\n")
+    var i: i32 = 0
+    while i < groups.len() as i32:
+        val group = groups[i]
+        var safe_total = group.total
+        if safe_total <= 0:
+            safe_total = 1
+        val pct = group.done * 100 / safe_total
+        parts.push("[")
+        parts.push(group.status)
+        parts.push("] ")
+        parts.push(group.name)
+        parts.push(" ")
+        parts.push(group.done.to_string())
+        parts.push("/")
+        parts.push(safe_total.to_string())
+        parts.push(" (")
+        parts.push(pct.to_string())
+        parts.push("%)")
+        if i + 1 < groups.len() as i32:
+            parts.push("\n")
+        i = i + 1
+    parts.join("")

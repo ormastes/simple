@@ -19,13 +19,48 @@ cd "${repo_root}/bin"
 
 ln -sf "release/${PLATFORM_TRIPLE}/simple" simple
 
-for b in simple_mcp_server t32_mcp_server t32_lsp_mcp_server; do
+for b in t32_mcp_server t32_lsp_mcp_server; do
   if [ -x "release/${PLATFORM_TRIPLE}/${b}" ]; then
     ln -sf "release/${PLATFORM_TRIPLE}/${b}" "${b}"
   fi
 done
 
-if [ -x "release/${PLATFORM_TRIPLE}/simple_lsp_mcp_server" ]; then
+if [ -x "release/${PLATFORM_TRIPLE}/simple_mcp_server" ] || [ -x "release/linux-x86_64/simple_mcp_server" ]; then
+  rm -f simple_mcp_server
+  cat > simple_mcp_server <<'EOF'
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
+
+if [ "${platform_dir}" = "x86_64-unknown-linux-gnu" ] && [ -x "${script_dir}/release/linux-x86_64/simple_mcp_server" ]; then
+  native="${script_dir}/release/linux-x86_64/simple_mcp_server"
+else
+  native="${script_dir}/release/${platform_dir}/simple_mcp_server"
+fi
+
+if [ ! -x "${native}" ]; then
+  for candidate in "${script_dir}"/release/*/simple_mcp_server; do
+    if [ -x "${candidate}" ]; then
+      native="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [ ! -x "${native}" ]; then
+  printf '%s\n' "error: native simple_mcp_server not found under ${script_dir}/release" >&2
+  exit 127
+fi
+
+exec "${native}" "$@"
+EOF
+  chmod +x simple_mcp_server
+fi
+
+if [ -x "release/${PLATFORM_TRIPLE}/simple_lsp_mcp_server" ] || [ -x "release/linux-x86_64/simple_lsp_mcp_server" ]; then
+  rm -f simple_lsp_mcp_server
   cat > simple_lsp_mcp_server <<'EOF'
 #!/bin/sh
 set -eu
@@ -45,7 +80,12 @@ esac
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
-native="${script_dir}/release/${platform_dir}/simple_lsp_mcp_server"
+
+if [ "${platform_dir}" = "x86_64-unknown-linux-gnu" ] && [ -x "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server" ]; then
+  native="${script_dir}/release/linux-x86_64/simple_lsp_mcp_server"
+else
+  native="${script_dir}/release/${platform_dir}/simple_lsp_mcp_server"
+fi
 
 if [ ! -x "${native}" ]; then
   for candidate in "${script_dir}"/release/*/simple_lsp_mcp_server; do

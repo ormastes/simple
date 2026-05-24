@@ -14,6 +14,7 @@ use nogc_sync_mut.db.dbfs_engine.sql_parser.{
 use nogc_sync_mut.db.dbfs_engine.mvcc.{
     MvccTable, MvccTxnManager, MvccSnapshot
 }
+use nogc_sync_mut.db.dbfs_engine.fts.search.{FtsEngine}
 
 # ── Full-text search types ──────────────────────────────────────────────────
 
@@ -195,6 +196,16 @@ fn _row_search_text(row_vals: [DbValue], col_names: [text], selected_cols: [text
         ci = ci + 1
     result
 
+fn _same_text_list(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i32 = 0
+    while i < a.len() as i32:
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
 fn _count_term(tokens: [text], term: text) -> i64:
     var count: i64 = 0
     var i: i32 = 0
@@ -256,6 +267,18 @@ fn _contains_score(doc: [text], terms: [text]) -> f64:
             score = score + 1.0
         i = i + 1
     score
+
+fn _fts_match_value(value: text, query: text) -> bool:
+    val doc = _text_tokens(value)
+    val terms = _text_tokens(query)
+    if terms.len() == 0:
+        return false
+    var i: i32 = 0
+    while i < terms.len() as i32:
+        if _contains_term(doc, terms[i]):
+            return true
+        i = i + 1
+    false
 
 fn _bm25_score(docs: [[text]], doc_index: i32, terms: [text], total_len: i64) -> f64:
     val doc = docs[doc_index]
@@ -332,6 +355,13 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
             ini = ini + 1
         return DbValue.Bool(value: found)
     if expr.kind == SqlExprKind.FunctionCall:
+        val fname = expr.value.to_lower()
+        if fname == "fts_match":
+            if expr.args.len() < 2:
+                return DbValue.Bool(value: false)
+            val target = _eval_expr(expr.args[0], cols, vals, params)
+            val query = _eval_expr(expr.args[1], cols, vals, params)
+            return DbValue.Bool(value: _fts_match_value(target.to_text(), query.to_text()))
         # Aggregate functions are evaluated in _do_select, not here.
         # Return Null as placeholder — real eval happens in aggregate path.
         return DbValue.Null
@@ -372,6 +402,8 @@ fn _apply_binop(op: text, a: DbValue, b: DbValue) -> DbValue:
         val av = a.to_text()
         val bv = b.to_text()
         return DbValue.Bool(value: _like_match(bv, av))
+    if op == "MATCH":
+        return DbValue.Bool(value: _fts_match_value(a.to_text(), b.to_text()))
     DbValue.Null
 
 fn _check_where(where_expr: SqlExpr?, cols: [text], vals: [DbValue], params: [DbValue]) -> bool:
@@ -599,6 +631,9 @@ class PureDatabase:
     _tbl_cols: [[text]]
     _tbl_data: [MvccTable]
     _tbl_rowids: [i64]
+    _fts_indexes: [FtsEngine]
+    _fts_valid: [bool]
+    _fts_columns: [[text]]
     _txn: MvccTxnManager
     is_open: bool
     _last_rowid: i64
@@ -610,6 +645,9 @@ class PureDatabase:
             _tbl_cols: [],
             _tbl_data: [],
             _tbl_rowids: [],
+            _fts_indexes: [],
+            _fts_valid: [],
+            _fts_columns: [],
             _txn: MvccTxnManager.new(),
             is_open: true,
             _last_rowid: 0,
@@ -688,6 +726,26 @@ class PureDatabase:
     fn changes() -> i64:
         self._last_changes
 
+    me _invalidate_fts(ti: i32):
+        if ti >= 0 and ti < self._fts_valid.len() as i32:
+            self._fts_valid[ti] = false
+
+    me _ensure_fts_index(ti: i32, col_names: [text], selected_cols: [text], visible: [text]):
+        if ti < 0 or ti >= self._fts_indexes.len() as i32:
+            return
+        if self._fts_valid[ti] and _same_text_list(self._fts_columns[ti], selected_cols):
+            return
+        var engine = FtsEngine.new()
+        var ri: i32 = 0
+        while ri < visible.len() as i32:
+            val row_vals = _deserialize_row(visible[ri])
+            val text_value = _row_search_text(row_vals, col_names, selected_cols)
+            engine.add_document(ri as i64, text_value)
+            ri = ri + 1
+        self._fts_indexes[ti] = engine
+        self._fts_valid[ti] = true
+        self._fts_columns[ti] = selected_cols
+
     me search(table: text, columns: [text], query: text, algorithm: PureSearchAlgorithm, limit: i64) -> Result<[PureSearchResult], DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
@@ -718,6 +776,24 @@ class PureDatabase:
             rows.push(DbRow(columns: col_names, values: row_vals))
             ri = ri + 1
         var results: [PureSearchResult] = []
+        if algorithm == PureSearchAlgorithm.Bm25:
+            self._ensure_fts_index(ti, col_names, columns, visible)
+            val engine = self._fts_indexes[ti]
+            val fts_results = engine.search(query)
+            var fi: i32 = 0
+            while fi < fts_results.len() as i32:
+                val row_idx = fts_results[fi].doc_id
+                if row_idx >= 0 and row_idx < rows.len():
+                    val score = fts_results[fi].score
+                    if score > 0:
+                        results = _push_ranked_result(results, PureSearchResult(
+                            row: rows[row_idx as i32],
+                            score: score as f64,
+                            row_index: row_idx
+                        ), limit)
+                fi = fi + 1
+            self._last_changes = 0
+            return Ok(results)
         var di: i32 = 0
         while di < docs.len() as i32:
             val score = _search_score(docs, di, terms, algorithm, total_len)
@@ -757,6 +833,9 @@ class PureDatabase:
         self._tbl_cols.push(col_names)
         self._tbl_data.push(MvccTable.new())
         self._tbl_rowids.push(0)
+        self._fts_indexes.push(FtsEngine.new())
+        self._fts_valid.push(false)
+        self._fts_columns.push([])
         self._last_changes = 0
         Ok(0)
 
@@ -774,6 +853,9 @@ class PureDatabase:
         var new_cols: [[text]] = []
         var new_data: [MvccTable] = []
         var new_rowids: [i64] = []
+        var new_fts_indexes: [FtsEngine] = []
+        var new_fts_valid: [bool] = []
+        var new_fts_columns: [[text]] = []
         var i: i32 = 0
         while i < self._tbl_names.len() as i32:
             if i != ti:
@@ -781,11 +863,17 @@ class PureDatabase:
                 new_cols.push(self._tbl_cols[i])
                 new_data.push(self._tbl_data[i])
                 new_rowids.push(self._tbl_rowids[i])
+                new_fts_indexes.push(self._fts_indexes[i])
+                new_fts_valid.push(self._fts_valid[i])
+                new_fts_columns.push(self._fts_columns[i])
             i = i + 1
         self._tbl_names = new_names
         self._tbl_cols = new_cols
         self._tbl_data = new_data
         self._tbl_rowids = new_rowids
+        self._fts_indexes = new_fts_indexes
+        self._fts_valid = new_fts_valid
+        self._fts_columns = new_fts_columns
         self._last_changes = 0
         Ok(0)
 
@@ -827,6 +915,8 @@ class PureDatabase:
             inserted = inserted + 1
             vi = vi + 1
         self._txn.commit(tid)
+        if inserted > 0:
+            self._invalidate_fts(ti)
         self._last_changes = inserted
         Ok(inserted)
 
@@ -1116,6 +1206,8 @@ class PureDatabase:
             ri = ri + 1
         self._tbl_data[ti] = tbl
         self._txn.commit(tid)
+        if updated > 0:
+            self._invalidate_fts(ti)
         self._last_changes = updated
         Ok(updated)
 
@@ -1145,6 +1237,8 @@ class PureDatabase:
             ri = ri + 1
         self._tbl_data[ti] = tbl
         self._txn.commit(tid)
+        if deleted > 0:
+            self._invalidate_fts(ti)
         self._last_changes = deleted
         Ok(deleted)
 

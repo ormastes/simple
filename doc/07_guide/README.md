@@ -43,6 +43,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/lsp_dap.md](tooling/lsp_dap.md) | LSP + DAP setup (VSCode, Neovim) |
 | [tooling/mcp.md](tooling/mcp.md) | MCP server setup and usage |
 | [tooling/lint.md](tooling/lint.md) | Linter configuration and usage |
+| [tooling/logging.md](tooling/logging.md) | Production logging, debug logging, and script print policy |
 | [tooling/ui_access.md](tooling/ui_access.md) | Canonical UI snapshot, act, and history workflow |
 | [tooling/ui_render.md](tooling/ui_render.md) | UI rendering pipeline |
 | [tooling/llm_dashboard_web_login.md](tooling/llm_dashboard_web_login.md) | Web login, bootstrap admin credentials, and auth-session storage for `llm_dashboard` |

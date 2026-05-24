@@ -170,6 +170,48 @@ describe "PureDatabase":
         val fts_first_id = fts_first_row.values[0]
         expect fts_first_id.to_text() == "1"
 
+    it "search reflects updated and deleted rows":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE docs (id INTEGER, body TEXT)").unwrap()
+        db.exec_sql("INSERT INTO docs (id, body) VALUES (1, 'alpha draft')").unwrap()
+        db.exec_sql("INSERT INTO docs (id, body) VALUES (2, 'beta live')").unwrap()
+        db.exec_sql("UPDATE docs SET body = 'alpha live' WHERE id = 1").unwrap()
+        db.exec_sql("DELETE FROM docs WHERE id = 2").unwrap()
+
+        val sr = db.fts5_search("docs", ["body"], "live", 5)
+        expect sr.is_ok() == true
+        val rows = sr.unwrap()
+        expect rows.len() == 1
+        val first = rows[0]
+        val first_row = first.row
+        val first_id = first_row.values[0]
+        expect first_id.to_text() == "1"
+
+    it "invalidates cached FTS search index after writes":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE docs (id INTEGER, body TEXT)").unwrap()
+        db.exec_sql("INSERT INTO docs (id, body) VALUES (1, 'alpha seed')").unwrap()
+
+        val warm = db.fts5_search("docs", ["body"], "omega", 5)
+        expect warm.is_ok() == true
+        expect warm.unwrap().len() == 0
+
+        db.exec_sql("INSERT INTO docs (id, body) VALUES (2, 'omega inserted')").unwrap()
+        val after_insert = db.fts5_search("docs", ["body"], "omega", 5)
+        expect after_insert.is_ok() == true
+        val inserted_rows = after_insert.unwrap()
+        expect inserted_rows.len() == 1
+        expect inserted_rows[0].row.values[0].to_text() == "2"
+
+        db.exec_sql("UPDATE docs SET body = 'alpha updated' WHERE id = 1").unwrap()
+        val after_update = db.fts5_search("docs", ["body"], "updated", 5)
+        expect after_update.is_ok() == true
+        val updated_rows = after_update.unwrap()
+        expect updated_rows.len() == 1
+        expect updated_rows[0].row.values[0].to_text() == "1"
+
     it "supports alternate lightweight search algorithms":
         val r = PureDatabase.memory()
         var db = r.unwrap()

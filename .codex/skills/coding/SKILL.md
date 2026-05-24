@@ -29,6 +29,14 @@ print "Hello, {name}!"        # String interpolation (default)
 print r"raw: \d+"              # Raw string (no interpolation)
 ```
 
+### Logging and Print
+
+- Use `print` only for scripts, examples, tests, and intentionally human-facing CLI output.
+- In `src/app/`, `src/lib/`, and `src/compiler/`, prefer structured logging calls: `log`, `info`, `warn`, `error`, `debug`, or `trace`.
+- `debug`/`trace` are for diagnostic detail and must be safe to compile out or suppress in production paths.
+- Hardware access, external process/file/network access, and trace capture should log through the AOP/debug logging path when available so human and LLM log modes can fold/group it.
+- `simple lint` emits `LOG001` when production source uses bare `print`; script-style `print` remains allowed outside production source roots.
+
 ### Functions
 
 ```simple
