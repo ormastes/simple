@@ -756,6 +756,49 @@ fn _parse_drop_table(sql: text) -> text:
         rest = rest.slice(0, rest.len() - 1).trim()
     rest
 
+fn _parse_txn_command(sql: text) -> text:
+    val trimmed = sql.trim()
+    var low = trimmed.to_lower()
+    # Strip trailing semicolon
+    if low.ends_with(";"):
+        low = low.slice(0, low.len() - 1).trim()
+    if low == "begin" or low == "begin transaction":
+        return "BEGIN"
+    if low == "commit" or low == "end transaction":
+        return "COMMIT"
+    if low == "rollback":
+        return "ROLLBACK"
+    ""
+
+fn _parse_alter_table(sql: text) -> [text]:
+    val trimmed = sql.trim()
+    val upper = trimmed.to_upper()
+    if not upper.starts_with("ALTER TABLE"):
+        return []
+    var rest = trimmed.slice(11, trimmed.len()).trim()
+    # Strip trailing semicolon
+    if rest.ends_with(";"):
+        rest = rest.slice(0, rest.len() - 1).trim()
+    # Extract table name (first token)
+    val parts = rest.split(" ")
+    if parts.len() < 4:
+        return []
+    val tbl_name = parts[0]
+    # Expect ADD COLUMN
+    val p1 = parts[1].to_upper()
+    val p2 = parts[2].to_upper()
+    if p1 != "ADD" or p2 != "COLUMN":
+        return []
+    val col_name = parts[3]
+    var col_type = "TEXT"
+    if parts.len() >= 5:
+        col_type = parts[4].to_upper()
+    var result: [text] = []
+    result.push(tbl_name)
+    result.push(col_name)
+    result.push(col_type)
+    result
+
 fn _join_text(values: [text], sep: text) -> text:
     var result = ""
     var i: i32 = 0
@@ -786,6 +829,12 @@ class PureDatabase:
     is_open: bool
     _last_rowid: i64
     _last_changes: i64
+    _in_transaction: bool
+    _snap_tbl_names: [text]
+    _snap_tbl_cols: [[text]]
+    _snap_row_tidx: [i32]
+    _snap_row_data: [text]
+    _snap_tbl_rowids: [i64]
 
     static fn memory() -> Result<PureDatabase, DbError>:
         Ok(PureDatabase(
@@ -800,7 +849,13 @@ class PureDatabase:
             _txn: MvccTxnManager.new(),
             is_open: true,
             _last_rowid: 0,
-            _last_changes: 0
+            _last_changes: 0,
+            _in_transaction: false,
+            _snap_tbl_names: [],
+            _snap_tbl_cols: [],
+            _snap_row_tidx: [],
+            _snap_row_data: [],
+            _snap_tbl_rowids: []
         ))
 
     static fn open(path: text) -> Result<PureDatabase, DbError>:
@@ -899,6 +954,21 @@ class PureDatabase:
     me exec(sql: text, params: [DbValue]) -> Result<i64, DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
+        # Handle transaction control before parsing
+        val txn_cmd = _parse_txn_command(sql)
+        if txn_cmd == "BEGIN":
+            return self._do_begin()
+        if txn_cmd == "COMMIT":
+            return self._do_commit()
+        if txn_cmd == "ROLLBACK":
+            return self._do_rollback()
+        # Handle ALTER TABLE before parsing
+        val alter_parts = _parse_alter_table(sql)
+        if alter_parts.len() == 3:
+            val a_tbl = alter_parts[0]
+            val a_col = alter_parts[1]
+            val a_type = alter_parts[2]
+            return self._do_alter_add_column(a_tbl, a_col, a_type)
         # Handle DROP TABLE before parsing (parser has no DropTable variant)
         val drop_tbl = _parse_drop_table(sql)
         if drop_tbl != "":
@@ -1046,6 +1116,142 @@ class PureDatabase:
     me fts5_search(table: text, columns: [text], query: text, limit: i64) -> Result<[PureSearchResult], DbError>:
         self.search(table, columns, query, PureSearchAlgorithm.Bm25, limit)
 
+    # ── Internal: Transaction control ────────────────────────────────────
+
+    me _snapshot_tables():
+        self._snap_tbl_names = []
+        self._snap_tbl_cols = []
+        self._snap_row_tidx = []
+        self._snap_row_data = []
+        self._snap_tbl_rowids = []
+        var ti: i32 = 0
+        while ti < self._tbl_names.len() as i32:
+            self._snap_tbl_names.push(self._tbl_names[ti])
+            # Deep copy columns
+            var cols_copy: [text] = []
+            var ci: i32 = 0
+            while ci < self._tbl_cols[ti].len() as i32:
+                cols_copy.push(self._tbl_cols[ti][ci])
+                ci = ci + 1
+            self._snap_tbl_cols.push(cols_copy)
+            self._snap_tbl_rowids.push(self._tbl_rowids[ti])
+            # Serialize visible rows for snapshot
+            val snap = self._txn.snapshot()
+            var tbl = self._tbl_data[ti]
+            val visible = tbl.scan(snap)
+            self._tbl_data[ti] = tbl
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                self._snap_row_tidx.push(ti)
+                self._snap_row_data.push(visible[ri])
+                ri = ri + 1
+            ti = ti + 1
+
+    me _restore_from_snapshot():
+        self._tbl_names = []
+        self._tbl_cols = []
+        self._tbl_data = []
+        self._tbl_rowids = []
+        self._fts_indexes = []
+        self._fts_valid = []
+        self._fts_columns = []
+        var ti: i32 = 0
+        while ti < self._snap_tbl_names.len() as i32:
+            self._tbl_names.push(self._snap_tbl_names[ti])
+            self._tbl_cols.push(self._snap_tbl_cols[ti])
+            self._tbl_data.push(MvccTable.new())
+            self._tbl_rowids.push(self._snap_tbl_rowids[ti])
+            self._fts_indexes.push(FtsEngine.new())
+            self._fts_valid.push(false)
+            self._fts_columns.push([])
+            ti = ti + 1
+        # Re-insert snapshot rows using parallel arrays
+        var ri: i32 = 0
+        while ri < self._snap_row_tidx.len() as i32:
+            val idx = self._snap_row_tidx[ri]
+            val row_data = self._snap_row_data[ri]
+            if idx >= 0 and idx < self._tbl_data.len() as i32:
+                val handle = self._txn.begin()
+                val tid = handle.txn_id
+                var tbl = self._tbl_data[idx]
+                tbl.insert(tid, row_data)
+                self._tbl_data[idx] = tbl
+                self._txn.commit(tid)
+            ri = ri + 1
+
+    me _do_begin() -> Result<i64, DbError>:
+        if self._in_transaction:
+            return Err(DbError.QueryFailed(sql: "BEGIN", message: "already in transaction"))
+        self._snapshot_tables()
+        self._in_transaction = true
+        self._last_changes = 0
+        Ok(0)
+
+    me _do_commit() -> Result<i64, DbError>:
+        if not self._in_transaction:
+            return Err(DbError.QueryFailed(sql: "COMMIT", message: "no active transaction"))
+        self._in_transaction = false
+        self._snap_tbl_names = []
+        self._snap_tbl_cols = []
+        self._snap_row_tidx = []
+        self._snap_row_data = []
+        self._snap_tbl_rowids = []
+        self._last_changes = 0
+        self._persist()?
+        Ok(0)
+
+    me _do_rollback() -> Result<i64, DbError>:
+        if not self._in_transaction:
+            return Err(DbError.QueryFailed(sql: "ROLLBACK", message: "no active transaction"))
+        self._restore_from_snapshot()
+        self._in_transaction = false
+        self._snap_tbl_names = []
+        self._snap_tbl_cols = []
+        self._snap_row_tidx = []
+        self._snap_row_data = []
+        self._snap_tbl_rowids = []
+        self._last_changes = 0
+        self._persist()?
+        Ok(0)
+
+    # ── Internal: ALTER TABLE ADD COLUMN ─────────────────────────────────
+
+    me _do_alter_add_column(table_name: text, col_name: text, col_type: text) -> Result<i64, DbError>:
+        val ti = _find_idx(self._tbl_names, table_name)
+        if ti < 0:
+            return Err(DbError.QueryFailed(
+                sql: "ALTER TABLE",
+                message: "no such table: {table_name}"
+            ))
+        # Add the new column name
+        var cols = self._tbl_cols[ti]
+        cols.push(col_name)
+        self._tbl_cols[ti] = cols
+        # Rewrite existing rows to append NULL for the new column
+        val snap = self._txn.snapshot()
+        var tbl = self._tbl_data[ti]
+        val visible = tbl.scan(snap)
+        var new_tbl = MvccTable.new()
+        val handle = self._txn.begin()
+        val tid = handle.txn_id
+        var ri: i32 = 0
+        while ri < visible.len() as i32:
+            val old_row = visible[ri]
+            var new_row = old_row
+            if old_row != "":
+                new_row = old_row + "\tN:"
+            else:
+                new_row = "N:"
+            new_tbl.insert(tid, new_row)
+            ri = ri + 1
+        self._tbl_data[ti] = new_tbl
+        self._txn.commit(tid)
+        self._invalidate_fts(ti)
+        self._last_changes = 0
+        if not self._in_transaction:
+            self._persist()?
+        Ok(0)
+
     # ── Internal: CREATE TABLE ───────────────────────────────────────────
 
     me _do_create(ct: SqlCreateTable) -> Result<i64, DbError>:
@@ -1070,7 +1276,8 @@ class PureDatabase:
         self._fts_valid.push(false)
         self._fts_columns.push([])
         self._last_changes = 0
-        self._persist()?
+        if not self._in_transaction:
+            self._persist()?
         Ok(0)
 
     # ── Internal: DROP TABLE ────────────────────────────────────────────
@@ -1109,7 +1316,8 @@ class PureDatabase:
         self._fts_valid = new_fts_valid
         self._fts_columns = new_fts_columns
         self._last_changes = 0
-        self._persist()?
+        if not self._in_transaction:
+            self._persist()?
         Ok(0)
 
     # ── Internal: INSERT ─────────────────────────────────────────────────
@@ -1153,7 +1361,8 @@ class PureDatabase:
         if inserted > 0:
             self._invalidate_fts(ti)
         self._last_changes = inserted
-        self._persist()?
+        if not self._in_transaction:
+            self._persist()?
         Ok(inserted)
 
     # ── Internal: SELECT ─────────────────────────────────────────────────
@@ -1445,7 +1654,8 @@ class PureDatabase:
         if updated > 0:
             self._invalidate_fts(ti)
         self._last_changes = updated
-        self._persist()?
+        if not self._in_transaction:
+            self._persist()?
         Ok(updated)
 
     # ── Internal: DELETE ─────────────────────────────────────────────────
@@ -1477,7 +1687,8 @@ class PureDatabase:
         if deleted > 0:
             self._invalidate_fts(ti)
         self._last_changes = deleted
-        self._persist()?
+        if not self._in_transaction:
+            self._persist()?
         Ok(deleted)
 
 # ── Column projection ────────────────────────────────────────────────────────
