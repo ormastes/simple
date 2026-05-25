@@ -394,6 +394,13 @@ with `env SIMPLEOS_PROTECTION_MODE=<mode>`. The base command stays unchanged,
 but the mode-aware command is replayable and preserves the selected optional
 MPU/MMU mode for runner-side protection acceptance.
 
+Follow-up physical selected-mode gate:
+`simpleos_physical_serial_acceptance_reason(...)` now rejects real-board logs
+that lack the requested `protection=<mode>` marker. RA4M1 and STM32U585 capture
+scripts seed the board/mode/kind marker into `SIMPLEOS_SERIAL_LOG` before
+appending UART bytes, so the verifier can distinguish wrong-mode or stale
+captures from a real run of the requested MPU mode.
+
 Follow-up runner-facing protection gate:
 `qemu_protection_serial_accepts_hardening(...)` and
 `qemu_protection_serial_reason(...)` now expose the same serial evidence
@@ -452,6 +459,10 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
 - `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
   `4` examples passed.
+- `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
+- `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
+  `4` examples passed.
+- `sh -n scripts/run_simpleos_ra4m1.shs && sh -n scripts/run_simpleos_stm32u585.shs`: PASS
 - `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
 - `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
   `4` examples passed.

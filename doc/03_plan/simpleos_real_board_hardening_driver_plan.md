@@ -178,6 +178,10 @@ Current status:
   has a specific protection kind; RA4M1 must match `pmsav7-mpu`, STM32U585 must
   match `pmsav8-mpu`, x86 must match paging hardening, and RISC-V must match
   Sv39 evidence.
+- DONE: physical serial acceptance now requires the captured log to contain the
+  requested `protection=<mode>` marker. RA4M1 and STM32U585 capture scripts seed
+  the board/mode/kind marker into `SIMPLEOS_SERIAL_LOG` before appending device
+  serial bytes so the verifier can reject wrong-mode captures.
 - DONE: `qemu_protection_serial_accepts_hardening(...)` and
   `qemu_protection_serial_reason(...)` expose the protection evidence contract
   through the QEMU runner module. Runners and reports can now gate a captured
