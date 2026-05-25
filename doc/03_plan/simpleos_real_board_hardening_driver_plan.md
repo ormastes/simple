@@ -427,6 +427,11 @@ Pure-Simple completion gate:
   `non-secure-resource-namespace`, shared common-driver logic, and IOMMU or
   grant-broker evidence for every enabled NVMe, virtio-net/e1000, or hardware
   RDMA path.
+- DONE: q35 pure-Simple serial acceptance now has a separate marker contract.
+  The older q35 markers can prove hardware activity with the current C bridge;
+  pure completion also requires serial evidence for `storage_provider` and
+  `network_provider` as `simple-driver`, user-space placement, resource grants,
+  non-secure namespaces, and shared common-driver logic.
 
 ## Phase 7 - QEMU And Real Board Verification
 
@@ -436,6 +441,8 @@ QEMU commands to prove before claiming completion:
   - `sh scripts/run_simpleos_cortex_m33_qemu.shs`
 - x86_64 q35 PCI/NVMe/network:
   - QEMU lane with q35, NVMe, virtio-net, serial log, and marker checks.
+  - Pure-Simple lane must use the pure q35 marker contract, not only
+    `nvme_rw_restore=pass` and `virtio_net_tx_rx=pass`.
 - riscv64 virt Sv39:
   - QEMU lane with MMU marker and network/storage options where available.
 

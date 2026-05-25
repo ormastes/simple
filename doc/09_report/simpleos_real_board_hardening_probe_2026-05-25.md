@@ -344,6 +344,13 @@ must also carry user-space driver placement, a raw-device or resource-grant-set
 token source, non-secure resource namespace evidence, shared common-driver
 logic, and IOMMU or grant-broker evidence.
 
+Follow-up q35 pure serial gate: `src/os/drivers/real_device_readiness.spl` now
+has `real_device_q35_pure_simple_serial_acceptance_reason(...)`. The current
+q35 activity markers still prove C-bridge hardware smoke, but pure Simple q35
+completion also requires serial evidence for `simple-driver` storage/network
+providers, user-space placement, resource grants, non-secure namespaces, and
+shared common-driver logic.
+
 Follow-up boot-storage tightening: `src/os/kernel/boot/boot_fs_mount.spl` now
 records the boot mount provider in `FsMountResult`. The current freestanding
 NVFS/DBFS probe through `CNvmeBlockAdapterFs` is tagged
@@ -441,6 +448,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/kernel/boot/boot_fs_mount.spl test/unit/os/kernel/boot/boot_fs_mount_acceptance_spec.spl`: PASS
 - `simple test test/unit/os/kernel/boot/boot_fs_mount_acceptance_spec.spl --clean`: PASS,
   `3` examples passed.
+- `simple check src/os/drivers/real_device_readiness.spl test/unit/os/drivers/real_device_readiness_spec.spl`: PASS
+- `simple test test/unit/os/drivers/real_device_readiness_spec.spl --clean`: PASS,
+  `6` examples passed.
 
 ## Remaining Gaps
 
@@ -456,6 +466,8 @@ plain exit `0` is no longer accepted as scenario success.
   an executable policy contract and docs only; it does not alter the boot path.
 - QEMU was not rerun for the pure-readiness tightening because it changes the
   acceptance contract and tests, not the boot image or runtime path.
+- QEMU was not rerun for the q35 pure serial gate because it changes the serial
+  acceptance contract and tests, not QEMU arguments or the boot image.
 - QEMU was not rerun for the protection-evidence contract because it changes
   the acceptance model and tests only; boot serial integration remains a
   follow-up.
