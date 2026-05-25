@@ -128,6 +128,21 @@ Exit evidence:
 - QEMU serial contains `protection=off|detect|enforce|fault-test`.
 - Real board serial contains the same selected protection mode and result.
 
+Current status:
+
+- DONE: `src/os/port/simpleos_board_hardening.spl` distinguishes configured
+  support from runtime proof. `simpleos_protection_evidence_ready(...)` now
+  refuses unchecked protection claims with `missing-runtime-check`.
+- DONE: `detect` requires a protection probe; `enforce` also requires enabled
+  protection and a region/page contract; `fault-test` additionally requires a
+  recovered negative access test.
+- DONE: `simpleos_protection_evidence_accepts_hardening(...)` keeps `off` and
+  `detect` as diagnostic modes only. Hardening acceptance requires `enforce` or
+  `fault-test` plus runtime evidence.
+- TODO: wire boot serial markers from AN505/q35/riscv64 and physical board
+  scripts into this evidence object instead of manually recording them in
+  reports.
+
 ## Phase 4 - PCI Driver Realism
 
 Current PCI code scans x86 config I/O ports directly. That is not enough for

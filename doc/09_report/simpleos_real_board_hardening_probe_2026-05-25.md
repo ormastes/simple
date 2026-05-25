@@ -171,6 +171,14 @@ must also carry user-space driver placement, a raw-device or resource-grant-set
 token source, non-secure resource namespace evidence, shared common-driver
 logic, and IOMMU or grant-broker evidence.
 
+Follow-up protection evidence tightening:
+`simpleos_protection_evidence_ready(...)` now separates board support from
+runtime proof. Protection claims require a QEMU or real-board check before they
+can be ready. `detect` requires a support probe, `enforce` requires probe,
+enable, and region/page contract evidence, and `fault-test` also requires a
+recovered negative access test. `off` and `detect` remain diagnostic and cannot
+satisfy hardening acceptance.
+
 ## Code Hardening Change
 
 `scenario_qemu_exit_success()` now rejects x86_64 QEMU exit code `0` for
@@ -198,6 +206,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/drivers/real_device_readiness.spl test/unit/os/drivers/real_device_readiness_spec.spl`: PASS
 - `simple test test/unit/os/drivers/real_device_readiness_spec.spl --clean`: PASS,
   `5` examples passed.
+- `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
+- `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
+  `2` examples passed.
 - `simple os build --arch=x86_64`: PASS
 - q35 QEMU with NVMe and virtio-net: PASS, expected exit code `1`
 
@@ -215,3 +226,6 @@ plain exit `0` is no longer accepted as scenario success.
   an executable policy contract and docs only; it does not alter the boot path.
 - QEMU was not rerun for the pure-readiness tightening because it changes the
   acceptance contract and tests, not the boot image or runtime path.
+- QEMU was not rerun for the protection-evidence contract because it changes
+  the acceptance model and tests only; boot serial integration remains a
+  follow-up.

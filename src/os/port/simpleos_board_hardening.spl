@@ -33,6 +33,16 @@ class SimpleOsBoardHardeningConfig:
     qemu_fidelity: text
     build_profile: text
 
+class SimpleOsProtectionEvidence:
+    board_id: text
+    mode: SimpleOsProtectionMode
+    support_probe: bool
+    protection_enabled: bool
+    region_contract: bool
+    fault_recovered: bool
+    qemu_checked: bool
+    real_board_checked: bool
+
 pub fn simpleos_protection_mode_from_text(value: text) -> SimpleOsProtectionMode?:
     if value == "off":
         return SimpleOsProtectionMode.Off
@@ -63,6 +73,27 @@ pub fn simpleos_protection_kind_name(kind: SimpleOsProtectionKind) -> text:
 pub fn simpleos_protection_mode_accepts_hardening(mode: SimpleOsProtectionMode) -> bool:
     val name = simpleos_protection_mode_name(mode)
     name == "enforce" or name == "fault-test"
+
+pub fn simpleos_protection_evidence(
+    board_id: text,
+    mode: SimpleOsProtectionMode,
+    support_probe: bool,
+    protection_enabled: bool,
+    region_contract: bool,
+    fault_recovered: bool,
+    qemu_checked: bool,
+    real_board_checked: bool
+) -> SimpleOsProtectionEvidence:
+    SimpleOsProtectionEvidence(
+        board_id: board_id,
+        mode: mode,
+        support_probe: support_probe,
+        protection_enabled: protection_enabled,
+        region_contract: region_contract,
+        fault_recovered: fault_recovered,
+        qemu_checked: qemu_checked,
+        real_board_checked: real_board_checked
+    )
 
 fn _board(
     board_id: text,
@@ -256,6 +287,38 @@ pub fn simpleos_board_supports_protection_mode_id(board_id: text, mode: SimpleOs
 
 pub fn simpleos_board_protection_marker_for_id(board_id: text, mode: SimpleOsProtectionMode) -> text:
     "board={board_id} protection={simpleos_protection_mode_name(mode)} kind={simpleos_protection_kind_name(simpleos_board_protection_kind_for_id(board_id))}"
+
+pub fn simpleos_protection_evidence_reason(evidence: SimpleOsProtectionEvidence) -> text:
+    if not simpleos_board_known(evidence.board_id):
+        return "unknown-board:" + evidence.board_id
+    if not simpleos_board_supports_protection_mode_id(evidence.board_id, evidence.mode):
+        return "unsupported-protection-mode:" + simpleos_protection_mode_name(evidence.mode)
+    if not evidence.qemu_checked and not evidence.real_board_checked:
+        return "missing-runtime-check"
+    if evidence.mode == SimpleOsProtectionMode.Off:
+        return "ready"
+    if not evidence.support_probe:
+        return "missing-protection-probe"
+    if evidence.mode == SimpleOsProtectionMode.Detect:
+        return "ready"
+    if not evidence.protection_enabled:
+        return "missing-protection-enable"
+    if not evidence.region_contract:
+        return "missing-region-contract"
+    if evidence.mode == SimpleOsProtectionMode.FaultTest and not evidence.fault_recovered:
+        return "missing-fault-recovery"
+    "ready"
+
+pub fn simpleos_protection_evidence_ready(evidence: SimpleOsProtectionEvidence) -> bool:
+    simpleos_protection_evidence_reason(evidence) == "ready"
+
+pub fn simpleos_protection_evidence_accepts_hardening(evidence: SimpleOsProtectionEvidence) -> bool:
+    simpleos_protection_evidence_ready(evidence) and simpleos_protection_mode_accepts_hardening(evidence.mode)
+
+pub fn simpleos_protection_evidence_marker(evidence: SimpleOsProtectionEvidence) -> text:
+    simpleos_board_protection_marker_for_id(evidence.board_id, evidence.mode) +
+        " runtime=" + (if evidence.qemu_checked: "qemu" else: if evidence.real_board_checked: "real-board" else: "none") +
+        " reason=" + simpleos_protection_evidence_reason(evidence)
 
 pub fn simpleos_board_qemu_command_for_id(board_id: text, elf_path: text) -> [text]:
     if board_id == "mps2-an505":
