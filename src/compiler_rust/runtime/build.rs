@@ -18,7 +18,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_crypto.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_contracts.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_env.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_base64.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_format.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_error.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_regex_stub.c");
@@ -128,7 +127,6 @@ fn compile_c_runtime_sources() {
         "runtime_crypto.c",
         "runtime_contracts.c",
         "runtime_env.c",
-        "runtime_base64.c",
         "runtime_format.c",
         "runtime_error.c",
         "runtime_regex_stub.c",
