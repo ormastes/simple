@@ -496,7 +496,7 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     else if scenario.name == "x64-toolchain-vfs-probe":
         toolchain_vfs_probe_serial_accepts_completion(serial_output)
     else if _scenario_uses_catalog_completion_contract(scenario):
-        _scenario_serial_accepts_completion(scenario, serial_output)
+        _scenario_serial_accepts_completion_with_optional_protection(scenario, serial_output)
     else:
         serial_output.contains("TEST PASSED")
     val success = accepted and scenario_qemu_exit_success(scenario, exit_code)
@@ -530,18 +530,21 @@ pub fn scenario_qemu_exit_success(scenario: QemuScenario, exit_code: i32) -> boo
     exit_code == 0
 
 fn arm_fs_exec_required_marker_fragments(scenario: QemuScenario) -> [text]:
-    if val lane = _catalog_lane_for_scenario(scenario):
-        return lane.required_serial_markers
+    val lane_opt = _catalog_lane_for_scenario(scenario)
+    if lane_opt != nil:
+        return lane_opt.required_serial_markers
     []
 
 fn riscv64_hosted_required_marker_fragments() -> [text]:
-    if val lane = _catalog_lane_for_scenario(scenario_riscv64_hosted()):
-        return lane.required_serial_markers
+    val lane_opt = _catalog_lane_for_scenario(scenario_riscv64_hosted())
+    if lane_opt != nil:
+        return lane_opt.required_serial_markers
     []
 
 fn _scenario_required_marker_fragments(scenario: QemuScenario) -> [text]:
-    if val lane = _catalog_lane_for_scenario(scenario):
-        return lane.required_serial_markers
+    val lane_opt = _catalog_lane_for_scenario(scenario)
+    if lane_opt != nil:
+        return lane_opt.required_serial_markers
     []
 
 fn _scenario_uses_catalog_completion_contract(scenario: QemuScenario) -> bool:
@@ -554,6 +557,21 @@ fn _scenario_serial_accepts_completion(scenario: QemuScenario, serial_output: te
         if not serial_output.contains(marker):
             return false
     true
+
+fn _scenario_serial_accepts_completion_with_optional_protection(scenario: QemuScenario, serial_output: text) -> bool:
+    val mode_text = rt_env_get("SIMPLEOS_PROTECTION_MODE") ?? ""
+    qemu_scenario_serial_acceptance_reason(scenario, mode_text, serial_output) == "ready"
+
+pub fn qemu_scenario_serial_acceptance_reason(scenario: QemuScenario, mode_text: text, serial_output: text) -> text:
+    for marker in _scenario_required_marker_fragments(scenario):
+        if not serial_output.contains(marker):
+            return "missing-marker:" + marker
+    if mode_text == "" or mode_text == "off":
+        return "ready"
+    qemu_scenario_protection_serial_reason(scenario, mode_text, serial_output)
+
+pub fn qemu_scenario_serial_accepts_completion(scenario: QemuScenario, mode_text: text, serial_output: text) -> bool:
+    qemu_scenario_serial_acceptance_reason(scenario, mode_text, serial_output) == "ready"
 
 fn _print_scenario_missing_markers(scenario: QemuScenario, serial_output: text):
     for marker in _scenario_required_marker_fragments(scenario):

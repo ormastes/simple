@@ -182,9 +182,14 @@ Current status:
   `build/os/simpleos_x86_64.elf`, exits with expected `isa-debug-exit` status
   `1`, emits `[harden] text_write_trap=pass`, enumerates 7 PCI devices through
   the Simple path, and reaches the NVMe and virtio-net pass markers.
-- TODO: wire the QEMU runner and physical board scripts to pass captured serial
-  output through `simpleos_protection_evidence_from_serial(...)` automatically
-  instead of manually recording the result in reports.
+- DONE: QEMU catalog lane completion can now pass captured serial through
+  `qemu_scenario_serial_acceptance_reason(...)`, which first checks required
+  lane markers and then, when `SIMPLEOS_PROTECTION_MODE` is set, routes the
+  same serial through `simpleos_protection_evidence_from_serial(...)` before
+  claiming acceptance. Empty or `off` mode preserves diagnostic-only lanes.
+- TODO: extend the physical flash/serial scripts to feed captured serial
+  through the same evidence parser after real-board execution, not just
+  build-only reporting.
 
 ## Phase 4 - PCI Driver Realism
 

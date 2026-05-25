@@ -297,6 +297,13 @@ provider, PCI enumeration, memory registration, protection domain, queue pair,
 completion queue, DMA isolation, and IOMMU or grant-broker evidence before
 `rdma_provider_hardware_ready(...)` can pass.
 
+Follow-up QEMU captured-serial gate: `src/os/qemu_runner_part5.spl` now exposes
+`qemu_scenario_serial_acceptance_reason(...)` and routes catalog lane completion
+through it. Required lane markers are checked first; when
+`SIMPLEOS_PROTECTION_MODE` is set, the same captured serial is also evaluated by
+the protection evidence parser before acceptance. This does not add new QEMU
+runtime evidence in this report.
+
 Follow-up readiness tightening: `real_device_pure_simple_ready(...)` now calls
 the direct-access policy. A provider value of `simple-driver` is no longer
 sufficient by itself. Enabled NVMe, virtio-net/e1000, and hardware RDMA paths
