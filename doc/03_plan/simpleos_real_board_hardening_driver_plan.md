@@ -448,6 +448,10 @@ Pure-Simple completion gate:
   zero-sized BAR/DMA grants. `ResourceGrantSet.grant_all(0)` does not mark
   resources granted, and `all_granted_with_tokens()` only passes once every
   requested BAR/IRQ/DMA has a positive issued token.
+- DONE: `driver_supervisor` grant broker now rejects invalid token cursors for
+  BAR/IRQ/DMA grants, raw-device passthrough rejects zero broker tokens, and
+  exokernel lane readiness requires a positive broker token in addition to the
+  readiness booleans.
 - DONE: q35 pure-Simple serial acceptance now has a separate marker contract.
   The older q35 markers can prove hardware activity with the current C bridge;
   pure completion also requires serial evidence for `storage_provider` and

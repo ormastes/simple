@@ -356,6 +356,12 @@ BAR, IRQ, and DMA grants. `ResourceGrantSet.grant_all(0)` leaves requests
 ungranted, and `all_granted_with_tokens()` requires every requested BAR/IRQ/DMA
 slot to carry a positive issued token.
 
+Follow-up broker-token tightening:
+`src/os/services/driver_supervisor/grant_broker.spl` now rejects invalid token
+cursors before issuing BAR/IRQ/DMA grants. Raw-device passthrough refuses a
+zero broker token, and exokernel lane readiness requires a positive broker
+token in addition to readiness booleans.
+
 Follow-up q35 pure serial gate: `src/os/drivers/real_device_readiness.spl` now
 has `real_device_q35_pure_simple_serial_acceptance_reason(...)`. The current
 q35 activity markers still prove C-bridge hardware smoke, but pure Simple q35
@@ -486,6 +492,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/services/driver_supervisor/resource_grant.spl test/unit/os/services/driver_supervisor/resource_grant_spec.spl`: PASS
 - `simple test test/unit/os/services/driver_supervisor/resource_grant_spec.spl --clean`: PASS,
   `2` examples passed.
+- `simple check src/os/services/driver_supervisor/grant_broker.spl test/unit/os/services/driver_supervisor/grant_broker_spec.spl`: PASS
+- `simple test test/unit/os/services/driver_supervisor/grant_broker_spec.spl --clean`: PASS,
+  `3` examples passed.
 - `simple check src/os/drivers/nvme/nvme_storage_model.spl test/unit/os/drivers/nvme/nvme_storage_model_spec.spl`: PASS
 - `simple test test/unit/os/drivers/nvme/nvme_storage_model_spec.spl --clean`: PASS,
   `9` examples passed.
