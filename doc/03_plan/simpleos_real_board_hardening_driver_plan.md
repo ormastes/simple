@@ -148,6 +148,10 @@ Exit evidence:
 
 - `test/unit/os/qemu_runner_spec.spl` covers selected mode in command/catalog
   construction.
+- Mode-aware board QEMU commands prefix the command with
+  `env SIMPLEOS_PROTECTION_MODE=<mode>` so copied/replayed commands preserve
+  the selected optional MPU/MMU mode instead of relying on out-of-band runner
+  state.
 - Existing MMU specs under `src/lib/hardware/*/mmu*.spl` run for supported
   targets.
 - QEMU serial contains `protection=off|detect|enforce|fault-test`.

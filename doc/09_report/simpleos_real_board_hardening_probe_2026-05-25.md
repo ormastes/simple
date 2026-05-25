@@ -388,6 +388,12 @@ PMSAv7 marker, RA4M1 must prove PMSAv7, x86 must prove paging hardening, and
 RISC-V must prove Sv39. This keeps optional MPU/MMU modes explicit per board
 instead of accepting generic protection text.
 
+Follow-up QEMU mode command contract:
+`simpleos_board_qemu_command_for_id_with_mode(...)` now prefixes QEMU commands
+with `env SIMPLEOS_PROTECTION_MODE=<mode>`. The base command stays unchanged,
+but the mode-aware command is replayable and preserves the selected optional
+MPU/MMU mode for runner-side protection acceptance.
+
 Follow-up runner-facing protection gate:
 `qemu_protection_serial_accepts_hardening(...)` and
 `qemu_protection_serial_reason(...)` now expose the same serial evidence
@@ -443,6 +449,9 @@ plain exit `0` is no longer accepted as scenario success.
   `4` examples passed.
 - `simple run src/app/simpleos_board_serial_check/main.spl --board stm32u585-uno-q --mode fault-test --serial-log build/serial/simpleos_board_serial_check_smoke.log`: PASS,
   `reason=ready` on a synthetic captured serial log.
+- `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
+- `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
+  `4` examples passed.
 - `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
 - `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
   `4` examples passed.
