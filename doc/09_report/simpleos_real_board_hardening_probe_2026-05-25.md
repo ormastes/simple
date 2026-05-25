@@ -164,6 +164,13 @@ user-space driver placement, brokered device grants, a non-secure resource
 namespace, and IOMMU or grant-broker evidence. C bridge providers are refused
 for pure direct-access completion.
 
+Follow-up readiness tightening: `real_device_pure_simple_ready(...)` now calls
+the direct-access policy. A provider value of `simple-driver` is no longer
+sufficient by itself. Enabled NVMe, virtio-net/e1000, and hardware RDMA paths
+must also carry user-space driver placement, a raw-device or resource-grant-set
+token source, non-secure resource namespace evidence, shared common-driver
+logic, and IOMMU or grant-broker evidence.
+
 ## Code Hardening Change
 
 `scenario_qemu_exit_success()` now rejects x86_64 QEMU exit code `0` for
@@ -188,6 +195,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/drivers/user_space_driver_contract.spl src/os/drivers/mod.spl test/unit/os/drivers/user_space_driver_contract_spec.spl`: PASS
 - `simple test test/unit/os/drivers/user_space_driver_contract_spec.spl --clean`: PASS,
   `3` examples passed.
+- `simple check src/os/drivers/real_device_readiness.spl test/unit/os/drivers/real_device_readiness_spec.spl`: PASS
+- `simple test test/unit/os/drivers/real_device_readiness_spec.spl --clean`: PASS,
+  `5` examples passed.
 - `simple os build --arch=x86_64`: PASS
 - q35 QEMU with NVMe and virtio-net: PASS, expected exit code `1`
 
@@ -203,3 +213,5 @@ plain exit `0` is no longer accepted as scenario success.
   still pass through the C bridge. Hardware RDMA remains open.
 - QEMU was not rerun for the user-space driver boundary change because it adds
   an executable policy contract and docs only; it does not alter the boot path.
+- QEMU was not rerun for the pure-readiness tightening because it changes the
+  acceptance contract and tests, not the boot image or runtime path.

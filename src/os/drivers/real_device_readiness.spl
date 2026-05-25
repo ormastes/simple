@@ -1,5 +1,7 @@
 # Truthful real-device readiness gates for SimpleOS board hardening.
 
+use os.drivers.user_space_driver_contract.{user_space_driver_direct_access_reason}
+
 struct RealDeviceReadiness:
     board_id: text
     pci_provider: text
@@ -17,6 +19,18 @@ struct RealDeviceReadiness:
     storage_provider: text
     network_provider: text
     rdma_provider: text
+    storage_placement: text
+    storage_grant: text
+    storage_namespace: text
+    storage_common_logic_shared: bool
+    network_placement: text
+    network_grant: text
+    network_namespace: text
+    network_common_logic_shared: bool
+    rdma_placement: text
+    rdma_grant: text
+    rdma_namespace: text
+    rdma_common_logic_shared: bool
 
 fn real_device_readiness(
     board_id: text,
@@ -70,6 +84,67 @@ fn real_device_readiness_with_providers(
     network_provider: text,
     rdma_provider: text
 ) -> RealDeviceReadiness:
+    real_device_readiness_with_access(
+        board_id: board_id,
+        pci_provider: pci_provider,
+        pci_enumerated: pci_enumerated,
+        storage_mode: storage_mode,
+        nvme_identify: nvme_identify,
+        nvme_read_write: nvme_read_write,
+        network_mode: network_mode,
+        network_queue: network_queue,
+        network_rx_tx: network_rx_tx,
+        rdma_mode: rdma_mode,
+        rdma_device: rdma_device,
+        dma_isolated: dma_isolated,
+        iommu_or_broker: iommu_or_broker,
+        storage_provider: storage_provider,
+        network_provider: network_provider,
+        rdma_provider: rdma_provider,
+        storage_placement: "unknown",
+        storage_grant: "none",
+        storage_namespace: "none",
+        storage_common_logic_shared: false,
+        network_placement: "unknown",
+        network_grant: "none",
+        network_namespace: "none",
+        network_common_logic_shared: false,
+        rdma_placement: "unknown",
+        rdma_grant: "none",
+        rdma_namespace: "none",
+        rdma_common_logic_shared: false
+    )
+
+fn real_device_readiness_with_access(
+    board_id: text,
+    pci_provider: text,
+    pci_enumerated: bool,
+    storage_mode: text,
+    nvme_identify: bool,
+    nvme_read_write: bool,
+    network_mode: text,
+    network_queue: bool,
+    network_rx_tx: bool,
+    rdma_mode: text,
+    rdma_device: bool,
+    dma_isolated: bool,
+    iommu_or_broker: bool,
+    storage_provider: text,
+    network_provider: text,
+    rdma_provider: text,
+    storage_placement: text,
+    storage_grant: text,
+    storage_namespace: text,
+    storage_common_logic_shared: bool,
+    network_placement: text,
+    network_grant: text,
+    network_namespace: text,
+    network_common_logic_shared: bool,
+    rdma_placement: text,
+    rdma_grant: text,
+    rdma_namespace: text,
+    rdma_common_logic_shared: bool
+) -> RealDeviceReadiness:
     RealDeviceReadiness(
         board_id: board_id,
         pci_provider: pci_provider,
@@ -86,7 +161,19 @@ fn real_device_readiness_with_providers(
         iommu_or_broker: iommu_or_broker,
         storage_provider: storage_provider,
         network_provider: network_provider,
-        rdma_provider: rdma_provider
+        rdma_provider: rdma_provider,
+        storage_placement: storage_placement,
+        storage_grant: storage_grant,
+        storage_namespace: storage_namespace,
+        storage_common_logic_shared: storage_common_logic_shared,
+        network_placement: network_placement,
+        network_grant: network_grant,
+        network_namespace: network_namespace,
+        network_common_logic_shared: network_common_logic_shared,
+        rdma_placement: rdma_placement,
+        rdma_grant: rdma_grant,
+        rdma_namespace: rdma_namespace,
+        rdma_common_logic_shared: rdma_common_logic_shared
     )
 
 fn real_device_pci_supported(board_id: text) -> bool:
@@ -130,7 +217,8 @@ fn real_device_pure_simple_ready(c: RealDeviceReadiness) -> bool:
     real_device_readiness_ready(c) and
         (c.storage_mode == "off" or c.storage_mode == "none" or real_device_provider_is_simple(c.storage_provider)) and
         (c.network_mode == "off" or c.network_mode == "none" or real_device_provider_is_simple(c.network_provider)) and
-        (c.rdma_mode == "off" or c.rdma_mode == "none" or real_device_provider_is_simple(c.rdma_provider))
+        (c.rdma_mode == "off" or c.rdma_mode == "none" or real_device_provider_is_simple(c.rdma_provider)) and
+        real_device_direct_access_reason(c) == "ready"
 
 fn real_device_readiness_ready(c: RealDeviceReadiness) -> bool:
     real_device_storage_ready(c) and real_device_network_ready(c) and real_device_rdma_ready(c)
@@ -172,6 +260,48 @@ fn real_device_pure_simple_reason(c: RealDeviceReadiness) -> text:
         return "network-not-pure-simple:" + c.network_provider
     if c.rdma_mode != "off" and c.rdma_mode != "none" and not real_device_provider_is_simple(c.rdma_provider):
         return "rdma-not-pure-simple:" + c.rdma_provider
+    real_device_direct_access_reason(c)
+
+fn real_device_direct_access_reason(c: RealDeviceReadiness) -> text:
+    if c.storage_mode == "nvme":
+        val storage_reason = user_space_driver_direct_access_reason(
+            "nvme",
+            c.storage_placement,
+            "dma",
+            c.storage_grant,
+            c.storage_namespace,
+            c.storage_common_logic_shared,
+            c.iommu_or_broker,
+            c.storage_provider
+        )
+        if storage_reason != "ready":
+            return "storage-direct-access:" + storage_reason
+    if c.network_mode == "virtio-net" or c.network_mode == "e1000":
+        val network_reason = user_space_driver_direct_access_reason(
+            c.network_mode,
+            c.network_placement,
+            "dma",
+            c.network_grant,
+            c.network_namespace,
+            c.network_common_logic_shared,
+            c.iommu_or_broker,
+            c.network_provider
+        )
+        if network_reason != "ready":
+            return "network-direct-access:" + network_reason
+    if c.rdma_mode == "device":
+        val rdma_reason = user_space_driver_direct_access_reason(
+            "rdma",
+            c.rdma_placement,
+            "dma",
+            c.rdma_grant,
+            c.rdma_namespace,
+            c.rdma_common_logic_shared,
+            c.iommu_or_broker,
+            c.rdma_provider
+        )
+        if rdma_reason != "ready":
+            return "rdma-direct-access:" + rdma_reason
     "ready"
 
 fn real_device_current_q35_c_bridge_readiness() -> RealDeviceReadiness:
