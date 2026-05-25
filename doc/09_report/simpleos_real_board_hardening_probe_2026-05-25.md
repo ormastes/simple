@@ -381,6 +381,13 @@ such as `[MPU] Enabled, ... regions...`, current x86 hardening evidence such as
 `protection_probe=pass`, `protection_enabled=pass`, `region_contract=pass`, and
 `fault_recovered=pass`.
 
+Follow-up protection kind contract:
+`SimpleOsProtectionEvidence` now records whether the captured serial matches
+the board's expected protection kind. A real STM32U585 run cannot pass with a
+PMSAv7 marker, RA4M1 must prove PMSAv7, x86 must prove paging hardening, and
+RISC-V must prove Sv39. This keeps optional MPU/MMU modes explicit per board
+instead of accepting generic protection text.
+
 Follow-up runner-facing protection gate:
 `qemu_protection_serial_accepts_hardening(...)` and
 `qemu_protection_serial_reason(...)` now expose the same serial evidence
@@ -436,6 +443,9 @@ plain exit `0` is no longer accepted as scenario success.
   `4` examples passed.
 - `simple run src/app/simpleos_board_serial_check/main.spl --board stm32u585-uno-q --mode fault-test --serial-log build/serial/simpleos_board_serial_check_smoke.log`: PASS,
   `reason=ready` on a synthetic captured serial log.
+- `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
+- `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
+  `4` examples passed.
 - `simple check src/os/drivers/nvme/nvme_storage_model.spl test/unit/os/drivers/nvme/nvme_storage_model_spec.spl`: PASS
 - `simple test test/unit/os/drivers/nvme/nvme_storage_model_spec.spl --clean`: PASS,
   `9` examples passed.

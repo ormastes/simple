@@ -37,6 +37,7 @@ class SimpleOsProtectionEvidence:
     board_id: text
     mode: SimpleOsProtectionMode
     support_probe: bool
+    kind_contract: bool
     protection_enabled: bool
     region_contract: bool
     fault_recovered: bool
@@ -78,6 +79,7 @@ pub fn simpleos_protection_evidence(
     board_id: text,
     mode: SimpleOsProtectionMode,
     support_probe: bool,
+    kind_contract: bool,
     protection_enabled: bool,
     region_contract: bool,
     fault_recovered: bool,
@@ -88,6 +90,7 @@ pub fn simpleos_protection_evidence(
         board_id: board_id,
         mode: mode,
         support_probe: support_probe,
+        kind_contract: kind_contract,
         protection_enabled: protection_enabled,
         region_contract: region_contract,
         fault_recovered: fault_recovered,
@@ -107,6 +110,7 @@ pub fn simpleos_protection_evidence_from_serial(
         board_id,
         mode,
         simpleos_serial_has_protection_probe(serial_output),
+        simpleos_serial_has_protection_kind_contract(board_id, serial_output),
         simpleos_serial_has_protection_enabled(serial_output),
         simpleos_serial_has_region_contract(serial_output),
         simpleos_serial_has_fault_recovery(serial_output),
@@ -120,6 +124,20 @@ pub fn simpleos_serial_has_protection_probe(serial_output: text) -> bool:
         serial_output.contains("[MPU]") or
         serial_output.contains("[PAGING]") or
         serial_output.contains("[harden]")
+
+pub fn simpleos_serial_has_protection_kind_contract(board_id: text, serial_output: text) -> bool:
+    val kind = simpleos_protection_kind_name(simpleos_board_protection_kind_for_id(board_id))
+    if kind == "none":
+        return true
+    if serial_output.contains("kind=" + kind) or serial_output.contains("protection_kind=" + kind):
+        return true
+    if board_id == "mps2-an505" and kind == "pmsav8-mpu":
+        return serial_output.contains("[MPU] Enabled") and serial_output.contains("regions")
+    if kind == "x86-paging-iommu":
+        return serial_output.contains("[harden] text_write_trap=pass") or serial_output.contains("[PAGING] x86_64")
+    if kind == "riscv-sv39":
+        return serial_output.contains("Sv39") or serial_output.contains("satp_mode=Sv39")
+    false
 
 pub fn simpleos_serial_has_protection_enabled(serial_output: text) -> bool:
     serial_output.contains("protection_enabled=pass") or
@@ -361,6 +379,8 @@ pub fn simpleos_protection_evidence_reason(evidence: SimpleOsProtectionEvidence)
         return "ready"
     if not evidence.support_probe:
         return "missing-protection-probe"
+    if not evidence.kind_contract:
+        return "missing-protection-kind-contract:" + simpleos_protection_kind_name(simpleos_board_protection_kind_for_id(evidence.board_id))
     if evidence.mode == SimpleOsProtectionMode.Detect:
         return "ready"
     if not evidence.protection_enabled:
