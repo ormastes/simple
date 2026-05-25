@@ -70,6 +70,44 @@ NVMe/net driver completion.
 
 ### QEMU AN505 Cortex-M33
 
+Latest smoke rerun result: PASS with self-terminating guest marker after adding
+the AN505 QEMU smoke path.
+
+Command:
+
+- `timeout 30s sh scripts/run_simpleos_cortex_m33_qemu.shs --smoke`
+
+Process result:
+
+- QEMU exit code: `0`.
+- Guest result: `TEST PASSED`.
+
+Serial reached:
+
+- `[qemu-smoke] mode=boot-selftest`
+- `[1] Stack canary: PASS`
+- `[2] Flash CRC: PASS`
+- `[3] MPU enabled: PASS`
+- `[4] Faults on: PASS`
+- `[5] DIV0 trap: PASS`
+- `[6] SysTick: PASS`
+- `[7] XN enforce: PASS`
+- `[8] AP-deny: PASS`
+- `Result: 8/8 ALL PASSED`
+- `protection_probe=pass`
+- `protection_enabled=pass`
+- `region_contract=pass`
+- `fault_recovered=pass`
+- `[qemu-smoke] selftest=pass`
+- `TEST PASSED`
+
+Interpretation: AN505 QEMU no longer needs timeout-as-normal-result for the
+smoke lane. The smoke mode runs real guest checks, emits explicit protection
+markers, and exits QEMU through semihosting. This proves `mps2-an505` QEMU
+`fault-test` evidence for the current C-shim bring-up profile. It still does
+not prove the final pure Simple board HAL because the lane builds
+`src/os/kernel/arch/cortex_m33/cm33_shim.c`.
+
 Latest rerun result: `QEMU_SMOKE_EXIT=124` because the command was intentionally
 bounded by `timeout 20s`.
 

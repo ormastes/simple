@@ -842,6 +842,12 @@ static void qemu_semihost_exit(int code) {
 
 static void qemu_smoke_run_and_exit(void) {
     uart_putln("[qemu-smoke] mode=boot-selftest");
+    uint32_t spin = 0;
+    __asm volatile("cpsie i" ::: "memory");
+    while (tick_count == 0 && spin < 8u) {
+        __asm volatile("wfi" ::: "memory");
+        spin++;
+    }
     int fail = cmd_selftest();
     if (fail == 0) {
         uart_putln("protection_probe=pass");

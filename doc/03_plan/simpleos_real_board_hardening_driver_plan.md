@@ -37,6 +37,14 @@ shell with `[MPU] Enabled, 8 regions available, 4 configured`. The serial
 classifies as `mps2-an505` QEMU `enforce` evidence, but not `fault-test`
 evidence, and the lane still needs a non-interactive guest pass/exit marker.
 
+Follow-up AN505 smoke progress: `scripts/run_simpleos_cortex_m33_qemu.shs
+--smoke` now runs the guest selftest, emits explicit protection markers
+(`protection_probe=pass`, `protection_enabled=pass`, `region_contract=pass`,
+`fault_recovered=pass`), prints `TEST PASSED`, and exits QEMU with status `0`.
+That closes the timeout-as-normal-result gap for the AN505 QEMU smoke lane,
+while the profile remains labeled `c-shim-board-bringup` until the pure Simple
+HAL replaces `cm33_shim.c`.
+
 ## Phase 1 - False Success And Fallback Removal
 
 1. Reject generic QEMU process success for lanes that require guest-reported
