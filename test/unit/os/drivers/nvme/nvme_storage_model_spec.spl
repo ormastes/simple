@@ -11,7 +11,7 @@ contracts used by capability-backed storage.
 """
 
 use std.spec.{describe, it, expect}
-use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceIdentity, NvmePartitionIdentity, NvmeQueueAssignment, nvme_queue_role_for_id, nvme_queue_is_system_reserved, nvme_first_data_queue_id}
+use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceIdentity, NvmePartitionIdentity, NvmeQueueAssignment, nvme_queue_role_for_id, nvme_queue_is_system_reserved, nvme_first_data_queue_id, nvme_transfer_evidence, nvme_transfer_readiness_reason, nvme_transfer_ready}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 
 describe "NVMe storage model":
@@ -84,3 +84,66 @@ describe "NVMe storage model":
             )
             expect(assignment.queue_id).to_equal(2)
             expect(assignment.owner_task).to_equal(99)
+
+    describe "pure Simple transfer evidence":
+        it "rejects the C boot bridge as NVMe transfer completion":
+            val bridge = nvme_transfer_evidence(
+                "c-boot-bridge",
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                false
+            )
+            expect(nvme_transfer_ready(bridge)).to_equal(false)
+            expect(nvme_transfer_readiness_reason(bridge)).to_equal("nvme-transfer-provider-not-simple:c-boot-bridge")
+
+        it "requires queues doorbells completion and reversible sector I/O":
+            val missing_completion = nvme_transfer_evidence(
+                "simple-driver",
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                true
+            )
+            val missing_restore = nvme_transfer_evidence(
+                "simple-driver",
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+            )
+            val ready = nvme_transfer_evidence(
+                "simple-driver",
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true
+            )
+
+            expect(nvme_transfer_readiness_reason(missing_completion)).to_equal("missing-nvme-completion")
+            expect(nvme_transfer_readiness_reason(missing_restore)).to_equal("missing-nvme-sector-restore")
+            expect(nvme_transfer_ready(ready)).to_equal(true)

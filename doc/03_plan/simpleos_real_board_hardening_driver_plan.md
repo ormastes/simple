@@ -318,6 +318,12 @@ Current status:
   `boot-storage-not-pure-simple:c-boot-bridge` as the acceptance reason, so a
   successful NVFS/DBFS probe cannot be counted as pure Simple NVMe boot
   storage.
+- DONE: `src/os/drivers/nvme/nvme_storage_model.spl` now exposes
+  `NvmeTransferEvidence` plus `nvme_transfer_readiness_reason(...)` and
+  `nvme_transfer_ready(...)`. Pure NVMe transfer completion refuses
+  `c-boot-bridge` and requires namespace identify, admin queue, I/O queue,
+  mapped doorbells, completion, sector read, sector write, sector restore, DMA
+  isolation, and user-space driver placement.
 - TODO: integrate the Simple NVMe driver path instead of the current C bridge.
 
 ## Phase 6 - Network And RDMA Realism

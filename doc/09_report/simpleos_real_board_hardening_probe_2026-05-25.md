@@ -311,6 +311,12 @@ After flashing, they can capture UART output and invoke
 `REAL_BOARD_NOT_RUN` and evaluates the captured log with real-board protection
 evidence semantics.
 
+Follow-up NVMe transfer gate: `src/os/drivers/nvme/nvme_storage_model.spl` now
+records `NvmeTransferEvidence`. Pure transfer readiness rejects the C boot
+bridge and requires namespace identify, admin and I/O queues, mapped doorbells,
+completion, sector read/write/restore, DMA isolation, and user-space driver
+placement before `nvme_transfer_ready(...)` can pass.
+
 Follow-up readiness tightening: `real_device_pure_simple_ready(...)` now calls
 the direct-access policy. A provider value of `simple-driver` is no longer
 sufficient by itself. Enabled NVMe, virtio-net/e1000, and hardware RDMA paths
@@ -403,6 +409,9 @@ plain exit `0` is no longer accepted as scenario success.
   `4` examples passed.
 - `simple run src/app/simpleos_board_serial_check/main.spl --board stm32u585-uno-q --mode fault-test --serial-log build/serial/simpleos_board_serial_check_smoke.log`: PASS,
   `reason=ready` on a synthetic captured serial log.
+- `simple check src/os/drivers/nvme/nvme_storage_model.spl test/unit/os/drivers/nvme/nvme_storage_model_spec.spl`: PASS
+- `simple test test/unit/os/drivers/nvme/nvme_storage_model_spec.spl --clean`: PASS,
+  `9` examples passed.
 
 ## Remaining Gaps
 
