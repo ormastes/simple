@@ -237,6 +237,12 @@ Current status:
   CAP/VS/CSTS register facts, validates NVM command-set support, queue depth,
   fatal status, doorbell stride, and namespace LBA size without a C parser.
   Unit tests use the observed q35 CAP value `0x4018200f0107ff`.
+- DONE: direct NVMe MMIO/DMA is now gated by the user-space driver access
+  contract. A pure completion claim requires `placement=user-space-driver`,
+  a `raw-device-grant` or `resource-grant-set`, a
+  `non-secure-resource-namespace`, shared common-driver logic, and an IOMMU or
+  grant broker. Kernel/common-driver direct access and C bridge providers are
+  refused by contract.
 - TODO: integrate the Simple NVMe driver path instead of the current C bridge.
 
 ## Phase 6 - Network And RDMA Realism
@@ -283,6 +289,11 @@ Current status:
 - DONE: executable readiness contract records the current provider as
   `network_provider=c-boot-bridge`, so this evidence cannot satisfy
   pure-Simple completion.
+- DONE: direct virtio-net/e1000/RDMA MMIO, DMA, IRQ, and doorbell access is
+  required to live in user-space driver capsules with explicit brokered grants
+  and a non-secure resource namespace. Common driver modules may own descriptor
+  builders, queue layouts, parsers, and state machines, but they must not own
+  direct device access.
 - TODO: integrate the Simple virtio-net driver path instead of the current C
   boot bridge.
 
@@ -293,6 +304,10 @@ Pure-Simple completion gate:
 - `real_device_pure_simple_ready(current_q35)` must fail until storage,
   network, and any RDMA provider fields are `simple-driver` for enabled
   hardware modes.
+- `user_space_driver_direct_access_ready(...)` must pass for every enabled
+  NVMe, network, or RDMA direct-access path. This keeps common driver code
+  reusable across kernel bring-up, user-space drivers, and tests while forcing
+  all real BAR/DMA/IRQ ownership through `driver_supervisor` grants.
 
 ## Phase 7 - QEMU And Real Board Verification
 
@@ -329,9 +344,14 @@ command. If real hardware was not connected, reports must say
    `c-shim-board-bringup` profile.
 5. Add pure Simple HAL equivalents for UART, MPU setup, fault-test, and SysTick.
 6. Add PCI provider split and q35 enumeration test.
-7. Add NVMe identify/read/write over PCI.
-8. Add virtio-net realistic queue smoke.
-9. Add RDMA provider gate and benchmark scaffold.
+7. Split NVMe into common driver logic plus a user-space driver capsule that
+   receives BAR/DMA/IRQ resources through `driver_supervisor`.
+8. Add NVMe identify/read/write over PCI from that user-space driver capsule.
+9. Split virtio-net/e1000 into common queue/packet logic plus user-space driver
+   capsules with brokered grants.
+10. Add virtio-net realistic queue smoke.
+11. Add RDMA provider gate and benchmark scaffold; hardware RDMA must use the
+   same user-space driver and IOMMU/broker contract.
 
 ## Done Criteria
 
@@ -341,6 +361,9 @@ command. If real hardware was not connected, reports must say
 - MPU/MMU mode is optional but explicit and tested.
 - At least one QEMU board lane and one physical board lane have serial evidence.
 - PCI enumeration is provider-based and supports q35.
-- NVMe reads/writes real sectors through PCI and DMA.
-- Network sends/receives through a realistic queue-backed NIC.
+- NVMe reads/writes real sectors through PCI and DMA from a user-space driver
+  capsule, not from a kernel/common-driver ambient-access path or C bridge.
+- Network sends/receives through a realistic queue-backed NIC from a
+  user-space driver capsule, with common driver logic shared but direct access
+  brokered.
 - RDMA cannot claim hardware support unless PCI/DMA/IOMMU prerequisites pass.

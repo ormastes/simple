@@ -154,6 +154,16 @@ namespace LBA parsing. This is not new QEMU evidence; it is the Simple-side
 contract needed before the current C NVMe init/read/write self-test can be
 replaced.
 
+Follow-up user-space driver boundary: the original SimpleOS design already
+places raw device passthrough behind `driver_supervisor` grants for user-space
+driver capsules. `src/os/drivers/user_space_driver_contract.spl` now records
+that as an executable rule for NVMe, virtio-net, e1000, and RDMA direct access.
+Common driver modules may share parsers, descriptor builders, queue layouts,
+and state machines, but MMIO, DMA, IRQ, and doorbell access must use a
+user-space driver placement, brokered device grants, a non-secure resource
+namespace, and IOMMU or grant-broker evidence. C bridge providers are refused
+for pure direct-access completion.
+
 ## Code Hardening Change
 
 `scenario_qemu_exit_success()` now rejects x86_64 QEMU exit code `0` for
@@ -175,6 +185,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/drivers/nvme/nvme_controller_contract.spl src/os/drivers/nvme/mod.spl test/unit/os/drivers/nvme/nvme_controller_contract_spec.spl`: PASS
 - `simple test test/unit/os/drivers/nvme/nvme_controller_contract_spec.spl --clean`: PASS,
   `4` examples passed.
+- `simple check src/os/drivers/user_space_driver_contract.spl src/os/drivers/mod.spl test/unit/os/drivers/user_space_driver_contract_spec.spl`: PASS
+- `simple test test/unit/os/drivers/user_space_driver_contract_spec.spl --clean`: PASS,
+  `3` examples passed.
 - `simple os build --arch=x86_64`: PASS
 - q35 QEMU with NVMe and virtio-net: PASS, expected exit code `1`
 
@@ -188,3 +201,5 @@ plain exit `0` is no longer accepted as scenario success.
 - x86_64 q35 now proves Simple-owned PCI enumeration for attached NVMe and
   virtio-net. NVMe identify/read/write/restore and virtio-net queue/TX/RX
   still pass through the C bridge. Hardware RDMA remains open.
+- QEMU was not rerun for the user-space driver boundary change because it adds
+  an executable policy contract and docs only; it does not alter the boot path.

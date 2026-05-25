@@ -1,0 +1,81 @@
+use std.spec.{describe, it, expect}
+use os.drivers.user_space_driver_contract.{
+    user_space_driver_direct_access_ready,
+    user_space_driver_direct_access_reason
+}
+
+describe "SimpleOS user-space direct driver contract":
+    it "requires NVMe direct access to run as a user-space driver with grants":
+        val denied = user_space_driver_direct_access_reason(
+            "nvme",
+            "kernel-driver",
+            "mmio",
+            "raw-device-grant",
+            "non-secure-resource-namespace",
+            true,
+            true,
+            "simple-driver"
+        )
+        expect(denied).to_equal("direct-access-not-user-space-driver:kernel-driver")
+
+        val ready = user_space_driver_direct_access_ready(
+            "nvme",
+            "user-space-driver",
+            "mmio",
+            "raw-device-grant",
+            "non-secure-resource-namespace",
+            true,
+            true,
+            "simple-driver"
+        )
+        expect(ready).to_equal(true)
+
+    it "keeps common drivers as shared logic without ambient MMIO or DMA":
+        val parser = user_space_driver_direct_access_reason(
+            "virtio-net",
+            "common-driver",
+            "descriptor-builder",
+            "none",
+            "none",
+            true,
+            false,
+            "simple-driver"
+        )
+        expect(parser).to_equal("ready")
+
+        val mmio = user_space_driver_direct_access_reason(
+            "virtio-net",
+            "common-driver",
+            "mmio",
+            "resource-grant-set",
+            "non-secure-resource-namespace",
+            true,
+            true,
+            "simple-driver"
+        )
+        expect(mmio).to_equal("direct-access-not-user-space-driver:common-driver")
+
+    it "rejects C bridge and unbrokered RDMA as pure direct access":
+        val bridge = user_space_driver_direct_access_reason(
+            "nvme",
+            "user-space-driver",
+            "dma",
+            "raw-device-grant",
+            "non-secure-resource-namespace",
+            true,
+            true,
+            "c-boot-bridge"
+        )
+        expect(bridge).to_equal("provider-not-simple-driver:c-boot-bridge")
+
+        val rdma = user_space_driver_direct_access_reason(
+            "rdma",
+            "user-space-driver",
+            "dma",
+            "resource-grant-set",
+            "non-secure-resource-namespace",
+            true,
+            false,
+            "simple-driver"
+        )
+        expect(rdma).to_equal("missing-iommu-or-grant-broker")

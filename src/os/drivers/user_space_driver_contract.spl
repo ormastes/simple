@@ -1,0 +1,67 @@
+# Contract for direct hardware access from SimpleOS drivers.
+#
+# NVMe, network, and RDMA direct MMIO/DMA must run in user-space driver
+# capsules with explicit resource grants. Common driver modules may share
+# parsers, queue layouts, and state machines, but not ambient device access.
+
+fn user_space_driver_is_direct_device(kind: text) -> bool:
+    kind == "nvme" or kind == "virtio-net" or kind == "e1000" or kind == "rdma"
+
+fn user_space_driver_is_direct_access(access: text) -> bool:
+    access == "mmio" or access == "dma" or access == "irq" or access == "doorbell"
+
+fn user_space_driver_is_common_only_access(access: text) -> bool:
+    access == "parser" or access == "queue-layout" or access == "state-machine" or access == "descriptor-builder"
+
+fn user_space_driver_direct_access_reason(
+    device_kind: text,
+    placement: text,
+    access_kind: text,
+    grant_kind: text,
+    namespace_mode: text,
+    common_logic_shared: bool,
+    iommu_or_broker: bool,
+    provider: text
+) -> text:
+    if not user_space_driver_is_direct_device(device_kind):
+        return "unsupported-device-kind:" + device_kind
+    if user_space_driver_is_common_only_access(access_kind):
+        if placement == "common-driver":
+            return "ready"
+        return "common-logic-not-in-common-driver:" + placement
+    if not user_space_driver_is_direct_access(access_kind):
+        return "unsupported-access-kind:" + access_kind
+    if provider != "simple-driver":
+        return "provider-not-simple-driver:" + provider
+    if placement != "user-space-driver":
+        return "direct-access-not-user-space-driver:" + placement
+    if grant_kind != "raw-device-grant" and grant_kind != "resource-grant-set":
+        return "missing-device-grant:" + grant_kind
+    if namespace_mode != "non-secure-resource-namespace":
+        return "missing-non-secure-resource-namespace:" + namespace_mode
+    if not common_logic_shared:
+        return "missing-common-driver-logic"
+    if not iommu_or_broker:
+        return "missing-iommu-or-grant-broker"
+    "ready"
+
+fn user_space_driver_direct_access_ready(
+    device_kind: text,
+    placement: text,
+    access_kind: text,
+    grant_kind: text,
+    namespace_mode: text,
+    common_logic_shared: bool,
+    iommu_or_broker: bool,
+    provider: text
+) -> bool:
+    user_space_driver_direct_access_reason(
+        device_kind,
+        placement,
+        access_kind,
+        grant_kind,
+        namespace_mode,
+        common_logic_shared,
+        iommu_or_broker,
+        provider
+    ) == "ready"
