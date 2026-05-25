@@ -251,6 +251,9 @@ Work:
    - DONE: display DMA framebuffer fallback is diagnostic-only for hardening
      acceptance. `DisplayDmaFallbackGate.hardening_acceptance_ready()` now
      refuses the framebuffer path unless the selected path is direct DMA.
+   - DONE: SR-IOV hardening acceptance now requires an actual IOMMU-isolated
+     VF request. The `trusted` no-IOMMU mode remains diagnostic and cannot
+     satisfy DMA isolation readiness.
 5. Add QEMU fixtures:
    - q35 root complex
    - virtio-net-pci
