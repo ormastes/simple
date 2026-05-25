@@ -46,6 +46,18 @@ struct PciEnumeratedFunction:
     bar1: PciBarInfo
     irq_line: u8
 
+struct PciResourceGrantEvidence:
+    """Evidence required before a PCI device can back a user-space driver grant."""
+    provider: text
+    device_kind: text
+    function_present: bool
+    bar0_implemented: bool
+    bar0_size: u64
+    irq_line: u8
+    dma_isolated: bool
+    iommu_or_broker: bool
+    namespace_mode: text
+
 fn pci_provider_kind_name(kind: PciProviderKind) -> text:
     match kind:
         PciProviderKind.NoPci: "no-pci"
@@ -194,3 +206,59 @@ fn pci_count_class(functions: [PciEnumeratedFunction], class_code: u8, subclass:
         if f.class_code == class_code and f.subclass == subclass:
             count = count + 1
     count
+
+fn pci_resource_grant_evidence(
+    provider: text,
+    device_kind: text,
+    function_present: bool,
+    bar0_implemented: bool,
+    bar0_size: u64,
+    irq_line: u8,
+    dma_isolated: bool,
+    iommu_or_broker: bool,
+    namespace_mode: text
+) -> PciResourceGrantEvidence:
+    PciResourceGrantEvidence(
+        provider: provider,
+        device_kind: device_kind,
+        function_present: function_present,
+        bar0_implemented: bar0_implemented,
+        bar0_size: bar0_size,
+        irq_line: irq_line,
+        dma_isolated: dma_isolated,
+        iommu_or_broker: iommu_or_broker,
+        namespace_mode: namespace_mode
+    )
+
+fn pci_resource_grant_evidence_from_function(provider: text, device_kind: text, f: PciEnumeratedFunction, dma_isolated: bool, iommu_or_broker: bool, namespace_mode: text) -> PciResourceGrantEvidence:
+    pci_resource_grant_evidence(
+        provider,
+        device_kind,
+        true,
+        f.bar0.implemented,
+        f.bar0.size,
+        f.irq_line,
+        dma_isolated,
+        iommu_or_broker,
+        namespace_mode
+    )
+
+fn pci_resource_grant_readiness_reason(e: PciResourceGrantEvidence) -> text:
+    if e.provider != "q35-config-io" and e.provider != "x86-config-io" and e.provider != "pci-ecam":
+        return "pci-grant-unsupported-provider:" + e.provider
+    if not e.function_present:
+        return "missing-pci-function:" + e.device_kind
+    if not e.bar0_implemented or e.bar0_size == 0u64:
+        return "missing-pci-bar0:" + e.device_kind
+    if e.irq_line == 0xFF:
+        return "missing-pci-irq:" + e.device_kind
+    if not e.dma_isolated:
+        return "missing-pci-dma-isolation:" + e.device_kind
+    if not e.iommu_or_broker:
+        return "missing-pci-iommu-or-broker:" + e.device_kind
+    if e.namespace_mode != "non-secure-resource-namespace":
+        return "missing-pci-non-secure-namespace:" + e.namespace_mode
+    "ready"
+
+fn pci_resource_grant_ready(e: PciResourceGrantEvidence) -> bool:
+    pci_resource_grant_readiness_reason(e) == "ready"

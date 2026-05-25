@@ -323,6 +323,12 @@ rejects the C boot bridge and requires feature negotiation, MAC read, link-up,
 TX queue, RX queue, TX completion, RX frame, DMA isolation, and user-space
 driver placement before `network_transfer_ready(...)` can pass.
 
+Follow-up PCI grant gate: `src/os/drivers/pci/pci_provider.spl` now records
+`PciResourceGrantEvidence`. PCI resource grants require a supported provider,
+a present function, implemented BAR0 with nonzero size, valid IRQ line, DMA
+isolation, IOMMU or grant-broker evidence, and
+`non-secure-resource-namespace` before `pci_resource_grant_ready(...)` can pass.
+
 Follow-up readiness tightening: `real_device_pure_simple_ready(...)` now calls
 the direct-access policy. A provider value of `simple-driver` is no longer
 sufficient by itself. Enabled NVMe, virtio-net/e1000, and hardware RDMA paths
@@ -421,6 +427,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/drivers/virtio/network_device.spl test/unit/os/drivers/virtio/network_device_spec.spl`: PASS
 - `simple test test/unit/os/drivers/virtio/network_device_spec.spl --clean`: PASS,
   `3` examples passed.
+- `simple check src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`: PASS
+- `simple test test/unit/os/drivers/pci/pci_provider_spec.spl --clean`: PASS,
+  `7` examples passed.
 
 ## Remaining Gaps
 

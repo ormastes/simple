@@ -12,6 +12,10 @@ use os.drivers.pci.pci_provider.{
     pci_function_is_infiniband,
     pci_function_is_nvme,
     pci_function_is_virtio_net,
+    pci_resource_grant_evidence,
+    pci_resource_grant_evidence_from_function,
+    pci_resource_grant_readiness_reason,
+    pci_resource_grant_ready,
     pci_config_io_addr,
     pci_ecam_addr,
     pci_provider_can_enumerate,
@@ -144,3 +148,67 @@ describe "PCI provider contracts":
         expect(pci_function_is_e1000(functions[1])).to_equal(true)
         expect(pci_function_is_infiniband(functions[2])).to_equal(true)
         expect(pci_count_class(functions, 0x02, 0x00)).to_equal(2)
+
+    it "requires real BAR IRQ DMA and namespace evidence before PCI grants are ready":
+        val nvme = PciConfigSnapshot(
+            target: PciConfigTarget(bus: 0, device: 4, func: 0, offset: 0),
+            id_dword: (0x5845u32 << 16) | 0x1B36u32,
+            class_dword: (0x01u32 << 24) | (0x08u32 << 16) | (0x02u32 << 8),
+            header_dword: 0u32,
+            bar0_raw: 0xFEB90000u32,
+            bar0_probe_mask: 0xFFFFF000u32,
+            bar1_raw: 0u32,
+            bar1_probe_mask: 0xFFFFFFFFu32,
+            irq_dword: 11u32
+        )
+        val parsed = pci_function_from_snapshot(nvme)
+        expect(parsed.?).to_equal(true)
+
+        val ready = pci_resource_grant_evidence_from_function(
+            "q35-config-io",
+            "nvme",
+            parsed,
+            true,
+            true,
+            "non-secure-resource-namespace"
+        )
+        expect(pci_resource_grant_ready(ready)).to_equal(true)
+
+        val no_bar = pci_resource_grant_evidence(
+            "q35-config-io",
+            "nvme",
+            true,
+            false,
+            0u64,
+            11,
+            true,
+            true,
+            "non-secure-resource-namespace"
+        )
+        expect(pci_resource_grant_readiness_reason(no_bar)).to_equal("missing-pci-bar0:nvme")
+
+        val no_irq = pci_resource_grant_evidence(
+            "q35-config-io",
+            "virtio-net",
+            true,
+            true,
+            0x100u64,
+            0xFF,
+            true,
+            true,
+            "non-secure-resource-namespace"
+        )
+        expect(pci_resource_grant_readiness_reason(no_irq)).to_equal("missing-pci-irq:virtio-net")
+
+        val bad_namespace = pci_resource_grant_evidence(
+            "pci-ecam",
+            "rdma",
+            true,
+            true,
+            0x1000u64,
+            12,
+            true,
+            true,
+            "secure-kernel-namespace"
+        )
+        expect(pci_resource_grant_readiness_reason(bad_namespace)).to_equal("missing-pci-non-secure-namespace:secure-kernel-namespace")

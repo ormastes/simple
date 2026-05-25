@@ -253,6 +253,12 @@ Current Simple-side provider status:
 - DONE: `pcimgr_grant_device()` no longer treats the C bridge IRQ field as
   BAR0. Grants now read BAR0 through config space, preserve the probed BAR
   size, and reject devices without real BAR evidence.
+- DONE: `src/os/drivers/pci/pci_provider.spl` now exposes
+  `PciResourceGrantEvidence` plus `pci_resource_grant_readiness_reason(...)`
+  and `pci_resource_grant_ready(...)`. A PCI grant cannot be reported ready
+  without a supported provider, present function, implemented BAR0 with size,
+  valid IRQ line, DMA isolation, IOMMU or grant-broker evidence, and
+  `non-secure-resource-namespace`.
 - DONE: live q35 PCI manager enumeration now uses Simple config-space reads
   instead of `rt_pci_device_count()` / `rt_pci_get_field()` from the C boot
   bridge. QEMU now reports 7 Simple-enumerated devices, including NVMe
