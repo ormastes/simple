@@ -299,6 +299,12 @@ NVFS/DBFS probe through `CNvmeBlockAdapterFs` is tagged
 C-bridge boot filesystem probe from being reported as pure Simple NVMe boot
 storage.
 
+Follow-up baremetal network fail-closed tightening:
+`src/os/kernel/net/driver_shim.spl` now gates send, sendfile, link-up, link
+speed, and MAC reporting behind `rt_net_tx_test()` and `rt_net_rx_ready()`.
+The shim no longer reports discarded sends, always-up links, fixed 1GbE speed,
+or a fixed MAC address before the boot packet provider proves both TX and RX.
+
 Follow-up protection evidence tightening:
 `simpleos_protection_evidence_ready(...)` now separates board support from
 runtime proof. Protection claims require a QEMU or real-board check before they

@@ -358,6 +358,12 @@ Current status:
   and a non-secure resource namespace. Common driver modules may own descriptor
   builders, queue layouts, parsers, and state machines, but they must not own
   direct device access.
+- DONE: the baremetal IoDriver shim now fails closed until the packet provider
+  proves both TX and RX. `rt_driver_submit_send`, `rt_driver_submit_sendfile`,
+  `rt_driver_link_state`, `rt_driver_link_speed_mbps`, and
+  `rt_driver_mac_addr` no longer advertise discarded sends, always-up link
+  state, fixed speed, or fixed MAC evidence before `rt_net_tx_test()` and
+  `rt_net_rx_ready()` pass.
 - TODO: integrate the Simple virtio-net driver path instead of the current C
   boot bridge.
 

@@ -30,6 +30,11 @@ use os.kernel.net.driver_shim_state.{
 use os.kernel.net.tcp_shim.{rt_io_tcp_accept, rt_io_tcp_read}
 
 extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_net_tx_test() -> i64
+extern fn rt_net_rx_ready() -> i64
+
+fn driver_shim_packet_io_ready() -> bool:
+    rt_net_tx_test() == 0 and rt_net_rx_ready() == 0
 
 # ============================================================================
 # Lifecycle
@@ -106,10 +111,11 @@ fn rt_driver_submit_recv(handle: i64, fd: i64, buf_size: i64) -> i64:
 fn rt_driver_submit_send(handle: i64, fd: i64, data: text, len: i64) -> i64:
     """Submit async send. Returns op_id.
 
-    B3 stub: immediately completes with result=len (data discarded, matching
-    B2 TCP write stub behaviour). The CompletedOp is placed directly on the
-    completed queue so the next poll() surfaces it.
+    Fails closed until the boot packet provider proves both TX and RX. This
+    prevents discarded-data paths from being accepted as real network transfer.
     """
+    if not driver_shim_packet_io_ready():
+        return -1
     val op_id = driver_alloc_op_id(handle)
     if op_id < 0:
         return -1
@@ -124,8 +130,11 @@ fn rt_driver_submit_send(handle: i64, fd: i64, data: text, len: i64) -> i64:
 fn rt_driver_submit_sendfile(handle: i64, sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
     """Submit async sendfile (zero-copy). Returns op_id.
 
-    B3 stub: immediately completes with result=len (no real transfer).
+    Fails closed until a real packet provider is ready. The baremetal driver
+    does not currently have filesystem-backed zero-copy transfer evidence.
     """
+    if not driver_shim_packet_io_ready():
+        return -1
     val op_id = driver_alloc_op_id(handle)
     if op_id < 0:
         return -1
@@ -161,17 +170,9 @@ fn rt_driver_submit_read(handle: i64, fd: i64, buf_size: i64, offset: i64) -> i6
 fn rt_driver_submit_write(handle: i64, fd: i64, data: text, len: i64, offset: i64) -> i64:
     """Submit async file write. Returns op_id.
 
-    B3 stub: immediately completes with result=len (data discarded).
+    Fails closed because the baremetal shim has no real filesystem write path.
     """
-    val op_id = driver_alloc_op_id(handle)
-    if op_id < 0:
-        return -1
-    val comp = CompletedOp(
-        op_id: op_id, result_val: len, flags: 0,
-        data_text: "", data_len: 0
-    )
-    driver_add_completed(handle, comp)
-    op_id
+    -1
 
 @export("C")
 fn rt_driver_submit_open(handle: i64, path: text, flags: i64, mode: i64) -> i64:
@@ -546,14 +547,16 @@ fn rt_driver_link_state(handle: i64) -> i64:
 
     Returns one of:
       RT_LINK_STATE_UNKNOWN (0) -- handle not found or driver dead
-      RT_LINK_STATE_UP      (1) -- link is up (baremetal always reports UP when alive)
+      RT_LINK_STATE_UP      (1) -- link is up after packet TX/RX readiness
       RT_LINK_STATE_DOWN    (2) -- link is down
 
-    B3 stub: a live handle always reports UP (the cooperative netstack is
-    assumed to be the only consumer). A dead handle returns UNKNOWN.
+    A live handle reports UP only after the boot packet provider proves both
+    TX and RX. A dead handle or unready packet provider returns UNKNOWN.
     """
     val drv = driver_get(handle)
     if drv == nil:
+        return RT_LINK_STATE_UNKNOWN
+    if not driver_shim_packet_io_ready():
         return RT_LINK_STATE_UNKNOWN
     RT_LINK_STATE_UP
 
@@ -566,11 +569,13 @@ fn rt_driver_link_up(handle: i64) -> bool:
 fn rt_driver_link_speed_mbps(handle: i64) -> i64:
     """Return the link speed in Mbps.
 
-    B3 stub: baremetal virtual NIC reports 1000 Mbps (1 GbE) when alive,
-    -1 for a dead handle.
+    Baremetal virtual NIC reports 1000 Mbps only when packet IO is ready;
+    otherwise link speed is unavailable.
     """
     val drv = driver_get(handle)
     if drv == nil:
+        return -1
+    if not driver_shim_packet_io_ready():
         return -1
     1000
 
@@ -578,11 +583,12 @@ fn rt_driver_link_speed_mbps(handle: i64) -> i64:
 fn rt_driver_mac_addr(handle: i64) -> text:
     """Return the MAC address for this driver handle as "XX:XX:XX:XX:XX:XX".
 
-    B3 stub: returns a fixed locally-administered unicast address. The
-    address is deterministic so upper layers can use it for ARP/NDP.
-    An empty string is returned for dead handles.
+    Returns a fixed locally-administered unicast address only after packet IO
+    is ready. An empty string is returned for dead or unready handles.
     """
     val drv = driver_get(handle)
     if drv == nil:
+        return ""
+    if not driver_shim_packet_io_ready():
         return ""
     "02:00:00:00:00:01"
