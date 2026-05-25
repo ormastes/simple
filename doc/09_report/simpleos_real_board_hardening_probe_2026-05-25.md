@@ -559,6 +559,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/kernel/arch/riscv64/rv64_preflight.spl src/os/kernel/arch/riscv64/rv64_smoke_lane.spl src/os/kernel/arch/riscv64/rv64_hosted_boot.spl test/unit/os/kernel/arch/riscv64/rv64_lane_acceptance_spec.spl`: PASS
 - `simple test test/unit/os/kernel/arch/riscv64/rv64_lane_acceptance_spec.spl --clean`: PASS,
   `6` examples passed.
+- `simple check src/os/drivers/dma/dma_safety_gate.spl test/unit/os/drivers/dma/dma_safety_gate_spec.spl`: PASS
+- `simple test test/unit/os/drivers/dma/dma_safety_gate_spec.spl --clean`: PASS,
+  `2` examples passed.
 
 ## Current q35 QEMU Rerun - 2026-05-25
 
@@ -613,3 +616,6 @@ Result:
 - QEMU was not rerun for RV64 empty-lane hardening because it changes the
   preflight/smoke/hosted-boot acceptance aggregates only; it does not alter
   generated QEMU arguments or the boot image.
+- QEMU was not rerun for display DMA fallback hardening because it changes the
+  driver acceptance contract only; it does not alter generated QEMU arguments
+  or the boot image.

@@ -248,6 +248,9 @@ Work:
    - legacy IRQ
    - MSI/MSI-X plan
    - fallback refusal when unsupported
+   - DONE: display DMA framebuffer fallback is diagnostic-only for hardening
+     acceptance. `DisplayDmaFallbackGate.hardening_acceptance_ready()` now
+     refuses the framebuffer path unless the selected path is direct DMA.
 5. Add QEMU fixtures:
    - q35 root complex
    - virtio-net-pci
