@@ -22,6 +22,30 @@ struct PciBarInfo:
     base_low: u64
     size: u64
 
+struct PciConfigSnapshot:
+    target: PciConfigTarget
+    id_dword: u32
+    class_dword: u32
+    header_dword: u32
+    bar0_raw: u32
+    bar0_probe_mask: u32
+    bar1_raw: u32
+    bar1_probe_mask: u32
+    irq_dword: u32
+
+struct PciEnumeratedFunction:
+    target: PciConfigTarget
+    vendor_id: u16
+    device_id: u16
+    class_code: u8
+    subclass: u8
+    prog_if: u8
+    header_type: u8
+    multifunction: bool
+    bar0: PciBarInfo
+    bar1: PciBarInfo
+    irq_line: u8
+
 fn pci_provider_kind_name(kind: PciProviderKind) -> text:
     match kind:
         PciProviderKind.NoPci: "no-pci"
@@ -100,3 +124,73 @@ fn pci_provider_refusal_reason(kind: PciProviderKind, board_id: text) -> text:
     if kind == PciProviderKind.NoPci:
         return "pci-unavailable:" + board_id
     "ready:" + pci_provider_kind_name(kind)
+
+fn pci_id_vendor(id_dword: u32) -> u16:
+    (id_dword & 0xFFFFu32).to_u16()
+
+fn pci_id_device(id_dword: u32) -> u16:
+    ((id_dword >> 16) & 0xFFFFu32).to_u16()
+
+fn pci_vendor_present(vendor_id: u16) -> bool:
+    vendor_id != 0xFFFF and vendor_id != 0x0000
+
+fn pci_class_code(class_dword: u32) -> u8:
+    ((class_dword >> 24) & 0xFFu32).to_u8()
+
+fn pci_subclass(class_dword: u32) -> u8:
+    ((class_dword >> 16) & 0xFFu32).to_u8()
+
+fn pci_prog_if(class_dword: u32) -> u8:
+    ((class_dword >> 8) & 0xFFu32).to_u8()
+
+fn pci_header_type(header_dword: u32) -> u8:
+    ((header_dword >> 16) & 0xFFu32).to_u8()
+
+fn pci_header_multifunction(header_type: u8) -> bool:
+    (header_type & 0x80) != 0
+
+fn pci_function_from_snapshot(s: PciConfigSnapshot) -> PciEnumeratedFunction?:
+    val vendor_id = pci_id_vendor(s.id_dword)
+    if not pci_vendor_present(vendor_id):
+        return nil
+    val header = pci_header_type(s.header_dword)
+    PciEnumeratedFunction(
+        target: s.target,
+        vendor_id: vendor_id,
+        device_id: pci_id_device(s.id_dword),
+        class_code: pci_class_code(s.class_dword),
+        subclass: pci_subclass(s.class_dword),
+        prog_if: pci_prog_if(s.class_dword),
+        header_type: header,
+        multifunction: pci_header_multifunction(header),
+        bar0: pci_bar_decode(s.bar0_raw, s.bar0_probe_mask),
+        bar1: pci_bar_decode(s.bar1_raw, s.bar1_probe_mask),
+        irq_line: (s.irq_dword & 0xFFu32).to_u8()
+    )
+
+fn pci_enumerate_snapshots(snapshots: [PciConfigSnapshot]) -> [PciEnumeratedFunction]:
+    var result: [PciEnumeratedFunction] = []
+    for snapshot in snapshots:
+        val parsed = pci_function_from_snapshot(snapshot)
+        if parsed.?:
+            result.push(parsed)
+    result
+
+fn pci_function_is_nvme(f: PciEnumeratedFunction) -> bool:
+    f.class_code == 0x01 and f.subclass == 0x08 and f.prog_if == 0x02
+
+fn pci_function_is_virtio_net(f: PciEnumeratedFunction) -> bool:
+    f.vendor_id == 0x1AF4 and (f.device_id == 0x1000 or f.device_id == 0x1041) and f.class_code == 0x02
+
+fn pci_function_is_e1000(f: PciEnumeratedFunction) -> bool:
+    f.vendor_id == 0x8086 and (f.device_id == 0x100Eu16 or f.device_id == 0x100Fu16 or f.device_id == 0x10D3u16)
+
+fn pci_function_is_infiniband(f: PciEnumeratedFunction) -> bool:
+    f.class_code == 0x0C and f.subclass == 0x06
+
+fn pci_count_class(functions: [PciEnumeratedFunction], class_code: u8, subclass: u8) -> i32:
+    var count = 0
+    for f in functions:
+        if f.class_code == class_code and f.subclass == subclass:
+            count = count + 1
+    count

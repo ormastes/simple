@@ -15,6 +15,8 @@ real-board/QEMU hardening goal.
 - `bin/release/x86_64-unknown-linux-gnu/simple check src/os/qemu_runner_part5.spl`
 - `bin/release/x86_64-unknown-linux-gnu/simple check test/unit/os/qemu_runner_spec.spl`
 - `bin/release/x86_64-unknown-linux-gnu/simple test test/unit/os/qemu_runner_spec.spl`
+- `bin/release/x86_64-unknown-linux-gnu/simple check src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`
+- `bin/release/x86_64-unknown-linux-gnu/simple test test/unit/os/drivers/pci/pci_provider_spec.spl --clean`
 
 ## Evidence
 
@@ -101,6 +103,12 @@ readiness contract now records that as `storage_provider=c-boot-bridge` and
 `real_device_pure_simple_ready` must still fail until the enabled providers are
 `simple-driver`.
 
+Follow-up Simple-side PCI progress: `src/os/drivers/pci/pci_provider.spl` now
+owns config-space snapshot parsing, absent vendor rejection, BAR decoding, and
+NVMe, virtio-net, e1000, and InfiniBand/RDMA classification. This is not a new
+QEMU boot result; it is the next parser/enumeration slice needed before live
+q35 config I/O can move out of the C boot bridge.
+
 ## Code Hardening Change
 
 `scenario_qemu_exit_success()` now rejects x86_64 QEMU exit code `0` for
@@ -114,6 +122,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple test test/unit/os/qemu_runner_spec.spl`: FAIL, unchanged known count
   of `59` passed and `3` failed. The runner does not print failing example
   names in the captured output.
+- `simple check src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`: PASS
+- `simple test test/unit/os/drivers/pci/pci_provider_spec.spl --clean`: PASS,
+  `6` examples passed.
 
 ## Remaining Gaps
 

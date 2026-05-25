@@ -181,6 +181,9 @@ Current Simple-side provider status:
 - DONE: provider tests cover deterministic config-I/O and ECAM address
   construction, no-PCI refusal for MCU boards, and BAR decoding for I/O,
   32-bit MMIO, and 64-bit prefetchable MMIO BARs.
+- DONE: provider tests now parse config-space snapshots into Simple-owned
+  enumerated functions, reject absent vendor sentinels, and classify NVMe,
+  virtio-net, e1000, and InfiniBand/RDMA candidates without a C bridge parser.
 - TODO: move live q35 enumeration from the C boot bridge onto this provider
   contract.
 

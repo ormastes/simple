@@ -1,9 +1,17 @@
 use std.spec.{describe, it, expect}
 use os.drivers.pci.pci_provider.{
+    PciConfigSnapshot,
     PciConfigTarget,
     PciProviderKind,
     pci_bar_decode,
     pci_bar_size_from_probe,
+    pci_count_class,
+    pci_enumerate_snapshots,
+    pci_function_from_snapshot,
+    pci_function_is_e1000,
+    pci_function_is_infiniband,
+    pci_function_is_nvme,
+    pci_function_is_virtio_net,
     pci_config_io_addr,
     pci_ecam_addr,
     pci_provider_can_enumerate,
@@ -58,3 +66,81 @@ describe "PCI provider contracts":
         expect(missing.implemented).to_equal(false)
         expect(missing.size).to_equal(0u64)
         expect(pci_bar_size_from_probe(0xFFFFFFFFu32, false)).to_equal(0u64)
+
+    it "parses config snapshots and rejects absent vendor sentinels":
+        val nvme = PciConfigSnapshot(
+            target: PciConfigTarget(bus: 0, device: 4, func: 0, offset: 0),
+            id_dword: (0x5845u32 << 16) | 0x1B36u32,
+            class_dword: (0x01u32 << 24) | (0x08u32 << 16) | (0x02u32 << 8),
+            header_dword: 0u32,
+            bar0_raw: 0xFEB90000u32,
+            bar0_probe_mask: 0xFFFFF000u32,
+            bar1_raw: 0u32,
+            bar1_probe_mask: 0xFFFFFFFFu32,
+            irq_dword: 11u32
+        )
+        val absent = PciConfigSnapshot(
+            target: PciConfigTarget(bus: 0, device: 5, func: 0, offset: 0),
+            id_dword: 0xFFFFFFFFu32,
+            class_dword: 0u32,
+            header_dword: 0u32,
+            bar0_raw: 0u32,
+            bar0_probe_mask: 0xFFFFFFFFu32,
+            bar1_raw: 0u32,
+            bar1_probe_mask: 0xFFFFFFFFu32,
+            irq_dword: 0u32
+        )
+        val parsed = pci_function_from_snapshot(nvme)
+        expect(parsed.?).to_equal(true)
+        val dev = parsed
+        expect(dev.vendor_id).to_equal(0x1B36)
+        expect(dev.device_id).to_equal(0x5845)
+        expect(dev.class_code).to_equal(0x01)
+        expect(dev.subclass).to_equal(0x08)
+        expect(dev.prog_if).to_equal(0x02)
+        expect(dev.bar0.size).to_equal(0x1000u64)
+        expect(dev.irq_line).to_equal(11)
+        expect(pci_function_is_nvme(dev)).to_equal(true)
+        expect(pci_function_from_snapshot(absent).?).to_equal(false)
+
+    it "enumerates snapshots and classifies q35 network and RDMA candidates":
+        val virtio_net = PciConfigSnapshot(
+            target: PciConfigTarget(bus: 0, device: 3, func: 0, offset: 0),
+            id_dword: (0x1000u32 << 16) | 0x1AF4u32,
+            class_dword: (0x02u32 << 24),
+            header_dword: 0x00800000u32,
+            bar0_raw: 0x0000C041u32,
+            bar0_probe_mask: 0xFFFFFF01u32,
+            bar1_raw: 0u32,
+            bar1_probe_mask: 0xFFFFFFFFu32,
+            irq_dword: 10u32
+        )
+        val e1000 = PciConfigSnapshot(
+            target: PciConfigTarget(bus: 0, device: 6, func: 0, offset: 0),
+            id_dword: (0x100Eu32 << 16) | 0x8086u32,
+            class_dword: (0x02u32 << 24),
+            header_dword: 0u32,
+            bar0_raw: 0xFEB80000u32,
+            bar0_probe_mask: 0xFFFF0000u32,
+            bar1_raw: 0u32,
+            bar1_probe_mask: 0xFFFFFFFFu32,
+            irq_dword: 9u32
+        )
+        val ib = PciConfigSnapshot(
+            target: PciConfigTarget(bus: 0, device: 7, func: 0, offset: 0),
+            id_dword: (0x1017u32 << 16) | 0x15B3u32,
+            class_dword: (0x0Cu32 << 24) | (0x06u32 << 16),
+            header_dword: 0u32,
+            bar0_raw: 0x8000000Cu32,
+            bar0_probe_mask: 0xFFFFC00Cu32,
+            bar1_raw: 0u32,
+            bar1_probe_mask: 0xFFFFFFFFu32,
+            irq_dword: 12u32
+        )
+        val functions = pci_enumerate_snapshots([virtio_net, e1000, ib])
+        expect(functions.len()).to_equal(3)
+        expect(pci_function_is_virtio_net(functions[0])).to_equal(true)
+        expect(functions[0].multifunction).to_equal(true)
+        expect(pci_function_is_e1000(functions[1])).to_equal(true)
+        expect(pci_function_is_infiniband(functions[2])).to_equal(true)
+        expect(pci_count_class(functions, 0x02, 0x00)).to_equal(2)
