@@ -149,6 +149,10 @@ Current status:
   through the QEMU runner module. Runners and reports can now gate a captured
   serial log on board id, selected protection mode, and runtime source without
   duplicating marker rules.
+- DONE: `qemu_scenario_protection_board_id(...)` maps known QEMU scenarios to
+  hardening board IDs. q35 x86_64 scenarios map to `x86_64-q35`, RISC-V virt
+  scenarios map to `riscv64-virt`, and unsupported scenarios fail with
+  `unsupported-qemu-board:<scenario>`.
 - TODO: wire the QEMU runner and physical board scripts to pass captured serial
   output through `simpleos_protection_evidence_from_serial(...)` automatically
   instead of manually recording the result in reports.

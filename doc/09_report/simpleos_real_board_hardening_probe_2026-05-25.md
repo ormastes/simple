@@ -192,6 +192,11 @@ Follow-up runner-facing protection gate:
 `qemu_protection_serial_reason(...)` now expose the same serial evidence
 contract from the QEMU runner module. This gives runner/report code a single
 gate for board id, selected mode, runtime source, and captured serial text.
+`qemu_scenario_protection_board_id(...)` and
+`qemu_scenario_protection_serial_reason(...)` also map known QEMU scenarios to
+board IDs before evaluating the same gate: q35 x86_64 scenarios use
+`x86_64-q35`, RISC-V virt scenarios use `riscv64-virt`, and unsupported
+scenarios produce an explicit `unsupported-qemu-board:<scenario>` reason.
 
 ## Code Hardening Change
 
@@ -225,7 +230,7 @@ plain exit `0` is no longer accepted as scenario success.
   `3` examples passed.
 - `simple check src/os/qemu_runner_part5.spl test/unit/os/qemu_runner_spec.spl`: PASS
 - `simple test test/unit/os/qemu_runner_spec.spl --clean`: FAIL, unchanged
-  coarse result of `60` passed and `3` failed. The runner does not print failing
+  coarse result of `61` passed and `3` failed. The runner does not print failing
   example names in the captured output.
 - `simple os build --arch=x86_64`: PASS
 - q35 QEMU with NVMe and virtio-net: PASS, expected exit code `1`
@@ -253,3 +258,6 @@ plain exit `0` is no longer accepted as scenario success.
 - QEMU was not rerun for the runner-facing protection gate because it adds a
   serial acceptance helper and tests only; it does not change QEMU arguments or
   the boot image.
+- QEMU was not rerun for scenario-to-board protection mapping because it is
+  classification logic over already captured serial output and leaves scenario
+  command construction unchanged.
