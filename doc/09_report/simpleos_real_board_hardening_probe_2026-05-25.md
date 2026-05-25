@@ -358,6 +358,14 @@ evidence such as `raw-device-grant:tok=...` or
 `resource-grant-set:tok=...`. Bare grant labels no longer satisfy pure
 user-space direct access for NVMe, virtio-net/e1000, or hardware RDMA.
 
+Follow-up common-driver tightening:
+`src/os/drivers/user_space_driver_contract.spl` now rejects common-only parser,
+queue-layout, state-machine, and descriptor-builder claims unless they are
+`provider=simple-driver`, `placement=common-driver`, explicitly shared common
+driver logic, and carry no ambient grant or resource namespace. Common modules
+can share logic, but they cannot own BAR/DMA/IRQ resources or substitute for a
+user-space driver capsule.
+
 Follow-up supervisor grant-token tightening:
 `src/os/services/driver_supervisor/resource_grant.spl` now rejects zero-token
 BAR, IRQ, and DMA grants. `ResourceGrantSet.grant_all(0)` leaves requests

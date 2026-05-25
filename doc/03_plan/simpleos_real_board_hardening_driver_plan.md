@@ -449,6 +449,12 @@ Pure-Simple completion gate:
   `user_space_driver_direct_access_reason(...)` requires an issued token marker
   in the grant evidence, so `raw-device-grant` and `resource-grant-set` alone
   remain incomplete.
+- DONE: common-driver-only logic also fails closed. Parser, queue-layout,
+  state-machine, and descriptor-builder paths require `provider=simple-driver`,
+  `placement=common-driver`, explicit shared common-driver logic, no ambient
+  grant, and no resource namespace. This keeps shared driver code reusable
+  while preventing C bridge or resource-owning common modules from satisfying
+  real hardware readiness.
 - DONE: `driver_supervisor` resource grants now reject zero-token grants and
   zero-sized BAR/DMA grants. `ResourceGrantSet.grant_all(0)` does not mark
   resources granted, and `all_granted_with_tokens()` only passes once every
