@@ -217,6 +217,9 @@ Current status:
   addition to the selected protection mode. The RA4M1 and STM32U585 scripts
   seed this marker before appending UART bytes, so wrong-board or hand-written
   protection-only logs cannot satisfy real-board readiness.
+- DONE: RV64 preflight and smoke-lane aggregates now fail closed when no probes
+  or entries are configured. Empty schedules keep their placeholder slots, but
+  `all_passed()` no longer treats zero active evidence as acceptance evidence.
 
 ## Phase 4 - PCI Driver Realism
 

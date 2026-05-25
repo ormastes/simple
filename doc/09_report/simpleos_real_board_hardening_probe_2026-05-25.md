@@ -556,6 +556,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/drivers/real_device_readiness.spl test/unit/os/drivers/real_device_readiness_spec.spl`: PASS
 - `simple test test/unit/os/drivers/real_device_readiness_spec.spl --clean`: PASS,
   `6` examples passed.
+- `simple check src/os/kernel/arch/riscv64/rv64_preflight.spl src/os/kernel/arch/riscv64/rv64_smoke_lane.spl test/unit/os/kernel/arch/riscv64/rv64_lane_acceptance_spec.spl`: PASS
+- `simple test test/unit/os/kernel/arch/riscv64/rv64_lane_acceptance_spec.spl --clean`: PASS,
+  `4` examples passed.
 
 ## Current q35 QEMU Rerun - 2026-05-25
 
@@ -607,3 +610,6 @@ Result:
 - QEMU was not rerun for scenario-to-board protection mapping because it is
   classification logic over already captured serial output and leaves scenario
   command construction unchanged.
+- QEMU was not rerun for RV64 empty-lane hardening because it changes the
+  preflight/smoke acceptance aggregate only; it does not alter generated QEMU
+  arguments or the boot image.
