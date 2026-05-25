@@ -100,11 +100,13 @@ queue setup, TX completion, and RX frame handling pass against QEMU user-mode
 networking through gateway ARP response traffic.
 
 Provider classification: this q35 evidence currently comes from the x86_64 C
-boot bridge, not the pure Simple NVMe or virtio-net driver path. The executable
-readiness contract now records that as `storage_provider=c-boot-bridge` and
+boot bridge for NVMe and virtio-net transfer self-tests, not the pure Simple
+NVMe or virtio-net driver path. PCI enumeration itself has moved to
+Simple-owned config-space reads. The executable readiness contract still records
+storage and network as `storage_provider=c-boot-bridge` and
 `network_provider=c-boot-bridge`; hardware readiness can pass, but
-`real_device_pure_simple_ready` must still fail until the enabled providers are
-`simple-driver`.
+`real_device_pure_simple_ready` must still fail until those enabled providers
+are `simple-driver`.
 
 Follow-up Simple-side PCI progress: `src/os/drivers/pci/pci_provider.spl` now
 owns config-space snapshot parsing, absent vendor rejection, BAR decoding, and
@@ -131,6 +133,18 @@ QEMU rerun after the grant hardening still reached the q35 acceptance markers:
 The process exit code was `1`, which is the expected success code for this
 `isa-debug-exit` lane.
 
+Follow-up live PCI enumeration hardening: `pcimgr_init()`,
+`pcimgr_find_by_class_i64()`, BAR reads, IRQ reads, and device dumps no longer
+depend on `rt_pci_device_count()` or `rt_pci_get_field()`. They now scan q35
+config I/O from Simple code. The latest QEMU rerun reported 7 devices through
+the Simple path, including:
+
+- `0:2.0 ... class=1.8` for NVMe
+- `0:3.0 ... class=2.0` for virtio-net
+
+The same run reached `nvme_identify_read=pass`, `nvme_rw_restore=pass`, and
+`virtio_net_tx_rx=pass`; those transfer self-tests still use the C bridge.
+
 ## Code Hardening Change
 
 `scenario_qemu_exit_success()` now rejects x86_64 QEMU exit code `0` for
@@ -148,6 +162,7 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple test test/unit/os/drivers/pci/pci_provider_spec.spl --clean`: PASS,
   `6` examples passed.
 - `simple check src/os/services/pcimgr/pcimgr.spl src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`: PASS
+- `simple check src/os/services/pcimgr/pcimgr.spl src/os/drivers/pci/pci.spl`: PASS
 - `simple os build --arch=x86_64`: PASS
 - q35 QEMU with NVMe and virtio-net: PASS, expected exit code `1`
 
@@ -158,6 +173,6 @@ plain exit `0` is no longer accepted as scenario success.
 - AN505 QEMU uses the C shim, not a pure Simple board HAL.
 - QEMU AN505 command has no non-interactive pass/exit marker yet, so the probe
   needs a timeout and cannot by itself close the hardening goal.
-- x86_64 q35 now proves PCI enumeration for attached NVMe and virtio-net,
-  NVMe identify/read/write/restore, and virtio-net queue/TX/RX. Hardware RDMA
-  remains open.
+- x86_64 q35 now proves Simple-owned PCI enumeration for attached NVMe and
+  virtio-net. NVMe identify/read/write/restore and virtio-net queue/TX/RX
+  still pass through the C bridge. Hardware RDMA remains open.

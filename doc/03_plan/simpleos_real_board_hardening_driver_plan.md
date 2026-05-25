@@ -187,8 +187,12 @@ Current Simple-side provider status:
 - DONE: `pcimgr_grant_device()` no longer treats the C bridge IRQ field as
   BAR0. Grants now read BAR0 through config space, preserve the probed BAR
   size, and reject devices without real BAR evidence.
-- TODO: move live q35 enumeration from the C boot bridge onto this provider
-  contract.
+- DONE: live q35 PCI manager enumeration now uses Simple config-space reads
+  instead of `rt_pci_device_count()` / `rt_pci_get_field()` from the C boot
+  bridge. QEMU now reports 7 Simple-enumerated devices, including NVMe
+  `class=1.8` and virtio-net `class=2.0`.
+- TODO: move NVMe controller init/read/write and virtio-net queue/RX/TX from
+  the current C self-test bridge onto Simple driver providers.
 
 ## Phase 5 - NVMe Driver Realism
 
