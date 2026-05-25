@@ -1,0 +1,102 @@
+# PCI provider contracts for Simple-side driver bring-up.
+
+enum PciProviderKind:
+    NoPci
+    X86ConfigIo
+    Q35ConfigIo
+    Ecam
+
+struct PciConfigTarget:
+    bus: u8
+    device: u8
+    func: u8
+    offset: u16
+
+struct PciBarInfo:
+    raw: u32
+    probe_mask: u32
+    implemented: bool
+    is_io: bool
+    is_mem64: bool
+    is_prefetchable: bool
+    base_low: u64
+    size: u64
+
+fn pci_provider_kind_name(kind: PciProviderKind) -> text:
+    match kind:
+        PciProviderKind.NoPci: "no-pci"
+        PciProviderKind.X86ConfigIo: "x86-config-io"
+        PciProviderKind.Q35ConfigIo: "q35-config-io"
+        PciProviderKind.Ecam: "pci-ecam"
+
+fn pci_provider_from_board(board_id: text) -> PciProviderKind:
+    if board_id == "x86_64-q35":
+        return PciProviderKind.Q35ConfigIo
+    if board_id == "riscv64-virt" or board_id == "xck26-ml-carrier":
+        return PciProviderKind.Ecam
+    PciProviderKind.NoPci
+
+fn pci_provider_can_enumerate(kind: PciProviderKind) -> bool:
+    kind != PciProviderKind.NoPci
+
+fn pci_config_io_addr(target: PciConfigTarget) -> u32:
+    val b = target.bus.to_u32()
+    val d = target.device.to_u32()
+    val f = target.func.to_u32()
+    val o = target.offset.to_u32()
+    (1u32 << 31) | (b << 16) | (d << 11) | (f << 8) | (o & 0xFC)
+
+fn pci_ecam_addr(ecam_base: u64, target: PciConfigTarget) -> u64:
+    ecam_base +
+        (target.bus.to_u64() << 20) +
+        (target.device.to_u64() << 15) +
+        (target.func.to_u64() << 12) +
+        (target.offset.to_u64() & 0xFFFu64)
+
+fn pci_provider_config_addr(kind: PciProviderKind, ecam_base: u64, target: PciConfigTarget) -> u64:
+    match kind:
+        PciProviderKind.NoPci: 0u64
+        PciProviderKind.X86ConfigIo: pci_config_io_addr(target).to_u64()
+        PciProviderKind.Q35ConfigIo: pci_config_io_addr(target).to_u64()
+        PciProviderKind.Ecam: pci_ecam_addr(ecam_base, target)
+
+fn pci_bar_size_from_probe(probe_mask: u32, is_io: bool) -> u64:
+    if probe_mask == 0u32 or probe_mask == 0xFFFFFFFFu32:
+        return 0u64
+    val masked = if is_io:
+        probe_mask & 0xFFFFFFFCu32
+    else:
+        probe_mask & 0xFFFFFFF0u32
+    if masked == 0u32:
+        return 0u64
+    ((masked ^ 0xFFFFFFFFu32) + 1u32).to_u64()
+
+fn pci_bar_decode(raw: u32, probe_mask: u32) -> PciBarInfo:
+    val implemented = raw != 0u32 and raw != 0xFFFFFFFFu32
+    val is_io = (raw & 1u32) != 0u32
+    val mem_type = (raw >> 1) & 0x3u32
+    val is_mem64 = (not is_io) and mem_type == 0x2u32
+    val is_prefetchable = (not is_io) and (raw & 0x8u32) != 0u32
+    val base_low = if is_io:
+        (raw & 0xFFFFFFFCu32).to_u64()
+    else:
+        (raw & 0xFFFFFFF0u32).to_u64()
+    val size = if implemented:
+        pci_bar_size_from_probe(probe_mask, is_io)
+    else:
+        0u64
+    PciBarInfo(
+        raw: raw,
+        probe_mask: probe_mask,
+        implemented: implemented,
+        is_io: is_io,
+        is_mem64: is_mem64,
+        is_prefetchable: is_prefetchable,
+        base_low: base_low,
+        size: size
+    )
+
+fn pci_provider_refusal_reason(kind: PciProviderKind, board_id: text) -> text:
+    if kind == PciProviderKind.NoPci:
+        return "pci-unavailable:" + board_id
+    "ready:" + pci_provider_kind_name(kind)

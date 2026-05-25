@@ -1865,6 +1865,51 @@ int64_t simpleos_nvme_write_sector(uint64_t device_idx, uint64_t lba, uint64_t b
     return _nvme_write_sector(device_idx, lba, buf_addr);
 }
 
+int64_t simpleos_nvme_rw_selftest(void)
+{
+    int rc = _nvme_init_controller();
+    if (rc < 0) return rc;
+    if (_nvme.sector_count == 0) return -19;
+    if (_nvme.sector_size == 0 || _nvme.sector_size > 512) return -22;
+
+    uint64_t lba = _nvme.sector_count - 1;
+    uint8_t backup[512];
+    uint8_t pattern[512];
+    uint8_t verify[512];
+    __builtin_memset(backup, 0, sizeof(backup));
+    __builtin_memset(pattern, 0, sizeof(pattern));
+    __builtin_memset(verify, 0, sizeof(verify));
+
+    rc = _nvme_read_sector_impl(lba, backup);
+    if (rc < 0) return rc;
+
+    for (uint32_t i = 0; i < _nvme.sector_size; i++) {
+        pattern[i] = (uint8_t)((i * 37u + 0x5Au) & 0xFFu);
+    }
+
+    rc = _nvme_write_sector_impl(lba, pattern);
+    if (rc < 0) return rc;
+
+    rc = _nvme_read_sector_impl(lba, verify);
+    if (rc < 0) {
+        (void)_nvme_write_sector_impl(lba, backup);
+        return rc;
+    }
+
+    int mismatch = 0;
+    for (uint32_t i = 0; i < _nvme.sector_size; i++) {
+        if (verify[i] != pattern[i]) {
+            mismatch = 1;
+            break;
+        }
+    }
+
+    int restore_rc = _nvme_write_sector_impl(lba, backup);
+    if (restore_rc < 0) return restore_rc;
+    if (mismatch) return -5;
+    return 0;
+}
+
 /* _nvme_init_and_read_sector0 — callable from Simple code or early boot
  * Initializes NVMe and reads sector 0 (FAT32 BPB).
  * Returns 0 on success, prints diagnostics to serial. */
@@ -3888,6 +3933,42 @@ static void _virtio_net_get_stats(void)
     serial_puts(" icmp_replies=");
     serial_put_dec(_vnet.icmp_replies);
     serial_puts("\r\n");
+}
+
+int64_t simpleos_virtio_net_selftest(void)
+{
+    int rc = _virtio_net_init();
+    if (rc < 0) return rc;
+
+    uint32_t tx_before = _vnet.tx_count;
+    uint32_t rx_before = _vnet.rx_count;
+    uint16_t tx_used_before = _vnet.tx_used ? _vnet.tx_used->idx : 0;
+    uint16_t rx_used_before = _vnet.rx_used ? _vnet.rx_used->idx : 0;
+
+    _vnet_send_arp_request(_vnet.gateway_ip);
+
+    int saw_tx_completion = 0;
+    int saw_rx_frame = 0;
+    for (int i = 0; i < 40000; i++) {
+        int reclaimed = _vnet_reclaim_tx();
+        if (reclaimed > 0 || (_vnet.tx_used && _vnet.tx_used->idx != tx_used_before)) {
+            saw_tx_completion = 1;
+        }
+        int processed = _virtio_net_poll();
+        if (processed > 0 || _vnet.rx_count > rx_before || (_vnet.rx_used && _vnet.rx_used->idx != rx_used_before)) {
+            saw_rx_frame = 1;
+        }
+        if (saw_tx_completion && saw_rx_frame) break;
+        for (volatile int d = 0; d < 1000; d++) {}
+    }
+
+    _vnet_reclaim_tx();
+    _virtio_net_get_stats();
+
+    if (_vnet.tx_count <= tx_before) return -5;
+    if (!saw_tx_completion) return -110;
+    if (!saw_rx_frame) return -61;
+    return 0;
 }
 
 /* ===================================================================
@@ -6551,6 +6632,60 @@ int64_t rt_rdrand(void)
 int64_t rt_entropy_hardware_ready(void)
 {
     return _cpu_has_rdrand() ? 1 : 0;
+}
+
+uint64_t rt_x86_read_cr0(void)
+{
+#ifdef __x86_64__
+    uint64_t value = 0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(value) :: "memory");
+    return value;
+#else
+    return 0;
+#endif
+}
+
+uint64_t rt_x86_read_cr4(void)
+{
+#ifdef __x86_64__
+    uint64_t value = 0;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(value) :: "memory");
+    return value;
+#else
+    return 0;
+#endif
+}
+
+uint64_t rt_x86_read_efer(void)
+{
+#ifdef __x86_64__
+    uint32_t lo = 0;
+    uint32_t hi = 0;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000080u));
+    return ((uint64_t)hi << 32) | lo;
+#else
+    return 0;
+#endif
+}
+
+uint64_t rt_x86_rdrand_or_rdtsc(void)
+{
+#ifdef __x86_64__
+    if (_cpu_has_rdrand()) {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            uint64_t value = 0;
+            unsigned char ok = 0;
+            __asm__ volatile("rdrand %0; setc %1" : "=r"(value), "=qm"(ok));
+            if (ok) return value;
+        }
+    }
+    uint32_t lo = 0;
+    uint32_t hi = 0;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+#else
+    return 0;
+#endif
 }
 
 /* rt_ed25519_sign_test: sign-only (skip broken verify). Returns 0=pass, -1=fail */

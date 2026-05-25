@@ -47,7 +47,7 @@ var dev_devid: [i64; 64] = [0; 64]
 var dev_class: [i64; 64] = [0; 64]
 var dev_subclass: [i64; 64] = [0; 64]
 var dev_state: [i64; 64] = [0; 64]
-var dev_grant_owner: [u64; 64] = [0; 64]  # Task ID that holds the grant
+var dev_grant_owner: [i64; 64] = [0; 64]  # Task ID that holds the grant
 
 use os.kernel.log.klog_api.{log_raw_println}
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
@@ -138,27 +138,6 @@ fn pcimgr_find_by_vendor_i64(vendor: i64, device_id: i64) -> i64:
         i = i + 1
     -1
 
-fn pcimgr_find_all_by_class(class_code: u8, subclass: u8) -> [u64]:
-    """Find all available devices matching class/subclass."""
-    pcimgr_find_all_by_class_i64(class_code.to_i64(), subclass.to_i64())
-
-fn pcimgr_find_all_by_class_i64(class_code: i64, subclass: i64) -> [u64]:
-    """Find all available devices matching class/subclass.
-
-    Uses the live PCI cache directly so the result does not depend on the
-    Simple-side mirror having already been populated.
-    """
-    var result: [u64] = []
-    val count = rt_pci_device_count()
-    var i: i64 = 0
-    while i < count:
-        val cls = rt_pci_get_field(i, 3)
-        val sub = rt_pci_get_field(i, 4)
-        if cls == class_code and sub == subclass:
-            result.push(i.to_u64())
-        i = i + 1
-    result
-
 fn pcimgr_device_count() -> u64:
     """Return total number of tracked devices."""
     dev_count
@@ -188,7 +167,7 @@ fn pcimgr_grant_device(dev_idx: u64, requester_task: u64) -> Result<DeviceGrant,
 
     if dev_idx < MAX_TRACKED_DEVICES:
         dev_state[dev_idx] = DEV_STATE_GRANTED
-        dev_grant_owner[dev_idx] = requester_task
+        dev_grant_owner[dev_idx] = requester_task.to_i64()
 
     log_raw_println("[pcimgr] Granted device [{dev_idx}] to task {requester_task}")
     Ok(DeviceGrant(
@@ -220,7 +199,7 @@ fn pcimgr_release_device(dev_idx: u64, requester_task: u64) -> Result<bool, text
         return Err("invalid device index: {dev_idx}")
     if dev_state[dev_idx] != DEV_STATE_GRANTED:
         return Err("device {dev_idx} is not currently granted")
-    if dev_grant_owner[dev_idx] != requester_task:
+    if dev_grant_owner[dev_idx] != requester_task.to_i64():
         return Err("device {dev_idx} is owned by task {dev_grant_owner[dev_idx]}, not {requester_task}")
 
     dev_state[dev_idx] = DEV_STATE_AVAILABLE

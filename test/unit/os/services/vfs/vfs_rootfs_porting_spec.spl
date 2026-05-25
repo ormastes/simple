@@ -1,7 +1,11 @@
+# @cover src/os/services/vfs/vfs_init.spl
+# @cover src/lib/nogc_sync_mut/fs_driver/mem_block_device.spl
+
 use std.spec
 use os.services.vfs.vfs_init.{
     _clear_vfs_rootfs_for_test,
     _mount_hosted_rootfs_for_test,
+    vfs_mount_rootfs,
     g_vfs_read_file_text,
     g_vfs_read_file_bytes,
     g_vfs_read_executable_bytes,
@@ -14,8 +18,10 @@ use std.fs_driver.instance.{DriverInstance}
 use std.db.dbfs_driver.{DbFsDriver}
 use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
 use std.fs_driver.types.{MountOptions}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.db.dbfs_engine.superblock.{dbfs_superblock_set_device, dbfs_superblock_format_disk}
 use os.kernel.loader.executable_source.{resolve_executable_bytes, _clear_synthetic_initramfs_for_test, _clear_synthetic_vfs_for_test}
-use os.kernel.loader.elf_loader.{load_user_executable}
+use os.kernel.loader.elf_loader.{load_user_executable, elf_image_entry}
 use os.kernel.arch.arch_context.{Architecture}
 
 extern fn rt_bytes_alloc(len: i64) -> [u8]
@@ -136,3 +142,46 @@ describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
         expect(bytes.len()).to_equal(5)
         expect(bytes[0]).to_equal(69u8)
         expect(bytes[4]).to_equal(65u8)
+
+    it "AC-4: DbFsDriver open_on_device stores and round-trips ELF bytes via block device":
+        # Arrange: create a MemBlockDevice with 2048 sectors of 512 bytes each
+        val dev = MemBlockDevice.new(2048u64, 512u32)
+        # Format DBFS superblock at LBA 2-3 on the device
+        dbfs_superblock_set_device(dev)
+        val fmt_ok = dbfs_superblock_format_disk(0xDEADBEEF00000001u64, 0x0000000000000002u64)
+        expect(fmt_ok).to_equal(true)
+        # Open DbFsDriver with arena starting at LBA 4 (size_sectors - 4 arena blocks)
+        val driver_r = DbFsDriver.open_on_device(dev, 4i64, 2044i64)
+        expect(driver_r.is_ok()).to_equal(true)
+        val driver = driver_r.unwrap()
+        # Write ELF bytes via driver write_bytes_handle
+        val elf = _make_elf64_rv64()
+        val write_r = driver.write_bytes_handle("/sbin/init", elf)
+        expect(write_r.is_ok()).to_equal(true)
+        # Mount the driver via vfs_mount_rootfs (new production API — AC-1 prerequisite)
+        _clear_vfs_rootfs_for_test()
+        _clear_synthetic_initramfs_for_test()
+        _clear_synthetic_vfs_for_test()
+        val mount_r = vfs_mount_rootfs(DriverInstance.DbFs(driver))
+        expect(mount_r.is_ok()).to_equal(true)
+        # Resolve via VFS → executable_source → elf_loader
+        val resolved = resolve_executable_bytes("/sbin/init", Architecture.Riscv64)
+        expect(resolved.is_ok()).to_equal(true)
+        val rbytes = resolved.unwrap()
+        expect(rbytes.len()).to_equal(4100)
+        expect(rbytes[0]).to_equal(0x7Fu8)
+        expect(rbytes[18]).to_equal(0xF3u8)
+        val image = load_user_executable(rbytes, Architecture.Riscv64)
+        expect(image.is_ok()).to_equal(true)
+        val entry = elf_image_entry(image.unwrap())
+        expect(entry > 0).to_equal(true)
+
+    it "AC-4: vfs_mount_rootfs registers driver at VFS root (file accessible after mount)":
+        # Arrange: hosted DBFS driver (simpler path to verify vfs_mount_rootfs itself)
+        _clear_vfs_rootfs_for_test()
+        val mount_r = vfs_mount_rootfs(DriverInstance.DbFs(DbFsDriver.new_hosted()))
+        expect(mount_r.is_ok()).to_equal(true)
+        # Writing a file after mount confirms VFS root is live
+        expect(g_vfs_write_file_text("/etc/vfs_mount_test.txt", "mounted")).to_equal(true)
+        expect(g_vfs_file_exists("/etc/vfs_mount_test.txt")).to_equal(true)
+        expect(g_vfs_read_file_text("/etc/vfs_mount_test.txt")).to_equal("mounted")

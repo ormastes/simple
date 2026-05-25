@@ -1,0 +1,60 @@
+use std.spec.{describe, it, expect}
+use os.drivers.pci.pci_provider.{
+    PciConfigTarget,
+    PciProviderKind,
+    pci_bar_decode,
+    pci_bar_size_from_probe,
+    pci_config_io_addr,
+    pci_ecam_addr,
+    pci_provider_can_enumerate,
+    pci_provider_config_addr,
+    pci_provider_from_board,
+    pci_provider_kind_name,
+    pci_provider_refusal_reason
+}
+
+describe "PCI provider contracts":
+    it "selects a provider by board without fallback success":
+        expect(pci_provider_kind_name(pci_provider_from_board("x86_64-q35"))).to_equal("q35-config-io")
+        expect(pci_provider_kind_name(pci_provider_from_board("riscv64-virt"))).to_equal("pci-ecam")
+        expect(pci_provider_kind_name(pci_provider_from_board("mps2-an505"))).to_equal("no-pci")
+        expect(pci_provider_can_enumerate(pci_provider_from_board("mps2-an505"))).to_equal(false)
+        expect(pci_provider_refusal_reason(PciProviderKind.NoPci, "mps2-an505")).to_equal("pci-unavailable:mps2-an505")
+
+    it "builds config I/O and ECAM addresses deterministically":
+        val target = PciConfigTarget(bus: 1, device: 2, func: 3, offset: 0x10)
+        val config_io = pci_config_io_addr(target)
+        val expected_io = (1u32 << 31) | (1u32 << 16) | (2u32 << 11) | (3u32 << 8) | 0x10u32
+        expect(config_io).to_equal(expected_io)
+
+        val ecam = pci_ecam_addr(0x30000000u64, target)
+        val expected_ecam = 0x30000000u64 + (1u64 << 20) + (2u64 << 15) + (3u64 << 12) + 0x10u64
+        expect(ecam).to_equal(expected_ecam)
+        expect(pci_provider_config_addr(PciProviderKind.NoPci, 0x30000000u64, target)).to_equal(0u64)
+        expect(pci_provider_config_addr(PciProviderKind.Ecam, 0x30000000u64, target)).to_equal(expected_ecam)
+
+    it "decodes I/O, 32-bit MMIO, and 64-bit prefetchable BARs":
+        val io_bar = pci_bar_decode(0x0000C041u32, 0xFFFFFF01u32)
+        expect(io_bar.implemented).to_equal(true)
+        expect(io_bar.is_io).to_equal(true)
+        expect(io_bar.base_low).to_equal(0x0000C040u64)
+        expect(io_bar.size).to_equal(0x100u64)
+
+        val mmio_bar = pci_bar_decode(0xFEB90000u32, 0xFFFFF000u32)
+        expect(mmio_bar.is_io).to_equal(false)
+        expect(mmio_bar.is_mem64).to_equal(false)
+        expect(mmio_bar.base_low).to_equal(0xFEB90000u64)
+        expect(mmio_bar.size).to_equal(0x1000u64)
+
+        val mmio64_bar = pci_bar_decode(0x8000000Cu32, 0xFFFFC00Cu32)
+        expect(mmio64_bar.is_io).to_equal(false)
+        expect(mmio64_bar.is_mem64).to_equal(true)
+        expect(mmio64_bar.is_prefetchable).to_equal(true)
+        expect(mmio64_bar.base_low).to_equal(0x80000000u64)
+        expect(mmio64_bar.size).to_equal(0x4000u64)
+
+    it "does not invent BAR size for unimplemented BARs":
+        val missing = pci_bar_decode(0u32, 0xFFFFFFFFu32)
+        expect(missing.implemented).to_equal(false)
+        expect(missing.size).to_equal(0u64)
+        expect(pci_bar_size_from_probe(0xFFFFFFFFu32, false)).to_equal(0u64)

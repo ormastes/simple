@@ -24,6 +24,7 @@ use compiler.mir_opt.mir_opt.cse (create_cse_pass, cse_run_on_function)
 use compiler.mir_opt.mir_opt.inline (create_inline_small_pass, create_inline_pass, create_inline_aggressive_pass, inline_run_on_function, inline_run_on_module)
 use compiler.mir_opt.mir_opt.loop_opt (create_loop_opt_conservative, create_loop_opt_pass, loop_opt_run_on_function)
 use compiler.mir_opt.mir_opt.bounds_check_elim (create_bounds_check_elim_pass, bounds_check_elim_run_on_function)
+use compiler.mir_opt.mir_opt.typed_byte_canon (create_typed_byte_canon_pass, typed_byte_canon_run_on_function)
 use compiler.mir_opt.mir_opt.loop_strength (create_strength_reduction_pass, strength_reduction_provider, strength_reduction_run_on_function)
 use compiler.mir_opt.mir_opt.string_builder_opt (create_string_builder_opt_pass, string_builder_opt_run_on_function)
 use compiler.mir_opt.mir_opt.outline (create_outline_pass, outline_run_on_function, outline_run_on_module)
@@ -141,6 +142,7 @@ enum PassKind:
     WriteCoalesce
     ReadAheadHoist
     SyscallBatch
+    TypedByteCanon
 
 enum PassScope:
     """Whether a pass operates per-function or on the whole module."""
@@ -194,7 +196,8 @@ fn mir_pass_descriptor_registry() -> [MirPassDescriptor]:
         mir_pass_descriptor("target_narrow_form", [], mir_pipeline_provider("target_narrow_form", false), PassKind.TargetNarrowForm, PassScope.Module),
         mir_pass_descriptor("write_coalesce", [], mir_pipeline_provider("write_coalesce", false), PassKind.WriteCoalesce, PassScope.FsDriver),
         mir_pass_descriptor("read_ahead_hoist", [], mir_pipeline_provider("read_ahead_hoist", false), PassKind.ReadAheadHoist, PassScope.FsDriver),
-        mir_pass_descriptor("syscall_batch", [], mir_pipeline_provider("syscall_batch", false), PassKind.SyscallBatch, PassScope.FsDriver)
+        mir_pass_descriptor("syscall_batch", [], mir_pipeline_provider("syscall_batch", false), PassKind.SyscallBatch, PassScope.FsDriver),
+        mir_pass_descriptor("typed_byte_canon", [], mir_pipeline_provider("typed_byte_canon", false), PassKind.TypedByteCanon, PassScope.Function)
     ]
 
 fn mir_pass_provider_registry() -> [OptimizationRuleProvider]:
@@ -252,6 +255,8 @@ fn mir_pass_descriptor_for_name(pass_name: text) -> MirPassDescriptor?:
         return Some(mir_pass_descriptor("read_ahead_hoist", [], mir_pipeline_provider("read_ahead_hoist", false), PassKind.ReadAheadHoist, PassScope.FsDriver))
     if pass_name == "syscall_batch":
         return Some(mir_pass_descriptor("syscall_batch", [], mir_pipeline_provider("syscall_batch", false), PassKind.SyscallBatch, PassScope.FsDriver))
+    if pass_name == "typed_byte_canon":
+        return Some(mir_pass_descriptor("typed_byte_canon", [], mir_pipeline_provider("typed_byte_canon", false), PassKind.TypedByteCanon, PassScope.Function))
     nil
 
 fn mir_pass_provider_name(pass_name: text) -> text:
@@ -579,6 +584,9 @@ fn run_typed_pass_on_function(kind: PassKind, func: MirFunction) -> MirFunction:
         case SyscallBatch:
             var sb_stats = OptimizationStats.create()
             optimize_syscall_batch(func, sb_stats)
+        case TypedByteCanon:
+            var tbc = create_typed_byte_canon_pass()
+            typed_byte_canon_run_on_function(tbc, func)
 
 fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirModule:
     """Run pipeline passes on all functions in a module.
@@ -709,6 +717,10 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
             for sym in module.functions.keys():
                 var sb_stats = OptimizationStats.create()
                 result_module.functions[sym] = optimize_syscall_batch(result_module.functions[sym], sb_stats)
+        case TypedByteCanon:
+            for sym in module.functions.keys():
+                var tbc = create_typed_byte_canon_pass()
+                result_module.functions[sym] = typed_byte_canon_run_on_function(tbc, result_module.functions[sym])
     result_module
 
 # ============================================================================

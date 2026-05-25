@@ -11,7 +11,8 @@ use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.arch.arch_context.{Architecture, current_architecture}
 use os.services.vfs.vfs_init.{
     vfs_boot_init, g_vfs_initialized, g_vfs_read_file_bytes,
-    g_c_adapter, CNvmeBlockAdapter
+    g_c_adapter, CNvmeBlockAdapter,
+    vfs_mount_rootfs
 }
 use os.userlib.process.{spawn_binary}
 use std.fs_driver.nvfs_superblock.{
@@ -23,6 +24,10 @@ use std.db.dbfs_engine.superblock.{
 }
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
 use std.fs_driver.types.{MountOptions}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+
+val DBFS_ARENA_BASE_LBA: i64 = 4
 
 extern fn serial_println(msg: text)
 
@@ -170,7 +175,18 @@ fn _try_dbfs_root() -> bool:
     val sb = dbfs_superblock_read_from_disk()
     log_raw_println("[boot-fs] DBFS superblock found: gen={sb.mount_generation}")
 
-    log_raw_println("[boot-fs] DBFS mounted as root filesystem")
+    val arena_count: i64 = sb.block_count.to_i64()
+    val driver_r = DbFsDriver.open_on_device(adapter, DBFS_ARENA_BASE_LBA, arena_count)
+    if driver_r.is_err():
+        log_raw_println("[boot-fs] DBFS driver open failed — falling through")
+        return false
+
+    val mount_r = vfs_mount_rootfs(DriverInstance.DbFs(driver_r.unwrap()))
+    if mount_r.is_err():
+        log_raw_println("[boot-fs] DBFS VFS mount failed — falling through")
+        return false
+
+    log_raw_println("[DBFS] mounted as root filesystem")
     true
 
 fn _launch_init(path: text) -> i64:

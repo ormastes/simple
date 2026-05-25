@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-23 05:17:20*
+*Generated: 2026-05-25 03:31:10*
 
-## test/unit/lib/security
+## test/lib/hal
 
-❌ **kms_vendor_adapters_spec.spl** (37ms)
-  - Source: `test/unit/lib/security/kms_vendor_adapters_spec.spl`
-  - Generated doc: `spec/kms_vendor_adapters_spec.md`
+❌ **hal_types_spec.spl** (253ms)
+  - Source: `test/lib/hal/hal_types_spec.spl`
+  - Generated doc: `spec/hal_types_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 1 ✅
-- **Failed:** 4 ❌
-- **Duration:** 39ms
+- **Passed:** 15 ✅
+- **Failed:** 1 ❌
+- **Duration:** 258ms

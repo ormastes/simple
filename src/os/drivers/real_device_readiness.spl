@@ -1,0 +1,257 @@
+# Truthful real-device readiness gates for SimpleOS board hardening.
+
+struct RealDeviceReadiness:
+    board_id: text
+    pci_provider: text
+    pci_enumerated: bool
+    storage_mode: text
+    nvme_identify: bool
+    nvme_read_write: bool
+    network_mode: text
+    network_queue: bool
+    network_rx_tx: bool
+    rdma_mode: text
+    rdma_device: bool
+    dma_isolated: bool
+    iommu_or_broker: bool
+    storage_provider: text
+    network_provider: text
+    rdma_provider: text
+
+fn real_device_readiness(
+    board_id: text,
+    pci_provider: text,
+    pci_enumerated: bool,
+    storage_mode: text,
+    nvme_identify: bool,
+    nvme_read_write: bool,
+    network_mode: text,
+    network_queue: bool,
+    network_rx_tx: bool,
+    rdma_mode: text,
+    rdma_device: bool,
+    dma_isolated: bool,
+    iommu_or_broker: bool
+) -> RealDeviceReadiness:
+    real_device_readiness_with_providers(
+        board_id: board_id,
+        pci_provider: pci_provider,
+        pci_enumerated: pci_enumerated,
+        storage_mode: storage_mode,
+        nvme_identify: nvme_identify,
+        nvme_read_write: nvme_read_write,
+        network_mode: network_mode,
+        network_queue: network_queue,
+        network_rx_tx: network_rx_tx,
+        rdma_mode: rdma_mode,
+        rdma_device: rdma_device,
+        dma_isolated: dma_isolated,
+        iommu_or_broker: iommu_or_broker,
+        storage_provider: "unspecified",
+        network_provider: "unspecified",
+        rdma_provider: "unspecified"
+    )
+
+fn real_device_readiness_with_providers(
+    board_id: text,
+    pci_provider: text,
+    pci_enumerated: bool,
+    storage_mode: text,
+    nvme_identify: bool,
+    nvme_read_write: bool,
+    network_mode: text,
+    network_queue: bool,
+    network_rx_tx: bool,
+    rdma_mode: text,
+    rdma_device: bool,
+    dma_isolated: bool,
+    iommu_or_broker: bool,
+    storage_provider: text,
+    network_provider: text,
+    rdma_provider: text
+) -> RealDeviceReadiness:
+    RealDeviceReadiness(
+        board_id: board_id,
+        pci_provider: pci_provider,
+        pci_enumerated: pci_enumerated,
+        storage_mode: storage_mode,
+        nvme_identify: nvme_identify,
+        nvme_read_write: nvme_read_write,
+        network_mode: network_mode,
+        network_queue: network_queue,
+        network_rx_tx: network_rx_tx,
+        rdma_mode: rdma_mode,
+        rdma_device: rdma_device,
+        dma_isolated: dma_isolated,
+        iommu_or_broker: iommu_or_broker,
+        storage_provider: storage_provider,
+        network_provider: network_provider,
+        rdma_provider: rdma_provider
+    )
+
+fn real_device_pci_supported(board_id: text) -> bool:
+    board_id == "x86_64-q35" or board_id == "riscv64-virt" or board_id == "xck26-ml-carrier"
+
+fn real_device_pci_provider_supported(provider: text) -> bool:
+    provider == "x86-config-io" or provider == "pci-ecam" or provider == "q35-config-io"
+
+fn real_device_storage_ready(c: RealDeviceReadiness) -> bool:
+    if c.storage_mode == "off" or c.storage_mode == "none":
+        return true
+    if c.storage_mode == "nvme":
+        return real_device_pci_supported(c.board_id) and real_device_pci_provider_supported(c.pci_provider) and c.pci_enumerated and c.nvme_identify and c.nvme_read_write and c.dma_isolated
+    false
+
+fn real_device_network_ready(c: RealDeviceReadiness) -> bool:
+    if c.network_mode == "off" or c.network_mode == "none":
+        return true
+    if c.network_mode == "virtio-net" or c.network_mode == "e1000":
+        return real_device_pci_supported(c.board_id) and real_device_pci_provider_supported(c.pci_provider) and c.pci_enumerated and c.network_queue and c.network_rx_tx and c.dma_isolated
+    if c.network_mode == "rdma":
+        return real_device_rdma_ready(c)
+    false
+
+fn real_device_rdma_ready(c: RealDeviceReadiness) -> bool:
+    if c.rdma_mode == "off" or c.rdma_mode == "none":
+        return true
+    if c.rdma_mode == "model" or c.rdma_mode == "sffi-host":
+        return false
+    if c.rdma_mode == "device":
+        return real_device_pci_supported(c.board_id) and real_device_pci_provider_supported(c.pci_provider) and c.pci_enumerated and c.rdma_device and c.dma_isolated and c.iommu_or_broker
+    false
+
+fn real_device_provider_is_simple(provider: text) -> bool:
+    provider == "simple-driver"
+
+fn real_device_provider_is_hardware(provider: text) -> bool:
+    provider == "simple-driver" or provider == "c-boot-bridge"
+
+fn real_device_pure_simple_ready(c: RealDeviceReadiness) -> bool:
+    real_device_readiness_ready(c) and
+        (c.storage_mode == "off" or c.storage_mode == "none" or real_device_provider_is_simple(c.storage_provider)) and
+        (c.network_mode == "off" or c.network_mode == "none" or real_device_provider_is_simple(c.network_provider)) and
+        (c.rdma_mode == "off" or c.rdma_mode == "none" or real_device_provider_is_simple(c.rdma_provider))
+
+fn real_device_readiness_ready(c: RealDeviceReadiness) -> bool:
+    real_device_storage_ready(c) and real_device_network_ready(c) and real_device_rdma_ready(c)
+
+fn real_device_readiness_reason(c: RealDeviceReadiness) -> text:
+    if not real_device_pci_supported(c.board_id) and (c.storage_mode == "nvme" or c.network_mode == "virtio-net" or c.network_mode == "e1000" or c.network_mode == "rdma" or c.rdma_mode == "device"):
+        return "missing-pci-board:" + c.board_id
+    if not real_device_pci_provider_supported(c.pci_provider) and c.pci_provider != "none":
+        return "unsupported-pci-provider:" + c.pci_provider
+    if (c.storage_mode == "nvme" or c.network_mode == "virtio-net" or c.network_mode == "e1000" or c.rdma_mode == "device") and not c.pci_enumerated:
+        return "missing-pci-enumeration"
+    if c.storage_mode == "nvme" and not c.nvme_identify:
+        return "missing-nvme-identify"
+    if c.storage_mode == "nvme" and not c.nvme_read_write:
+        return "missing-nvme-read-write"
+    if (c.storage_mode == "nvme" or c.network_mode == "virtio-net" or c.network_mode == "e1000" or c.rdma_mode == "device") and not c.dma_isolated:
+        return "missing-dma-isolation"
+    if (c.network_mode == "virtio-net" or c.network_mode == "e1000") and not c.network_queue:
+        return "missing-network-queue:" + c.network_mode
+    if (c.network_mode == "virtio-net" or c.network_mode == "e1000") and not c.network_rx_tx:
+        return "missing-network-rx-tx:" + c.network_mode
+    if c.rdma_mode == "model" or c.rdma_mode == "sffi-host":
+        return "rdma-not-hardware:" + c.rdma_mode
+    if c.rdma_mode == "device" and not c.rdma_device:
+        return "missing-rdma-device"
+    if c.rdma_mode == "device" and not c.iommu_or_broker:
+        return "missing-rdma-iommu-or-broker"
+    if real_device_readiness_ready(c):
+        return "ready"
+    "unsupported-device-claim"
+
+fn real_device_pure_simple_reason(c: RealDeviceReadiness) -> text:
+    val hardware_reason = real_device_readiness_reason(c)
+    if hardware_reason != "ready":
+        return hardware_reason
+    if c.storage_mode != "off" and c.storage_mode != "none" and not real_device_provider_is_simple(c.storage_provider):
+        return "storage-not-pure-simple:" + c.storage_provider
+    if c.network_mode != "off" and c.network_mode != "none" and not real_device_provider_is_simple(c.network_provider):
+        return "network-not-pure-simple:" + c.network_provider
+    if c.rdma_mode != "off" and c.rdma_mode != "none" and not real_device_provider_is_simple(c.rdma_provider):
+        return "rdma-not-pure-simple:" + c.rdma_provider
+    "ready"
+
+fn real_device_current_q35_c_bridge_readiness() -> RealDeviceReadiness:
+    real_device_readiness_with_providers(
+        "x86_64-q35",
+        "q35-config-io",
+        true,
+        "nvme",
+        true,
+        true,
+        "virtio-net",
+        true,
+        true,
+        "off",
+        false,
+        true,
+        true,
+        "c-boot-bridge",
+        "c-boot-bridge",
+        "none"
+    )
+
+fn real_device_qemu_args_for_image(c: RealDeviceReadiness, nvme_image: text) -> [text]:
+    var args: [text] = []
+    if c.storage_mode == "nvme":
+        args.push("-drive")
+        args.push("file=" + nvme_image + ",if=none,id=nvme0,format=raw")
+        args.push("-device")
+        args.push("nvme,drive=nvme0,serial=simpleos0")
+    if c.network_mode == "virtio-net":
+        args.push("-netdev")
+        args.push("user,id=net0")
+        args.push("-device")
+        args.push("virtio-net-pci,netdev=net0")
+    if c.network_mode == "e1000":
+        args.push("-netdev")
+        args.push("user,id=net0")
+        args.push("-device")
+        args.push("e1000,netdev=net0")
+    args
+
+fn real_device_qemu_args(c: RealDeviceReadiness) -> [text]:
+    real_device_qemu_args_for_image(c, "build/os/simpleos-nvme.img")
+
+fn real_device_q35_qemu_command(c: RealDeviceReadiness, kernel_path: text, nvme_image: text) -> [text]:
+    if c.board_id != "x86_64-q35":
+        return []
+    if not real_device_pci_provider_supported(c.pci_provider):
+        return []
+    [
+        "qemu-system-x86_64",
+        "-machine", "q35",
+        "-cpu", "qemu64",
+        "-m", "512M",
+        "-kernel", kernel_path,
+        "-serial", "stdio",
+        "-monitor", "none",
+        "-display", "none",
+        "-no-reboot",
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"
+    ] + real_device_qemu_args_for_image(c, nvme_image)
+
+fn real_device_marker(c: RealDeviceReadiness) -> text:
+    "[real-device] board=" + c.board_id +
+        " pci=" + c.pci_provider +
+        " storage=" + c.storage_mode +
+        " storage_provider=" + c.storage_provider +
+        " network=" + c.network_mode +
+        " network_provider=" + c.network_provider +
+        " rdma=" + c.rdma_mode +
+        " rdma_provider=" + c.rdma_provider +
+        " reason=" + real_device_readiness_reason(c)
+
+fn real_device_q35_boot_markers() -> [text]:
+    [
+        "[stage1] pci_count=",
+        "[stage1] nvme_pci=present",
+        "[stage1] nvme_identify_read=pass",
+        "[stage1] nvme_rw_restore=pass",
+        "[stage1] net_pci=present",
+        "[stage1] virtio_net_tx_rx=pass",
+        "TEST PASSED"
+    ]

@@ -1,0 +1,211 @@
+use std.spec.{describe, it, expect}
+use os.drivers.real_device_readiness.{
+    real_device_current_q35_c_bridge_readiness,
+    real_device_q35_boot_markers,
+    real_device_marker,
+    real_device_pure_simple_ready,
+    real_device_pure_simple_reason,
+    real_device_q35_qemu_command,
+    real_device_qemu_args,
+    real_device_qemu_args_for_image,
+    real_device_readiness,
+    real_device_readiness_ready,
+    real_device_readiness_reason,
+    real_device_readiness_with_providers
+}
+
+describe "SimpleOS real-device readiness":
+    it "accepts q35 NVMe and virtio-net only with hardware evidence":
+        val ready = real_device_readiness(
+            "x86_64-q35",
+            "q35-config-io",
+            true,
+            "nvme",
+            true,
+            true,
+            "virtio-net",
+            true,
+            true,
+            "off",
+            false,
+            true,
+            true
+        )
+        expect(real_device_readiness_ready(ready)).to_equal(true)
+        expect(real_device_readiness_reason(ready)).to_equal("ready")
+        expect(real_device_marker(ready)).to_contain("storage=nvme")
+        expect(real_device_marker(ready)).to_contain("network=virtio-net")
+
+        val args = real_device_qemu_args(ready)
+        expect(args).to_contain("nvme,drive=nvme0,serial=simpleos0")
+        expect(args).to_contain("virtio-net-pci,netdev=net0")
+
+        val custom_args = real_device_qemu_args_for_image(ready, "build/os/q35-nvme.img")
+        expect(custom_args).to_contain("file=build/os/q35-nvme.img,if=none,id=nvme0,format=raw")
+
+        val cmd = real_device_q35_qemu_command(ready, "build/os/simpleos_x86_64.elf", "build/os/q35-nvme.img")
+        expect(cmd[0]).to_equal("qemu-system-x86_64")
+        expect(cmd).to_contain("-machine")
+        expect(cmd).to_contain("q35")
+        expect(cmd).to_contain("-kernel")
+        expect(cmd).to_contain("build/os/simpleos_x86_64.elf")
+        expect(cmd).to_contain("file=build/os/q35-nvme.img,if=none,id=nvme0,format=raw")
+        expect(cmd).to_contain("virtio-net-pci,netdev=net0")
+
+    it "rejects fallback or incomplete storage and network claims":
+        val no_pci_board = real_device_readiness(
+            "mps2-an505",
+            "none",
+            false,
+            "nvme",
+            true,
+            true,
+            "off",
+            false,
+            false,
+            "off",
+            false,
+            true,
+            false
+        )
+        val no_identify = real_device_readiness(
+            "x86_64-q35",
+            "q35-config-io",
+            true,
+            "nvme",
+            false,
+            true,
+            "off",
+            false,
+            false,
+            "off",
+            false,
+            true,
+            true
+        )
+        val no_rx_tx = real_device_readiness(
+            "x86_64-q35",
+            "q35-config-io",
+            true,
+            "off",
+            false,
+            false,
+            "e1000",
+            true,
+            false,
+            "off",
+            false,
+            true,
+            true
+        )
+
+        expect(real_device_readiness_ready(no_pci_board)).to_equal(false)
+        expect(real_device_readiness_reason(no_pci_board)).to_equal("missing-pci-board:mps2-an505")
+        expect(real_device_q35_qemu_command(no_pci_board, "kernel.elf", "disk.img").len()).to_equal(0)
+        expect(real_device_readiness_reason(no_identify)).to_equal("missing-nvme-identify")
+        expect(real_device_readiness_reason(no_rx_tx)).to_equal("missing-network-rx-tx:e1000")
+
+    it "distinguishes current C bridge evidence from pure Simple driver completion":
+        val current = real_device_current_q35_c_bridge_readiness()
+        expect(real_device_readiness_ready(current)).to_equal(true)
+        expect(real_device_pure_simple_ready(current)).to_equal(false)
+        expect(real_device_pure_simple_reason(current)).to_equal("storage-not-pure-simple:c-boot-bridge")
+        expect(real_device_marker(current)).to_contain("storage_provider=c-boot-bridge")
+        expect(real_device_marker(current)).to_contain("network_provider=c-boot-bridge")
+
+        val pure = real_device_readiness_with_providers(
+            "x86_64-q35",
+            "q35-config-io",
+            true,
+            "nvme",
+            true,
+            true,
+            "virtio-net",
+            true,
+            true,
+            "off",
+            false,
+            true,
+            true,
+            "simple-driver",
+            "simple-driver",
+            "none"
+        )
+        expect(real_device_readiness_ready(pure)).to_equal(true)
+        expect(real_device_pure_simple_ready(pure)).to_equal(true)
+        expect(real_device_pure_simple_reason(pure)).to_equal("ready")
+
+    it "lists q35 boot markers needed for real storage and network acceptance":
+        val markers = real_device_q35_boot_markers()
+        expect(markers).to_contain("[stage1] nvme_identify_read=pass")
+        expect(markers).to_contain("[stage1] nvme_rw_restore=pass")
+        expect(markers).to_contain("[stage1] virtio_net_tx_rx=pass")
+        expect(markers).to_contain("TEST PASSED")
+
+    it "does not report model or SFFI RDMA as hardware RDMA":
+        val model = real_device_readiness(
+            "x86_64-q35",
+            "q35-config-io",
+            true,
+            "off",
+            false,
+            false,
+            "off",
+            false,
+            false,
+            "model",
+            true,
+            true,
+            true
+        )
+        val host = real_device_readiness(
+            "x86_64-q35",
+            "q35-config-io",
+            true,
+            "off",
+            false,
+            false,
+            "off",
+            false,
+            false,
+            "sffi-host",
+            true,
+            true,
+            true
+        )
+        val device = real_device_readiness(
+            "x86_64-q35",
+            "q35-config-io",
+            true,
+            "off",
+            false,
+            false,
+            "rdma",
+            true,
+            true,
+            "device",
+            true,
+            true,
+            true
+        )
+        val unsafe = real_device_readiness(
+            "x86_64-q35",
+            "q35-config-io",
+            true,
+            "off",
+            false,
+            false,
+            "rdma",
+            true,
+            true,
+            "device",
+            true,
+            true,
+            false
+        )
+
+        expect(real_device_readiness_ready(model)).to_equal(false)
+        expect(real_device_readiness_reason(model)).to_equal("rdma-not-hardware:model")
+        expect(real_device_readiness_reason(host)).to_equal("rdma-not-hardware:sffi-host")
+        expect(real_device_readiness_ready(device)).to_equal(true)
+        expect(real_device_readiness_reason(unsafe)).to_equal("missing-rdma-iommu-or-broker")

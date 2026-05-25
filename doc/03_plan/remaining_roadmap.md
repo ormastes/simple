@@ -10,6 +10,8 @@
 **Priority:** P0
 **Status:** Active as of 2026-05-25
 **Plan:** [`crash_recovery_replan_2026-05-25.md`](crash_recovery_replan_2026-05-25.md)
+**Pure Simple/standalone plan:** [`pure_simple_lib_standalone_hw_plan.md`](pure_simple_lib_standalone_hw_plan.md)
+**SimpleOS real-board hardening/driver plan:** [`simpleos_real_board_hardening_driver_plan.md`](simpleos_real_board_hardening_driver_plan.md)
 
 ### Scope
 - Remove dummy/fallback pass paths from SimpleOS QEMU checks and make the
@@ -22,6 +24,12 @@
   wins.
 - Improve SimpleQ plus embedded/full Simple DB with executor-backed indexes and
   benchmark gates.
+- Move default library functionality from C/runtime-hosted paths into pure
+  Simple `src/lib`, keep host C access explicit through SFFI providers, and make
+  the standalone hardware profile no-libc/no-shell by default.
+- Harden SimpleOS real-board and QEMU evidence: reject false fallback success,
+  make MPU/MMU modes explicit, align QEMU settings with existing boards, and
+  advance PCI/NVMe/network/RDMA toward realistic provider-backed drivers.
 
 ## 1. 3D Engine GPU Acceleration + WebGPU (DONE)
 
