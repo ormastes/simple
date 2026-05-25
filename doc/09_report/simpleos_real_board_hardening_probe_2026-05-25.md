@@ -294,7 +294,8 @@ Follow-up RDMA provider gate: `src/lib/nogc_async_mut/io/rdma.spl` now has an
 explicit `RdmaProviderEvidence` interface and readiness reason. Hardware RDMA
 still refuses `model` and `sffi-host`; `rdma=device` requires the Simple driver
 provider, PCI enumeration, memory registration, protection domain, queue pair,
-completion queue, DMA isolation, and IOMMU or grant-broker evidence before
+completion queue, DMA isolation, IOMMU or grant-broker evidence, an issued
+direct-access grant token, and a `non-secure-resource-namespace` before
 `rdma_provider_hardware_ready(...)` can pass.
 
 Follow-up QEMU captured-serial gate: `src/os/qemu_runner_part5.spl` now exposes

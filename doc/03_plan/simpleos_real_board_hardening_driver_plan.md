@@ -410,7 +410,8 @@ Current status:
   `rdma_provider_hardware_ready(...)`. Hardware RDMA refuses `model` and
   `sffi-host`, requires `provider=simple-driver`, PCI enumeration, memory
   registration, protection domain, queue pair, completion queue, DMA isolation,
-  and IOMMU or grant-broker evidence.
+  IOMMU or grant-broker evidence, an issued direct-access grant token, and a
+  `non-secure-resource-namespace`.
 - DONE: the baremetal IoDriver shim now fails closed until the packet provider
   proves both TX and RX. `rt_driver_submit_send`, `rt_driver_submit_sendfile`,
   `rt_driver_link_state`, `rt_driver_link_speed_mbps`, and
