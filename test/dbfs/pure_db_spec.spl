@@ -769,3 +769,71 @@ describe "PureDatabase":
         val m1_vals = m1.values
         val m1_name = m1_vals[1]
         expect m1_name.to_text() == "B"
+    it "persists to file and reloads":
+        val path = "/tmp/test_pure_db_persist.pdb"
+        val r1 = PureDatabase.open(path)
+        var db1 = r1.unwrap()
+        db1.exec_sql("CREATE TABLE IF NOT EXISTS t (id INTEGER, name TEXT)").unwrap()
+        db1.exec_sql("DELETE FROM t").unwrap()
+        db1.exec_sql("INSERT INTO t (id, name) VALUES (1, 'Alice')").unwrap()
+        db1.exec_sql("INSERT INTO t (id, name) VALUES (2, 'Bob')").unwrap()
+        db1.close().unwrap()
+        # Reopen and verify data survived
+        val r2 = PureDatabase.open(path)
+        var db2 = r2.unwrap()
+        expect(db2.table_exists("t")).to_be(true)
+        val qr = db2.query("SELECT * FROM t", [])
+        val rows = qr.unwrap()
+        expect(rows.len()).to_equal(2)
+        db2.close().unwrap()
+    it "full SQL feature integration":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        # Schema
+        db.exec_sql("CREATE TABLE products (id INTEGER, name TEXT, price INTEGER, category TEXT)").unwrap()
+        db.exec_sql("CREATE TABLE orders (oid INTEGER, product_id INTEGER, qty INTEGER)").unwrap()
+        # Bulk insert
+        db.exec_sql("INSERT INTO products (id, name, price, category) VALUES (1, 'Widget', 10, 'A'); INSERT INTO products (id, name, price, category) VALUES (2, 'Gadget', 25, 'B'); INSERT INTO products (id, name, price, category) VALUES (3, 'Doohickey', 15, 'A')").unwrap()
+        db.exec_sql("INSERT INTO orders (oid, product_id, qty) VALUES (100, 1, 5); INSERT INTO orders (oid, product_id, qty) VALUES (101, 2, 3); INSERT INTO orders (oid, product_id, qty) VALUES (102, 1, 2)").unwrap()
+        # JOIN + WHERE + ORDER BY
+        val jq = db.query("SELECT products.name, orders.qty FROM products JOIN orders ON products.id = orders.product_id WHERE orders.qty > 2 ORDER BY orders.qty DESC", [])
+        val jrows = jq.unwrap()
+        expect(jrows.len()).to_equal(2)
+        # Aggregates with GROUP BY
+        val aq = db.query("SELECT category, COUNT(*), SUM(price) FROM products GROUP BY category", [])
+        val arows = aq.unwrap()
+        expect(arows.len()).to_equal(2)
+        # Transaction rollback
+        db.exec_sql("BEGIN").unwrap()
+        db.exec_sql("DELETE FROM products WHERE id = 1").unwrap()
+        db.exec_sql("ROLLBACK").unwrap()
+        val rq = db.query("SELECT * FROM products", [])
+        val rrows = rq.unwrap()
+        expect(rrows.len()).to_equal(3)
+        # ALTER TABLE + UPDATE
+        db.exec_sql("ALTER TABLE products ADD COLUMN stock INTEGER").unwrap()
+        db.exec_sql("UPDATE products SET stock = 100 WHERE id = 1").unwrap()
+        val sq = db.query("SELECT stock FROM products WHERE id = 1", [])
+        val srows = sq.unwrap()
+        expect(srows.len()).to_equal(1)
+    it "handles empty table queries":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE empty (id INTEGER)").unwrap()
+        val qr = db.query("SELECT * FROM empty", [])
+        val rows = qr.unwrap()
+        expect(rows.len()).to_equal(0)
+        val cr = db.query("SELECT COUNT(*) FROM empty", [])
+        val crows = cr.unwrap()
+        val first = crows[0]
+        val vals = first.values
+        val count_val = vals[0]
+        expect(count_val.to_text()).to_equal("0")
+    it "handles special characters in text":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE t (id INTEGER, name TEXT)").unwrap()
+        db.exec_sql("INSERT INTO t (id, name) VALUES (1, 'O''Brien')").unwrap()
+        val qr = db.query("SELECT * FROM t", [])
+        val rows = qr.unwrap()
+        expect(rows.len()).to_equal(1)
