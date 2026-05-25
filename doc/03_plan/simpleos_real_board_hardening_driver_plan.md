@@ -233,6 +233,10 @@ Current status:
 - DONE: executable readiness contract records the current provider as
   `storage_provider=c-boot-bridge`, so this evidence cannot satisfy
   pure-Simple completion.
+- DONE: `src/os/drivers/nvme/nvme_controller_contract.spl` decodes q35-style
+  CAP/VS/CSTS register facts, validates NVM command-set support, queue depth,
+  fatal status, doorbell stride, and namespace LBA size without a C parser.
+  Unit tests use the observed q35 CAP value `0x4018200f0107ff`.
 - TODO: integrate the Simple NVMe driver path instead of the current C bridge.
 
 ## Phase 6 - Network And RDMA Realism

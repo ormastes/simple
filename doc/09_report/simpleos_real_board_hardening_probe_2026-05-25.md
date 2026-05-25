@@ -145,6 +145,15 @@ the Simple path, including:
 The same run reached `nvme_identify_read=pass`, `nvme_rw_restore=pass`, and
 `virtio_net_tx_rx=pass`; those transfer self-tests still use the C bridge.
 
+Follow-up NVMe Simple contract progress: `src/os/drivers/nvme/`
+now includes `nvme_controller_contract.spl`, which decodes q35-style CAP,
+VS, CC, CSTS, and namespace identify facts without calling the C bridge.
+The focused unit test covers the observed q35 CAP value `0x4018200f0107ff`,
+the expected enable CC bits, fatal/unsupported refusal reasons, and 512-byte
+namespace LBA parsing. This is not new QEMU evidence; it is the Simple-side
+contract needed before the current C NVMe init/read/write self-test can be
+replaced.
+
 ## Code Hardening Change
 
 `scenario_qemu_exit_success()` now rejects x86_64 QEMU exit code `0` for
@@ -163,6 +172,9 @@ plain exit `0` is no longer accepted as scenario success.
   `6` examples passed.
 - `simple check src/os/services/pcimgr/pcimgr.spl src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`: PASS
 - `simple check src/os/services/pcimgr/pcimgr.spl src/os/drivers/pci/pci.spl`: PASS
+- `simple check src/os/drivers/nvme/nvme_controller_contract.spl src/os/drivers/nvme/mod.spl test/unit/os/drivers/nvme/nvme_controller_contract_spec.spl`: PASS
+- `simple test test/unit/os/drivers/nvme/nvme_controller_contract_spec.spl --clean`: PASS,
+  `4` examples passed.
 - `simple os build --arch=x86_64`: PASS
 - q35 QEMU with NVMe and virtio-net: PASS, expected exit code `1`
 
