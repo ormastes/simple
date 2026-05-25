@@ -344,6 +344,12 @@ must also carry user-space driver placement, a raw-device or resource-grant-set
 token source, non-secure resource namespace evidence, shared common-driver
 logic, and IOMMU or grant-broker evidence.
 
+Follow-up grant-token tightening:
+`src/os/drivers/user_space_driver_contract.spl` now requires issued-token grant
+evidence such as `raw-device-grant:tok=...` or
+`resource-grant-set:tok=...`. Bare grant labels no longer satisfy pure
+user-space direct access for NVMe, virtio-net/e1000, or hardware RDMA.
+
 Follow-up q35 pure serial gate: `src/os/drivers/real_device_readiness.spl` now
 has `real_device_q35_pure_simple_serial_acceptance_reason(...)`. The current
 q35 activity markers still prove C-bridge hardware smoke, but pure Simple q35
@@ -466,6 +472,11 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
 - `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
   `4` examples passed.
+- `simple check src/os/drivers/user_space_driver_contract.spl test/unit/os/drivers/user_space_driver_contract_spec.spl src/os/drivers/real_device_readiness.spl test/unit/os/drivers/real_device_readiness_spec.spl`: PASS
+- `simple test test/unit/os/drivers/user_space_driver_contract_spec.spl --clean`: PASS,
+  `7` examples passed.
+- `simple test test/unit/os/drivers/real_device_readiness_spec.spl --clean`: PASS,
+  `6` examples passed.
 - `simple check src/os/drivers/nvme/nvme_storage_model.spl test/unit/os/drivers/nvme/nvme_storage_model_spec.spl`: PASS
 - `simple test test/unit/os/drivers/nvme/nvme_storage_model_spec.spl --clean`: PASS,
   `9` examples passed.

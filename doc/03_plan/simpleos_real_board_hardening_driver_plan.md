@@ -436,10 +436,14 @@ Pure-Simple completion gate:
   all real BAR/DMA/IRQ ownership through `driver_supervisor` grants.
 - A bare `simple-driver` provider label is not enough for pure completion.
   `real_device_pure_simple_ready(...)` now also requires direct-access evidence:
-  user-space placement, `raw-device-grant` or `resource-grant-set`,
-  `non-secure-resource-namespace`, shared common-driver logic, and IOMMU or
-  grant-broker evidence for every enabled NVMe, virtio-net/e1000, or hardware
-  RDMA path.
+  user-space placement, an issued `raw-device-grant:tok=...` or
+  `resource-grant-set:tok=...`, `non-secure-resource-namespace`, shared
+  common-driver logic, and IOMMU or grant-broker evidence for every enabled
+  NVMe, virtio-net/e1000, or hardware RDMA path.
+- DONE: bare grant labels no longer satisfy user-space driver direct access.
+  `user_space_driver_direct_access_reason(...)` requires an issued token marker
+  in the grant evidence, so `raw-device-grant` and `resource-grant-set` alone
+  remain incomplete.
 - DONE: q35 pure-Simple serial acceptance now has a separate marker contract.
   The older q35 markers can prove hardware activity with the current C bridge;
   pure completion also requires serial evidence for `storage_provider` and
