@@ -252,9 +252,9 @@ fn _write_smoke_result(target: OsTarget, success: bool, has_banner: bool, serial
         return
     val baseline_path = "{_result_arch_dir(target.arch)}/baseline_smoke.json"
     val baseline_match = target.arch != Architecture.X86_64 or rt_file_exists(baseline_path)
-    # Current smoke lanes do not emit one uniform NVFS-ready serial marker.
-    # Treat a green smoke run as the acceptance proxy for the mounted runtime FS.
-    val nvfs_mounted = success or serial_output.contains("nvfs") or serial_output.contains("NVFS")
+    # Do not infer storage readiness from a generic boot PASS.  This field is
+    # evidence for a filesystem marker, not an alias for "QEMU exited OK".
+    val nvfs_mounted = serial_output.contains("nvfs") or serial_output.contains("NVFS") or serial_output.contains("[vfs] mounted")
     val body = _smoke_result_body(target, success, has_banner, nvfs_mounted, serial_output, exit_code, baseline_match)
     if not rt_file_write_text(_smoke_result_path(target.arch), body):
         print "[test] WARNING: could not write smoke result for {arch_display_name(target.arch)}"
@@ -326,17 +326,18 @@ fn _print_native_build_failure_hint(arch_label: text, backend_name: text, stderr
     if hint != "":
         print "[build][{arch_label}] prerequisite: {hint}"
 
-fn is_qemu_success(target: OsTarget, exit_code: i32) -> bool:
+pub fn is_qemu_success(target: OsTarget, exit_code: i32) -> bool:
     """Interpret QEMU exit code based on architecture.
 
     x86/x86_64 with isa-debug-exit: guest writes 0 -> QEMU exits with (0 << 1) | 1 = 1
-    ARM64/RISC-V with semihosting: exit code 0 = success
+    Non-x86 lanes do not attach isa-debug-exit in this runner, so only exit 0
+    is accepted.  Accepting exit 1 globally hid real guest failures.
     """
     match target.arch:
         Architecture.X86_64: exit_code == 1
         Architecture.X86: exit_code == 1
-        Architecture.Arm64: exit_code == 0 or exit_code == 1
-        Architecture.Arm32: exit_code == 0 or exit_code == 1
+        Architecture.Arm64: exit_code == 0
+        Architecture.Arm32: exit_code == 0
         _: exit_code == 0
 
 # ===========================================================================

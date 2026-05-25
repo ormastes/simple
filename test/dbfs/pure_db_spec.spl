@@ -837,3 +837,56 @@ describe "PureDatabase":
         val qr = db.query("SELECT * FROM t", [])
         val rows = qr.unwrap()
         expect(rows.len()).to_equal(1)
+    it "supports CREATE INDEX":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE idx_t (id INTEGER, name TEXT)").unwrap()
+        db.exec_sql("INSERT INTO idx_t (id, name) VALUES (1, 'Alice')").unwrap()
+        db.exec_sql("INSERT INTO idx_t (id, name) VALUES (2, 'Bob')").unwrap()
+        val cr = db.exec_sql("CREATE INDEX idx_name ON idx_t (name)")
+        expect(cr.is_ok()).to_be(true)
+        # Queries should still work after index creation
+        val qr = db.query("SELECT * FROM idx_t WHERE name = 'Alice'", [])
+        val rows = qr.unwrap()
+        expect(rows.len()).to_equal(1)
+    it "supports CREATE UNIQUE INDEX":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE uq_t (id INTEGER, name TEXT)").unwrap()
+        db.exec_sql("INSERT INTO uq_t (id, name) VALUES (1, 'Alice')").unwrap()
+        val cr = db.exec_sql("CREATE UNIQUE INDEX uq_name ON uq_t (name)")
+        expect(cr.is_ok()).to_be(true)
+        # Insert duplicate should fail
+        val dup = db.exec_sql("INSERT INTO uq_t (id, name) VALUES (2, 'Alice')")
+        expect(dup.is_err()).to_be(true)
+        # Insert different value should succeed
+        val ok = db.exec_sql("INSERT INTO uq_t (id, name) VALUES (3, 'Bob')")
+        expect(ok.is_ok()).to_be(true)
+    it "supports DROP INDEX":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE di_t (id INTEGER, name TEXT)").unwrap()
+        val cr = db.exec_sql("CREATE INDEX di_idx ON di_t (name)")
+        expect(cr.is_ok()).to_be(true)
+        val dr = db.exec_sql("DROP INDEX di_idx")
+        expect(dr.is_ok()).to_be(true)
+        # Dropping non-existent index should fail
+        val dr2 = db.exec_sql("DROP INDEX di_idx")
+        expect(dr2.is_err()).to_be(true)
+    it "FTS uses shared engine for bm25_search":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE fts_t (id INTEGER, title TEXT, body TEXT)").unwrap()
+        db.exec_sql("INSERT INTO fts_t (id, title, body) VALUES (1, 'SQLite FTS5', 'embedded search engine bm25 ranking')").unwrap()
+        db.exec_sql("INSERT INTO fts_t (id, title, body) VALUES (2, 'Other Storage', 'plain key value storage')").unwrap()
+        db.exec_sql("INSERT INTO fts_t (id, title, body) VALUES (3, 'BM25 Search', 'bm25 bm25 search ranking support')").unwrap()
+        val sr = db.bm25_search("fts_t", ["title", "body"], "bm25 search", 10)
+        expect(sr.is_ok()).to_be(true)
+        val rows = sr.unwrap()
+        expect(rows.len()).to_equal(2)
+        val first = rows[0]
+        val second = rows[1]
+        expect(first.score).to_be_greater_than(second.score)
+        val first_row = first.row
+        val first_id = first_row.values[0]
+        expect(first_id.to_text()).to_equal("3")

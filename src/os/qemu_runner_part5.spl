@@ -439,7 +439,7 @@ fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
         print "[run] serial output:\n{serial_output}"
     if stderr != "":
         print "[run] stderr:\n{stderr}"
-    val success = exit_code == 0 or exit_code == 1
+    val success = scenario_qemu_exit_success(scenario, exit_code)
     if not success:
         print "[run] FAILED (exit code {exit_code})"
     success
@@ -493,7 +493,7 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
         _scenario_serial_accepts_completion(scenario, serial_output)
     else:
         serial_output.contains("TEST PASSED")
-    val success = accepted and (exit_code == 0 or exit_code == 1 or scenario.name == "x64-desktop-uefi")
+    val success = accepted and scenario_qemu_exit_success(scenario, exit_code)
     if not success:
         if scenario.name == "x64-desktop-uefi":
             print "[test] FAILED: scenario {scenario.name} did not satisfy desktop driver completion markers"
@@ -510,6 +510,18 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
         else:
             print "[test] FAILED: scenario {scenario.name} did not report TEST PASSED"
     success
+
+pub fn scenario_qemu_exit_success(scenario: QemuScenario, exit_code: i32) -> bool:
+    """Return whether a QEMU process exit code is successful for this scenario.
+
+    x86_64 scenarios include isa-debug-exit in their QEMU arguments, where a
+    guest success code exits QEMU as 1.  Other architectures use normal QEMU
+    process status and must exit 0.  This keeps marker checks from masking a
+    timeout, crash, or failed guest run.
+    """
+    if scenario.arch == Architecture.X86_64:
+        return exit_code == 0 or exit_code == 1
+    exit_code == 0
 
 fn arm_fs_exec_required_marker_fragments(scenario: QemuScenario) -> [text]:
     if val lane = _catalog_lane_for_scenario(scenario):

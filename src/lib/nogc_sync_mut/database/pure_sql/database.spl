@@ -773,6 +773,80 @@ fn _parse_drop_table(sql: text) -> text:
         rest = rest.slice(0, rest.len() - 1).trim()
     rest
 
+# ── CREATE INDEX parser ──────────────────────────────────────────────────────
+# Returns [is_unique, index_name, table_name, col1, col2, ...]
+# Returns [] if not a CREATE INDEX statement.
+
+fn _parse_create_index(sql: text) -> [text]:
+    val trimmed = sql.trim()
+    var upper = trimmed.to_upper()
+    if upper.ends_with(";"):
+        upper = upper.slice(0, upper.len() - 1).trim()
+    var is_unique = "false"
+    var rest = trimmed
+    if upper.starts_with("CREATE UNIQUE INDEX"):
+        is_unique = "true"
+        rest = trimmed.slice(19, trimmed.len()).trim()
+    elif upper.starts_with("CREATE INDEX"):
+        rest = trimmed.slice(12, trimmed.len()).trim()
+    else:
+        return []
+    # Strip trailing semicolon from rest too
+    if rest.ends_with(";"):
+        rest = rest.slice(0, rest.len() - 1).trim()
+    # rest = "idx_name ON table (col1, col2)"
+    val parts = rest.split(" ")
+    if parts.len() < 3:
+        return []
+    val idx_name = parts[0]
+    val on_word = parts[1].to_upper()
+    if on_word != "ON":
+        return []
+    # Find the table name and columns in parentheses
+    # Rejoin remainder after "ON"
+    var after_on = ""
+    var pi: i32 = 2
+    while pi < parts.len() as i32:
+        if after_on != "":
+            after_on = after_on + " "
+        after_on = after_on + parts[pi]
+        pi = pi + 1
+    # Find open paren
+    val paren_start = after_on.index_of("(")
+    if paren_start < 0:
+        return []
+    val tbl_name = after_on.slice(0, paren_start).trim()
+    if tbl_name == "":
+        return []
+    val paren_end = after_on.index_of(")")
+    if paren_end < 0:
+        return []
+    val cols_str = after_on.slice(paren_start + 1, paren_end).trim()
+    val col_parts = cols_str.split(",")
+    var result: [text] = []
+    result.push(is_unique)
+    result.push(idx_name)
+    result.push(tbl_name)
+    var ci: i32 = 0
+    while ci < col_parts.len() as i32:
+        val col = col_parts[ci].trim()
+        if col != "":
+            result.push(col)
+        ci = ci + 1
+    result
+
+# ── DROP INDEX parser ───────────────────────────────────────────────────────
+
+fn _parse_drop_index(sql: text) -> text:
+    val trimmed = sql.trim()
+    val upper = trimmed.to_upper()
+    if not upper.starts_with("DROP INDEX"):
+        return ""
+    var rest = trimmed.slice(10, trimmed.len()).trim()
+    if rest.ends_with(";"):
+        rest = rest.slice(0, rest.len() - 1).trim()
+    rest
+
 fn _parse_txn_command(sql: text) -> text:
     val trimmed = sql.trim()
     var low = trimmed.to_lower()
@@ -842,6 +916,8 @@ class PureDatabase:
     _fts_indexes: [FtsEngine]
     _fts_valid: [bool]
     _fts_columns: [[text]]
+    _indexes: [[[text]]]
+    _index_unique: [[bool]]
     _txn: MvccTxnManager
     is_open: bool
     _last_rowid: i64
@@ -852,6 +928,8 @@ class PureDatabase:
     _snap_row_tidx: [i32]
     _snap_row_data: [text]
     _snap_tbl_rowids: [i64]
+    _snap_indexes: [[[text]]]
+    _snap_index_unique: [[bool]]
 
     static fn memory() -> Result<PureDatabase, DbError>:
         Ok(PureDatabase(
@@ -863,6 +941,8 @@ class PureDatabase:
             _fts_indexes: [],
             _fts_valid: [],
             _fts_columns: [],
+            _indexes: [],
+            _index_unique: [],
             _txn: MvccTxnManager.new(),
             is_open: true,
             _last_rowid: 0,
@@ -872,7 +952,9 @@ class PureDatabase:
             _snap_tbl_cols: [],
             _snap_row_tidx: [],
             _snap_row_data: [],
-            _snap_tbl_rowids: []
+            _snap_tbl_rowids: [],
+            _snap_indexes: [],
+            _snap_index_unique: []
         ))
 
     static fn open(path: text) -> Result<PureDatabase, DbError>:
@@ -949,6 +1031,8 @@ class PureDatabase:
                     self._fts_indexes.push(FtsEngine.new())
                     self._fts_valid.push(false)
                     self._fts_columns.push([])
+                    self._indexes.push([])
+                    self._index_unique.push([])
                 elif kind == "fts":
                     val ti = _find_idx(self._tbl_names, table_name)
                     if ti >= 0:
@@ -986,6 +1070,22 @@ class PureDatabase:
             val a_col = alter_parts[1]
             val a_type = alter_parts[2]
             return self._do_alter_add_column(a_tbl, a_col, a_type)
+        # Handle CREATE INDEX before parsing
+        val ci_parts = _parse_create_index(sql)
+        if ci_parts.len() >= 4:
+            val ci_unique = ci_parts[0] == "true"
+            val ci_name = ci_parts[1]
+            val ci_tbl = ci_parts[2]
+            var ci_cols: [text] = []
+            var cci: i32 = 3
+            while cci < ci_parts.len() as i32:
+                ci_cols.push(ci_parts[cci])
+                cci = cci + 1
+            return self._do_create_index(ci_unique, ci_name, ci_tbl, ci_cols)
+        # Handle DROP INDEX before parsing
+        val drop_idx = _parse_drop_index(sql)
+        if drop_idx != "":
+            return self._do_drop_index(drop_idx)
         # Handle DROP TABLE before parsing (parser has no DropTable variant)
         val drop_tbl = _parse_drop_table(sql)
         if drop_tbl != "":
@@ -1169,6 +1269,8 @@ class PureDatabase:
         self._snap_row_tidx = []
         self._snap_row_data = []
         self._snap_tbl_rowids = []
+        self._snap_indexes = []
+        self._snap_index_unique = []
         var ti: i32 = 0
         while ti < self._tbl_names.len() as i32:
             self._snap_tbl_names.push(self._tbl_names[ti])
@@ -1180,6 +1282,8 @@ class PureDatabase:
                 ci = ci + 1
             self._snap_tbl_cols.push(cols_copy)
             self._snap_tbl_rowids.push(self._tbl_rowids[ti])
+            self._snap_indexes.push(self._indexes[ti])
+            self._snap_index_unique.push(self._index_unique[ti])
             # Serialize visible rows for snapshot
             val snap = self._txn.snapshot()
             var tbl = self._tbl_data[ti]
@@ -1200,6 +1304,8 @@ class PureDatabase:
         self._fts_indexes = []
         self._fts_valid = []
         self._fts_columns = []
+        self._indexes = []
+        self._index_unique = []
         var ti: i32 = 0
         while ti < self._snap_tbl_names.len() as i32:
             self._tbl_names.push(self._snap_tbl_names[ti])
@@ -1209,6 +1315,8 @@ class PureDatabase:
             self._fts_indexes.push(FtsEngine.new())
             self._fts_valid.push(false)
             self._fts_columns.push([])
+            self._indexes.push(self._snap_indexes[ti])
+            self._index_unique.push(self._snap_index_unique[ti])
             ti = ti + 1
         # Re-insert snapshot rows using parallel arrays
         var ri: i32 = 0
@@ -1241,6 +1349,8 @@ class PureDatabase:
         self._snap_row_tidx = []
         self._snap_row_data = []
         self._snap_tbl_rowids = []
+        self._snap_indexes = []
+        self._snap_index_unique = []
         self._last_changes = 0
         self._persist()?
         Ok(0)
@@ -1255,6 +1365,8 @@ class PureDatabase:
         self._snap_row_tidx = []
         self._snap_row_data = []
         self._snap_tbl_rowids = []
+        self._snap_indexes = []
+        self._snap_index_unique = []
         self._last_changes = 0
         self._persist()?
         Ok(0)
@@ -1297,6 +1409,186 @@ class PureDatabase:
             self._persist()?
         Ok(0)
 
+    # ── Internal: CREATE INDEX ──────────────────────────────────────────
+
+    me _do_create_index(is_unique: bool, idx_name: text, tbl_name: text, idx_cols: [text]) -> Result<i64, DbError>:
+        val ti = _find_idx(self._tbl_names, tbl_name)
+        if ti < 0:
+            return Err(DbError.QueryFailed(
+                sql: "CREATE INDEX",
+                message: "no such table: {tbl_name}"
+            ))
+        # Check for duplicate index name across all tables
+        var tti: i32 = 0
+        while tti < self._indexes.len() as i32:
+            val tbl_idxs = self._indexes[tti]
+            var ii: i32 = 0
+            while ii < tbl_idxs.len() as i32:
+                val existing = tbl_idxs[ii]
+                if existing.len() > 0:
+                    if existing[0] == idx_name:
+                        return Err(DbError.QueryFailed(
+                            sql: "CREATE INDEX",
+                            message: "index already exists: {idx_name}"
+                        ))
+                ii = ii + 1
+            tti = tti + 1
+        # Verify columns exist
+        val col_names = self._tbl_cols[ti]
+        var vi: i32 = 0
+        while vi < idx_cols.len() as i32:
+            val cidx = _find_idx(col_names, idx_cols[vi])
+            if cidx < 0:
+                return Err(DbError.QueryFailed(
+                    sql: "CREATE INDEX",
+                    message: "no such column: {idx_cols[vi]}"
+                ))
+            vi = vi + 1
+        # Build index entry: [idx_name, col1, col2, ...]
+        var entry: [text] = []
+        entry.push(idx_name)
+        var ei: i32 = 0
+        while ei < idx_cols.len() as i32:
+            entry.push(idx_cols[ei])
+            ei = ei + 1
+        var tbl_idxs2 = self._indexes[ti]
+        tbl_idxs2.push(entry)
+        self._indexes[ti] = tbl_idxs2
+        var tbl_uniq = self._index_unique[ti]
+        tbl_uniq.push(is_unique)
+        self._index_unique[ti] = tbl_uniq
+        # If unique, validate existing data has no duplicates
+        if is_unique:
+            val check = self._check_unique_constraint(ti, idx_cols)
+            if check.is_err():
+                # Rollback: remove the just-added index
+                var roll_idxs = self._indexes[ti]
+                var new_idxs: [[text]] = []
+                var new_uniq: [bool] = []
+                var rri: i32 = 0
+                while rri < roll_idxs.len() as i32:
+                    if rri < roll_idxs.len() as i32 - 1:
+                        new_idxs.push(roll_idxs[rri])
+                        new_uniq.push(self._index_unique[ti][rri])
+                    rri = rri + 1
+                self._indexes[ti] = new_idxs
+                self._index_unique[ti] = new_uniq
+                return check
+        self._last_changes = 0
+        Ok(0)
+
+    me _do_drop_index(idx_name: text) -> Result<i64, DbError>:
+        var found_ti: i32 = -1
+        var found_ii: i32 = -1
+        var tti: i32 = 0
+        while tti < self._indexes.len() as i32:
+            val tbl_idxs = self._indexes[tti]
+            var ii: i32 = 0
+            while ii < tbl_idxs.len() as i32:
+                val entry = tbl_idxs[ii]
+                if entry.len() > 0:
+                    if entry[0] == idx_name:
+                        found_ti = tti
+                        found_ii = ii
+                ii = ii + 1
+            tti = tti + 1
+        if found_ti < 0:
+            return Err(DbError.QueryFailed(
+                sql: "DROP INDEX",
+                message: "no such index: {idx_name}"
+            ))
+        # Remove index at found_ii
+        val old_idxs = self._indexes[found_ti]
+        val old_uniq = self._index_unique[found_ti]
+        var new_idxs: [[text]] = []
+        var new_uniq: [bool] = []
+        var ri: i32 = 0
+        while ri < old_idxs.len() as i32:
+            if ri != found_ii:
+                new_idxs.push(old_idxs[ri])
+                new_uniq.push(old_uniq[ri])
+            ri = ri + 1
+        self._indexes[found_ti] = new_idxs
+        self._index_unique[found_ti] = new_uniq
+        self._last_changes = 0
+        Ok(0)
+
+    me _check_unique_constraint(ti: i32, idx_cols: [text]) -> Result<i64, DbError>:
+        val col_names = self._tbl_cols[ti]
+        val snap = self._txn.snapshot()
+        var tbl = self._tbl_data[ti]
+        val visible = tbl.scan(snap)
+        self._tbl_data[ti] = tbl
+        var seen_keys: [text] = []
+        var ri: i32 = 0
+        while ri < visible.len() as i32:
+            val row_vals = _deserialize_row(visible[ri])
+            var key = ""
+            var ci: i32 = 0
+            while ci < idx_cols.len() as i32:
+                val cidx = _find_idx(col_names, idx_cols[ci])
+                if cidx >= 0 and cidx < row_vals.len() as i32:
+                    if ci > 0:
+                        key = key + "\x00"
+                    key = key + row_vals[cidx].to_text()
+                ci = ci + 1
+            # Check if key already seen
+            var ki: i32 = 0
+            while ki < seen_keys.len() as i32:
+                if seen_keys[ki] == key:
+                    return Err(DbError.QueryFailed(
+                        sql: "INSERT",
+                        message: "UNIQUE constraint failed"
+                    ))
+                ki = ki + 1
+            seen_keys.push(key)
+            ri = ri + 1
+        Ok(0)
+
+    me _check_unique_for_insert(ti: i32, row_vals: [DbValue]) -> Result<i64, DbError>:
+        val col_names = self._tbl_cols[ti]
+        val tbl_idxs = self._indexes[ti]
+        val tbl_uniq = self._index_unique[ti]
+        var ii: i32 = 0
+        while ii < tbl_idxs.len() as i32:
+            if tbl_uniq[ii]:
+                val entry = tbl_idxs[ii]
+                # Build key for the new row
+                var new_key = ""
+                var ci: i32 = 1
+                while ci < entry.len() as i32:
+                    val cidx = _find_idx(col_names, entry[ci])
+                    if cidx >= 0 and cidx < row_vals.len() as i32:
+                        if ci > 1:
+                            new_key = new_key + "\x00"
+                        new_key = new_key + row_vals[cidx].to_text()
+                    ci = ci + 1
+                # Check against existing rows
+                val snap = self._txn.snapshot()
+                var tbl = self._tbl_data[ti]
+                val visible = tbl.scan(snap)
+                self._tbl_data[ti] = tbl
+                var ri: i32 = 0
+                while ri < visible.len() as i32:
+                    val existing = _deserialize_row(visible[ri])
+                    var existing_key = ""
+                    var eci: i32 = 1
+                    while eci < entry.len() as i32:
+                        val ecidx = _find_idx(col_names, entry[eci])
+                        if ecidx >= 0 and ecidx < existing.len() as i32:
+                            if eci > 1:
+                                existing_key = existing_key + "\x00"
+                            existing_key = existing_key + existing[ecidx].to_text()
+                        eci = eci + 1
+                    if existing_key == new_key:
+                        return Err(DbError.QueryFailed(
+                            sql: "INSERT",
+                            message: "UNIQUE constraint failed"
+                        ))
+                    ri = ri + 1
+            ii = ii + 1
+        Ok(0)
+
     # ── Internal: CREATE TABLE ───────────────────────────────────────────
 
     me _do_create(ct: SqlCreateTable) -> Result<i64, DbError>:
@@ -1320,6 +1612,8 @@ class PureDatabase:
         self._fts_indexes.push(FtsEngine.new())
         self._fts_valid.push(false)
         self._fts_columns.push([])
+        self._indexes.push([])
+        self._index_unique.push([])
         self._last_changes = 0
         if not self._in_transaction:
             self._persist()?
@@ -1342,6 +1636,8 @@ class PureDatabase:
         var new_fts_indexes: [FtsEngine] = []
         var new_fts_valid: [bool] = []
         var new_fts_columns: [[text]] = []
+        var new_indexes: [[[text]]] = []
+        var new_index_unique: [[bool]] = []
         var i: i32 = 0
         while i < self._tbl_names.len() as i32:
             if i != ti:
@@ -1352,6 +1648,8 @@ class PureDatabase:
                 new_fts_indexes.push(self._fts_indexes[i])
                 new_fts_valid.push(self._fts_valid[i])
                 new_fts_columns.push(self._fts_columns[i])
+                new_indexes.push(self._indexes[i])
+                new_index_unique.push(self._index_unique[i])
             i = i + 1
         self._tbl_names = new_names
         self._tbl_cols = new_cols
@@ -1360,6 +1658,8 @@ class PureDatabase:
         self._fts_indexes = new_fts_indexes
         self._fts_valid = new_fts_valid
         self._fts_columns = new_fts_columns
+        self._indexes = new_indexes
+        self._index_unique = new_index_unique
         self._last_changes = 0
         if not self._in_transaction:
             self._persist()?
@@ -1394,6 +1694,11 @@ class PureDatabase:
                 else:
                     row_vals.push(DbValue.Null)
                 ci = ci + 1
+            # Check UNIQUE constraints before inserting
+            val uq_check = self._check_unique_for_insert(ti, row_vals)
+            if uq_check.is_err():
+                self._txn.commit(tid)
+                return uq_check
             val ser = _serialize_row(row_vals)
             var tbl = self._tbl_data[ti]
             tbl.insert(tid, ser)

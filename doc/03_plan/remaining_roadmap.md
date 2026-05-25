@@ -5,6 +5,24 @@
 
 ---
 
+## 0. Crash Recovery Replan - Active
+
+**Priority:** P0
+**Status:** Active as of 2026-05-25
+**Plan:** [`crash_recovery_replan_2026-05-25.md`](crash_recovery_replan_2026-05-25.md)
+
+### Scope
+- Remove dummy/fallback pass paths from SimpleOS QEMU checks and make the
+  board lane runnable on real hardware.
+- Optimize Simple FAT until it beats the C FAT path on representative
+  filesystem workloads.
+- Optimize NVFS and DBFS until both beat the optimized FAT path for executable
+  load, metadata, write, and recovery workloads.
+- Continue optimization plugin work with measured native/MIR specialization
+  wins.
+- Improve SimpleQ plus embedded/full Simple DB with executor-backed indexes and
+  benchmark gates.
+
 ## 1. 3D Engine GPU Acceleration + WebGPU (DONE)
 
 **Priority:** P1

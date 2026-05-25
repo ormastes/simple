@@ -4,6 +4,10 @@ A comprehensive reference for all embedded targets supported by the Simple
 compiler toolchain, covering the remote JIT interpreter, baremetal OS support,
 and replay/rewind debugging.
 
+For the current local board inventory, SimpleOS baremetal feature matrix, and
+verified-vs-source-present support status, see
+[`platform/simpleos_baremetal_board_support.md`](platform/simpleos_baremetal_board_support.md).
+
 ---
 
 ## 1. Supported Boards & Adapters
