@@ -304,6 +304,13 @@ through it. Required lane markers are checked first; when
 the protection evidence parser before acceptance. This does not add new QEMU
 runtime evidence in this report.
 
+Follow-up physical captured-serial gate: RA4M1 and STM32U585 physical scripts
+now support `SIMPLEOS_SERIAL_LOG=<path>` and `SIMPLEOS_SERIAL_SECONDS=<n>`.
+After flashing, they can capture UART output and invoke
+`src/app/simpleos_board_serial_check/main.spl`, which rejects
+`REAL_BOARD_NOT_RUN` and evaluates the captured log with real-board protection
+evidence semantics.
+
 Follow-up readiness tightening: `real_device_pure_simple_ready(...)` now calls
 the direct-access policy. A provider value of `simple-driver` is no longer
 sufficient by itself. Enabled NVMe, virtio-net/e1000, and hardware RDMA paths
@@ -391,6 +398,11 @@ plain exit `0` is no longer accepted as scenario success.
   example names in the captured output.
 - `simple os build --arch=x86_64`: PASS
 - q35 QEMU with NVMe and virtio-net: PASS, expected exit code `1`
+- `simple check src/os/port/simpleos_board_hardening.spl src/app/simpleos_board_serial_check/main.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
+- `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
+  `4` examples passed.
+- `simple run src/app/simpleos_board_serial_check/main.spl --board stm32u585-uno-q --mode fault-test --serial-log build/serial/simpleos_board_serial_check_smoke.log`: PASS,
+  `reason=ready` on a synthetic captured serial log.
 
 ## Remaining Gaps
 

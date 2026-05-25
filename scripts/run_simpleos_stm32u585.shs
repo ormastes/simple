@@ -14,6 +14,8 @@ set -eu
 #   FLASHER             st-flash | openocd | stm32prog (default: st-flash)
 #   SERIAL_PORT         Serial port (default: /dev/ttyACM0)
 #   SERIAL_BAUD         Baud rate (default: 115200)
+#   SIMPLEOS_SERIAL_LOG If set, capture serial to this file and verify it
+#   SIMPLEOS_SERIAL_SECONDS Capture duration when SIMPLEOS_SERIAL_LOG is set (default: 20)
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
@@ -21,6 +23,8 @@ SIMPLEOS_U585_ELF="${SIMPLEOS_U585_ELF:-${ROOT_DIR}/build/os/simpleos_stm32u585.
 FLASHER="${FLASHER:-st-flash}"
 SERIAL_PORT="${SERIAL_PORT:-/dev/ttyACM0}"
 SERIAL_BAUD="${SERIAL_BAUD:-115200}"
+SERIAL_LOG="${SIMPLEOS_SERIAL_LOG:-}"
+SERIAL_SECONDS="${SIMPLEOS_SERIAL_SECONDS:-20}"
 PROTECTION_MODE="${SIMPLEOS_PROTECTION_MODE:-enforce}"
 LINKER_SCRIPT="${ROOT_DIR}/src/compiler/70.backend/baremetal/cortex_m33/linker_stm32u585.ld"
 BOARD_DIR="${ROOT_DIR}/src/os/kernel/arch/cortex_m33"
@@ -101,6 +105,20 @@ case "$FLASHER" in
 esac
 
 echo "[u585] Flash complete. Opening serial monitor on $SERIAL_PORT @ $SERIAL_BAUD..."
+
+if [ -n "$SERIAL_LOG" ]; then
+    mkdir -p "$(dirname "$SERIAL_LOG")"
+    : > "$SERIAL_LOG"
+    stty -F "$SERIAL_PORT" "$SERIAL_BAUD" raw -echo 2>/dev/null || true
+    echo "[u585] Capturing serial for ${SERIAL_SECONDS}s to $SERIAL_LOG"
+    timeout "$SERIAL_SECONDS" cat "$SERIAL_PORT" > "$SERIAL_LOG" 2>/dev/null || true
+    echo "[u585] SERIAL_CAPTURED board=stm32u585-uno-q path=$SERIAL_LOG protection=$PROTECTION_MODE"
+    exec "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" run \
+        "${ROOT_DIR}/src/app/simpleos_board_serial_check/main.spl" \
+        --board stm32u585-uno-q \
+        --mode "$PROTECTION_MODE" \
+        --serial-log "$SERIAL_LOG"
+fi
 
 if command -v picocom >/dev/null 2>&1; then
     exec picocom -b "$SERIAL_BAUD" "$SERIAL_PORT"

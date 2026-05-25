@@ -187,9 +187,12 @@ Current status:
   lane markers and then, when `SIMPLEOS_PROTECTION_MODE` is set, routes the
   same serial through `simpleos_protection_evidence_from_serial(...)` before
   claiming acceptance. Empty or `off` mode preserves diagnostic-only lanes.
-- TODO: extend the physical flash/serial scripts to feed captured serial
-  through the same evidence parser after real-board execution, not just
-  build-only reporting.
+- DONE: physical RA4M1 and STM32U585 scripts now support
+  `SIMPLEOS_SERIAL_LOG=<path>` plus `SIMPLEOS_SERIAL_SECONDS=<n>` for
+  non-interactive serial capture after flashing. The scripts invoke
+  `src/app/simpleos_board_serial_check/main.spl`, which reads the captured log
+  and runs `simpleos_physical_serial_acceptance_reason(...)` with
+  `runtime=real-board`.
 
 ## Phase 4 - PCI Driver Realism
 

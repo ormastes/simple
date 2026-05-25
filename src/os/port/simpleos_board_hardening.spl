@@ -316,6 +316,18 @@ pub fn simpleos_board_physical_build_only_command_for_id_with_mode(board_id: tex
         return []
     ["sh", script, "--build-only", "--protection=" + simpleos_protection_mode_name(mode)]
 
+pub fn simpleos_board_physical_serial_check_command_for_id_with_mode(board_id: text, mode: SimpleOsProtectionMode, serial_log_path: text) -> [text]:
+    if simpleos_board_physical_script(board_id) == "":
+        return []
+    [
+        "bin/release/x86_64-unknown-linux-gnu/simple",
+        "run",
+        "src/app/simpleos_board_serial_check/main.spl",
+        "--board", board_id,
+        "--mode", simpleos_protection_mode_name(mode),
+        "--serial-log", serial_log_path
+    ]
+
 pub fn simpleos_board_protection_kind_for_id(board_id: text) -> SimpleOsProtectionKind:
     if board_id == "ra4m1-uno-r4":
         return SimpleOsProtectionKind.Pmsav7Mpu
@@ -369,6 +381,25 @@ pub fn simpleos_protection_evidence_marker(evidence: SimpleOsProtectionEvidence)
     simpleos_board_protection_marker_for_id(evidence.board_id, evidence.mode) +
         " runtime=" + (if evidence.qemu_checked: "qemu" else: if evidence.real_board_checked: "real-board" else: "none") +
         " reason=" + simpleos_protection_evidence_reason(evidence)
+
+pub fn simpleos_physical_serial_acceptance_reason(board_id: text, mode_text: text, serial_output: text) -> text:
+    if simpleos_board_physical_script(board_id) == "":
+        return "missing-physical-board-script:" + board_id
+    if serial_output.contains("REAL_BOARD_NOT_RUN"):
+        return "real-board-not-run"
+    val mode = simpleos_protection_mode_from_text(mode_text)
+    if val parsed_mode = mode:
+        val evidence = simpleos_protection_evidence_from_serial(board_id, parsed_mode, "real-board", serial_output)
+        if simpleos_protection_evidence_accepts_hardening(evidence):
+            return "ready"
+        val reason = simpleos_protection_evidence_reason(evidence)
+        if reason == "ready":
+            return "diagnostic-protection-mode:" + mode_text
+        return reason
+    "unsupported-protection-mode:" + mode_text
+
+pub fn simpleos_physical_serial_accepts_hardening(board_id: text, mode_text: text, serial_output: text) -> bool:
+    simpleos_physical_serial_acceptance_reason(board_id, mode_text, serial_output) == "ready"
 
 pub fn simpleos_board_qemu_command_for_id(board_id: text, elf_path: text) -> [text]:
     if board_id == "mps2-an505":
