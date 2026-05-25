@@ -206,6 +206,10 @@ Current status:
   `src/app/simpleos_board_serial_check/main.spl`, which reads the captured log
   and runs `simpleos_physical_serial_acceptance_reason(...)` with
   `runtime=real-board`.
+- DONE: physical serial acceptance now requires a `board=<id>` marker in
+  addition to the selected protection mode. The RA4M1 and STM32U585 scripts
+  seed this marker before appending UART bytes, so wrong-board or hand-written
+  protection-only logs cannot satisfy real-board readiness.
 
 ## Phase 4 - PCI Driver Realism
 

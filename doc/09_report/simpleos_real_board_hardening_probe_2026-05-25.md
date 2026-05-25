@@ -443,6 +443,12 @@ scripts seed the board/mode/kind marker into `SIMPLEOS_SERIAL_LOG` before
 appending UART bytes, so the verifier can distinguish wrong-mode or stale
 captures from a real run of the requested MPU mode.
 
+Follow-up physical board-marker gate:
+`simpleos_physical_serial_acceptance_reason(...)` now also requires the captured
+log to contain `board=<id>`. This keeps a protection-only or wrong-board serial
+sample from satisfying RA4M1/STM32U585 readiness; the physical scripts already
+seed the matching board marker before UART capture.
+
 Follow-up runner-facing protection gate:
 `qemu_protection_serial_accepts_hardening(...)` and
 `qemu_protection_serial_reason(...)` now expose the same serial evidence
