@@ -317,6 +317,12 @@ bridge and requires namespace identify, admin and I/O queues, mapped doorbells,
 completion, sector read/write/restore, DMA isolation, and user-space driver
 placement before `nvme_transfer_ready(...)` can pass.
 
+Follow-up network transfer gate: `src/os/drivers/virtio/network_device.spl` now
+records `NetworkTransferEvidence`. Pure virtio-net/e1000 transfer readiness
+rejects the C boot bridge and requires feature negotiation, MAC read, link-up,
+TX queue, RX queue, TX completion, RX frame, DMA isolation, and user-space
+driver placement before `network_transfer_ready(...)` can pass.
+
 Follow-up readiness tightening: `real_device_pure_simple_ready(...)` now calls
 the direct-access policy. A provider value of `simple-driver` is no longer
 sufficient by itself. Enabled NVMe, virtio-net/e1000, and hardware RDMA paths
@@ -412,6 +418,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/drivers/nvme/nvme_storage_model.spl test/unit/os/drivers/nvme/nvme_storage_model_spec.spl`: PASS
 - `simple test test/unit/os/drivers/nvme/nvme_storage_model_spec.spl --clean`: PASS,
   `9` examples passed.
+- `simple check src/os/drivers/virtio/network_device.spl test/unit/os/drivers/virtio/network_device_spec.spl`: PASS
+- `simple test test/unit/os/drivers/virtio/network_device_spec.spl --clean`: PASS,
+  `3` examples passed.
 
 ## Remaining Gaps
 

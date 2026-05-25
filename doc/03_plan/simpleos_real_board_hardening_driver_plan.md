@@ -390,6 +390,12 @@ Current status:
   `rt_driver_mac_addr` no longer advertise discarded sends, always-up link
   state, fixed speed, or fixed MAC evidence before `rt_net_tx_test()` and
   `rt_net_rx_ready()` pass.
+- DONE: `src/os/drivers/virtio/network_device.spl` now exposes
+  `NetworkTransferEvidence` plus `network_transfer_readiness_reason(...)` and
+  `network_transfer_ready(...)`. Pure virtio-net/e1000 transfer completion
+  refuses `c-boot-bridge` and requires feature negotiation, MAC read, link-up,
+  TX queue, RX queue, TX completion, RX frame, DMA isolation, and user-space
+  driver placement.
 - TODO: integrate the Simple virtio-net driver path instead of the current C
   boot bridge.
 
