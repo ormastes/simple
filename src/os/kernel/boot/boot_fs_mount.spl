@@ -40,6 +40,13 @@ struct FsMountResult:
     provider: text
     pure_simple: bool
 
+struct BootStorageAcceptanceEvidence:
+    result: FsMountResult
+    pci_resource_grant_ready: bool
+    storage_transfer_ready: bool
+    superblock_from_real_sector: bool
+    non_secure_namespace: bool
+
 var _fs_mount_done: bool = false
 var _fs_mount_type: FsMountType = FsMountType.None_
 
@@ -90,6 +97,43 @@ fn boot_fs_mount_acceptance_reason(result: FsMountResult) -> text:
     if result.pure_simple and boot_fs_mount_provider_is_pure_simple(result.provider):
         return "ready"
     "boot-storage-not-pure-simple:" + result.provider
+
+fn boot_storage_acceptance_evidence(
+    result: FsMountResult,
+    pci_resource_grant_ready: bool,
+    storage_transfer_ready: bool,
+    superblock_from_real_sector: bool,
+    non_secure_namespace: bool
+) -> BootStorageAcceptanceEvidence:
+    BootStorageAcceptanceEvidence(
+        result: result,
+        pci_resource_grant_ready: pci_resource_grant_ready,
+        storage_transfer_ready: storage_transfer_ready,
+        superblock_from_real_sector: superblock_from_real_sector,
+        non_secure_namespace: non_secure_namespace
+    )
+
+fn boot_storage_acceptance_reason(e: BootStorageAcceptanceEvidence) -> text:
+    if not e.result.mounted:
+        return "not-mounted"
+    if e.result.fs_type == FsMountType.None_:
+        return "missing-root-filesystem"
+    if not e.result.pure_simple:
+        return "boot-storage-not-pure-simple:" + e.result.provider
+    if not boot_fs_mount_provider_is_pure_simple(e.result.provider):
+        return "boot-storage-not-pure-simple:" + e.result.provider
+    if not e.pci_resource_grant_ready:
+        return "missing-boot-storage-pci-grant"
+    if not e.storage_transfer_ready:
+        return "missing-boot-storage-transfer"
+    if not e.superblock_from_real_sector:
+        return "missing-real-sector-superblock-probe"
+    if not e.non_secure_namespace:
+        return "missing-boot-storage-non-secure-namespace"
+    "ready"
+
+fn boot_storage_acceptance_ready(e: BootStorageAcceptanceEvidence) -> bool:
+    boot_storage_acceptance_reason(e) == "ready"
 
 # ============================================================================
 # Internal helpers — freestanding only, no hosted symbols

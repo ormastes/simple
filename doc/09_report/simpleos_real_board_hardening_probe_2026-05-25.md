@@ -329,6 +329,14 @@ a present function, implemented BAR0 with nonzero size, valid IRQ line, DMA
 isolation, IOMMU or grant-broker evidence, and
 `non-secure-resource-namespace` before `pci_resource_grant_ready(...)` can pass.
 
+Follow-up boot-storage acceptance gate:
+`src/os/kernel/boot/boot_fs_mount.spl` now records
+`BootStorageAcceptanceEvidence`. Pure Simple boot storage requires a mounted
+NVFS/DBFS result from `simple-driver`, `pure_simple=true`, a ready PCI resource
+grant, ready storage transfer evidence, a superblock read from a real sector
+probe, and a non-secure resource namespace. A C bridge NVFS/DBFS probe remains
+diagnostic and returns `boot-storage-not-pure-simple:c-boot-bridge`.
+
 Follow-up readiness tightening: `real_device_pure_simple_ready(...)` now calls
 the direct-access policy. A provider value of `simple-driver` is no longer
 sufficient by itself. Enabled NVMe, virtio-net/e1000, and hardware RDMA paths
@@ -430,6 +438,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`: PASS
 - `simple test test/unit/os/drivers/pci/pci_provider_spec.spl --clean`: PASS,
   `7` examples passed.
+- `simple check src/os/kernel/boot/boot_fs_mount.spl test/unit/os/kernel/boot/boot_fs_mount_acceptance_spec.spl`: PASS
+- `simple test test/unit/os/kernel/boot/boot_fs_mount_acceptance_spec.spl --clean`: PASS,
+  `3` examples passed.
 
 ## Remaining Gaps
 

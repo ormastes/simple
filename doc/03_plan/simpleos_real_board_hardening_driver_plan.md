@@ -324,6 +324,11 @@ Current status:
   `boot-storage-not-pure-simple:c-boot-bridge` as the acceptance reason, so a
   successful NVFS/DBFS probe cannot be counted as pure Simple NVMe boot
   storage.
+- DONE: boot-storage acceptance now has an explicit evidence object. NVFS/DBFS
+  root readiness requires `simple-driver`, `pure_simple=true`, a ready PCI
+  resource grant, ready storage transfer evidence, a superblock read from a
+  real sector probe, and `non-secure-resource-namespace` before pure Simple
+  boot storage can report `ready`.
 - DONE: `src/os/drivers/nvme/nvme_storage_model.spl` now exposes
   `NvmeTransferEvidence` plus `nvme_transfer_readiness_reason(...)` and
   `nvme_transfer_ready(...)`. Pure NVMe transfer completion refuses

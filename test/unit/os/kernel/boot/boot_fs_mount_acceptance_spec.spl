@@ -1,0 +1,57 @@
+use std.spec.{describe, it, expect}
+use os.kernel.boot.boot_fs_mount.{
+    FsMountResult,
+    FsMountType,
+    boot_storage_acceptance_evidence,
+    boot_storage_acceptance_reason,
+    boot_storage_acceptance_ready,
+    boot_fs_mount_acceptance_reason
+}
+
+fn simple_nvfs_result() -> FsMountResult:
+    FsMountResult(
+        mounted: true,
+        fs_type: FsMountType.Nvfs,
+        provider: "simple-driver",
+        pure_simple: true
+    )
+
+describe "boot filesystem mount acceptance":
+    it "rejects C bridge mounts as pure Simple boot storage":
+        val c_bridge = FsMountResult(
+            mounted: true,
+            fs_type: FsMountType.Nvfs,
+            provider: "c-boot-bridge",
+            pure_simple: false
+        )
+        val evidence = boot_storage_acceptance_evidence(c_bridge, true, true, true, true)
+        expect(boot_fs_mount_acceptance_reason(c_bridge)).to_equal("boot-storage-not-pure-simple:c-boot-bridge")
+        expect(boot_storage_acceptance_ready(evidence)).to_equal(false)
+        expect(boot_storage_acceptance_reason(evidence)).to_equal("boot-storage-not-pure-simple:c-boot-bridge")
+
+    it "requires PCI grants, transfers, sector probe, and non-secure namespace":
+        val missing_grant = boot_storage_acceptance_evidence(simple_nvfs_result(), false, true, true, true)
+        expect(boot_storage_acceptance_reason(missing_grant)).to_equal("missing-boot-storage-pci-grant")
+
+        val missing_transfer = boot_storage_acceptance_evidence(simple_nvfs_result(), true, false, true, true)
+        expect(boot_storage_acceptance_reason(missing_transfer)).to_equal("missing-boot-storage-transfer")
+
+        val missing_probe = boot_storage_acceptance_evidence(simple_nvfs_result(), true, true, false, true)
+        expect(boot_storage_acceptance_reason(missing_probe)).to_equal("missing-real-sector-superblock-probe")
+
+        val secure_namespace = boot_storage_acceptance_evidence(simple_nvfs_result(), true, true, true, false)
+        expect(boot_storage_acceptance_reason(secure_namespace)).to_equal("missing-boot-storage-non-secure-namespace")
+
+    it "accepts NVFS and DBFS only after the full Simple evidence set":
+        val nvfs = boot_storage_acceptance_evidence(simple_nvfs_result(), true, true, true, true)
+        expect(boot_storage_acceptance_ready(nvfs)).to_equal(true)
+        expect(boot_storage_acceptance_reason(nvfs)).to_equal("ready")
+
+        val dbfs_result = FsMountResult(
+            mounted: true,
+            fs_type: FsMountType.Dbfs,
+            provider: "simple-driver",
+            pure_simple: true
+        )
+        val dbfs = boot_storage_acceptance_evidence(dbfs_result, true, true, true, true)
+        expect(boot_storage_acceptance_ready(dbfs)).to_equal(true)
