@@ -290,6 +290,13 @@ IRQ, and doorbell evidence for NVMe, virtio-net/e1000, and hardware RDMA. A
 single DMA-only proof can no longer satisfy
 `real_device_pure_simple_ready(...)`.
 
+Follow-up RDMA provider gate: `src/lib/nogc_async_mut/io/rdma.spl` now has an
+explicit `RdmaProviderEvidence` interface and readiness reason. Hardware RDMA
+still refuses `model` and `sffi-host`; `rdma=device` requires the Simple driver
+provider, PCI enumeration, memory registration, protection domain, queue pair,
+completion queue, DMA isolation, and IOMMU or grant-broker evidence before
+`rdma_provider_hardware_ready(...)` can pass.
+
 Follow-up readiness tightening: `real_device_pure_simple_ready(...)` now calls
 the direct-access policy. A provider value of `simple-driver` is no longer
 sufficient by itself. Enabled NVMe, virtio-net/e1000, and hardware RDMA paths

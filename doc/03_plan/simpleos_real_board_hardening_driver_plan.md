@@ -328,7 +328,7 @@ RDMA work:
 
 1. Keep `src/lib/nogc_async_mut/io/rdma.spl` as a model until a real provider
    exists.
-2. Add explicit provider interface:
+2. DONE: add explicit provider interface:
    - memory registration
    - protection domain
    - queue pair
@@ -364,6 +364,12 @@ Current status:
 - DONE: pure virtio-net/e1000/RDMA completion now calls the full direct-access
   gate for MMIO, DMA, IRQ, and doorbell evidence. Partial evidence cannot
   satisfy `real_device_pure_simple_ready(...)`.
+- DONE: `src/lib/nogc_async_mut/io/rdma.spl` now exposes
+  `RdmaProviderEvidence` plus `rdma_provider_readiness_reason(...)` and
+  `rdma_provider_hardware_ready(...)`. Hardware RDMA refuses `model` and
+  `sffi-host`, requires `provider=simple-driver`, PCI enumeration, memory
+  registration, protection domain, queue pair, completion queue, DMA isolation,
+  and IOMMU or grant-broker evidence.
 - DONE: the baremetal IoDriver shim now fails closed until the packet provider
   proves both TX and RX. `rt_driver_submit_send`, `rt_driver_submit_sendfile`,
   `rt_driver_link_state`, `rt_driver_link_speed_mbps`, and
