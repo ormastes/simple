@@ -9,10 +9,15 @@ use os.port.simpleos_board_hardening.{
     simpleos_board_qemu_command_for_id,
     simpleos_board_supports_protection_mode_id,
     simpleos_protection_evidence,
+    simpleos_protection_evidence_from_serial,
     simpleos_protection_evidence_accepts_hardening,
     simpleos_protection_evidence_marker,
     simpleos_protection_evidence_ready,
     simpleos_protection_evidence_reason,
+    simpleos_serial_has_fault_recovery,
+    simpleos_serial_has_protection_enabled,
+    simpleos_serial_has_protection_probe,
+    simpleos_serial_has_region_contract,
     simpleos_protection_mode_accepts_hardening,
     simpleos_protection_mode_from_text,
     simpleos_protection_mode_name
@@ -135,3 +140,48 @@ describe "SimpleOS board hardening catalog":
         )
         expect(simpleos_protection_evidence_ready(fault_ready)).to_equal(true)
         expect(simpleos_protection_evidence_accepts_hardening(fault_ready)).to_equal(true)
+
+    it "classifies protection evidence from serial markers":
+        val an505_serial = "[BOOT] Platform: MPS2-AN505 (QEMU)\n[FAULT] MemManage, BusFault, UsageFault enabled; DIV0 trap on\n[MPU] Enabled, 8 regions available, 4 configured\n[BOOT] Entering shell..."
+        expect(simpleos_serial_has_protection_probe(an505_serial)).to_equal(true)
+        expect(simpleos_serial_has_protection_enabled(an505_serial)).to_equal(true)
+        expect(simpleos_serial_has_region_contract(an505_serial)).to_equal(true)
+        expect(simpleos_serial_has_fault_recovery(an505_serial)).to_equal(false)
+
+        val an505_evidence = simpleos_protection_evidence_from_serial(
+            "mps2-an505",
+            SimpleOsProtectionMode.Enforce,
+            "qemu",
+            an505_serial
+        )
+        expect(simpleos_protection_evidence_ready(an505_evidence)).to_equal(true)
+        expect(simpleos_protection_evidence_accepts_hardening(an505_evidence)).to_equal(true)
+        expect(simpleos_protection_evidence_marker(an505_evidence)).to_contain("runtime=qemu")
+
+        val explicit_fault_serial = "protection_probe=pass\nprotection_enabled=pass\nregion_contract=pass\nfault_recovered=pass\nTEST PASSED"
+        val fault_evidence = simpleos_protection_evidence_from_serial(
+            "stm32u585-uno-q",
+            SimpleOsProtectionMode.FaultTest,
+            "real-board",
+            explicit_fault_serial
+        )
+        expect(simpleos_protection_evidence_ready(fault_evidence)).to_equal(true)
+        expect(simpleos_protection_evidence_accepts_hardening(fault_evidence)).to_equal(true)
+        expect(simpleos_protection_evidence_marker(fault_evidence)).to_contain("runtime=real-board")
+
+        val x86_serial = "[BOOT64] call _start\n[harden] text_write_trap=pass\nTEST PASSED"
+        val x86_evidence = simpleos_protection_evidence_from_serial(
+            "x86_64-q35",
+            SimpleOsProtectionMode.Enforce,
+            "qemu",
+            x86_serial
+        )
+        expect(simpleos_protection_evidence_ready(x86_evidence)).to_equal(true)
+
+        val no_runtime = simpleos_protection_evidence_from_serial(
+            "mps2-an505",
+            SimpleOsProtectionMode.Enforce,
+            "none",
+            an505_serial
+        )
+        expect(simpleos_protection_evidence_reason(no_runtime)).to_equal("missing-runtime-check")

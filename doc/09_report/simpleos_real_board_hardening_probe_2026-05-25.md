@@ -179,6 +179,14 @@ enable, and region/page contract evidence, and `fault-test` also requires a
 recovered negative access test. `off` and `detect` remain diagnostic and cannot
 satisfy hardening acceptance.
 
+Follow-up serial marker classification:
+`simpleos_protection_evidence_from_serial(...)` now maps captured boot output
+into the protection evidence object. It recognizes current AN505 MPU output
+such as `[MPU] Enabled, ... regions...`, current x86 hardening evidence such as
+`[harden] text_write_trap=pass`, and the stricter future markers
+`protection_probe=pass`, `protection_enabled=pass`, `region_contract=pass`, and
+`fault_recovered=pass`.
+
 ## Code Hardening Change
 
 `scenario_qemu_exit_success()` now rejects x86_64 QEMU exit code `0` for
@@ -208,7 +216,7 @@ plain exit `0` is no longer accepted as scenario success.
   `5` examples passed.
 - `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
 - `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
-  `2` examples passed.
+  `3` examples passed.
 - `simple os build --arch=x86_64`: PASS
 - q35 QEMU with NVMe and virtio-net: PASS, expected exit code `1`
 
@@ -229,3 +237,6 @@ plain exit `0` is no longer accepted as scenario success.
 - QEMU was not rerun for the protection-evidence contract because it changes
   the acceptance model and tests only; boot serial integration remains a
   follow-up.
+- QEMU was not rerun for serial marker classification because it consumes
+  captured serial text and does not change the boot image. Existing AN505 and
+  q35 serial samples are now covered by unit tests.

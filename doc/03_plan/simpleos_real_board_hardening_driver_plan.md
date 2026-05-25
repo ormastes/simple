@@ -139,9 +139,14 @@ Current status:
 - DONE: `simpleos_protection_evidence_accepts_hardening(...)` keeps `off` and
   `detect` as diagnostic modes only. Hardening acceptance requires `enforce` or
   `fault-test` plus runtime evidence.
-- TODO: wire boot serial markers from AN505/q35/riscv64 and physical board
-  scripts into this evidence object instead of manually recording them in
-  reports.
+- DONE: `simpleos_protection_evidence_from_serial(...)` classifies existing
+  AN505 `[MPU] Enabled, ... regions...` serial output, x86
+  `[harden] text_write_trap=pass`, and future explicit
+  `protection_probe=pass`, `protection_enabled=pass`,
+  `region_contract=pass`, and `fault_recovered=pass` markers.
+- TODO: wire the QEMU runner and physical board scripts to pass captured serial
+  output through `simpleos_protection_evidence_from_serial(...)` automatically
+  instead of manually recording the result in reports.
 
 ## Phase 4 - PCI Driver Realism
 
