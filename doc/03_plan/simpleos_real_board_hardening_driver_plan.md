@@ -301,6 +301,12 @@ Current status:
   `non-secure-resource-namespace`, shared common-driver logic, and an IOMMU or
   grant broker. Kernel/common-driver direct access and C bridge providers are
   refused by contract.
+- DONE: the freestanding boot filesystem mount result now carries
+  `provider` and `pure_simple` evidence. The current `CNvmeBlockAdapterFs`
+  path returns `provider=c-boot-bridge`, `pure_simple=false`, and
+  `boot-storage-not-pure-simple:c-boot-bridge` as the acceptance reason, so a
+  successful NVFS/DBFS probe cannot be counted as pure Simple NVMe boot
+  storage.
 - TODO: integrate the Simple NVMe driver path instead of the current C bridge.
 
 ## Phase 6 - Network And RDMA Realism

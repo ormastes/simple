@@ -291,6 +291,14 @@ must also carry user-space driver placement, a raw-device or resource-grant-set
 token source, non-secure resource namespace evidence, shared common-driver
 logic, and IOMMU or grant-broker evidence.
 
+Follow-up boot-storage tightening: `src/os/kernel/boot/boot_fs_mount.spl` now
+records the boot mount provider in `FsMountResult`. The current freestanding
+NVFS/DBFS probe through `CNvmeBlockAdapterFs` is tagged
+`provider=c-boot-bridge` and `pure_simple=false`; the acceptance reason is
+`boot-storage-not-pure-simple:c-boot-bridge`. This prevents a successful
+C-bridge boot filesystem probe from being reported as pure Simple NVMe boot
+storage.
+
 Follow-up protection evidence tightening:
 `simpleos_protection_evidence_ready(...)` now separates board support from
 runtime proof. Protection claims require a QEMU or real-board check before they
