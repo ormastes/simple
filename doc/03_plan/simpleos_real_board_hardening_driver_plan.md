@@ -50,6 +50,13 @@ The board catalog now exposes the same mode-specific QEMU contract:
 adds `-semihosting-config enable=on,target=native`, matching the
 self-terminating AN505 smoke lane.
 
+Physical board script follow-up: RA4M1 and STM32U585 scripts now accept
+`--protection=off|detect|enforce|fault-test`, print board id, selected
+protection mode, protection kind, build profile, and linker script before
+building/flashing, and print `REAL_BOARD_NOT_RUN ... reason=build-only` for
+build-only checks. The board catalog exposes matching build-only command
+builders with `simpleos_board_physical_build_only_command_for_id_with_mode(...)`.
+
 ## Phase 1 - False Success And Fallback Removal
 
 1. Reject generic QEMU process success for lanes that require guest-reported

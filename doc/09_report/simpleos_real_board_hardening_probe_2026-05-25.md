@@ -146,7 +146,11 @@ this shell smoke.
 
 ### RA4M1 Build-Only
 
-Result: `RA4M1_BUILD_EXIT=0`.
+Latest result: `RA4M1_BUILD_EXIT=0` with explicit protection mode.
+
+Command:
+
+- `timeout 40s sh scripts/run_simpleos_ra4m1.shs --build-only --protection=fault-test`
 
 The script built `build/os/simpleos_ra4m1.elf` and reported:
 
@@ -154,18 +158,33 @@ The script built `build/os/simpleos_ra4m1.elf` and reported:
 - data: `0`
 - bss: `7540`
 - total: `28756`
+- board marker: `board=ra4m1-uno-r4 protection=fault-test kind=pmsav7-mpu`
+- profile: `c-shim-board-bringup`
+- `REAL_BOARD_NOT_RUN board=ra4m1-uno-r4 reason=build-only protection=fault-test`
 
 Interpretation: the current RA4M1 linker/build config is runnable through
-build-only mode. Physical flashing and serial verification were not run.
+build-only mode with an explicit protection selection. Physical flashing and
+serial verification were not run.
 
 ### STM32U585 Build-Only
 
-Result: `STM32U585_BUILD_EXIT=0`.
+Latest result: `STM32U585_BUILD_EXIT=0` with explicit protection mode.
+
+Command:
+
+- `timeout 40s sh scripts/run_simpleos_stm32u585.shs --build-only --protection=fault-test`
 
 The script built `build/os/simpleos_stm32u585.elf`.
 
+Additional markers:
+
+- board marker: `board=stm32u585-uno-q protection=fault-test kind=pmsav8-mpu`
+- profile: `c-shim-board-bringup`
+- `REAL_BOARD_NOT_RUN board=stm32u585-uno-q reason=build-only protection=fault-test`
+
 Interpretation: the current STM32U585 linker/build config is runnable through
-build-only mode. Physical flashing and serial verification were not run.
+build-only mode with an explicit protection selection. Physical flashing and
+serial verification were not run.
 
 ### QEMU x86_64 q35 PCI/NVMe/Virtio-Net
 
@@ -329,6 +348,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
 - `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
   `3` examples passed.
+- `sh -n scripts/run_simpleos_ra4m1.shs && sh -n scripts/run_simpleos_stm32u585.shs`: PASS
+- `timeout 40s sh scripts/run_simpleos_ra4m1.shs --build-only --protection=fault-test`: PASS
+- `timeout 40s sh scripts/run_simpleos_stm32u585.shs --build-only --protection=fault-test`: PASS
 - `simple check src/os/qemu_runner_part5.spl test/unit/os/qemu_runner_spec.spl`: PASS
 - `simple test test/unit/os/qemu_runner_spec.spl --clean`: FAIL, unchanged
   coarse result of `61` passed and `3` failed. The runner does not print failing
