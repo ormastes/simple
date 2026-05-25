@@ -220,6 +220,9 @@ Current status:
 - DONE: RV64 preflight and smoke-lane aggregates now fail closed when no probes
   or entries are configured. Empty schedules keep their placeholder slots, but
   `all_passed()` no longer treats zero active evidence as acceptance evidence.
+- DONE: RV64 hosted boot aggregates now also fail closed when no boot phases
+  are configured. `all_complete()` requires at least one configured phase, so
+  an empty hosted boot object cannot satisfy QEMU/real-board readiness.
 
 ## Phase 4 - PCI Driver Realism
 
