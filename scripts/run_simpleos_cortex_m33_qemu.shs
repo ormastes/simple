@@ -6,6 +6,7 @@ set -eu
 # Usage:
 #   sh scripts/run_simpleos_cortex_m33_qemu.shs              # build + run
 #   sh scripts/run_simpleos_cortex_m33_qemu.shs --no-build   # run existing ELF
+#   sh scripts/run_simpleos_cortex_m33_qemu.shs --smoke      # build + self-test + QEMU exit
 #
 # Env knobs:
 #   SIMPLEOS_CM33_ELF   Path to kernel ELF (default: build/os/simpleos_cm33.elf)
@@ -20,9 +21,11 @@ QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
 LINKER_SCRIPT="${ROOT_DIR}/src/compiler/70.backend/baremetal/cortex_m33/linker.ld"
 
 NO_BUILD=0
+SMOKE=0
 for arg in "$@"; do
     case "$arg" in
         --no-build) NO_BUILD=1 ;;
+        --smoke) SMOKE=1 ;;
         *) echo "Unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
@@ -40,11 +43,17 @@ if [ "$NO_BUILD" -eq 0 ]; then
 
     BOARD_DIR="${ROOT_DIR}/src/os/kernel/arch/cortex_m33"
 
+    SMOKE_CFLAGS=""
+    if [ "$SMOKE" -eq 1 ]; then
+        SMOKE_CFLAGS="-DSIMPLEOS_QEMU_SMOKE=1"
+    fi
+
     clang \
         --target=thumbv8m.main-none-eabihf \
         -mcpu=cortex-m33 -mthumb -mfloat-abi=soft \
         -I "$BOARD_DIR" \
         -nostdlib -nostartfiles -ffreestanding -O1 \
+        $SMOKE_CFLAGS \
         -T "$LINKER_SCRIPT" \
         -o "$SIMPLEOS_CM33_ELF" \
         "$SHIM_C" \
@@ -62,6 +71,11 @@ fi
 echo "[cm33] Launching QEMU MPS2-AN505 (Cortex-M33)..."
 echo "  elf  : $SIMPLEOS_CM33_ELF"
 echo "  mem  : $QEMU_MEM"
+echo "  smoke: $SMOKE"
+
+if [ "$SMOKE" -eq 1 ]; then
+    QEMU_EXTRA_ARGS="-semihosting-config enable=on,target=native $QEMU_EXTRA_ARGS"
+fi
 
 # shellcheck disable=SC2086
 exec qemu-system-arm \

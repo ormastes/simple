@@ -425,8 +425,8 @@ implement-done
 - `test/fixtures/net_sffi.spl` — Test fixture: SFFI wrapper module (*_sffi.spl naming)
 - `test/fixtures/shell_backed_example.spl` — Test fixture: shell-backed module (contains /bin/sh)
 - `test/fixtures/hw_hook_example.spl` — Test fixture: hw-hook module (contains rt_volatile externs)
-- `doc/10_metrics/pure_simple_lib/inventory_2026-05-25.md` — Stub inventory report (populate by running `generate_inventory_report`)
-- `doc/10_metrics/pure_simple_lib/benchmark_ledger_2026-05-25.md` — Stub benchmark ledger (populate by running `generate_benchmark_ledger`)
+- `doc/10_metrics/pure_simple_lib/inventory_2026-05-25.md` — Full inventory report: 5,676 modules classified (5,147 PureSimple, 372 CWrapper, 116 SffiWrapper, 32 ShellBacked, 9 HwHook)
+- `doc/10_metrics/pure_simple_lib/benchmark_ledger_2026-05-25.md` — Benchmark ledger with real timing data for all 5 hot-path categories
 
 **Files modified:**
 - `src/app/stats/__init__.spl` — Added re-exports for ProviderType, ClassifyResult, HotPathCategory, classify_module, classify_all_modules, generate_inventory_report, run_category_benchmark, c_baseline_for, compute_parity_ratio, generate_benchmark_ledger
@@ -436,6 +436,13 @@ implement-done
 **Test results:**
 - AC-1 (inventory_classifier_spec.spl): 9 examples, 0 failures
 - AC-2 (benchmark_ledger_spec.spl): 8 examples, 0 failures
+
+**Perf note:**
+- inventory_classifier_spec.spl takes ~50s due to walking all 5,676 src/lib .spl files via app.io — consider caching or limiting scan scope in future iterations
+
+**Generation note:**
+- Inventory report generated via shell-script reproduction of the classifier logic (interpreter `it` bodies do not execute file_write; `bin/simple run` blocked by unrelated stdlib parse errors). Logic verified to match priority ordering in inventory_classifier.spl. Re-run via compiled binary in phase 6/7 to confirm parity.
+- Benchmark ledger sourced from /tmp/test_ledger_rows.md (previous test run timestamp 2026-05-25 03:35).
 
 ### 5-implement-wp2
 

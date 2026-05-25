@@ -1,0 +1,169 @@
+# Simple optimizer - analysis engine
+# AC-9: Read-only MIR pass analysis: reports what passes would do and estimated speedup.
+
+use app.io.file_shell.{shell_output}
+use std.log.{error}
+
+# ── Types ─────────────────────────────────────────────────────────────────────
+
+struct OptOpportunity:
+    pass_name:       text
+    location:        text   # "line:col" or "function:name"
+    description:     text
+    expected_speedup: text  # qualitative: "low" | "medium" | "high"
+
+# ── Level → pass list ─────────────────────────────────────────────────────────
+
+fn passes_for_level(level: text) -> [text]:
+    if level == "O0":
+        return []
+    if level == "O1":
+        return ["dead_code_elimination", "constant_folding"]
+    if level == "O3":
+        return [
+            "dead_code_elimination", "constant_folding",
+            "copy_propagation", "common_subexpr_elim",
+            "inline_small_functions", "loop_invariant_motion",
+            "loop_unroll", "bounds_check_elimination", "strength_reduction"
+        ]
+    # O2 default
+    [
+        "dead_code_elimination", "constant_folding",
+        "copy_propagation", "common_subexpr_elim",
+        "inline_small_functions"
+    ]
+
+# ── Simple static scan (no full MIR parse) ────────────────────────────────────
+
+fn _scan_source_for_opportunities(source: text, passes: [text]) -> [OptOpportunity]:
+    var results: [OptOpportunity] = []
+    val lines = source.split("\n")
+    var line_num: i64 = 1
+
+    while line_num <= lines.len():
+        val ln = lines[line_num - 1].trim()
+
+        # dead_code_elimination: unreachable after return
+        if _passes_contain(passes, "dead_code_elimination"):
+            if ln.starts_with("return ") or ln == "return":
+                if line_num < lines.len():
+                    val next_ln = lines[line_num].trim()
+                    if next_ln != "" and not next_ln.starts_with("#") and not next_ln.starts_with("}"):
+                        results.push(OptOpportunity(
+                            pass_name:        "dead_code_elimination",
+                            location:         "{line_num}:1",
+                            description:      "Unreachable code after return statement",
+                            expected_speedup: "low"
+                        ))
+
+        # constant_folding: obvious literal ops
+        if _passes_contain(passes, "constant_folding"):
+            if (ln.contains("* 1") or ln.contains("+ 0") or ln.contains("- 0") or ln.contains("/ 1")):
+                results.push(OptOpportunity(
+                    pass_name:        "constant_folding",
+                    location:         "{line_num}:1",
+                    description:      "Identity operation with constant (e.g. x*1, x+0)",
+                    expected_speedup: "low"
+                ))
+
+        # loop_invariant_motion: variable access in loop body
+        if _passes_contain(passes, "loop_invariant_motion"):
+            if ln.starts_with("while ") or ln.starts_with("for "):
+                results.push(OptOpportunity(
+                    pass_name:        "loop_invariant_motion",
+                    location:         "{line_num}:1",
+                    description:      "Loop detected — invariant expressions may be hoistable",
+                    expected_speedup: "medium"
+                ))
+
+        # bounds_check_elimination: indexed access inside loop
+        if _passes_contain(passes, "bounds_check_elimination"):
+            if ln.contains("[") and ln.contains("]") and not ln.starts_with("#"):
+                results.push(OptOpportunity(
+                    pass_name:        "bounds_check_elimination",
+                    location:         "{line_num}:1",
+                    description:      "Array index access — bounds check may be eliminable if bounds are statically known",
+                    expected_speedup: "low"
+                ))
+
+        # strength_reduction: multiply by power of 2
+        if _passes_contain(passes, "strength_reduction"):
+            if ln.contains("* 2") or ln.contains("* 4") or ln.contains("* 8") or ln.contains("* 16"):
+                results.push(OptOpportunity(
+                    pass_name:        "strength_reduction",
+                    location:         "{line_num}:1",
+                    description:      "Multiply by power-of-2 constant — can be replaced with shift",
+                    expected_speedup: "low"
+                ))
+
+        line_num = line_num + 1
+
+    results
+
+fn _passes_contain(passes: [text], name: text) -> bool:
+    var i = 0
+    while i < passes.len():
+        if passes[i] == name:
+            return true
+        i = i + 1
+    false
+
+fn _speedup_weight(s: text) -> i64:
+    if s == "high":   return 15
+    if s == "medium": return 5
+    1
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+fn optimize_analyze(file_path: text, level: text) -> i64:
+    use app.io.file_shell.{shell_output}
+
+    print "=== Optimizer Analysis: {file_path} (level={level}) ==="
+    print ""
+
+    val source = shell_output("cat '{file_path}' 2>/dev/null")
+    if source.trim() == "":
+        print "Error: could not read file: {file_path}"
+        return 1
+
+    val passes = passes_for_level(level)
+
+    if passes.is_empty():
+        print "Level O0: no optimization passes selected."
+        return 0
+
+    print "Passes enabled: {passes.len()}"
+    var pi = 0
+    while pi < passes.len():
+        print "  - {passes[pi]}"
+        pi = pi + 1
+    print ""
+
+    val opps = _scan_source_for_opportunities(source, passes)
+
+    if opps.is_empty():
+        print "No optimization opportunities found."
+        return 0
+
+    print "Optimization opportunities found: {opps.len()}"
+    print ""
+    var i = 0
+    while i < opps.len():
+        val opp = opps[i]
+        print "  [{opp.expected_speedup}] {opp.pass_name} @ line {opp.location}"
+        print "         {opp.description}"
+        i = i + 1
+
+    # Estimate total speedup
+    var total_weight: i64 = 0
+    var j = 0
+    while j < opps.len():
+        total_weight = total_weight + _speedup_weight(opps[j].expected_speedup)
+        j = j + 1
+    val est_pct = if total_weight > 30: 30 else: total_weight
+
+    print ""
+    print "Summary: Found {opps.len()} optimization opportunities, estimated ~{est_pct}% total speedup"
+    print "Run with --apply to automatically apply safe passes."
+
+    0

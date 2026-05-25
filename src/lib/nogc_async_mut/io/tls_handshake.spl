@@ -394,3 +394,59 @@ fn extract_encrypted_pms(cke_data: [i64]) -> text:
     if data_len < 2 + pms_len:
         return bytes_to_wire(slice(cke_data, 2, data_len))
     bytes_to_wire(slice(cke_data, 2, 2 + pms_len))
+
+fn parse_alpn_extension(ext_data: [i64]) -> text:
+    """Parse a TLS ALPN extension payload (RFC 7301) and return the first protocol name.
+
+    The `ext_data` argument is the raw extension data field — the bytes
+    that follow the 2-byte extension type (0x0010) and 2-byte extension
+    length in the ClientHello extensions block.
+
+    Wire format inside ext_data:
+      protocol_name_list_length : u16  (big-endian, total bytes of the list)
+      for each entry:
+        name_length : u8
+        name        : [u8; name_length]
+
+    Returns the first protocol name as text (e.g. "h2", "http/1.1"),
+    or "" if the data is missing, malformed, or the list is empty.
+
+    Args:
+        ext_data: Raw bytes of the ALPN extension value field.
+
+    Returns:
+        First protocol name, or "" if not found.
+    """
+    val data_len = len(ext_data)
+    if data_len < 4:
+        return ""
+
+    # 2-byte protocol name list length
+    val list_len = (byte_at(ext_data, 0) * 256) + byte_at(ext_data, 1)
+    if list_len == 0 or data_len < 2 + list_len:
+        return ""
+
+    # First entry: 1-byte name length + name bytes
+    val name_len = byte_at(ext_data, 2)
+    if name_len == 0 or data_len < 3 + name_len:
+        return ""
+
+    val name_bytes = slice(ext_data, 3, 3 + name_len)
+    _bytes_to_text(name_bytes)
+
+fn _bytes_to_text(bytes: [i64]) -> text:
+    """Convert a slice of ASCII byte values to a text string."""
+    var result = ""
+    var i = 0
+    while i < len(bytes):
+        result = result + _byte_to_char(byte_at(bytes, i))
+        i = i + 1
+    result
+
+fn _byte_to_char(b: i64) -> text:
+    """Convert a single ASCII byte value to a one-character text string."""
+    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val offset = b - 32
+    if offset < 0 or offset >= len_text(chars):
+        return "?"
+    chars.char_at(offset)

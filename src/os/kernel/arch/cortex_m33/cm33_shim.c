@@ -781,7 +781,7 @@ static void __attribute__((naked, used)) try_fault_call(uint32_t target_thumb_ad
     );
 }
 
-static void cmd_selftest(void) {
+static int cmd_selftest(void) {
     int pass = 0, fail = 0;
 
     uint32_t canary_loc = ((uint32_t)&_ebss + 3) & ~3u;
@@ -826,7 +826,37 @@ static void cmd_selftest(void) {
     uart_puts("  Result: ");
     write_dec(pass); uart_puts("/"); write_dec(pass + fail);
     uart_putln(fail ? " SOME FAILED" : " ALL PASSED");
+    return fail;
 }
+
+#ifdef SIMPLEOS_QEMU_SMOKE
+static void qemu_semihost_exit(int code) {
+    static volatile uint32_t args[2];
+    args[0] = 0x20026; /* ADP_Stopped_ApplicationExit */
+    args[1] = (uint32_t)code;
+    register uint32_t r0 __asm("r0") = 0x20; /* SYS_EXIT_EXTENDED */
+    register uint32_t r1 __asm("r1") = (uint32_t)args;
+    __asm volatile("bkpt 0xAB" : : "r"(r0), "r"(r1) : "memory");
+    while (1) {}
+}
+
+static void qemu_smoke_run_and_exit(void) {
+    uart_putln("[qemu-smoke] mode=boot-selftest");
+    int fail = cmd_selftest();
+    if (fail == 0) {
+        uart_putln("protection_probe=pass");
+        uart_putln("protection_enabled=pass");
+        uart_putln("region_contract=pass");
+        uart_putln("fault_recovered=pass");
+        uart_putln("[qemu-smoke] selftest=pass");
+        uart_putln("TEST PASSED");
+        qemu_semihost_exit(0);
+    }
+    uart_putln("[qemu-smoke] selftest=fail");
+    uart_putln("TEST FAILED");
+    qemu_semihost_exit(1);
+}
+#endif
 
 /* ── Shell ────────────────────────────────────────────────────── */
 static char shell_buf[128];
@@ -965,6 +995,10 @@ void _c_main(void) {
 
     uart_putln("[BOOT] Entering shell...");
     uart_putln("");
+
+#ifdef SIMPLEOS_QEMU_SMOKE
+    qemu_smoke_run_and_exit();
+#endif
 
     shell();
 }

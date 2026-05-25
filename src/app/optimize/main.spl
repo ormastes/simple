@@ -1,0 +1,123 @@
+# Simple CLI - optimize command
+# Optimizer CLI entry point: analyze, apply, and compare MIR optimization passes.
+# AC-9: CLI surface for web-server-optimizer-complete feature.
+
+use std.cli.cli_util.{get_cli_args}
+use app.io.file_shell.{file_exists}
+use app.optimize.analyze.{optimize_analyze}
+use app.optimize.compare.{optimize_compare}
+use app.optimize.apply.{optimize_apply}
+
+fn print_optimize_help():
+    print "Usage: simple optimize <file.spl> [options]"
+    print ""
+    print "Analyze and apply MIR optimization passes to a Simple source file."
+    print ""
+    print "Options:"
+    print "  --compare             Benchmark Simple codegen vs C codegen (AC-6)"
+    print "  --apply               Auto-apply safe optimization passes"
+    print "  --passes=P1,P2,...    Comma-separated list of passes to run"
+    print "  --level=O0|O1|O2|O3  Optimization level (default: O2)"
+    print "  -h, --help            Show this help"
+    print ""
+    print "Optimization levels:"
+    print "  O0  None        (no MIR passes)"
+    print "  O1  Basic       (dce, const_fold)"
+    print "  O2  Standard    (+ copy_prop, cse, inlining)  [default]"
+    print "  O3  Aggressive  (+ loop opts, bounds elim)"
+    print ""
+    print "Examples:"
+    print "  simple optimize src/app/web/server.spl"
+    print "  simple optimize src/app/web/server.spl --compare"
+    print "  simple optimize src/app/web/server.spl --apply --level=O3"
+    print "  simple optimize src/app/web/server.spl --passes=dead_code_elimination,copy_propagation"
+
+struct OptimizeArgs:
+    file_path:  text
+    do_compare: bool
+    do_apply:   bool
+    passes:     [text]
+    level:      text    # "O0"|"O1"|"O2"|"O3"
+
+fn parse_flag_value(args: [text], prefix: text) -> text:
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a.starts_with(prefix):
+            return a[prefix.len():]
+        i = i + 1
+    ""
+
+fn has_flag(args: [text], flag: text) -> bool:
+    var i = 0
+    while i < args.len():
+        if args[i] == flag:
+            return true
+        i = i + 1
+    false
+
+fn split_passes(passes_str: text) -> [text]:
+    if passes_str == "":
+        return []
+    passes_str.split(",")
+
+fn parse_optimize_args(args: [text]) -> OptimizeArgs?:
+    # args[0] is "optimize", positional file is first non-flag arg after that
+    var file_path = ""
+    var i = 1    # skip "optimize"
+    while i < args.len():
+        val a = args[i]
+        if not a.starts_with("-"):
+            file_path = a
+        i = i + 1
+
+    if file_path == "":
+        return nil
+
+    val level_raw = parse_flag_value(args, "--level=")
+    val level = if level_raw == "": "O2" else: level_raw
+
+    val passes_raw = parse_flag_value(args, "--passes=")
+    val passes = split_passes(passes_raw)
+
+    OptimizeArgs(
+        file_path:  file_path,
+        do_compare: has_flag(args, "--compare"),
+        do_apply:   has_flag(args, "--apply"),
+        passes:     passes,
+        level:      level
+    )
+
+fn run_optimize_command(opt_args: OptimizeArgs) -> i64:
+    if not file_exists(opt_args.file_path):
+        print "Error: file not found: {opt_args.file_path}"
+        return 1
+
+    var exit_code = 0
+
+    if opt_args.do_compare:
+        exit_code = optimize_compare(opt_args.file_path)
+    elif opt_args.do_apply:
+        exit_code = optimize_apply(opt_args.file_path, opt_args.passes, opt_args.level)
+    else:
+        exit_code = optimize_analyze(opt_args.file_path, opt_args.level)
+
+    exit_code
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    if args.len() < 2:
+        print_optimize_help()
+        return 0
+
+    val first = args[1]
+    if first == "-h" or first == "--help":
+        print_optimize_help()
+        return 0
+
+    if val opt_args = parse_optimize_args(args):
+        return run_optimize_command(opt_args)
+    else:
+        print_optimize_help()
+        return 1

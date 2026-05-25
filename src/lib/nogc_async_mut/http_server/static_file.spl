@@ -28,7 +28,7 @@ use std.http_server.response.{
 use std.http_server.error.{HttpServerError}
 use std.http_server.compression.{compress_response_body, supported_encodings}
 use std.nogc_sync_mut.http.accept_encoding.{negotiate_encoding}
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_size, file_read_text}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_size, file_read_text, file_stat, file_read_text_at}
 use std.nogc_sync_mut.io.dir_ops.{is_dir}
 
 # ============================================================================
@@ -325,14 +325,235 @@ class StaticFileHandler:
         val size = file_size(actual_path)
         val mime = mime_from_extension(actual_path)
 
+        # Compute ETag from mtime + size
+        val mtime = file_stat(actual_path)
+        val etag = static_file_etag(actual_path, mtime, size)
+
+        # ETag / If-None-Match check
+        val if_none_match = _get_header_ci(request.headers, "if-none-match")
+        if if_none_match.len() > 0 and static_file_check_etag(if_none_match, etag):
+            return HttpResponseData(
+                status: 304,
+                reason: "Not Modified",
+                headers: [
+                    ("ETag", etag),
+                    ("Server", "SimpleServer")
+                ],
+                body: "",
+                body_bytes: [],
+                body_file: "",
+                body_offset: 0,
+                body_length: 0,
+                chunked: false
+            )
+
+        # Range request check
+        val range_header = _get_header_ci(request.headers, "range")
+        if range_header.len() > 0:
+            val range = static_file_parse_range(range_header, size)
+            if range.0 == -1 and range.1 == -1:
+                return HttpResponseData(
+                    status: 416,
+                    reason: "Range Not Satisfiable",
+                    headers: [
+                        ("Content-Range", "bytes */" + size.to_text()),
+                        ("Server", "SimpleServer")
+                    ],
+                    body: "",
+                    body_bytes: [],
+                    body_file: "",
+                    body_offset: 0,
+                    body_length: 0,
+                    chunked: false
+                )
+            val range_result = static_file_serve_range(actual_path, range.0, range.1, size, etag, mime)
+            return range_result
+
         # For small files, read into memory and try compression cache.
         # For large files, use sendfile (body_file) — cannot be cached.
+        var base_resp: HttpResponseData
         if size <= 65536:
             val content = file_read_text(actual_path)
             val accept = _get_header_ci(request.headers, "accept-encoding")
-            serve_compressed_or_plain(content, mime, actual_path, accept, self.cache)
+            base_resp = serve_compressed_or_plain(content, mime, actual_path, accept, self.cache)
         else:
-            build_file_response(actual_path, mime, size)
+            base_resp = build_file_response(actual_path, mime, size)
+
+        # Append ETag and Accept-Ranges to response headers
+        var new_headers: [(text, text)] = []
+        for h in base_resp.headers:
+            new_headers.push(h)
+        new_headers.push(("ETag", etag))
+        new_headers.push(("Accept-Ranges", "bytes"))
+        base_resp.headers = new_headers
+        base_resp
+
+# ============================================================================
+# ETag + Range Support
+# ============================================================================
+
+fn static_file_etag(path: text, mtime: i64, size: i64) -> text:
+    """Generate a strong ETag from file metadata (mtime + size).
+
+    Does NOT read file content. Uses path as salt so two files with
+    identical mtime+size on different paths produce different ETags.
+    Format: "<hex-hash>"
+
+    Args:
+        path:  Absolute file path
+        mtime: Last-modified time (seconds since epoch) from file_stat()
+        size:  File size in bytes from file_size()
+
+    Returns:
+        ETag string including surrounding double-quotes, e.g. `"a3f8c2d1"`
+    """
+    val raw = path + ":" + mtime.to_text() + ":" + size.to_text()
+    val h = _etag_hash(raw)
+    "\"" + h + "\""
+
+fn _etag_hash(s: text) -> text:
+    """Lightweight djb2-style hash of a string, returned as 8 hex chars."""
+    var h: i64 = 5381
+    var i = 0
+    while i < s.len():
+        h = ((h * 33) + s.byte_at(i)) % 4294967296
+        i = i + 1
+    _i64_to_hex8(h)
+
+fn _i64_to_hex8(n: i64) -> text:
+    """Format an integer as exactly 8 lowercase hex characters."""
+    val digits = "0123456789abcdef"
+    var result = ""
+    var v = n % 4294967296
+    var k = 0
+    while k < 8:
+        val nibble = (v % 16)
+        result = digits.char_at(nibble) + result
+        v = v / 16
+        k = k + 1
+    result
+
+fn static_file_check_etag(request_etag: text, file_etag: text) -> bool:
+    """Compare If-None-Match header value against computed ETag.
+
+    Handles the wildcard `*` and strips optional W/ weak prefix.
+    Returns true if the ETags match (caller should send 304).
+
+    Args:
+        request_etag: Value of the If-None-Match header (may be empty)
+        file_etag:    ETag computed by static_file_etag()
+    """
+    if request_etag == "*":
+        return true
+    # Strip weak prefix if present
+    var req = request_etag
+    if req.starts_with("W/"):
+        req = req.slice(2, req.len())
+    req == file_etag
+
+fn static_file_parse_range(range_header: text, file_size: i64) -> (i64, i64):
+    """Parse a `Range: bytes=...` header value.
+
+    Supported formats:
+      - `bytes=start-end`   → (start, end) inclusive
+      - `bytes=start-`      → (start, file_size - 1)
+      - `bytes=-suffix`     → (file_size - suffix, file_size - 1)
+
+    Returns (-1, -1) for any unsatisfiable or malformed range.
+    Caller should return 416 Range Not Satisfiable on (-1, -1).
+
+    Args:
+        range_header: The raw header value (e.g. "bytes=0-1023")
+        file_size:    Total file size in bytes
+    """
+    if file_size <= 0:
+        return (-1, -1)
+    val prefix = "bytes="
+    if not range_header.starts_with(prefix):
+        return (-1, -1)
+    val spec = range_header.slice(prefix.len(), range_header.len())
+    val dash_pos = spec.index_of("-")
+    if dash_pos < 0:
+        return (-1, -1)
+
+    val before = spec.slice(0, dash_pos)
+    val after = spec.slice(dash_pos + 1, spec.len())
+
+    var start: i64
+    var end: i64
+
+    if before.len() == 0:
+        # bytes=-suffix
+        if after.len() == 0:
+            return (-1, -1)
+        val suffix = _parse_i64(after)
+        if suffix <= 0:
+            return (-1, -1)
+        start = file_size - suffix
+        end = file_size - 1
+    elif after.len() == 0:
+        # bytes=start-
+        start = _parse_i64(before)
+        end = file_size - 1
+    else:
+        # bytes=start-end
+        start = _parse_i64(before)
+        end = _parse_i64(after)
+
+    if start < 0 or end < 0 or start > end or start >= file_size:
+        return (-1, -1)
+    if end >= file_size:
+        end = file_size - 1
+    (start, end)
+
+fn _parse_i64(s: text) -> i64:
+    """Parse a non-negative decimal integer from text. Returns -1 on error."""
+    if s.len() == 0:
+        return -1
+    var n: i64 = 0
+    var i = 0
+    while i < s.len():
+        val b = s.byte_at(i)
+        if b < 48 or b > 57:
+            return -1
+        n = n * 10 + (b - 48)
+        i = i + 1
+    n
+
+fn static_file_serve_range(path: text, start: i64, end: i64, file_size: i64, etag: text, mime: text) -> HttpResponseData:
+    """Build a 206 Partial Content response for a valid byte range.
+
+    Reads the slice [start, end] inclusive from the file on disk using
+    file_read_text_at() and returns it as body_bytes.
+
+    Args:
+        path:      Absolute file path
+        start:     First byte of the range (0-based, inclusive)
+        end:       Last byte of the range (0-based, inclusive)
+        file_size: Total file size (used in Content-Range header)
+        etag:      Pre-computed ETag string
+        mime:      MIME type for Content-Type header
+    """
+    val length = end - start + 1
+    val content = file_read_text_at(path, start, length)
+    val content_range = "bytes " + start.to_text() + "-" + end.to_text() + "/" + file_size.to_text()
+    HttpResponseData(
+        status: 206,
+        reason: "Partial Content",
+        headers: [
+            ("Content-Type", mime),
+            ("Content-Range", content_range),
+            ("ETag", etag),
+            ("Accept-Ranges", "bytes"),
+            ("Server", "SimpleServer")
+        ],
+        body: content,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
 
 # ============================================================================
 # Path Utilities

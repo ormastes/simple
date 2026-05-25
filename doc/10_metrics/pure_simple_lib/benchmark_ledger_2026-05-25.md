@@ -2,10 +2,9 @@
 
 | Category | Pure Simple (ns) | C Baseline (ns) | ratio |
 |----------|-----------------|----------------|-------|
-| Memcpy | -- | -- | -- |
-| StringOps | -- | -- | -- |
-| FileSystem | -- | -- | -- |
-| Compress | -- | -- | -- |
-| Crypto | -- | -- | -- |
+| Memcpy | 7566000 | 331000 | 0.04374834787205921 |
+| StringOps | 178000 | 329000 | 1.848314606741573 |
+| FileSystem | 823000 | 330000 | 0.40097205346294046 |
+| Compress | 908000 | 339000 | 0.3733480176211454 |
+| Crypto | 858000 | 358000 | 0.4172494172494173 |
 
-> Stub ledger — run `generate_benchmark_ledger()` from `src/app/stats/benchmark_ledger.spl` to populate with live measurements.

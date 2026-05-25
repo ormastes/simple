@@ -65,6 +65,7 @@ use std.nogc_async_mut.io.tls.{AsyncTlsListener, AsyncTlsStream, TlsConfig}
 use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.http_server.protocol_handler.{ProtocolKind, protocol_from_alpn, protocol_handler_label}
 
 fn _http_time_now_ms() -> i64:
     current_time_ms()
@@ -530,6 +531,37 @@ class Worker:
             tcp_backend_close(fd)
         self.connections = {}
         self.active_count = 0
+
+    me dispatch_by_alpn(alpn: text, fd: i64, now: i64):
+        """Dispatch a new TLS connection based on the negotiated ALPN protocol.
+
+        Called after TLS accept when the handshake result carries a negotiated
+        ALPN string. Logs the chosen protocol and routes accordingly.
+
+        Currently:
+          - Http1 (or empty ALPN) → standard handle_accept() H1 path
+          - Http2                 → log + fall through to H1 for now
+                                    TODO(AC-4): wire h2_server_conn_new() here
+          - Http3                 → reject (H3 arrives on UDP, not TCP)
+
+        Args:
+            alpn: Negotiated ALPN string from TLS handshake. May be "".
+            fd:   Accepted client socket fd.
+            now:  Current epoch-ms timestamp from _http_time_now_ms().
+        """
+        val kind = protocol_from_alpn(alpn)
+        val label = protocol_handler_label(kind)
+        match kind:
+            ProtocolKind.Http2:
+                # H2 connection detected via ALPN.
+                # TODO(AC-4): dispatch to h2_server_conn_new(fd, ...) once
+                #             h2_server.spl is wired. For now, fall through to H1.
+                self.handle_accept(fd, now)
+            ProtocolKind.Http3:
+                # H3 over TCP is a client error — reject immediately.
+                tcp_backend_close(fd)
+            ProtocolKind.Http1:
+                self.handle_accept(fd, now)
 
     me reap_expired(now: i64):
         """Close connections that have exceeded their timeout."""

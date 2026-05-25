@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-25 03:31:10*
+*Generated: 2026-05-25 04:20:16*
 
-## test/lib/hal
+## test/compiler/mir_opt
 
-❌ **hal_types_spec.spl** (253ms)
-  - Source: `test/lib/hal/hal_types_spec.spl`
-  - Generated doc: `spec/hal_types_spec.md`
+❌ **pattern_rule_spec.spl** (213ms)
+  - Source: `test/compiler/mir_opt/pattern_rule_spec.spl`
+  - Generated doc: `spec/pattern_rule_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 15 ✅
-- **Failed:** 1 ❌
-- **Duration:** 258ms
+- **Passed:** 5 ✅
+- **Failed:** 2 ❌
+- **Duration:** 217ms
