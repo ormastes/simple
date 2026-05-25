@@ -478,6 +478,23 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
             if _dbval_cmp(mna, mnb) <= 0:
                 return mna
             return mnb
+        # ── CASE WHEN expression ────────────────────────────────────
+        if fname == "case":
+            val nargs = expr.args.len() as i32
+            val has_else = (nargs % 2) != 0
+            var pair_count = nargs / 2
+            var cwi: i32 = 0
+            while cwi < pair_count:
+                val cond_idx = cwi * 2
+                val then_idx = cond_idx + 1
+                val cond_val = _eval_expr(expr.args[cond_idx], cols, vals, params)
+                if _dbval_truthy(cond_val):
+                    return _eval_expr(expr.args[then_idx], cols, vals, params)
+                cwi = cwi + 1
+            if has_else:
+                val else_idx = nargs - 1
+                return _eval_expr(expr.args[else_idx], cols, vals, params)
+            return DbValue.Null
         # ── NULL handling functions ──────────────────────────────────
         if fname == "coalesce":
             var ci: i32 = 0
@@ -973,14 +990,31 @@ class PureDatabase:
         val drop_tbl = _parse_drop_table(sql)
         if drop_tbl != "":
             return self._do_drop(drop_tbl)
+        # Handle INSERT OR REPLACE / REPLACE INTO
+        var actual_sql = sql
+        var is_replace = false
+        val trimmed_sql = sql.trim()
+        val trimmed_upper = trimmed_sql.to_upper()
+        if trimmed_upper.starts_with("INSERT OR REPLACE"):
+            val trimmed_len = trimmed_sql.len()
+            val after_ior = trimmed_sql.slice(17, trimmed_len)
+            actual_sql = "INSERT" + after_ior
+            is_replace = true
+        elif trimmed_upper.starts_with("REPLACE INTO"):
+            val trimmed_len2 = trimmed_sql.len()
+            val after_rep = trimmed_sql.slice(7, trimmed_len2)
+            actual_sql = "INSERT" + after_rep
+            is_replace = true
         _param_idx = 0
-        val pr = sql_parse(sql)
+        val pr = sql_parse(actual_sql)
         if pr.is_err():
             return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
         val stmt = pr.unwrap()
         if stmt.kind == SqlStmtKind.CreateTable:
             return self._do_create(stmt.create_table)
         if stmt.kind == SqlStmtKind.Insert:
+            if is_replace:
+                return self._do_insert_or_replace(stmt.insert, params)
             return self._do_insert(stmt.insert, params)
         if stmt.kind == SqlStmtKind.Update:
             return self._do_update(stmt.update, params)
@@ -991,7 +1025,18 @@ class PureDatabase:
         Err(DbError.QueryFailed(sql: sql, message: "unsupported statement"))
 
     me exec_sql(sql: text) -> Result<i64, DbError>:
-        self.exec(sql, [])
+        val stmts = sql.split(";")
+        var total: i64 = 0
+        var si: i32 = 0
+        while si < stmts.len() as i32:
+            val s = stmts[si].trim()
+            if s != "":
+                val r = self.exec(s, [])
+                if r.is_err():
+                    return r
+                total = total + r.unwrap()
+            si = si + 1
+        Ok(total)
 
     me query(sql: text, params: [DbValue]) -> Result<[DbRow], DbError>:
         if not self.is_open:
@@ -1364,6 +1409,73 @@ class PureDatabase:
         if not self._in_transaction:
             self._persist()?
         Ok(inserted)
+
+    # ── Internal: INSERT OR REPLACE (UPSERT) ──────────────────────────────
+
+    me _do_insert_or_replace(ins: SqlInsert, params: [DbValue]) -> Result<i64, DbError>:
+        val ti = _find_idx(self._tbl_names, ins.table)
+        if ti < 0:
+            return Err(DbError.QueryFailed(
+                sql: "INSERT OR REPLACE",
+                message: "no such table: {ins.table}"
+            ))
+        val col_names = self._tbl_cols[ti]
+        var ins_cols = ins.columns
+        if ins_cols.len() == 0:
+            ins_cols = col_names
+        val pk_col_idx: i32 = 0
+        val handle = self._txn.begin()
+        val tid = handle.txn_id
+        var affected: i64 = 0
+        var vi: i32 = 0
+        while vi < ins.values.len() as i32:
+            val vrow = ins.values[vi]
+            var row_vals: [DbValue] = []
+            var rci: i32 = 0
+            while rci < col_names.len() as i32:
+                val col = col_names[rci]
+                val fi = _find_idx(ins_cols, col)
+                if fi >= 0 and fi < vrow.len() as i32:
+                    row_vals.push(_expr_to_dbvalue(vrow[fi], params))
+                else:
+                    row_vals.push(DbValue.Null)
+                rci = rci + 1
+            val pk_val = row_vals[pk_col_idx]
+            val snap = self._txn.snapshot()
+            var tbl = self._tbl_data[ti]
+            val visible = tbl.scan(snap)
+            self._tbl_data[ti] = tbl
+            var found_ri: i32 = -1
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                val existing = _deserialize_row(visible[ri])
+                if existing.len() > pk_col_idx:
+                    val existing_pk = existing[pk_col_idx]
+                    if _dbval_eq(pk_val, existing_pk):
+                        found_ri = ri
+                ri = ri + 1
+            val ser = _serialize_row(row_vals)
+            if found_ri >= 0:
+                val old_ser = visible[found_ri]
+                var tbl2 = self._tbl_data[ti]
+                tbl2.delete_matching(tid, old_ser)
+                tbl2.insert(tid, ser)
+                self._tbl_data[ti] = tbl2
+            else:
+                var tbl3 = self._tbl_data[ti]
+                tbl3.insert(tid, ser)
+                self._tbl_data[ti] = tbl3
+                self._tbl_rowids[ti] = self._tbl_rowids[ti] + 1
+                self._last_rowid = self._tbl_rowids[ti]
+            affected = affected + 1
+            vi = vi + 1
+        self._txn.commit(tid)
+        if affected > 0:
+            self._invalidate_fts(ti)
+        self._last_changes = affected
+        if not self._in_transaction:
+            self._persist()?
+        Ok(affected)
 
     # ── Internal: SELECT ─────────────────────────────────────────────────
 
