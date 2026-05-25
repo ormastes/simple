@@ -536,6 +536,28 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple test test/unit/os/drivers/real_device_readiness_spec.spl --clean`: PASS,
   `6` examples passed.
 
+## Current q35 QEMU Rerun - 2026-05-25
+
+Command:
+
+- `timeout 30s qemu-system-x86_64 -machine q35 -cpu qemu64 -m 512M -kernel build/os/simpleos_x86_64.elf -serial stdio -monitor none -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file=build/os/fat32-x86_64.img,if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=simpleos0 -netdev user,id=net0 -device virtio-net-pci,netdev=net0`
+
+Result:
+
+- QEMU produced expected q35 serial evidence and exited with code `1`, which
+  is the expected `isa-debug-exit` success shape for this lane.
+- Evidence markers observed:
+  - `[stage1] pci_count=7`
+  - `[stage1] nvme_pci=present`
+  - `[stage1] nvme_identify_read=pass`
+  - `[stage1] nvme_rw_restore=pass`
+  - `[stage1] net_pci=present`
+  - `[stage1] virtio_net_tx_rx=pass`
+  - `TEST PASSED`
+- Driver boundary: this remains the diagnostic C bridge boot path. It proves
+  q35 PCI enumeration plus NVMe and virtio-net hardware activity, but it does
+  not prove pure Simple NVMe/network user-space driver completion.
+
 ## Remaining Gaps
 
 - Real board flashing and serial marker verification were not run for RA4M1 or

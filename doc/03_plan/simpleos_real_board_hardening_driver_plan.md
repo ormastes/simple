@@ -483,6 +483,10 @@ QEMU commands to prove before claiming completion:
   - QEMU lane with q35, NVMe, virtio-net, serial log, and marker checks.
   - Pure-Simple lane must use the pure q35 marker contract, not only
     `nvme_rw_restore=pass` and `virtio_net_tx_rx=pass`.
+  - Current rerun evidence: q35 produced `pci_count=7`,
+    `nvme_identify_read=pass`, `nvme_rw_restore=pass`,
+    `virtio_net_tx_rx=pass`, and `TEST PASSED` with the diagnostic C bridge
+    boot path.
 - riscv64 virt Sv39:
   - QEMU lane with MMU marker and network/storage options where available.
 
