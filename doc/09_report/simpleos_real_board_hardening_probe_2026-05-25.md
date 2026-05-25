@@ -187,6 +187,12 @@ such as `[MPU] Enabled, ... regions...`, current x86 hardening evidence such as
 `protection_probe=pass`, `protection_enabled=pass`, `region_contract=pass`, and
 `fault_recovered=pass`.
 
+Follow-up runner-facing protection gate:
+`qemu_protection_serial_accepts_hardening(...)` and
+`qemu_protection_serial_reason(...)` now expose the same serial evidence
+contract from the QEMU runner module. This gives runner/report code a single
+gate for board id, selected mode, runtime source, and captured serial text.
+
 ## Code Hardening Change
 
 `scenario_qemu_exit_success()` now rejects x86_64 QEMU exit code `0` for
@@ -217,6 +223,10 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
 - `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
   `3` examples passed.
+- `simple check src/os/qemu_runner_part5.spl test/unit/os/qemu_runner_spec.spl`: PASS
+- `simple test test/unit/os/qemu_runner_spec.spl --clean`: FAIL, unchanged
+  coarse result of `60` passed and `3` failed. The runner does not print failing
+  example names in the captured output.
 - `simple os build --arch=x86_64`: PASS
 - q35 QEMU with NVMe and virtio-net: PASS, expected exit code `1`
 
@@ -240,3 +250,6 @@ plain exit `0` is no longer accepted as scenario success.
 - QEMU was not rerun for serial marker classification because it consumes
   captured serial text and does not change the boot image. Existing AN505 and
   q35 serial samples are now covered by unit tests.
+- QEMU was not rerun for the runner-facing protection gate because it adds a
+  serial acceptance helper and tests only; it does not change QEMU arguments or
+  the boot image.

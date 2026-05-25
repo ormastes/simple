@@ -144,6 +144,11 @@ Current status:
   `[harden] text_write_trap=pass`, and future explicit
   `protection_probe=pass`, `protection_enabled=pass`,
   `region_contract=pass`, and `fault_recovered=pass` markers.
+- DONE: `qemu_protection_serial_accepts_hardening(...)` and
+  `qemu_protection_serial_reason(...)` expose the protection evidence contract
+  through the QEMU runner module. Runners and reports can now gate a captured
+  serial log on board id, selected protection mode, and runtime source without
+  duplicating marker rules.
 - TODO: wire the QEMU runner and physical board scripts to pass captured serial
   output through `simpleos_protection_evidence_from_serial(...)` automatically
   instead of manually recording the result in reports.
