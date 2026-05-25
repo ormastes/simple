@@ -57,6 +57,13 @@ building/flashing, and print `REAL_BOARD_NOT_RUN ... reason=build-only` for
 build-only checks. The board catalog exposes matching build-only command
 builders with `simpleos_board_physical_build_only_command_for_id_with_mode(...)`.
 
+Physical firmware mode follow-up: the RA4M1 and STM32U585 build scripts now
+pass the selected protection mode into `cm33_shim.c`. The shim emits
+`protection=<mode>`, `kind=pmsav7-mpu|pmsav8-mpu`,
+`protection_probe=pass`, `protection_enabled=pass`, and
+`region_contract=pass` from firmware. `fault-test` builds also run the
+protection selftest during boot and emit `fault_recovered=pass` when it passes.
+
 ## Phase 1 - False Success And Fallback Removal
 
 1. Reject generic QEMU process success for lanes that require guest-reported

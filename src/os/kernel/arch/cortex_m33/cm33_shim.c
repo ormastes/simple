@@ -123,6 +123,9 @@ static volatile uint32_t fault_recovery_pc;
 #define APP_TIMEOUT_TICKS 500
 
 #define STACK_CANARY 0xDEADBEEF
+#ifndef SIMPLEOS_PROTECTION_MODE_TEXT
+#define SIMPLEOS_PROTECTION_MODE_TEXT "enforce"
+#endif
 static uint32_t mpu_regions;
 
 static void mpu_configure_region(uint32_t region, uint32_t rbar, uint32_t rattr) {
@@ -829,6 +832,30 @@ static int cmd_selftest(void) {
     return fail;
 }
 
+static const char *protection_kind_text(void) {
+#ifdef BOARD_MPU_V7
+    return "pmsav7-mpu";
+#else
+    return "pmsav8-mpu";
+#endif
+}
+
+static void emit_protection_boot_markers(void) {
+    uart_puts("protection=");
+    uart_putln(SIMPLEOS_PROTECTION_MODE_TEXT);
+    uart_puts("kind=");
+    uart_putln(protection_kind_text());
+    if (MPU_TYPE != 0) {
+        uart_putln("protection_probe=pass");
+    }
+    if (MPU_CTRL & 1) {
+        uart_putln("protection_enabled=pass");
+    }
+    if (mpu_regions >= 4) {
+        uart_putln("region_contract=pass");
+    }
+}
+
 #ifdef SIMPLEOS_QEMU_SMOKE
 static void qemu_semihost_exit(int code) {
     static volatile uint32_t args[2];
@@ -993,6 +1020,7 @@ void _c_main(void) {
 
     flash_crc = compute_flash_crc();
     uart_puts("[BOOT] Flash CRC: 0x"); write_hex32(flash_crc); uart_putln("");
+    emit_protection_boot_markers();
 
     uint32_t cv = *(volatile uint32_t *)canary_loc;
     if (cv != STACK_CANARY) {
@@ -1004,6 +1032,12 @@ void _c_main(void) {
 
 #ifdef SIMPLEOS_QEMU_SMOKE
     qemu_smoke_run_and_exit();
+#endif
+
+#ifdef SIMPLEOS_PROTECTION_MODE_FAULT_TEST
+    if (cmd_selftest() == 0) {
+        uart_putln("fault_recovered=pass");
+    }
 #endif
 
     shell();

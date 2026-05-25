@@ -154,13 +154,15 @@ Command:
 
 The script built `build/os/simpleos_ra4m1.elf` and reported:
 
-- text: `21216`
+- text: `21488`
 - data: `0`
 - bss: `7540`
-- total: `28756`
+- total: `29028`
 - board marker: `board=ra4m1-uno-r4 protection=fault-test kind=pmsav7-mpu`
 - profile: `c-shim-board-bringup`
 - `REAL_BOARD_NOT_RUN board=ra4m1-uno-r4 reason=build-only protection=fault-test`
+- ELF string evidence includes `protection=`, `fault-test`,
+  `fault_recovered=pass`, and `pmsav7-mpu`.
 
 Interpretation: the current RA4M1 linker/build config is runnable through
 build-only mode with an explicit protection selection. Physical flashing and
@@ -181,6 +183,15 @@ Additional markers:
 - board marker: `board=stm32u585-uno-q protection=fault-test kind=pmsav8-mpu`
 - profile: `c-shim-board-bringup`
 - `REAL_BOARD_NOT_RUN board=stm32u585-uno-q reason=build-only protection=fault-test`
+- ELF string evidence includes `protection=`, `fault-test`,
+  `fault_recovered=pass`, and `pmsav8-mpu`.
+
+Follow-up physical firmware mode propagation: RA4M1 and STM32U585 build scripts
+now pass the selected protection mode into `cm33_shim.c`. Firmware boot output
+emits `protection=<mode>`, protection kind, probe/enabled/region markers, and
+`fault-test` builds run the selftest automatically before the shell so a
+non-interactive serial capture can contain `fault_recovered=pass` without
+manual shell input.
 
 Interpretation: the current STM32U585 linker/build config is runnable through
 build-only mode with an explicit protection selection. Physical flashing and
