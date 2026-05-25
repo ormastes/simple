@@ -284,6 +284,12 @@ user-space driver placement, brokered device grants, a non-secure resource
 namespace, and IOMMU or grant-broker evidence. C bridge providers are refused
 for pure direct-access completion.
 
+Follow-up full-access tightening: the pure-driver readiness path now uses
+`user_space_driver_all_direct_access_reason(...)`, which requires MMIO, DMA,
+IRQ, and doorbell evidence for NVMe, virtio-net/e1000, and hardware RDMA. A
+single DMA-only proof can no longer satisfy
+`real_device_pure_simple_ready(...)`.
+
 Follow-up readiness tightening: `real_device_pure_simple_ready(...)` now calls
 the direct-access policy. A provider value of `simple-driver` is no longer
 sufficient by itself. Enabled NVMe, virtio-net/e1000, and hardware RDMA paths

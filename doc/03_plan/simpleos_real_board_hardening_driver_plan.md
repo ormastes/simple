@@ -301,6 +301,9 @@ Current status:
   `non-secure-resource-namespace`, shared common-driver logic, and an IOMMU or
   grant broker. Kernel/common-driver direct access and C bridge providers are
   refused by contract.
+- DONE: pure NVMe completion now requires the full direct-access set:
+  MMIO, DMA, IRQ, and doorbell evidence must all satisfy the user-space driver
+  grant contract. A single DMA-only claim is no longer enough.
 - DONE: the freestanding boot filesystem mount result now carries
   `provider` and `pure_simple` evidence. The current `CNvmeBlockAdapterFs`
   path returns `provider=c-boot-bridge`, `pure_simple=false`, and
@@ -358,6 +361,9 @@ Current status:
   and a non-secure resource namespace. Common driver modules may own descriptor
   builders, queue layouts, parsers, and state machines, but they must not own
   direct device access.
+- DONE: pure virtio-net/e1000/RDMA completion now calls the full direct-access
+  gate for MMIO, DMA, IRQ, and doorbell evidence. Partial evidence cannot
+  satisfy `real_device_pure_simple_ready(...)`.
 - DONE: the baremetal IoDriver shim now fails closed until the packet provider
   proves both TX and RX. `rt_driver_submit_send`, `rt_driver_submit_sendfile`,
   `rt_driver_link_state`, `rt_driver_link_speed_mbps`, and
