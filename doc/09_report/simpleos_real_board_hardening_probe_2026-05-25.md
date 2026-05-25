@@ -352,6 +352,12 @@ must also carry user-space driver placement, a raw-device or resource-grant-set
 token source, non-secure resource namespace evidence, shared common-driver
 logic, and IOMMU or grant-broker evidence.
 
+Follow-up hardware-provider tightening:
+`real_device_readiness_ready(...)` no longer accepts enabled storage, network,
+or hardware RDMA lanes with unspecified provider labels. Hardware readiness can
+still report the current diagnostic `c-boot-bridge` path, but provider evidence
+must now be explicit before the broader hardware-readiness gate can pass.
+
 Follow-up grant-token tightening:
 `src/os/drivers/user_space_driver_contract.spl` now requires issued-token grant
 evidence such as `raw-device-grant:tok=...` or

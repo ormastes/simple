@@ -432,6 +432,10 @@ Pure-Simple completion gate:
 
 - `real_device_readiness_ready(current_q35)` may pass with `c-boot-bridge`
   evidence.
+- Broad hardware readiness no longer passes with unspecified provider labels.
+  Enabled NVMe, virtio-net/e1000, and hardware RDMA paths must name either
+  `simple-driver` or the explicitly diagnostic `c-boot-bridge` provider before
+  `real_device_readiness_ready(...)` can pass.
 - `real_device_pure_simple_ready(current_q35)` must fail until storage,
   network, and any RDMA provider fields are `simple-driver` for enabled
   hardware modes.
