@@ -108,6 +108,11 @@ markers, and exits QEMU through semihosting. This proves `mps2-an505` QEMU
 not prove the final pure Simple board HAL because the lane builds
 `src/os/kernel/arch/cortex_m33/cm33_shim.c`.
 
+Catalog alignment: `simpleos_board_qemu_command_for_id_with_mode("mps2-an505",
+..., FaultTest)` now includes `-semihosting-config enable=on,target=native`, so
+the executable board catalog represents the same self-terminating smoke command
+shape as `scripts/run_simpleos_cortex_m33_qemu.shs --smoke`.
+
 Latest rerun result: `QEMU_SMOKE_EXIT=124` because the command was intentionally
 bounded by `timeout 20s`.
 

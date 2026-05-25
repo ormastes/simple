@@ -45,6 +45,11 @@ That closes the timeout-as-normal-result gap for the AN505 QEMU smoke lane,
 while the profile remains labeled `c-shim-board-bringup` until the pure Simple
 HAL replaces `cm33_shim.c`.
 
+The board catalog now exposes the same mode-specific QEMU contract:
+`simpleos_board_qemu_command_for_id_with_mode("mps2-an505", ..., FaultTest)`
+adds `-semihosting-config enable=on,target=native`, matching the
+self-terminating AN505 smoke lane.
+
 ## Phase 1 - False Success And Fallback Removal
 
 1. Reject generic QEMU process success for lanes that require guest-reported
