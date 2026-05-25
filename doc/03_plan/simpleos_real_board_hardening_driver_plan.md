@@ -470,7 +470,8 @@ Pure-Simple completion gate:
 - DONE: q35 pure-Simple serial acceptance now has a separate marker contract.
   The older q35 markers can prove hardware activity with the current C bridge;
   pure completion also requires serial evidence for `storage_provider` and
-  `network_provider` as `simple-driver`, user-space placement, resource grants,
+  `network_provider` as `simple-driver`, user-space placement, issued
+  `raw-device-grant:tok=...` and `resource-grant-set:tok=...` evidence,
   non-secure namespaces, and shared common-driver logic.
 
 ## Phase 7 - QEMU And Real Board Verification

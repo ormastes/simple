@@ -388,8 +388,9 @@ Follow-up q35 pure serial gate: `src/os/drivers/real_device_readiness.spl` now
 has `real_device_q35_pure_simple_serial_acceptance_reason(...)`. The current
 q35 activity markers still prove C-bridge hardware smoke, but pure Simple q35
 completion also requires serial evidence for `simple-driver` storage/network
-providers, user-space placement, resource grants, non-secure namespaces, and
-shared common-driver logic.
+providers, user-space placement, issued `raw-device-grant:tok=...` and
+`resource-grant-set:tok=...` evidence, non-secure namespaces, and shared
+common-driver logic.
 
 Follow-up boot-storage tightening: `src/os/kernel/boot/boot_fs_mount.spl` now
 records the boot mount provider in `FsMountResult`. The current freestanding
