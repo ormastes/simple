@@ -350,6 +350,12 @@ evidence such as `raw-device-grant:tok=...` or
 `resource-grant-set:tok=...`. Bare grant labels no longer satisfy pure
 user-space direct access for NVMe, virtio-net/e1000, or hardware RDMA.
 
+Follow-up supervisor grant-token tightening:
+`src/os/services/driver_supervisor/resource_grant.spl` now rejects zero-token
+BAR, IRQ, and DMA grants. `ResourceGrantSet.grant_all(0)` leaves requests
+ungranted, and `all_granted_with_tokens()` requires every requested BAR/IRQ/DMA
+slot to carry a positive issued token.
+
 Follow-up q35 pure serial gate: `src/os/drivers/real_device_readiness.spl` now
 has `real_device_q35_pure_simple_serial_acceptance_reason(...)`. The current
 q35 activity markers still prove C-bridge hardware smoke, but pure Simple q35
@@ -477,6 +483,9 @@ plain exit `0` is no longer accepted as scenario success.
   `7` examples passed.
 - `simple test test/unit/os/drivers/real_device_readiness_spec.spl --clean`: PASS,
   `6` examples passed.
+- `simple check src/os/services/driver_supervisor/resource_grant.spl test/unit/os/services/driver_supervisor/resource_grant_spec.spl`: PASS
+- `simple test test/unit/os/services/driver_supervisor/resource_grant_spec.spl --clean`: PASS,
+  `2` examples passed.
 - `simple check src/os/drivers/nvme/nvme_storage_model.spl test/unit/os/drivers/nvme/nvme_storage_model_spec.spl`: PASS
 - `simple test test/unit/os/drivers/nvme/nvme_storage_model_spec.spl --clean`: PASS,
   `9` examples passed.

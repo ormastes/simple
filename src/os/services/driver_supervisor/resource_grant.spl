@@ -26,6 +26,10 @@ class BarGrant:
 
     me grant(tok: i64, addr: i64, sz: i64, mmio: bool, prefetch: bool) -> text:
         """Apply a grant token and physical parameters to this request."""
+        if tok <= 0:
+            return "error: invalid token"
+        if sz <= 0:
+            return "error: invalid size"
         self.token = tok
         self.phys_addr = addr
         self.size = sz
@@ -33,6 +37,9 @@ class BarGrant:
         self.is_prefetchable = prefetch
         self.granted = true
         "ok"
+
+    me has_issued_token() -> bool:
+        self.granted and self.token > 0 and self.size > 0
 
     me revoke() -> text:
         """Revoke this BAR grant and clear token."""
@@ -84,9 +91,14 @@ class IrqGrant:
 
     me grant(tok: i64) -> text:
         """Apply a grant token to this IRQ request."""
+        if tok <= 0:
+            return "error: invalid token"
         self.token = tok
         self.granted = true
         "ok"
+
+    me has_issued_token() -> bool:
+        self.granted and self.token > 0
 
     me revoke() -> text:
         """Revoke this IRQ grant and clear token."""
@@ -143,11 +155,18 @@ class DmaGrant:
 
     me grant(tok: i64, phys: i64, virt: i64) -> text:
         """Apply grant token and resolved addresses to this DMA request."""
+        if tok <= 0:
+            return "error: invalid token"
+        if self.size <= 0:
+            return "error: invalid size"
         self.token = tok
         self.phys_addr = phys
         self.virt_addr = virt
         self.granted = true
         "ok"
+
+    me has_issued_token() -> bool:
+        self.granted and self.token > 0 and self.size > 0
 
     me revoke() -> text:
         """Revoke this DMA grant and clear addresses."""
@@ -315,6 +334,8 @@ class ResourceGrantSet:
 
     me grant_all(base_token: i64) -> i64:
         """Grant all pending resources using sequential tokens from base_token."""
+        if base_token <= 0:
+            return 0
         var tok = base_token
         var count: i64 = 0
         if self.bar_count > 0 and self.b0_granted == false:
@@ -357,6 +378,25 @@ class ResourceGrantSet:
             self.d1_granted = true
             count = count + 1
         count
+
+    me all_granted_with_tokens() -> bool:
+        if self.bar_count > 0 and (not self.b0_granted or self.b0_token <= 0):
+            return false
+        if self.bar_count > 1 and (not self.b1_granted or self.b1_token <= 0):
+            return false
+        if self.bar_count > 2 and (not self.b2_granted or self.b2_token <= 0):
+            return false
+        if self.bar_count > 3 and (not self.b3_granted or self.b3_token <= 0):
+            return false
+        if self.irq_count > 0 and (not self.i0_granted or self.i0_token <= 0):
+            return false
+        if self.irq_count > 1 and (not self.i1_granted or self.i1_token <= 0):
+            return false
+        if self.dma_count > 0 and (not self.d0_granted or self.d0_token <= 0):
+            return false
+        if self.dma_count > 1 and (not self.d1_granted or self.d1_token <= 0):
+            return false
+        self.bar_count > 0 or self.irq_count > 0 or self.dma_count > 0
 
     me revoke_all() -> i64:
         """Revoke all active grants and clear tokens. Returns count revoked."""

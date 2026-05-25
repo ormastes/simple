@@ -444,6 +444,10 @@ Pure-Simple completion gate:
   `user_space_driver_direct_access_reason(...)` requires an issued token marker
   in the grant evidence, so `raw-device-grant` and `resource-grant-set` alone
   remain incomplete.
+- DONE: `driver_supervisor` resource grants now reject zero-token grants and
+  zero-sized BAR/DMA grants. `ResourceGrantSet.grant_all(0)` does not mark
+  resources granted, and `all_granted_with_tokens()` only passes once every
+  requested BAR/IRQ/DMA has a positive issued token.
 - DONE: q35 pure-Simple serial acceptance now has a separate marker contract.
   The older q35 markers can prove hardware activity with the current C bridge;
   pure completion also requires serial evidence for `storage_provider` and
