@@ -23,6 +23,51 @@ real-board/QEMU hardening goal.
 
 ## Evidence
 
+### Latest q35 QEMU Rerun After Protection-Gate Wiring
+
+Result: build and QEMU smoke passed on 2026-05-25 after the runner-facing
+protection serial gate was added.
+
+Commands:
+
+- `bin/release/x86_64-unknown-linux-gnu/simple os build --arch=x86_64`
+- `timeout 30s qemu-system-x86_64 -machine q35 -cpu qemu64 -m 512M -kernel build/os/simpleos_x86_64.elf -serial stdio -monitor none -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file=build/os/fat32-x86_64.img,if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=simpleos0 -netdev user,id=net0 -device virtio-net-pci,netdev=net0`
+
+Process result:
+
+- Build: PASS, elapsed `5191 ms`.
+- QEMU exit code: `1`, expected success for this x86_64 `isa-debug-exit`
+  lane.
+
+Serial evidence:
+
+- `[harden] text_write_trap=pass`
+- `[stage1] PCI manager initialized`
+- `[pcimgr] === Device Table (7 devices) ===`
+- `0:2.0 ... class=1.8` for NVMe
+- `0:3.0 ... class=2.0` for virtio-net
+- `[stage1] pci_count=7`
+- `[stage1] nvme_pci=present`
+- `[stage1] nvme_identify_read=pass`
+- `[stage1] nvme_rw_restore=pass`
+- `[stage1] net_pci=present`
+- `[stage1] virtio_net_tx_rx=pass`
+- `TEST PASSED`
+
+Protection classification:
+
+- `qemu_scenario_protection_board_id(x64 q35)` maps this lane to
+  `x86_64-q35`.
+- The captured serial contains `[harden] text_write_trap=pass`, which satisfies
+  the q35 enforce-mode probe, enable, and region/page-contract evidence used by
+  `qemu_scenario_protection_serial_reason(..., "enforce", serial)`.
+- Protection result: `ready` for q35 QEMU enforce evidence.
+
+Limit still open: NVMe identify/read/write/restore and virtio-net queue/TX/RX
+are still C boot-bridge transfer self-tests. This QEMU run proves current q35
+runtime evidence and Simple-owned PCI enumeration, not pure Simple user-space
+NVMe/net driver completion.
+
 ### QEMU AN505 Cortex-M33
 
 Result: `QEMU_SMOKE_EXIT=124` because the command was intentionally bounded by

@@ -153,6 +153,10 @@ Current status:
   hardening board IDs. q35 x86_64 scenarios map to `x86_64-q35`, RISC-V virt
   scenarios map to `riscv64-virt`, and unsupported scenarios fail with
   `unsupported-qemu-board:<scenario>`.
+- DONE: latest q35 QEMU rerun after the protection-gate wiring builds
+  `build/os/simpleos_x86_64.elf`, exits with expected `isa-debug-exit` status
+  `1`, emits `[harden] text_write_trap=pass`, enumerates 7 PCI devices through
+  the Simple path, and reaches the NVMe and virtio-net pass markers.
 - TODO: wire the QEMU runner and physical board scripts to pass captured serial
   output through `simpleos_protection_evidence_from_serial(...)` automatically
   instead of manually recording the result in reports.
