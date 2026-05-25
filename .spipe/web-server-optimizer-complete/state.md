@@ -49,7 +49,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-05-25
 - [x] 6-refactor (Tech Lead) — 2026-05-25
 - [x] 7-verify (QA) — 2026-05-25
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-25
 
 ## Agent Teams
 
@@ -170,4 +170,6 @@ Verification complete (2026-05-25). 9/10 specs passing (55 tests green).
 1 remaining failure: CLI "prints usage when no arguments" — interpreter argv population issue (outside scope).
 
 ### 8-ship
-<pending>
+Shipped (2026-05-25). Committed via jj: "feat: web server H2/H3 engine + optimizer CLI with MIR pass generalization"
+
+## Status: CLOSED — 2026-05-25
