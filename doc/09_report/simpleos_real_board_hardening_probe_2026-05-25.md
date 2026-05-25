@@ -329,6 +329,10 @@ a present function, implemented BAR0 with nonzero size, valid IRQ line, DMA
 isolation, IOMMU or grant-broker evidence, and
 `non-secure-resource-namespace` before `pci_resource_grant_ready(...)` can pass.
 
+Follow-up PCI issued-token gate: `PciResourceGrantEvidence` now also requires
+a positive issued grant token. PCI BAR/IRQ/DMA facts alone no longer satisfy
+grant readiness unless the evidence is tied to a `driver_supervisor` token.
+
 Follow-up boot-storage acceptance gate:
 `src/os/kernel/boot/boot_fs_mount.spl` now records
 `BootStorageAcceptanceEvidence`. Pure Simple boot storage requires a mounted
@@ -495,6 +499,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/services/driver_supervisor/grant_broker.spl test/unit/os/services/driver_supervisor/grant_broker_spec.spl`: PASS
 - `simple test test/unit/os/services/driver_supervisor/grant_broker_spec.spl --clean`: PASS,
   `3` examples passed.
+- `simple check src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`: PASS
+- `simple test test/unit/os/drivers/pci/pci_provider_spec.spl --clean`: PASS,
+  `7` examples passed.
 - `simple check src/os/drivers/nvme/nvme_storage_model.spl test/unit/os/drivers/nvme/nvme_storage_model_spec.spl`: PASS
 - `simple test test/unit/os/drivers/nvme/nvme_storage_model_spec.spl --clean`: PASS,
   `9` examples passed.
