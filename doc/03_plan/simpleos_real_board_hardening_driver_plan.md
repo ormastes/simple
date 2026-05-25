@@ -184,6 +184,9 @@ Current Simple-side provider status:
 - DONE: provider tests now parse config-space snapshots into Simple-owned
   enumerated functions, reject absent vendor sentinels, and classify NVMe,
   virtio-net, e1000, and InfiniBand/RDMA candidates without a C bridge parser.
+- DONE: `pcimgr_grant_device()` no longer treats the C bridge IRQ field as
+  BAR0. Grants now read BAR0 through config space, preserve the probed BAR
+  size, and reject devices without real BAR evidence.
 - TODO: move live q35 enumeration from the C boot bridge onto this provider
   contract.
 

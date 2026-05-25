@@ -17,6 +17,9 @@ real-board/QEMU hardening goal.
 - `bin/release/x86_64-unknown-linux-gnu/simple test test/unit/os/qemu_runner_spec.spl`
 - `bin/release/x86_64-unknown-linux-gnu/simple check src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`
 - `bin/release/x86_64-unknown-linux-gnu/simple test test/unit/os/drivers/pci/pci_provider_spec.spl --clean`
+- `bin/release/x86_64-unknown-linux-gnu/simple check src/os/services/pcimgr/pcimgr.spl src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`
+- `bin/release/x86_64-unknown-linux-gnu/simple os build --arch=x86_64`
+- `timeout 30s qemu-system-x86_64 -machine q35 -cpu qemu64 -m 512M -kernel build/os/simpleos_x86_64.elf -serial stdio -monitor none -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file=build/os/fat32-x86_64.img,if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=simpleos0 -netdev user,id=net0 -device virtio-net-pci,netdev=net0`
 
 ## Evidence
 
@@ -109,6 +112,25 @@ NVMe, virtio-net, e1000, and InfiniBand/RDMA classification. This is not a new
 QEMU boot result; it is the next parser/enumeration slice needed before live
 q35 config I/O can move out of the C boot bridge.
 
+Follow-up PCI grant hardening: `pcimgr_grant_device()` no longer reads
+`rt_pci_get_field(idx, 7)` as BAR0. That bridge field is IRQ, so the old grant
+path could fabricate a BAR from an interrupt line and assign a hardcoded
+4096-byte size. Grants now use `pcimgr_get_bar()` to read BAR0 through config
+space, probe its size, and reject devices without real BAR evidence.
+
+QEMU rerun after the grant hardening still reached the q35 acceptance markers:
+
+- `[stage1] pci_count=5`
+- `[stage1] nvme_pci=present`
+- `[stage1] nvme_identify_read=pass`
+- `[stage1] nvme_rw_restore=pass`
+- `[stage1] net_pci=present`
+- `[stage1] virtio_net_tx_rx=pass`
+- `TEST PASSED`
+
+The process exit code was `1`, which is the expected success code for this
+`isa-debug-exit` lane.
+
 ## Code Hardening Change
 
 `scenario_qemu_exit_success()` now rejects x86_64 QEMU exit code `0` for
@@ -125,6 +147,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`: PASS
 - `simple test test/unit/os/drivers/pci/pci_provider_spec.spl --clean`: PASS,
   `6` examples passed.
+- `simple check src/os/services/pcimgr/pcimgr.spl src/os/drivers/pci/pci_provider.spl test/unit/os/drivers/pci/pci_provider_spec.spl`: PASS
+- `simple os build --arch=x86_64`: PASS
+- q35 QEMU with NVMe and virtio-net: PASS, expected exit code `1`
 
 ## Remaining Gaps
 
