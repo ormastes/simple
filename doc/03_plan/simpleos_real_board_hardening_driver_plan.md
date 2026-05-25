@@ -421,8 +421,10 @@ Current status:
   `NetworkTransferEvidence` plus `network_transfer_readiness_reason(...)` and
   `network_transfer_ready(...)`. Pure virtio-net/e1000 transfer completion
   refuses `c-boot-bridge` and requires feature negotiation, MAC read, link-up,
-  TX queue, RX queue, TX completion, RX frame, DMA isolation, and user-space
-  driver placement.
+  TX queue, RX queue, TX completion, RX frame, DMA isolation, user-space
+  driver placement, an issued direct-access grant token, a
+  `non-secure-resource-namespace`, shared common-driver logic, and IOMMU or
+  grant-broker evidence.
 - TODO: integrate the Simple virtio-net driver path instead of the current C
   boot bridge.
 

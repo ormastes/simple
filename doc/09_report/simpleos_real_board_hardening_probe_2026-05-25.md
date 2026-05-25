@@ -314,14 +314,18 @@ evidence semantics.
 Follow-up NVMe transfer gate: `src/os/drivers/nvme/nvme_storage_model.spl` now
 records `NvmeTransferEvidence`. Pure transfer readiness rejects the C boot
 bridge and requires namespace identify, admin and I/O queues, mapped doorbells,
-completion, sector read/write/restore, DMA isolation, and user-space driver
-placement before `nvme_transfer_ready(...)` can pass.
+completion, sector read/write/restore, DMA isolation, user-space driver
+placement, an issued direct-access grant token, a
+`non-secure-resource-namespace`, shared common-driver logic, and IOMMU or
+grant-broker evidence before `nvme_transfer_ready(...)` can pass.
 
 Follow-up network transfer gate: `src/os/drivers/virtio/network_device.spl` now
 records `NetworkTransferEvidence`. Pure virtio-net/e1000 transfer readiness
 rejects the C boot bridge and requires feature negotiation, MAC read, link-up,
-TX queue, RX queue, TX completion, RX frame, DMA isolation, and user-space
-driver placement before `network_transfer_ready(...)` can pass.
+TX queue, RX queue, TX completion, RX frame, DMA isolation, user-space driver
+placement, an issued direct-access grant token, a
+`non-secure-resource-namespace`, shared common-driver logic, and IOMMU or
+grant-broker evidence before `network_transfer_ready(...)` can pass.
 
 Follow-up PCI grant gate: `src/os/drivers/pci/pci_provider.spl` now records
 `PciResourceGrantEvidence`. PCI resource grants require a supported provider,

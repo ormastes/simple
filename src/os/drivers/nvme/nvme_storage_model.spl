@@ -4,6 +4,7 @@
 # NVMe and capability-backed storage without changing the current boot path.
 
 use os.kernel.types.capability_types.{SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
+use os.drivers.user_space_driver_contract.{user_space_driver_all_direct_access_reason}
 
 enum NvmeQueueRole:
     Admin
@@ -56,7 +57,11 @@ struct NvmeTransferEvidence:
     sector_write: bool
     sector_restored: bool
     dma_isolated: bool
-    user_space_driver: bool
+    driver_placement: text
+    grant_kind: text
+    namespace_mode: text
+    common_logic_shared: bool
+    iommu_or_broker: bool
 
 fn nvme_queue_role_for_id(queue_id: u16) -> NvmeQueueRole:
     """Return the architectural role for a queue ID."""
@@ -84,7 +89,11 @@ fn nvme_transfer_evidence(
     sector_write: bool,
     sector_restored: bool,
     dma_isolated: bool,
-    user_space_driver: bool
+    driver_placement: text,
+    grant_kind: text,
+    namespace_mode: text,
+    common_logic_shared: bool,
+    iommu_or_broker: bool
 ) -> NvmeTransferEvidence:
     NvmeTransferEvidence(
         provider: provider,
@@ -97,14 +106,27 @@ fn nvme_transfer_evidence(
         sector_write: sector_write,
         sector_restored: sector_restored,
         dma_isolated: dma_isolated,
-        user_space_driver: user_space_driver
+        driver_placement: driver_placement,
+        grant_kind: grant_kind,
+        namespace_mode: namespace_mode,
+        common_logic_shared: common_logic_shared,
+        iommu_or_broker: iommu_or_broker
     )
 
 fn nvme_transfer_readiness_reason(e: NvmeTransferEvidence) -> text:
     if e.provider != "simple-driver":
         return "nvme-transfer-provider-not-simple:" + e.provider
-    if not e.user_space_driver:
-        return "nvme-transfer-not-user-space-driver"
+    val access_reason = user_space_driver_all_direct_access_reason(
+        "nvme",
+        e.driver_placement,
+        e.grant_kind,
+        e.namespace_mode,
+        e.common_logic_shared,
+        e.iommu_or_broker,
+        e.provider
+    )
+    if access_reason != "ready":
+        return "nvme-transfer-direct-access-not-ready:" + access_reason
     if not e.namespace_identified:
         return "missing-nvme-namespace-identify"
     if not e.admin_queue_ready:
