@@ -32,6 +32,11 @@ boots to the hardened shell with MPU enabled under a bounded timeout, and the
 RA4M1/STM32U585 physical-board scripts pass build-only mode. Physical flashing
 and pure Simple HAL execution remain open.
 
+Latest AN505 rerun after protection evidence wiring still reaches the hardened
+shell with `[MPU] Enabled, 8 regions available, 4 configured`. The serial
+classifies as `mps2-an505` QEMU `enforce` evidence, but not `fault-test`
+evidence, and the lane still needs a non-interactive guest pass/exit marker.
+
 ## Phase 1 - False Success And Fallback Removal
 
 1. Reject generic QEMU process success for lanes that require guest-reported

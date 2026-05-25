@@ -70,16 +70,21 @@ NVMe/net driver completion.
 
 ### QEMU AN505 Cortex-M33
 
-Result: `QEMU_SMOKE_EXIT=124` because the command was intentionally bounded by
-`timeout 20s`.
+Latest rerun result: `QEMU_SMOKE_EXIT=124` because the command was intentionally
+bounded by `timeout 20s`.
 
-Serial reached the interactive shell before timeout:
+Command:
+
+- `timeout 20s sh scripts/run_simpleos_cortex_m33_qemu.shs`
+
+Serial again reached the interactive shell before timeout:
 
 - `[BOOT] SimpleOS Lite v0.5 - Cortex-M33 (ARMv8-M)`
 - `[BOOT] Platform: MPS2-AN505 (QEMU)`
 - `[FAULT] MemManage, BusFault, UsageFault enabled; DIV0 trap on`
 - `[MPU] Enabled, 8 regions available, 4 configured`
 - `[TICK] SysTick enabled (~100 Hz)`
+- `[FS] In-memory filesystem: 6 files, 392 bytes used`
 - `[BOOT] Entering shell...`
 - `SimpleOS Lite v0.5 (hardened)`
 
@@ -87,6 +92,14 @@ Interpretation: QEMU was checked for the current AN505 C-shim bring-up lane and
 it boots with MPU enabled. This is not yet proof of the requested final pure
 Simple standalone board lane because the script builds
 `src/os/kernel/arch/cortex_m33/cm33_shim.c`.
+
+Protection classification: the captured AN505 serial contains `[MPU] Enabled`
+and `regions`, so `simpleos_protection_evidence_from_serial("mps2-an505",
+Enforce, "qemu", serial)` has probe, enable, region-contract, and runtime
+evidence. This is ready for `enforce` mode, but not for `fault-test` because no
+recovered negative access marker is emitted. The lane still lacks a
+non-interactive guest pass/exit marker, so timeout `124` remains expected for
+this shell smoke.
 
 ### RA4M1 Build-Only
 
