@@ -18,6 +18,7 @@
 
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.boot.c_nvme_adapter.{CNvmeBlockAdapterFs}
+use os.drivers.user_space_driver_contract.{user_space_driver_all_direct_access_reason}
 use std.fs_driver.nvfs_superblock.{
     nvfs_superblock_set_device, nvfs_superblock_probe_disk, nvfs_superblock_read_from_disk
 }
@@ -46,6 +47,10 @@ struct BootStorageAcceptanceEvidence:
     storage_transfer_ready: bool
     superblock_from_real_sector: bool
     non_secure_namespace: bool
+    storage_grant_kind: text
+    driver_placement: text
+    common_driver_logic_shared: bool
+    iommu_or_broker: bool
 
 var _fs_mount_done: bool = false
 var _fs_mount_type: FsMountType = FsMountType.None_
@@ -103,14 +108,22 @@ fn boot_storage_acceptance_evidence(
     pci_resource_grant_ready: bool,
     storage_transfer_ready: bool,
     superblock_from_real_sector: bool,
-    non_secure_namespace: bool
+    non_secure_namespace: bool,
+    storage_grant_kind: text,
+    driver_placement: text,
+    common_driver_logic_shared: bool,
+    iommu_or_broker: bool
 ) -> BootStorageAcceptanceEvidence:
     BootStorageAcceptanceEvidence(
         result: result,
         pci_resource_grant_ready: pci_resource_grant_ready,
         storage_transfer_ready: storage_transfer_ready,
         superblock_from_real_sector: superblock_from_real_sector,
-        non_secure_namespace: non_secure_namespace
+        non_secure_namespace: non_secure_namespace,
+        storage_grant_kind: storage_grant_kind,
+        driver_placement: driver_placement,
+        common_driver_logic_shared: common_driver_logic_shared,
+        iommu_or_broker: iommu_or_broker
     )
 
 fn boot_storage_acceptance_reason(e: BootStorageAcceptanceEvidence) -> text:
@@ -130,6 +143,17 @@ fn boot_storage_acceptance_reason(e: BootStorageAcceptanceEvidence) -> text:
         return "missing-real-sector-superblock-probe"
     if not e.non_secure_namespace:
         return "missing-boot-storage-non-secure-namespace"
+    val direct_access_reason = user_space_driver_all_direct_access_reason(
+        "nvme",
+        e.driver_placement,
+        e.storage_grant_kind,
+        "non-secure-resource-namespace",
+        e.common_driver_logic_shared,
+        e.iommu_or_broker,
+        e.result.provider
+    )
+    if direct_access_reason != "ready":
+        return "boot-storage-direct-access:" + direct_access_reason
     "ready"
 
 fn boot_storage_acceptance_ready(e: BootStorageAcceptanceEvidence) -> bool:

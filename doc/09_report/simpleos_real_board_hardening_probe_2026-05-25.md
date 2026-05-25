@@ -354,8 +354,10 @@ Follow-up boot-storage acceptance gate:
 `BootStorageAcceptanceEvidence`. Pure Simple boot storage requires a mounted
 NVFS/DBFS result from `simple-driver`, `pure_simple=true`, a ready PCI resource
 grant, ready storage transfer evidence, a superblock read from a real sector
-probe, and a non-secure resource namespace. A C bridge NVFS/DBFS probe remains
-diagnostic and returns `boot-storage-not-pure-simple:c-boot-bridge`.
+probe, a non-secure resource namespace, user-space driver placement, an issued
+device grant token, shared common-driver logic, and IOMMU or grant-broker
+evidence. A C bridge NVFS/DBFS probe remains diagnostic and returns
+`boot-storage-not-pure-simple:c-boot-bridge`.
 
 Follow-up readiness tightening: `real_device_pure_simple_ready(...)` now calls
 the direct-access policy. A provider value of `simple-driver` is no longer

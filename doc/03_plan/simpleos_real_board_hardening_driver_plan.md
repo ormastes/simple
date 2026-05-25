@@ -354,8 +354,10 @@ Current status:
 - DONE: boot-storage acceptance now has an explicit evidence object. NVFS/DBFS
   root readiness requires `simple-driver`, `pure_simple=true`, a ready PCI
   resource grant, ready storage transfer evidence, a superblock read from a
-  real sector probe, and `non-secure-resource-namespace` before pure Simple
-  boot storage can report `ready`.
+  real sector probe, `non-secure-resource-namespace`, user-space driver
+  placement, an issued `raw-device-grant:tok=...` or resource grant token,
+  shared common-driver logic, and IOMMU or grant-broker evidence before pure
+  Simple boot storage can report `ready`.
 - DONE: `src/os/drivers/nvme/nvme_storage_model.spl` now exposes
   `NvmeTransferEvidence` plus `nvme_transfer_readiness_reason(...)` and
   `nvme_transfer_ready(...)`. Pure NVMe transfer completion refuses
