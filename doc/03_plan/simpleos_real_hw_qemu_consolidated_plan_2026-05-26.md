@@ -76,6 +76,29 @@ hardware actions.
   coverage in `test/compiler/mir_opt/clib_parity_hotspot_spec.spl`. Command:
   `src/compiler_rust/target/debug/simple test test/compiler/mir_opt/clib_parity_hotspot_spec.spl --mode=interpreter`.
   Result: pass, 19 tests.
+- 2026-05-26: Ran safe board-validation lane without flashing hardware.
+  Artifacts are under
+  `build/test-artifacts/simpleos-board-validation-2026-05-26/`.
+  Commands and results:
+  - `timeout 120 sh scripts/run_simpleos_ra4m1.shs --build-only --protection=fault-test`;
+    result: pass, built `build/os/simpleos_ra4m1.elf`, emitted
+    `REAL_BOARD_NOT_RUN board=ra4m1-uno-r4 reason=build-only`.
+  - `timeout 120 sh scripts/run_simpleos_stm32u585.shs --build-only --protection=fault-test`;
+    result: pass, built `build/os/simpleos_stm32u585.elf`, emitted
+    `REAL_BOARD_NOT_RUN board=stm32u585-uno-q reason=build-only`.
+  - `timeout 180 sh scripts/run_simpleos_cortex_m33_qemu.shs --smoke`;
+    result: pass, AN505 QEMU emitted `TEST PASSED` and
+    `fault_recovered=pass`.
+  - `src/compiler_rust/target/debug/simple test test/unit/os/simpleos_board_hardening_spec.spl --mode=interpreter --clean`;
+    result: pass, 4 tests.
+  - `src/compiler_rust/target/debug/simple test test/unit/os/qemu_runner_spec.spl --mode=interpreter --clean`;
+    result: pass by exit code and summary, 26 tests. The runner also printed a
+    per-file `FAILED` status line for process code `-1`; keep this as a
+    follow-up runner-output cleanup item, not board evidence.
+  Remaining gate: x86_64 q35 protected live smoke was not run in this pass
+  because `scripts/run_simpleos_qemu.shs` has no documented bounded self-test
+  flag comparable to AN505 `--smoke`. Physical RA4M1/STM32U585 pass still
+  requires actual flash plus captured serial markers.
 
 ## Verification Gates
 
