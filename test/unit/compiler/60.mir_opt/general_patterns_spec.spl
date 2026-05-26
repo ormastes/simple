@@ -9,7 +9,7 @@
 
 use std.spec
 use compiler.mir_opt.general_patterns.{
-    GeneralPatternInfo,
+    GeneralPatternInfo, OptimizationFact,
     byte_scan_to_delimiter_info, switch_on_short_string_info,
     capability_guarded_fast_path_info, bit_unpack_fixed_table_info,
     checksum_reducer_info, prefix_scan_table_info, wal_batch_flush_info,
@@ -19,10 +19,17 @@ use compiler.mir_opt.general_patterns.{
     general_patterns_manifest_name, general_patterns_manifest_version,
     is_byte_scan_loop, is_short_string_switch,
     is_capability_guard, is_bit_unpack_loop,
-    is_checksum_reducer_loop, is_prefix_scan_lookup, is_wal_batch_flush
+    is_checksum_reducer_loop, is_prefix_scan_lookup, is_wal_batch_flush,
+    web_hot_path_facts, fact_for_recognizer, all_fact_keys
 }
 use compiler.mir_opt.optimizer_manifest.{
     DynamicPassRegistry, dynamic_pass_registry_new, dynamic_pass_registry_lookup
+}
+use compiler.mir_opt.mir_opt.pattern.rules_clib_parity.{
+    CLibPatternKind, CLibParityRule, clib_parity_rule_table,
+    clib_parity_rule_is_general, clib_parity_domain_rule_count,
+    clib_parity_rule_by_name, clib_parity_rule_has_required_fact,
+    clib_parity_rule_can_rewrite
 }
 
 describe "Dynamic manifest entries registered (AC-5)":
@@ -261,3 +268,98 @@ describe "Cross-domain pattern coverage (AC-8)":
     it "wal-batch-flush matches SimpleOS syscall batching":
         val code = "while idx < syscalls.len():\n    ring.push(syscalls[idx])\n    idx = idx + 1\nring.flush()"
         expect(is_wal_batch_flush(code)).to_equal(true)
+
+describe "Optimization facts for web hot paths (AC-9)":
+    it "produces seven optimization facts":
+        val facts = web_hot_path_facts()
+        expect(facts.len()).to_equal(7)
+
+    it "each fact has a non-empty key and description":
+        val facts = web_hot_path_facts()
+        var i = 0
+        while i < facts.len():
+            expect(facts[i].key.length() > 0).to_equal(true)
+            expect(facts[i].description.length() > 0).to_equal(true)
+            i = i + 1
+
+    it "each fact maps to a known recognizer":
+        val facts = web_hot_path_facts()
+        val infos = all_general_pattern_infos()
+        var i = 0
+        while i < facts.len():
+            var found = false
+            var j = 0
+            while j < infos.len():
+                if infos[j].name == facts[i].general_recognizer:
+                    found = true
+                j = j + 1
+            expect(found).to_equal(true)
+            i = i + 1
+
+    it "fact_for_recognizer finds byte-scan fact":
+        val f = fact_for_recognizer("byte-scan-to-delimiter")
+        expect(f.?).to_equal(true)
+        expect(f.unwrap().key).to_equal("bounded_scan_terminates")
+
+    it "fact_for_recognizer finds capability-guard fact":
+        val f = fact_for_recognizer("capability-guarded-fast-path")
+        expect(f.?).to_equal(true)
+        expect(f.unwrap().key).to_equal("copy_guard_fast_path_safe")
+
+    it "fact_for_recognizer finds bit-unpack fact":
+        val f = fact_for_recognizer("bit-unpack-fixed-table")
+        expect(f.?).to_equal(true)
+        expect(f.unwrap().key).to_equal("bit_extract_table_fixed")
+
+    it "fact_for_recognizer returns nil for unknown recognizer":
+        val f = fact_for_recognizer("nonexistent-pattern")
+        expect(f.?).to_equal(false)
+
+    it "all_fact_keys returns seven keys":
+        val keys = all_fact_keys()
+        expect(keys.len()).to_equal(7)
+
+describe "General-domain CLib parity rules (AC-10)":
+    it "rule table includes general bounded scan rule":
+        val rule = clib_parity_rule_by_name("match_general_bounded_scan")
+        expect(rule.?).to_equal(true)
+        expect(rule.unwrap().domain).to_equal("general")
+        expect(rule.unwrap().intrinsic).to_equal("bounded_scan_fast")
+
+    it "rule table includes general dispatch switch rule":
+        val rule = clib_parity_rule_by_name("match_general_dispatch_switch")
+        expect(rule.?).to_equal(true)
+        expect(rule.unwrap().domain).to_equal("general")
+        expect(rule.unwrap().intrinsic).to_equal("dispatch_switch_fast")
+
+    it "rule table includes general copy guard rule":
+        val rule = clib_parity_rule_by_name("match_general_copy_guard")
+        expect(rule.?).to_equal(true)
+        expect(rule.unwrap().domain).to_equal("general")
+        expect(rule.unwrap().intrinsic).to_equal("copy_elide_guard")
+
+    it "rule table includes general bit extract rule":
+        val rule = clib_parity_rule_by_name("match_general_bit_extract")
+        expect(rule.?).to_equal(true)
+        expect(rule.unwrap().domain).to_equal("general")
+        expect(rule.unwrap().intrinsic).to_equal("bit_unpack_batch")
+
+    it "general rules require no provider-specific facts":
+        val scan = clib_parity_rule_by_name("match_general_bounded_scan")
+        expect(scan.unwrap().requires).to_equal("none")
+        val guard = clib_parity_rule_by_name("match_general_copy_guard")
+        expect(guard.unwrap().requires).to_equal("none")
+
+    it "general rules are eligible with empty facts and matching proofs":
+        val rule = clib_parity_rule_by_name("match_general_bounded_scan").unwrap()
+        val can = clib_parity_rule_can_rewrite(rule, [], ["scan_termination_equivalence"])
+        expect(can).to_equal(true)
+
+    it "general rules are not eligible without required proof":
+        val rule = clib_parity_rule_by_name("match_general_bounded_scan").unwrap()
+        val can = clib_parity_rule_can_rewrite(rule, [], [])
+        expect(can).to_equal(false)
+
+    it "general domain rule count increased":
+        val count = clib_parity_domain_rule_count("general")
+        expect(count).to_be_greater_than(13)
