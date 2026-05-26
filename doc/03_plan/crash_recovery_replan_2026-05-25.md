@@ -17,6 +17,53 @@ or fallback-only completion.
   support, web-server comparison perf harnesses, and stricter SimpleOS disk
   validation that refuses raw-image scan fallbacks as passing evidence.
 
+## 24-Hour Remaining Plan - Crash-Safe Execution
+
+Detailed task rules are in
+`doc/03_plan/agent_tasks/crash_safe_24h_remaining_2026-05-26.md`.
+
+The next 24 hours prioritize progress without repeating the May 25 host
+hard-lockup pattern. All heavy work is serialized through the main agent:
+
+- At most one QEMU/KVM guest at a time.
+- At most one USB/JTAG or board serial capture at a time.
+- No QEMU while board flash/serial work is active.
+- Every QEMU, native-build smoke, benchmark, OpenOCD, and serial capture uses a
+  timeout and writes logs under `build/test-artifacts/`.
+- Before heavy work, record disk, memory, top CPU consumers, and recent kernel
+  logs.
+- Stop immediately if kernel logs show hard lockup, hung task, OOM, NVMe I/O
+  errors, or repeated USB reconnect loops.
+
+Resource floors:
+
+- Disk: at least 250 GiB free.
+- Memory: at least 32 GiB available.
+- CPU: heavy jobs stay below half of logical CPUs unless measuring scaling.
+- Swap is not counted as safe capacity.
+
+Spawned agents may work in parallel only on disjoint documentation or source
+scopes. They must not run QEMU, OpenOCD, board flashing, full bootstrap, or
+unbounded benchmarks. The main agent owns git, QEMU, physical hardware, and
+pushes.
+
+## Consolidated Remaining Plans
+
+The remaining work is now arranged into four active tracks:
+
+1. `doc/03_plan/simpleos_real_hw_qemu_consolidated_plan_2026-05-26.md`
+   - SimpleOS QEMU, real hardware, board hardening, disk validation, and driver
+     realism.
+2. `doc/03_plan/filesystem_compiler_plugin_optimization_plan_2026-05-26.md`
+   - FAT, NVFS, DBFS, and compiler/optimization-plugin work needed to make pure
+     Simple filesystem paths fast.
+3. `doc/03_plan/db_hardening_optimization_plan_2026-05-26.md`
+   - SimpleQ, embedded DB, full DB, BM25/FTS5, DBFS storage, durability, and
+     executor/index performance.
+4. `doc/03_plan/webserver_hardening_optimization_plan_2026-05-26.md`
+   - HTTP server hardening, async I/O, sendfile, nginx comparison, QUIC/H3, and
+     HPACK follow-up.
+
 ## Priority 1 - SimpleOS QEMU And Real Board Bring-Up
 
 - Remove dummy fallback implementations from the SimpleOS check path. Fallbacks

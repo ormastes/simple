@@ -362,3 +362,80 @@ fn generate_boundary() -> text:
     # Simplified - in real implementation would use random data
     return "----SimpleFormBoundary7MA4YWxkTrZu0gW"
 
+# ============================================================================
+# Header Canonicalization
+# ============================================================================
+
+fn canonicalize_headers(headers: list) -> list:
+    var result = []
+    var i = 0
+    while i < headers.length():
+        val header = headers[i]
+        val name = normalize_header_name(header[0])
+        val value = header[1]
+        result.push((name, value))
+        i = i + 1
+    return result
+
+# ============================================================================
+# Duplicate Header Policy
+# ============================================================================
+
+fn singleton_header_names() -> [text]:
+    ["content-type", "content-length", "host", "authorization",
+     "date", "etag", "location", "server", "user-agent",
+     "content-encoding", "transfer-encoding", "connection"]
+
+fn is_singleton_header(name: text) -> bool:
+    val lower = name.lower()
+    val singletons = singleton_header_names()
+    var i = 0
+    while i < singletons.len():
+        if singletons[i] == lower:
+            return true
+        i = i + 1
+    false
+
+fn deduplicate_headers_last_wins(headers: list) -> list:
+    var seen: [text] = []
+    var result = []
+    var i = headers.length() - 1
+    while i >= 0:
+        val header = headers[i]
+        val lower_name = header[0].lower()
+        if is_singleton_header(lower_name):
+            var already_seen = false
+            var s = 0
+            while s < seen.len():
+                if seen[s] == lower_name:
+                    already_seen = true
+                    break
+                s = s + 1
+            if not already_seen:
+                result.push(header)
+                seen = seen.push(lower_name)
+        else:
+            result.push(header)
+        i = i - 1
+    var reversed = []
+    var r = result.length() - 1
+    while r >= 0:
+        reversed.push(result[r])
+        r = r - 1
+    return reversed
+
+fn validate_no_duplicate_singletons(headers: list) -> Result<list, text>:
+    var seen: [text] = []
+    var i = 0
+    while i < headers.length():
+        val header = headers[i]
+        val lower_name = header[0].lower()
+        if is_singleton_header(lower_name):
+            var s = 0
+            while s < seen.len():
+                if seen[s] == lower_name:
+                    return Err("duplicate singleton header: " + lower_name)
+                s = s + 1
+            seen = seen.push(lower_name)
+        i = i + 1
+    Ok(headers)

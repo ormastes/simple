@@ -10,6 +10,11 @@
 **Priority:** P0
 **Status:** Active as of 2026-05-25
 **Plan:** [`crash_recovery_replan_2026-05-25.md`](crash_recovery_replan_2026-05-25.md)
+**24-hour crash-safe task plan:** [`agent_tasks/crash_safe_24h_remaining_2026-05-26.md`](agent_tasks/crash_safe_24h_remaining_2026-05-26.md)
+**SimpleOS HW/QEMU track:** [`simpleos_real_hw_qemu_consolidated_plan_2026-05-26.md`](simpleos_real_hw_qemu_consolidated_plan_2026-05-26.md)
+**Filesystem/compiler optimization track:** [`filesystem_compiler_plugin_optimization_plan_2026-05-26.md`](filesystem_compiler_plugin_optimization_plan_2026-05-26.md)
+**DB hardening/optimization track:** [`db_hardening_optimization_plan_2026-05-26.md`](db_hardening_optimization_plan_2026-05-26.md)
+**Webserver hardening/optimization track:** [`webserver_hardening_optimization_plan_2026-05-26.md`](webserver_hardening_optimization_plan_2026-05-26.md)
 **Pure Simple/standalone plan:** [`pure_simple_lib_standalone_hw_plan.md`](pure_simple_lib_standalone_hw_plan.md)
 **SimpleOS real-board hardening/driver plan:** [`simpleos_real_board_hardening_driver_plan.md`](simpleos_real_board_hardening_driver_plan.md)
 
@@ -30,6 +35,21 @@
 - Harden SimpleOS real-board and QEMU evidence: reject false fallback success,
   make MPU/MMU modes explicit, align QEMU settings with existing boards, and
   advance PCI/NVMe/network/RDMA toward realistic provider-backed drivers.
+- Use the four consolidated 2026-05-26 tracks as the current working split:
+  SimpleOS HW/QEMU, filesystem+compiler optimization, DB hardening, and
+  webserver hardening.
+
+### 24-Hour Crash-Safe Operating Rules
+
+- Main agent owns git, QEMU/KVM, physical hardware, and pushes.
+- Spawned agents may only work on disjoint, bounded scopes and must not launch
+  QEMU, OpenOCD, board flashing, full bootstrap, or unbounded benchmarks.
+- Run at most one QEMU/KVM guest and one board/USB serial capture, never both at
+  the same time.
+- Preflight every heavy run with disk, memory, process, and kernel-log
+  snapshots.
+- Stop on hard-lockup, hung-task, OOM, NVMe I/O, or repeated USB reconnect
+  signatures.
 
 ## 1. 3D Engine GPU Acceleration + WebGPU (DONE)
 

@@ -25,7 +25,11 @@ with 3+ C-library-shape patterns: byte-copy, endian-load, checksum-reducer.
 
 use std.spec
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{OptimizerProviderKind, optimization_rule_provider_clib_parity}
-use compiler.mir_opt.mir_opt.pattern.rules_clib_parity.{CLibPatternKind, CLibParityRule, clib_parity_rule_table, clib_parity_rule_provider}
+use compiler.mir_opt.mir_opt.pattern.rules_clib_parity.{
+    CLibPatternKind, CLibParityRule, clib_parity_rule_table, clib_parity_rule_provider,
+    clib_parity_rule_is_simpleos_safe, clib_parity_domain_rule_count,
+    clib_parity_all_rules_are_general
+}
 
 
 # ============================================================================
@@ -56,6 +60,12 @@ describe "CLibParityHotspot":
             val is_checksum = kind == CLibPatternKind.ChecksumReducer
             expect(is_checksum).to_equal(true)
 
+        it "covers filesystem, database, webserver, and SimpleOS general patterns":
+            expect(CLibPatternKind.DirectoryScan == CLibPatternKind.DirectoryScan).to_equal(true)
+            expect(CLibPatternKind.PrefixLookup == CLibPatternKind.PrefixLookup).to_equal(true)
+            expect(CLibPatternKind.HeaderScan == CLibPatternKind.HeaderScan).to_equal(true)
+            expect(CLibPatternKind.MmioPoll == CLibPatternKind.MmioPoll).to_equal(true)
+
     describe "clib_parity_rule_table":
         it "AC-3: returns at least 3 rules":
             val rules = clib_parity_rule_table()
@@ -77,6 +87,10 @@ describe "CLibParityHotspot":
             var has_byte_copy = false
             var has_endian = false
             var has_checksum = false
+            var has_filesystem = false
+            var has_database = false
+            var has_webserver = false
+            var has_simpleos = false
 
             var i = 0
             while i < rules.len():
@@ -87,11 +101,50 @@ describe "CLibParityHotspot":
                     has_endian = true
                 if rule.pattern_kind == CLibPatternKind.ChecksumReducer:
                     has_checksum = true
+                if rule.domain == "filesystem":
+                    has_filesystem = true
+                if rule.domain == "database":
+                    has_database = true
+                if rule.domain == "webserver":
+                    has_webserver = true
+                if rule.domain == "simpleos":
+                    has_simpleos = true
                 i = i + 1
 
             expect(has_byte_copy).to_equal(true)
             expect(has_endian).to_equal(true)
             expect(has_checksum).to_equal(true)
+            expect(has_filesystem).to_equal(true)
+            expect(has_database).to_equal(true)
+            expect(has_webserver).to_equal(true)
+            expect(has_simpleos).to_equal(true)
+
+        it "keeps provider rules general rather than optimizer-only":
+            expect(clib_parity_all_rules_are_general()).to_equal(true)
+            expect(clib_parity_domain_rule_count("filesystem")).to_be_greater_than(2)
+            expect(clib_parity_domain_rule_count("database")).to_be_greater_than(1)
+            expect(clib_parity_domain_rule_count("webserver")).to_be_greater_than(1)
+            expect(clib_parity_domain_rule_count("simpleos")).to_be_greater_than(2)
+
+        it "requires explicit proofs for filesystem, DB, web, and SimpleOS rewrites":
+            val rules = clib_parity_rule_table()
+            var all_have_proofs = true
+            var i = 0
+            while i < rules.len():
+                if rules[i].required_proof == "":
+                    all_have_proofs = false
+                i = i + 1
+            expect(all_have_proofs).to_equal(true)
+
+        it "marks SimpleOS/QEMU rules safe only when ordering or fail-closed contracts are preserved":
+            val rules = clib_parity_rule_table()
+            var simpleos_safe = true
+            var i = 0
+            while i < rules.len():
+                if rules[i].domain == "simpleos" and not clib_parity_rule_is_simpleos_safe(rules[i]):
+                    simpleos_safe = false
+                i = i + 1
+            expect(simpleos_safe).to_equal(true)
 
     describe "clib_parity_rule_provider":
         it "AC-3: returns provider with required_facts":
@@ -100,12 +153,16 @@ describe "CLibParityHotspot":
             val facts = provider.required_facts
             expect(facts).to_contain("typed_mir")
             expect(facts).to_contain("loop_bounds_proof")
+            expect(facts).to_contain("semantic_equivalence_proof")
+            expect(facts).to_contain("provider_boundary_proof")
 
         it "AC-3: returns provider with produced_facts":
             val provider = clib_parity_rule_provider()
 
             val facts = provider.produced_facts
             expect(facts).to_contain("clib_parity_rewrite")
+            expect(facts).to_contain("general_hotpath_rewrite")
+            expect(facts).to_contain("provider_boundary_preserved")
 
         it "AC-3: provider safety class is pure":
             val provider = clib_parity_rule_provider()

@@ -1,8 +1,22 @@
 """DB Query — production query primitives over DbTable.
 
-Provides prefix scan, range scan by id, and multi-key lookup.
-Replaces placeholder no-op query branches.
+Provides prefix scan, range scan by id, multi-key lookup, and contains search.
+Uses PrefixIndex/TextIndex when the table has been indexed; falls back to
+linear scan otherwise.  The query planner selects the best execution strategy.
 """
+
+use std.db.prefix_index.{prefix_index_lookup_prefix, prefix_index_lookup_exact, prefix_index_size}
+use std.db.text_index.{text_index_search_prefix, text_index_search_contains, text_index_search_exact, text_index_size}
+use std.db.query_planner.{
+    choose_plan,
+    predicate_eq,
+    predicate_prefix,
+    predicate_range,
+    IndexDescriptor,
+    IndexKind,
+    index_descriptor_new,
+    PlanNodeKind
+}
 
 class QueryResult:
     ids: [i64]
@@ -11,14 +25,42 @@ class QueryResult:
 fn query_result_empty() -> QueryResult:
     QueryResult(ids: [], count: 0)
 
-fn db_prefix_scan(rows: [DbRow], prefix: text) -> QueryResult:
+# ── Helper: build index descriptors from a DbTable ──────────────────────────
+
+fn _table_index_descriptors(table: DbTable) -> [IndexDescriptor]:
+    var descs: [IndexDescriptor] = []
+    val ki = table.key_index()
+    if prefix_index_size(ki) > 0:
+        descs.push(index_descriptor_new("key_prefix", "key", IndexKind.Prefix))
+    val ti = table.text_idx()
+    if text_index_size(ti) > 0:
+        descs.push(index_descriptor_new("key_text", "key", IndexKind.Hash))
+    descs
+
+# ── Linear-scan fallbacks (backward compat) ─────────────────────────────────
+
+fn _linear_prefix_scan(rows: [DbRow], prefix_str: text) -> QueryResult:
     var ids: [i64] = []
     var i = 0
     while i < rows.len():
-        if rows[i].key.starts_with(prefix):
+        if rows[i].key.starts_with(prefix_str):
             ids.push(rows[i].id)
         i = i + 1
     QueryResult(ids: ids, count: ids.len())
+
+fn _linear_keys_matching(rows: [DbRow], needle: text) -> QueryResult:
+    var ids: [i64] = []
+    var i = 0
+    while i < rows.len():
+        if rows[i].key == needle:
+            ids.push(rows[i].id)
+        i = i + 1
+    QueryResult(ids: ids, count: ids.len())
+
+# ── Public query API (raw [DbRow] — legacy callers) ────────────────────────
+
+fn db_prefix_scan(rows: [DbRow], prefix_str: text) -> QueryResult:
+    _linear_prefix_scan(rows, prefix_str)
 
 fn db_range_scan(rows: [DbRow], min_id: i64, max_id: i64) -> QueryResult:
     var ids: [i64] = []
@@ -31,13 +73,7 @@ fn db_range_scan(rows: [DbRow], min_id: i64, max_id: i64) -> QueryResult:
     QueryResult(ids: ids, count: ids.len())
 
 fn db_keys_matching(rows: [DbRow], needle: text) -> QueryResult:
-    var ids: [i64] = []
-    var i = 0
-    while i < rows.len():
-        if rows[i].key == needle:
-            ids.push(rows[i].id)
-        i = i + 1
-    QueryResult(ids: ids, count: ids.len())
+    _linear_keys_matching(rows, needle)
 
 fn db_all_ids(rows: [DbRow]) -> QueryResult:
     var ids: [i64] = []
@@ -46,3 +82,44 @@ fn db_all_ids(rows: [DbRow]) -> QueryResult:
         ids.push(rows[i].id)
         i = i + 1
     QueryResult(ids: ids, count: ids.len())
+
+# ── Indexed query API (takes DbTable, uses planner) ────────────────────────
+
+fn db_table_prefix_scan(table: DbTable, prefix_str: text) -> QueryResult:
+    val descs = _table_index_descriptors(table)
+    val pred = predicate_prefix("key", prefix_str)
+    val plan = choose_plan(pred, descs, table.row_count())
+    if plan.kind == PlanNodeKind.IndexPrefix:
+        val ki = table.key_index()
+        val ids = prefix_index_lookup_prefix(ki, prefix_str)
+        return QueryResult(ids: ids, count: ids.len())
+    _linear_prefix_scan(table.rows, prefix_str)
+
+fn db_table_exact_match(table: DbTable, needle: text) -> QueryResult:
+    val descs = _table_index_descriptors(table)
+    val pred = predicate_eq("key", needle)
+    val plan = choose_plan(pred, descs, table.row_count())
+    if plan.kind == PlanNodeKind.IndexLookup:
+        val ti = table.text_idx()
+        val ids = text_index_search_exact(ti, needle)
+        return QueryResult(ids: ids, count: ids.len())
+    _linear_keys_matching(table.rows, needle)
+
+fn db_table_contains_scan(table: DbTable, token: text) -> QueryResult:
+    val ti = table.text_idx()
+    if text_index_size(ti) > 0:
+        val ids = text_index_search_contains(ti, token)
+        return QueryResult(ids: ids, count: ids.len())
+    var ids: [i64] = []
+    var i = 0
+    while i < table.rows.len():
+        if table.rows[i].key.contains(token):
+            ids.push(table.rows[i].id)
+        i = i + 1
+    QueryResult(ids: ids, count: ids.len())
+
+fn db_table_range_scan(table: DbTable, min_id: i64, max_id: i64) -> QueryResult:
+    db_range_scan(table.rows, min_id, max_id)
+
+fn db_table_all_ids(table: DbTable) -> QueryResult:
+    db_all_ids(table.rows)

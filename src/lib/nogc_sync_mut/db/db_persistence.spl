@@ -1,8 +1,12 @@
 """DB Persistence — production persistence and query workflow primitives.
 
-Replaces placeholder no-op persistence with real insert/find/delete semantics.
 Row IDs are monotonically increasing integers assigned at insert time.
+Maintains PrefixIndex and TextIndex for accelerated queries; indexes are
+invalidated and rebuilt on every mutation (insert/update/delete).
 """
+
+use std.db.prefix_index.{PrefixIndex, prefix_index_new, prefix_index_insert, prefix_index_lookup_prefix, prefix_index_lookup_exact, prefix_index_size}
+use std.db.text_index.{TextIndex, text_index_new, text_index_insert, text_index_search_prefix, text_index_search_contains, text_index_search_exact, text_index_size}
 
 fn row_not_found() -> i64:
     -1
@@ -16,19 +20,49 @@ class DbTable:
     name: text
     rows: [DbRow]
     next_id: i64
+    _key_index: PrefixIndex
+    _text_index: TextIndex
+    _indexes_dirty: bool
 
-    fn insert(k: text, v: text) -> i64:
+    me fn _rebuild_indexes():
+        var ki = prefix_index_new()
+        var ti = text_index_new()
+        var i = 0
+        while i < self.rows.len():
+            val r = self.rows[i]
+            ki = prefix_index_insert(ki, r.key, r.id)
+            ti = text_index_insert(ti, r.key, r.id)
+            i = i + 1
+        self._key_index = ki
+        self._text_index = ti
+        self._indexes_dirty = false
+
+    me fn _ensure_indexes():
+        if self._indexes_dirty:
+            self._rebuild_indexes()
+
+    me fn insert(k: text, v: text) -> i64:
         val new_id = self.next_id
         self.rows.push(DbRow(id: new_id, key: k, payload: v))
         self.next_id = self.next_id + 1
+        self._indexes_dirty = true
         new_id
 
-    fn find_by_key(k: text) -> i64:
+    me fn update(k: text, v: text) -> bool:
         var i = 0
         while i < self.rows.len():
             if self.rows[i].key == k:
-                return self.rows[i].id
+                self.rows[i] = DbRow(id: self.rows[i].id, key: k, payload: v)
+                self._indexes_dirty = true
+                return true
             i = i + 1
+        false
+
+    fn find_by_key(k: text) -> i64:
+        self._ensure_indexes()
+        val hits = prefix_index_lookup_exact(self._key_index, k)
+        if hits.len() > 0:
+            return hits[0]
         row_not_found()
 
     fn get_by_id(id: i64) -> text:
@@ -39,11 +73,12 @@ class DbTable:
             i = i + 1
         ""
 
-    fn delete_by_key(k: text) -> bool:
+    me fn delete_by_key(k: text) -> bool:
         var i = 0
         while i < self.rows.len():
             if self.rows[i].key == k:
                 self.rows.remove(i)
+                self._indexes_dirty = true
                 return true
             i = i + 1
         false
@@ -51,5 +86,27 @@ class DbTable:
     fn row_count() -> i64:
         self.rows.len()
 
+    fn has_indexes() -> bool:
+        self._ensure_indexes()
+        (prefix_index_size(self._key_index) > 0 or text_index_size(self._text_index) > 0)
+
+    fn key_index() -> PrefixIndex:
+        self._ensure_indexes()
+        self._key_index
+
+    fn text_idx() -> TextIndex:
+        self._ensure_indexes()
+        self._text_index
+
+    fn indexes_dirty() -> bool:
+        self._indexes_dirty
+
 fn db_table_new(table_name: text) -> DbTable:
-    DbTable(name: table_name, rows: [], next_id: 0)
+    DbTable(
+        name: table_name,
+        rows: [],
+        next_id: 0,
+        _key_index: prefix_index_new(),
+        _text_index: text_index_new(),
+        _indexes_dirty: false
+    )

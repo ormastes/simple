@@ -1,26 +1,27 @@
 # Simple CLI - optimize command
-# Optimizer CLI entry point: analyze, apply, and compare MIR optimization passes.
-# AC-9: CLI surface for web-server-optimizer-complete feature.
+# General-purpose optimizer: MIR passes, DB query patterns, and general optimizations.
 
 use std.cli.cli_util.{get_cli_args}
 use app.io.file_shell.{file_exists}
-use app.optimize.analyze.{optimize_analyze}
+use app.optimize.analyze.{optimize_analyze, optimize_db_analyze, optimize_full_analyze}
 use app.optimize.compare.{optimize_compare}
 use app.optimize.apply.{optimize_apply}
 
 fn print_optimize_help():
     print "Usage: simple optimize <file.spl> [options]"
     print ""
-    print "Analyze and apply MIR optimization passes to a Simple source file."
+    print "Analyze and optimize Simple source files across multiple domains."
     print ""
     print "Options:"
-    print "  --compare             Benchmark Simple codegen vs C codegen (AC-6)"
+    print "  --compare             Benchmark Simple codegen vs C codegen"
     print "  --apply               Auto-apply safe optimization passes"
-    print "  --passes=P1,P2,...    Comma-separated list of passes to run"
-    print "  --level=O0|O1|O2|O3  Optimization level (default: O2)"
+    print "  --db-analyze          Analyze DB query patterns (linear scans, missing indexes)"
+    print "  --full                Full analysis: MIR + DB + general patterns combined"
+    print "  --passes=P1,P2,...    Comma-separated list of MIR passes to run"
+    print "  --level=O0|O1|O2|O3  MIR optimization level (default: O2)"
     print "  -h, --help            Show this help"
     print ""
-    print "Optimization levels:"
+    print "Optimization levels (MIR):"
     print "  O0  None        (no MIR passes)"
     print "  O1  Basic       (dce, const_fold)"
     print "  O2  Standard    (+ copy_prop, cse, inlining)  [default]"
@@ -29,15 +30,18 @@ fn print_optimize_help():
     print "Examples:"
     print "  simple optimize src/app/web/server.spl"
     print "  simple optimize src/app/web/server.spl --compare"
+    print "  simple optimize src/app/web/server.spl --db-analyze"
+    print "  simple optimize src/app/web/server.spl --full --level=O3"
     print "  simple optimize src/app/web/server.spl --apply --level=O3"
-    print "  simple optimize src/app/web/server.spl --passes=dead_code_elimination,copy_propagation"
 
 struct OptimizeArgs:
-    file_path:  text
-    do_compare: bool
-    do_apply:   bool
-    passes:     [text]
-    level:      text    # "O0"|"O1"|"O2"|"O3"
+    file_path:    text
+    do_compare:   bool
+    do_apply:     bool
+    do_db_analyze: bool
+    do_full:      bool
+    passes:       [text]
+    level:        text    # "O0"|"O1"|"O2"|"O3"
 
 fn parse_flag_value(args: [text], prefix: text) -> text:
     var i = 0
@@ -81,11 +85,13 @@ fn parse_optimize_args(args: [text]) -> OptimizeArgs?:
     val passes = split_passes(passes_raw)
 
     OptimizeArgs(
-        file_path:  file_path,
-        do_compare: has_flag(args, "--compare"),
-        do_apply:   has_flag(args, "--apply"),
-        passes:     passes,
-        level:      level
+        file_path:    file_path,
+        do_compare:   has_flag(args, "--compare"),
+        do_apply:     has_flag(args, "--apply"),
+        do_db_analyze: has_flag(args, "--db-analyze"),
+        do_full:      has_flag(args, "--full"),
+        passes:       passes,
+        level:        level
     )
 
 fn run_optimize_command(opt_args: OptimizeArgs) -> i64:
@@ -99,6 +105,10 @@ fn run_optimize_command(opt_args: OptimizeArgs) -> i64:
         exit_code = optimize_compare(opt_args.file_path)
     elif opt_args.do_apply:
         exit_code = optimize_apply(opt_args.file_path, opt_args.passes, opt_args.level)
+    elif opt_args.do_db_analyze:
+        exit_code = optimize_db_analyze(opt_args.file_path)
+    elif opt_args.do_full:
+        exit_code = optimize_full_analyze(opt_args.file_path, opt_args.level)
     else:
         exit_code = optimize_analyze(opt_args.file_path, opt_args.level)
 
