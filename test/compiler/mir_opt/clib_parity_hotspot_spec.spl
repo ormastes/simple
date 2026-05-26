@@ -123,7 +123,7 @@ describe "CLibParityHotspot":
         it "keeps provider rules general rather than optimizer-only":
             expect(clib_parity_all_rules_are_general()).to_equal(true)
             expect(clib_parity_domain_rule_count("filesystem")).to_be_greater_than(2)
-            expect(clib_parity_domain_rule_count("database")).to_be_greater_than(1)
+            expect(clib_parity_domain_rule_count("database")).to_be_greater_than(6)
             expect(clib_parity_domain_rule_count("webserver")).to_be_greater_than(1)
             expect(clib_parity_domain_rule_count("simpleos")).to_be_greater_than(2)
 
@@ -217,6 +217,146 @@ describe "CLibParityHotspot":
             val provider = clib_parity_rule_provider()
 
             expect(provider.safety_class).to_equal("pure")
+
+    # ========================================================================
+    # AC-5: DB Optimization Patterns — 5 new CLibPatternKind variants + rules
+    # ========================================================================
+
+    describe "DB optimization CLibPatternKind variants (AC-5)":
+        it "AC-5: enum has FtsMatch variant":
+            val kind = CLibPatternKind.FtsMatch
+            val is_fts = kind == CLibPatternKind.FtsMatch
+            expect(is_fts).to_equal(true)
+
+        it "AC-5: enum has ContainsSearch variant":
+            val kind = CLibPatternKind.ContainsSearch
+            val is_contains = kind == CLibPatternKind.ContainsSearch
+            expect(is_contains).to_equal(true)
+
+        it "AC-5: enum has PageSummaryScan variant":
+            val kind = CLibPatternKind.PageSummaryScan
+            val is_page = kind == CLibPatternKind.PageSummaryScan
+            expect(is_page).to_equal(true)
+
+        it "AC-5: enum has CacheInvalidation variant":
+            val kind = CLibPatternKind.CacheInvalidation
+            val is_cache = kind == CLibPatternKind.CacheInvalidation
+            expect(is_cache).to_equal(true)
+
+        it "AC-5: enum has ReopenRecovery variant":
+            val kind = CLibPatternKind.ReopenRecovery
+            val is_reopen = kind == CLibPatternKind.ReopenRecovery
+            expect(is_reopen).to_equal(true)
+
+    describe "DB optimization rules in clib_parity_rule_table (AC-5)":
+        it "AC-5: database domain has at least 7 rules after DB hardening":
+            expect(clib_parity_domain_rule_count("database")).to_be_greater_than(6)
+
+        it "AC-5: match_db_fts_match rule exists with correct fields":
+            val maybe_rule = clib_parity_rule_by_name("match_db_fts_match")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                expect(rule.intrinsic).to_equal("db_fts_match")
+                expect(rule.requires).to_equal("fts_index")
+                expect(rule.required_proof).to_equal("fts_index_consistency")
+                expect(rule.domain).to_equal("database")
+
+        it "AC-5: match_db_contains_search rule exists with correct fields":
+            val maybe_rule = clib_parity_rule_by_name("match_db_contains_search")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                expect(rule.intrinsic).to_equal("db_contains_search")
+                expect(rule.requires).to_equal("text_index")
+                expect(rule.required_proof).to_equal("text_index_consistency")
+                expect(rule.domain).to_equal("database")
+
+        it "AC-5: match_db_page_summary_scan rule exists with correct fields":
+            val maybe_rule = clib_parity_rule_by_name("match_db_page_summary_scan")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                expect(rule.intrinsic).to_equal("db_page_summary_scan")
+                expect(rule.requires).to_equal("page_summary_index")
+                expect(rule.required_proof).to_equal("summary_range_soundness")
+                expect(rule.domain).to_equal("database")
+
+        it "AC-5: match_db_cache_invalidate rule exists with correct fields":
+            val maybe_rule = clib_parity_rule_by_name("match_db_cache_invalidate")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                expect(rule.intrinsic).to_equal("db_cache_invalidate")
+                expect(rule.requires).to_equal("fts_dirty_flag")
+                expect(rule.required_proof).to_equal("mutation_invalidation_complete")
+                expect(rule.domain).to_equal("database")
+
+        it "AC-5: match_db_reopen_recovery rule exists with correct fields":
+            val maybe_rule = clib_parity_rule_by_name("match_db_reopen_recovery")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                expect(rule.intrinsic).to_equal("db_reopen_recovery")
+                expect(rule.requires).to_equal("wal_log")
+                expect(rule.required_proof).to_equal("wal_replay_idempotent")
+                expect(rule.domain).to_equal("database")
+
+    describe "DB optimization rewrite decisions (AC-5)":
+        it "AC-5: FTS match rewrite gated on fts_index fact and fts_index_consistency proof":
+            val maybe_rule = clib_parity_rule_by_name("match_db_fts_match")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val no_fact = clib_parity_rule_rewrite_decision(rule, [], ["fts_index_consistency"])
+                expect(no_fact.eligible).to_equal(false)
+                expect(no_fact.reason).to_equal("missing_required_fact:fts_index")
+                val no_proof = clib_parity_rule_rewrite_decision(rule, ["fts_index"], [])
+                expect(no_proof.eligible).to_equal(false)
+                expect(no_proof.reason).to_equal("missing_required_proof:fts_index_consistency")
+                val ok = clib_parity_rule_rewrite_decision(rule, ["fts_index"], ["fts_index_consistency"])
+                expect(ok.eligible).to_equal(true)
+                expect(ok.intrinsic).to_equal("db_fts_match")
+
+        it "AC-5: contains search rewrite gated on text_index and text_index_consistency":
+            val maybe_rule = clib_parity_rule_by_name("match_db_contains_search")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val missing = clib_parity_rule_rewrite_decision(rule, [], [])
+                expect(missing.eligible).to_equal(false)
+                val ok = clib_parity_rule_rewrite_decision(rule, ["text_index"], ["text_index_consistency"])
+                expect(ok.eligible).to_equal(true)
+
+        it "AC-5: page summary scan rewrite gated on page_summary_index and summary_range_soundness":
+            val maybe_rule = clib_parity_rule_by_name("match_db_page_summary_scan")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val missing = clib_parity_rule_rewrite_decision(rule, [], [])
+                expect(missing.eligible).to_equal(false)
+                val ok = clib_parity_rule_rewrite_decision(rule, ["page_summary_index"], ["summary_range_soundness"])
+                expect(ok.eligible).to_equal(true)
+
+        it "AC-5: cache invalidation rewrite gated on fts_dirty_flag and mutation_invalidation_complete":
+            val maybe_rule = clib_parity_rule_by_name("match_db_cache_invalidate")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val missing = clib_parity_rule_rewrite_decision(rule, [], [])
+                expect(missing.eligible).to_equal(false)
+                val ok = clib_parity_rule_rewrite_decision(rule, ["fts_dirty_flag"], ["mutation_invalidation_complete"])
+                expect(ok.eligible).to_equal(true)
+
+        it "AC-5: reopen recovery rewrite gated on wal_log and wal_replay_idempotent":
+            val maybe_rule = clib_parity_rule_by_name("match_db_reopen_recovery")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val missing = clib_parity_rule_rewrite_decision(rule, [], [])
+                expect(missing.eligible).to_equal(false)
+                val ok = clib_parity_rule_rewrite_decision(rule, ["wal_log"], ["wal_replay_idempotent"])
+                expect(ok.eligible).to_equal(true)
 
     describe "optimization_rule_provider_clib_parity factory":
         it "AC-3: factory creates provider with given name":

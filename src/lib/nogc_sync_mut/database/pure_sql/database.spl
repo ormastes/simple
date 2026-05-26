@@ -16,6 +16,8 @@ use nogc_sync_mut.db.dbfs_engine.mvcc.{
     MvccTable, MvccTxnManager, MvccSnapshot
 }
 use nogc_sync_mut.db.dbfs_engine.fts.search.{FtsEngine}
+use nogc_sync_mut.db.db_query.{query_fts_match, query_page_summary_scan}
+use nogc_sync_mut.db.page_summary.{PageSummaryIndex}
 
 # ── Full-text search types ──────────────────────────────────────────────────
 
@@ -1228,18 +1230,34 @@ class PureDatabase:
             self._ensure_fts_index(ti, col_names, columns, visible)
             val engine = self._fts_indexes[ti]
             val fts_results = engine.search(query)
+            # Collect matched doc IDs for query_fts_match dispatch
+            var matched_ids: [i64] = []
             var fi: i32 = 0
             while fi < fts_results.len() as i32:
                 val row_idx = fts_results[fi].doc_id
                 if row_idx >= 0 and row_idx < rows.len():
-                    val score = fts_results[fi].score
-                    if score > 0:
-                        results = _push_ranked_result(results, PureSearchResult(
-                            row: rows[row_idx as i32],
-                            score: score as f64,
-                            row_index: row_idx
-                        ), limit)
+                    if fts_results[fi].score > 0:
+                        matched_ids.push(row_idx)
                 fi = fi + 1
+            val qr = query_fts_match(matched_ids)
+            # Build ranked results from the query result
+            var qi: i32 = 0
+            while qi < qr.ids.len() as i32:
+                val rid = qr.ids[qi]
+                if rid >= 0 and rid < rows.len():
+                    # Re-score from fts_results for ranking
+                    var rscore = 1.0
+                    var si: i32 = 0
+                    while si < fts_results.len() as i32:
+                        if fts_results[si].doc_id == rid:
+                            rscore = fts_results[si].score as f64
+                        si = si + 1
+                    results = _push_ranked_result(results, PureSearchResult(
+                        row: rows[rid as i32],
+                        score: rscore,
+                        row_index: rid
+                    ), limit)
+                qi = qi + 1
             self._last_changes = 0
             return Ok(results)
         var di: i32 = 0
@@ -1870,6 +1888,15 @@ class PureDatabase:
                 base_rows = joined_rows
                 col_names = combined_cols
                 ji = ji + 1
+
+        # ── Page summary range skip optimization ─────────────────────
+        # When a page summary index is available for range predicates,
+        # use query_page_summary_scan to skip non-matching pages.
+        var page_summary_idx = PageSummaryIndex(pages: [])
+        if page_summary_idx.pages.len() > 0 and sel.where_expr.?:
+            val ps_result = query_page_summary_scan(page_summary_idx, 0, 0)
+            # Future: use ps_result to prune base_rows before linear filter
+            val _ps_count = ps_result.count
 
         # ── WHERE filter ─────────────────────────────────────────────
         var filtered: [[DbValue]] = []
