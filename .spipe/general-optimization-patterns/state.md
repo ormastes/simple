@@ -30,7 +30,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-05-26
 - [x] 6-refactor (Tech Lead) — 2026-05-26
 - [x] 7-verify (QA) — 2026-05-26
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-26
 
 ## Phase Outputs
 
@@ -70,4 +70,4 @@ No refactor needed — new patterns follow established structure exactly.
 - All 7 patterns: manifest entries, rules, registry lookup, recognizer matching, cross-domain validation
 
 ### 8-ship
-Ready to commit. All ACs met.
+Committed as `ccf402b926` (source + plan) and `a008445696` (spec tests). All 7 ACs met, 42 tests pass.
