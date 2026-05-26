@@ -1,0 +1,183 @@
+"""
+# General MIR Optimization Patterns Specification
+
+**Feature IDs:** #AC-5, #AC-6, #AC-7
+**Category:** Compiler / Optimization
+**Difficulty:** 4/5
+**Status:** Active
+"""
+
+use std.spec
+use compiler.mir_opt.general_patterns.{
+    GeneralPatternInfo,
+    byte_scan_to_delimiter_info, switch_on_short_string_info,
+    capability_guarded_fast_path_info, bit_unpack_fixed_table_info,
+    all_general_pattern_infos,
+    general_pattern_manifest_entries, general_pattern_rules,
+    load_general_patterns_manifest, register_general_patterns,
+    general_patterns_manifest_name, general_patterns_manifest_version,
+    is_byte_scan_loop, is_short_string_switch,
+    is_capability_guard, is_bit_unpack_loop
+}
+use compiler.mir_opt.optimizer_manifest.{
+    DynamicPassRegistry, dynamic_pass_registry_new, dynamic_pass_registry_lookup
+}
+
+describe "Dynamic manifest entries registered (AC-5)":
+    it "produces exactly four manifest entries":
+        val entries = general_pattern_manifest_entries()
+        expect(entries.len()).to_equal(4)
+
+    it "entries have correct stable names":
+        val entries = general_pattern_manifest_entries()
+        expect(entries[0].stable_name).to_equal("byte-scan-to-delimiter")
+        expect(entries[1].stable_name).to_equal("switch-on-short-string")
+        expect(entries[2].stable_name).to_equal("capability-guarded-fast-path")
+        expect(entries[3].stable_name).to_equal("bit-unpack-fixed-table")
+
+    it "entries have function scope":
+        val entries = general_pattern_manifest_entries()
+        expect(entries.len()).to_equal(4)
+
+    it "entries have valid entry symbols":
+        val entries = general_pattern_manifest_entries()
+        expect(entries[0].entry_symbol).to_equal("general_pattern_byte_scan_to_delimiter")
+        expect(entries[1].entry_symbol).to_equal("general_pattern_switch_on_short_string")
+        expect(entries[2].entry_symbol).to_equal("general_pattern_capability_guarded_fast_path")
+        expect(entries[3].entry_symbol).to_equal("general_pattern_bit_unpack_fixed_table")
+
+    it "produces four pattern rules":
+        val rules = general_pattern_rules()
+        expect(rules.len()).to_equal(4)
+
+    it "all rules are marked safe":
+        val rules = general_pattern_rules()
+        var i = 0
+        while i < rules.len():
+            expect(rules[i].safety).to_equal("safe")
+            i = i + 1
+
+    it "loads manifest successfully":
+        val result = load_general_patterns_manifest()
+        match result:
+            case Ok(manifest):
+                expect(manifest.name).to_equal("simple.opt.general-patterns")
+                expect(manifest.version).to_equal("1.0.0")
+                expect(manifest.passes.len()).to_equal(4)
+                expect(manifest.rules.len()).to_equal(4)
+            case Err(msg):
+                expect(false).to_equal(true)
+
+    it "registers into a fresh DynamicPassRegistry":
+        val registry = dynamic_pass_registry_new()
+        val result = register_general_patterns(registry)
+        match result:
+            case Ok(updated):
+                expect(updated.descriptors.len()).to_equal(4)
+            case Err(msg):
+                expect(false).to_equal(true)
+
+    it "registered passes are findable by name":
+        val registry = dynamic_pass_registry_new()
+        val result = register_general_patterns(registry)
+        match result:
+            case Ok(updated):
+                val found = dynamic_pass_registry_lookup(updated, "byte-scan-to-delimiter")
+                expect(found.?).to_equal(true)
+                val found2 = dynamic_pass_registry_lookup(updated, "switch-on-short-string")
+                expect(found2.?).to_equal(true)
+                val found3 = dynamic_pass_registry_lookup(updated, "capability-guarded-fast-path")
+                expect(found3.?).to_equal(true)
+                val found4 = dynamic_pass_registry_lookup(updated, "bit-unpack-fixed-table")
+                expect(found4.?).to_equal(true)
+            case Err(msg):
+                expect(false).to_equal(true)
+
+    it "double registration fails with conflict":
+        val registry = dynamic_pass_registry_new()
+        val result = register_general_patterns(registry)
+        match result:
+            case Ok(updated):
+                val result2 = register_general_patterns(updated)
+                match result2:
+                    case Ok(dup): expect(false).to_equal(true)
+                    case Err(msg): expect(msg.length() > 0).to_equal(true)
+            case Err(msg):
+                expect(false).to_equal(true)
+
+describe "General recognizers fire on general patterns (AC-6)":
+    it "byte-scan recognizer matches generic delimiter scan":
+        val loop_body = "while i < len:\n    if buf[i] == ':':\n        break\n    i = i + 1"
+        expect(is_byte_scan_loop(loop_body)).to_equal(true)
+
+    it "byte-scan recognizer rejects non-scan code":
+        val non_scan = "val x = compute(a, b)\nreturn x + 1"
+        expect(is_byte_scan_loop(non_scan)).to_equal(false)
+
+    it "short-string-switch recognizer matches dispatch chain":
+        val code = "if method == \"GET\":\n    handle_get()\nelif method == \"POST\":\n    handle_post()\nelif method == \"PUT\":\n    handle_put()\nelif method == \"DELETE\":\n    handle_delete()"
+        expect(is_short_string_switch(code)).to_equal(true)
+
+    it "short-string-switch rejects fewer than 4 branches":
+        val code = "if x == \"a\":\n    do_a()\nelif x == \"b\":\n    do_b()"
+        expect(is_short_string_switch(code)).to_equal(false)
+
+    it "capability-guard recognizer matches guard pattern":
+        val code = "if has_sendfile:\n    sendfile(fd, sock)\nelse:\n    buffer = alloc(size)\n    copy(fd, buffer)\n    send(sock, buffer)"
+        expect(is_capability_guard(code)).to_equal(true)
+
+    it "capability-guard rejects simple if without copy fallback":
+        val code = "if x > 0:\n    print(x)\nelse:\n    print(0)"
+        expect(is_capability_guard(code)).to_equal(false)
+
+    it "bit-unpack recognizer matches extraction loop":
+        val code = "while bit_pos < total:\n    val sym = (buf >> shift) & 0xff\n    val decoded = table[sym]\n    bit_pos = bit_pos + 8"
+        expect(is_bit_unpack_loop(code)).to_equal(true)
+
+    it "bit-unpack rejects non-bit code":
+        val code = "for item in list:\n    process(item)"
+        expect(is_bit_unpack_loop(code)).to_equal(false)
+
+describe "Patterns validate on web hot paths (AC-7)":
+    it "byte-scan matches HTTP header line scanning":
+        val http_scan = "while i < raw.len():\n    if raw[i] == '\\r':\n        break\n    i = i + 1"
+        expect(is_byte_scan_loop(http_scan)).to_equal(true)
+
+    it "short-string-switch matches HTTP method dispatch":
+        val http_dispatch = "if method == \"GET\":\n    get_handler()\nelif method == \"POST\":\n    post_handler()\nelif method == \"PUT\":\n    put_handler()\nelif method == \"DELETE\":\n    delete_handler()\nelif method == \"PATCH\":\n    patch_handler()"
+        expect(is_short_string_switch(http_dispatch)).to_equal(true)
+
+    it "capability-guard matches sendfile decision":
+        val sendfile_decision = "if supports_sendfile:\n    sendfile(file_fd, socket_fd)\nelse:\n    buffer = alloc(4096)\n    copy(file_fd, buffer)\n    write(socket_fd, buffer)"
+        expect(is_capability_guard(sendfile_decision)).to_equal(true)
+
+    it "bit-unpack matches HPACK Huffman decode loop":
+        val hpack_loop = "while bit_pos < bit_count:\n    val extracted = (input[byte_idx] >> bit_in_byte) & 1\n    val code_match = codes[sym]\n    bit_pos = bit_pos + code_len"
+        expect(is_bit_unpack_loop(hpack_loop)).to_equal(true)
+
+describe "Pattern info descriptions are general (AC-6)":
+    it "byte-scan description does not mention HTTP":
+        val info = byte_scan_to_delimiter_info()
+        expect(info.description.contains("HTTP")).to_equal(false)
+        expect(info.description.contains("byte buffer")).to_equal(true)
+
+    it "switch-on-short-string description is general":
+        val info = switch_on_short_string_info()
+        expect(info.description.contains("chains of string equality")).to_equal(true)
+
+    it "capability-guarded description is general":
+        val info = capability_guarded_fast_path_info()
+        expect(info.description.contains("boolean/capability guard")).to_equal(true)
+        expect(info.description.contains("zero-copy")).to_equal(true)
+
+    it "bit-unpack description is general":
+        val info = bit_unpack_fixed_table_info()
+        expect(info.description.contains("bits")).to_equal(true)
+        expect(info.description.contains("fixed table")).to_equal(true)
+
+    it "all patterns have example sites including non-web uses":
+        val infos = all_general_pattern_infos()
+        var i = 0
+        while i < infos.len():
+            expect(infos[i].example_sites.len() >= 2).to_equal(true)
+            i = i + 1

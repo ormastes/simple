@@ -1,0 +1,226 @@
+# General MIR Optimization Patterns
+#
+# Four general-purpose MIR optimization patterns registered as dynamic-pass
+# manifest entries. These are NOT domain-specific — they recognize common
+# code patterns that happen to appear in webserver hot paths, but apply
+# anywhere the same structure occurs.
+#
+# Patterns:
+#   1. byte-scan-to-delimiter  — loop scanning bytes until a sentinel
+#   2. switch-on-short-string  — dispatch on short fixed strings
+#   3. capability-guarded-fast-path — skip buffer copy when capability is set
+#   4. bit-unpack-fixed-table  — bit extraction with fixed lookup table
+
+use compiler.mir_opt.optimizer_manifest.{
+    ManifestPassEntry, ManifestPassContract, OptimizerManifest,
+    ManifestSchemaVersion, ManifestError, manifest_error_message,
+    load_manifest_v1_from_parsed_with_rules,
+    DynamicPassRegistry, dynamic_pass_registry_register
+}
+use compiler.mir_opt.mir_opt.mod.{PassScope}
+use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass.{
+    PatternRule, PatternRuleSet, pattern_rule_set_new,
+    MirPattern, MirPatternSlot, MirRewrite
+}
+
+# ============================================================================
+# Pattern Descriptors
+# ============================================================================
+
+struct GeneralPatternInfo:
+    name: text
+    description: text
+    match_criteria: text
+    example_sites: [text]
+
+fn byte_scan_to_delimiter_info() -> GeneralPatternInfo:
+    GeneralPatternInfo(
+        name: "byte-scan-to-delimiter",
+        description: "Recognizes loops that scan a byte buffer until a delimiter character is found. Candidate for SIMD vectorization or memchr intrinsic replacement.",
+        match_criteria: "while-loop with byte index increment, body contains single-byte compare against constant, loop exits on match or end-of-buffer",
+        example_sites: ["HTTP header line scan", "CSV field delimiter", "line-oriented text parsing"]
+    )
+
+fn switch_on_short_string_info() -> GeneralPatternInfo:
+    GeneralPatternInfo(
+        name: "switch-on-short-string",
+        description: "Recognizes chains of string equality checks against short fixed literals. Candidate for hash-switch or prefix-trie lowering.",
+        match_criteria: "if-elif chain where each branch compares the same variable against a string literal of length <= 16, minimum 4 branches",
+        example_sites: ["HTTP method dispatch", "route path matching", "command name dispatch"]
+    )
+
+fn capability_guarded_fast_path_info() -> GeneralPatternInfo:
+    GeneralPatternInfo(
+        name: "capability-guarded-fast-path",
+        description: "Recognizes a boolean/capability guard that selects between a zero-copy fast path and a buffer-copy fallback. Candidate for branch-weight annotation and copy-elision.",
+        match_criteria: "if-else where the condition is a boolean field or capability check, true-branch avoids allocation/copy, false-branch performs explicit buffer copy",
+        example_sites: ["sendfile vs read+write", "DMA capable vs memcpy", "zero-copy network send"]
+    )
+
+fn bit_unpack_fixed_table_info() -> GeneralPatternInfo:
+    GeneralPatternInfo(
+        name: "bit-unpack-fixed-table",
+        description: "Recognizes loops that extract bits from a packed buffer and look up each extracted value in a fixed table. Candidate for batch-decode intrinsic or lookup-table flattening.",
+        match_criteria: "while-loop with bit-position counter, body contains shift+mask to extract N bits, result used as index into a fixed-size array",
+        example_sites: ["Huffman decoding", "variable-length integer decoding", "bitfield unpacking"]
+    )
+
+fn all_general_pattern_infos() -> [GeneralPatternInfo]:
+    [
+        byte_scan_to_delimiter_info(),
+        switch_on_short_string_info(),
+        capability_guarded_fast_path_info(),
+        bit_unpack_fixed_table_info()
+    ]
+
+# ============================================================================
+# Manifest Entry Construction
+# ============================================================================
+
+fn general_pattern_contract() -> ManifestPassContract:
+    ManifestPassContract(
+        inputs: ["typed_mir"],
+        outputs: ["canonical_mir"],
+        purity: "pure"
+    )
+
+fn pattern_info_to_manifest_entry(info: GeneralPatternInfo) -> ManifestPassEntry:
+    ManifestPassEntry(
+        stable_name: info.name,
+        aliases: [],
+        scope: PassScope.Function,
+        capability_requires: [],
+        contract: general_pattern_contract(),
+        entry_symbol: "general_pattern_" + info.name.replace("-", "_")
+    )
+
+fn general_pattern_manifest_entries() -> [ManifestPassEntry]:
+    var entries: [ManifestPassEntry] = []
+    for info in all_general_pattern_infos():
+        entries = entries.push(pattern_info_to_manifest_entry(info))
+    entries
+
+# ============================================================================
+# Pattern Rule Construction
+# ============================================================================
+
+fn make_pattern_rule(name: text, match_slot_kind: text, rewrite_kind: text) -> PatternRule:
+    val slot = MirPatternSlot(
+        kind_tag: match_slot_kind,
+        operand_0: Some("$src"),
+        operand_1: Some("$const"),
+        dest: Some("$dest")
+    )
+    val pattern = MirPattern(inst_count: 1, slots: [slot])
+    val rewrite = MirRewrite(kind_tag: rewrite_kind, dest: "$dest", operands: ["$src", "$const"])
+    PatternRule(
+        name: name,
+        pattern: pattern,
+        rewrite: rewrite,
+        cost_delta: -1,
+        safety: "safe"
+    )
+
+fn byte_scan_to_delimiter_rule() -> PatternRule:
+    make_pattern_rule("byte-scan-to-delimiter", "Intrinsic", "Intrinsic")
+
+fn switch_on_short_string_rule() -> PatternRule:
+    make_pattern_rule("switch-on-short-string", "BinOp", "Intrinsic")
+
+fn capability_guarded_fast_path_rule() -> PatternRule:
+    make_pattern_rule("capability-guarded-fast-path", "Copy", "Copy")
+
+fn bit_unpack_fixed_table_rule() -> PatternRule:
+    make_pattern_rule("bit-unpack-fixed-table", "Load", "Intrinsic")
+
+fn general_pattern_rules() -> [PatternRule]:
+    [
+        byte_scan_to_delimiter_rule(),
+        switch_on_short_string_rule(),
+        capability_guarded_fast_path_rule(),
+        bit_unpack_fixed_table_rule()
+    ]
+
+# ============================================================================
+# Manifest Construction and Registration
+# ============================================================================
+
+fn general_patterns_manifest_name() -> text:
+    "simple.opt.general-patterns"
+
+fn general_patterns_manifest_version() -> text:
+    "1.0.0"
+
+fn load_general_patterns_manifest() -> Result<OptimizerManifest, text>:
+    val result = load_manifest_v1_from_parsed_with_rules(
+        1,
+        "simple.opt.mir.v1",
+        general_patterns_manifest_name(),
+        general_patterns_manifest_version(),
+        "0.9.0",
+        general_pattern_manifest_entries(),
+        general_pattern_rules()
+    )
+    match result:
+        case Ok(manifest): Ok(manifest)
+        case Err(err):
+            Err("failed to load general patterns manifest: " + manifest_error_message(err))
+
+fn register_general_patterns(registry: DynamicPassRegistry) -> Result<DynamicPassRegistry, text>:
+    val manifest_result = load_general_patterns_manifest()
+    match manifest_result:
+        case Err(msg): return Err(msg)
+        case Ok(manifest):
+            val reg_result = dynamic_pass_registry_register(registry, manifest)
+            match reg_result:
+                case Ok(updated): Ok(updated)
+                case Err(err):
+                    Err("failed to register general patterns: " + manifest_error_message(err))
+
+# ============================================================================
+# Pattern Matching Verification (general recognizers)
+# ============================================================================
+
+fn is_byte_scan_loop(loop_body: text) -> bool:
+    val has_index_increment = loop_body.contains("+ 1") or loop_body.contains("+= 1")
+    val has_byte_compare = loop_body.contains("==") and (loop_body.contains("[") and loop_body.contains("]"))
+    val has_break = loop_body.contains("break")
+    has_index_increment and has_byte_compare and has_break
+
+fn is_short_string_switch(code: text) -> bool:
+    var branch_count = 0
+    val lines = code.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("if ") or trimmed.starts_with("elif "):
+            if trimmed.contains("==") and trimmed.contains("\""):
+                branch_count = branch_count + 1
+    branch_count >= 4
+
+fn is_capability_guard(code: text) -> bool:
+    val has_if_else = code.contains("if ") and code.contains("else:")
+    val has_copy_fallback = code.contains("copy") or code.contains("alloc") or code.contains("buffer")
+    has_if_else and has_copy_fallback
+
+fn is_bit_unpack_loop(code: text) -> bool:
+    val has_shift = code.contains(">>") or code.contains("<<")
+    val has_mask = code.contains("&")
+    val has_table_lookup = code.contains("[") and code.contains("]")
+    val has_bit_counter = code.contains("bit_pos") or code.contains("bit_offset")
+    has_shift and has_mask and has_table_lookup and has_bit_counter
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GeneralPatternInfo
+export byte_scan_to_delimiter_info, switch_on_short_string_info
+export capability_guarded_fast_path_info, bit_unpack_fixed_table_info
+export all_general_pattern_infos
+
+export general_pattern_manifest_entries, general_pattern_rules
+export load_general_patterns_manifest, register_general_patterns
+export general_patterns_manifest_name, general_patterns_manifest_version
+
+export is_byte_scan_loop, is_short_string_switch
+export is_capability_guard, is_bit_unpack_loop
