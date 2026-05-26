@@ -1,8 +1,14 @@
 # HTTP Request Handling
 #
 # Provides HTTP request parsing and building functionality.
+# Includes hardened parsing with configurable limits.
 
-import common from "std/http/common"
+use std.http.common.{parse_headers as common_parse_headers, parse_int as common_parse_int, format_headers as common_format_headers, index_of as common_index_of}
+use std.http.limits.{
+    HttpLimits, http_limits_default, HttpParseError,
+    check_request_line, check_header_count, check_header_size, check_body_size
+}
+use std.http.types.{is_valid_method}
 
 # ============================================================================
 # HTTP Request Parsing
@@ -37,7 +43,7 @@ fn parse_request(text: text) -> tuple:
         header_lines.push(lines[j])
         j = j + 1
 
-    val headers = common.parse_headers(header_lines)
+    val headers = common_parse_headers(header_lines)
 
     # Parse body (everything after empty line)
     var body_lines = []
@@ -49,6 +55,70 @@ fn parse_request(text: text) -> tuple:
     val body = "\r\n".join(body_lines)
 
     return (method, path, version, headers, body)
+
+# Hardened parse with configurable limits — returns Result
+fn parse_request_safe(raw: text, limits: HttpLimits) -> Result<tuple, HttpParseError>:
+    val lines = raw.split("\r\n")
+    if lines.length() == 0:
+        return Err(HttpParseError.MalformedRequestLine(""))
+
+    val request_line = lines[0]
+    val line_err = check_request_line(request_line, limits)
+    if line_err.?:
+        return Err(line_err.unwrap())
+
+    val request_parts = parse_request_line(request_line)
+    val method = request_parts[0]
+    val path = request_parts[1]
+    val version = request_parts[2]
+
+    if not is_valid_method(method):
+        return Err(HttpParseError.InvalidMethod(method))
+
+    var header_end = 1
+    var i = 1
+    while i < lines.length():
+        if lines[i] == "":
+            header_end = i
+            break
+        i = i + 1
+
+    val header_count = header_end - 1
+    val count_err = check_header_count(header_count, limits)
+    if count_err.?:
+        return Err(count_err.unwrap())
+
+    var header_lines = []
+    var j = 1
+    while j < header_end:
+        val hline = lines[j]
+        val colon_pos = hline.index_of(":")
+        if colon_pos > 0:
+            val hname = hline.substring(0, colon_pos)
+            val hval = hline.substring(colon_pos + 1, hline.length()).trim()
+            val size_err = check_header_size(hname, hval, limits)
+            if size_err.?:
+                return Err(size_err.unwrap())
+        header_lines.push(hline)
+        j = j + 1
+
+    val headers = common_parse_headers(header_lines)
+
+    var body_lines = []
+    var k = header_end + 1
+    while k < lines.length():
+        body_lines.push(lines[k])
+        k = k + 1
+    val body = "\r\n".join(body_lines)
+
+    val body_err = check_body_size(body.length(), limits)
+    if body_err.?:
+        return Err(body_err.unwrap())
+
+    Ok((method, path, version, headers, body))
+
+fn parse_request_with_defaults(raw: text) -> Result<tuple, HttpParseError>:
+    parse_request_safe(raw, http_limits_default())
 
 # Parse HTTP request line
 # Example: "GET /path HTTP/1.1" -> ("GET", "/path", "HTTP/1.1")
@@ -92,7 +162,7 @@ fn parse_version(text: text) -> text:
 # Build complete HTTP request from components
 # headers: list of (name, value) tuples
 fn build_request(method: text, path: text, headers: list, body: text) -> text:
-    val headers_text = common.format_headers(headers)
+    val headers_text = common_format_headers(headers)
 
     var parts: [text] = []
     parts.push(method + " " + path + " HTTP/1.1")

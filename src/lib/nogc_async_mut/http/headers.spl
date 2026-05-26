@@ -1,8 +1,9 @@
 # HTTP Headers Handling
 #
 # Provides HTTP header parsing, formatting, and manipulation.
+# Includes canonicalization and duplicate-header policy.
 
-import common from "std/http/common"
+use std.http.common.{parse_headers as common_parse_headers, parse_header as common_parse_header, format_headers as common_format_headers, parse_int as common_parse_int, index_of as common_index_of, hex_to_int as common_hex_to_int}
 
 # ============================================================================
 # HTTP Headers
@@ -10,16 +11,16 @@ import common from "std/http/common"
 
 # Parse list of header lines into list of (name, value) tuples
 fn parse_headers(lines: list) -> list:
-    return common.parse_headers(lines)
+    return common_parse_headers(lines)
 
 # Parse single header line
 # Example: "Content-Type: application/json" -> ("Content-Type", "application/json")
 fn parse_header(line: text) -> tuple:
-    return common.parse_header(line)
+    return common_parse_header(line)
 
 # Format headers list into HTTP header text
 fn format_headers(headers: list) -> text:
-    return common.format_headers(headers)
+    return common_format_headers(headers)
 
 # Get header value by name (case-insensitive)
 # Returns nil if not found
@@ -108,7 +109,7 @@ fn capitalize_word(word: text) -> text:
         return word
 
     val first = word[0].upper()
-    val rest = word.substring(1, word.length())
+    val rest = word.substring(1, word.length()).lower()
 
     return first + rest
 
@@ -119,7 +120,7 @@ fn get_content_length(headers: list) -> i64:
     if length_str == nil:
         return 0
 
-    return common.parse_int(length_str)
+    return common_parse_int(length_str)
 
 # Check if response uses chunked encoding
 fn is_chunked(headers: list) -> bool:
@@ -178,7 +179,7 @@ fn decode_chunked(encoded: text) -> text:
 
     while pos < encoded.length():
         # Find end of chunk size line
-        val size_end = common.index_of(encoded, "\r\n", pos)
+        val size_end = common_index_of(encoded, "\r\n", pos)
 
         if size_end < 0:
             break
@@ -223,7 +224,7 @@ fn parse_hex_text(hex: text) -> i64:
 
 # Convert hex digit to integer
 fn hex_to_int(ch: text) -> i64:
-    return common.hex_to_int(ch)
+    return common_hex_to_int(ch)
 
 # ============================================================================
 # Range Header Handling
@@ -247,11 +248,11 @@ fn parse_range_header(header: text) -> tuple:
 
     var start = 0
     if start_str.length() > 0:
-        start = common.parse_int(start_str)
+        start = common_parse_int(start_str)
 
     var end = 0
     if end_str.length() > 0:
-        end = common.parse_int(end_str)
+        end = common_parse_int(end_str)
 
     return (start, end)
 
@@ -361,4 +362,82 @@ fn build_multipart(parts: list, boundary: text) -> text:
 fn generate_boundary() -> text:
     # Simplified - in real implementation would use random data
     return "----SimpleFormBoundary7MA4YWxkTrZu0gW"
+
+# ============================================================================
+# Header Canonicalization
+# ============================================================================
+
+fn canonicalize_headers(headers: list) -> list:
+    var result = []
+    var i = 0
+    while i < headers.length():
+        val header = headers[i]
+        val name = normalize_header_name(header[0])
+        val value = header[1]
+        result.push((name, value))
+        i = i + 1
+    return result
+
+# ============================================================================
+# Duplicate Header Policy
+# ============================================================================
+
+fn singleton_header_names() -> [text]:
+    ["content-type", "content-length", "host", "authorization",
+     "date", "etag", "location", "server", "user-agent",
+     "content-encoding", "transfer-encoding", "connection"]
+
+fn is_singleton_header(name: text) -> bool:
+    val lower = name.lower()
+    val singletons = singleton_header_names()
+    var i = 0
+    while i < singletons.len():
+        if singletons[i] == lower:
+            return true
+        i = i + 1
+    false
+
+fn deduplicate_headers_last_wins(headers: list) -> list:
+    var seen: [text] = []
+    var result = []
+    var i = headers.length() - 1
+    while i >= 0:
+        val header = headers[i]
+        val lower_name = header[0].lower()
+        if is_singleton_header(lower_name):
+            var already_seen = false
+            var s = 0
+            while s < seen.len():
+                if seen[s] == lower_name:
+                    already_seen = true
+                    break
+                s = s + 1
+            if not already_seen:
+                result.push(header)
+                seen = seen.push(lower_name)
+        else:
+            result.push(header)
+        i = i - 1
+    var reversed = []
+    var r = result.length() - 1
+    while r >= 0:
+        reversed.push(result[r])
+        r = r - 1
+    return reversed
+
+fn validate_no_duplicate_singletons(headers: list) -> Result<list, text>:
+    var seen: [text] = []
+    var i = 0
+    while i < headers.length():
+        val header = headers[i]
+        val lower_name = header[0].lower()
+        if is_singleton_header(lower_name):
+            var s = 0
+            while s < seen.len():
+                if seen[s] == lower_name:
+                    return Err("duplicate singleton header: " + lower_name)
+                s = s + 1
+            seen = seen.push(lower_name)
+        i = i + 1
+    Ok(headers)
 
