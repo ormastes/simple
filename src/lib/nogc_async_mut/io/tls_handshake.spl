@@ -49,6 +49,10 @@ use std.nogc_async_mut.io.tls_common.{
     tls_aes_gcm_encrypt,
     tls_aes_gcm_decrypt
 }
+use std.tls.ech.{
+    detect_ech_extension, EchDecision, ech_server_decide,
+    ech_build_retry_config_extension
+}
 use std.nogc_async_mut.io.tls_io.{
     read_tls_record,
     send_all,
@@ -106,6 +110,22 @@ fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Res
 
     # Track all handshake messages for Finished verification
     var all_handshake_bytes = record_payload
+
+    # --- ECH detection (RFC 9460) ---
+    val ch_extensions = client_hello[4]
+    val ech_payload = detect_ech_extension(ch_extensions)
+    val ech_decision = ech_server_decide(ech_payload, config.ech_config)
+    match ech_decision:
+        case EchDecision.RejectWithRetryConfig:
+            val retry_ext = ech_build_retry_config_extension(config.ech_config)
+            if retry_ext.len() > 0:
+                pass_dn
+        case EchDecision.ProviderUnavailable:
+            pass_dn
+        case EchDecision.AcceptInner:
+            pass_dn
+        case EchDecision.NotPresent:
+            pass_dn
 
     # --- 2. Select cipher suite ---
     val selected_cipher = negotiate_cipher(ch_cipher_suites)

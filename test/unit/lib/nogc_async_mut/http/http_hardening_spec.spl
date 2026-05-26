@@ -229,3 +229,54 @@ describe "Connection limits configuration (AC-4)":
         val body_err = HttpParseError.BodyTooLarge(20000000, 10485760)
         val body_msg = http_parse_error_message(body_err)
         expect(body_msg.contains("too large")).to_equal(true)
+
+describe "Hardening enforcement — no unbounded claims (AC-5)":
+    it "default limits bound request line size":
+        val limits = http_limits_default()
+        expect(limits.max_request_line_bytes > 0).to_equal(true)
+        expect(limits.max_request_line_bytes <= 65536).to_equal(true)
+
+    it "default limits bound header count":
+        val limits = http_limits_default()
+        expect(limits.max_header_count > 0).to_equal(true)
+        expect(limits.max_header_count <= 1000).to_equal(true)
+
+    it "default limits bound body size":
+        val limits = http_limits_default()
+        expect(limits.max_body_bytes > 0).to_equal(true)
+        expect(limits.max_body_bytes <= 104857600).to_equal(true)
+
+    it "default limits bound connection lifetime":
+        val limits = http_limits_default()
+        expect(limits.idle_timeout_seconds > 0).to_equal(true)
+        expect(limits.idle_timeout_seconds <= 3600).to_equal(true)
+
+    it "default limits bound requests per connection":
+        val limits = http_limits_default()
+        expect(limits.max_requests_per_connection > 0).to_equal(true)
+        expect(limits.max_requests_per_connection <= 10000).to_equal(true)
+
+    it "zero-value limits reject all input":
+        val limits = HttpLimits(
+            max_request_line_bytes: 0,
+            max_header_count: 0,
+            max_header_size_bytes: 0,
+            max_body_bytes: 0,
+            idle_timeout_seconds: 1,
+            max_requests_per_connection: 1
+        )
+        val line_err = check_request_line("GET / HTTP/1.1", limits)
+        expect(line_err.?).to_equal(true)
+        val hdr_err = check_header_count(1, limits)
+        expect(hdr_err.?).to_equal(true)
+        val body_err = check_body_size(1, limits)
+        expect(body_err.?).to_equal(true)
+
+    it "path traversal is always rejected regardless of limits":
+        expect(is_safe_static_path("/../../../etc/shadow")).to_equal(false)
+        expect(is_safe_static_path("/..\\secret")).to_equal(false)
+        expect(is_safe_static_path("/good/../../../bad")).to_equal(false)
+
+    it "normalize_path removes redundant slashes":
+        val norm = normalize_path("/css//style.css")
+        expect(norm.contains("//")).to_equal(false)
