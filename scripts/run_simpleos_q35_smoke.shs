@@ -1,0 +1,100 @@
+#!/bin/sh
+set -eu
+
+# Bounded x86_64 q35 smoke lane for SimpleOS.
+#
+# Usage:
+#   sh scripts/run_simpleos_q35_smoke.shs
+#   sh scripts/run_simpleos_q35_smoke.shs --timeout=30
+#
+# Env knobs:
+#   SIMPLEOS_Q35_ELF       Kernel ELF (default: build/os/simpleos_x86_64.elf)
+#   SIMPLEOS_Q35_DISK      NVMe raw disk image (default: build/os/fat32-x86_64.img)
+#   SIMPLEOS_Q35_LOG       Serial log path
+#   SIMPLEOS_Q35_TIMEOUT   Timeout seconds (default: 30)
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+
+SIMPLEOS_Q35_ELF="${SIMPLEOS_Q35_ELF:-${ROOT_DIR}/build/os/simpleos_x86_64.elf}"
+SIMPLEOS_Q35_DISK="${SIMPLEOS_Q35_DISK:-${ROOT_DIR}/build/os/fat32-x86_64.img}"
+SIMPLEOS_Q35_LOG="${SIMPLEOS_Q35_LOG:-${ROOT_DIR}/build/test-artifacts/simpleos-q35-smoke/q35_smoke.log}"
+SIMPLEOS_Q35_TIMEOUT="${SIMPLEOS_Q35_TIMEOUT:-30}"
+
+for arg in "$@"; do
+    case "$arg" in
+        --timeout=*) SIMPLEOS_Q35_TIMEOUT="${arg#--timeout=}" ;;
+        *) echo "[q35-smoke] Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+case "$SIMPLEOS_Q35_TIMEOUT" in
+    ''|*[!0-9]*) echo "[q35-smoke] timeout must be seconds as a positive integer" >&2; exit 2 ;;
+esac
+
+if [ ! -f "$SIMPLEOS_Q35_ELF" ]; then
+    echo "[q35-smoke] ERROR: kernel ELF not found: $SIMPLEOS_Q35_ELF" >&2
+    exit 3
+fi
+
+if [ ! -f "$SIMPLEOS_Q35_DISK" ]; then
+    echo "[q35-smoke] ERROR: disk image not found: $SIMPLEOS_Q35_DISK" >&2
+    exit 3
+fi
+
+mkdir -p "$(dirname "$SIMPLEOS_Q35_LOG")"
+rm -f "$SIMPLEOS_Q35_LOG"
+
+echo "[q35-smoke] board=x86_64-q35 protection=enforce kind=paging profile=c-boot-bridge"
+echo "[q35-smoke] elf=$SIMPLEOS_Q35_ELF"
+echo "[q35-smoke] disk=$SIMPLEOS_Q35_DISK"
+echo "[q35-smoke] log=$SIMPLEOS_Q35_LOG"
+
+set +e
+timeout "${SIMPLEOS_Q35_TIMEOUT}s" qemu-system-x86_64 \
+    -machine q35 \
+    -cpu qemu64 \
+    -m 512M \
+    -kernel "$SIMPLEOS_Q35_ELF" \
+    -serial stdio \
+    -monitor none \
+    -display none \
+    -no-reboot \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=${SIMPLEOS_Q35_DISK},if=none,id=nvme0,format=raw" \
+    -device nvme,drive=nvme0,serial=simpleos0 \
+    -netdev user,id=net0 \
+    -device virtio-net-pci,netdev=net0 \
+    > "$SIMPLEOS_Q35_LOG" 2>&1
+code=$?
+set -e
+
+cat "$SIMPLEOS_Q35_LOG"
+
+if [ "$code" -ne 1 ]; then
+    echo "[q35-smoke] FAIL unexpected_exit=$code expected=1"
+    exit 1
+fi
+
+missing=0
+for marker in \
+    "[harden] text_write_trap=pass" \
+    "[stage1] pci_count=" \
+    "[stage1] nvme_pci=present" \
+    "[stage1] nvme_identify_read=pass" \
+    "[stage1] nvme_rw_restore=pass" \
+    "[stage1] net_pci=present" \
+    "[stage1] virtio_net_tx_rx=pass" \
+    "TEST PASSED"
+do
+    if ! grep -a -F -q "$marker" "$SIMPLEOS_Q35_LOG"; then
+        echo "[q35-smoke] missing marker: $marker"
+        missing=1
+    fi
+done
+
+if [ "$missing" -ne 0 ]; then
+    echo "[q35-smoke] FAIL marker_contract=missing"
+    exit 1
+fi
+
+echo "[q35-smoke] PASS board=x86_64-q35 protection=enforce qemu_exit=1 marker_contract=ready"

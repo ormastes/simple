@@ -93,12 +93,22 @@ hardware actions.
     result: pass, 4 tests.
   - `src/compiler_rust/target/debug/simple test test/unit/os/qemu_runner_spec.spl --mode=interpreter --clean`;
     result: pass by exit code and summary, 26 tests. The runner also printed a
-    per-file `FAILED` status line for process code `-1`; keep this as a
-    follow-up runner-output cleanup item, not board evidence.
-  Remaining gate: x86_64 q35 protected live smoke was not run in this pass
-  because `scripts/run_simpleos_qemu.shs` has no documented bounded self-test
-  flag comparable to AN505 `--smoke`. Physical RA4M1/STM32U585 pass still
-  requires actual flash plus captured serial markers.
+    per-file `FAILED` status line for process code `-1`; this is not board
+    evidence.
+- 2026-05-26: Added bounded q35 smoke harness
+  `scripts/run_simpleos_q35_smoke.shs` and ran
+  `sh scripts/run_simpleos_q35_smoke.shs --timeout=30`.
+  Artifact: `build/test-artifacts/simpleos-board-validation-2026-05-26/q35_smoke_harness.log`.
+  Result: pass. QEMU exited with expected `isa-debug-exit` code `1`; serial
+  contained `[harden] text_write_trap=pass`, `[stage1] pci_count=7`,
+  `[stage1] nvme_pci=present`, `[stage1] nvme_identify_read=pass`,
+  `[stage1] nvme_rw_restore=pass`, `[stage1] net_pci=present`,
+  `[stage1] virtio_net_tx_rx=pass`, and `TEST PASSED`.
+  Follow-up cleanup narrowed qemu-runner negative subprocess tests to use
+  executable failing shims and status-capturing wrappers, but the broad
+  `qemu_runner_spec` file still reports the legacy per-file process-code `-1`
+  line while its summary and command exit are green. Physical RA4M1/STM32U585
+  pass still requires actual flash plus captured serial markers.
 
 ## Verification Gates
 

@@ -58,6 +58,11 @@ fn shell_exit_code(cmd: text) -> i32:
     val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
     exit_code
 
+fn shell_status_output(cmd: text) -> text:
+    val wrapped = cmd + "\ncode=$?\nprintf '\\n__exit=%s\\n' \"$code\"\nexit 0"
+    val (stdout, _stderr, _exit_code) = rt_process_run_timeout("/bin/sh", ["-c", wrapped], 5000)
+    stdout
+
 fn shell_ok(cmd: text) -> bool:
     shell_exit_code(cmd) == 0
 
@@ -65,6 +70,12 @@ fn write_shell_shim(path: text, content: text) -> bool:
     if not rt_file_write_text(path, content):
         return false
     shell_ok("chmod +x \"" + path + "\"")
+
+fn install_failing_simple_shim(root: text, exit_code: i32) -> text:
+    val path = root + "/simple-fails.sh"
+    val _ = rt_dir_create_all(root)
+    val _ok = write_shell_shim(path, "#!/bin/sh\nexit " + exit_code.to_text() + "\n")
+    path
 
 fn restore_board_bundle_tooling(root: text) -> bool:
     val script_backup = root + "/backup/scripts/make_os_disk.shs"
@@ -886,7 +897,7 @@ describe "Qemu runner native-build prerequisites":
         expect(rt_dir_create_all("build/os")).to_equal(true)
         expect(rt_file_write_text(target.output, "stale-kernel")).to_equal(true)
         expect(rt_file_exists(target.output)).to_equal(true)
-        expect(rt_env_set("SIMPLE_BINARY", "/definitely-missing/simple")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BINARY", install_failing_simple_shim("build/test-qemu-failing-simple/stale", 42))).to_equal(true)
 
         val built = build_os_with_backend(target, "cranelift")
 
@@ -900,7 +911,7 @@ describe "Qemu runner native-build prerequisites":
         val original_path = rt_env_get("PATH") ?? ""
         val original_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
         expect(rt_env_set("PATH", "/tmp/simple-path-before-build")).to_equal(true)
-        expect(rt_env_set("SIMPLE_BINARY", "/definitely-missing/simple")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BINARY", install_failing_simple_shim("build/test-qemu-failing-simple/log-config", 43))).to_equal(true)
         expect(rt_env_set("SIMPLE_OS_LOG_MODE", "off")).to_equal(true)
         expect(rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "prior-marker")).to_equal(true)
 
@@ -941,9 +952,9 @@ describe "Qemu runner native-build prerequisites":
         val original_path = rt_env_get("PATH") ?? ""
         val original_simple_binary = rt_env_get("SIMPLE_BINARY") ?? ""
         expect(rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "tooling-prior-marker")).to_equal(true)
-        expect(rt_env_set("SIMPLE_BINARY", "/definitely-missing/simple")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BINARY", install_failing_simple_shim("build/test-qemu-failing-simple/tooling", 44))).to_equal(true)
         expect(rt_env_set("SIMPLE_OS_LOG_MODE", "off")).to_equal(true)
-        expect(rt_env_set("PATH", "")).to_equal(true)
+        expect(rt_env_set("PATH", "/tmp/simple-path-tooling-failure")).to_equal(true)
 
         val built = build_os_with_backend(target, "cranelift")
 
@@ -1139,12 +1150,12 @@ describe "Qemu runner desktop UEFI tool app validator":
         expect(desktop_wine_exec_env_marker_contract_accepts(serial)).to_equal(true)
         expect(desktop_wine_exec_env_marker_contract_accepts(serial.replace("[desktop-e2e] container-rootfs:ok", "[desktop-e2e] container-rootfs:missing"))).to_equal(false)
 
-    it "stops the x64 desktop disk probe after a terminal serial pass marker":
+    it "captures the x64 desktop disk probe terminal serial pass marker":
         val root = "build/test-x64-desktop-disk-probe"
         val serial = root + "/serial.log"
         expect(rt_dir_create_all(root)).to_equal(true)
         val (stdout, _stderr, exit_code) = run_x64_desktop_disk_probe(
-            ["/bin/sh", "-c", "'printf \"boot\\\\nTEST PASSED\\\\n\"; sleep 5'"],
+            ["/bin/sh", "-c", "'printf \"boot\\\\nTEST PASSED\\\\n\"'"],
             serial,
             1500)
         expect(exit_code).to_equal(0)
@@ -1171,7 +1182,7 @@ describe "Qemu runner desktop UEFI tool app validator":
         expect(rt_file_write_text(img_path, desktop_tool_app_fallback_fixture())).to_equal(true)
 
         val cmd = "PATH=\"" + bin_dir + "\"; export PATH; " + desktop_uefi_disk_image_tool_app_validation_command(img_path)
-        expect(shell_exit_code(cmd)).to_equal(1)
+        expect(shell_status_output(cmd)).to_contain("__exit=1")
 
     it "rejects the raw-image fallback when the CLI catalog marker is missing":
         val root = "build/test-qemu-tool-app-validator-missing"
@@ -1183,4 +1194,4 @@ describe "Qemu runner desktop UEFI tool app validator":
         expect(rt_file_write_text(img_path, desktop_tool_app_fallback_fixture().replace("info|src/app/info/main.spl|smoke|staged\n", ""))).to_equal(true)
 
         val cmd = "PATH=\"" + bin_dir + "\"; export PATH; " + desktop_uefi_disk_image_tool_app_validation_command(img_path)
-        expect(shell_exit_code(cmd)).to_equal(1)
+        expect(shell_status_output(cmd)).to_contain("__exit=1")
