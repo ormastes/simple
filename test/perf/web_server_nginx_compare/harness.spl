@@ -22,7 +22,18 @@ class BenchmarkResult:
     rps: f64            # requests per second
     p99_latency_ms: f64 # 99th-percentile latency in milliseconds
     throughput_mbps: f64 # throughput in MB/s
+    failure_count: i64  # non-2xx responses + socket errors
     file_size: i64      # file size in bytes that was tested
+    timestamp: text     # ISO-8601 timestamp of this run
+
+class BenchmarkConfig:
+    """Configuration for a benchmark run."""
+    server_label: text  # "simple" or "nginx"
+    host: text          # e.g. "127.0.0.1"
+    port: i64           # TCP port
+    concurrency: i64    # number of concurrent connections
+    duration_s: i64     # test duration in seconds
+    fixture_dir: text   # directory containing bench/ fixtures
 
 # ============================================================================
 # Internal: parse wrk output
@@ -93,6 +104,56 @@ fn _parse_wrk_p99(output: text) -> f64:
         return num_text.parse_f64() * 1000.0
     0.0
 
+fn _parse_wrk_failures(output: text) -> i64:
+    """Extract failure count from wrk output.
+
+    wrk prints 'Non-2xx or 3xx responses: NNN' and/or
+    'Socket errors: connect N, read N, write N, timeout N'.
+    Sum non-2xx count + socket error counts. Lines may be absent (= 0).
+    """
+    var total: i64 = 0
+    # Non-2xx responses
+    val non2xx_marker = "Non-2xx or 3xx responses:"
+    val non2xx_idx = output.find(non2xx_marker)
+    if non2xx_idx >= 0:
+        val rest = output.slice(non2xx_idx + non2xx_marker.len(), output.len())
+        val trimmed = rest.trim()
+        val nl = trimmed.find("\n")
+        var line = trimmed
+        if nl >= 0:
+            line = trimmed.slice(0, nl).trim()
+        total = total + line.parse_i64()
+
+    # Socket errors
+    val sock_marker = "Socket errors:"
+    val sock_idx = output.find(sock_marker)
+    if sock_idx >= 0:
+        val rest = output.slice(sock_idx + sock_marker.len(), output.len())
+        val trimmed = rest.trim()
+        val nl = trimmed.find("\n")
+        var line = trimmed
+        if nl >= 0:
+            line = trimmed.slice(0, nl).trim()
+        # Format: "connect N, read N, write N, timeout N"
+        # Sum all numbers
+        var pos = 0
+        while pos < line.len():
+            val ch = line.char_at(pos)
+            if ch >= "0" and ch <= "9":
+                var num_end = pos + 1
+                while num_end < line.len():
+                    val nc = line.char_at(num_end)
+                    if nc >= "0" and nc <= "9":
+                        num_end = num_end + 1
+                    else:
+                        break
+                val num_text = line.slice(pos, num_end)
+                total = total + num_text.parse_i64()
+                pos = num_end
+            else:
+                pos = pos + 1
+    total
+
 # ============================================================================
 # Internal: parse ab output
 # ============================================================================
@@ -146,6 +207,45 @@ fn _parse_ab_throughput(output: text) -> f64:
     # ab reports in Kbytes/sec — convert to MB/s
     num_text.parse_f64() / 1024.0
 
+fn _parse_ab_failures(output: text) -> i64:
+    """Extract failure count from ab output.
+
+    ab prints 'Failed requests: NNN' and optionally 'Non-2xx responses: NNN'.
+    Return the max of these (they overlap).
+    """
+    var failed: i64 = 0
+    var non2xx: i64 = 0
+
+    val fail_marker = "Failed requests:"
+    val fail_idx = output.find(fail_marker)
+    if fail_idx >= 0:
+        val rest = output.slice(fail_idx + fail_marker.len(), output.len())
+        val trimmed = rest.trim()
+        val nl = trimmed.find("\n")
+        var line = trimmed
+        if nl >= 0:
+            line = trimmed.slice(0, nl).trim()
+        failed = line.parse_i64()
+
+    val non2xx_marker = "Non-2xx responses:"
+    val non2xx_idx = output.find(non2xx_marker)
+    if non2xx_idx >= 0:
+        val rest = output.slice(non2xx_idx + non2xx_marker.len(), output.len())
+        val trimmed = rest.trim()
+        val nl = trimmed.find("\n")
+        var line = trimmed
+        if nl >= 0:
+            line = trimmed.slice(0, nl).trim()
+        non2xx = line.parse_i64()
+
+    if non2xx > failed:
+        return non2xx
+    failed
+
+fn _get_timestamp() -> text:
+    """Return current ISO-8601 timestamp via shell date command."""
+    shell_output_trimmed("date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null", "1970-01-01T00:00:00Z")
+
 # ============================================================================
 # Public API
 # ============================================================================
@@ -162,44 +262,68 @@ pub fn run_benchmark(server_type: text, host: text, port: i64, file_sizes: [i64]
     file_sizes:  list of file sizes to test (bytes); matching files must exist
     Returns list of BenchmarkResult, one per file size.
     """
+    val cfg = BenchmarkConfig(
+        server_label: server_type,
+        host: host,
+        port: port,
+        concurrency: 10,
+        duration_s: 10,
+        fixture_dir: ""
+    )
+    run_benchmark_with_config(cfg, file_sizes)
+
+pub fn run_benchmark_with_config(cfg: BenchmarkConfig, file_sizes: [i64]) -> [BenchmarkResult]:
+    """Run benchmark using a BenchmarkConfig for each file size.
+
+    Tries wrk first; falls back to ab if wrk is not found.
+    The server must already be running and serving /bench/<size>.html.
+    Returns list of BenchmarkResult, one per file size.
+    """
     val wrk_check = shell_output_trimmed("which wrk 2>/dev/null", "")
     val use_wrk = wrk_check.len() > 0
+    val ts = _get_timestamp()
 
     var results: [BenchmarkResult] = []
     var idx = 0
     while idx < file_sizes.len():
         val sz = file_sizes[idx]
-        val url = "http://{host}:{port}/bench/{sz}.html"
+        val url = "http://{cfg.host}:{cfg.port}/bench/{sz}.html"
+        val conc = cfg.concurrency
+        val dur = cfg.duration_s
 
         var output = ""
         if use_wrk:
-            # -t2 threads, -c10 connections, 10s duration, latency percentiles
-            val cmd = "wrk -t2 -c10 -d10s --latency '{url}' 2>&1"
+            val cmd = "wrk -t2 -c{conc} -d{dur}s --latency '{url}' 2>&1"
             output = shell_output_trimmed(cmd, "")
         else:
-            # ab: 1000 requests, 10 concurrent, with percentiles
-            val cmd = "ab -n 1000 -c 10 -e /dev/null '{url}' 2>&1"
+            val nreqs = conc * dur * 100
+            val cmd = "ab -n {nreqs} -c {conc} -e /dev/null '{url}' 2>&1"
             output = shell_output_trimmed(cmd, "")
 
         var rps_val: f64 = 0.0
         var p99_val: f64 = 0.0
         var tp_val: f64 = 0.0
+        var fail_val: i64 = 0
 
         if use_wrk:
             rps_val = _parse_wrk_rps(output)
             p99_val = _parse_wrk_p99(output)
             tp_val = _parse_wrk_throughput(output)
+            fail_val = _parse_wrk_failures(output)
         else:
             rps_val = _parse_ab_rps(output)
             p99_val = _parse_ab_p99(output)
             tp_val = _parse_ab_throughput(output)
+            fail_val = _parse_ab_failures(output)
 
         results.push(BenchmarkResult(
-            server: server_type,
+            server: cfg.server_label,
             rps: rps_val,
             p99_latency_ms: p99_val,
             throughput_mbps: tp_val,
-            file_size: sz
+            failure_count: fail_val,
+            file_size: sz,
+            timestamp: ts
         ))
         idx = idx + 1
 
