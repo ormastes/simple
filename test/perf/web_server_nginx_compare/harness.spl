@@ -1,0 +1,206 @@
+# Nginx vs Simple Static File Server Benchmark Harness
+#
+# Runs wrk or ab (Apache Bench) against a running HTTP server and collects:
+#   - requests/sec
+#   - p99 latency (ms)
+#   - throughput (MB/s)
+#
+# The caller is responsible for starting the server under test before calling
+# run_benchmark, and stopping it afterwards.
+#
+# Depends on: std.io_runtime (shell_output_trimmed)
+
+use std.io_runtime.{shell_output_trimmed, print}
+
+# ============================================================================
+# Result type
+# ============================================================================
+
+class BenchmarkResult:
+    """Results from one benchmark run against one file size."""
+    server: text        # "simple" or "nginx"
+    rps: f64            # requests per second
+    p99_latency_ms: f64 # 99th-percentile latency in milliseconds
+    throughput_mbps: f64 # throughput in MB/s
+    file_size: i64      # file size in bytes that was tested
+
+# ============================================================================
+# Internal: parse wrk output
+# ============================================================================
+
+fn _parse_wrk_rps(output: text) -> f64:
+    """Extract Requests/sec from wrk output."""
+    val marker = "Requests/sec:"
+    val idx = output.find(marker)
+    if idx < 0:
+        return 0.0
+    val rest = output.slice(idx + marker.len(), output.len())
+    val trimmed = rest.trim()
+    val space_idx = trimmed.find(" ")
+    val newline_idx = trimmed.find("\n")
+    var end_idx = trimmed.len()
+    if space_idx >= 0 and space_idx < end_idx:
+        end_idx = space_idx
+    if newline_idx >= 0 and newline_idx < end_idx:
+        end_idx = newline_idx
+    val num_text = trimmed.slice(0, end_idx).trim()
+    num_text.parse_f64()
+
+fn _parse_wrk_throughput(output: text) -> f64:
+    """Extract Transfer/sec in MB/s from wrk output."""
+    val marker = "Transfer/sec:"
+    val idx = output.find(marker)
+    if idx < 0:
+        return 0.0
+    val rest = output.slice(idx + marker.len(), output.len())
+    val trimmed = rest.trim()
+    # wrk reports e.g. "1.23MB" or "456.78KB"
+    val mb_idx = trimmed.find("MB")
+    val kb_idx = trimmed.find("KB")
+    if mb_idx >= 0:
+        val num_text = trimmed.slice(0, mb_idx).trim()
+        return num_text.parse_f64()
+    if kb_idx >= 0:
+        val num_text = trimmed.slice(0, kb_idx).trim()
+        return num_text.parse_f64() / 1024.0
+    0.0
+
+fn _parse_wrk_p99(output: text) -> f64:
+    """Extract 99th-percentile latency in ms from wrk output.
+
+    wrk prints latency percentiles like:
+      99%    4.50ms
+    Units may be us, ms, or s.
+    """
+    val marker = "99%"
+    val idx = output.find(marker)
+    if idx < 0:
+        return 0.0
+    val rest = output.slice(idx + marker.len(), output.len())
+    val trimmed = rest.trim()
+    val newline = trimmed.find("\n")
+    var line = trimmed
+    if newline >= 0:
+        line = trimmed.slice(0, newline).trim()
+    if line.find("ms") >= 0:
+        val num_text = line.slice(0, line.find("ms")).trim()
+        return num_text.parse_f64()
+    if line.find("us") >= 0:
+        val num_text = line.slice(0, line.find("us")).trim()
+        return num_text.parse_f64() / 1000.0
+    if line.find("s") >= 0:
+        val num_text = line.slice(0, line.find("s")).trim()
+        return num_text.parse_f64() * 1000.0
+    0.0
+
+# ============================================================================
+# Internal: parse ab output
+# ============================================================================
+
+fn _parse_ab_rps(output: text) -> f64:
+    """Extract Requests per second from ab output."""
+    val marker = "Requests per second:"
+    val idx = output.find(marker)
+    if idx < 0:
+        return 0.0
+    val rest = output.slice(idx + marker.len(), output.len())
+    val trimmed = rest.trim()
+    val space_idx = trimmed.find(" ")
+    var end_idx = trimmed.len()
+    if space_idx >= 0:
+        end_idx = space_idx
+    val num_text = trimmed.slice(0, end_idx).trim()
+    num_text.parse_f64()
+
+fn _parse_ab_p99(output: text) -> f64:
+    """Extract 99th-percentile latency in ms from ab output.
+
+    ab prints:
+      99%    1234  (in milliseconds)
+    """
+    val marker = "99%"
+    val idx = output.find(marker)
+    if idx < 0:
+        return 0.0
+    val rest = output.slice(idx + marker.len(), output.len())
+    val trimmed = rest.trim()
+    val newline = trimmed.find("\n")
+    var line = trimmed
+    if newline >= 0:
+        line = trimmed.slice(0, newline).trim()
+    line.parse_f64()
+
+fn _parse_ab_throughput(output: text) -> f64:
+    """Extract Transfer rate in MB/s from ab output."""
+    val marker = "Transfer rate:"
+    val idx = output.find(marker)
+    if idx < 0:
+        return 0.0
+    val rest = output.slice(idx + marker.len(), output.len())
+    val trimmed = rest.trim()
+    val space_idx = trimmed.find(" ")
+    var end_idx = trimmed.len()
+    if space_idx >= 0:
+        end_idx = space_idx
+    val num_text = trimmed.slice(0, end_idx).trim()
+    # ab reports in Kbytes/sec — convert to MB/s
+    num_text.parse_f64() / 1024.0
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn run_benchmark(server_type: text, host: text, port: i64, file_sizes: [i64]) -> [BenchmarkResult]:
+    """Run benchmark against a server for each file size in file_sizes.
+
+    Tries wrk first; falls back to ab if wrk is not found.
+    The server must already be running and serving /bench/<size>.html.
+
+    server_type: label for output ("simple" or "nginx")
+    host:        hostname, e.g. "127.0.0.1"
+    port:        TCP port
+    file_sizes:  list of file sizes to test (bytes); matching files must exist
+    Returns list of BenchmarkResult, one per file size.
+    """
+    val wrk_check = shell_output_trimmed("which wrk 2>/dev/null", "")
+    val use_wrk = wrk_check.len() > 0
+
+    var results: [BenchmarkResult] = []
+    var idx = 0
+    while idx < file_sizes.len():
+        val sz = file_sizes[idx]
+        val url = "http://{host}:{port}/bench/{sz}.html"
+
+        var output = ""
+        if use_wrk:
+            # -t2 threads, -c10 connections, 10s duration, latency percentiles
+            val cmd = "wrk -t2 -c10 -d10s --latency '{url}' 2>&1"
+            output = shell_output_trimmed(cmd, "")
+        else:
+            # ab: 1000 requests, 10 concurrent, with percentiles
+            val cmd = "ab -n 1000 -c 10 -e /dev/null '{url}' 2>&1"
+            output = shell_output_trimmed(cmd, "")
+
+        var rps_val: f64 = 0.0
+        var p99_val: f64 = 0.0
+        var tp_val: f64 = 0.0
+
+        if use_wrk:
+            rps_val = _parse_wrk_rps(output)
+            p99_val = _parse_wrk_p99(output)
+            tp_val = _parse_wrk_throughput(output)
+        else:
+            rps_val = _parse_ab_rps(output)
+            p99_val = _parse_ab_p99(output)
+            tp_val = _parse_ab_throughput(output)
+
+        results.push(BenchmarkResult(
+            server: server_type,
+            rps: rps_val,
+            p99_latency_ms: p99_val,
+            throughput_mbps: tp_val,
+            file_size: sz
+        ))
+        idx = idx + 1
+
+    results

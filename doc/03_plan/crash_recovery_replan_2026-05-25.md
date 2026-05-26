@@ -6,6 +6,17 @@ This plan replaces the interrupted local working plan after the crash. It
 keeps the current code changes focused on executable evidence instead of dummy
 or fallback-only completion.
 
+## 24-Hour Recovery Checkpoint - 2026-05-26
+
+- Main worktree was recovered from detached `HEAD` back onto `main`.
+- `jj` metadata is currently unreadable in this checkout, so recovery uses git
+  until the jj store is repaired.
+- Stale `.git/index.lock` from the interrupted run was removed after verifying
+  no git or jj process was active.
+- Current source changes are grouped around QUIC/H3 library work, HPACK Huffman
+  support, web-server comparison perf harnesses, and stricter SimpleOS disk
+  validation that refuses raw-image scan fallbacks as passing evidence.
+
 ## Priority 1 - SimpleOS QEMU And Real Board Bring-Up
 
 - Remove dummy fallback implementations from the SimpleOS check path. Fallbacks
