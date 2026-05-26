@@ -1,15 +1,19 @@
 # General MIR Optimization Patterns
 #
-# Four general-purpose MIR optimization patterns registered as dynamic-pass
-# manifest entries. These are NOT domain-specific — they recognize common
-# code patterns that happen to appear in webserver hot paths, but apply
-# anywhere the same structure occurs.
+# Seven general-purpose MIR optimization patterns registered as dynamic-pass
+# manifest entries, plus optimization facts that bridge recognizers to the
+# CLib parity rewrite layer. These are NOT domain-specific — they recognize
+# common code patterns that appear across filesystem, database, webserver,
+# and SimpleOS hot paths, but apply anywhere the same structure occurs.
 #
 # Patterns:
 #   1. byte-scan-to-delimiter  — loop scanning bytes until a sentinel
 #   2. switch-on-short-string  — dispatch on short fixed strings
 #   3. capability-guarded-fast-path — skip buffer copy when capability is set
 #   4. bit-unpack-fixed-table  — bit extraction with fixed lookup table
+#   5. checksum-reducer        — accumulator loop folding bytes into checksum
+#   6. prefix-scan-table       — prefix/trie-based table lookup
+#   7. wal-batch-flush         — write batching before single flush/sync
 
 use compiler.mir_opt.optimizer_manifest.{
     ManifestPassEntry, ManifestPassContract, OptimizerManifest,
@@ -65,12 +69,39 @@ fn bit_unpack_fixed_table_info() -> GeneralPatternInfo:
         example_sites: ["Huffman decoding", "variable-length integer decoding", "bitfield unpacking"]
     )
 
+fn checksum_reducer_info() -> GeneralPatternInfo:
+    GeneralPatternInfo(
+        name: "checksum-reducer",
+        description: "Recognizes accumulator loops that fold bytes into a running checksum value. Candidate for hardware CRC intrinsic, vectorized hash, or table-driven reduction.",
+        match_criteria: "while-loop or for-loop with running accumulator variable, body XORs/adds/shifts input bytes into accumulator, loop iterates over contiguous byte range",
+        example_sites: ["FS metadata checksum verification", "database page checksum", "HTTP content integrity", "network protocol CRC"]
+    )
+
+fn prefix_scan_table_info() -> GeneralPatternInfo:
+    GeneralPatternInfo(
+        name: "prefix-scan-table",
+        description: "Recognizes prefix or trie-based table lookups for name resolution. Candidate for radix-tree lowering, hash-prefix shortcut, or binary-search rewrite.",
+        match_criteria: "loop or recursive descent that walks a sorted table or trie structure comparing key prefixes, exits on mismatch or exact match",
+        example_sites: ["FS dentry prefix lookup", "database index prefix scan", "URL route prefix matching", "symbol table resolution"]
+    )
+
+fn wal_batch_flush_info() -> GeneralPatternInfo:
+    GeneralPatternInfo(
+        name: "wal-batch-flush",
+        description: "Recognizes write-ahead-log style batching where multiple small writes are coalesced into a buffer before a single flush or sync call. Candidate for batch-size tuning, write-combining, or deferred-sync annotation.",
+        match_criteria: "loop appending to a buffer or log structure, followed by a single flush/sync/commit call outside the loop, buffer size bounded by constant or threshold",
+        example_sites: ["FS journal batch write", "database WAL checkpoint", "HTTP response buffering", "SimpleOS syscall batching"]
+    )
+
 fn all_general_pattern_infos() -> [GeneralPatternInfo]:
     [
         byte_scan_to_delimiter_info(),
         switch_on_short_string_info(),
         capability_guarded_fast_path_info(),
-        bit_unpack_fixed_table_info()
+        bit_unpack_fixed_table_info(),
+        checksum_reducer_info(),
+        prefix_scan_table_info(),
+        wal_batch_flush_info()
     ]
 
 # ============================================================================
@@ -133,12 +164,24 @@ fn capability_guarded_fast_path_rule() -> PatternRule:
 fn bit_unpack_fixed_table_rule() -> PatternRule:
     make_pattern_rule("bit-unpack-fixed-table", "Load", "Intrinsic")
 
+fn checksum_reducer_rule() -> PatternRule:
+    make_pattern_rule("checksum-reducer", "BinOp", "Intrinsic")
+
+fn prefix_scan_table_rule() -> PatternRule:
+    make_pattern_rule("prefix-scan-table", "Load", "Intrinsic")
+
+fn wal_batch_flush_rule() -> PatternRule:
+    make_pattern_rule("wal-batch-flush", "Store", "Intrinsic")
+
 fn general_pattern_rules() -> [PatternRule]:
     [
         byte_scan_to_delimiter_rule(),
         switch_on_short_string_rule(),
         capability_guarded_fast_path_rule(),
-        bit_unpack_fixed_table_rule()
+        bit_unpack_fixed_table_rule(),
+        checksum_reducer_rule(),
+        prefix_scan_table_rule(),
+        wal_batch_flush_rule()
     ]
 
 # ============================================================================
@@ -209,6 +252,88 @@ fn is_bit_unpack_loop(code: text) -> bool:
     val has_bit_counter = code.contains("bit_pos") or code.contains("bit_offset")
     has_shift and has_mask and has_table_lookup and has_bit_counter
 
+fn is_checksum_reducer_loop(code: text) -> bool:
+    val has_accumulator = code.contains("^=") or code.contains("^") or code.contains("xor")
+    val has_loop = code.contains("while") or code.contains("for ")
+    val has_byte_access = code.contains("[") and code.contains("]")
+    has_accumulator and has_loop and has_byte_access
+
+fn is_prefix_scan_lookup(code: text) -> bool:
+    val has_prefix_compare = code.contains("starts_with") or code.contains("prefix")
+    val has_lookup = code.contains("[") and code.contains("]")
+    val has_iteration = code.contains("while") or code.contains("for ")
+    has_prefix_compare and has_lookup and has_iteration
+
+fn is_wal_batch_flush(code: text) -> bool:
+    val has_append = code.contains("append") or code.contains("push") or code.contains("write")
+    val has_flush = code.contains("flush") or code.contains("sync") or code.contains("commit")
+    val has_loop = code.contains("while") or code.contains("for ")
+    has_append and has_flush and has_loop
+
+# ============================================================================
+# Optimization Facts for Web Hot Paths
+# ============================================================================
+
+struct OptimizationFact:
+    key: text
+    description: text
+    general_recognizer: text
+
+fn web_hot_path_facts() -> [OptimizationFact]:
+    [
+        OptimizationFact(
+            key: "bounded_scan_terminates",
+            description: "Byte-scan loop has bounded length or sentinel — safe for SIMD memchr replacement",
+            general_recognizer: "byte-scan-to-delimiter"
+        ),
+        OptimizationFact(
+            key: "dispatch_branches_exhaustive",
+            description: "Short-string switch covers all expected inputs — safe for hash-switch lowering",
+            general_recognizer: "switch-on-short-string"
+        ),
+        OptimizationFact(
+            key: "copy_guard_fast_path_safe",
+            description: "Capability guard selects zero-copy path when available — safe for copy elision",
+            general_recognizer: "capability-guarded-fast-path"
+        ),
+        OptimizationFact(
+            key: "bit_extract_table_fixed",
+            description: "Bit-extraction loop uses fixed lookup table — safe for batch decode intrinsic",
+            general_recognizer: "bit-unpack-fixed-table"
+        ),
+        OptimizationFact(
+            key: "checksum_associative",
+            description: "Checksum accumulator is associative — safe for vectorized reduction",
+            general_recognizer: "checksum-reducer"
+        ),
+        OptimizationFact(
+            key: "prefix_table_sorted",
+            description: "Prefix lookup table is sorted — safe for binary-search or radix rewrite",
+            general_recognizer: "prefix-scan-table"
+        ),
+        OptimizationFact(
+            key: "batch_flush_bounded",
+            description: "Write batch has bounded size before flush — safe for write-combining annotation",
+            general_recognizer: "wal-batch-flush"
+        )
+    ]
+
+fn fact_for_recognizer(recognizer_name: text) -> OptimizationFact?:
+    val facts = web_hot_path_facts()
+    var i = 0
+    while i < facts.len():
+        if facts[i].general_recognizer == recognizer_name:
+            return Some(facts[i])
+        i = i + 1
+    nil
+
+fn all_fact_keys() -> [text]:
+    val facts = web_hot_path_facts()
+    var keys: [text] = []
+    for f in facts:
+        keys = keys.push(f.key)
+    keys
+
 # ============================================================================
 # Exports
 # ============================================================================
@@ -216,6 +341,7 @@ fn is_bit_unpack_loop(code: text) -> bool:
 export GeneralPatternInfo
 export byte_scan_to_delimiter_info, switch_on_short_string_info
 export capability_guarded_fast_path_info, bit_unpack_fixed_table_info
+export checksum_reducer_info, prefix_scan_table_info, wal_batch_flush_info
 export all_general_pattern_infos
 
 export general_pattern_manifest_entries, general_pattern_rules
@@ -224,3 +350,6 @@ export general_patterns_manifest_name, general_patterns_manifest_version
 
 export is_byte_scan_loop, is_short_string_switch
 export is_capability_guard, is_bit_unpack_loop
+export is_checksum_reducer_loop, is_prefix_scan_lookup, is_wal_batch_flush
+
+export OptimizationFact, web_hot_path_facts, fact_for_recognizer, all_fact_keys

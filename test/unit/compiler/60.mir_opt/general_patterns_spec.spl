@@ -12,21 +12,23 @@ use compiler.mir_opt.general_patterns.{
     GeneralPatternInfo,
     byte_scan_to_delimiter_info, switch_on_short_string_info,
     capability_guarded_fast_path_info, bit_unpack_fixed_table_info,
+    checksum_reducer_info, prefix_scan_table_info, wal_batch_flush_info,
     all_general_pattern_infos,
     general_pattern_manifest_entries, general_pattern_rules,
     load_general_patterns_manifest, register_general_patterns,
     general_patterns_manifest_name, general_patterns_manifest_version,
     is_byte_scan_loop, is_short_string_switch,
-    is_capability_guard, is_bit_unpack_loop
+    is_capability_guard, is_bit_unpack_loop,
+    is_checksum_reducer_loop, is_prefix_scan_lookup, is_wal_batch_flush
 }
 use compiler.mir_opt.optimizer_manifest.{
     DynamicPassRegistry, dynamic_pass_registry_new, dynamic_pass_registry_lookup
 }
 
 describe "Dynamic manifest entries registered (AC-5)":
-    it "produces exactly four manifest entries":
+    it "produces exactly seven manifest entries":
         val entries = general_pattern_manifest_entries()
-        expect(entries.len()).to_equal(4)
+        expect(entries.len()).to_equal(7)
 
     it "entries have correct stable names":
         val entries = general_pattern_manifest_entries()
@@ -34,10 +36,13 @@ describe "Dynamic manifest entries registered (AC-5)":
         expect(entries[1].stable_name).to_equal("switch-on-short-string")
         expect(entries[2].stable_name).to_equal("capability-guarded-fast-path")
         expect(entries[3].stable_name).to_equal("bit-unpack-fixed-table")
+        expect(entries[4].stable_name).to_equal("checksum-reducer")
+        expect(entries[5].stable_name).to_equal("prefix-scan-table")
+        expect(entries[6].stable_name).to_equal("wal-batch-flush")
 
     it "entries have function scope":
         val entries = general_pattern_manifest_entries()
-        expect(entries.len()).to_equal(4)
+        expect(entries.len()).to_equal(7)
 
     it "entries have valid entry symbols":
         val entries = general_pattern_manifest_entries()
@@ -45,10 +50,13 @@ describe "Dynamic manifest entries registered (AC-5)":
         expect(entries[1].entry_symbol).to_equal("general_pattern_switch_on_short_string")
         expect(entries[2].entry_symbol).to_equal("general_pattern_capability_guarded_fast_path")
         expect(entries[3].entry_symbol).to_equal("general_pattern_bit_unpack_fixed_table")
+        expect(entries[4].entry_symbol).to_equal("general_pattern_checksum_reducer")
+        expect(entries[5].entry_symbol).to_equal("general_pattern_prefix_scan_table")
+        expect(entries[6].entry_symbol).to_equal("general_pattern_wal_batch_flush")
 
-    it "produces four pattern rules":
+    it "produces seven pattern rules":
         val rules = general_pattern_rules()
-        expect(rules.len()).to_equal(4)
+        expect(rules.len()).to_equal(7)
 
     it "all rules are marked safe":
         val rules = general_pattern_rules()
@@ -63,8 +71,8 @@ describe "Dynamic manifest entries registered (AC-5)":
             case Ok(manifest):
                 expect(manifest.name).to_equal("simple.opt.general-patterns")
                 expect(manifest.version).to_equal("1.0.0")
-                expect(manifest.passes.len()).to_equal(4)
-                expect(manifest.rules.len()).to_equal(4)
+                expect(manifest.passes.len()).to_equal(7)
+                expect(manifest.rules.len()).to_equal(7)
             case Err(msg):
                 expect(false).to_equal(true)
 
@@ -73,7 +81,7 @@ describe "Dynamic manifest entries registered (AC-5)":
         val result = register_general_patterns(registry)
         match result:
             case Ok(updated):
-                expect(updated.descriptors.len()).to_equal(4)
+                expect(updated.descriptors.len()).to_equal(7)
             case Err(msg):
                 expect(false).to_equal(true)
 
@@ -90,6 +98,12 @@ describe "Dynamic manifest entries registered (AC-5)":
                 expect(found3.?).to_equal(true)
                 val found4 = dynamic_pass_registry_lookup(updated, "bit-unpack-fixed-table")
                 expect(found4.?).to_equal(true)
+                val found5 = dynamic_pass_registry_lookup(updated, "checksum-reducer")
+                expect(found5.?).to_equal(true)
+                val found6 = dynamic_pass_registry_lookup(updated, "prefix-scan-table")
+                expect(found6.?).to_equal(true)
+                val found7 = dynamic_pass_registry_lookup(updated, "wal-batch-flush")
+                expect(found7.?).to_equal(true)
             case Err(msg):
                 expect(false).to_equal(true)
 
@@ -140,6 +154,30 @@ describe "General recognizers fire on general patterns (AC-6)":
         val code = "for item in list:\n    process(item)"
         expect(is_bit_unpack_loop(code)).to_equal(false)
 
+    it "checksum-reducer recognizer matches CRC accumulator loop":
+        val code = "var crc = 0\nwhile i < len:\n    crc = crc ^ data[i]\n    i = i + 1"
+        expect(is_checksum_reducer_loop(code)).to_equal(true)
+
+    it "checksum-reducer rejects non-accumulator code":
+        val code = "val x = compute(a, b)\nreturn x + 1"
+        expect(is_checksum_reducer_loop(code)).to_equal(false)
+
+    it "prefix-scan recognizer matches trie lookup":
+        val code = "var idx = 0\nwhile idx < table.len():\n    if key.starts_with(table[idx].prefix):\n        return table[idx].value\n    idx = idx + 1"
+        expect(is_prefix_scan_lookup(code)).to_equal(true)
+
+    it "prefix-scan rejects non-prefix code":
+        val code = "val total = a + b\nreturn total"
+        expect(is_prefix_scan_lookup(code)).to_equal(false)
+
+    it "wal-batch-flush recognizer matches batch-then-flush":
+        val code = "while i < count:\n    log.append(entries[i])\n    i = i + 1\nlog.flush()"
+        expect(is_wal_batch_flush(code)).to_equal(true)
+
+    it "wal-batch-flush rejects non-batching code":
+        val code = "val x = read(fd)\nreturn x"
+        expect(is_wal_batch_flush(code)).to_equal(false)
+
 describe "Patterns validate on web hot paths (AC-7)":
     it "byte-scan matches HTTP header line scanning":
         val http_scan = "while i < raw.len():\n    if raw[i] == '\\r':\n        break\n    i = i + 1"
@@ -177,9 +215,49 @@ describe "Pattern info descriptions are general (AC-6)":
         expect(info.description.contains("bits")).to_equal(true)
         expect(info.description.contains("fixed table")).to_equal(true)
 
+    it "checksum-reducer description is general":
+        val info = checksum_reducer_info()
+        expect(info.description.contains("accumulator")).to_equal(true)
+        expect(info.description.contains("checksum")).to_equal(true)
+
+    it "prefix-scan-table description is general":
+        val info = prefix_scan_table_info()
+        expect(info.description.contains("prefix")).to_equal(true)
+        expect(info.description.contains("name resolution")).to_equal(true)
+
+    it "wal-batch-flush description is general":
+        val info = wal_batch_flush_info()
+        expect(info.description.contains("batching")).to_equal(true)
+        expect(info.description.contains("flush")).to_equal(true)
+
     it "all patterns have example sites including non-web uses":
         val infos = all_general_pattern_infos()
         var i = 0
         while i < infos.len():
             expect(infos[i].example_sites.len()).to_be_greater_than(1)
             i = i + 1
+
+describe "Cross-domain pattern coverage (AC-8)":
+    it "checksum-reducer matches FS metadata verification":
+        val code = "var checksum = 0\nwhile i < block_size:\n    checksum = checksum ^ sector[i]\n    i = i + 1"
+        expect(is_checksum_reducer_loop(code)).to_equal(true)
+
+    it "checksum-reducer matches database page checksum":
+        val code = "var hash = 0\nfor idx in range(page_len):\n    hash = hash ^ page_data[idx]\n"
+        expect(is_checksum_reducer_loop(code)).to_equal(true)
+
+    it "prefix-scan matches URL route prefix matching":
+        val code = "var r = 0\nwhile r < routes.len():\n    if path.starts_with(routes[r].prefix):\n        return routes[r].handler\n    r = r + 1"
+        expect(is_prefix_scan_lookup(code)).to_equal(true)
+
+    it "prefix-scan matches database index prefix scan":
+        val code = "var pos = 0\nwhile pos < index.len():\n    if search_key.starts_with(index[pos].prefix):\n        return index[pos].page_id\n    pos = pos + 1"
+        expect(is_prefix_scan_lookup(code)).to_equal(true)
+
+    it "wal-batch-flush matches database WAL checkpoint":
+        val code = "while pending < wal.len():\n    batch.append(wal[pending])\n    pending = pending + 1\nbatch.sync()"
+        expect(is_wal_batch_flush(code)).to_equal(true)
+
+    it "wal-batch-flush matches SimpleOS syscall batching":
+        val code = "while idx < syscalls.len():\n    ring.push(syscalls[idx])\n    idx = idx + 1\nring.flush()"
+        expect(is_wal_batch_flush(code)).to_equal(true)

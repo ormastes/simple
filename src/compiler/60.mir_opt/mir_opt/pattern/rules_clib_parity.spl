@@ -24,6 +24,8 @@ enum CLibPatternKind:
     MmioPoll
     SerialMarkerScan
     ProviderGrantCheck
+    CopyGuard
+    BitExtractTable
 
 struct CLibParityRule:
     name: text
@@ -34,6 +36,12 @@ struct CLibParityRule:
     required_proof: text
     cost_delta: i64
     software_cost: i64
+
+struct CLibParityRewriteDecision:
+    rule_name: text
+    intrinsic: text
+    eligible: bool
+    reason: text
 
 fn clib_parity_rule(
     name: text,
@@ -66,6 +74,10 @@ fn clib_parity_rule_table() -> [CLibParityRule]:
         clib_parity_rule("match_db_wal_batch",      CLibPatternKind.WalBatch,           "database",   "db_wal_batch_write",       "wal_batch",        "durable_replay_equivalence",   -6, 1700),
         clib_parity_rule("match_http_header_scan",  CLibPatternKind.HeaderScan,         "webserver",  "http_header_scan_fast",    "bounded_headers",  "parser_limit_equivalence",     -4, 1300),
         clib_parity_rule("match_http_route_lookup", CLibPatternKind.RouteLookup,        "webserver",  "http_route_lookup_fast",   "route_table",      "route_precedence_equivalence", -4, 1200),
+        clib_parity_rule("match_general_bounded_scan",    CLibPatternKind.HeaderScan,   "general",    "bounded_scan_fast",        "none",             "scan_termination_equivalence", -3, 1100),
+        clib_parity_rule("match_general_dispatch_switch", CLibPatternKind.RouteLookup,  "general",    "dispatch_switch_fast",     "none",             "branch_coverage_equivalence",  -3, 1000),
+        clib_parity_rule("match_general_copy_guard",      CLibPatternKind.CopyGuard,    "general",    "copy_elide_guard",         "none",             "fast_path_semantics_preserved",-4, 1100),
+        clib_parity_rule("match_general_bit_extract",     CLibPatternKind.BitExtractTable, "general", "bit_unpack_batch",         "none",             "bit_extraction_equivalence",   -3, 900),
         clib_parity_rule("match_mmio_poll_loop",    CLibPatternKind.MmioPoll,           "simpleos",   "hal_mmio_poll_bounded",    "volatile_mmio",    "volatile_ordering_preserved",  -3, 1100),
         clib_parity_rule("match_serial_marker_scan",CLibPatternKind.SerialMarkerScan,   "simpleos",   "qemu_serial_marker_scan",  "bounded_serial",   "marker_contract_preserved",    -3, 1000),
         clib_parity_rule("match_provider_grants",   CLibPatternKind.ProviderGrantCheck, "simpleos",   "provider_grant_check_fast", "grant_tokens",     "fail_closed_equivalence",      -4, 1200)
@@ -83,6 +95,49 @@ fn clib_parity_rule_is_simpleos_safe(rule: CLibParityRule) -> bool:
     rule.required_proof == "volatile_ordering_preserved" or
         rule.required_proof == "marker_contract_preserved" or
         rule.required_proof == "fail_closed_equivalence"
+
+fn clib_parity_text_list_contains(items: [text], value: text) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn clib_parity_rule_by_name(name: text) -> CLibParityRule?:
+    val rules = clib_parity_rule_table()
+    var i = 0
+    while i < rules.len():
+        if rules[i].name == name:
+            return Some(rules[i])
+        i = i + 1
+    nil
+
+fn clib_parity_rule_has_required_fact(rule: CLibParityRule, available_facts: [text]) -> bool:
+    rule.requires == "none" or clib_parity_text_list_contains(available_facts, rule.requires)
+
+fn clib_parity_rule_has_required_proof(rule: CLibParityRule, available_proofs: [text]) -> bool:
+    clib_parity_text_list_contains(available_proofs, rule.required_proof)
+
+fn clib_parity_rule_rewrite_decision(
+    rule: CLibParityRule,
+    available_facts: [text],
+    available_proofs: [text]
+) -> CLibParityRewriteDecision:
+    if not clib_parity_rule_is_simpleos_safe(rule):
+        return CLibParityRewriteDecision(rule.name, rule.intrinsic, false, "simpleos_contract_not_preserved")
+    if not clib_parity_rule_has_required_fact(rule, available_facts):
+        return CLibParityRewriteDecision(rule.name, rule.intrinsic, false, "missing_required_fact:" + rule.requires)
+    if not clib_parity_rule_has_required_proof(rule, available_proofs):
+        return CLibParityRewriteDecision(rule.name, rule.intrinsic, false, "missing_required_proof:" + rule.required_proof)
+    CLibParityRewriteDecision(rule.name, rule.intrinsic, true, "eligible")
+
+fn clib_parity_rule_can_rewrite(
+    rule: CLibParityRule,
+    available_facts: [text],
+    available_proofs: [text]
+) -> bool:
+    clib_parity_rule_rewrite_decision(rule, available_facts, available_proofs).eligible
 
 fn clib_parity_domain_rule_count(domain: text) -> i64:
     val rules = clib_parity_rule_table()

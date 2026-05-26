@@ -63,7 +63,19 @@ hardware actions.
    exact command, timeout, and result.
 7. Feed safe SimpleOS/QEMU hot paths into
    `CLibParityHotspot`/general parity rules instead of creating one-off
-   optimizers for the runner itself.
+   optimizers for the runner itself. Status: implemented for the optimizer
+   rule metadata path via `clib_parity_rule_rewrite_decision(...)`; bounded
+   MMIO polling, serial marker scanning, and provider grant checks now share
+   the same required-fact plus required-proof gate used by filesystem,
+   database, and webserver parity rules.
+
+## Evidence Log
+
+- 2026-05-26: Added proof-gated `CLibParityHotspot` rewrite eligibility in
+  `src/compiler/60.mir_opt/mir_opt/pattern/rules_clib_parity.spl` and focused
+  coverage in `test/compiler/mir_opt/clib_parity_hotspot_spec.spl`. Command:
+  `src/compiler_rust/target/debug/simple test test/compiler/mir_opt/clib_parity_hotspot_spec.spl --mode=interpreter`.
+  Result: pass, 19 tests.
 
 ## Verification Gates
 

@@ -28,7 +28,8 @@ use compiler.mir_opt.mir_opt.pattern.rule_engine.{OptimizerProviderKind, optimiz
 use compiler.mir_opt.mir_opt.pattern.rules_clib_parity.{
     CLibPatternKind, CLibParityRule, clib_parity_rule_table, clib_parity_rule_provider,
     clib_parity_rule_is_simpleos_safe, clib_parity_domain_rule_count,
-    clib_parity_all_rules_are_general
+    clib_parity_all_rules_are_general, clib_parity_rule_by_name,
+    clib_parity_rule_can_rewrite, clib_parity_rule_rewrite_decision
 }
 
 
@@ -145,6 +146,54 @@ describe "CLibParityHotspot":
                     simpleos_safe = false
                 i = i + 1
             expect(simpleos_safe).to_equal(true)
+
+        it "gates bounded MMIO polling on volatile ordering proof":
+            val maybe_rule = clib_parity_rule_by_name("match_mmio_poll_loop")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                expect(clib_parity_rule_can_rewrite(rule, ["volatile_mmio"], [])).to_equal(false)
+                val decision = clib_parity_rule_rewrite_decision(rule, ["volatile_mmio"], ["volatile_ordering_preserved"])
+                expect(decision.eligible).to_equal(true)
+                expect(decision.intrinsic).to_equal("hal_mmio_poll_bounded")
+
+        it "gates serial marker scanning on marker contract proof":
+            val maybe_rule = clib_parity_rule_by_name("match_serial_marker_scan")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val missing_fact = clib_parity_rule_rewrite_decision(rule, [], ["marker_contract_preserved"])
+                expect(missing_fact.eligible).to_equal(false)
+                expect(missing_fact.reason).to_equal("missing_required_fact:bounded_serial")
+                val decision = clib_parity_rule_rewrite_decision(rule, ["bounded_serial"], ["marker_contract_preserved"])
+                expect(decision.eligible).to_equal(true)
+
+        it "gates provider grant checks on fail-closed proof":
+            val maybe_rule = clib_parity_rule_by_name("match_provider_grants")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val missing_proof = clib_parity_rule_rewrite_decision(rule, ["grant_tokens"], ["marker_contract_preserved"])
+                expect(missing_proof.eligible).to_equal(false)
+                expect(missing_proof.reason).to_equal("missing_required_proof:fail_closed_equivalence")
+                val decision = clib_parity_rule_rewrite_decision(rule, ["grant_tokens"], ["fail_closed_equivalence"])
+                expect(decision.eligible).to_equal(true)
+
+        it "uses the same proof gate for filesystem, database, and webserver rules":
+            val fs_rule = clib_parity_rule_by_name("match_fat_dir_scan")
+            val db_rule = clib_parity_rule_by_name("match_db_prefix_lookup")
+            val web_rule = clib_parity_rule_by_name("match_http_header_scan")
+
+            expect(fs_rule.?).to_equal(true)
+            expect(db_rule.?).to_equal(true)
+            expect(web_rule.?).to_equal(true)
+
+            if fs_rule:
+                expect(clib_parity_rule_can_rewrite(fs_rule.unwrap(), ["fat_dir_entry"], ["directory_order_preserved"])).to_equal(true)
+            if db_rule:
+                expect(clib_parity_rule_can_rewrite(db_rule.unwrap(), ["prefix_index"], ["index_update_delete_drop"])).to_equal(true)
+            if web_rule:
+                expect(clib_parity_rule_can_rewrite(web_rule.unwrap(), ["bounded_headers"], ["parser_limit_equivalence"])).to_equal(true)
 
     describe "clib_parity_rule_provider":
         it "AC-3: returns provider with required_facts":

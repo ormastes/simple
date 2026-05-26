@@ -66,6 +66,20 @@ with C/provider baselines.
    - add MIR/native benchmark cases
    - verify warm-start, invalidation, and RSS impact.
    - require semantic-equivalence and provider-boundary proofs before rewrite.
+   Status: the general MIR pattern registry now includes `checksum-reducer`,
+   `prefix-scan-table`, and `wal-batch-flush` descriptors, manifest entries,
+   safe pattern rules, and recognizer helpers. The `CLibParityHotspot` rule
+   path also gates filesystem, database, webserver, and SimpleOS/QEMU parity
+   rewrites on required facts plus explicit proofs.
+
+## Evidence Log
+
+- 2026-05-26: `src/compiler_rust/target/debug/simple test test/unit/compiler/60.mir_opt/general_patterns_spec.spl --mode=interpreter --clean`
+  passed with 33 tests.
+- 2026-05-26: `bin/simple test test/unit/compiler/60.mir_opt/general_patterns_spec.spl`
+  passed with 42 tests (7 patterns: 4 original + 3 new general patterns).
+- 2026-05-26: `src/compiler_rust/target/debug/simple test test/compiler/mir_opt/clib_parity_hotspot_spec.spl --mode=interpreter`
+  passed with 19 tests.
 
 ## Verification Gates
 
@@ -79,3 +93,55 @@ with C/provider baselines.
 - Optimization-plugin changes must not regress MCP/LSP startup latency or RSS.
 - General parity rules must include filesystem, database, webserver, and
   SimpleOS/QEMU domains with explicit required proofs.
+
+## General Optimization Parity Rules
+
+Each domain must satisfy the following before an optimization-plugin rewrite
+replaces a default code path. The seven general MIR patterns (byte-scan,
+short-string-switch, capability-guard, bit-unpack, checksum-reducer,
+prefix-scan-table, wal-batch-flush) apply across all four domains.
+
+### Filesystem Domain
+- **Required facts:** `typed_mir`, `gep_contiguous` for bulk patterns;
+  `shift_or_chain` / `shift_and_store_chain` for endian patterns.
+- **Required proofs:** Semantic equivalence between optimized path and original
+  FAT/NVFS/DBFS reference implementation. Provider-boundary proof that no
+  SFFI call is bypassed without an equivalent pure-Simple path.
+- **Applicable patterns:** byte-scan (directory-entry scan), checksum-reducer
+  (metadata verification), prefix-scan-table (dentry lookup), wal-batch-flush
+  (journal batching), capability-guard (DMA vs memcpy).
+
+### Database Domain
+- **Required facts:** `typed_mir` for bulk patterns; query plan facts for
+  index-aware rewrites.
+- **Required proofs:** Semantic equivalence against scalar/direct baseline.
+  Durability proof — every rewrite must preserve crash-recovery guarantees
+  (reopen + WAL replay produces identical state). Index invalidation proof —
+  cache/index optimizations must cover update/delete/drop paths.
+- **Applicable patterns:** checksum-reducer (page checksum), prefix-scan-table
+  (index prefix scan), wal-batch-flush (WAL checkpoint), byte-scan (row
+  parsing), bit-unpack (column encoding).
+
+### Webserver Domain
+- **Required facts:** `typed_mir` for bulk patterns; `http_bounded_request`
+  for parser-aware rewrites.
+- **Required proofs:** Semantic equivalence against nginx or reference HTTP
+  implementation. Bounded-resource proof — no rewrite may remove request
+  size limits, connection timeouts, or backpressure. Provider-boundary proof
+  for sendfile vs portable-read paths.
+- **Applicable patterns:** byte-scan (header line scan), short-string-switch
+  (HTTP method dispatch), capability-guard (sendfile decision), bit-unpack
+  (HPACK Huffman decode), checksum-reducer (content integrity),
+  wal-batch-flush (response buffering).
+
+### SimpleOS/QEMU Domain
+- **Required facts:** `typed_mir` for bulk patterns; target-arch facts
+  (`riscv32`, `riscv64`, `x86_64`, `arm64`) for instruction selection.
+- **Required proofs:** Semantic equivalence verified on bare-metal or QEMU
+  target — not just hosted interpreter. Memory-safety proof — no rewrite
+  may introduce unbounded stack or heap allocation in kernel context.
+  ISA-compatibility proof — target instruction must be available on the
+  minimum supported ISA variant.
+- **Applicable patterns:** byte-scan (UART/console scan), capability-guard
+  (DMA vs PIO), checksum-reducer (network protocol CRC), wal-batch-flush
+  (syscall batching), bit-unpack (device register decode).
