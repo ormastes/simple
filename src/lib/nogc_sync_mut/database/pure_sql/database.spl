@@ -16,6 +16,7 @@ use nogc_sync_mut.db.dbfs_engine.mvcc.{
     MvccTable, MvccTxnManager, MvccSnapshot, MvccTuple, mvcc_is_visible
 }
 use nogc_sync_mut.db.dbfs_engine.fts.search.{FtsEngine}
+use nogc_sync_mut.db.accel.{RowBitmap, row_bitmap_indices, ScanPredicate, ScanPredicateKind, key_matches_predicate, FilterStats}
 use nogc_sync_mut.db.db_query.{query_fts_match, query_page_summary_scan}
 use nogc_sync_mut.db.page_summary.{PageSummaryIndex}
 
@@ -1073,6 +1074,7 @@ class PureDatabase:
     _tbl_typed: [[[DbValue]]]
     _tbl_pk_col: [i32]
     _tbl_pk_map: [Dict<text, i32>]
+    _tbl_dirty: [bool]
 
     static fn memory() -> Result<PureDatabase, DbError>:
         Ok(PureDatabase(
@@ -1104,7 +1106,8 @@ class PureDatabase:
             _snap_index_unique: [],
             _tbl_typed: [],
             _tbl_pk_col: [],
-            _tbl_pk_map: []
+            _tbl_pk_map: [],
+            _tbl_dirty: []
         ))
 
     static fn memory_deferred() -> Result<PureDatabase, DbError>:
@@ -1137,12 +1140,22 @@ class PureDatabase:
         if self._dirty:
             self._persist()?
             self._dirty = false
+            var ci: i32 = 0
+            while ci < self._tbl_dirty.len() as i32:
+                self._tbl_dirty[ci] = false
+                ci = ci + 1
         Ok(())
 
     me _mark_dirty() -> Result<(), DbError>:
         self._dirty = true
         if self._auto_checkpoint and not self._in_transaction:
             self.checkpoint()?
+        Ok(())
+
+    me _mark_table_dirty(ti: i32) -> Result<(), DbError>:
+        if ti >= 0 and ti < self._tbl_dirty.len() as i32:
+            self._tbl_dirty[ti] = true
+        self._mark_dirty()?
         Ok(())
 
     me close() -> Result<(), DbError>:
@@ -1298,6 +1311,63 @@ class PureDatabase:
         self._tbl_data[ti] = tbl
         Ok(rows)
 
+    me scan_range(table: text, col: text, low: DbValue, high: DbValue) -> Result<[DbRow], DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        val ti = _find_idx(self._tbl_names, table)
+        if ti < 0:
+            return Err(DbError.QueryFailed(sql: "SCAN_RANGE", message: "no such table: {table}"))
+        val col_names = self._tbl_cols[ti]
+        val cci = _find_idx(col_names, col)
+        if cci < 0:
+            return Err(DbError.QueryFailed(sql: "SCAN_RANGE", message: "no such column: {col}"))
+        val snap = self._txn.snapshot()
+        var tbl = self._tbl_data[ti]
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
+        var rows: [DbRow] = []
+        if use_typed:
+            val low_i = _dbval_as_i64(low)
+            val high_i = _dbval_as_i64(high)
+            var visible_keys: [i64] = []
+            var visible_idxs: [i32] = []
+            var si: i32 = 0
+            while si < tbl.tuples.len() as i32:
+                if mvcc_is_visible(tbl.tuples[si], snap):
+                    val rv = typed[si]
+                    if cci < rv.len() as i32:
+                        val cv = _dbval_as_i64(rv[cci])
+                        visible_keys.push(cv)
+                        visible_idxs.push(si)
+                si = si + 1
+            var bm = RowBitmap.empty(visible_keys.len() as i64)
+            var ki: i32 = 0
+            while ki < visible_keys.len() as i32:
+                val kv = visible_keys[ki]
+                if kv >= low_i and kv < high_i:
+                    bm.set(ki as i64)
+                ki = ki + 1
+            val matched = row_bitmap_indices(bm)
+            var mi: i32 = 0
+            while mi < matched.len() as i32:
+                val row_idx = visible_idxs[matched[mi] as i32]
+                rows.push(DbRow(columns: col_names, values: typed[row_idx]))
+                mi = mi + 1
+        else:
+            val visible = tbl.scan(snap)
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                val rv = _deserialize_row(visible[ri])
+                if cci < rv.len() as i32:
+                    val cv = _dbval_as_i64(rv[cci])
+                    val lv = _dbval_as_i64(low)
+                    val hv = _dbval_as_i64(high)
+                    if cv >= lv and cv < hv:
+                        rows.push(DbRow(columns: col_names, values: rv))
+                ri = ri + 1
+        self._tbl_data[ti] = tbl
+        Ok(rows)
+
     me _serialize_disk() -> text:
         var lines: [text] = ["simple-pure-db-v1"]
         var ti: i32 = 0
@@ -1367,6 +1437,7 @@ class PureDatabase:
                     self._tbl_pk_col.push(-1)
                     var empty_pk: Dict<text, i32> = {}
                     self._tbl_pk_map.push(empty_pk)
+                    self._tbl_dirty.push(false)
                 elif kind == "fts":
                     val ti = _find_idx(self._tbl_names, table_name)
                     if ti >= 0:
@@ -2009,6 +2080,7 @@ class PureDatabase:
         self._tbl_pk_col.push(pk_ci)
         var empty_pk_map: Dict<text, i32> = {}
         self._tbl_pk_map.push(empty_pk_map)
+        self._tbl_dirty.push(true)
         self._last_changes = 0
         self._mark_dirty()?
         Ok(0)
