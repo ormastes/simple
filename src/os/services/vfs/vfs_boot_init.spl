@@ -94,9 +94,7 @@ fn _vfs_boot_reset_storage_state():
 pub fn vfs_boot_init() -> bool:
     """Initialize the full storage stack: PCI -> NVMe -> FAT32 -> VFS.
 
-    Prefers the pure-Simple NVMe -> lease-backed BlockDevice -> FAT32 path.
-    Falls back to the C NVMe bridge on baremetal while the pure path is still
-    being hardened against hardware-specific mount failures.
+    Uses only the pure-Simple NVMe -> lease-backed BlockDevice -> FAT32 path.
 
     Returns true if VFS is ready to serve file requests.
     """
@@ -114,78 +112,13 @@ pub fn vfs_boot_init() -> bool:
     val nvme_idx = pcimgr_find_by_class_i64(nvme_class, nvme_sub)
     if nvme_idx < 0:
         log_raw_println("[vfs-init] No NVMe device found -- VFS unavailable")
-        return _vfs_boot_init_virtio_fat32()
+        return false
     log_raw_println("[vfs-init] Found NVMe device at index {nvme_idx}")
 
     if _vfs_boot_init_pure_nvme_fat32(nvme_idx.to_u64()):
         return true
-    log_raw_println("[vfs-init] pure-Simple NVMe + FAT32 unavailable; falling back to C bridge")
-
-    log_raw_println("[vfs-init] Initializing C-backed NVMe block adapter...")
-    val adapter_init = g_c_adapter.init_c_bridge()
-    if not adapter_init:
-        log_raw_println("[vfs-init] C NVMe adapter init failed")
-        return _vfs_boot_init_virtio_fat32()
-    log_raw_println("[vfs-init] C NVMe controller initialized!")
-    log_raw_println("[vfs-init] C NVMe + FAT32 verified (via C driver)")
-    g_vfs_initialized = true
-    g_vfs_boot_storage_provider = "c-boot-bridge"
-    g_vfs_boot_storage_pure_simple = false
-
-    # Keep VFS available through the C FAT32 driver-backed executable read path
-    # while the pure-Simple FAT32 boot path is being hardened for every
-    # baremetal image variant. Apps are still loaded from the FAT32 image as
-    # separate processes, while only this fallback storage path remains
-    # baremetal-aware.
-    log_raw_println("[vfs-init] FAT32 executable VFS path ready")
-
-    val manifest_bytes = simpleos_fat32_read_path_array("/SYS/APPS/APPIDX.TXT")
-    if manifest_bytes.len() > 0:
-        val manifest_text = _vfs_bytes_to_text(manifest_bytes, manifest_bytes.len().to_u64())
-        app_registry_load(manifest_text)
-        log_raw_println("[vfs-init] app-registry loaded from manifest")
-    else:
-        app_registry_load_hardcoded_fallback()
-        log_raw_println("[vfs-init] app-registry loaded from hardcoded fallback")
-
-    val exec_probe_path = "/SYS/APPS/BROWSMF.SMF"
-    val exec_probe_size = simpleos_fat32_read_path_size(exec_probe_path)
-    if exec_probe_size <= 4:
-        log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} size={exec_probe_size}")
-        return false
-    if exec_probe_size.to_u64() > FAT32_PATH_READ_BUFFER_MAX:
-        log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} oversize={exec_probe_size}")
-        return false
-    val exec_probe_read = simpleos_fat32_read_path(exec_probe_path)
-    if exec_probe_read != 0:
-        log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} rc={exec_probe_read}")
-        return false
-    if not _known_app_has_elf_magic(simpleos_fat32_path_read_buffer_addr()):
-        log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} invalid_elf")
-        return false
-    val browser_probe_bytes = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), exec_probe_size.to_u64())
-    app_registry_cache_bytes("/sys/apps/browser_demo", browser_probe_bytes)
-    log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo bytes={exec_probe_size}")
-    for seed_entry in app_registry_boot_seed_entries():
-        if seed_entry.canonical_path == "/sys/apps/browser_demo":
-            continue
-        val seed_fat32 = app_registry_fat32_alias(seed_entry.canonical_path)
-        if seed_fat32 == nil:
-            continue
-        val seed_path = seed_fat32.unwrap()
-        val seed_root = app_registry_root_alias(seed_entry.canonical_path)
-        var fat32_path = seed_path
-        if seed_root != nil:
-            val root_bytes = _seed_c_fat32_exec_bytes(seed_entry.canonical_path, seed_root.unwrap())
-            if root_bytes.len() > 0:
-                app_registry_cache_bytes(seed_entry.canonical_path, root_bytes)
-                continue
-        val seed_bytes = _seed_c_fat32_exec_bytes(seed_entry.canonical_path, fat32_path)
-        if seed_bytes.len() > 0:
-            app_registry_cache_bytes(seed_entry.canonical_path, seed_bytes)
-
-    log_raw_println("[vfs-init] VFS ready (C-backed)")
-    return true
+    log_raw_println("[vfs-init] pure-Simple NVMe + FAT32 unavailable; VFS unavailable")
+    false
 
 pub fn vfs_boot_init_production() -> bool:
     """Initialize production VFS without entering C bridge or virtio fallback storage."""
