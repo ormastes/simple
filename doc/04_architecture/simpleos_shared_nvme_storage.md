@@ -26,7 +26,8 @@ must not each grow separate NVMe access paths. The existing code already has:
   `DriverInstance` needed by the VFS mount table.
 - `src/os/services/vfs/vfs_boot_init.spl` builds the pure-Simple boot FAT32
   adapter through the same `NvmeFilesystemLease` contract instead of a
-  whole-device `NvmeBlockAdapter`.
+  whole-device `NvmeBlockAdapter`, and the VFS boot initializer tries that path
+  before the C bridge fallback.
 - `src/os/kernel/ipc/dma_alloc_contract.spl` documents the syscall 84 layout:
   the syscall return is the CPU virtual address, result word 0 is the
   device-visible physical address, and result word 1 remains the allocation id.
@@ -64,6 +65,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   instead of a hand-written token string.
 - The pure-Simple boot FAT32 helper is now lease-bounded before FAT32 sees the
   device, which keeps system boot storage on the same contract as NVFS and DBFS.
+- VFS boot now prefers the pure-Simple NVMe/FAT32 path; the C bridge is fallback
+  behavior rather than the first storage path.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -75,8 +78,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - FAT32/NVFS/DBFS mounting still needs end-to-end hardware verification on real
   namespaces, but the VFS NVMe adapter now enforces the lease window before
   translating filesystem-relative LBAs to physical namespace LBAs.
-- The top-level baremetal boot entry still falls back to the C NVMe/FAT32 bridge
-  until the pure-Simple FAT32 mount path has hardware-safe failure behavior.
+- The top-level baremetal boot entry still keeps the C NVMe/FAT32 bridge as a
+  fallback until the pure-Simple FAT32 mount path has hardware-safe behavior on
+  every boot image variant.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,

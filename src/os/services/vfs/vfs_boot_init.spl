@@ -66,8 +66,9 @@ var g_mount_table: MountTable = MountTable.new()
 pub fn vfs_boot_init() -> bool:
     """Initialize the full storage stack: PCI -> NVMe -> FAT32 -> VFS.
 
-    Uses the C NVMe bridge on baremetal, bypassing the
-    auto-stubbed Simple MMIO functions that return 0.
+    Prefers the pure-Simple NVMe -> lease-backed BlockDevice -> FAT32 path.
+    Falls back to the C NVMe bridge on baremetal while the pure path is still
+    being hardened against hardware-specific mount failures.
 
     Returns true if VFS is ready to serve file requests.
     """
@@ -87,6 +88,10 @@ pub fn vfs_boot_init() -> bool:
         return _vfs_boot_init_virtio_fat32()
     log_raw_println("[vfs-init] Found NVMe device at index {nvme_idx}")
 
+    if _vfs_boot_init_pure_nvme_fat32(nvme_idx.to_u64()):
+        return true
+    log_raw_println("[vfs-init] pure-Simple NVMe + FAT32 unavailable; falling back to C bridge")
+
     log_raw_println("[vfs-init] Initializing C-backed NVMe block adapter...")
     val adapter_init = g_c_adapter.init_c_bridge()
     if not adapter_init:
@@ -96,10 +101,11 @@ pub fn vfs_boot_init() -> bool:
     log_raw_println("[vfs-init] C NVMe + FAT32 verified (via C driver)")
     g_vfs_initialized = true
 
-    # The pure-Simple FAT32 root driver currently exits during mount in a clean
-    # baremetal build. Keep VFS available through the C FAT32 driver-backed
-    # executable read path below; apps are still loaded from the FAT32 image as
-    # separate processes, while only storage driver code remains baremetal-aware.
+    # Keep VFS available through the C FAT32 driver-backed executable read path
+    # while the pure-Simple FAT32 boot path is being hardened for every
+    # baremetal image variant. Apps are still loaded from the FAT32 image as
+    # separate processes, while only this fallback storage path remains
+    # baremetal-aware.
     log_raw_println("[vfs-init] FAT32 executable VFS path ready")
 
     val manifest_bytes = simpleos_fat32_read_path_array("/SYS/APPS/APPIDX.TXT")
