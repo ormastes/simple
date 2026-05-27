@@ -158,7 +158,12 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
         return nil
     if expr.contains("(") and not _placeholder_calls_are_safe(expr, param):
         return nil
-    if not _placeholder_expr_is_safe(expr) and not _placeholder_expr_is_single_param_call(expr, param) and not _placeholder_expr_is_call_with_safe_args(expr, param) and not _placeholder_expr_is_simple_param_interpolation(expr, param) and not _placeholder_expr_is_field_access(expr, param):
+    if _placeholder_expr_is_unary_not_safe(expr, param):
+        val unary_new_text = _replace_plain_identifier(expr, param, "_")
+        if unary_new_text == expr:
+            return nil
+        return Some(ShortGrammarPlaceholderCandidate(new_text: unary_new_text, end_offset: expr_end))
+    if not _placeholder_expr_is_safe(expr) and not _placeholder_expr_is_single_param_call(expr, param) and not _placeholder_expr_is_call_with_safe_args(expr, param) and not _placeholder_expr_is_simple_param_interpolation(expr, param) and not _placeholder_expr_is_field_access(expr, param) and not _placeholder_expr_is_unary_not_safe(expr, param):
         return nil
 
     val new_text = _replace_plain_identifier(expr, param, "_")
@@ -263,6 +268,18 @@ fn _placeholder_expr_is_field_access(expr: text, param: text) -> bool:
         return false
     val field = expr[prefix.len():expr.len()]
     _is_plain_identifier(field)
+
+fn _placeholder_expr_is_unary_not_safe(expr: text, param: text) -> bool:
+    val prefix = "not "
+    if not expr.starts_with(prefix):
+        return false
+    val inner = expr[prefix.len():expr.len()].trim()
+    if inner == "":
+        return false
+    val field_prefix = param + "."
+    if inner.starts_with(field_prefix):
+        return _is_plain_identifier(inner[field_prefix.len():inner.len()])
+    _placeholder_expr_is_safe(inner) or _placeholder_expr_is_single_param_call(inner, param) or _placeholder_expr_is_call_with_safe_args(inner, param) or _placeholder_expr_is_field_access(inner, param)
 
 fn _placeholder_position_is_inside_brackets(expr: text, pos: i64) -> bool:
     var depth = 0
