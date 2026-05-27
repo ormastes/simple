@@ -1259,6 +1259,42 @@ pub(crate) fn evaluate_method_call_with_self_update(
         )? {
             return Ok((result, Some(updated_self)));
         }
+        if let Some(field_value) = fields.get(method) {
+            match field_value {
+                Value::Lambda {
+                    params,
+                    body,
+                    env: captured_env,
+                } => {
+                    let mut arg_vals = Vec::new();
+                    for arg in args {
+                        arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+                    }
+                    let mut local_env = Env::clone(captured_env);
+                    for (i, param) in params.iter().enumerate() {
+                        if let Some(val) = arg_vals.get(i) {
+                            local_env.insert(param.clone(), val.clone());
+                        }
+                    }
+                    let result = evaluate_expr(body.as_ref(), &mut local_env, functions, classes, enums, impl_methods)?;
+                    return Ok((result, None));
+                }
+                Value::Function { def, captured_env, .. } => {
+                    let result = exec_function_with_captured_env(
+                        def,
+                        args,
+                        env,
+                        &mut Env::clone(captured_env),
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                    return Ok((result, None));
+                }
+                _ => {}
+            }
+        }
         // Try method_missing hook
         if let Some(result) = try_method_missing(
             method,

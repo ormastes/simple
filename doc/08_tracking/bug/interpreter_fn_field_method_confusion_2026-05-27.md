@@ -34,3 +34,10 @@ Extract to local: `val h = r.handler; h(42)`. Works but clutters call sites.
 ## Impact
 
 Any class storing function-typed fields (callbacks, handlers, strategies) cannot use direct call syntax in interpreter mode.
+
+## Status
+
+**RESOLVED** — `evaluate_method_call_with_self_update` now falls back to
+callable object fields (`Lambda` and `Function`) before reporting an unknown
+method. Added `test/unit/compiler/interpreter/fn_field_call_spec.spl` to cover
+`route.handler(41)` on a function-typed field.
