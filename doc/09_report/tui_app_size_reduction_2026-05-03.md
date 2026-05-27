@@ -28,8 +28,8 @@ Date: 2026-05-27
 
 ## Simple Minimal TUI Sections
 
-- text=18696, data=664, bss=168, dec=19528
-- .text: 002b40
+- text=18864, data=664, bss=168, dec=19696
+- .text: 002be8
 - .rodata: 000e39
 - .eh_frame: 00072c
 - .bss: 0000a8
@@ -44,7 +44,7 @@ Date: 2026-05-27
 
 ## Notes
 
-- The generated TUI entry uses `app.ui.tui.standalone.run_standalone_tui`.
+- The generated TUI entry uses the narrow `app.ui.tui.screen` ANSI lane.
 - The Simple artifacts are built on the explicit bootstrap-floor lane: `--runtime-bundle core-c-bootstrap`.
 - This audit measures the bootstrap core floor, not the default `auto` lane once `simple-core` is available.
 - The audit intentionally records anchor strings instead of claiming full transitive Rust crate closure proof.

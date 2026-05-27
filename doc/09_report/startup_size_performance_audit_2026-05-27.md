@@ -13,15 +13,15 @@ Date: 2026-05-27
 
 | Artifact | Bytes | Dec Section Bytes | Run Status | Avg Runtime ms | Path | Heavy Markers |
 |---|---:|---:|---|---:|---|---|
-| asm hello syscall | 8568 | 90 | ok | 2.356 | build/startup_size_perf_audit/hello_asm | none |
-| C hello write | 14472 | 1998 | ok | 3.362 | build/startup_size_perf_audit/hello_c | none |
-| C termios TUI | 14472 | 2426 | ok | 2.343 | build/startup_size_perf_audit/tui_termios_c | none |
-| C mmap preload argparse | 14472 | 2800 | ok | 2.343 | build/startup_size_perf_audit/mmap_preload_argparse_c | none |
-| C TCP connect | 14472 | 2547 | ok | 2.435 | build/startup_size_perf_audit/tcp_connect_c | none |
-| C UDP send | 14472 | 2556 | ok | 2.496 | build/startup_size_perf_audit/udp_send_c | none |
-| C HTTP plain connect | 14472 | 2694 | ok | 3.243 | build/startup_size_perf_audit/http_plain_c | none |
-| Simple hello core-c-bootstrap | 26864 | 19501 | ok | 2.409 | build/startup_size_perf_audit/hello_simple | none |
-| Simple standalone TUI core-c-bootstrap | 26864 | 19528 | exit:3 | fail | build/startup_size_perf_audit/simple_tui_standalone | none |
+| asm hello syscall | 8568 | 90 | ok | 2.304 | build/startup_size_perf_audit/hello_asm | none |
+| C hello write | 14472 | 1998 | ok | 2.464 | build/startup_size_perf_audit/hello_c | none |
+| C termios TUI | 14472 | 2426 | ok | 2.369 | build/startup_size_perf_audit/tui_termios_c | none |
+| C mmap preload argparse | 14472 | 2800 | ok | 2.453 | build/startup_size_perf_audit/mmap_preload_argparse_c | none |
+| C TCP connect | 14472 | 2547 | ok | 2.787 | build/startup_size_perf_audit/tcp_connect_c | none |
+| C UDP send | 14472 | 2556 | ok | 2.454 | build/startup_size_perf_audit/udp_send_c | none |
+| C HTTP plain connect | 14472 | 2694 | ok | 2.467 | build/startup_size_perf_audit/http_plain_c | none |
+| Simple hello core-c-bootstrap | 26864 | 19501 | ok | 2.716 | build/startup_size_perf_audit/hello_simple | none |
+| Simple standalone TUI core-c-bootstrap | 26864 | 19696 | ok | 2.553 | build/startup_size_perf_audit/simple_tui_standalone | none |
 | Simple full TUI app simple-core | 92312 | 85866 | exit:139 | fail | build/startup_size_perf_audit/simple_tui_app | none |
 
 ## Windows And SimpleOS Counterpart Notes

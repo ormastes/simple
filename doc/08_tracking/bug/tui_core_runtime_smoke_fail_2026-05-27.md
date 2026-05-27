@@ -4,12 +4,13 @@ Date: 2026-05-27
 
 ## Summary
 
-The startup/size audit builds small Simple TUI binaries, but the runtime smoke
-does not pass:
+The startup/size audit builds small Simple TUI binaries. The generated
+standalone ANSI lane now passes, but the fuller `run_tui` simple-core app still
+does not:
 
-- `build/startup_size_perf_audit/simple_tui_standalone` exits with status `3`.
+- `build/startup_size_perf_audit/simple_tui_standalone` exits successfully.
 - `build/startup_size_perf_audit/simple_tui_app` exits with status `139`.
-- Both failures produced no stderr in the audit run.
+- The full TUI failure produced no stderr in the audit run.
 
 ## Evidence
 
@@ -30,15 +31,12 @@ Current measured sizes:
 
 ## Impact
 
-The size direction is correct, but the TUI lane cannot be counted as production
-ready until the small binaries also execute successfully. This blocks using the
-TUI measurements as final proof for startup-speed and dependency-elimination
-requirements.
+The generated standalone TUI size/startup lane can now be counted as executable
+evidence. The fuller `run_tui` app cannot be counted as production-ready until
+the simple-core segfault is fixed.
 
 ## Next Checks
 
-- Isolate whether exit `3` in the standalone lane comes from core-C bootstrap
-  runtime startup, ANSI string output, or unresolved runtime hooks.
 - Debug the `simple-core` full TUI app segfault before adding stricter TUI size
   gates.
 - Once fixed, rerun the startup/size audit and the existing TUI closure guard.
