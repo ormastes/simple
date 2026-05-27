@@ -184,6 +184,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   assignable again.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
   `BlockDevice` surfaces.
+- The freestanding boot mount path now uses the same provider-neutral
+  `BlockDevice` entry point for NVFS, DBFS, and FAT32 probes. FAT32 is detected
+  from the sector-0 BPB parser without importing hosted VFS state or the C bridge
+  into the pure-Simple adapter entry point.
 - Production performance claims now have an explicit NVMe contract: measured
   samples must be warm 4K random read/write runs on the pure Simple provider,
   without the C bridge or per-I/O allocation, with enough queue depth and common
@@ -278,6 +282,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `test/unit/os/kernel/types/device_mem_types_spec.spl` covers DeviceGrant
   BAR/IRQ/DMA/IOMMU token metadata, and the NVMe storage model spec covers using
   that label for a user-assigned namespace lease.
+- `test/unit/os/kernel/boot/boot_fs_mount_acceptance_spec.spl` covers the
+  provider-neutral boot mount path for NVFS, DBFS, and FAT32 over the same
+  `BlockDevice` interface and keeps production acceptance fail-closed on
+  non-pure storage evidence.
 - `test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl` covers the
   pure-Simple boot FAT32 lease helper and rejects invalid namespace geometry
   before mounting.

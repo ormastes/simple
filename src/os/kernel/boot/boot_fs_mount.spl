@@ -13,6 +13,7 @@
 #   - CNvmeBlockAdapterFs from c_nvme_adapter (C NVMe bridge only, freestanding copy)
 #   - nvfs_superblock (BlockDevice-level NVFS probe, no hosted driver)
 #   - dbfs_engine.superblock (BlockDevice-level DBFS probe, no hosted driver)
+#   - os.kernel.fs.fat32 parse_bpb (sector-level FAT32 BPB probe, no hosted VFS)
 #
 # MDSOC: feature dimension, kernel boot layer.
 
@@ -31,6 +32,7 @@ use std.fs_driver.nvfs_superblock.{
 use std.db.dbfs_engine.superblock.{
     dbfs_superblock_set_device, dbfs_superblock_probe_disk, dbfs_superblock_read_from_disk
 }
+use os.kernel.fs.fat32.{parse_bpb}
 
 # ============================================================================
 # Mount-result enum — no spawn, no PID, no hosted state
@@ -39,6 +41,7 @@ use std.db.dbfs_engine.superblock.{
 enum FsMountType:
     Nvfs
     Dbfs
+    Fat32
     None_
 
 struct FsMountResult:
@@ -116,6 +119,10 @@ fn boot_fs_mount_from_device(dev: BlockDevice, provider: text, pure_simple: bool
     if dbfs_r.is_ok():
         return dbfs_r
 
+    val fat32_r = boot_fs_mount_fat32_from_device(dev, provider, pure_simple)
+    if fat32_r.is_ok():
+        return fat32_r
+
     Err("boot-fs-mount: no root filesystem on provider:" + provider)
 
 fn boot_fs_mount_pure_nvme_from_device(dev: BlockDevice, evidence: NvmeTransferEvidence) -> Result<FsMountResult, text>:
@@ -156,6 +163,27 @@ fn boot_fs_mount_dbfs_from_device(dev: BlockDevice, provider: text, pure_simple:
     _fs_mount_type = FsMountType.Dbfs
     log_raw_println("[boot-fs-mount] DBFS superblock confirmed: gen={sb.mount_generation}")
     Ok(FsMountResult(mounted: true, fs_type: FsMountType.Dbfs, provider: provider, pure_simple: pure_simple))
+
+fn boot_fs_mount_fat32_from_device(dev: BlockDevice, provider: text, pure_simple: bool) -> Result<FsMountResult, text>:
+    """Probe FAT32 from sector 0 using the same provider-neutral BlockDevice."""
+    log_raw_println("[boot-fs-mount] Probing NVMe for FAT32 BPB...")
+    var sector0: [u8] = []
+    var i: u64 = 0
+    while i < 512u64:
+        sector0.push(0u8)
+        i = i + 1
+    val read_result = dev.read_sector(0u64, sector0)
+    if read_result.is_err():
+        log_raw_println("[boot-fs-mount] FAT32 BPB read failed")
+        return Err("boot-fs-mount: no FAT32 BPB")
+    val bpb = parse_bpb(sector0)
+    if bpb.is_err():
+        log_raw_println("[boot-fs-mount] No FAT32 BPB at LBA 0")
+        return Err("boot-fs-mount: no FAT32 BPB")
+    _fs_mount_done = true
+    _fs_mount_type = FsMountType.Fat32
+    log_raw_println("[boot-fs-mount] FAT32 BPB confirmed")
+    Ok(FsMountResult(mounted: true, fs_type: FsMountType.Fat32, provider: provider, pure_simple: pure_simple))
 
 fn boot_fs_mount_provider_is_pure_simple(provider: text) -> bool:
     provider == "simple-driver"
