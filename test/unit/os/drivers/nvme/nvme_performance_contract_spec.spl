@@ -3,6 +3,10 @@ use os.drivers.nvme.nvme_performance_contract.{
     nvme_c_parity_perf_comparison,
     nvme_c_parity_perf_ready,
     nvme_c_parity_perf_reason,
+    nvme_production_perf_report,
+    nvme_production_perf_report_line,
+    nvme_production_perf_report_ready,
+    nvme_production_perf_serial_acceptance_reason,
     nvme_random_io_perf_sample,
     nvme_random_io_perf_sample_ready,
     nvme_random_io_perf_sample_reason
@@ -76,3 +80,21 @@ describe "NVMe production performance contract":
         expect(nvme_c_parity_perf_ready(ready)).to_equal(true)
         expect(nvme_c_parity_perf_reason(slow_read)).to_equal("simple-read-iops-not-faster-than-c")
         expect(nvme_c_parity_perf_reason(slow_write_p99)).to_equal("simple-write-p99-slower-than-c")
+
+    it "formats a single hardware-runner report line for acceptance gates":
+        val report = nvme_production_perf_report(nvme_c_parity_perf_comparison(
+            _simple_sample(120000u64, 90000u64, 800u64, 1000u64),
+            _c_sample(100000u64, 80000u64, 900u64, 1100u64)
+        ))
+        val line = nvme_production_perf_report_line(report)
+
+        expect(nvme_production_perf_report_ready(report)).to_equal(true)
+        expect(line).to_contain("nvme_perf reason=ready")
+        expect(line).to_contain("simple_read_iops=120000")
+        expect(line).to_contain("c_write_iops=80000")
+        expect(nvme_production_perf_serial_acceptance_reason(line)).to_equal("ready")
+
+    it "rejects incomplete or non-ready serial benchmark reports":
+        expect(nvme_production_perf_serial_acceptance_reason("boot ok")).to_equal("missing-nvme-perf-report")
+        expect(nvme_production_perf_serial_acceptance_reason("nvme_perf reason=simple-read-iops-not-faster-than-c simple_read_iops=1")).to_equal("nvme-perf-report-not-ready")
+        expect(nvme_production_perf_serial_acceptance_reason("nvme_perf reason=ready simple_read_iops=1")).to_equal("missing-simple-write-iops")
