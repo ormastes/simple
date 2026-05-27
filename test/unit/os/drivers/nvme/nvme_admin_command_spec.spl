@@ -1,0 +1,48 @@
+use std.spec.{describe, it, expect}
+use os.drivers.nvme.nvme_admin_command.{
+    nvme_admin_identify_controller,
+    nvme_admin_identify_namespace,
+    nvme_admin_set_num_queues,
+    nvme_admin_create_io_completion_queue,
+    nvme_admin_create_io_submission_queue
+}
+use os.drivers.nvme.nvme_types.{NVME_ADMIN_IDENTIFY, NVME_ADMIN_SET_FEATURES, NVME_ADMIN_CREATE_IOCQ, NVME_ADMIN_CREATE_IOSQ}
+
+describe "NVMe admin command":
+    it "builds identify commands without hosted driver state":
+        val controller = nvme_admin_identify_controller(0x200000u64).unwrap()
+        expect(controller.opcode).to_equal(NVME_ADMIN_IDENTIFY)
+        expect(controller.nsid).to_equal(0u32)
+        expect(controller.prp1).to_equal(0x200000u64)
+        expect(controller.cdw10).to_equal(1u32)
+
+        val namespace = nvme_admin_identify_namespace(1u32, 0x210000u64).unwrap()
+        expect(namespace.opcode).to_equal(NVME_ADMIN_IDENTIFY)
+        expect(namespace.nsid).to_equal(1u32)
+        expect(namespace.prp1).to_equal(0x210000u64)
+        expect(namespace.cdw10).to_equal(0u32)
+
+    it "builds queue feature and create queue commands":
+        val queues = nvme_admin_set_num_queues(2u16, 3u16).unwrap()
+        expect(queues.opcode).to_equal(NVME_ADMIN_SET_FEATURES)
+        expect(queues.cdw10).to_equal(0x07u32)
+        expect(queues.cdw11).to_equal(1u32 | (2u32 << 16))
+
+        val iocq = nvme_admin_create_io_completion_queue(1u16, 64u16, 0x300000u64).unwrap()
+        expect(iocq.opcode).to_equal(NVME_ADMIN_CREATE_IOCQ)
+        expect(iocq.prp1).to_equal(0x300000u64)
+        expect(iocq.cdw10).to_equal(1u32 | (63u32 << 16))
+        expect(iocq.cdw11).to_equal(1u32)
+
+        val iosq = nvme_admin_create_io_submission_queue(1u16, 64u16, 1u16, 0x310000u64).unwrap()
+        expect(iosq.opcode).to_equal(NVME_ADMIN_CREATE_IOSQ)
+        expect(iosq.prp1).to_equal(0x310000u64)
+        expect(iosq.cdw10).to_equal(1u32 | (63u32 << 16))
+        expect(iosq.cdw11).to_equal(1u32 | (1u32 << 16))
+
+    it "rejects invalid admin command resources before submission":
+        expect(nvme_admin_identify_controller(0u64).unwrap_err()).to_equal("nvme-admin-identify-buffer-zero")
+        expect(nvme_admin_identify_namespace(0u32, 0x200000u64).unwrap_err()).to_equal("nvme-admin-identify-namespace-zero")
+        expect(nvme_admin_set_num_queues(0u16, 1u16).unwrap_err()).to_equal("nvme-admin-queue-count-zero")
+        expect(nvme_admin_create_io_completion_queue(0u16, 64u16, 0x300000u64).unwrap_err()).to_equal("nvme-admin-iocq-qid-zero")
+        expect(nvme_admin_create_io_submission_queue(1u16, 64u16, 0u16, 0x310000u64).unwrap_err()).to_equal("nvme-admin-iosq-cqid-zero")

@@ -28,6 +28,7 @@ use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
 use os.drivers.nvme.nvme_queue_notify.*
 use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_pair_from_resources, nvme_cq_doorbell_addr, nvme_sq_doorbell_addr, nvme_dstrd_to_doorbell_stride_bytes}
 use os.drivers.nvme.nvme_transfer_command.{nvme_read_io_command, nvme_write_io_command, nvme_flush_io_command, nvme_io_status_code}
+use os.drivers.nvme.nvme_admin_command.{nvme_admin_identify_controller, nvme_admin_identify_namespace, nvme_admin_set_num_queues, nvme_admin_create_io_completion_queue, nvme_admin_create_io_submission_queue}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
@@ -318,10 +319,13 @@ impl NvmeDriver:
         val buf = buf_result.unwrap()
         self.zero_memory(buf.virt, DMA_PAGE_SIZE)
 
-        # Identify: opcode=0x06, NSID=0, PRP1=buffer, CDW10=CNS (1=controller)
+        val cmd_result = nvme_admin_identify_controller(buf.phys)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: identify controller " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
         self.admin_queue.submit_command(
-            0x06, 0, buf.phys, 0,
-            1, 0, 0
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
         )
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
@@ -340,10 +344,13 @@ impl NvmeDriver:
         val buf = buf_result.unwrap()
         self.zero_memory(buf.virt, DMA_PAGE_SIZE)
 
-        # Identify Namespace: opcode=0x06, NSID=1, PRP1=buffer, CDW10=CNS (0=namespace)
+        val cmd_result = nvme_admin_identify_namespace(1u32, buf.phys)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: identify namespace " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
         self.admin_queue.submit_command(
-            0x06, 1, buf.phys, 0,
-            0, 0, 0
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
         )
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
@@ -374,14 +381,14 @@ impl NvmeDriver:
         Requests nsq submission queues and ncq completion queues.
         CDW11: bits[31:16] = NCQR (0-based), bits[15:0] = NSQR (0-based).
         """
-        val nsqr = (nsq - 1).to_u32()
-        val ncqr = (ncq - 1).to_u32()
-        val cdw11 = nsqr | (ncqr << 16)
-        val feature_id: u32 = 0x07  # Number of Queues
+        val cmd_result = nvme_admin_set_num_queues(nsq, ncq)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: set num queues " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
 
         self.admin_queue.submit_command(
-            NVME_ADMIN_OPCODE_SET_FEATURES, 0, 0, 0,
-            feature_id, cdw11, 0
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
         )
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
@@ -406,14 +413,14 @@ impl NvmeDriver:
 
         self.io_queue.cq_doorbell = nvme_cq_doorbell_addr(self.bar0_virt, 1u16, nvme_dstrd_to_doorbell_stride_bytes(self.db_stride))
 
-        # CDW10: QID=1 | QSIZE=(depth-1) << 16
-        val cdw10 = 1 | (63u32 << 16)
-        # CDW11: PC=1 (physically contiguous), IV=0, IEN=1
-        val cdw11: u32 = 0x01  # PC bit
+        val cmd_result = nvme_admin_create_io_completion_queue(1u16, 64u16, cq.phys)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: create I/O CQ " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
 
         self.admin_queue.submit_command(
-            NVME_ADMIN_OPCODE_CREATE_IOCQ, 0, cq.phys, 0,
-            cdw10, cdw11, 0
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
         )
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
@@ -450,14 +457,14 @@ impl NvmeDriver:
             return Result.Err("NVMe: invalid I/O queue resources: " + io_queue_result.unwrap_err())
         self.io_queue = io_queue_result.unwrap()
 
-        # CDW10: QID=1 | QSIZE=(depth-1) << 16
-        val cdw10 = 1 | (63u32 << 16)
-        # CDW11: PC=1 (physically contiguous), CQID=1 << 16
-        val cdw11: u32 = 0x01 | (1 << 16)
+        val cmd_result = nvme_admin_create_io_submission_queue(1u16, 64u16, 1u16, sq.phys)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: create I/O SQ " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
 
         self.admin_queue.submit_command(
-            NVME_ADMIN_OPCODE_CREATE_IOSQ, 0, sq.phys, 0,
-            cdw10, cdw11, 0
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
         )
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
