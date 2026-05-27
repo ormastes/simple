@@ -27,7 +27,7 @@ Cannot remove until native linker resolves them from Simple-compiled objects.
 | `runtime_contracts.c` | 2 (`simple_contract_check*`) | codegen emits direct calls | 3 files | Core compiler infrastructure — codegen hardcodes symbol |
 | `runtime_error.c` | `rt_function_not_found`, `rt_method_not_found` | codegen/core-C native-project archive | 2 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native unresolved-call fallbacks. |
 | `runtime_time.c` | 18 (`rt_time_*`, `rt_timestamp_*`) | 8+ files | **199 files** | Most used runtime module; syscall wrappers |
-| `runtime_equality.c` | `rt_native_eq`, `rt_native_neq`, `rt_value_eq`, `rt_value_compare` | `codegen/instr/core.rs`, `llvm/instructions.rs`, `elf_utils.rs`, `runtime_sffi.rs` | 0 direct | Codegen emits eq/neq ops; elf_utils resolves symbol for native link |
+| `runtime_equality.c` | `rt_native_eq`, `rt_native_neq`, `rt_value_eq`, `rt_value_compare` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native equality exports. |
 | `runtime_memory.c` | `rt_alloc`, `rt_free`, `rt_ptr_read_i64/i32`, `rt_ptr_write_*`, `rt_memset`, `rt_memcpy` | `codegen/instr/core.rs`, `memory.rs`, `closures_structs.rs`, `llvm/objects.rs` | gpu/memory.spl, ptr/raw.spl, torch/sffi.spl, sffi/llvm_loader.spl | Codegen emits `rt_alloc` for every struct/array alloc; core ABI |
 | `runtime_value.c` | `rt_value_int/float/bool/nil`, `rt_value_as_int`, `rt_value_truthy`, `rt_value_is_nil/int/float/bool/heap`, `rt_value_type_tag` | none in `simple-runtime` as of 2026-05-27 | 0 direct | Rust runtime crate now implements value operations and pointer conversions directly; core C/native runtime still keeps this source for native value helpers |
 | `runtime_format.c` | `__c_rt_value_format_string` (→ `rt_value_format_string`), `__c_rt_raw_u64_to_str`, `__c_rt_value_to_display_str` | `codegen/instr/collections.rs`, `llvm/functions.rs`, `runtime_sffi.rs`, `mir/lower/lowering_expr_builtin.rs` | 0 direct | Codegen emits `rt_value_format_string` for string interpolation; `rt_raw_u64_to_string` for int→str |
@@ -94,6 +94,11 @@ Additional 2026-05-27 simple-runtime reductions:
 - `value/sffi/value_ops.rs` and the pointer conversion helpers in
   `value/sffi/memory.rs` now implement the value helpers directly in Rust, so
   `runtime/build.rs` no longer compiles `runtime_value.c`.
+- `value/sffi/equality.rs` now implements value/native equality and comparison
+  directly in Rust, so `runtime/build.rs` no longer compiles
+  `runtime_equality.c`.
+- The stale `runtime_ctype.c` entry was removed from `runtime/build.rs`; that
+  C source was already deleted and skipped by the build when absent.
 
 Verification:
 
@@ -104,6 +109,7 @@ cargo test -p simple-runtime sffi::random --manifest-path src/compiler_rust/Carg
 cargo test -p simple-runtime sffi::config --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::error_handling --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime value::tests::test_sffi_functions --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::equality --manifest-path src/compiler_rust/Cargo.toml
 ```
 
 ## Path to C Removal for Remaining Modules
@@ -112,7 +118,7 @@ For **math/random**: the Rust shim no longer calls these C files as of
 2026-05-27. Remaining removal requires migrating the core-C/native-project
 SFFI export path so native builds no longer need the archived C sources.
 
-For **contracts/equality/memory/format/native/string_index/async_driver/env**:
+For **contracts/memory/format/native/string_index/async_driver/env**:
 codegen-emitted or ABI-layer symbols. Removal requires the native-build linker to
 resolve them from Simple-compiled objects instead of the C archive. Blocked by the
 cross-module ABI bug.
