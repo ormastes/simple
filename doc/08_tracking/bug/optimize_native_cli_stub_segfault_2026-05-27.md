@@ -2,7 +2,7 @@
 
 ## Status
 
-Open.
+Fixed in follow-up.
 
 ## Summary
 
@@ -36,6 +36,35 @@ EXIT=139
 ```
 
 Running the binary with no arguments also exits `139`.
+
+## Resolution
+
+The crash had two native CLI startup causes:
+
+- `std.sffi.cli.cli_get_args()` used `?? []`, which lowered through `rt_unwrap_or_self`; the selected `simple-core` runtime did not provide that helper, so the linker weak-stubbed it to nil.
+- `std.cli.cli_util.get_cli_args()` assigned the boolean result of `args.push(...)` back into `args`, causing native callers to receive `1` instead of an array.
+- The shared CLI helper skipped any second `.spl` argument as a launcher script path, which broke standalone native binaries whose first user argument is a source file.
+- `optimize.main` used a native-fragile optional binding for parsed arguments and assumed `args[0]` was always the `optimize` launcher subcommand.
+- The analyze path read files through `shell_output("cat ...")`, which depends on `rt_process_run`; the standalone native runtime did not provide that safely.
+
+The fix replaces the `?? []` calls with explicit nil checks, mutates CLI argument arrays with `args.push(...)` without assignment, skips `.spl` launcher paths only for the Simple launcher/runtime, parses optimizer args without optional binding, and uses `std.io.file_read` for optimizer analysis.
+
+Verified:
+
+```bash
+bin/simple native-build --source src/app --source src/lib --entry-closure --entry src/app/optimize/main.spl --strip --output build/tmp/optimize_cli_native_smoke
+timeout 5s build/tmp/optimize_cli_native_smoke --help
+```
+
+Observed result: help text printed and `EXIT=0`.
+
+Also verified:
+
+```bash
+timeout 15s build/tmp/optimize_cli_native_smoke src/app/optimize/main.spl --level=O1
+```
+
+Observed result: analysis completed and `ANALYZE_EXIT=0`.
 
 ## Impact
 
