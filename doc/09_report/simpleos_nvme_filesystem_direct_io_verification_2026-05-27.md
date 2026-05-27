@@ -97,4 +97,6 @@ delegates to the same checker. The wrapper also supports `--preflight` to verify
 the checker runtime/app and a host-visible NVMe namespace device before capture.
 For production lab use, `--production --preflight-out <path> --report-out <path>`
 generates the host NVMe identity report and then validates that the SimpleOS
-serial log reports the same serial and namespace.
+serial log reports the same serial and namespace. The generated preflight path
+requires the host device glob to match exactly one namespace; broad multi-device
+globs are rejected as ambiguous production evidence.

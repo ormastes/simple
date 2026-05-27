@@ -229,7 +229,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Production lab runs should use `--production --preflight-out <path>
   --report-out <path>` when the host and serial capture are checked in one
   invocation. The wrapper writes the host-visible NVMe identity report first and
-  then requires the captured SimpleOS serial identity to match it.
+  then requires the captured SimpleOS serial identity to match it. Generated
+  production preflight evidence is accepted only when the device glob resolves
+  to exactly one namespace, so labs must narrow `SIMPLEOS_NVME_DEVICE_GLOB`
+  before assigning a user namespace.
 - The q35 pure-Simple real-device marker contract now lists `nvme_perf
   reason=ready`, and serial acceptance validates the detailed performance fields
   in addition to provider, grant, namespace, and transfer markers.

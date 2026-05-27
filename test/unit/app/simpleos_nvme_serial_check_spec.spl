@@ -221,11 +221,13 @@ describe "SimpleOS physical NVMe serial checker app":
         val invalid_report = "/tmp/simpleos_nvme_identity_compare_invalid.sdn"
         val mismatch_report = "/tmp/simpleos_nvme_identity_compare_mismatch.sdn"
         val match_report = "/tmp/simpleos_nvme_identity_compare_match.sdn"
+        val multi_report = "/tmp/simpleos_nvme_identity_compare_multi.sdn"
         val _ = rt_file_delete(ready_path)
         val _ = rt_file_delete(preflight_report)
         val _ = rt_file_delete(invalid_report)
         val _ = rt_file_delete(mismatch_report)
         val _ = rt_file_delete(match_report)
+        val _ = rt_file_delete(multi_report)
         val ready_log = _physical_nvme_access_marker() + _physical_nvme_perf_marker("real-nvme", "false", "real-device") + "TEST PASSED\n"
         val invalid_preflight = "serial: SN123456\nnamespace_nsid: 1\n"
         val mismatch_preflight =
@@ -237,6 +239,16 @@ describe "SimpleOS physical NVMe serial checker app":
         val matching_preflight =
             "physical_nvme_preflight:\n" +
             "  device: /dev/nvme9n1\n" +
+            "    model: Samsung PM9A3\n" +
+            "    serial: SN123456\n" +
+            "    namespace_nsid: 1\n"
+        val multi_preflight =
+            "physical_nvme_preflight:\n" +
+            "  device: /dev/nvme9n1\n" +
+            "    model: Samsung PM9A3\n" +
+            "    serial: SN123456\n" +
+            "    namespace_nsid: 1\n" +
+            "  device: /dev/nvme10n1\n" +
             "    model: Samsung PM9A3\n" +
             "    serial: SN123456\n" +
             "    namespace_nsid: 1\n"
@@ -262,6 +274,13 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(match_code).to_equal(0)
         expect(match_text).to_contain("reason: ready")
         expect(match_text).to_contain("preflight_identity_match: true")
+
+        expect(rt_file_write_text(preflight_report, multi_preflight)).to_equal(true)
+        val (_multi_stdout, _multi_stderr, multi_code) = _run_checker_with_preflight(ready_path, preflight_report, multi_report)
+        val multi_text = rt_file_read_text(multi_report) ?? ""
+        expect(multi_code).to_equal(1)
+        expect(multi_text).to_contain("reason: physical-nvme-preflight-multiple-devices")
+        expect(multi_text).to_contain("preflight_identity_match: false")
 
     it "passes preflight identity comparison through the physical NVMe lab wrapper":
         val ready_path = "/tmp/simpleos_nvme_lab_wrapper_identity_compare.log"
@@ -416,6 +435,34 @@ describe "SimpleOS physical NVMe serial checker app":
 
         expect(code).to_equal(1)
         expect(stderr).to_contain("incomplete NVMe sysfs identity")
+
+    it "rejects one-shot production when the host device glob is ambiguous":
+        val fake_root = "/tmp/simpleos_nvme_production_preflight_multi_sysfs"
+        val fake_dev_a = "/tmp/simpleos_nvme_production_preflight_multi_device/nvme9n1"
+        val fake_dev_b = "/tmp/simpleos_nvme_production_preflight_multi_device/nvme10n1"
+        val fake_sysfs_a = fake_root + "/nvme9n1"
+        val fake_sysfs_b = fake_root + "/nvme10n1"
+        val fake_glob = fake_dev_a + " " + fake_dev_b
+        val ready_path = "/tmp/simpleos_nvme_production_preflight_multi.log"
+        val preflight_out = "/tmp/simpleos_nvme_production_preflight_multi.sdn"
+        val report = "/tmp/simpleos_nvme_production_preflight_multi_report.sdn"
+        val _cleanup = rt_process_run_timeout("/bin/sh", ["-c", "rm -rf \"" + fake_root + "\" \"" + fake_dev_a + "\" \"" + fake_dev_b + "\" \"" + preflight_out + "\" \"" + report + "\" \"" + ready_path + "\""], 5000)
+        val _mkdir = rt_process_run_timeout("/bin/sh", ["-c", "mkdir -p \"" + fake_sysfs_a + "/device\" \"" + fake_sysfs_b + "/device\" \"$(dirname \"" + fake_dev_a + "\")\""], 5000)
+        val ready_log = _physical_nvme_access_marker() + _physical_nvme_perf_marker("real-nvme", "false", "real-device") + "TEST PASSED\n"
+        expect(rt_file_write_text(fake_dev_a, "device-a")).to_equal(true)
+        expect(rt_file_write_text(fake_dev_b, "device-b")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs_a + "/device/model", "Samsung PM9A3\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs_a + "/device/serial", "SN123456\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs_a + "/nsid", "1\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs_b + "/device/model", "Samsung PM9A3\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs_b + "/device/serial", "SN123456\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs_b + "/nsid", "1\n")).to_equal(true)
+        expect(rt_file_write_text(ready_path, ready_log)).to_equal(true)
+
+        val (_stdout, stderr, code) = _run_lab_wrapper_production_with_preflight_out(ready_path, fake_glob, fake_root, preflight_out, report)
+
+        expect(code).to_equal(1)
+        expect(stderr).to_contain("exactly one NVMe namespace device")
 
     it "preflights the physical NVMe lab environment before serial capture":
         val fake_nvme = "/tmp/simpleos_nvme_preflight_device"
