@@ -226,6 +226,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - User data queue reuse is now bound to controller id, namespace id, owner task,
   and queue depth. A hardware user namespace assignment cannot reuse an existing
   queue id for a different namespace or owner.
+- The hosted `boot_fs_sequence()` default is production-safe: it no longer
+  probes NVFS/DBFS through the C bridge. The C-backed hosted root probing path is
+  retained only behind an explicitly named development helper.
 
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware
