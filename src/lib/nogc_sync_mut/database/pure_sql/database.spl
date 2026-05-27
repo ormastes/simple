@@ -324,6 +324,8 @@ fn _extract_bound(expr: SqlExpr, col_map: Dict<text, i32>) -> [i64]:
             kind = 2
         elif op == "<":
             kind = 3
+        elif op == "=":
+            kind = 4
         if kind < 0:
             return []
         var result: [i64] = []
@@ -350,6 +352,8 @@ fn _extract_bound(expr: SqlExpr, col_map: Dict<text, i32>) -> [i64]:
             kind = 2
         elif op == ">":
             kind = 3
+        elif op == "=":
+            kind = 4
         if kind < 0:
             return []
         var result: [i64] = []
@@ -358,6 +362,21 @@ fn _extract_bound(expr: SqlExpr, col_map: Dict<text, i32>) -> [i64]:
         result.push(kind)
         return result
     []
+
+# Extract a single-sided integer comparison from a WHERE clause.
+# Returns [col_index, value, kind] where kind: 0=>=, 1=>, 2=<=, 3=<, 4==
+# Returns [] if not a simple single comparison.
+fn _extract_single_int_bound(where_expr: SqlExpr?, col_map: Dict<text, i32>) -> [i64]:
+    if not where_expr.?:
+        return []
+    val expr = where_expr
+    if expr.kind != SqlExprKind.BinaryOp:
+        return []
+    # Skip AND/OR — those are handled by _extract_int_range
+    val op = expr.value
+    if op == "AND" or op == "OR":
+        return []
+    _extract_bound(expr, col_map)
 
 fn _dbval_is_int(v: DbValue) -> bool:
     match v:
@@ -2790,8 +2809,39 @@ class PureDatabase:
                     ri = ri + 1
                 used_range_path = true
 
+        # ── Single-bound integer fast path (e.g. score > 150) ────────
+        var used_single_bound = false
+        if not used_pk_path and not used_range_path and use_typed and not has_join:
+            val sb = _extract_single_int_bound(sel.where_expr, col_map)
+            if sb.len() == 3:
+                val sb_ci = sb[0] as i32
+                val sb_val = sb[1]
+                val sb_kind = sb[2]
+                val n = tbl.tuples.len() as i32
+                var ri: i32 = 0
+                while ri < n:
+                    if mvcc_is_visible(tbl.tuples[ri], snap):
+                        val rv = typed[ri]
+                        if sb_ci < rv.len() as i32:
+                            val cv = _dbval_as_i64(rv[sb_ci])
+                            var ok = false
+                            if sb_kind == 0:
+                                ok = cv >= sb_val
+                            elif sb_kind == 1:
+                                ok = cv > sb_val
+                            elif sb_kind == 2:
+                                ok = cv <= sb_val
+                            elif sb_kind == 3:
+                                ok = cv < sb_val
+                            elif sb_kind == 4:
+                                ok = cv == sb_val
+                            if ok:
+                                base_rows.push(rv)
+                    ri = ri + 1
+                used_single_bound = true
+
         # ── Full scan path (typed or fallback) ───────────────────────
-        if not used_pk_path and not used_range_path:
+        if not used_pk_path and not used_range_path and not used_single_bound:
             if use_typed:
                 var ti2: i32 = 0
                 while ti2 < tbl.tuples.len() as i32:
