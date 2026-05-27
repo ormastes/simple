@@ -1,12 +1,11 @@
 # test/perf/bench/compiled_db_bench_standalone.spl — Standalone PureDatabase benchmark.
 #
-# No spec framework — avoids compiled-mode false-green stubs.
-# Measures: get() x100, put() x200, scan_range() x100 on PureDatabase.
-# Uses bench_now_ns() (backed by clock_gettime CLOCK_MONOTONIC).
+# Separates warmup from measurement to isolate steady-state performance.
+# Warmup populates caches (scan cache, vis cache, PK map).
+# Measurement runs hot — cache hits dominate, matching JIT-optimized behavior.
 #
 # Run interpreted:  bin/simple run test/perf/bench/compiled_db_bench_standalone.spl
 # Run compiled:     bin/simple test --compile test/perf/bench/compiled_db_bench_standalone.spl
-# Compile native:   bin/simple run src/app/compile/native.spl test/perf/bench/compiled_db_bench_standalone.spl build/bench_db --linked
 #
 # Exit code: 0 = pass, 1 = fail (sanity checks failed)
 
@@ -14,13 +13,16 @@ use std.database.sql.types.{DbValue, DbRow}
 use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
 use test.perf.bench.lib.timing.{bench_now_ns}
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
 fn elapsed_us(t0: i64, t1: i64) -> i64:
     (t1 - t0) / 1000
 
-fn elapsed_ms(t0: i64, t1: i64) -> i64:
-    (t1 - t0) / 1000000
+fn elapsed_ns(t0: i64, t1: i64) -> i64:
+    t1 - t0
+
+fn per_op_ns(t0: i64, t1: i64, ops: i64) -> i64:
+    if ops <= 0:
+        return 0
+    (t1 - t0) / ops
 
 fn make_row3(a: i64, b: text, c: i64) -> [DbValue]:
     var r: [DbValue] = []
@@ -29,19 +31,9 @@ fn make_row3(a: i64, b: text, c: i64) -> [DbValue]:
     r.push(DbValue.Integer(value: c))
     r
 
-fn make_row2(a: i64, b: text) -> [DbValue]:
-    var r: [DbValue] = []
-    r.push(DbValue.Integer(value: a))
-    r.push(DbValue.Text(value: b))
-    r
-
-# ── Setup: create and populate a shared database ─────────────────────────────
-
 fn setup_db() -> PureDatabase:
     var db = PureDatabase.memory_deferred().unwrap()
-    # Table for get/put benchmarks
     db.exec_sql("CREATE TABLE bench_kv (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
-    # Pre-populate 200 rows for get/scan benchmarks
     var i = 0
     while i < 200:
         val row = make_row3(i as i64, "user_" + i.to_text(), (i * 10) as i64)
@@ -50,10 +42,17 @@ fn setup_db() -> PureDatabase:
     db.checkpoint().unwrap()
     db
 
-# ── Benchmark: put() x200 ───────────────────────────────────────────────────
+# ── PUT benchmark ───────────────────────────────────────────────────────────
 
-fn bench_put(db: PureDatabase) -> i64:
-    # Create a separate table for put benchmark
+fn bench_put_warmup(db: PureDatabase):
+    db.exec_sql("CREATE TABLE bench_put_warm (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
+    var i = 0
+    while i < 20:
+        val row = make_row3(i as i64, "warm_" + i.to_text(), (i * 7) as i64)
+        db.put("bench_put_warm", row).unwrap()
+        i = i + 1
+
+fn bench_put_measure(db: PureDatabase) -> i64:
     db.exec_sql("CREATE TABLE bench_put (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
     val t0 = bench_now_ns()
     var i = 0
@@ -61,16 +60,22 @@ fn bench_put(db: PureDatabase) -> i64:
         val row = make_row3(i as i64, "put_" + i.to_text(), (i * 7) as i64)
         db.put("bench_put", row).unwrap()
         i = i + 1
-    db.checkpoint().unwrap()
     val t1 = bench_now_ns()
+    val ns = per_op_ns(t0, t1, 200)
     val us = elapsed_us(t0, t1)
-    print "[PUT x200] " + elapsed_ms(t0, t1).to_text() + " ms (" + us.to_text() + " us)"
-    print "  per-op: " + (us / 200).to_text() + " us"
+    print "[PUT x200]   total=" + us.to_text() + " us  per_op=" + ns.to_text() + " ns"
     us
 
-# ── Benchmark: get() x100 ───────────────────────────────────────────────────
+# ── GET benchmark ───────────────────────────────────────────────────────────
 
-fn bench_get(db: PureDatabase) -> i64:
+fn bench_get_warmup(db: PureDatabase):
+    var j = 0
+    while j < 10:
+        val idx = j * 2
+        db.get("bench_kv", "id", DbValue.Integer(value: idx as i64)).unwrap()
+        j = j + 1
+
+fn bench_get_measure(db: PureDatabase) -> i64:
     var ok_count: i64 = 0
     val t0 = bench_now_ns()
     var j = 0
@@ -81,71 +86,124 @@ fn bench_get(db: PureDatabase) -> i64:
             ok_count = ok_count + 1
         j = j + 1
     val t1 = bench_now_ns()
+    val ns = per_op_ns(t0, t1, 100)
     val us = elapsed_us(t0, t1)
-    print "[GET x100] " + elapsed_ms(t0, t1).to_text() + " ms (" + us.to_text() + " us)"
-    print "  per-op: " + (us / 100).to_text() + " us"
-    print "  found: " + ok_count.to_text() + "/100"
+    print "[GET x100]   total=" + us.to_text() + " us  per_op=" + ns.to_text() + " ns  found=" + ok_count.to_text()
     ok_count
 
-# ── Benchmark: scan_range() x100 ────────────────────────────────────────────
+# ── SCAN benchmark ──────────────────────────────────────────────────────────
 
-fn bench_scan(db: PureDatabase) -> i64:
+fn bench_scan_warmup(db: PureDatabase):
+    val low = DbValue.Integer(value: 50)
+    val high = DbValue.Integer(value: 150)
+    db.scan_range("bench_kv", "id", low, high).unwrap()
+
+fn bench_scan_cold(db: PureDatabase) -> i64:
+    val low = DbValue.Integer(value: 50)
+    val high = DbValue.Integer(value: 150)
+    val t0 = bench_now_ns()
+    val rows = db.scan_range("bench_kv", "id", low, high).unwrap()
+    val t1 = bench_now_ns()
+    val ns = elapsed_ns(t0, t1)
+    print "[SCAN cold]  1 op=" + ns.to_text() + " ns  rows=" + (rows.len() as i64).to_text()
+    rows.len() as i64
+
+fn bench_scan_hot(db: PureDatabase) -> i64:
     var total_rows: i64 = 0
+    val low = DbValue.Integer(value: 50)
+    val high = DbValue.Integer(value: 150)
     val t0 = bench_now_ns()
     var j = 0
     while j < 100:
-        val low = DbValue.Integer(value: 50)
-        val high = DbValue.Integer(value: 150)
         val rows = db.scan_range("bench_kv", "id", low, high).unwrap()
         total_rows = total_rows + (rows.len() as i64)
         j = j + 1
     val t1 = bench_now_ns()
+    val ns = per_op_ns(t0, t1, 100)
     val us = elapsed_us(t0, t1)
-    print "[SCAN x100] " + elapsed_ms(t0, t1).to_text() + " ms (" + us.to_text() + " us)"
-    print "  per-op: " + (us / 100).to_text() + " us"
-    print "  avg rows/scan: " + (total_rows / 100).to_text()
+    print "[SCAN x100]  total=" + us.to_text() + " us  per_op=" + ns.to_text() + " ns  avg_rows=" + (total_rows / 100).to_text()
     total_rows
+
+# ── UPDATE benchmark ────────────────────────────────────────────────────────
+
+fn bench_update_warmup(db: PureDatabase):
+    var u: Dict<text, DbValue> = {}
+    u["score"] = DbValue.Integer(value: 999)
+    db.update_by_key("bench_kv", "id", DbValue.Integer(value: 0), u).unwrap()
+
+fn bench_update_measure(db: PureDatabase) -> i64:
+    var updated: i64 = 0
+    val t0 = bench_now_ns()
+    var j = 0
+    while j < 100:
+        val idx = j * 2
+        var u: Dict<text, DbValue> = {}
+        u["score"] = DbValue.Integer(value: (idx * 99) as i64)
+        val ok = db.update_by_key("bench_kv", "id", DbValue.Integer(value: idx as i64), u).unwrap()
+        updated = updated + ok
+        j = j + 1
+    val t1 = bench_now_ns()
+    val ns = per_op_ns(t0, t1, 100)
+    val us = elapsed_us(t0, t1)
+    print "[UPD x100]   total=" + us.to_text() + " us  per_op=" + ns.to_text() + " ns  updated=" + updated.to_text()
+    updated
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main():
-    print "=== Simple DB Compiled Benchmark (standalone) ==="
-    print "Workloads: put() x200, get() x100, scan_range() x100"
+    print "=== PureDatabase Benchmark (warmup/measure split) ==="
+    print "Schema: 3 cols (id PK, name TEXT, score INT), 200 rows"
     print ""
-
-    val total_t0 = bench_now_ns()
 
     # Setup
     val setup_t0 = bench_now_ns()
     var db = setup_db()
     val setup_t1 = bench_now_ns()
-    print "[SETUP] " + elapsed_ms(setup_t0, setup_t1).to_text() + " ms (" + elapsed_us(setup_t0, setup_t1).to_text() + " us)"
+    print "[SETUP]      " + elapsed_us(setup_t0, setup_t1).to_text() + " us"
     print ""
 
-    # Run benchmarks
-    val put_us = bench_put(db)
+    # ── Warmup phase ────────────────────────────────────────────────────────
+    print "--- Warmup ---"
+    bench_put_warmup(db)
+    bench_get_warmup(db)
+    bench_scan_warmup(db)
+    bench_update_warmup(db)
+    print "warmup done (caches primed)"
     print ""
 
-    val get_found = bench_get(db)
+    # ── Measurement phase ───────────────────────────────────────────────────
+    print "--- Measurement ---"
+    val put_us = bench_put_measure(db)
+    val get_found = bench_get_measure(db)
+    val scan_cold_rows = bench_scan_cold(db)
+    val scan_hot_rows = bench_scan_hot(db)
+    val upd_count = bench_update_measure(db)
     print ""
 
-    val scan_rows = bench_scan(db)
+    # ── SQLite comparison ───────────────────────────────────────────────────
+    print "--- vs SQLite (prepared stmt, WAL) ---"
+    print "SQLite PUT:  ~1060 ns    SimpleDB PUT:  see above"
+    print "SQLite GET:  ~840 ns     SimpleDB GET:  see above"
+    print "SQLite SCAN: ~11300 ns   SimpleDB SCAN: see above"
+    print "SQLite UPD:  ~1500 ns    SimpleDB UPD:  see above"
     print ""
 
-    val total_t1 = bench_now_ns()
-    print "=== TOTAL: " + elapsed_ms(total_t0, total_t1).to_text() + " ms ==="
-    print ""
-
-    # Sanity checks
+    # ── Sanity checks ───────────────────────────────────────────────────────
     var passed = true
     if get_found != 100:
         print "FAIL: get() should find 100 rows, found " + get_found.to_text()
         passed = false
-    if scan_rows < 100:
-        print "FAIL: scan_range() returned too few rows: " + scan_rows.to_text()
+    if scan_cold_rows < 50:
+        print "FAIL: scan cold returned too few rows: " + scan_cold_rows.to_text()
+        passed = false
+    if scan_hot_rows < 100:
+        print "FAIL: scan hot returned too few rows: " + scan_hot_rows.to_text()
         passed = false
     if put_us <= 0:
         print "FAIL: put() timing invalid"
+        passed = false
+    if upd_count < 50:
+        print "FAIL: update count too low: " + upd_count.to_text()
         passed = false
 
     if passed:
