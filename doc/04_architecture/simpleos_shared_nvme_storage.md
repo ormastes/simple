@@ -82,6 +82,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Kernel boot service initialization and the FAT32 root fallback in
   `boot_fs.spl` now select the production VFS boot gate, so those production
   paths no longer treat C-backed VFS readiness as acceptable storage.
+- The freestanding `os_main` root probe now calls a production wrapper that
+  rejects the C-only boot bridge result instead of marking it mounted.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
