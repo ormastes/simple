@@ -34,20 +34,6 @@
 
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign, ed25519_verify}
 use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed, ecdsa_p256_verify_fixed}
-use std.common.cbor.encode.{
-    cbor_encode_bytes,
-    cbor_encode_text,
-    cbor_encode_array_header,
-    cbor_encode_map_header,
-    cbor_encode_int,
-    cbor_encode_tagged
-}
-use std.common.cbor.decode.{
-    cbor_decode_bytes,
-    cbor_decode_array_header,
-    cbor_decode_tag,
-    cbor_item_size
-}
 
 # ============================================================================
 # Algorithm IDs (RFC 9052 Table 1 / IANA COSE Algorithms)
@@ -138,6 +124,195 @@ fn _u8_concat(a: [u8], b: [u8]) -> [u8]:
         out.push(b[i])
         i = i + 1
     out
+
+# ============================================================================
+# Internal: minimal CBOR helpers used by COSE
+#
+# COSE only needs definite-length arrays/maps, byte/text strings, small/medium
+# ints, and tags. Keeping these local avoids interpreter resolution failures
+# when the SMF-only std.common.cbor helpers are unavailable.
+# ============================================================================
+
+fn _cbor_encode_type_value(major: i64, value: i64) -> [i64]:
+    var out: [i64] = []
+    val prefix = major << 5
+    if value < 24:
+        out.push(prefix | value)
+    elif value <= 255:
+        out.push(prefix | 24)
+        out.push(value & 0xff)
+    elif value <= 65535:
+        out.push(prefix | 25)
+        out.push((value >> 8) & 0xff)
+        out.push(value & 0xff)
+    else:
+        out.push(prefix | 26)
+        out.push((value >> 24) & 0xff)
+        out.push((value >> 16) & 0xff)
+        out.push((value >> 8) & 0xff)
+        out.push(value & 0xff)
+    out
+
+fn cbor_encode_int(value: i64) -> [i64]:
+    if value >= 0:
+        _cbor_encode_type_value(0, value)
+    else:
+        _cbor_encode_type_value(1, -1 - value)
+
+fn cbor_encode_bytes(data: [i64]) -> [i64]:
+    var out = _cbor_encode_type_value(2, data.len().to_i64())
+    var i: u64 = 0
+    while i < data.len():
+        out.push(data[i] & 0xff)
+        i = i + 1
+    out
+
+fn cbor_encode_text(value: text) -> [i64]:
+    var bytes: [i64] = []
+    if value == "MAC0":
+        bytes.push(77)
+        bytes.push(65)
+        bytes.push(67)
+        bytes.push(48)
+    elif value == "Signature1":
+        bytes.push(83)
+        bytes.push(105)
+        bytes.push(103)
+        bytes.push(110)
+        bytes.push(97)
+        bytes.push(116)
+        bytes.push(117)
+        bytes.push(114)
+        bytes.push(101)
+        bytes.push(49)
+    var out = _cbor_encode_type_value(3, bytes.len().to_i64())
+    var i: u64 = 0
+    while i < bytes.len():
+        out.push(bytes[i])
+        i = i + 1
+    out
+
+fn cbor_encode_array_header(count: i64) -> [i64]:
+    _cbor_encode_type_value(4, count)
+
+fn cbor_encode_map_header(count: i64) -> [i64]:
+    _cbor_encode_type_value(5, count)
+
+fn cbor_encode_tagged(tag: i64, inner: [i64]) -> [i64]:
+    var out = _cbor_encode_type_value(6, tag)
+    var i: u64 = 0
+    while i < inner.len():
+        out.push(inner[i])
+        i = i + 1
+    out
+
+fn _cbor_read_len(data: [i64], offset: i64, expected_major: i64) -> (i64, i64, bool):
+    if offset < 0:
+        return (0, 0, false)
+    if offset >= data.len().to_i64():
+        return (0, 0, false)
+    val first = data[offset.to_u64()] & 0xff
+    val major = first >> 5
+    val addl = first & 0x1f
+    if major != expected_major:
+        return (0, 0, false)
+    if addl < 24:
+        return (addl, 1, true)
+    if addl == 24:
+        if offset + 1 >= data.len().to_i64():
+            return (0, 0, false)
+        return (data[(offset + 1).to_u64()] & 0xff, 2, true)
+    if addl == 25:
+        if offset + 2 >= data.len().to_i64():
+            return (0, 0, false)
+        val value = ((data[(offset + 1).to_u64()] & 0xff) << 8) | (data[(offset + 2).to_u64()] & 0xff)
+        return (value, 3, true)
+    if addl == 26:
+        if offset + 4 >= data.len().to_i64():
+            return (0, 0, false)
+        val value =
+            ((data[(offset + 1).to_u64()] & 0xff) << 24) |
+            ((data[(offset + 2).to_u64()] & 0xff) << 16) |
+            ((data[(offset + 3).to_u64()] & 0xff) << 8) |
+            (data[(offset + 4).to_u64()] & 0xff)
+        return (value, 5, true)
+    (0, 0, false)
+
+fn cbor_decode_array_header(data: [i64], offset: i64) -> (i64, i64, i64):
+    val decoded = _cbor_read_len(data, offset, 4)
+    if not decoded.2:
+        return (0, 0, 0)
+    (decoded.0, 0, decoded.1)
+
+fn cbor_decode_bytes(data: [i64], offset: i64) -> ([i64], i64):
+    val decoded = _cbor_read_len(data, offset, 2)
+    if not decoded.2:
+        return ([], 0)
+    val len = decoded.0
+    val header_len = decoded.1
+    if offset + header_len + len > data.len().to_i64():
+        return ([], 0)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < len:
+        out.push(data[(offset + header_len + i).to_u64()] & 0xff)
+        i = i + 1
+    (out, header_len + len)
+
+fn cbor_decode_tag(data: [i64], offset: i64) -> (i64, i64):
+    val decoded = _cbor_read_len(data, offset, 6)
+    if not decoded.2:
+        return (0, 0)
+    (decoded.0, decoded.1)
+
+fn cbor_item_size(data: [i64], offset: i64) -> i64:
+    if offset < 0:
+        return 0
+    if offset >= data.len().to_i64():
+        return 0
+    val first = data[offset.to_u64()] & 0xff
+    val major = first >> 5
+    if major == 0 or major == 1 or major == 6:
+        val scalar = _cbor_read_len(data, offset, major)
+        if scalar.2:
+            return scalar.1
+        return 0
+    if major == 2 or major == 3:
+        val bytes = _cbor_read_len(data, offset, major)
+        if bytes.2:
+            return bytes.1 + bytes.0
+        return 0
+    if major == 4:
+        val arr = _cbor_read_len(data, offset, 4)
+        if not arr.2:
+            return 0
+        var pos = offset + arr.1
+        var i: i64 = 0
+        while i < arr.0:
+            val item = cbor_item_size(data, pos)
+            if item == 0:
+                return 0
+            pos = pos + item
+            i = i + 1
+        return pos - offset
+    if major == 5:
+        val map = _cbor_read_len(data, offset, 5)
+        if not map.2:
+            return 0
+        var pos = offset + map.1
+        var i: i64 = 0
+        while i < map.0:
+            val key_size = cbor_item_size(data, pos)
+            if key_size == 0:
+                return 0
+            pos = pos + key_size
+            val value_size = cbor_item_size(data, pos)
+            if value_size == 0:
+                return 0
+            pos = pos + value_size
+            i = i + 1
+        return pos - offset
+    0
 
 # ============================================================================
 # Internal: constant-time [u8] comparison (timing-safe)

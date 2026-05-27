@@ -84,3 +84,12 @@ uses `rt_ed25519_sign` which was never part of the shadow.
    at every call site across multiple modules without fixing the underlying naming.
 3. Detect and error on duplicate names during import loading — a useful hardening
    but does not fix the existing caller breakage.
+
+## Re-verification (2026-05-27)
+
+`test/unit/os/crypto/cose_rfc9052_kat_spec.spl` now passes 8/8 in interpreter
+mode. The remaining failure after the original shadow rename was not another
+Ed25519 collision; `cose.spl` depended on SMF-only `std.common.cbor.*` helpers
+that were unavailable to the interpreter. COSE now carries the small CBOR subset
+it needs locally, and the Mac0 KAT length guard was corrected from 63 to 62
+bytes because a 20-byte CBOR byte string has a one-byte header.
