@@ -8,7 +8,6 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_contracts.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_env.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_format.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_regex_stub.c");
@@ -108,7 +107,6 @@ fn compile_c_runtime_sources() {
     let c_sources = [
         "runtime_memory.c",
         "runtime_time.c",
-        "runtime_contracts.c",
         "runtime_env.c",
         "runtime_format.c",
         "runtime_regex_stub.c",

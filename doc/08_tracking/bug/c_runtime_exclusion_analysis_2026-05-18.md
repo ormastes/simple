@@ -24,7 +24,7 @@ Cannot remove until native linker resolves them from Simple-compiled objects.
 |--------|-------------|-----------------|-------------|-------------|
 | `runtime_math.c` | 27 (`rt_math_*`) | codegen/core-C native-project archive | 12 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
 | `runtime_random.c` | 8 (`rt_random_*`) | codegen/core-C native-project archive | 10 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
-| `runtime_contracts.c` | 2 (`simple_contract_check*`) | codegen emits direct calls | 3 files | Core compiler infrastructure — codegen hardcodes symbol |
+| `runtime_contracts.c` | 2 (`simple_contract_check*`) | codegen/core-C native-project archive | 3 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native contract-check exports. |
 | `runtime_error.c` | `rt_function_not_found`, `rt_method_not_found` | codegen/core-C native-project archive | 2 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native unresolved-call fallbacks. |
 | `runtime_time.c` | 18 (`rt_time_*`, `rt_timestamp_*`) | 8+ files | **199 files** | Most used runtime module; syscall wrappers |
 | `runtime_equality.c` | `rt_native_eq`, `rt_native_neq`, `rt_value_eq`, `rt_value_compare` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native equality exports. |
@@ -99,6 +99,9 @@ Additional 2026-05-27 simple-runtime reductions:
   `runtime_equality.c`.
 - The stale `runtime_ctype.c` entry was removed from `runtime/build.rs`; that
   C source was already deleted and skipped by the build when absent.
+- `value/sffi/contracts.rs` now implements the contract diagnostics and abort
+  behavior directly in Rust, so `runtime/build.rs` no longer compiles
+  `runtime_contracts.c`.
 
 Verification:
 
@@ -110,6 +113,7 @@ cargo test -p simple-runtime sffi::config --manifest-path src/compiler_rust/Carg
 cargo test -p simple-runtime sffi::error_handling --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime value::tests::test_sffi_functions --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::equality --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::contracts --manifest-path src/compiler_rust/Cargo.toml
 ```
 
 ## Path to C Removal for Remaining Modules
@@ -118,7 +122,7 @@ For **math/random**: the Rust shim no longer calls these C files as of
 2026-05-27. Remaining removal requires migrating the core-C/native-project
 SFFI export path so native builds no longer need the archived C sources.
 
-For **contracts/memory/format/native/string_index/async_driver/env**:
+For **memory/format/native/string_index/async_driver/env**:
 codegen-emitted or ABI-layer symbols. Removal requires the native-build linker to
 resolve them from Simple-compiled objects instead of the C archive. Blocked by the
 cross-module ABI bug.
