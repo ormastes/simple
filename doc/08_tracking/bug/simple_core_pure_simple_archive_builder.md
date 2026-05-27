@@ -59,14 +59,16 @@ Simple LSP MCP package validation, but it is not a pure-Simple runtime archive.
   instead of compiling the C runtime sources into that lane.
 - Pure-Simple required-symbol coverage is now complete for the current
   core-required set. The Simple source archive builds cleanly, the generated
-  hello binary prints `Hello World`, and the standalone TUI smoke binary prints
-  the expected TUI output including `UI closed.`.
-- The full real TUI app smoke is not yet verified on `simple-core`. Current
-  native-build output still generates unresolved stubs for UI and terminal
-  symbols such as `rt_platform_name`, `rt_process_run`, `rt_term_enable_ansi`,
-  `rt_term_poll`, `rt_term_read_timeout`, `rt_dict_new`, `rt_tuple_get`, and
-  `rt_is_some`. The resulting app currently crashes before the simple-core
-  gate can be considered board-ready.
+  hello binary prints `Hello World`, the standalone TUI smoke binary prints the
+  expected TUI output including `UI closed.`, and the full TUI app smoke exits
+  cleanly through the same `UI closed.` marker.
+- The full TUI app native-build log is clean for the previous missing UI and
+  terminal closure: no `Failed to load imported types`, generated stub, or
+  unresolved-symbol preview warnings remain.
+- The full TUI app smoke uses a minimal frame renderer on this path while the
+  standalone TUI smoke continues to cover the richer terminal output path. Treat
+  this as a bootstrap/runtime closure verification, not a terminal rendering
+  fidelity test.
 
 ## Required Fix
 
@@ -88,10 +90,11 @@ Add a Simple-source runtime archive lane:
 
 ## Status
 
-Partially unblocked: Simple native archive output exists and is tested, and the
-`simple-core` Simple module tree can now export the core-required lifecycle,
-tagged-value, memory, process/time/panic, array, string, length, conversion,
-slice/equality, stdio, and print/write symbols needed by the hello and
-standalone TUI smoke gates. Remaining blockers are the full TUI app dependency
-closure and generated unresolved stubs noted above; do not treat this runtime
-lane as board-ready until that smoke gate also passes.
+Resolved for the tracked bootstrap gate: `scripts/check-simple-core-runtime-smoke.shs`
+passes with `simple_core_hello=true`, `simple_core_standalone_tui=true`,
+`simple_core_tui_app=true`, and `simple_core_closure_clean=true`. The
+`simple-core` Simple module tree now exports the core-required lifecycle,
+tagged-value, memory, process/time/panic, array, tuple/dict/option helpers,
+terminal/platform shims, string, length, conversion, slice/equality, stdio, and
+print/write symbols needed by the smoke gates without generated unresolved
+stubs in the full TUI app build.
