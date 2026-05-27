@@ -282,6 +282,11 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   queue, while the legacy shared-DMA methods delegate to the current system
   namespace queue. This is the no-per-I/O-allocation path production 4K random
   I/O benchmarks must exercise.
+- The lease-backed VFS NVMe adapter exposes explicit 4KiB shared-DMA read/write
+  entry points over the same lease NSID and queue ID used by FAT32, NVFS, and
+  DBFS. The common filesystem mount surface stays `BlockDevice`, while
+  production random-I/O runners and future filesystem direct-I/O hooks can bypass
+  byte-array bounce copies with caller-owned DMA buffers.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.

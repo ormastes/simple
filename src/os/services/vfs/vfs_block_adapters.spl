@@ -14,6 +14,7 @@ use os.drivers.nvme.nvme_storage_model.{
     nvme_filesystem_lease_reason, nvme_filesystem_lease_absolute_lba,
     nvme_filesystem_lease_sector_count, nvme_filesystem_consumer_name
 }
+use std.io.dma.{SharedDmaBuffer}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read8, mmio_write8}
 use os.kernel.log.klog_api.{log_raw_println}
 extern fn unsafe_addr_of(ref: any) -> u64
@@ -215,6 +216,30 @@ impl NvmeBlockAdapter:
         self.ready = true
         log_raw_println("[nvme-adapter] Bounce buffer allocated: virt=0x{self.bounce_virt}, phys=0x{self.bounce_phys}")
         Result.Ok(true)
+
+    me read_4k_shared_dma(relative_lba: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Read 4KiB from the lease using caller-owned DMA memory."""
+        if buf.byte_len < 4096u64:
+            return Result.Err("NvmeBlockAdapter: shared DMA buffer smaller than 4K")
+        if self.lease_sector_size == 0u32 or (4096u32 % self.lease_sector_size) != 0u32:
+            return Result.Err("NvmeBlockAdapter: lease sector size not 4K divisible")
+        val sector_count = 4096u32 / self.lease_sector_size
+        val absolute_lba = self.translate_lba(relative_lba)
+        if absolute_lba.is_err():
+            return Result.Err(absolute_lba.unwrap_err())
+        self.nvme.read_shared_dma_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id, absolute_lba.unwrap(), sector_count, buf)
+
+    me write_4k_shared_dma(relative_lba: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Write 4KiB to the lease using caller-owned DMA memory."""
+        if buf.byte_len < 4096u64:
+            return Result.Err("NvmeBlockAdapter: shared DMA buffer smaller than 4K")
+        if self.lease_sector_size == 0u32 or (4096u32 % self.lease_sector_size) != 0u32:
+            return Result.Err("NvmeBlockAdapter: lease sector size not 4K divisible")
+        val sector_count = 4096u32 / self.lease_sector_size
+        val absolute_lba = self.translate_lba(relative_lba)
+        if absolute_lba.is_err():
+            return Result.Err(absolute_lba.unwrap_err())
+        self.nvme.write_shared_dma_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id, absolute_lba.unwrap(), sector_count, buf)
 
 impl BlockDevice for NvmeBlockAdapter:
     me read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
