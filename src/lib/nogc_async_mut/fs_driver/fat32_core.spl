@@ -70,6 +70,8 @@ class Fat32Core:
     _chain_values: [u32]
     _chain_valid: bool
     _cluster_cache: Dict<u32, [u8]>
+    _cluster_cache_keys: [u32]
+    _cluster_cache_values: [[u8]]
     _dirty_clusters: [u32]
     _window_cache: Dict<i64, [u8]>
     _block_cache_start: u32
@@ -98,6 +100,8 @@ impl Fat32Core:
             _chain_values: [],
             _chain_valid: false,
             _cluster_cache: {},
+            _cluster_cache_keys: [],
+            _cluster_cache_values: [],
             _dirty_clusters: [],
             _window_cache: {},
             _block_cache_start: 0,
@@ -263,10 +267,28 @@ impl Fat32Core:
     me fn cluster_to_sector(cluster: u32) -> u64:
         (self.data_start_sector + (cluster - 2) * self.sectors_per_cluster).to_u64()
 
+    me fn _cluster_cache_lookup(cluster: u32) -> [u8]:
+        var i = 0
+        while i < self._cluster_cache_keys.len():
+            if self._cluster_cache_keys[i] == cluster:
+                return self._cluster_cache_values[i]
+            i = i + 1
+        []
+
+    me fn _cluster_cache_put(cluster: u32, data: [u8]):
+        var i = 0
+        while i < self._cluster_cache_keys.len():
+            if self._cluster_cache_keys[i] == cluster:
+                self._cluster_cache_values[i] = data
+                return
+            i = i + 1
+        self._cluster_cache_keys.push(cluster)
+        self._cluster_cache_values.push(data)
+
     me fn read_cluster(cluster: u32) -> Result<[u8], text>:
-        val cached = self._cluster_cache.get(cluster)
-        if cached.?:
-            return Ok(cached!)
+        val cached = self._cluster_cache_lookup(cluster)
+        if cached.len() > 0:
+            return Ok(cached)
         val cluster_bytes = self.bytes_per_sector * self.sectors_per_cluster
         var data: [u8] = []
         var i: u32 = 0
@@ -286,9 +308,7 @@ impl Fat32Core:
                 data[idx.to_i32()] = sector_buf[j.to_i32()]
                 j = j + 1
             sec = sec + 1
-        var cc = self._cluster_cache
-        cc[cluster] = data
-        self._cluster_cache = cc
+        self._cluster_cache_put(cluster, data)
         Ok(data)
 
     me fn mark_cluster_dirty(cluster: u32):
@@ -319,9 +339,7 @@ impl Fat32Core:
         Ok(())
 
     me fn write_cluster(cluster: u32, data: [u8]) -> Result<(), text>:
-        var cc = self._cluster_cache
-        cc[cluster] = data
-        self._cluster_cache = cc
+        self._cluster_cache_put(cluster, data)
         if cluster == self.root_cluster:
             val root_write = self.write_cluster_raw(cluster, data)
             return root_write
@@ -634,26 +652,7 @@ impl Fat32Core:
         start_cluster.to_i64() * 4294967296 + position
 
     me fn close(handle: FileHandle) -> Result<(), text>:
-        val idx = handle.id.to_i32() - 1
-        if idx < 0 or idx >= self.open_files.len():
-            return Err("invalid file handle")
-        var of = self.open_files[idx]
-        if not of.is_open:
-            return Err("file handle not open")
-        var flush_i = 0
-        while flush_i < self._dirty_clusters.len():
-            val cluster = self._dirty_clusters[flush_i]
-            val cached = self._cluster_cache.get(cluster)
-            if cached.?:
-                val core: Fat32Core = self
-                val rc = core.write_cluster_raw(cluster, cached!)
-                if rc.is_err():
-                    return Err(rc.unwrap_err())
-            flush_i = flush_i + 1
-        self._dirty_clusters = []
-        of.is_open = false
-        self._save_open_file(idx, of)
-        Ok(())
+        fat32_close(self, handle)
 
     me fn seek(handle: FileHandle, position: i64) -> Result<(), text>:
         if not self.mounted:
@@ -992,3 +991,118 @@ impl Fat32Core:
             of.position = size
         self._save_open_file(idx, of)
         Ok(())
+
+fn fat32_close(core: Fat32Core, handle: FileHandle) -> Result<(), text>:
+    val idx = handle.id.to_i32() - 1
+    if idx < 0 or idx >= core.open_files.len():
+        return Err("invalid file handle")
+    var of = core.open_files[idx]
+    if not of.is_open:
+        return Err("file handle not open")
+    var flush_i = 0
+    while flush_i < core._dirty_clusters.len():
+        val cluster = core._dirty_clusters[flush_i]
+        val cached = core._cluster_cache_lookup(cluster)
+        if cached.len() > 0:
+            val rc = core.write_cluster_raw(cluster, cached)
+            if rc.is_err():
+                return Err(rc.unwrap_err())
+        flush_i = flush_i + 1
+    core._dirty_clusters = []
+    of.is_open = false
+    core._save_open_file(idx, of)
+    Ok(())
+
+fn fat32_write(core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> Result<i64, text>:
+    if not core.mounted:
+        return Err("filesystem not mounted")
+    val idx = handle.id.to_i32() - 1
+    if idx < 0 or idx >= core.open_files.len():
+        return Err("invalid file handle")
+    var of = core.open_files[idx]
+    if not of.is_open:
+        return Err("file handle not open")
+    val cluster_bytes = (core.bytes_per_sector * core.sectors_per_cluster).to_i64()
+    var start = of.start_cluster
+    if start < 2:
+        val alloc_rc = core.alloc_cluster()
+        if alloc_rc.is_err():
+            return Err(alloc_rc.unwrap_err())
+        start = alloc_rc.unwrap()
+        of.start_cluster = start
+        of.current_cluster = start
+    val chain_rc = core.follow_chain(start)
+    if chain_rc.is_err():
+        return Err(chain_rc.unwrap_err())
+    var chain = chain_rc.unwrap()
+    var bytes_written: i64 = 0
+    var pos = of.position
+    val original_pos = of.position
+    while bytes_written < len:
+        val cluster_index = (pos / cluster_bytes).to_i32()
+        val offset_in_cluster = (pos % cluster_bytes).to_i32()
+        while cluster_index >= chain.len():
+            val new_rc = core.alloc_cluster()
+            if new_rc.is_err():
+                of.position = pos
+                if of.size < pos:
+                    of.size = pos
+                core._save_open_file(idx, of)
+                return Err(new_rc.unwrap_err())
+            val new_cluster = new_rc.unwrap()
+            val last = chain[chain.len() - 1]
+            val link_rc = core.write_fat_entry(last, new_cluster)
+            if link_rc.is_err():
+                of.position = pos
+                core._save_open_file(idx, of)
+                return Err(link_rc.unwrap_err())
+            chain.push(new_cluster)
+        if offset_in_cluster == 0 and (len - bytes_written) >= cluster_bytes and buf.len().to_i64() >= bytes_written + cluster_bytes:
+            val wrc = core.write_cluster_from(chain[cluster_index], buf, bytes_written)
+            if wrc.is_err():
+                of.position = pos
+                core._save_open_file(idx, of)
+                return Err(wrc.unwrap_err())
+            bytes_written = bytes_written + cluster_bytes
+            pos = pos + cluster_bytes
+            continue
+        val cdata_rc = core.read_cluster(chain[cluster_index])
+        if cdata_rc.is_err():
+            of.position = pos
+            core._save_open_file(idx, of)
+            return Err(cdata_rc.unwrap_err())
+        var cdata = cdata_rc.unwrap()
+        var bi = offset_in_cluster
+        while bi < cluster_bytes.to_i32() and bytes_written < len:
+            if bytes_written.to_i32() < buf.len():
+                cdata[bi] = buf[bytes_written.to_i32()]
+            else:
+                cdata[bi] = 0
+            bytes_written = bytes_written + 1
+            pos = pos + 1
+            bi = bi + 1
+        val wrc = core.write_cluster(chain[cluster_index], cdata)
+        if wrc.is_err():
+            of.position = pos
+            core._save_open_file(idx, of)
+            return Err(wrc.unwrap_err())
+    of.position = pos
+    if pos > of.size:
+        of.size = pos
+    core._chain_start = start
+    core._chain_values = chain
+    core._chain_valid = true
+    if len == 4096 and (original_pos % 4096) == 0 and buf.len() >= 4096:
+        val block_index = (original_pos / 4096).to_i32()
+        if not core._block_cache_valid or core._block_cache_start != start:
+            core._block_cache_start = start
+            core._block_cache_blocks = []
+            core._block_cache_valid = true
+        while core._block_cache_blocks.len() <= block_index:
+            core._block_cache_blocks.push([])
+        core._block_cache_blocks[block_index] = buf[0:4096]
+        var wc = core._window_cache
+        wc[core.window_cache_key(start, original_pos)] = buf[0:4096]
+        core._window_cache = wc
+    core._save_open_file(idx, of)
+    Ok(bytes_written)

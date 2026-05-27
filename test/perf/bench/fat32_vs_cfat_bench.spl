@@ -11,36 +11,39 @@ use std.io_runtime.{
     file_delete, file_size, mkdir_p, list_dir, shell
 }
 use std.fs_driver.block_device.{BlockDevice}
-use std.fs_driver.fat32_core.{Fat32Core}
+use std.fs_driver.fat32_core.{Fat32Core, fat32_close, fat32_write}
 use std.nogc_sync_mut.io.file_ops.{file_read_text_at, file_write_text_at}
 
 # ── In-memory FAT32 image (from fat32_microbench.spl) ──────────────────────
-var __banks: [[[u8]]] = []
+var __bench_data: [u8] = []
+var __bench_active_bank: i32 = 0
 var __vfat_mnt: text = "/tmp/simple_vfat_bench_mnt"
 var __vfat_loop: text = ""
 var __vfat_use_udisks: bool = false
 
 fn _alloc_bank() -> i32:
-    var sectors: [[u8]] = []
-    var s: i32 = 0
-    while s < 4096:
-        var sec: [u8] = []
-        var b: i32 = 0
-        while b < 512:
-            sec.push(0)
-            b = b + 1
-        sectors.push(sec)
-        s = s + 1
-    __banks.push(sectors)
-    __banks.len() - 1
+    __bench_data = []
+    var i: i32 = 0
+    while i < 2097152:
+        __bench_data.push(0)
+        i = i + 1
+    0
 
 fn _set_sec(bid: i32, sec: i32, data: [u8]):
-    var bk = __banks[bid]
-    bk[sec] = data
-    __banks[bid] = bk
+    val base = sec * 512
+    var i: i32 = 0
+    while i < 512 and i < data.len():
+        __bench_data[base + i] = data[i]
+        i = i + 1
 
 fn _get_sec(bid: i32, sec: i32) -> [u8]:
-    __banks[bid][sec]
+    val base = sec * 512
+    var out: [u8] = []
+    var i: i32 = 0
+    while i < 512:
+        out.push(__bench_data[base + i])
+        i = i + 1
+    out
 
 fn _w32(buf: [u8], off: i64, v: u32):
     buf[off] = (v & 0xFF).to_u8()
@@ -75,6 +78,7 @@ impl BMBlockDev:
     static fn new() -> BMBlockDev:
         val bid = _alloc_bank()
         _init_image(bid)
+        __bench_active_bank = bid
         BMBlockDev(bank_id: bid)
 
 impl BlockDevice for BMBlockDev:
@@ -82,7 +86,7 @@ impl BlockDevice for BMBlockDev:
         val idx = lba.to_i32()
         if idx < 0 or idx >= 4096:
             return Result.Ok(true)
-        val src = _get_sec(self.bank_id, idx)
+        val src = _get_sec(__bench_active_bank, idx)
         var i = 0
         while i < buffer.len() and i < src.len():
             buffer[i] = src[i]
@@ -92,7 +96,7 @@ impl BlockDevice for BMBlockDev:
         val idx = lba.to_i32()
         if idx < 0 or idx >= 4096:
             return Result.Err("sector out of range")
-        _set_sec(self.bank_id, idx, data)
+        _set_sec(__bench_active_bank, idx, data)
         Result.Ok(true)
     fn sector_size() -> u32:
         512
@@ -122,30 +126,29 @@ fn _fill_bytes(n: i64, value: u8) -> [u8]:
 fn _rand_block(i: i64, block_count: i64) -> i64:
     ((i * 1103515245 + 12345) & 0x7FFFFFFF) % block_count
 
-# ── Sort + Percentile ──────────────────────────────────────────────────────
-fn sort_asc(arr: [i64]) -> [i64]:
-    var a = arr
-    var i = 0
-    while i < a.len():
-        var j = i + 1
-        while j < a.len():
-            if a[j] < a[i]:
-                val tmp = a[i]
-                a[i] = a[j]
-                a[j] = tmp
-            j = j + 1
-        i = i + 1
-    a
-
 fn percentile(latencies: [i64], pct: i64) -> i64:
-    val sorted = sort_asc(latencies)
-    val n = sorted.len()
+    val n = latencies.len()
     if n == 0:
         return 0
     var idx = (n * pct) / 100
     if idx >= n:
         idx = n - 1
-    sorted[idx]
+    var i = 0
+    while i < n:
+        val candidate = latencies[i]
+        var less = 0
+        var leq = 0
+        var j = 0
+        while j < n:
+            if latencies[j] < candidate:
+                less = less + 1
+            if latencies[j] <= candidate:
+                leq = leq + 1
+            j = j + 1
+        if less <= idx and idx < leq:
+            return candidate
+        i = i + 1
+    latencies[n - 1]
 
 # ── BenchResult ────────────────────────────────────────────────────────────
 struct BenchResult:
@@ -157,7 +160,7 @@ struct BenchResult:
 fn result_line(r: BenchResult) -> text:
     if r.p50_us < 0:
         return "  " + r.driver_name + ": SKIPPED (file handle bug)"
-    "  " + r.driver_name + ": p50=" + r.p50_us.to_text() + " us, p99=" + r.p99_us.to_text() + " us"
+    "  {r.driver_name}: p50={r.p50_us} us, p99={r.p99_us} us"
 
 fn skipped_result(workload: text, driver: text) -> BenchResult:
     BenchResult(workload_name: workload, driver_name: driver, p50_us: -1, p99_us: -1)
@@ -246,13 +249,15 @@ fn _vfat_teardown():
 # Workload 1: Create — create N files
 # ══════════════════════════════════════════════════════════════════════════
 fn bench_create_simple(count: i64) -> BenchResult:
-    var core = _make_core()
+    var core: Fat32Core = _make_core()
     var latencies: [i64] = []
     var i: i64 = 0
     while i < count:
         val t0 = time_now_unix_micros()
-        val _fh = core.create_file("/C" + i.to_text() + ".TXT")
-        latencies = latencies.push(time_now_unix_micros() - t0)
+        val fh = core.create_file("/C{i}.TXT")
+        if fh.is_ok():
+            val _c = fat32_close(core, fh.unwrap())
+        latencies.push(time_now_unix_micros() - t0)
         i = i + 1
     BenchResult(workload_name: "create", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
@@ -261,10 +266,10 @@ fn bench_create_host(count: i64, base_dir: text, driver_name: text) -> BenchResu
     var latencies: [i64] = []
     var i: i64 = 0
     while i < count:
-        val path = base_dir + "/c" + i.to_text() + ".txt"
+        val path = "{base_dir}/c{i}.txt"
         val t0 = time_now_unix_micros()
         write_file(path, "")
-        latencies = latencies.push(time_now_unix_micros() - t0)
+        latencies.push(time_now_unix_micros() - t0)
         i = i + 1
     _host_clean(base_dir)
     BenchResult(workload_name: "create", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
@@ -273,7 +278,7 @@ fn bench_create_host(count: i64, base_dir: text, driver_name: text) -> BenchResu
 # Workload 2: Lookup — resolve a file path
 # ══════════════════════════════════════════════════════════════════════════
 fn bench_lookup_simple(iters: i64) -> BenchResult:
-    var core = _make_core()
+    var core: Fat32Core = _make_core()
     val _fh = core.create_file("/LK.TXT")
     var latencies: [i64] = []
     var i: i64 = 0
@@ -282,7 +287,7 @@ fn bench_lookup_simple(iters: i64) -> BenchResult:
         val r = core.find_entry_in_dir(2u32, "LK.TXT")
         val elapsed = time_now_unix_micros() - t0
         if r.is_ok():
-            latencies = latencies.push(elapsed)
+            latencies.push(elapsed)
         i = i + 1
     if latencies.len() == 0:
         return skipped_result("lookup", "simple_fat32")
@@ -297,7 +302,7 @@ fn bench_lookup_host(iters: i64, base_dir: text, driver_name: text) -> BenchResu
     while i < iters:
         val t0 = time_now_unix_micros()
         val _e = file_exists(path)
-        latencies = latencies.push(time_now_unix_micros() - t0)
+        latencies.push(time_now_unix_micros() - t0)
         i = i + 1
     _host_clean(base_dir)
     BenchResult(workload_name: "lookup", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
@@ -306,7 +311,7 @@ fn bench_lookup_host(iters: i64, base_dir: text, driver_name: text) -> BenchResu
 # Workload 3: Sequential Read — read a file (requires file handles)
 # ══════════════════════════════════════════════════════════════════════════
 fn bench_seq_read_simple(iters: i64) -> BenchResult:
-    var core = _make_core()
+    var core: Fat32Core = _make_core()
     val cr = core.create_file("/RD.TXT")
     if cr.is_err():
         return skipped_result("sequential_read", "simple_fat32")
@@ -316,10 +321,10 @@ fn bench_seq_read_simple(iters: i64) -> BenchResult:
     while b < 128:
         buf.push(0x41)
         b = b + 1
-    val wr = core.write(h, buf, 128)
+    val wr = fat32_write(core, h, buf, 128)
     if wr.is_err():
         return skipped_result("sequential_read", "simple_fat32")
-    val cr2 = core.close(h)
+    val cr2 = fat32_close(core, h)
     if cr2.is_err():
         return skipped_result("sequential_read", "simple_fat32")
     val oh = core.open("/RD.TXT")
@@ -330,7 +335,7 @@ fn bench_seq_read_simple(iters: i64) -> BenchResult:
     while i < iters:
         val t0 = time_now_unix_micros()
         val _r = core.read_bytes(oh.unwrap(), 128)
-        latencies = latencies.push(time_now_unix_micros() - t0)
+        latencies.push(time_now_unix_micros() - t0)
         i = i + 1
     BenchResult(workload_name: "sequential_read", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
@@ -344,7 +349,7 @@ fn bench_seq_read_host(iters: i64, total_bytes: i64, base_dir: text, driver_name
     while j < iters:
         val t0 = time_now_unix_micros()
         val _data = read_file(path)
-        latencies = latencies.push(time_now_unix_micros() - t0)
+        latencies.push(time_now_unix_micros() - t0)
         j = j + 1
     _host_clean(base_dir)
     BenchResult(workload_name: "sequential_read", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
@@ -353,7 +358,7 @@ fn bench_seq_read_host(iters: i64, total_bytes: i64, base_dir: text, driver_name
 # Workload 4: Append — write data to file (requires file handles)
 # ══════════════════════════════════════════════════════════════════════════
 fn bench_append_simple(iters: i64) -> BenchResult:
-    var core = _make_core()
+    var core: Fat32Core = _make_core()
     var buf: [u8] = []
     var b: i64 = 0
     while b < 128:
@@ -362,17 +367,17 @@ fn bench_append_simple(iters: i64) -> BenchResult:
     var latencies: [i64] = []
     var j: i64 = 0
     while j < iters:
-        val cr = core.create_file("/W" + j.to_text() + ".TXT")
+        val cr = core.create_file("/W{j}.TXT")
         if cr.is_err():
             return skipped_result("append", "simple_fat32")
         val h = cr.unwrap()
         val t0 = time_now_unix_micros()
-        val wr = core.write(h, buf, 128)
+        val wr = fat32_write(core, h, buf, 128)
         val elapsed = time_now_unix_micros() - t0
         if wr.is_err():
             return skipped_result("append", "simple_fat32")
-        latencies = latencies.push(elapsed)
-        val _c = core.close(h)
+        latencies.push(elapsed)
+        val _c = fat32_close(core, h)
         j = j + 1
     BenchResult(workload_name: "append", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
@@ -382,10 +387,10 @@ fn bench_append_host(iters: i64, total_bytes: i64, base_dir: text, driver_name: 
     var latencies: [i64] = []
     var j: i64 = 0
     while j < iters:
-        val path = base_dir + "/a" + j.to_text() + ".txt"
+        val path = "{base_dir}/a{j}.txt"
         val t0 = time_now_unix_micros()
         write_file(path, content)
-        latencies = latencies.push(time_now_unix_micros() - t0)
+        latencies.push(time_now_unix_micros() - t0)
         j = j + 1
     _host_clean(base_dir)
     BenchResult(workload_name: "append", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
@@ -394,20 +399,20 @@ fn bench_append_host(iters: i64, total_bytes: i64, base_dir: text, driver_name: 
 # Workload 5: Delete — unlink files
 # ══════════════════════════════════════════════════════════════════════════
 fn bench_delete_simple(count: i64) -> BenchResult:
-    var core = _make_core()
+    var core: Fat32Core = _make_core()
     var i: i64 = 0
     while i < count:
-        val _fh = core.create_file("/D" + i.to_text() + ".TXT")
+        val _fh = core.create_file("/D{i}.TXT")
         i = i + 1
     val _warm = core.readdir("/")
     var latencies: [i64] = []
     var j: i64 = 0
     while j < count:
         val t0 = time_now_unix_micros()
-        val r = core.unlink("/D" + j.to_text() + ".TXT")
+        val r = core.unlink("/D{j}.TXT")
         val elapsed = time_now_unix_micros() - t0
         if r.is_ok():
-            latencies = latencies.push(elapsed)
+            latencies.push(elapsed)
         j = j + 1
     if latencies.len() == 0:
         return skipped_result("delete", "simple_fat32")
@@ -417,15 +422,15 @@ fn bench_delete_host(count: i64, base_dir: text, driver_name: text) -> BenchResu
     _host_setup(base_dir)
     var i: i64 = 0
     while i < count:
-        write_file(base_dir + "/d" + i.to_text() + ".txt", "")
+        write_file("{base_dir}/d{i}.txt", "")
         i = i + 1
     var latencies: [i64] = []
     var j: i64 = 0
     while j < count:
-        val path = base_dir + "/d" + j.to_text() + ".txt"
+        val path = "{base_dir}/d{j}.txt"
         val t0 = time_now_unix_micros()
         file_delete(path)
-        latencies = latencies.push(time_now_unix_micros() - t0)
+        latencies.push(time_now_unix_micros() - t0)
         j = j + 1
     BenchResult(workload_name: "delete", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
@@ -433,7 +438,7 @@ fn bench_delete_host(count: i64, base_dir: text, driver_name: text) -> BenchResu
 # Workload 6: Stat — resolve file metadata
 # ══════════════════════════════════════════════════════════════════════════
 fn bench_stat_simple(iters: i64) -> BenchResult:
-    var core = _make_core()
+    var core: Fat32Core = _make_core()
     val _fh = core.create_file("/ST.TXT")
     var latencies: [i64] = []
     var i: i64 = 0
@@ -442,7 +447,7 @@ fn bench_stat_simple(iters: i64) -> BenchResult:
         val r = core.find_entry_in_dir(2u32, "ST.TXT")
         val elapsed = time_now_unix_micros() - t0
         if r.is_ok():
-            latencies = latencies.push(elapsed)
+            latencies.push(elapsed)
         i = i + 1
     if latencies.len() == 0:
         return skipped_result("stat", "simple_fat32")
@@ -457,7 +462,7 @@ fn bench_stat_host(iters: i64, base_dir: text, driver_name: text) -> BenchResult
     while i < iters:
         val t0 = time_now_unix_micros()
         val _sz = file_size(path)
-        latencies = latencies.push(time_now_unix_micros() - t0)
+        latencies.push(time_now_unix_micros() - t0)
         i = i + 1
     _host_clean(base_dir)
     BenchResult(workload_name: "stat", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
@@ -466,10 +471,10 @@ fn bench_stat_host(iters: i64, base_dir: text, driver_name: text) -> BenchResult
 # Workload 7: Directory Scan — list directory entries
 # ══════════════════════════════════════════════════════════════════════════
 fn bench_dirscan_simple(file_count: i64, iters: i64) -> BenchResult:
-    var core = _make_core()
+    var core: Fat32Core = _make_core()
     var i: i64 = 0
     while i < file_count:
-        val _fh = core.create_file("/S" + i.to_text() + ".TXT")
+        val _fh = core.create_file("/S{i}.TXT")
         i = i + 1
     var latencies: [i64] = []
     var j: i64 = 0
@@ -478,7 +483,7 @@ fn bench_dirscan_simple(file_count: i64, iters: i64) -> BenchResult:
         val r = core.readdir("/")
         val elapsed = time_now_unix_micros() - t0
         if r.is_ok():
-            latencies = latencies.push(elapsed)
+            latencies.push(elapsed)
         j = j + 1
     if latencies.len() == 0:
         return skipped_result("directory_scan", "simple_fat32")
@@ -488,14 +493,14 @@ fn bench_dirscan_host(file_count: i64, iters: i64, base_dir: text, driver_name: 
     _host_setup(base_dir)
     var i: i64 = 0
     while i < file_count:
-        write_file(base_dir + "/s" + i.to_text() + ".txt", "")
+        write_file("{base_dir}/s{i}.txt", "")
         i = i + 1
     var latencies: [i64] = []
     var j: i64 = 0
     while j < iters:
         val t0 = time_now_unix_micros()
         val _files = list_dir(base_dir)
-        latencies = latencies.push(time_now_unix_micros() - t0)
+        latencies.push(time_now_unix_micros() - t0)
         j = j + 1
     _host_clean(base_dir)
     BenchResult(workload_name: "directory_scan", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
@@ -504,7 +509,7 @@ fn bench_dirscan_host(file_count: i64, iters: i64, base_dir: text, driver_name: 
 # Workload 8: 4K Random Read
 # ══════════════════════════════════════════════════════════════════════════
 fn bench_random4k_read_simple(iters: i64, block_count: i64) -> BenchResult:
-    var core = _make_core()
+    var core: Fat32Core = _make_core()
     val cr = core.create_file("/R4KREAD.BIN")
     if cr.is_err():
         return skipped_result("random_4k_read", "simple_fat32")
@@ -512,7 +517,7 @@ fn bench_random4k_read_simple(iters: i64, block_count: i64) -> BenchResult:
     val block = _fill_bytes(4096, 0x52)
     var b: i64 = 0
     while b < block_count:
-        val wr = core.write(h, block, 4096)
+        val wr = fat32_write(core, h, block, 4096)
         if wr.is_err():
             return skipped_result("random_4k_read", "simple_fat32")
         b = b + 1
@@ -528,7 +533,7 @@ fn bench_random4k_read_simple(iters: i64, block_count: i64) -> BenchResult:
         val elapsed = time_now_unix_micros() - t0
         if rr.is_err():
             return skipped_result("random_4k_read", "simple_fat32")
-        latencies = latencies.push(elapsed)
+        latencies.push(elapsed)
         i = i + 1
     BenchResult(workload_name: "random_4k_read", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
@@ -546,7 +551,7 @@ fn bench_random4k_read_host(iters: i64, block_count: i64, base_dir: text, driver
         if rr.len() < 4096:
             _host_clean(base_dir)
             return skipped_result("random_4k_read", driver_name)
-        latencies = latencies.push(elapsed)
+        latencies.push(elapsed)
         i = i + 1
     _host_clean(base_dir)
     BenchResult(workload_name: "random_4k_read", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
@@ -555,7 +560,7 @@ fn bench_random4k_read_host(iters: i64, block_count: i64, base_dir: text, driver
 # Workload 9: 4K Random Overwrite
 # ══════════════════════════════════════════════════════════════════════════
 fn bench_random4k_overwrite_simple(iters: i64, block_count: i64) -> BenchResult:
-    var core = _make_core()
+    var core: Fat32Core = _make_core()
     val cr = core.create_file("/R4KWR.BIN")
     if cr.is_err():
         return skipped_result("random_4k_overwrite", "simple_fat32")
@@ -564,7 +569,7 @@ fn bench_random4k_overwrite_simple(iters: i64, block_count: i64) -> BenchResult:
     val write_block = _fill_bytes(4096, 0x57)
     var b: i64 = 0
     while b < block_count:
-        val wr = core.write(h, seed_block, 4096)
+        val wr = fat32_write(core, h, seed_block, 4096)
         if wr.is_err():
             return skipped_result("random_4k_overwrite", "simple_fat32")
         b = b + 1
@@ -576,11 +581,11 @@ fn bench_random4k_overwrite_simple(iters: i64, block_count: i64) -> BenchResult:
         if sr.is_err():
             return skipped_result("random_4k_overwrite", "simple_fat32")
         val t0 = time_now_unix_micros()
-        val wr = core.write(h, write_block, 4096)
+        val wr = fat32_write(core, h, write_block, 4096)
         val elapsed = time_now_unix_micros() - t0
         if wr.is_err():
             return skipped_result("random_4k_overwrite", "simple_fat32")
-        latencies = latencies.push(elapsed)
+        latencies.push(elapsed)
         i = i + 1
     BenchResult(workload_name: "random_4k_overwrite", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
@@ -600,7 +605,7 @@ fn bench_random4k_overwrite_host(iters: i64, block_count: i64, base_dir: text, d
         if wr < 0:
             _host_clean(base_dir)
             return skipped_result("random_4k_overwrite", driver_name)
-        latencies = latencies.push(elapsed)
+        latencies.push(elapsed)
         i = i + 1
     _host_clean(base_dir)
     BenchResult(workload_name: "random_4k_overwrite", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
@@ -611,13 +616,13 @@ fn bench_random4k_overwrite_host(iters: i64, block_count: i64, base_dir: text, d
 fn _fmt_cell(r: BenchResult) -> text:
     if r.p50_us < 0:
         return "SKIP | SKIP"
-    r.p50_us.to_text() + " | " + r.p99_us.to_text()
+    "{r.p50_us} | {r.p99_us}"
 
 fn _ratio_text(s: BenchResult, b: BenchResult) -> text:
     if s.p50_us < 0 or b.p50_us <= 0:
         return "N/A"
     val ratio = (s.p50_us * 100) / b.p50_us
-    ratio.to_text() + "%"
+    "{ratio}%"
 
 fn _md_row(results: [BenchResult], has_vfat: bool) -> text:
     val s = results[0]
@@ -695,8 +700,8 @@ fn main():
     if has_vfat:
         val r1v = bench_create_host(file_count, vb, "c_fat_vfat")
         print result_line(r1v)
-        row1 = row1.push(r1v)
-    rows = rows.push(row1)
+        row1.push(r1v)
+    rows.push(row1)
 
     print "[2/9] lookup"
     val r2s = bench_lookup_simple(iters)
@@ -707,8 +712,8 @@ fn main():
     if has_vfat:
         val r2v = bench_lookup_host(iters, vb, "c_fat_vfat")
         print result_line(r2v)
-        row2 = row2.push(r2v)
-    rows = rows.push(row2)
+        row2.push(r2v)
+    rows.push(row2)
 
     print "[3/9] sequential_read"
     val r3s = bench_seq_read_simple(iters)
@@ -719,8 +724,8 @@ fn main():
     if has_vfat:
         val r3v = bench_seq_read_host(iters, total_bytes, vb, "c_fat_vfat")
         print result_line(r3v)
-        row3 = row3.push(r3v)
-    rows = rows.push(row3)
+        row3.push(r3v)
+    rows.push(row3)
 
     print "[4/9] append"
     val r4s = bench_append_simple(iters)
@@ -731,8 +736,8 @@ fn main():
     if has_vfat:
         val r4v = bench_append_host(iters, total_bytes, vb, "c_fat_vfat")
         print result_line(r4v)
-        row4 = row4.push(r4v)
-    rows = rows.push(row4)
+        row4.push(r4v)
+    rows.push(row4)
 
     print "[5/9] delete"
     val r5s = bench_delete_simple(file_count)
@@ -743,8 +748,8 @@ fn main():
     if has_vfat:
         val r5v = bench_delete_host(file_count, vb, "c_fat_vfat")
         print result_line(r5v)
-        row5 = row5.push(r5v)
-    rows = rows.push(row5)
+        row5.push(r5v)
+    rows.push(row5)
 
     print "[6/9] stat"
     val r6s = bench_stat_simple(iters)
@@ -755,8 +760,8 @@ fn main():
     if has_vfat:
         val r6v = bench_stat_host(iters, vb, "c_fat_vfat")
         print result_line(r6v)
-        row6 = row6.push(r6v)
-    rows = rows.push(row6)
+        row6.push(r6v)
+    rows.push(row6)
 
     print "[7/9] directory_scan"
     val r7s = bench_dirscan_simple(file_count, iters)
@@ -767,8 +772,8 @@ fn main():
     if has_vfat:
         val r7v = bench_dirscan_host(file_count, iters, vb, "c_fat_vfat")
         print result_line(r7v)
-        row7 = row7.push(r7v)
-    rows = rows.push(row7)
+        row7.push(r7v)
+    rows.push(row7)
 
     val random_blocks: i64 = 32
 
@@ -781,8 +786,8 @@ fn main():
     if has_vfat:
         val r8v = bench_random4k_read_host(iters, random_blocks, vb, "c_fat_vfat")
         print result_line(r8v)
-        row8 = row8.push(r8v)
-    rows = rows.push(row8)
+        row8.push(r8v)
+    rows.push(row8)
 
     print "[9/9] random_4k_overwrite"
     val r9s = bench_random4k_overwrite_simple(iters, random_blocks)
@@ -793,8 +798,8 @@ fn main():
     if has_vfat:
         val r9v = bench_random4k_overwrite_host(iters, random_blocks, vb, "c_fat_vfat")
         print result_line(r9v)
-        row9 = row9.push(r9v)
-    rows = rows.push(row9)
+        row9.push(r9v)
+    rows.push(row9)
 
     print ""
     write_report(rows, has_vfat)
