@@ -191,10 +191,13 @@ Tests named `*_spec.spl`. Structure mirrors src/ plus topic-based groupings.
 
 | Path | Purpose |
 |------|---------|
+| `scripts/check-workspace-root-guard.shs` | Workspace root and immediate-child write guard |
 | `scripts/bootstrap/` | Bootstrap scripts (3 allowed shell scripts) |
 | `scripts/audit/` | Code auditing scripts |
+| `scripts/hooks/` | Shared local VCS hook wrappers (Git hook names may omit extension) |
 
-All scripts in `.spl` or `.shs` format except 3 bootstrap scripts.
+All scripts in `.spl` or `.shs` format except 3 bootstrap scripts and
+extensionless VCS hook entrypoints under `scripts/hooks/`.
 
 ---
 

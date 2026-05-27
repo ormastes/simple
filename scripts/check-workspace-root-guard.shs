@@ -1,0 +1,479 @@
+#!/bin/sh
+# Workspace Root Write Guard
+# Audits or fixes misplaced root entries using FILE.md as the policy source.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+MODE="audit"
+STRICT=0
+STAGED_ONLY=0
+FIX=0
+DRY_RUN=0
+APPLY=0
+PATH_FILE=""
+QUARANTINE_BASE="build/workspace_quarantine"
+MUTABLE_ROOT_DIRS="build tmp target bootstrap .git .jj"
+
+usage() {
+    cat <<'EOF'
+Usage: sh scripts/check-workspace-root-guard.shs [audit|fix|lock|unlock] [options]
+
+Options:
+  --dry-run              Report changes without moving files or changing permissions.
+  --apply                Apply lock/unlock permission changes. Default is preview only.
+  --strict               Report all policy violations, including existing tracked entries.
+  --staged               Check only staged added/renamed paths.
+  --path-file <file>     Check newline-separated paths from a file.
+  --self-test            Run parser and path-classification smoke tests.
+
+Lock/unlock print platform-specific commands by default. Use --dry-run explicitly
+when integrating in automation; this script does not delete files.
+EOF
+}
+
+die() {
+    echo "workspace-root-guard: $1" >&2
+    exit 2
+}
+
+is_ignored() {
+    contains_line "$1" "$IGNORED_FILE"
+}
+
+is_tracked() {
+    contains_line "$1" "$TRACKED_FILE" || grep -Fq -- "$1/" "$TRACKED_FILE"
+}
+
+path_depth() {
+    printf '%s\n' "$1" | awk -F/ '{print NF}'
+}
+
+root_name() {
+    printf '%s\n' "$1" | awk -F/ '{print $1}'
+}
+
+load_allowed_root() {
+    awk '
+        BEGIN { in_table = 0 }
+        /^## Quick Reference/ { in_table = 1; next }
+        /^## Root Files/ { in_table = 1; next }
+        in_table && /^\*\*No other files at root\./ { exit }
+        in_table && /^## / { in_table = 0 }
+        in_table && /\|/ {
+            line = $0
+            while (match(line, /`[^`]+`|\*\*[^*]+\*\*/)) {
+                item = substr(line, RSTART, RLENGTH)
+                gsub(/^`|`$/, "", item)
+                gsub(/^\*\*|\*\*$/, "", item)
+                gsub(/\/$/, "", item)
+                if (item != "File/Directory" && item != "File" && item != "") {
+                    print item
+                }
+                line = substr(line, RSTART + RLENGTH)
+            }
+        }
+    ' FILE.md | sort -u
+}
+
+load_allowed_child_paths() {
+    awk '
+        /^## [A-Za-z0-9_.-]+\/ / || /^## [A-Za-z0-9_.-]+\/\(/ || /^## [A-Za-z0-9_.-]+\// {
+            section = $2
+            gsub(/\/.*/, "", section)
+            gsub(/[^A-Za-z0-9_.-]/, "", section)
+            next
+        }
+        section != "" && /\| `/ {
+            line = $0
+            while (match(line, /`[^`]+`/)) {
+                item = substr(line, RSTART + 1, RLENGTH - 2)
+                gsub(/\/$/, "", item)
+                if (index(item, section "/") == 1) {
+                    print item
+                }
+                line = substr(line, RSTART + RLENGTH)
+            }
+        }
+    ' FILE.md | sort -u
+}
+
+contains_line() {
+    value="$1"
+    file="$2"
+    grep -Fxq -- "$value" "$file"
+}
+
+is_mutable_root_dir() {
+    candidate="$1"
+    for mutable in $MUTABLE_ROOT_DIRS; do
+        if [ "$candidate" = "$mutable" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+protected_lock_dirs() {
+    echo "."
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        if [ -d "$entry" ] && ! is_mutable_root_dir "$entry"; then
+            printf '%s\n' "$entry"
+        fi
+    done < "$ALLOWED_ROOT_FILE"
+}
+
+policy_tmp_dir() {
+    d="${TMPDIR:-/tmp}/workspace-root-guard.$$"
+    mkdir -p "$d"
+    printf '%s\n' "$d"
+}
+
+classify_path() {
+    rel="${1#./}"
+    case "$rel" in
+        ""|".git"|".jj"|.git/*|.jj/*)
+            return 0
+            ;;
+    esac
+
+    if is_ignored "$rel"; then
+        return 0
+    fi
+
+    first="$(root_name "$rel")"
+    if ! contains_line "$first" "$ALLOWED_ROOT_FILE"; then
+        if [ "$STRICT" -eq 1 ] || ! is_tracked "$first"; then
+            echo "WRG001 root entry is not allowed by FILE.md: $first"
+            return 1
+        fi
+        return 0
+    fi
+
+    depth="$(path_depth "$rel")"
+    if [ "$depth" -eq 2 ]; then
+        if contains_line "$rel" "$ALLOWED_CHILD_FILE"; then
+            return 0
+        fi
+        if [ "$STRICT" -eq 1 ] || ! is_tracked "$rel"; then
+            echo "WRG002 immediate root child entry is not declared by FILE.md: $rel"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+list_audit_paths() {
+    if [ "$STAGED_ONLY" -eq 1 ]; then
+        git diff --cached --name-only --diff-filter=AR 2>/dev/null || true
+        return
+    fi
+    if [ -n "$PATH_FILE" ]; then
+        cat "$PATH_FILE"
+        return
+    fi
+    {
+        git ls-files 2>/dev/null || true
+        git ls-files --others --exclude-standard 2>/dev/null || true
+    } | awk -F/ '
+        NF == 1 { print $1; next }
+        NF > 1 {
+            print $1
+            print $1 "/" $2
+        }
+    ' | sort -u
+}
+
+run_audit() {
+    PATHS_FILE="$TMP_DIR/paths.txt"
+    list_audit_paths > "$PATHS_FILE"
+    effective_strict="$STRICT"
+    awk -v strict="$effective_strict" \
+        -v allowed_root_file="$ALLOWED_ROOT_FILE" \
+        -v allowed_child_file="$ALLOWED_CHILD_FILE" \
+        -v tracked_file="$TRACKED_FILE" \
+        -v ignored_file="$IGNORED_FILE" \
+        -v paths_file="$PATHS_FILE" '
+        FILENAME == allowed_root_file { allowed_root[$0] = 1; next }
+        FILENAME == allowed_child_file { allowed_child[$0] = 1; next }
+        FILENAME == tracked_file {
+            tracked[$0] = 1
+            split($0, parts, "/")
+            tracked[parts[1]] = 1
+            if (parts[2] != "") {
+                tracked[parts[1] "/" parts[2]] = 1
+            }
+            next
+        }
+        FILENAME == ignored_file { ignored[$0] = 1; next }
+        FILENAME == paths_file {
+            rel = $0
+            sub(/^\.\//, "", rel)
+            if (rel == "" || rel == ".git" || rel == ".jj") next
+            if (rel ~ /^\.git\// || rel ~ /^\.jj\//) next
+            if (ignored[rel]) next
+            part_count = split(rel, parts, "/")
+            first = parts[1]
+            if (first == "build" || first == "tmp" || first == "target" || first == "bootstrap") next
+            if (!allowed_root[first]) {
+                if (strict == 1 || !tracked[first]) {
+                    key = "WRG001:" first
+                    if (!seen[key]) {
+                        print "WRG001 root entry is not allowed by FILE.md: " first
+                        seen[key] = 1
+                    }
+                }
+                next
+            }
+            if (part_count == 2 && !allowed_child[rel]) {
+                if (strict == 1 || !tracked[rel]) {
+                    key = "WRG002:" rel
+                    if (!seen[key]) {
+                        print "WRG002 immediate root child entry is not declared by FILE.md: " rel
+                        seen[key] = 1
+                    }
+                }
+            }
+        }
+    ' "$ALLOWED_ROOT_FILE" "$ALLOWED_CHILD_FILE" "$TRACKED_FILE" "$IGNORED_FILE" "$PATHS_FILE" > "$TMP_DIR/violations"
+
+    if [ -s "$TMP_DIR/violations" ]; then
+        cat "$TMP_DIR/violations"
+        count="$(wc -l < "$TMP_DIR/violations" | tr -d ' ')"
+        echo "workspace-root-guard: FAILED with $count violation(s)"
+        return 1
+    fi
+    echo "workspace-root-guard: OK"
+    return 0
+}
+
+quarantine_path_for() {
+    rel="$1"
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    printf '%s/%s/%s\n' "$QUARANTINE_BASE" "$stamp" "$rel"
+}
+
+run_fix() {
+    run_audit || true
+    if [ ! -s "$TMP_DIR/violations" ]; then
+        echo "workspace-root-guard: nothing to fix"
+        return 0
+    fi
+
+    mkdir -p "$QUARANTINE_BASE"
+    manifest="$QUARANTINE_BASE/manifest.$(date +%Y%m%d-%H%M%S).txt"
+    : > "$manifest"
+
+    awk -F': ' '{print $2}' "$TMP_DIR/violations" | while IFS= read -r rel; do
+        [ -e "$rel" ] || continue
+        dest="$(quarantine_path_for "$rel")"
+        if [ "$DRY_RUN" -eq 1 ]; then
+            echo "DRY-RUN move $rel -> $dest"
+        else
+            mkdir -p "$(dirname "$dest")"
+            mv "$rel" "$dest"
+            printf '%s -> %s\n' "$rel" "$dest" >> "$manifest"
+        fi
+    done
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "workspace-root-guard: dry-run fix complete"
+    else
+        echo "workspace-root-guard: quarantined violations; manifest $manifest"
+    fi
+}
+
+run_lock_preview() {
+    os="$(uname -s 2>/dev/null || echo unknown)"
+    manifest="$QUARANTINE_BASE/permissions.restore.$(date +%Y%m%d-%H%M%S).txt"
+    echo "workspace-root-guard: $MODE preview"
+    echo "restore manifest: $manifest"
+    case "$os" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            echo "Windows Administrator commands:"
+            echo "  icacls . /save \"$manifest\" /t"
+            protected_lock_dirs | while IFS= read -r dir; do
+                echo "  icacls \"$dir\" /deny %USERNAME%:(WD,AD)"
+            done
+            echo "Unlock:"
+            echo "  icacls . /restore \"$manifest\""
+            ;;
+        *)
+            echo "Unix/macOS commands:"
+            echo "  mkdir -p \"$QUARANTINE_BASE\""
+            echo "  # Save and remove write permission for root plus protected immediate child dirs."
+            protected_lock_dirs | while IFS= read -r dir; do
+                echo "  chmod a-w \"$dir\""
+            done
+            echo "Unlock:"
+            echo "  # Restore modes from $manifest, or chmod u+w each protected dir as recovery."
+            ;;
+    esac
+}
+
+run_lock_apply() {
+    mkdir -p "$QUARANTINE_BASE"
+    manifest="$QUARANTINE_BASE/permissions.restore.latest.txt"
+    os="$(uname -s 2>/dev/null || echo unknown)"
+    case "$os" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            echo "workspace-root-guard: applying Windows ACL lock; Administrator privilege may be required"
+            icacls . /save "$manifest" /t
+            protected_lock_dirs | while IFS= read -r dir; do
+                icacls "$dir" /deny "%USERNAME%:(WD,AD)"
+            done
+            ;;
+        *)
+            echo "workspace-root-guard: applying Unix/macOS root write lock"
+            : > "$manifest"
+            protected_lock_dirs | while IFS= read -r dir; do
+                mode="$(stat -f '%Lp' "$dir" 2>/dev/null || stat -c '%a' "$dir" 2>/dev/null || echo "")"
+                printf '%s %s\n' "$dir" "$mode" >> "$manifest"
+                chmod a-w "$dir"
+            done
+            ;;
+    esac
+    echo "workspace-root-guard: lock applied; restore manifest $manifest"
+}
+
+run_unlock_apply() {
+    manifest="$QUARANTINE_BASE/permissions.restore.latest.txt"
+    os="$(uname -s 2>/dev/null || echo unknown)"
+    case "$os" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            echo "workspace-root-guard: restoring Windows ACLs; Administrator privilege may be required"
+            if [ -f "$manifest" ]; then
+                icacls . /restore "$manifest"
+            else
+                echo "workspace-root-guard: missing $manifest"
+                echo "manual recovery: icacls . /remove:d %USERNAME%"
+                return 1
+            fi
+            ;;
+        *)
+            echo "workspace-root-guard: restoring Unix/macOS root write permission"
+            if [ -f "$manifest" ]; then
+                while IFS=' ' read -r dir mode; do
+                    [ -n "$dir" ] || continue
+                    if [ -n "$mode" ] && [ -e "$dir" ]; then
+                        chmod "$mode" "$dir" || chmod u+w "$dir"
+                    fi
+                done < "$manifest"
+            else
+                echo "workspace-root-guard: missing $manifest"
+                echo "manual recovery:"
+                protected_lock_dirs | while IFS= read -r dir; do
+                    echo "  chmod u+w \"$dir\""
+                done
+                return 1
+            fi
+            ;;
+    esac
+    echo "workspace-root-guard: unlock applied"
+}
+
+self_test() {
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/wrg-self.XXXXXX")"
+    trap 'rm -rf "$tmp"' EXIT INT TERM
+    cp FILE.md "$tmp/FILE.md"
+    (
+        cd "$tmp"
+        mkdir src build
+        : > README.md
+        : > surprise.tmp
+        git init -q
+        git add FILE.md README.md src build
+        git commit -qm init >/dev/null 2>&1 || true
+        printf '%s\n' surprise.tmp src/new_child > paths.txt
+        if WRG_ROOT_DIR="$tmp" sh "$ROOT_DIR/scripts/check-workspace-root-guard.shs" audit --path-file paths.txt > out.txt 2>&1; then
+            echo "workspace-root-guard: self-test expected violations but audit passed" >&2
+            exit 1
+        fi
+        grep -q "WRG001" out.txt
+        grep -q "WRG002" out.txt
+        printf '%s\n' README.md build/generated.tmp > clean_paths.txt
+        WRG_ROOT_DIR="$tmp" sh "$ROOT_DIR/scripts/check-workspace-root-guard.shs" audit --path-file clean_paths.txt >/dev/null
+    )
+    echo "workspace-root-guard: self-test OK"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        audit|fix|lock|unlock)
+            MODE="$1"
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            ;;
+        --apply)
+            APPLY=1
+            ;;
+        --strict)
+            STRICT=1
+            ;;
+        --staged)
+            STAGED_ONLY=1
+            ;;
+        --path-file)
+            shift
+            [ "$#" -gt 0 ] || die "--path-file needs a file"
+            PATH_FILE="$1"
+            ;;
+        --self-test)
+            self_test
+            exit 0
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            die "unknown argument: $1"
+            ;;
+    esac
+    shift
+done
+
+if [ -n "${WRG_ROOT_DIR:-}" ]; then
+    ROOT_DIR="$WRG_ROOT_DIR"
+    cd "$ROOT_DIR"
+fi
+
+[ -f FILE.md ] || die "FILE.md not found at repository root"
+
+TMP_DIR="$(policy_tmp_dir)"
+trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+ALLOWED_ROOT_FILE="$TMP_DIR/allowed-root.txt"
+ALLOWED_CHILD_FILE="$TMP_DIR/allowed-child.txt"
+TRACKED_FILE="$TMP_DIR/tracked.txt"
+IGNORED_FILE="$TMP_DIR/ignored.txt"
+load_allowed_root > "$ALLOWED_ROOT_FILE"
+load_allowed_child_paths > "$ALLOWED_CHILD_FILE"
+git ls-files > "$TRACKED_FILE" 2>/dev/null || : > "$TRACKED_FILE"
+find . -mindepth 1 -maxdepth 2 \
+    -not -path './.git' -not -path './.git/*' \
+    -not -path './.jj' -not -path './.jj/*' \
+    -print | sed 's#^\./##' | git check-ignore --stdin > "$IGNORED_FILE" 2>/dev/null || : > "$IGNORED_FILE"
+
+case "$MODE" in
+    audit)
+        run_audit
+        ;;
+    fix)
+        FIX=1
+        run_fix
+        ;;
+    lock|unlock)
+        if [ "$APPLY" -eq 1 ]; then
+            if [ "$MODE" = "lock" ]; then
+                run_lock_apply
+            else
+                run_unlock_apply
+            fi
+        else
+            run_lock_preview
+        fi
+        ;;
+esac

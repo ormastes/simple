@@ -15,6 +15,7 @@ enum RuleType:
     Exact      # Exact path match
     Glob       # Glob pattern (*.sdn)
     Regex      # Regex pattern
+    RootPolicy # Workspace root and immediate-child creation guard
 
 # Protection actions
 enum RuleAction:
@@ -62,6 +63,8 @@ class ProtectionEngine:
                     m.start == 0 and m.end == path.len()
                 else:
                     false
+            RuleType.RootPolicy:
+                workspace_root_policy_violation(path)
 
     # Find first matching rule for path
     fn find_rule(path: text) -> ProtectionRule?:
@@ -158,6 +161,7 @@ fn create_engine(config_path: text, temp_base: text) -> ProtectionEngine:
         # Add default rules if no config
         add_default_rules(engine)
 
+    add_workspace_root_policy_rule(engine)
     engine
 
 # Load protection rules from SDN config
@@ -200,6 +204,7 @@ fn load_config(engine: ProtectionEngine, config_path: text):
                     "exact": RuleType.Exact
                     "glob": RuleType.Glob
                     "regex": RuleType.Regex
+                    "root_policy": RuleType.RootPolicy
                     _: RuleType.Exact
 
                 val action = match action_str:
@@ -218,6 +223,42 @@ fn add_default_rules(engine: ProtectionEngine):
     engine.add_rule("/", RuleType.Exact, RuleAction.Deny, "Root directory")
     engine.add_rule("CLAUDE.md", RuleType.Exact, RuleAction.Protect, "Project instructions")
     engine.add_rule("*.sdn", RuleType.Glob, RuleAction.Atomic, "Database files require atomic writes")
+
+fn add_workspace_root_policy_rule(engine: ProtectionEngine):
+    engine.add_rule("FILE.md", RuleType.RootPolicy, RuleAction.Deny, "Workspace root policy from FILE.md")
+
+fn workspace_root_policy_violation(path: text) -> bool:
+    val norm = normalize_path(path)
+    if norm == "" or norm.starts_with("/") or norm.starts_with("../"):
+        return false
+    if norm.starts_with(".git/") or norm.starts_with(".jj/"):
+        return false
+    val parts = norm.split("/")
+    if parts.len() == 0:
+        return false
+    val root = parts[0]
+    if workspace_root_mutable_dir(root):
+        return false
+    if parts.len() == 1:
+        return (not workspace_root_allowed_entry(root)) and (not file_exists(norm))
+    if parts.len() == 2:
+        return workspace_root_allowed_entry(root) and (not file_exists(norm))
+    false
+
+fn workspace_root_mutable_dir(name: text) -> bool:
+    name == "build" or name == "tmp" or name == "target" or name == "bootstrap"
+
+fn workspace_root_allowed_entry(name: text) -> bool:
+    val allowed = [
+        "CLAUDE.md", "FILE.md", "README.md", "AGENTS.md", "GEMINI.md",
+        "MCP.md", "CHANGELOG.md", "VERSION", "LICENSE",
+        "THIRD_PARTY_NOTICES.md", ".gitignore", ".jjignore", ".gitmodules",
+        ".gitattributes", ".envrc", ".mcp.json", ".jscpd.json",
+        ".dockerignore", ".sstack", "bin", "src", "test", "examples",
+        "doc", "config", "scripts", "tools", "build", "tmp", "target",
+        "bootstrap"
+    ]
+    allowed.contains(name)
     engine.add_rule("*.lock", RuleType.Glob, RuleAction.Deny, "Lock files managed by system")
     engine.add_rule("src/", RuleType.Exact, RuleAction.Protect, "Source code directory")
     engine.add_rule("test/", RuleType.Exact, RuleAction.Protect, "Test directory")

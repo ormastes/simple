@@ -2,6 +2,7 @@
 # Tests rule matching, action enforcement, and edge cases
 
 use std.nogc_async_mut.mcp.fileio_protection (ProtectionEngine, RuleType, RuleAction, ProtectionResult, create_engine)
+use std.io_runtime.{read_file}
 fn check(condition: bool):
     expect(condition).to_equal(true)
 fn check_msg(condition: bool, message: text):
@@ -226,3 +227,42 @@ describe "File I/O Protection Engine":
             val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
             val info = engine.get_protection_info("random.txt")
             expect(info.contains("No protection")).to_equal(true)
+
+    describe "Server Integration":
+
+        it "safe_atomic_write uses protection checks":
+            val source = read_file("src/lib/nogc_async_mut/mcp/fileio_server.spl")
+            expect(source.contains("fn tool_safe_atomic_write")).to_equal(true)
+            expect(source.contains("check_path(path, \"write\")")).to_equal(true)
+            expect(source.contains("Atomic write denied")).to_equal(true)
+
+        it "default engine denies new root entries":
+            val engine = create_engine("missing_workspace_root_guard_config.sdn", "/tmp")
+            val result = engine.check_path("new_root_file.tmp", "write")
+            match result:
+                ProtectionResult.Denied(reason):
+                    check(reason.contains("Workspace root policy"))
+                _: assert false, "Expected workspace root policy denial"
+
+        it "default engine denies new immediate child entries":
+            val engine = create_engine("missing_workspace_root_guard_config.sdn", "/tmp")
+            val result = engine.check_path("src/new_child_entry", "write")
+            match result:
+                ProtectionResult.Denied(reason):
+                    check(reason.contains("Workspace root policy"))
+                _: assert false, "Expected workspace root child policy denial"
+
+        it "default engine keeps mutable build directory writable":
+            val engine = create_engine("missing_workspace_root_guard_config.sdn", "/tmp")
+            val result = engine.check_path("build/new_artifact.tmp", "write")
+            match result:
+                ProtectionResult.Allowed: assert true
+                _: assert false, "Expected build artifact path to remain writable"
+
+        it "configured engine still installs workspace root policy":
+            val engine = create_engine("config/critical_files.sdn", "/tmp")
+            val result = engine.check_path("another_root_file.tmp", "write")
+            match result:
+                ProtectionResult.Denied(reason):
+                    check(reason.contains("Workspace root policy"))
+                _: assert false, "Expected configured engine to retain root policy"

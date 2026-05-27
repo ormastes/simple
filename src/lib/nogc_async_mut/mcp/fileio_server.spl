@@ -224,11 +224,23 @@ class FileIOServer:
         if path.len() == 0:
             return self.error_response("Missing 'path' argument")
 
-        # Perform atomic write (write to temp, then rename)
-        val temp_path = path + ".tmp"
-        self.write_file(temp_path, content)
-        self.move_file(temp_path, path)
-        self.success_response("File written atomically: " + path)
+        val result = self.ensure_engine().check_path(path, "write")
+        match result:
+            ProtectionResult.Allowed:
+                self.atomic_write_file(path, content)
+                self.success_response("File written atomically: " + path)
+
+            ProtectionResult.Redirected(new_path):
+                val actual_path = self.ensure_temp_manager().get_temp_path(path)
+                self.atomic_write_file(actual_path, content)
+                self.success_response("File written atomically to temp: " + actual_path)
+
+            ProtectionResult.Denied(reason):
+                self.error_response("Atomic write denied: " + reason)
+
+            ProtectionResult.RequiresAtomic:
+                self.atomic_write_file(path, content)
+                self.success_response("File written atomically: " + path)
 
     # Tool: safe_append
     fn tool_safe_append(arguments: text) -> text:
@@ -381,6 +393,11 @@ class FileIOServer:
 
     fn move_file(src: text, dest: text):
         shell("mv '{src}' '{dest}'")
+
+    fn atomic_write_file(path: text, content: text):
+        val temp_path = path + ".tmp"
+        self.write_file(temp_path, content)
+        self.move_file(temp_path, path)
 
     fn append_file(path: text, content: text):
         val escaped = content.replace("'", "'\\''")
