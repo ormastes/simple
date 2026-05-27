@@ -214,6 +214,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   It requires the pure Simple storage access markers, shared FAT32/NVFS/DBFS
   direct-I/O markers, and the stricter real-hardware performance identity before
   returning `ready`; q35 perf-only output remains insufficient for that gate.
+  Physical and q35 perf evidence must now include both
+  `storage_placement=user-space-driver` for the assigned namespace and
+  `system_storage_placement=system-driver` for the system driver lane.
 - Hardware labs can run
   `src/app/simpleos_nvme_serial_check/main.spl --serial-log <path>` against the
   captured serial log. The app delegates to the same physical-NVMe readiness
