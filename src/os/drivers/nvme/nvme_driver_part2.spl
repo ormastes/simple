@@ -27,7 +27,7 @@ use os.drivers.nvme.nvme_types.{NVME_REG_VS}
 use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
 use os.drivers.nvme.nvme_queue_notify.*
 use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_pair_from_resources, nvme_cq_doorbell_addr, nvme_sq_doorbell_addr, nvme_dstrd_to_doorbell_stride_bytes}
-use os.drivers.nvme.nvme_transfer_command.{nvme_read_io_command_for_namespace, nvme_write_io_command_for_namespace, nvme_flush_io_command_for_namespace, nvme_io_status_code}
+use os.drivers.nvme.nvme_transfer_command.{NVME_TRANSFER_OPCODE_READ, NVME_TRANSFER_OPCODE_WRITE, nvme_read_io_command_for_namespace, nvme_write_io_command_for_namespace, nvme_flush_io_command_for_namespace, nvme_io_status_code}
 use os.drivers.nvme.nvme_admin_command.{nvme_admin_identify_controller, nvme_admin_identify_namespace, nvme_admin_set_num_queues, nvme_admin_create_io_completion_queue, nvme_admin_create_io_submission_queue}
 use os.drivers.nvme.nvme_controller_contract.{NvmeControllerRegs, nvme_controller_facts, nvme_controller_refusal_reason, nvme_cap_dstrd, nvme_namespace_facts, nvme_namespace_refusal_reason, nvme_controller_enable_cc}
 use os.drivers.nvme.nvme_sector_probe.{NvmeSectorProbeResult, nvme_sector_probe_result}
@@ -885,17 +885,19 @@ impl NvmeDriver:
         if lba + sectors_per_4k.to_u64() > namespace_sectors.unwrap():
             return Result.Err("NVMe: burst beyond namespace capacity")
 
+        val ss = sector_size.unwrap().to_u64()
         var sector: u32 = 0u32
         while sector < sectors_per_4k:
             val sector_lba = lba + sector.to_u64()
-            val sector_addr = buf.device_addr + (sector.to_u64() * sector_size.unwrap().to_u64())
-            val cmd_result = nvme_read_io_command_for_namespace(nsid, sector_lba, 1u32, sector_addr, namespace_sectors.unwrap())
-            if cmd_result.is_err():
-                return Result.Err("NVMe: burst read " + cmd_result.unwrap_err())
-            val cmd = cmd_result.unwrap()
+            val sector_addr = buf.device_addr + (sector.to_u64() * ss)
             val cmd_id = self.io_queue.submit_command(
-                cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
-                cmd.cdw10, cmd.cdw11, cmd.cdw12
+                NVME_TRANSFER_OPCODE_READ,
+                nsid,
+                sector_addr,
+                0u64,
+                (sector_lba & 0xFFFFFFFFu64).to_u32(),
+                (sector_lba >> 32).to_u32(),
+                0u32
             )
             if cmd_id == 0xFFFFu16:
                 return Result.Err("NVMe: burst read submit failed")
@@ -931,17 +933,19 @@ impl NvmeDriver:
             return Result.Err("NVMe: burst beyond namespace capacity")
 
         dma_shared_sync_cpu_to_device(buf)
+        val ss = sector_size.unwrap().to_u64()
         var sector: u32 = 0u32
         while sector < sectors_per_4k:
             val sector_lba = lba + sector.to_u64()
-            val sector_addr = buf.device_addr + (sector.to_u64() * sector_size.unwrap().to_u64())
-            val cmd_result = nvme_write_io_command_for_namespace(nsid, sector_lba, 1u32, sector_addr, namespace_sectors.unwrap())
-            if cmd_result.is_err():
-                return Result.Err("NVMe: burst write " + cmd_result.unwrap_err())
-            val cmd = cmd_result.unwrap()
+            val sector_addr = buf.device_addr + (sector.to_u64() * ss)
             val cmd_id = self.io_queue.submit_command(
-                cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
-                cmd.cdw10, cmd.cdw11, cmd.cdw12
+                NVME_TRANSFER_OPCODE_WRITE,
+                nsid,
+                sector_addr,
+                0u64,
+                (sector_lba & 0xFFFFFFFFu64).to_u32(),
+                (sector_lba >> 32).to_u32(),
+                0u32
             )
             if cmd_id == 0xFFFFu16:
                 return Result.Err("NVMe: burst write submit failed")
