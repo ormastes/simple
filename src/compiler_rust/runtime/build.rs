@@ -9,7 +9,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_ctype.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_value.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_equality.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_contracts.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_env.c");
@@ -112,7 +111,6 @@ fn compile_c_runtime_sources() {
         "runtime_memory.c",
         "runtime_time.c",
         "runtime_ctype.c",
-        "runtime_value.c",
         "runtime_equality.c",
         "runtime_contracts.c",
         "runtime_env.c",

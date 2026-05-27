@@ -2,6 +2,7 @@
 //! rt_ptr_to_value/rt_value_to_ptr stay in Rust (RuntimeValue internals).
 
 use crate::value::core::RuntimeValue;
+use crate::value::heap::HeapHeader;
 
 mod c_sffi {
     extern "C" {
@@ -64,19 +65,19 @@ pub fn rt_memcpy(dst: *mut u8, src: *const u8, n: i64) -> *mut u8 {
     unsafe { c_sffi::rt_memcpy(dst, src, n) }
 }
 
-mod c_sffi_mem {
-    use crate::value::core::RuntimeValue;
-    extern "C" {
-        pub(super) fn rt_ptr_to_value(ptr: *mut u8) -> RuntimeValue;
-        pub(super) fn rt_value_to_ptr(v: RuntimeValue) -> *mut u8;
-    }
-}
-
 #[inline(always)]
 pub fn rt_ptr_to_value(ptr: *mut u8) -> RuntimeValue {
-    unsafe { c_sffi_mem::rt_ptr_to_value(ptr) }
+    if ptr.is_null() {
+        RuntimeValue::NIL
+    } else {
+        unsafe { RuntimeValue::from_heap_ptr(ptr.cast::<HeapHeader>()) }
+    }
 }
 #[inline(always)]
 pub fn rt_value_to_ptr(v: RuntimeValue) -> *mut u8 {
-    unsafe { c_sffi_mem::rt_value_to_ptr(v) }
+    if v.is_heap() {
+        v.as_heap_ptr().cast::<u8>()
+    } else {
+        std::ptr::null_mut()
+    }
 }
