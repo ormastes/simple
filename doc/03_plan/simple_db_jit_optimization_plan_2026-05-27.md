@@ -230,6 +230,10 @@ B1: Minimal repro ──→ B2: HIR fix ──→ B3: Pattern→JIT bridge ─�
 **A1: Hot-Path Restructuring — IN PROGRESS**
 - Sonnet agent working on array copy elimination in database.spl
 
-**B1: JIT HIR Error Diagnosis — IN PROGRESS**
-- Sonnet agent investigating `Unknown variable: int` error source in Rust compiler
-- Known: error appears during HIR lowering when JIT attempts to compile a function
+**B1: JIT HIR Error Diagnosis — DONE**
+- Error source: `src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:292` fires `LowerError::UnknownVariable("int")`
+- Root cause: `int(x)` is a constructor-style type-cast. Parser produces `Expr::Call { callee: Expr::Identifier("int") }`. HIR lowerer can't resolve `"int"` as identifier — builtin cast names aren't registered in HIR scope
+- Interpreter works because it bypasses HIR entirely: `interpreter/expr/casting.rs:40` handles via `NumericType::from_name("int")`
+- Same failure for all cast calls: `text(x)`, `bool(x)`, `char(x)`, `i8(x)`..`u64(x)`, `f32(x)`, `f64(x)`
+- Fix: Rust HIR lowerer only — either (A) intercept in `hir/lower/expr/calls.rs` when callee matches NumericType::from_name, or (B) register all builtin cast names as pseudo-globals at lowerer init
+- Minimal repro: `fn parse_int(s: text) -> i64: int(s)` + `fn main(): print(parse_int("42").to_text())`
