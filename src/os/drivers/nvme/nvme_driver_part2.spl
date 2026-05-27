@@ -40,10 +40,20 @@ extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
 extern fn rt_dma_phys_of(handle: i64) -> i64
 
 val NVME_DRIVER_MAX_DATA_QUEUE_ID: u16 = 3
+var g_nvme_user_queue_ids: [u16] = []
+var g_nvme_user_queue_controller_ids: [u32] = []
+var g_nvme_user_queue_nsids: [u32] = []
+var g_nvme_user_queue_owner_tasks: [u64] = []
+var g_nvme_user_queue_depths: [u16] = []
 # Timeout for controller ready transitions (spin iterations)
 impl NvmeDriver:
     static fn new() -> NvmeDriver:
         """Create an uninitialized NVMe driver."""
+        g_nvme_user_queue_ids = []
+        g_nvme_user_queue_controller_ids = []
+        g_nvme_user_queue_nsids = []
+        g_nvme_user_queue_owner_tasks = []
+        g_nvme_user_queue_depths = []
         NvmeDriver(
             bar0_virt: 0,
             admin_queue: NvmeQueuePair.new(0, 32),
@@ -514,6 +524,73 @@ impl NvmeDriver:
         if queue_result.is_err():
             return queue_result
         self.user_io_queues = self.user_io_queues.push(queue_result.unwrap())
+        Result.Ok(true)
+
+    me user_data_queue_owner_reason(queue_id: u16, depth: u16, controller_id: u32, nsid: u32, owner_task: u64) -> text:
+        """Return ready only when a user data queue is unowned or owned by the same assignment."""
+        if queue_id < SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID or queue_id > NVME_DRIVER_MAX_DATA_QUEUE_ID:
+            return "NVMe: unsupported user data queue"
+        if depth == 0u16:
+            return "NVMe: user data queue depth zero"
+        var idx: i32 = 0
+        for existing_queue_id in g_nvme_user_queue_ids:
+            if existing_queue_id == queue_id:
+                if g_nvme_user_queue_controller_ids[idx] != controller_id:
+                    return "NVMe: user data queue controller conflict"
+                if g_nvme_user_queue_nsids[idx] != nsid:
+                    return "NVMe: user data queue namespace conflict"
+                if g_nvme_user_queue_owner_tasks[idx] != owner_task:
+                    return "NVMe: user data queue owner conflict"
+                if g_nvme_user_queue_depths[idx] < depth:
+                    return "NVMe: user data queue depth too small"
+                return "ready"
+            idx = idx + 1
+        "ready"
+
+    me remember_user_data_queue_owner(queue_id: u16, depth: u16, controller_id: u32, nsid: u32, owner_task: u64):
+        var queue_ids: [u16] = []
+        var controller_ids: [u32] = []
+        var nsids: [u32] = []
+        var owner_tasks: [u64] = []
+        var depths: [u16] = []
+        var replaced = false
+        var idx: i32 = 0
+        for existing_queue_id in g_nvme_user_queue_ids:
+            if existing_queue_id == queue_id:
+                queue_ids = queue_ids.push(queue_id)
+                controller_ids = controller_ids.push(controller_id)
+                nsids = nsids.push(nsid)
+                owner_tasks = owner_tasks.push(owner_task)
+                depths = depths.push(depth)
+                replaced = true
+            else:
+                queue_ids = queue_ids.push(existing_queue_id)
+                controller_ids = controller_ids.push(g_nvme_user_queue_controller_ids[idx])
+                nsids = nsids.push(g_nvme_user_queue_nsids[idx])
+                owner_tasks = owner_tasks.push(g_nvme_user_queue_owner_tasks[idx])
+                depths = depths.push(g_nvme_user_queue_depths[idx])
+            idx = idx + 1
+        if not replaced:
+            queue_ids = queue_ids.push(queue_id)
+            controller_ids = controller_ids.push(controller_id)
+            nsids = nsids.push(nsid)
+            owner_tasks = owner_tasks.push(owner_task)
+            depths = depths.push(depth)
+        g_nvme_user_queue_ids = queue_ids
+        g_nvme_user_queue_controller_ids = controller_ids
+        g_nvme_user_queue_nsids = nsids
+        g_nvme_user_queue_owner_tasks = owner_tasks
+        g_nvme_user_queue_depths = depths
+
+    me ensure_user_data_queue_for_assignment(queue_id: u16, depth: u16, controller_id: u32, nsid: u32, owner_task: u64) -> Result<bool, text>:
+        """Create or reuse a user data queue only for the same controller/namespace owner."""
+        val owner_reason = self.user_data_queue_owner_reason(queue_id, depth, controller_id, nsid, owner_task)
+        if owner_reason != "ready":
+            return Result.Err(owner_reason)
+        val queue_ready = self.ensure_user_data_queue(queue_id, depth)
+        if queue_ready.is_err():
+            return queue_ready
+        self.remember_user_data_queue_owner(queue_id, depth, controller_id, nsid, owner_task)
         Result.Ok(true)
 
     me create_io_queue_pair(qid: u16, depth: u16) -> Result<NvmeQueuePair, text>:

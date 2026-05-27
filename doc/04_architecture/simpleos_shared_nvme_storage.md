@@ -223,6 +223,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   transfer evidence must be ready and one NVMe filesystem lease must be ready
   for FAT32, NVFS, and DBFS before the provider-neutral root probe may read
   sectors from the device.
+- User data queue reuse is now bound to controller id, namespace id, owner task,
+  and queue depth. A hardware user namespace assignment cannot reuse an existing
+  queue id for a different namespace or owner.
 
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware

@@ -1,5 +1,6 @@
 use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file}
+use os.drivers.nvme.nvme_driver.{NvmeDriver}
 
 describe "NVMe driver reversible sector probe contract":
     it "executes the probe through shared transfer commands and structured evidence":
@@ -42,6 +43,10 @@ describe "NVMe driver reversible sector probe contract":
         expect(source.contains("me write_shared_dma_in_namespace_on_queue(nsid: u32, queue_id: u16")).to_equal(true)
         expect(source.contains("self.read_sectors_in_namespace_on_queue(nsid, queue_id, lba, count, buf.device_addr)")).to_equal(true)
         expect(source.contains("self.write_sectors_in_namespace_on_queue(nsid, queue_id, lba, count, buf.device_addr)")).to_equal(true)
+        expect(source.contains("var g_nvme_user_queue_ids: [u16] = []")).to_equal(true)
+        expect(source.contains("var g_nvme_user_queue_nsids: [u32] = []")).to_equal(true)
+        expect(source.contains("me ensure_user_data_queue_for_assignment(queue_id: u16, depth: u16, controller_id: u32, nsid: u32, owner_task: u64)")).to_equal(true)
+        expect(source.contains("val owner_reason = self.user_data_queue_owner_reason(queue_id, depth, controller_id, nsid, owner_task)")).to_equal(true)
         expect(source.contains("identified_nsid: 1u32")).to_equal(true)
         expect(source.contains("identified_namespaces: [NvmeNamespaceFacts]")).to_equal(true)
         expect(source.contains("me identify_namespace_id(nsid: u32)")).to_equal(true)
@@ -62,3 +67,13 @@ describe "NVMe driver reversible sector probe contract":
         expect(source.contains("val total_commands = lbas.len() as u32")).to_equal(true)
         expect(source.contains("val cmd_result = nvme_read_io_command_for_namespace(nsid, base_lba, sectors_per_4k, buf.device_addr + slot_offset")).to_equal(true)
         expect(source.contains("val cmd_result = nvme_write_io_command_for_namespace(nsid, base_lba, sectors_per_4k, buf.device_addr + slot_offset")).to_equal(true)
+
+    it "tracks user data queue ownership by controller namespace and owner task":
+        var driver = NvmeDriver.new()
+
+        expect(driver.user_data_queue_owner_reason(2u16, 64u16, 0u32, 5u32, 42u64)).to_equal("ready")
+        driver.remember_user_data_queue_owner(2u16, 64u16, 0u32, 5u32, 42u64)
+        expect(driver.user_data_queue_owner_reason(2u16, 64u16, 0u32, 5u32, 42u64)).to_equal("ready")
+        expect(driver.user_data_queue_owner_reason(2u16, 64u16, 0u32, 6u32, 42u64)).to_equal("NVMe: user data queue namespace conflict")
+        expect(driver.user_data_queue_owner_reason(2u16, 64u16, 0u32, 5u32, 43u64)).to_equal("NVMe: user data queue owner conflict")
+        expect(driver.user_data_queue_owner_reason(2u16, 128u16, 0u32, 5u32, 42u64)).to_equal("NVMe: user data queue depth too small")
