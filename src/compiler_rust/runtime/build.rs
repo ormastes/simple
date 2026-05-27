@@ -6,11 +6,9 @@ use std::path::{Path, PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
     println!("cargo:rerun-if-changed=src");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_math.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_ctype.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_random.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_equality.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_config.c");
@@ -113,11 +111,9 @@ fn compile_c_runtime_sources() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
 
     let c_sources = [
-        "runtime_math.c",
         "runtime_memory.c",
         "runtime_time.c",
         "runtime_ctype.c",
-        "runtime_random.c",
         "runtime_value.c",
         "runtime_equality.c",
         "runtime_config.c",

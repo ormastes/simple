@@ -22,8 +22,8 @@ Cannot remove until native linker resolves them from Simple-compiled objects.
 
 | C File | Key Symbols | Codegen Callers | .spl Callers | Why It Stays |
 |--------|-------------|-----------------|-------------|-------------|
-| `runtime_math.c` | 27 (`rt_math_*`) | interpreter, sffi shim | 12 files | Interpreter calls C via Rust FFI; transcendentals need libm |
-| `runtime_random.c` | 8 (`rt_random_*`) | interpreter, sffi shim | 10 files | Interpreter + crypto/session callers |
+| `runtime_math.c` | 27 (`rt_math_*`) | codegen/core-C native-project archive | 12 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
+| `runtime_random.c` | 8 (`rt_random_*`) | codegen/core-C native-project archive | 10 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
 | `runtime_contracts.c` | 2 (`simple_contract_check*`) | codegen emits direct calls | 3 files | Core compiler infrastructure — codegen hardcodes symbol |
 | `runtime_error.c` | `rt_function_not_found`, `rt_method_not_found` | ~10 codegen files + `runtime_native.c` | 2 files | Core codegen — every unresolved call falls through here |
 | `runtime_time.c` | 18 (`rt_time_*`, `rt_timestamp_*`) | 8+ files | **199 files** | Most used runtime module; syscall wrappers |
@@ -77,10 +77,28 @@ bin/simple check src/compiler_rust/lib/std/src/infra/hash.spl src/lib/nogc_sync_
 cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml
 ```
 
+Additional 2026-05-27 simple-runtime reductions:
+
+- `value/sffi/math.rs` now implements the `rt_math_*` wrappers directly in
+  Rust using standard `f64` operations and a Rust `gcd`, so
+  `runtime/build.rs` no longer compiles `runtime_math.c`.
+- `value/sffi/random.rs` now implements the legacy LCG state and random-hex
+  helper directly in Rust, so `runtime/build.rs` no longer compiles
+  `runtime_random.c`.
+
+Verification:
+
+```bash
+cargo check -p simple-runtime --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::math --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::random --manifest-path src/compiler_rust/Cargo.toml
+```
+
 ## Path to C Removal for Remaining Modules
 
-For **math/random**: replace Rust shim's C FFI with native Rust calls (e.g.,
-`c_sffi::rt_math_pow(base, exp)` → `base.powf(exp)`). Then the C file is dead.
+For **math/random**: the Rust shim no longer calls these C files as of
+2026-05-27. Remaining removal requires migrating the core-C/native-project
+SFFI export path so native builds no longer need the archived C sources.
 
 For **contracts/error/equality/memory/value/format/native/string_index/async_driver/config/env**:
 codegen-emitted or ABI-layer symbols. Removal requires the native-build linker to
