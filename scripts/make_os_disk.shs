@@ -21,7 +21,7 @@ total_sectors = 8192
 reserved = 32
 fat_count = 1
 fat_size = 64
-spc = 1
+spc = 8
 root_cluster = 2
 data_start = reserved + fat_count * fat_size
 cluster_size = sector_size * spc
@@ -72,6 +72,12 @@ def read_file(path):
         with open(path, "rb") as f:
             return f.read()
     return b""
+
+def read_cfat4k_baseline():
+    override = os.environ.get("SIMPLEOS_CFAT4K_BASELINE", "")
+    if override:
+        return read_file(override)
+    return read_file(os.path.join("build", "os", "perf", "CFAT4K.TXT"))
 
 def elf64(marker, machine):
     marker_bytes = (marker + "\0").encode("ascii")
@@ -257,14 +263,17 @@ efi_entries = []
 boot_entries = []
 sys_entries = []
 apps_entries = []
+perf_entries = []
 
 fat[root_cluster] = 0x0FFFFFFF
 efi_cluster = alloc_clusters(b"")
 boot_cluster = alloc_clusters(b"")
 sys_cluster = alloc_clusters(b"")
 apps_cluster = alloc_clusters(b"")
+perf_cluster = alloc_clusters(b"")
 kernel_bytes = read_file(kernel_path)
 bootloader_bytes = read_file(uefi_bootloader_path)
+cfat4k_baseline = read_cfat4k_baseline()
 kernel_payload = kernel_bytes if kernel_bytes else b"SIMPLEOS_UEFI_KERNEL_MISSING\n"
 bootloader_payload = bootloader_bytes if bootloader_bytes else b"SIMPLEOS_UEFI_BOOTLOADER_MISSING\n"
 limine_cfg = b"timeout: 0\nserial: yes\n/ SimpleOS\nprotocol: multiboot1\npath: boot():/kernel.elf\ntextmode: no\nresolution: 1024x768x32\ncmdline: console=serial root=/dev/nvme0n1\n"
@@ -301,6 +310,7 @@ llvm_cluster = alloc_clusters(llvm_app)
 clang_cluster = alloc_clusters(clang_app)
 rust_cluster = alloc_clusters(rust_app)
 steam_2048_cluster = alloc_clusters(steam_2048_app)
+cfat4k_cluster = alloc_clusters(cfat4k_baseline) if cfat4k_baseline else 0
 
 root_entries.append(dir_entry("EFI        ", efi_cluster, 0, 0x10))
 root_entries.append(dir_entry("SYS        ", sys_cluster, 0, 0x10))
@@ -312,6 +322,7 @@ root_entries.append(dir_entry("HELLO   SPL", hello_spl_cluster, len(hello_spl)))
 efi_entries.append(dir_entry("BOOT       ", boot_cluster, 0, 0x10))
 boot_entries.append(dir_entry("BOOTX64 EFI", bootloader_cluster, len(bootloader_payload)))
 sys_entries.append(dir_entry("APPS       ", apps_cluster, 0, 0x10))
+sys_entries.append(dir_entry("PERF       ", perf_cluster, 0, 0x10))
 sys_entries.append(dir_entry("NVFSVER TXT", nvfs_cluster, len(nvfs)))
 sys_entries.append(dir_entry("TOOLSET SDN", toolset_cluster, len(toolset)))
 sys_entries.append(dir_entry("MARKERS TXT", markers_cluster, len(markers)))
@@ -337,12 +348,15 @@ apps_entries.append(dir_entry("LLVMSMF SMF", llvm_cluster, len(llvm_app)))
 apps_entries.append(dir_entry("CLANGSMFSMF", clang_cluster, len(clang_app)))
 apps_entries.append(dir_entry("RUSTSMF SMF", rust_cluster, len(rust_app)))
 apps_entries.append(dir_entry("STEAM204SMF", steam_2048_cluster, len(steam_2048_app)))
+if cfat4k_baseline:
+    perf_entries.append(dir_entry("CFAT4K  TXT", cfat4k_cluster, len(cfat4k_baseline)))
 
 image[cluster_offset(root_cluster):cluster_offset(root_cluster) + len(b"".join(root_entries))] = b"".join(root_entries)
 image[cluster_offset(efi_cluster):cluster_offset(efi_cluster) + len(b"".join(efi_entries))] = b"".join(efi_entries)
 image[cluster_offset(boot_cluster):cluster_offset(boot_cluster) + len(b"".join(boot_entries))] = b"".join(boot_entries)
 image[cluster_offset(sys_cluster):cluster_offset(sys_cluster) + len(b"".join(sys_entries))] = b"".join(sys_entries)
 image[cluster_offset(apps_cluster):cluster_offset(apps_cluster) + len(b"".join(apps_entries))] = b"".join(apps_entries)
+image[cluster_offset(perf_cluster):cluster_offset(perf_cluster) + len(b"".join(perf_entries))] = b"".join(perf_entries)
 
 image[0:3] = b"\xEB\x58\x90"
 image[3:11] = b"SIMPLEOS"
@@ -508,6 +522,12 @@ EOF
             ;;
     esac
     app_markers
+    baseline_path="${SIMPLEOS_CFAT4K_BASELINE:-build/os/perf/CFAT4K.TXT}"
+    if [ -f "$baseline_path" ]; then
+        printf '/SYS/PERF/CFAT4K.TXT\n'
+        cat "$baseline_path"
+        printf '\n'
+    fi
     printf 'Hello from SimpleOS\n'
     printf 'fn main\n'
     printf '5\n'
