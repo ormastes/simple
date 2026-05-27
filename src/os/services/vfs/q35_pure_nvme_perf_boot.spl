@@ -100,6 +100,21 @@ fn _fat32_fixture_direct_offsets(nvme: NvmeDriver, sector_size: u32, buf: Shared
         (_fat32_cluster_to_lba(second_cluster.unwrap(), sectors_per_cluster, data_start) * sector_size.to_u64()) as i64
     ])
 
+fn _dbfs_arena_direct_offsets(sector_size: u32, sector_count: u64, arena_base_lba: u64) -> Result<[i64], text>:
+    if sector_size == 0u32:
+        return Err("dbfs-arena-invalid-sector-size")
+    val sectors_per_4k = 4096u64 / sector_size.to_u64()
+    if sectors_per_4k == 0u64 or (4096u64 % sector_size.to_u64()) != 0u64:
+        return Err("dbfs-arena-sector-size-not-4k-divisible")
+    val first_lba = arena_base_lba + 1u64
+    val second_lba = arena_base_lba + 1u64 + sectors_per_4k
+    if second_lba + sectors_per_4k >= sector_count:
+        return Err("dbfs-arena-out-of-range")
+    Ok([
+        (first_lba * sector_size.to_u64()) as i64,
+        (second_lba * sector_size.to_u64()) as i64
+    ])
+
 fn _access_marker(storage_grant: text, network_grant: text) -> text:
     "[real-device] storage_provider=simple-driver network_provider=simple-driver " +
         "storage_placement=user-space-driver network_placement=user-space-driver " +
@@ -152,6 +167,8 @@ fn _perf_marker(
         " simple_provider=simple-driver workload=4k-random-read-write io_size_bytes=4096" +
         " direct_io_path=nvme-lease-shared-dma-4k fs_consumers=" + fs_consumers +
         " fat32_extent_source=freestanding-fat32-extents" +
+        " nvfs_extent_source=freestanding-dbfs-arena" +
+        " dbfs_extent_source=freestanding-dbfs-arena" +
         " c_bridge_used=false common_logic_shared=true allocation_per_io=false" +
         " simple_read_iops=" + simple_read_iops.to_text() +
         " simple_write_iops=" + simple_write_iops.to_text() +
@@ -270,6 +287,16 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
         dma_free(dma)
         return ["[q35-pure-nvme-perf] skipped reason=fat32-driver-direct-extent-failed detail=" + fat32_offsets_result.unwrap_err()]
     val fat32_offsets = fat32_offsets_result.unwrap()
+    val nvfs_offsets_result = _dbfs_arena_direct_offsets(sector_size, sector_count, 639u64)
+    if nvfs_offsets_result.is_err():
+        dma_free(dma)
+        return ["[q35-pure-nvme-perf] skipped reason=nvfs-arena-direct-extent-failed detail=" + nvfs_offsets_result.unwrap_err()]
+    val nvfs_offsets = nvfs_offsets_result.unwrap()
+    val dbfs_offsets_result = _dbfs_arena_direct_offsets(sector_size, sector_count, 767u64)
+    if dbfs_offsets_result.is_err():
+        dma_free(dma)
+        return ["[q35-pure-nvme-perf] skipped reason=dbfs-arena-direct-extent-failed detail=" + dbfs_offsets_result.unwrap_err()]
+    val dbfs_offsets = dbfs_offsets_result.unwrap()
 
     var read_ops: u64 = 0u64
     var write_ops: u64 = 0u64
@@ -304,8 +331,18 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
                     fat_idx = fat_idx + 1
             if consumer_name == "nvfs":
                 saw_nvfs = true
+                var nvfs_idx: i32 = 0
+                while nvfs_idx < offsets.len() and nvfs_idx < nvfs_offsets.len():
+                    offsets[nvfs_idx] = nvfs_offsets[nvfs_idx]
+                    lbas[nvfs_idx] = (nvfs_offsets[nvfs_idx] as u64) / sector_size.to_u64()
+                    nvfs_idx = nvfs_idx + 1
             if consumer_name == "dbfs":
                 saw_dbfs = true
+                var dbfs_idx: i32 = 0
+                while dbfs_idx < offsets.len() and dbfs_idx < dbfs_offsets.len():
+                    offsets[dbfs_idx] = dbfs_offsets[dbfs_idx]
+                    lbas[dbfs_idx] = (dbfs_offsets[dbfs_idx] as u64) / sector_size.to_u64()
+                    dbfs_idx = dbfs_idx + 1
             for lba in lbas:
                 all_lbas.push(lba)
             val read_req = direct_io_read_batch_request(1u64, offsets, shared, 200000u32)
