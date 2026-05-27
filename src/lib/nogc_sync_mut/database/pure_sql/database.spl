@@ -43,6 +43,19 @@ fn _find_idx(names: [text], target: text) -> i32:
         i = i + 1
     -1
 
+fn _build_col_map(cols: [text]) -> Dict<text, i32>:
+    var m: Dict<text, i32> = {}
+    var i: i32 = 0
+    while i < cols.len() as i32:
+        m[cols[i]] = i
+        i = i + 1
+    m
+
+fn _col_idx(m: Dict<text, i32>, name: text) -> i32:
+    if m.has(name):
+        return m[name]
+    -1
+
 # ── Row serialization ────────────────────────────────────────────────────────
 # Each cell: TYPE_CHAR ":" value, cells separated by "\t".
 
@@ -561,6 +574,98 @@ fn _check_where(where_expr: SqlExpr?, cols: [text], vals: [DbValue], params: [Db
     if not where_expr.?:
         return true
     val result = _eval_expr(where_expr, cols, vals, params)
+    _dbval_truthy(result)
+
+fn _eval_expr_fast(expr: SqlExpr, cm: Dict<text, i32>, vals: [DbValue], params: [DbValue]) -> DbValue:
+    if expr.kind == SqlExprKind.Literal:
+        return _parse_literal(expr.value)
+    if expr.kind == SqlExprKind.Column:
+        val idx = _col_idx(cm, expr.value)
+        if idx >= 0:
+            return vals[idx]
+        return DbValue.Null
+    if expr.kind == SqlExprKind.Placeholder:
+        if _param_idx < params.len():
+            val v = params[_param_idx]
+            _param_idx = _param_idx + 1
+            return v
+        return DbValue.Null
+    if expr.kind == SqlExprKind.IsNull:
+        val inner = _eval_expr_fast(expr.left, cm, vals, params)
+        return DbValue.Bool(value: inner.is_null())
+    if expr.kind == SqlExprKind.IsNotNull:
+        val inner = _eval_expr_fast(expr.left, cm, vals, params)
+        return DbValue.Bool(value: not inner.is_null())
+    if expr.kind == SqlExprKind.UnaryOp:
+        val uval = _eval_expr_fast(expr.left, cm, vals, params)
+        val uop = expr.value.to_upper()
+        if uop == "NOT":
+            return DbValue.Bool(value: not _dbval_truthy(uval))
+        if uop == "-":
+            match uval:
+                DbValue.Integer(value):
+                    return DbValue.Integer(value: 0 - value)
+                DbValue.Real(value):
+                    return DbValue.Real(value: 0.0 - value)
+                _:
+                    return DbValue.Null
+        return DbValue.Null
+    if expr.kind == SqlExprKind.BinaryOp:
+        val lv = _eval_expr_fast(expr.left, cm, vals, params)
+        val rv = _eval_expr_fast(expr.right, cm, vals, params)
+        return _apply_binop(expr.value, lv, rv)
+    if expr.kind == SqlExprKind.Between:
+        val bval = _eval_expr_fast(expr.left, cm, vals, params)
+        val lo = _eval_expr_fast(expr.args[0], cm, vals, params)
+        val hi = _eval_expr_fast(expr.args[1], cm, vals, params)
+        val ge_lo = _dbval_cmp(lo, bval) <= 0
+        val le_hi = _dbval_cmp(bval, hi) <= 0
+        return DbValue.Bool(value: ge_lo and le_hi)
+    if expr.kind == SqlExprKind.InList:
+        val target = _eval_expr_fast(expr.left, cm, vals, params)
+        var found = false
+        var ini: i32 = 0
+        while ini < expr.args.len() as i32:
+            val item = _eval_expr_fast(expr.args[ini], cm, vals, params)
+            if _dbval_eq(target, item):
+                found = true
+            ini = ini + 1
+        return DbValue.Bool(value: found)
+    if expr.kind == SqlExprKind.FunctionCall:
+        val fname = expr.value.to_lower()
+        if fname == "fts_match":
+            if expr.args.len() < 2:
+                return DbValue.Bool(value: false)
+            val target = _eval_expr_fast(expr.args[0], cm, vals, params)
+            val query = _eval_expr_fast(expr.args[1], cm, vals, params)
+            return DbValue.Bool(value: _fts_match_value(target.to_text(), query.to_text()))
+        if fname == "length":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val lv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if lv.is_null():
+                return DbValue.Null
+            return DbValue.Integer(value: lv.to_text().len())
+        if fname == "upper":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val uv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if uv.is_null():
+                return DbValue.Null
+            return DbValue.Text(value: uv.to_text().to_upper())
+        if fname == "lower":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val lwv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if lwv.is_null():
+                return DbValue.Null
+            return DbValue.Text(value: lwv.to_text().to_lower())
+    DbValue.Null
+
+fn _check_where_fast(where_expr: SqlExpr?, cm: Dict<text, i32>, vals: [DbValue], params: [DbValue]) -> bool:
+    if not where_expr.?:
+        return true
+    val result = _eval_expr_fast(where_expr, cm, vals, params)
     _dbval_truthy(result)
 
 # ── LIKE pattern matching ────────────────────────────────────────────────────
@@ -1868,12 +1973,16 @@ class PureDatabase:
         var tbl = self._tbl_data[ti]
         val visible = tbl.scan(snap)
         self._tbl_data[ti] = tbl
+        val col_map = _build_col_map(col_names)
 
         # ── JOIN support ─────────────────────────────────────────────
         var base_rows: [[DbValue]] = []
+        val has_join = sel.joins.len() > 0
         var ri: i32 = 0
         while ri < visible.len() as i32:
-            base_rows.push(_deserialize_row(visible[ri]))
+            val row_vals = _deserialize_row(visible[ri])
+            if has_join or _check_where_fast(sel.where_expr, col_map, row_vals, params):
+                base_rows.push(row_vals)
             ri = ri + 1
 
         val joins_arr = sel.joins
@@ -1954,11 +2063,14 @@ class PureDatabase:
 
         # ── WHERE filter ─────────────────────────────────────────────
         var filtered: [[DbValue]] = []
-        var fi: i32 = 0
-        while fi < base_rows.len() as i32:
-            if _check_where(sel.where_expr, col_names, base_rows[fi], params):
-                filtered.push(base_rows[fi])
-            fi = fi + 1
+        if has_join:
+            var fi: i32 = 0
+            while fi < base_rows.len() as i32:
+                if _check_where_fast(sel.where_expr, col_map, base_rows[fi], params):
+                    filtered.push(base_rows[fi])
+                fi = fi + 1
+        else:
+            filtered = base_rows
 
         # ── Aggregate / GROUP BY path ────────────────────────────────
         var rows: [DbRow] = []
@@ -2045,7 +2157,7 @@ class PureDatabase:
             # Non-aggregate path — project each row
             var pri: i32 = 0
             while pri < filtered.len() as i32:
-                val proj = _project_row(sel, col_names, filtered[pri])
+                val proj = _project_row_fast(sel, col_map, col_names, filtered[pri])
                 rows.push(proj)
                 pri = pri + 1
 
@@ -2188,6 +2300,39 @@ class PureDatabase:
         Ok(deleted)
 
 # ── Column projection ────────────────────────────────────────────────────────
+
+fn _project_row_fast(sel: SqlSelect, cm: Dict<text, i32>, col_names: [text], row_vals: [DbValue]) -> DbRow:
+    if sel.columns.len() == 1:
+        val first = sel.columns[0]
+        if first.kind == SqlExprKind.Star:
+            return DbRow(columns: col_names, values: row_vals)
+    var proj_cols: [text] = []
+    var proj_vals: [DbValue] = []
+    var ci: i32 = 0
+    while ci < sel.columns.len() as i32:
+        val expr = sel.columns[ci]
+        val inner = _unwrap_as_expr(expr)
+        val col_alias = _get_as_alias(expr)
+        if inner.kind == SqlExprKind.Column:
+            val idx = _col_idx(cm, inner.value)
+            if col_alias != "":
+                proj_cols.push(col_alias)
+            else:
+                proj_cols.push(inner.value)
+            if idx >= 0:
+                proj_vals.push(row_vals[idx])
+            else:
+                proj_vals.push(DbValue.Null)
+        elif inner.kind == SqlExprKind.Star:
+            return DbRow(columns: col_names, values: row_vals)
+        else:
+            if col_alias != "":
+                proj_cols.push(col_alias)
+            else:
+                proj_cols.push(inner.value)
+            proj_vals.push(_eval_expr_fast(inner, cm, row_vals, []))
+        ci = ci + 1
+    DbRow(columns: proj_cols, values: proj_vals)
 
 fn _project_row(sel: SqlSelect, col_names: [text], row_vals: [DbValue]) -> DbRow:
     if sel.columns.len() == 1:
