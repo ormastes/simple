@@ -46,7 +46,7 @@ use std.fs_driver.capability.{Capability}
 use std.fs_driver.extension.{Extension, DirectIoExt}
 use std.fs_driver.direct_io.{DirectIoRequest, DirectIoBatchRequest, DirectIoResult, direct_io_read_request, direct_io_write_request, direct_io_read_batch_request, direct_io_write_batch_request, direct_io_validate_batch}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, dma_alloc, dma_free, dma_buffer_to_shared}
-use std.fs_driver.types.{Path, MountOptions, OpenFlags}
+use std.fs_driver.types.{Path, MountOptions, OpenFlags, FileHandle}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
 use os.kernel.log.klog_api.{log_raw_println}
@@ -488,24 +488,54 @@ fn vfs_boot_nvme_filesystem_direct_io_extension(driver: DriverInstance) -> Resul
             Err(FsError.Unsupported)
 
 fn vfs_boot_nvme_submit_filesystem_direct_4k(driver: DriverInstance, lease: NvmeFilesystemLease, req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
-    """Validate a DirectIo request through the filesystem extension before the NVMe lease adapter."""
+    """Resolve a filesystem DirectIo request to a storage extent before NVMe submission."""
     val ext = vfs_boot_nvme_filesystem_direct_io_extension(driver)
     if ext.is_err():
         return Err(ext.unwrap_err())
     val valid = ext.unwrap().validate_shared_buffer(req.file_offset, req.buffer)
     if valid.is_err():
         return Err(valid.unwrap_err())
-    vfs_boot_nvme_submit_active_lease_direct_4k(lease, req)
+    val extent = driver.direct_io_extent_for_handle(FileHandle(id: req.handle_id), req.file_offset, 4096u64)
+    if extent.is_err():
+        return Err(extent.unwrap_err())
+    val mapped = extent.unwrap()
+    if mapped.byte_len != 4096u64:
+        return Err(FsError.InvalidArg)
+    val storage_offset = (mapped.storage_lba * mapped.sector_size.to_u64()) as i64
+    val storage_req = DirectIoRequest(
+        handle_id: req.handle_id,
+        file_offset: storage_offset,
+        op: req.op,
+        buffer: req.buffer,
+        timeout_polls: req.timeout_polls
+    )
+    vfs_boot_nvme_submit_active_lease_direct_4k(lease, storage_req)
 
 fn vfs_boot_nvme_submit_filesystem_direct_4k_batch(driver: DriverInstance, lease: NvmeFilesystemLease, req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>:
-    """Validate a DirectIo batch through the filesystem extension before the NVMe lease adapter."""
+    """Resolve filesystem DirectIo batch offsets to storage extents before NVMe submission."""
     val ext = vfs_boot_nvme_filesystem_direct_io_extension(driver)
     if ext.is_err():
         return Err(ext.unwrap_err())
     val valid = direct_io_validate_batch(ext.unwrap(), req, 4096u64)
     if valid.is_err():
         return Err(valid.unwrap_err())
-    vfs_boot_nvme_submit_active_lease_direct_4k_batch(lease, req)
+    var storage_offsets: [i64] = []
+    for offset in req.file_offsets:
+        val extent = driver.direct_io_extent_for_handle(FileHandle(id: req.handle_id), offset, 4096u64)
+        if extent.is_err():
+            return Err(extent.unwrap_err())
+        val mapped = extent.unwrap()
+        if mapped.byte_len != 4096u64:
+            return Err(FsError.InvalidArg)
+        storage_offsets.push((mapped.storage_lba * mapped.sector_size.to_u64()) as i64)
+    val storage_req = DirectIoBatchRequest(
+        handle_id: req.handle_id,
+        file_offsets: storage_offsets,
+        op: req.op,
+        buffer: req.buffer,
+        timeout_polls: req.timeout_polls
+    )
+    vfs_boot_nvme_submit_active_lease_direct_4k_batch(lease, storage_req)
 
 fn _vfs_boot_q35_elapsed_us(start_us: i64, end_us: i64) -> u64:
     if end_us <= start_us:
