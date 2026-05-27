@@ -247,6 +247,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   constructs a lease-backed `NvmeBlockAdapter`; no user/system assignment can
   touch the global controller driver while boot storage is unmounted, C-backed,
   VirtIO-backed, uninitialized, or reporting invalid namespace geometry.
+- Failed hardware-backed user namespace admission restores the previously
+  identified system namespace after queue-creation or adapter-validation
+  failures, so a rejected user assignment cannot leave the shared system driver
+  pointed at the user namespace.
 - User-assigned namespace leases require the queue owner to match the task
   encoded in the issued `DeviceGrant` BAR/IRQ/DMA/IOMMU tokens, so a grant
   issued to one user-space driver cannot be reused to expose FAT32, NVFS, or
