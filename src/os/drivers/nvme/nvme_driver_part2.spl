@@ -22,7 +22,7 @@ use os.drivers.nvme.nvme_driver.*
 #   26 = NotificationWait(notif_id)
 
 use os.kernel.types.device_mem_types.{DeviceGrant}
-use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_write64}
+use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read32, mmio_write32, mmio_read64, mmio_write64}
 use os.drivers.nvme.nvme_types.{NVME_REG_VS}
 use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
 use os.drivers.nvme.nvme_queue_notify.*
@@ -30,6 +30,7 @@ use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_pair_fr
 use os.drivers.nvme.nvme_transfer_command.{nvme_read_io_command, nvme_write_io_command, nvme_flush_io_command, nvme_io_status_code}
 use os.drivers.nvme.nvme_admin_command.{nvme_admin_identify_controller, nvme_admin_identify_namespace, nvme_admin_set_num_queues, nvme_admin_create_io_completion_queue, nvme_admin_create_io_submission_queue}
 use os.drivers.nvme.nvme_controller_contract.{NvmeControllerRegs, nvme_controller_facts, nvme_controller_refusal_reason, nvme_cap_dstrd, nvme_namespace_facts, nvme_namespace_refusal_reason, nvme_controller_enable_cc}
+use os.drivers.nvme.nvme_sector_probe.{NvmeSectorProbeResult, nvme_sector_probe_result}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
@@ -674,6 +675,63 @@ impl NvmeDriver:
             return Result.Err("NVMe: shared DMA device address unaligned")
         dma_shared_sync_cpu_to_device(buf)
         self.write_sectors_notify(lba, count, buf.device_addr)
+
+    me run_reversible_sector_probe(lba: u64) -> Result<NvmeSectorProbeResult, text>:
+        """Execute read/write/verify/restore on one sector and return readiness evidence."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        if self.sector_size == 0u32:
+            return Result.Err("NVMe: sector size unknown")
+        if lba >= self.sector_count:
+            return Result.Err("NVMe: probe lba beyond namespace capacity")
+
+        val bytes = self.sector_size.to_u64()
+        val original_result = self.alloc_dma(bytes)
+        if original_result.is_err():
+            return Result.Err("NVMe: probe original DMA allocation failed")
+        val original = original_result.unwrap()
+        val pattern_result = self.alloc_dma(bytes)
+        if pattern_result.is_err():
+            return Result.Err("NVMe: probe pattern DMA allocation failed")
+        val pattern = pattern_result.unwrap()
+        val verify_result = self.alloc_dma(bytes)
+        if verify_result.is_err():
+            return Result.Err("NVMe: probe verify DMA allocation failed")
+        val verify = verify_result.unwrap()
+
+        self.zero_memory(original.virt, bytes)
+        self.zero_memory(pattern.virt, bytes)
+        self.zero_memory(verify.virt, bytes)
+
+        val read_result = self.read_sectors(lba, 1u32, original.phys)
+        val read_ok = read_result.is_ok()
+        if not read_ok:
+            return Ok(nvme_sector_probe_result(lba, bytes, 1u32, false, false, false, true))
+
+        var i: u64 = 0
+        while i < bytes:
+            val original_byte = mmio_read8(original.virt + i)
+            val pattern_byte = original_byte ^ 0xA5u8
+            mmio_write8(pattern.virt + i, pattern_byte)
+            i = i + 1
+
+        val write_result = self.write_sectors(lba, 1u32, pattern.phys)
+        var write_ok = write_result.is_ok()
+        if write_ok:
+            val verify_read = self.read_sectors(lba, 1u32, verify.phys)
+            if verify_read.is_err():
+                write_ok = false
+            else:
+                i = 0
+                while i < bytes:
+                    if mmio_read8(verify.virt + i) != mmio_read8(pattern.virt + i):
+                        write_ok = false
+                    i = i + 1
+
+        val restore_result = self.write_sectors(lba, 1u32, original.phys)
+        val restore_ok = restore_result.is_ok()
+        val completion_status: u32 = if read_ok and write_ok and restore_ok: 0u32 else: 1u32
+        Ok(nvme_sector_probe_result(lba, bytes, completion_status, read_ok, write_ok, restore_ok, true))
 
     me flush_notify() -> Result<bool, text>:
         """Flush write cache using notification-based completion (non-spinning).

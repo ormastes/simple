@@ -133,6 +133,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   LBA, byte length, completion status, read/write/restore results, and a flag
   proving the probe used the shared transfer command logic. Freestanding
   readiness consumes that contract instead of loose booleans.
+- The hosted NVMe driver can now produce that structured evidence by executing
+  a real polling read/write/verify/restore sector probe through its shared
+  `read_sectors`/`write_sectors` transfer path.
 - Freestanding controller readiness now has an explicit resource contract that
   binds system-driver or user-space-driver placement, grant/namespace mode,
   admin queue resources, I/O queue resources, DMA isolation, and IOMMU/broker
@@ -173,6 +176,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   identify or failed I/O queue creation.
 - Sector probe evidence is not sufficient unless it records successful
   completion, read, write, restore, and shared transfer logic usage.
+- Probe I/O failures return non-ready structured evidence rather than marking
+  storage ready; invalid probe preconditions still return driver errors.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
@@ -212,3 +217,7 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `test/unit/os/drivers/nvme/nvme_sector_probe_spec.spl` covers the structured
   reversible-sector probe contract and rejects missing completion, read, write,
   restore, byte count, or shared transfer logic.
+- `test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl` guards that
+  the hosted driver probe uses shared read/write sector paths, verifies the
+  written pattern, restores the original sector, and returns the structured
+  probe result.
