@@ -1061,3 +1061,37 @@ fn fat32_write(core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> Resu
     core._chain_valid = true
     core._save_open_file(idx, of)
     Ok(bytes_written)
+
+fn fat32_write_4k_overwrite(core: Fat32Core, handle: FileHandle, buf: [u8]) -> Result<i64, text>:
+    if not core.mounted:
+        return Err("filesystem not mounted")
+    if buf.len() < 4096:
+        return Err("buffer too small")
+    val idx = handle.id.to_i32() - 1
+    if idx < 0 or idx >= core.open_files.len():
+        return Err("invalid file handle")
+    var of = core.open_files[idx]
+    if not of.is_open:
+        return Err("file handle not open")
+    if (of.position % 4096) != 0:
+        return Err("unaligned 4k overwrite")
+    if of.start_cluster < 2:
+        return Err("file has no cluster")
+    val cluster_bytes = (core.bytes_per_sector * core.sectors_per_cluster).to_i64()
+    if cluster_bytes != 4096:
+        return Err("cluster is not 4k")
+    val cluster_index = (of.position / 4096).to_i32()
+    val chain_rc = core.follow_chain(of.start_cluster)
+    if chain_rc.is_err():
+        return Err(chain_rc.unwrap_err())
+    val chain = chain_rc.unwrap()
+    if cluster_index < 0 or cluster_index >= chain.len():
+        return Err("overwrite beyond allocated file")
+    val wrc = core.write_cluster_from(chain[cluster_index], buf, 0)
+    if wrc.is_err():
+        return Err(wrc.unwrap_err())
+    of.position = of.position + 4096
+    if of.position > of.size:
+        of.size = of.position
+    core._save_open_file(idx, of)
+    Ok(4096)
