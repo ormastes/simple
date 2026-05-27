@@ -1363,6 +1363,8 @@ class PureDatabase:
     _tbl_name_idx: Dict<text, i32>
     _tbl_col_idx: [Dict<text, i32>]
     _fts_rows: [[DbRow]]
+    _tbl_vis: [[bool]]
+    _tbl_vis_xmax: [i64]
 
     static fn memory() -> Result<PureDatabase, DbError>:
         Ok(PureDatabase(
@@ -1398,7 +1400,9 @@ class PureDatabase:
             _tbl_dirty: [],
             _tbl_name_idx: {},
             _tbl_col_idx: [],
-            _fts_rows: []
+            _fts_rows: [],
+            _tbl_vis: [],
+            _tbl_vis_xmax: []
         ))
 
     static fn memory_deferred() -> Result<PureDatabase, DbError>:
@@ -1891,6 +1895,8 @@ class PureDatabase:
                     self._fts_valid.push(false)
                     self._fts_columns.push([])
                     self._fts_rows.push([])
+                    self._tbl_vis.push([])
+                    self._tbl_vis_xmax.push(-1)
                     self._indexes.push([])
                     self._index_unique.push([])
                     self._tbl_fts_next_doc_id.push(0)
@@ -2276,6 +2282,8 @@ class PureDatabase:
         self._fts_valid = []
         self._fts_columns = []
         self._fts_rows = []
+        self._tbl_vis = []
+        self._tbl_vis_xmax = []
         self._indexes = []
         self._index_unique = []
         var restore_ni: Dict<text, i32> = {}
@@ -2290,6 +2298,8 @@ class PureDatabase:
             self._fts_valid.push(false)
             self._fts_columns.push([])
             self._fts_rows.push([])
+            self._tbl_vis.push([])
+            self._tbl_vis_xmax.push(-1)
             self._indexes.push(self._snap_indexes[ti])
             self._index_unique.push(self._snap_index_unique[ti])
             restore_ni[self._snap_tbl_names[ti]] = ti
@@ -2622,6 +2632,8 @@ class PureDatabase:
         self._fts_valid.push(false)
         self._fts_columns.push([])
         self._fts_rows.push([])
+        self._tbl_vis.push([])
+        self._tbl_vis_xmax.push(-1)
         self._indexes.push([])
         self._index_unique.push([])
         self._tbl_fts_next_doc_id.push(0)
@@ -2665,6 +2677,8 @@ class PureDatabase:
         var new_fts_valid: [bool] = []
         var new_fts_columns: [[text]] = []
         var new_fts_rows: [[DbRow]] = []
+        var new_vis: [[bool]] = []
+        var new_vis_xmax: [i64] = []
         var new_indexes: [[[text]]] = []
         var new_index_unique: [[bool]] = []
         var i: i32 = 0
@@ -2678,6 +2692,8 @@ class PureDatabase:
                 new_fts_valid.push(self._fts_valid[i])
                 new_fts_columns.push(self._fts_columns[i])
                 new_fts_rows.push(self._fts_rows[i])
+                new_vis.push(self._tbl_vis[i])
+                new_vis_xmax.push(self._tbl_vis_xmax[i])
                 new_indexes.push(self._indexes[i])
                 new_index_unique.push(self._index_unique[i])
             i = i + 1
@@ -2689,6 +2705,8 @@ class PureDatabase:
         self._fts_valid = new_fts_valid
         self._fts_columns = new_fts_columns
         self._fts_rows = new_fts_rows
+        self._tbl_vis = new_vis
+        self._tbl_vis_xmax = new_vis_xmax
         self._indexes = new_indexes
         self._index_unique = new_index_unique
         # Rebuild typed storage + pk index without the dropped table
@@ -2888,6 +2906,19 @@ class PureDatabase:
         val typed = self._tbl_typed[ti]
         val use_typed = typed.len() == tbl.tuples.len()
 
+        # ── Visibility cache: recompute only when snapshot changes ───
+        val n_tuples = tbl.tuples.len() as i32
+        var vis = self._tbl_vis[ti]
+        if self._tbl_vis_xmax[ti] != snap.xmax or vis.len() != n_tuples as i64:
+            var new_vis: [bool] = []
+            var vi: i32 = 0
+            while vi < n_tuples:
+                new_vis.push(mvcc_is_visible(tbl.tuples[vi], snap))
+                vi = vi + 1
+            self._tbl_vis[ti] = new_vis
+            self._tbl_vis_xmax[ti] = snap.xmax
+            vis = new_vis
+
         # ── Hash index fast path for point lookups ───────────────────
         val pk_ci = self._tbl_pk_col[ti]
         val has_join = sel.joins.len() > 0
@@ -2899,8 +2930,8 @@ class PureDatabase:
                 val pkm = self._tbl_pk_map[ti]
                 if pkm.has(pk_eq):
                     val tidx = pkm[pk_eq]
-                    if tidx >= 0 and tidx < tbl.tuples.len() as i32:
-                        if mvcc_is_visible(tbl.tuples[tidx], snap):
+                    if tidx >= 0 and tidx < n_tuples:
+                        if vis[tidx]:
                             base_rows.push(typed[tidx])
                 used_pk_path = true
 
@@ -2914,10 +2945,9 @@ class PureDatabase:
                 val rng_hi = rng[2]
                 val rng_lo_inc = rng[3] == 1
                 val rng_hi_inc = rng[4] == 1
-                val n = tbl.tuples.len() as i32
                 var ri: i32 = 0
-                while ri < n:
-                    if mvcc_is_visible(tbl.tuples[ri], snap):
+                while ri < n_tuples:
+                    if vis[ri]:
                         val rv = typed[ri]
                         if rng_ci < rv.len() as i32:
                             val cv = _dbval_as_i64(rv[rng_ci])
@@ -2945,10 +2975,9 @@ class PureDatabase:
                 val sb_ci = sb[0] as i32
                 val sb_val = sb[1]
                 val sb_kind = sb[2]
-                val n = tbl.tuples.len() as i32
                 var ri: i32 = 0
-                while ri < n:
-                    if mvcc_is_visible(tbl.tuples[ri], snap):
+                while ri < n_tuples:
+                    if vis[ri]:
                         val rv = typed[ri]
                         if sb_ci < rv.len() as i32:
                             val cv = _dbval_as_i64(rv[sb_ci])
@@ -2975,10 +3004,9 @@ class PureDatabase:
             if like_ci >= 0:
                 val like_prefix = _like_prefix_str(sel.where_expr)
                 if like_prefix != "":
-                    val n = tbl.tuples.len() as i32
                     var ri: i32 = 0
-                    while ri < n:
-                        if mvcc_is_visible(tbl.tuples[ri], snap):
+                    while ri < n_tuples:
+                        if vis[ri]:
                             val rv = typed[ri]
                             if like_ci < rv.len() as i32:
                                 val sv = rv[like_ci].to_text()
@@ -2994,10 +3022,9 @@ class PureDatabase:
             if like_col >= 0:
                 val like_pat = _extract_like_pattern(sel.where_expr)
                 if like_pat != "":
-                    val n = tbl.tuples.len() as i32
                     var ri: i32 = 0
-                    while ri < n:
-                        if mvcc_is_visible(tbl.tuples[ri], snap):
+                    while ri < n_tuples:
+                        if vis[ri]:
                             val rv = typed[ri]
                             if like_col < rv.len() as i32:
                                 val sv = rv[like_col].to_text()
@@ -3010,8 +3037,8 @@ class PureDatabase:
         if not used_pk_path and not used_range_path and not used_single_bound and not used_like_prefix and not used_like_typed:
             if use_typed:
                 var ti2: i32 = 0
-                while ti2 < tbl.tuples.len() as i32:
-                    if mvcc_is_visible(tbl.tuples[ti2], snap):
+                while ti2 < n_tuples:
+                    if vis[ti2]:
                         val row_vals = typed[ti2]
                         if has_join or _check_where_fast(sel.where_expr, col_map, row_vals, params):
                             base_rows.push(row_vals)
