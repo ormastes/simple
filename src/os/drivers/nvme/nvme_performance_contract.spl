@@ -192,28 +192,75 @@ fn nvme_production_perf_report_line_from_measurements(
         nvme_production_perf_report(nvme_c_parity_perf_comparison(simple, c_baseline))
     )
 
+fn _nvme_perf_u64_field(line: text, prefix: text, missing_reason: text, invalid_reason: text) -> Result<u64, text>:
+    val parts = line.split(" ")
+    for part in parts:
+        val token = part.trim()
+        if token.starts_with(prefix):
+            val value_text: text = token.substring(prefix.len(), token.len()).trim()
+            if value_text.len() == 0:
+                return Err(invalid_reason)
+            for ch in value_text:
+                if ch < "0" or ch > "9":
+                    return Err(invalid_reason)
+            var value: u64 = 0u64
+            for ch in value_text:
+                val digit = ch.to_i32() - "0".to_i32()
+                value = value * 10u64 + digit.to_u64()
+            if value == 0u64:
+                return Err(invalid_reason)
+            return Ok(value)
+    Err(missing_reason)
+
 fn nvme_production_perf_serial_acceptance_reason(line: text) -> text:
     """Evaluate one benchmark report line emitted by a hardware runner."""
     if not line.contains("nvme_perf"):
         return "missing-nvme-perf-report"
     if not line.contains("reason=ready"):
         return "nvme-perf-report-not-ready"
-    if not line.contains("simple_read_iops="):
-        return "missing-simple-read-iops"
-    if not line.contains("simple_write_iops="):
-        return "missing-simple-write-iops"
-    if not line.contains("simple_read_p99_us="):
-        return "missing-simple-read-p99"
-    if not line.contains("simple_write_p99_us="):
-        return "missing-simple-write-p99"
-    if not line.contains("c_read_iops="):
-        return "missing-c-read-iops"
-    if not line.contains("c_write_iops="):
-        return "missing-c-write-iops"
-    if not line.contains("queue_depth="):
-        return "missing-queue-depth"
-    if not line.contains("warm_runs="):
-        return "missing-warm-runs"
-    if not line.contains("max_rss_kib="):
-        return "missing-max-rss"
+    val simple_read_iops_r = _nvme_perf_u64_field(line, "simple_read_iops=", "missing-simple-read-iops", "invalid-simple-read-iops")
+    if simple_read_iops_r.is_err():
+        return simple_read_iops_r.unwrap_err()
+    val simple_write_iops_r = _nvme_perf_u64_field(line, "simple_write_iops=", "missing-simple-write-iops", "invalid-simple-write-iops")
+    if simple_write_iops_r.is_err():
+        return simple_write_iops_r.unwrap_err()
+    val simple_read_p99_r = _nvme_perf_u64_field(line, "simple_read_p99_us=", "missing-simple-read-p99", "invalid-simple-read-p99")
+    if simple_read_p99_r.is_err():
+        return simple_read_p99_r.unwrap_err()
+    val simple_write_p99_r = _nvme_perf_u64_field(line, "simple_write_p99_us=", "missing-simple-write-p99", "invalid-simple-write-p99")
+    if simple_write_p99_r.is_err():
+        return simple_write_p99_r.unwrap_err()
+    val c_read_iops_r = _nvme_perf_u64_field(line, "c_read_iops=", "missing-c-read-iops", "invalid-c-read-iops")
+    if c_read_iops_r.is_err():
+        return c_read_iops_r.unwrap_err()
+    val c_write_iops_r = _nvme_perf_u64_field(line, "c_write_iops=", "missing-c-write-iops", "invalid-c-write-iops")
+    if c_write_iops_r.is_err():
+        return c_write_iops_r.unwrap_err()
+    val c_read_p99_r = _nvme_perf_u64_field(line, "c_read_p99_us=", "missing-c-read-p99", "invalid-c-read-p99")
+    if c_read_p99_r.is_err():
+        return c_read_p99_r.unwrap_err()
+    val c_write_p99_r = _nvme_perf_u64_field(line, "c_write_p99_us=", "missing-c-write-p99", "invalid-c-write-p99")
+    if c_write_p99_r.is_err():
+        return c_write_p99_r.unwrap_err()
+    val queue_depth_r = _nvme_perf_u64_field(line, "queue_depth=", "missing-queue-depth", "invalid-queue-depth")
+    if queue_depth_r.is_err():
+        return queue_depth_r.unwrap_err()
+    val warm_runs_r = _nvme_perf_u64_field(line, "warm_runs=", "missing-warm-runs", "invalid-warm-runs")
+    if warm_runs_r.is_err():
+        return warm_runs_r.unwrap_err()
+    val max_rss_r = _nvme_perf_u64_field(line, "max_rss_kib=", "missing-max-rss", "invalid-max-rss")
+    if max_rss_r.is_err():
+        return max_rss_r.unwrap_err()
+    if simple_read_iops_r.unwrap() <= c_read_iops_r.unwrap():
+        return "simple-read-iops-not-faster-than-c"
+    if simple_write_iops_r.unwrap() <= c_write_iops_r.unwrap():
+        return "simple-write-iops-not-faster-than-c"
+    if simple_read_p99_r.unwrap() > c_read_p99_r.unwrap():
+        return "simple-read-p99-slower-than-c"
+    if simple_write_p99_r.unwrap() > c_write_p99_r.unwrap():
+        return "simple-write-p99-slower-than-c"
+    if queue_depth_r.unwrap() < 32u64:
+        return "nvme-perf-queue-depth-too-low"
+    if warm_runs_r.unwrap() < 3u64:
+        return "nvme-perf-not-warm"
     "ready"

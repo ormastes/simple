@@ -171,9 +171,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   logic sharing, and Simple must beat the C FAT baseline for read/write IOPS and
   p99 latency.
 - Hardware runners can emit one `nvme_perf` line from measured counters through
-  the performance report helper; serial acceptance rejects missing fields and
-  non-ready reasons before release gates can treat the run as production
-  evidence.
+  the performance report helper; serial acceptance re-parses the numeric fields
+  and rejects missing fields, invalid values, insufficient warm/queue settings,
+  and Simple-not-faster-than-C counters before release gates can treat the run
+  as production evidence.
 - The q35 pure-Simple real-device marker contract now lists `nvme_perf
   reason=ready`, and serial acceptance validates the detailed performance fields
   in addition to provider, grant, namespace, and transfer markers.
