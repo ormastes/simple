@@ -1,30 +1,28 @@
-# FAT32 vs C FAT (POSIX) Benchmark Results
+# FAT32 vs C FAT Benchmark Results
 
-**Date:** 2026-05-26
+**Date:** 2026-05-27
 **Mode:** interpreter (`bin/simple run`)
 **Simple FAT32:** in-memory Fat32Core, 4096 sectors x 512 B
-**C FAT baseline:** host kernel POSIX filesystem via std.io_runtime
+**POSIX baseline:** host kernel filesystem (ext4/btrfs) via std.io_runtime
 
 ## Per-Workload Comparison
 
-| Workload | Simple p50 (us) | Simple p99 (us) | POSIX p50 (us) | POSIX p99 (us) | Ratio p50 |
-|----------|----------------|----------------|----------------|----------------|-----------|
-| create | 260762 | 386692 | 1974 | 3018 | 13209% |
-| lookup | 123514 | 136858 | 12 | 23 | 1029283% |
-| sequential_read | 26 | 35 | 26 | 51 | 100% |
-| append | 138436 | 139720 | 3017 | 3121 | 4588% |
-| delete | 155949 | 168781 | 56 | 93 | 278480% |
-| stat | 119988 | 121262 | 2453 | 2879 | 4891% |
-| directory_scan | 317243 | 450109 | 2013 | 2906 | 15759% |
+| Workload | Simple p50 | Simple p99 | POSIX p50 | POSIX p99 | S/P Ratio |
+|----------|-----------|-----------|----------|----------|----------|
+| create | 278565 | 544101 | 1616 | 2198 | 17237% |
+| lookup | 130024 | 191189 | 13 | 34 | 1000184% |
+| sequential_read | 36 | 46 | 44 | 86 | 81% |
+| append | 145154 | 159338 | 2797 | 4894 | 5189% |
+| delete | 160646 | 190240 | 66 | 130 | 243403% |
+| stat | 123831 | 162427 | 2321 | 3527 | 5335% |
+| directory_scan | 353600 | 505998 | 2614 | 3211 | 13527% |
 
 ## Interpretation
 
-- **Ratio** = (Simple p50 / POSIX p50) x 100. Values > 100% mean Simple is slower.
-- **SKIP** = workload could not complete (directory full or other runtime error).
+- **S/P Ratio** = (Simple p50 / POSIX p50) x 100. Values > 100% mean Simple is slower.
 - Simple FAT32 runs entirely in-process with in-memory block device.
 - POSIX baseline uses host kernel file operations (ext4/btrfs, not VFAT).
 - Both measurements include Simple interpreter dispatch overhead.
-- For compiled-mode estimates, see fs_driver_vfat_comparison.md.
 
 ## Known Limitations
 
