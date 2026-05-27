@@ -206,6 +206,11 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   same guest via the C NVMe bridge on the same random LBA sequence after the
   Simple path runs. The `c_bridge_used=false` field still refers to the Simple
   data path; the C bridge is only the measured comparison baseline.
+- VFS tracks direct-I/O adapter ownership by the exact NVMe filesystem lease
+  instead of by active-lease array position. Lease-only user namespace
+  admission, system boot leases, and hardware-backed FAT32/NVFS/DBFS adapters
+  can coexist without releasing one lease shifting another lease onto the wrong
+  direct adapter.
 
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware

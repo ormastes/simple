@@ -72,6 +72,7 @@ var g_vfs_initialized: bool = false
 var g_vfs_boot_storage_provider: text = "not-mounted"
 var g_vfs_boot_storage_pure_simple: bool = false
 var g_vfs_nvme_active_leases: [NvmeFilesystemLease] = []
+var g_vfs_nvme_direct_adapter_leases: [NvmeFilesystemLease] = []
 var g_vfs_nvme_direct_adapters: [NvmeBlockAdapter] = []
 # M1 mount table — wired at boot after NVMe init succeeds (see vfs_boot_init).
 var g_mount_table: MountTable = MountTable.new()
@@ -93,6 +94,7 @@ pub fn vfs_boot_init() -> bool:
     g_vfs_boot_storage_provider = "not-mounted"
     g_vfs_boot_storage_pure_simple = false
     g_vfs_nvme_active_leases = []
+    g_vfs_nvme_direct_adapter_leases = []
     g_vfs_nvme_direct_adapters = []
 
     pcimgr_init()
@@ -259,6 +261,7 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     g_vfs_boot_storage_provider = "simple-driver"
     g_vfs_boot_storage_pure_simple = true
     g_vfs_nvme_active_leases = [lease]
+    g_vfs_nvme_direct_adapter_leases = [lease]
     g_vfs_nvme_direct_adapters = [g_adapter]
     app_registry_cache_bytes("/sys/apps/browser_demo", exec_probe)
     _seed_root_fat32_exec_cache(root)
@@ -360,6 +363,7 @@ fn _vfs_boot_init_virtio_fat32() -> bool:
     g_vfs_boot_storage_provider = "virtio-blk"
     g_vfs_boot_storage_pure_simple = true
     g_vfs_nvme_active_leases = []
+    g_vfs_nvme_direct_adapter_leases = []
     g_vfs_nvme_direct_adapters = []
     log_raw_println("[vfs-init] VirtIO FAT32 mounted at /")
 
@@ -394,6 +398,7 @@ fn vfs_boot_nvme_direct_adapter_count_for_test() -> u64:
 
 fn vfs_boot_nvme_reset_active_leases_for_test():
     g_vfs_nvme_active_leases = []
+    g_vfs_nvme_direct_adapter_leases = []
     g_vfs_nvme_direct_adapters = []
 
 fn vfs_boot_nvme_record_active_lease_for_test(lease: NvmeFilesystemLease) -> text:
@@ -424,28 +429,35 @@ fn vfs_boot_nvme_shared_driver_ready_for_user_assignment() -> text:
 
 fn vfs_boot_nvme_release_active_lease(lease: NvmeFilesystemLease) -> text:
     var remaining: [NvmeFilesystemLease] = []
+    var remaining_adapter_leases: [NvmeFilesystemLease] = []
     var remaining_adapters: [NvmeBlockAdapter] = []
     var removed = false
-    var idx: i32 = 0
     for active in g_vfs_nvme_active_leases:
         if not removed and nvme_filesystem_lease_same_assignment(active, lease):
             removed = true
         else:
             remaining = remaining.push(active)
-            if idx < g_vfs_nvme_direct_adapters.len():
-                remaining_adapters = remaining_adapters.push(g_vfs_nvme_direct_adapters[idx])
-        idx = idx + 1
     if not removed:
         return "nvme-fs-active-lease-not-found"
+
+    var adapter_idx: i32 = 0
+    for adapter_lease in g_vfs_nvme_direct_adapter_leases:
+        if not nvme_filesystem_lease_same_assignment(adapter_lease, lease):
+            remaining_adapter_leases = remaining_adapter_leases.push(adapter_lease)
+            if adapter_idx < g_vfs_nvme_direct_adapters.len():
+                remaining_adapters = remaining_adapters.push(g_vfs_nvme_direct_adapters[adapter_idx])
+        adapter_idx = adapter_idx + 1
+
     g_vfs_nvme_active_leases = remaining
+    g_vfs_nvme_direct_adapter_leases = remaining_adapter_leases
     g_vfs_nvme_direct_adapters = remaining_adapters
     "ready"
 
 fn vfs_boot_nvme_submit_active_lease_direct_4k(lease: NvmeFilesystemLease, req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
     """Submit 4KiB direct I/O through the concrete adapter for an admitted NVMe filesystem lease."""
     var idx: i32 = 0
-    for active in g_vfs_nvme_active_leases:
-        if nvme_filesystem_lease_same_assignment(active, lease):
+    for adapter_lease in g_vfs_nvme_direct_adapter_leases:
+        if nvme_filesystem_lease_same_assignment(adapter_lease, lease):
             if idx >= g_vfs_nvme_direct_adapters.len():
                 return Err(FsError.StaleHandle)
             return g_vfs_nvme_direct_adapters[idx].submit_direct_4k_shared_dma(req)
@@ -455,8 +467,8 @@ fn vfs_boot_nvme_submit_active_lease_direct_4k(lease: NvmeFilesystemLease, req: 
 fn vfs_boot_nvme_submit_active_lease_direct_4k_batch(lease: NvmeFilesystemLease, req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>:
     """Submit batched 4KiB direct I/O through the concrete adapter for an admitted NVMe filesystem lease."""
     var idx: i32 = 0
-    for active in g_vfs_nvme_active_leases:
-        if nvme_filesystem_lease_same_assignment(active, lease):
+    for adapter_lease in g_vfs_nvme_direct_adapter_leases:
+        if nvme_filesystem_lease_same_assignment(adapter_lease, lease):
             if idx >= g_vfs_nvme_direct_adapters.len():
                 return Err(FsError.StaleHandle)
             return g_vfs_nvme_direct_adapters[idx].submit_direct_4k_shared_dma_batch(req)
@@ -794,6 +806,7 @@ fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
     if driver_result.is_err():
         return driver_result
     g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)
+    g_vfs_nvme_direct_adapter_leases = g_vfs_nvme_direct_adapter_leases.push(lease)
     g_vfs_nvme_direct_adapters = g_vfs_nvme_direct_adapters.push(adapter)
     driver_result
 

@@ -13,6 +13,7 @@ use os.services.vfs.vfs_boot_init.{
     vfs_boot_nvme_assign_user_namespace_driver_instance,
     vfs_boot_nvme_assign_user_namespace_hardware_driver_instance,
     vfs_boot_nvme_shared_driver_ready_for_user_assignment,
+    vfs_boot_nvme_direct_adapter_count_for_test,
     vfs_boot_storage_acceptance_reason,
     vfs_boot_storage_production_ready
 }
@@ -143,6 +144,7 @@ describe "VFS boot NVMe lease contract":
         expect(source.contains("\"system-kernel-namespace\"")).to_equal(true)
         expect(source.contains("vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(")).to_equal(true)
         expect(source.contains("g_vfs_nvme_active_leases = [lease]")).to_equal(true)
+        expect(source.contains("g_vfs_nvme_direct_adapter_leases = [lease]")).to_equal(true)
         expect(source.contains("pure-Simple NVMe evidence lease failed")).to_equal(true)
 
     it "records boot NVMe leases and rejects later user assignment of the same namespace":
@@ -206,7 +208,26 @@ describe "VFS boot NVMe lease contract":
         expect(source.contains("val bounce = adapter.init_bounce_buffer()")).to_equal(true)
         expect(source.contains("vfs_nvme_driver_instance_for_lease(name, adapter, lease, consumer)")).to_equal(true)
         expect(source.contains("g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)")).to_equal(true)
+        expect(source.contains("g_vfs_nvme_direct_adapter_leases = g_vfs_nvme_direct_adapter_leases.push(lease)")).to_equal(true)
         expect(source.contains("g_vfs_nvme_direct_adapters = g_vfs_nvme_direct_adapters.push(adapter)")).to_equal(true)
+
+    it "keeps direct IO adapter ownership mapped by lease instead of active lease index":
+        vfs_boot_nvme_reset_active_leases_for_test()
+        val grant = _tokenized_grant_for_owner(42u64)
+        val evidence = _user_evidence(grant)
+        val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+
+        val lease_only = vfs_boot_nvme_assign_user_namespace_lease(evidence, grant, 0u32, 16u32, 512u32, 65536u64, 0u64, 1024u64, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID, 42u64, 64u16, NvmeFilesystemConsumer.Nvfs)
+        expect(lease_only.is_ok()).to_equal(true)
+        expect(vfs_boot_nvme_active_lease_count_for_test()).to_equal(1u64)
+        expect(vfs_boot_nvme_direct_adapter_count_for_test()).to_equal(0u64)
+
+        expect(source.contains("var g_vfs_nvme_direct_adapter_leases: [NvmeFilesystemLease] = []")).to_equal(true)
+        expect(source.contains("for adapter_lease in g_vfs_nvme_direct_adapter_leases:")).to_equal(true)
+        expect(source.contains("remaining_adapter_leases = remaining_adapter_leases.push(adapter_lease)")).to_equal(true)
+        expect(source.contains("g_vfs_nvme_direct_adapter_leases = remaining_adapter_leases")).to_equal(true)
+        expect(source.contains("for active in g_vfs_nvme_active_leases:\n        if nvme_filesystem_lease_same_assignment(active, lease):\n            if idx >= g_vfs_nvme_direct_adapters.len():")).to_equal(false)
+        vfs_boot_nvme_reset_active_leases_for_test()
 
     it "wires q35 pure Simple perf evidence to real shared-DMA direct I/O":
         val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
