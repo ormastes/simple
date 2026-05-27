@@ -15,6 +15,9 @@ use os.drivers.nvme.nvme_storage_model.{
     nvme_filesystem_lease_sector_count, nvme_filesystem_consumer_name
 }
 use std.io.dma.{SharedDmaBuffer}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.extension.{DirectIoExt}
+use std.fs_driver.direct_io.{DirectIoRequest, DirectIoResult, DIRECT_IO_READ, DIRECT_IO_WRITE, DIRECT_IO_TIMEOUT_CODE}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read8, mmio_write8}
 use os.kernel.log.klog_api.{log_raw_println}
 extern fn unsafe_addr_of(ref: any) -> u64
@@ -240,6 +243,49 @@ impl NvmeBlockAdapter:
         if absolute_lba.is_err():
             return Result.Err(absolute_lba.unwrap_err())
         self.nvme.write_shared_dma_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id, absolute_lba.unwrap(), sector_count, buf)
+
+    fn direct_4k_extension() -> DirectIoExt:
+        """Expose the adapter's zero-copy 4KiB random I/O capability."""
+        DirectIoExt(
+            sector_alignment: 4096u32,
+            file_alignment: 4096u32,
+            max_io_bytes: 4096u64,
+            backend_tag: "simpleos-nvme-lease-shared-dma-4k",
+            bounce_allowed: false
+        )
+
+    me submit_direct_4k_shared_dma(req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
+        """Route a common DirectIoRequest to the lease queue without per-I/O allocation."""
+        if not self.ready:
+            return Err(FsError.Busy)
+        if req.handle_id == 0u64:
+            return Err(FsError.InvalidArg)
+        if req.op != DIRECT_IO_READ and req.op != DIRECT_IO_WRITE:
+            return Err(FsError.InvalidArg)
+        if req.timeout_polls == 0u32:
+            return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
+        val ext = self.direct_4k_extension()
+        val valid = ext.validate_shared_buffer(req.file_offset, req.buffer)
+        if val Err(e) = valid:
+            return Err(e)
+        if self.lease_sector_size == 0u32:
+            return Err(FsError.InvalidArg)
+        val relative_lba = (req.file_offset as u64) / self.lease_sector_size.to_u64()
+        val io_result = if req.op == DIRECT_IO_READ:
+            self.read_4k_shared_dma(relative_lba, req.buffer)
+        else:
+            self.write_4k_shared_dma(relative_lba, req.buffer)
+        if io_result.is_err():
+            return Err(FsError.IoError(code: 5u32))
+        Ok(DirectIoResult(
+            submitted: true,
+            bytes: 4096u64,
+            backend_tag: ext.backend_tag,
+            status: "submitted",
+            buffered_copy_bytes: 0u64,
+            direct_dma_copy_bytes: 0u64,
+            cleanup_required: true
+        ))
 
 impl BlockDevice for NvmeBlockAdapter:
     me read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
