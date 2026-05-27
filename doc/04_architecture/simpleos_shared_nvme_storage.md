@@ -277,6 +277,11 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   range before queue creation; lease-backed FAT32/NVFS/DBFS adapters store that
   queue ID and submit namespace I/O through queue-aware driver methods instead
   of always using the system I/O queue.
+- The shared DMA fast path is now namespace- and queue-aware as well: user-space
+  storage services can submit preallocated DMA buffers on the assigned namespace
+  queue, while the legacy shared-DMA methods delegate to the current system
+  namespace queue. This is the no-per-I/O-allocation path production 4K random
+  I/O benchmarks must exercise.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.

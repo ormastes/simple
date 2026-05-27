@@ -812,29 +812,43 @@ impl NvmeDriver:
 
     me read_shared_dma(lba: u64, count: u32, buf: SharedDmaBuffer) -> Result<bool, text>:
         """Submit a direct NVMe read into caller-owned shared DMA memory."""
+        self.read_shared_dma_in_namespace_on_queue(self.get_namespace_id(), self.io_queue.qid, lba, count, buf)
+
+    me read_shared_dma_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, count: u32, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Submit a direct NVMe read into caller-owned shared DMA memory on a concrete namespace queue."""
         if not buf.is_valid():
             return Result.Err("NVMe: invalid shared DMA buffer")
-        val bytes = count.to_u64() * self.sector_size.to_u64()
+        val sector_size = self.namespace_sector_size(nsid)
+        if sector_size.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        val bytes = count.to_u64() * sector_size.unwrap().to_u64()
         if bytes == 0 or buf.byte_len < bytes:
             return Result.Err("NVMe: shared DMA buffer too small")
-        if (buf.device_addr % self.sector_size.to_u64()) != 0:
+        if (buf.device_addr % sector_size.unwrap().to_u64()) != 0:
             return Result.Err("NVMe: shared DMA device address unaligned")
-        val result = self.read_sectors_notify(lba, count, buf.device_addr)
+        val result = self.read_sectors_in_namespace_on_queue(nsid, queue_id, lba, count, buf.device_addr)
         if result.is_ok():
             dma_shared_sync_device_to_cpu(buf)
         result
 
     me write_shared_dma(lba: u64, count: u32, buf: SharedDmaBuffer) -> Result<bool, text>:
         """Submit a direct NVMe write from caller-owned shared DMA memory."""
+        self.write_shared_dma_in_namespace_on_queue(self.get_namespace_id(), self.io_queue.qid, lba, count, buf)
+
+    me write_shared_dma_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, count: u32, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Submit a direct NVMe write from caller-owned shared DMA memory on a concrete namespace queue."""
         if not buf.is_valid():
             return Result.Err("NVMe: invalid shared DMA buffer")
-        val bytes = count.to_u64() * self.sector_size.to_u64()
+        val sector_size = self.namespace_sector_size(nsid)
+        if sector_size.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        val bytes = count.to_u64() * sector_size.unwrap().to_u64()
         if bytes == 0 or buf.byte_len < bytes:
             return Result.Err("NVMe: shared DMA buffer too small")
-        if (buf.device_addr % self.sector_size.to_u64()) != 0:
+        if (buf.device_addr % sector_size.unwrap().to_u64()) != 0:
             return Result.Err("NVMe: shared DMA device address unaligned")
         dma_shared_sync_cpu_to_device(buf)
-        self.write_sectors_notify(lba, count, buf.device_addr)
+        self.write_sectors_in_namespace_on_queue(nsid, queue_id, lba, count, buf.device_addr)
 
     me run_reversible_sector_probe(lba: u64) -> Result<NvmeSectorProbeResult, text>:
         """Execute read/write/verify/restore on one sector and return readiness evidence."""
