@@ -5,13 +5,20 @@ use os.kernel.boot.boot_fs_mount.{
     FsMountType,
     boot_fs_mount_from_device,
     boot_fs_mount_pure_nvme_from_device,
+    boot_fs_mount_pure_nvme_from_lease_device,
+    boot_fs_mount_lease_acceptance_reason,
     boot_storage_acceptance_evidence,
     boot_storage_acceptance_reason,
     boot_storage_acceptance_ready,
     boot_fs_mount_acceptance_reason,
     boot_fs_mount_provider_is_pure_simple
 }
-use os.drivers.nvme.nvme_storage_model.{nvme_transfer_evidence}
+use os.drivers.nvme.nvme_storage_model.{
+    NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer,
+    NvmeNamespaceIdentity, NvmeQueueAssignment,
+    nvme_filesystem_lease, nvme_transfer_evidence
+}
+use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 
 fn simple_nvfs_result() -> FsMountResult:
     FsMountResult(
@@ -72,6 +79,48 @@ fn fat32_boot_sector() -> [u8]:
     sector[510] = 0x55u8
     sector[511] = 0xAAu8
     sector
+
+fn ready_transfer_evidence():
+    nvme_transfer_evidence(
+        "simple-driver",
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        "user-space-driver",
+        "resource-grant-set:tok=boot-nvme",
+        "non-secure-resource-namespace",
+        true,
+        true
+    )
+
+fn ready_boot_lease(provider: text):
+    val ns = NvmeNamespaceIdentity(
+        controller_id: 0,
+        nsid: 1,
+        lba_size: 512,
+        lba_count: 2048,
+        eui64: 0,
+        nguid_lo: 0,
+        nguid_hi: 0,
+        uuid_lo: 0,
+        uuid_hi: 0
+    )
+    val queue = NvmeQueueAssignment(
+        queue_id: SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID,
+        role: NvmeQueueRole.Data,
+        controller_id: 0,
+        nsid: 1,
+        owner_task: 42,
+        max_depth: 64,
+        rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+    )
+    nvme_filesystem_lease(ns, 0u64, 2048u64, NvmeNamespaceMode.UserAssigned, queue, provider, "resource-grant-set:tok=boot-nvme", true, true)
 
 describe "boot filesystem mount acceptance":
     it "rejects C bridge mounts as pure Simple boot storage":
@@ -286,3 +335,20 @@ describe "boot filesystem mount acceptance":
         val no_fs = boot_fs_mount_pure_nvme_from_device(empty_dev, ready)
         expect(no_fs.is_err()).to_equal(true)
         expect(no_fs.unwrap_err()).to_equal("boot-fs-mount: no root filesystem on provider:simple-driver")
+
+    it "requires a filesystem-ready NVMe lease before freestanding root probes":
+        val dev = MemBlockDevice.new(2048u64, 512u32)
+        expect(dev.write_sector(0u64, fat32_boot_sector()).is_ok()).to_equal(true)
+        val lease = ready_boot_lease("simple-driver")
+        val invalid = ready_boot_lease("c-boot-bridge")
+
+        expect(boot_fs_mount_lease_acceptance_reason(lease)).to_equal("ready")
+        expect(boot_fs_mount_lease_acceptance_reason(invalid)).to_equal("fat32:nvme-fs-provider-not-simple:c-boot-bridge")
+
+        val rejected = boot_fs_mount_pure_nvme_from_lease_device(dev, ready_transfer_evidence(), invalid)
+        expect(rejected.unwrap_err()).to_equal("boot-fs-mount: nvme-lease-not-ready:fat32:nvme-fs-provider-not-simple:c-boot-bridge")
+
+        val mounted = boot_fs_mount_pure_nvme_from_lease_device(dev, ready_transfer_evidence(), lease).unwrap()
+        expect(mounted.fs_type).to_equal(FsMountType.Fat32)
+        expect(mounted.provider).to_equal("simple-driver")
+        expect(mounted.pure_simple).to_equal(true)

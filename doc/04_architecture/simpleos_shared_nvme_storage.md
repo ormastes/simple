@@ -219,6 +219,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   release and direct-adapter routing, including base LBA, length, namespace
   geometry, and queue depth. Reusing the same owner/grant/queue for a different
   namespace window is rejected instead of becoming an ambiguous alias.
+- Freestanding pure-NVMe root probing now has a lease-admitted entry point:
+  transfer evidence must be ready and one NVMe filesystem lease must be ready
+  for FAT32, NVFS, and DBFS before the provider-neutral root probe may read
+  sectors from the device.
 
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware

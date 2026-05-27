@@ -23,7 +23,10 @@ use os.kernel.boot.freestanding_nvme_adapter_contract.{
     freestanding_nvme_adapter_provider,
     freestanding_nvme_adapter_refusal_reason
 }
-use os.drivers.nvme.nvme_storage_model.{NvmeTransferEvidence}
+use os.drivers.nvme.nvme_storage_model.{
+    NvmeTransferEvidence, NvmeFilesystemLease, NvmeFilesystemConsumer,
+    nvme_filesystem_lease_reason
+}
 use os.drivers.user_space_driver_contract.{user_space_driver_all_direct_access_reason}
 use os.services.block_device.{BlockDevice}
 use std.fs_driver.nvfs_superblock.{
@@ -131,6 +134,59 @@ fn boot_fs_mount_pure_nvme_from_device(dev: BlockDevice, evidence: NvmeTransferE
     if reason != "ready":
         return Err("boot-fs-mount: pure-nvme-adapter-not-ready:" + reason)
     boot_fs_mount_from_device(dev, freestanding_nvme_adapter_provider(), true)
+
+fn boot_fs_mount_pure_nvme_from_lease_device(dev: BlockDevice, evidence: NvmeTransferEvidence, lease: NvmeFilesystemLease) -> Result<FsMountResult, text>:
+    """Enter freestanding root probing only with pure-Simple evidence and a filesystem-ready NVMe lease."""
+    val reason = freestanding_nvme_adapter_refusal_reason(evidence)
+    if reason != "ready":
+        return Err("boot-fs-mount: pure-nvme-adapter-not-ready:" + reason)
+    val lease_reason = boot_fs_mount_lease_acceptance_reason(lease)
+    if lease_reason != "ready":
+        return Err("boot-fs-mount: nvme-lease-not-ready:" + lease_reason)
+
+    val nvfs_r = boot_fs_mount_nvfs_from_lease_device(dev, lease)
+    if nvfs_r.is_ok():
+        return nvfs_r
+
+    val dbfs_r = boot_fs_mount_dbfs_from_lease_device(dev, lease)
+    if dbfs_r.is_ok():
+        return dbfs_r
+
+    val fat32_r = boot_fs_mount_fat32_from_lease_device(dev, lease)
+    if fat32_r.is_ok():
+        return fat32_r
+
+    Err("boot-fs-mount: no root filesystem on provider:" + freestanding_nvme_adapter_provider())
+
+fn boot_fs_mount_lease_acceptance_reason(lease: NvmeFilesystemLease) -> text:
+    val fat = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)
+    if fat != "ready":
+        return "fat32:" + fat
+    val nvfs = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Nvfs)
+    if nvfs != "ready":
+        return "nvfs:" + nvfs
+    val dbfs = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Dbfs)
+    if dbfs != "ready":
+        return "dbfs:" + dbfs
+    "ready"
+
+fn boot_fs_mount_nvfs_from_lease_device(dev: BlockDevice, lease: NvmeFilesystemLease) -> Result<FsMountResult, text>:
+    val reason = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Nvfs)
+    if reason != "ready":
+        return Err("boot-fs-mount: nvfs-lease-not-ready:" + reason)
+    boot_fs_mount_nvfs_from_device(dev, freestanding_nvme_adapter_provider(), true)
+
+fn boot_fs_mount_dbfs_from_lease_device(dev: BlockDevice, lease: NvmeFilesystemLease) -> Result<FsMountResult, text>:
+    val reason = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Dbfs)
+    if reason != "ready":
+        return Err("boot-fs-mount: dbfs-lease-not-ready:" + reason)
+    boot_fs_mount_dbfs_from_device(dev, freestanding_nvme_adapter_provider(), true)
+
+fn boot_fs_mount_fat32_from_lease_device(dev: BlockDevice, lease: NvmeFilesystemLease) -> Result<FsMountResult, text>:
+    val reason = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)
+    if reason != "ready":
+        return Err("boot-fs-mount: fat32-lease-not-ready:" + reason)
+    boot_fs_mount_fat32_from_device(dev, freestanding_nvme_adapter_provider(), true)
 
 fn boot_fs_mount_nvfs_from_device(dev: BlockDevice, provider: text, pure_simple: bool) -> Result<FsMountResult, text>:
     """Probe NVFS using a caller-provided freestanding-safe BlockDevice."""
