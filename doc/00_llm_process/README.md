@@ -12,12 +12,36 @@ For the next implementation step, use [pipeline_next_step_plan.md](pipeline_next
 
 ## knowledge model
 
+- Project experts live at `project_expert/<project-or-subproject>/skill.md`.
 - Feature experts live at `feature_expert/<feature>/skill.md`.
 - Layer experts live at `layer_expert/<layer>/skill.md`.
+- Domain experts live at `domain_expert/<domain>/skill.md`.
+- Tool experts live at `tool_expert/<tool>/skill.md`.
 - Initial expert templates live in `template/`.
 - Reusable project-neutral skill and command knowledge lives in `skill_command/`.
 
 When a new feature or layer expert is needed, copy the matching template from `template/`, create the expert directory, and update the new `skill.md` with links to the relevant project docs and source paths. When product knowledge changes during research, design, implementation, verification, or release, update the affected feature and layer expert skills.
+
+## SPipe submodule
+
+Reusable SPipe process assets are being moved to the `.spipe/spipe` submodule
+from `https://github.com/ormastes/Spipe.git`. The host setup script initializes
+the submodule and links reusable expert roots into this repository:
+
+```bash
+sh scripts/setup-spipe-submodule.shs
+```
+
+On Windows, run the PowerShell setup script from the submodule:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .spipe\spipe\scripts\setup-spipe-links.ps1
+```
+
+The link setup preserves existing host-owned directories unless `--force` is
+passed. In this repository, `skill_command/`, `spipe/`, `template/`,
+`project_expert/`, `domain_expert/`, and `tool_expert/` are linked from the
+submodule.
 
 ## generator tool
 
@@ -58,8 +82,11 @@ Additional extracted skills:
 - Codex: `skill_command/skills/codex/<skill>/skill.md`
 - Gemini: `skill_command/skills/gemini/<skill>/skill.md`
 - Claude helpers: `skill_command/skills/claude/lib/<skill>/skill.md`
+- Project experts: `project_expert/<project-or-subproject>/skill.md`
 - Feature experts: `feature_expert/<feature>/skill.md`
 - Layer experts: `layer_expert/<layer>/skill.md`
+- Domain experts: `domain_expert/<domain>/skill.md`
+- Tool experts: `tool_expert/<tool>/skill.md`
 - Templates: `template/feature_skill.md`, `template/layer_skill.md`
 
 Every extracted skill folder includes `tools.sdn` with `tools |id, type, name, purpose|`; `type` is `cli` or `mcp`.

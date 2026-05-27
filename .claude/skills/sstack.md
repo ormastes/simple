@@ -15,9 +15,11 @@ SStack is a full-lifecycle development pipeline that combines three frameworks:
 ```
 /sstack <user request>
 /dev <user request>              # alias — same 8 phases
+/sp_dev <user request>           # SPipe-prefixed alias — same 8 phases
 ```
 
-`/dev` is an alias for `/sstack`. Both run the same 8-phase pipeline.
+`/dev` and `/sp_dev` are aliases for `/sstack`. All three run the same 8-phase
+pipeline.
 
 ## How It Works
 
@@ -266,6 +268,7 @@ SStack agents invoke existing skills per phase:
 | Workflow | Relationship |
 |----------|-------------|
 | `/dev` | Alias for `/sstack` — same 8 phases, same pipeline |
+| `/sp_dev` | SPipe-prefixed alias for `/dev` and `/sstack` — same pipeline |
 | `/impl` | 15-phase heavyweight workflow — generates doc artifacts, uses agent teams. Independent of sstack but shares skill references (`/coding`, `/spipe`, `/verify`) |
 | `/research` | Standalone research skill — used within sstack Phase 2, also runs independently |
 | `/research_codex` | Codex cooperative research — used within sstack Phase 2 when Codex available |
