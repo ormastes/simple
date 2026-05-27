@@ -111,10 +111,17 @@ For each phase N (2 through 8):
 2. **Read** `.spipe/<feature>/state.md` to get current state
 3. **Read** the phase definitions from `.claude/skills/lib/spipe_phases.md` for phase N's entry/exit criteria
 4. **Verify entry criteria** -- if the previous phase output is missing or incomplete, re-run the previous phase
-5. **Spawn a fresh Agent** with this prompt:
+5. **Preflight local runner:** before spawning any agent that may run tests or
+   build checks, verify `bin/simple` exists. If it is missing, run
+   `sh scripts/setup.sh`; if `bin/simple` is still missing after setup, stop
+   and report the setup failure instead of spawning the agent.
+6. **Spawn a fresh Agent** with this prompt:
 
 ```
 Read .claude/agents/spipe/<phase-name>.md and follow its instructions.
+
+Before running tests or build checks, verify bin/simple exists. If it is missing,
+report that setup failure and exit immediately.
 
 State file: .spipe/<feature>/state.md
 Feature: <feature>
@@ -127,15 +134,18 @@ Read the state file, perform your role, then update the state file with:
 - Ensure exit criteria from .claude/skills/lib/spipe_phases.md are met
 ```
 
-6. **After agent returns**, read `.spipe/<feature>/state.md`
-7. **Verify exit criteria** for phase N (from spipe_phases.md)
-8. If exit criteria fail: re-run the agent (max 2 retries total per phase, then **stop and escalate to user** — do NOT continue to the next phase or improvise fixes)
-9. Proceed to next phase
+7. **After agent returns**, read `.spipe/<feature>/state.md`
+8. **Verify exit criteria** for phase N (from spipe_phases.md)
+9. If exit criteria fail: re-run the agent (max 2 retries total per phase, then **stop and escalate to user** -- do NOT continue to the next phase or improvise fixes)
+10. Proceed to next phase
 
 **IMPORTANT — Session safety:**
 - Every `bin/simple test` or `bin/simple build` call in agent prompts MUST pipe through `| tail -40` to cap output
 - Agents must have explicit iteration limits on any test-fix loop (max 5 per file, max 10 total per phase)
 - If an agent runs more than 15 tool calls without progress, it must stop and report back
+- If a phase agent does not return within 10 minutes, interrupt it, record the
+  phase as blocked in the state file, and run the failing verification inline
+  only after confirming `bin/simple` exists.
 
 ### Completion
 

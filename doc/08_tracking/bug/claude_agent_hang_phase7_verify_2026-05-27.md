@@ -1,7 +1,7 @@
 # BUG: Claude Code sub-agent hangs during Phase 7 verify of SStack pipeline
 
 **Date:** 2026-05-27
-**Status:** OPEN
+**Status:** RESOLVED 2026-05-27
 **Severity:** Medium (blocks pipeline completion, requires manual intervention)
 **Component:** Claude Code Agent tool / SStack orchestrator
 
@@ -56,3 +56,18 @@ Two possible causes:
   immediately."
 - Consider adding a timeout to Agent tool calls for SStack phases (e.g.,
   10 minutes max).
+
+## Resolution
+
+The SStack orchestration instructions now require a `bin/simple` preflight before
+spawning phases 2-8. If `bin/simple` is missing, the orchestrator runs
+`sh scripts/setup.sh` and stops with a setup failure if the binary is still
+unavailable, instead of spawning an agent that may hang.
+
+The Phase 7 verify agent instructions now include an explicit first verification
+step for `bin/simple`. If the runner is missing, the agent writes a setup-failure
+report to the state file and exits immediately without retrying.
+
+The session-safety rules now also cap stuck phase agents at 10 minutes: interrupt
+the phase, mark it blocked in state, and only run verification inline after
+confirming `bin/simple` exists.
