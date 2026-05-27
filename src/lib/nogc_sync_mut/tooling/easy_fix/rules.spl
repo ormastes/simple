@@ -768,7 +768,8 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
     if not expr.starts_with(value_prefix) and not expr.starts_with(member_prefix) and not _short_expr_contains_plain_identifier(expr: expr, param: param):
         return nil
     if not _short_placeholder_brackets_are_param_free(expr: expr, param: param):
-        return nil
+        if not _short_placeholder_expr_is_array_literal(expr: expr, param: param):
+            return nil
     if not _short_placeholder_quotes_are_safe(expr: expr, param: param):
         return nil
     if expr.contains("(") and not _short_placeholder_calls_are_safe(expr: expr, param: param):
@@ -779,7 +780,7 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
         if unary_new_text == expr:
             return nil
         return Some(ShortGrammarPlaceholderCandidate(new_text: unary_new_text, end_offset: expr_end))
-    if not _short_placeholder_expr_is_safe(expr) and not _short_placeholder_expr_is_single_param_call(expr: expr, param: param) and not _short_placeholder_expr_is_param_cast(expr: expr, param: param) and not _short_placeholder_expr_is_call_with_safe_args(expr: expr, param: param) and not _short_placeholder_expr_is_field_access(expr: expr, param: param) and not _short_placeholder_expr_is_presence_check(expr: expr, param: param) and not _short_placeholder_expr_is_unary_not_safe(expr: expr, param: param):
+    if not _short_placeholder_expr_is_safe(expr) and not _short_placeholder_expr_is_single_param_call(expr: expr, param: param) and not _short_placeholder_expr_is_param_cast(expr: expr, param: param) and not _short_placeholder_expr_is_call_with_safe_args(expr: expr, param: param) and not _short_placeholder_expr_is_field_access(expr: expr, param: param) and not _short_placeholder_expr_is_presence_check(expr: expr, param: param) and not _short_placeholder_expr_is_unary_not_safe(expr: expr, param: param) and not _short_placeholder_expr_is_array_literal(expr: expr, param: param):
         return nil
 
     val new_text = _short_replace_plain_identifier(expr: expr, param: param, replacement: replacement)
@@ -904,15 +905,20 @@ fn _parse_tuple_placeholder_candidate(line: text, lambda_start: i64, colon_abs: 
 fn _short_scan_simple_lambda_expr_end(line: text, start: i64) -> i64:
     var i = start
     var paren_depth = 0
+    var bracket_depth = 0
     while i < line.len():
         val ch = line.slice(i, i + 1)
         if ch == "(":
             paren_depth = paren_depth + 1
+        elif ch == "[":
+            bracket_depth = bracket_depth + 1
+        elif ch == "]" and bracket_depth > 0:
+            bracket_depth = bracket_depth - 1
         elif ch == ")":
-            if paren_depth == 0:
+            if paren_depth == 0 and bracket_depth == 0:
                 return i
             paren_depth = paren_depth - 1
-        elif ch == "," and paren_depth == 0:
+        elif ch == "," and paren_depth == 0 and bracket_depth == 0:
             return i
         i = i + 1
     i
@@ -1027,6 +1033,14 @@ fn _short_placeholder_expr_is_index_access(expr: text, param: text) -> bool:
         return false
     val close = _short_find_text_from(line: expr, needle: "]", search_from: prefix.len())
     close == expr.len() - 1
+
+fn _short_placeholder_expr_is_array_literal(expr: text, param: text) -> bool:
+    if not expr.starts_with("[") or not expr.ends_with("]"):
+        return false
+    val inner = expr.slice(1, expr.len() - 1).trim()
+    if inner == "":
+        return true
+    _short_placeholder_call_args_are_safe(inner: inner, param: param)
 
 fn _short_placeholder_expr_is_receiver_no_arg_method_call(expr: text, param: text) -> bool:
     val prefix = param + "."
