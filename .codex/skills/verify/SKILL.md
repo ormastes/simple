@@ -41,6 +41,11 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
 - SPipe files are current with the final requirements/design; stale specs are a FAIL, not a release task
 - Built-in matchers only: `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Use `to_equal(true)` not `to_be_true()`
+- For short grammar features, require runtime-specific evidence:
+  - Interpreter specs for pipe-forward, composition, placeholder lambdas, method references, optional access, and compact DSL forms.
+  - Native specs for only the compact forms intended to work in native mode.
+  - Native evidence is invalid if the run reports codegen stub fallback; rerun with `SIMPLE_NO_STUB_FALLBACK=1`.
+  - Specs that claim `:=` support must use the actual `:=` token, not equivalent `val` declarations.
 
 ### Phase 3: Implementation Stubs
 
@@ -124,3 +129,4 @@ STATUS: FAIL (2 failures, 1 warning)
 - Verify cache invalidation exists for write flows that affect cached or indexed data
 - Require startup and representative request performance evidence for performance-sensitive tooling changes
 - Do not mark STATUS: PASS for compiler/core/lib or MCP/LSP work unless the matching runtime and MCP smoke checks passed
+- Do not mark short grammar verification PASS when docs list a counterpart but executable tests only cover a longer equivalent form.

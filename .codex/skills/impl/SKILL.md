@@ -43,12 +43,22 @@ Skip if exist. See `design` skill for details.
 - Implement in `src/**/<feature>.spl`
 - Follow `/coding` rules strictly
 - Reference: `doc/07_guide/quick_reference/syntax_quick_reference.md`
+- Use short grammar deliberately:
+  - Prefer expression-bodied functions for small pure helpers.
+  - Prefer placeholder lambdas (`_`, `_1`, `_2`) and method references (`&:name`) only for single-expression transforms.
+  - Prefer comprehensions for local map/filter construction.
+  - Avoid `:=` until actual walrus-token parser/runtime tests pass; use `val`.
+  - Avoid `|>` in native-targeted implementation unless the specific path passes with `SIMPLE_NO_STUB_FALLBACK=1`.
 
 ### Phases 9-10: Unit + Integration Tests
 - 80%+ branch coverage target
 - Write unit tests alongside implementation
 - Write integration tests for cross-module interactions
 - Add doctests for public API functions
+- For short grammar changes, add interpreter and native coverage separately:
+  - Interpreter specs may cover pipe-forward, composition, dynamic lambda dispatch, and no-paren DSL forms.
+  - Native specs must avoid forms that only pass through codegen stub fallback.
+  - Run native short-grammar tests with `SIMPLE_NO_STUB_FALLBACK=1` when checking support.
 
 ### Phases 11-13: Bug Reports + Duplication Check + Refactoring
 - Run `bin/simple bug-add` for any discovered bugs
@@ -118,3 +128,4 @@ Before declaring implementation complete, verify:
 - When cached or indexed data depends on writable files, implement explicit invalidation on create, edit, move, delete, rename, template application, and bulk replace flows
 - Add perf smoke coverage for startup and representative hot requests when changing performance-sensitive tooling
 - After compiler/core/lib changes, verify MCP/LSP source-native startup before finishing the task; after packaging/release changes, verify isolated npm install startup too
+- Short grammar is preferred where it is proven and readable; never normalize a failing compact form into a long workaround without either fixing it or recording a concrete bug/report.

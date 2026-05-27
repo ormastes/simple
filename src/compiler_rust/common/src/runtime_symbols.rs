@@ -405,6 +405,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_db_get_int_by_pk",
     "rt_db_update_int",
     "rt_db_update_text",
+    // Integer-PK DB operations (zero string alloc from caller)
+    "rt_db_iput3",
+    "rt_db_iget_int",
+    "rt_db_iupdate_int",
+    "rt_db_idelete",
     // Index/slice operations
     "rt_index_get",
     "rt_index_set",

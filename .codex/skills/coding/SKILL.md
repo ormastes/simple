@@ -18,7 +18,7 @@ Full syntax: `doc/07_guide/quick_reference/syntax_quick_reference.md`
 
 ```simple
 val name = "Alice"             # Immutable (preferred)
-name := "Alice"                # Walrus operator (:= is val synonym)
+# name := "Alice"              # Walrus shorthand is not currently proven; use val
 var count = 0                  # Mutable
 ```
 
@@ -115,6 +115,33 @@ items.map(_1 * 10)             # Numbered placeholder
 words.map(&:len)               # Method reference
 ```
 
+### Short Grammar Use
+
+Use compact grammar when it removes local boilerplate without hiding control flow:
+
+```simple
+fn double(x: i64) -> i64: x * 2              # Expression-bodied function
+items.map(_ * 2)                              # Single-argument transform
+items.zip(other).map(_1 + _2)                 # Short tuple/zip transform
+words.map(&:len)                              # Method reference
+[for x in items if x > 0: x * x]              # Comprehension
+value ?? fallback                             # Nil coalescing
+```
+
+Prefer explicit forms when the expression has side effects, more than one decision point,
+or needs clear runtime support in native mode:
+
+```simple
+items.map(\x:
+    val scaled = x * factor
+    scaled + offset
+)
+```
+
+- Do not use `:=` in new code until parser/runtime tests prove the actual token works; use `val`.
+- Treat `|>` pipe-forward dispatch as interpreter-supported unless native tests pass with `SIMPLE_NO_STUB_FALLBACK=1`.
+- For native-targeted code, prefer expression-bodied functions, comprehensions, and direct calls over pipe chains.
+
 ### Comprehensions
 
 ```simple
@@ -163,6 +190,8 @@ alias Optional = Option        # Class alias
 | Nested closure capture | Can READ outer vars, CANNOT MODIFY (module closures work fine) |
 | Chained methods broken | Use intermediate `var` |
 | `?` in names | Not allowed — `?` is operator only; use `.?` over `is_*` predicates |
+| `:=` walrus shorthand | Use `val name = expr` until real `:=` parser/runtime tests pass |
+| Native pipe-forward dispatch | Use direct calls or run native tests with `SIMPLE_NO_STUB_FALLBACK=1` |
 
 ## Reserved Keywords
 

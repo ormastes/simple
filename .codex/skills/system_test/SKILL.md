@@ -83,6 +83,11 @@ describe "<Feature Name>":
 - Test descriptions start with "should" and describe behavior, not implementation
 - No test depends on external state or other tests
 - Error paths use `Result<T, E>` pattern, not exceptions
+- Short grammar features must have runtime-specific coverage:
+  - Interpreter specs may cover pipe-forward, composition, placeholder lambdas, method references, optional access, and compact DSL forms.
+  - Native specs must cover only compact forms intended to work in native mode.
+  - Native short-grammar evidence must be run with `SIMPLE_NO_STUB_FALLBACK=1` so codegen stub fallback cannot masquerade as a pass.
+  - A spec claiming walrus shorthand support must use the actual `:=` token, not `val` as a substitute.
 
 ## Phase 3: Traceability Matrix
 
@@ -141,3 +146,4 @@ bin/simple test path/to/spec.spl --native  # Compiled mode (full execution)
 - Generics use `<>` not `[]`
 - NO inheritance in test helpers — use composition
 - NEVER skip or ignore failing tests without user approval
+- Do not write short-grammar tests that only prove a longer equivalent form; the compact token/form itself must appear in executable coverage.

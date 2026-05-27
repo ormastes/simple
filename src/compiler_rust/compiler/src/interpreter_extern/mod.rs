@@ -923,6 +923,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_db_get_int_by_pk", sffi_db::rt_db_get_int_by_pk_fn as ExternFn);
     m.insert("rt_db_update_int", sffi_db::rt_db_update_int_fn as ExternFn);
     m.insert("rt_db_update_text", sffi_db::rt_db_update_text_fn as ExternFn);
+    m.insert("rt_db_iput3", sffi_db::rt_db_iput3_fn as ExternFn);
+    m.insert("rt_db_iget_int", sffi_db::rt_db_iget_int_fn as ExternFn);
+    m.insert("rt_db_iupdate_int", sffi_db::rt_db_iupdate_int_fn as ExternFn);
+    m.insert("rt_db_idelete", sffi_db::rt_db_idelete_fn as ExternFn);
     m.insert("rt_diagram_clear", diagram::rt_diagram_clear as ExternFn);
     m.insert("rt_diagram_disable", diagram::rt_diagram_disable as ExternFn);
     m.insert("rt_diagram_enable", diagram::rt_diagram_enable as ExternFn);

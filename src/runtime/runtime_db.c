@@ -330,6 +330,8 @@ int64_t rt_db_put(int64_t handle, const char* pk_text, int64_t num_values) {
 
 void rt_db_put_value_int(int64_t handle, int64_t row, int64_t col, int64_t value) {
     ensure_init();
+    FILE* dbg = fopen("/tmp/rt_db_c_trace.log", "a");
+    if (dbg) { fprintf(dbg, "put_value_int: h=%ld row=%ld col=%ld val=%ld in_use=%d\n", handle, row, col, value, (handle >= 0 && handle < DB_MAX_TABLES) ? g_tables[handle].in_use : -1); fclose(dbg); }
     if (handle < 0 || handle >= DB_MAX_TABLES) return;
     DbTable* t = &g_tables[handle];
     if (!t->in_use) return;
@@ -339,6 +341,7 @@ void rt_db_put_value_int(int64_t handle, int64_t row, int64_t col, int64_t value
     if (!r->alive) return;
     r->int_values[col] = value;
     r->col_types[col] = COL_INT;
+    if (dbg) { dbg = fopen("/tmp/rt_db_c_trace.log", "a"); if (dbg) { fprintf(dbg, "put_value_int: stored OK col_type=%d\n", r->col_types[col]); fclose(dbg); } }
 }
 
 void rt_db_put_value_text(int64_t handle, int64_t row, int64_t col, const char* value) {
@@ -365,6 +368,8 @@ int64_t rt_db_get(int64_t handle, const char* pk_text) {
 
 int64_t rt_db_get_int(int64_t handle, int64_t row, int64_t col) {
     ensure_init();
+    FILE* dbg = fopen("/tmp/rt_db_c_trace.log", "a");
+    if (dbg) { fprintf(dbg, "get_int: h=%ld row=%ld col=%ld in_use=%d\n", handle, row, col, (handle >= 0 && handle < DB_MAX_TABLES) ? g_tables[handle].in_use : -1); fclose(dbg); }
     if (handle < 0 || handle >= DB_MAX_TABLES) return 0;
     DbTable* t = &g_tables[handle];
     if (!t->in_use) return 0;
@@ -372,7 +377,10 @@ int64_t rt_db_get_int(int64_t handle, int64_t row, int64_t col) {
     if (col < 0 || col >= t->num_cols) return 0;
     DbRow* r = &t->rows[row];
     if (!r->alive) return 0;
-    return r->int_values[col];
+    int64_t result = r->int_values[col];
+    dbg = fopen("/tmp/rt_db_c_trace.log", "a");
+    if (dbg) { fprintf(dbg, "get_int: returning %ld col_type=%d\n", result, r->col_types[col]); fclose(dbg); }
+    return result;
 }
 
 const char* rt_db_get_text(int64_t handle, int64_t row, int64_t col) {
@@ -559,4 +567,39 @@ int64_t rt_db_update_text(int64_t handle, const char* pk, int64_t col,
     r->text_values[col] = strdup(value ? value : "");
     r->col_types[col] = COL_TEXT;
     return 1;
+}
+
+/* ================================================================
+ * Integer-PK variants (zero string allocation from caller)
+ * ================================================================ */
+
+static inline void ipk_to_str(int64_t pk, char buf[32]) {
+    snprintf(buf, 32, "%ld", (long)pk);
+}
+
+int64_t rt_db_iput3(int64_t handle, int64_t pk_int,
+                    int64_t v0, int64_t v1, int64_t v2) {
+    char buf[32];
+    ipk_to_str(pk_int, buf);
+    return rt_db_put_row3(handle, buf, 0, v0, v1, v2);
+}
+
+int64_t rt_db_iget_int(int64_t handle, int64_t pk_int, int64_t col,
+                       int64_t default_val) {
+    char buf[32];
+    ipk_to_str(pk_int, buf);
+    return rt_db_get_int_by_pk(handle, buf, col, default_val);
+}
+
+int64_t rt_db_iupdate_int(int64_t handle, int64_t pk_int, int64_t col,
+                          int64_t value) {
+    char buf[32];
+    ipk_to_str(pk_int, buf);
+    return rt_db_update_int(handle, buf, col, value);
+}
+
+int64_t rt_db_idelete(int64_t handle, int64_t pk_int) {
+    char buf[32];
+    ipk_to_str(pk_int, buf);
+    return rt_db_delete(handle, buf);
 }

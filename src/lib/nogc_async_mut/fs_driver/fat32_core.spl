@@ -114,12 +114,24 @@ impl Fat32Core:
             i = i + 1
         buffer
 
+    me fn _device_sector_size() -> u32:
+        val dev: BlockDevice = self.device
+        dev.sector_size()
+
+    me fn _device_read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        val dev: BlockDevice = self.device
+        dev.read_sector(lba, buffer)
+
+    me fn _device_write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        val dev: BlockDevice = self.device
+        dev.write_sector(lba, data)
+
     me fn read_boot_sector() -> Result<[u8], text>:
-        val sector_size = self.device.sector_size()
+        val sector_size = self._device_sector_size()
         if sector_size < 512:
             return Err("FAT32 boot sector must be at least 512 bytes")
         var buffer = self._zero_sector(sector_size)
-        val rc = self.device.read_sector(0, buffer)
+        val rc = self._device_read_sector(0, buffer)
         if rc.is_err():
             return Err("failed to read FAT32 boot sector")
         Ok(buffer)
@@ -217,8 +229,8 @@ impl Fat32Core:
         val fat_offset = cluster * 4
         val fat_sector = self.reserved_sectors.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
         val entry_offset = (fat_offset % self.bytes_per_sector).to_i32()
-        var buffer = self._zero_sector(self.device.sector_size())
-        val rc = self.device.read_sector(fat_sector, buffer)
+        var buffer = self._zero_sector(self._device_sector_size())
+        val rc = self._device_read_sector(fat_sector, buffer)
         if rc.is_err():
             return Err("failed to read FAT")
         if entry_offset < 0 or (entry_offset + 3) >= buffer.len():
@@ -265,7 +277,7 @@ impl Fat32Core:
         var sec: u32 = 0
         while sec < self.sectors_per_cluster:
             var sector_buf = self._zero_sector(self.bytes_per_sector)
-            val rc = self.device.read_sector(start_sector + sec.to_u64(), sector_buf)
+            val rc = self._device_read_sector(start_sector + sec.to_u64(), sector_buf)
             if rc.is_err():
                 return Err("failed to read cluster data")
             var j: u32 = 0
@@ -275,7 +287,7 @@ impl Fat32Core:
                 j = j + 1
             sec = sec + 1
         var cc = self._cluster_cache
-        cc.set(cluster, data)
+        cc[cluster] = data
         self._cluster_cache = cc
         Ok(data)
 
@@ -300,7 +312,7 @@ impl Fat32Core:
                 else:
                     sector_buf.push(0)
                 j = j + 1
-            val rc = self.device.write_sector(start_sector + sec.to_u64(), sector_buf)
+            val rc = self._device_write_sector(start_sector + sec.to_u64(), sector_buf)
             if rc.is_err():
                 return Err("failed to write cluster data")
             sec = sec + 1
@@ -308,7 +320,7 @@ impl Fat32Core:
 
     me fn write_cluster(cluster: u32, data: [u8]) -> Result<(), text>:
         var cc = self._cluster_cache
-        cc.set(cluster, data)
+        cc[cluster] = data
         self._cluster_cache = cc
         if cluster == self.root_cluster:
             val root_write = self.write_cluster_raw(cluster, data)
@@ -368,8 +380,8 @@ impl Fat32Core:
         val fat_offset = cluster * 4
         val fat_sector = self.reserved_sectors.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
         val entry_offset = (fat_offset % self.bytes_per_sector).to_i32()
-        var buffer = self._zero_sector(self.device.sector_size())
-        val read_rc = self.device.read_sector(fat_sector, buffer)
+        var buffer = self._zero_sector(self._device_sector_size())
+        val read_rc = self._device_read_sector(fat_sector, buffer)
         if read_rc.is_err():
             return Err("failed to read FAT for write")
         val masked = value & 0x0FFFFFFF
@@ -377,7 +389,7 @@ impl Fat32Core:
         buffer[entry_offset + 1] = ((masked >> 8) & 0xFF).to_u8()
         buffer[entry_offset + 2] = ((masked >> 16) & 0xFF).to_u8()
         buffer[entry_offset + 3] = ((masked >> 24) & 0xFF).to_u8()
-        val write_rc = self.device.write_sector(fat_sector, buffer)
+        val write_rc = self._device_write_sector(fat_sector, buffer)
         if write_rc.is_err():
             return Err("failed to write FAT entry")
         self._chain_valid = false
@@ -628,9 +640,17 @@ impl Fat32Core:
         var of = self.open_files[idx]
         if not of.is_open:
             return Err("file handle not open")
-        val flush_rc = self.flush_dirty_clusters()
-        if flush_rc.is_err():
-            return Err(flush_rc.unwrap_err())
+        var flush_i = 0
+        while flush_i < self._dirty_clusters.len():
+            val cluster = self._dirty_clusters[flush_i]
+            val cached = self._cluster_cache.get(cluster)
+            if cached.?:
+                val core: Fat32Core = self
+                val rc = core.write_cluster_raw(cluster, cached!)
+                if rc.is_err():
+                    return Err(rc.unwrap_err())
+            flush_i = flush_i + 1
+        self._dirty_clusters = []
         of.is_open = false
         self._save_open_file(idx, of)
         Ok(())
@@ -888,7 +908,7 @@ impl Fat32Core:
                 self._block_cache_blocks.push([])
             self._block_cache_blocks[block_index] = buf[0:4096]
             var wc = self._window_cache
-            wc.set(self.window_cache_key(start, original_pos), buf[0:4096])
+            wc[self.window_cache_key(start, original_pos)] = buf[0:4096]
             self._window_cache = wc
         self._save_open_file(idx, of)
         Ok(bytes_written)

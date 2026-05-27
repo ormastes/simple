@@ -75,15 +75,9 @@ fn arg_str(args: &[Value], idx: usize, fn_name: &str) -> Result<String, CompileE
 // ============================================================================
 
 pub fn rt_db_table_create_fn(args: &[Value]) -> Result<Value, CompileError> {
-    for (i, arg) in args.iter().enumerate() {
-        eprintln!("[sffi_db]   arg[{}] = {:?}", i, arg);
-    }
     let name = arg_str(args, 0, "rt_db_table_create")?;
-    eprintln!("[sffi_db] name={}", name);
     let num_cols = arg_int(args, 1, "rt_db_table_create")?;
-    eprintln!("[sffi_db] num_cols={}", num_cols);
     let pk_col = arg_int(args, 2, "rt_db_table_create")?;
-    eprintln!("[sffi_db] pk_col={}", pk_col);
 
     if num_cols <= 0 || num_cols > 64 || pk_col < 0 || pk_col >= num_cols {
         return Ok(Value::Int(-1));
@@ -104,7 +98,6 @@ pub fn rt_db_table_create_fn(args: &[Value]) -> Result<Value, CompileError> {
     for (i, slot) in tables.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some(table);
-            eprintln!("[sffi_db] returning handle {}", i);
             return Ok(Value::Int(i as i64));
         }
     }
@@ -168,14 +161,22 @@ pub fn rt_db_put_value_int_fn(args: &[Value]) -> Result<Value, CompileError> {
     let row = arg_int(args, 1, "rt_db_put_value_int")? as usize;
     let col = arg_int(args, 2, "rt_db_put_value_int")? as usize;
     let value = arg_int(args, 3, "rt_db_put_value_int")?;
+    use std::io::Write;
+    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "put_value_int: h={handle} row={row} col={col} val={value} args={:?}", args); });
 
     let mut tables = TABLES.lock().unwrap();
     let t = match tables.get_mut(handle).and_then(|s| s.as_mut()) {
         Some(t) => t,
-        None => return Ok(Value::Nil),
+        None => {
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "put_value_int: table not found for handle={handle}"); });
+            return Ok(Value::Nil);
+        }
     };
     if row < t.rows.len() && col < t.num_cols as usize && t.rows[row].alive {
         t.rows[row].values[col] = ColValue::Int(value);
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "put_value_int: stored OK"); });
+    } else {
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "put_value_int: bounds check failed row={row} rows_len={} col={col} num_cols={} alive={}", t.rows.len(), t.num_cols, t.rows.get(row).map(|r| r.alive).unwrap_or(false)); });
     }
     Ok(Value::Nil)
 }
@@ -229,19 +230,32 @@ pub fn rt_db_get_int_fn(args: &[Value]) -> Result<Value, CompileError> {
     let handle = arg_int(args, 0, "rt_db_get_int")? as usize;
     let row = arg_int(args, 1, "rt_db_get_int")? as usize;
     let col = arg_int(args, 2, "rt_db_get_int")? as usize;
+    use std::io::Write;
+    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "get_int: h={handle} row={row} col={col} args={:?}", args); });
 
     let tables = TABLES.lock().unwrap();
     let t = match tables.get(handle).and_then(|s| s.as_ref()) {
         Some(t) => t,
-        None => return Ok(Value::Int(0)),
+        None => {
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "get_int: table not found"); });
+            return Ok(Value::Int(0));
+        }
     };
     if row >= t.rows.len() || col >= t.num_cols as usize || !t.rows[row].alive {
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "get_int: bounds check failed"); });
         return Ok(Value::Int(0));
     }
-    match &t.rows[row].values[col] {
-        ColValue::Int(v) => Ok(Value::Int(*v)),
-        _ => Ok(Value::Int(0)),
-    }
+    let result = match &t.rows[row].values[col] {
+        ColValue::Int(v) => {
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "get_int: returning {v}"); });
+            Ok(Value::Int(*v))
+        }
+        other => {
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "get_int: col value is {:?}, returning 0", other); });
+            Ok(Value::Int(0))
+        }
+    };
+    result
 }
 
 // ============================================================================
@@ -488,4 +502,64 @@ pub fn rt_db_update_text_fn(args: &[Value]) -> Result<Value, CompileError> {
         }
         _ => Ok(Value::Int(0)),
     }
+}
+
+// ============================================================================
+// Integer-PK variants — convert int to string key internally
+// ============================================================================
+
+pub fn rt_db_iput3_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = arg_int(args, 0, "rt_db_iput3")? as usize;
+    let pk_int = arg_int(args, 1, "rt_db_iput3")?;
+    let v0 = arg_int(args, 2, "rt_db_iput3")?;
+    let v1 = arg_int(args, 3, "rt_db_iput3")?;
+    let v2 = arg_int(args, 4, "rt_db_iput3")?;
+    let pk = format!("{pk_int}");
+    let str_args = vec![
+        Value::Int(handle as i64),
+        Value::Str(pk),
+        Value::Int(0),
+        Value::Int(v0),
+        Value::Int(v1),
+        Value::Int(v2),
+    ];
+    rt_db_put_row3_fn(&str_args)
+}
+
+pub fn rt_db_iget_int_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = arg_int(args, 0, "rt_db_iget_int")? as usize;
+    let pk_int = arg_int(args, 1, "rt_db_iget_int")?;
+    let col = arg_int(args, 2, "rt_db_iget_int")?;
+    let default_val = arg_int(args, 3, "rt_db_iget_int")?;
+    let pk = format!("{pk_int}");
+    let str_args = vec![
+        Value::Int(handle as i64),
+        Value::Str(pk),
+        Value::Int(col),
+        Value::Int(default_val),
+    ];
+    rt_db_get_int_by_pk_fn(&str_args)
+}
+
+pub fn rt_db_iupdate_int_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = arg_int(args, 0, "rt_db_iupdate_int")? as usize;
+    let pk_int = arg_int(args, 1, "rt_db_iupdate_int")?;
+    let col = arg_int(args, 2, "rt_db_iupdate_int")?;
+    let value = arg_int(args, 3, "rt_db_iupdate_int")?;
+    let pk = format!("{pk_int}");
+    let str_args = vec![
+        Value::Int(handle as i64),
+        Value::Str(pk),
+        Value::Int(col),
+        Value::Int(value),
+    ];
+    rt_db_update_int_fn(&str_args)
+}
+
+pub fn rt_db_idelete_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = arg_int(args, 0, "rt_db_idelete")? as usize;
+    let pk_int = arg_int(args, 1, "rt_db_idelete")?;
+    let pk = format!("{pk_int}");
+    let str_args = vec![Value::Int(handle as i64), Value::Str(pk)];
+    rt_db_delete_fn(&str_args)
 }

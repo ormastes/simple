@@ -5,24 +5,26 @@ Date: 2026-05-27
 ## Summary
 
 `bin/simple run test/perf/bench/fat32_microbench.spl` does not complete after
-the FAT32 shared-core optimization work. The earlier JIT blockers from
-`Result.Ok(...)` / `Result.Err(...)` static-member sugar in the FAT benchmark
-dependency slice were removed, but JIT now stops with:
+the FAT32 shared-core optimization work.
 
-```text
-HIR lowering error: Memory safety error [W1006]: mutation without mut capability: mutation requires `mut` capability
-```
+The first blockers were removed:
 
-The fallback interpreter then exits with:
+- `Result.Ok(...)` / `Result.Err(...)` static-member sugar in the FAT benchmark
+  dependency slice blocked HIR lowering.
+- The benchmark's nested `[[[u8]]]` sector bank crashed native execution before
+  FAT code ran; it was replaced with flat byte storage.
+- FAT cache writes that used `Dict.set(...)` crashed under JIT dispatch; the
+  hot FAT cache paths now use dictionary index assignment.
 
-```text
-error: semantic: variable `self` not found
-```
+Current native execution reaches the write workload and then segfaults before
+entering `Fat32Core.write`. With `SIMPLE_DEBUG_METHOD_DISPATCH=1`, the compiler
+reports several bare method calls in the FAT block-device path with `receiver ty
+= Any`, including `read_sector`, `write_sector`, `sector_size`, and `get`.
 
 ## Reproduce
 
 ```bash
-bin/simple run test/perf/bench/fat32_microbench.spl
+src/compiler_rust/target/debug/simple test/perf/bench/fat32_microbench.spl
 ```
 
 ## Current Status
@@ -30,7 +32,8 @@ bin/simple run test/perf/bench/fat32_microbench.spl
 - `bin/simple check` passes for the sync and async FAT fs-driver files.
 - `bin/simple check test/perf/bench/fat32_microbench.spl --mode=interpreter`
   passes.
-- Runtime execution remains blocked before benchmark numbers are produced.
+- Native execution prints the file-create result, then segfaults during the
+  first write workload.
 
 ## Expected
 

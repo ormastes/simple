@@ -1,6 +1,6 @@
 # Simple Language Syntax Quick Reference
 
-**Last Updated:** 2026-05-09
+**Last Updated:** 2026-05-27
 
 A concise reference for the canonical public Simple syntax. Legacy or parser-compatibility forms are called out explicitly instead of being presented as current style.
 
@@ -11,6 +11,7 @@ A concise reference for the canonical public Simple syntax. Legacy or parser-com
 ## Table of Contents
 
 - [Variables](#variables)
+- [Short Grammar](#short-grammar)
 - [Type & Function Aliases](#type--function-aliases)
 - [Strings](#strings)
 - [Numbers](#numbers)
@@ -28,6 +29,28 @@ A concise reference for the canonical public Simple syntax. Legacy or parser-com
 - [Resource Cleanup](#resource-cleanup)
 - [Traits](#traits)
 - [Visibility & Friend Access](#visibility--friend-access)
+
+---
+
+## Short Grammar
+
+Simple supports compact expression forms that are intended to replace boilerplate,
+not clarity. Prefer them for small, local, single-expression transformations:
+
+```simple
+fn double(x: i64) -> i64: x * 2
+items.map(_ * 2)
+items.zip(other).map(_1 + _2)
+words.map(&:len)
+[for x in items if x > 0: x * x]
+user?.name ?? "Anonymous"
+```
+
+Runtime notes:
+
+- `|>` pipe-forward and `>>` composition are useful in interpreter-oriented code, but native support must be proven with `SIMPLE_NO_STUB_FALLBACK=1`.
+- `:=` is documented as a walrus-style `val` shorthand in older guidance, but current executable coverage does not prove the actual token. Use `val name = expr` until parser/runtime tests pass.
+- Use explicit lambdas or helper functions once the expression has side effects, nested decisions, or non-obvious runtime behavior.
 
 ---
 

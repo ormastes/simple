@@ -23,6 +23,10 @@ extern fn rt_db_row_count(table: i64) -> i64
 extern fn rt_db_put_row3(handle: i64, pk: text, type_mask: i64, v0: i64, v1: i64, v2: i64) -> i64
 extern fn rt_db_get_int_by_pk(handle: i64, pk: text, col: i64, default_val: i64) -> i64
 extern fn rt_db_update_int(handle: i64, pk: text, col: i64, value: i64) -> i64
+extern fn rt_db_iput3(handle: i64, pk_int: i64, v0: i64, v1: i64, v2: i64) -> i64
+extern fn rt_db_iget_int(handle: i64, pk_int: i64, col: i64, default_val: i64) -> i64
+extern fn rt_db_iupdate_int(handle: i64, pk_int: i64, col: i64, value: i64) -> i64
+extern fn rt_db_idelete(handle: i64, pk_int: i64) -> i64
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -112,6 +116,42 @@ fn main():
     val upd_per_ns = per_op_ns(upd_t0, upd_t1, 100)
     print "[UPDATE x100]      per_op=" + int_to_str(upd_per_ns) + " ns  updated=" + int_to_str(updated)
 
+    # ── Integer-PK PUT x200 (zero string alloc) ────────────────────────────────
+    val tbl3 = rt_db_table_create("bench_ipk", 3, 0)
+    val iput_t0 = bench_now_ns()
+    var ii = 0
+    while ii < 200:
+        val row = rt_db_iput3(tbl3, ii, ii, ii * 100, ii * 10)
+        ii = ii + 1
+    val iput_t1 = bench_now_ns()
+    val iput_per_ns = per_op_ns(iput_t0, iput_t1, 200)
+    print "[PUT_IPK x200]     per_op=" + int_to_str(iput_per_ns) + " ns  (int PK, 0 string alloc)"
+
+    # ── Integer-PK GET x100 (zero string alloc) ──────────────────────────────
+    val iget_t0 = bench_now_ns()
+    var ifound = 0
+    var ij = 0
+    while ij < 100:
+        val score = rt_db_iget_int(tbl3, ij * 2, 2, -1)
+        if score == ij * 2 * 10:
+            ifound = ifound + 1
+        ij = ij + 1
+    val iget_t1 = bench_now_ns()
+    val iget_per_ns = per_op_ns(iget_t0, iget_t1, 100)
+    print "[GET_IPK x100]     per_op=" + int_to_str(iget_per_ns) + " ns  (int PK, 0 string alloc)  found=" + int_to_str(ifound)
+
+    # ── Integer-PK UPDATE x100 ────────────────────────────────────────────────
+    val iupd_t0 = bench_now_ns()
+    var iupdated = 0
+    var iu = 0
+    while iu < 100:
+        val ok = rt_db_iupdate_int(tbl3, iu, 2, iu * 99)
+        iupdated = iupdated + ok
+        iu = iu + 1
+    val iupd_t1 = bench_now_ns()
+    val iupd_per_ns = per_op_ns(iupd_t0, iupd_t1, 100)
+    print "[UPD_IPK x100]     per_op=" + int_to_str(iupd_per_ns) + " ns  updated=" + int_to_str(iupdated)
+
     # ── SCAN x100 (range on score col=2) ──────────────────────────────────────
     val scan_t0 = bench_now_ns()
     var total_scan_rows = 0
@@ -141,15 +181,16 @@ fn main():
 
     val remaining = rt_db_row_count(tbl2)
     print ""
-    print "=== Speedup: Batched vs Original ==="
-    print "PUT: " + int_to_str(put_per_ns) + " -> " + int_to_str(bput_per_ns) + " ns/op"
-    print "GET: " + int_to_str(get_per_ns) + " -> " + int_to_str(bget_per_ns) + " ns/op"
+    print "=== Speedup: Original -> Batched -> Int-PK ==="
+    print "PUT: " + int_to_str(put_per_ns) + " -> " + int_to_str(bput_per_ns) + " -> " + int_to_str(iput_per_ns) + " ns/op"
+    print "GET: " + int_to_str(get_per_ns) + " -> " + int_to_str(bget_per_ns) + " -> " + int_to_str(iget_per_ns) + " ns/op"
+    print "UPD: " + int_to_str(upd_per_ns) + " -> " + int_to_str(iupd_per_ns) + " ns/op"
     print ""
     print "=== vs SQLite (prepared stmt, WAL) ==="
-    print "SQLite PUT: ~1060 ns   FastTable: " + int_to_str(bput_per_ns) + " ns"
-    print "SQLite GET: ~840 ns    FastTable: " + int_to_str(bget_per_ns) + " ns"
+    print "SQLite PUT: ~1060 ns   FastTable: " + int_to_str(iput_per_ns) + " ns"
+    print "SQLite GET: ~840 ns    FastTable: " + int_to_str(iget_per_ns) + " ns"
     print "SQLite SCAN: ~11300 ns FastTable: " + int_to_str(scan_per_ns) + " ns"
-    print "SQLite UPD:  ~1500 ns  FastTable: " + int_to_str(upd_per_ns) + " ns"
+    print "SQLite UPD:  ~1500 ns  FastTable: " + int_to_str(iupd_per_ns) + " ns"
     print ""
 
     # ── Sanity checks ─────────────────────────────────────────────────────────
@@ -170,6 +211,13 @@ fn main():
         print "FAIL: remaining " + int_to_str(remaining) + " expected 150"
         passed = false
 
+    if ifound != 100:
+        print "FAIL: GET_IPK found " + int_to_str(ifound) + " expected 100"
+        passed = false
+    if iupdated != 100:
+        print "FAIL: UPD_IPK updated " + int_to_str(iupdated) + " expected 100"
+        passed = false
+
     if passed:
         print "RESULT: PASS"
     else:
@@ -177,3 +225,4 @@ fn main():
 
     rt_db_table_destroy(tbl)
     rt_db_table_destroy(tbl2)
+    rt_db_table_destroy(tbl3)

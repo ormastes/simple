@@ -273,6 +273,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_db_get_int_by_pk", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_update_int", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_update_text", &[I64, I64, I64, I64], &[I64]),
+    // Integer-PK DB operations (zero string alloc from caller)
+    RuntimeFuncSpec::new("rt_db_iput3", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_iget_int", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_iupdate_int", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_idelete", &[I64, I64], &[I64]),
     // =========================================================================
     // Index/slice operations
     // =========================================================================

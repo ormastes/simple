@@ -21,4 +21,9 @@ unsafe extern "C" {
     pub fn rt_db_get_int_by_pk(handle: i64, pk: *const u8, col: i64, default_val: i64) -> i64;
     pub fn rt_db_update_int(handle: i64, pk: *const u8, col: i64, value: i64) -> i64;
     pub fn rt_db_update_text(handle: i64, pk: *const u8, col: i64, value: *const u8) -> i64;
+    // Integer-PK variants
+    pub fn rt_db_iput3(handle: i64, pk_int: i64, v0: i64, v1: i64, v2: i64) -> i64;
+    pub fn rt_db_iget_int(handle: i64, pk_int: i64, col: i64, default_val: i64) -> i64;
+    pub fn rt_db_iupdate_int(handle: i64, pk_int: i64, col: i64, value: i64) -> i64;
+    pub fn rt_db_idelete(handle: i64, pk_int: i64) -> i64;
 }
