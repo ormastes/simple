@@ -161,7 +161,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - User-space namespace assignment has a concrete helper that takes the issued
   `DeviceGrant`, validates resource tokens and IOMMU isolation, verifies that
   transfer evidence belongs to that grant, assigns a data queue, and emits the
-  same FAT32/NVFS/DBFS lease surface as system boot storage.
+  same FAT32/NVFS/DBFS lease surface as system boot storage. The checked helper
+  also evaluates active namespace leases before exposing the user assignment.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - Namespace lease admission now has a shared conflict check: the same
   controller namespace cannot be system-owned and user-assigned at the same
@@ -235,8 +236,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   and shared FAT32/NVFS/DBFS block-interface readiness.
 - `test/unit/os/drivers/nvme/nvme_namespace_assignment_spec.spl` covers
   user-assigned namespace lease construction from a tokenized `DeviceGrant`,
-  grant/evidence mismatch rejection, missing-token rejection, and FAT32/NVFS/DBFS
-  readiness on the shared lease surface.
+  grant/evidence mismatch rejection, missing-token rejection, active system/user
+  namespace conflict rejection, and FAT32/NVFS/DBFS readiness on the shared
+  lease surface.
 - `test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl` covers the
   production 4K random read/write measurement contract and rejects C-bridge,
   cold-run, per-I/O allocation, wrong-size, slower-than-C samples, and incomplete
