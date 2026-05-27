@@ -15,11 +15,13 @@ Verification pass for the SimpleOS NVMe hardware-driver goal:
 ## Evidence
 
 Commands run against current working tree based on `origin/main` state
-`0d888851e8` plus the q35 user-namespace proof update:
+`ec74237ad2` plus the storage-model reserved-queue expectation update:
 
 ```bash
+src/compiler_rust/target/debug/simple test test/unit/os/drivers/nvme/nvme_storage_model_spec.spl --mode=interpreter --clean
 src/compiler_rust/target/debug/simple test test/unit/os/drivers/nvme/nvme_namespace_assignment_spec.spl --mode=interpreter --clean
 src/compiler_rust/target/debug/simple test test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl --mode=interpreter --clean
+src/compiler_rust/target/debug/simple test test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl --mode=interpreter --clean
 src/compiler_rust/target/debug/simple test test/unit/os/services/vfs/nvme_block_adapter_spec.spl --mode=interpreter --clean
 src/compiler_rust/target/debug/simple test test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl --mode=interpreter --clean
 src/compiler_rust/target/debug/simple test test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl --mode=interpreter --clean
@@ -30,8 +32,10 @@ src/compiler_rust/target/debug/simple os test --scenario x86_64-q35-pure-nvme-pe
 
 Observed results:
 
+- NVMe storage model: 23 passed.
 - NVMe namespace assignment: 8 passed.
 - NVMe driver probe contract: 6 passed.
+- NVMe performance contract: 9 passed.
 - NVMe block adapter: 7 passed.
 - NVMe filesystem mounts: 12 passed.
 - VFS boot NVMe lease and DirectIo contract: 23 passed.
@@ -44,7 +48,7 @@ Latest q35 serial evidence:
 ```text
 [real-device] storage_provider=simple-driver network_provider=simple-driver storage_placement=user-space-driver network_placement=user-space-driver storage_namespace=non-secure-resource-namespace network_namespace=non-secure-resource-namespace storage_grant=resource-grant-set:tok=nvme0 network_grant=resource-grant-set:tok=net0 common_driver_logic=shared
 user_namespace_assignment=hardware-data-queue user_namespace_mode=user-assigned user_namespace_queue_id=2 user_namespace_direct_io=read-write user_namespace_conflict_policy=active-lease-checked
-nvme_perf reason=ready simple_provider=simple-driver workload=4k-random-read-write io_size_bytes=4096 direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs fat32_extent_source=freestanding-fat32-extents nvfs_extent_source=freestanding-dbfs-arena dbfs_extent_source=freestanding-dbfs-arena c_bridge_used=false common_logic_shared=true allocation_per_io=false simple_read_iops=1625 simple_write_iops=1868 simple_read_p99_us=6800 simple_write_p99_us=2296 c_read_iops=96 c_write_iops=154 c_read_p99_us=13056 c_write_p99_us=8728 queue_depth=128 warm_runs=3 max_rss_kib=1
+nvme_perf reason=ready simple_provider=simple-driver workload=4k-random-read-write io_size_bytes=4096 direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs fat32_extent_source=freestanding-fat32-extents nvfs_extent_source=freestanding-dbfs-arena dbfs_extent_source=freestanding-dbfs-arena c_bridge_used=false common_logic_shared=true allocation_per_io=false simple_read_iops=1393 simple_write_iops=1488 simple_read_p99_us=7548 simple_write_p99_us=2732 c_read_iops=80 c_write_iops=130 c_read_p99_us=38520 c_write_p99_us=90928 queue_depth=128 warm_runs=3 max_rss_kib=1
 TEST PASSED
 ```
 
@@ -70,3 +74,6 @@ constructors into the tiny boot image. FAT32 uses a freestanding FAT fixture
 extent path; NVFS and DBFS use their shared DBFS arena extent formula. Hosted
 constructor/extent behavior is covered by unit-level FAT32 source guards and
 NVFS/DBFS device-backed extent tests, not by the q35 freestanding image.
+Representative real-NVMe hardware validation is still required before claiming
+production throughput outside q35: queue depth, warm 4K random read/write
+latency, and max RSS need measurement on actual target devices.
