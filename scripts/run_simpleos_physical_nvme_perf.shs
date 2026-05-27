@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+
+# run_simpleos_physical_nvme_perf.shs — validate physical SimpleOS NVMe perf serial evidence
+#
+# Usage:
+#   sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log build/serial/physical-nvme.log --validate-log-only
+#   SERIAL_PORT=/dev/ttyUSB0 sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log build/serial/physical-nvme.log
+#
+# Env knobs:
+#   SERIAL_PORT                  Serial port to capture when not using --validate-log-only
+#   SERIAL_BAUD                  Serial baud rate (default: 115200)
+#   SIMPLEOS_NVME_SERIAL_LOG     Serial log path when --serial-log is omitted
+#   SIMPLEOS_NVME_SERIAL_SECONDS Capture duration in seconds (default: 30)
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+
+SERIAL_PORT="${SERIAL_PORT:-}"
+SERIAL_BAUD="${SERIAL_BAUD:-115200}"
+SERIAL_LOG="${SIMPLEOS_NVME_SERIAL_LOG:-}"
+SERIAL_SECONDS="${SIMPLEOS_NVME_SERIAL_SECONDS:-30}"
+VALIDATE_LOG_ONLY=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --serial-log)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "[physical-nvme] missing value for --serial-log" >&2
+                exit 2
+            fi
+            SERIAL_LOG="$1"
+            ;;
+        --serial-log=*)
+            SERIAL_LOG="${1#--serial-log=}"
+            ;;
+        --validate-log-only)
+            VALIDATE_LOG_ONLY=1
+            ;;
+        --serial-seconds=*)
+            SERIAL_SECONDS="${1#--serial-seconds=}"
+            ;;
+        *)
+            echo "[physical-nvme] unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+if [ -z "$SERIAL_LOG" ]; then
+    echo "[physical-nvme] --serial-log or SIMPLEOS_NVME_SERIAL_LOG is required" >&2
+    exit 2
+fi
+
+if [ "$VALIDATE_LOG_ONLY" -eq 0 ]; then
+    if [ -z "$SERIAL_PORT" ]; then
+        echo "[physical-nvme] SERIAL_PORT is required unless --validate-log-only is used" >&2
+        exit 2
+    fi
+    mkdir -p "$(dirname "$SERIAL_LOG")"
+    echo "[physical-nvme] capturing serial from $SERIAL_PORT @ $SERIAL_BAUD for ${SERIAL_SECONDS}s to $SERIAL_LOG"
+    stty -F "$SERIAL_PORT" "$SERIAL_BAUD" raw -echo 2>/dev/null || true
+    timeout "$SERIAL_SECONDS" cat "$SERIAL_PORT" > "$SERIAL_LOG" 2>/dev/null || true
+fi
+
+if [ ! -f "$SERIAL_LOG" ]; then
+    echo "[physical-nvme] serial log not found: $SERIAL_LOG" >&2
+    exit 1
+fi
+
+exec "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" run \
+    "${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl" \
+    --serial-log "$SERIAL_LOG"

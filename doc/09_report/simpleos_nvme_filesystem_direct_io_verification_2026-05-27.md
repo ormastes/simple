@@ -90,3 +90,7 @@ direct-I/O markers, and the real-NVMe identity fields. An actual physical NVMe
 run remains pending. The same gate is now exposed by
 `src/app/simpleos_nvme_serial_check/main.spl --serial-log <path>` so captured
 real hardware logs can be checked directly in the runner or lab workflow.
+`scripts/run_simpleos_physical_nvme_perf.shs --serial-log <path>
+--validate-log-only` is the canonical wrapper for checking an existing capture;
+without `--validate-log-only` it captures from `SERIAL_PORT` first and then
+delegates to the same checker.

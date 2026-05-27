@@ -219,6 +219,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   captured serial log. The app delegates to the same physical-NVMe readiness
   gate and exits nonzero when the log is q35/emulator-only or lacks real device
   identity.
+- The canonical lab wrapper is `scripts/run_simpleos_physical_nvme_perf.shs`.
+  In `--validate-log-only` mode it checks an existing serial capture; otherwise
+  it captures from `SERIAL_PORT` for `SIMPLEOS_NVME_SERIAL_SECONDS` and then
+  invokes the same checker app.
 - The q35 pure-Simple real-device marker contract now lists `nvme_perf
   reason=ready`, and serial acceptance validates the detailed performance fields
   in addition to provider, grant, namespace, and transfer markers.
