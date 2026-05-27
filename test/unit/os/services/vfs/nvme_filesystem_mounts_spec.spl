@@ -4,7 +4,7 @@ use std.fs_driver.mem_block_device.{MemBlockDevice}
 use std.fs_driver.types.{Path, OpenFlags}
 use std.fs_driver.capability.{Capability}
 use std.fs_driver.extension.{Extension}
-use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks}
+use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks}
 use os.services.vfs.vfs_init.{_clear_vfs_rootfs_for_test, vfs_mount_rootfs_from_nvme_lease_checked}
 use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmeQueueAssignment, NvmeFilesystemLease, nvme_filesystem_lease}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
@@ -72,6 +72,16 @@ describe "NVMe filesystem mount factory":
                 expect(ext.bounce_allowed).to_equal(false)
             case _:
                 expect(false).to_equal(true)
+
+    it "keeps arbitrary BlockDevice user mounts buffered unless hardware registered an NVMe adapter":
+        val lease = _user_mount_test_lease(12u32)
+        val fat = vfs_nvme_buffered_driver_instance_for_lease("user-fat", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Fat32).unwrap()
+        val nvfs = vfs_nvme_buffered_driver_instance_for_lease("user-nvfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Nvfs).unwrap()
+        val dbfs = vfs_nvme_buffered_driver_instance_for_lease("user-dbfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs).unwrap()
+
+        expect(fat.probe(Capability.DirectIo).is_none()).to_equal(true)
+        expect(nvfs.probe(Capability.DirectIo).is_none()).to_equal(true)
+        expect(dbfs.probe(Capability.DirectIo).is_none()).to_equal(true)
 
     it "builds NVFS from the shared lease-backed BlockDevice surface":
         val lease = _mount_test_lease()

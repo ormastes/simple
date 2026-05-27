@@ -35,6 +35,30 @@ fn vfs_nvme_fs_error_name(err: FsError) -> text:
 fn vfs_nvme_filesystem_region_blocks(lease: NvmeFilesystemLease) -> i64:
     nvme_filesystem_lease_sector_count(lease) as i64
 
+fn vfs_nvme_buffered_driver_instance_for_lease(
+    name: text,
+    dev: BlockDevice,
+    lease: NvmeFilesystemLease,
+    consumer: NvmeFilesystemConsumer
+) -> Result<DriverInstance, text>:
+    val reason = nvme_filesystem_lease_reason(lease, consumer)
+    if reason != "ready":
+        return Err(reason)
+    val block_count = vfs_nvme_filesystem_region_blocks(lease)
+    match consumer:
+        case NvmeFilesystemConsumer.Fat32:
+            Ok(DriverInstance.Fat32(FsFat32Driver.new(name, dev)))
+        case NvmeFilesystemConsumer.Nvfs:
+            val opened = NvfsDriver.new_on_device(name, dev, 0i64, block_count)
+            if opened.is_err():
+                return Err("nvfs-open-on-device:" + vfs_nvme_fs_error_name(opened.unwrap_err()))
+            Ok(DriverInstance.Nvfs(opened.unwrap()))
+        case NvmeFilesystemConsumer.Dbfs:
+            val opened = DbFsDriver.open_on_device(dev, 0i64, block_count)
+            if opened.is_err():
+                return Err("dbfs-open-on-device:" + vfs_nvme_fs_error_name(opened.unwrap_err()))
+            Ok(DriverInstance.DbFs(opened.unwrap()))
+
 fn vfs_nvme_driver_instance_for_lease(
     name: text,
     dev: BlockDevice,
