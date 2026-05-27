@@ -363,6 +363,50 @@ fn _extract_bound(expr: SqlExpr, col_map: Dict<text, i32>) -> [i64]:
         return result
     []
 
+# Extract a LIKE prefix pattern from a WHERE clause.
+# Returns (col_index, prefix_string) if pattern is "prefix%" or "prefix_...%"
+# Returns (-1, "") if not a simple LIKE prefix pattern.
+fn _extract_like_prefix(where_expr: SqlExpr?, col_map: Dict<text, i32>) -> i32:
+    if not where_expr.?:
+        return -1
+    val expr = where_expr
+    if expr.kind != SqlExprKind.BinaryOp:
+        return -1
+    if expr.value != "LIKE":
+        return -1
+    if not expr.left.? or not expr.right.?:
+        return -1
+    val left = expr.left
+    val right = expr.right
+    if left.kind != SqlExprKind.Column:
+        return -1
+    val ci = _col_idx(col_map, left.value)
+    if ci < 0:
+        return -1
+    if right.kind != SqlExprKind.Literal:
+        return -1
+    ci
+
+fn _like_prefix_str(where_expr: SqlExpr?) -> text:
+    """Extract the literal prefix before the first % wildcard."""
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if not expr.right.?:
+        return ""
+    val pattern = expr.right.value
+    # Remove surrounding quotes if present
+    var pat = pattern
+    if pat.starts_with("'") and pat.ends_with("'"):
+        pat = pat.slice(1, pat.len() - 1)
+    # Find first % and take everything before it as the prefix
+    var i: i64 = 0
+    while i < pat.len():
+        if pat.char_at(i) == "%":
+            return pat.slice(0, i)
+        i = i + 1
+    ""
+
 # Extract a single-sided integer comparison from a WHERE clause.
 # Returns [col_index, value, kind] where kind: 0=>=, 1=>, 2=<=, 3=<, 4==
 # Returns [] if not a simple single comparison.
@@ -2840,8 +2884,27 @@ class PureDatabase:
                     ri = ri + 1
                 used_single_bound = true
 
+        # ── LIKE prefix fast path ────────────────────────────────────
+        var used_like_prefix = false
+        if not used_pk_path and not used_range_path and not used_single_bound and use_typed and not has_join:
+            val like_ci = _extract_like_prefix(sel.where_expr, col_map)
+            if like_ci >= 0:
+                val like_prefix = _like_prefix_str(sel.where_expr)
+                if like_prefix != "":
+                    val n = tbl.tuples.len() as i32
+                    var ri: i32 = 0
+                    while ri < n:
+                        if mvcc_is_visible(tbl.tuples[ri], snap):
+                            val rv = typed[ri]
+                            if like_ci < rv.len() as i32:
+                                val sv = rv[like_ci].to_text()
+                                if sv.starts_with(like_prefix):
+                                    base_rows.push(rv)
+                        ri = ri + 1
+                    used_like_prefix = true
+
         # ── Full scan path (typed or fallback) ───────────────────────
-        if not used_pk_path and not used_range_path and not used_single_bound:
+        if not used_pk_path and not used_range_path and not used_single_bound and not used_like_prefix:
             if use_typed:
                 var ti2: i32 = 0
                 while ti2 < tbl.tuples.len() as i32:
