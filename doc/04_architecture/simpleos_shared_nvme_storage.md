@@ -87,6 +87,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Freestanding NVFS/DBFS superblock probing is split into provider-independent
   `BlockDevice` helpers, leaving a concrete insertion point for a freestanding
   pure-Simple NVMe adapter without duplicating filesystem probe logic.
+- Freestanding root probing now has one provider-neutral `BlockDevice` entry
+  point that tries NVFS then DBFS, so a pure-Simple NVMe adapter does not need
+  filesystem-specific boot wiring.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS

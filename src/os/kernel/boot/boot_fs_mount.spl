@@ -73,25 +73,14 @@ fn boot_fs_mount_freestanding() -> Result<FsMountResult, text>:
     Safe to call from os_main in a freestanding RV64 closure."""
     log_raw_println("[boot-fs-mount] Starting freestanding filesystem probe...")
 
-    # Try NVFS first
-    var nvfs_adapter = _make_c_adapter()
-    val nvfs_init_ok = nvfs_adapter.init_c_bridge()
-    if nvfs_init_ok:
-        val nvfs_r = boot_fs_mount_nvfs_from_device(nvfs_adapter, "c-boot-bridge", false)
-        if nvfs_r.is_ok():
-            return nvfs_r
+    var adapter = _make_c_adapter()
+    val init_ok = adapter.init_c_bridge()
+    if init_ok:
+        val mount_r = boot_fs_mount_from_device(adapter, "c-boot-bridge", false)
+        if mount_r.is_ok():
+            return mount_r
     else:
-        log_raw_println("[boot-fs-mount] NVMe adapter init failed — no NVFS")
-
-    # Try DBFS
-    var dbfs_adapter = _make_c_adapter()
-    val dbfs_init_ok = dbfs_adapter.init_c_bridge()
-    if dbfs_init_ok:
-        val dbfs_r = boot_fs_mount_dbfs_from_device(dbfs_adapter, "c-boot-bridge", false)
-        if dbfs_r.is_ok():
-            return dbfs_r
-    else:
-        log_raw_println("[boot-fs-mount] NVMe adapter init failed — no DBFS")
+        log_raw_println("[boot-fs-mount] NVMe adapter init failed — no NVFS/DBFS")
 
     log_raw_println("[boot-fs-mount] No NVFS or DBFS superblock found")
     _fs_mount_done = false
@@ -111,6 +100,18 @@ fn boot_fs_mount_freestanding_production() -> Result<FsMountResult, text>:
         log_raw_println("[boot-fs-mount] production storage rejected: {reason}")
         return Err(reason)
     Ok(result)
+
+fn boot_fs_mount_from_device(dev: BlockDevice, provider: text, pure_simple: bool) -> Result<FsMountResult, text>:
+    """Probe supported root filesystems from one provider-neutral BlockDevice."""
+    val nvfs_r = boot_fs_mount_nvfs_from_device(dev, provider, pure_simple)
+    if nvfs_r.is_ok():
+        return nvfs_r
+
+    val dbfs_r = boot_fs_mount_dbfs_from_device(dev, provider, pure_simple)
+    if dbfs_r.is_ok():
+        return dbfs_r
+
+    Err("boot-fs-mount: no root filesystem on provider:" + provider)
 
 fn boot_fs_mount_nvfs_from_device(dev: BlockDevice, provider: text, pure_simple: bool) -> Result<FsMountResult, text>:
     """Probe NVFS using a caller-provided freestanding-safe BlockDevice."""
