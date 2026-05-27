@@ -957,6 +957,118 @@ impl NvmeDriver:
             return Result.Err("NVMe: burst write error, status=" + status.unwrap().to_u64().to_text())
         Result.Ok(true)
 
+    me read_4k_shared_dma_batch_in_namespace_on_queue(nsid: u32, queue_id: u16, lbas: [u64], sector_size: u32, namespace_sectors: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Read multiple 4KiB operations into contiguous shared DMA slots."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        if queue_id != self.io_queue.qid:
+            return Result.Err("NVMe: batch queue not ready")
+        if lbas.len() == 0:
+            return Result.Err("NVMe: empty read batch")
+        if not buf.is_valid():
+            return Result.Err("NVMe: invalid shared DMA buffer")
+        if sector_size == 0u32 or (4096u32 % sector_size) != 0u32:
+            return Result.Err("NVMe: batch sector size not 4K divisible")
+        if namespace_sectors == 0u64:
+            return Result.Err("NVMe: namespace not identified")
+        val sectors_per_4k = 4096u32 / sector_size
+        val total_commands = (lbas.len() as u32) * sectors_per_4k
+        if total_commands >= self.io_queue.depth.to_u32():
+            return Result.Err("NVMe: batch exceeds queue depth commands=" + total_commands.to_u64().to_text() +
+                " depth=" + self.io_queue.depth.to_u64().to_text() + " ops=" + (lbas.len() as u64).to_text() +
+                " sector_size=" + sector_size.to_u64().to_text() +
+                " sectors_per_4k=" + sectors_per_4k.to_u64().to_text())
+        if buf.byte_len < lbas.len().to_u64() * 4096u64:
+            return Result.Err("NVMe: shared DMA buffer too small")
+        val ss = sector_size.to_u64()
+
+        var op_index: i64 = 0
+        while op_index < lbas.len():
+            val base_lba = lbas[op_index]
+            if base_lba + sectors_per_4k.to_u64() > namespace_sectors:
+                return Result.Err("NVMe: batch beyond namespace capacity")
+            var sector: u32 = 0u32
+            while sector < sectors_per_4k:
+                val sector_lba = base_lba + sector.to_u64()
+                val slot_offset = (op_index as u64) * 4096u64
+                val sector_addr = buf.device_addr + slot_offset + (sector.to_u64() * ss)
+                val cmd_id = self.io_queue.submit_command(
+                    NVME_TRANSFER_OPCODE_READ,
+                    nsid,
+                    sector_addr,
+                    0u64,
+                    (sector_lba & 0xFFFFFFFFu64).to_u32(),
+                    (sector_lba >> 32).to_u32(),
+                    0u32
+                )
+                if cmd_id == 0xFFFFu16:
+                    return Result.Err("NVMe: batch read submit failed")
+                sector = sector + 1u32
+            op_index = op_index + 1
+        val status = self.io_queue.wait_completions(total_commands, CMD_TIMEOUT)
+        if status.is_err():
+            return Result.Err("NVMe: batch read " + status.unwrap_err())
+        if status.unwrap() != 0u32:
+            return Result.Err("NVMe: batch read error, status=" + status.unwrap().to_u64().to_text())
+        dma_shared_sync_device_to_cpu(buf)
+        Result.Ok(true)
+
+    me write_4k_shared_dma_batch_in_namespace_on_queue(nsid: u32, queue_id: u16, lbas: [u64], sector_size: u32, namespace_sectors: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Write multiple 4KiB operations from contiguous shared DMA slots."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        if queue_id != self.io_queue.qid:
+            return Result.Err("NVMe: batch queue not ready")
+        if lbas.len() == 0:
+            return Result.Err("NVMe: empty write batch")
+        if not buf.is_valid():
+            return Result.Err("NVMe: invalid shared DMA buffer")
+        if sector_size == 0u32 or (4096u32 % sector_size) != 0u32:
+            return Result.Err("NVMe: batch sector size not 4K divisible")
+        if namespace_sectors == 0u64:
+            return Result.Err("NVMe: namespace not identified")
+        val sectors_per_4k = 4096u32 / sector_size
+        val total_commands = (lbas.len() as u32) * sectors_per_4k
+        if total_commands >= self.io_queue.depth.to_u32():
+            return Result.Err("NVMe: batch exceeds queue depth commands=" + total_commands.to_u64().to_text() +
+                " depth=" + self.io_queue.depth.to_u64().to_text() + " ops=" + (lbas.len() as u64).to_text() +
+                " sector_size=" + sector_size.to_u64().to_text() +
+                " sectors_per_4k=" + sectors_per_4k.to_u64().to_text())
+        if buf.byte_len < lbas.len().to_u64() * 4096u64:
+            return Result.Err("NVMe: shared DMA buffer too small")
+        val ss = sector_size.to_u64()
+
+        dma_shared_sync_cpu_to_device(buf)
+        var op_index: i64 = 0
+        while op_index < lbas.len():
+            val base_lba = lbas[op_index]
+            if base_lba + sectors_per_4k.to_u64() > namespace_sectors:
+                return Result.Err("NVMe: batch beyond namespace capacity")
+            var sector: u32 = 0u32
+            while sector < sectors_per_4k:
+                val sector_lba = base_lba + sector.to_u64()
+                val slot_offset = (op_index as u64) * 4096u64
+                val sector_addr = buf.device_addr + slot_offset + (sector.to_u64() * ss)
+                val cmd_id = self.io_queue.submit_command(
+                    NVME_TRANSFER_OPCODE_WRITE,
+                    nsid,
+                    sector_addr,
+                    0u64,
+                    (sector_lba & 0xFFFFFFFFu64).to_u32(),
+                    (sector_lba >> 32).to_u32(),
+                    0u32
+                )
+                if cmd_id == 0xFFFFu16:
+                    return Result.Err("NVMe: batch write submit failed")
+                sector = sector + 1u32
+            op_index = op_index + 1
+        val status = self.io_queue.wait_completions(total_commands, CMD_TIMEOUT)
+        if status.is_err():
+            return Result.Err("NVMe: batch write " + status.unwrap_err())
+        if status.unwrap() != 0u32:
+            return Result.Err("NVMe: batch write error, status=" + status.unwrap().to_u64().to_text())
+        Result.Ok(true)
+
     me run_reversible_sector_probe(lba: u64) -> Result<NvmeSectorProbeResult, text>:
         """Execute read/write/verify/restore on one sector and return readiness evidence."""
         if not self.initialized:
@@ -1097,6 +1209,8 @@ impl NvmeDriver:
     fn namespace_sector_count(nsid: u32) -> Result<u64, text>:
         if nsid == self.identified_nsid and self.sector_count > 0u64:
             return Ok(self.sector_count)
+        if nsid == 1u32 and self.sector_count > 0u64:
+            return Ok(self.sector_count)
         for facts in self.identified_namespaces:
             if facts.nsid == nsid:
                 return Ok(facts.lba_count)
@@ -1105,8 +1219,10 @@ impl NvmeDriver:
     fn namespace_sector_size(nsid: u32) -> Result<u32, text>:
         if nsid == self.identified_nsid and self.sector_size >= 512u32:
             return Ok(self.sector_size)
+        if nsid == 1u32 and self.sector_size >= 512u32:
+            return Ok(self.sector_size)
         for facts in self.identified_namespaces:
-            if facts.nsid == nsid:
+            if facts.nsid == nsid and facts.formatted_lba_size >= 512u32:
                 return Ok(facts.formatted_lba_size)
         Err("NVMe: namespace not identified")
 

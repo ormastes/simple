@@ -88,15 +88,15 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
     )
     if evidence_result.is_err():
         return ["[q35-pure-nvme-perf] skipped reason=nvme-transfer-probe-failed detail=" + evidence_result.unwrap_err()]
-    val sector_size_result = nvme.namespace_sector_size(1u32)
-    if sector_size_result.is_err():
-        return ["[q35-pure-nvme-perf] skipped reason=nvme-sector-size-missing detail=" + sector_size_result.unwrap_err()]
-    val sector_count_result = nvme.namespace_sector_count(1u32)
-    if sector_count_result.is_err():
-        return ["[q35-pure-nvme-perf] skipped reason=nvme-sector-count-missing detail=" + sector_count_result.unwrap_err()]
-    val sector_size = sector_size_result.unwrap()
-    val sector_count = sector_count_result.unwrap()
-    val dma_result = dma_alloc(8192, DmaDir.Bidirectional)
+    val sector_size = nvme.get_sector_size()
+    val sector_count = nvme.get_sector_count()
+    if sector_size < 512u32:
+        return ["[q35-pure-nvme-perf] skipped reason=nvme-sector-size-invalid detail=" + sector_size.to_u64().to_text()]
+    if sector_count == 0u64:
+        return ["[q35-pure-nvme-perf] skipped reason=nvme-sector-count-missing"]
+    val batch_4k_ops: u32 = 3u32
+    val batch_bytes = batch_4k_ops.to_u64() * 4096u64
+    val dma_result = dma_alloc((batch_bytes + 4096u64) as i64, DmaDir.Bidirectional)
     if dma_result.is_err():
         return ["[q35-pure-nvme-perf] skipped reason=dma-alloc-failed"]
     val dma = dma_result.unwrap()
@@ -109,7 +109,7 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
         cpu_virt_addr: dma_virt + align_delta,
         host_phys_addr: dma_phys + align_delta,
         device_addr: dma_phys + align_delta,
-        byte_len: 4096u64,
+        byte_len: batch_bytes,
         cache_policy: DmaCachePolicy.Coherent,
         owner: owner,
         allocation_id: 1u64
@@ -125,12 +125,19 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
     while run < 3u32:
         var op: u32 = 0u32
         while op < 32u32:
-            val relative_lba = _relative_4k_lba(sector_size, sector_count, run, op)
+            var lbas: [u64] = []
+            var batch_op: u32 = 0u32
+            while batch_op < batch_4k_ops and op + batch_op < 32u32:
+                lbas.push(_relative_4k_lba(sector_size, sector_count, run, op + batch_op))
+                batch_op = batch_op + 1u32
+
             val read_start = rt_time_now_unix_micros()
-            val read_result = nvme.read_4k_shared_dma_burst_in_namespace_on_queue(
+            val read_result = nvme.read_4k_shared_dma_batch_in_namespace_on_queue(
                 1u32,
                 SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
-                relative_lba,
+                lbas,
+                sector_size,
+                sector_count,
                 shared
             )
             val read_elapsed = _elapsed_us(read_start, rt_time_now_unix_micros())
@@ -140,13 +147,15 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
             if read_elapsed > read_p99_us:
                 read_p99_us = read_elapsed
             read_total_us = read_total_us + read_elapsed
-            read_ops = read_ops + 1u64
+            read_ops = read_ops + lbas.len().to_u64()
 
             val write_start = rt_time_now_unix_micros()
-            val write_result = nvme.write_4k_shared_dma_burst_in_namespace_on_queue(
+            val write_result = nvme.write_4k_shared_dma_batch_in_namespace_on_queue(
                 1u32,
                 SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
-                relative_lba,
+                lbas,
+                sector_size,
+                sector_count,
                 shared
             )
             val write_elapsed = _elapsed_us(write_start, rt_time_now_unix_micros())
@@ -156,8 +165,8 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
             if write_elapsed > write_p99_us:
                 write_p99_us = write_elapsed
             write_total_us = write_total_us + write_elapsed
-            write_ops = write_ops + 1u64
-            op = op + 1u32
+            write_ops = write_ops + lbas.len().to_u64()
+            op = op + lbas.len().to_u32()
         run = run + 1u32
 
     dma_free(dma)
