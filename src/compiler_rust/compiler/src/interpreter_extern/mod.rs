@@ -81,6 +81,7 @@ pub mod sandbox;
 pub mod mock_policy;
 pub mod sffi_value;
 pub mod sffi_array;
+pub mod sffi_db;
 pub mod sffi_dict;
 pub mod signatures;
 pub mod pbkdf2;
@@ -905,6 +906,19 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
         "rt_db_accel_bitmap_or_words",
         simd::rt_db_accel_bitmap_or_words as ExternFn,
     );
+    m.insert("rt_db_col_count", sffi_db::rt_db_col_count_fn as ExternFn);
+    m.insert("rt_db_delete", sffi_db::rt_db_delete_fn as ExternFn);
+    m.insert("rt_db_get", sffi_db::rt_db_get_fn as ExternFn);
+    m.insert("rt_db_get_int", sffi_db::rt_db_get_int_fn as ExternFn);
+    m.insert("rt_db_get_text", sffi_db::rt_db_get_text_fn as ExternFn);
+    m.insert("rt_db_put", sffi_db::rt_db_put_fn as ExternFn);
+    m.insert("rt_db_put_value_int", sffi_db::rt_db_put_value_int_fn as ExternFn);
+    m.insert("rt_db_put_value_text", sffi_db::rt_db_put_value_text_fn as ExternFn);
+    m.insert("rt_db_row_count", sffi_db::rt_db_row_count_fn as ExternFn);
+    m.insert("rt_db_scan_range", sffi_db::rt_db_scan_range_fn as ExternFn);
+    m.insert("rt_db_scan_result", sffi_db::rt_db_scan_result_fn as ExternFn);
+    m.insert("rt_db_table_create", sffi_db::rt_db_table_create_fn as ExternFn);
+    m.insert("rt_db_table_destroy", sffi_db::rt_db_table_destroy_fn as ExternFn);
     m.insert("rt_diagram_clear", diagram::rt_diagram_clear as ExternFn);
     m.insert("rt_diagram_disable", diagram::rt_diagram_disable as ExternFn);
     m.insert("rt_diagram_enable", diagram::rt_diagram_enable as ExternFn);

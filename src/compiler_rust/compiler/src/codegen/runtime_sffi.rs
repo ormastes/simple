@@ -119,6 +119,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
     // Tier 1: Alloc — collections, strings, objects, closures, pointers, memory
     if name.starts_with("rt_array_")
         || name.starts_with("rt_tuple_")
+        || name.starts_with("rt_db_")
         || name.starts_with("rt_dict_")
         || name.starts_with("rt_index_")
         || name.starts_with("rt_slice")
@@ -251,6 +252,22 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_dict_clear", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_keys", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_dict_values", &[I64], &[I64]),
+    // =========================================================================
+    // Fast DB operations (runtime_db.c)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_db_table_create", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_table_destroy", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_db_put", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_put_value_int", &[I64, I64, I64, I64], &[]),
+    RuntimeFuncSpec::new("rt_db_put_value_text", &[I64, I64, I64, I64], &[]),
+    RuntimeFuncSpec::new("rt_db_get", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_get_int", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_get_text", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_scan_range", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_scan_result", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_delete", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_row_count", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_col_count", &[I64], &[I64]),
     // =========================================================================
     // Index/slice operations
     // =========================================================================

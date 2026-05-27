@@ -734,6 +734,29 @@ impl Fat32Core:
         self._save_open_file(idx, of)
         Result.Ok(result)
 
+    me fn read_4k(handle: FileHandle) -> Result<[u8], text>:
+        if not self.mounted:
+            return Result.Err("filesystem not mounted")
+        val idx = handle.id.to_i32() - 1
+        if idx < 0 or idx >= self.open_files.len():
+            return Result.Err("invalid file handle")
+        var of = self.open_files[idx]
+        if not of.is_open:
+            return Result.Err("file handle not open")
+        if of.size - of.position < 4096:
+            val short_read = self.read_bytes(handle, 4096)
+            return short_read
+        if (of.position % 4096) == 0:
+            val block_index = (of.position / 4096).to_i32()
+            if self._block_cache_valid and self._block_cache_start == of.start_cluster and block_index >= 0 and block_index < self._block_cache_blocks.len():
+                val cached_block = self._block_cache_blocks[block_index]
+                if cached_block.len() == 4096:
+                    of.position = of.position + 4096
+                    self._save_open_file(idx, of)
+                    return Result.Ok(cached_block)
+        val uncached_read = self.read_bytes(handle, 4096)
+        uncached_read
+
     me fn read(handle: FileHandle, buf: [u8], len: i64) -> Result<i64, text>:
         if not self.mounted:
             return Result.Err("filesystem not mounted")

@@ -1,0 +1,154 @@
+# SimpleOS FAT32 adapter backed by the shared stdlib FAT32 core.
+#
+# This keeps the SimpleOS VFS contract stable while routing FAT operations
+# through the std.fs_driver implementation used by stdlib benchmarks.
+
+use std.fs_driver.fat32_core.{Fat32Core as SharedFat32Core}
+use std.fs_driver.types.{FileHandle as SharedFileHandle, DirEntry as SharedDirEntry}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+use os.services.block_device.{BlockDevice}
+use std.fs_driver.types.{Path}
+
+class SharedFat32Driver:
+    inner: SharedFat32Core
+    handles: [SharedFileHandle]
+    handle_ids: [u64]
+    next_handle: u64
+    mounted: bool
+
+impl SharedFat32Driver:
+    static fn new(device: BlockDevice) -> SharedFat32Driver:
+        SharedFat32Driver(
+            inner: SharedFat32Core.new(device),
+            handles: [],
+            handle_ids: [],
+            next_handle: 1,
+            mounted: false)
+
+    me fn _entry_node(entry: SharedDirEntry) -> FsNode:
+        var kind = FsNodeKind.File
+        if entry.is_dir:
+            kind = FsNodeKind.Directory
+        var size: u64 = 0
+        if entry.size > 0:
+            size = entry.size.to_u64()
+        FsNode(
+            id: entry.inode.id,
+            kind: kind,
+            size: size,
+            permissions: 0o644,
+            owner: 0,
+            group: 0,
+            created_ns: 0,
+            modified_ns: 0)
+
+    me fn _alloc_handle(handle: SharedFileHandle) -> u64:
+        val id = self.next_handle
+        self.next_handle = self.next_handle + 1
+        self.handle_ids.push(id)
+        self.handles.push(handle)
+        id
+
+    me fn _find_handle(id: u64) -> SharedFileHandle?:
+        var i = 0
+        while i < self.handle_ids.len():
+            if self.handle_ids[i] == id:
+                return Some(self.handles[i])
+            i = i + 1
+        nil
+
+    me fn _remove_handle(id: u64):
+        var next_ids: [u64] = []
+        var next_handles: [SharedFileHandle] = []
+        var i = 0
+        while i < self.handle_ids.len():
+            if self.handle_ids[i] != id:
+                next_ids.push(self.handle_ids[i])
+                next_handles.push(self.handles[i])
+            i = i + 1
+        self.handle_ids = next_ids
+        self.handles = next_handles
+
+    me fn mount(device: text, options: text) -> Result<bool, text>:
+        val rc = self.inner.mount()
+        if rc.is_err():
+            return Result.Err(rc.unwrap_err())
+        self.mounted = true
+        Result.Ok(true)
+
+    me fn open(path: text, flags: FileFlags) -> Result<u64, text>:
+        if not self.mounted:
+            return Result.Err("filesystem not mounted")
+        var open_rc = self.inner.open(path)
+        if open_rc.is_err() and flags.create:
+            open_rc = self.inner.create_file(path)
+        if open_rc.is_err():
+            return Result.Err(open_rc.unwrap_err())
+        val shared_handle = open_rc.unwrap()
+        if flags.truncate:
+            val trunc_rc = self.inner.truncate(shared_handle, 0)
+            if trunc_rc.is_err():
+                self.inner.close(shared_handle)
+                return Result.Err(trunc_rc.unwrap_err())
+        if flags.append:
+            val stat_rc = self.inner.resolve_path(path)
+            if stat_rc.is_ok():
+                self.inner.seek(shared_handle, stat_rc.unwrap().size)
+        val id = self._alloc_handle(shared_handle)
+        Result.Ok(id)
+
+    me fn read(handle: u64, size: u64) -> Result<[u8], text>:
+        val shared_opt = self._find_handle(handle)
+        if not shared_opt.?:
+            return Result.Err("invalid file handle")
+        self.inner.read_bytes(shared_opt.unwrap(), size.to_i64())
+
+    me fn write(handle: u64, data: [u8]) -> Result<u64, text>:
+        val shared_opt = self._find_handle(handle)
+        if not shared_opt.?:
+            return Result.Err("invalid file handle")
+        val written = self.inner.write(shared_opt.unwrap(), data, data.len().to_i64())
+        if written.is_err():
+            return Result.Err(written.unwrap_err())
+        Result.Ok(written.unwrap().to_u64())
+
+    me fn close(handle: u64) -> Result<bool, text>:
+        val shared_opt = self._find_handle(handle)
+        if not shared_opt.?:
+            return Result.Err("invalid file handle")
+        val rc = self.inner.close(shared_opt.unwrap())
+        if rc.is_err():
+            return Result.Err(rc.unwrap_err())
+        self._remove_handle(handle)
+        Result.Ok(true)
+
+    me fn stat(path: text) -> Result<FsNode, text>:
+        val rc = self.inner.resolve_path(path)
+        if rc.is_err():
+            return Result.Err(rc.unwrap_err())
+        Result.Ok(self._entry_node(rc.unwrap()))
+
+    me fn readdir(path: text) -> Result<[DirEntry], text>:
+        val rc = self.inner.readdir(path)
+        if rc.is_err():
+            return Result.Err(rc.unwrap_err())
+        var out: [DirEntry] = []
+        val entries = rc.unwrap()
+        var i = 0
+        while i < entries.len():
+            val entry = entries[i]
+            out.push(DirEntry(name: entry.name, node: self._entry_node(entry)))
+            i = i + 1
+        Result.Ok(out)
+
+    me fn mkdir(path: text) -> Result<bool, text>:
+        val rc = self.inner.mkdir(path)
+        if rc.is_err():
+            return Result.Err(rc.unwrap_err())
+        Result.Ok(true)
+
+    me fn unlink(path: Path) -> Result<bool, text>:
+        val rc = self.inner.unlink(path.raw)
+        if rc.is_err():
+            return Result.Err(rc.unwrap_err())
+        Result.Ok(true)

@@ -1405,6 +1405,55 @@ class PureDatabase:
                 ri = ri + 1
         Ok(nil)
 
+    me get_batch(table: text, key_col: text, key_vals: [DbValue]) -> Result<[DbRow?], DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(table):
+            ti = self._tbl_name_idx[table]
+        else:
+            ti = _find_idx(self._tbl_names, table)
+        if ti < 0:
+            return Err(DbError.QueryFailed(sql: "GET_BATCH", message: "no such table: {table}"))
+        val col_names = self._tbl_cols[ti]
+        var kci: i32 = -1
+        if ti < self._tbl_col_idx.len() as i32:
+            val cm = self._tbl_col_idx[ti]
+            if cm.has(key_col):
+                kci = cm[key_col]
+        if kci < 0:
+            kci = _find_idx(col_names, key_col)
+        if kci < 0:
+            return Err(DbError.QueryFailed(sql: "GET_BATCH", message: "no such column: {key_col}"))
+        val snap = self._txn.snapshot()
+        var tbl = self._tbl_data[ti]
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
+        val use_pk = use_typed and kci == self._tbl_pk_col[ti]
+        val pkm = self._tbl_pk_map[ti]
+        var results: [DbRow?] = []
+        var ki: i32 = 0
+        while ki < key_vals.len() as i32:
+            val key_txt = key_vals[ki].to_text()
+            var found: DbRow? = nil
+            if use_pk:
+                if pkm.has(key_txt):
+                    val tidx = pkm[key_txt]
+                    if tidx >= 0 and tidx < tbl.tuples.len() as i32:
+                        if mvcc_is_visible(tbl.tuples[tidx], snap):
+                            found = DbRow(columns: col_names, values: typed[tidx])
+            elif use_typed:
+                var gi: i32 = 0
+                while gi < tbl.tuples.len() as i32:
+                    if mvcc_is_visible(tbl.tuples[gi], snap):
+                        val rv = typed[gi]
+                        if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
+                            found = DbRow(columns: col_names, values: rv)
+                    gi = gi + 1
+            results.push(found)
+            ki = ki + 1
+        Ok(results)
+
     me put(table: text, values: [DbValue]) -> Result<i64, DbError>:
         if not self.is_open:
             return Err(DbError.Closed)

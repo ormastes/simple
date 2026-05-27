@@ -283,6 +283,13 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
     // Tier 1: Alloc
     if name.starts_with("rt_array_")
         || name.starts_with("rt_tuple_")
+        || name.starts_with("rt_db_table_")
+        || name.starts_with("rt_db_put")
+        || name.starts_with("rt_db_get")
+        || name.starts_with("rt_db_scan")
+        || name.starts_with("rt_db_delete")
+        || name.starts_with("rt_db_row_")
+        || name.starts_with("rt_db_col_")
         || name.starts_with("rt_dict_")
         || name.starts_with("rt_index_")
         || name.starts_with("rt_slice")
@@ -379,6 +386,20 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_dict_clear",
     "rt_dict_keys",
     "rt_dict_values",
+    // Fast DB operations (runtime_db.c)
+    "rt_db_table_create",
+    "rt_db_table_destroy",
+    "rt_db_put",
+    "rt_db_put_value_int",
+    "rt_db_put_value_text",
+    "rt_db_get",
+    "rt_db_get_int",
+    "rt_db_get_text",
+    "rt_db_scan_range",
+    "rt_db_scan_result",
+    "rt_db_delete",
+    "rt_db_row_count",
+    "rt_db_col_count",
     // Index/slice operations
     "rt_index_get",
     "rt_index_set",

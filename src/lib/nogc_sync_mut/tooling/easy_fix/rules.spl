@@ -1,0 +1,485 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# EasyFix Shared Rules Module
+# Each rule: fn check_<rule>(source: String, file: String) -> [EasyFix]
+#
+# Rule IDs:
+#   L:print_in_test_spec         — Replace print() with expect() in test specs
+#   L:unnamed_duplicate_typed_args — Add distinct param names for duplicate types
+#   L:resource_leak              — Wrap resource in `with` block
+#   L:spipe_missing_docstrings   — Add template docstring to describe/context
+#   L:spipe_manual_assertions    — Replace manual if/fail with expect()
+#   L:non_exhaustive_match       — Add missing match arms with todo()
+#   E:typo_suggestion            — Fix misspelled identifiers (Levenshtein)
+#   E:parser_contextual_keyword  — Fix contextual keyword syntax
+#   E:type_mismatch_coercion     — Insert type coercion (.to_string() etc.)
+#   L:deprecated_if_let          — Replace `if let` with `if val`
+#
+# Sub-modules:
+#   rules_helpers.spl  — LineContext, line_contexts, byte offset helpers, parsing helpers
+#   rules_lint.spl     — Rules 1, 3, 4, 5, 6 (lint rules)
+#   rules_errors.spl   — Rules 7, 8, 9, 10 (error/deprecated rules)
+
+# ============================================================================
+# Data types imported from stdlib
+# ============================================================================
+
+use std.tooling.easy_fix.types.{EasyFix, FixConfidence, Replacement}
+use std.tooling.easy_fix.rules_helpers.{
+    LineContext, line_contexts,
+    _split_top_level_csv, _find_top_level_colon, _find_matching_paren_on_line,
+    _is_identifier_char, _is_digit_char
+}
+use std.tooling.easy_fix.rules_lint.{
+    check_print_in_test_spec,
+    check_resource_leak,
+    check_spipe_missing_docstrings,
+    check_spipe_manual_assertions,
+    check_non_exhaustive_match
+}
+use std.tooling.easy_fix.rules_errors.{
+    check_typo_suggestion,
+    check_parser_contextual_keyword,
+    check_type_mismatch_coercion,
+    check_deprecated_if_let
+}
+
+struct DuplicateTypedArgSignature:
+    name: text
+    line_num: i64
+    decl_paren_start: i64
+    decl_paren_end: i64
+    decl_column: i64
+    arg_count: i64
+    param_names: [text]
+    new_params_text: text
+    has_decl_rewrite: bool
+    can_rewrite_calls: bool
+
+# ============================================================================
+# Rule 2: unnamed_duplicate_typed_args
+# Detects fn signatures with duplicate types that lack distinct names.
+# Confidence: Uncertain
+# ============================================================================
+
+fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]:
+    val signatures = _collect_duplicate_typed_arg_signatures(source: source)
+    var fixes: [EasyFix] = []
+
+    for sig in signatures:
+        var replacements: [Replacement] = []
+
+        if sig.has_decl_rewrite:
+            replacements.push(Replacement.create(
+                file: file,
+                start: sig.decl_paren_start,
+                end: sig.decl_paren_end,
+                line: sig.line_num,
+                column: sig.decl_column,
+                new_text: sig.new_params_text
+            ))
+
+        if sig.can_rewrite_calls and _is_unique_call_target(signatures: signatures, sig: sig):
+            val call_replacements = _collect_call_replacements_for_signature(source: source, file: file, sig: sig)
+            for rep in call_replacements:
+                replacements.push(rep)
+
+        if not replacements.is_empty():
+            val description = if sig.has_decl_rewrite:
+                "add distinct parameter names for duplicate types"
+            else:
+                "rewrite positional duplicate-typed arguments as named calls"
+            var fix = EasyFix.create(
+                id: "L:unnamed_duplicate_typed_args:{sig.line_num}",
+                description: description,
+                confidence: FixConfidence.Uncertain
+            )
+            for rep in replacements:
+                fix.add_replacement(rep)
+            fixes.push(fix)
+
+    fixes
+
+fn _collect_duplicate_typed_arg_signatures(source: text) -> [DuplicateTypedArgSignature]:
+    var signatures: [DuplicateTypedArgSignature] = []
+    for ctx in line_contexts(source):
+        val sig = _parse_duplicate_typed_arg_signature(ctx)
+        match sig:
+            case Some(found):
+                signatures.push(found)
+            case nil:
+                pass
+    signatures
+
+fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> Option<DuplicateTypedArgSignature>:
+    if not _dup_is_fn_sig(trimmed: ctx.trimmed):
+        return nil
+    if not ctx.trimmed.contains("("):
+        return nil
+
+    val paren_start = ctx.trimmed.find("(")
+    if paren_start < 0:
+        return nil
+    val paren_end = _find_matching_paren_on_line(text: ctx.trimmed, open_paren: paren_start)
+    if paren_end <= paren_start:
+        return nil
+
+    val name = _extract_sig_name(trimmed: ctx.trimmed, paren_start: paren_start)
+    if name == "":
+        return nil
+
+    val params_str = ctx.trimmed.slice(paren_start + 1, paren_end)
+    val params = _split_top_level_csv(text: params_str)
+    if params.is_empty():
+        return nil
+
+    var raw_names: [text] = []
+    var raw_types: [text] = []
+    var normalized_types: [text] = []
+    var has_unnamed = false
+
+    for param in params:
+        val trimmed_param = param.trim()
+        if trimmed_param == "":
+            continue
+        val colon_pos = _find_top_level_colon(text: trimmed_param)
+        if colon_pos >= 0:
+            raw_names.push(trimmed_param.slice(0, colon_pos).trim())
+            raw_types.push(trimmed_param.slice(colon_pos + 1).trim())
+        else:
+            raw_names.push("")
+            raw_types.push(trimmed_param)
+            has_unnamed = true
+        normalized_types.push(raw_types[raw_types.len() - 1].trim())
+
+    if raw_types.len() < 2:
+        return nil
+
+    var type_counts: Dict<text, i64> = {}
+    var has_duplicate_types = false
+    for ty in normalized_types:
+        val count = type_counts[ty] ?? 0
+        type_counts[ty] = count + 1
+        if count + 1 >= 2:
+            has_duplicate_types = true
+    if not has_duplicate_types:
+        return nil
+
+    var resolved_names: [text] = []
+    var rewritten_params: [text] = []
+    var generated_counts: Dict<text, i64> = {}
+    var i = 0
+    while i < raw_types.len():
+        val param_name = raw_names[i]
+        val param_type = raw_types[i]
+        var resolved_name = param_name
+        if resolved_name == "":
+            val key = normalized_types[i]
+            val next_count = (generated_counts[key] ?? 0) + 1
+            generated_counts[key] = next_count
+            resolved_name = "{_type_name_to_identifier(text: param_type)}{next_count}"
+        rewritten_params.push("{resolved_name}: {param_type}")
+        resolved_names.push(resolved_name)
+        i = i + 1
+
+    var stable_names = true
+    var seen_names: Dict<text, bool> = {}
+    i = 0
+    while i < resolved_names.len():
+        if type_counts[normalized_types[i]] >= 2:
+            val name_i = resolved_names[i]
+            if name_i == "" or name_i == "_" or name_i.starts_with("_"):
+                stable_names = false
+            elif seen_names.has(name_i):
+                stable_names = false
+            else:
+                seen_names[name_i] = true
+        i = i + 1
+
+    Some(DuplicateTypedArgSignature(
+        name: name,
+        line_num: ctx.line_num,
+        decl_paren_start: ctx.byte_offset + ctx.indent + paren_start + 1,
+        decl_paren_end: ctx.byte_offset + ctx.indent + paren_end,
+        decl_column: paren_start + 2,
+        arg_count: resolved_names.len(),
+        param_names: resolved_names,
+        new_params_text: rewritten_params.join(", "),
+        has_decl_rewrite: has_unnamed,
+        can_rewrite_calls: stable_names
+    ))
+
+fn _collect_call_replacements_for_signature(source: text, file: text, sig: DuplicateTypedArgSignature) -> [Replacement]:
+    var replacements: [Replacement] = []
+
+    for ctx in line_contexts(source):
+        val line_replacements = _collect_line_call_replacements(line: ctx.line, file: file, sig: sig, line_num: ctx.line_num, byte_offset: ctx.byte_offset)
+        for rep in line_replacements:
+            replacements.push(rep)
+
+    replacements
+
+fn _collect_line_call_replacements(line: text, file: text, sig: DuplicateTypedArgSignature, line_num: i64, byte_offset: i64) -> [Replacement]:
+    var replacements: [Replacement] = []
+    var i = 0
+    while i < line.len():
+        if not _matches_identifier_at(line: line, start: i, name: sig.name):
+            i = i + 1
+            continue
+        if _is_definition_context(line: line, token_start: i):
+            i = i + sig.name.len()
+            continue
+        val open_paren = _find_call_open_paren(line: line, start: i + sig.name.len())
+        if open_paren < 0:
+            i = i + sig.name.len()
+            continue
+        val close_paren = _find_matching_paren_on_line(text: line, open_paren: open_paren)
+        if close_paren <= open_paren:
+            i = i + sig.name.len()
+            continue
+        val args_str = line.slice(open_paren + 1, close_paren)
+        val args = _split_top_level_csv(text: args_str)
+        if args.len() != sig.arg_count or _args_have_named_entries(args: args):
+            i = close_paren + 1
+            continue
+        var named_args: [text] = []
+        var arg_index = 0
+        while arg_index < args.len():
+            named_args.push("{sig.param_names[arg_index]}: {args[arg_index].trim()}")
+            arg_index = arg_index + 1
+        replacements.push(Replacement.create(
+            file: file,
+            start: byte_offset + open_paren + 1,
+            end: byte_offset + close_paren,
+            line: line_num,
+            column: open_paren + 2,
+            new_text: named_args.join(", ")
+        ))
+        i = close_paren + 1
+    replacements
+
+fn _is_unique_call_target(signatures: [DuplicateTypedArgSignature], sig: DuplicateTypedArgSignature) -> bool:
+    var matches = 0
+    for candidate in signatures:
+        if candidate.can_rewrite_calls and candidate.name == sig.name and candidate.arg_count == sig.arg_count:
+            matches = matches + 1
+    matches == 1
+
+fn _dup_is_fn_sig(trimmed: text) -> bool:
+    trimmed.starts_with("fn ")
+        or trimmed.starts_with("me ")
+        or trimmed.starts_with("static fn ")
+        or trimmed.starts_with("pub fn ")
+        or trimmed.starts_with("pub me ")
+        or trimmed.starts_with("pub static fn ")
+
+fn _extract_sig_name(trimmed: text, paren_start: i64) -> text:
+    val before = trimmed.slice(0, paren_start).trim()
+    val parts = before.split(" ")
+    if parts.is_empty():
+        return ""
+    parts[parts.len() - 1].trim()
+
+fn _type_name_to_identifier(text: text) -> text:
+    var out = ""
+    var prev_underscore = false
+    var i = 0
+    while i < text.len():
+        val ch = text.slice(i, i + 1).lower()
+        if _is_identifier_char(ch):
+            out = out + ch
+            prev_underscore = false
+        elif not prev_underscore:
+            out = out + "_"
+            prev_underscore = true
+        i = i + 1
+    while out.starts_with("_"):
+        out = out.slice(1)
+    while out.ends_with("_"):
+        out = out.slice(0, out.len() - 1)
+    if out == "":
+        return "arg"
+    if _is_digit_char(out.slice(0, 1)):
+        return "arg_{out}"
+    out
+
+fn _matches_identifier_at(line: text, start: i64, name: text) -> bool:
+    if start < 0 or start + name.len() > line.len():
+        return false
+    if line.slice(start, start + name.len()) != name:
+        return false
+    if start > 0 and _is_identifier_char(line.slice(start - 1, start)):
+        return false
+    val end = start + name.len()
+    if end < line.len() and _is_identifier_char(line.slice(end, end + 1)):
+        return false
+    true
+
+fn _is_definition_context(line: text, token_start: i64) -> bool:
+    val before = line.slice(0, token_start).trim()
+    before.ends_with("fn") or before.ends_with("me")
+
+fn _find_call_open_paren(line: text, start: i64) -> i64:
+    var i = start
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == " " or ch == "\t":
+            i = i + 1
+            continue
+        if ch == "(":
+            return i
+        return -1
+    -1
+
+fn _args_have_named_entries(args: [text]) -> bool:
+    for arg in args:
+        if _find_top_level_colon(text: arg.trim()) >= 0:
+            return true
+    false
+
+# ============================================================================
+# Rule 12: stub_impl (text-scanning)
+# Detects function signatures followed by trivial body expressions.
+# Confidence: Likely
+# ============================================================================
+
+fn _stub_trivial() -> [text]:
+    ["0", "\"\"", "false", "nil", "[]", "()", "true",
+     "return 0", "return \"\"", "return false", "return nil",
+     "return []", "return ()", "return true",
+     "Ok(nil)", "Ok(0)", "return Ok(nil)", "return Ok(0)"]
+
+fn check_stub_impl_text(source: text, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+
+    for ctx in line_contexts(source):
+        if _stub_is_fn(ctx.trimmed):
+            val body = _stub_inline_body(ctx.trimmed)
+            if body != "" and _stub_is_trivial(body) and _stub_has_params(ctx.trimmed):
+                var fix = EasyFix.create(
+                    id: "L:stub_impl:{ctx.line_num}",
+                    description: "function with params returns trivial '{body}' — possible stub",
+                    confidence: FixConfidence.Likely
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file, start: ctx.byte_offset, end: ctx.byte_offset + ctx.line.len(),
+                    line: ctx.line_num, column: 1, new_text: ctx.line
+                ))
+                fixes.push(fix)
+
+        if _stub_is_fn_header(ctx.trimmed) and _stub_has_params(ctx.trimmed):
+            if ctx.line_num < lines.len():
+                val nl = lines[ctx.line_num]
+                val nt = nl.trim()
+                val ni = nl.len() - nt.len()
+                if ni > ctx.indent and _stub_is_trivial(nt):
+                    var single = true
+                    if ctx.line_num + 1 < lines.len():
+                        val al = lines[ctx.line_num + 1]
+                        val at = al.trim()
+                        val ai = al.len() - at.len()
+                        if at != "" and ai > ctx.indent:
+                            single = false
+                    if single:
+                        var fix = EasyFix.create(
+                            id: "L:stub_impl:{ctx.line_num}",
+                            description: "function with params returns trivial '{nt}' — possible stub",
+                            confidence: FixConfidence.Likely
+                        )
+                        fix.add_replacement(Replacement.create(
+                            file: file, start: ctx.byte_offset, end: ctx.byte_offset + ctx.line.len(),
+                            line: ctx.line_num, column: 1, new_text: ctx.line
+                        ))
+                        fixes.push(fix)
+
+    fixes
+
+fn _stub_is_fn(t: text) -> bool:
+    t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("static fn ")
+
+fn _stub_is_fn_header(t: text) -> bool:
+    _stub_is_fn(t) and t.ends_with(":")
+
+fn _stub_has_params(t: text) -> bool:
+    if not t.contains("(") or not t.contains(")"):
+        return false
+    val paren_parts = t.split("(")
+    if paren_parts.len() < 2:
+        return false
+    val after_open = paren_parts[1]
+    if not after_open.contains(")"):
+        return false
+    val close_parts = after_open.split(")")
+    val inner = close_parts[0].trim()
+    inner.len() > 0
+
+fn _stub_inline_body(t: text) -> text:
+    if not t.contains(")"):
+        return ""
+    val paren_parts = t.split(")")
+    if paren_parts.len() < 2:
+        return ""
+    val after = paren_parts[1]
+    if not after.contains(":"):
+        return ""
+    val colon_parts = after.split(":")
+    if colon_parts.len() < 2:
+        return ""
+    val body_raw = colon_parts[1]
+    body_raw.trim()
+
+fn _stub_is_trivial(body: text) -> bool:
+    if body.starts_with("pass_todo") or body.starts_with("pass_do_nothing") or body.starts_with("pass_dn"):
+        return false
+    for p in _stub_trivial():
+        if body == p:
+            return true
+    body == "pass"
+
+# ============================================================================
+# Master: run all text-scanning rules
+# ============================================================================
+
+fn check_all_rules(source: String, file: String) -> [EasyFix]:
+    var all_fixes: [EasyFix] = []
+
+    val fixes1 = check_print_in_test_spec(source: source, file: file)
+    for f in fixes1:
+        all_fixes.push(f)
+
+    val fixes2 = check_unnamed_duplicate_typed_args(source: source, file: file)
+    for f in fixes2:
+        all_fixes.push(f)
+
+    val fixes3 = check_resource_leak(source: source, file: file)
+    for f in fixes3:
+        all_fixes.push(f)
+
+    val fixes4 = check_spipe_missing_docstrings(source: source, file: file)
+    for f in fixes4:
+        all_fixes.push(f)
+
+    val fixes5 = check_spipe_manual_assertions(source: source, file: file)
+    for f in fixes5:
+        all_fixes.push(f)
+
+    val fixes6 = check_non_exhaustive_match(source: source, file: file)
+    for f in fixes6:
+        all_fixes.push(f)
+
+    val fixes7 = check_parser_contextual_keyword(source: source, file: file)
+    for f in fixes7:
+        all_fixes.push(f)
+
+    val fixes8 = check_deprecated_if_let(source: source, file: file)
+    for f in fixes8:
+        all_fixes.push(f)
+
+    val fixes9 = check_stub_impl_text(source: source, file: file)
+    for f in fixes9:
+        all_fixes.push(f)
+
+    # Rules 7 (typo) and 9 (type coercion) are no-ops in text-scanning mode.
+    # They require compiler integration (Rust side).
+
+    all_fixes
