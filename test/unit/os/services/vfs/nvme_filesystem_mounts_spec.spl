@@ -4,6 +4,8 @@ use std.fs_driver.mem_block_device.{MemBlockDevice}
 use std.fs_driver.types.{Path, OpenFlags}
 use std.fs_driver.capability.{Capability}
 use std.fs_driver.extension.{Extension}
+use std.fs_driver.direct_io.{direct_io_nvme_filesystem_extension}
+use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks}
 use os.services.vfs.vfs_init.{_clear_vfs_rootfs_for_test, vfs_mount_rootfs_from_nvme_lease_checked}
 use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmeQueueAssignment, NvmeFilesystemLease, nvme_filesystem_lease}
@@ -142,16 +144,57 @@ describe "NVMe filesystem mount factory":
     it "persists DBFS normal writes through the raw NVMe arena on device-backed mounts":
         val driver_source = read_file("src/lib/nogc_sync_mut/db/dbfs_driver/dbfs_driver.spl")
         val nvfs_source = read_file("src/lib/nogc_sync_mut/fs_driver/nvfs_driver.spl")
+        val arena_source = read_file("src/lib/nogc_sync_mut/db/dbfs_engine/raw_nvme_arena.spl")
 
         expect(driver_source.contains("fn _commit_inode_bytes_to_device(inode_id: u64, data: [u8]) -> Result<bool, FsError>:")).to_equal(true)
         expect(driver_source.contains("if self.direct_io.is_none():\n            return Ok(false)")).to_equal(true)
-        expect(driver_source.contains("val r = arena.arena_append(arena.arena_handle(), data, DurabilityClass.BestEffort)")).to_equal(true)
+        expect(driver_source.contains("val handle = arena.arena_handle()\n        val r = arena.arena_append(handle, data, DurabilityClass.BestEffort)")).to_equal(true)
         expect(driver_source.contains("_dbfs_record_device_blob(self.inst_id, inode_id, offset, r.bytes_written)")).to_equal(true)
-        expect(driver_source.contains("arena.arena_read_bytes(arena.arena_handle(), _dbfs_device_blob_offsets[blob_idx], want)")).to_equal(true)
+        expect(driver_source.contains("val bytes = arena.arena_read_bytes(handle, _dbfs_device_blob_offsets[blob_idx], want)")).to_equal(true)
         expect(driver_source.contains("val committed = self._commit_inode_bytes_to_device(old.id, _dbfs_slice_bytes(content, content.len() as i64))")).to_equal(true)
         expect(driver_source.contains("if committed.is_err():\n            return Ok(())")).to_equal(true)
         expect(driver_source.contains("val committed = self._commit_inode_bytes_to_device(old.id, _dbfs_text_to_bytes(new_content))")).to_equal(true)
         expect(nvfs_source.contains("self.inner.pwrite_handle(handle, content, offset)?")).to_equal(true)
+        expect(arena_source.contains("var _nvm_mirror_idxs: [i32]")).to_equal(true)
+        expect(arena_source.contains("_nvm_mirror_secs.push(sector_copy)")).to_equal(true)
+
+    it "round-trips DBFS DirectIo-backed normal bytes from the raw NVMe arena":
+        val direct = direct_io_nvme_filesystem_extension("dbfs", 512u32)
+        val opened = DbFsDriver.open_on_device_with_direct_io(MemBlockDevice.new(1024u64, 512u32), 256i64, 128i64, direct)
+        expect(opened.is_ok()).to_equal(true)
+        val driver = opened.unwrap()
+        val handle = driver.open_path(Path(raw: "/arena.db"), OpenFlags.read_write().with_create())
+        expect(handle.is_ok()).to_equal(true)
+        val write = driver.write_bytes_handle(handle.unwrap(), [0x44u8, 0x42u8, 0x46u8, 0x53u8])
+        expect(write.is_ok()).to_equal(true)
+        val read = driver.read_bytes_handle(handle.unwrap(), 4i64)
+        expect(read.is_ok()).to_equal(true)
+        val bytes = read.unwrap()
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0x44u8)
+        expect(bytes[3]).to_equal(0x53u8)
+
+    it "does not reuse stale DBFS DirectIo arena sectors across fresh devices":
+        val direct = direct_io_nvme_filesystem_extension("dbfs", 512u32)
+        val first = DbFsDriver.open_on_device_with_direct_io(MemBlockDevice.new(1024u64, 512u32), 384i64, 128i64, direct)
+        expect(first.is_ok()).to_equal(true)
+        val first_driver = first.unwrap()
+        val first_handle = first_driver.open_path(Path(raw: "/arena.db"), OpenFlags.read_write().with_create())
+        expect(first_handle.is_ok()).to_equal(true)
+        expect(first_driver.write_bytes_handle(first_handle.unwrap(), [0x41u8, 0x41u8, 0x41u8, 0x41u8]).is_ok()).to_equal(true)
+
+        val second = DbFsDriver.open_on_device_with_direct_io(MemBlockDevice.new(1024u64, 512u32), 384i64, 128i64, direct)
+        expect(second.is_ok()).to_equal(true)
+        val second_driver = second.unwrap()
+        val second_handle = second_driver.open_path(Path(raw: "/arena.db"), OpenFlags.read_write().with_create())
+        expect(second_handle.is_ok()).to_equal(true)
+        expect(second_driver.write_bytes_handle(second_handle.unwrap(), [0x42u8, 0x42u8, 0x42u8, 0x42u8]).is_ok()).to_equal(true)
+        val second_read = second_driver.read_bytes_handle(second_handle.unwrap(), 4i64)
+        expect(second_read.is_ok()).to_equal(true)
+        val second_bytes = second_read.unwrap()
+        expect(second_bytes.len()).to_equal(4)
+        expect(second_bytes[0]).to_equal(0x42u8)
+        expect(second_bytes[3]).to_equal(0x42u8)
 
     it "keeps FAT32 direct I/O extent mapping tied to cluster-chain storage sectors":
         val factory = read_file("src/os/services/vfs/nvme_filesystem_mounts.spl")

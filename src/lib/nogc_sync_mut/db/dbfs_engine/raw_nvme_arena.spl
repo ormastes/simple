@@ -40,6 +40,9 @@ struct _NvmeArenaMeta:
 var _nvm_bases:  [i64]          = []
 var _nvm_metas:  [_NvmeArenaMeta] = []
 var _nvm_devs:   [BlockDevice]  = []
+var _nvm_mirror_idxs: [i32]     = []
+var _nvm_mirror_lbas: [u64]     = []
+var _nvm_mirror_secs: [[u8]]    = []
 
 fn _nvm_find(base_block: i64) -> i32:
     """Return index for base_block, or -1."""
@@ -49,6 +52,16 @@ fn _nvm_find(base_block: i64) -> i32:
             return i
         i = i + 1
     -1
+
+fn _nvm_clear_mirror_for_idx(idx: i32):
+    """Drop cached sectors for an arena slot when a fresh device is registered."""
+    var i: i32 = _nvm_mirror_idxs.len() as i32 - 1
+    while i >= 0:
+        if _nvm_mirror_idxs[i] == idx:
+            _nvm_mirror_idxs.remove(i)
+            _nvm_mirror_lbas.remove(i)
+            _nvm_mirror_secs.remove(i)
+        i = i - 1
 
 # ---------------------------------------------------------------------------
 # Helpers: sector-level read / write wrappers
@@ -60,6 +73,11 @@ fn _sector_size_of(idx: i32) -> i64:
 fn _read_sector_bytes(idx: i32, lba: u64) -> [u8]:
     """Read one sector; returns empty on error."""
     val sz = _sector_size_of(idx)
+    var mirror_idx: i32 = 0
+    while mirror_idx < _nvm_mirror_idxs.len() as i32:
+        if _nvm_mirror_idxs[mirror_idx] == idx and _nvm_mirror_lbas[mirror_idx] == lba:
+            return _nvm_mirror_secs[mirror_idx]
+        mirror_idx = mirror_idx + 1
     var buf: [u8] = []
     var j: i64 = 0
     while j < sz:
@@ -73,7 +91,27 @@ fn _read_sector_bytes(idx: i32, lba: u64) -> [u8]:
 
 fn _write_sector_bytes(idx: i32, lba: u64, data: [u8]) -> bool:
     val r = _nvm_devs[idx].write_sector(lba, data)
-    r.is_ok()
+    if r.is_err():
+        return false
+    val sz = _sector_size_of(idx)
+    var sector_copy: [u8] = []
+    var ci: i64 = 0
+    while ci < sz and ci < data.len():
+        sector_copy.push(data[ci])
+        ci = ci + 1
+    while ci < sz:
+        sector_copy.push(0)
+        ci = ci + 1
+    var mirror_idx: i32 = 0
+    while mirror_idx < _nvm_mirror_idxs.len() as i32:
+        if _nvm_mirror_idxs[mirror_idx] == idx and _nvm_mirror_lbas[mirror_idx] == lba:
+            _nvm_mirror_secs[mirror_idx] = sector_copy
+            return true
+        mirror_idx = mirror_idx + 1
+    _nvm_mirror_idxs.push(idx)
+    _nvm_mirror_lbas.push(lba)
+    _nvm_mirror_secs.push(sector_copy)
+    true
 
 fn _data_lba(base_block: i64, byte_offset: i64, sector_size: i64) -> u64:
     """Convert logical byte offset (relative to arena data region) to LBA."""
@@ -97,13 +135,10 @@ struct RawNvmeArena:
     static fn new(dev: BlockDevice, base_block: i64, block_count: i64) -> RawNvmeArena:
         """Register a new arena over the given BlockDevice region.
 
-        If an arena at base_block is already registered it is reused (idempotent).
+        If an arena at base_block is already registered it is rebound to the
+        fresh BlockDevice and its sparse sector mirror is cleared.
         block_count must be >= 2 (block 0 = metadata, blocks 1..N-1 = data).
         """
-        val existing = _nvm_find(base_block)
-        if existing >= 0:
-            return RawNvmeArena(base_block: base_block, block_count: block_count)
-
         val meta = _NvmeArenaMeta(
             base_block:  base_block,
             block_count: block_count,
@@ -112,6 +147,13 @@ struct RawNvmeArena:
             discarded:   false,
             total_bytes: 0,
         )
+        val existing = _nvm_find(base_block)
+        if existing >= 0:
+            _nvm_metas[existing] = meta
+            _nvm_devs[existing] = dev
+            _nvm_clear_mirror_for_idx(existing)
+            return RawNvmeArena(base_block: base_block, block_count: block_count)
+
         _nvm_bases.push(base_block)
         _nvm_metas.push(meta)
         _nvm_devs.push(dev)
