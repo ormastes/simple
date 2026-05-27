@@ -73,6 +73,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - VFS exposes boot storage provider state and a production acceptance helper so
   `VFS ready` is not treated as production-ready NVMe unless it came from the
   pure-Simple `simple-driver` path.
+- Production VFS boot has a fail-closed entry point: development boots may keep
+  the C bridge fallback, but production NVMe boot rejects fallback-backed VFS
+  readiness.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
