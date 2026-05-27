@@ -1,0 +1,49 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _physical_nvme_access_marker() -> text:
+    "[real-device] storage_provider=simple-driver network_provider=simple-driver " +
+        "storage_placement=user-space-driver network_placement=user-space-driver " +
+        "storage_namespace=non-secure-resource-namespace network_namespace=non-secure-resource-namespace " +
+        "storage_grant=resource-grant-set:tok=501 network_grant=resource-grant-set:tok=none common_driver_logic=shared\n"
+
+fn _physical_nvme_perf_marker(hardware_target: text, qemu: text, measured_on: text) -> text:
+    "nvme_perf reason=ready simple_provider=simple-driver workload=4k-random-read-write " +
+        "io_size_bytes=4096 direct_io_path=nvme-lease-shared-dma-4k " +
+        "fs_consumers=fat32,nvfs,dbfs c_bridge_used=false common_logic_shared=true " +
+        "allocation_per_io=false simple_read_iops=120000 simple_write_iops=90000 " +
+        "simple_read_p99_us=800 simple_write_p99_us=1000 c_read_iops=100000 " +
+        "c_write_iops=80000 c_read_p99_us=900 c_write_p99_us=1100 " +
+        "queue_depth=64 warm_runs=5 max_rss_kib=32768 hardware_target=" + hardware_target +
+        " qemu=" + qemu + " device_model=Samsung_PM9A3 device_serial=SN123456 " +
+        "namespace_nsid=1 measured_on=" + measured_on + "\n"
+
+fn _run_checker(serial_path: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "src/compiler_rust/target/debug/simple",
+        ["run", "src/app/simpleos_nvme_serial_check/main.spl", "--serial-log", serial_path],
+        15000
+    )
+
+describe "SimpleOS physical NVMe serial checker app":
+    it "exits zero for real NVMe evidence and nonzero for q35 emulator evidence":
+        val ready_path = "/tmp/simpleos_nvme_serial_check_ready.log"
+        val q35_path = "/tmp/simpleos_nvme_serial_check_q35.log"
+        val _ = rt_file_delete(ready_path)
+        val _ = rt_file_delete(q35_path)
+        val ready_log = _physical_nvme_access_marker() + _physical_nvme_perf_marker("real-nvme", "false", "real-device") + "TEST PASSED\n"
+        val q35_log = _physical_nvme_access_marker() + _physical_nvme_perf_marker("q35", "true", "emulator") + "TEST PASSED\n"
+
+        expect(rt_file_write_text(ready_path, ready_log)).to_equal(true)
+        expect(rt_file_write_text(q35_path, q35_log)).to_equal(true)
+
+        val (ready_stdout, _ready_stderr, ready_code) = _run_checker(ready_path)
+        val (q35_stdout, _q35_stderr, q35_code) = _run_checker(q35_path)
+
+        expect(ready_code).to_equal(0)
+        expect(ready_stdout).to_contain("reason=ready")
+        expect(q35_code).to_equal(1)
+        expect(q35_stdout).to_contain("reason=missing-physical-nvme-marker:hardware_target=real-nvme")
