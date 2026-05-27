@@ -139,6 +139,19 @@ describe "NVMe filesystem mount factory":
         expect(mapped.byte_len).to_equal(4096u64)
         expect(mapped.sector_size).to_equal(512u32)
 
+    it "persists DBFS normal writes through the raw NVMe arena on device-backed mounts":
+        val driver_source = read_file("src/lib/nogc_sync_mut/db/dbfs_driver/dbfs_driver.spl")
+        val nvfs_source = read_file("src/lib/nogc_sync_mut/fs_driver/nvfs_driver.spl")
+
+        expect(driver_source.contains("fn _commit_inode_bytes_to_device(inode_id: u64, data: [u8]) -> Result<bool, FsError>:")).to_equal(true)
+        expect(driver_source.contains("if self.direct_io.is_none():\n            return Ok(false)")).to_equal(true)
+        expect(driver_source.contains("val r = arena.arena_append(arena.arena_handle(), data, DurabilityClass.BestEffort)")).to_equal(true)
+        expect(driver_source.contains("_dbfs_record_device_blob(self.inst_id, inode_id, offset, r.bytes_written)")).to_equal(true)
+        expect(driver_source.contains("val committed = self._commit_inode_bytes_to_device(old.id, _dbfs_slice_bytes(content, content.len() as i64))")).to_equal(true)
+        expect(driver_source.contains("if committed.is_err():\n            return Ok(())")).to_equal(true)
+        expect(driver_source.contains("val committed = self._commit_inode_bytes_to_device(old.id, _dbfs_text_to_bytes(new_content))")).to_equal(true)
+        expect(nvfs_source.contains("self.inner.pwrite_handle(handle, content, offset)?")).to_equal(true)
+
     it "keeps FAT32 direct I/O extent mapping tied to cluster-chain storage sectors":
         val factory = read_file("src/os/services/vfs/nvme_filesystem_mounts.spl")
         val stub = read_file("src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl")
