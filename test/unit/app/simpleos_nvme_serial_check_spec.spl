@@ -64,6 +64,20 @@ fn _run_lab_wrapper_with_preflight(serial_path: text, preflight_path: text, repo
         15000
     )
 
+fn _run_lab_wrapper_production(serial_path: text, preflight_path: text, report_path: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        ["scripts/run_simpleos_physical_nvme_perf.shs", "--production", "--serial-log", serial_path, "--validate-log-only", "--preflight-report", preflight_path, "--report-out", report_path],
+        15000
+    )
+
+fn _run_lab_wrapper_production_without_preflight(serial_path: text, report_path: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        ["scripts/run_simpleos_physical_nvme_perf.shs", "--production", "--serial-log", serial_path, "--validate-log-only", "--report-out", report_path],
+        15000
+    )
+
 fn _run_lab_preflight(fake_nvme_path: text) -> (text, text, i32):
     rt_process_run_timeout(
         "/bin/sh",
@@ -244,6 +258,32 @@ describe "SimpleOS physical NVMe serial checker app":
 
         expect(code).to_equal(0)
         expect(report_text).to_contain("preflight_report: " + preflight_report)
+        expect(report_text).to_contain("preflight_identity_match: true")
+
+    it "requires preflight identity and validation report in production wrapper mode":
+        val ready_path = "/tmp/simpleos_nvme_lab_wrapper_production.log"
+        val preflight_report = "/tmp/simpleos_nvme_lab_wrapper_production_preflight.sdn"
+        val report = "/tmp/simpleos_nvme_lab_wrapper_production_report.sdn"
+        val _ = rt_file_delete(ready_path)
+        val _ = rt_file_delete(preflight_report)
+        val _ = rt_file_delete(report)
+        val ready_log = _physical_nvme_access_marker() + _physical_nvme_perf_marker("real-nvme", "false", "real-device") + "TEST PASSED\n"
+        val matching_preflight =
+            "physical_nvme_preflight:\n" +
+            "  device: /dev/nvme9n1\n" +
+            "    serial: SN123456\n" +
+            "    namespace_nsid: 1\n"
+
+        expect(rt_file_write_text(ready_path, ready_log)).to_equal(true)
+        val (_missing_stdout, missing_stderr, missing_code) = _run_lab_wrapper_production_without_preflight(ready_path, report)
+        expect(missing_code).to_equal(2)
+        expect(missing_stderr).to_contain("--production requires --preflight-report")
+
+        expect(rt_file_write_text(preflight_report, matching_preflight)).to_equal(true)
+        val (_stdout, _stderr, code) = _run_lab_wrapper_production(ready_path, preflight_report, report)
+        val report_text = rt_file_read_text(report) ?? ""
+
+        expect(code).to_equal(0)
         expect(report_text).to_contain("preflight_identity_match: true")
 
     it "preflights the physical NVMe lab environment before serial capture":
