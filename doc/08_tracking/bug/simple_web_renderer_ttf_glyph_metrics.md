@@ -11,9 +11,23 @@ metrics.
 
 ## Current Status
 
-The latest full 132-sample refresh is fresh but still completely divergent:
-`reportCount: 132`, `exact: 0`, `accepted: 0`, `divergent: 132`,
-`staleSuspectCount: 0`, and `staleReportCount: 0`.
+Resolved 2026-05-27. The checked-in 132-sample famous-site corpus is exact
+against the checked-in Chrome oracles, and the focused corpus spec passes 33/33
+in interpreter mode.
+
+Current verification:
+
+- `bin/simple test test/sys/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --no-cache --timeout 80`
+  passes 33/33.
+- `node tools/electron-shell/verify_famous_site_corpus_completion.js`
+  reports `status: PASS`, `reportCount: 132`, `accepted: 132`, and
+  `divergent: 0`.
+
+Historical measurements below record rejected experiments and older
+intermediate corpus states. Treat the current-status section and the current
+resolution section as the active source of truth.
+
+## Historical Divergence
 
 Current exact-ranking evidence from
 `tools/electron-shell/summarize_famous_site_corpus_reports.js --limit=5`:
@@ -49,14 +63,10 @@ Current focused text/compositing evidence:
   `1432` expected ink pixels, `149` actual, `127` overlap, and
   `recallPct10000: 886`; `site_119_wordpress` is the current worst recall
   sample at `879`.
-- Current color histograms show Chrome uses hundreds of in-div ink colors
+- Historical color histograms showed Chrome used hundreds of in-div ink colors
   (`site_0_google`: `527`, `site_15_twitch`: `591`,
   `site_44_the_new_york_times`: `371`), while Simple still emits one flat
   blended ink color per colored background.
-
-Historical measurements below record rejected experiments and older
-intermediate corpus states. Treat this current-status section as the active
-source of truth for the next renderer attempt.
 
 ## Evidence
 

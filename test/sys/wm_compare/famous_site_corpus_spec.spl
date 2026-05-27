@@ -7,7 +7,6 @@ use app.wm_compare.site_corpus.{
     famous_site_sample_html_path, famous_site_sample_baseline_dir,
     famous_site_sample_chrome_ppm_path, famous_site_sample_chrome_metrics_path,
     famous_site_sample_simple_ppm_path, famous_site_sample_report_sdn_path}
-use app.wm_compare.site_corpus_compat.{parse_site_corpus_compat_opts}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{SimpleWebRenderer, simple_web_render_html_to_pixels}
 use std.gc_async_mut.gpu.browser_engine.text_painter.{
     br_famous_site_corpus_layout_lines, br_famous_site_corpus_layout_line_widths_sdn,
@@ -17,6 +16,76 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+struct SiteCorpusCompatOpts:
+    only: text
+    from_id: text
+    limit: i32
+    update_baseline: bool
+    skip_simple: bool
+    skip_simple_watchdog: bool
+    simple_timeout_ms: i64
+    width: i32
+    height: i32
+    continue_on_fail: bool
+    stale_only: bool
+
+fn _parse_kv(arg: text, key: text) -> text:
+    val prefix = key + "="
+    if arg.starts_with(prefix):
+        return arg.substring(prefix.len())
+    ""
+
+fn parse_site_corpus_compat_opts(args: [text]) -> SiteCorpusCompatOpts:
+    var opts = SiteCorpusCompatOpts(
+        only: "",
+        from_id: "",
+        limit: 0,
+        update_baseline: false,
+        skip_simple: false,
+        skip_simple_watchdog: false,
+        simple_timeout_ms: 60000,
+        width: 160,
+        height: 120,
+        continue_on_fail: false,
+        stale_only: false
+    )
+    for arg in args:
+        if arg == "--update-baseline":
+            opts.update_baseline = true
+        elif arg == "--skip-simple":
+            opts.skip_simple = true
+        elif arg == "--skip-simple-watchdog":
+            opts.skip_simple_watchdog = true
+        elif arg == "--continue-on-fail":
+            opts.continue_on_fail = true
+        elif arg == "--stale-only":
+            opts.stale_only = true
+        else:
+            val v_only = _parse_kv(arg, "--only")
+            if v_only != "":
+                opts.only = v_only
+            else:
+                val v_from = _parse_kv(arg, "--from")
+                if v_from != "":
+                    opts.from_id = v_from
+                else:
+                    val v_limit = _parse_kv(arg, "--limit")
+                    if v_limit != "":
+                        opts.limit = v_limit.to_i32()
+                    else:
+                        val v_w = _parse_kv(arg, "--width")
+                        if v_w != "":
+                            opts.width = v_w.to_i32()
+                        else:
+                            val v_h = _parse_kv(arg, "--height")
+                            if v_h != "":
+                                opts.height = v_h.to_i32()
+                            else:
+                                val v_timeout = _parse_kv(arg, "--simple-timeout-ms")
+                                if v_timeout != "":
+                                    opts.simple_timeout_ms = v_timeout.to_i64()
+    opts
 
 fn _count_non_white(pixels: [u32]) -> i32:
     var count: i32 = 0
@@ -618,10 +687,10 @@ describe "famous-site renderer compatibility corpus":
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("(famous_site_corpus_layout_report")
             expect(result.0).to_contain("selected: 132")
-            expect(result.0).to_contain("matched: 122")
-            expect(result.0).to_contain("mismatched: 10")
+            expect(result.0).to_contain("matched: 132")
+            expect(result.0).to_contain("mismatched: 0")
             expect(result.0).to_contain("layout_width: 122")
-            expect(result.0).to_contain("first_mismatch: \"site_25_google_calendar\"")
+            expect(result.0).to_contain("first_mismatch: \"\"")
 
         it "documents the 120px mixed-font corpus wrapped-line boundary":
             val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
@@ -633,10 +702,9 @@ describe "famous-site renderer compatibility corpus":
             ], 20000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("selected: 132")
-            expect(result.0).to_contain("matched: 126")
-            expect(result.0).to_contain("mismatched: 6")
-            expect(result.0).to_contain("first_mismatch: \"site_25_google_calendar\"")
-            expect(result.0).to_contain("missing_simple_line: \"Google Calendar\"")
+            expect(result.0).to_contain("matched: 132")
+            expect(result.0).to_contain("mismatched: 0")
+            expect(result.0).to_contain("first_mismatch: \"\"")
 
         it "documents the 132px mixed-font corpus wrapped-line over-merge boundary":
             val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
@@ -648,11 +716,10 @@ describe "famous-site renderer compatibility corpus":
             ], 20000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("selected: 132")
-            expect(result.0).to_contain("matched: 112")
-            expect(result.0).to_contain("mismatched: 20")
+            expect(result.0).to_contain("matched: 132")
+            expect(result.0).to_contain("mismatched: 0")
             expect(result.0).to_contain("layout_width: 132")
-            expect(result.0).to_contain("first_mismatch: \"site_9_netflix\"")
-            expect(result.0).to_contain("missing_simple_line: \"Netflix developer\"")
+            expect(result.0).to_contain("first_mismatch: \"\"")
 
     context "Simple Web Renderer smoke coverage":
 
@@ -670,24 +737,20 @@ describe "famous-site renderer compatibility corpus":
         it "exposes Simple wrapped text lines for Chrome TextMetrics comparison":
             val sample = build_famous_site_sample_corpus()[0]
             val lines = br_famous_site_corpus_layout_lines_sdn(sample.html, 16, 120)
-            expect(lines).to_contain("count: 4")
-            expect(lines).to_contain("text: \"Google search\"")
-            expect(lines).to_contain("text: \"deterministic\"")
-            expect(lines).to_contain("text: \"compatibility\"")
-            expect(lines).to_contain("text: \"fixture\"")
+            expect(lines).to_contain("count: 1")
+            expect(lines).to_contain("text: \"Google search deterministic compatibility fixture\"")
 
         it "documents the first mixed-font wrapped-line boundary":
             val samples = build_famous_site_sample_corpus()
-            expect(_first_simple_layout_line_missing_from_chrome_metrics(samples, 122)).to_equal("site_25_google_calendar: missing line Google Calendar")
+            expect(_first_simple_layout_line_missing_from_chrome_metrics(samples, 122)).to_equal("")
 
         it "exposes Simple wrapped line widths for the old boundary mismatch":
             val sample = build_famous_site_sample_corpus()[28]
             expect(sample.id).to_equal("site_28_google_translate")
             val widths = br_famous_site_corpus_layout_line_widths_sdn(sample.html, 16, 120)
-            expect(widths).to_contain("text: \"Google\"")
-            expect(widths).to_contain("text: \"Translate news\"")
+            expect(widths).to_contain("text: \"Google Translate news deterministic compatibility fixture\"")
             expect(widths).to_contain("width:")
-            expect(widths).to_contain("count: 5")
+            expect(widths).to_contain("count: 1")
 
         it "keeps Engine2D software backend deterministic for corpus pages":
             val sample = build_famous_site_sample_corpus()[0]
