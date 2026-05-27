@@ -29,3 +29,20 @@ description: Version bump and release. Accepts version argument (major/first, mi
 ## Prerequisite
 
 Run $verify first — must show STATUS: PASS.
+SPipe must already be complete and verified. Do not create or update SPipe in
+release; if SPipe is missing/stale, return to verify/implementation.
+
+## Push
+
+After commit/tag, ask before pushing. If approved, use jj linear sync:
+
+```bash
+FILE_COUNT_BEFORE=$(git ls-files | wc -l | tr -d ' ')
+jj git fetch
+jj rebase -d main@origin
+FILE_COUNT_AFTER=$(git ls-files | wc -l | tr -d ' ')
+test "$FILE_COUNT_AFTER" -ge "$FILE_COUNT_BEFORE"
+jj bookmark set main -r @-
+jj git push --bookmark main
+git push --tags
+```

@@ -171,6 +171,11 @@ Run `/verify` — production readiness check:
 | Architecture | `doc/04_architecture/` missing or outdated |
 | Design | `doc/05_design/` missing or outdated |
 
+SPipe belongs to verify as a release-blocking evidence gate. Implementation or
+design creates/updates SPipe specs; verify checks that they exist, are current,
+use real assertions, cover REQ-NNN requirements, and contain no placeholder
+passes. Release must not create or update SPipe after verify.
+
 Additional required checks for compiler/core/lib or MCP/LSP changes:
 - `<runtime> check src/compiler`
 - `<runtime> check src/lib`
@@ -187,7 +192,22 @@ Must show `STATUS: PASS` before release.
 
 ## Step 5: Release
 
-Run `/release` — version bump, CHANGELOG, commit, tag, push.
+Run `/release` — version bump, CHANGELOG, commit, tag, and push only after
+`/verify` shows `STATUS: PASS`.
+
+Release uses jj for linear history:
+
+```bash
+jj commit -m "chore: release vX.Y.Z"
+jj git fetch
+jj rebase -d main@origin
+jj bookmark set main -r @-
+jj git push --bookmark main
+git push --tags
+```
+
+Ask before pushing. Treat "pull" as `jj git fetch` plus `jj rebase`; do not use
+merge-style pulls.
 
 ---
 

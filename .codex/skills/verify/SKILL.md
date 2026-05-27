@@ -27,11 +27,18 @@ description: "Codex verification skill (primary verifier in cooperative mode). 6
 - Map changes to requirements (REQ-NNN)
 - Verify no unrelated changes sneaked in
 
-### Phase 2: SPipe Quality
+### Phase 2: SPipe Quality and Coverage
+
+SPipe is owned by **design/implementation for creation** and by
+**verify for acceptance**. Release must only consume a completed verify result;
+release must not create, rewrite, or weaken SPipe evidence after verification.
 
 - Every `it` block has real assertions (not `pass_todo`, not `expect(true).to_equal(true)`)
 - Edge cases and error paths tested
 - Every REQ-NNN has at least one test
+- Every required SPipe spec exists at `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
+- Every BDD scenario has an executable or intentionally skipped SPipe `it` block with a concrete reason
+- SPipe files are current with the final requirements/design; stale specs are a FAIL, not a release task
 - Built-in matchers only: `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Use `to_equal(true)` not `to_be_true()`
 
@@ -108,6 +115,7 @@ STATUS: FAIL (2 failures, 1 warning)
 ## Rules
 
 - NEVER downgrade a FAIL to WARN — fix the issue
+- NEVER defer SPipe creation, cleanup, or requirement coverage updates to release
 - NEVER skip stub detection — STUB001 is non-negotiable
 - NEVER mark STATUS: PASS with outstanding FAILs
 - If verification finds issues, report them — do not auto-fix without user approval

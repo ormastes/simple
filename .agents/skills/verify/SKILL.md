@@ -16,9 +16,15 @@ description: Production readiness verification. Checks SPipe tests for stubs/dum
 ## Checks
 
 ### 1. SPipe Tests
+SPipe is verified here, before release. Release consumes `STATUS: PASS`; it does
+not create, rewrite, or weaken SPipe after verification.
+
 - Every `it` block has real assertions (not `pass_todo`, not `expect(true).to_equal(true)`)
 - Edge cases and error paths tested
 - Every REQ-NNN has test coverage
+- Required SPipe specs exist under `doc/06_spec/app/<app_name>/feature/`
+- Every BDD scenario has an executable or intentionally skipped SPipe `it` block with a concrete reason
+- Stale, missing, placeholder, or requirement-disconnected SPipe is a FAIL
 
 ### 2. Implementation
 - No stub functions (`pass_todo`, weak `pass_do_nothing(...)`, weak `pass_dn(...)`, weak `todo(...)`)
@@ -61,4 +67,5 @@ description: Production readiness verification. Checks SPipe tests for stubs/dum
 - Zero FAIL items
 - WARN items reviewed
 - STATUS: PASS before release
+- Do not defer SPipe fixes or coverage updates to release
 - Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed

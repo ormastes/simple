@@ -25,6 +25,10 @@ Run `verify` skill first — must show **STATUS: PASS**.
 
 Do NOT proceed with release if verification has any FAIL items.
 
+SPipe specs and SPipe coverage are verified before release. Do not create,
+rewrite, or weaken SPipe during release; if SPipe is missing, stale, or
+placeholder-based, stop and go back to verify/implementation.
+
 ## Steps
 
 ### 1. Read Current Version
@@ -78,7 +82,7 @@ git add -A && git commit -m "chore: release vX.Y.Z"
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
 ```
 
-### 7. Push (ASK FIRST)
+### 7. Sync and Push (ASK FIRST)
 
 **Do NOT push without user approval.**
 
@@ -86,6 +90,11 @@ Ask: **"Ready to push vX.Y.Z to remote? (y/n)"**
 
 If approved:
 ```bash
+FILE_COUNT_BEFORE=$(git ls-files | wc -l | tr -d ' ')
+jj git fetch
+jj rebase -d main@origin
+FILE_COUNT_AFTER=$(git ls-files | wc -l | tr -d ' ')
+test "$FILE_COUNT_AFTER" -ge "$FILE_COUNT_BEFORE"
 jj bookmark set main -r @- && jj git push --bookmark main
 git push --tags
 ```
@@ -101,6 +110,7 @@ git push --tags
 ## Rules
 
 - NEVER release without verify PASS
+- NEVER update SPipe in release; release must consume verified SPipe evidence
 - NEVER push without user approval
 - NEVER skip version locations — all 4 files must be updated
 - All code in `.spl` — no Python, no Bash

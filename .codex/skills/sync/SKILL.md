@@ -1,9 +1,12 @@
 ---
 name: sync
-description: "Pull, rebase, and push with file-count safety checks. Worktree-aware jj sync. Use when syncing the repository."
+description: "Commit, fetch/pull, rebase, and push with file-count safety checks. Worktree-aware jj sync. Use when syncing the repository."
 ---
 
-# Sync Skill — Pull/Rebase/Push with Safety Checks
+# Sync Skill — Commit, Pull/Rebase, Push with Safety Checks
+
+`jj` does not use `git pull` directly in this workflow. Treat "pull" as
+`jj git fetch` followed by `jj rebase -d main@origin`.
 
 ## Rules
 1. **NO BRANCHES** — work directly on `main`
@@ -20,7 +23,7 @@ FILE_COUNT_BEFORE=$(git ls-files | wc -l | tr -d ' ')
 # 1. Commit local changes (if any)
 jj commit -m "<type>: <msg>"
 
-# 2. Fetch remote
+# 2. Pull remote state (jj fetch)
 jj git fetch
 
 # 3. Rebase onto latest remote
@@ -49,3 +52,5 @@ then return to the original workspace path and run `jj workspace update-stale`.
 ## Safety
 - If file count drops unexpectedly, show `jj diff --stat`, exit before bookmark/push, and require explicit human continuation outside the script block
 - Restore with: `jj op restore <op_id>` if rebase went wrong
+- Never push if verify has not passed for release-bound changes
+- Never push without explicit user approval when acting inside release flow
