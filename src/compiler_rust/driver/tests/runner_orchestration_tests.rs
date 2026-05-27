@@ -51,7 +51,7 @@ throttled_threads = 4
 "#;
 
     let mut options = TestOptions::default();
-    assert_eq!(options.throttled_threads, 1); // default value
+    assert_eq!(options.throttled_threads, 4); // default value
 }
 
 #[test]

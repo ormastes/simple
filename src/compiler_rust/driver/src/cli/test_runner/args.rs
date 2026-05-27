@@ -279,11 +279,14 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             "--throttled-threads" => {
                 i += 1;
                 if i < args.len() {
-                    options.throttled_threads = args[i].parse().unwrap_or(1);
+                    options.throttled_threads = args[i].parse().unwrap_or(options.throttled_threads);
                 }
             }
             arg if arg.starts_with("--throttled-threads=") => {
-                options.throttled_threads = arg.trim_start_matches("--throttled-threads=").parse().unwrap_or(1);
+                options.throttled_threads = arg
+                    .trim_start_matches("--throttled-threads=")
+                    .parse()
+                    .unwrap_or(options.throttled_threads);
             }
             "--cpu-check-interval" => {
                 i += 1;

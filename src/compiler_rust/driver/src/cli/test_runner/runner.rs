@@ -113,7 +113,7 @@ fn parse_resource_throttle_config(content: &str, options: &mut TestOptions) {
                 }
                 "throttled_threads" => {
                     if let Ok(v) = value.parse::<usize>() {
-                        if options.throttled_threads == 1 {
+                        if options.throttled_threads == 4 {
                             options.throttled_threads = v;
                         }
                     }

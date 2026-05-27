@@ -302,7 +302,7 @@ impl Default for TestOptions {
             max_threads: 0, // Auto-detect (only used when parallel=true)
             cpu_threshold: 70,
             memory_threshold: 70,
-            throttled_threads: 1,
+            throttled_threads: 4,
             full_parallel: false,
             cpu_check_interval: 5,
             slow_threshold_ms: None,

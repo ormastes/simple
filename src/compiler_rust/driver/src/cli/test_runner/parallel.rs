@@ -38,7 +38,7 @@ impl Default for ParallelConfig {
             max_threads: 0, // Auto-detect
             cpu_threshold: 70,
             memory_threshold: 70,
-            throttled_threads: 1,
+            throttled_threads: 4,
             // Reduced from 5s to 1s for faster response to resource changes.
             // With condvar-based interruptible sleep, shorter intervals don't
             // cause stop() to hang.
@@ -76,6 +76,8 @@ pub struct ParallelExecutor {
     config: ParallelConfig,
     resource_monitor: Option<ResourceMonitor>,
     current_threads: Arc<AtomicUsize>,
+    high_resource_samples: AtomicUsize,
+    low_resource_samples: AtomicUsize,
 }
 
 impl ParallelExecutor {
@@ -113,6 +115,8 @@ impl ParallelExecutor {
             config,
             resource_monitor,
             current_threads: Arc::new(AtomicUsize::new(initial_threads)),
+            high_resource_samples: AtomicUsize::new(0),
+            low_resource_samples: AtomicUsize::new(0),
         }
     }
 
@@ -230,8 +234,19 @@ impl ParallelExecutor {
             let memory_high = monitor.is_memory_above_threshold(self.config.memory_threshold);
 
             if cpu_high || memory_high {
-                // Either resource is high - reduce threads
-                let new_threads = self.config.throttled_threads.max(1);
+                self.low_resource_samples.store(0, Ordering::SeqCst);
+                let high_samples = self.high_resource_samples.fetch_add(1, Ordering::SeqCst) + 1;
+                if high_samples < 3 {
+                    return;
+                }
+
+                // Either resource is high for several samples - reduce threads gradually.
+                let floor = self
+                    .config
+                    .throttled_threads
+                    .max(1)
+                    .min(self.config.effective_max_threads());
+                let new_threads = current.div_ceil(2).max(floor);
                 if current > new_threads {
                     self.current_threads.store(new_threads, Ordering::SeqCst);
                     if !quiet {
@@ -259,6 +274,7 @@ impl ParallelExecutor {
                     );
                 }
             } else {
+                self.high_resource_samples.store(0, Ordering::SeqCst);
                 // Check if BOTH resources are below hysteresis threshold to scale up
                 let cpu_hysteresis = self.config.cpu_threshold.saturating_sub(10) as f32;
                 let memory_hysteresis = self.config.memory_threshold.saturating_sub(10) as f32;
@@ -266,10 +282,15 @@ impl ParallelExecutor {
                 let memory_low = memory_usage < memory_hysteresis;
 
                 if cpu_low && memory_low {
+                    let low_samples = self.low_resource_samples.fetch_add(1, Ordering::SeqCst) + 1;
+                    if low_samples < 2 {
+                        return;
+                    }
+
                     // Both resources are low - consider increasing threads
                     let max_threads = self.config.effective_max_threads();
                     if current < max_threads {
-                        let new_threads = (current + 1).min(max_threads);
+                        let new_threads = (current * 2).min(max_threads);
                         self.current_threads.store(new_threads, Ordering::SeqCst);
                         debug_log!(
                             DebugLevel::Trace,
@@ -281,6 +302,8 @@ impl ParallelExecutor {
                             new_threads
                         );
                     }
+                } else {
+                    self.low_resource_samples.store(0, Ordering::SeqCst);
                 }
                 // If only one is below hysteresis, stay at current thread count
             }
@@ -346,7 +369,7 @@ mod tests {
         let config = ParallelConfig::default();
         assert_eq!(config.max_threads, 0);
         assert_eq!(config.cpu_threshold, 70);
-        assert_eq!(config.throttled_threads, 1);
+        assert_eq!(config.throttled_threads, 4);
         assert_eq!(config.check_interval, 1); // Reduced from 5 to 1 for faster response
         assert!(!config.full_parallel);
     }

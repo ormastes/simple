@@ -1,4 +1,4 @@
-# Bug: Test runner CPU throttle drops to 1 thread, effectively stalls full suite
+# Bug: Test runner CPU throttle dropped to 1 thread, effectively stalling full suite
 
 **Date:** 2026-05-27
 **Severity:** Medium
@@ -30,6 +30,20 @@ The CPU throttle logic in the test runner:
 1. Checks CPU percentage at a single point in time
 2. Drops from current thread count directly to 1 (no gradual reduction)
 3. Does not appear to ramp back up when CPU usage normalizes
+
+## Status
+
+**RESOLVED** — fixed in `src/compiler_rust/driver/src/cli/test_runner/parallel.rs`.
+
+The runner now:
+- waits for 3 consecutive high-resource samples before throttling
+- reduces gradually by halving current thread count instead of jumping directly
+  to the floor
+- uses a default throttled floor of 4 threads instead of 1
+- requires 2 consecutive low-resource samples before ramping back up
+- ramps up by doubling current thread count up to the configured maximum
+
+The CLI/config defaults and tests were updated to match the new default floor.
 
 With 32 threads each spawning interpreter processes, CPU briefly spikes during
 the initial burst. The throttle fires immediately and locks at 1 thread for the
