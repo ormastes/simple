@@ -7,7 +7,7 @@ use app.io.cli_commands.*
 use compiler.driver.driver_api_core.{interpret_file}
 use compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
-use compiler.tools.fix.rules.{check_simd_opportunities, easyfix_id_text, easyfix_description_text}
+use compiler.tools.fix.rules.{check_simd_opportunities, check_short_grammar_refactor, easyfix_id_text, easyfix_description_text}
 use compiler.tools.lint.main.{LintConfig, LintLevel, Linter}
 use std.tooling.easy_fix.{FixConfidence}
 use std.tooling.easy_fix.types.{fixreport_applied, fixreport_details}
@@ -345,12 +345,15 @@ fn cli_run_fix(args: [text]) -> i64:
     # Parse flags from args
     var dry_run = false
     var fix_all = false
+    var fix_id: text = ""
     var files: [text] = []
     for arg in args:
         if arg == "--dry-run":
             dry_run = true
         elif arg == "--fix-all":
             fix_all = true
+        elif arg.starts_with("--fix-id="):
+            fix_id = arg.slice(9)
         elif arg == "fix":
             # Skip the command name itself
             val _ = 0
@@ -363,6 +366,7 @@ fn cli_run_fix(args: [text]) -> i64:
         print "Options:"
         print "  --dry-run   Show what would be fixed without applying"
         print "  --fix-all   Apply all fixes regardless of confidence"
+        print "  --fix-id=ID Apply only fixes matching ID prefix"
         return 1
 
     var exit_code = 0
@@ -378,7 +382,10 @@ fn cli_run_fix(args: [text]) -> i64:
             exit_code = 1
             continue
 
-        val fixes = collect_fixes_from_source(file_path, source)
+        val fixes = if fix_id.starts_with("L:short_grammar_"):
+            check_short_grammar_refactor(source, file_path)
+        else:
+            collect_fixes_from_source(file_path, source)
         if fixes.len() == 0:
             print "No fixes available for {file_path}"
             continue
@@ -387,6 +394,8 @@ fn cli_run_fix(args: [text]) -> i64:
         var filtered = fixes
         if not fix_all:
             filtered = FixApplicator.filter_by_confidence(filtered, FixConfidence.Safe)
+        if fix_id != "":
+            filtered = FixApplicator.filter_by_id(filtered, fix_id)
 
         if filtered.len() == 0:
             print "No applicable fixes found for {file_path}"
