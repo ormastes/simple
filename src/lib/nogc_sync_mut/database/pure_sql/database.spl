@@ -1123,6 +1123,152 @@ class PureDatabase:
         self.is_open = false
         Ok(())
 
+    # ── Direct Typed API (Phase 3 — bypass SQL parse) ────────────────
+
+    me get(table: text, key_col: text, key_val: DbValue) -> Result<DbRow?, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        val ti = _find_idx(self._tbl_names, table)
+        if ti < 0:
+            return Err(DbError.QueryFailed(sql: "GET", message: "no such table: {table}"))
+        val col_names = self._tbl_cols[ti]
+        val kci = _find_idx(col_names, key_col)
+        if kci < 0:
+            return Err(DbError.QueryFailed(sql: "GET", message: "no such column: {key_col}"))
+        val snap = self._txn.snapshot()
+        var tbl = self._tbl_data[ti]
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
+        val key_txt = key_val.to_text()
+        if use_typed and kci == self._tbl_pk_col[ti]:
+            val pkm = self._tbl_pk_map[ti]
+            if pkm.has(key_txt):
+                val tidx = pkm[key_txt]
+                if tidx >= 0 and tidx < tbl.tuples.len() as i32:
+                    if mvcc_is_visible(tbl.tuples[tidx], snap):
+                        self._tbl_data[ti] = tbl
+                        return Ok(Some(DbRow(columns: col_names, values: typed[tidx])))
+            self._tbl_data[ti] = tbl
+            return Ok(nil)
+        if use_typed:
+            var gi: i32 = 0
+            while gi < tbl.tuples.len() as i32:
+                if mvcc_is_visible(tbl.tuples[gi], snap):
+                    val rv = typed[gi]
+                    if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
+                        self._tbl_data[ti] = tbl
+                        return Ok(Some(DbRow(columns: col_names, values: rv)))
+                gi = gi + 1
+        else:
+            val visible = tbl.scan(snap)
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                val rv = _deserialize_row(visible[ri])
+                if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
+                    self._tbl_data[ti] = tbl
+                    return Ok(Some(DbRow(columns: col_names, values: rv)))
+                ri = ri + 1
+        self._tbl_data[ti] = tbl
+        Ok(nil)
+
+    me put(table: text, values: [DbValue]) -> Result<i64, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        val ti = _find_idx(self._tbl_names, table)
+        if ti < 0:
+            return Err(DbError.QueryFailed(sql: "PUT", message: "no such table: {table}"))
+        val handle = self._txn.begin()
+        val tid = handle.txn_id
+        val ser = _serialize_row(values)
+        var tbl = self._tbl_data[ti]
+        tbl.insert(tid, ser)
+        self._tbl_data[ti] = tbl
+        var typed_put = self._tbl_typed[ti]
+        typed_put.push(values)
+        self._tbl_typed[ti] = typed_put
+        val pk_ci = self._tbl_pk_col[ti]
+        if pk_ci >= 0 and pk_ci < values.len() as i32:
+            var pkm = self._tbl_pk_map[ti]
+            pkm[values[pk_ci].to_text()] = tbl.tuples.len() as i32 - 1
+            self._tbl_pk_map[ti] = pkm
+        self._tbl_rowids[ti] = self._tbl_rowids[ti] + 1
+        self._last_rowid = self._tbl_rowids[ti]
+        self._txn.commit(tid)
+        self._last_changes = 1
+        self._mark_dirty()?
+        Ok(1)
+
+    me delete_by_key(table: text, key_col: text, key_val: DbValue) -> Result<i64, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        val ti = _find_idx(self._tbl_names, table)
+        if ti < 0:
+            return Err(DbError.QueryFailed(sql: "DELETE_BY_KEY", message: "no such table: {table}"))
+        val col_names = self._tbl_cols[ti]
+        val kci = _find_idx(col_names, key_col)
+        if kci < 0:
+            return Err(DbError.QueryFailed(sql: "DELETE_BY_KEY", message: "no such column: {key_col}"))
+        val handle = self._txn.begin()
+        val tid = handle.txn_id
+        val snap = self._txn.snapshot()
+        var tbl = self._tbl_data[ti]
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
+        val key_txt = key_val.to_text()
+        var deleted: i64 = 0
+        if use_typed:
+            var dki: i32 = 0
+            while dki < tbl.tuples.len() as i32:
+                if mvcc_is_visible(tbl.tuples[dki], snap):
+                    val rv = typed[dki]
+                    if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
+                        tbl.delete_matching(tid, tbl.tuples[dki].data)
+                        deleted = deleted + 1
+                dki = dki + 1
+        else:
+            val visible = tbl.scan(snap)
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                val rv = _deserialize_row(visible[ri])
+                if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
+                    tbl.delete_matching(tid, visible[ri])
+                    deleted = deleted + 1
+                ri = ri + 1
+        self._tbl_data[ti] = tbl
+        self._txn.commit(tid)
+        if deleted > 0:
+            self._invalidate_fts(ti)
+        self._last_changes = deleted
+        self._mark_dirty()?
+        Ok(deleted)
+
+    me scan_all(table: text) -> Result<[DbRow], DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        val ti = _find_idx(self._tbl_names, table)
+        if ti < 0:
+            return Err(DbError.QueryFailed(sql: "SCAN", message: "no such table: {table}"))
+        val col_names = self._tbl_cols[ti]
+        val snap = self._txn.snapshot()
+        var tbl = self._tbl_data[ti]
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
+        var rows: [DbRow] = []
+        if use_typed:
+            var si: i32 = 0
+            while si < tbl.tuples.len() as i32:
+                if mvcc_is_visible(tbl.tuples[si], snap):
+                    rows.push(DbRow(columns: col_names, values: typed[si]))
+                si = si + 1
+        else:
+            val visible = tbl.scan(snap)
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                rows.push(DbRow(columns: col_names, values: _deserialize_row(visible[ri])))
+                ri = ri + 1
+        self._tbl_data[ti] = tbl
+        Ok(rows)
+
     me _serialize_disk() -> text:
         var lines: [text] = ["simple-pure-db-v1"]
         var ti: i32 = 0
@@ -1133,12 +1279,21 @@ class PureDatabase:
                 lines.push("fts|" + table_name + "|" + _join_text(self._fts_columns[ti], ","))
             val snap = self._txn.snapshot()
             var tbl = self._tbl_data[ti]
-            val visible = tbl.scan(snap)
+            val typed = self._tbl_typed[ti]
+            val use_typed = typed.len() == tbl.tuples.len()
+            if use_typed:
+                var si: i32 = 0
+                while si < tbl.tuples.len() as i32:
+                    if mvcc_is_visible(tbl.tuples[si], snap):
+                        lines.push("row|" + table_name + "|" + _serialize_row(typed[si]))
+                    si = si + 1
+            else:
+                val visible = tbl.scan(snap)
+                var ri: i32 = 0
+                while ri < visible.len() as i32:
+                    lines.push("row|" + table_name + "|" + visible[ri])
+                    ri = ri + 1
             self._tbl_data[ti] = tbl
-            var ri: i32 = 0
-            while ri < visible.len() as i32:
-                lines.push("row|" + table_name + "|" + visible[ri])
-                ri = ri + 1
             ti = ti + 1
         lines.join("\n")
 
