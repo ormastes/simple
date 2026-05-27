@@ -10,7 +10,7 @@ use std.nogc_sync_mut.http_server.parser.{parse_request}
 use std.nogc_sync_mut.http_server.response.{write_response, write_error}
 use std.nogc_sync_mut.http_server.router.{Router}
 
-# extern fn thread_spawn2<A, B>(a: A, b: B, f: fn(A, B)) -> Thread
+extern fn thread_spawn2<A, B>(a: A, b: B, f: fn(A, B)) -> Thread
 
 class SimpleHttpServer:
     host: text
@@ -23,10 +23,11 @@ class SimpleHttpServer:
             host: host,
             port: port,
             router: router,
-            running: true
+            running: false
         )
 
     fn start():
+        self.running = true
         val addr = "{self.host}:{self.port}"
         match TcpListener.bind(addr):
             Err(e):
@@ -37,6 +38,7 @@ class SimpleHttpServer:
                 self.serve_loop(listener)
 
     fn start_with_callback(on_ready: fn(text, i32)):
+        self.running = true
         val addr = "{self.host}:{self.port}"
         match TcpListener.bind(addr):
             Err(e):
@@ -47,15 +49,20 @@ class SimpleHttpServer:
                 self.serve_loop(listener)
 
     fn stop():
-        pass_dn
+        self.running = false
 
     fn serve_loop(listener: TcpListener):
-        while true:
+        while self.running:
             match listener.accept():
                 Ok(stream):
-                    self.handle_connection(stream)
+                    val handler = thread_spawn2(stream, self, \conn_stream, server:
+                        val srv: SimpleHttpServer = server
+                        SimpleHttpServer.handle_connection_static(srv, conn_stream)
+                    )
+                    handler.free()
                 Err(e):
-                    print "Accept error: {e}"
+                    if self.running:
+                        print "Accept error: {e}"
 
     static fn handle_connection_static(server: SimpleHttpServer, stream: TcpStream):
         server.handle_connection(stream)
