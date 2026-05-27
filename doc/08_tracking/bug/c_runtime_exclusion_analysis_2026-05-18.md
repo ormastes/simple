@@ -25,7 +25,7 @@ Cannot remove until native linker resolves them from Simple-compiled objects.
 | `runtime_math.c` | 27 (`rt_math_*`) | codegen/core-C native-project archive | 12 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
 | `runtime_random.c` | 8 (`rt_random_*`) | codegen/core-C native-project archive | 10 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
 | `runtime_contracts.c` | 2 (`simple_contract_check*`) | codegen emits direct calls | 3 files | Core compiler infrastructure — codegen hardcodes symbol |
-| `runtime_error.c` | `rt_function_not_found`, `rt_method_not_found` | ~10 codegen files + `runtime_native.c` | 2 files | Core codegen — every unresolved call falls through here |
+| `runtime_error.c` | `rt_function_not_found`, `rt_method_not_found` | codegen/core-C native-project archive | 2 files | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native unresolved-call fallbacks. |
 | `runtime_time.c` | 18 (`rt_time_*`, `rt_timestamp_*`) | 8+ files | **199 files** | Most used runtime module; syscall wrappers |
 | `runtime_equality.c` | `rt_native_eq`, `rt_native_neq`, `rt_value_eq`, `rt_value_compare` | `codegen/instr/core.rs`, `llvm/instructions.rs`, `elf_utils.rs`, `runtime_sffi.rs` | 0 direct | Codegen emits eq/neq ops; elf_utils resolves symbol for native link |
 | `runtime_memory.c` | `rt_alloc`, `rt_free`, `rt_ptr_read_i64/i32`, `rt_ptr_write_*`, `rt_memset`, `rt_memcpy` | `codegen/instr/core.rs`, `memory.rs`, `closures_structs.rs`, `llvm/objects.rs` | gpu/memory.spl, ptr/raw.spl, torch/sffi.spl, sffi/llvm_loader.spl | Codegen emits `rt_alloc` for every struct/array alloc; core ABI |
@@ -88,6 +88,9 @@ Additional 2026-05-27 simple-runtime reductions:
 - `value/sffi/config.rs` now implements the macro-trace and debug-mode flags as
   Rust `AtomicBool` state, so `runtime/build.rs` no longer compiles
   `runtime_config.c`.
+- `value/sffi/error_handling.rs` now emits the not-found diagnostics and
+  returns the Rust runtime error sentinel directly, so `runtime/build.rs` no
+  longer compiles `runtime_error.c`.
 
 Verification:
 
@@ -96,6 +99,7 @@ cargo check -p simple-runtime --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::math --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::random --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::config --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::error_handling --manifest-path src/compiler_rust/Cargo.toml
 ```
 
 ## Path to C Removal for Remaining Modules
@@ -104,7 +108,7 @@ For **math/random**: the Rust shim no longer calls these C files as of
 2026-05-27. Remaining removal requires migrating the core-C/native-project
 SFFI export path so native builds no longer need the archived C sources.
 
-For **contracts/error/equality/memory/value/format/native/string_index/async_driver/env**:
+For **contracts/equality/memory/value/format/native/string_index/async_driver/env**:
 codegen-emitted or ABI-layer symbols. Removal requires the native-build linker to
 resolve them from Simple-compiled objects instead of the C archive. Blocked by the
 cross-module ABI bug.

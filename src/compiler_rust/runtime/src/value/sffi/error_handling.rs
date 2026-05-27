@@ -1,23 +1,29 @@
-//! Error handling SFFI — implementations in src/runtime/runtime_error.c.
+//! Error handling SFFI implemented directly in Rust.
 
 use crate::value::core::RuntimeValue;
+use crate::value::tags;
 
-mod c_sffi {
-    use crate::value::core::RuntimeValue;
-    extern "C" {
-        pub(super) fn rt_function_not_found(name_ptr: *const u8, name_len: u64) -> RuntimeValue;
-        pub(super) fn rt_method_not_found(
-            type_ptr: *const u8,
-            type_len: u64,
-            method_ptr: *const u8,
-            method_len: u64,
-        ) -> RuntimeValue;
+unsafe fn string_from_raw_parts(ptr: *const u8, len: u64, fallback: &str) -> String {
+    if ptr.is_null() || len == 0 {
+        return fallback.to_string();
     }
+    let bytes = std::slice::from_raw_parts(ptr, len as usize);
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn runtime_error_value() -> RuntimeValue {
+    RuntimeValue::from_special(tags::SPECIAL_ERROR)
 }
 
 #[inline(always)]
 pub unsafe fn rt_function_not_found(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
-    c_sffi::rt_function_not_found(name_ptr, name_len)
+    if name_ptr.is_null() {
+        eprintln!("Runtime error: Function not found (unknown name)");
+    } else {
+        let name = string_from_raw_parts(name_ptr, name_len, "");
+        eprintln!("Runtime error: Function '{name}' not found");
+    }
+    runtime_error_value()
 }
 #[inline(always)]
 pub unsafe fn rt_method_not_found(
@@ -26,7 +32,10 @@ pub unsafe fn rt_method_not_found(
     method_ptr: *const u8,
     method_len: u64,
 ) -> RuntimeValue {
-    c_sffi::rt_method_not_found(type_ptr, type_len, method_ptr, method_len)
+    let type_name = string_from_raw_parts(type_ptr, type_len, "<unknown type>");
+    let method_name = string_from_raw_parts(method_ptr, method_len, "<unknown method>");
+    eprintln!("Runtime error: Method '{method_name}' not found on type '{type_name}'");
+    runtime_error_value()
 }
 
 #[cfg(test)]
