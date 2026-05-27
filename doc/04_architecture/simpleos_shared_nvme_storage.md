@@ -242,6 +242,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   constructs a lease-backed `NvmeBlockAdapter`; no user/system assignment can
   touch the global controller driver while boot storage is unmounted, C-backed,
   VirtIO-backed, uninitialized, or reporting invalid namespace geometry.
+- User-assigned namespace leases require the queue owner to match the task
+  encoded in the issued `DeviceGrant` BAR/IRQ/DMA/IOMMU tokens, so a grant
+  issued to one user-space driver cannot be reused to expose FAT32, NVFS, or
+  DBFS over another task's data queue.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.
@@ -253,9 +257,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   and shared FAT32/NVFS/DBFS block-interface readiness.
 - `test/unit/os/drivers/nvme/nvme_namespace_assignment_spec.spl` covers
   user-assigned namespace lease construction from a tokenized `DeviceGrant`,
-  grant/evidence mismatch rejection, missing-token rejection, active system/user
-  namespace conflict rejection, and FAT32/NVFS/DBFS readiness on the shared
-  lease surface.
+  grant/evidence mismatch rejection, grant owner mismatch rejection,
+  missing-token rejection, active system/user namespace conflict rejection, and
+  FAT32/NVFS/DBFS readiness on the shared lease surface.
 - `test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl` covers the
   production 4K random read/write measurement contract and rejects C-bridge,
   cold-run, per-I/O allocation, wrong-size, slower-than-C samples, and incomplete
