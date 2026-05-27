@@ -1,6 +1,7 @@
 # Perf Bug: Pure Simple ctype 0.07x–0.46x C (Cranelift, no inlining)
 
 **Date:** 2026-05-18
+**Status:** Open — partially mitigated 2026-05-27; benchmark harness repaired and ctype call nesting flattened, but native remains below the 0.50x C floor.
 **Severity:** Medium — ctype is not hot-path, but pattern applies to all pure Simple stdlib
 **Component:** Cranelift AOT codegen / function inlining
 **Related:** `native_cross_module_call_abi_broken_2026-05-18.md`
@@ -50,3 +51,39 @@ uses same-file inlined functions as a workaround.
 - `test/perf/ctype/bench_ctype_ref.c` — C reference (gcc -O2)
 - `test/perf/ctype/bench_ctype.spl` — Simple (cross-module, interpreter only)
 - `test/perf/ctype/bench_ctype_inline.spl` — Simple (same-file, native-safe)
+
+## 2026-05-27 Follow-up
+
+The benchmark harness itself had drifted:
+
+- `sh test/perf/ctype/run_ctype_benchmarks.shs` failed because the script uses
+  Bash arrays and `pipefail`.
+- `bash test/perf/ctype/run_ctype_benchmarks.shs` failed because `run_samples`
+  referenced `tag` in the same `local` declaration that assigned it.
+- The native build command used the obsolete `bin/simple build native` form.
+- The C reference still ran 1,000,000 iterations while the Simple benchmark ran
+  1,000, making checksum parity fail before any ratio could be trusted.
+
+The harness now runs with Bash, uses `bin/simple native-build`, and the C
+reference mirrors the Simple iteration count. `std.common.ctype` also no longer
+routes hot aliases and composite predicates through nested ctype calls; it uses
+direct range checks for `is_*`, `alpha`, `alnum`, `xdigit`, `to_lower`, and
+`to_upper`.
+
+Current one-sample evidence:
+
+```text
+benchmark        c_ops/ms   interp_ops/ms   native_ops/ms     interp/c     native/c
+is_digit          1122807             159          258585        0.00x        0.23x
+is_upper          1032258             157          261758        0.00x        0.25x
+is_lower           748538             159          243346        0.00x        0.33x
+is_alpha           836601             140          204800        0.00x        0.24x
+is_alnum          1185185             131          151479        0.00x        0.13x
+is_xdigit          579185             135          155151        0.00x        0.27x
+is_space          1855072             130          157441        0.00x        0.08x
+to_lower          1454545             154          258064        0.00x        0.18x
+to_upper          1600000             156          267782        0.00x        0.17x
+```
+
+The bug remains open. The remaining root is still native call/codegen overhead
+or missing inlining/specialization, not library-level nested predicate calls.

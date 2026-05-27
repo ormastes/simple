@@ -51,7 +51,9 @@ static void report(const char *bench, int64_t ops, int64_t micros, int64_t check
 }
 
 /* ---- benchmark helpers ---- */
-#define ITERS     1000000
+#ifndef ITERS
+#define ITERS     1000
+#endif
 #define ASCII_RANGE 128
 #define TOTAL_OPS ((int64_t)ITERS * ASCII_RANGE)
 
