@@ -17,9 +17,8 @@ use os.services.vfs.vfs_init.{
 use std.fs_driver.instance.{DriverInstance}
 use std.db.dbfs_driver.{DbFsDriver}
 use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
-use std.fs_driver.types.{MountOptions}
+use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use std.fs_driver.mem_block_device.{MemBlockDevice}
-use std.db.dbfs_engine.superblock.{dbfs_superblock_set_device, dbfs_superblock_format_disk}
 use os.kernel.loader.executable_source.{resolve_executable_bytes, _clear_synthetic_initramfs_for_test, _clear_synthetic_vfs_for_test}
 use os.kernel.loader.elf_loader.{load_user_executable, elf_image_entry}
 use os.kernel.arch.arch_context.{Architecture}
@@ -146,18 +145,18 @@ describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
     it "AC-4: DbFsDriver open_on_device stores and round-trips ELF bytes via block device":
         # Arrange: create a MemBlockDevice with 2048 sectors of 512 bytes each
         val dev = MemBlockDevice.new(2048u64, 512u32)
-        # Format DBFS superblock at LBA 2-3 on the device
-        dbfs_superblock_set_device(dev)
-        val fmt_ok = dbfs_superblock_format_disk(0xDEADBEEF00000001u64, 0x0000000000000002u64)
-        expect(fmt_ok).to_equal(true)
         # Open DbFsDriver with arena starting at LBA 4 (size_sectors - 4 arena blocks)
         val driver_r = DbFsDriver.open_on_device(dev, 4i64, 2044i64)
         expect(driver_r.is_ok()).to_equal(true)
         val driver = driver_r.unwrap()
-        # Write ELF bytes via driver write_bytes_handle
+        # Write ELF bytes via the same handle API used by the VFS dispatcher.
         val elf = _make_elf64_rv64()
-        val write_r = driver.write_bytes_handle("/sbin/init", elf)
+        val open_r = driver.open_path(Path(raw: "sbin/init"), OpenFlags.create_write())
+        expect(open_r.is_ok()).to_equal(true)
+        val write_r = driver.write_bytes_handle(open_r.unwrap(), elf)
         expect(write_r.is_ok()).to_equal(true)
+        val close_r = driver.close_handle(open_r.unwrap())
+        expect(close_r.is_ok()).to_equal(true)
         # Mount the driver via vfs_mount_rootfs (new production API — AC-1 prerequisite)
         _clear_vfs_rootfs_for_test()
         _clear_synthetic_initramfs_for_test()
