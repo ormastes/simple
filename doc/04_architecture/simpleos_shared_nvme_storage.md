@@ -219,8 +219,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   `system_storage_placement=system-driver` for the system driver lane.
   Physical NVMe acceptance also requires
   `user_namespace_assignment=hardware-data-queue`,
-  `user_namespace_mode=user-assigned`, `user_namespace_direct_io=read-write`,
-  and `user_namespace_conflict_policy=active-lease-checked`.
+  `user_namespace_mode=user-assigned`, `user_namespace_queue_id=<data queue>`,
+  `user_namespace_direct_io=read-write`, and
+  `user_namespace_conflict_policy=active-lease-checked`.
   It also requires per-filesystem extent proof:
   `fat32_extent_source=freestanding-fat32-extents`,
   `nvfs_extent_source=freestanding-dbfs-arena`, and
