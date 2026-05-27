@@ -221,6 +221,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   `user_namespace_assignment=hardware-data-queue`,
   `user_namespace_mode=user-assigned`, `user_namespace_direct_io=read-write`,
   and `user_namespace_conflict_policy=active-lease-checked`.
+  It also requires per-filesystem extent proof:
+  `fat32_extent_source=freestanding-fat32-extents`,
+  `nvfs_extent_source=freestanding-dbfs-arena`, and
+  `dbfs_extent_source=freestanding-dbfs-arena`.
 - Hardware labs can run
   `src/app/simpleos_nvme_serial_check/main.spl --serial-log <path>` against the
   captured serial log. The app delegates to the same physical-NVMe readiness
