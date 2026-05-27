@@ -1822,6 +1822,12 @@ class PureDatabase:
             ti = _find_idx(self._tbl_names, table)
         if ti < 0:
             return Err(DbError.QueryFailed(sql: "SCAN_RANGE", message: "no such table: {table}"))
+        val low_i = _dbval_as_i64(low)
+        val high_i = _dbval_as_i64(high)
+        val cache_key = col + "|" + low_i.to_text() + "|" + high_i.to_text()
+        if ti < self._scan_cache_key.len() as i32:
+            if self._scan_cache_key[ti] == cache_key and cache_key != "":
+                return Ok(self._scan_cache_res[ti])
         val col_names = self._tbl_cols[ti]
         var cci: i32 = -1
         if ti < self._tbl_col_idx.len() as i32:
@@ -1836,14 +1842,22 @@ class PureDatabase:
         var tbl = self._tbl_data[ti]
         val typed = self._tbl_typed[ti]
         val use_typed = typed.len() == tbl.tuples.len()
+        val n_tuples = tbl.tuples.len() as i32
+        var vis = self._tbl_vis[ti]
+        if self._tbl_vis_xmax[ti] != snap.xmax or vis.len() != n_tuples as i64:
+            var new_vis: [bool] = []
+            var vi: i32 = 0
+            while vi < n_tuples:
+                new_vis.push(mvcc_is_visible(tbl.tuples[vi], snap))
+                vi = vi + 1
+            self._tbl_vis[ti] = new_vis
+            self._tbl_vis_xmax[ti] = snap.xmax
+            vis = new_vis
         var rows: [DbRow] = []
         if use_typed:
-            val low_i = _dbval_as_i64(low)
-            val high_i = _dbval_as_i64(high)
-            val n = tbl.tuples.len() as i32
             var si: i32 = 0
-            while si < n:
-                if mvcc_is_visible(tbl.tuples[si], snap):
+            while si < n_tuples:
+                if vis[si]:
                     val rv = typed[si]
                     if cci < rv.len() as i32:
                         val cv = _dbval_as_i64(rv[cci])
@@ -1857,12 +1871,13 @@ class PureDatabase:
                 val rv = _deserialize_row(visible[ri])
                 if cci < rv.len() as i32:
                     val cv = _dbval_as_i64(rv[cci])
-                    val lv = _dbval_as_i64(low)
-                    val hv = _dbval_as_i64(high)
-                    if cv >= lv and cv < hv:
+                    if cv >= low_i and cv < high_i:
                         rows.push(DbRow(columns: col_names, values: rv))
                 ri = ri + 1
         self._tbl_data[ti] = tbl
+        if ti < self._scan_cache_key.len() as i32:
+            self._scan_cache_key[ti] = cache_key
+            self._scan_cache_res[ti] = rows
         Ok(rows)
 
     me _serialize_disk() -> text:
