@@ -390,6 +390,22 @@ fn vfs_boot_nvme_record_active_lease_for_test(lease: NvmeFilesystemLease) -> tex
 fn vfs_boot_nvme_active_lease_acceptance_reason(lease: NvmeFilesystemLease) -> text:
     nvme_filesystem_lease_set_acceptance_reason(g_vfs_nvme_active_leases, lease)
 
+fn vfs_boot_nvme_shared_driver_ready_for_user_assignment() -> text:
+    val storage_reason = vfs_boot_storage_acceptance_reason(
+        g_vfs_initialized,
+        g_vfs_boot_storage_provider,
+        g_vfs_boot_storage_pure_simple
+    )
+    if storage_reason != "ready":
+        return "nvme-user-assign-boot-storage-not-ready:" + storage_reason
+    if not g_nvme.is_initialized():
+        return "nvme-user-assign-driver-not-initialized"
+    if g_nvme.get_sector_count() == 0u64:
+        return "nvme-user-assign-driver-empty-namespace"
+    if g_nvme.get_sector_size() < 512u32:
+        return "nvme-user-assign-driver-invalid-sector-size"
+    "ready"
+
 fn vfs_boot_nvme_release_active_lease(lease: NvmeFilesystemLease) -> text:
     var remaining: [NvmeFilesystemLease] = []
     var removed = false
@@ -493,6 +509,9 @@ fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
     max_depth: u16,
     consumer: NvmeFilesystemConsumer
 ) -> Result<DriverInstance, text>:
+    val driver_ready = vfs_boot_nvme_shared_driver_ready_for_user_assignment()
+    if driver_ready != "ready":
+        return Err(driver_ready)
     val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(
         evidence,
         grant,

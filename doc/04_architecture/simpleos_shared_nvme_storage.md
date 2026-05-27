@@ -233,6 +233,11 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   reject.
 - Queue assignment is part of filesystem readiness: leases without read, write,
   and queue-submit rights are rejected before FAT32, NVFS, or DBFS can mount.
+- Hardware-backed user namespace mounts are gated on the already-mounted
+  pure-Simple boot storage and the initialized shared `NvmeDriver` before VFS
+  constructs a lease-backed `NvmeBlockAdapter`; no user/system assignment can
+  touch the global controller driver while boot storage is unmounted, C-backed,
+  VirtIO-backed, uninitialized, or reporting invalid namespace geometry.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.
@@ -266,8 +271,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   pure-Simple boot path calls the hardware probe before mounting, then records
   the boot lease for later system/user conflict admission and records accepted
   user namespace assignments in the same active lease registry after driver
-  construction succeeds, including hardware-adapter routing and
-  release/reassignment coverage.
+  construction succeeds, including hardware-adapter routing, fail-closed shared
+  driver readiness gating, and release/reassignment coverage.
 - `test/unit/os/kernel/ipc/dma_alloc_contract_spec.spl` covers the DMA syscall
   result layout used by the pure Simple NVMe driver and VFS adapter.
 - `test/unit/os/kernel/types/device_mem_types_spec.spl` covers DeviceGrant
