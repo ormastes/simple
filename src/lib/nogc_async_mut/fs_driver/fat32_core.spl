@@ -72,13 +72,6 @@ class Fat32Core:
     _cluster_cache_keys: [u32]
     _cluster_cache_values: [[u8]]
     _dirty_clusters: [u32]
-    _block_cache_start: u32
-    _block_cache_zero_start: u32
-    _block_cache_zero_value: [u8]
-    _block_cache_zero_valid: bool
-    _block_cache_keys: [i32]
-    _block_cache_values: [[u8]]
-    _block_cache_valid: bool
     _next_free_hint: u32
 
 impl Fat32Core:
@@ -104,13 +97,6 @@ impl Fat32Core:
             _cluster_cache_keys: [],
             _cluster_cache_values: [],
             _dirty_clusters: [],
-            _block_cache_start: 0,
-            _block_cache_zero_start: 0,
-            _block_cache_zero_value: [],
-            _block_cache_zero_valid: false,
-            _block_cache_keys: [],
-            _block_cache_values: [],
-            _block_cache_valid: false,
             _next_free_hint: 2
         )
 
@@ -289,48 +275,6 @@ impl Fat32Core:
         self._cluster_cache_keys.push(cluster)
         self._cluster_cache_values.push(data)
 
-    me fn _block_cache_lookup(start_cluster: u32, block_index: i32) -> [u8]:
-        if block_index == 0 and self._block_cache_zero_valid and self._block_cache_zero_start == start_cluster:
-            var copy: [u8] = []
-            var zi = 0
-            while zi < self._block_cache_zero_value.len():
-                copy.push(self._block_cache_zero_value[zi])
-                zi = zi + 1
-            return copy
-        if not self._block_cache_valid or self._block_cache_start != start_cluster:
-            return []
-        var i = 0
-        while i < self._block_cache_keys.len():
-            if self._block_cache_keys[i] == block_index:
-                var copy: [u8] = []
-                var vi = 0
-                while vi < self._block_cache_values[i].len():
-                    copy.push(self._block_cache_values[i][vi])
-                    vi = vi + 1
-                return copy
-            i = i + 1
-        []
-
-    me fn _block_cache_put(start_cluster: u32, block_index: i32, data: [u8]):
-        if block_index == 0:
-            self._block_cache_zero_start = start_cluster
-            self._block_cache_zero_value = data
-            self._block_cache_zero_valid = true
-            return
-        if not self._block_cache_valid or self._block_cache_start != start_cluster:
-            self._block_cache_start = start_cluster
-            self._block_cache_keys = []
-            self._block_cache_values = []
-            self._block_cache_valid = true
-        var i = 0
-        while i < self._block_cache_keys.len():
-            if self._block_cache_keys[i] == block_index:
-                self._block_cache_values[i] = data
-                return
-            i = i + 1
-        self._block_cache_keys.push(block_index)
-        self._block_cache_values.push(data)
-
     me fn read_cluster(cluster: u32) -> Result<[u8], text>:
         val cached = self._cluster_cache_lookup(cluster)
         if cached.len() > 0:
@@ -457,9 +401,6 @@ impl Fat32Core:
         if write_rc.is_err():
             return Err("failed to write FAT entry")
         self._chain_valid = false
-        if value == FAT32_FREE:
-            self._block_cache_valid = false
-            self._block_cache_zero_valid = false
         Ok(())
 
     me fn alloc_cluster() -> Result<u32, text>:
@@ -927,9 +868,6 @@ impl Fat32Core:
         self._chain_start = start
         self._chain_values = chain
         self._chain_valid = true
-        if len == 4096 and (original_pos % 4096) == 0 and buf.len() >= 4096:
-            val block_index = (original_pos / 4096).to_i32()
-            self._block_cache_put(start, block_index, buf[0:4096])
         self._save_open_file(idx, of)
         Ok(bytes_written)
 
@@ -1113,8 +1051,5 @@ fn fat32_write(core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> Resu
     core._chain_start = start
     core._chain_values = chain
     core._chain_valid = true
-    if len == 4096 and (original_pos % 4096) == 0 and buf.len() >= 4096:
-        val block_index = (original_pos / 4096).to_i32()
-        core._block_cache_put(start, block_index, buf[0:4096])
     core._save_open_file(idx, of)
     Ok(bytes_written)
