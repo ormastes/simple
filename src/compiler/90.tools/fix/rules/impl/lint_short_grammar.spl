@@ -18,7 +18,7 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
     var fixes: [EasyFix] = []
     var search_from = 0
     while search_from < ctx.line.len():
-        val lambda_start = _find_next_collection_lambda_start(ctx.line, search_from)
+        val lambda_start = _find_next_lambda_start(ctx.line, search_from)
         if lambda_start < 0:
             return fixes
         val parsed = _parse_method_ref_candidate(ctx.line, lambda_start)
@@ -63,15 +63,37 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
 
     fixes
 
-fn _find_next_collection_lambda_start(line: text, search_from: i64) -> i64:
-    var best = -1
-    for marker in [".map(", ".mapped(", ".filter(", ".reject(", ".any(", ".all(", ".flat_map(", ".compact_map(", ".map_err(", ".then("]:
-        val marker_start = _find_text_from(line, marker, search_from)
-        if marker_start >= 0:
-            val candidate = marker_start + marker.len()
-            if best < 0 or candidate < best:
-                best = candidate
-    best
+fn _find_next_lambda_start(line: text, search_from: i64) -> i64:
+    val rel = line[search_from:line.len()].find("\\")
+    if rel < 0:
+        return -1
+    val candidate = search_from + rel
+    if _line_has_comment_before(line, candidate) or _position_is_inside_string(line, candidate):
+        return _find_next_lambda_start(line, candidate + 1)
+    if candidate + 1 >= line.len():
+        return -1
+    val next = line[candidate + 1:candidate + 2]
+    if _is_identifier_start(next) or next == "(":
+        return candidate
+    _find_next_lambda_start(line, candidate + 1)
+
+fn _line_has_comment_before(line: text, pos: i64) -> bool:
+    var i = 0
+    while i < pos:
+        if line[i:i + 1] == "#":
+            return true
+        i = i + 1
+    false
+
+fn _position_is_inside_string(line: text, pos: i64) -> bool:
+    var i = 0
+    var in_string = false
+    while i < pos:
+        val ch = line[i:i + 1]
+        if ch == "\"":
+            in_string = not in_string
+        i = i + 1
+    in_string
 
 struct ShortGrammarMethodRefCandidate:
     method: text
