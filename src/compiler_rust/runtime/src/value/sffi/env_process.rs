@@ -11,38 +11,16 @@ use crate::coverage::{rt_coverage_condition_probe, rt_coverage_decision_probe, r
 use crate::value::collections::{rt_array_get, rt_array_len, rt_string_new, rt_tuple_new, rt_tuple_set};
 use crate::value::{HeapObjectType, RuntimeString, RuntimeValue};
 
-mod c_sffi_env {
-    extern "C" {
-        #[link_name = "__c_rt_env_get_i64"]
-        pub(super) fn rt_env_get_i64(name_ptr: *const u8, name_len: u64, default_value: i64) -> i64;
-        #[link_name = "__c_rt_env_set"]
-        pub(super) fn rt_env_set(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) -> bool;
-        #[link_name = "__c_rt_set_env"]
-        pub(super) fn rt_set_env(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64);
-        #[link_name = "__c_rt_env_exists"]
-        pub(super) fn rt_env_exists(name_ptr: *const u8, name_len: u64) -> bool;
-        #[link_name = "__c_rt_env_remove"]
-        pub(super) fn rt_env_remove(name_ptr: *const u8, name_len: u64) -> bool;
-        #[link_name = "__c_rt_exit"]
-        pub(super) fn rt_exit(code: i32);
-        #[link_name = "__c_rt_platform_name"]
-        pub(super) fn platform_name(out_ptr: *mut *const u8) -> i64;
-        #[link_name = "__c_rt_term_get_size"]
-        pub(super) fn term_get_size(cols: *mut i32, rows: *mut i32);
-        #[link_name = "__c_rt_env_get_str"]
-        pub(super) fn env_get_str(
-            name_ptr: *const u8,
-            name_len: u64,
-            out_ptr: *mut *const u8,
-            out_len: *mut u64,
-        ) -> i32;
-        #[link_name = "__c_rt_env_cwd"]
-        pub(super) fn env_cwd(out: *mut u8, out_cap: u64) -> i64;
-        #[link_name = "__c_rt_env_home"]
-        pub(super) fn env_home(out_ptr: *mut *const u8, out_len: *mut u64) -> i32;
-        #[link_name = "__c_rt_env_temp"]
-        pub(super) fn env_temp(out: *mut u8, out_cap: u64) -> i64;
+unsafe fn ptr_bytes<'a>(ptr: *const u8, len: u64, max_len: usize) -> Option<&'a [u8]> {
+    if ptr.is_null() || len == 0 || len as usize > max_len {
+        return None;
     }
+    Some(std::slice::from_raw_parts(ptr, len as usize))
+}
+
+unsafe fn ptr_string(ptr: *const u8, len: u64, max_len: usize) -> Option<String> {
+    let bytes = ptr_bytes(ptr, len, max_len)?;
+    Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
 fn clear_simple_child_stack_env(command: &mut std::process::Command) {
@@ -134,8 +112,7 @@ pub extern "C" fn rt_path_probe(path_id: u64, block_id: u32) {
 /// Exit the process with the given exit code
 #[no_mangle]
 pub extern "C" fn rt_exit(code: i32) -> ! {
-    unsafe { c_sffi_env::rt_exit(code) }
-    unreachable!()
+    std::process::exit(code)
 }
 
 // ============================================================================
@@ -145,22 +122,25 @@ pub extern "C" fn rt_exit(code: i32) -> ! {
 /// Get environment variable value
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_get(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
-    if name_ptr.is_null() {
+    let Some(name) = ptr_string(name_ptr, name_len, 4095) else {
         return RuntimeValue::NIL;
-    }
-    let mut out_ptr: *const u8 = std::ptr::null();
-    let mut out_len: u64 = 0;
-    if c_sffi_env::env_get_str(name_ptr, name_len, &mut out_ptr, &mut out_len) != 0 {
-        rt_string_new(out_ptr, out_len)
-    } else {
-        RuntimeValue::NIL
-    }
+    };
+    let Ok(value) = std::env::var(name) else {
+        return RuntimeValue::NIL;
+    };
+    rt_string_new(value.as_ptr(), value.len() as u64)
 }
 
 /// Get environment variable parsed as i64, or return the supplied default.
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_get_i64(name_ptr: *const u8, name_len: u64, default_value: i64) -> i64 {
-    c_sffi_env::rt_env_get_i64(name_ptr, name_len, default_value)
+    let Some(name) = ptr_string(name_ptr, name_len, 4095) else {
+        return default_value;
+    };
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(default_value)
 }
 
 /// Alias for rt_env_get for backwards compatibility
@@ -172,25 +152,30 @@ pub unsafe extern "C" fn rt_get_env(name_ptr: *const u8, name_len: u64) -> Runti
 /// Set environment variable
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_set(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) -> bool {
-    c_sffi_env::rt_env_set(name_ptr, name_len, value_ptr, value_len)
+    let Some(name) = ptr_string(name_ptr, name_len, 4095) else {
+        return false;
+    };
+    let Some(value) = ptr_string(value_ptr, value_len, 65535) else {
+        return false;
+    };
+    std::env::set_var(name, value);
+    true
 }
 
 /// Alias for rt_env_set for backwards compatibility
 #[no_mangle]
 pub unsafe extern "C" fn rt_set_env(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) {
-    c_sffi_env::rt_set_env(name_ptr, name_len, value_ptr, value_len);
+    let _ = rt_env_set(name_ptr, name_len, value_ptr, value_len);
 }
 
 /// Get current working directory
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_cwd() -> RuntimeValue {
-    let mut buf = [0u8; 4096];
-    let len = c_sffi_env::env_cwd(buf.as_mut_ptr(), buf.len() as u64);
-    if len > 0 {
-        rt_string_new(buf.as_ptr(), len as u64)
-    } else {
-        RuntimeValue::NIL
-    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return RuntimeValue::NIL;
+    };
+    let text = cwd.to_string_lossy();
+    rt_string_new(text.as_ptr(), text.len() as u64)
 }
 
 /// Get all environment variables as array of (key, value) tuples
@@ -236,37 +221,46 @@ pub unsafe extern "C" fn rt_env_all() -> RuntimeValue {
 /// Check if environment variable exists
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_exists(name_ptr: *const u8, name_len: u64) -> bool {
-    c_sffi_env::rt_env_exists(name_ptr, name_len)
+    let Some(name) = ptr_string(name_ptr, name_len, 4095) else {
+        return false;
+    };
+    std::env::var_os(name).is_some()
 }
 
 /// Remove environment variable
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_remove(name_ptr: *const u8, name_len: u64) -> bool {
-    c_sffi_env::rt_env_remove(name_ptr, name_len)
+    let Some(name) = ptr_string(name_ptr, name_len, 4095) else {
+        return false;
+    };
+    std::env::remove_var(name);
+    true
 }
 
 /// Get home directory path
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_home() -> RuntimeValue {
-    let mut out_ptr: *const u8 = std::ptr::null();
-    let mut out_len: u64 = 0;
-    if c_sffi_env::env_home(&mut out_ptr, &mut out_len) != 0 {
-        rt_string_new(out_ptr, out_len)
-    } else {
-        RuntimeValue::NIL
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok();
+    match home {
+        Some(value) => rt_string_new(value.as_ptr(), value.len() as u64),
+        None => RuntimeValue::NIL,
     }
 }
 
 /// Get temp directory path
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_temp() -> RuntimeValue {
-    let mut buf = [0u8; 4096];
-    let len = unsafe { c_sffi_env::env_temp(buf.as_mut_ptr(), buf.len() as u64) };
-    if len > 0 {
-        rt_string_new(buf.as_ptr(), len as u64)
-    } else {
-        RuntimeValue::NIL
-    }
+    let temp = std::env::var("TMPDIR")
+        .or_else(|_| std::env::var("TMP"))
+        .or_else(|_| std::env::var("TEMP"))
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "C:\\Temp".to_string()
+            } else {
+                "/tmp".to_string()
+            }
+        });
+    rt_string_new(temp.as_ptr(), temp.len() as u64)
 }
 
 // ============================================================================
@@ -903,9 +897,16 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
 /// Returns "windows", "macos", "linux", etc.
 #[no_mangle]
 pub extern "C" fn rt_platform_name() -> RuntimeValue {
-    let mut ptr: *const u8 = std::ptr::null();
-    let len = unsafe { c_sffi_env::platform_name(&mut ptr) };
-    unsafe { rt_string_new(ptr, len as u64) }
+    let name = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unix"
+    };
+    rt_string_new(name.as_ptr(), name.len() as u64)
 }
 
 /// Enable ANSI virtual terminal processing on Windows console.
@@ -941,9 +942,7 @@ pub extern "C" fn rt_term_enable_ansi() -> RuntimeValue {
 pub extern "C" fn rt_term_get_size() -> RuntimeValue {
     let mut cols: i32 = 80;
     let mut rows: i32 = 24;
-    unsafe {
-        c_sffi_env::term_get_size(&mut cols, &mut rows);
-    }
+    fill_terminal_size(&mut cols, &mut rows);
     unsafe {
         let tuple = super::super::collections::rt_tuple_new(2);
         super::super::collections::rt_tuple_set(tuple, 0, RuntimeValue::from_int(cols as i64));
@@ -951,6 +950,24 @@ pub extern "C" fn rt_term_get_size() -> RuntimeValue {
         tuple
     }
 }
+
+#[cfg(unix)]
+fn fill_terminal_size(cols: &mut i32, rows: &mut i32) {
+    let mut ws = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let rc = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
+    if rc == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+        *cols = ws.ws_col as i32;
+        *rows = ws.ws_row as i32;
+    }
+}
+
+#[cfg(not(unix))]
+fn fill_terminal_size(_cols: &mut i32, _rows: &mut i32) {}
 
 // ============================================================================
 // Tests

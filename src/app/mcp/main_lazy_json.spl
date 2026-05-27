@@ -89,13 +89,8 @@ fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
 
 # Manual JSON value scanner.
 #
-# NOTE: These helpers use manual character scanning rather than
-# `text.index_of()` + `match Some(i)`. There is a Cranelift codegen
-# bug where `match idx_opt: Some(i): ... nil: ...` on the result of
-# `index_of()` segfaults at runtime in native binaries. The manual
-# scanner pattern below is the same one used successfully in
-# examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl.
-# Do NOT re-introduce `match Some(i)` on `index_of` results here.
+# NOTE: Avoid `match Some(i)` on `index_of()` results here; that pattern has
+# crashed native Cranelift binaries. Use `?? -1` instead.
 
 fn _char_at(s: text, i: i64) -> text:
     _slice_text(s, i, i + 1)
@@ -106,17 +101,11 @@ fn _is_ws(ch: text) -> bool:
 fn _find_json_value_start(json: text, key: text) -> i64:
     val search = Q() + key + Q()
     var offset = 0
-    while offset + search.len() <= json.len():
-        var matches = true
-        var j = 0
-        while j < search.len():
-            if _slice_text(json, offset + j, offset + j + 1) != _slice_text(search, j, j + 1):
-                matches = false
-                break
-            j = j + 1
-        if not matches:
-            offset = offset + 1
-            continue
+    while offset < json.len():
+        val found = json.index_of(search, offset) ?? -1
+        if found < 0:
+            return -1
+        offset = found
         var value_start = offset + search.len()
         while value_start < json.len() and _is_ws(_char_at(json, value_start)):
             value_start = value_start + 1

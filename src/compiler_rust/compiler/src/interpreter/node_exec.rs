@@ -708,22 +708,24 @@ fn exec_assignment(
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         // Get the object name (must be an identifier for now)
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
-            if let Some(obj_val) = env.get(obj_name).cloned() {
+            if let Some(obj_val) = env.remove(obj_name) {
                 match obj_val {
-                    Value::Object { class, fields } => {
-                        let object = Value::Object {
-                            class: class.clone(),
-                            fields: fields.clone(),
-                        };
-                        if let Some(updated) = super::update_bitfield_field(&object, field, value.clone()) {
-                            env.insert(obj_name.clone(), updated);
-                            return Ok(Control::Next);
+                    Value::Object { class, mut fields } => {
+                        {
+                            let bf_check = Value::Object {
+                                class: class.clone(),
+                                fields: Arc::clone(&fields),
+                            };
+                            if let Some(updated) = super::update_bitfield_field(&bf_check, field, value.clone()) {
+                                env.insert(obj_name.clone(), updated);
+                                return Ok(Control::Next);
+                            }
                         }
-                        let mut fields = fields;
                         Arc::make_mut(&mut fields).insert(field.clone(), value);
                         env.insert(obj_name.clone(), Value::Object { class, fields });
                     }
-                    _ => {
+                    other => {
+                        env.insert(obj_name.clone(), other);
                         let ctx = ErrorContext::new()
                             .with_code(codes::INVALID_ASSIGNMENT)
                             .with_help("field assignment requires an object with mutable access");
@@ -765,10 +767,9 @@ fn exec_assignment(
         } = receiver.as_ref()
         {
             if let Expr::Identifier(obj_name) = inner_receiver.as_ref() {
-                if let Some(obj_val) = env.get(obj_name).cloned() {
+                if let Some(obj_val) = env.remove(obj_name) {
                     match obj_val {
-                        Value::Object { class, fields } => {
-                            let mut fields = fields;
+                        Value::Object { class, mut fields } => {
                             // Get the inner object
                             if let Some(inner_val) = fields.get(inner_field).cloned() {
                                 match inner_val {
@@ -1450,26 +1451,19 @@ fn exec_augmented_assignment(
     // Handle field access targets: obj.field += 1
     else if let Expr::FieldAccess { receiver, field } = &assign.target {
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
-            if let Some(obj_val) = env.get(obj_name).cloned() {
+            // Evaluate RHS while object is still in env (RHS may reference self.field)
+            let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+            if is_suspend {
+                rhs_value = await_value(rhs_value)?;
+            }
+            if let Some(obj_val) = env.remove(obj_name) {
                 match obj_val {
-                    Value::Object { class, fields } => {
-                        let mut fields = fields;
-                        // Evaluate the RHS
-                        let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
-
-                        // If suspension, await the value
-                        if is_suspend {
-                            rhs_value = await_value(rhs_value)?;
-                        }
-
-                        // If compound assignment, combine with current value
+                    Value::Object { class, mut fields } => {
                         let new_value = if let Some(op) = bin_op {
-                            // Create a binary expression and evaluate it
                             let current = fields
                                 .get(field)
                                 .cloned()
                                 .ok_or_else(|| crate::error::factory::undefined_field(field))?;
-                            // Insert temps and evaluate
                             let temp_lhs = "__lhs_temp__".to_string();
                             let temp_rhs = "__rhs_temp__".to_string();
                             env.insert(temp_lhs.clone(), current);
@@ -1491,7 +1485,8 @@ fn exec_augmented_assignment(
                         env.insert(obj_name.clone(), Value::Object { class, fields });
                         Ok(Control::Next)
                     }
-                    _ => {
+                    other => {
+                        env.insert(obj_name.clone(), other);
                         let ctx = ErrorContext::new()
                             .with_code(codes::INVALID_ASSIGNMENT)
                             .with_help("augmented assignment on fields requires an object value");

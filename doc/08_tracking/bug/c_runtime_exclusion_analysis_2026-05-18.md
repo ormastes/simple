@@ -35,7 +35,7 @@ Cannot remove until native linker resolves them from Simple-compiled objects.
 | `runtime_string_index.c` | `rt_swi_build/char_to_byte/byte_to_char/free`, `rt_rank_select_build`, `rt_rank_query`, `rt_select_query`, `rt_rank_select_free` | `codegen/runtime_sffi.rs` (8 entries), `interpreter_extern/simd.rs` | 0 direct | Codegen SFFI table + interpreter extern; Unicode index structures |
 | `async_driver.c` | `rt_driver_create/destroy`, `rt_driver_submit_*` (13 variants), `rt_driver_poll*`, `rt_driver_cancel` | `codegen/runtime_sffi.rs` (15 entries), `codegen/instr/calls.rs`, `llvm/functions/calls.rs` | 0 direct spl; driven via codegen SFFI | Async I/O driver; codegen emits all submit/poll calls |
 | `runtime_config.c` | `rt_set_macro_trace`, `rt_is_macro_trace_enabled`, `rt_set_debug_mode`, `rt_is_debug_mode_enabled` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
-| `runtime_env.c` | `__c_rt_env_get_i64`, `__c_rt_env_set/exists/remove/get_str/cwd/home/temp`, `__c_rt_exit`, `__c_rt_stdout/stderr_flush`, `__c_rt_platform_name`, `__c_rt_term_get_size` | `codegen/runtime_sffi.rs` (`rt_env_*` family), `interpreter_extern/system.rs` | 0 direct (wrapped by Rust `rt_env_*` shims) | Env/platform syscall wrappers; Rust shims expose as `rt_env_*` |
+| `runtime_env.c` | `__c_rt_env_get_i64`, `__c_rt_env_set/exists/remove/get_str/cwd/home/temp`, `__c_rt_exit`, `__c_rt_stdout/stderr_flush`, `__c_rt_platform_name`, `__c_rt_term_get_size` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native env/platform exports. |
 
 ### Group B — SPL FFI surface (blocked by no Simple replacement yet)
 
@@ -110,6 +110,9 @@ Additional 2026-05-27 simple-runtime reductions:
   `runtime/build.rs` no longer compiles `runtime_format.c`.
 - `value/pty.rs` now exports `rt_pty_open` and `rt_pty_spawn` directly in
   Rust, so `runtime/build.rs` no longer compiles `runtime_pty.c`.
+- `value/sffi/env_process.rs` and `value/sffi/io_print.rs` now implement
+  env/platform/terminal helpers, process exit, and stdout/stderr flush directly
+  in Rust, so `runtime/build.rs` no longer compiles `runtime_env.c`.
 
 Verification:
 
@@ -125,6 +128,7 @@ cargo test -p simple-runtime sffi::contracts --manifest-path src/compiler_rust/C
 cargo test -p simple-runtime sffi::regex_stub --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::io_print --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime value::pty --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::env_process --manifest-path src/compiler_rust/Cargo.toml
 ```
 
 ## Path to C Removal for Remaining Modules
@@ -133,7 +137,7 @@ For **math/random**: the Rust shim no longer calls these C files as of
 2026-05-27. Remaining removal requires migrating the core-C/native-project
 SFFI export path so native builds no longer need the archived C sources.
 
-For **memory/native/string_index/async_driver/env**:
+For **memory/native/string_index/async_driver**:
 codegen-emitted or ABI-layer symbols. Removal requires the native-build linker to
 resolve them from Simple-compiled objects instead of the C archive. Blocked by the
 cross-module ABI bug.

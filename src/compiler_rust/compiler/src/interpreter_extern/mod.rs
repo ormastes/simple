@@ -1042,6 +1042,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_file_read_bytes", file_io::rt_file_read_bytes as ExternFn);
     m.insert("rt_file_read_lines", file_io::rt_file_read_lines as ExternFn);
     m.insert("rt_file_read_text", file_io::rt_file_read_text as ExternFn);
+    m.insert("rt_file_read_text_at", file_io::rt_file_read_text_at as ExternFn);
     m.insert("rt_file_remove", file_io::rt_file_remove as ExternFn);
     m.insert("rt_file_rename", file_io::rt_file_rename as ExternFn);
     m.insert("rt_file_size", file_io::rt_file_size as ExternFn);

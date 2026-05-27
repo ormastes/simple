@@ -73,7 +73,11 @@ pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<Str
         let runner = create_runner(gc_log, gc_off);
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let result = if matches!(extension, "spl" | "simple" | "sscript" | "shs" | "") {
-            runner.run_file_interpreted_with_args(&path, args)
+            if runner.is_jit_mode() {
+                runner.run_file_with_args(&path, args)
+            } else {
+                runner.run_file_interpreted_with_args(&path, args)
+            }
         } else {
             runner.run_file(&path)
         };

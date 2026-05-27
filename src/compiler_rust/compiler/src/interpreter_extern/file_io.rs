@@ -7,7 +7,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -256,6 +256,34 @@ pub fn rt_file_write_text_at(args: &[Value]) -> Result<Value, CompileError> {
     match file.write_all(content.as_bytes()) {
         Ok(_) => Ok(Value::Int(content.len() as i64)),
         Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+/// Read text at an absolute byte offset without reading the full file.
+pub fn rt_file_read_text_at(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let offset = match args.get(1) {
+        Some(Value::Int(n)) if *n >= 0 => *n as u64,
+        _ => return Ok(Value::Str(String::new())),
+    };
+    let size = match args.get(2) {
+        Some(Value::Int(n)) if *n >= 0 => *n as usize,
+        _ => return Ok(Value::Str(String::new())),
+    };
+    let mut file = match OpenOptions::new().read(true).open(&path) {
+        Ok(file) => file,
+        Err(_) => return Ok(Value::Str(String::new())),
+    };
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return Ok(Value::Str(String::new()));
+    }
+    let mut buf = vec![0u8; size];
+    match file.read(&mut buf) {
+        Ok(n) => {
+            buf.truncate(n);
+            Ok(Value::Str(String::from_utf8_lossy(&buf).to_string()))
+        }
+        Err(_) => Ok(Value::Str(String::new())),
     }
 }
 

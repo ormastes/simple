@@ -99,11 +99,22 @@ impl Runner {
         self.core.gc_runtime.as_deref()
     }
 
+    pub fn is_jit_mode(&self) -> bool {
+        self.core.execution_mode.is_jit()
+    }
+
     /// Run a Simple source file from disk.
     /// Auto-detects file type by extension: .spl (source) or .smf (binary).
     #[instrument(skip(self), fields(path = %path.display()))]
     pub fn run_file(&self, path: &Path) -> Result<i32, String> {
         self.core.run_file(path)
+    }
+
+    /// Run a Simple source file with command-line arguments.
+    /// Dispatches to JIT or interpreter based on execution mode.
+    #[instrument(skip(self, args), fields(path = %path.display()))]
+    pub fn run_file_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
+        self.core.run_file_with_args(path, args)
     }
 
     /// Run a Simple source file using the interpreter.

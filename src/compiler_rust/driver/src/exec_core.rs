@@ -601,6 +601,14 @@ impl ExecCore {
     /// Dispatches to JIT or interpreter based on `execution_mode`.
     /// When in JIT mode, falls back to interpreter on JIT failure.
     pub fn run_file(&self, path: &Path) -> Result<i32, String> {
+        self.run_file_with_args(path, vec![])
+    }
+
+    /// Run a file with command-line arguments, auto-detecting type by extension.
+    ///
+    /// Dispatches to JIT or interpreter based on `execution_mode`.
+    /// When in JIT mode, falls back to interpreter with args on JIT failure.
+    pub fn run_file_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         match extension {
@@ -615,7 +623,7 @@ impl ExecCore {
                                 "[INFO] JIT compilation failed, falling back to interpreter: {}",
                                 jit_err
                             );
-                            self.run_file_interpreted(path)
+                            self.run_file_interpreted_with_args(path, args)
                         }
                     }
                 } else {
@@ -635,26 +643,22 @@ impl ExecCore {
 
     /// Run a .spl file using JIT compilation via ExecutionManager.
     ///
-    /// Parses → HIR → MIR → JIT compile → execute.
+    /// Loads with import resolution → HIR → MIR → JIT compile → execute.
     /// Falls back to interpreter for code without `fn main()`.
     pub fn run_file_jit(&self, path: &Path) -> Result<i32, String> {
         use simple_compiler::codegen::{ExecutionManager, LocalExecutionManager, JitBackend};
         use simple_compiler::hir;
-        use simple_compiler::interpreter::evaluate_module;
+        use simple_compiler::interpreter::{evaluate_module, set_current_file};
         use simple_compiler::mir::lower_to_mir;
+        use simple_compiler::pipeline::module_loader::load_module_with_imports;
+        use std::collections::HashSet;
 
-        // Read and parse source
-        let source = std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-        // Normalize CRLF → LF
-        let source = if source.contains('\r') {
-            source.replace('\r', "")
-        } else {
-            source
-        };
-        let mut parser = Parser::new(&source);
-        let parse_result = parser.parse();
-        self.display_error_hints(&parser, &source);
-        let ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
+        // Set current file for module resolution
+        set_current_file(Some(path.to_path_buf()));
+
+        // Load with import resolution (handles `use` statements)
+        let ast = load_module_with_imports(path, &mut HashSet::new())
+            .map_err(|e| format!("module load error: {}", e))?;
 
         // Lower to HIR
         let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;
@@ -666,8 +670,8 @@ impl ExecCore {
         let has_main = mir_module.functions.iter().any(|f| f.name == "main");
 
         if !has_main {
-            // No main function - use interpreter for module-level code
             let exit_code = evaluate_module(&ast.items).map_err(|e| format!("{}", e))?;
+            set_current_file(None);
             self.collect_gc();
             return Ok(exit_code);
         }
@@ -686,6 +690,7 @@ impl ExecCore {
 
         // Execute main
         let exit_code = em.execute("main", &[])?;
+        set_current_file(None);
         self.collect_gc();
         Ok(exit_code as i32)
     }

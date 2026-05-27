@@ -18,6 +18,7 @@ use std.fs_driver.types.{DirEntry}
 class FatSectorCache:
     sectors: Dict<u64, [u8]>
     max_size: i32
+    count: i32
     access_counter: i64
     access_time: Dict<u64, i64>
     pinned: Dict<u64, bool>
@@ -26,6 +27,7 @@ class FatSectorCache:
         FatSectorCache(
             sectors: {},
             max_size: max_size,
+            count: 0,
             access_counter: 0,
             access_time: {},
             pinned: {}
@@ -41,27 +43,35 @@ class FatSectorCache:
         result
 
     me fn put(sector: u64, data: [u8]):
+        val is_new = not self.sectors.has(sector)
         var s = self.sectors
-        if s.keys().len() as i32 >= self.max_size:
+        if is_new and self.count >= self.max_size:
             self._evict_one()
             s = self.sectors
         s.set(sector, data)
         self.sectors = s
+        if is_new:
+            self.count = self.count + 1
         self.access_counter = self.access_counter + 1
         var at = self.access_time
         at.set(sector, self.access_counter)
         self.access_time = at
 
     me fn update(sector: u64, data: [u8]):
+        val is_new = not self.sectors.has(sector)
         var s = self.sectors
         s.set(sector, data)
         self.sectors = s
+        if is_new:
+            self.count = self.count + 1
         self.access_counter = self.access_counter + 1
         var at = self.access_time
         at.set(sector, self.access_counter)
         self.access_time = at
 
     me fn invalidate(sector: u64):
+        if self.sectors.has(sector):
+            self.count = self.count - 1
         var s = self.sectors
         s.delete(sector)
         self.sectors = s
@@ -77,6 +87,7 @@ class FatSectorCache:
         self.access_time = {}
         self.pinned = {}
         self.access_counter = 0
+        self.count = 0
 
     me fn mark_dirty(sector: u64):
         var p = self.pinned
@@ -113,6 +124,7 @@ class FatSectorCache:
             var at = self.access_time
             at.delete(min_key)
             self.access_time = at
+            self.count = self.count - 1
 
 # ============================================================================
 # ChainCache — LRU with capacity bound
@@ -121,6 +133,7 @@ class FatSectorCache:
 class ChainCache:
     chains: Dict<u32, [u32]>
     max_size: i32
+    count: i32
     access_counter: i64
     access_time: Dict<u32, i64>
 
@@ -128,6 +141,7 @@ class ChainCache:
         ChainCache(
             chains: {},
             max_size: max_size,
+            count: 0,
             access_counter: 0,
             access_time: {}
         )
@@ -142,18 +156,23 @@ class ChainCache:
         result
 
     me fn put_chain(start_cluster: u32, chain: [u32]):
+        val is_new = not self.chains.has(start_cluster)
         var c = self.chains
-        if c.keys().len() as i32 >= self.max_size:
+        if is_new and self.count >= self.max_size:
             self._evict_one()
             c = self.chains
         c.set(start_cluster, chain)
         self.chains = c
+        if is_new:
+            self.count = self.count + 1
         self.access_counter = self.access_counter + 1
         var at = self.access_time
         at.set(start_cluster, self.access_counter)
         self.access_time = at
 
     me fn invalidate(start_cluster: u32):
+        if self.chains.has(start_cluster):
+            self.count = self.count - 1
         var c = self.chains
         c.delete(start_cluster)
         self.chains = c
@@ -165,6 +184,7 @@ class ChainCache:
         self.chains = {}
         self.access_time = {}
         self.access_counter = 0
+        self.count = 0
 
     me fn _evict_one():
         val ks = self.access_time.keys()
@@ -187,6 +207,7 @@ class ChainCache:
             var at = self.access_time
             at.delete(min_key)
             self.access_time = at
+            self.count = self.count - 1
 
 # ============================================================================
 # PathCache — LRU with capacity bound
@@ -195,6 +216,7 @@ class ChainCache:
 class PathCache:
     entries: Dict<text, DirEntry>
     max_size: i32
+    count: i32
     access_counter: i64
     access_time: Dict<text, i64>
 
@@ -202,6 +224,7 @@ class PathCache:
         PathCache(
             entries: {},
             max_size: max_size,
+            count: 0,
             access_counter: 0,
             access_time: {}
         )
@@ -216,12 +239,15 @@ class PathCache:
         result
 
     me fn put(path: text, entry: DirEntry):
+        val is_new = not self.entries.has(path)
         var e = self.entries
-        if e.keys().len() as i32 >= self.max_size:
+        if is_new and self.count >= self.max_size:
             self._evict_one()
             e = self.entries
         e.set(path, entry)
         self.entries = e
+        if is_new:
+            self.count = self.count + 1
         self.access_counter = self.access_counter + 1
         var at = self.access_time
         at.set(path, self.access_counter)
@@ -231,20 +257,24 @@ class PathCache:
         var e = self.entries
         var at = self.access_time
         val ks = e.keys()
+        var removed = 0
         var i = 0
         while i < ks.len():
             val k = ks[i]
             if k.starts_with(prefix):
                 e.delete(k)
                 at.delete(k)
+                removed = removed + 1
             i = i + 1
         self.entries = e
         self.access_time = at
+        self.count = self.count - removed
 
     me fn clear():
         self.entries = {}
         self.access_time = {}
         self.access_counter = 0
+        self.count = 0
 
     me fn _evict_one():
         val ks = self.access_time.keys()
@@ -267,6 +297,7 @@ class PathCache:
             var at = self.access_time
             at.delete(min_key)
             self.access_time = at
+            self.count = self.count - 1
 
 # ============================================================================
 # ClusterDataCache — LRU with dirty-key pinning
@@ -275,6 +306,7 @@ class PathCache:
 class ClusterDataCache:
     data: Dict<u32, [u8]>
     max_size: i32
+    count: i32
     access_counter: i64
     access_time: Dict<u32, i64>
     pinned: Dict<u32, bool>
@@ -283,6 +315,7 @@ class ClusterDataCache:
         ClusterDataCache(
             data: {},
             max_size: max_size,
+            count: 0,
             access_counter: 0,
             access_time: {},
             pinned: {}
@@ -298,18 +331,23 @@ class ClusterDataCache:
         result
 
     me fn put(cluster: u32, buf: [u8]):
+        val is_new = not self.data.has(cluster)
         var d = self.data
-        if d.keys().len() as i32 >= self.max_size:
+        if is_new and self.count >= self.max_size:
             self._evict_one()
             d = self.data
         d.set(cluster, buf)
         self.data = d
+        if is_new:
+            self.count = self.count + 1
         self.access_counter = self.access_counter + 1
         var at = self.access_time
         at.set(cluster, self.access_counter)
         self.access_time = at
 
     me fn invalidate(cluster: u32):
+        if self.data.has(cluster):
+            self.count = self.count - 1
         var d = self.data
         d.delete(cluster)
         self.data = d
@@ -325,6 +363,7 @@ class ClusterDataCache:
         self.access_time = {}
         self.pinned = {}
         self.access_counter = 0
+        self.count = 0
 
     me fn mark_dirty(cluster: u32):
         var p = self.pinned
@@ -361,3 +400,4 @@ class ClusterDataCache:
             var at = self.access_time
             at.delete(min_key)
             self.access_time = at
+            self.count = self.count - 1

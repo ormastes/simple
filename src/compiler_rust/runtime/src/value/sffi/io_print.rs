@@ -41,15 +41,6 @@ use super::io_capture::{
 };
 use std::io::Write;
 
-mod c_sffi_io {
-    extern "C" {
-        #[link_name = "__c_rt_stdout_flush"]
-        pub(super) fn rt_stdout_flush() -> i64;
-        #[link_name = "__c_rt_stderr_flush"]
-        pub(super) fn rt_stderr_flush() -> i64;
-    }
-}
-
 #[derive(Clone, Copy)]
 struct FormatSpec {
     fill: char,
@@ -190,19 +181,21 @@ pub extern "C" fn rt_stderr_write(data: i64) -> i64 {
 /// Runtime-prefixed stdout flush alias used by native-built entry closures.
 #[no_mangle]
 pub extern "C" fn rt_stdout_flush() -> i64 {
-    unsafe { c_sffi_io::rt_stdout_flush() }
+    let _ = std::io::stdout().flush();
+    0
 }
 
 /// Runtime-prefixed stderr flush alias used by native-built entry closures.
 #[no_mangle]
 pub extern "C" fn rt_stderr_flush() -> i64 {
-    unsafe { c_sffi_io::rt_stderr_flush() }
+    let _ = std::io::stderr().flush();
+    0
 }
 
 /// Legacy alias used by source-level `extern fn stderr_flush() -> i64`.
 #[no_mangle]
 pub extern "C" fn stderr_flush() -> i64 {
-    unsafe { c_sffi_io::rt_stderr_flush() }
+    rt_stderr_flush()
 }
 
 /// Print a string to stderr with newline (with optional capture).

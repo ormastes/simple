@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use simple_parser::ast::Block;
@@ -23,14 +23,16 @@ thread_local! {
     static MACRO_TRACE_ENABLED: RefCell<bool> = const { RefCell::new(false) };
 
     /// Current macro expansion depth (for recursion limit)
-    static MACRO_EXPANSION_DEPTH: RefCell<usize> = const { RefCell::new(0) };
+    /// Uses Cell<usize> instead of RefCell — skips runtime borrow checks for Copy types.
+    static MACRO_EXPANSION_DEPTH: Cell<usize> = const { Cell::new(0) };
 
     /// Pending tail injections - blocks to execute at the end of the current block
     /// Each entry is (depth, block) where depth is the block nesting level
     static PENDING_TAIL_INJECTIONS: RefCell<Vec<(usize, Block)>> = const { RefCell::new(Vec::new()) };
 
     /// Current block nesting depth for tail injection tracking
-    static BLOCK_DEPTH: RefCell<usize> = const { RefCell::new(0) };
+    /// Uses Cell<usize> instead of RefCell — skips runtime borrow checks for Copy types.
+    static BLOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
 
     /// Cache for pre-processed macro contracts (definition-time optimization)
     /// For macros without const parameters, contracts can be processed once at definition
@@ -65,13 +67,13 @@ pub(super) fn macro_trace(msg: &str) {
 /// Increment macro expansion depth and check for overflow
 pub(super) fn push_macro_depth(macro_name: &str) -> Result<(), CompileError> {
     let depth = MACRO_EXPANSION_DEPTH.with(|cell| {
-        let mut d = cell.borrow_mut();
-        *d += 1;
-        *d
+        let d = cell.get() + 1;
+        cell.set(d);
+        d
     });
 
     if depth > MAX_MACRO_EXPANSION_DEPTH {
-        MACRO_EXPANSION_DEPTH.with(|cell| *cell.borrow_mut() -= 1);
+        MACRO_EXPANSION_DEPTH.with(|cell| cell.set(cell.get() - 1));
         return Err(crate::error::factory::macro_expansion_depth_exceeded(
             MAX_MACRO_EXPANSION_DEPTH,
             macro_name,
@@ -88,9 +90,9 @@ pub(super) fn push_macro_depth(macro_name: &str) -> Result<(), CompileError> {
 /// Decrement macro expansion depth
 pub(super) fn pop_macro_depth() {
     MACRO_EXPANSION_DEPTH.with(|cell| {
-        let mut d = cell.borrow_mut();
-        if *d > 0 {
-            *d -= 1;
+        let d = cell.get();
+        if d > 0 {
+            cell.set(d - 1);
         }
     });
 }
@@ -109,21 +111,20 @@ pub(crate) fn store_macro_introduced_symbols(contract_result: MacroContractResul
 /// Enter a new block scope for tail injection tracking
 pub(crate) fn enter_block_scope() -> usize {
     BLOCK_DEPTH.with(|cell| {
-        let mut d = cell.borrow_mut();
-        *d += 1;
-        *d
+        let d = cell.get() + 1;
+        cell.set(d);
+        d
     })
 }
 
 /// Exit a block scope and return any pending tail injections for this depth
 pub(crate) fn exit_block_scope() -> Vec<Block> {
     let current_depth = BLOCK_DEPTH.with(|cell| {
-        let mut d = cell.borrow_mut();
-        let depth = *d;
-        if *d > 0 {
-            *d -= 1;
+        let d = cell.get();
+        if d > 0 {
+            cell.set(d - 1);
         }
-        depth
+        d
     });
 
     // Fast path: skip expensive borrow if no pending injections exist
@@ -160,7 +161,7 @@ pub(crate) fn exit_block_scope() -> Vec<Block> {
 
 /// Queue a block for tail injection at the current block scope
 pub(crate) fn queue_tail_injection(block: Block) {
-    let current_depth = BLOCK_DEPTH.with(|cell| *cell.borrow());
+    let current_depth = BLOCK_DEPTH.with(|cell| cell.get());
     if is_macro_trace_enabled() {
         macro_trace(&format!("  queuing tail injection at depth {}", current_depth));
     }
@@ -234,9 +235,9 @@ pub(crate) fn get_current_class_context() -> Option<String> {
 pub fn clear_macro_state() {
     MACRO_INTRODUCED_SYMBOLS.with(|cell| *cell.borrow_mut() = None);
     MACRO_TRACE_ENABLED.with(|cell| *cell.borrow_mut() = false);
-    MACRO_EXPANSION_DEPTH.with(|cell| *cell.borrow_mut() = 0);
+    MACRO_EXPANSION_DEPTH.with(|cell| cell.set(0));
     PENDING_TAIL_INJECTIONS.with(|cell| cell.borrow_mut().clear());
-    BLOCK_DEPTH.with(|cell| *cell.borrow_mut() = 0);
+    BLOCK_DEPTH.with(|cell| cell.set(0));
     MACRO_CONTRACT_CACHE.with(|cell| cell.borrow_mut().clear());
     CURRENT_CLASS_CONTEXT.with(|cell| *cell.borrow_mut() = None);
 }

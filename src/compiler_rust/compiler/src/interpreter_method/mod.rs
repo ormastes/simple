@@ -31,7 +31,7 @@ pub fn clear_pinned_strings() {
 }
 
 // Re-export the with-self-update functions
-pub use special::{exec_function_with_self_return, find_and_exec_method_with_self};
+pub(crate) use special::{exec_function_with_self_return, find_and_exec_method_with_self, find_and_exec_method_with_self_owned, lookup_class_method_index, lookup_impl_method_index};
 
 /// Main entry point for method call evaluation
 #[allow(clippy::borrowed_box, clippy::too_many_arguments)] // reason: Box<dyn Trait> dispatch with ABI-locked entry; refactoring deferred
@@ -1244,13 +1244,13 @@ pub(crate) fn evaluate_method_call_with_self_update(
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
 
     // Only handle Object methods with self mutation
-    if let Value::Object { class, fields } = recv_val.clone() {
+    if let Value::Object { ref class, ref fields } = recv_val {
         // Try to find and execute the method
         if let Some((result, updated_self)) = special::find_and_exec_method_with_self(
             method,
             args,
-            &class,
-            &fields,
+            class.as_str(),
+            fields,
             env,
             functions,
             classes,
@@ -1299,8 +1299,8 @@ pub(crate) fn evaluate_method_call_with_self_update(
         if let Some(result) = try_method_missing(
             method,
             args,
-            &class,
-            &fields,
+            class.as_str(),
+            fields,
             env,
             functions,
             classes,
@@ -1324,11 +1324,11 @@ pub(crate) fn evaluate_method_call_with_self_update(
         }
         // Collect available methods for typo suggestion
         let mut available_methods: Vec<&str> = Vec::new();
-        if let Some(methods) = impl_methods.get(&class) {
+        if let Some(methods) = impl_methods.get(class.as_str()) {
             available_methods.extend(methods.iter().map(|m| m.name.as_str()));
         }
         available_methods.extend(["new", "to_string", "clone", "equals"].iter().copied());
-        bail_unknown_method!(method, class, available_methods);
+        bail_unknown_method!(method, class.as_str(), available_methods);
     }
 
     // For non-objects (Array, Dict, String, etc.), check if the method returns a mutated value

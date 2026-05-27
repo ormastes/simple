@@ -635,7 +635,16 @@ fn resolve_builtin_runtime_symbol(name: &str) -> Option<usize> {
         "rt_coverage_condition_probe" => Some(crate::coverage::rt_coverage_condition_probe as *const () as usize),
         "rt_coverage_path_probe" => Some(crate::coverage::rt_coverage_path_probe as *const () as usize),
         "rt_coverage_path_finalize" => Some(crate::coverage::rt_coverage_path_finalize as *const () as usize),
-        _ => simple_runtime_abi::lookup_registered_static_runtime_symbol(normalized).map(|ptr| ptr as usize),
+        _ => {
+            let aliased = match normalized {
+                "rt_file_delete" => "rt_file_remove",
+                "rt_file_read_text" => "rt_file_read_text_rv",
+                other => other,
+            };
+            simple_runtime_abi::lookup_registered_static_runtime_symbol(aliased)
+                .or_else(|| simple_runtime_abi::lookup_registered_static_runtime_symbol(normalized))
+                .map(|ptr| ptr as usize)
+        }
     }
 }
 
