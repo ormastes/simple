@@ -24,6 +24,9 @@ must not each grow separate NVMe access paths. The existing code already has:
 - `src/os/services/vfs/nvme_filesystem_mounts.spl` converts a validated
   `NvmeFilesystemLease` plus a lease-backed `BlockDevice` into the
   `DriverInstance` needed by the VFS mount table.
+- `src/os/kernel/ipc/dma_alloc_contract.spl` documents the syscall 84 layout:
+  the syscall return is the CPU virtual address, result word 0 is the
+  device-visible physical address, and result word 1 remains the allocation id.
 
 ## Decision
 The NVMe driver owns controller init, namespace discovery, queue assignment,
@@ -48,6 +51,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   `BlockDevice` interface instead of filesystem-specific NVMe code.
 - VFS code has one mount-factory entry point for selecting FAT32, NVFS, or DBFS
   from the same lease validation path.
+- Pure Simple NVMe DMA allocation now uses the same syscall contract as
+  user-space DMA descriptors, so result word 1 is no longer mistaken for a
+  virtual address.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -70,3 +76,5 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   the same shared `BlockDevice` surface used by FAT32 and DBFS.
 - `test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl` covers producing
   FAT32, NVFS, and DBFS `DriverInstance` values from one NVMe lease contract.
+- `test/unit/os/kernel/ipc/dma_alloc_contract_spec.spl` covers the DMA syscall
+  result layout used by the pure Simple NVMe driver and VFS adapter.

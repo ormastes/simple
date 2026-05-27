@@ -719,20 +719,19 @@ impl NvmeDriver:
         """Allocate DMA-capable memory via syscall 84.
 
         Returns both virtual and physical addresses.
-        The kernel writes (phys_addr: u64, virt_addr: u64) at the result_ptr,
-        and also returns virt_addr as the syscall return value.
+        The kernel writes phys_addr at result_ptr[0] and allocation_id at
+        result_ptr[1], and returns virt_addr as the syscall return value.
         """
         # Kernel protocol: arg0=size, arg1=pointer to 16-byte result buffer
-        # Result buffer layout: offset 0 = phys_addr (u64), offset 8 = virt_addr (u64)
+        # Result buffer layout: offset 0 = phys_addr, offset 8 = allocation_id.
+        # The syscall return value is the CPU virtual address.
         var result_buf = DmaAddrs(virt: 0, phys: 0)
         val result_ptr = unsafe_addr_of(result_buf)
         val virt_result = syscall(SYS_ALLOC_DMA, size, result_ptr, 0, 0, 0)
         if virt_result < 0:
             return Result.Err("DMA allocation failed")
-        # Kernel wrote phys at result_buf.phys (offset 0) and virt at result_buf.virt (offset 8)
-        # But struct field order is virt then phys, so read via MMIO to be safe
         val phys_addr = mmio_read64(result_ptr)
-        val virt_addr = mmio_read64(result_ptr + 8)
+        val virt_addr = virt_result as u64
         if phys_addr == 0 or virt_addr == 0:
             return Result.Err("DMA allocation returned zero address")
         if size >= DMA_PAGE_SIZE:
