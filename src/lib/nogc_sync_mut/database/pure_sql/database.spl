@@ -1515,9 +1515,21 @@ class PureDatabase:
             kci = _find_idx(col_names, key_col)
         if kci < 0:
             return Err(DbError.QueryFailed(sql: "GET", message: "no such column: {key_col}"))
+        val typed = self._tbl_typed[ti]
+        val key_txt = key_val.to_text()
+        if kci == self._tbl_pk_col[ti]:
+            val pkm = self._tbl_pk_map[ti]
+            if pkm.has(key_txt):
+                val tidx = pkm[key_txt]
+                var tbl = self._tbl_data[ti]
+                val use_typed = typed.len() == tbl.tuples.len()
+                if use_typed and tidx >= 0 and tidx < tbl.tuples.len() as i32:
+                    val snap = self._txn.snapshot()
+                    if mvcc_is_visible(tbl.tuples[tidx], snap):
+                        return Ok(Some(DbRow(columns: col_names, values: typed[tidx])))
+            return Ok(nil)
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
-        val typed = self._tbl_typed[ti]
         val use_typed = typed.len() == tbl.tuples.len()
         val n_tuples = tbl.tuples.len() as i32
         var vis = self._tbl_vis[ti]
@@ -1530,15 +1542,6 @@ class PureDatabase:
             self._tbl_vis[ti] = new_vis
             self._tbl_vis_xmax[ti] = snap.xmax
             vis = new_vis
-        val key_txt = key_val.to_text()
-        if use_typed and kci == self._tbl_pk_col[ti]:
-            val pkm = self._tbl_pk_map[ti]
-            if pkm.has(key_txt):
-                val tidx = pkm[key_txt]
-                if tidx >= 0 and tidx < n_tuples:
-                    if vis[tidx]:
-                        return Ok(Some(DbRow(columns: col_names, values: typed[tidx])))
-            return Ok(nil)
         if use_typed:
             var gi: i32 = 0
             while gi < n_tuples:
@@ -1637,7 +1640,12 @@ class PureDatabase:
         self._last_rowid = self._tbl_rowids[ti]
         self._txn.commit(tid)
         self._last_changes = 1
-        self._invalidate_fts(ti)
+        if ti < self._scan_cache_key.len() as i32:
+            self._scan_cache_key[ti] = ""
+        if ti < self._sel_cache_key.len() as i32:
+            self._sel_cache_key[ti] = ""
+        if ti < self._tbl_vis_xmax.len() as i32:
+            self._tbl_vis_xmax[ti] = -1
         self._mark_dirty()?
         Ok(1)
 

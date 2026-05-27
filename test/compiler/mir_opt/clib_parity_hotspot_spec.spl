@@ -123,7 +123,7 @@ describe "CLibParityHotspot":
         it "keeps provider rules general rather than optimizer-only":
             expect(clib_parity_all_rules_are_general()).to_equal(true)
             expect(clib_parity_domain_rule_count("filesystem")).to_be_greater_than(2)
-            expect(clib_parity_domain_rule_count("database")).to_be_greater_than(11)
+            expect(clib_parity_domain_rule_count("database")).to_be_greater_than(14)
             expect(clib_parity_domain_rule_count("webserver")).to_be_greater_than(1)
             expect(clib_parity_domain_rule_count("simpleos")).to_be_greater_than(2)
 
@@ -250,7 +250,7 @@ describe "CLibParityHotspot":
 
     describe "DB optimization rules in clib_parity_rule_table (AC-5)":
         it "AC-5: database domain has at least 12 rules after DB hardening":
-            expect(clib_parity_domain_rule_count("database")).to_be_greater_than(11)
+            expect(clib_parity_domain_rule_count("database")).to_be_greater_than(14)
 
         it "AC-5: match_db_fts_match rule exists with correct fields":
             val maybe_rule = clib_parity_rule_by_name("match_db_fts_match")
@@ -557,6 +557,113 @@ describe "CLibParityHotspot":
                 expect(rule.domain).to_equal("general")
                 expect(rule.intrinsic).to_equal("int_cmp_reduced")
                 expect(rule.software_cost).to_equal(700)
+
+    # ========================================================================
+    # AC-9: Scan/Vis/PointLookup Optimization Patterns
+    # ========================================================================
+
+    describe "New CLibPatternKind variants (AC-9)":
+        it "AC-9: enum has ScanResultCache variant":
+            val kind = CLibPatternKind.ScanResultCache
+            val is_scan = kind == CLibPatternKind.ScanResultCache
+            expect(is_scan).to_equal(true)
+
+        it "AC-9: enum has VisibilityBatchPrecompute variant":
+            val kind = CLibPatternKind.VisibilityBatchPrecompute
+            val is_vis = kind == CLibPatternKind.VisibilityBatchPrecompute
+            expect(is_vis).to_equal(true)
+
+        it "AC-9: enum has CopyElisionPointLookup variant":
+            val kind = CLibPatternKind.CopyElisionPointLookup
+            val is_pt = kind == CLibPatternKind.CopyElisionPointLookup
+            expect(is_pt).to_equal(true)
+
+    describe "Scan result cache rules (AC-9)":
+        it "AC-9: match_db_scan_result_cache rule exists with correct fields":
+            val maybe_rule = clib_parity_rule_by_name("match_db_scan_result_cache")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_scan = rule.pattern_kind == CLibPatternKind.ScanResultCache
+                expect(is_scan).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_scan_result_cached")
+                expect(rule.requires).to_equal("scan_cache_key")
+                expect(rule.required_proof).to_equal("mutation_invalidation_complete")
+                expect(rule.cost_delta).to_equal(-8)
+
+        it "AC-9: match_general_scan_result_cache rule exists":
+            val maybe_rule = clib_parity_rule_by_name("match_general_scan_result_cache")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                expect(rule.domain).to_equal("general")
+                expect(rule.intrinsic).to_equal("scan_result_cached")
+                expect(rule.software_cost).to_equal(1800)
+
+        it "AC-9: scan cache rewrite gated on scan_cache_key and mutation_invalidation_complete":
+            val maybe_rule = clib_parity_rule_by_name("match_db_scan_result_cache")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val missing = clib_parity_rule_rewrite_decision(rule, [], [])
+                expect(missing.eligible).to_equal(false)
+                val ok = clib_parity_rule_rewrite_decision(rule, ["scan_cache_key"], ["mutation_invalidation_complete"])
+                expect(ok.eligible).to_equal(true)
+
+    describe "Visibility batch precompute rules (AC-9)":
+        it "AC-9: match_db_visibility_batch rule exists with correct fields":
+            val maybe_rule = clib_parity_rule_by_name("match_db_visibility_batch")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_vis = rule.pattern_kind == CLibPatternKind.VisibilityBatchPrecompute
+                expect(is_vis).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_vis_batch_precomputed")
+                expect(rule.requires).to_equal("snapshot_epoch")
+                expect(rule.required_proof).to_equal("snapshot_monotonic_equivalence")
+
+        it "AC-9: match_general_filter_batch rule exists":
+            val maybe_rule = clib_parity_rule_by_name("match_general_filter_batch")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                expect(rule.domain).to_equal("general")
+                expect(rule.intrinsic).to_equal("filter_batch_precomputed")
+
+    describe "Copy elision point lookup rules (AC-9)":
+        it "AC-9: match_db_pk_point_lookup rule exists with correct fields":
+            val maybe_rule = clib_parity_rule_by_name("match_db_pk_point_lookup")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_pt = rule.pattern_kind == CLibPatternKind.CopyElisionPointLookup
+                expect(is_pt).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_pk_point_lookup_direct")
+                expect(rule.requires).to_equal("pk_index")
+                expect(rule.required_proof).to_equal("index_key_immutable_in_lookup")
+                expect(rule.cost_delta).to_equal(-7)
+
+        it "AC-9: match_general_index_point_lookup rule exists":
+            val maybe_rule = clib_parity_rule_by_name("match_general_index_point_lookup")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                expect(rule.domain).to_equal("general")
+                expect(rule.intrinsic).to_equal("index_point_lookup_direct")
+                expect(rule.software_cost).to_equal(1400)
+
+        it "AC-9: pk point lookup rewrite gated on pk_index and index_key_immutable_in_lookup":
+            val maybe_rule = clib_parity_rule_by_name("match_db_pk_point_lookup")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val missing = clib_parity_rule_rewrite_decision(rule, [], [])
+                expect(missing.eligible).to_equal(false)
+                val ok = clib_parity_rule_rewrite_decision(rule, ["pk_index"], ["index_key_immutable_in_lookup"])
+                expect(ok.eligible).to_equal(true)
 
     describe "optimization_rule_provider_clib_parity factory":
         it "AC-3: factory creates provider with given name":
