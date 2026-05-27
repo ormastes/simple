@@ -6,7 +6,7 @@ set -eu
 # Usage:
 #   sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log build/serial/physical-nvme.log --validate-log-only
 #   sh scripts/run_simpleos_physical_nvme_perf.shs --preflight
-#   sh scripts/run_simpleos_physical_nvme_perf.shs --production --serial-log build/serial/physical-nvme.log --preflight-report build/serial/physical-nvme-preflight.sdn --report-out build/serial/physical-nvme-validation.sdn --validate-log-only
+#   sh scripts/run_simpleos_physical_nvme_perf.shs --production --serial-log build/serial/physical-nvme.log --preflight-out build/serial/physical-nvme-preflight.sdn --report-out build/serial/physical-nvme-validation.sdn --validate-log-only
 #   SERIAL_PORT=/dev/ttyUSB0 sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log build/serial/physical-nvme.log
 #
 # Env knobs:
@@ -17,6 +17,7 @@ set -eu
 #   SIMPLEOS_NVME_SERIAL_LOG     Serial log path when --serial-log is omitted
 #   SIMPLEOS_NVME_REPORT_OUT     Optional validation report output path
 #   SIMPLEOS_NVME_PREFLIGHT_REPORT Optional preflight identity report to compare
+#   SIMPLEOS_NVME_PREFLIGHT_OUT    Optional preflight identity report to create
 #   SIMPLEOS_NVME_SERIAL_SECONDS Capture duration in seconds (default: 30)
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -28,10 +29,54 @@ NVME_SYSFS_ROOT="${SIMPLEOS_NVME_SYSFS_ROOT:-/sys/block}"
 SERIAL_LOG="${SIMPLEOS_NVME_SERIAL_LOG:-}"
 REPORT_OUT="${SIMPLEOS_NVME_REPORT_OUT:-}"
 PREFLIGHT_REPORT="${SIMPLEOS_NVME_PREFLIGHT_REPORT:-}"
+PREFLIGHT_OUT="${SIMPLEOS_NVME_PREFLIGHT_OUT:-}"
 SERIAL_SECONDS="${SIMPLEOS_NVME_SERIAL_SECONDS:-30}"
 VALIDATE_LOG_ONLY=0
 PREFLIGHT=0
 PRODUCTION=0
+
+check_preflight_ready() {
+    if [ ! -x "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
+        echo "[physical-nvme] missing executable checker runtime: ${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" >&2
+        exit 1
+    fi
+    if [ ! -f "${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl" ]; then
+        echo "[physical-nvme] missing checker app: ${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl" >&2
+        exit 1
+    fi
+    if ! ls $NVME_DEVICE_GLOB >/dev/null 2>&1; then
+        echo "[physical-nvme] no NVMe namespace device matched: $NVME_DEVICE_GLOB" >&2
+        exit 1
+    fi
+}
+
+write_preflight_report() {
+    report_path="$1"
+    mkdir -p "$(dirname "$report_path")"
+    {
+        echo "physical_nvme_preflight:"
+        echo "  accepted: true"
+        echo "  nvme_device_glob: $NVME_DEVICE_GLOB"
+        echo "  checker: ${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl"
+        for dev in $NVME_DEVICE_GLOB; do
+            name="$(basename "$dev")"
+            model="$(cat "${NVME_SYSFS_ROOT}/${name}/device/model" 2>/dev/null || echo unknown)"
+            serial="$(cat "${NVME_SYSFS_ROOT}/${name}/device/serial" 2>/dev/null || echo unknown)"
+            nsid="$(cat "${NVME_SYSFS_ROOT}/${name}/nsid" 2>/dev/null || cat "${NVME_SYSFS_ROOT}/${name}/device/nsid" 2>/dev/null || echo unknown)"
+            model_trimmed="$(echo "$model" | xargs)"
+            serial_trimmed="$(echo "$serial" | xargs)"
+            nsid_trimmed="$(echo "$nsid" | xargs)"
+            if [ "$model_trimmed" = "unknown" ] || [ "$serial_trimmed" = "unknown" ] || [ "$nsid_trimmed" = "unknown" ]; then
+                echo "[physical-nvme] incomplete NVMe sysfs identity for $dev" >&2
+                exit 1
+            fi
+            echo "  device: $dev"
+            echo "    model: $model_trimmed"
+            echo "    serial: $serial_trimmed"
+            echo "    namespace_nsid: $nsid_trimmed"
+        done
+    } > "$report_path"
+}
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -80,6 +125,17 @@ while [ "$#" -gt 0 ]; do
         --preflight-report=*)
             PREFLIGHT_REPORT="${1#--preflight-report=}"
             ;;
+        --preflight-out)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "[physical-nvme] missing value for --preflight-out" >&2
+                exit 2
+            fi
+            PREFLIGHT_OUT="$1"
+            ;;
+        --preflight-out=*)
+            PREFLIGHT_OUT="${1#--preflight-out=}"
+            ;;
         *)
             echo "[physical-nvme] unknown argument: $1" >&2
             exit 2
@@ -89,36 +145,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$PREFLIGHT" -eq 1 ]; then
-    if [ ! -x "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
-        echo "[physical-nvme] missing executable checker runtime: ${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" >&2
-        exit 1
-    fi
-    if [ ! -f "${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl" ]; then
-        echo "[physical-nvme] missing checker app: ${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl" >&2
-        exit 1
-    fi
-    if ! ls $NVME_DEVICE_GLOB >/dev/null 2>&1; then
-        echo "[physical-nvme] no NVMe namespace device matched: $NVME_DEVICE_GLOB" >&2
-        exit 1
-    fi
+    check_preflight_ready
     if [ -n "$REPORT_OUT" ]; then
-        mkdir -p "$(dirname "$REPORT_OUT")"
-        {
-            echo "physical_nvme_preflight:"
-            echo "  accepted: true"
-            echo "  nvme_device_glob: $NVME_DEVICE_GLOB"
-            echo "  checker: ${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl"
-            for dev in $NVME_DEVICE_GLOB; do
-                name="$(basename "$dev")"
-                model="$(cat "${NVME_SYSFS_ROOT}/${name}/device/model" 2>/dev/null || echo unknown)"
-                serial="$(cat "${NVME_SYSFS_ROOT}/${name}/device/serial" 2>/dev/null || echo unknown)"
-                nsid="$(cat "${NVME_SYSFS_ROOT}/${name}/nsid" 2>/dev/null || cat "${NVME_SYSFS_ROOT}/${name}/device/nsid" 2>/dev/null || echo unknown)"
-                echo "  device: $dev"
-                echo "    model: $(echo "$model" | xargs)"
-                echo "    serial: $(echo "$serial" | xargs)"
-                echo "    namespace_nsid: $(echo "$nsid" | xargs)"
-            done
-        } > "$REPORT_OUT"
+        write_preflight_report "$REPORT_OUT"
+    fi
+    if [ -n "$PREFLIGHT_OUT" ]; then
+        write_preflight_report "$PREFLIGHT_OUT"
     fi
     echo "[physical-nvme] preflight=ready nvme_device_glob=$NVME_DEVICE_GLOB checker=present"
     exit 0
@@ -130,13 +162,34 @@ if [ -z "$SERIAL_LOG" ]; then
 fi
 
 if [ "$PRODUCTION" -eq 1 ]; then
-    if [ -z "$PREFLIGHT_REPORT" ]; then
-        echo "[physical-nvme] --production requires --preflight-report" >&2
+    if [ -n "$PREFLIGHT_REPORT" ] && [ -n "$PREFLIGHT_OUT" ]; then
+        echo "[physical-nvme] --production accepts either --preflight-report or --preflight-out, not both" >&2
+        exit 2
+    fi
+    if [ -z "$PREFLIGHT_REPORT" ] && [ -z "$PREFLIGHT_OUT" ]; then
+        echo "[physical-nvme] --production requires --preflight-report or --preflight-out" >&2
         exit 2
     fi
     if [ -z "$REPORT_OUT" ]; then
         echo "[physical-nvme] --production requires --report-out" >&2
         exit 2
+    fi
+    if [ -n "$PREFLIGHT_OUT" ] && [ "$PREFLIGHT_OUT" = "$REPORT_OUT" ]; then
+        echo "[physical-nvme] --preflight-out must differ from --report-out" >&2
+        exit 2
+    fi
+    if [ -n "$PREFLIGHT_OUT" ] && [ "$PREFLIGHT_OUT" = "$SERIAL_LOG" ]; then
+        echo "[physical-nvme] --preflight-out must differ from --serial-log" >&2
+        exit 2
+    fi
+    if [ -n "$PREFLIGHT_REPORT" ] && [ "$PREFLIGHT_REPORT" = "$REPORT_OUT" ]; then
+        echo "[physical-nvme] --preflight-report must differ from --report-out" >&2
+        exit 2
+    fi
+    if [ -z "$PREFLIGHT_REPORT" ]; then
+        check_preflight_ready
+        write_preflight_report "$PREFLIGHT_OUT"
+        PREFLIGHT_REPORT="$PREFLIGHT_OUT"
     fi
 fi
 

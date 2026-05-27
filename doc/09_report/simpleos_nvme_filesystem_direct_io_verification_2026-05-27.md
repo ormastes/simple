@@ -95,3 +95,6 @@ real hardware logs can be checked directly in the runner or lab workflow.
 without `--validate-log-only` it captures from `SERIAL_PORT` first and then
 delegates to the same checker. The wrapper also supports `--preflight` to verify
 the checker runtime/app and a host-visible NVMe namespace device before capture.
+For production lab use, `--production --preflight-out <path> --report-out <path>`
+generates the host NVMe identity report and then validates that the SimpleOS
+serial log reports the same serial and namespace.
