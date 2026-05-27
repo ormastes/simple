@@ -70,6 +70,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - A successful pure-Simple FAT32 boot loads the app manifest and executable
   cache from the lease-backed FAT32 root; pure boot validation does not fall
   through to C-backed reads.
+- VFS exposes boot storage provider state and a production acceptance helper so
+  `VFS ready` is not treated as production-ready NVMe unless it came from the
+  pure-Simple `simple-driver` path.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS

@@ -56,6 +56,8 @@ var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
 var g_root_fat32: Fat32Core? = nil
 var g_root_nvfs_hosted: NvfsHostedDriver? = nil
 var g_vfs_initialized: bool = false
+var g_vfs_boot_storage_provider: text = "not-mounted"
+var g_vfs_boot_storage_pure_simple: bool = false
 # M1 mount table — wired at boot after NVMe init succeeds (see vfs_boot_init).
 var g_mount_table: MountTable = MountTable.new()
 
@@ -73,6 +75,8 @@ pub fn vfs_boot_init() -> bool:
     Returns true if VFS is ready to serve file requests.
     """
     log_raw_println("[vfs-init] Starting storage stack initialization...")
+    g_vfs_boot_storage_provider = "not-mounted"
+    g_vfs_boot_storage_pure_simple = false
 
     pcimgr_init()
     log_raw_println("[vfs-init] PCI cache ready")
@@ -100,6 +104,8 @@ pub fn vfs_boot_init() -> bool:
     log_raw_println("[vfs-init] C NVMe controller initialized!")
     log_raw_println("[vfs-init] C NVMe + FAT32 verified (via C driver)")
     g_vfs_initialized = true
+    g_vfs_boot_storage_provider = "c-boot-bridge"
+    g_vfs_boot_storage_pure_simple = false
 
     # Keep VFS available through the C FAT32 driver-backed executable read path
     # while the pure-Simple FAT32 boot path is being hardened for every
@@ -200,6 +206,8 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
             return false
     g_root_fat32 = Some(root)
     g_vfs_initialized = true
+    g_vfs_boot_storage_provider = "simple-driver"
+    g_vfs_boot_storage_pure_simple = true
     app_registry_cache_bytes("/sys/apps/browser_demo", exec_probe)
     _seed_root_fat32_exec_cache(root)
     log_raw_println("[vfs-init] version file read ok path=/sys/version.txt bytes={version_probe.len()}")
@@ -262,6 +270,8 @@ fn _vfs_boot_init_virtio_fat32() -> bool:
 
     g_root_fat32 = Some(root)
     g_vfs_initialized = true
+    g_vfs_boot_storage_provider = "virtio-blk"
+    g_vfs_boot_storage_pure_simple = true
     log_raw_println("[vfs-init] VirtIO FAT32 mounted at /")
 
     val probe = g_vfs_read_file_bytes("/SYS/APPS/HELLOSMF.SMF")
@@ -316,6 +326,28 @@ pub fn vfs_service_poll():
 pub fn vfs_is_ready() -> bool:
     """Check if VFS has been initialized and is ready for file operations."""
     g_vfs_initialized
+
+fn vfs_boot_storage_provider() -> text:
+    g_vfs_boot_storage_provider
+
+fn vfs_boot_storage_is_pure_simple() -> bool:
+    g_vfs_boot_storage_pure_simple
+
+fn vfs_boot_storage_acceptance_reason(initialized: bool, provider: text, pure_simple: bool) -> text:
+    if not initialized:
+        return "not-mounted"
+    if not pure_simple:
+        return "vfs-boot-storage-not-pure-simple:" + provider
+    if provider != "simple-driver":
+        return "vfs-boot-storage-not-nvme-simple-driver:" + provider
+    "ready"
+
+fn vfs_boot_storage_acceptance_ready() -> bool:
+    vfs_boot_storage_acceptance_reason(
+        g_vfs_initialized,
+        g_vfs_boot_storage_provider,
+        g_vfs_boot_storage_pure_simple
+    ) == "ready"
 
 pub fn vfs_get_manager() -> VfsManager:
     """Return the global VFS manager instance."""
