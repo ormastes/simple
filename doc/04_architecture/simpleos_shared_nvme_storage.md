@@ -173,8 +173,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Hardware runners can emit one `nvme_perf` line from the performance report
   helper; serial acceptance rejects missing fields and non-ready reasons before
   release gates can treat the run as production evidence.
-- The q35 pure-Simple real-device serial gate now requires that `nvme_perf`
-  evidence in addition to provider, grant, namespace, and transfer markers.
+- The q35 pure-Simple real-device marker contract now lists `nvme_perf
+  reason=ready`, and serial acceptance validates the detailed performance fields
+  in addition to provider, grant, namespace, and transfer markers.
 
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware
@@ -229,7 +230,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   cold-run, per-I/O allocation, wrong-size, slower-than-C samples, and incomplete
   serial report lines.
 - `test/unit/os/drivers/real_device_readiness_spec.spl` covers that pure-Simple
-  q35 completion is rejected when the NVMe performance evidence line is missing.
+  q35 completion requires the NVMe performance marker and is rejected when the
+  evidence line is missing.
 - `test/unit/os/services/vfs/nvme_block_adapter_spec.spl` covers adapter-visible
   lease translation and out-of-range rejection without requiring real hardware.
 - `test/unit/lib/fs_driver/nvfs_device_backed_spec.spl` covers NVFS opening on
