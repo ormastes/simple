@@ -1,7 +1,9 @@
 # Perf Bug: Pure Simple ctype 0.07x–0.46x C (Cranelift, no inlining)
 
 **Date:** 2026-05-18
-**Status:** Open — partially mitigated 2026-05-27; benchmark harness repaired and ctype call nesting flattened, but native remains below the 0.50x C floor.
+**Status:** Open — partially mitigated 2026-05-27; benchmark harness repaired,
+ctype call nesting flattened, and MIR inlining now handles non-tail calls, but
+native remains below the 0.50x C floor.
 **Severity:** Medium — ctype is not hot-path, but pattern applies to all pure Simple stdlib
 **Component:** Cranelift AOT codegen / function inlining
 **Related:** `native_cross_module_call_abi_broken_2026-05-18.md`
@@ -87,3 +89,38 @@ to_upper          1600000             156          267782        0.00x        0.
 
 The bug remains open. The remaining root is still native call/codegen overhead
 or missing inlining/specialization, not library-level nested predicate calls.
+
+## 2026-05-27 MIR Inliner Follow-up
+
+The Cranelift MIR inliner only handled calls that were the final instruction in
+their block. That missed ctype calls used inside loop conditions and arithmetic
+continuations. The inliner now moves the caller's remaining instructions into a
+continuation block, so small callees can be inlined at non-tail call sites while
+preserving the caller's control flow.
+
+Focused verification:
+
+```bash
+rustfmt --check src/compiler_rust/compiler/src/codegen/mir_inline.rs
+cargo test -p simple-compiler codegen::mir_inline --manifest-path src/compiler_rust/Cargo.toml
+```
+
+Benchmark evidence with `SIMPLE_CTYPE_BENCH_ENFORCE=1
+SIMPLE_CTYPE_BENCH_SAMPLES=1 bash test/perf/ctype/run_ctype_benchmarks.shs`:
+
+```text
+benchmark        c_ops/ms   interp_ops/ms   native_ops/ms     interp/c     native/c
+is_digit          1040650             183          344086        0.00x        0.33x
+is_upper           992248             179          377581        0.00x        0.38x
+is_lower           636815             182          351648        0.00x        0.55x
+is_alpha           825806             162          327365        0.00x        0.40x
+is_alnum          1084745             168          268907        0.00x        0.25x
+is_xdigit          581818             205          266112        0.00x        0.46x
+is_space          1662337             196          283813        0.00x        0.17x
+to_lower          1376344             206          393846        0.00x        0.29x
+to_upper          1454545             209          343163        0.00x        0.24x
+```
+
+The enforced benchmark still fails on eight of nine native ratios. The remaining
+work is broader native code quality: branch/code shape, loop optimization, and
+specialization beyond basic MIR call inlining.

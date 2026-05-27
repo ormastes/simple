@@ -125,16 +125,13 @@ fn inline_in_function_indexed(
             index += 1;
             continue;
         };
-        if callee.name == caller.name
-            || callee.params.len() != args.len()
-            || call_pos + 1 != caller.blocks[index].instructions.len()
-        {
+        if callee.name == caller.name || callee.params.len() != args.len() {
             index += 1;
             continue;
         }
         // Clone happens here, at the actual inline site.
         let callee = callee.clone();
-        inline_tail_call(caller, index, call_pos, dest, args, &callee);
+        inline_call(caller, index, call_pos, dest, args, &callee);
         index += 1;
     }
 }
@@ -151,7 +148,7 @@ fn tail_call_in_block(block: &MirBlock) -> Option<(usize, Option<VReg>, &CallTar
         })
 }
 
-fn inline_tail_call(
+fn inline_call(
     caller: &mut MirFunction,
     block_index: usize,
     call_pos: usize,
@@ -160,7 +157,9 @@ fn inline_tail_call(
     callee: &MirFunction,
 ) {
     let original_terminator = caller.blocks[block_index].terminator.clone();
+    let continuation_instructions = caller.blocks[block_index].instructions[call_pos + 1..].to_vec();
     let continuation = caller.new_block();
+    caller.block_mut(continuation).unwrap().instructions = continuation_instructions;
     caller.block_mut(continuation).unwrap().terminator = original_terminator;
 
     let mut local_map = HashMap::new();
@@ -458,6 +457,79 @@ mod tests {
             .iter()
             .flat_map(|block| block.instructions.iter())
             .all(|inst| !matches!(inst, MirInst::Load { .. })));
+    }
+
+    #[test]
+    fn inlines_small_non_tail_call_and_preserves_continuation() {
+        let mut callee = MirFunction::new("tiny".to_string(), TypeId::I64, Visibility::Private);
+        callee.params.push(MirLocal {
+            name: "x".to_string(),
+            ty: TypeId::I64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        let addr = callee.new_vreg();
+        let loaded = callee.new_vreg();
+        callee.blocks[0].instructions.push(MirInst::LocalAddr {
+            dest: addr,
+            local_index: 0,
+        });
+        callee.blocks[0].instructions.push(MirInst::Load {
+            dest: loaded,
+            addr,
+            ty: TypeId::I64,
+        });
+        callee.blocks[0].terminator = Terminator::Return(Some(loaded));
+
+        let mut caller = MirFunction::new("caller".to_string(), TypeId::I64, Visibility::Private);
+        let arg = caller.new_vreg();
+        let result = caller.new_vreg();
+        let one = caller.new_vreg();
+        let sum = caller.new_vreg();
+        caller.blocks[0]
+            .instructions
+            .push(MirInst::ConstInt { dest: arg, value: 7 });
+        caller.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(result),
+            target: CallTarget::from_name("tiny"),
+            args: vec![arg],
+        });
+        caller.blocks[0]
+            .instructions
+            .push(MirInst::ConstInt { dest: one, value: 1 });
+        caller.blocks[0].instructions.push(MirInst::BinOp {
+            dest: sum,
+            op: crate::hir::BinOp::Add,
+            left: result,
+            right: one,
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(sum));
+
+        let mut module = MirModule::new();
+        module.functions.push(callee);
+        module.functions.push(caller);
+
+        let functions = inline_small_pure_functions(&module, module.functions.clone());
+        let inlined = functions.iter().find(|f| f.name == "caller").unwrap();
+
+        assert!(inlined.blocks.iter().all(|block| {
+            block
+                .instructions
+                .iter()
+                .all(|inst| !matches!(inst, MirInst::Call { target, .. } if target.name() == "tiny"))
+        }));
+        assert!(inlined.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                matches!(
+                    inst,
+                    MirInst::BinOp {
+                        dest,
+                        op: crate::hir::BinOp::Add,
+                        ..
+                    } if *dest == sum
+                )
+            })
+        }));
     }
 
     #[test]
