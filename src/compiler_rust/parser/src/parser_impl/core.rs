@@ -77,6 +77,10 @@ pub struct Parser<'a> {
     /// this counter tracks how many should be consumed at a later point (e.g., after
     /// an if-block before checking for elif/else).
     pub(crate) deferred_dedent_count: usize,
+    /// Nesting depth while parsing call arguments. Placeholder short grammar is
+    /// transformed for the direct argument expression and deferred for nested
+    /// ordinary call arguments so outer callbacks can own the placeholder scope.
+    pub(crate) call_arg_depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -103,6 +107,7 @@ impl<'a> Parser<'a> {
             pending_statements: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
+            call_arg_depth: 0,
         };
 
         // Check for common mistakes in the initial token
@@ -188,6 +193,7 @@ impl<'a> Parser<'a> {
             pending_statements: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
+            call_arg_depth: 0,
         }
     }
 

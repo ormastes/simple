@@ -97,6 +97,18 @@ main = [1].map(add(_1, 1))[0]
 }
 
 #[test]
+fn interpreter_placeholder_lambda_in_nested_call_arg_expression() {
+    let code = r#"
+fn wrap(value: i64) -> i64:
+    return value
+
+main = [3].map(wrap(_1 + 4))[0]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 7);
+}
+
+#[test]
 fn interpreter_placeholder_lambda_initializer() {
     let code = r#"
 fn run() -> i64:

@@ -3,7 +3,6 @@
 use crate::ast::{Argument, Expr, LambdaParam, MacroArg, MoveMode, Pattern};
 use crate::Span;
 use crate::error::ParseError;
-use crate::expressions::placeholder::transform_placeholder_lambda;
 use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
 
@@ -447,7 +446,10 @@ impl<'a> Parser<'a> {
                 // else leave current untouched; pending_tokens already holds the peeked token
             }
 
-            let mut value = self.parse_expression()?;
+            self.call_arg_depth += 1;
+            let parsed_value = self.parse_expression();
+            self.call_arg_depth -= 1;
+            let mut value = parsed_value?;
 
             // Check for spread operator: args...
             // This enables spreading variadic parameters in function calls
@@ -456,10 +458,6 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume ...
                 value = Expr::Spread(Box::new(value));
             }
-
-            // Transform placeholder lambda syntax: _ * 2 -> \__p0: __p0 * 2
-            // Count and replace all _ identifiers with unique parameters
-            value = transform_placeholder_lambda(value);
 
             // Create span from start to current position
             let arg_end = self.previous.span;

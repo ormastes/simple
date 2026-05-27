@@ -1,20 +1,25 @@
 use crate::ast::{Argument, BinOp, Expr, LambdaParam, MoveMode, Type, UnaryOp};
 use crate::error::ParseError;
 use crate::error_recovery::{ErrorHint, ErrorHintLevel};
-use crate::expressions::placeholder::{force_transform_placeholder_lambda, is_exact_placeholder_expr};
+use crate::expressions::placeholder::{force_transform_placeholder_lambda, transform_placeholder_lambda};
 use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
 
 impl<'a> Parser<'a> {
-    fn transform_exact_placeholder_args_for_hof(&self, callee: &Expr, args: &mut [Argument]) {
-        if !Self::expr_is_higher_order_callee(callee) {
-            return;
-        }
-        for arg in args {
-            if is_exact_placeholder_expr(&arg.value) {
+    fn transform_placeholder_args_for_call(&self, callee: &Expr, args: &mut [Argument]) {
+        if Self::expr_is_higher_order_callee(callee) {
+            for arg in args {
                 let value = std::mem::replace(&mut arg.value, Expr::Nil);
                 arg.value = force_transform_placeholder_lambda(value);
             }
+            return;
+        }
+        if self.call_arg_depth > 0 {
+            return;
+        }
+        for arg in args {
+            let value = std::mem::replace(&mut arg.value, Expr::Nil);
+            arg.value = transform_placeholder_lambda(value);
         }
     }
 
@@ -366,7 +371,7 @@ impl<'a> Parser<'a> {
                         if self.check(&TokenKind::LParen) {
                             let mut args = self.parse_arguments()?;
                             let method_callee = Expr::Identifier(field.clone());
-                            self.transform_exact_placeholder_args_for_hof(&method_callee, &mut args);
+                            self.transform_placeholder_args_for_call(&method_callee, &mut args);
                             // Check for trailing block: obj.method(args) \x: body
                             if self.check(&TokenKind::Backslash) {
                                 let trailing_lambda = self.parse_trailing_lambda()?;
@@ -799,7 +804,7 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_call(&mut self, callee: Expr) -> Result<Expr, ParseError> {
         let mut args = self.parse_arguments()?;
-        self.transform_exact_placeholder_args_for_hof(&callee, &mut args);
+        self.transform_placeholder_args_for_call(&callee, &mut args);
         // Check for trailing block: func(args) \x: body
         if self.check(&TokenKind::Backslash) {
             let trailing_lambda = self.parse_trailing_lambda()?;
