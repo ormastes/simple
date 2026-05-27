@@ -1,0 +1,118 @@
+# NVMe production performance contract.
+#
+# This module is intentionally data-only. Hardware benchmark runners can feed
+# their measured 4K random read/write results here before claiming production
+# readiness or C-FAT parity.
+
+struct NvmeRandomIoPerfSample:
+    provider: text
+    workload: text
+    io_size_bytes: u32
+    queue_depth: u16
+    warm_runs: u32
+    random_read_iops: u64
+    random_write_iops: u64
+    p99_read_latency_us: u64
+    p99_write_latency_us: u64
+    max_rss_kib: u64
+    c_bridge_used: bool
+    common_logic_shared: bool
+    allocation_per_io: bool
+
+fn nvme_random_io_perf_sample(
+    provider: text,
+    workload: text,
+    io_size_bytes: u32,
+    queue_depth: u16,
+    warm_runs: u32,
+    random_read_iops: u64,
+    random_write_iops: u64,
+    p99_read_latency_us: u64,
+    p99_write_latency_us: u64,
+    max_rss_kib: u64,
+    c_bridge_used: bool,
+    common_logic_shared: bool,
+    allocation_per_io: bool
+) -> NvmeRandomIoPerfSample:
+    NvmeRandomIoPerfSample(
+        provider: provider,
+        workload: workload,
+        io_size_bytes: io_size_bytes,
+        queue_depth: queue_depth,
+        warm_runs: warm_runs,
+        random_read_iops: random_read_iops,
+        random_write_iops: random_write_iops,
+        p99_read_latency_us: p99_read_latency_us,
+        p99_write_latency_us: p99_write_latency_us,
+        max_rss_kib: max_rss_kib,
+        c_bridge_used: c_bridge_used,
+        common_logic_shared: common_logic_shared,
+        allocation_per_io: allocation_per_io
+    )
+
+fn nvme_random_io_perf_sample_reason(sample: NvmeRandomIoPerfSample) -> text:
+    if sample.provider != "simple-driver":
+        return "nvme-perf-provider-not-simple:" + sample.provider
+    if sample.c_bridge_used:
+        return "nvme-perf-c-bridge-used"
+    if sample.workload != "4k-random-read-write":
+        return "nvme-perf-workload-not-4k-random:" + sample.workload
+    if sample.io_size_bytes != 4096u32:
+        return "nvme-perf-io-size-not-4k"
+    if sample.queue_depth < 32u16:
+        return "nvme-perf-queue-depth-too-low"
+    if sample.warm_runs < 3u32:
+        return "nvme-perf-not-warm"
+    if sample.random_read_iops == 0u64:
+        return "nvme-perf-missing-read-iops"
+    if sample.random_write_iops == 0u64:
+        return "nvme-perf-missing-write-iops"
+    if sample.p99_read_latency_us == 0u64:
+        return "nvme-perf-missing-read-p99"
+    if sample.p99_write_latency_us == 0u64:
+        return "nvme-perf-missing-write-p99"
+    if sample.max_rss_kib == 0u64:
+        return "nvme-perf-missing-rss"
+    if not sample.common_logic_shared:
+        return "nvme-perf-common-logic-not-shared"
+    if sample.allocation_per_io:
+        return "nvme-perf-allocation-per-io"
+    "ready"
+
+fn nvme_random_io_perf_sample_ready(sample: NvmeRandomIoPerfSample) -> bool:
+    nvme_random_io_perf_sample_reason(sample) == "ready"
+
+struct NvmeCParityPerfComparison:
+    simple: NvmeRandomIoPerfSample
+    c_baseline: NvmeRandomIoPerfSample
+
+fn nvme_c_parity_perf_comparison(
+    simple: NvmeRandomIoPerfSample,
+    c_baseline: NvmeRandomIoPerfSample
+) -> NvmeCParityPerfComparison:
+    NvmeCParityPerfComparison(simple: simple, c_baseline: c_baseline)
+
+fn nvme_c_parity_perf_reason(cmp: NvmeCParityPerfComparison) -> text:
+    val simple_reason = nvme_random_io_perf_sample_reason(cmp.simple)
+    if simple_reason != "ready":
+        return "simple-sample-not-ready:" + simple_reason
+    if cmp.c_baseline.workload != "4k-random-read-write":
+        return "c-baseline-workload-not-4k-random:" + cmp.c_baseline.workload
+    if cmp.c_baseline.io_size_bytes != 4096u32:
+        return "c-baseline-io-size-not-4k"
+    if cmp.c_baseline.random_read_iops == 0u64 or cmp.c_baseline.random_write_iops == 0u64:
+        return "c-baseline-missing-iops"
+    if cmp.c_baseline.p99_read_latency_us == 0u64 or cmp.c_baseline.p99_write_latency_us == 0u64:
+        return "c-baseline-missing-p99"
+    if cmp.simple.random_read_iops <= cmp.c_baseline.random_read_iops:
+        return "simple-read-iops-not-faster-than-c"
+    if cmp.simple.random_write_iops <= cmp.c_baseline.random_write_iops:
+        return "simple-write-iops-not-faster-than-c"
+    if cmp.simple.p99_read_latency_us > cmp.c_baseline.p99_read_latency_us:
+        return "simple-read-p99-slower-than-c"
+    if cmp.simple.p99_write_latency_us > cmp.c_baseline.p99_write_latency_us:
+        return "simple-write-p99-slower-than-c"
+    "ready"
+
+fn nvme_c_parity_perf_ready(cmp: NvmeCParityPerfComparison) -> bool:
+    nvme_c_parity_perf_reason(cmp) == "ready"

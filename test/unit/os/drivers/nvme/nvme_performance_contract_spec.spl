@@ -1,0 +1,78 @@
+use std.spec.{describe, it, expect}
+use os.drivers.nvme.nvme_performance_contract.{
+    nvme_c_parity_perf_comparison,
+    nvme_c_parity_perf_ready,
+    nvme_c_parity_perf_reason,
+    nvme_random_io_perf_sample,
+    nvme_random_io_perf_sample_ready,
+    nvme_random_io_perf_sample_reason
+}
+
+fn _simple_sample(read_iops: u64, write_iops: u64, read_p99: u64, write_p99: u64):
+    nvme_random_io_perf_sample(
+        "simple-driver",
+        "4k-random-read-write",
+        4096u32,
+        64u16,
+        5u32,
+        read_iops,
+        write_iops,
+        read_p99,
+        write_p99,
+        32768u64,
+        false,
+        true,
+        false
+    )
+
+fn _c_sample(read_iops: u64, write_iops: u64, read_p99: u64, write_p99: u64):
+    nvme_random_io_perf_sample(
+        "c-fat-baseline",
+        "4k-random-read-write",
+        4096u32,
+        64u16,
+        5u32,
+        read_iops,
+        write_iops,
+        read_p99,
+        write_p99,
+        32768u64,
+        true,
+        false,
+        false
+    )
+
+describe "NVMe production performance contract":
+    it "accepts warmed pure Simple 4K random I/O samples without C bridge or per-I/O allocation":
+        val sample = _simple_sample(120000u64, 80000u64, 900u64, 1300u64)
+        expect(nvme_random_io_perf_sample_reason(sample)).to_equal("ready")
+        expect(nvme_random_io_perf_sample_ready(sample)).to_equal(true)
+
+    it "rejects samples that are not measuring the production 4K random NVMe path":
+        val c_bridge = nvme_random_io_perf_sample("simple-driver", "4k-random-read-write", 4096u32, 64u16, 5u32, 120000u64, 80000u64, 900u64, 1300u64, 32768u64, true, true, false)
+        val cold = nvme_random_io_perf_sample("simple-driver", "4k-random-read-write", 4096u32, 64u16, 1u32, 120000u64, 80000u64, 900u64, 1300u64, 32768u64, false, true, false)
+        val alloc = nvme_random_io_perf_sample("simple-driver", "4k-random-read-write", 4096u32, 64u16, 5u32, 120000u64, 80000u64, 900u64, 1300u64, 32768u64, false, true, true)
+        val wrong_size = nvme_random_io_perf_sample("simple-driver", "4k-random-read-write", 512u32, 64u16, 5u32, 120000u64, 80000u64, 900u64, 1300u64, 32768u64, false, true, false)
+
+        expect(nvme_random_io_perf_sample_reason(c_bridge)).to_equal("nvme-perf-c-bridge-used")
+        expect(nvme_random_io_perf_sample_reason(cold)).to_equal("nvme-perf-not-warm")
+        expect(nvme_random_io_perf_sample_reason(alloc)).to_equal("nvme-perf-allocation-per-io")
+        expect(nvme_random_io_perf_sample_reason(wrong_size)).to_equal("nvme-perf-io-size-not-4k")
+
+    it "requires pure Simple random read and write to beat the C FAT baseline":
+        val ready = nvme_c_parity_perf_comparison(
+            _simple_sample(120000u64, 90000u64, 800u64, 1000u64),
+            _c_sample(100000u64, 80000u64, 900u64, 1100u64)
+        )
+        val slow_read = nvme_c_parity_perf_comparison(
+            _simple_sample(100000u64, 90000u64, 800u64, 1000u64),
+            _c_sample(100000u64, 80000u64, 900u64, 1100u64)
+        )
+        val slow_write_p99 = nvme_c_parity_perf_comparison(
+            _simple_sample(120000u64, 90000u64, 800u64, 1200u64),
+            _c_sample(100000u64, 80000u64, 900u64, 1100u64)
+        )
+
+        expect(nvme_c_parity_perf_ready(ready)).to_equal(true)
+        expect(nvme_c_parity_perf_reason(slow_read)).to_equal("simple-read-iops-not-faster-than-c")
+        expect(nvme_c_parity_perf_reason(slow_write_p99)).to_equal("simple-write-p99-slower-than-c")

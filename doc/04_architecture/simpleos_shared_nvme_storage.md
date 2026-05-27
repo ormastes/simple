@@ -165,6 +165,11 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
   `BlockDevice` surfaces.
+- Production performance claims now have an explicit NVMe contract: measured
+  samples must be warm 4K random read/write runs on the pure Simple provider,
+  without the C bridge or per-I/O allocation, with enough queue depth and common
+  logic sharing, and Simple must beat the C FAT baseline for read/write IOPS and
+  p99 latency.
 
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware
@@ -214,6 +219,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   user-assigned namespace lease construction from a tokenized `DeviceGrant`,
   grant/evidence mismatch rejection, missing-token rejection, and FAT32/NVFS/DBFS
   readiness on the shared lease surface.
+- `test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl` covers the
+  production 4K random read/write measurement contract and rejects C-bridge,
+  cold-run, per-I/O allocation, wrong-size, and slower-than-C samples.
 - `test/unit/os/services/vfs/nvme_block_adapter_spec.spl` covers adapter-visible
   lease translation and out-of-range rejection without requiring real hardware.
 - `test/unit/lib/fs_driver/nvfs_device_backed_spec.spl` covers NVFS opening on
