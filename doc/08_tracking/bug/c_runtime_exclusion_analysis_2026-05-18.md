@@ -59,7 +59,7 @@ or Rust-only replacement is wired through the same symbol name.
 | `runtime_thread.c` | `spl_thread_create/join/detach/current_id/sleep/yield/cpu_count/pool_spawn_worker`, `spl_mutex_*`, `spl_condvar_*` | 0 Rust codegen | `nogc_async_mut/thread_sffi.spl`, `thread_pool.spl` | Threading primitives |
 | `runtime.c` | Bootstrap `spl_*` symbol set (spl_nil, spl_bool, spl_str, spl_array_*, spl_dict_*, spl_print*, spl_shell*, spl_malloc/free, rt_str_hash, …) | Bootstrap compiler stage only | 0 spl | Legacy bootstrap runtime; not linked in self-hosted build but must stay for stage0/stage1 |
 | `scv_wasm_shim.c` | `wasm_rt_load`, `wasm_rt_free`, `wasm_rt_parse_all` | 0 Rust codegen | `src/lib/scv/wasm_executor.spl` (3 callers) | SCV grammar parsing via WASM tree-sitter |
-| `runtime_regex_stub.c` | `sffi_regex_is_match/find/find_all/captures/replace/replace_all/split/split_n` | `codegen/instr/calls.rs` (dispatch table), `interpreter_extern/mod.rs` | `nogc_sync_mut/io/regex_simple.spl` | Regex stubs; Rust interpreter has native impl, native codegen links stubs |
+| `runtime_regex_stub.c` | `sffi_regex_is_match/find/find_all/captures/replace/replace_all/split/split_n` | `codegen/instr/calls.rs` (dispatch table), `interpreter_extern/mod.rs` | `nogc_sync_mut/io/regex_simple.spl` | `simple-runtime` no longer calls the C file as of 2026-05-27; native codegen still links regex stub symbols when the full regex runtime is unavailable. |
 
 ## New Removal Candidates (zero native/codegen callers, interpreter duplicate exists)
 
@@ -102,6 +102,9 @@ Additional 2026-05-27 simple-runtime reductions:
 - `value/sffi/contracts.rs` now implements the contract diagnostics and abort
   behavior directly in Rust, so `runtime/build.rs` no longer compiles
   `runtime_contracts.c`.
+- `value/sffi/regex_stub.rs` now implements the disabled-regex stub behavior
+  directly in Rust, so `runtime/build.rs` no longer compiles
+  `runtime_regex_stub.c`.
 
 Verification:
 
@@ -114,6 +117,7 @@ cargo test -p simple-runtime sffi::error_handling --manifest-path src/compiler_r
 cargo test -p simple-runtime value::tests::test_sffi_functions --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::equality --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::contracts --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::regex_stub --manifest-path src/compiler_rust/Cargo.toml
 ```
 
 ## Path to C Removal for Remaining Modules

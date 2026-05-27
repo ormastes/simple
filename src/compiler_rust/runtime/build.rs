@@ -10,7 +10,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_env.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_format.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_regex_stub.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_pty.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
@@ -109,7 +108,6 @@ fn compile_c_runtime_sources() {
         "runtime_time.c",
         "runtime_env.c",
         "runtime_format.c",
-        "runtime_regex_stub.c",
         "runtime_pty.c",
     ];
     let mut objects = Vec::new();
