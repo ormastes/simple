@@ -7,6 +7,7 @@ use os.drivers.nvme.nvme_performance_contract.{
     nvme_real_hardware_perf_report_line_from_measurements,
     nvme_real_hardware_perf_serial_acceptance_reason
 }
+use os.kernel.types.capability_types.{SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 
 struct RealDeviceReadiness:
     board_id: text
@@ -554,12 +555,42 @@ fn _real_device_serial_marker_present(serial_output: text, marker: text) -> bool
                 return true
     false
 
+fn _real_device_serial_text_field(serial_output: text, prefix: text) -> text:
+    var normalized = serial_output.replace("\n", " ")
+    normalized = normalized.replace("\r", " ")
+    normalized = normalized.replace("\t", " ")
+    for part in normalized.split(" "):
+        val token = part.trim()
+        if token.starts_with(prefix):
+            return token.substring(prefix.len(), token.len()).trim()
+    ""
+
+fn _real_device_serial_u16_field(serial_output: text, prefix: text) -> Result<u16, text>:
+    val value_text = _real_device_serial_text_field(serial_output, prefix)
+    if value_text.len() == 0:
+        return Err("missing")
+    for ch in value_text:
+        if ch < "0" or ch > "9":
+            return Err("invalid")
+    var value: u64 = 0u64
+    for ch in value_text:
+        val digit = ch.to_i32() - "0".to_i32()
+        value = value * 10u64 + digit.to_u64()
+    if value > 65535u64:
+        return Err("invalid")
+    Ok(value as u16)
+
 fn real_device_physical_nvme_serial_acceptance_reason(serial_output: text) -> text:
     if serial_output.contains("storage_provider=c-boot-bridge"):
         return "storage-not-pure-simple:c-boot-bridge"
     for marker in real_device_physical_nvme_boot_markers():
         if not _real_device_serial_marker_present(serial_output, marker):
             return "missing-physical-nvme-marker:" + marker
+    val user_queue = _real_device_serial_u16_field(serial_output, "user_namespace_queue_id=")
+    if user_queue.is_err():
+        return "physical-nvme-user-queue-invalid"
+    if user_queue.unwrap() < SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID:
+        return "physical-nvme-user-queue-not-data"
     val perf_reason = nvme_real_hardware_perf_serial_acceptance_reason(serial_output)
     if perf_reason != "ready":
         return "nvme-real-hardware-perf:" + perf_reason
