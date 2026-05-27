@@ -1,0 +1,59 @@
+# NVMe filesystem mount factory.
+#
+# Converts a validated NvmeFilesystemLease plus a lease-backed BlockDevice into
+# the concrete DriverInstance used by the VFS mount table. The BlockDevice is
+# expected to be produced by NvmeBlockAdapter.for_filesystem_lease for real
+# SimpleOS NVMe hardware; tests may pass MemBlockDevice to verify wiring.
+
+use os.services.block_device.{BlockDevice}
+use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemLease, NvmeFilesystemConsumer, nvme_filesystem_lease_reason, nvme_filesystem_lease_sector_count}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
+use std.fs_driver.error.{FsError}
+
+fn vfs_nvme_fs_error_name(err: FsError) -> text:
+    match err:
+        case FsError.Unsupported: "unsupported"
+        case FsError.Transient(_): "transient"
+        case FsError.Corrupt: "corrupt"
+        case FsError.NoSpace: "no-space"
+        case FsError.Permission: "permission"
+        case FsError.NotFound: "not-found"
+        case FsError.AlreadyExists: "already-exists"
+        case FsError.Busy: "busy"
+        case FsError.IoError(_): "io-error"
+        case FsError.Interrupted: "interrupted"
+        case FsError.TooLarge: "too-large"
+        case FsError.ReadOnly: "read-only"
+        case FsError.InvalidArg: "invalid-arg"
+        case FsError.StaleHandle: "stale-handle"
+        case FsError.PathTraversal: "path-traversal"
+
+fn vfs_nvme_filesystem_region_blocks(lease: NvmeFilesystemLease) -> i64:
+    nvme_filesystem_lease_sector_count(lease) as i64
+
+fn vfs_nvme_driver_instance_for_lease(
+    name: text,
+    dev: BlockDevice,
+    lease: NvmeFilesystemLease,
+    consumer: NvmeFilesystemConsumer
+) -> Result<DriverInstance, text>:
+    val reason = nvme_filesystem_lease_reason(lease, consumer)
+    if reason != "ready":
+        return Err(reason)
+    val block_count = vfs_nvme_filesystem_region_blocks(lease)
+    match consumer:
+        case NvmeFilesystemConsumer.Fat32:
+            Ok(DriverInstance.Fat32(FsFat32Driver.new(name, dev)))
+        case NvmeFilesystemConsumer.Nvfs:
+            val opened = NvfsDriver.new_on_device(name, dev, 0i64, block_count)
+            if opened.is_err():
+                return Err("nvfs-open-on-device:" + vfs_nvme_fs_error_name(opened.unwrap_err()))
+            Ok(DriverInstance.Nvfs(opened.unwrap()))
+        case NvmeFilesystemConsumer.Dbfs:
+            val opened = DbFsDriver.open_on_device(dev, 0i64, block_count)
+            if opened.is_err():
+                return Err("dbfs-open-on-device:" + vfs_nvme_fs_error_name(opened.unwrap_err()))
+            Ok(DriverInstance.DbFs(opened.unwrap()))

@@ -1,0 +1,80 @@
+use std.spec.{describe, it, expect}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_filesystem_region_blocks}
+use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmeQueueAssignment, NvmeFilesystemLease, nvme_filesystem_lease}
+use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
+
+fn _mount_test_lease() -> NvmeFilesystemLease:
+    val ns = NvmeNamespaceIdentity(
+        controller_id: 0,
+        nsid: 9,
+        lba_size: 512,
+        lba_count: 4096,
+        eui64: 0,
+        nguid_lo: 0,
+        nguid_hi: 0,
+        uuid_lo: 0,
+        uuid_hi: 0
+    )
+    val queue = NvmeQueueAssignment(
+        queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        role: NvmeQueueRole.System,
+        controller_id: 0,
+        nsid: 9,
+        owner_task: 0,
+        max_depth: 128,
+        rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+    )
+    nvme_filesystem_lease(ns, 128u64, 1024u64, NvmeNamespaceMode.System, queue, "simple-driver", "none", true, true)
+
+describe "NVMe filesystem mount factory":
+    it "reports the lease region block count used by device-backed filesystems":
+        val lease = _mount_test_lease()
+        expect(vfs_nvme_filesystem_region_blocks(lease)).to_equal(1024i64)
+
+    it "builds FAT32 from the shared lease-backed BlockDevice surface":
+        val lease = _mount_test_lease()
+        val fat = vfs_nvme_driver_instance_for_lease("fat32-root", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Fat32)
+        expect(fat.is_ok()).to_equal(true)
+        val driver = fat.unwrap()
+        expect(driver.driver_name()).to_equal("fat32-root")
+
+    it "builds NVFS from the shared lease-backed BlockDevice surface":
+        val lease = _mount_test_lease()
+        val nvfs = vfs_nvme_driver_instance_for_lease("nvfs-root", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Nvfs)
+        expect(nvfs.is_ok()).to_equal(true)
+        val driver = nvfs.unwrap()
+        expect(driver.driver_name()).to_equal("nvfs-root")
+
+    it "builds DBFS from the shared lease-backed BlockDevice surface":
+        val lease = _mount_test_lease()
+        val dbfs = vfs_nvme_driver_instance_for_lease("dbfs-root", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs)
+        expect(dbfs.is_ok()).to_equal(true)
+        val driver = dbfs.unwrap()
+        expect(driver.driver_name()).to_equal("DbFsDriver")
+
+    it "rejects consumers when the lease is not filesystem-ready":
+        val ns = NvmeNamespaceIdentity(
+            controller_id: 0,
+            nsid: 10,
+            lba_size: 512,
+            lba_count: 4096,
+            eui64: 0,
+            nguid_lo: 0,
+            nguid_hi: 0,
+            uuid_lo: 0,
+            uuid_hi: 0
+        )
+        val queue = NvmeQueueAssignment(
+            queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+            role: NvmeQueueRole.System,
+            controller_id: 0,
+            nsid: 10,
+            owner_task: 0,
+            max_depth: 128,
+            rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+        )
+        val lease = nvme_filesystem_lease(ns, 0u64, 1024u64, NvmeNamespaceMode.System, queue, "simple-driver", "none", false, true)
+        val result = vfs_nvme_driver_instance_for_lease("bad", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Fat32)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("nvme-fs-lease-missing-shared-block-interface")

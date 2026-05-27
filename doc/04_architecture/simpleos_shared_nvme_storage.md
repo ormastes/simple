@@ -21,6 +21,9 @@ must not each grow separate NVMe access paths. The existing code already has:
 - `src/lib/nogc_sync_mut/fs_driver/nvfs_driver.spl` now has a device-backed
   constructor so FAT32, NVFS, and DBFS all expose a shared `BlockDevice`
   construction path.
+- `src/os/services/vfs/nvme_filesystem_mounts.spl` converts a validated
+  `NvmeFilesystemLease` plus a lease-backed `BlockDevice` into the
+  `DriverInstance` needed by the VFS mount table.
 
 ## Decision
 The NVMe driver owns controller init, namespace discovery, queue assignment,
@@ -43,6 +46,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - FAT32, NVFS, and DBFS can share one NVMe namespace lease contract.
 - FAT32, NVFS, and DBFS can each mount from the same lease-backed
   `BlockDevice` interface instead of filesystem-specific NVMe code.
+- VFS code has one mount-factory entry point for selecting FAT32, NVFS, or DBFS
+  from the same lease validation path.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -63,3 +68,5 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   lease translation and out-of-range rejection without requiring real hardware.
 - `test/unit/lib/fs_driver/nvfs_device_backed_spec.spl` covers NVFS opening on
   the same shared `BlockDevice` surface used by FAT32 and DBFS.
+- `test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl` covers producing
+  FAT32, NVFS, and DBFS `DriverInstance` values from one NVMe lease contract.
