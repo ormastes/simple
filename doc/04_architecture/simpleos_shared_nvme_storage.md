@@ -92,6 +92,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   filesystem-specific boot wiring.
 - Real-device readiness now treats `c-boot-bridge` as non-production evidence;
   only the pure-Simple `simple-driver` provider can satisfy storage readiness.
+- `src/os/kernel/boot/freestanding_nvme_adapter_contract.spl` defines the
+  evidence gate for a freestanding pure-Simple NVMe adapter before it may enter
+  the shared `boot_fs_mount_from_device` filesystem probe.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
