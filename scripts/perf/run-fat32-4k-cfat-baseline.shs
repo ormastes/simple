@@ -8,8 +8,44 @@ OUT="${TMPDIR:-/tmp}/cfat32_4k_baseline"
 "$CC_BIN" -O2 "$ROOT/scripts/perf/cfat32_4k_baseline.c" -o "$OUT"
 
 echo "=== Simple FAT32 4K benchmark ==="
-SIMPLE_LIB="$ROOT/src" "$ROOT/src/compiler_rust/target/debug/simple" "$ROOT/test/perf/bench/fat32_4k_compare.spl"
+SIMPLE_OUT="$(SIMPLE_LIB="$ROOT/src" "$ROOT/src/compiler_rust/target/debug/simple" "$ROOT/test/perf/bench/fat32_4k_compare.spl")"
+printf '%s\n' "$SIMPLE_OUT"
 
 echo
 echo "=== C FAT32 direct-image baseline ==="
-"$OUT"
+C_OUT="$("$OUT")"
+printf '%s\n' "$C_OUT"
+
+extract_p50() {
+    local name="$1"
+    local text="$2"
+    printf '%s\n' "$text" | awk -v name="$name" '
+        index($0, name ":") == 1 {
+            sub(/^.*p50=/, "", $0)
+            sub(/us.*$/, "", $0)
+            print $0
+            exit
+        }
+    '
+}
+
+simple_read="$(extract_p50 simple_fat32_read4k "$SIMPLE_OUT")"
+simple_write="$(extract_p50 simple_fat32_write4k "$SIMPLE_OUT")"
+c_read="$(extract_p50 c_fat_direct_read4k "$C_OUT")"
+c_write="$(extract_p50 c_fat_direct_write4k "$C_OUT")"
+
+if [ -z "$simple_read" ] || [ -z "$simple_write" ] || [ -z "$c_read" ] || [ -z "$c_write" ]; then
+    echo "FAILED: could not parse benchmark p50 values" >&2
+    exit 1
+fi
+
+if [ "$simple_read" -lt "$c_read" ] && [ "$simple_write" -lt "$c_write" ]; then
+    echo
+    echo "PASS: simple_fat32 is faster than direct C FAT32 for 4K random read/write p50"
+else
+    echo
+    echo "FAIL: simple_fat32 is not faster than direct C FAT32 for both 4K random read/write p50" >&2
+    echo "read p50: simple=${simple_read}us c_fat=${c_read}us" >&2
+    echo "write p50: simple=${simple_write}us c_fat=${c_write}us" >&2
+    exit 1
+fi
