@@ -108,6 +108,8 @@ Additional 2026-05-27 simple-runtime reductions:
 - `value/sffi/io_print.rs` now implements value formatting, raw u64
   stringification, and display-string conversion directly in Rust, so
   `runtime/build.rs` no longer compiles `runtime_format.c`.
+- `value/pty.rs` now exports `rt_pty_open` and `rt_pty_spawn` directly in
+  Rust, so `runtime/build.rs` no longer compiles `runtime_pty.c`.
 
 Verification:
 
@@ -122,6 +124,7 @@ cargo test -p simple-runtime sffi::equality --manifest-path src/compiler_rust/Ca
 cargo test -p simple-runtime sffi::contracts --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::regex_stub --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::io_print --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime value::pty --manifest-path src/compiler_rust/Cargo.toml
 ```
 
 ## Path to C Removal for Remaining Modules

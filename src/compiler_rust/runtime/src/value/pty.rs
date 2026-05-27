@@ -7,6 +7,151 @@ use std::os::unix::io::{AsRawFd, RawFd};
 #[cfg(unix)]
 use nix::pty::openpty;
 
+#[cfg(unix)]
+mod pty_process {
+    use std::collections::HashMap;
+    use std::ffi::CString;
+    use std::sync::Mutex;
+
+    lazy_static::lazy_static! {
+        static ref SLAVE_TABLE: Mutex<HashMap<i32, i32>> = Mutex::new(HashMap::new());
+    }
+
+    pub(super) fn open(rows: i32, cols: i32) -> i32 {
+        let mut master_fd: libc::c_int = -1;
+        let mut slave_fd: libc::c_int = -1;
+
+        let ws = libc::winsize {
+            ws_row: rows.max(1) as libc::c_ushort,
+            ws_col: cols.max(1) as libc::c_ushort,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+
+        let ret = unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &ws,
+            )
+        };
+
+        if ret < 0 {
+            return -1;
+        }
+
+        unsafe {
+            let flags = libc::fcntl(master_fd, libc::F_GETFL, 0);
+            if flags >= 0 {
+                libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+
+        if let Ok(mut table) = SLAVE_TABLE.lock() {
+            table.insert(master_fd, slave_fd);
+        }
+
+        master_fd
+    }
+
+    pub(super) fn spawn(master_fd: i32, shell: &str) -> i64 {
+        if shell.is_empty() {
+            return -1;
+        }
+
+        let slave_fd = match SLAVE_TABLE.lock().ok().and_then(|table| table.get(&master_fd).copied()) {
+            Some(fd) => fd,
+            None => return -1,
+        };
+
+        let shell_cstr = match CString::new(shell) {
+            Ok(value) => value,
+            Err(_) => return -1,
+        };
+        let argv0 = shell.rsplit('/').next().unwrap_or(shell);
+        let argv0_cstr = match CString::new(argv0) {
+            Ok(value) => value,
+            Err(_) => return -1,
+        };
+
+        unsafe {
+            libc::fflush(std::ptr::null_mut());
+
+            let pid = libc::fork();
+            if pid < 0 {
+                return -1;
+            }
+
+            if pid == 0 {
+                if libc::setsid() < 0 {
+                    libc::_exit(1);
+                }
+
+                libc::ioctl(slave_fd, libc::TIOCSCTTY, 0 as libc::c_int);
+                libc::dup2(slave_fd, libc::STDIN_FILENO);
+                libc::dup2(slave_fd, libc::STDOUT_FILENO);
+                libc::dup2(slave_fd, libc::STDERR_FILENO);
+                if slave_fd > libc::STDERR_FILENO {
+                    libc::close(slave_fd);
+                }
+                libc::close(master_fd);
+
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                libc::signal(libc::SIGHUP, libc::SIG_DFL);
+
+                let argv: &[*const libc::c_char] = &[argv0_cstr.as_ptr(), std::ptr::null()];
+                libc::execvp(shell_cstr.as_ptr(), argv.as_ptr());
+                libc::_exit(127);
+            }
+
+            libc::close(slave_fd);
+            if let Ok(mut table) = SLAVE_TABLE.lock() {
+                table.remove(&master_fd);
+            }
+
+            pid as i64
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_pty_open(rows: i32, cols: i32) -> i32 {
+    #[cfg(unix)]
+    {
+        pty_process::open(rows, cols)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (rows, cols);
+        -1
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_pty_spawn(master_fd: i32, shell: *const std::os::raw::c_char) -> i64 {
+    #[cfg(unix)]
+    {
+        if shell.is_null() {
+            return -1;
+        }
+        let Ok(shell) = std::ffi::CStr::from_ptr(shell).to_str() else {
+            return -1;
+        };
+        pty_process::spawn(master_fd, shell)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (master_fd, shell);
+        -1
+    }
+}
+
 /// Open a new pseudo-terminal pair
 /// Returns: [master_fd, slave_fd]
 #[no_mangle]
@@ -184,5 +329,19 @@ pub extern "C" fn native_pty_close(fd: i64) -> RuntimeValue {
     #[cfg(not(unix))]
     {
         RuntimeValue::from_bool(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rt_pty_spawn_rejects_invalid_inputs() {
+        unsafe {
+            assert_eq!(rt_pty_spawn(-1, std::ptr::null()), -1);
+            assert_eq!(rt_pty_spawn(-1, c"/bin/sh".as_ptr()), -1);
+            assert_eq!(rt_pty_spawn(-1, c"".as_ptr()), -1);
+        }
     }
 }
