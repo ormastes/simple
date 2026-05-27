@@ -406,10 +406,10 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "fix",
-        app_path: "src/app/fix/main.spl",
+        app_path: "src/app/cli/lint_entry.spl",
         rust_handler: Handler::Args(run_lint),
         env_override: "SIMPLE_FIX_RUST",
-        needs_rust_flags: &["--fix", "--fix-all", "--fix-dry-run", "--fix-interactive"],
+        needs_rust_flags: &[],
     },
     CommandEntry {
         name: "fmt",
@@ -1006,6 +1006,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
     // Rust handlers, but selected app surfaces need a real Simple entrypoint.
     if app_relative_path != "src/app/ui/cli_entry.spl"
         && app_relative_path != "src/app/cli/theme_sync.spl"
+        && app_relative_path != "src/app/cli/lint_entry.spl"
         && app_relative_path != "src/app/ui.tauri/tauri_entry.spl"
         && app_relative_path != "src/app/office/mod.spl"
         && app_relative_path != "src/app/cli/bootstrap_main.spl"
