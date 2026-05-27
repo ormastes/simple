@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-25 04:20:16*
+*Generated: 2026-05-27 03:11:12*
 
-## test/compiler/mir_opt
+## test/unit/lib/nogc_async_mut/http/h2
 
-❌ **pattern_rule_spec.spl** (213ms)
-  - Source: `test/compiler/mir_opt/pattern_rule_spec.spl`
-  - Generated doc: `spec/pattern_rule_spec.md`
+❌ **hpack_huffman_spec.spl** (4495ms)
+  - Source: `test/unit/lib/nogc_async_mut/http/h2/hpack_huffman_spec.spl`
+  - Generated doc: `spec/hpack_huffman_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 5 ✅
-- **Failed:** 2 ❌
-- **Duration:** 217ms
+- **Passed:** 30 ✅
+- **Failed:** 1 ❌
+- **Duration:** 4498ms

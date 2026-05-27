@@ -4,16 +4,15 @@
 # methods.  Fat32Core.{create_file,mkdir,unlink,rename} delegate here to keep
 # fat32_core.spl under the 800-line limit.
 
-use common.string_core.{str_char_at}
 use std.fs_driver.types.{FileHandle, DirEntry, Inode}
 use std.fs_driver.fat32_core.{
     Fat32Core, OpenFile,
     FAT32_FREE, FAT32_EOC, FAT32_DIR_ENTRY_SIZE,
     FAT32_ATTR_DIRECTORY, FAT32_ATTR_LONG_NAME
 }
-use std.fs_driver.fat32_parsers.{_read_u16_le, _read_u32_le, _parse_short_name, _split_path}
+use std.fs_driver.fat32_parsers.{_read_u16_le, _read_u32_le, _parse_short_name, _split_path, _lower_text}
 
-fn fat32_create_file(core: Fat32Core, path: text) -> Result<FileHandle, text>:
+fn fat32_create_file(core: Fat32Core, path: text) -> Result<[u32], text>:
     if not core.mounted:
         return Result.Err("filesystem not mounted")
     val parts = _split_path(path)
@@ -59,12 +58,32 @@ fn fat32_create_file(core: Fat32Core, path: text) -> Result<FileHandle, text>:
     while ni < 11:
         dir_data[slot_off + ni] = 0x20
         ni = ni + 1
+    # Split on dot for 8.3 encoding
+    var base_part = name
+    var ext_part = ""
+    var di: i64 = 0
+    while di < name.len():
+        var db: u8 = name.char_at(di) as u8
+        if db == 0x2E:
+            base_part = name.slice(0, di)
+            ext_part = name.slice(di + 1, name.len())
+        di = di + 1
+    # Write base (up to 8 chars, uppercased)
     var ci = 0
-    while ci < name.len() and ci < 8:
-        val ch = str_char_at(name, ci)
-        var b: u8 = ch.len().to_u8()
+    while ci < base_part.len() and ci < 8:
+        var b: u8 = base_part.char_at(ci) as u8
+        if b >= 0x61 and b <= 0x7A:
+            b = b - 32
         dir_data[slot_off + ci] = b
         ci = ci + 1
+    # Write extension (up to 3 chars, uppercased)
+    var exi = 0
+    while exi < ext_part.len() and exi < 3:
+        var b: u8 = ext_part.char_at(exi) as u8
+        if b >= 0x61 and b <= 0x7A:
+            b = b - 32
+        dir_data[slot_off + 8 + exi] = b
+        exi = exi + 1
     dir_data[slot_off + 11] = 0x20
     dir_data[slot_off + 20] = ((new_cluster >> 16) & 0xFF).to_u8()
     dir_data[slot_off + 21] = ((new_cluster >> 24) & 0xFF).to_u8()
@@ -77,10 +96,7 @@ fn fat32_create_file(core: Fat32Core, path: text) -> Result<FileHandle, text>:
     val wrc = core.write_cluster(dir_cluster, dir_data)
     if wrc.is_err():
         return Result.Err(wrc.unwrap_err())
-    core.invalidate_path_prefix(path)
-    core.invalidate_dir_cache(dir_cluster)
-    val handle = core.alloc_file_handle(new_cluster, 0, false)
-    Result.Ok(handle)
+    Result.Ok([new_cluster, dir_cluster])
 
 fn fat32_mkdir(core: Fat32Core, path: text) -> Result<(), text>:
     if not core.mounted:
@@ -128,12 +144,32 @@ fn fat32_mkdir(core: Fat32Core, path: text) -> Result<(), text>:
     while ni < 11:
         dir_data[slot_off + ni] = 0x20
         ni = ni + 1
+    # Split on dot for 8.3 encoding
+    var base_part = name
+    var ext_part = ""
+    var di: i64 = 0
+    while di < name.len():
+        var db: u8 = name.char_at(di) as u8
+        if db == 0x2E:
+            base_part = name.slice(0, di)
+            ext_part = name.slice(di + 1, name.len())
+        di = di + 1
+    # Write base (up to 8 chars, uppercased)
     var ci = 0
-    while ci < name.len() and ci < 8:
-        val ch = str_char_at(name, ci)
-        var b: u8 = ch.len().to_u8()
+    while ci < base_part.len() and ci < 8:
+        var b: u8 = base_part.char_at(ci) as u8
+        if b >= 0x61 and b <= 0x7A:
+            b = b - 32
         dir_data[slot_off + ci] = b
         ci = ci + 1
+    # Write extension (up to 3 chars, uppercased)
+    var exi = 0
+    while exi < ext_part.len() and exi < 3:
+        var b: u8 = ext_part.char_at(exi) as u8
+        if b >= 0x61 and b <= 0x7A:
+            b = b - 32
+        dir_data[slot_off + 8 + exi] = b
+        exi = exi + 1
     dir_data[slot_off + 11] = FAT32_ATTR_DIRECTORY
     dir_data[slot_off + 20] = ((new_cluster >> 16) & 0xFF).to_u8()
     dir_data[slot_off + 21] = ((new_cluster >> 24) & 0xFF).to_u8()
@@ -171,7 +207,7 @@ fn fat32_unlink(core: Fat32Core, path: text) -> Result<(), text>:
             return Result.Err("not a directory in path")
         dir_cluster = entry.inode.id.to_u32()
         pi = pi + 1
-    val target = parts[parts.len() - 1]
+    val target = _lower_text(parts[parts.len() - 1])
     val chain_rc = core.follow_chain(dir_cluster)
     if chain_rc.is_err():
         return Result.Err(chain_rc.unwrap_err())
@@ -239,7 +275,7 @@ fn fat32_rename(core: Fat32Core, old_path: text, new_path: text) -> Result<(), t
             return Result.Err(entry_rc.unwrap_err())
         old_dir_cluster = entry_rc.unwrap().inode.id.to_u32()
         pi = pi + 1
-    val old_name = old_parts[old_parts.len() - 1]
+    val old_name = _lower_text(old_parts[old_parts.len() - 1])
     var new_dir_cluster = core.root_cluster
     pi = 0
     while pi < new_parts.len() - 1:
@@ -318,11 +354,32 @@ fn fat32_rename(core: Fat32Core, old_path: text, new_path: text) -> Result<(), t
                 while ni < 11:
                     cdata[off + ni] = 0x20
                     ni = ni + 1
+                # Split on dot for 8.3 encoding
+                var rn_base = new_name
+                var rn_ext = ""
+                var rn_di: i64 = 0
+                while rn_di < new_name.len():
+                    var rn_db: u8 = new_name.char_at(rn_di) as u8
+                    if rn_db == 0x2E:
+                        rn_base = new_name.slice(0, rn_di)
+                        rn_ext = new_name.slice(rn_di + 1, new_name.len())
+                    rn_di = rn_di + 1
+                # Write base (up to 8 chars, uppercased)
                 var nci = 0
-                while nci < new_name.len() and nci < 8:
-                    val ch = str_char_at(new_name, nci)
-                    cdata[off + nci] = ch.len().to_u8()
+                while nci < rn_base.len() and nci < 8:
+                    var nb: u8 = rn_base.char_at(nci) as u8
+                    if nb >= 0x61 and nb <= 0x7A:
+                        nb = nb - 32
+                    cdata[off + nci] = nb
                     nci = nci + 1
+                # Write extension (up to 3 chars, uppercased)
+                var rn_exi = 0
+                while rn_exi < rn_ext.len() and rn_exi < 3:
+                    var nb: u8 = rn_ext.char_at(rn_exi) as u8
+                    if nb >= 0x61 and nb <= 0x7A:
+                        nb = nb - 32
+                    cdata[off + 8 + rn_exi] = nb
+                    rn_exi = rn_exi + 1
                 cdata[off + 11] = found_attr
                 cdata[off + 20] = ((found_cluster >> 16) & 0xFF).to_u8()
                 cdata[off + 21] = ((found_cluster >> 24) & 0xFF).to_u8()

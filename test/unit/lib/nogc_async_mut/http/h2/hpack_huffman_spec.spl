@@ -1,0 +1,353 @@
+"""
+# HPACK Huffman Correctness and Decode/Encode Coverage
+
+**Feature IDs:** #HTTP2-HUFFMAN-001
+**Category:** Stdlib / HTTP/2 / HPACK Huffman
+**Difficulty:** 3/5
+**Status:** Draft
+
+Comprehensive tests for `src/lib/nogc_async_mut/http/h2/hpack_huffman.spl`.
+Covers round-trip correctness, RFC 7541 Appendix B/C.4 test vectors,
+edge cases (empty, single char, all-padding, max-length), error handling
+(truncated/invalid sequences), padding validation, and compression ratio.
+"""
+
+use std.spec
+use std.http.h2.hpack_huffman.{
+    hpack_huffman_encode,
+    hpack_huffman_decode,
+    hpack_huffman_encoded_length
+}
+
+# ===========================================================================
+# Module-level helpers — kept outside `it` blocks per interpreter constraints.
+# ===========================================================================
+
+fn bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn str_to_bytes(s: text) -> [u8]:
+    """Convert an ASCII text string to a [u8] array."""
+    var out: [u8] = []
+    var i = 0
+    while i < s.len():
+        out.push(s.char_code_at(i))
+        i = i + 1
+    out
+
+fn make_repeating(byte_val: u8, n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(byte_val)
+        i = i + 1
+    out
+
+fn make_indexed(n: i64) -> [u8]:
+    """Build [u8] where byte i = i mod 256, covering all symbol values."""
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push((i & 0xff) & 0xff)
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# RFC 7541 Appendix C.4 reference vectors
+# ---------------------------------------------------------------------------
+
+fn www_example_com_bytes() -> [u8]:
+    # "www.example.com" as ASCII bytes
+    var out: [u8] = [0x77, 0x77, 0x77, 0x2e, 0x65, 0x78, 0x61, 0x6d,
+                     0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d]
+    out
+
+fn www_example_com_huffman() -> [u8]:
+    # RFC 7541 C.4.1: Huffman encoding of "www.example.com" (12 bytes)
+    var out: [u8] = [0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0,
+                     0xab, 0x90, 0xf4, 0xff]
+    out
+
+fn no_cache_bytes() -> [u8]:
+    # "no-cache"
+    var out: [u8] = [0x6e, 0x6f, 0x2d, 0x63, 0x61, 0x63, 0x68, 0x65]
+    out
+
+fn no_cache_huffman() -> [u8]:
+    # RFC 7541 C.4.2: Huffman encoding of "no-cache" (6 bytes)
+    var out: [u8] = [0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf]
+    out
+
+fn custom_key_bytes() -> [u8]:
+    # "custom-key"
+    var out: [u8] = [0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b,
+                     0x65, 0x79]
+    out
+
+fn custom_key_huffman() -> [u8]:
+    # RFC 7541 C.4.3: Huffman encoding of "custom-key" (8 bytes)
+    var out: [u8] = [0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f]
+    out
+
+fn custom_value_bytes() -> [u8]:
+    # "custom-value"
+    var out: [u8] = [0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x76,
+                     0x61, 0x6c, 0x75, 0x65]
+    out
+
+fn custom_value_huffman() -> [u8]:
+    # RFC 7541 C.4.3: Huffman encoding of "custom-value" (9 bytes)
+    var out: [u8] = [0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xb8, 0xe8, 0xb4,
+                     0xbf]
+    out
+
+# ===========================================================================
+# Encoder tests — RFC 7541 Appendix C.4 vectors
+# ===========================================================================
+
+describe "HPACK Huffman encoder — RFC 7541 C.4 vectors":
+
+    it "encodes 'www.example.com' to RFC C.4.1 bytes":
+        val encoded = hpack_huffman_encode(www_example_com_bytes())
+        expect(encoded.len()).to_equal(12)
+        expect(bytes_eq(encoded, www_example_com_huffman())).to_equal(true)
+
+    it "encodes 'no-cache' to RFC C.4.2 bytes":
+        val encoded = hpack_huffman_encode(no_cache_bytes())
+        expect(encoded.len()).to_equal(6)
+        expect(bytes_eq(encoded, no_cache_huffman())).to_equal(true)
+
+    it "encodes 'custom-key' to RFC C.4.3 bytes":
+        val encoded = hpack_huffman_encode(custom_key_bytes())
+        expect(encoded.len()).to_equal(8)
+        expect(bytes_eq(encoded, custom_key_huffman())).to_equal(true)
+
+    it "encodes 'custom-value' to RFC C.4.3 bytes":
+        val encoded = hpack_huffman_encode(custom_value_bytes())
+        expect(encoded.len()).to_equal(9)
+        expect(bytes_eq(encoded, custom_value_huffman())).to_equal(true)
+
+# ===========================================================================
+# Encoder tests — basic and edge cases
+# ===========================================================================
+
+describe "HPACK Huffman encoder — basic cases":
+
+    it "encodes empty input to empty output":
+        val out = hpack_huffman_encode([])
+        expect(out.len()).to_equal(0)
+
+    it "encodes single byte 0x61 ('a') with EOS padding":
+        # 'a' = code 0x00011, 5 bits → padded to 8 bits: 00011 111 = 0x1f
+        val out = hpack_huffman_encode([0x61])
+        expect(out.len()).to_equal(1)
+        expect(out[0]).to_equal(0x1f)
+
+    it "encodes single byte 0x30 ('0') correctly":
+        # '0' = code 0x00, 5 bits → padded to 8 bits: 00000 111 = 0x07
+        val out = hpack_huffman_encode([0x30])
+        expect(out.len()).to_equal(1)
+        expect(out[0]).to_equal(0x07)
+
+    it "padding bits are all 1s (EOS prefix)":
+        # For any single-char encode, the trailing pad bits must be 1s.
+        # 'e' = code 00100, 5 bits → 00100 111 = 0x27
+        val out = hpack_huffman_encode([0x65])
+        expect(out.len()).to_equal(1)
+        # Verify the low 3 bits (padding) are all 1
+        val pad = out[0] & 0x07
+        expect(pad).to_equal(0x07)
+
+# ===========================================================================
+# Decoder tests — RFC 7541 Appendix C.4 vectors
+# ===========================================================================
+
+describe "HPACK Huffman decoder — RFC 7541 C.4 vectors":
+
+    it "decodes 'www.example.com' (C.4.1) correctly":
+        val enc = www_example_com_huffman()
+        val decoded = hpack_huffman_decode(enc, enc.len() * 8)
+        expect(bytes_eq(decoded, www_example_com_bytes())).to_equal(true)
+
+    it "decodes 'no-cache' (C.4.2) correctly":
+        val enc = no_cache_huffman()
+        val decoded = hpack_huffman_decode(enc, enc.len() * 8)
+        expect(bytes_eq(decoded, no_cache_bytes())).to_equal(true)
+
+    it "decodes 'custom-key' (C.4.3) correctly":
+        val enc = custom_key_huffman()
+        val decoded = hpack_huffman_decode(enc, enc.len() * 8)
+        expect(bytes_eq(decoded, custom_key_bytes())).to_equal(true)
+
+    it "decodes 'custom-value' (C.4.3) correctly":
+        val enc = custom_value_huffman()
+        val decoded = hpack_huffman_decode(enc, enc.len() * 8)
+        expect(bytes_eq(decoded, custom_value_bytes())).to_equal(true)
+
+# ===========================================================================
+# Decoder tests — edge and error cases
+# ===========================================================================
+
+describe "HPACK Huffman decoder — edge cases":
+
+    it "decodes empty input to empty output":
+        val decoded = hpack_huffman_decode([], 0)
+        expect(decoded.len()).to_equal(0)
+
+    it "decodes with zero bit_count returns empty":
+        val enc = no_cache_huffman()
+        val decoded = hpack_huffman_decode(enc, 0)
+        expect(decoded.len()).to_equal(0)
+
+    it "truncated input returns partial decode (not crash)":
+        # Take first 3 bytes of www.example.com encoding (12 bytes total)
+        # Decode should produce some output without crashing
+        val full = www_example_com_huffman()
+        var truncated: [u8] = [full[0], full[1], full[2]]
+        val decoded = hpack_huffman_decode(truncated, truncated.len() * 8)
+        # Should produce fewer characters than the full 15-char original
+        expect(decoded.len()).to_be_less_than(15)
+
+    it "single all-1s byte (pure padding) decodes to empty":
+        # 0xff = 8 bits of 1s. This is valid padding only (no complete symbol
+        # starts with all 1s at lengths <= 8). Decoder should produce empty.
+        val decoded = hpack_huffman_decode([0xff], 8)
+        expect(decoded.len()).to_equal(0)
+
+# ===========================================================================
+# Round-trip tests — encode then decode equals original
+# ===========================================================================
+
+describe "HPACK Huffman round-trip":
+
+    it "round-trips empty input":
+        val encoded = hpack_huffman_encode([])
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(decoded.len()).to_equal(0)
+
+    it "round-trips single byte 'a' (0x61)":
+        val payload: [u8] = [0x61]
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(decoded.len()).to_equal(1)
+        expect(decoded[0]).to_equal(0x61)
+
+    it "round-trips 'content-type'":
+        val payload = str_to_bytes("content-type")
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips 'GET'":
+        val payload = str_to_bytes("GET")
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips '/index.html'":
+        val payload = str_to_bytes("/index.html")
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips 'www.example.com'":
+        val payload = www_example_com_bytes()
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips 'no-cache'":
+        val payload = no_cache_bytes()
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips 100-byte repeating payload":
+        val payload = make_repeating(0x41, 100)
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(decoded.len()).to_equal(100)
+        expect(bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips 64-byte indexed payload":
+        val payload = make_indexed(64)
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(decoded.len()).to_equal(64)
+        expect(bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips 128-byte indexed payload":
+        val payload = make_indexed(128)
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(decoded.len()).to_equal(128)
+        expect(bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips 256-byte indexed payload (all symbols 0x00-0xff)":
+        val payload = make_indexed(256)
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(decoded.len()).to_equal(256)
+        expect(bytes_eq(decoded, payload)).to_equal(true)
+
+    it "round-trips 10-byte mixed payload":
+        var payload: [u8] = [0x00, 0x41, 0x61, 0x7a, 0x2f, 0x3a, 0x20, 0x0d, 0x0a, 0xff]
+        val encoded = hpack_huffman_encode(payload)
+        val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
+        expect(decoded.len() >= 10).to_equal(true)
+        var ok = true
+        var i = 0
+        while i < 10:
+            if decoded[i] != payload[i]:
+                ok = false
+            i = i + 1
+        expect(ok).to_equal(true)
+
+# ===========================================================================
+# Compression ratio and encoded-length tests
+# ===========================================================================
+
+describe "HPACK Huffman encoded length":
+
+    it "encoded_length matches actual encode output length":
+        val payload = www_example_com_bytes()
+        val predicted = hpack_huffman_encoded_length(payload)
+        val enc = hpack_huffman_encode(payload)
+        val actual = enc.len()
+        expect(predicted).to_equal(actual)
+
+    it "encoded_length of empty input is zero":
+        val predicted = hpack_huffman_encoded_length([])
+        expect(predicted).to_equal(0)
+
+    it "encoded_length of single 'a' is 1":
+        val predicted = hpack_huffman_encoded_length([0x61])
+        expect(predicted).to_equal(1)
+
+    it "typical HTTP text compresses (output <= input length)":
+        # Common HTTP header values should compress or stay same size
+        val payload = str_to_bytes("text/html; charset=utf-8")
+        val enc_len = hpack_huffman_encoded_length(payload)
+        expect(enc_len <= payload.len()).to_equal(true)
+
+    it "Huffman encoding of 'www.example.com' saves space":
+        val payload = www_example_com_bytes()
+        val enc_len = hpack_huffman_encoded_length(payload)
+        # 15 ASCII bytes → 12 Huffman bytes
+        expect(enc_len).to_equal(12)
+        expect(enc_len).to_be_less_than(payload.len())
+
+    it "encoded_length matches for 'no-cache'":
+        val payload = no_cache_bytes()
+        val predicted = hpack_huffman_encoded_length(payload)
+        val enc = hpack_huffman_encode(payload)
+        val actual = enc.len()
+        expect(predicted).to_equal(actual)
+        expect(predicted).to_equal(6)

@@ -8,7 +8,7 @@ use std.driver.types.{DeviceId, DriverClass}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.types.{FileHandle, DirEntry, Inode}
 use std.fs_driver.fat32_parsers.{
-    _to_lower_byte, _read_u32_le, _read_u16_le, _parse_short_name, _split_path
+    _to_lower_byte, _read_u32_le, _read_u16_le, _parse_short_name, _split_path, _lower_text
 }
 use std.fs_driver.fat32_dir_ops.{fat32_create_file, fat32_mkdir, fat32_unlink, fat32_rename}
 
@@ -367,9 +367,10 @@ impl Fat32Core:
         if entries_rc.is_err():
             return Result.Err(entries_rc.unwrap_err())
         val entries = entries_rc.unwrap()
+        val lower_target = _lower_text(target_name)
         var i = 0
         while i < entries.len():
-            if entries[i].name == target_name:
+            if entries[i].name == lower_target:
                 return Result.Ok(entries[i])
             i = i + 1
         Result.Err("file not found")
@@ -479,7 +480,7 @@ impl Fat32Core:
             dir_cluster = entry_rc.unwrap().inode.id.to_u32()
             pi = pi + 1
         # Now scan the raw directory entries for the target name
-        val target = parts[parts.len() - 1]
+        val target = _lower_text(parts[parts.len() - 1])
         val chain_rc = self.follow_chain(dir_cluster)
         if chain_rc.is_err():
             return Result.Err(chain_rc.unwrap_err())
@@ -696,7 +697,13 @@ impl Fat32Core:
         self.read_dir_entries(dir_cluster)
 
     me fn create_file(path: text) -> Result<FileHandle, text>:
-        fat32_create_file(self, path)
+        val rc = fat32_create_file(self, path)
+        if rc.is_err():
+            return Result.Err(rc.unwrap_err())
+        val clusters = rc.unwrap()
+        val new_cluster = clusters[0]
+        val handle = self.alloc_file_handle(new_cluster, 0, false)
+        Result.Ok(handle)
 
     me fn mkdir(path: text) -> Result<(), text>:
         fat32_mkdir(self, path)
