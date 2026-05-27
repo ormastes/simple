@@ -1736,29 +1736,53 @@ class PureDatabase:
                             new_key = new_key + "\x00"
                         new_key = new_key + row_vals[cidx].to_text()
                     ci = ci + 1
-                # Check against existing rows
+                # Check against existing rows (typed fast path)
                 val snap = self._txn.snapshot()
                 var tbl = self._tbl_data[ti]
-                val visible = tbl.scan(snap)
+                val uq_typed = self._tbl_typed[ti]
+                val uq_use_typed = uq_typed.len() == tbl.tuples.len()
+                if uq_use_typed:
+                    var ui: i32 = 0
+                    while ui < tbl.tuples.len() as i32:
+                        if mvcc_is_visible(tbl.tuples[ui], snap):
+                            val existing = uq_typed[ui]
+                            var existing_key = ""
+                            var eci: i32 = 1
+                            while eci < entry.len() as i32:
+                                val ecidx = _find_idx(col_names, entry[eci])
+                                if ecidx >= 0 and ecidx < existing.len() as i32:
+                                    if eci > 1:
+                                        existing_key = existing_key + "\x00"
+                                    existing_key = existing_key + existing[ecidx].to_text()
+                                eci = eci + 1
+                            if existing_key == new_key:
+                                self._tbl_data[ti] = tbl
+                                return Err(DbError.QueryFailed(
+                                    sql: "INSERT",
+                                    message: "UNIQUE constraint failed"
+                                ))
+                        ui = ui + 1
+                else:
+                    val visible = tbl.scan(snap)
+                    var ri: i32 = 0
+                    while ri < visible.len() as i32:
+                        val existing = _deserialize_row(visible[ri])
+                        var existing_key = ""
+                        var eci: i32 = 1
+                        while eci < entry.len() as i32:
+                            val ecidx = _find_idx(col_names, entry[eci])
+                            if ecidx >= 0 and ecidx < existing.len() as i32:
+                                if eci > 1:
+                                    existing_key = existing_key + "\x00"
+                                existing_key = existing_key + existing[ecidx].to_text()
+                            eci = eci + 1
+                        if existing_key == new_key:
+                            return Err(DbError.QueryFailed(
+                                sql: "INSERT",
+                                message: "UNIQUE constraint failed"
+                            ))
+                        ri = ri + 1
                 self._tbl_data[ti] = tbl
-                var ri: i32 = 0
-                while ri < visible.len() as i32:
-                    val existing = _deserialize_row(visible[ri])
-                    var existing_key = ""
-                    var eci: i32 = 1
-                    while eci < entry.len() as i32:
-                        val ecidx = _find_idx(col_names, entry[eci])
-                        if ecidx >= 0 and ecidx < existing.len() as i32:
-                            if eci > 1:
-                                existing_key = existing_key + "\x00"
-                            existing_key = existing_key + existing[ecidx].to_text()
-                        eci = eci + 1
-                    if existing_key == new_key:
-                        return Err(DbError.QueryFailed(
-                            sql: "INSERT",
-                            message: "UNIQUE constraint failed"
-                        ))
-                    ri = ri + 1
             ii = ii + 1
         Ok(0)
 
