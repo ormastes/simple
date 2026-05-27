@@ -28,6 +28,13 @@ fn _run_checker(serial_path: text) -> (text, text, i32):
         15000
     )
 
+fn _run_lab_wrapper(serial_path: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        ["scripts/run_simpleos_physical_nvme_perf.shs", "--serial-log", serial_path, "--validate-log-only"],
+        15000
+    )
+
 describe "SimpleOS physical NVMe serial checker app":
     it "exits zero for real NVMe evidence and nonzero for q35 emulator evidence":
         val ready_path = "/tmp/simpleos_nvme_serial_check_ready.log"
@@ -42,6 +49,25 @@ describe "SimpleOS physical NVMe serial checker app":
 
         val (ready_stdout, _ready_stderr, ready_code) = _run_checker(ready_path)
         val (q35_stdout, _q35_stderr, q35_code) = _run_checker(q35_path)
+
+        expect(ready_code).to_equal(0)
+        expect(ready_stdout).to_contain("reason=ready")
+        expect(q35_code).to_equal(1)
+        expect(q35_stdout).to_contain("reason=missing-physical-nvme-marker:hardware_target=real-nvme")
+
+    it "keeps the physical NVMe lab wrapper fail-closed in validate-log-only mode":
+        val ready_path = "/tmp/simpleos_nvme_lab_wrapper_ready.log"
+        val q35_path = "/tmp/simpleos_nvme_lab_wrapper_q35.log"
+        val _ = rt_file_delete(ready_path)
+        val _ = rt_file_delete(q35_path)
+        val ready_log = _physical_nvme_access_marker() + _physical_nvme_perf_marker("real-nvme", "false", "real-device") + "TEST PASSED\n"
+        val q35_log = _physical_nvme_access_marker() + _physical_nvme_perf_marker("q35", "true", "emulator") + "TEST PASSED\n"
+
+        expect(rt_file_write_text(ready_path, ready_log)).to_equal(true)
+        expect(rt_file_write_text(q35_path, q35_log)).to_equal(true)
+
+        val (ready_stdout, _ready_stderr, ready_code) = _run_lab_wrapper(ready_path)
+        val (q35_stdout, _q35_stderr, q35_code) = _run_lab_wrapper(q35_path)
 
         expect(ready_code).to_equal(0)
         expect(ready_stdout).to_contain("reason=ready")
