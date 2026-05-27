@@ -490,7 +490,12 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
                 fixes.push(fix)
                 search_from = candidate.end_offset
             case nil:
-                val placeholder = _parse_placeholder_candidate(line: ctx.line, lambda_start: lambda_start)
+                var placeholder = _parse_compact_placeholder_candidate(line: ctx.line, lambda_start: lambda_start)
+                match placeholder:
+                    case Some(_candidate):
+                        pass
+                    case nil:
+                        placeholder = _parse_placeholder_candidate(line: ctx.line, lambda_start: lambda_start)
                 match placeholder:
                     case Some(candidate):
                         var fix = EasyFix.create(
@@ -646,6 +651,47 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
         return nil
     Some(ShortGrammarPlaceholderCandidate(new_text: new_text, end_offset: expr_end))
 
+fn _parse_compact_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarPlaceholderCandidate>:
+    val colon_abs = _short_find_text_from(line: line, needle: ":", search_from: lambda_start)
+    if colon_abs < 0:
+        return nil
+    val raw_param = line.slice(lambda_start, colon_abs).trim()
+    if raw_param.len() < 2:
+        return nil
+    val introducer = raw_param.slice(0, 1)
+    if _short_is_identifier_char(introducer):
+        return nil
+    val param = raw_param.slice(1, raw_param.len()).trim()
+    if not _short_is_plain_identifier(param):
+        return nil
+
+    var body_start = colon_abs + 1
+    while body_start < line.len() and line.slice(body_start, body_start + 1) == " ":
+        body_start = body_start + 1
+    val expr_end = _short_scan_simple_lambda_expr_end(line: line, start: body_start)
+    if expr_end <= body_start:
+        return nil
+    val expr = line.slice(body_start, expr_end).trim()
+    if not expr.starts_with(param):
+        return nil
+    val tail = expr.slice(param.len(), expr.len()).trim()
+    if not _short_placeholder_tail_starts_with_operator(tail):
+        return nil
+    if not _short_placeholder_brackets_are_param_free(expr: expr, param: param):
+        return nil
+    if not _short_placeholder_quotes_are_safe(expr: expr, param: param):
+        return nil
+    val new_text = _short_replace_plain_identifier(expr: expr, param: param, replacement: "_1")
+    if new_text == expr:
+        return nil
+    Some(ShortGrammarPlaceholderCandidate(new_text: new_text, end_offset: expr_end))
+
+fn _short_placeholder_tail_starts_with_operator(tail: text) -> bool:
+    if tail == "":
+        return false
+    val ch = tail.slice(0, 1)
+    ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "%" or ch == ">" or ch == "<" or ch == "=" or ch == "!"
+
 fn _parse_tuple_placeholder_candidate(line: text, lambda_start: i64, colon_abs: i64) -> Option<ShortGrammarPlaceholderCandidate>:
     val raw_param = line.slice(lambda_start, colon_abs).trim()
     if not raw_param.starts_with("\\(") or not raw_param.ends_with(")"):
@@ -721,7 +767,20 @@ fn _short_find_text_from(line: text, needle: text, search_from: i64) -> i64:
     -1
 
 fn _short_placeholder_expr_is_safe(expr: text) -> bool:
-    expr.contains(" + ") or expr.contains(" - ") or expr.contains(" * ") or expr.contains(" / ") or expr.contains(" % ") or expr.contains(" > ") or expr.contains(" < ") or expr.contains(" == ") or expr.contains(" != ") or expr.contains(" >= ") or expr.contains(" <= ")
+    _short_placeholder_expr_has_binary_operator(expr)
+
+fn _short_placeholder_expr_has_binary_operator(expr: text) -> bool:
+    var i = 0
+    while i < expr.len():
+        val ch = expr.slice(i, i + 1)
+        if ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "%" or ch == ">" or ch == "<":
+            return true
+        if ch == "=" and i + 1 < expr.len() and expr.slice(i + 1, i + 2) == "=":
+            return true
+        if ch == "!" and i + 1 < expr.len() and expr.slice(i + 1, i + 2) == "=":
+            return true
+        i = i + 1
+    false
 
 fn _short_placeholder_calls_are_safe(expr: text, param: text) -> bool:
     var i = 0
