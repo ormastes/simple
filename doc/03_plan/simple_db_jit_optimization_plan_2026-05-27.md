@@ -208,3 +208,28 @@ B1: Minimal repro ──→ B2: HIR fix ──→ B3: Pattern→JIT bridge ─�
 1. **Near-term (Track A):** PureDatabase within 15x of SQLite on PUT/GET/UPD, within 1x on SCAN
 2. **Mid-term (Track B1-B2):** JIT compiles basic functions without HIR error
 3. **Full (Track B3-B4):** PureDatabase within 2x of SQLite on all operations with JIT enabled
+
+---
+
+## Progress Log
+
+### 2026-05-27 — Phase 1 In Progress
+
+**A2: MIR Optimization Patterns — DONE (prior commit)**
+- 3 new CLibPatternKind variants: ScanResultCache, VisibilityBatchPrecompute, CopyElisionPointLookup
+- 6 new rules in clib_parity_rule_table() (database + general variants)
+- 5 new general patterns: DictLookupFusion, ArrayLenHoist, DeadBranchElim, StringConcatReduce, IntCmpStrengthReduce
+- All 66 clib_parity_hotspot_spec tests pass
+
+**A3: Benchmark Hardening — DONE**
+- 5-iteration median/min/max reporting with NOISY variance detection
+- Insertion sort for small i64 arrays, per-table PUT isolation
+- SCAN cold kept as single-shot; sanity checks use verification pass
+- Latest median results: PUT 141,839 ns, GET 48,155 ns, SCAN 18,790 ns, UPD 224,064 ns
+
+**A1: Hot-Path Restructuring — IN PROGRESS**
+- Sonnet agent working on array copy elimination in database.spl
+
+**B1: JIT HIR Error Diagnosis — IN PROGRESS**
+- Sonnet agent investigating `Unknown variable: int` error source in Rust compiler
+- Known: error appears during HIR lowering when JIT attempts to compile a function
