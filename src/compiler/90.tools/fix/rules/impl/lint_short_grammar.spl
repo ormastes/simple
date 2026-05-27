@@ -150,17 +150,19 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
     val expr = line[body_start:expr_end].trim()
     val value_prefix = param + " "
     val member_prefix = param + "."
-    if not expr.starts_with(value_prefix) and not expr.starts_with(member_prefix):
+    if not expr.starts_with(value_prefix) and not expr.starts_with(member_prefix) and not _expr_contains_plain_identifier(expr, param):
         return nil
     if expr.contains("[") or expr.contains("\""):
         return nil
-    if expr.contains("(") and not _placeholder_calls_are_empty(expr):
+    if expr.contains("(") and not _placeholder_calls_are_empty_or_param_only(expr, param):
         return nil
-    if not _placeholder_expr_is_safe(expr):
+    if not _placeholder_expr_is_safe(expr) and not _placeholder_expr_is_single_param_call(expr, param):
         return nil
 
-    val suffix = expr[param.len():expr.len()]
-    Some(ShortGrammarPlaceholderCandidate(new_text: "_" + suffix, end_offset: expr_end))
+    val new_text = _replace_plain_identifier(expr, param, "_")
+    if new_text == expr:
+        return nil
+    Some(ShortGrammarPlaceholderCandidate(new_text: new_text, end_offset: expr_end))
 
 fn _scan_simple_lambda_expr_end(line: text, start: i64) -> i64:
     var i = start
@@ -191,16 +193,53 @@ fn _find_text_from(line: text, needle: text, search_from: i64) -> i64:
 fn _placeholder_expr_is_safe(expr: text) -> bool:
     expr.contains(" + ") or expr.contains(" - ") or expr.contains(" * ") or expr.contains(" / ") or expr.contains(" % ") or expr.contains(" > ") or expr.contains(" < ") or expr.contains(" == ") or expr.contains(" != ") or expr.contains(" >= ") or expr.contains(" <= ")
 
-fn _placeholder_calls_are_empty(expr: text) -> bool:
+fn _placeholder_calls_are_empty_or_param_only(expr: text, param: text) -> bool:
     var i = 0
     while i < expr.len():
         if expr[i:i + 1] == "(":
-            if i + 1 >= expr.len() or expr[i + 1:i + 2] != ")":
+            val close = _find_text_from(expr, ")", i + 1)
+            if close < 0:
                 return false
-            i = i + 2
+            val inner = expr[i + 1:close].trim()
+            if inner != "" and inner != param:
+                return false
+            i = close + 1
         else:
             i = i + 1
     true
+
+fn _placeholder_expr_is_single_param_call(expr: text, param: text) -> bool:
+    val open = _find_text_from(expr, "(", 0)
+    if open <= 0:
+        return false
+    val fn_name = expr[0:open].trim()
+    if not _is_plain_identifier(fn_name):
+        return false
+    val close = _find_text_from(expr, ")", open + 1)
+    if close != expr.len() - 1:
+        return false
+    expr[open + 1:close].trim() == param
+
+fn _expr_contains_plain_identifier(expr: text, param: text) -> bool:
+    _replace_plain_identifier(expr, param, "_") != expr
+
+fn _replace_plain_identifier(expr: text, param: text, replacement: text) -> text:
+    var result = ""
+    var i = 0
+    while i < expr.len():
+        if i + param.len() <= expr.len() and expr[i:i + param.len()] == param:
+            val before = if i == 0: "" else: expr[i - 1:i]
+            val after = if i + param.len() >= expr.len(): "" else: expr[i + param.len():i + param.len() + 1]
+            if (before == "" or not _is_identifier_char(before)) and (after == "" or not _is_identifier_char(after)):
+                result = result + replacement
+                i = i + param.len()
+            else:
+                result = result + expr[i:i + 1]
+                i = i + 1
+        else:
+            result = result + expr[i:i + 1]
+            i = i + 1
+    result
 
 fn _scan_identifier_end(line: text, start: i64) -> i64:
     var i = start
