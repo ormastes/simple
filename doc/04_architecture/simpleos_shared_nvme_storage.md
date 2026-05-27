@@ -95,6 +95,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `src/os/kernel/boot/freestanding_nvme_adapter_contract.spl` defines the
   evidence gate for a freestanding pure-Simple NVMe adapter before it may enter
   the shared `boot_fs_mount_from_device` filesystem probe.
+- `boot_fs_mount_pure_nvme_from_device` connects that evidence gate to the
+  freestanding filesystem probe, so a future pure-Simple adapter must prove
+  transfer readiness before NVFS/DBFS probing starts.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS

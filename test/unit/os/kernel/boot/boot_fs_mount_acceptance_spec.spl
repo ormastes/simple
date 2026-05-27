@@ -4,12 +4,14 @@ use os.kernel.boot.boot_fs_mount.{
     FsMountResult,
     FsMountType,
     boot_fs_mount_from_device,
+    boot_fs_mount_pure_nvme_from_device,
     boot_storage_acceptance_evidence,
     boot_storage_acceptance_reason,
     boot_storage_acceptance_ready,
     boot_fs_mount_acceptance_reason,
     boot_fs_mount_provider_is_pure_simple
 }
+use os.drivers.nvme.nvme_storage_model.{nvme_transfer_evidence}
 
 fn simple_nvfs_result() -> FsMountResult:
     FsMountResult(
@@ -182,3 +184,47 @@ describe "boot filesystem mount acceptance":
         val result = boot_fs_mount_from_device(empty_dev, "simple-driver", true)
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err()).to_equal("boot-fs-mount: no root filesystem on provider:simple-driver")
+
+    it "gates pure NVMe freestanding probing on transfer evidence":
+        val empty_dev = MemBlockDevice.new(8u64, 512u32)
+        val missing_sector = nvme_transfer_evidence(
+            "simple-driver",
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+            "user-space-driver",
+            "raw-device-grant:tok=boot-nvme",
+            "non-secure-resource-namespace",
+            true,
+            true
+        )
+        val rejected = boot_fs_mount_pure_nvme_from_device(empty_dev, missing_sector)
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal("boot-fs-mount: pure-nvme-adapter-not-ready:missing-nvme-sector-read")
+
+        val ready = nvme_transfer_evidence(
+            "simple-driver",
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            "user-space-driver",
+            "raw-device-grant:tok=boot-nvme",
+            "non-secure-resource-namespace",
+            true,
+            true
+        )
+        val no_fs = boot_fs_mount_pure_nvme_from_device(empty_dev, ready)
+        expect(no_fs.is_err()).to_equal(true)
+        expect(no_fs.unwrap_err()).to_equal("boot-fs-mount: no root filesystem on provider:simple-driver")
