@@ -163,6 +163,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   transfer evidence belongs to that grant, assigns a data queue, and emits the
   same FAT32/NVFS/DBFS lease surface as system boot storage.
 - System boot/root storage and user-assigned storage are separated by queue role.
+- Namespace lease admission now has a shared conflict check: the same
+  controller namespace cannot be system-owned and user-assigned at the same
+  time, and repeated user filesystem views are accepted only for the same grant,
+  owner task, and queue.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
   `BlockDevice` surfaces.
 - Production performance claims now have an explicit NVMe contract: measured
@@ -221,8 +225,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
   user-assigned leases, grant failures, reserved queue rejection, required queue
-  rights, evidence-gated lease minting, and shared FAT32/NVFS/DBFS
-  block-interface readiness.
+  rights, namespace ownership conflict rejection, evidence-gated lease minting,
+  and shared FAT32/NVFS/DBFS block-interface readiness.
 - `test/unit/os/drivers/nvme/nvme_namespace_assignment_spec.spl` covers
   user-assigned namespace lease construction from a tokenized `DeviceGrant`,
   grant/evidence mismatch rejection, missing-token rejection, and FAT32/NVFS/DBFS

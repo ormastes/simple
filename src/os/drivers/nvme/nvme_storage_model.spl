@@ -206,6 +206,32 @@ fn nvme_filesystem_lease_absolute_lba(lease: NvmeFilesystemLease, relative_lba: 
         return Err("nvme-fs-lease-lba-out-of-range")
     Ok(lease.base_lba + relative_lba)
 
+fn nvme_filesystem_lease_same_namespace(a: NvmeFilesystemLease, b: NvmeFilesystemLease) -> bool:
+    a.namespace.controller_id == b.namespace.controller_id and a.namespace.nsid == b.namespace.nsid
+
+fn nvme_filesystem_lease_conflict_reason(active: NvmeFilesystemLease, requested: NvmeFilesystemLease) -> text:
+    """Reject simultaneous system/user ownership of one namespace."""
+    if not nvme_filesystem_lease_same_namespace(active, requested):
+        return "ready"
+    if active.mode != requested.mode:
+        return "nvme-fs-namespace-mode-conflict:" + nvme_namespace_mode_name(active.mode) + ":" + nvme_namespace_mode_name(requested.mode)
+    if active.mode == NvmeNamespaceMode.System:
+        return "ready"
+    if active.grant_kind != requested.grant_kind:
+        return "nvme-fs-user-namespace-grant-conflict"
+    if active.queue.owner_task != requested.queue.owner_task:
+        return "nvme-fs-user-namespace-owner-conflict"
+    if active.queue.queue_id != requested.queue.queue_id:
+        return "nvme-fs-user-namespace-queue-conflict"
+    "ready"
+
+fn nvme_filesystem_lease_set_acceptance_reason(active_leases: [NvmeFilesystemLease], requested: NvmeFilesystemLease) -> text:
+    for active in active_leases:
+        val conflict = nvme_filesystem_lease_conflict_reason(active, requested)
+        if conflict != "ready":
+            return conflict
+    "ready"
+
 fn nvme_namespace_mode_from_transfer_evidence(e: NvmeTransferEvidence) -> Result<NvmeNamespaceMode, text>:
     if e.driver_placement == "system-driver" and e.namespace_mode == "system-kernel-namespace":
         return Ok(NvmeNamespaceMode.System)

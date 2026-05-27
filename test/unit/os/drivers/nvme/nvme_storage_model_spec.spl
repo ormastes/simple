@@ -11,7 +11,7 @@ contracts used by capability-backed storage.
 """
 
 use std.spec.{describe, it, expect}
-use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmePartitionIdentity, NvmeQueueAssignment, nvme_queue_role_for_id, nvme_queue_is_system_reserved, nvme_first_data_queue_id, nvme_transfer_evidence, nvme_transfer_readiness_reason, nvme_transfer_ready, nvme_filesystem_lease, nvme_filesystem_lease_from_transfer_evidence, nvme_filesystem_lease_reason, nvme_filesystem_lease_ready, nvme_filesystem_consumer_name, nvme_namespace_mode_name, nvme_filesystem_lease_sector_size, nvme_filesystem_lease_sector_count, nvme_filesystem_lease_absolute_lba}
+use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmePartitionIdentity, NvmeQueueAssignment, nvme_queue_role_for_id, nvme_queue_is_system_reserved, nvme_first_data_queue_id, nvme_transfer_evidence, nvme_transfer_readiness_reason, nvme_transfer_ready, nvme_filesystem_lease, nvme_filesystem_lease_from_transfer_evidence, nvme_filesystem_lease_reason, nvme_filesystem_lease_ready, nvme_filesystem_consumer_name, nvme_namespace_mode_name, nvme_filesystem_lease_sector_size, nvme_filesystem_lease_sector_count, nvme_filesystem_lease_absolute_lba, nvme_filesystem_lease_conflict_reason, nvme_filesystem_lease_set_acceptance_reason}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id, device_grant_resource_set_label, device_grant_is_isolated}
 
@@ -289,6 +289,101 @@ describe "NVMe storage model":
             expect(nvme_filesystem_lease_absolute_lba(lease, 0u64).unwrap()).to_equal(128u64)
             expect(nvme_filesystem_lease_absolute_lba(lease, 255u64).unwrap()).to_equal(383u64)
             expect(nvme_filesystem_lease_absolute_lba(lease, 256u64).unwrap_err()).to_equal("nvme-fs-lease-lba-out-of-range")
+
+        it "rejects simultaneous system and user ownership of one namespace":
+            val ns = NvmeNamespaceIdentity(
+                controller_id: 0,
+                nsid: 9,
+                lba_size: 4096,
+                lba_count: 4096,
+                eui64: 0,
+                nguid_lo: 0,
+                nguid_hi: 0,
+                uuid_lo: 0,
+                uuid_hi: 0
+            )
+            val other_ns = NvmeNamespaceIdentity(
+                controller_id: 0,
+                nsid: 10,
+                lba_size: 4096,
+                lba_count: 4096,
+                eui64: 0,
+                nguid_lo: 0,
+                nguid_hi: 0,
+                uuid_lo: 0,
+                uuid_hi: 0
+            )
+            val system_queue = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+                role: NvmeQueueRole.System,
+                controller_id: 0,
+                nsid: 9,
+                owner_task: 0,
+                max_depth: 128,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val user_queue = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID,
+                role: NvmeQueueRole.Data,
+                controller_id: 0,
+                nsid: 9,
+                owner_task: 42,
+                max_depth: 64,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val other_queue = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID,
+                role: NvmeQueueRole.Data,
+                controller_id: 0,
+                nsid: 10,
+                owner_task: 42,
+                max_depth: 64,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val system_lease = nvme_filesystem_lease(ns, 0u64, 1024u64, NvmeNamespaceMode.System, system_queue, "simple-driver", "kernel-owned-resource", true, true)
+            val user_lease = nvme_filesystem_lease(ns, 0u64, 1024u64, NvmeNamespaceMode.UserAssigned, user_queue, "simple-driver", "resource-grant-set:tok=200", true, true)
+            val other_user = nvme_filesystem_lease(other_ns, 0u64, 1024u64, NvmeNamespaceMode.UserAssigned, other_queue, "simple-driver", "resource-grant-set:tok=200", true, true)
+
+            expect(nvme_filesystem_lease_conflict_reason(system_lease, user_lease)).to_equal("nvme-fs-namespace-mode-conflict:system:user-assigned")
+            expect(nvme_filesystem_lease_conflict_reason(system_lease, other_user)).to_equal("ready")
+            expect(nvme_filesystem_lease_set_acceptance_reason([system_lease], user_lease)).to_equal("nvme-fs-namespace-mode-conflict:system:user-assigned")
+
+        it "allows repeated user filesystem views only for the same grant owner and queue":
+            val ns = NvmeNamespaceIdentity(
+                controller_id: 0,
+                nsid: 11,
+                lba_size: 4096,
+                lba_count: 4096,
+                eui64: 0,
+                nguid_lo: 0,
+                nguid_hi: 0,
+                uuid_lo: 0,
+                uuid_hi: 0
+            )
+            val queue_a = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID,
+                role: NvmeQueueRole.Data,
+                controller_id: 0,
+                nsid: 11,
+                owner_task: 42,
+                max_depth: 64,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val queue_b = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID + 1u16,
+                role: NvmeQueueRole.Data,
+                controller_id: 0,
+                nsid: 11,
+                owner_task: 43,
+                max_depth: 64,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val active = nvme_filesystem_lease(ns, 0u64, 1024u64, NvmeNamespaceMode.UserAssigned, queue_a, "simple-driver", "resource-grant-set:tok=201", true, true)
+            val same_owner = nvme_filesystem_lease(ns, 128u64, 512u64, NvmeNamespaceMode.UserAssigned, queue_a, "simple-driver", "resource-grant-set:tok=201", true, true)
+            val other_owner = nvme_filesystem_lease(ns, 128u64, 512u64, NvmeNamespaceMode.UserAssigned, queue_b, "simple-driver", "resource-grant-set:tok=202", true, true)
+
+            expect(nvme_filesystem_lease_conflict_reason(active, same_owner)).to_equal("ready")
+            expect(nvme_filesystem_lease_conflict_reason(active, other_owner)).to_equal("nvme-fs-user-namespace-grant-conflict")
 
     describe "pure Simple transfer evidence":
         it "rejects the C boot bridge as NVMe transfer completion":
