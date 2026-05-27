@@ -98,6 +98,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `boot_fs_mount_pure_nvme_from_device` connects that evidence gate to the
   freestanding filesystem probe, so a future pure-Simple adapter must prove
   transfer readiness before NVFS/DBFS probing starts.
+- NVMe read/write/flush command construction now lives in a syscall-free shared
+  transfer module. Hosted and freestanding drivers can use the same LBA bounds,
+  NLB encoding, DMA pointer validation, and completion-status decoding instead
+  of duplicating C-bridge or syscall-specific logic.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -112,6 +116,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - The top-level baremetal boot entry still keeps the C NVMe/FAT32 bridge as a
   fallback until the pure-Simple FAT32 mount path has hardware-safe behavior on
   every boot image variant.
+- The freestanding adapter still needs queue memory ownership and MMIO BAR
+  mapping from the boot allocator/platform path; the shared transfer module only
+  removes duplicated command construction and range validation.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
@@ -131,3 +138,6 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl` covers the
   pure-Simple boot FAT32 lease helper and rejects invalid namespace geometry
   before mounting.
+- `test/unit/os/drivers/nvme/nvme_transfer_command_spec.spl` covers shared
+  syscall-free NVMe transfer command construction, zero-count rejection, NLB
+  limit rejection, DMA pointer validation, and completion-status decoding.
