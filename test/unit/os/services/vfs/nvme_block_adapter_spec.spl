@@ -66,12 +66,30 @@ describe "NVMe VFS block adapter lease helpers":
         val adapter = NvmeBlockAdapter.for_filesystem_lease(NvmeDriver.new(), lease, NvmeFilesystemConsumer.Fat32)
         expect(adapter.unwrap_err()).to_equal("NvmeBlockAdapter: namespace not identified by driver")
 
+    it "enforces the lease window used by filesystem-facing BlockDevice sector IO":
+        val adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
+            NvmeDriver.new(),
+            7u32,
+            SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+            128u64,
+            4u64,
+            512u32,
+            "fat32"
+        )
+
+        expect(adapter.sector_count()).to_equal(4u64)
+        expect(adapter.filesystem_consumer()).to_equal("fat32")
+        expect(adapter.sector_io_absolute_lba_for_test(0u64).unwrap()).to_equal(128u64)
+        expect(adapter.sector_io_absolute_lba_for_test(3u64).unwrap()).to_equal(131u64)
+        expect(adapter.sector_io_absolute_lba_for_test(4u64).unwrap_err()).to_equal("NvmeBlockAdapter: lba beyond filesystem lease")
+
     it "routes lease-backed I/O through namespace-aware driver methods":
         val source = read_file("src/os/services/vfs/vfs_block_adapters.spl")
         expect(source.contains("lease_nsid: lease.namespace.nsid")).to_equal(true)
         expect(source.contains("lease_queue_id: lease.queue.queue_id")).to_equal(true)
         expect(source.contains("identified_sector_count.unwrap() != lease.namespace.lba_count")).to_equal(true)
         expect(source.contains("identified_sector_size.unwrap() != lease.namespace.lba_size")).to_equal(true)
+        expect(source.contains("fn sector_io_absolute_lba_for_test(lba: u64) -> Result<u64, text>:")).to_equal(true)
         expect(source.contains("self.nvme.read_sectors_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id")).to_equal(true)
         expect(source.contains("self.nvme.write_sectors_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id")).to_equal(true)
 

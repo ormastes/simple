@@ -229,6 +229,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - The hosted `boot_fs_sequence()` default is production-safe: it no longer
   probes NVFS/DBFS through the C bridge. The C-backed hosted root probing path is
   retained only behind an explicitly named development helper.
+- The filesystem-facing NVMe `BlockDevice` sector path now has behavioral
+  coverage for the same lease-window translation used at runtime: sector access
+  maps through `base_lba` and rejects the first LBA beyond `lba_count`.
 
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware
