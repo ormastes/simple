@@ -1,4 +1,5 @@
 use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file}
 use std.fs_driver.mem_block_device.{MemBlockDevice}
 use std.fs_driver.types.{Path, OpenFlags}
 use std.fs_driver.capability.{Capability}
@@ -127,6 +128,17 @@ describe "NVMe filesystem mount factory":
         expect(mapped.storage_lba).to_equal(1u64)
         expect(mapped.byte_len).to_equal(4096u64)
         expect(mapped.sector_size).to_equal(512u32)
+
+    it "keeps FAT32 direct I/O extent mapping tied to cluster-chain storage sectors":
+        val core = read_file("src/lib/nogc_sync_mut/fs_driver/fat32_core.spl")
+        val async_core = read_file("src/lib/nogc_async_mut/fs_driver/fat32_core.spl")
+
+        expect(core.contains("me fn direct_io_extent_for_handle(handle: FileHandle, file_offset: i64, byte_len: u64) -> Result<DirectIoExtent, text>:")).to_equal(true)
+        expect(core.contains("val chain_rc = self.follow_chain(of.start_cluster)")).to_equal(true)
+        expect(core.contains("val storage_lba = self.cluster_to_sector(chain[cluster_index]) + (offset_in_cluster / sector_size).to_u64()")).to_equal(true)
+        expect(core.contains("return Err(\"direct I/O range crosses FAT32 cluster\")")).to_equal(true)
+        expect(async_core.contains("val chain_rc = self.follow_chain(of.start_cluster)")).to_equal(true)
+        expect(async_core.contains("val storage_lba = self.cluster_to_sector(chain[cluster_index]) + (offset_in_cluster / sector_size).to_u64()")).to_equal(true)
 
     it "rejects consumers when the lease is not filesystem-ready":
         val ns = NvmeNamespaceIdentity(
