@@ -2,14 +2,17 @@
 
 **Date:** 2026-05-15
 **Severity:** Low (cosmetic/tooling)
-**Status:** Partially resolved — tracking/plan/requirements docs clean (2026-05-16)
+**Status:** RESOLVED 2026-05-27 — names kept distinct with explicit roles
 
 ## Summary
 
-`sstack` was conceptually updated to `spipe` but both `.claude/skills/sstack.md`
-and `.claude/skills/spipe.md` still exist. The `/dev` alias and
-`repo_and_pull_req.md` still reference `sstack`. The skill registry also lists
-both `sstack` and `spipe` as separate skills.
+`sstack` and `spipe` are distinct skills, not duplicate names:
+
+- `sstack` is the 8-phase lifecycle development orchestrator.
+- `spipe` is the focused BDD/spec-writing skill used inside the pipeline.
+
+The `/dev` alias intentionally points to `sstack` because it invokes the full
+development pipeline. `repo_and_pull_req.md` now documents both roles.
 
 ## Affected Files
 
@@ -20,8 +23,8 @@ both `sstack` and `spipe` as separate skills.
 
 ## Expected
 
-One consistent name. Either consolidate sstack into spipe or keep them separate
-with clear distinct roles. Update all references and the skill registry.
+Keep both names with clear distinct roles. Update references that made
+`sstack` look like a stale rename instead of the orchestrator.
 
 ## Notes (2026-05-16)
 
@@ -31,8 +34,13 @@ with clear distinct roles. Update all references and the skill registry.
   reports predating the rename) and `doc/00_llm_process/` (rename migration tables — intentional
   historical references). These do not need updating.
 
-## Proposed Fix (remaining)
+## Resolution
 
-1. Decide: merge sstack orchestrator into spipe, or keep them separate with clear distinct roles.
-2. Update `.claude/skills/dev.md` alias and `.claude/skills/repo_and_pull_req.md` cross-references.
-3. Remove or consolidate the stale `.claude/skills/sstack.md` skill file once roles are clarified.
+Decision: keep `sstack` and `spipe` separate.
+
+- `.claude/skills/dev.md` now identifies `/dev` as a `sstack` orchestrator
+  alias and points BDD/spec-only work to `/spipe`.
+- `.claude/skills/repo_and_pull_req.md` now lists `sstack` as the lifecycle
+  orchestrator and `spipe` as the BDD/spec-writing skill.
+- `.claude/skills/sstack.md` remains active because it is the orchestrator, not
+  a stale copy of the `spipe` skill.

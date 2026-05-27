@@ -451,6 +451,30 @@ fn require_i32_field(name: &str, fields: &HashMap<String, Value>, field: &str) -
     }
 }
 
+fn require_u32_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<u32, CompileError> {
+    match fields.get(field) {
+        Some(Value::UInt { value, .. }) => Ok(*value as u32),
+        Some(Value::Int(n)) if *n >= 0 => Ok(*n as u32),
+        Some(other) => Err(CompileError::runtime(format!(
+            "{name}: field {field} must be a u32, got {:?}",
+            other
+        ))),
+        None => Err(CompileError::runtime(format!("{name}: missing field {field}"))),
+    }
+}
+
+fn require_i64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<i64, CompileError> {
+    match fields.get(field) {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(Value::UInt { value, .. }) => Ok(*value as i64),
+        Some(other) => Err(CompileError::runtime(format!(
+            "{name}: field {field} must be an i64, got {:?}",
+            other
+        ))),
+        None => Err(CompileError::runtime(format!("{name}: missing field {field}"))),
+    }
+}
+
 fn require_f64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<f64, CompileError> {
     match fields.get(field) {
         Some(Value::Float(n)) => Ok(*n),
@@ -460,6 +484,46 @@ fn require_f64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -
             other
         ))),
         None => Err(CompileError::runtime(format!("{name}: missing field {field}"))),
+    }
+}
+
+fn unpack_vec4u32(name: &str, value: &Value) -> Result<[u32; 4], CompileError> {
+    match value {
+        Value::Object { class, fields } => {
+            if class != "Vec4u32" {
+                return Err(CompileError::runtime(format!("{name}: expected Vec4u32, got {class}")));
+            }
+            Ok([
+                require_u32_field(name, fields, "x")?,
+                require_u32_field(name, fields, "y")?,
+                require_u32_field(name, fields, "z")?,
+                require_u32_field(name, fields, "w")?,
+            ])
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected Vec4u32 Object, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn unpack_vec4i64(name: &str, value: &Value) -> Result<[i64; 4], CompileError> {
+    match value {
+        Value::Object { class, fields } => {
+            if class != "Vec4i64" {
+                return Err(CompileError::runtime(format!("{name}: expected Vec4i64, got {class}")));
+            }
+            Ok([
+                require_i64_field(name, fields, "x")?,
+                require_i64_field(name, fields, "y")?,
+                require_i64_field(name, fields, "z")?,
+                require_i64_field(name, fields, "w")?,
+            ])
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected Vec4i64 Object, got {:?}",
+            other
+        ))),
     }
 }
 
@@ -520,6 +584,54 @@ fn unpack_vec4d(name: &str, value: &Value) -> Result<[f64; 4], CompileError> {
             "{name}: expected Vec4d Object, got {:?}",
             other
         ))),
+    }
+}
+
+fn pack_vec4u32(lanes: [u32; 4]) -> Value {
+    let mut fields = HashMap::with_capacity(4);
+    fields.insert(
+        "x".to_string(),
+        Value::UInt {
+            value: lanes[0] as u64,
+            width: 32,
+        },
+    );
+    fields.insert(
+        "y".to_string(),
+        Value::UInt {
+            value: lanes[1] as u64,
+            width: 32,
+        },
+    );
+    fields.insert(
+        "z".to_string(),
+        Value::UInt {
+            value: lanes[2] as u64,
+            width: 32,
+        },
+    );
+    fields.insert(
+        "w".to_string(),
+        Value::UInt {
+            value: lanes[3] as u64,
+            width: 32,
+        },
+    );
+    Value::Object {
+        class: "Vec4u32".to_string(),
+        fields: Arc::new(fields),
+    }
+}
+
+fn pack_vec4i64(lanes: [i64; 4]) -> Value {
+    let mut fields = HashMap::with_capacity(4);
+    fields.insert("x".to_string(), Value::Int(lanes[0]));
+    fields.insert("y".to_string(), Value::Int(lanes[1]));
+    fields.insert("z".to_string(), Value::Int(lanes[2]));
+    fields.insert("w".to_string(), Value::Int(lanes[3]));
+    Value::Object {
+        class: "Vec4i64".to_string(),
+        fields: Arc::new(fields),
     }
 }
 
@@ -661,6 +773,30 @@ where
     let a = unpack_vec8i(name, &args[0])?;
     let b = unpack_vec8i(name, &args[1])?;
     Ok(pack_vec8i(op(a, b)))
+}
+
+fn binop_u32x4<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn([u32; 4], [u32; 4]) -> [u32; 4],
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec4u32(name, &args[0])?;
+    let b = unpack_vec4u32(name, &args[1])?;
+    Ok(pack_vec4u32(op(a, b)))
+}
+
+fn binop_i64x4<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn([i64; 4], [i64; 4]) -> [i64; 4],
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec4i64(name, &args[0])?;
+    let b = unpack_vec4i64(name, &args[1])?;
+    Ok(pack_vec4i64(op(a, b)))
 }
 
 fn binop_f64x4<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
@@ -825,6 +961,68 @@ pub fn rt_simd_shr_i32x4(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_simd_add_i32x8(args: &[Value]) -> Result<Value, CompileError> {
     binop_i32x8("rt_simd_add_i32x8", args, sffi_add_i32x8)
+}
+
+pub fn rt_simd_add_u32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u32x4("rt_simd_add_u32x4", args, |a, b| {
+        [
+            a[0].wrapping_add(b[0]),
+            a[1].wrapping_add(b[1]),
+            a[2].wrapping_add(b[2]),
+            a[3].wrapping_add(b[3]),
+        ]
+    })
+}
+
+pub fn rt_simd_sub_u32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u32x4("rt_simd_sub_u32x4", args, |a, b| {
+        [
+            a[0].wrapping_sub(b[0]),
+            a[1].wrapping_sub(b[1]),
+            a[2].wrapping_sub(b[2]),
+            a[3].wrapping_sub(b[3]),
+        ]
+    })
+}
+
+pub fn rt_simd_and_u32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u32x4("rt_simd_and_u32x4", args, |a, b| {
+        [a[0] & b[0], a[1] & b[1], a[2] & b[2], a[3] & b[3]]
+    })
+}
+
+pub fn rt_simd_or_u32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u32x4("rt_simd_or_u32x4", args, |a, b| {
+        [a[0] | b[0], a[1] | b[1], a[2] | b[2], a[3] | b[3]]
+    })
+}
+
+pub fn rt_simd_xor_u32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u32x4("rt_simd_xor_u32x4", args, |a, b| {
+        [a[0] ^ b[0], a[1] ^ b[1], a[2] ^ b[2], a[3] ^ b[3]]
+    })
+}
+
+pub fn rt_simd_add_i64x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i64x4("rt_simd_add_i64x4", args, |a, b| {
+        [
+            a[0].wrapping_add(b[0]),
+            a[1].wrapping_add(b[1]),
+            a[2].wrapping_add(b[2]),
+            a[3].wrapping_add(b[3]),
+        ]
+    })
+}
+
+pub fn rt_simd_sub_i64x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i64x4("rt_simd_sub_i64x4", args, |a, b| {
+        [
+            a[0].wrapping_sub(b[0]),
+            a[1].wrapping_sub(b[1]),
+            a[2].wrapping_sub(b[2]),
+            a[3].wrapping_sub(b[3]),
+        ]
+    })
 }
 
 pub fn rt_simd_sub_i32x8(args: &[Value]) -> Result<Value, CompileError> {

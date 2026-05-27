@@ -1,11 +1,13 @@
 ---
 name: dev
-description: Alias for /sstack — same 8-phase BDD/TDD pipeline. Use for any dev task (bug fix, feature, refactor, TODO).
+description: Alias for /sstack — the 8-phase development orchestrator. Use for any dev task (bug fix, feature, refactor, TODO).
 ---
 
-# Dev Skill — SStack Alias
+# Dev Skill — SStack Orchestrator Alias
 
-`/dev` is an alias for `/sstack`. Same 8 phases, same state file, same quality gates, same cooperative workflow.
+`/dev` is an alias for `/sstack`, the lifecycle development orchestrator. It is
+separate from `/spipe`, which is the focused BDD/spec-writing skill used inside
+the pipeline.
 
 ## Usage
 
@@ -24,6 +26,7 @@ Read `.claude/skills/sstack.md` and execute its orchestrator procedure with the 
 | Scenario | Use |
 |----------|-----|
 | Any dev task (bug fix, feature, refactor, TODO) | `/dev` or `/sstack` |
+| BDD/spec authoring only | `/spipe` |
 | Large feature needing 15-phase doc artifacts | `/impl` |
 | Research only, no implementation | `/research` |
 | Design only, implementation later | `/design` |

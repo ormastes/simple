@@ -1,10 +1,19 @@
 # Bug / Audit: SIMD Extern Stub Survey — simd.spl
 # 2026-05-02  (Wave L / L5)
-# **Updated 2026-05-20 (status check)** — no new stubs since Wave 15; 60 wired, 0 stub, open gaps unchanged.
+# **Updated 2026-05-27 (resolution)** — public `simd.spl` externs are interpreter-wired; no fully stubbed public SIMD externs remain.
 
-**Status:** OPEN (ongoing tracker) — all extern declarations in simd.spl are
-now wired; remaining open items are the str_* orphan gap (§3.2, interpreter-internal),
-the uniform Cranelift gap (§4), and the missing-feature additions from Wave 15 (now done).
+**Status:** RESOLVED 2026-05-27 — the current public `simd.spl` extern surface
+contains 48 `rt_simd_*` declarations and all 48 have interpreter dispatch and
+implementation coverage. The late audit gap was seven public externs
+(`rt_simd_{add,sub,and,or,xor}_u32x4`, `rt_simd_{add,sub}_i64x4`) that were
+declared in `simd.spl` but absent from `interpreter_extern`; these now have
+scalar interpreter implementations and dispatch entries, covered by
+`test/unit/lib/simd/public_extern_interpreter_spec.spl`.
+
+The `rt_simd_str_*` entries remain intentionally interpreter-internal string
+helpers, documented in `interpreter_extern/mod.rs`. Native Cranelift support for
+the lane-record SIMD extern ABI is still a future feature/performance project,
+not a fully stubbed interpreter extern bug.
 
 **Purpose:** Provide a complete, cited map of every `extern fn rt_simd_*`
 declared in `src/lib/nogc_sync_mut/simd.spl` and its actual wiring status, so
@@ -37,12 +46,10 @@ scalar.  Both are distinguished in §2.
 An extern is **FULLY STUB** if conditions 2, 3, and 4 are all absent.
 
 **Critical note on Cranelift:** `src/compiler_rust/compiler/src/codegen/
-runtime_ffi.rs` lines 261-294 contain only `rt_vec_*` generic-vector entries.
-There are ZERO `rt_simd_*` entries.  This means ALL rt_simd_* externs —
-whether interpreter-wired or stub — are **CRANELIFT-BLOCKED**: calling them
-from code compiled to native via Cranelift AOT will fail with a
-missing-symbol error.  The "interpreter-wired / Cranelift-blocked" split is
-uniform; it is not a property of individual externs.
+runtime_sffi.rs` now classifies `rt_simd_*` as external runtime symbols and has
+targeted entries for AES-round and string helpers. The public lane-record SIMD
+extern ABI exposed by `simd.spl` is still interpreter-only; native support needs
+a deliberate marshaling/codegen design rather than a missing interpreter stub.
 
 ### 1.2  Grep patterns used
 
@@ -62,7 +69,7 @@ grep -rn "rt_simd_\|aes_round\|clmul\|add_u8x16" \
 
 # Step 5 — Cranelift FFI table
 grep -n "rt_simd_\|rt_vec_" \
-  src/compiler_rust/compiler/src/codegen/runtime_ffi.rs
+  src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
 ```
 
 K1 bug doc `simd_aesni_runtime_stub_only_2026-05-02.md` searched
@@ -236,12 +243,11 @@ All externs declared in simd.spl are now interpreter-wired.  The 2026-05-10
 snapshot listed 18 fully stub externs; they have since been implemented
 (float ops) or are covered by the 2026-05-19 hadd/hmax/hmin additions.
 
-### §3.2  Orphan ops — impl-only, no extern decl in simd.spl
+### §3.2  Internal string ops — impl-only, no extern decl in simd.spl
 
 These three have `pub fn` implementations in `simd.rs` and dispatch arms in
 `mod.rs`, but have **no `extern fn` declaration in `simd.spl`**.  They cannot
-be called from user Simple code.  They appear to be used by the interpreter
-string subsystem internally.
+be called from user Simple code.  They are interpreter-internal string helpers.
 
 | Name | simd.rs | mod.rs | simd.spl |
 |------|---------|--------|----------|
@@ -249,10 +255,9 @@ string subsystem internally.
 | `rt_simd_str_last_index_of` | 1337 | 1036 | **ABSENT** |
 | `rt_simd_str_equal` | 1354 | 1035 | **ABSENT** |
 
-**Action required (future wave):** Decide whether to:
-- Expose as Simple externs: add `extern fn` declarations to simd.spl, or
-- Mark as interpreter-internal: add a comment in mod.rs noting they are not
-  callable from Simple code (the dispatch entry is harmless but misleading).
+**Resolution:** Keep these out of the public `std.simd` extern surface. A
+comment in `interpreter_extern/mod.rs` marks them as interpreter-internal
+string acceleration helpers.
 
 ### §3.3  Missing features (not declared in simd.spl)
 
@@ -263,13 +268,12 @@ string subsystem internally.
 
 ---
 
-## §4  Half-Wired: Interpreter-Wired but Cranelift-Blocked (all 51 from §2)
+## §4  Native Cranelift Lane-Record SIMD Gap
 
-Every extern listed in §2 works in interpreter mode but fails in Cranelift
-AOT compiled mode (`--mode=native`).
-
-Root cause: `src/compiler_rust/compiler/src/codegen/runtime_ffi.rs` lines
-261-294 contain only `rt_vec_*` entries; there are no `rt_simd_*` entries.
+Every public lane-record extern listed in `simd.spl` now works in interpreter
+mode. Native Cranelift support for those same public `Vec4f`, `Vec4i`,
+`Vec4u32`, `Vec4i64`, and related record-shaped externs remains a separate ABI
+and codegen design task.
 
 **To unblock Cranelift for a specific extern**, the following three edits are
 needed per extern:
@@ -279,9 +283,8 @@ needed per extern:
    `call_rt_vec_*` helpers.
 3. Emit the call from the relevant Simple AST lowering pass.
 
-This is MEDIUM-effort Rust-seed work.  The runtime implementations already
-exist for all 51 interpreter-wired ops; only the Cranelift codegen wiring is
-missing.
+This is MEDIUM-effort Rust-seed work and should be tracked as native SIMD ABI
+enablement, not as a stubbed interpreter extern.
 
 ---
 
@@ -308,12 +311,13 @@ missing.
 | SHA-3 / Keccak | `Vec4u64` + `rt_simd_{xor,and,or,shl,shr}_u64x4` absent | **DONE** — Vec4u64 declared + all 5 ops wired (scalar fallback) |
 | SHA-512 4-wide u64 | Same Vec4u64 absence | **DONE** — same Vec4u64 fix unblocks this |
 
-### §5.3  Blocked until Cranelift runtime_ffi.rs is updated
+### §5.3  Native lane-record ABI work
 
 Any task that must run in Cranelift AOT compiled mode (`--mode=native`) requires
-adding `rt_simd_*` entries to `runtime_ffi.rs`.  This applies uniformly to all
-51 interpreter-wired externs.  Until then, all SIMD cipher code must remain
-in interpreter / SMF mode or use the scalar FFI path for compiled deployments.
+a lane-record SIMD ABI design in the native lowering path, plus any needed
+`runtime_sffi.rs` entries for exported runtime symbols. Until then, public
+record-shaped SIMD code should be treated as interpreter / SMF mode coverage,
+or compiled through a separately verified scalar/native path.
 
 ### §5.4  J2 recommendation re-evaluation (updated 2026-05-19)
 
@@ -334,6 +338,7 @@ in interpreter / SMF mode or use the scalar FFI path for compiled deployments.
 | 2026-05-19 | Full re-audit: float ops (15) reclassified as interpreter-wired scalar fallback (previously miscategorised as stub); `rt_simd_hadd/hmax/hmin_f32x4` implemented in `interpreter_extern/simd.rs:921-950` and wired in mod.rs:1015-1017; str_* orphan gap documented (§3.2); total wired count = 51, stub = 0; condition 4 of §1.1 definition expanded to include scalar-only impls; line-number tables re-verified against post-edit source |
 | 2026-05-19 (Wave 15) | §3.3 gaps closed: `rt_simd_shuffle_u8x16` (scalar PSHUFB impl) + `Vec4u64` struct + `rt_simd_{xor,and,or,shl,shr}_u64x4` + `rt_simd_vec4u64_{new,get}` all declared in simd.spl and wired in interpreter_extern/simd.rs + mod.rs; total wired count = 60; §5.2 blockers resolved; Rec 3 (J2) complete |
 | 2026-05-20 | Status check: grep confirms 60 wired, 0 stub — no new extern declarations added since Wave 15. Open items unchanged: str_* orphan gap (§3.2, interpreter-internal only), uniform Cranelift gap (§4, all 60 externs absent from runtime_ffi.rs). No doc update to wiring tables required. |
+| 2026-05-27 | Mechanical re-audit found 48 public `rt_simd_*` declarations in `simd.spl`; seven were still missing interpreter dispatch/implementation (`u32x4` add/sub/and/or/xor and `i64x4` add/sub). Added scalar interpreter implementations, dispatch entries, and `test/unit/lib/simd/public_extern_interpreter_spec.spl`. Marked `rt_simd_str_*` helpers interpreter-internal. Tracker resolved; native lane-record SIMD remains separate ABI work. |
 
 ---
 
