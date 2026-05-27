@@ -129,6 +129,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   the shared controller validation, DMA allocation wrapper, queue resource
   builder, admin command builders, namespace parser, and I/O queue setup, and it
   fails closed when identify or queue creation fails.
+- Reversible sector probing is now represented as a structured contract with
+  LBA, byte length, completion status, read/write/restore results, and a flag
+  proving the probe used the shared transfer command logic. Freestanding
+  readiness consumes that contract instead of loose booleans.
 - Freestanding controller readiness now has an explicit resource contract that
   binds system-driver or user-space-driver placement, grant/namespace mode,
   admin queue resources, I/O queue resources, DMA isolation, and IOMMU/broker
@@ -167,6 +171,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   so unsupported controllers cannot appear as partially initialized storage.
 - Baremetal initialization no longer reports initialized storage after failed
   identify or failed I/O queue creation.
+- Sector probe evidence is not sufficient unless it records successful
+  completion, read, write, restore, and shared transfer logic usage.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
@@ -203,3 +209,6 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   freestanding controller resource validation, system-driver evidence, and the
   requirement that real completion and reversible sector probes be supplied
   before transfer readiness becomes `ready`.
+- `test/unit/os/drivers/nvme/nvme_sector_probe_spec.spl` covers the structured
+  reversible-sector probe contract and rejects missing completion, read, write,
+  restore, byte count, or shared transfer logic.

@@ -4,8 +4,10 @@ use os.drivers.nvme.nvme_freestanding_controller.{
     NvmeFreestandingControllerResources,
     nvme_freestanding_controller_resource_reason,
     nvme_freestanding_controller_from_resources,
-    nvme_freestanding_transfer_evidence
+    nvme_freestanding_transfer_evidence,
+    nvme_freestanding_transfer_evidence_from_probe
 }
+use os.drivers.nvme.nvme_sector_probe.{nvme_sector_probe_result, nvme_sector_probe_reason}
 use os.drivers.nvme.nvme_storage_model.{nvme_transfer_readiness_reason}
 
 fn _queue(qid: u16, base: u64) -> NvmeQueueResources:
@@ -46,9 +48,19 @@ describe "freestanding NVMe controller resources":
 
     it "only reports ready after actual completion and reversible sector probes are supplied":
         val controller = nvme_freestanding_controller_from_resources(_system_resources()).unwrap()
-        val ready = nvme_freestanding_transfer_evidence(controller, true, true, true, true)
+        val probe = nvme_sector_probe_result(0u64, 512u64, 0u32, true, true, true, true)
+        val ready = nvme_freestanding_transfer_evidence_from_probe(controller, probe)
 
+        expect(nvme_sector_probe_reason(probe)).to_equal("ready")
         expect(nvme_transfer_readiness_reason(ready)).to_equal("ready")
+
+    it "rejects probe evidence that bypasses shared transfer logic":
+        val controller = nvme_freestanding_controller_from_resources(_system_resources()).unwrap()
+        val probe = nvme_sector_probe_result(0u64, 512u64, 0u32, true, true, true, false)
+        val evidence = nvme_freestanding_transfer_evidence_from_probe(controller, probe)
+
+        expect(nvme_sector_probe_reason(probe)).to_equal("nvme-sector-probe-not-shared-transfer")
+        expect(nvme_transfer_readiness_reason(evidence)).to_contain("missing-common-driver-logic")
 
     it "rejects invalid controller resources before transfer evidence can be built":
         var resources = _system_resources()
