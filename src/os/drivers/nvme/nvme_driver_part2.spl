@@ -36,6 +36,8 @@ use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
+extern fn rt_dma_phys_of(handle: i64) -> i64
 
 val NVME_DRIVER_MAX_DATA_QUEUE_ID: u16 = 3
 # Timeout for controller ready transitions (spin iterations)
@@ -82,7 +84,7 @@ impl NvmeDriver:
         val csts = mmio_read32(self.bar0_virt + 0x1C)
         val facts = nvme_controller_facts(NvmeControllerRegs(cap: cap, vs: vs, cc: cc, csts: csts), 64u32)
         val controller_reason = nvme_controller_refusal_reason(facts)
-        if controller_reason != "ready":
+        if controller_reason != "ready" and controller_reason != "nvme-controller-fatal":
             return Result.Err("NVMe: controller " + controller_reason)
         val dstrd = nvme_cap_dstrd(cap)
         self.db_stride = dstrd
@@ -194,7 +196,7 @@ impl NvmeDriver:
         val csts = mmio_read32(self.bar0_virt + 0x1C)
         val facts = nvme_controller_facts(NvmeControllerRegs(cap: cap, vs: vs, cc: cc, csts: csts), 64u32)
         val controller_reason = nvme_controller_refusal_reason(facts)
-        if controller_reason != "ready":
+        if controller_reason != "ready" and controller_reason != "nvme-controller-fatal":
             return Result.Err("[nvme] controller " + controller_reason)
         val dstrd = nvme_cap_dstrd(cap)
         self.db_stride = dstrd
@@ -1028,12 +1030,25 @@ impl NvmeDriver:
         var result_buf = DmaAddrs(virt: 0, phys: 0)
         val result_ptr = unsafe_addr_of(result_buf)
         val virt_result = syscall(SYS_ALLOC_DMA, size, result_ptr, 0, 0, 0)
-        if virt_result < 0:
-            return Result.Err("DMA allocation failed")
+        if virt_result <= 0:
+            val handle = rt_dma_alloc(size.to_i64(), 2)
+            if handle <= 0:
+                return Result.Err("DMA allocation failed")
+            val phys_fallback = rt_dma_phys_of(handle)
+            if phys_fallback <= 0:
+                return Result.Err("DMA allocation returned zero address")
+            val fallback_addrs = DmaAddrs(virt: handle.to_u64(), phys: phys_fallback.to_u64())
+            return Result.Ok(fallback_addrs)
         val phys_addr = mmio_read64(result_ptr)
         val virt_addr = virt_result as u64
         if phys_addr == 0 or virt_addr == 0:
-            return Result.Err("DMA allocation returned zero address")
+            val handle = rt_dma_alloc(size.to_i64(), 2)
+            if handle <= 0:
+                return Result.Err("DMA allocation returned zero address")
+            val phys_fallback = rt_dma_phys_of(handle)
+            if phys_fallback <= 0:
+                return Result.Err("DMA allocation returned zero address")
+            return Result.Ok(DmaAddrs(virt: handle.to_u64(), phys: phys_fallback.to_u64()))
         if size >= DMA_PAGE_SIZE:
             if (phys_addr & (DMA_PAGE_SIZE - 1)) != 0:
                 return Result.Err("DMA physical address not page-aligned")

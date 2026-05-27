@@ -14306,6 +14306,45 @@ RuntimeValue rt_array_new_with_cap_bool(int64_t cap)
     return rt_array_new_with_cap(cap);
 }
 
+RuntimeValue rt_array_new_with_cap_u64(int64_t cap)
+{
+    return rt_array_new_with_cap(cap);
+}
+
+int64_t rt_any_add(int64_t left, int64_t right)
+{
+    return left + right;
+}
+
+int8_t rt_typed_words_u64_push(RuntimeValue arr, int64_t val)
+{
+    return rt_array_push(arr, ENCODE_INT(val));
+}
+
+int8_t rt_typed_words_u64_set(RuntimeValue arr, int64_t idx, int64_t val)
+{
+    return rt_array_set(arr, (RuntimeValue)idx, ENCODE_INT(val));
+}
+
+int64_t os__services__vfs__vfs_boot_init__VfsFileSize_dot_to_i64(RuntimeValue self)
+{
+    if (!IS_HEAP(self)) return 0;
+    RuntimeValue *fields = (RuntimeValue *)DECODE_PTR(self);
+    RuntimeValue first = fields[0];
+    return IS_INT(first) ? DECODE_INT(first) : (int64_t)first;
+}
+
+int64_t lib__nogc_sync_mut__replay__event_kinds__EventKind_dot_to_i32(RuntimeValue self)
+{
+    return IS_INT(self) ? DECODE_INT(self) : (int64_t)self;
+}
+
+RuntimeValue lib__nogc_sync_mut__replay__event_kinds__EventKind_dot_to_text(RuntimeValue self)
+{
+    (void)self;
+    return rt_string_from_cstr("event");
+}
+
 /* =========================================================================
  * rt_verify_kexinit_roundtrip(data [u8]) -> 0 on success, -1 on failure
  *
@@ -15345,12 +15384,14 @@ __attribute__((weak)) RuntimeValue rt_arm_virtq_used_idx(void)                  
 /* rt_dma_* — DMA allocator (x86_64 freestanding: use regular malloc) */
 __attribute__((weak)) RuntimeValue rt_dma_alloc(RuntimeValue size, RuntimeValue align)
 {
-    (void)align;
-    /* On x86_64 freestanding the bump allocator satisfies alignment up to 64
-     * bytes naturally.  Just delegate to malloc for the smoke test. */
-    void *p = malloc((size_t)(int64_t)size);
-    if (!p) return 0;
-    return (RuntimeValue)(uintptr_t)p;
+    uint64_t requested = (uint64_t)(int64_t)size;
+    uint64_t alignment = (uint64_t)(int64_t)align;
+    if (alignment < 4096) alignment = 4096;
+    void *raw = malloc((size_t)(requested + alignment));
+    if (!raw) return 0;
+    uintptr_t base = (uintptr_t)raw;
+    uintptr_t aligned = (base + (uintptr_t)(alignment - 1)) & ~(uintptr_t)(alignment - 1);
+    return (RuntimeValue)aligned;
 }
 __attribute__((weak)) RuntimeValue rt_dma_bytes_to_array(RuntimeValue addr, RuntimeValue len)
 {
