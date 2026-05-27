@@ -8,6 +8,7 @@ use os.drivers.nvme.nvme_performance_contract.{
     nvme_production_perf_report_line_from_measurements,
     nvme_production_perf_report_ready,
     nvme_production_perf_serial_acceptance_reason,
+    nvme_real_hardware_perf_report_line_from_measurements,
     nvme_real_hardware_perf_serial_acceptance_reason,
     nvme_random_io_perf_sample,
     nvme_random_io_perf_sample_ready,
@@ -191,8 +192,59 @@ describe "NVMe production performance contract":
         val real = perf + " hardware_target=real-nvme qemu=false device_model=Samsung-MZQL2960HCJR device_serial=SIMPLE123 namespace_nsid=1 measured_on=real-device"
         val q35 = perf + " hardware_target=q35 qemu=true device_model=qemu-nvme device_serial=pure-simple-perf namespace_nsid=1 measured_on=emulator"
         val spoofed = perf + " hardware_target=real-nvme qemu=true device_model=qemu-nvme device_serial=pure-simple-perf namespace_nsid=1 measured_on=emulator"
+        val missing_nsid = perf + " hardware_target=real-nvme qemu=false device_model=Samsung-MZQL2960HCJR device_serial=SIMPLE123 measured_on=real-device"
 
         expect(nvme_real_hardware_perf_serial_acceptance_reason(perf)).to_equal("nvme-real-hardware-target-missing")
         expect(nvme_real_hardware_perf_serial_acceptance_reason(q35)).to_equal("nvme-real-hardware-target-missing")
         expect(nvme_real_hardware_perf_serial_acceptance_reason(spoofed)).to_equal("nvme-real-hardware-emulator-report")
+        expect(nvme_real_hardware_perf_serial_acceptance_reason(missing_nsid)).to_equal("nvme-real-hardware-namespace-missing")
         expect(nvme_real_hardware_perf_serial_acceptance_reason(real)).to_equal("ready")
+
+    it "builds accepted real-hardware report lines with sanitized physical identity":
+        val line = nvme_real_hardware_perf_report_line_from_measurements(
+            120000u64,
+            90000u64,
+            800u64,
+            1000u64,
+            100000u64,
+            80000u64,
+            900u64,
+            1100u64,
+            64u16,
+            5u32,
+            32768u64,
+            false,
+            "Samsung PM9A3",
+            "SN 123\t456",
+            1u32
+        )
+
+        expect(line).to_contain("hardware_target=real-nvme")
+        expect(line).to_contain("qemu=false")
+        expect(line).to_contain("device_model=Samsung_PM9A3")
+        expect(line).to_contain("device_serial=SN_123_456")
+        expect(line).to_contain("namespace_nsid=1")
+        expect(line).to_contain("measured_on=real-device")
+        expect(nvme_real_hardware_perf_serial_acceptance_reason(line)).to_equal("ready")
+
+    it "keeps real-hardware report builder fail-closed when measured counters are not ready":
+        val line = nvme_real_hardware_perf_report_line_from_measurements(
+            100000u64,
+            90000u64,
+            800u64,
+            1000u64,
+            100000u64,
+            80000u64,
+            900u64,
+            1100u64,
+            64u16,
+            5u32,
+            32768u64,
+            false,
+            "Samsung PM9A3",
+            "SN123456",
+            1u32
+        )
+
+        expect(line).to_contain("reason=simple-read-iops-not-faster-than-c")
+        expect(nvme_real_hardware_perf_serial_acceptance_reason(line)).to_equal("nvme-perf-report-not-ready")

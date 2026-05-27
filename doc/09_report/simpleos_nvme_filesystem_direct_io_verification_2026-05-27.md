@@ -81,3 +81,7 @@ The acceptance gate for that evidence now rejects emulator-only reports unless
 they also carry real-device identity fields: `hardware_target=real-nvme`,
 `qemu=false`, `device_model=...`, `device_serial=...`, `namespace_nsid=...`,
 and `measured_on=real-device`.
+Real-device runners now have the canonical helper
+`nvme_real_hardware_perf_report_line_from_measurements` to produce that accepted
+line from measured counters plus physical NVMe identity, but an actual physical
+NVMe run remains pending.

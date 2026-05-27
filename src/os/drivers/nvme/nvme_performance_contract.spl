@@ -200,6 +200,54 @@ fn nvme_production_perf_report_line_from_measurements(
         nvme_production_perf_report(nvme_c_parity_perf_comparison(simple, c_baseline))
     )
 
+fn _nvme_perf_identity_token(value: text) -> text:
+    var token = value.trim()
+    if token.len() == 0:
+        return "unknown"
+    token = token.replace(" ", "_")
+    token = token.replace("\t", "_")
+    token = token.replace("\n", "_")
+    token = token.replace("\r", "_")
+    token
+
+fn nvme_real_hardware_perf_report_line_from_measurements(
+    simple_read_iops: u64,
+    simple_write_iops: u64,
+    simple_read_p99_us: u64,
+    simple_write_p99_us: u64,
+    c_read_iops: u64,
+    c_write_iops: u64,
+    c_read_p99_us: u64,
+    c_write_p99_us: u64,
+    queue_depth: u16,
+    warm_runs: u32,
+    max_rss_kib: u64,
+    allocation_per_io: bool,
+    device_model: text,
+    device_serial: text,
+    namespace_nsid: u32
+) -> text:
+    nvme_production_perf_report_line_from_measurements(
+        simple_read_iops,
+        simple_write_iops,
+        simple_read_p99_us,
+        simple_write_p99_us,
+        c_read_iops,
+        c_write_iops,
+        c_read_p99_us,
+        c_write_p99_us,
+        queue_depth,
+        warm_runs,
+        max_rss_kib,
+        allocation_per_io
+    ) +
+        " hardware_target=real-nvme" +
+        " qemu=false" +
+        " device_model=" + _nvme_perf_identity_token(device_model) +
+        " device_serial=" + _nvme_perf_identity_token(device_serial) +
+        " namespace_nsid=" + namespace_nsid.to_text() +
+        " measured_on=real-device"
+
 fn _nvme_perf_u64_field(line: text, prefix: text, missing_reason: text, invalid_reason: text) -> Result<u64, text>:
     var normalized = line.replace("\n", " ")
     normalized = normalized.replace("\r", " ")
@@ -221,6 +269,20 @@ fn _nvme_perf_u64_field(line: text, prefix: text, missing_reason: text, invalid_
             if value == 0u64:
                 return Err(invalid_reason)
             return Ok(value)
+    Err(missing_reason)
+
+fn _nvme_perf_text_field(line: text, prefix: text, missing_reason: text, invalid_reason: text) -> Result<text, text>:
+    var normalized = line.replace("\n", " ")
+    normalized = normalized.replace("\r", " ")
+    normalized = normalized.replace("\t", " ")
+    val parts = normalized.split(" ")
+    for part in parts:
+        val token = part.trim()
+        if token.starts_with(prefix):
+            val value_text: text = token.substring(prefix.len(), token.len()).trim()
+            if value_text.len() == 0:
+                return Err(invalid_reason)
+            return Ok(value_text)
     Err(missing_reason)
 
 fn nvme_production_perf_serial_acceptance_reason(line: text) -> text:
@@ -308,12 +370,15 @@ fn nvme_real_hardware_perf_serial_acceptance_reason(line: text) -> text:
         return "nvme-real-hardware-emulator-report"
     if not line.contains("qemu=false"):
         return "nvme-real-hardware-qemu-flag-missing"
-    if not line.contains("device_model="):
-        return "nvme-real-hardware-device-model-missing"
-    if not line.contains("device_serial="):
-        return "nvme-real-hardware-device-serial-missing"
-    if not line.contains("namespace_nsid="):
-        return "nvme-real-hardware-namespace-missing"
+    val device_model_r = _nvme_perf_text_field(line, "device_model=", "nvme-real-hardware-device-model-missing", "nvme-real-hardware-device-model-invalid")
+    if device_model_r.is_err():
+        return device_model_r.unwrap_err()
+    val device_serial_r = _nvme_perf_text_field(line, "device_serial=", "nvme-real-hardware-device-serial-missing", "nvme-real-hardware-device-serial-invalid")
+    if device_serial_r.is_err():
+        return device_serial_r.unwrap_err()
+    val namespace_nsid_r = _nvme_perf_u64_field(line, "namespace_nsid=", "nvme-real-hardware-namespace-missing", "nvme-real-hardware-namespace-invalid")
+    if namespace_nsid_r.is_err():
+        return namespace_nsid_r.unwrap_err()
     if not line.contains("measured_on=real-device"):
         return "nvme-real-hardware-measurement-source-missing"
     "ready"

@@ -204,6 +204,11 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   `hardware_target=real-nvme`, `qemu=false`, nonempty device model/serial,
   namespace identity, and `measured_on=real-device`; q35/emulator reports are
   rejected even when their counters are faster than the C baseline.
+- Real-device runners should emit that line through
+  `nvme_real_hardware_perf_report_line_from_measurements`, which appends the
+  required physical identity fields to the same measured-counter report and
+  normalizes whitespace in model/serial tokens before serial acceptance parses
+  them.
 - The q35 pure-Simple real-device marker contract now lists `nvme_perf
   reason=ready`, and serial acceptance validates the detailed performance fields
   in addition to provider, grant, namespace, and transfer markers.
