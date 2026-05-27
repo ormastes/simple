@@ -225,6 +225,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   `fat32_extent_source=freestanding-fat32-extents`,
   `nvfs_extent_source=freestanding-dbfs-arena`, and
   `dbfs_extent_source=freestanding-dbfs-arena`.
+  The performance line must also prove the C comparison baseline with
+  `c_baseline_device=same-nvme`, `c_baseline_scope=in-guest`, and
+  `c_baseline_cache=direct`.
 - Hardware labs can run
   `src/app/simpleos_nvme_serial_check/main.spl --serial-log <path>` against the
   captured serial log. The app delegates to the same physical-NVMe readiness
