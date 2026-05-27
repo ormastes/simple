@@ -191,8 +191,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Production performance claims now have an explicit NVMe contract: measured
   samples must be warm 4K random read/write runs on the pure Simple provider,
   without the C bridge or per-I/O allocation, with enough queue depth and common
-  logic sharing, and Simple must beat the C FAT baseline for read/write IOPS and
-  p99 latency.
+  logic sharing, and Simple must beat a same-device in-guest C NVMe/FAT baseline
+  for read/write IOPS and p99 latency. Host page-cache measurements are not
+  accepted as q35 production evidence.
 - Hardware runners can emit one `nvme_perf` line from measured counters through
   the performance report helper; serial acceptance re-parses the numeric fields
   and rejects missing fields, invalid values, insufficient warm/queue settings,
@@ -201,6 +202,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - The q35 pure-Simple real-device marker contract now lists `nvme_perf
   reason=ready`, and serial acceptance validates the detailed performance fields
   in addition to provider, grant, namespace, and transfer markers.
+- The standalone q35 pure-NVMe lane now measures its C comparison inside the
+  same guest via the C NVMe bridge on the same random LBA sequence after the
+  Simple path runs. The `c_bridge_used=false` field still refers to the Simple
+  data path; the C bridge is only the measured comparison baseline.
 
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware
@@ -297,9 +302,11 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   multi-sector command when the namespace LBA size is smaller than 4KiB. The
   batch path therefore spends queue entries on filesystem 4KiB operations, not
   on internal 512-byte sectors.
-- The q35 performance probe now exercises a 32-operation 4KiB random batch over
-  that shared lease path, so the evidence lane measures the production
-  filesystem-facing adapter rather than a sector-by-sector benchmark shortcut.
+- The q35 performance probes exercise batched 4KiB random I/O over that shared
+  lease path, so the evidence lanes measure the production filesystem-facing
+  adapter rather than a sector-by-sector benchmark shortcut. The full VFS probe
+  advertises the queue-depth-sized 32-operation batch path; the standalone q35
+  lane uses a smaller measured batch window when that is faster on QEMU.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.

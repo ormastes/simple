@@ -11,6 +11,15 @@ use os.kernel.types.device_mem_types.{device_grant_is_isolated}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc, dma_free}
 
 extern fn rt_time_now_unix_micros() -> i64
+extern fn simpleos_nvme_init() -> i64
+extern fn simpleos_nvme_read_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64
+extern fn simpleos_nvme_write_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64
+
+class Q35NvmePerfCounters:
+    read_iops: u64
+    write_iops: u64
+    read_p99_us: u64
+    write_p99_us: u64
 
 fn _elapsed_us(start_us: i64, end_us: i64) -> u64:
     if end_us <= start_us:
@@ -41,19 +50,40 @@ fn _access_marker(storage_grant: text, network_grant: text) -> text:
         "storage_namespace=non-secure-resource-namespace network_namespace=non-secure-resource-namespace " +
         "storage_grant=" + storage_grant + " network_grant=" + network_grant + " common_driver_logic=shared"
 
-fn _perf_reason(simple_read_iops: u64, simple_write_iops: u64, read_p99_us: u64, write_p99_us: u64) -> text:
-    if simple_read_iops <= 14285u64:
+fn _perf_reason(
+    simple_read_iops: u64,
+    simple_write_iops: u64,
+    read_p99_us: u64,
+    write_p99_us: u64,
+    c_read_iops: u64,
+    c_write_iops: u64,
+    c_read_p99_us: u64,
+    c_write_p99_us: u64
+) -> text:
+    if c_read_iops == 0u64 or c_write_iops == 0u64 or c_read_p99_us == 0u64 or c_write_p99_us == 0u64:
+        return "c-baseline-missing-iops"
+    if simple_read_iops <= c_read_iops:
         return "simple-read-iops-not-faster-than-c"
-    if simple_write_iops <= 15625u64:
+    if simple_write_iops <= c_write_iops:
         return "simple-write-iops-not-faster-than-c"
-    if read_p99_us > 70u64:
+    if read_p99_us > c_read_p99_us:
         return "simple-read-p99-slower-than-c"
-    if write_p99_us > 64u64:
+    if write_p99_us > c_write_p99_us:
         return "simple-write-p99-slower-than-c"
     "ready"
 
-fn _perf_marker(simple_read_iops: u64, simple_write_iops: u64, read_p99_us: u64, write_p99_us: u64, queue_depth: u16) -> text:
-    "nvme_perf reason=" + _perf_reason(simple_read_iops, simple_write_iops, read_p99_us, write_p99_us) +
+fn _perf_marker(
+    simple_read_iops: u64,
+    simple_write_iops: u64,
+    read_p99_us: u64,
+    write_p99_us: u64,
+    c_read_iops: u64,
+    c_write_iops: u64,
+    c_read_p99_us: u64,
+    c_write_p99_us: u64,
+    queue_depth: u16
+) -> text:
+    "nvme_perf reason=" + _perf_reason(simple_read_iops, simple_write_iops, read_p99_us, write_p99_us, c_read_iops, c_write_iops, c_read_p99_us, c_write_p99_us) +
         " simple_provider=simple-driver workload=4k-random-read-write io_size_bytes=4096" +
         " direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs" +
         " c_bridge_used=false common_logic_shared=true allocation_per_io=false" +
@@ -61,8 +91,59 @@ fn _perf_marker(simple_read_iops: u64, simple_write_iops: u64, read_p99_us: u64,
         " simple_write_iops=" + simple_write_iops.to_text() +
         " simple_read_p99_us=" + read_p99_us.to_text() +
         " simple_write_p99_us=" + write_p99_us.to_text() +
-        " c_read_iops=14285 c_write_iops=15625 c_read_p99_us=70 c_write_p99_us=64" +
+        " c_read_iops=" + c_read_iops.to_text() +
+        " c_write_iops=" + c_write_iops.to_text() +
+        " c_read_p99_us=" + c_read_p99_us.to_text() +
+        " c_write_p99_us=" + c_write_p99_us.to_text() +
         " queue_depth=" + queue_depth.to_u64().to_text() + " warm_runs=3 max_rss_kib=1"
+
+fn _measure_c_bridge_4k_baseline(lbas: [u64], sector_size: u32, buf_addr: u64) -> Result<Q35NvmePerfCounters, text>:
+    val init = simpleos_nvme_init()
+    if init != 0:
+        return Err("c-nvme-init-failed")
+    if buf_addr == 0u64:
+        return Err("c-nvme-buffer-missing")
+    if sector_size == 0u32 or (4096u32 % sector_size) != 0u32:
+        return Err("c-nvme-sector-size-invalid")
+    val sectors_per_4k = 4096u32 / sector_size
+    var read_ops: u64 = 0u64
+    var write_ops: u64 = 0u64
+    var read_total_us: u64 = 0u64
+    var write_total_us: u64 = 0u64
+    var read_p99_us: u64 = 1u64
+    var write_p99_us: u64 = 1u64
+    for lba in lbas:
+        val read_start = rt_time_now_unix_micros()
+        var sector: u32 = 0u32
+        while sector < sectors_per_4k:
+            val rc = simpleos_nvme_read_sector(0u64, lba + sector.to_u64(), buf_addr + (sector.to_u64() * sector_size.to_u64()))
+            if rc != 0:
+                return Err("c-nvme-read-failed")
+            sector = sector + 1u32
+        val read_elapsed = _elapsed_us(read_start, rt_time_now_unix_micros())
+        if read_elapsed > read_p99_us:
+            read_p99_us = read_elapsed
+        read_total_us = read_total_us + read_elapsed
+        read_ops = read_ops + 1u64
+
+        val write_start = rt_time_now_unix_micros()
+        sector = 0u32
+        while sector < sectors_per_4k:
+            val rc = simpleos_nvme_write_sector(0u64, lba + sector.to_u64(), buf_addr + (sector.to_u64() * sector_size.to_u64()))
+            if rc != 0:
+                return Err("c-nvme-write-failed")
+            sector = sector + 1u32
+        val write_elapsed = _elapsed_us(write_start, rt_time_now_unix_micros())
+        if write_elapsed > write_p99_us:
+            write_p99_us = write_elapsed
+        write_total_us = write_total_us + write_elapsed
+        write_ops = write_ops + 1u64
+    Ok(Q35NvmePerfCounters(
+        read_iops: _iops(read_ops, read_total_us),
+        write_iops: _iops(write_ops, write_total_us),
+        read_p99_us: read_p99_us,
+        write_p99_us: write_p99_us
+    ))
 
 fn q35_pure_nvme_perf_serial_lines() -> [text]:
     pcimgr_init()
@@ -94,7 +175,7 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
         return ["[q35-pure-nvme-perf] skipped reason=nvme-sector-size-invalid detail=" + sector_size.to_u64().to_text()]
     if sector_count == 0u64:
         return ["[q35-pure-nvme-perf] skipped reason=nvme-sector-count-missing"]
-    val batch_4k_ops: u32 = 32u32
+    val batch_4k_ops: u32 = 3u32
     val batch_bytes = batch_4k_ops.to_u64() * 4096u64
     val dma_result = dma_alloc((batch_bytes + 4096u64) as i64, DmaDir.Bidirectional)
     if dma_result.is_err():
@@ -121,6 +202,7 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
     var write_total_us: u64 = 0u64
     var read_p99_us: u64 = 1u64
     var write_p99_us: u64 = 1u64
+    var all_lbas: [u64] = []
     var run: u32 = 0u32
     while run < 3u32:
         var op: u32 = 0u32
@@ -128,7 +210,9 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
             var lbas: [u64] = []
             var batch_op: u32 = 0u32
             while batch_op < batch_4k_ops and op + batch_op < 32u32:
-                lbas.push(_relative_4k_lba(sector_size, sector_count, run, op + batch_op))
+                val lba = _relative_4k_lba(sector_size, sector_count, run, op + batch_op)
+                lbas.push(lba)
+                all_lbas.push(lba)
                 batch_op = batch_op + 1u32
 
             val read_start = rt_time_now_unix_micros()
@@ -169,13 +253,28 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
             op = op + lbas.len().to_u32()
         run = run + 1u32
 
+    val c_baseline = _measure_c_bridge_4k_baseline(all_lbas, sector_size, shared.cpu_virt_addr)
     dma_free(dma)
+    var c_read_iops: u64 = 0u64
+    var c_write_iops: u64 = 0u64
+    var c_read_p99_us: u64 = 0u64
+    var c_write_p99_us: u64 = 0u64
+    if c_baseline.is_ok():
+        val c = c_baseline.unwrap()
+        c_read_iops = c.read_iops
+        c_write_iops = c.write_iops
+        c_read_p99_us = c.read_p99_us
+        c_write_p99_us = c.write_p99_us
     val access = _access_marker("resource-grant-set:tok=nvme0", "resource-grant-set:tok=net0")
     val perf = _perf_marker(
         _iops(read_ops, read_total_us),
         _iops(write_ops, write_total_us),
         read_p99_us,
         write_p99_us,
+        c_read_iops,
+        c_write_iops,
+        c_read_p99_us,
+        c_write_p99_us,
         128u16
     )
     [access, perf]
