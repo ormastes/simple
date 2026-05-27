@@ -246,6 +246,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   encoded in the issued `DeviceGrant` BAR/IRQ/DMA/IOMMU tokens, so a grant
   issued to one user-space driver cannot be reused to expose FAT32, NVFS, or
   DBFS over another task's data queue.
+- The hardware `NvmeBlockAdapter` rejects leases whose NSID does not match the
+  namespace currently identified by `NvmeDriver` before issuing read/write
+  commands. This keeps multi-namespace user assignments fail-closed until the
+  driver can identify and submit I/O to each assigned namespace explicitly.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.
@@ -268,7 +272,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   q35 completion requires the NVMe performance marker and is rejected when the
   evidence line is missing.
 - `test/unit/os/services/vfs/nvme_block_adapter_spec.spl` covers adapter-visible
-  lease translation and out-of-range rejection without requiring real hardware.
+  lease translation, out-of-range rejection, and fail-closed rejection when a
+  lease NSID is not the driver's identified namespace, without requiring real
+  hardware.
 - `test/unit/lib/fs_driver/nvfs_device_backed_spec.spl` covers NVFS opening on
   the same shared `BlockDevice` surface used by FAT32 and DBFS.
 - `test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl` covers producing
