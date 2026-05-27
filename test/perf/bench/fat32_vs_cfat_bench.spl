@@ -8,7 +8,7 @@
 
 use std.io_runtime.{
     time_now_unix_micros, write_file, read_file, file_exists,
-    file_delete, file_size, mkdir_p, list_dir
+    file_delete, file_size, mkdir_p, list_dir, shell
 }
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.fat32_core.{Fat32Core}
@@ -148,19 +148,51 @@ fn result_line(r: BenchResult) -> text:
 fn skipped_result(workload: text, driver: text) -> BenchResult:
     BenchResult(workload_name: workload, driver_name: driver, p50_us: -1, p99_us: -1)
 
-# ── POSIX helpers ──────────────────────────────────────────────────────────
+# ── Host-filesystem helpers ────────────────────────────────────────────────
 fn _posix_base() -> text:
     "/tmp/simple_fat32_vs_cfat_bench"
 
-fn _posix_clean():
-    val base = _posix_base()
+fn _vfat_image() -> text:
+    "/tmp/simple_vfat_bench.img"
+
+fn _vfat_base() -> text:
+    "/tmp/simple_vfat_bench_mnt"
+
+fn _host_clean(base: text):
     val files = list_dir(base)
     for f in files:
         val _d = file_delete(base + "/" + f)
 
-fn _posix_setup():
-    mkdir_p(_posix_base())
-    _posix_clean()
+fn _host_setup(base: text):
+    mkdir_p(base)
+    _host_clean(base)
+
+fn _vfat_setup() -> bool:
+    val img = _vfat_image()
+    val mnt = _vfat_base()
+    val r1 = shell("dd if=/dev/zero of=" + img + " bs=1M count=64 2>/dev/null")
+    if r1.exit_code != 0:
+        print "  VFAT: dd failed"
+        return false
+    val r2 = shell("mkfs.fat -F 32 " + img + " 2>/dev/null")
+    if r2.exit_code != 0:
+        print "  VFAT: mkfs.fat failed (install dosfstools)"
+        return false
+    mkdir_p(mnt)
+    val r3 = shell("sudo -n mount -o loop " + img + " " + mnt + " 2>/dev/null")
+    if r3.exit_code != 0:
+        print "  VFAT: mount failed (needs passwordless sudo)"
+        val _rm = shell("rm -f " + img)
+        return false
+    val _ch = shell("sudo -n chmod 777 " + mnt + " 2>/dev/null")
+    true
+
+fn _vfat_teardown():
+    val mnt = _vfat_base()
+    val img = _vfat_image()
+    val _u = shell("sudo -n umount " + mnt + " 2>/dev/null")
+    val _r1 = shell("rmdir " + mnt + " 2>/dev/null")
+    val _r2 = shell("rm -f " + img)
 
 # ══════════════════════════════════════════════════════════════════════════
 # Workload 1: Create — create N files
@@ -176,18 +208,18 @@ fn bench_create_simple(count: i64) -> BenchResult:
         i = i + 1
     BenchResult(workload_name: "create", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
-fn bench_create_posix(count: i64) -> BenchResult:
-    _posix_setup()
+fn bench_create_host(count: i64, base_dir: text, driver_name: text) -> BenchResult:
+    _host_setup(base_dir)
     var latencies: [i64] = []
     var i: i64 = 0
     while i < count:
-        val path = _posix_base() + "/c" + i.to_text() + ".txt"
+        val path = base_dir + "/c" + i.to_text() + ".txt"
         val t0 = time_now_unix_micros()
         write_file(path, "")
         latencies = latencies.push(time_now_unix_micros() - t0)
         i = i + 1
-    _posix_clean()
-    BenchResult(workload_name: "create", driver_name: "c_fat_posix", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
+    _host_clean(base_dir)
+    BenchResult(workload_name: "create", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
 # ══════════════════════════════════════════════════════════════════════════
 # Workload 2: Lookup — resolve a file path
@@ -208,9 +240,9 @@ fn bench_lookup_simple(iters: i64) -> BenchResult:
         return skipped_result("lookup", "simple_fat32")
     BenchResult(workload_name: "lookup", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
-fn bench_lookup_posix(iters: i64) -> BenchResult:
-    _posix_setup()
-    val path = _posix_base() + "/lookup.txt"
+fn bench_lookup_host(iters: i64, base_dir: text, driver_name: text) -> BenchResult:
+    _host_setup(base_dir)
+    val path = base_dir + "/lookup.txt"
     write_file(path, "x")
     var latencies: [i64] = []
     var i: i64 = 0
@@ -219,8 +251,8 @@ fn bench_lookup_posix(iters: i64) -> BenchResult:
         val _e = file_exists(path)
         latencies = latencies.push(time_now_unix_micros() - t0)
         i = i + 1
-    _posix_clean()
-    BenchResult(workload_name: "lookup", driver_name: "c_fat_posix", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
+    _host_clean(base_dir)
+    BenchResult(workload_name: "lookup", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
 # ══════════════════════════════════════════════════════════════════════════
 # Workload 3: Sequential Read — read a file (requires file handles)
@@ -254,9 +286,9 @@ fn bench_seq_read_simple(iters: i64) -> BenchResult:
         i = i + 1
     BenchResult(workload_name: "sequential_read", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
-fn bench_seq_read_posix(iters: i64, total_bytes: i64) -> BenchResult:
-    _posix_setup()
-    val path = _posix_base() + "/seqrd.txt"
+fn bench_seq_read_host(iters: i64, total_bytes: i64, base_dir: text, driver_name: text) -> BenchResult:
+    _host_setup(base_dir)
+    val path = base_dir + "/seqrd.txt"
     val content = _fill_text(total_bytes)
     write_file(path, content)
     var latencies: [i64] = []
@@ -266,8 +298,8 @@ fn bench_seq_read_posix(iters: i64, total_bytes: i64) -> BenchResult:
         val _data = read_file(path)
         latencies = latencies.push(time_now_unix_micros() - t0)
         j = j + 1
-    _posix_clean()
-    BenchResult(workload_name: "sequential_read", driver_name: "c_fat_posix", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
+    _host_clean(base_dir)
+    BenchResult(workload_name: "sequential_read", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
 # ══════════════════════════════════════════════════════════════════════════
 # Workload 4: Append — write data to file (requires file handles)
