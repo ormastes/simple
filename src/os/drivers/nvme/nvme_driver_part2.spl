@@ -29,7 +29,7 @@ use os.drivers.nvme.nvme_queue_notify.*
 use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_pair_from_resources, nvme_cq_doorbell_addr, nvme_sq_doorbell_addr, nvme_dstrd_to_doorbell_stride_bytes}
 use os.drivers.nvme.nvme_transfer_command.{nvme_read_io_command, nvme_write_io_command, nvme_flush_io_command, nvme_io_status_code}
 use os.drivers.nvme.nvme_admin_command.{nvme_admin_identify_controller, nvme_admin_identify_namespace, nvme_admin_set_num_queues, nvme_admin_create_io_completion_queue, nvme_admin_create_io_submission_queue}
-use os.drivers.nvme.nvme_controller_contract.{nvme_namespace_facts, nvme_namespace_refusal_reason}
+use os.drivers.nvme.nvme_controller_contract.{NvmeControllerRegs, nvme_controller_facts, nvme_controller_refusal_reason, nvme_cap_dstrd, nvme_namespace_facts, nvme_namespace_refusal_reason, nvme_controller_enable_cc}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
@@ -69,13 +69,18 @@ impl NvmeDriver:
         self.bar0_virt = bar0_result.to_u64()
         log_info("[nvme] " + "NVMe: BAR0 mapped")
 
-        # Step 2: Read CAP register -- extract doorbell stride and max queue entries
+        # Step 2: Read controller registers and validate CAP before queue setup.
         val cap = mmio_read64(self.bar0_virt + 0x00)
-        # CAP bits 32-35: DSTRD (Doorbell Stride, in units of 4 bytes)
-        val dstrd = ((cap >> 32) & 0x0F).to_u32()
+        val vs = mmio_read32(self.bar0_virt + 0x08)
+        val cc = mmio_read32(self.bar0_virt + 0x14)
+        val csts = mmio_read32(self.bar0_virt + 0x1C)
+        val facts = nvme_controller_facts(NvmeControllerRegs(cap: cap, vs: vs, cc: cc, csts: csts), 64u32)
+        val controller_reason = nvme_controller_refusal_reason(facts)
+        if controller_reason != "ready":
+            return Result.Err("NVMe: controller " + controller_reason)
+        val dstrd = nvme_cap_dstrd(cap)
         self.db_stride = dstrd
-        # CAP bits 0-15: MQES (Maximum Queue Entries Supported, 0-based)
-        val mqes = (cap & 0xFFFF).to_u16()
+        val mqes = facts.mq_entries.to_u16()
         log_info("[nvme] " + "NVMe: CAP read, DSTRD={dstrd}, MQES={mqes}")
 
         # Step 3: Disable controller
@@ -290,7 +295,7 @@ impl NvmeDriver:
 
     me enable_controller() -> Result<bool, text>:
         """Enable controller with NVM command set, 4KB pages, 64B SQ / 16B CQ entries."""
-        val cc = 1 | 0 | 0 | 393216 | 4194304
+        val cc = nvme_controller_enable_cc()
         mmio_write32(self.bar0_virt + 0x14, cc)
 
         # Wait for CSTS.RDY to set

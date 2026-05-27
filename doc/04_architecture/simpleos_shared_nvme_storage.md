@@ -121,6 +121,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   invalid namespace geometry instead of silently falling back to 512-byte
   sectors. FAT32, NVFS, and DBFS leases must be backed by the same proven
   namespace LBA count and formatted LBA size.
+- Hosted controller initialization now validates CAP/VS/CSTS through the shared
+  controller facts contract before queue setup and uses the shared controller
+  enable CC value. User-space and freestanding/system paths therefore share the
+  same controller capability and enable policy.
 - Freestanding controller readiness now has an explicit resource contract that
   binds system-driver or user-space-driver placement, grant/namespace mode,
   admin queue resources, I/O queue resources, DMA isolation, and IOMMU/broker
@@ -155,6 +159,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   plus read/write/restore sector probes are supplied.
 - Invalid namespace identify data is a hard driver error for production paths;
   it is not converted into a fake default sector size.
+- Invalid controller facts are a hard error before admin queues are allocated,
+  so unsupported controllers cannot appear as partially initialized storage.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
