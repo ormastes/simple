@@ -125,6 +125,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   controller facts contract before queue setup and uses the shared controller
   enable CC value. User-space and freestanding/system paths therefore share the
   same controller capability and enable policy.
+- The baremetal initializer no longer has a permissive fallback lane. It uses
+  the shared controller validation, DMA allocation wrapper, queue resource
+  builder, admin command builders, namespace parser, and I/O queue setup, and it
+  fails closed when identify or queue creation fails.
 - Freestanding controller readiness now has an explicit resource contract that
   binds system-driver or user-space-driver placement, grant/namespace mode,
   admin queue resources, I/O queue resources, DMA isolation, and IOMMU/broker
@@ -161,6 +165,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   it is not converted into a fake default sector size.
 - Invalid controller facts are a hard error before admin queues are allocated,
   so unsupported controllers cannot appear as partially initialized storage.
+- Baremetal initialization no longer reports initialized storage after failed
+  identify or failed I/O queue creation.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
