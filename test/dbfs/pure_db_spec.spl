@@ -890,3 +890,58 @@ describe "PureDatabase":
         val first_row = first.row
         val first_id = first_row.values[0]
         expect(first_id.to_text()).to_equal("3")
+    it "update_by_key updates a row via typed API":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE ubk (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
+        db.exec_sql("INSERT INTO ubk (id, name) VALUES (1, 'Alice')").unwrap()
+        db.exec_sql("INSERT INTO ubk (id, name) VALUES (2, 'Bob')").unwrap()
+        var updates: Dict<text, DbValue> = {}
+        updates["name"] = DbValue.Text(value: "Zara")
+        val ur = db.update_by_key("ubk", "id", DbValue.Integer(value: 1), updates)
+        expect(ur.is_ok()).to_be(true)
+        expect(ur.unwrap()).to_equal(1)
+        # Verify updated row via SQL
+        val qr = db.query("SELECT * FROM ubk WHERE id = 1", [])
+        val rows2 = qr.unwrap()
+        expect(rows2.len()).to_equal(1)
+        val row = rows2[0]
+        expect(row.values[1].to_text()).to_equal("Zara")
+        # Verify other row untouched
+        val qr2 = db.query("SELECT * FROM ubk WHERE id = 2", [])
+        val rows3 = qr2.unwrap()
+        expect(rows3.len()).to_equal(1)
+        expect(rows3[0].values[1].to_text()).to_equal("Bob")
+    it "update_by_key returns 0 for non-existent key":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE ubk2 (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
+        db.exec_sql("INSERT INTO ubk2 (id, name) VALUES (1, 'Alice')").unwrap()
+        var upd2: Dict<text, DbValue> = {}
+        upd2["name"] = DbValue.Text(value: "Zara")
+        val ur = db.update_by_key("ubk2", "id", DbValue.Integer(value: 99), upd2)
+        expect(ur.is_ok()).to_be(true)
+        expect(ur.unwrap()).to_equal(0)
+    it "update_by_key updates PK column and fixes PK map":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE ubk3 (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
+        db.exec_sql("INSERT INTO ubk3 (id, name) VALUES (10, 'Alice')").unwrap()
+        db.exec_sql("INSERT INTO ubk3 (id, name) VALUES (20, 'Bob')").unwrap()
+        # Change PK value 10 -> 99
+        var upd3: Dict<text, DbValue> = {}
+        upd3["id"] = DbValue.Integer(value: 99)
+        val ur = db.update_by_key("ubk3", "id", DbValue.Integer(value: 10), upd3)
+        expect(ur.is_ok()).to_be(true)
+        expect(ur.unwrap()).to_equal(1)
+        # Old PK should return 0 rows
+        val qr_old = db.query("SELECT * FROM ubk3 WHERE id = 10", [])
+        expect(qr_old.unwrap().len()).to_equal(0)
+        # New PK should return 1 row with name Alice
+        val qr_new = db.query("SELECT * FROM ubk3 WHERE id = 99", [])
+        val rows_new = qr_new.unwrap()
+        expect(rows_new.len()).to_equal(1)
+        expect(rows_new[0].values[1].to_text()).to_equal("Alice")
+        # Other row untouched
+        val qr_bob = db.query("SELECT * FROM ubk3 WHERE id = 20", [])
+        expect(qr_bob.unwrap().len()).to_equal(1)

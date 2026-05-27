@@ -1466,7 +1466,16 @@ class PureDatabase:
         val use_typed = typed.len() == tbl.tuples.len()
         val key_txt = key_val.to_text()
         var deleted: i64 = 0
-        if use_typed:
+        # PK map fast path: O(1) lookup when deleting by primary key
+        if use_typed and kci == self._tbl_pk_col[ti]:
+            val pkm = self._tbl_pk_map[ti]
+            if pkm.has(key_txt):
+                val tidx = pkm[key_txt]
+                if tidx >= 0 and tidx < tbl.tuples.len() as i32:
+                    if mvcc_is_visible(tbl.tuples[tidx], snap):
+                        tbl.delete_matching(tid, tbl.tuples[tidx].data)
+                        deleted = 1
+        elif use_typed:
             var dki: i32 = 0
             while dki < tbl.tuples.len() as i32:
                 if mvcc_is_visible(tbl.tuples[dki], snap):
@@ -1488,9 +1497,96 @@ class PureDatabase:
         self._txn.commit(tid)
         if deleted > 0:
             self._invalidate_fts(ti)
+            # Remove from PK map
+            if kci == self._tbl_pk_col[ti]:
+                var pkm2 = self._tbl_pk_map[ti]
+                pkm2.remove(key_txt)
+                self._tbl_pk_map[ti] = pkm2
         self._last_changes = deleted
         self._mark_dirty()?
         Ok(deleted)
+
+    me update_by_key(table: text, key_col: text, key_val: DbValue, col_updates: Dict<text, DbValue>) -> Result<i64, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(table):
+            ti = self._tbl_name_idx[table]
+        else:
+            ti = _find_idx(self._tbl_names, table)
+        if ti < 0:
+            return Err(DbError.QueryFailed(sql: "UPDATE_BY_KEY", message: "no such table: {table}"))
+        val col_names = self._tbl_cols[ti]
+        var kci: i32 = -1
+        if ti < self._tbl_col_idx.len() as i32:
+            val cm = self._tbl_col_idx[ti]
+            if cm.has(key_col):
+                kci = cm[key_col]
+        if kci < 0:
+            kci = _find_idx(col_names, key_col)
+        if kci < 0:
+            return Err(DbError.QueryFailed(sql: "UPDATE_BY_KEY", message: "no such column: {key_col}"))
+        val handle = self._txn.begin()
+        val tid = handle.txn_id
+        val snap = self._txn.snapshot()
+        var tbl = self._tbl_data[ti]
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
+        val key_txt = key_val.to_text()
+        val pk_ci = self._tbl_pk_col[ti]
+        var found_tidx: i32 = -1
+        # PK map fast path
+        if use_typed and kci == pk_ci:
+            val pkm = self._tbl_pk_map[ti]
+            if pkm.has(key_txt):
+                val tidx = pkm[key_txt]
+                if tidx >= 0 and tidx < tbl.tuples.len() as i32:
+                    if mvcc_is_visible(tbl.tuples[tidx], snap):
+                        found_tidx = tidx
+        elif use_typed:
+            var si: i32 = 0
+            while si < tbl.tuples.len() as i32:
+                if mvcc_is_visible(tbl.tuples[si], snap):
+                    val rv = typed[si]
+                    if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
+                        found_tidx = si
+                si = si + 1
+        if found_tidx < 0:
+            self._tbl_data[ti] = tbl
+            self._txn.commit(tid)
+            self._last_changes = 0
+            return Ok(0)
+        val row_vals = typed[found_tidx]
+        var new_vals: [DbValue] = []
+        var ci: i32 = 0
+        while ci < col_names.len() as i32:
+            val col = col_names[ci]
+            if col_updates.has(col):
+                new_vals.push(col_updates[col])
+            else:
+                new_vals.push(row_vals[ci])
+            ci = ci + 1
+        val old_data = tbl.tuples[found_tidx].data
+        tbl.delete_matching(tid, old_data)
+        val new_ser = _serialize_row(new_vals)
+        tbl.insert(tid, new_ser)
+        val new_pos = tbl.tuples.len() as i32 - 1
+        self._tbl_data[ti] = tbl
+        var typed2 = self._tbl_typed[ti]
+        typed2.push(new_vals)
+        self._tbl_typed[ti] = typed2
+        # Update PK map
+        if pk_ci >= 0 and pk_ci < new_vals.len() as i32:
+            var pkm2 = self._tbl_pk_map[ti]
+            if pk_ci < row_vals.len() as i32:
+                pkm2.remove(row_vals[pk_ci].to_text())
+            pkm2[new_vals[pk_ci].to_text()] = new_pos
+            self._tbl_pk_map[ti] = pkm2
+        self._txn.commit(tid)
+        self._invalidate_fts(ti)
+        self._last_changes = 1
+        self._mark_dirty()?
+        Ok(1)
 
     me scan_all(table: text) -> Result<[DbRow], DbError>:
         if not self.is_open:
