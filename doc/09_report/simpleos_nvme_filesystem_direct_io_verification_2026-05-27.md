@@ -83,5 +83,8 @@ they also carry real-device identity fields: `hardware_target=real-nvme`,
 and `measured_on=real-device`.
 Real-device runners now have the canonical helper
 `nvme_real_hardware_perf_report_line_from_measurements` to produce that accepted
-line from measured counters plus physical NVMe identity, but an actual physical
-NVMe run remains pending.
+line from measured counters plus physical NVMe identity. The readiness layer now
+has `real_device_physical_nvme_serial_acceptance_reason` to reject physical-run
+logs unless they include pure Simple storage access, shared FAT32/NVFS/DBFS
+direct-I/O markers, and the real-NVMe identity fields. An actual physical NVMe
+run remains pending.

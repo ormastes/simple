@@ -3,6 +3,10 @@ use os.drivers.real_device_readiness.{
     real_device_current_q35_c_bridge_readiness,
     real_device_q35_boot_markers,
     real_device_marker,
+    real_device_physical_nvme_boot_markers,
+    real_device_physical_nvme_perf_marker_from_measurements,
+    real_device_physical_nvme_serial_acceptance_reason,
+    real_device_physical_nvme_serial_accepts_completion,
     real_device_pure_simple_ready,
     real_device_pure_simple_reason,
     real_device_q35_pure_simple_access_marker,
@@ -317,6 +321,56 @@ describe "SimpleOS real-device readiness":
         expect(perf).to_contain("direct_io_path=nvme-lease-shared-dma-4k")
         expect(perf).to_contain("fs_consumers=fat32,nvfs,dbfs")
         expect(real_device_q35_pure_simple_serial_acceptance_reason(serial)).to_equal("ready")
+
+    it "accepts physical NVMe perf only with pure Simple storage access and real-device identity":
+        val access = real_device_q35_pure_simple_access_marker(
+            "resource-grant-set:tok=501",
+            "resource-grant-set:tok=none"
+        )
+        val perf = real_device_physical_nvme_perf_marker_from_measurements(
+            120000u64,
+            90000u64,
+            800u64,
+            1000u64,
+            100000u64,
+            80000u64,
+            900u64,
+            1100u64,
+            64u16,
+            5u32,
+            32768u64,
+            false,
+            "Samsung PM9A3",
+            "SN123456",
+            1u32
+        )
+        val serial = access + "\n" + perf + "\nTEST PASSED\n"
+        val q35_perf = real_device_q35_pure_simple_perf_marker_from_measurements(
+            120000u64,
+            90000u64,
+            800u64,
+            1000u64,
+            100000u64,
+            80000u64,
+            900u64,
+            1100u64,
+            64u16,
+            5u32,
+            32768u64,
+            false
+        )
+        val q35_serial = access + "\n" + q35_perf + "\nTEST PASSED\n"
+        val bridge_serial = serial.replace("storage_provider=simple-driver", "storage_provider=c-boot-bridge")
+
+        expect(real_device_physical_nvme_boot_markers()).to_contain("hardware_target=real-nvme")
+        expect(perf).to_contain("hardware_target=real-nvme")
+        expect(perf).to_contain("qemu=false")
+        expect(perf).to_contain("device_model=Samsung_PM9A3")
+        expect(perf).to_contain("namespace_nsid=1")
+        expect(real_device_physical_nvme_serial_acceptance_reason(q35_serial)).to_equal("missing-physical-nvme-marker:hardware_target=real-nvme")
+        expect(real_device_physical_nvme_serial_acceptance_reason(bridge_serial)).to_equal("storage-not-pure-simple:c-boot-bridge")
+        expect(real_device_physical_nvme_serial_accepts_completion(serial)).to_equal(true)
+        expect(real_device_physical_nvme_serial_acceptance_reason(serial)).to_equal("ready")
 
     it "does not report model or SFFI RDMA as hardware RDMA":
         val model = real_device_readiness(

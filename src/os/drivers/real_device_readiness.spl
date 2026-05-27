@@ -1,7 +1,12 @@
 # Truthful real-device readiness gates for SimpleOS board hardening.
 
 use os.drivers.user_space_driver_contract.{user_space_driver_all_direct_access_reason}
-use os.drivers.nvme.nvme_performance_contract.{nvme_production_perf_report_line_from_measurements, nvme_production_perf_serial_acceptance_reason}
+use os.drivers.nvme.nvme_performance_contract.{
+    nvme_production_perf_report_line_from_measurements,
+    nvme_production_perf_serial_acceptance_reason,
+    nvme_real_hardware_perf_report_line_from_measurements,
+    nvme_real_hardware_perf_serial_acceptance_reason
+}
 
 struct RealDeviceReadiness:
     board_id: text
@@ -448,6 +453,42 @@ fn real_device_q35_pure_simple_perf_marker_from_measurements(
         allocation_per_io
     )
 
+fn real_device_physical_nvme_perf_marker_from_measurements(
+    simple_read_iops: u64,
+    simple_write_iops: u64,
+    simple_read_p99_us: u64,
+    simple_write_p99_us: u64,
+    c_read_iops: u64,
+    c_write_iops: u64,
+    c_read_p99_us: u64,
+    c_write_p99_us: u64,
+    queue_depth: u16,
+    warm_runs: u32,
+    max_rss_kib: u64,
+    allocation_per_io: bool,
+    device_model: text,
+    device_serial: text,
+    namespace_nsid: u32
+) -> text:
+    """Build the physical-NVMe serial perf marker consumed by release gates."""
+    nvme_real_hardware_perf_report_line_from_measurements(
+        simple_read_iops,
+        simple_write_iops,
+        simple_read_p99_us,
+        simple_write_p99_us,
+        c_read_iops,
+        c_write_iops,
+        c_read_p99_us,
+        c_write_p99_us,
+        queue_depth,
+        warm_runs,
+        max_rss_kib,
+        allocation_per_io,
+        device_model,
+        device_serial,
+        namespace_nsid
+    )
+
 fn real_device_q35_pure_simple_serial_acceptance_reason(serial_output: text) -> text:
     if serial_output.contains("storage_provider=c-boot-bridge"):
         return "storage-not-pure-simple:c-boot-bridge"
@@ -463,3 +504,38 @@ fn real_device_q35_pure_simple_serial_acceptance_reason(serial_output: text) -> 
 
 fn real_device_q35_pure_simple_serial_accepts_completion(serial_output: text) -> bool:
     real_device_q35_pure_simple_serial_acceptance_reason(serial_output) == "ready"
+
+fn real_device_physical_nvme_boot_markers() -> [text]:
+    [
+        "storage_provider=simple-driver",
+        "storage_placement=user-space-driver",
+        "storage_namespace=non-secure-resource-namespace",
+        "storage_grant=resource-grant-set:tok=",
+        "common_driver_logic=shared",
+        "nvme_perf reason=ready",
+        "direct_io_path=nvme-lease-shared-dma-4k",
+        "fs_consumers=fat32,nvfs,dbfs",
+        "c_bridge_used=false",
+        "allocation_per_io=false",
+        "hardware_target=real-nvme",
+        "qemu=false",
+        "device_model=",
+        "device_serial=",
+        "namespace_nsid=",
+        "measured_on=real-device",
+        "TEST PASSED"
+    ]
+
+fn real_device_physical_nvme_serial_acceptance_reason(serial_output: text) -> text:
+    if serial_output.contains("storage_provider=c-boot-bridge"):
+        return "storage-not-pure-simple:c-boot-bridge"
+    for marker in real_device_physical_nvme_boot_markers():
+        if not serial_output.contains(marker):
+            return "missing-physical-nvme-marker:" + marker
+    val perf_reason = nvme_real_hardware_perf_serial_acceptance_reason(serial_output)
+    if perf_reason != "ready":
+        return "nvme-real-hardware-perf:" + perf_reason
+    "ready"
+
+fn real_device_physical_nvme_serial_accepts_completion(serial_output: text) -> bool:
+    real_device_physical_nvme_serial_acceptance_reason(serial_output) == "ready"
