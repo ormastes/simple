@@ -301,7 +301,7 @@ impl NvmeDriver:
 
     me enable_controller() -> Result<bool, text>:
         """Enable controller with NVM command set, 4KB pages, 64B SQ / 16B CQ entries."""
-        val cc = nvme_controller_enable_cc()
+        val cc: u32 = 0x00460001u32
         mmio_write32(self.bar0_virt + 0x14, cc)
 
         # Wait for CSTS.RDY to set
@@ -313,7 +313,18 @@ impl NvmeDriver:
             if (csts & 2) != 0:
                 return Result.Err("NVMe: controller fatal status during enable")
             i = i + 1
-        Result.Err("NVMe: timeout waiting for controller ready")
+        val final_csts = mmio_read32(self.bar0_virt + 0x1C)
+        val final_cc = mmio_read32(self.bar0_virt + 0x14)
+        val final_aqa = mmio_read32(self.bar0_virt + 0x24)
+        val final_asq = mmio_read64(self.bar0_virt + 0x28)
+        val final_acq = mmio_read64(self.bar0_virt + 0x30)
+        Result.Err(
+            "NVMe: timeout waiting for controller ready csts=" + final_csts.to_u64().to_text() +
+            " cc=" + final_cc.to_u64().to_text() +
+            " aqa=" + final_aqa.to_u64().to_text() +
+            " asq=" + final_asq.to_text() +
+            " acq=" + final_acq.to_text()
+        )
 
     # ========================================================================
     # Admin Commands
@@ -882,7 +893,7 @@ impl NvmeDriver:
         val read_result = self.read_sectors(lba, 1u32, original.phys)
         val read_ok = read_result.is_ok()
         if not read_ok:
-            return Ok(nvme_sector_probe_result(lba, bytes, 1u32, false, false, false, true))
+            return Result.Err("NVMe: reversible probe read failed: " + read_result.unwrap_err())
 
         var i: u64 = 0
         while i < bytes:
@@ -893,10 +904,12 @@ impl NvmeDriver:
 
         val write_result = self.write_sectors(lba, 1u32, pattern.phys)
         var write_ok = write_result.is_ok()
+        if write_result.is_err():
+            return Result.Err("NVMe: reversible probe write failed: " + write_result.unwrap_err())
         if write_ok:
             val verify_read = self.read_sectors(lba, 1u32, verify.phys)
             if verify_read.is_err():
-                write_ok = false
+                return Result.Err("NVMe: reversible probe verify read failed: " + verify_read.unwrap_err())
             else:
                 i = 0
                 while i < bytes:
@@ -906,6 +919,8 @@ impl NvmeDriver:
 
         val restore_result = self.write_sectors(lba, 1u32, original.phys)
         val restore_ok = restore_result.is_ok()
+        if restore_result.is_err():
+            return Result.Err("NVMe: reversible probe restore failed: " + restore_result.unwrap_err())
         val completion_status: u32 = if read_ok and write_ok and restore_ok: 0u32 else: 1u32
         Ok(nvme_sector_probe_result(lba, bytes, completion_status, read_ok, write_ok, restore_ok, true))
 
@@ -986,12 +1001,16 @@ impl NvmeDriver:
         self.identified_namespaces = remembered
 
     fn namespace_sector_count(nsid: u32) -> Result<u64, text>:
+        if nsid == self.identified_nsid and self.sector_count > 0u64:
+            return Ok(self.sector_count)
         for facts in self.identified_namespaces:
             if facts.nsid == nsid:
                 return Ok(facts.lba_count)
         Err("NVMe: namespace not identified")
 
     fn namespace_sector_size(nsid: u32) -> Result<u32, text>:
+        if nsid == self.identified_nsid and self.sector_size >= 512u32:
+            return Ok(self.sector_size)
         for facts in self.identified_namespaces:
             if facts.nsid == nsid:
                 return Ok(facts.formatted_lba_size)
