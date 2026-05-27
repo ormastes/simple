@@ -37,6 +37,7 @@ use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, lo
 
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
 
+val NVME_DRIVER_MAX_DATA_QUEUE_ID: u16 = 3
 # Timeout for controller ready transitions (spin iterations)
 impl NvmeDriver:
     static fn new() -> NvmeDriver:
@@ -45,6 +46,7 @@ impl NvmeDriver:
             bar0_virt: 0,
             admin_queue: NvmeQueuePair.new(0, 32),
             io_queue: NvmeQueuePair.new(1, 64),
+            user_io_queues: [],
             notif_id: 0,
             identified_nsid: 1u32,
             identified_namespaces: [],
@@ -155,7 +157,7 @@ impl NvmeDriver:
         log_info("[nvme] " + "NVMe: namespace identified, sectors={self.sector_count}, sector_size={self.sector_size}")
 
         # Step 11: Set Number of Queues feature (feature ID 0x07)
-        val set_queues_result = self.set_num_queues(1, 1)
+        val set_queues_result = self.set_num_queues(NVME_DRIVER_MAX_DATA_QUEUE_ID, NVME_DRIVER_MAX_DATA_QUEUE_ID)
         if set_queues_result.is_err():
             return set_queues_result
 
@@ -257,7 +259,7 @@ impl NvmeDriver:
         if ns_result.is_err():
             return ns_result
 
-        val set_queues_result = self.set_num_queues(1, 1)
+        val set_queues_result = self.set_num_queues(NVME_DRIVER_MAX_DATA_QUEUE_ID, NVME_DRIVER_MAX_DATA_QUEUE_ID)
         if set_queues_result.is_err():
             return set_queues_result
 
@@ -484,6 +486,76 @@ impl NvmeDriver:
             return Result.Err("NVMe: create I/O SQ timeout")
         Result.Ok(true)
 
+    me ensure_user_data_queue(queue_id: u16, depth: u16) -> Result<bool, text>:
+        """Create or reuse a user data I/O queue used by user-assigned namespaces."""
+        if queue_id < SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID or queue_id > NVME_DRIVER_MAX_DATA_QUEUE_ID:
+            return Result.Err("NVMe: unsupported user data queue")
+        if depth == 0u16:
+            return Result.Err("NVMe: user data queue depth zero")
+        for existing in self.user_io_queues:
+            if existing.qid == queue_id:
+                if existing.depth < depth:
+                    return Result.Err("NVMe: user data queue depth too small")
+                return Result.Ok(true)
+        val queue_result = self.create_io_queue_pair(queue_id, depth)
+        if queue_result.is_err():
+            return queue_result
+        self.user_io_queues = self.user_io_queues.push(queue_result.unwrap())
+        Result.Ok(true)
+
+    me create_io_queue_pair(qid: u16, depth: u16) -> Result<NvmeQueuePair, text>:
+        """Create a concrete I/O completion/submission queue pair."""
+        if qid == 0u16:
+            return Result.Err("NVMe: I/O queue id zero")
+        if depth == 0u16:
+            return Result.Err("NVMe: I/O queue depth zero")
+        val cq_size = depth.to_u64() * 16u64
+        val cq_result = self.alloc_dma(cq_size)
+        if cq_result.is_err():
+            return Result.Err("NVMe: failed to allocate data I/O CQ")
+        val cq = cq_result.unwrap()
+        self.zero_memory(cq.virt, cq_size)
+        val cq_cmd_result = nvme_admin_create_io_completion_queue(qid, depth, cq.phys)
+        if cq_cmd_result.is_err():
+            return Result.Err("NVMe: create data I/O CQ " + cq_cmd_result.unwrap_err())
+        val cq_cmd = cq_cmd_result.unwrap()
+        self.admin_queue.submit_command(
+            cq_cmd.opcode, cq_cmd.nsid, cq_cmd.prp1, cq_cmd.prp2,
+            cq_cmd.cdw10, cq_cmd.cdw11, cq_cmd.cdw12
+        )
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: create data I/O CQ timeout")
+
+        val sq_size = depth.to_u64() * 64u64
+        val sq_result = self.alloc_dma(sq_size)
+        if sq_result.is_err():
+            return Result.Err("NVMe: failed to allocate data I/O SQ")
+        val sq = sq_result.unwrap()
+        self.zero_memory(sq.virt, sq_size)
+        val queue_result = nvme_queue_pair_from_resources(NvmeQueueResources(
+            qid: qid,
+            depth: depth,
+            sq_phys: sq.phys,
+            sq_virt: sq.virt,
+            cq_phys: cq.phys,
+            cq_virt: cq.virt,
+            bar0_virt: self.bar0_virt,
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride)
+        ))
+        if queue_result.is_err():
+            return Result.Err("NVMe: invalid data I/O queue resources: " + queue_result.unwrap_err())
+        val sq_cmd_result = nvme_admin_create_io_submission_queue(qid, depth, qid, sq.phys)
+        if sq_cmd_result.is_err():
+            return Result.Err("NVMe: create data I/O SQ " + sq_cmd_result.unwrap_err())
+        val sq_cmd = sq_cmd_result.unwrap()
+        self.admin_queue.submit_command(
+            sq_cmd.opcode, sq_cmd.nsid, sq_cmd.prp1, sq_cmd.prp2,
+            sq_cmd.cdw10, sq_cmd.cdw11, sq_cmd.cdw12
+        )
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: create data I/O SQ timeout")
+        Ok(queue_result.unwrap())
+
     # ========================================================================
     # Block I/O
     # ========================================================================
@@ -506,6 +578,10 @@ impl NvmeDriver:
 
     me read_sectors_in_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
         """Read sectors from an identified namespace."""
+        self.read_sectors_in_namespace_on_queue(nsid, self.io_queue.qid, lba, count, buf_phys)
+
+    me read_sectors_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Read sectors from an identified namespace on a concrete I/O queue."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
         val sector_count = self.namespace_sector_count(nsid)
@@ -516,16 +592,36 @@ impl NvmeDriver:
             return Result.Err("NVMe: read " + cmd_result.unwrap_err())
         val cmd = cmd_result.unwrap()
 
-        self.io_queue.submit_command(
-            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
-            cmd.cdw10, cmd.cdw11, cmd.cdw12
-        )
+        var status_dw3: u32 = 0u32
+        if queue_id == self.io_queue.qid:
+            self.io_queue.submit_command(
+                cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                cmd.cdw10, cmd.cdw11, cmd.cdw12
+            )
+            if not self.io_queue.wait_completion(CMD_TIMEOUT):
+                return Result.Err("NVMe: read timeout at LBA {lba}")
+            status_dw3 = self.io_queue.get_completion_status()
+        else:
+            var updated_queues: [NvmeQueuePair] = []
+            var matched_queue = false
+            for existing in self.user_io_queues:
+                if existing.qid == queue_id:
+                    var q = existing
+                    q.submit_command(
+                        cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                        cmd.cdw10, cmd.cdw11, cmd.cdw12
+                    )
+                    if not q.wait_completion(CMD_TIMEOUT):
+                        return Result.Err("NVMe: read timeout at LBA {lba}")
+                    status_dw3 = q.get_completion_status()
+                    updated_queues = updated_queues.push(q)
+                    matched_queue = true
+                else:
+                    updated_queues = updated_queues.push(existing)
+            self.user_io_queues = updated_queues
+            if not matched_queue:
+                return Result.Err("NVMe: I/O queue not ready")
 
-        if not self.io_queue.wait_completion(CMD_TIMEOUT):
-            return Result.Err("NVMe: read timeout at LBA {lba}")
-
-        # Check completion status
-        val status_dw3 = self.io_queue.get_completion_status()
         val status_code = nvme_io_status_code(status_dw3)
         if status_code != 0:
             return Result.Err("NVMe: read error, status={status_code}")
@@ -550,6 +646,10 @@ impl NvmeDriver:
 
     me write_sectors_in_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
         """Write sectors to an identified namespace."""
+        self.write_sectors_in_namespace_on_queue(nsid, self.io_queue.qid, lba, count, buf_phys)
+
+    me write_sectors_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Write sectors to an identified namespace on a concrete I/O queue."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
         val sector_count = self.namespace_sector_count(nsid)
@@ -560,16 +660,36 @@ impl NvmeDriver:
             return Result.Err("NVMe: write " + cmd_result.unwrap_err())
         val cmd = cmd_result.unwrap()
 
-        self.io_queue.submit_command(
-            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
-            cmd.cdw10, cmd.cdw11, cmd.cdw12
-        )
+        var status_dw3: u32 = 0u32
+        if queue_id == self.io_queue.qid:
+            self.io_queue.submit_command(
+                cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                cmd.cdw10, cmd.cdw11, cmd.cdw12
+            )
+            if not self.io_queue.wait_completion(CMD_TIMEOUT):
+                return Result.Err("NVMe: write timeout at LBA {lba}")
+            status_dw3 = self.io_queue.get_completion_status()
+        else:
+            var updated_queues: [NvmeQueuePair] = []
+            var matched_queue = false
+            for existing in self.user_io_queues:
+                if existing.qid == queue_id:
+                    var q = existing
+                    q.submit_command(
+                        cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                        cmd.cdw10, cmd.cdw11, cmd.cdw12
+                    )
+                    if not q.wait_completion(CMD_TIMEOUT):
+                        return Result.Err("NVMe: write timeout at LBA {lba}")
+                    status_dw3 = q.get_completion_status()
+                    updated_queues = updated_queues.push(q)
+                    matched_queue = true
+                else:
+                    updated_queues = updated_queues.push(existing)
+            self.user_io_queues = updated_queues
+            if not matched_queue:
+                return Result.Err("NVMe: I/O queue not ready")
 
-        if not self.io_queue.wait_completion(CMD_TIMEOUT):
-            return Result.Err("NVMe: write timeout at LBA {lba}")
-
-        # Check completion status
-        val status_dw3 = self.io_queue.get_completion_status()
         val status_code = nvme_io_status_code(status_dw3)
         if status_code != 0:
             return Result.Err("NVMe: write error, status={status_code}")

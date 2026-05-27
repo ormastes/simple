@@ -271,6 +271,12 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   namespace sector count or sector size differs from the lease, and the VFS
   user-assignment path restores the previous identified NSID after recording the
   user namespace facts so legacy boot-namespace operations are not redirected.
+- Hardware user namespace assignment now requires the driver to create or reuse
+  the lease's user data I/O queue before mounting. Controller initialization
+  requests enough I/O queues for the system queue and the bounded data-queue
+  range before queue creation; lease-backed FAT32/NVFS/DBFS adapters store that
+  queue ID and submit namespace I/O through queue-aware driver methods instead
+  of always using the system I/O queue.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.
@@ -328,8 +334,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   decoding.
 - `test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl` covers that
   the driver exposes namespace-aware identify/sector methods, stores identified
-  NSID geometry, and keeps non-identified namespaces fail-closed before hardware
-  submission.
+  NSID geometry, creates bounded user data queues for assigned namespaces, and
+  keeps non-identified namespaces fail-closed before hardware submission.
 - `test/unit/os/drivers/nvme/nvme_queue_boundary_spec.spl` guards that the
   reusable queue submission/polling module does not import hosted syscalls or
   notification waits.
