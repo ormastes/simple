@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MNT="${VFAT_MNT:-/tmp/simple_vfat_bench_mnt}"
+IMG="${VFAT_IMG:-/tmp/simple_vfat_bench.img}"
+SIZE_MIB="${VFAT_SIZE_MIB:-64}"
+BYTES=$((64 * 4096))
+UID_ARG="$(id -u)"
+GID_ARG="$(id -g)"
+
+mkdir -p "$MNT"
+
+if mountpoint -q "$MNT"; then
+    if [ -w "$MNT" ]; then
+        :
+    elif sudo -n true 2>/dev/null; then
+        sudo -n umount "$MNT"
+    else
+        echo "VFAT mount exists but is not writable: $MNT" >&2
+        echo "Run with passwordless sudo or remount it with uid=$UID_ARG,gid=$GID_ARG." >&2
+        exit 1
+    fi
+fi
+
+if ! mountpoint -q "$MNT"; then
+    rm -f "$IMG"
+    dd if=/dev/zero of="$IMG" bs=1M count="$SIZE_MIB" status=none
+    mkfs.fat -F 32 "$IMG" >/dev/null
+    if sudo -n true 2>/dev/null; then
+        sudo -n mount -o "loop,uid=$UID_ARG,gid=$GID_ARG,fmask=0022,dmask=0022" "$IMG" "$MNT"
+    else
+        echo "Need sudo to mount VFAT loop image at $MNT." >&2
+        exit 1
+    fi
+fi
+
+python3 - "$MNT" "$BYTES" <<'PY'
+import pathlib
+import sys
+
+mnt = pathlib.Path(sys.argv[1])
+size = int(sys.argv[2])
+for name in ("read", "write"):
+    path = mnt / f"simple_fat32_4k_vfat_{name}.bin"
+    path.write_bytes(b"A" * size)
+print(f"seeded {size} bytes x2 under {mnt}")
+PY
+
+findmnt -T "$MNT" -o TARGET,SOURCE,FSTYPE,OPTIONS -n
