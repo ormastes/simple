@@ -13,6 +13,7 @@ contracts used by capability-backed storage.
 use std.spec.{describe, it, expect}
 use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmePartitionIdentity, NvmeQueueAssignment, nvme_queue_role_for_id, nvme_queue_is_system_reserved, nvme_first_data_queue_id, nvme_transfer_evidence, nvme_transfer_readiness_reason, nvme_transfer_ready, nvme_filesystem_lease, nvme_filesystem_lease_reason, nvme_filesystem_lease_ready, nvme_filesystem_consumer_name, nvme_namespace_mode_name, nvme_filesystem_lease_sector_size, nvme_filesystem_lease_sector_count, nvme_filesystem_lease_absolute_lba}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
+use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id, device_grant_resource_set_label, device_grant_is_isolated}
 
 describe "NVMe storage model":
     describe "queue role policy":
@@ -155,6 +156,63 @@ describe "NVMe storage model":
             expect(nvme_filesystem_lease_reason(bad_queue, NvmeFilesystemConsumer.Nvfs)).to_equal("nvme-fs-user-namespace-not-data-queue")
             expect(nvme_filesystem_lease_reason(missing_token, NvmeFilesystemConsumer.Dbfs)).to_contain("missing-issued-device-grant-token")
             expect(nvme_filesystem_lease_ready(ready, NvmeFilesystemConsumer.Fat32)).to_equal(true)
+
+        it "accepts user-assigned namespaces with tokenized DeviceGrant metadata":
+            val ns = NvmeNamespaceIdentity(
+                controller_id: 0,
+                nsid: 5,
+                lba_size: 4096,
+                lba_count: 8192,
+                eui64: 0,
+                nguid_lo: 0,
+                nguid_hi: 0,
+                uuid_lo: 0,
+                uuid_hi: 0
+            )
+            val queue = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID,
+                role: NvmeQueueRole.Data,
+                controller_id: 0,
+                nsid: 5,
+                owner_task: 42,
+                max_depth: 64,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val base = device_grant_token_base(0u8, 4u8, 0u8, 42u64)
+            val grant = DeviceGrant(
+                pci_vendor: 0x1B36u16,
+                pci_device: 0x5845u16,
+                pci_bus: 0u8,
+                pci_dev: 4u8,
+                pci_func: 0u8,
+                pci_class: 1u8,
+                pci_subclass: 8u8,
+                bar0_phys: 0xFEB90000u64,
+                bar0_size: 0x1000u64,
+                bar0_cap: device_grant_bar_token(base),
+                irq_vector: 43u32,
+                irq_notification_id: 1u64,
+                irq_notification_bit: 1u64,
+                irq_cap: device_grant_irq_token(base),
+                dma_device_addr: 0u64,
+                dma_host_addr: 0u64,
+                dma_size: 0u64,
+                dma_cap: device_grant_dma_token(base),
+                iommu_domain_id: device_grant_iommu_domain_id(0u8, 4u8, 0u8),
+                iommu_cap: device_grant_iommu_token(base)
+            )
+            val lease = nvme_filesystem_lease(
+                ns,
+                128u64,
+                1024u64,
+                NvmeNamespaceMode.UserAssigned,
+                queue,
+                "simple-driver",
+                device_grant_resource_set_label(grant),
+                true,
+                device_grant_is_isolated(grant)
+            )
+            expect(nvme_filesystem_lease_ready(lease, NvmeFilesystemConsumer.Fat32)).to_equal(true)
 
         it "rejects filesystem leases that do not expose the shared block interface":
             val ns = NvmeNamespaceIdentity(

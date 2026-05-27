@@ -27,6 +27,9 @@ must not each grow separate NVMe access paths. The existing code already has:
 - `src/os/kernel/ipc/dma_alloc_contract.spl` documents the syscall 84 layout:
   the syscall return is the CPU virtual address, result word 0 is the
   device-visible physical address, and result word 1 remains the allocation id.
+- `src/os/kernel/types/device_mem_types.spl`, `src/os/services/pcimgr/pcimgr.spl`,
+  and `src/os/kernel/ipc/syscall_device.spl` issue tokenized BAR/IRQ/DMA/IOMMU
+  grant metadata for user-space direct driver handoff.
 
 ## Decision
 The NVMe driver owns controller init, namespace discovery, queue assignment,
@@ -54,6 +57,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Pure Simple NVMe DMA allocation now uses the same syscall contract as
   user-space DMA descriptors, so result word 1 is no longer mistaken for a
   virtual address.
+- User-assigned namespace leases can consume a `DeviceGrant` resource-set label
+  instead of a hand-written token string.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -78,3 +83,6 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   FAT32, NVFS, and DBFS `DriverInstance` values from one NVMe lease contract.
 - `test/unit/os/kernel/ipc/dma_alloc_contract_spec.spl` covers the DMA syscall
   result layout used by the pure Simple NVMe driver and VFS adapter.
+- `test/unit/os/kernel/types/device_mem_types_spec.spl` covers DeviceGrant
+  BAR/IRQ/DMA/IOMMU token metadata, and the NVMe storage model spec covers using
+  that label for a user-assigned namespace lease.
