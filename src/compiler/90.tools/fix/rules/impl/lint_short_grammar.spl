@@ -4,6 +4,7 @@
 #   L:short_grammar_method_ref — `\x: x.method()` -> `&:method`
 #   L:short_grammar_placeholder — `\x: x * 2` -> `_ * 2`
 #                               — `\x: x.method() > 0` -> `_.method() > 0`
+#                               — `\(a, b): "{a}: {b}"` -> `"{_.0}: {_.1}"`
 
 use std.tooling.easy_fix.*
 use compiler.tools.fix.rules.helpers.*
@@ -133,6 +134,12 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
     val raw_param = line[lambda_start:colon_abs].trim()
     if raw_param.len() < 2:
         return nil
+    val tuple_candidate = _parse_tuple_placeholder_candidate(line, lambda_start, colon_abs)
+    match tuple_candidate:
+        case Some(candidate):
+            return Some(candidate)
+        case nil:
+            pass
     val introducer = raw_param[0:1]
     if _is_identifier_char(introducer):
         return nil
@@ -168,6 +175,52 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
 
     val new_text = _replace_plain_identifier(expr, param, "_")
     if new_text == expr:
+        return nil
+    Some(ShortGrammarPlaceholderCandidate(new_text: new_text, end_offset: expr_end))
+
+fn _parse_tuple_placeholder_candidate(line: text, lambda_start: i64, colon_abs: i64) -> Option<ShortGrammarPlaceholderCandidate>:
+    val raw_param = line[lambda_start:colon_abs].trim()
+    if not raw_param.starts_with("\\(") or not raw_param.ends_with(")"):
+        return nil
+    val inner = raw_param[2:raw_param.len() - 1].trim()
+    if inner == "":
+        return nil
+
+    val params = inner.split(",")
+    if params.len() < 2:
+        return nil
+    var clean_params: [text] = []
+    for param in params:
+        val clean = param.trim()
+        if not _is_plain_identifier(clean):
+            return nil
+        clean_params.push(clean)
+
+    var body_start = colon_abs + 1
+    while body_start < line.len() and line[body_start:body_start + 1] == " ":
+        body_start = body_start + 1
+
+    val expr_end = _scan_simple_lambda_expr_end(line, body_start)
+    if expr_end <= body_start:
+        return nil
+    val expr = line[body_start:expr_end].trim()
+    if expr == "":
+        return nil
+
+    var new_text = expr
+    var replaced = false
+    var idx = 0
+    while idx < clean_params.len():
+        val replacement = "_.{idx}"
+        val updated = _replace_plain_identifier(new_text, clean_params[idx], replacement)
+        if updated != new_text:
+            replaced = true
+        new_text = updated
+        idx = idx + 1
+
+    if not replaced or new_text == expr:
+        return nil
+    if new_text.contains("\\(") or new_text.contains("\\)"):
         return nil
     Some(ShortGrammarPlaceholderCandidate(new_text: new_text, end_offset: expr_end))
 
