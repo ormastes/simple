@@ -15,9 +15,17 @@ use os.services.vfs.vfs_boot_init.{
     vfs_boot_nvme_shared_driver_ready_for_user_assignment,
     vfs_boot_nvme_direct_adapter_count_for_test,
     vfs_boot_storage_acceptance_reason,
-    vfs_boot_storage_production_ready
+    vfs_boot_storage_production_ready,
+    vfs_boot_nvme_submit_filesystem_direct_4k,
+    vfs_boot_nvme_submit_filesystem_direct_4k_batch
 }
+use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease}
 use os.services.vfs.vfs_init.{vfs_boot_storage_acceptance_ready}
+use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.direct_io.{direct_io_read_request, direct_io_read_batch_request}
+use std.fs_driver.error.{FsError}
+use std.io.dma.{SharedDmaBuffer, DmaOwner, DmaCachePolicy}
 use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmeQueueAssignment, nvme_filesystem_lease, nvme_filesystem_lease_reason, nvme_transfer_evidence}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 use os.kernel.types.device_mem_types.{DeviceGrant, new_device_grant, device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id, device_grant_resource_set_label}
@@ -79,6 +87,17 @@ fn _user_lease_for_boot_nsid(nsid: u32):
         rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
     )
     nvme_filesystem_lease(ns, 0u64, 1024u64, NvmeNamespaceMode.UserAssigned, queue, "simple-driver", "resource-grant-set:tok=301", true, true)
+
+fn _valid_shared_dma_4k() -> SharedDmaBuffer:
+    SharedDmaBuffer(
+        cpu_virt_addr: 0x1000u64,
+        host_phys_addr: 0x2000u64,
+        device_addr: 0x2000u64,
+        byte_len: 4096u64,
+        cache_policy: DmaCachePolicy.Coherent,
+        owner: DmaOwner(task_id: 42u64, bdf_bus: 0u8, bdf_device: 4u8, bdf_function: 0u8),
+        allocation_id: 9u64
+    )
 
 describe "VFS boot NVMe lease contract":
     it "builds a filesystem-ready system FAT32 lease for pure Simple boot":
@@ -232,6 +251,29 @@ describe "VFS boot NVMe lease contract":
         expect(source.contains("remaining_adapter_leases = remaining_adapter_leases.push(adapter_lease)")).to_equal(true)
         expect(source.contains("g_vfs_nvme_direct_adapter_leases = remaining_adapter_leases")).to_equal(true)
         expect(source.contains("for active in g_vfs_nvme_active_leases:\n        if nvme_filesystem_lease_same_assignment(active, lease):\n            if idx >= g_vfs_nvme_direct_adapters.len():")).to_equal(false)
+        vfs_boot_nvme_reset_active_leases_for_test()
+
+    it "requires filesystem DirectIo probe before submitting through lease adapters":
+        vfs_boot_nvme_reset_active_leases_for_test()
+        val lease = _user_lease_for_boot_nsid(18u32)
+        val unsupported = DriverInstance.DbFs(DbFsDriver.new_hosted())
+        val mounted = vfs_nvme_driver_instance_for_lease("user-dbfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs).unwrap()
+        val req = direct_io_read_request(7u64, 0i64, _valid_shared_dma_4k(), 100u32)
+        val unaligned = direct_io_read_request(7u64, 7i64, _valid_shared_dma_4k(), 100u32)
+        val batch = direct_io_read_batch_request(7u64, [0i64, 4096i64], SharedDmaBuffer(
+            cpu_virt_addr: 0x1000u64,
+            host_phys_addr: 0x2000u64,
+            device_addr: 0x2000u64,
+            byte_len: 8192u64,
+            cache_policy: DmaCachePolicy.Coherent,
+            owner: DmaOwner(task_id: 42u64, bdf_bus: 0u8, bdf_device: 4u8, bdf_function: 0u8),
+            allocation_id: 10u64
+        ), 100u32)
+
+        expect(vfs_boot_nvme_submit_filesystem_direct_4k(unsupported, lease, req).unwrap_err()).to_equal(FsError.Unsupported)
+        expect(vfs_boot_nvme_submit_filesystem_direct_4k(mounted, lease, unaligned).unwrap_err()).to_equal(FsError.InvalidArg)
+        val mounted_batch = vfs_nvme_driver_instance_for_lease("user-dbfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs).unwrap()
+        expect(vfs_boot_nvme_submit_filesystem_direct_4k_batch(mounted_batch, lease, batch).unwrap_err()).to_equal(FsError.NotFound)
         vfs_boot_nvme_reset_active_leases_for_test()
 
     it "wires q35 pure Simple perf evidence to real shared-DMA direct I/O":
