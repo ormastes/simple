@@ -87,4 +87,6 @@ line from measured counters plus physical NVMe identity. The readiness layer now
 has `real_device_physical_nvme_serial_acceptance_reason` to reject physical-run
 logs unless they include pure Simple storage access, shared FAT32/NVFS/DBFS
 direct-I/O markers, and the real-NVMe identity fields. An actual physical NVMe
-run remains pending.
+run remains pending. The same gate is now exposed by
+`src/app/simpleos_nvme_serial_check/main.spl --serial-log <path>` so captured
+real hardware logs can be checked directly in the runner or lab workflow.

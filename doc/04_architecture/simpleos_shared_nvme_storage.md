@@ -214,6 +214,11 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   It requires the pure Simple storage access markers, shared FAT32/NVFS/DBFS
   direct-I/O markers, and the stricter real-hardware performance identity before
   returning `ready`; q35 perf-only output remains insufficient for that gate.
+- Hardware labs can run
+  `src/app/simpleos_nvme_serial_check/main.spl --serial-log <path>` against the
+  captured serial log. The app delegates to the same physical-NVMe readiness
+  gate and exits nonzero when the log is q35/emulator-only or lacks real device
+  identity.
 - The q35 pure-Simple real-device marker contract now lists `nvme_perf
   reason=ready`, and serial acceptance validates the detailed performance fields
   in addition to provider, grant, namespace, and transfer markers.
