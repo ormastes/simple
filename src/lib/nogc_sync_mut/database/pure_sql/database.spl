@@ -1918,6 +1918,27 @@ class PureDatabase:
         self._tbl_fts_doc_ids[ti] = doc_ids
         self._tbl_fts_next_doc_id[ti] = visible.len()
 
+    me _ensure_fts_index_typed(ti: i32, col_names: [text], selected_cols: [text], typed_rows: [[DbValue]], visible_indices: [i32]):
+        if ti < 0 or ti >= self._fts_indexes.len() as i32:
+            return
+        if self._fts_valid[ti] and _same_text_list(self._fts_columns[ti], selected_cols):
+            return
+        var engine = FtsEngine.new()
+        var doc_ids: [i64] = []
+        var ri: i32 = 0
+        while ri < visible_indices.len() as i32:
+            val idx = visible_indices[ri]
+            val row_vals = typed_rows[idx]
+            val text_value = _row_search_text(row_vals, col_names, selected_cols)
+            engine.add_document(ri as i64, text_value)
+            doc_ids.push(ri as i64)
+            ri = ri + 1
+        self._fts_indexes[ti] = engine
+        self._fts_valid[ti] = true
+        self._fts_columns[ti] = selected_cols
+        self._tbl_fts_doc_ids[ti] = doc_ids
+        self._tbl_fts_next_doc_id[ti] = visible_indices.len()
+
     me search(table: text, columns: [text], query: text, algorithm: PureSearchAlgorithm, limit: i64) -> Result<[PureSearchResult], DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
@@ -1937,23 +1958,43 @@ class PureDatabase:
         val col_names = self._tbl_cols[ti]
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
-        val visible = tbl.scan(snap)
-        self._tbl_data[ti] = tbl
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
         var docs: [[text]] = []
         var rows: [DbRow] = []
         var total_len: i64 = 0
-        var ri: i32 = 0
-        while ri < visible.len() as i32:
-            val row_vals = _deserialize_row(visible[ri])
-            val text_value = _row_search_text(row_vals, col_names, columns)
-            val tokens = _text_tokens(text_value)
-            total_len = total_len + tokens.len()
-            docs.push(tokens)
-            rows.push(DbRow(columns: col_names, values: row_vals))
-            ri = ri + 1
+        var visible_indices: [i32] = []
+        if use_typed:
+            var ri: i32 = 0
+            while ri < tbl.tuples.len() as i32:
+                if mvcc_is_visible(tbl.tuples[ri], snap):
+                    val row_vals = typed[ri]
+                    val text_value = _row_search_text(row_vals, col_names, columns)
+                    val tokens = _text_tokens(text_value)
+                    total_len = total_len + tokens.len()
+                    docs.push(tokens)
+                    rows.push(DbRow(columns: col_names, values: row_vals))
+                    visible_indices.push(ri)
+                ri = ri + 1
+        else:
+            val visible = tbl.scan(snap)
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                val row_vals = _deserialize_row(visible[ri])
+                val text_value = _row_search_text(row_vals, col_names, columns)
+                val tokens = _text_tokens(text_value)
+                total_len = total_len + tokens.len()
+                docs.push(tokens)
+                rows.push(DbRow(columns: col_names, values: row_vals))
+                ri = ri + 1
+        self._tbl_data[ti] = tbl
         var results: [PureSearchResult] = []
         if algorithm == PureSearchAlgorithm.Bm25:
-            self._ensure_fts_index(ti, col_names, columns, visible)
+            if use_typed:
+                self._ensure_fts_index_typed(ti, col_names, columns, typed, visible_indices)
+            else:
+                val visible_fb = tbl.scan(snap)
+                self._ensure_fts_index(ti, col_names, columns, visible_fb)
             val engine = self._fts_indexes[ti]
             val fts_results = engine.search(query)
             # Collect matched doc IDs for query_fts_match dispatch
