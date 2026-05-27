@@ -167,6 +167,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   controller namespace cannot be system-owned and user-assigned at the same
   time, and repeated user filesystem views are accepted only for the same grant,
   owner task, and queue.
+- The VFS NVMe mount factory exposes a checked mount entry point that applies
+  that active-lease conflict rule before constructing FAT32, NVFS, or DBFS
+  driver instances.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
   `BlockDevice` surfaces.
 - Production performance claims now have an explicit NVMe contract: measured
@@ -243,7 +246,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `test/unit/lib/fs_driver/nvfs_device_backed_spec.spl` covers NVFS opening on
   the same shared `BlockDevice` surface used by FAT32 and DBFS.
 - `test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl` covers producing
-  FAT32, NVFS, and DBFS `DriverInstance` values from one NVMe lease contract.
+  FAT32, NVFS, and DBFS `DriverInstance` values from one NVMe lease contract and
+  rejects checked mounts that would mix system/user ownership of one namespace.
 - `test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl` covers the
   evidence-gated production FAT32 boot lease constructor and guards that the
   pure-Simple boot path calls the hardware probe before mounting.
