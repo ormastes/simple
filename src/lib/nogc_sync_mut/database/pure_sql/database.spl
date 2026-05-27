@@ -1498,7 +1498,6 @@ class PureDatabase:
     me get(table: text, key_col: text, key_val: DbValue) -> Result<DbRow?, DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
-        # Fast table lookup via Dict cache
         var ti: i32 = -1
         if self._tbl_name_idx.has(table):
             ti = self._tbl_name_idx[table]
@@ -1507,7 +1506,6 @@ class PureDatabase:
         if ti < 0:
             return Err(DbError.QueryFailed(sql: "GET", message: "no such table: {table}"))
         val col_names = self._tbl_cols[ti]
-        # Fast column lookup via Dict cache
         var kci: i32 = -1
         if ti < self._tbl_col_idx.len() as i32:
             val cm = self._tbl_col_idx[ti]
@@ -1521,19 +1519,30 @@ class PureDatabase:
         var tbl = self._tbl_data[ti]
         val typed = self._tbl_typed[ti]
         val use_typed = typed.len() == tbl.tuples.len()
+        val n_tuples = tbl.tuples.len() as i32
+        var vis = self._tbl_vis[ti]
+        if self._tbl_vis_xmax[ti] != snap.xmax or vis.len() != n_tuples as i64:
+            var new_vis: [bool] = []
+            var vi: i32 = 0
+            while vi < n_tuples:
+                new_vis.push(mvcc_is_visible(tbl.tuples[vi], snap))
+                vi = vi + 1
+            self._tbl_vis[ti] = new_vis
+            self._tbl_vis_xmax[ti] = snap.xmax
+            vis = new_vis
         val key_txt = key_val.to_text()
         if use_typed and kci == self._tbl_pk_col[ti]:
             val pkm = self._tbl_pk_map[ti]
             if pkm.has(key_txt):
                 val tidx = pkm[key_txt]
-                if tidx >= 0 and tidx < tbl.tuples.len() as i32:
-                    if mvcc_is_visible(tbl.tuples[tidx], snap):
+                if tidx >= 0 and tidx < n_tuples:
+                    if vis[tidx]:
                         return Ok(Some(DbRow(columns: col_names, values: typed[tidx])))
             return Ok(nil)
         if use_typed:
             var gi: i32 = 0
-            while gi < tbl.tuples.len() as i32:
-                if mvcc_is_visible(tbl.tuples[gi], snap):
+            while gi < n_tuples:
+                if vis[gi]:
                     val rv = typed[gi]
                     if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
                         return Ok(Some(DbRow(columns: col_names, values: rv)))
@@ -1628,6 +1637,8 @@ class PureDatabase:
         self._last_rowid = self._tbl_rowids[ti]
         self._txn.commit(tid)
         self._last_changes = 1
+        self._tbl_vis_xmax[ti] = -1
+        self._invalidate_fts(ti)
         self._mark_dirty()?
         Ok(1)
 
