@@ -55,7 +55,10 @@ TEST PASSED
   by q35 hardware evidence that queue 2 is created as a user data queue and can
   perform direct 4K read/write on a user-assigned lease.
 - Shared FAT32/NVFS/DBFS interface: proven by mount contracts, DirectIo extent
-  mapping tests, and q35 extent-source markers.
+  mapping tests, and q35 extent-source markers. The FAT32 hosted constructor is
+  guarded to use `FsFat32Driver.new_with_direct_io`, retain its DirectIo
+  capability, and delegate to the shared FAT32 cluster-chain extent mapper;
+  NVFS/DBFS constructor paths are covered by device-backed extent tests.
 - Pure Simple path faster than C FAT/NVMe baseline: proven by q35 same-device
   read/write IOPS and p99 comparison, with `c_bridge_used=false` on the Simple
   path and `allocation_per_io=false`.
@@ -65,5 +68,5 @@ TEST PASSED
 The q35 freestanding proof intentionally avoids linking hosted filesystem driver
 constructors into the tiny boot image. FAT32 uses a freestanding FAT fixture
 extent path; NVFS and DBFS use their shared DBFS arena extent formula. Hosted
-driver constructor behavior is covered by unit-level mount/extent tests, not by
-the q35 freestanding image.
+constructor/extent behavior is covered by unit-level FAT32 source guards and
+NVFS/DBFS device-backed extent tests, not by the q35 freestanding image.
