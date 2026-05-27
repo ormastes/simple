@@ -63,7 +63,7 @@ use std.http_server.security_context.{dispatch_with_task_remote_security_context
 use std.async_host.task_identity.{allocate_scheduler_task_id, current_unified_task_key, enter_scheduler_task_id, exit_scheduler_task_id}
 use std.nogc_async_mut.io.tls.{AsyncTlsListener, AsyncTlsStream, TlsConfig}
 use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
-use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.http_server.protocol_handler.{ProtocolKind, protocol_from_alpn, protocol_handler_label}
 
@@ -247,10 +247,7 @@ class Worker:
     # ========================================================================
 
     me handle_completion(op_id: i64, result: i64, completion_index: i64, now: i64):
-        """Handle a non-accept I/O completion.
-
-        Uses op_to_fd/op_type maps to dispatch to the correct connection.
-        """
+        """Handle a non-accept I/O completion."""
         val fd = self.op_to_fd.get(op_id)
         if not fd.?:
             return
@@ -428,17 +425,7 @@ class Worker:
         val route_result = self.router.route(request)
         match route_result:
             Ok((location, params)):
-                var req = HttpRequestData(
-                    method: request.method,
-                    path: request.path,
-                    query: request.query,
-                    version: request.version,
-                    headers: request.headers,
-                    body: request.body,
-                    params: params,
-                    peer_addr: request.peer_addr
-                )
-                val resp = self.execute_handler_with_remote_security_context(location, req)
+                val resp = self.inline_static_handler(location, request)
                 self.send_response(fd, resp, now)
 
             Err(e):
@@ -446,6 +433,32 @@ class Worker:
 
         # Run log phase
         self.pipeline.run_log_phase(request, self.config)
+
+    me inline_static_handler(location: LocationConfig, request: HttpRequestData) -> HttpResponseData:
+        val root = location.root
+        val path = request.path
+        val full_path = root + path
+        if file_exists(full_path):
+            val content = file_read_text(full_path)
+            var ctype = "application/octet-stream"
+            if path.ends_with(".html") or path.ends_with(".htm"):
+                ctype = "text/html; charset=utf-8"
+            elif path.ends_with(".txt"):
+                ctype = "text/plain; charset=utf-8"
+            elif path.ends_with(".css"):
+                ctype = "text/css"
+            elif path.ends_with(".js"):
+                ctype = "application/javascript"
+            elif path.ends_with(".json"):
+                ctype = "application/json"
+            elif path.ends_with(".png"):
+                ctype = "image/png"
+            elif path.ends_with(".jpg") or path.ends_with(".jpeg"):
+                ctype = "image/jpeg"
+            var resp = default_response_data(200, "OK", content)
+            resp.headers = [("Content-Type", ctype), ("Server", "SimpleServer")]
+            return resp
+        build_not_found()
 
     me execute_handler(location: LocationConfig,
                        request: HttpRequestData) -> HttpResponseData:
