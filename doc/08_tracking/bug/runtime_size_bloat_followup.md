@@ -1,7 +1,7 @@
 # Runtime Size Bloat — Architectural Follow-up Plan
 
 *Written: 2026-04-28. Track T3 of executable-size-bloat-analysis Phase 5.*
-Status: Open
+Status: Resolved 2026-05-27 for the tracked T3/native-app floor target.
 *Evidence base: `.sstack/executable-size-bloat-analysis/research_local.md`, `research_measure.md`.*
 
 ---
@@ -417,3 +417,32 @@ Interpretation:
 - current-source narrow bootstrap apps are now back near the earlier
   `~423 KB` plateau, but this time from current artifacts rather than stale
   archives
+
+## 13. Closure Evidence
+
+The tracked follow-up target was to remove broad runtime anchors from ordinary
+native app builds. Option B estimated a post-fix hello-world size of **1-2 MB**;
+the current bootstrap-floor lane is now below that target.
+
+Verification command:
+
+```bash
+MAX_HELLO_SIMPLE_BYTES=500000 MAX_MINIMAL_TUI_BYTES=510000 sh scripts/check-ui-native-size-audit.shs
+```
+
+Result on 2026-05-27:
+
+```text
+size_audit_ready=true
+report_path=doc/09_report/tui_app_size_reduction_2026-05-03.md
+hello_simple_bytes=451552
+minimal_tui_bytes=451552
+hello_c_bytes=14472
+hello_ncurses_bytes=14472
+```
+
+The generated report records no `rustls`, `ureq`, `regex`, `sha1`, `sha256`,
+`browser`, `render_html_tree`, or `run_standalone_tui` anchor strings in either
+the Simple hello or minimal TUI binary. Remaining size work is now a narrower
+standard-library/runtime-floor optimization topic, not this broad dependency
+anchoring bug.
