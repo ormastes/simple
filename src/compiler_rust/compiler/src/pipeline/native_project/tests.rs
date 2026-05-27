@@ -1109,6 +1109,7 @@ void rt_string_data(void) {}
 void rt_string_len(void) {}
 void rt_array_new(void) {}
 void rt_array_len(void) {}
+void rt_declared_only(void) {}
 "#,
     )
     .unwrap();
@@ -1116,6 +1117,7 @@ void rt_array_len(void) {}
         &app_c,
         r#"
 extern void rt_used(void);
+__asm__(".weak rt_declared_only");
 void app_call(void) { rt_used(); }
 "#,
     )
@@ -1167,6 +1169,7 @@ void app_call(void) { rt_used(); }
     assert!(roots.contains(&"__simple_runtime_init".to_string()));
     assert!(roots.contains(&"rt_function_not_found".to_string()));
     assert!(!roots.contains(&"rt_unused".to_string()));
+    assert!(!roots.contains(&"rt_declared_only".to_string()));
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

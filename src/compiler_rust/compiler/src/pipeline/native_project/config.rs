@@ -46,7 +46,11 @@ fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
 }
 
 fn runtime_bundle_requests_hosted(value: &str) -> bool {
-    matches!(value, "all" | "hosted" | "rust-hosted")
+    matches!(value, "all" | "hosted" | "rust-hosted" | "hosted-runtime" | "rust-runtime")
+}
+
+fn runtime_bundle_requests_hosted_runtime(value: &str) -> bool {
+    matches!(value, "hosted-runtime" | "rust-runtime")
 }
 
 fn is_compiler_like_entry(path: &Path) -> bool {
@@ -130,6 +134,16 @@ impl NativeProjectBuilder {
             .is_some_and(runtime_bundle_requests_hosted)
     }
 
+    fn runtime_bundle_is_hosted_runtime_only(&self) -> bool {
+        if runtime_bundle_requests_hosted_runtime(&self.config.runtime_bundle) {
+            return true;
+        }
+        std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
+            .ok()
+            .as_deref()
+            .is_some_and(runtime_bundle_requests_hosted_runtime)
+    }
+
     pub(crate) fn runtime_bundle_is_explicit_simple_core(&self) -> bool {
         if runtime_bundle_requests_simple_core(&self.config.runtime_bundle) {
             return true;
@@ -165,6 +179,7 @@ impl NativeProjectBuilder {
 
     pub(crate) fn selected_runtime_library(&self, temp_dir: &Path) -> Result<Option<(PathBuf, bool)>, String> {
         let lane = self.resolve_runtime_lane();
+        let hosted_runtime_only = self.runtime_bundle_is_hosted_runtime_only();
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
 
         let mut push_runtime_candidates = |dir: &Path| {
@@ -199,10 +214,24 @@ impl NativeProjectBuilder {
                     }
                 }
                 NativeRuntimeLane::RustHosted => {
-                    if native_all.exists() {
+                    if hosted_runtime_only {
+                        if runtime_deps.exists() {
+                            candidates.push((runtime_deps, false));
+                        }
+                        if runtime.exists() {
+                            candidates.push((runtime, false));
+                        }
+                    } else if native_all.exists() {
                         let lib = strip_llvm_constructors(&native_all, temp_dir)
                             .unwrap_or_else(|e| warn_strip_failure(e, &native_all));
                         candidates.push((lib, true));
+                    } else {
+                        if runtime_deps.exists() {
+                            candidates.push((runtime_deps, false));
+                        }
+                        if runtime.exists() {
+                            candidates.push((runtime, false));
+                        }
                     }
                 }
             }
@@ -235,10 +264,16 @@ impl NativeProjectBuilder {
                     }
                 }
                 NativeRuntimeLane::RustHosted => {
-                    if let Some(native_all) = find_native_all_library() {
+                    if hosted_runtime_only {
+                        if let Some(runtime) = find_runtime_library() {
+                            candidates.push((runtime, false));
+                        }
+                    } else if let Some(native_all) = find_native_all_library() {
                         let lib = strip_llvm_constructors(&native_all, temp_dir)
                             .unwrap_or_else(|e| warn_strip_failure(e, &native_all));
                         candidates.push((lib, true));
+                    } else if let Some(runtime) = find_runtime_library() {
+                        candidates.push((runtime, false));
                     }
                 }
             }

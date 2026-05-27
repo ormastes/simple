@@ -1637,6 +1637,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
         "spl_thread_cpu_count",
         concurrency::rt_thread_available_parallelism as ExternFn,
     );
+    m.insert("spl_thread_join", concurrency::rt_thread_join as ExternFn);
+    m.insert("spl_thread_detach", concurrency::rt_thread_free as ExternFn);
+    m.insert("spl_thread_current_id", concurrency::rt_thread_id as ExternFn);
+    m.insert("spl_thread_sleep", concurrency::rt_thread_sleep as ExternFn);
+    m.insert("spl_thread_yield", concurrency::rt_thread_yield as ExternFn);
     m.insert("rt_thread_free", concurrency::rt_thread_free as ExternFn);
     m.insert("rt_thread_id", concurrency::rt_thread_id as ExternFn);
     m.insert("rt_thread_is_done", concurrency::rt_thread_is_done as ExternFn);
@@ -2258,7 +2263,7 @@ pub(crate) fn call_extern_function(
         }
 
         // Concurrency — thread_spawn needs env/functions/classes to capture interpreter state
-        "rt_thread_spawn_isolated" => {
+        "rt_thread_spawn_isolated" | "spl_thread_create" => {
             concurrency::rt_thread_spawn_isolated_with_context(&evaluated, env, functions, classes, enums, impl_methods)
         }
         "rt_thread_spawn_isolated2" => concurrency::rt_thread_spawn_isolated2_with_context(

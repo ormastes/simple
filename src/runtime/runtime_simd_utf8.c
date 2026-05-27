@@ -540,6 +540,12 @@ void simd_text_init(void) {
     /* Note: search and case TUs upgrade their own slots lazily */
 }
 
+static inline void simd_text_ensure_init(void) {
+    if (!g_simd_text.utf8_count_codepoints) {
+        simd_text_init();
+    }
+}
+
 /* ================================================================
  * UTF-8 SIMD slot upgrading (called from simd_text_init)
  * ================================================================ */
@@ -579,6 +585,7 @@ static void simd_utf8_init_slots(void) {
  * Caches the result in reserved for subsequent calls.
  */
 int64_t rt_text_count_codepoints_cached(int64_t value) {
+    simd_text_ensure_init();
     RtCoreStringSimd* s = simd_as_string(value);
     if (!s) return 0;
 
@@ -605,6 +612,7 @@ int64_t rt_text_count_codepoints(int64_t value) {
  * Fast path: if ASCII cache says all-ASCII, return valid immediately.
  */
 int64_t rt_text_validate_utf8(int64_t value) {
+    simd_text_ensure_init();
     RtCoreStringSimd* s = simd_as_string(value);
     if (!s) return 1; /* nil/non-string: vacuously valid */
 
@@ -620,6 +628,7 @@ int64_t rt_text_validate_utf8(int64_t value) {
  *   Returns byte offset of first invalid byte, or -1 if valid.
  */
 int64_t rt_text_find_invalid_utf8(int64_t value) {
+    simd_text_ensure_init();
     RtCoreStringSimd* s = simd_as_string(value);
     if (!s) return -1;
 

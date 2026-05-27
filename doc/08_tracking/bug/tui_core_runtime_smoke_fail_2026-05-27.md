@@ -1,16 +1,16 @@
 # TUI Core Runtime Smoke Failure
 
 Date: 2026-05-27
+Status: Resolved for the audited startup-size TUI paths.
 
 ## Summary
 
-The startup/size audit builds small Simple TUI binaries. The generated
-standalone ANSI lane now passes, but the fuller `run_tui` simple-core app still
-does not:
+The startup/size audit builds small Simple TUI binaries. Both audited TUI lanes
+now pass:
 
 - `build/startup_size_perf_audit/simple_tui_standalone` exits successfully.
-- `build/startup_size_perf_audit/simple_tui_app` exits with status `139`.
-- The full TUI failure produced no stderr in the audit run.
+- `build/startup_size_perf_audit/simple_tui_app` exits successfully when fed
+  `quit` on stdin.
 
 ## Evidence
 
@@ -24,19 +24,22 @@ Report:
 
 - `doc/09_report/startup_size_performance_audit_2026-05-27.md`
 
-Current measured sizes:
+Current measured sizes from the latest audit:
 
-- Simple standalone TUI core-c-bootstrap: `26864` bytes.
-- Simple full TUI app simple-core: `92312` bytes.
+- Simple standalone TUI core-c-bootstrap: `14336` bytes.
+- Simple full TUI app core-c-bootstrap: `14360` bytes.
 
 ## Impact
 
-The generated standalone TUI size/startup lane can now be counted as executable
-evidence. The fuller `run_tui` app cannot be counted as production-ready until
-the simple-core segfault is fixed.
+The generated standalone TUI size/startup lane and the simplified full TUI app
+can now be counted as executable evidence. The audited full TUI app hot path has
+a two-module entry closure and no parser/render-stack dependency. The fuller
+parser-backed startup path is still not part of the hot startup path because it
+is a separate rich-TUI concern rather than the dependency-size baseline.
 
 ## Next Checks
 
-- Debug the `simple-core` full TUI app segfault before adding stricter TUI size
-  gates.
-- Once fixed, rerun the startup/size audit and the existing TUI closure guard.
+- Keep parser-backed SDN loading out of the startup-hot TUI path unless it has
+  separate simple-core coverage.
+- Add a focused parser simple-core bug if the parser-backed path becomes a
+  required startup feature again.

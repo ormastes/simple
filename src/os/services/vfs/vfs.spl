@@ -135,7 +135,7 @@ impl VfsManager:
         """Open a file, returning a file descriptor."""
         val mount = self.resolve_mount(path)
         if mount.?:
-            val entry = mount.unwrap()
+            val entry = mount
             val relative = self.strip_mount_prefix(path, entry.point.path)
             val result = entry.fs.open(relative, flags)
             if result.is_ok():
@@ -156,7 +156,7 @@ impl VfsManager:
         """Get file/directory metadata."""
         val mount = self.resolve_mount(path)
         if mount.?:
-            val entry = mount.unwrap()
+            val entry = mount
             val relative = self.strip_mount_prefix(path, entry.point.path)
             return entry.fs.stat(relative)
         Result.Err("no filesystem mounted for path: {path}")
@@ -165,7 +165,7 @@ impl VfsManager:
         """List directory contents."""
         val mount = self.resolve_mount(path)
         if mount.?:
-            val entry = mount.unwrap()
+            val entry = mount
             val relative = self.strip_mount_prefix(path, entry.point.path)
             return entry.fs.readdir(relative)
         Result.Err("no filesystem mounted for path: {path}")
@@ -174,7 +174,7 @@ impl VfsManager:
         """Create directory."""
         val mount = self.resolve_mount(path)
         if mount.?:
-            val entry = mount.unwrap()
+            val entry = mount
             if entry.point.read_only:
                 return Result.Err("filesystem is read-only")
             val relative = self.strip_mount_prefix(path, entry.point.path)
@@ -185,7 +185,7 @@ impl VfsManager:
         """Remove an empty directory."""
         val mount = self.resolve_mount(path)
         if mount.?:
-            val entry = mount.unwrap()
+            val entry = mount
             if entry.point.read_only:
                 return Result.Err("filesystem is read-only")
             val relative = self.strip_mount_prefix(path, entry.point.path)
@@ -214,7 +214,7 @@ impl VfsManager:
         """Delete a file."""
         val mount = self.resolve_mount(path)
         if mount.?:
-            val entry = mount.unwrap()
+            val entry = mount
             if entry.point.read_only:
                 return Result.Err("filesystem is read-only")
             val relative = self.strip_mount_prefix(path, entry.point.path)
@@ -225,7 +225,7 @@ impl VfsManager:
         """Rename a file or directory."""
         val mount = self.resolve_mount(old_path)
         if mount.?:
-            val entry = mount.unwrap()
+            val entry = mount
             if entry.point.read_only:
                 return Result.Err("filesystem is read-only")
             val rel_old = self.strip_mount_prefix(old_path, entry.point.path)
@@ -237,7 +237,7 @@ impl VfsManager:
         """Create a symbolic link at link_path pointing to target."""
         val mount = self.resolve_mount(link_path)
         if mount.?:
-            val entry = mount.unwrap()
+            val entry = mount
             if entry.point.read_only:
                 return Result.Err("filesystem is read-only")
             val rel_link = self.strip_mount_prefix(link_path, entry.point.path)
@@ -269,10 +269,10 @@ impl VfsManager:
 
     me read_text(path: text) -> Result<text, text>:
         """Read entire file contents as text (open → read → close)."""
-        val mount = self.resolve_mount(path)
-        if not mount.?:
+        val maybe_entry = self.resolve_mount(path)
+        if not maybe_entry.?:
             return Result.Err("no filesystem mounted for path: {path}")
-        val entry = mount.unwrap()
+        val entry = maybe_entry
         val relative = self.strip_mount_prefix(path, entry.point.path)
         val stat_result = entry.fs.stat(relative)
         if stat_result.is_err():
@@ -290,12 +290,65 @@ impl VfsManager:
         val bytes = read_result.unwrap()
         Ok(bytes_to_string(bytes))
 
+    me preload_file_pages(path: text, page_size: u64) -> Result<u64, text>:
+        """Warm the filesystem/block cache for a file by reading page-sized chunks.
+
+        This is the SimpleOS counterpart to host mmap preload: it preserves the
+        same path-level contract without requiring the VFS layer to know a
+        filesystem's sector layout. Filesystems backed by BlockCache naturally
+        warm their cache through normal reads.
+        """
+        if page_size == 0:
+            return Result.Err("page_size must be greater than zero")
+        val maybe_entry = self.resolve_mount(path)
+        if not maybe_entry.?:
+            return Result.Err("no filesystem mounted for path: {path}")
+        val entry = maybe_entry
+        val relative = self.strip_mount_prefix(path, entry.point.path)
+        val stat_result = entry.fs.stat(relative)
+        if stat_result.is_err():
+            return Result.Err(stat_result.unwrap_err())
+        val node = stat_result.unwrap()
+        if node.kind != FsNodeKind.File:
+            return Result.Err("preload target is not a file: {path}")
+        if node.size == 0:
+            return Result.Ok(0)
+
+        val flags = FileFlags(read: true, write: false, append: false, create: false, truncate: false, directory: false)
+        val open_result = entry.fs.open(relative, flags)
+        if open_result.is_err():
+            return Result.Err(open_result.unwrap_err())
+        val handle = open_result.unwrap()
+
+        var remaining = node.size
+        var pages: u64 = 0
+        while remaining > 0:
+            var chunk = page_size
+            if remaining < chunk:
+                chunk = remaining
+            val read_result = entry.fs.read(handle, chunk)
+            if read_result.is_err():
+                entry.fs.close(handle)
+                return Result.Err(read_result.unwrap_err())
+            val data = read_result.unwrap()
+            if data.len() == 0:
+                entry.fs.close(handle)
+                return Result.Err("short preload read")
+            pages = pages + 1
+            val got = data.len().to_u64()
+            if got >= remaining:
+                remaining = 0
+            else:
+                remaining = remaining - got
+        entry.fs.close(handle)
+        Result.Ok(pages)
+
     me write_text(path: text, content: text) -> Result<bool, text>:
         """Write text to a file (open → write → close)."""
-        val mount = self.resolve_mount(path)
-        if not mount.?:
+        val maybe_entry = self.resolve_mount(path)
+        if not maybe_entry.?:
             return Result.Err("no filesystem mounted for path: {path}")
-        val entry = mount.unwrap()
+        val entry = maybe_entry
         if entry.point.read_only:
             return Result.Err("filesystem is read-only")
         val relative = self.strip_mount_prefix(path, entry.point.path)

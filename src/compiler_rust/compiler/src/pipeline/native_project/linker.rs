@@ -7,6 +7,7 @@ use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports,
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     find_archive_tool, find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_native_all_library,
+    find_objcopy_tool,
     is_system_symbol, strip_llvm_constructors,
 };
 
@@ -159,6 +160,132 @@ impl NativeProjectBuilder {
         Ok(symbols)
     }
 
+    fn normalize_relocation_symbol(raw_name: &str) -> String {
+        let mut name = raw_name
+            .split('@')
+            .next()
+            .unwrap_or(raw_name)
+            .trim()
+            .to_string();
+        for marker in ["+0x", "-0x", "+0X", "-0X"] {
+            if let Some((base, _)) = name.split_once(marker) {
+                name = base.to_string();
+                break;
+            }
+        }
+        if cfg!(target_os = "macos") {
+            name.strip_prefix('_').unwrap_or(&name).to_string()
+        } else {
+            name
+        }
+    }
+
+    fn read_relocated_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
+        let output = std::process::Command::new("objdump")
+            .arg("-r")
+            .arg(obj)
+            .output()
+            .map_err(|e| format!("objdump relocations: {e}"))?;
+        if !output.status.success() {
+            return Self::read_undefined_symbol_set(obj);
+        }
+        let mut symbols = HashSet::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let Some(reloc) = parts.get(1) else {
+                continue;
+            };
+            if !reloc.starts_with("R_") {
+                continue;
+            }
+            if let Some(raw_name) = parts.get(2) {
+                symbols.insert(Self::normalize_relocation_symbol(raw_name));
+            }
+        }
+        Ok(symbols)
+    }
+
+    fn is_libm_symbol(sym: &str) -> bool {
+        matches!(
+            sym,
+            "acos"
+                | "acosf"
+                | "asin"
+                | "asinf"
+                | "atan"
+                | "atan2"
+                | "atan2f"
+                | "atanf"
+                | "ceil"
+                | "ceilf"
+                | "cos"
+                | "cosf"
+                | "exp"
+                | "exp2"
+                | "exp2f"
+                | "expf"
+                | "fabs"
+                | "fabsf"
+                | "floor"
+                | "floorf"
+                | "fmod"
+                | "fmodf"
+                | "log"
+                | "log10"
+                | "log10f"
+                | "log2"
+                | "log2f"
+                | "logf"
+                | "pow"
+                | "powf"
+                | "round"
+                | "roundf"
+                | "sin"
+                | "sinf"
+                | "sqrt"
+                | "sqrtf"
+                | "tan"
+                | "tanf"
+                | "trunc"
+                | "truncf"
+        )
+    }
+
+    fn is_runtime_math_symbol(sym: &str) -> bool {
+        sym.starts_with("rt_math_") || matches!(sym, "rt_sin" | "rt_cos" | "rt_sqrt" | "rt_pow")
+    }
+
+    fn is_openssl_runtime_symbol(sym: &str) -> bool {
+        matches!(sym, "rt_net_https_openssl_local_probe")
+    }
+
+    fn entry_objects_require_libm(object_paths: &[PathBuf]) -> Result<bool, String> {
+        for input in object_paths {
+            if Self::read_undefined_symbol_set(input)?
+                .iter()
+                .any(|sym| Self::is_libm_symbol(sym) || Self::is_runtime_math_symbol(sym))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn entry_objects_require_openssl(object_paths: &[PathBuf]) -> Result<bool, String> {
+        for input in object_paths {
+            if Self::read_undefined_symbol_set(input)?
+                .iter()
+                .any(|sym| Self::is_openssl_runtime_symbol(sym))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn runtime_retention_symbols(
         object_paths: &[PathBuf],
         main_o: &Path,
@@ -169,38 +296,25 @@ impl NativeProjectBuilder {
         let runtime_defined = Self::read_defined_symbol_set(runtime_lib)?;
         let mut required = BTreeSet::new();
         for obj in object_paths.iter().map(|p| p.as_path()).chain(std::iter::once(main_o)) {
-            for sym in Self::read_undefined_symbol_set(obj)? {
+            for sym in Self::read_relocated_symbol_set(obj)? {
                 if runtime_defined.contains(&sym) {
                     required.insert(sym);
                 }
             }
         }
         if let Some(init) = init_o {
-            for sym in Self::read_undefined_symbol_set(init)? {
+            for sym in Self::read_relocated_symbol_set(init)? {
                 if runtime_defined.contains(&sym) {
                     required.insert(sym);
                 }
             }
         }
 
-        // These runtime roots are reached indirectly by generated dispatch,
-        // string lookup, or lifecycle code and may not appear as direct object
-        // undefineds in tiny native outputs.
-        for root in [
-            "__simple_runtime_init",
-            "__simple_runtime_shutdown",
-            "rt_set_args",
-            "rt_function_not_found",
-            "rt_string_new",
-            "rt_string_data",
-            "rt_string_len",
-            "rt_print_str",
-            "rt_println_str",
-            "rt_print_value",
-            "rt_println_value",
-            "rt_array_new",
-            "rt_array_len",
-        ] {
+        // Lifecycle, argv capture, and fallback dispatch are invoked from
+        // generated C stubs or unresolved-call paths and may not appear as
+        // direct object undefineds. Other runtime functions should be retained
+        // only when entry objects reference them.
+        for root in ["__simple_runtime_init", "__simple_runtime_shutdown", "rt_set_args", "rt_function_not_found"] {
             if runtime_defined.contains(root) {
                 required.insert(root.to_string());
             }
@@ -322,7 +436,16 @@ int main(int argc, char** argv) {
                 .map_err(|e| format!("compile main stub: {e}"))?
         } else {
             std::process::Command::new(&cxx)
-                .args(["-c", "-ffunction-sections", "-fdata-sections", "-o"])
+                .args([
+                    "-c",
+                    "-Os",
+                    "-ffunction-sections",
+                    "-fdata-sections",
+                    "-fno-asynchronous-unwind-tables",
+                    "-fno-unwind-tables",
+                    "-fno-stack-protector",
+                    "-o",
+                ])
                 .arg(&main_o)
                 .arg(&main_cpp)
                 .output()
@@ -444,9 +567,12 @@ int main(int argc, char** argv) {
         } else {
             let mut cmd = std::process::Command::new(&cxx);
             cmd.arg("-c")
-                .arg("-O2")
+                .arg("-Os")
                 .arg("-ffunction-sections")
-                .arg("-fdata-sections");
+                .arg("-fdata-sections")
+                .arg("-fno-asynchronous-unwind-tables")
+                .arg("-fno-unwind-tables")
+                .arg("-fno-stack-protector");
             if let Some(triple) = init_target_triple {
                 cmd.arg(format!("--target={}", triple));
             }
@@ -760,19 +886,43 @@ int main(int argc, char** argv) {
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| !is_native_all)
             && self.runtime_bundle_prefers_core_lane();
+        let omit_libm = cfg!(target_os = "linux")
+            && selected_runtime
+                .as_ref()
+                .is_some_and(|(_, is_native_all)| !is_native_all)
+            && self.runtime_bundle_prefers_core_lane()
+            && !Self::entry_objects_require_libm(object_paths)?;
+        let require_openssl = cfg!(target_os = "linux") && Self::entry_objects_require_openssl(object_paths)?;
         if is_clang_cl {
             for lib in &link_config.libraries {
                 if omit_unwind && *lib == "unwind" {
                     continue;
                 }
+                if omit_libm && *lib == "m" {
+                    continue;
+                }
                 cmd.arg(format!("{}.lib", lib));
             }
         } else {
+            #[cfg(target_os = "linux")]
+            {
+                cmd.arg("-Wl,--as-needed");
+            }
             for lib in &link_config.libraries {
                 if omit_unwind && *lib == "unwind" {
                     continue;
                 }
+                if omit_libm && *lib == "m" {
+                    continue;
+                }
                 cmd.arg(format!("-l{}", lib));
+            }
+            if require_openssl {
+                cmd.arg("-lssl").arg("-lcrypto");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                cmd.arg("-Wl,--no-as-needed");
             }
         }
         if cfg!(target_os = "macos") && find_native_all_library().is_some() {
@@ -840,6 +990,15 @@ int main(int argc, char** argv) {
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            if self.config.strip {
+                if let Some(objcopy) = find_objcopy_tool() {
+                    let _ = std::process::Command::new(objcopy)
+                        .arg("--remove-section=.comment")
+                        .arg(&self.output)
+                        .status();
+                }
+            }
             if let Ok(meta) = std::fs::metadata(&self.output) {
                 eprintln!("Linked: {} ({} KB) via {cc}", self.output.display(), meta.len() / 1024);
             }
@@ -1415,5 +1574,77 @@ mod linker_tests {
         let err = NativeProjectBuilder::write_linker_object_response_file(temp.path(), &object_paths).unwrap_err();
 
         assert!(err.contains("unsupported newline"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn link_inputs_require_libm_detects_math_symbols_only_when_referenced() {
+        let temp = tempfile::tempdir().unwrap();
+        let plain_c = temp.path().join("plain.c");
+        let math_c = temp.path().join("math.c");
+        let plain_o = temp.path().join("plain.o");
+        let math_o = temp.path().join("math.o");
+
+        std::fs::write(&plain_c, "int plain(void) { return 1; }\n").unwrap();
+        std::fs::write(&math_c, "extern double sqrt(double); double mathy(double x) { return sqrt(x); }\n").unwrap();
+
+        let plain_status = std::process::Command::new("cc")
+            .args(["-c", "-O0"])
+            .arg(&plain_c)
+            .arg("-o")
+            .arg(&plain_o)
+            .status()
+            .unwrap();
+        assert!(plain_status.success());
+
+        let math_status = std::process::Command::new("cc")
+            .args(["-c", "-O0", "-fno-builtin-sqrt"])
+            .arg(&math_c)
+            .arg("-o")
+            .arg(&math_o)
+            .status()
+            .unwrap();
+        assert!(math_status.success());
+
+        assert!(!NativeProjectBuilder::entry_objects_require_libm(&[plain_o]).unwrap());
+        assert!(NativeProjectBuilder::entry_objects_require_libm(&[math_o]).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn link_inputs_require_openssl_detects_https_probe_only_when_referenced() {
+        let temp = tempfile::tempdir().unwrap();
+        let plain_c = temp.path().join("plain.c");
+        let https_c = temp.path().join("https.c");
+        let plain_o = temp.path().join("plain.o");
+        let https_o = temp.path().join("https.o");
+
+        std::fs::write(&plain_c, "int plain(void) { return 1; }\n").unwrap();
+        std::fs::write(
+            &https_c,
+            "extern long long rt_net_https_openssl_local_probe(void); long long httpsy(void) { return rt_net_https_openssl_local_probe(); }\n",
+        )
+        .unwrap();
+
+        let plain_status = std::process::Command::new("cc")
+            .args(["-c", "-O0"])
+            .arg(&plain_c)
+            .arg("-o")
+            .arg(&plain_o)
+            .status()
+            .unwrap();
+        assert!(plain_status.success());
+
+        let https_status = std::process::Command::new("cc")
+            .args(["-c", "-O0"])
+            .arg(&https_c)
+            .arg("-o")
+            .arg(&https_o)
+            .status()
+            .unwrap();
+        assert!(https_status.success());
+
+        assert!(!NativeProjectBuilder::entry_objects_require_openssl(&[plain_o]).unwrap());
+        assert!(NativeProjectBuilder::entry_objects_require_openssl(&[https_o]).unwrap());
     }
 }

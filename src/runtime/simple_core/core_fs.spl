@@ -18,8 +18,11 @@ extern fn open(path: i64, flags: i64) -> i64
 extern fn read(fd: i64, ptr: i64, count: i64) -> i64
 extern fn close(fd: i64) -> i64
 extern fn lseek(fd: i64, offset: i64, whence: i64) -> i64
+extern fn mmap(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
+extern fn munmap(addr: i64, length: i64) -> i64
 extern fn mkdir(path: i64, mode: i64) -> i64
 extern fn rt_string_data(value: i64) -> i64
+extern fn rt_string_len(value: i64) -> i64
 extern fn rt_string_new(bytes: i64, len: i64) -> i64
 extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
@@ -85,7 +88,12 @@ pub fn rt_file_exists(path_ptr_raw: i64, path_len: i64) -> i8:
 # --- File Read ---
 
 pub fn rt_file_read_text(path_ptr_raw: i64, path_len: i64) -> i64:
-    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    var raw_ptr = path_ptr_raw
+    var raw_len = path_len
+    if raw_len < 1 and (raw_ptr & 7) == 1:
+        raw_len = rt_string_len(raw_ptr)
+        raw_ptr = rt_string_data(raw_ptr)
+    val path_ptr = fs_copy_cstr(raw_ptr, raw_len)
     if path_ptr < 1:
         return rt_string_new(0, 0)
     val fd = open(path_ptr, 0)
@@ -109,6 +117,43 @@ pub fn rt_file_read_text(path_ptr_raw: i64, path_len: i64) -> i64:
     val out = rt_string_new(buf, bytes_read)
     free(buf)
     return out
+
+pub fn rt_file_read_text_rv(path: i64) -> i64:
+    val ptr = rt_string_data(path)
+    val len = rt_string_len(path)
+    if ptr < 1 or len < 1:
+        return rt_string_new(0, 0)
+    return rt_file_read_text(ptr, len)
+
+pub fn rt_file_preload_pages(path: i64) -> i64:
+    val raw_ptr = rt_string_data(path)
+    val raw_len = rt_string_len(path)
+    val path_ptr = fs_copy_cstr(raw_ptr, raw_len)
+    if path_ptr < 1:
+        return -1
+    val fd = open(path_ptr, 0)
+    free(path_ptr)
+    if fd < 0:
+        return -2
+    val size = lseek(fd, 0, 2)
+    if size < 1:
+        close(fd)
+        return 0
+    lseek(fd, 0, 0)
+    # PROT_READ=1, MAP_PRIVATE=2 on POSIX/Linux.
+    val mapped = mmap(0, size, 1, 2, fd, 0)
+    close(fd)
+    if mapped == -1:
+        return -3
+    var pos = 0
+    var pages = 0
+    var sum = 0
+    while pos < size:
+        sum = sum + spl_load_u8(mapped, pos)
+        pages = pages + 1
+        pos = pos + 4096
+    munmap(mapped, size)
+    return pages + (sum & 0)
 
 # --- File Write ---
 

@@ -11,27 +11,35 @@ Date: 2026-05-27
 
 ## Results
 
-| Artifact | Bytes | Dec Section Bytes | Run Status | Avg Runtime ms | Path | Heavy Markers |
-|---|---:|---:|---|---:|---|---|
-| asm hello syscall | 8568 | 90 | ok | 2.304 | build/startup_size_perf_audit/hello_asm | none |
-| C hello write | 14472 | 1998 | ok | 2.464 | build/startup_size_perf_audit/hello_c | none |
-| C termios TUI | 14472 | 2426 | ok | 2.369 | build/startup_size_perf_audit/tui_termios_c | none |
-| C mmap preload argparse | 14472 | 2800 | ok | 2.453 | build/startup_size_perf_audit/mmap_preload_argparse_c | none |
-| C TCP connect | 14472 | 2547 | ok | 2.787 | build/startup_size_perf_audit/tcp_connect_c | none |
-| C UDP send | 14472 | 2556 | ok | 2.454 | build/startup_size_perf_audit/udp_send_c | none |
-| C HTTP plain connect | 14472 | 2694 | ok | 2.467 | build/startup_size_perf_audit/http_plain_c | none |
-| Simple hello core-c-bootstrap | 26864 | 19501 | ok | 2.716 | build/startup_size_perf_audit/hello_simple | none |
-| Simple standalone TUI core-c-bootstrap | 26864 | 19696 | ok | 2.553 | build/startup_size_perf_audit/simple_tui_standalone | none |
-| Simple full TUI app simple-core | 92312 | 85866 | exit:139 | fail | build/startup_size_perf_audit/simple_tui_app | none |
+| Artifact | Bytes | Dec Section Bytes | Run Status | Avg Runtime ms | Path | Loaded Libs | Loaded Lib Bytes | Heavy Markers |
+|---|---:|---:|---|---:|---|---|---:|---|
+| asm hello syscall | 8568 | 90 | ok | 2.747 | build/startup_size_perf_audit/hello_asm | none | 0 | none |
+| C hello write | 14472 | 1998 | ok | 2.492 | build/startup_size_perf_audit/hello_c | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| C termios TUI | 14472 | 2426 | ok | 2.416 | build/startup_size_perf_audit/tui_termios_c | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| C mmap preload argparse | 14472 | 2800 | ok | 2.363 | build/startup_size_perf_audit/mmap_preload_argparse_c | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| Simple mmap preload argparse | 14400 | 5669 | ok | 2.720 | build/startup_size_perf_audit/simple_mmap_preload | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| C TCP connect | 14472 | 2547 | ok | 2.374 | build/startup_size_perf_audit/tcp_connect_c | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| Simple TCP connect | 14328 | 2998 | ok | 2.696 | build/startup_size_perf_audit/simple_tcp_connect | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| C UDP send | 14472 | 2556 | ok | 2.457 | build/startup_size_perf_audit/udp_send_c | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| Simple UDP send | 14328 | 3022 | ok | 2.361 | build/startup_size_perf_audit/simple_udp_send | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| C HTTP plain connect | 14472 | 2694 | ok | 2.600 | build/startup_size_perf_audit/http_plain_c | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| Simple HTTP plain connect | 14336 | 3095 | ok | 2.587 | build/startup_size_perf_audit/simple_http_plain | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| C HTTPS OpenSSL connect | 14472 | 3672 | ok | 6.734 | build/startup_size_perf_audit/https_openssl_c | libssl.so.3,libc.so.6,libcrypto.so.3,/lib64/ld-linux-x86-64.so.2 | 8131240 | none |
+| Simple HTTPS OpenSSL core-c connect | 14336 | 3722 | ok | 3.344 | build/startup_size_perf_audit/simple_https_openssl | libssl.so.3,libc.so.6,libcrypto.so.3,/lib64/ld-linux-x86-64.so.2 | 8131240 | none |
+| Simple HTTPS rustls hosted connect | 431144 | 420936 | ok | 3.703 | build/startup_size_perf_audit/simple_https_tls | libunwind.so.1,libstdc++.so.6,libm.so.6,libgcc_s.so.1,libc.so.6,/lib64/ld-linux-x86-64.so.2 | 5904912 | none |
+| Simple hello core-c-bootstrap | 14336 | 3565 | ok | 2.740 | build/startup_size_perf_audit/hello_simple | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| Simple standalone TUI core-c-bootstrap | 14336 | 3819 | ok | 2.338 | build/startup_size_perf_audit/simple_tui_standalone | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
+| Simple full TUI app core-c-bootstrap | 14360 | 6075 | ok | 2.836 | build/startup_size_perf_audit/simple_tui_app | libc.so.6,/lib64/ld-linux-x86-64.so.2 | 2125328 | none |
 
 ## Windows And SimpleOS Counterpart Notes
 
 - Linux mmap preload baseline uses `open`, `fstat`, `mmap`, and page-touching every 4096 bytes.
-- Windows counterpart should use `CreateFileW`, `GetFileSizeEx`, `CreateFileMappingW`, `MapViewOfFile`, `PrefetchVirtualMemory` when available, and `UnmapViewOfFile`.
-- SimpleOS counterpart should use the same preload contract but back it with the OS page/file cache once the kernel VFS/cache path exists; until then, measure explicit read-ahead into the core runtime cache.
-- HTTPS is intentionally not linked in this baseline because a real TLS stack changes the target class; Simple should keep TLS behind an explicit runtime feature/capsule.
+- Windows counterpart source is generated at `build/startup_size_perf_audit/mmap_preload_argparse_win.c`; it uses `CreateFileW`, `GetFileSizeEx`, `CreateFileMappingW`, `MapViewOfFile`, `PrefetchVirtualMemory` when available, and `UnmapViewOfFile`.
+- SimpleOS counterpart uses `VfsManager.preload_file_pages(path, page_size)` to warm the filesystem/block-cache path by explicit page-sized read-ahead without coupling VFS to a filesystem's sector map.
+- HTTPS is measured as a separate TLS lane because a real TLS stack changes the target class; TCP, UDP, and plain HTTP must remain TLS-free.
+- Loaded-library evidence is included to catch regressions where Simple core rows load more shared libraries than the C counters.
 
 ## Current Direction
 
-- Do not rewrite the TUI from scratch while the standalone Simple TUI remains near the C termios baseline.
-- Continue dependency refactoring: keep TUI off GUI/web stacks, keep network/TLS/compression out of default runtime, and make mmap/preload an opt-in core capsule.
+- Do not rewrite the TUI from scratch while the standalone and audited app TUI lanes remain below the C termios baseline.
+- Continue dependency refactoring: keep TUI off GUI/web stacks, keep TLS/compression out of default TCP/UDP/plain-HTTP runtime paths, and keep mmap/network probes on the core-C startup lane.

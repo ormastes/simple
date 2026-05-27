@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-27 03:11:12*
+*Generated: 2026-05-27 14:56:25*
 
-## test/unit/lib/nogc_async_mut/http/h2
+## test/unit/os/services/vfs
 
-❌ **hpack_huffman_spec.spl** (4495ms)
-  - Source: `test/unit/lib/nogc_async_mut/http/h2/hpack_huffman_spec.spl`
-  - Generated doc: `spec/hpack_huffman_spec.md`
+❌ **vfs_boot_nvme_lease_spec.spl** (1364ms)
+  - Source: `test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl`
+  - Generated doc: `spec/vfs_boot_nvme_lease_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 30 ✅
-- **Failed:** 1 ❌
-- **Duration:** 4498ms
+- **Passed:** 10 ✅
+- **Failed:** 2 ❌
+- **Duration:** 1368ms

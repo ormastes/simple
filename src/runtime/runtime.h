@@ -405,6 +405,7 @@ int64_t     rt_env_get_i64(const char* key, int64_t default_value);
 void        spl_env_set(const char* key, const char* value);
 bool        rt_env_set(const char* key, const char* value);
 const char* rt_platform_name(void);
+int64_t     rt_term_enable_ansi(void);
 
 /* ===== Cross-Platform System Functions ===== */
 

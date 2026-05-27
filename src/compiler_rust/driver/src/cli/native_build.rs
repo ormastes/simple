@@ -18,7 +18,7 @@
 //!   --no-mangle         Disable name mangling (enabled by default for symbol collision avoidance)
 //!   --backend <name>    Compilation backend (cranelift, llvm)
 //!   --cpu <name>        CPU profile: default, native, x86-64-v1..v4
-//!   --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap, rust-hosted)
+//!   --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap, rust-hosted, hosted-runtime)
 //!   --emit-archive      Emit a static archive from Simple objects instead of linking an executable
 //!   --entry-closure     Compile only modules reachable from --entry
 //!   --help              Show help
@@ -44,6 +44,8 @@ fn is_valid_runtime_bundle(value: &str) -> bool {
             | "core_c"
             | "hosted"
             | "rust-hosted"
+            | "hosted-runtime"
+            | "rust-runtime"
             | "all"
     )
 }
@@ -321,7 +323,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
 
     if !is_valid_runtime_bundle(&runtime_bundle) {
         eprintln!(
-            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, runtime, hosted, rust-hosted, all",
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, runtime, hosted, rust-hosted, hosted-runtime, all",
             runtime_bundle
         );
         return 1;
@@ -569,7 +571,7 @@ fn print_help() {
     println!("  --backend <name>    Codegen backend: llvm (default when available) or cranelift");
     println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
     println!("  --list-optimizations Print implemented optimization groups and levels");
-    println!("  --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap, rust-hosted)");
+    println!("  --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap, rust-hosted, hosted-runtime)");
     println!("  --emit-archive     Emit a static archive from Simple objects instead of linking an executable");
     println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");
