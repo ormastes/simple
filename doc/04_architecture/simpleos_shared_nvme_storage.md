@@ -18,6 +18,9 @@ must not each grow separate NVMe access paths. The existing code already has:
   arenas.
 - `src/lib/nogc_sync_mut/fs_driver/fat32_core.spl` and NVFS arena/superblock
   modules already written against shared `BlockDevice` concepts.
+- `src/lib/nogc_sync_mut/fs_driver/nvfs_driver.spl` now has a device-backed
+  constructor so FAT32, NVFS, and DBFS all expose a shared `BlockDevice`
+  construction path.
 
 ## Decision
 The NVMe driver owns controller init, namespace discovery, queue assignment,
@@ -38,6 +41,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 ## Consequences
 ### Positive
 - FAT32, NVFS, and DBFS can share one NVMe namespace lease contract.
+- FAT32, NVFS, and DBFS can each mount from the same lease-backed
+  `BlockDevice` interface instead of filesystem-specific NVMe code.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -56,3 +61,5 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   FAT32/NVFS/DBFS block-interface readiness.
 - `test/unit/os/services/vfs/nvme_block_adapter_spec.spl` covers adapter-visible
   lease translation and out-of-range rejection without requiring real hardware.
+- `test/unit/lib/fs_driver/nvfs_device_backed_spec.spl` covers NVFS opening on
+  the same shared `BlockDevice` surface used by FAT32 and DBFS.
