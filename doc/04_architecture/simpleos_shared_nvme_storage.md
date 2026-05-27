@@ -90,6 +90,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Freestanding root probing now has one provider-neutral `BlockDevice` entry
   point that tries NVFS then DBFS, so a pure-Simple NVMe adapter does not need
   filesystem-specific boot wiring.
+- Real-device readiness now treats `c-boot-bridge` as non-production evidence;
+  only the pure-Simple `simple-driver` provider can satisfy storage readiness.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
