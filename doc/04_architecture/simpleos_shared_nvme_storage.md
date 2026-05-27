@@ -170,6 +170,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - The VFS NVMe mount factory exposes a checked mount entry point that applies
   that active-lease conflict rule before constructing FAT32, NVFS, or DBFS
   driver instances.
+- Pure-Simple VFS boot records its system FAT32 NVMe lease as an active lease,
+  so later user-space namespace assignment can be checked against the boot-owned
+  namespace before it is mounted.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
   `BlockDevice` surfaces.
 - Production performance claims now have an explicit NVMe contract: measured
@@ -250,7 +253,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   rejects checked mounts that would mix system/user ownership of one namespace.
 - `test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl` covers the
   evidence-gated production FAT32 boot lease constructor and guards that the
-  pure-Simple boot path calls the hardware probe before mounting.
+  pure-Simple boot path calls the hardware probe before mounting, then records
+  the boot lease for later system/user conflict admission.
 - `test/unit/os/kernel/ipc/dma_alloc_contract_spec.spl` covers the DMA syscall
   result layout used by the pure Simple NVMe driver and VFS adapter.
 - `test/unit/os/kernel/types/device_mem_types_spec.spl` covers DeviceGrant
