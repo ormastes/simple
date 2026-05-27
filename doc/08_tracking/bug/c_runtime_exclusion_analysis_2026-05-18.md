@@ -30,7 +30,7 @@ Cannot remove until native linker resolves them from Simple-compiled objects.
 | `runtime_equality.c` | `rt_native_eq`, `rt_native_neq`, `rt_value_eq`, `rt_value_compare` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native equality exports. |
 | `runtime_memory.c` | `rt_alloc`, `rt_free`, `rt_ptr_read_i64/i32`, `rt_ptr_write_*`, `rt_memset`, `rt_memcpy` | `codegen/instr/core.rs`, `memory.rs`, `closures_structs.rs`, `llvm/objects.rs` | gpu/memory.spl, ptr/raw.spl, torch/sffi.spl, sffi/llvm_loader.spl | Codegen emits `rt_alloc` for every struct/array alloc; core ABI |
 | `runtime_value.c` | `rt_value_int/float/bool/nil`, `rt_value_as_int`, `rt_value_truthy`, `rt_value_is_nil/int/float/bool/heap`, `rt_value_type_tag` | none in `simple-runtime` as of 2026-05-27 | 0 direct | Rust runtime crate now implements value operations and pointer conversions directly; core C/native runtime still keeps this source for native value helpers |
-| `runtime_format.c` | `__c_rt_value_format_string` (→ `rt_value_format_string`), `__c_rt_raw_u64_to_str`, `__c_rt_value_to_display_str` | `codegen/instr/collections.rs`, `llvm/functions.rs`, `runtime_sffi.rs`, `mir/lower/lowering_expr_builtin.rs` | 0 direct | Codegen emits `rt_value_format_string` for string interpolation; `rt_raw_u64_to_string` for int→str |
+| `runtime_format.c` | `__c_rt_value_format_string` (→ `rt_value_format_string`), `__c_rt_raw_u64_to_str`, `__c_rt_value_to_display_str` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native formatting exports. |
 | `runtime_native.c` | `rt_print`, `rt_println`, `rt_stdout_write`, `rt_stderr_write`, `rt_stdin_read_line`, `rt_string_new/len/data`, `rt_native_eq`, `rt_interp_call`, `rt_to_string`, etc. | `codegen/instr/calls.rs`, `linker/stubs.rs`, `elf_utils.rs`, interpreter dispatch | 0 direct (exposed via `use std.*`) | Foundation of the runtime ABI — strings, I/O, value boxing |
 | `runtime_string_index.c` | `rt_swi_build/char_to_byte/byte_to_char/free`, `rt_rank_select_build`, `rt_rank_query`, `rt_select_query`, `rt_rank_select_free` | `codegen/runtime_sffi.rs` (8 entries), `interpreter_extern/simd.rs` | 0 direct | Codegen SFFI table + interpreter extern; Unicode index structures |
 | `async_driver.c` | `rt_driver_create/destroy`, `rt_driver_submit_*` (13 variants), `rt_driver_poll*`, `rt_driver_cancel` | `codegen/runtime_sffi.rs` (15 entries), `codegen/instr/calls.rs`, `llvm/functions/calls.rs` | 0 direct spl; driven via codegen SFFI | Async I/O driver; codegen emits all submit/poll calls |
@@ -105,6 +105,9 @@ Additional 2026-05-27 simple-runtime reductions:
 - `value/sffi/regex_stub.rs` now implements the disabled-regex stub behavior
   directly in Rust, so `runtime/build.rs` no longer compiles
   `runtime_regex_stub.c`.
+- `value/sffi/io_print.rs` now implements value formatting, raw u64
+  stringification, and display-string conversion directly in Rust, so
+  `runtime/build.rs` no longer compiles `runtime_format.c`.
 
 Verification:
 
@@ -118,6 +121,7 @@ cargo test -p simple-runtime value::tests::test_sffi_functions --manifest-path s
 cargo test -p simple-runtime sffi::equality --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::contracts --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::regex_stub --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::io_print --manifest-path src/compiler_rust/Cargo.toml
 ```
 
 ## Path to C Removal for Remaining Modules
@@ -126,7 +130,7 @@ For **math/random**: the Rust shim no longer calls these C files as of
 2026-05-27. Remaining removal requires migrating the core-C/native-project
 SFFI export path so native builds no longer need the archived C sources.
 
-For **memory/format/native/string_index/async_driver/env**:
+For **memory/native/string_index/async_driver/env**:
 codegen-emitted or ABI-layer symbols. Removal requires the native-build linker to
 resolve them from Simple-compiled objects instead of the C archive. Blocked by the
 cross-module ABI bug.

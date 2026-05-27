@@ -31,8 +31,10 @@
 //! When I/O capture is enabled (via rt_capture_stdout_start()), print functions
 //! append to the capture buffer instead of writing to stdout/stderr.
 
-use crate::value::core::RuntimeValue;
 use crate::value::collections::RuntimeString;
+use crate::value::core::RuntimeValue;
+use crate::value::heap::HeapObjectType;
+use crate::value::tags;
 use super::io_capture::{
     append_stdout, append_stderr, is_stdout_capturing, is_stderr_capturing, read_stdin_line_internal,
     rt_read_stdin_char,
@@ -40,24 +42,38 @@ use super::io_capture::{
 use std::io::Write;
 
 mod c_sffi_io {
-    use crate::value::core::RuntimeValue;
     extern "C" {
         #[link_name = "__c_rt_stdout_flush"]
         pub(super) fn rt_stdout_flush() -> i64;
         #[link_name = "__c_rt_stderr_flush"]
         pub(super) fn rt_stderr_flush() -> i64;
-        #[link_name = "__c_rt_value_format_string"]
-        pub(super) fn value_format_string(
-            v: RuntimeValue,
-            fmt_ptr: *const u8,
-            fmt_len: u64,
-            out: *mut u8,
-            out_cap: u64,
-        ) -> i64;
-        #[link_name = "__c_rt_raw_u64_to_str"]
-        pub(super) fn raw_u64_to_str(raw: i64, out: *mut u8, out_cap: u64) -> i64;
-        #[link_name = "__c_rt_value_to_display_str"]
-        pub(super) fn value_to_display_str(v: RuntimeValue, out: *mut u8, out_cap: u64) -> i64;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FormatSpec {
+    fill: char,
+    align: Option<char>,
+    sign: Option<char>,
+    alt_form: bool,
+    zero_pad: bool,
+    width: Option<usize>,
+    precision: Option<usize>,
+    type_code: Option<char>,
+}
+
+impl Default for FormatSpec {
+    fn default() -> Self {
+        Self {
+            fill: ' ',
+            align: None,
+            sign: None,
+            alt_form: false,
+            zero_pad: false,
+            width: None,
+            precision: None,
+            type_code: None,
+        }
     }
 }
 
@@ -284,12 +300,8 @@ pub extern "C" fn rt_value_to_string(v: RuntimeValue) -> RuntimeValue {
 /// through this helper instead of `rt_value_to_string`.
 #[no_mangle]
 pub extern "C" fn rt_raw_u64_to_string(raw: i64) -> RuntimeValue {
-    let mut buf = [0u8; 32];
-    let len = unsafe { c_sffi_io::raw_u64_to_str(raw, buf.as_mut_ptr(), buf.len() as u64) };
-    if len <= 0 {
-        return RuntimeValue::NIL;
-    }
-    unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), len as u64) }
+    let s = (raw as u64).to_string();
+    unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
 /// Format a RuntimeValue using a format specifier string.
@@ -313,30 +325,271 @@ pub extern "C" fn rt_raw_u64_to_string(raw: i64) -> RuntimeValue {
 ///   fmt_len:  length of the format spec string
 #[no_mangle]
 pub extern "C" fn rt_value_format_string(v: RuntimeValue, fmt_ptr: *const u8, fmt_len: u64) -> RuntimeValue {
-    let mut buf = [0u8; 1024];
-    let written = unsafe { c_sffi_io::value_format_string(v, fmt_ptr, fmt_len, buf.as_mut_ptr(), buf.len() as u64) };
-    if written <= 0 {
+    let spec = unsafe {
+        if fmt_ptr.is_null() {
+            ""
+        } else {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(fmt_ptr, fmt_len as usize))
+        }
+    };
+    let s = format_runtime_value(v, spec);
+    if s.is_empty() {
         return unsafe { crate::value::collections::rt_string_new(std::ptr::null(), 0) };
     }
-    unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), written as u64) }
+    unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
 fn value_to_display_string(v: RuntimeValue) -> String {
-    let mut buf = [0u8; 256];
-    let len = unsafe { c_sffi_io::value_to_display_str(v, buf.as_mut_ptr(), buf.len() as u64) };
-    if len > 0 {
-        unsafe { String::from_utf8_unchecked(buf[..len as usize].to_vec()) }
-    } else if len < 0 {
-        let need = (-len) as usize;
-        let mut heap_buf = vec![0u8; need];
-        let len2 = unsafe { c_sffi_io::value_to_display_str(v, heap_buf.as_mut_ptr(), need as u64) };
-        if len2 > 0 {
-            unsafe { String::from_utf8_unchecked(heap_buf[..len2 as usize].to_vec()) }
-        } else {
-            String::new()
+    match v.tag() {
+        tags::TAG_SPECIAL => match v.payload() {
+            tags::SPECIAL_NIL => "nil".to_string(),
+            tags::SPECIAL_TRUE => "true".to_string(),
+            tags::SPECIAL_FALSE => "false".to_string(),
+            tags::SPECIAL_ERROR => "error".to_string(),
+            p => format!("<special:{p}>"),
+        },
+        tags::TAG_INT => v.as_int().to_string(),
+        tags::TAG_FLOAT => format_float_display(v.as_float()),
+        tags::TAG_HEAP => unsafe { heap_value_to_display_string(v) },
+        _ => format!("<value:0x{:x}>", v.to_raw()),
+    }
+}
+
+unsafe fn heap_value_to_display_string(v: RuntimeValue) -> String {
+    let ptr = v.as_heap_ptr();
+    if ptr.is_null() {
+        return "nil".to_string();
+    }
+    match (*ptr).object_type {
+        HeapObjectType::String => {
+            let s = ptr as *const RuntimeString;
+            String::from_utf8_lossy((*s).as_bytes()).into_owned()
         }
+        HeapObjectType::Array => format!("<array@{ptr:p}>"),
+        HeapObjectType::Dict => format!("<dict@{ptr:p}>"),
+        HeapObjectType::Tuple => format!("<tuple@{ptr:p}>"),
+        HeapObjectType::Object => format!("<object@{ptr:p}>"),
+        HeapObjectType::Closure => format!("<closure@{ptr:p}>"),
+        HeapObjectType::Enum => format!("<enum@{ptr:p}>"),
+        _ => format!("<heap@{ptr:p}>"),
+    }
+}
+
+fn format_float_display(value: f64) -> String {
+    for precision in 1..=17 {
+        let candidate = format!("{value:.precision$}");
+        if candidate.parse::<f64>().ok() == Some(value) {
+            return candidate;
+        }
+    }
+    format!("{value:.17}")
+}
+
+fn format_runtime_value(v: RuntimeValue, spec: &str) -> String {
+    let fs = parse_format_spec(spec);
+    let raw = match fs.type_code {
+        Some('f') | Some('F') => format_fixed(v, fs),
+        Some('e') => format_scientific(v, fs, false),
+        Some('E') => format_scientific(v, fs, true),
+        Some('d') => format_decimal(v, fs),
+        Some('x') => format_int_radix(v, fs, 16, false),
+        Some('X') => format_int_radix(v, fs, 16, true),
+        Some('o') => format_int_radix(v, fs, 8, false),
+        Some('b') => format_int_radix(v, fs, 2, false),
+        Some('%') => format_percent(v, fs),
+        _ => {
+            let mut text = value_to_display_string(v);
+            if fs.type_code == Some('s') {
+                if let Some(precision) = fs.precision {
+                    text.truncate(precision);
+                }
+            }
+            text
+        }
+    };
+    apply_alignment(&raw, fs)
+}
+
+fn parse_format_spec(spec: &str) -> FormatSpec {
+    let chars: Vec<char> = spec.chars().collect();
+    let mut fs = FormatSpec::default();
+    let mut pos = 0;
+
+    if chars.len() >= 2 && matches!(chars[1], '<' | '>' | '^' | '=') {
+        fs.fill = chars[0];
+        fs.align = Some(chars[1]);
+        pos = 2;
+    } else if chars.first().is_some_and(|c| matches!(c, '<' | '>' | '^' | '=')) {
+        fs.align = Some(chars[0]);
+        pos = 1;
+    }
+    if chars.get(pos).is_some_and(|c| matches!(c, '+' | '-' | ' ')) {
+        fs.sign = Some(chars[pos]);
+        pos += 1;
+    }
+    if chars.get(pos) == Some(&'#') {
+        fs.alt_form = true;
+        pos += 1;
+    }
+    if chars.get(pos) == Some(&'0') {
+        fs.zero_pad = true;
+        pos += 1;
+    }
+    if chars.get(pos).is_some_and(|c| c.is_ascii_digit()) {
+        let mut width = 0usize;
+        while chars.get(pos).is_some_and(|c| c.is_ascii_digit()) {
+            width = width * 10 + chars[pos].to_digit(10).unwrap() as usize;
+            pos += 1;
+        }
+        fs.width = Some(width);
+    }
+    if chars.get(pos).is_some_and(|c| matches!(c, ',' | '_')) {
+        pos += 1;
+    }
+    if chars.get(pos) == Some(&'.') {
+        pos += 1;
+        let mut precision = 0usize;
+        while chars.get(pos).is_some_and(|c| c.is_ascii_digit()) {
+            precision = precision * 10 + chars[pos].to_digit(10).unwrap() as usize;
+            pos += 1;
+        }
+        fs.precision = Some(precision);
+    }
+    if let Some(&type_code) = chars.get(pos) {
+        fs.type_code = Some(type_code);
+    }
+    fs
+}
+
+fn format_fixed(v: RuntimeValue, fs: FormatSpec) -> String {
+    let f = if v.is_float() {
+        v.as_float()
+    } else if v.is_int() {
+        v.as_int() as f64
     } else {
-        String::new()
+        0.0
+    };
+    let precision = fs.precision.unwrap_or(6);
+    let magnitude = format!("{:.precision$}", f.abs());
+    format_sign(&magnitude, f >= 0.0, fs)
+}
+
+fn format_scientific(v: RuntimeValue, fs: FormatSpec, upper: bool) -> String {
+    let f = if v.is_float() {
+        v.as_float()
+    } else if v.is_int() {
+        v.as_int() as f64
+    } else {
+        0.0
+    };
+    let precision = fs.precision.unwrap_or(6);
+    if upper {
+        format!("{f:.precision$E}")
+    } else {
+        format!("{f:.precision$e}")
+    }
+}
+
+fn format_decimal(v: RuntimeValue, fs: FormatSpec) -> String {
+    let i = if v.is_int() {
+        v.as_int()
+    } else if v.is_float() {
+        v.as_float() as i64
+    } else {
+        0
+    };
+    format_sign(&i.abs().to_string(), i >= 0, fs)
+}
+
+fn format_int_radix(v: RuntimeValue, fs: FormatSpec, radix: u32, upper: bool) -> String {
+    let i = if v.is_int() { v.as_int() as u64 } else { 0 };
+    let digits = match (radix, upper) {
+        (16, true) => format!("{i:X}"),
+        (16, false) => format!("{i:x}"),
+        (8, _) => format!("{i:o}"),
+        (2, _) => format!("{i:b}"),
+        _ => i.to_string(),
+    };
+    if !fs.alt_form {
+        return digits;
+    }
+    let prefix = match (radix, upper) {
+        (16, true) => "0X",
+        (16, false) => "0x",
+        (8, _) => "0o",
+        (2, _) => "0b",
+        _ => "",
+    };
+    format!("{prefix}{digits}")
+}
+
+fn format_percent(v: RuntimeValue, fs: FormatSpec) -> String {
+    let f = if v.is_float() {
+        v.as_float()
+    } else if v.is_int() {
+        v.as_int() as f64
+    } else {
+        0.0
+    };
+    let precision = fs.precision.unwrap_or(6);
+    format!("{:.precision$}%", f * 100.0)
+}
+
+fn format_sign(magnitude: &str, is_positive: bool, fs: FormatSpec) -> String {
+    if !is_positive {
+        format!("-{magnitude}")
+    } else if fs.sign == Some('+') {
+        format!("+{magnitude}")
+    } else if fs.sign == Some(' ') {
+        format!(" {magnitude}")
+    } else {
+        magnitude.to_string()
+    }
+}
+
+fn apply_alignment(s: &str, fs: FormatSpec) -> String {
+    let Some(width) = fs.width else {
+        return s.to_string();
+    };
+    let len = s.len();
+    if len >= width {
+        return s.to_string();
+    }
+    let padding = width - len;
+    let fill = if fs.zero_pad && fs.align.is_none() {
+        '0'
+    } else {
+        fs.fill
+    };
+    let align = fs.align.unwrap_or(if fs.zero_pad { '>' } else { '<' });
+
+    match align {
+        '>' => {
+            if fill == '0' && matches!(s.as_bytes().first(), Some(b'+' | b'-' | b' ')) {
+                format!("{}{}{}", &s[..1], fill.to_string().repeat(padding), &s[1..])
+            } else {
+                format!("{}{}", fill.to_string().repeat(padding), s)
+            }
+        }
+        '<' => format!("{}{}", s, fill.to_string().repeat(padding)),
+        '^' => {
+            let left = padding / 2;
+            let right = padding - left;
+            format!(
+                "{}{}{}",
+                fill.to_string().repeat(left),
+                s,
+                fill.to_string().repeat(right)
+            )
+        }
+        '=' => {
+            if matches!(s.as_bytes().first(), Some(b'+' | b'-' | b' ')) {
+                format!("{}{}{}", &s[..1], fill.to_string().repeat(padding), &s[1..])
+            } else {
+                format!("{}{}", fill.to_string().repeat(padding), s)
+            }
+        }
+        _ => s.to_string(),
     }
 }
 
