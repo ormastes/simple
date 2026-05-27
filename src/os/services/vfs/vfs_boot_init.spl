@@ -18,6 +18,7 @@ use os.services.fat32.shared_fat32_driver.{SharedFat32Driver as Fat32Core}
 use os.services.block_device.{BlockDevice}
 use os.drivers.virtio.virtio_blk.{VirtioBlkDriver}
 use os.drivers.nvme.nvme_driver.{NvmeDriver, DmaAddrs}
+use os.drivers.nvme.nvme_namespace_assignment.{nvme_user_assigned_filesystem_lease_from_grant_checked}
 use os.drivers.nvme.nvme_storage_model.{
     NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer,
     NvmeNamespaceIdentity, NvmeQueueAssignment, NvmeFilesystemLease,
@@ -386,6 +387,41 @@ fn vfs_boot_nvme_record_active_lease_for_test(lease: NvmeFilesystemLease) -> tex
 
 fn vfs_boot_nvme_active_lease_acceptance_reason(lease: NvmeFilesystemLease) -> text:
     nvme_filesystem_lease_set_acceptance_reason(g_vfs_nvme_active_leases, lease)
+
+fn vfs_boot_nvme_assign_user_namespace_lease(
+    evidence: NvmeTransferEvidence,
+    grant: DeviceGrant,
+    controller_id: u32,
+    nsid: u32,
+    namespace_lba_size: u32,
+    namespace_lba_count: u64,
+    base_lba: u64,
+    lease_lba_count: u64,
+    queue_id: u16,
+    owner_task: u64,
+    max_depth: u16,
+    consumer: NvmeFilesystemConsumer
+) -> Result<NvmeFilesystemLease, text>:
+    val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(
+        evidence,
+        grant,
+        controller_id,
+        nsid,
+        namespace_lba_size,
+        namespace_lba_count,
+        base_lba,
+        lease_lba_count,
+        queue_id,
+        owner_task,
+        max_depth,
+        consumer,
+        g_vfs_nvme_active_leases
+    )
+    if lease_result.is_err():
+        return lease_result
+    val lease = lease_result.unwrap()
+    g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)
+    Ok(lease)
 
 # Module-level VFS service instance for cooperative scheduling
 var g_vfs_service: VfsService? = nil

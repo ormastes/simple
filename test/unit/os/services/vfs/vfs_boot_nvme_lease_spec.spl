@@ -7,13 +7,14 @@ use os.services.vfs.vfs_boot_init.{
     vfs_boot_nvme_active_lease_count_for_test,
     vfs_boot_nvme_record_active_lease_for_test,
     vfs_boot_nvme_reset_active_leases_for_test,
+    vfs_boot_nvme_assign_user_namespace_lease,
     vfs_boot_storage_acceptance_reason,
     vfs_boot_storage_production_ready
 }
 use os.services.vfs.vfs_init.{vfs_boot_storage_acceptance_ready}
 use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmeQueueAssignment, nvme_filesystem_lease, nvme_filesystem_lease_reason, nvme_transfer_evidence}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
-use os.kernel.types.device_mem_types.{new_device_grant, device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id}
+use os.kernel.types.device_mem_types.{DeviceGrant, new_device_grant, device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id, device_grant_resource_set_label}
 
 fn _tokenized_boot_grant() -> os.kernel.types.device_mem_types.DeviceGrant:
     var grant = new_device_grant()
@@ -27,6 +28,25 @@ fn _tokenized_boot_grant() -> os.kernel.types.device_mem_types.DeviceGrant:
     grant.iommu_cap = device_grant_iommu_token(base)
     grant.iommu_domain_id = device_grant_iommu_domain_id(grant.pci_bus, grant.pci_dev, grant.pci_func)
     grant
+
+fn _user_evidence(grant: DeviceGrant):
+    nvme_transfer_evidence(
+        "simple-driver",
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        "user-space-driver",
+        device_grant_resource_set_label(grant),
+        "non-secure-resource-namespace",
+        true,
+        true
+    )
 
 fn _user_lease_for_boot_nsid(nsid: u32):
     val ns = NvmeNamespaceIdentity(
@@ -127,6 +147,21 @@ describe "VFS boot NVMe lease contract":
         expect(vfs_boot_nvme_active_lease_count_for_test()).to_equal(1u64)
         expect(vfs_boot_nvme_active_lease_acceptance_reason(conflicting_user)).to_equal("nvme-fs-namespace-mode-conflict:system:user-assigned")
         expect(vfs_boot_nvme_active_lease_acceptance_reason(other_user)).to_equal("ready")
+        vfs_boot_nvme_reset_active_leases_for_test()
+
+    it "assigns user namespaces through the active VFS lease registry":
+        vfs_boot_nvme_reset_active_leases_for_test()
+        val boot_lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
+        val grant = _tokenized_boot_grant()
+        val evidence = _user_evidence(grant)
+
+        expect(vfs_boot_nvme_record_active_lease_for_test(boot_lease)).to_equal("ready")
+        val conflict = vfs_boot_nvme_assign_user_namespace_lease(evidence, grant, 0u32, 1u32, 512u32, 65536u64, 0u64, 1024u64, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID, 42u64, 64u16, NvmeFilesystemConsumer.Nvfs)
+        val assigned = vfs_boot_nvme_assign_user_namespace_lease(evidence, grant, 0u32, 12u32, 512u32, 65536u64, 0u64, 1024u64, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID, 42u64, 64u16, NvmeFilesystemConsumer.Dbfs)
+
+        expect(conflict.unwrap_err()).to_equal("nvme-fs-namespace-mode-conflict:system:user-assigned")
+        expect(assigned.is_ok()).to_equal(true)
+        expect(vfs_boot_nvme_active_lease_count_for_test()).to_equal(2u64)
         vfs_boot_nvme_reset_active_leases_for_test()
 
     it "accepts only pure Simple NVMe boot storage as production-ready":
