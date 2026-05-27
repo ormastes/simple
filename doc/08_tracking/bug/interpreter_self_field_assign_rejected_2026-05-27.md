@@ -32,3 +32,11 @@ Use factory constructors or return new instances. Not acceptable for mutable API
 ## Impact
 
 Blocks interpreter-mode usage of any class with mutable state (HTTP server, routers, connection pools).
+
+## Status
+
+**RESOLVED** — interpreter assignment execution now allows `self.field = value`
+and `self.field[index] = value` inside ordinary `fn` methods, matching compiled
+mode behavior. Added
+`test/unit/compiler/interpreter/self_field_assign_spec.spl` to cover both
+direct field assignment and indexed field mutation.

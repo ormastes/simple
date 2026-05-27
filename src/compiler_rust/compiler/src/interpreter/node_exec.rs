@@ -10,10 +10,7 @@ use super::async_support::await_value;
 use super::expr::evaluate_expr;
 use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
 use super::interpreter_control::{exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with};
-use super::interpreter_state::{
-    mark_as_moved, get_current_file, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD,
-    MODULE_GLOBALS,
-};
+use super::interpreter_state::{mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
 use super::coverage_helpers::{record_node_coverage, extract_node_location};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
 use simple_runtime::debug;
@@ -707,21 +704,6 @@ fn exec_assignment(
         }
         Ok(Control::Next)
     } else if let Expr::FieldAccess { receiver, field } = &assign.target {
-        // E1052: Check for self mutation in immutable fn method
-        if let Expr::Identifier(obj_name) = receiver.as_ref() {
-            if obj_name == "self" {
-                let in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
-                if in_immutable_fn {
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::INVALID_ASSIGNMENT)
-                        .with_help("use `me` instead of `fn` to allow self mutation in methods");
-                    return Err(CompileError::semantic_with_context(
-                        format!("cannot modify self.{} in immutable fn method", field),
-                        ctx,
-                    ));
-                }
-            }
-        }
         // Handle field assignment: obj.field = value
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         // Get the object name (must be an identifier for now)
@@ -870,48 +852,6 @@ fn exec_assignment(
             ))
         }
     } else if let Expr::Index { receiver, index } = &assign.target {
-        // E1052: Check for self mutation in immutable fn method
-        // Handle self[key] = value and self.field[key] = value
-        let is_self_mutation = match receiver.as_ref() {
-            Expr::Identifier(name) if name == "self" => true,
-            Expr::FieldAccess { receiver: inner, .. } => {
-                matches!(inner.as_ref(), Expr::Identifier(name) if name == "self")
-            }
-            _ => false,
-        };
-        if is_self_mutation {
-            let in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
-            if in_immutable_fn {
-                // Get current file for debugging
-                let current_file = get_current_file()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let receiver_info = match receiver.as_ref() {
-                    Expr::Identifier(name) => format!("{}[...]", name),
-                    Expr::FieldAccess { receiver: inner, field } => {
-                        if let Expr::Identifier(name) = inner.as_ref() {
-                            format!("{}.{}[...]", name, field)
-                        } else {
-                            "self.field[...]".to_string()
-                        }
-                    }
-                    _ => "unknown[...]".to_string(),
-                };
-                // Debug output
-                eprintln!(
-                    "DEBUG: cannot modify self in file: {}, assignment: {}",
-                    current_file, receiver_info
-                );
-                let ctx = ErrorContext::new()
-                    .with_code(codes::INVALID_ASSIGNMENT)
-                    .with_help("use `me` instead of `fn` to allow self mutation in methods")
-                    .with_note(format!("in file: {}, assignment: {}", current_file, receiver_info));
-                return Err(CompileError::semantic_with_context(
-                    "cannot modify self in immutable fn method",
-                    ctx,
-                ));
-            }
-        }
         // Handle index assignment: arr[i] = value or dict["key"] = value or self.dict[key] = value
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         let index_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
