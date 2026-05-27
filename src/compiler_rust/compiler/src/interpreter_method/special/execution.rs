@@ -19,7 +19,7 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-pub(crate) fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_name: &str) -> Option<usize> {
+pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_name: &str) -> Option<usize> {
     METHOD_INDEX_CLASS.with(|cache| {
         // Fast path: probe with &str — avoids String allocation when entry exists (common case)
         {
@@ -39,7 +39,7 @@ pub(crate) fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, 
     })
 }
 
-pub(crate) fn lookup_impl_method_index(methods: &[Arc<FunctionDef>], class_name: &str, method_name: &str) -> Option<usize> {
+pub fn lookup_impl_method_index(methods: &[Arc<FunctionDef>], class_name: &str, method_name: &str) -> Option<usize> {
     METHOD_INDEX_IMPL.with(|cache| {
         // Fast path: probe with &str — avoids String allocation when entry exists (common case)
         {
