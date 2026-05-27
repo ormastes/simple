@@ -75,7 +75,6 @@ fn arg_str(args: &[Value], idx: usize, fn_name: &str) -> Result<String, CompileE
 // ============================================================================
 
 pub fn rt_db_table_create_fn(args: &[Value]) -> Result<Value, CompileError> {
-    eprintln!("[sffi_db] rt_db_table_create_fn called with {} args", args.len());
     for (i, arg) in args.iter().enumerate() {
         eprintln!("[sffi_db]   arg[{}] = {:?}", i, arg);
     }
