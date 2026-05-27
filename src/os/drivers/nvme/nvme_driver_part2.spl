@@ -31,6 +31,7 @@ use os.drivers.nvme.nvme_transfer_command.{nvme_read_io_command, nvme_write_io_c
 use os.drivers.nvme.nvme_admin_command.{nvme_admin_identify_controller, nvme_admin_identify_namespace, nvme_admin_set_num_queues, nvme_admin_create_io_completion_queue, nvme_admin_create_io_submission_queue}
 use os.drivers.nvme.nvme_controller_contract.{NvmeControllerRegs, nvme_controller_facts, nvme_controller_refusal_reason, nvme_cap_dstrd, nvme_namespace_facts, nvme_namespace_refusal_reason, nvme_controller_enable_cc}
 use os.drivers.nvme.nvme_sector_probe.{NvmeSectorProbeResult, nvme_sector_probe_result}
+use os.drivers.nvme.nvme_storage_model.{NvmeTransferEvidence, nvme_transfer_evidence}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
@@ -732,6 +733,37 @@ impl NvmeDriver:
         val restore_ok = restore_result.is_ok()
         val completion_status: u32 = if read_ok and write_ok and restore_ok: 0u32 else: 1u32
         Ok(nvme_sector_probe_result(lba, bytes, completion_status, read_ok, write_ok, restore_ok, true))
+
+    me transfer_evidence_from_reversible_probe(
+        lba: u64,
+        driver_placement: text,
+        grant_kind: text,
+        namespace_mode: text,
+        dma_isolated: bool,
+        iommu_or_broker: bool
+    ) -> Result<NvmeTransferEvidence, text>:
+        """Run the hardware sector probe and convert it into NVMe transfer evidence."""
+        val probe_result = self.run_reversible_sector_probe(lba)
+        if probe_result.is_err():
+            return Result.Err(probe_result.unwrap_err())
+        val probe = probe_result.unwrap()
+        Ok(nvme_transfer_evidence(
+            "simple-driver",
+            self.sector_count > 0u64 and self.sector_size >= 512u32,
+            self.admin_queue.depth > 0u16,
+            self.io_queue.depth > 0u16,
+            self.admin_queue.sq_doorbell != 0u64 and self.admin_queue.cq_doorbell != 0u64 and self.io_queue.sq_doorbell != 0u64 and self.io_queue.cq_doorbell != 0u64,
+            probe.completion_status == 0u32,
+            probe.read_ok,
+            probe.write_ok,
+            probe.restore_ok,
+            dma_isolated,
+            driver_placement,
+            grant_kind,
+            namespace_mode,
+            probe.used_shared_transfer_logic,
+            iommu_or_broker
+        ))
 
     me flush_notify() -> Result<bool, text>:
         """Flush write cache using notification-based completion (non-spinning).

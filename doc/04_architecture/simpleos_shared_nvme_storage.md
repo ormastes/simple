@@ -136,6 +136,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - The hosted NVMe driver can now produce that structured evidence by executing
   a real polling read/write/verify/restore sector probe through its shared
   `read_sectors`/`write_sectors` transfer path.
+- The hosted NVMe driver can also convert the executable probe result into the
+  standard `NvmeTransferEvidence` consumed by boot and VFS gates, using explicit
+  placement, grant, namespace, DMA-isolation, and IOMMU/broker metadata supplied
+  by the caller.
 - Freestanding controller readiness now has an explicit resource contract that
   binds system-driver or user-space-driver placement, grant/namespace mode,
   admin queue resources, I/O queue resources, DMA isolation, and IOMMU/broker
@@ -178,6 +182,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   completion, read, write, restore, and shared transfer logic usage.
 - Probe I/O failures return non-ready structured evidence rather than marking
   storage ready; invalid probe preconditions still return driver errors.
+- Transfer evidence production remains fail-closed: probe precondition failures
+  return errors, while probe I/O failures become evidence that the boot/VFS gates
+  reject.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
