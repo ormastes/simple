@@ -394,16 +394,11 @@ impl DbFsDriver:
             return Err(FsError.Unsupported)
         val blob_len = _dbfs_device_blob_lengths[blob_idx]
         val want = if length < blob_len: length else: blob_len
-        var buf: [u8] = []
-        var i: i64 = 0
-        while i < want:
-            buf.push(0)
-            i = i + 1
         val arena = RawNvmeArena(base_block: self.arena_base, block_count: self.arena_block_count)
-        val got = arena.arena_readv(arena.arena_handle(), _dbfs_device_blob_offsets[blob_idx], buf)
-        if got < want:
+        val bytes = arena.arena_read_bytes(arena.arena_handle(), _dbfs_device_blob_offsets[blob_idx], want)
+        if bytes.len() < want:
             return Err(FsError.IoError(code: 0))
-        Ok(_dbfs_slice_bytes(buf, want))
+        Ok(bytes)
 
     # --- stat ---
 
@@ -496,6 +491,11 @@ impl DbFsDriver:
         val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
         if inode_idx < 0:
             return Ok("")
+        if self.direct_io.is_some():
+            val device = self._read_inode_bytes_from_device(_dbfs_inodes[inode_idx].id, length)
+            if device.is_ok():
+                val bytes = device.unwrap()
+                return Ok(_dbfs_bytes_to_text(bytes, bytes.len() as i64))
         val content = _dbfs_inodes[inode_idx].content
         var result: text = ""
         var i: i64 = 0
@@ -515,6 +515,10 @@ impl DbFsDriver:
         val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
         if inode_idx < 0:
             return Ok([])
+        if self.direct_io.is_some():
+            val device = self._read_inode_bytes_from_device(_dbfs_inodes[inode_idx].id, length)
+            if device.is_ok():
+                return device
         val content = _dbfs_inodes[inode_idx].content_bytes
         val cap: i64 = if length < content.len(): length else: content.len()
         Ok(_dbfs_slice_bytes(content, cap))
@@ -526,6 +530,22 @@ impl DbFsDriver:
         val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
         if inode_idx < 0:
             return Err(FsError.NotFound)
+        if self.direct_io.is_some():
+            val device = self._read_inode_bytes_from_device(_dbfs_inodes[inode_idx].id, offset + length)
+            if device.is_ok():
+                val bytes = device.unwrap()
+                val full = _dbfs_bytes_to_text(bytes, bytes.len() as i64)
+                var device_result: text = ""
+                var di: i64 = offset
+                val device_end: i64 = if offset + length < full.len(): offset + length else: full.len()
+                while di < device_end:
+                    device_result = device_result + full[di:di + 1]
+                    di = di + 1
+                var device_pad: i64 = device_end - offset
+                while device_pad < length:
+                    device_result = device_result + "\0"
+                    device_pad = device_pad + 1
+                return Ok(device_result)
         val content = _dbfs_inodes[inode_idx].content
         var result: text = ""
         var i: i64 = offset
