@@ -97,6 +97,32 @@ main = [1].map(add(_1, 1))[0]
 }
 
 #[test]
+fn interpreter_placeholder_lambda_initializer() {
+    let code = r#"
+fn run() -> i64:
+    val double = _1 * 2
+    return double(21)
+
+main = run()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_numbered_placeholder_lambda_initializer() {
+    let code = r#"
+fn run() -> i64:
+    val square = _1 * _1
+    return square(7)
+
+main = run()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 49);
+}
+
+#[test]
 fn interpreter_functional_update_array_concat() {
     let code = r#"
 arr = [1, 2]

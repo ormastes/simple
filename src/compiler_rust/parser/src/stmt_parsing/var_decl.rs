@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::error::ParseError;
 use crate::error_recovery::{ErrorHint, ErrorHintLevel};
+use crate::expressions::placeholder::force_transform_placeholder_lambda;
 use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
 
@@ -247,6 +248,7 @@ impl Parser<'_> {
             let mut expr = self.parse_expression()?;
             // Support no-paren calls in assignment: val x = double 5
             expr = self.parse_with_no_paren_calls(expr)?;
+            expr = force_transform_placeholder_lambda(expr);
             // Consume matching dedent if we consumed an indent
             if consumed_indent {
                 // Skip newlines before dedent
@@ -274,6 +276,7 @@ impl Parser<'_> {
             let mut expr = self.parse_expression()?;
             // Support no-paren calls in suspend assignment: val x ~= double 5
             expr = self.parse_with_no_paren_calls(expr)?;
+            expr = force_transform_placeholder_lambda(expr);
             // Consume matching dedent if we consumed an indent
             if consumed_indent {
                 // Skip newlines before dedent
