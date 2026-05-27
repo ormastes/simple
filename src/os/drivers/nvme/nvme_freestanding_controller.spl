@@ -1,0 +1,93 @@
+# Freestanding pure-Simple NVMe controller resource contract.
+#
+# This module binds platform-owned BAR/DMA resources to the shared queue and
+# transfer-evidence contracts. It does not claim real I/O readiness; completion
+# and reversible sector probes must still come from hardware execution.
+
+use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
+use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_resources_reason, nvme_queue_pair_from_resources}
+use os.drivers.nvme.nvme_storage_model.{NvmeTransferEvidence, nvme_transfer_evidence}
+
+struct NvmeFreestandingControllerResources:
+    provider: text
+    driver_placement: text
+    grant_kind: text
+    namespace_mode: text
+    namespace_identified: bool
+    dma_isolated: bool
+    iommu_or_broker: bool
+    admin: NvmeQueueResources
+    io: NvmeQueueResources
+
+struct NvmeFreestandingController:
+    provider: text
+    driver_placement: text
+    grant_kind: text
+    namespace_mode: text
+    namespace_identified: bool
+    dma_isolated: bool
+    iommu_or_broker: bool
+    admin_queue: NvmeQueuePair
+    io_queue: NvmeQueuePair
+
+fn nvme_freestanding_controller_resource_reason(r: NvmeFreestandingControllerResources) -> text:
+    if r.provider != "simple-driver":
+        return "nvme-freestanding-provider-not-simple:" + r.provider
+    if r.driver_placement != "system-driver" and r.driver_placement != "user-space-driver":
+        return "nvme-freestanding-placement-invalid:" + r.driver_placement
+    val admin_reason = nvme_queue_resources_reason(r.admin)
+    if admin_reason != "ready":
+        return "nvme-freestanding-admin-" + admin_reason
+    val io_reason = nvme_queue_resources_reason(r.io)
+    if io_reason != "ready":
+        return "nvme-freestanding-io-" + io_reason
+    if r.admin.qid != 0u16:
+        return "nvme-freestanding-admin-qid-not-zero"
+    if r.io.qid == 0u16:
+        return "nvme-freestanding-io-qid-zero"
+    if not r.dma_isolated:
+        return "nvme-freestanding-dma-not-isolated"
+    if not r.iommu_or_broker:
+        return "nvme-freestanding-missing-iommu-or-broker"
+    "ready"
+
+fn nvme_freestanding_controller_from_resources(r: NvmeFreestandingControllerResources) -> Result<NvmeFreestandingController, text>:
+    val reason = nvme_freestanding_controller_resource_reason(r)
+    if reason != "ready":
+        return Err(reason)
+    Ok(NvmeFreestandingController(
+        provider: r.provider,
+        driver_placement: r.driver_placement,
+        grant_kind: r.grant_kind,
+        namespace_mode: r.namespace_mode,
+        namespace_identified: r.namespace_identified,
+        dma_isolated: r.dma_isolated,
+        iommu_or_broker: r.iommu_or_broker,
+        admin_queue: nvme_queue_pair_from_resources(r.admin).unwrap(),
+        io_queue: nvme_queue_pair_from_resources(r.io).unwrap()
+    ))
+
+fn nvme_freestanding_transfer_evidence(
+    c: NvmeFreestandingController,
+    completion_seen: bool,
+    sector_read: bool,
+    sector_write: bool,
+    sector_restored: bool
+) -> NvmeTransferEvidence:
+    nvme_transfer_evidence(
+        c.provider,
+        c.namespace_identified,
+        c.admin_queue.depth > 0u16,
+        c.io_queue.depth > 0u16,
+        c.admin_queue.sq_doorbell != 0u64 and c.admin_queue.cq_doorbell != 0u64 and c.io_queue.sq_doorbell != 0u64 and c.io_queue.cq_doorbell != 0u64,
+        completion_seen,
+        sector_read,
+        sector_write,
+        sector_restored,
+        c.dma_isolated,
+        c.driver_placement,
+        c.grant_kind,
+        c.namespace_mode,
+        true,
+        c.iommu_or_broker
+    )

@@ -109,6 +109,13 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Freestanding queue construction has a syscall-free resource builder that
   validates platform-owned BAR0, DMA queue memory, queue depth, DMA alignment,
   and doorbell stride before constructing the shared `NvmeQueuePair`.
+- Freestanding controller readiness now has an explicit resource contract that
+  binds system-driver or user-space-driver placement, grant/namespace mode,
+  admin queue resources, I/O queue resources, DMA isolation, and IOMMU/broker
+  state before producing transfer evidence.
+- System-driver NVMe transfer evidence uses kernel-owned system namespace
+  resources; user-space driver evidence still requires issued grant tokens and
+  non-secure user-assigned resource namespaces.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -131,6 +138,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   provides polling mechanics only.
 - The queue resource builder does not allocate memory or map BARs; those remain
   responsibilities of the system boot allocator or user-space grant broker.
+- Controller resource readiness still does not claim production transfer by
+  itself. The evidence path remains fail-closed until real hardware completion
+  plus read/write/restore sector probes are supplied.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
@@ -159,3 +169,7 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `test/unit/os/drivers/nvme/nvme_queue_resources_spec.spl` covers syscall-free
   construction of `NvmeQueuePair` from owned BAR/DMA resources and rejects
   invalid depth, missing BAR mapping, invalid doorbell stride, and unaligned DMA.
+- `test/unit/os/drivers/nvme/nvme_freestanding_controller_spec.spl` covers
+  freestanding controller resource validation, system-driver evidence, and the
+  requirement that real completion and reversible sector probes be supplied
+  before transfer readiness becomes `ready`.
