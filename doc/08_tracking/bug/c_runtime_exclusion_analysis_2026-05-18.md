@@ -10,6 +10,8 @@
 |--------|---------|--------|
 | `runtime_ctype.c` | `__is_alnum/alpha/digit/xdigit/space/lower/upper` | Deleted. Rust shim had zero pub fns. Removed from tools.rs. |
 | `runtime_audio_effects.c` | `rt_audio_set_pitch` + 6 stubs | Deleted. Not in tools.rs. Zero .rs/.spl callers. |
+| `runtime_hash.c` | `rt_fnv_hash` | Deleted 2026-05-27. `simple-runtime` now implements FNV-1a in Rust and the legacy Rust std hash shim computes FNV in Simple instead of declaring the C extern. Removed from the core-C native-project runtime input list. |
+| `runtime_crypto.c` | `rt_constant_time_compare` | Deleted 2026-05-27. `simple-runtime` and interpreter dispatch both implement constant-time comparison in Rust/Simple runtime code; no native-project runtime input remains. |
 
 ## Cannot Remove (active Rust/codegen callers)
 
@@ -63,15 +65,16 @@ or Rust-only replacement is wired through the same symbol name.
 
 | C File | Symbols | Status | Blocker |
 |--------|---------|--------|---------|
-| `runtime_crypto.c` | `rt_constant_time_compare` | **Partially resolved 2026-05-27** — `simple-runtime` now implements this helper in Rust (`value/sffi/crypto_compare.rs`) and no longer compiles `runtime_crypto.c` in `runtime/build.rs`. Interpreter still has its Rust duplicate in `interpreter_extern/crypto.rs`. | Core-C/native-project archive still includes `runtime_crypto.c`; remove there only after confirming no native SPL/runtime-bundle extern surface still requires the C symbol. |
-| `runtime_hash.c` | `rt_fnv_hash` | **Partially resolved 2026-05-27** — `simple-runtime` now implements FNV-1a in Rust (`value/sffi/utils.rs`) and no longer compiles `runtime_hash.c` in `runtime/build.rs`. | Core-C/native-project archive still includes `runtime_hash.c`; `src/compiler_rust/lib/std/src/infra/hash.spl` still declares `extern fn rt_fnv_hash`, so that lane needs a separate migration before deleting the C file. |
+| _none currently verified_ | — | The 2026-05-27 pass removed the two previously listed candidates. | Continue auditing Group A/B modules above. |
 
-Verification for the 2026-05-27 simple-runtime reduction:
+Verification for the 2026-05-27 runtime hash/crypto removal:
 
 ```bash
 cargo check -p simple-runtime --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::utils --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::crypto_compare --manifest-path src/compiler_rust/Cargo.toml
+bin/simple check src/compiler_rust/lib/std/src/infra/hash.spl src/lib/nogc_sync_mut/src/hash.spl
+cargo check -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml
 ```
 
 ## Path to C Removal for Remaining Modules
