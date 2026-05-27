@@ -285,6 +285,22 @@ fn _nvme_perf_text_field(line: text, prefix: text, missing_reason: text, invalid
             return Ok(value_text)
     Err(missing_reason)
 
+fn _nvme_perf_exact_text_field_reason(line: text, prefix: text, expected: text, missing_reason: text, invalid_reason: text) -> text:
+    val value_r = _nvme_perf_text_field(line, prefix, missing_reason, invalid_reason)
+    if value_r.is_err():
+        return value_r.unwrap_err()
+    if value_r.unwrap() != expected:
+        return invalid_reason
+    "ready"
+
+fn _nvme_perf_real_identity_reason(line: text, prefix: text, missing_reason: text, invalid_reason: text) -> text:
+    val value_r = _nvme_perf_text_field(line, prefix, missing_reason, invalid_reason)
+    if value_r.is_err():
+        return value_r.unwrap_err()
+    if value_r.unwrap() == "unknown":
+        return invalid_reason
+    "ready"
+
 fn nvme_production_perf_serial_acceptance_reason(line: text) -> text:
     """Evaluate one benchmark report line emitted by a hardware runner."""
     if not line.contains("nvme_perf"):
@@ -364,21 +380,26 @@ fn nvme_real_hardware_perf_serial_acceptance_reason(line: text) -> text:
     val perf_reason = nvme_production_perf_serial_acceptance_reason(line)
     if perf_reason != "ready":
         return perf_reason
-    if not line.contains("hardware_target=real-nvme"):
-        return "nvme-real-hardware-target-missing"
-    if line.contains("hardware_target=q35") or line.contains("qemu=true"):
+    val target_reason = _nvme_perf_exact_text_field_reason(line, "hardware_target=", "real-nvme", "nvme-real-hardware-target-missing", "nvme-real-hardware-target-invalid")
+    if target_reason != "ready":
+        if target_reason == "nvme-real-hardware-target-invalid":
+            return "nvme-real-hardware-target-missing"
+        return target_reason
+    val qemu_reason = _nvme_perf_exact_text_field_reason(line, "qemu=", "false", "nvme-real-hardware-qemu-flag-missing", "nvme-real-hardware-emulator-report")
+    if qemu_reason == "nvme-real-hardware-emulator-report":
         return "nvme-real-hardware-emulator-report"
-    if not line.contains("qemu=false"):
-        return "nvme-real-hardware-qemu-flag-missing"
-    val device_model_r = _nvme_perf_text_field(line, "device_model=", "nvme-real-hardware-device-model-missing", "nvme-real-hardware-device-model-invalid")
-    if device_model_r.is_err():
-        return device_model_r.unwrap_err()
-    val device_serial_r = _nvme_perf_text_field(line, "device_serial=", "nvme-real-hardware-device-serial-missing", "nvme-real-hardware-device-serial-invalid")
-    if device_serial_r.is_err():
-        return device_serial_r.unwrap_err()
+    if qemu_reason != "ready":
+        return qemu_reason
+    val device_model_reason = _nvme_perf_real_identity_reason(line, "device_model=", "nvme-real-hardware-device-model-missing", "nvme-real-hardware-device-model-invalid")
+    if device_model_reason != "ready":
+        return device_model_reason
+    val device_serial_reason = _nvme_perf_real_identity_reason(line, "device_serial=", "nvme-real-hardware-device-serial-missing", "nvme-real-hardware-device-serial-invalid")
+    if device_serial_reason != "ready":
+        return device_serial_reason
     val namespace_nsid_r = _nvme_perf_u64_field(line, "namespace_nsid=", "nvme-real-hardware-namespace-missing", "nvme-real-hardware-namespace-invalid")
     if namespace_nsid_r.is_err():
         return namespace_nsid_r.unwrap_err()
-    if not line.contains("measured_on=real-device"):
-        return "nvme-real-hardware-measurement-source-missing"
+    val measured_reason = _nvme_perf_exact_text_field_reason(line, "measured_on=", "real-device", "nvme-real-hardware-measurement-source-missing", "nvme-real-hardware-measurement-source-invalid")
+    if measured_reason != "ready":
+        return measured_reason
     "ready"
