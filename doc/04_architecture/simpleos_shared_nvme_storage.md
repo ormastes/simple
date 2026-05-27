@@ -158,7 +158,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - System-driver NVMe transfer evidence uses kernel-owned system namespace
   resources; user-space driver evidence still requires issued grant tokens and
   non-secure user-assigned resource namespaces.
-- User-space namespace assignment is explicit and testable.
+- User-space namespace assignment has a concrete helper that takes the issued
+  `DeviceGrant`, validates resource tokens and IOMMU isolation, verifies that
+  transfer evidence belongs to that grant, assigns a data queue, and emits the
+  same FAT32/NVFS/DBFS lease surface as system boot storage.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
   `BlockDevice` surfaces.
@@ -207,6 +210,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   user-assigned leases, grant failures, reserved queue rejection, required queue
   rights, evidence-gated lease minting, and shared FAT32/NVFS/DBFS
   block-interface readiness.
+- `test/unit/os/drivers/nvme/nvme_namespace_assignment_spec.spl` covers
+  user-assigned namespace lease construction from a tokenized `DeviceGrant`,
+  grant/evidence mismatch rejection, missing-token rejection, and FAT32/NVFS/DBFS
+  readiness on the shared lease surface.
 - `test/unit/os/services/vfs/nvme_block_adapter_spec.spl` covers adapter-visible
   lease translation and out-of-range rejection without requiring real hardware.
 - `test/unit/lib/fs_driver/nvfs_device_backed_spec.spl` covers NVFS opening on

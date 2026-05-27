@@ -1,0 +1,95 @@
+# NVMe namespace assignment helpers.
+#
+# Converts a user-space DeviceGrant plus proven transfer evidence into the
+# bounded filesystem lease consumed by FAT32, NVFS, and DBFS.
+
+use os.drivers.nvme.nvme_storage_model.{
+    NvmeFilesystemConsumer,
+    NvmeFilesystemLease,
+    NvmeNamespaceIdentity,
+    NvmeQueueAssignment,
+    NvmeQueueRole,
+    NvmeTransferEvidence,
+    nvme_filesystem_lease_from_transfer_evidence
+}
+use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT}
+use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_has_resource_tokens, device_grant_is_isolated, device_grant_resource_set_label}
+
+fn nvme_user_namespace_identity(
+    controller_id: u32,
+    nsid: u32,
+    lba_size: u32,
+    lba_count: u64
+) -> NvmeNamespaceIdentity:
+    NvmeNamespaceIdentity(
+        controller_id: controller_id,
+        nsid: nsid,
+        lba_size: lba_size,
+        lba_count: lba_count,
+        eui64: 0,
+        nguid_lo: 0,
+        nguid_hi: 0,
+        uuid_lo: 0,
+        uuid_hi: 0
+    )
+
+fn nvme_user_namespace_queue_assignment(
+    controller_id: u32,
+    nsid: u32,
+    queue_id: u16,
+    owner_task: u64,
+    max_depth: u16
+) -> NvmeQueueAssignment:
+    NvmeQueueAssignment(
+        queue_id: queue_id,
+        role: NvmeQueueRole.Data,
+        controller_id: controller_id,
+        nsid: nsid,
+        owner_task: owner_task,
+        max_depth: max_depth,
+        rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+    )
+
+fn nvme_user_assigned_filesystem_lease_from_grant(
+    evidence: NvmeTransferEvidence,
+    grant: DeviceGrant,
+    controller_id: u32,
+    nsid: u32,
+    namespace_lba_size: u32,
+    namespace_lba_count: u64,
+    base_lba: u64,
+    lease_lba_count: u64,
+    queue_id: u16,
+    owner_task: u64,
+    max_depth: u16,
+    consumer: NvmeFilesystemConsumer
+) -> Result<NvmeFilesystemLease, text>:
+    """Mint a user-assigned namespace lease from a real grant and transfer proof."""
+    if not device_grant_has_resource_tokens(grant):
+        return Err("nvme-user-namespace-grant-missing-resource-tokens")
+    if not device_grant_is_isolated(grant):
+        return Err("nvme-user-namespace-grant-not-isolated")
+    val grant_label = device_grant_resource_set_label(grant)
+    if evidence.grant_kind != grant_label:
+        return Err("nvme-user-namespace-evidence-grant-mismatch:" + evidence.grant_kind)
+    val namespace = nvme_user_namespace_identity(
+        controller_id,
+        nsid,
+        namespace_lba_size,
+        namespace_lba_count
+    )
+    val queue = nvme_user_namespace_queue_assignment(
+        controller_id,
+        nsid,
+        queue_id,
+        owner_task,
+        max_depth
+    )
+    nvme_filesystem_lease_from_transfer_evidence(
+        evidence,
+        namespace,
+        base_lba,
+        lease_lba_count,
+        queue,
+        consumer
+    )
