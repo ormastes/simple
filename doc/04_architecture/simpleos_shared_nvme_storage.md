@@ -324,6 +324,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   range before queue creation; lease-backed FAT32/NVFS/DBFS adapters store that
   queue ID and submit namespace I/O through queue-aware driver methods instead
   of always using the system I/O queue.
+- The q35 pure-NVMe lane now proves that hardware path directly: it creates the
+  first user data queue, mints a user-assigned lease from the grant, and performs
+  4KiB read/write through that queue before emitting
+  `user_namespace_assignment=hardware-data-queue`.
 - The shared DMA fast path is now namespace- and queue-aware as well: user-space
   storage services can submit preallocated DMA buffers on the assigned namespace
   queue, while the legacy shared-DMA methods delegate to the current system

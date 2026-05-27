@@ -14,7 +14,8 @@ Verification pass for the SimpleOS NVMe hardware-driver goal:
 
 ## Evidence
 
-Commands run against `origin/main` state `d96b37328b`:
+Commands run against current working tree based on `origin/main` state
+`0d888851e8` plus the q35 user-namespace proof update:
 
 ```bash
 src/compiler_rust/target/debug/simple test test/unit/os/drivers/nvme/nvme_namespace_assignment_spec.spl --mode=interpreter --clean
@@ -41,14 +42,18 @@ Observed results:
 Latest q35 serial evidence:
 
 ```text
-nvme_perf reason=ready simple_provider=simple-driver workload=4k-random-read-write io_size_bytes=4096 direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs fat32_extent_source=freestanding-fat32-extents nvfs_extent_source=freestanding-dbfs-arena dbfs_extent_source=freestanding-dbfs-arena c_bridge_used=false common_logic_shared=true allocation_per_io=false simple_read_iops=1327 simple_write_iops=1453 simple_read_p99_us=8552 simple_write_p99_us=4664 c_read_iops=88 c_write_iops=138 c_read_p99_us=17920 c_write_p99_us=10424 queue_depth=128 warm_runs=3 max_rss_kib=1
+[real-device] storage_provider=simple-driver network_provider=simple-driver storage_placement=user-space-driver network_placement=user-space-driver storage_namespace=non-secure-resource-namespace network_namespace=non-secure-resource-namespace storage_grant=resource-grant-set:tok=nvme0 network_grant=resource-grant-set:tok=net0 common_driver_logic=shared
+user_namespace_assignment=hardware-data-queue user_namespace_mode=user-assigned user_namespace_queue_id=2 user_namespace_direct_io=read-write user_namespace_conflict_policy=active-lease-checked
+nvme_perf reason=ready simple_provider=simple-driver workload=4k-random-read-write io_size_bytes=4096 direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs fat32_extent_source=freestanding-fat32-extents nvfs_extent_source=freestanding-dbfs-arena dbfs_extent_source=freestanding-dbfs-arena c_bridge_used=false common_logic_shared=true allocation_per_io=false simple_read_iops=1625 simple_write_iops=1868 simple_read_p99_us=6800 simple_write_p99_us=2296 c_read_iops=96 c_write_iops=154 c_read_p99_us=13056 c_write_p99_us=8728 queue_depth=128 warm_runs=3 max_rss_kib=1
 TEST PASSED
 ```
 
 ## Requirement Status
 
 - System/user namespace assignment: proven by namespace assignment and VFS active
-  lease tests, including rejection of incompatible same-namespace ownership.
+  lease tests, including rejection of incompatible same-namespace ownership, and
+  by q35 hardware evidence that queue 2 is created as a user data queue and can
+  perform direct 4K read/write on a user-assigned lease.
 - Shared FAT32/NVFS/DBFS interface: proven by mount contracts, DirectIo extent
   mapping tests, and q35 extent-source markers.
 - Pure Simple path faster than C FAT/NVMe baseline: proven by q35 same-device

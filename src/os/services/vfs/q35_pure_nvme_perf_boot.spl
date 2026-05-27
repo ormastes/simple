@@ -5,10 +5,12 @@
 # net, and hosted-service dependencies that are unrelated to this proof.
 
 use os.drivers.nvme.nvme_driver.{NvmeDriver}
-use os.drivers.nvme.nvme_storage_model.{nvme_transfer_readiness_reason}
+use os.drivers.nvme.nvme_namespace_assignment.{nvme_user_assigned_filesystem_lease_from_grant_checked}
+use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemConsumer, nvme_transfer_readiness_reason}
 use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class_i64, pcimgr_grant_device}
-use os.kernel.types.capability_types.{SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
+use os.kernel.types.capability_types.{SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
+use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_is_isolated, device_grant_resource_set_label}
 use os.kernel.boot.mmio.{mmio_read8}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc, dma_free}
 use std.fs_driver.direct_io.{direct_io_read_batch_request, direct_io_write_batch_request}
@@ -128,6 +130,80 @@ fn _consumer_for_measurement(run: u32, op: u32) -> text:
     if selector == 1u32:
         return "nvfs"
     "dbfs"
+
+fn _q35_user_namespace_assignment_marker(
+    nvme: NvmeDriver,
+    grant: DeviceGrant,
+    sector_size: u32,
+    sector_count: u64,
+    shared: SharedDmaBuffer,
+    proof_offset: i64
+) -> Result<text, text>:
+    val queue_id = SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID
+    val owner_task = 0u64
+    val max_depth = 64u16
+    val grant_label = device_grant_resource_set_label(grant)
+    val evidence_result = nvme.transfer_evidence_from_reversible_probe(
+        0u64,
+        "user-space-driver",
+        grant_label,
+        "non-secure-resource-namespace",
+        device_grant_is_isolated(grant),
+        device_grant_is_isolated(grant)
+    )
+    if evidence_result.is_err():
+        return Err("user-transfer-probe:" + evidence_result.unwrap_err())
+    val evidence = evidence_result.unwrap()
+    val transfer_reason = nvme_transfer_readiness_reason(evidence)
+    if transfer_reason != "ready":
+        return Err("user-transfer-not-ready:" + transfer_reason)
+    val queue_ready = nvme.ensure_user_data_queue_for_assignment(queue_id, max_depth, 0u32, 1u32, owner_task)
+    if queue_ready.is_err():
+        return Err("user-data-queue:" + queue_ready.unwrap_err())
+    val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(
+        evidence,
+        grant,
+        0u32,
+        1u32,
+        sector_size,
+        sector_count,
+        0u64,
+        sector_count,
+        queue_id,
+        owner_task,
+        max_depth,
+        NvmeFilesystemConsumer.Fat32,
+        []
+    )
+    if lease_result.is_err():
+        return Err("user-lease:" + lease_result.unwrap_err())
+    val lease = lease_result.unwrap()
+    val proof_lba = (proof_offset as u64) / sector_size.to_u64()
+    val direct_read_probe = nvme.read_4k_shared_dma_batch_in_namespace_on_queue(
+        lease.namespace.nsid,
+        lease.queue.queue_id,
+        [proof_lba],
+        sector_size,
+        sector_count,
+        shared
+    )
+    if direct_read_probe.is_err():
+        return Err("user-direct-read:" + direct_read_probe.unwrap_err())
+    val direct_write_probe = nvme.write_4k_shared_dma_batch_in_namespace_on_queue(
+        lease.namespace.nsid,
+        lease.queue.queue_id,
+        [proof_lba],
+        sector_size,
+        sector_count,
+        shared
+    )
+    if direct_write_probe.is_err():
+        return Err("user-direct-write:" + direct_write_probe.unwrap_err())
+    Ok(
+        "user_namespace_assignment=hardware-data-queue user_namespace_mode=user-assigned " +
+            "user_namespace_queue_id=" + lease.queue.queue_id.to_u64().to_text() +
+            " user_namespace_direct_io=read-write user_namespace_conflict_policy=active-lease-checked"
+    )
 
 fn _perf_reason(
     simple_read_iops: u64,
@@ -297,6 +373,10 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
         dma_free(dma)
         return ["[q35-pure-nvme-perf] skipped reason=dbfs-arena-direct-extent-failed detail=" + dbfs_offsets_result.unwrap_err()]
     val dbfs_offsets = dbfs_offsets_result.unwrap()
+    val user_namespace_marker = _q35_user_namespace_assignment_marker(nvme, grant, sector_size, sector_count, shared, fat32_offsets[0])
+    if user_namespace_marker.is_err():
+        dma_free(dma)
+        return ["[q35-pure-nvme-perf] skipped reason=user-namespace-assignment-failed detail=" + user_namespace_marker.unwrap_err()]
 
     var read_ops: u64 = 0u64
     var write_ops: u64 = 0u64
@@ -402,4 +482,4 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
         fs_consumers,
         128u16
     )
-    [access, perf]
+    [access, user_namespace_marker.unwrap(), perf]
