@@ -414,6 +414,27 @@ fn _like_prefix_str(where_expr: SqlExpr?) -> text:
         i = i + 1
     ""
 
+fn _like_any_prefix(where_expr: SqlExpr?) -> text:
+    """Extract the literal prefix before the first wildcard (% or _).
+    Used as a starts_with pre-filter before running full _like_match.
+    Returns "" if no literal prefix exists (pattern starts with wildcard)."""
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if not expr.right.?:
+        return ""
+    val pattern = expr.right.value
+    var pat = pattern
+    if pat.starts_with("'") and pat.ends_with("'"):
+        pat = pat.slice(1, pat.len() - 1)
+    var i: i64 = 0
+    while i < pat.len():
+        val ch = pat.char_at(i)
+        if ch == "%" or ch == "_":
+            return pat.slice(0, i)
+        i = i + 1
+    ""
+
 # Extract column index and full LIKE pattern from WHERE col LIKE 'pattern'.
 # Returns (col_index, pattern_string). col_index is -1 if not a simple LIKE.
 fn _extract_like_col(where_expr: SqlExpr?, col_map: Dict<text, i32>) -> i32:
@@ -1365,6 +1386,10 @@ class PureDatabase:
     _fts_rows: [[DbRow]]
     _tbl_vis: [[bool]]
     _tbl_vis_xmax: [i64]
+    _fts_search_key: [text]
+    _fts_search_res: [[PureSearchResult]]
+    _sel_cache_key: [text]
+    _sel_cache_res: [[DbRow]]
 
     static fn memory() -> Result<PureDatabase, DbError>:
         Ok(PureDatabase(
@@ -1402,7 +1427,11 @@ class PureDatabase:
             _tbl_col_idx: [],
             _fts_rows: [],
             _tbl_vis: [],
-            _tbl_vis_xmax: []
+            _tbl_vis_xmax: [],
+            _fts_search_key: [],
+            _fts_search_res: [],
+            _sel_cache_key: [],
+            _sel_cache_res: []
         ))
 
     static fn memory_deferred() -> Result<PureDatabase, DbError>:
@@ -1897,6 +1926,10 @@ class PureDatabase:
                     self._fts_rows.push([])
                     self._tbl_vis.push([])
                     self._tbl_vis_xmax.push(-1)
+                    self._fts_search_key.push("")
+                    self._fts_search_res.push([])
+                    self._sel_cache_key.push("")
+                    self._sel_cache_res.push([])
                     self._indexes.push([])
                     self._index_unique.push([])
                     self._tbl_fts_next_doc_id.push(0)
@@ -2022,6 +2055,26 @@ class PureDatabase:
     me query(sql: text, params: [DbValue]) -> Result<[DbRow], DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
+        # ── SELECT result cache: skip parse+scan for repeated queries ──
+        if params.len() == 0:
+            _param_idx = 0
+            val cpr = sql_parse(sql)
+            if cpr.is_err():
+                return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+            val cstmt = cpr.unwrap()
+            if cstmt.kind == SqlStmtKind.Select:
+                val ctable = cstmt.select.from_table
+                var cti: i32 = -1
+                if self._tbl_name_idx.has(ctable):
+                    cti = self._tbl_name_idx[ctable]
+                if cti >= 0 and cti < self._sel_cache_key.len() as i32:
+                    if self._sel_cache_key[cti] == sql and sql != "":
+                        return Ok(self._sel_cache_res[cti])
+                val result = self._do_select(cstmt.select, params)
+                if result.is_ok() and cti >= 0 and cti < self._sel_cache_key.len() as i32:
+                    self._sel_cache_key[cti] = sql
+                    self._sel_cache_res[cti] = result.unwrap()
+                return result
         _param_idx = 0
         val pr = sql_parse(sql)
         if pr.is_err():
@@ -2060,6 +2113,12 @@ class PureDatabase:
     me _invalidate_fts(ti: i32):
         if ti >= 0 and ti < self._fts_valid.len() as i32:
             self._fts_valid[ti] = false
+        if ti >= 0 and ti < self._fts_search_key.len() as i32:
+            self._fts_search_key[ti] = ""
+            self._fts_search_res[ti] = []
+        if ti >= 0 and ti < self._sel_cache_key.len() as i32:
+            self._sel_cache_key[ti] = ""
+            self._sel_cache_res[ti] = []
 
     me _ensure_fts_index(ti: i32, col_names: [text], selected_cols: [text], visible: [text]):
         if ti < 0 or ti >= self._fts_indexes.len() as i32:
@@ -2120,6 +2179,12 @@ class PureDatabase:
             return Ok([])
         val col_names = self._tbl_cols[ti]
         var results: [PureSearchResult] = []
+        # ── Search result cache: return immediately on identical query ──
+        val search_cache_key = table + "|" + query + "|" + limit.to_text()
+        if ti >= 0 and ti < self._fts_search_key.len() as i32:
+            if self._fts_search_key[ti] == search_cache_key and search_cache_key != "":
+                self._last_changes = 0
+                return Ok(self._fts_search_res[ti])
         # ── BM25 fast path: skip MVCC scan when FTS index is cached ──
         if algorithm == PureSearchAlgorithm.Bm25:
             val fts_cached = self._fts_valid[ti] and _same_text_list(self._fts_columns[ti], columns)
@@ -2187,6 +2252,9 @@ class PureDatabase:
                     ), limit)
                 qi = qi + 1
             self._last_changes = 0
+            if ti >= 0 and ti < self._fts_search_key.len() as i32:
+                self._fts_search_key[ti] = search_cache_key
+                self._fts_search_res[ti] = results
             return Ok(results)
         # ── Non-BM25 fallback: full scan + score ──
         val snap = self._txn.snapshot()
@@ -2230,6 +2298,9 @@ class PureDatabase:
                 ), limit)
             di = di + 1
         self._last_changes = 0
+        if ti >= 0 and ti < self._fts_search_key.len() as i32:
+            self._fts_search_key[ti] = search_cache_key
+            self._fts_search_res[ti] = results
         Ok(results)
 
     me bm25_search(table: text, columns: [text], query: text, limit: i64) -> Result<[PureSearchResult], DbError>:
@@ -2284,6 +2355,10 @@ class PureDatabase:
         self._fts_rows = []
         self._tbl_vis = []
         self._tbl_vis_xmax = []
+        self._fts_search_key = []
+        self._fts_search_res = []
+        self._sel_cache_key = []
+        self._sel_cache_res = []
         self._indexes = []
         self._index_unique = []
         var restore_ni: Dict<text, i32> = {}
@@ -2300,6 +2375,10 @@ class PureDatabase:
             self._fts_rows.push([])
             self._tbl_vis.push([])
             self._tbl_vis_xmax.push(-1)
+            self._fts_search_key.push("")
+            self._fts_search_res.push([])
+            self._sel_cache_key.push("")
+            self._sel_cache_res.push([])
             self._indexes.push(self._snap_indexes[ti])
             self._index_unique.push(self._snap_index_unique[ti])
             restore_ni[self._snap_tbl_names[ti]] = ti
@@ -2634,6 +2713,10 @@ class PureDatabase:
         self._fts_rows.push([])
         self._tbl_vis.push([])
         self._tbl_vis_xmax.push(-1)
+        self._fts_search_key.push("")
+        self._fts_search_res.push([])
+        self._sel_cache_key.push("")
+        self._sel_cache_res.push([])
         self._indexes.push([])
         self._index_unique.push([])
         self._tbl_fts_next_doc_id.push(0)
@@ -2679,6 +2762,10 @@ class PureDatabase:
         var new_fts_rows: [[DbRow]] = []
         var new_vis: [[bool]] = []
         var new_vis_xmax: [i64] = []
+        var new_fts_sk: [text] = []
+        var new_fts_sr: [[PureSearchResult]] = []
+        var new_sel_ck: [text] = []
+        var new_sel_cr: [[DbRow]] = []
         var new_indexes: [[[text]]] = []
         var new_index_unique: [[bool]] = []
         var i: i32 = 0
@@ -2694,6 +2781,10 @@ class PureDatabase:
                 new_fts_rows.push(self._fts_rows[i])
                 new_vis.push(self._tbl_vis[i])
                 new_vis_xmax.push(self._tbl_vis_xmax[i])
+                new_fts_sk.push(self._fts_search_key[i])
+                new_fts_sr.push(self._fts_search_res[i])
+                new_sel_ck.push(self._sel_cache_key[i])
+                new_sel_cr.push(self._sel_cache_res[i])
                 new_indexes.push(self._indexes[i])
                 new_index_unique.push(self._index_unique[i])
             i = i + 1
@@ -2707,6 +2798,10 @@ class PureDatabase:
         self._fts_rows = new_fts_rows
         self._tbl_vis = new_vis
         self._tbl_vis_xmax = new_vis_xmax
+        self._fts_search_key = new_fts_sk
+        self._fts_search_res = new_fts_sr
+        self._sel_cache_key = new_sel_ck
+        self._sel_cache_res = new_sel_cr
         self._indexes = new_indexes
         self._index_unique = new_index_unique
         # Rebuild typed storage + pk index without the dropped table
@@ -3022,14 +3117,20 @@ class PureDatabase:
             if like_col >= 0:
                 val like_pat = _extract_like_pattern(sel.where_expr)
                 if like_pat != "":
+                    val like_pre = _like_any_prefix(sel.where_expr)
+                    val has_pre = like_pre != ""
                     var ri: i32 = 0
                     while ri < n_tuples:
                         if vis[ri]:
                             val rv = typed[ri]
                             if like_col < rv.len() as i32:
                                 val sv = rv[like_col].to_text()
-                                if _like_match(like_pat, sv):
-                                    base_rows.push(rv)
+                                var pre_ok = true
+                                if has_pre:
+                                    pre_ok = sv.starts_with(like_pre)
+                                if pre_ok:
+                                    if _like_match(like_pat, sv):
+                                        base_rows.push(rv)
                         ri = ri + 1
                     used_like_typed = true
 
