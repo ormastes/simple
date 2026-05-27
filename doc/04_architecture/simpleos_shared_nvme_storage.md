@@ -223,6 +223,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   In `--validate-log-only` mode it checks an existing serial capture; otherwise
   it captures from `SERIAL_PORT` for `SIMPLEOS_NVME_SERIAL_SECONDS` and then
   invokes the same checker app.
+- The same wrapper supports `--preflight`, which verifies the checker runtime,
+  checker app, and at least one host-visible NVMe namespace device before a lab
+  run starts. Labs may override the device glob with `SIMPLEOS_NVME_DEVICE_GLOB`.
 - The q35 pure-Simple real-device marker contract now lists `nvme_perf
   reason=ready`, and serial acceptance validates the detailed performance fields
   in addition to provider, grant, namespace, and transfer markers.

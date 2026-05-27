@@ -5,11 +5,13 @@ set -eu
 #
 # Usage:
 #   sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log build/serial/physical-nvme.log --validate-log-only
+#   sh scripts/run_simpleos_physical_nvme_perf.shs --preflight
 #   SERIAL_PORT=/dev/ttyUSB0 sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log build/serial/physical-nvme.log
 #
 # Env knobs:
 #   SERIAL_PORT                  Serial port to capture when not using --validate-log-only
 #   SERIAL_BAUD                  Serial baud rate (default: 115200)
+#   SIMPLEOS_NVME_DEVICE_GLOB    NVMe namespace device glob for preflight (default: /dev/nvme*n1)
 #   SIMPLEOS_NVME_SERIAL_LOG     Serial log path when --serial-log is omitted
 #   SIMPLEOS_NVME_REPORT_OUT     Optional validation report output path
 #   SIMPLEOS_NVME_SERIAL_SECONDS Capture duration in seconds (default: 30)
@@ -18,10 +20,12 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 SERIAL_PORT="${SERIAL_PORT:-}"
 SERIAL_BAUD="${SERIAL_BAUD:-115200}"
+NVME_DEVICE_GLOB="${SIMPLEOS_NVME_DEVICE_GLOB:-/dev/nvme*n1}"
 SERIAL_LOG="${SIMPLEOS_NVME_SERIAL_LOG:-}"
 REPORT_OUT="${SIMPLEOS_NVME_REPORT_OUT:-}"
 SERIAL_SECONDS="${SIMPLEOS_NVME_SERIAL_SECONDS:-30}"
 VALIDATE_LOG_ONLY=0
+PREFLIGHT=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -38,6 +42,9 @@ while [ "$#" -gt 0 ]; do
             ;;
         --validate-log-only)
             VALIDATE_LOG_ONLY=1
+            ;;
+        --preflight)
+            PREFLIGHT=1
             ;;
         --serial-seconds=*)
             SERIAL_SECONDS="${1#--serial-seconds=}"
@@ -60,6 +67,23 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+if [ "$PREFLIGHT" -eq 1 ]; then
+    if [ ! -x "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
+        echo "[physical-nvme] missing executable checker runtime: ${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" >&2
+        exit 1
+    fi
+    if [ ! -f "${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl" ]; then
+        echo "[physical-nvme] missing checker app: ${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl" >&2
+        exit 1
+    fi
+    if ! ls $NVME_DEVICE_GLOB >/dev/null 2>&1; then
+        echo "[physical-nvme] no NVMe namespace device matched: $NVME_DEVICE_GLOB" >&2
+        exit 1
+    fi
+    echo "[physical-nvme] preflight=ready nvme_device_glob=$NVME_DEVICE_GLOB checker=present"
+    exit 0
+fi
 
 if [ -z "$SERIAL_LOG" ]; then
     echo "[physical-nvme] --serial-log or SIMPLEOS_NVME_SERIAL_LOG is required" >&2
