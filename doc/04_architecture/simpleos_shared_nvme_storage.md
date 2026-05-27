@@ -67,6 +67,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   device, which keeps system boot storage on the same contract as NVFS and DBFS.
 - VFS boot now prefers the pure-Simple NVMe/FAT32 path; the C bridge is fallback
   behavior rather than the first storage path.
+- A successful pure-Simple FAT32 boot loads the app manifest and executable
+  cache from the lease-backed FAT32 root; pure boot validation does not fall
+  through to C-backed reads.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
