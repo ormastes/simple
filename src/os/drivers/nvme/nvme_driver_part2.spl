@@ -26,6 +26,7 @@ use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_write64}
 use os.drivers.nvme.nvme_types.{NVME_REG_VS}
 use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
 use os.drivers.nvme.nvme_queue_notify.*
+use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_pair_from_resources, nvme_cq_doorbell_addr, nvme_sq_doorbell_addr, nvme_dstrd_to_doorbell_stride_bytes}
 use os.drivers.nvme.nvme_transfer_command.{nvme_read_io_command, nvme_write_io_command, nvme_flush_io_command, nvme_io_status_code}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
@@ -87,27 +88,29 @@ impl NvmeDriver:
         if admin_sq_result.is_err():
             return Result.Err("NVMe: failed to allocate admin SQ")
         val admin_sq_addrs = admin_sq_result.unwrap()
-        self.admin_queue.sq_virt = admin_sq_addrs.virt
-        self.admin_queue.sq_phys = admin_sq_addrs.phys
 
         val admin_cq_result = self.alloc_dma(admin_cq_size)
         if admin_cq_result.is_err():
             return Result.Err("NVMe: failed to allocate admin CQ")
         val admin_cq_addrs = admin_cq_result.unwrap()
-        self.admin_queue.cq_virt = admin_cq_addrs.virt
-        self.admin_queue.cq_phys = admin_cq_addrs.phys
+
+        val admin_queue_result = nvme_queue_pair_from_resources(NvmeQueueResources(
+            qid: 0u16,
+            depth: 32u16,
+            sq_phys: admin_sq_addrs.phys,
+            sq_virt: admin_sq_addrs.virt,
+            cq_phys: admin_cq_addrs.phys,
+            cq_virt: admin_cq_addrs.virt,
+            bar0_virt: self.bar0_virt,
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride)
+        ))
+        if admin_queue_result.is_err():
+            return Result.Err("NVMe: invalid admin queue resources: " + admin_queue_result.unwrap_err())
+        self.admin_queue = admin_queue_result.unwrap()
 
         # Zero out queue memory
         self.zero_memory(self.admin_queue.sq_virt, admin_sq_size)
         self.zero_memory(self.admin_queue.cq_virt, admin_cq_size)
-
-        # Set admin queue doorbells
-        # SQ y Tail Doorbell = 0x1000 + 2*y * (4 << DSTRD)
-        # CQ y Head Doorbell = 0x1000 + (2*y+1) * (4 << DSTRD)
-        val db_size = 4 << self.db_stride
-        val db_size_u64 = db_size.to_u64()
-        self.admin_queue.sq_doorbell = self.bar0_virt + 0x1000
-        self.admin_queue.cq_doorbell = self.bar0_virt + 0x1000 + db_size_u64
 
         # Step 5: Write AQA (admin queue attributes)
         # Bits 0-11: ASQS (admin SQ size, 0-based), Bits 16-27: ACQS (admin CQ size, 0-based)
@@ -401,11 +404,7 @@ impl NvmeDriver:
         self.io_queue.cq_phys = cq.phys
         self.zero_memory(cq.virt, cq_size)
 
-        # Set I/O CQ doorbell: CQ y Head Doorbell = 0x1000 + (2*y+1) * (4 << DSTRD)
-        val db_size = 4 << self.db_stride
-        val db_size_u64 = db_size.to_u64()
-        val io_qid: u64 = 1
-        self.io_queue.cq_doorbell = self.bar0_virt + 0x1000 + (2 * io_qid + 1) * db_size_u64
+        self.io_queue.cq_doorbell = nvme_cq_doorbell_addr(self.bar0_virt, 1u16, nvme_dstrd_to_doorbell_stride_bytes(self.db_stride))
 
         # CDW10: QID=1 | QSIZE=(depth-1) << 16
         val cdw10 = 1 | (63u32 << 16)
@@ -437,11 +436,19 @@ impl NvmeDriver:
         self.io_queue.sq_phys = sq.phys
         self.zero_memory(sq.virt, sq_size)
 
-        # Set I/O SQ doorbell: SQ y Tail Doorbell = 0x1000 + 2*y * (4 << DSTRD)
-        val db_size = 4 << self.db_stride
-        val db_size_u64 = db_size.to_u64()
-        val io_qid: u64 = 1
-        self.io_queue.sq_doorbell = self.bar0_virt + 0x1000 + 2 * io_qid * db_size_u64
+        val io_queue_result = nvme_queue_pair_from_resources(NvmeQueueResources(
+            qid: 1u16,
+            depth: 64u16,
+            sq_phys: sq.phys,
+            sq_virt: sq.virt,
+            cq_phys: self.io_queue.cq_phys,
+            cq_virt: self.io_queue.cq_virt,
+            bar0_virt: self.bar0_virt,
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride)
+        ))
+        if io_queue_result.is_err():
+            return Result.Err("NVMe: invalid I/O queue resources: " + io_queue_result.unwrap_err())
+        self.io_queue = io_queue_result.unwrap()
 
         # CDW10: QID=1 | QSIZE=(depth-1) << 16
         val cdw10 = 1 | (63u32 << 16)

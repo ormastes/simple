@@ -109,6 +109,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Freestanding queue construction has a syscall-free resource builder that
   validates platform-owned BAR0, DMA queue memory, queue depth, DMA alignment,
   and doorbell stride before constructing the shared `NvmeQueuePair`.
+- Hosted NVMe initialization now uses the same queue resource builder for
+  completed admin and I/O queue pairs, so user-space and freestanding/system
+  paths share doorbell stride conversion, resource validation, and queue-pair
+  construction instead of carrying separate doorbell math.
 - Freestanding controller readiness now has an explicit resource contract that
   binds system-driver or user-space-driver placement, grant/namespace mode,
   admin queue resources, I/O queue resources, DMA isolation, and IOMMU/broker
@@ -168,7 +172,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   notification waits.
 - `test/unit/os/drivers/nvme/nvme_queue_resources_spec.spl` covers syscall-free
   construction of `NvmeQueuePair` from owned BAR/DMA resources and rejects
-  invalid depth, missing BAR mapping, invalid doorbell stride, and unaligned DMA.
+  invalid depth, missing BAR mapping, invalid doorbell stride, unaligned DMA,
+  and invalid DSTRD-to-doorbell-stride conversion.
 - `test/unit/os/drivers/nvme/nvme_freestanding_controller_spec.spl` covers
   freestanding controller resource validation, system-driver evidence, and the
   requirement that real completion and reversible sector probes be supplied
