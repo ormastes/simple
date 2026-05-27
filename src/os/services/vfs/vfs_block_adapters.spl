@@ -9,6 +9,11 @@
 use os.services.vfs.vfs.{Filesystem}
 use os.services.block_device.{BlockDevice}
 use os.drivers.nvme.nvme_driver.{NvmeDriver, DmaAddrs}
+use os.drivers.nvme.nvme_storage_model.{
+    NvmeFilesystemLease, NvmeFilesystemConsumer,
+    nvme_filesystem_lease_reason, nvme_filesystem_lease_absolute_lba,
+    nvme_filesystem_lease_sector_count, nvme_filesystem_consumer_name
+}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read8, mmio_write8}
 use os.kernel.log.klog_api.{log_raw_println}
 extern fn unsafe_addr_of(ref: any) -> u64
@@ -118,11 +123,16 @@ impl BlockDevice for CNvmeBlockAdapter:
 # data between user-space byte arrays and DMA memory.
 
 class NvmeBlockAdapter:
-    """Wraps NvmeDriver to implement BlockDevice for FAT32."""
+    """Wraps NvmeDriver to implement the filesystem BlockDevice contract."""
     nvme: NvmeDriver
     bounce_virt: u64    # Virtual address of DMA bounce buffer
     bounce_phys: u64    # Physical address of DMA bounce buffer
     ready: bool
+    lease_enabled: bool
+    lease_base_lba: u64
+    lease_lba_count: u64
+    lease_sector_size: u32
+    consumer_name: text
 
 impl NvmeBlockAdapter:
     static fn new(nvme: NvmeDriver) -> NvmeBlockAdapter:
@@ -130,8 +140,52 @@ impl NvmeBlockAdapter:
             nvme: nvme,
             bounce_virt: 0,
             bounce_phys: 0,
-            ready: false
+            ready: false,
+            lease_enabled: false,
+            lease_base_lba: 0u64,
+            lease_lba_count: nvme.sector_count,
+            lease_sector_size: nvme.get_sector_size(),
+            consumer_name: "whole-device"
         )
+
+    static fn for_filesystem_lease(nvme: NvmeDriver, lease: NvmeFilesystemLease, consumer: NvmeFilesystemConsumer) -> Result<NvmeBlockAdapter, text>:
+        val reason = nvme_filesystem_lease_reason(lease, consumer)
+        if reason != "ready":
+            return Err(reason)
+        Ok(NvmeBlockAdapter(
+            nvme: nvme,
+            bounce_virt: 0,
+            bounce_phys: 0,
+            ready: false,
+            lease_enabled: true,
+            lease_base_lba: lease.base_lba,
+            lease_lba_count: nvme_filesystem_lease_sector_count(lease),
+            lease_sector_size: lease.namespace.lba_size,
+            consumer_name: nvme_filesystem_consumer_name(consumer)
+        ))
+
+    fn translate_lba(lba: u64) -> Result<u64, text>:
+        if not self.lease_enabled:
+            if lba >= self.nvme.sector_count:
+                return Err("NvmeBlockAdapter: lba beyond device")
+            return Ok(lba)
+        if lba >= self.lease_lba_count:
+            return Err("NvmeBlockAdapter: lba beyond filesystem lease")
+        Ok(self.lease_base_lba + lba)
+
+    fn sector_count() -> u64:
+        if self.lease_enabled:
+            return self.lease_lba_count
+        self.nvme.sector_count
+
+    fn filesystem_consumer() -> text:
+        self.consumer_name
+
+    static fn translate_lease_lba_for_test(lease: NvmeFilesystemLease, relative_lba: u64) -> Result<u64, text>:
+        nvme_filesystem_lease_absolute_lba(lease, relative_lba)
+
+    static fn lease_sector_count_for_test(lease: NvmeFilesystemLease) -> u64:
+        nvme_filesystem_lease_sector_count(lease)
 
     me init_bounce_buffer() -> Result<bool, text>:
         """Allocate a DMA bounce buffer for sector transfers."""
@@ -151,6 +205,9 @@ impl BlockDevice for NvmeBlockAdapter:
         """Read one sector from NVMe into byte buffer via DMA bounce."""
         if not self.ready:
             return Result.Err("NvmeBlockAdapter: not initialized")
+        val absolute_lba = self.translate_lba(lba)
+        if absolute_lba.is_err():
+            return Result.Err(absolute_lba.unwrap_err())
         # Zero bounce buffer
         var offset: u64 = 0
         val ss = self.nvme.get_sector_size().to_u64()
@@ -159,15 +216,14 @@ impl BlockDevice for NvmeBlockAdapter:
             offset = offset + 4
 
         # Issue NVMe read (1 sector)
-        val result = self.nvme.read_sectors(lba, 1, self.bounce_phys)
+        val result = self.nvme.read_sectors(absolute_lba.unwrap(), 1, self.bounce_phys)
         if result.is_err():
             return Result.Err(result.unwrap_err())
 
         # Copy from bounce buffer to byte array
         var i: u64 = 0
         while i < ss and i.to_i32() < buffer.len():
-            val byte_val = mmio_read32(self.bounce_virt + i) & 0xFF
-            buffer[i.to_i32()] = byte_val.to_u8()
+            buffer[i.to_i32()] = mmio_read8(self.bounce_virt + i)
             i = i + 1
         Result.Ok(true)
 
@@ -175,19 +231,27 @@ impl BlockDevice for NvmeBlockAdapter:
         """Write one sector to NVMe from byte buffer via DMA bounce."""
         if not self.ready:
             return Result.Err("NvmeBlockAdapter: not initialized")
-        # Copy data into bounce buffer
+        val absolute_lba = self.translate_lba(lba)
+        if absolute_lba.is_err():
+            return Result.Err(absolute_lba.unwrap_err())
+        # Clear the whole bounce sector, then copy caller bytes into it.
         val ss = self.nvme.get_sector_size().to_u64()
         var i: u64 = 0
+        while i < ss:
+            mmio_write8(self.bounce_virt + i, 0u8)
+            i = i + 1
+        i = 0
         while i < ss and i.to_i32() < data.len():
-            val byte_val = data[i.to_i32()].to_u32()
-            mmio_write32(self.bounce_virt + i, byte_val)
+            mmio_write8(self.bounce_virt + i, data[i.to_i32()])
             i = i + 1
 
         # Issue NVMe write (1 sector)
-        val result = self.nvme.write_sectors(lba, 1, self.bounce_phys)
+        val result = self.nvme.write_sectors(absolute_lba.unwrap(), 1, self.bounce_phys)
         if result.is_err():
             return Result.Err(result.unwrap_err())
         Result.Ok(true)
 
     me fn sector_size() -> u32:
+        if self.lease_enabled:
+            return self.lease_sector_size
         self.nvme.get_sector_size()

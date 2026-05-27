@@ -46,10 +46,13 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware
   DMA completion or production queue depth performance.
-- Existing filesystem modules still need adapters from `NvmeFilesystemLease` to
-  their concrete `BlockDevice` implementations.
+- FAT32/NVFS/DBFS mounting still needs end-to-end hardware verification on real
+  namespaces, but the VFS NVMe adapter now enforces the lease window before
+  translating filesystem-relative LBAs to physical namespace LBAs.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
   user-assigned leases, grant failures, reserved queue rejection, and shared
   FAT32/NVFS/DBFS block-interface readiness.
+- `test/unit/os/services/vfs/nvme_block_adapter_spec.spl` covers adapter-visible
+  lease translation and out-of-range rejection without requiring real hardware.

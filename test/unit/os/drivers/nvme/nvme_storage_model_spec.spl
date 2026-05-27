@@ -11,7 +11,7 @@ contracts used by capability-backed storage.
 """
 
 use std.spec.{describe, it, expect}
-use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmePartitionIdentity, NvmeQueueAssignment, nvme_queue_role_for_id, nvme_queue_is_system_reserved, nvme_first_data_queue_id, nvme_transfer_evidence, nvme_transfer_readiness_reason, nvme_transfer_ready, nvme_filesystem_lease, nvme_filesystem_lease_reason, nvme_filesystem_lease_ready, nvme_filesystem_consumer_name, nvme_namespace_mode_name}
+use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmePartitionIdentity, NvmeQueueAssignment, nvme_queue_role_for_id, nvme_queue_is_system_reserved, nvme_first_data_queue_id, nvme_transfer_evidence, nvme_transfer_readiness_reason, nvme_transfer_ready, nvme_filesystem_lease, nvme_filesystem_lease_reason, nvme_filesystem_lease_ready, nvme_filesystem_consumer_name, nvme_namespace_mode_name, nvme_filesystem_lease_sector_size, nvme_filesystem_lease_sector_count, nvme_filesystem_lease_absolute_lba}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 
 describe "NVMe storage model":
@@ -179,6 +179,34 @@ describe "NVMe storage model":
             )
             val lease = nvme_filesystem_lease(ns, 0u64, 512u64, NvmeNamespaceMode.System, queue, "simple-driver", "none", false, true)
             expect(nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)).to_equal("nvme-fs-lease-missing-shared-block-interface")
+
+        it "translates filesystem-relative LBAs inside the namespace lease only":
+            val ns = NvmeNamespaceIdentity(
+                controller_id: 0,
+                nsid: 4,
+                lba_size: 4096,
+                lba_count: 4096,
+                eui64: 0,
+                nguid_lo: 0,
+                nguid_hi: 0,
+                uuid_lo: 0,
+                uuid_hi: 0
+            )
+            val queue = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+                role: NvmeQueueRole.System,
+                controller_id: 0,
+                nsid: 4,
+                owner_task: 0,
+                max_depth: 128,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val lease = nvme_filesystem_lease(ns, 128u64, 256u64, NvmeNamespaceMode.System, queue, "simple-driver", "none", true, true)
+            expect(nvme_filesystem_lease_sector_size(lease)).to_equal(4096)
+            expect(nvme_filesystem_lease_sector_count(lease)).to_equal(256u64)
+            expect(nvme_filesystem_lease_absolute_lba(lease, 0u64).unwrap()).to_equal(128u64)
+            expect(nvme_filesystem_lease_absolute_lba(lease, 255u64).unwrap()).to_equal(383u64)
+            expect(nvme_filesystem_lease_absolute_lba(lease, 256u64).unwrap_err()).to_equal("nvme-fs-lease-lba-out-of-range")
 
     describe "pure Simple transfer evidence":
         it "rejects the C boot bridge as NVMe transfer completion":
