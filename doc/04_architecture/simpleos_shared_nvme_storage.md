@@ -102,6 +102,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   transfer module. Hosted and freestanding drivers can use the same LBA bounds,
   NLB encoding, DMA pointer validation, and completion-status decoding instead
   of duplicating C-bridge or syscall-specific logic.
+- `NvmeQueuePair` submission and polling are now syscall-free. Hosted
+  notification waiting lives in a separate companion module, so freestanding
+  system-driver boot code can reuse SQ/CQ ring mechanics without importing the
+  user/hosted `NotificationWait` path.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -119,6 +123,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - The freestanding adapter still needs queue memory ownership and MMIO BAR
   mapping from the boot allocator/platform path; the shared transfer module only
   removes duplicated command construction and range validation.
+- Freestanding queue use still needs platform-owned timeout and interrupt policy
+  once it has real MMIO/DMA ownership; the reusable queue module currently
+  provides polling mechanics only.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
@@ -141,3 +148,6 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `test/unit/os/drivers/nvme/nvme_transfer_command_spec.spl` covers shared
   syscall-free NVMe transfer command construction, zero-count rejection, NLB
   limit rejection, DMA pointer validation, and completion-status decoding.
+- `test/unit/os/drivers/nvme/nvme_queue_boundary_spec.spl` guards that the
+  reusable queue submission/polling module does not import hosted syscalls or
+  notification waits.
