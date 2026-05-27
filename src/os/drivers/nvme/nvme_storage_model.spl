@@ -11,6 +11,15 @@ enum NvmeQueueRole:
     System
     Data
 
+enum NvmeNamespaceMode:
+    System
+    UserAssigned
+
+enum NvmeFilesystemConsumer:
+    Fat32
+    Nvfs
+    Dbfs
+
 struct NvmeNamespaceIdentity:
     """Controller-local namespace plus stable descriptors when available."""
     controller_id: u32
@@ -45,6 +54,23 @@ struct NvmeQueueAssignment:
     max_depth: u16
     rights: u32
 
+struct NvmeFilesystemLease:
+    """Filesystem-facing lease over one NVMe namespace or namespace slice.
+
+    This is the shared contract FAT32, NVFS, and DBFS consume. The real NVMe
+    driver owns queue submission and namespace assignment; filesystems receive
+    only a bounded BlockDevice-compatible LBA window.
+    """
+    namespace: NvmeNamespaceIdentity
+    base_lba: u64
+    lba_count: u64
+    mode: NvmeNamespaceMode
+    queue: NvmeQueueAssignment
+    provider: text
+    grant_kind: text
+    shared_block_interface: bool
+    iommu_or_broker: bool
+
 struct NvmeTransferEvidence:
     """Evidence required before NVMe transfer can replace the C boot bridge."""
     provider: text
@@ -77,6 +103,91 @@ fn nvme_queue_is_system_reserved(queue_id: u16) -> bool:
 
 fn nvme_first_data_queue_id() -> u16:
     SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID
+
+fn nvme_filesystem_consumer_name(consumer: NvmeFilesystemConsumer) -> text:
+    match consumer:
+        case NvmeFilesystemConsumer.Fat32: "fat32"
+        case NvmeFilesystemConsumer.Nvfs: "nvfs"
+        case NvmeFilesystemConsumer.Dbfs: "dbfs"
+
+fn nvme_namespace_mode_name(mode: NvmeNamespaceMode) -> text:
+    match mode:
+        case NvmeNamespaceMode.System: "system"
+        case NvmeNamespaceMode.UserAssigned: "user-assigned"
+
+fn nvme_filesystem_uses_shared_block_interface(consumer: NvmeFilesystemConsumer) -> bool:
+    match consumer:
+        case NvmeFilesystemConsumer.Fat32: true
+        case NvmeFilesystemConsumer.Nvfs: true
+        case NvmeFilesystemConsumer.Dbfs: true
+
+fn nvme_filesystem_lease(
+    namespace: NvmeNamespaceIdentity,
+    base_lba: u64,
+    lba_count: u64,
+    mode: NvmeNamespaceMode,
+    queue: NvmeQueueAssignment,
+    provider: text,
+    grant_kind: text,
+    shared_block_interface: bool,
+    iommu_or_broker: bool
+) -> NvmeFilesystemLease:
+    NvmeFilesystemLease(
+        namespace: namespace,
+        base_lba: base_lba,
+        lba_count: lba_count,
+        mode: mode,
+        queue: queue,
+        provider: provider,
+        grant_kind: grant_kind,
+        shared_block_interface: shared_block_interface,
+        iommu_or_broker: iommu_or_broker
+    )
+
+fn nvme_filesystem_lease_reason(lease: NvmeFilesystemLease, consumer: NvmeFilesystemConsumer) -> text:
+    if lease.provider != "simple-driver":
+        return "nvme-fs-provider-not-simple:" + lease.provider
+    if not nvme_filesystem_uses_shared_block_interface(consumer):
+        return "nvme-fs-consumer-missing-block-interface:" + nvme_filesystem_consumer_name(consumer)
+    if not lease.shared_block_interface:
+        return "nvme-fs-lease-missing-shared-block-interface"
+    if lease.namespace.lba_size < 512u32:
+        return "nvme-fs-namespace-invalid-lba-size"
+    if lease.namespace.lba_count == 0u64:
+        return "nvme-fs-namespace-empty"
+    if lease.lba_count == 0u64:
+        return "nvme-fs-lease-empty"
+    if lease.base_lba + lease.lba_count > lease.namespace.lba_count:
+        return "nvme-fs-lease-out-of-range"
+    if lease.queue.controller_id != lease.namespace.controller_id:
+        return "nvme-fs-queue-controller-mismatch"
+    if lease.queue.nsid != lease.namespace.nsid:
+        return "nvme-fs-queue-namespace-mismatch"
+    if lease.queue.max_depth == 0u16:
+        return "nvme-fs-queue-depth-zero"
+    if lease.mode == NvmeNamespaceMode.System:
+        if lease.queue.role != NvmeQueueRole.System:
+            return "nvme-fs-system-namespace-not-system-queue"
+        return "ready"
+    if lease.queue.role != NvmeQueueRole.Data:
+        return "nvme-fs-user-namespace-not-data-queue"
+    if nvme_queue_is_system_reserved(lease.queue.queue_id):
+        return "nvme-fs-user-namespace-uses-reserved-queue"
+    val access_reason = user_space_driver_all_direct_access_reason(
+        "nvme",
+        "user-space-driver",
+        lease.grant_kind,
+        "non-secure-resource-namespace",
+        lease.shared_block_interface,
+        lease.iommu_or_broker,
+        lease.provider
+    )
+    if access_reason != "ready":
+        return "nvme-fs-user-access-not-ready:" + access_reason
+    "ready"
+
+fn nvme_filesystem_lease_ready(lease: NvmeFilesystemLease, consumer: NvmeFilesystemConsumer) -> bool:
+    nvme_filesystem_lease_reason(lease, consumer) == "ready"
 
 fn nvme_transfer_evidence(
     provider: text,
