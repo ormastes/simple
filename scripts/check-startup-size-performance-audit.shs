@@ -1,0 +1,332 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+BUILD_DIR="${BUILD_DIR:-build/startup_size_perf_audit}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/startup_size_performance_audit_2026-05-27.md}"
+RUNS="${RUNS:-20}"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+bytes_of() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo "n/a"
+    fi
+}
+
+section_dec() {
+    if [ -f "$1" ] && have size; then
+        size "$1" | awk 'NR == 2 {print $4}'
+    else
+        echo "n/a"
+    fi
+}
+
+avg_ms() {
+    cmd="$1"
+    runs="$2"
+    if ! have date; then
+        echo "n/a"
+        return
+    fi
+    i=0
+    total=0
+    ok=0
+    while [ "$i" -lt "$runs" ]; do
+        start="$(date +%s%N)"
+        if sh -c "$cmd" >/dev/null 2>&1; then
+            end="$(date +%s%N)"
+            total=$((total + (end - start)))
+            ok=$((ok + 1))
+        fi
+        i=$((i + 1))
+    done
+    if [ "$ok" -eq 0 ]; then
+        echo "fail"
+    else
+        awk "BEGIN {printf \"%.3f\", ($total / $ok) / 1000000}"
+    fi
+}
+
+write_sources() {
+    cat >"$BUILD_DIR/hello.c" <<'EOF'
+#include <unistd.h>
+int main(void) {
+    static const char msg[] = "Hello World\n";
+    return write(1, msg, sizeof(msg) - 1) < 0;
+}
+EOF
+
+    cat >"$BUILD_DIR/hello_asm.s" <<'EOF'
+.global _start
+.section .text
+_start:
+    mov $1, %rax
+    mov $1, %rdi
+    lea msg(%rip), %rsi
+    mov $12, %rdx
+    syscall
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+.section .rodata
+msg:
+    .ascii "Hello World\n"
+EOF
+
+    cat >"$BUILD_DIR/tui_termios.c" <<'EOF'
+#include <termios.h>
+#include <unistd.h>
+int main(void) {
+    struct termios oldt;
+    tcgetattr(0, &oldt);
+    write(1, "\033[?1049h\033[?25lSimple TUI\033[?25h\033[?1049l\n", 38);
+    tcsetattr(0, TCSANOW, &oldt);
+    return 0;
+}
+EOF
+
+    cat >"$BUILD_DIR/mmap_preload_argparse.c" <<'EOF'
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    const char *path = 0;
+    for (int i = 1; i + 1 < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] == 'f' && argv[i][2] == 0) {
+            path = argv[i + 1];
+            i++;
+        }
+    }
+    if (!path) return 2;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 3;
+    struct stat st;
+    if (fstat(fd, &st) != 0) return 4;
+    if (st.st_size == 0) return 0;
+    unsigned char *p = mmap(0, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (p == MAP_FAILED) return 5;
+    volatile uint64_t sum = 0;
+    for (off_t i = 0; i < st.st_size; i += 4096) sum += p[i];
+    munmap(p, (size_t)st.st_size);
+    close(fd);
+    return (int)(sum & 0);
+}
+EOF
+
+    cat >"$BUILD_DIR/tcp_connect.c" <<'EOF'
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+int main(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return 2;
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(9);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    connect(fd, (struct sockaddr *)&a, sizeof(a));
+    close(fd);
+    return 0;
+}
+EOF
+
+    cat >"$BUILD_DIR/udp_send.c" <<'EOF'
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+int main(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return 2;
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(9);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    sendto(fd, "x", 1, 0, (struct sockaddr *)&a, sizeof(a));
+    close(fd);
+    return 0;
+}
+EOF
+
+    cat >"$BUILD_DIR/http_plain.c" <<'EOF'
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+int main(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return 2;
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(80);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0) {
+        write(fd, "GET / HTTP/1.0\r\n\r\n", 18);
+    }
+    close(fd);
+    return 0;
+}
+EOF
+
+    cat >"$BUILD_DIR/simple_tui_entry.spl" <<'EOF'
+use app.ui.tui.standalone.{run_standalone_tui}
+
+fn main() -> i64:
+    return run_standalone_tui("examples/ui/minimal.ui.sdn")
+EOF
+
+    cat >"$BUILD_DIR/simple_tui_app_entry.spl" <<'EOF'
+use app.ui.tui.app.{run_tui}
+
+fn main() -> i64:
+    return run_tui("examples/ui/minimal.ui.sdn")
+EOF
+
+    dd if=/dev/zero of="$BUILD_DIR/preload_fixture.bin" bs=4096 count=64 >/dev/null 2>&1
+}
+
+build_c() {
+    cc -Os -s "$1" -o "$2"
+}
+
+build_all() {
+    write_sources
+    build_c "$BUILD_DIR/hello.c" "$BUILD_DIR/hello_c"
+    cc -nostdlib -static -s "$BUILD_DIR/hello_asm.s" -o "$BUILD_DIR/hello_asm" 2>/dev/null || true
+    build_c "$BUILD_DIR/tui_termios.c" "$BUILD_DIR/tui_termios_c"
+    build_c "$BUILD_DIR/mmap_preload_argparse.c" "$BUILD_DIR/mmap_preload_argparse_c"
+    build_c "$BUILD_DIR/tcp_connect.c" "$BUILD_DIR/tcp_connect_c"
+    build_c "$BUILD_DIR/udp_send.c" "$BUILD_DIR/udp_send_c"
+    build_c "$BUILD_DIR/http_plain.c" "$BUILD_DIR/http_plain_c"
+
+    if [ -x "$SIMPLE_BINARY" ]; then
+        SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BINARY" native-build \
+            --runtime-bundle core-c-bootstrap \
+            --source src/lib \
+            --source src/app \
+            --entry-closure \
+            --entry examples/01_getting_started/hello_native.spl \
+            --output "$BUILD_DIR/hello_simple" \
+            --strip \
+            --opt-level=aggressive >/tmp/startup_size_perf_hello.$$ 2>&1 || true
+
+        SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BINARY" native-build \
+            --runtime-bundle core-c-bootstrap \
+            --source src/lib \
+            --source src/app \
+            --entry-closure \
+            --entry "$BUILD_DIR/simple_tui_entry.spl" \
+            --output "$BUILD_DIR/simple_tui_standalone" \
+            --strip \
+            --opt-level=aggressive >/tmp/startup_size_perf_tui.$$ 2>&1 || true
+
+        SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BINARY" native-build \
+            --runtime-bundle simple-core \
+            --source src \
+            --entry-closure \
+            --entry "$BUILD_DIR/simple_tui_app_entry.spl" \
+            --output "$BUILD_DIR/simple_tui_app" \
+            --strip >/tmp/startup_size_perf_tui_app.$$ 2>&1 || true
+    fi
+}
+
+marker_summary() {
+    path="$1"
+    if [ -f "$path" ]; then
+        markers="$(strings "$path" | rg -o 'rustls|ureq|regex|ratatui|crossterm|tauri|electron|browser|html_widgets|simple_native_all|libsimple_native_all' | sort | uniq -c | awk '{print $2 ":" $1}' | paste -sd ', ' - 2>/dev/null || true)"
+        if [ -n "$markers" ]; then
+            echo "$markers"
+        else
+            echo "none"
+        fi
+    else
+        echo "n/a"
+    fi
+}
+
+run_status() {
+    cmd="$1"
+    if sh -c "$cmd" >/dev/null 2>&1; then
+        echo "ok"
+    else
+        echo "exit:$?"
+    fi
+}
+
+row() {
+    name="$1"
+    path="$2"
+    run_cmd="$3"
+    printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
+        "$name" \
+        "$(bytes_of "$path")" \
+        "$(section_dec "$path")" \
+        "$(run_status "$run_cmd")" \
+        "$(avg_ms "$run_cmd" "$RUNS")" \
+        "$path" \
+        "$(marker_summary "$path")"
+}
+
+write_report() {
+    {
+        echo "# Startup Size Performance Audit"
+        echo
+        echo "Date: $(date -u +%F)"
+        echo
+        echo "## Scope"
+        echo
+        echo "- Compares minimized C/asm counters with Simple hello and TUI lanes."
+        echo "- Measures stripped file size, \`size\` decimal sections, and average process runtime over $RUNS runs."
+        echo "- C mmap+argparse is the current baseline for preload-cache startup work."
+        echo "- Network rows are minimal C socket baselines for future Simple TCP/UDP/HTTP/S size targets."
+        echo
+        echo "## Results"
+        echo
+        echo "| Artifact | Bytes | Dec Section Bytes | Run Status | Avg Runtime ms | Path | Heavy Markers |"
+        echo "|---|---:|---:|---|---:|---|---|"
+        row "asm hello syscall" "$BUILD_DIR/hello_asm" "$BUILD_DIR/hello_asm"
+        row "C hello write" "$BUILD_DIR/hello_c" "$BUILD_DIR/hello_c"
+        row "C termios TUI" "$BUILD_DIR/tui_termios_c" "$BUILD_DIR/tui_termios_c"
+        row "C mmap preload argparse" "$BUILD_DIR/mmap_preload_argparse_c" "$BUILD_DIR/mmap_preload_argparse_c -f $BUILD_DIR/preload_fixture.bin"
+        row "C TCP connect" "$BUILD_DIR/tcp_connect_c" "$BUILD_DIR/tcp_connect_c"
+        row "C UDP send" "$BUILD_DIR/udp_send_c" "$BUILD_DIR/udp_send_c"
+        row "C HTTP plain connect" "$BUILD_DIR/http_plain_c" "$BUILD_DIR/http_plain_c"
+        row "Simple hello core-c-bootstrap" "$BUILD_DIR/hello_simple" "$BUILD_DIR/hello_simple"
+        row "Simple standalone TUI core-c-bootstrap" "$BUILD_DIR/simple_tui_standalone" "$BUILD_DIR/simple_tui_standalone"
+        row "Simple full TUI app simple-core" "$BUILD_DIR/simple_tui_app" "printf 'quit\\n' | $BUILD_DIR/simple_tui_app"
+        echo
+        echo "## Windows And SimpleOS Counterpart Notes"
+        echo
+        echo "- Linux mmap preload baseline uses \`open\`, \`fstat\`, \`mmap\`, and page-touching every 4096 bytes."
+        echo "- Windows counterpart should use \`CreateFileW\`, \`GetFileSizeEx\`, \`CreateFileMappingW\`, \`MapViewOfFile\`, \`PrefetchVirtualMemory\` when available, and \`UnmapViewOfFile\`."
+        echo "- SimpleOS counterpart should use the same preload contract but back it with the OS page/file cache once the kernel VFS/cache path exists; until then, measure explicit read-ahead into the core runtime cache."
+        echo "- HTTPS is intentionally not linked in this baseline because a real TLS stack changes the target class; Simple should keep TLS behind an explicit runtime feature/capsule."
+        echo
+        echo "## Current Direction"
+        echo
+        echo "- Do not rewrite the TUI from scratch while the standalone Simple TUI remains near the C termios baseline."
+        echo "- Continue dependency refactoring: keep TUI off GUI/web stacks, keep network/TLS/compression out of default runtime, and make mmap/preload an opt-in core capsule."
+    } >"$REPORT_PATH"
+}
+
+build_all
+write_report
+
+echo "startup_size_perf_audit_ready=true"
+echo "report_path=$REPORT_PATH"

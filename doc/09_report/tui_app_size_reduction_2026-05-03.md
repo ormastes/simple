@@ -13,30 +13,26 @@ Date: 2026-05-27
 
 | Artifact | Bytes | Approx |
 |---|---:|---:|
-| Simple hello | 451552 | 0.4 MB |
-| Simple minimal TUI | 451552 | 0.4 MB |
+| Simple hello | 26864 | 0.0 MB |
+| Simple minimal TUI | 26864 | 0.0 MB |
 | C hello | 14472 | 14.1 KB |
 | C ncurses hello | 14472 | 14.1 KB |
 
 ## Simple Hello Sections
 
-- text=421181, data=19848, bss=368, dec=441397
-- .text: 04f8f0
-- .rodata: 00b5e8
-- .eh_frame: 007acc
-- .gcc_except_table: 001aa0
-- .data: 000a00
-- .bss: 000100
+- text=18669, data=664, bss=168, dec=19501
+- .text: 002b35
+- .rodata: 000e29
+- .eh_frame: 00072c
+- .bss: 0000a8
 
 ## Simple Minimal TUI Sections
 
-- text=421205, data=19848, bss=368, dec=441421
-- .text: 04f8f8
-- .rodata: 00b5f8
-- .eh_frame: 007acc
-- .gcc_except_table: 001aa0
-- .data: 000a00
-- .bss: 000100
+- text=18696, data=664, bss=168, dec=19528
+- .text: 002b40
+- .rodata: 000e39
+- .eh_frame: 00072c
+- .bss: 0000a8
 
 ## Anchor Strings
 
