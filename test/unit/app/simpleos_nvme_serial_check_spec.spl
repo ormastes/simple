@@ -36,6 +36,13 @@ fn _run_checker_with_report(serial_path: text, report_path: text) -> (text, text
         15000
     )
 
+fn _run_checker_with_preflight(serial_path: text, preflight_path: text, report_path: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "src/compiler_rust/target/debug/simple",
+        ["run", "src/app/simpleos_nvme_serial_check/main.spl", "--serial-log", serial_path, "--preflight-report", preflight_path, "--report-out", report_path],
+        15000
+    )
+
 fn _run_lab_wrapper(serial_path: text) -> (text, text, i32):
     rt_process_run_timeout(
         "/bin/sh",
@@ -47,6 +54,13 @@ fn _run_lab_wrapper_with_report(serial_path: text, report_path: text) -> (text, 
     rt_process_run_timeout(
         "/bin/sh",
         ["scripts/run_simpleos_physical_nvme_perf.shs", "--serial-log", serial_path, "--validate-log-only", "--report-out", report_path],
+        15000
+    )
+
+fn _run_lab_wrapper_with_preflight(serial_path: text, preflight_path: text, report_path: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        ["scripts/run_simpleos_physical_nvme_perf.shs", "--serial-log", serial_path, "--validate-log-only", "--preflight-report", preflight_path, "--report-out", report_path],
         15000
     )
 
@@ -159,6 +173,68 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(ready_report_text).to_contain("accepted: true")
         expect(ready_report_text).to_contain("device_serial: SN123456")
         expect(ready_report_text).to_contain("gate: real_device_physical_nvme_serial_acceptance_reason")
+
+    it "requires serial identity to match the host preflight report when supplied":
+        val ready_path = "/tmp/simpleos_nvme_identity_compare_ready.log"
+        val preflight_report = "/tmp/simpleos_nvme_identity_compare_preflight.sdn"
+        val mismatch_report = "/tmp/simpleos_nvme_identity_compare_mismatch.sdn"
+        val match_report = "/tmp/simpleos_nvme_identity_compare_match.sdn"
+        val _ = rt_file_delete(ready_path)
+        val _ = rt_file_delete(preflight_report)
+        val _ = rt_file_delete(mismatch_report)
+        val _ = rt_file_delete(match_report)
+        val ready_log = _physical_nvme_access_marker() + _physical_nvme_perf_marker("real-nvme", "false", "real-device") + "TEST PASSED\n"
+        val mismatch_preflight =
+            "physical_nvme_preflight:\n" +
+            "  device: /dev/nvme9n1\n" +
+            "    model: Samsung PM9A3\n" +
+            "    serial: DIFFERENT\n" +
+            "    namespace_nsid: 1\n"
+        val matching_preflight =
+            "physical_nvme_preflight:\n" +
+            "  device: /dev/nvme9n1\n" +
+            "    model: Samsung PM9A3\n" +
+            "    serial: SN123456\n" +
+            "    namespace_nsid: 1\n"
+
+        expect(rt_file_write_text(ready_path, ready_log)).to_equal(true)
+        expect(rt_file_write_text(preflight_report, mismatch_preflight)).to_equal(true)
+        val (_mismatch_stdout, _mismatch_stderr, mismatch_code) = _run_checker_with_preflight(ready_path, preflight_report, mismatch_report)
+        val mismatch_text = rt_file_read_text(mismatch_report) ?? ""
+        expect(mismatch_code).to_equal(1)
+        expect(mismatch_text).to_contain("reason: physical-nvme-preflight-serial-mismatch")
+        expect(mismatch_text).to_contain("preflight_identity_match: false")
+
+        expect(rt_file_write_text(preflight_report, matching_preflight)).to_equal(true)
+        val (_match_stdout, _match_stderr, match_code) = _run_checker_with_preflight(ready_path, preflight_report, match_report)
+        val match_text = rt_file_read_text(match_report) ?? ""
+        expect(match_code).to_equal(0)
+        expect(match_text).to_contain("reason: ready")
+        expect(match_text).to_contain("preflight_identity_match: true")
+
+    it "passes preflight identity comparison through the physical NVMe lab wrapper":
+        val ready_path = "/tmp/simpleos_nvme_lab_wrapper_identity_compare.log"
+        val preflight_report = "/tmp/simpleos_nvme_lab_wrapper_identity_preflight.sdn"
+        val report = "/tmp/simpleos_nvme_lab_wrapper_identity_compare.sdn"
+        val _ = rt_file_delete(ready_path)
+        val _ = rt_file_delete(preflight_report)
+        val _ = rt_file_delete(report)
+        val ready_log = _physical_nvme_access_marker() + _physical_nvme_perf_marker("real-nvme", "false", "real-device") + "TEST PASSED\n"
+        val matching_preflight =
+            "physical_nvme_preflight:\n" +
+            "  device: /dev/nvme9n1\n" +
+            "    serial: SN123456\n" +
+            "    namespace_nsid: 1\n"
+
+        expect(rt_file_write_text(ready_path, ready_log)).to_equal(true)
+        expect(rt_file_write_text(preflight_report, matching_preflight)).to_equal(true)
+
+        val (_stdout, _stderr, code) = _run_lab_wrapper_with_preflight(ready_path, preflight_report, report)
+        val report_text = rt_file_read_text(report) ?? ""
+
+        expect(code).to_equal(0)
+        expect(report_text).to_contain("preflight_report: " + preflight_report)
+        expect(report_text).to_contain("preflight_identity_match: true")
 
     it "preflights the physical NVMe lab environment before serial capture":
         val fake_nvme = "/tmp/simpleos_nvme_preflight_device"
