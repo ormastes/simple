@@ -12,6 +12,7 @@ use os.drivers.nvme.nvme_storage_model.{
     NvmeQueueRole,
     nvme_filesystem_lease,
     nvme_filesystem_lease_ready,
+    nvme_filesystem_lease_same_identity,
     nvme_first_data_queue_id,
     nvme_transfer_evidence
 }
@@ -184,3 +185,16 @@ describe "NVMe user namespace assignment":
 
         expect(result.is_ok()).to_equal(true)
         expect(nvme_filesystem_lease_ready(result.unwrap(), NvmeFilesystemConsumer.Dbfs)).to_equal(true)
+
+    it "rejects same queue user leases with different LBA windows":
+        val grant = _grant(42u64)
+        val evidence = _user_evidence(grant)
+        val active = nvme_user_assigned_filesystem_lease_from_grant(evidence, grant, 0u32, 5u32, 4096u32, 8192u64, 128u64, 1024u64, nvme_first_data_queue_id(), 42u64, 64u16, NvmeFilesystemConsumer.Fat32).unwrap()
+        val same = nvme_user_assigned_filesystem_lease_from_grant_checked(evidence, grant, 0u32, 5u32, 4096u32, 8192u64, 128u64, 1024u64, nvme_first_data_queue_id(), 42u64, 64u16, NvmeFilesystemConsumer.Nvfs, [active])
+        val shifted = nvme_user_assigned_filesystem_lease_from_grant_checked(evidence, grant, 0u32, 5u32, 4096u32, 8192u64, 256u64, 1024u64, nvme_first_data_queue_id(), 42u64, 64u16, NvmeFilesystemConsumer.Dbfs, [active])
+        val resized = nvme_user_assigned_filesystem_lease_from_grant_checked(evidence, grant, 0u32, 5u32, 4096u32, 8192u64, 128u64, 2048u64, nvme_first_data_queue_id(), 42u64, 64u16, NvmeFilesystemConsumer.Dbfs, [active])
+
+        expect(same.is_ok()).to_equal(true)
+        expect(nvme_filesystem_lease_same_identity(active, same.unwrap())).to_equal(true)
+        expect(shifted.unwrap_err()).to_equal("nvme-fs-user-namespace-window-conflict")
+        expect(resized.unwrap_err()).to_equal("nvme-fs-user-namespace-window-conflict")

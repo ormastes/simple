@@ -17,7 +17,7 @@ use os.drivers.nvme.nvme_storage_model.{
 use std.io.dma.{SharedDmaBuffer}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.extension.{DirectIoExt}
-use std.fs_driver.direct_io.{DirectIoRequest, DirectIoBatchRequest, DirectIoResult, DIRECT_IO_READ, DIRECT_IO_WRITE, DIRECT_IO_TIMEOUT_CODE}
+use std.fs_driver.direct_io.{DirectIoRequest, DirectIoBatchRequest, DirectIoResult, DIRECT_IO_READ, DIRECT_IO_WRITE, DIRECT_IO_TIMEOUT_CODE, direct_io_validate_batch}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read8, mmio_write8}
 use os.kernel.log.klog_api.{log_raw_println}
 extern fn unsafe_addr_of(ref: any) -> u64
@@ -370,18 +370,13 @@ impl NvmeBlockAdapter:
         if req.file_offsets.len() == 0:
             return Err(FsError.InvalidArg)
         val ext = self.direct_4k_batch_extension()
-        val expected_bytes = req.file_offsets.len().to_u64() * 4096u64
-        if req.buffer.byte_len < expected_bytes:
+        val expected_bytes = direct_io_validate_batch(ext, req, 4096u64)
+        if expected_bytes.is_err():
+            return Err(expected_bytes.unwrap_err())
+        if self.lease_sector_size == 0u32:
             return Err(FsError.InvalidArg)
-        val valid = ext.validate_shared_buffer(req.file_offsets[0], req.buffer)
-        if val Err(e) = valid:
-            return Err(e)
         var relative_lbas: [u64] = []
         for offset in req.file_offsets:
-            if offset < 0:
-                return Err(FsError.InvalidArg)
-            if (offset as u64) % 4096u64 != 0u64:
-                return Err(FsError.InvalidArg)
             relative_lbas.push((offset as u64) / self.lease_sector_size.to_u64())
         val io_result = if req.op == DIRECT_IO_READ:
             self.read_4k_shared_dma_batch(relative_lbas, req.buffer)
@@ -391,7 +386,7 @@ impl NvmeBlockAdapter:
             return Err(FsError.IoError(code: 5u32))
         Ok(DirectIoResult(
             submitted: true,
-            bytes: expected_bytes,
+            bytes: expected_bytes.unwrap(),
             backend_tag: ext.backend_tag,
             status: "submitted",
             buffered_copy_bytes: 0u64,

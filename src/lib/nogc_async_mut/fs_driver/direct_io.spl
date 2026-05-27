@@ -93,6 +93,30 @@ fn direct_io_write_batch_request(handle_id: u64, file_offsets: [i64], buffer: Sh
         timeout_polls: timeout_polls
     )
 
+fn direct_io_validate_batch(ext: DirectIoExt, req: DirectIoBatchRequest, slot_bytes: u64) -> Result<u64, FsError>:
+    """Validate a same-size random direct-I/O batch without issuing it."""
+    if req.handle_id == 0:
+        return Err(FsError.InvalidArg)
+    if req.op != DIRECT_IO_READ and req.op != DIRECT_IO_WRITE:
+        return Err(FsError.InvalidArg)
+    if req.timeout_polls == 0:
+        return Err(FsError.Transient(code: DIRECT_IO_TIMEOUT_CODE))
+    if req.file_offsets.len() == 0:
+        return Err(FsError.InvalidArg)
+    if slot_bytes == 0u64:
+        return Err(FsError.InvalidArg)
+    val expected_bytes = req.file_offsets.len().to_u64() * slot_bytes
+    if req.buffer.byte_len < expected_bytes:
+        return Err(FsError.InvalidArg)
+    val valid = ext.validate_shared_buffer(req.file_offsets[0], req.buffer)
+    if val Err(e) = valid:
+        return Err(e)
+    for offset in req.file_offsets:
+        val offset_valid = ext.validate_shared_buffer(offset, req.buffer)
+        if val Err(e) = offset_valid:
+            return Err(e)
+    Ok(expected_bytes)
+
 fn direct_io_submit(ext: DirectIoExt, req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
     """Validate and model an explicit direct-I/O submission."""
     if req.handle_id == 0:
@@ -124,6 +148,27 @@ fn direct_io_submit(ext: DirectIoExt, req: DirectIoRequest) -> Result<DirectIoRe
     Ok(DirectIoResult(
         submitted: true,
         bytes: req.buffer.byte_len,
+        backend_tag: ext.backend_tag,
+        status: "submitted",
+        buffered_copy_bytes: 0,
+        direct_dma_copy_bytes: 0,
+        cleanup_required: true
+    ))
+
+fn direct_io_submit_batch(ext: DirectIoExt, req: DirectIoBatchRequest, slot_bytes: u64) -> Result<DirectIoResult, FsError>:
+    """Validate and model an explicit batched direct-I/O submission."""
+    val expected_bytes = direct_io_validate_batch(ext, req, slot_bytes)
+    if expected_bytes.is_err():
+        return Err(expected_bytes.unwrap_err())
+
+    if req.op == DIRECT_IO_WRITE:
+        dma_shared_sync_cpu_to_device(req.buffer)
+    else:
+        dma_shared_sync_device_to_cpu(req.buffer)
+
+    Ok(DirectIoResult(
+        submitted: true,
+        bytes: expected_bytes.unwrap(),
         backend_tag: ext.backend_tag,
         status: "submitted",
         buffered_copy_bytes: 0,

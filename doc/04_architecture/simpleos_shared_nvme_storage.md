@@ -211,6 +211,14 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   admission, system boot leases, and hardware-backed FAT32/NVFS/DBFS adapters
   can coexist without releasing one lease shifting another lease onto the wrong
   direct adapter.
+- Batched direct-I/O validation now lives in the shared stdlib DirectIo module
+  used by hosted and SimpleOS storage code. The NVMe adapter still owns the
+  hardware submission, but handle/op/timeout/alignment/buffer-size checks and
+  submitted-byte reporting are common logic rather than adapter-local policy.
+- Active user namespace leases are treated as exact lease identities for
+  release and direct-adapter routing, including base LBA, length, namespace
+  geometry, and queue depth. Reusing the same owner/grant/queue for a different
+  namespace window is rejected instead of becoming an ambiguous alias.
 
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware
