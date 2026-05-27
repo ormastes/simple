@@ -1,0 +1,115 @@
+# EasyFix Rules - Short Grammar Refactors (Text-Scanning)
+#
+# Conservative rewrites from explicit long grammar to proven short grammar:
+#   L:short_grammar_method_ref — `\x: x.method()` -> `&:method`
+
+use std.tooling.easy_fix.*
+use compiler.tools.fix.rules.helpers.*
+
+fn check_short_grammar_refactor(source: text, file: text) -> [EasyFix]:
+    for_each_line(source, \ctx:
+        _check_short_grammar_line(ctx, file)
+    )
+
+fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    var search_from = 0
+    while search_from < ctx.line.len():
+        val tail = ctx.line.slice(search_from)
+        val rel = tail.find("\\")
+        if rel < 0:
+            return fixes
+
+        val lambda_start = search_from + rel
+        val parsed = _parse_method_ref_candidate(ctx.line, lambda_start)
+        match parsed:
+            case Some(candidate):
+                var fix = EasyFix.create(
+                    id: "L:short_grammar_method_ref:{ctx.line_num}:{lambda_start + 1}",
+                    description: "replace explicit lambda with method reference short grammar `&:{candidate.method}`",
+                    confidence: FixConfidence.Safe
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file,
+                    start: ctx.byte_offset + lambda_start,
+                    end: ctx.byte_offset + candidate.end_offset,
+                    line: ctx.line_num,
+                    column: lambda_start + 1,
+                    new_text: "&:{candidate.method}"
+                ))
+                fixes.push(fix)
+                search_from = candidate.end_offset
+            case nil:
+                search_from = lambda_start + 1
+
+    fixes
+
+struct ShortGrammarMethodRefCandidate:
+    method: text
+    end_offset: i64
+
+fn _parse_method_ref_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarMethodRefCandidate>:
+    val after_lambda = line.slice(lambda_start + 1)
+    val colon_rel = after_lambda.find(":")
+    if colon_rel < 0:
+        return nil
+
+    val param = after_lambda.slice(0, colon_rel).trim()
+    if not _is_plain_identifier(param):
+        return nil
+
+    var body_start = lambda_start + 1 + colon_rel + 1
+    while body_start < line.len() and line.slice(body_start, body_start + 1) == " ":
+        body_start = body_start + 1
+
+    val receiver_prefix = param + "."
+    if not line.slice(body_start).starts_with(receiver_prefix):
+        return nil
+
+    val method_start = body_start + receiver_prefix.len()
+    val method_end = _scan_identifier_end(line, method_start)
+    if method_end <= method_start:
+        return nil
+
+    val method = line.slice(method_start, method_end)
+    if method.starts_with("_"):
+        return nil
+
+    val call_end = method_end + 2
+    if call_end > line.len() or line.slice(method_end, call_end) != "()":
+        return nil
+
+    val suffix = line.slice(call_end).trim()
+    if suffix != "" and not suffix.starts_with(")") and not suffix.starts_with(","):
+        return nil
+
+    Some(ShortGrammarMethodRefCandidate(method: method, end_offset: call_end))
+
+fn _scan_identifier_end(line: text, start: i64) -> i64:
+    var i = start
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if not _is_identifier_char(ch):
+            return i
+        i = i + 1
+    i
+
+fn _is_plain_identifier(value: text) -> bool:
+    if value == "":
+        return false
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if i == 0:
+            if not _is_identifier_start(ch):
+                return false
+        elif not _is_identifier_char(ch):
+            return false
+        i = i + 1
+    true
+
+fn _is_identifier_start(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+
+fn _is_identifier_char(ch: text) -> bool:
+    _is_identifier_start(ch) or (ch >= "0" and ch <= "9")

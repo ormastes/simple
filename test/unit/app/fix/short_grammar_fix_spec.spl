@@ -1,0 +1,38 @@
+use compiler.tools.fix.rules.{check_short_grammar_refactor}
+use compiler.tools.fix.main.{FixApplicator, collect_fixes_from_source}
+use std.tooling.easy_fix.{easyfix_replacements}
+
+describe "short grammar easy fix":
+    it "rewrites explicit method-call lambda to method reference":
+        val source = "fn sample():\n    val lengths = words.map(\\w: w.len())\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("&:len")
+
+    it "applies method reference replacement in memory":
+        val source = "fn sample():\n    val lengths = words.map(\\w: w.len())\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        var sources: Dict<text, text> = {}
+        sources["sample.spl"] = source
+        val result = FixApplicator.apply(fixes, sources)
+        match result:
+            case Ok(updated):
+                expect(updated["sample.spl"]).to_contain("words.map(&:len)")
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "does not rewrite lambdas with additional expression logic":
+        val source = "fn sample():\n    val adjusted = words.map(\\w: w.len() + 1)\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(0)
+
+    it "is registered in all fix rules":
+        val source = "fn sample():\n    val trimmed = parts.map(\\p: p.trim())\n"
+        val fixes = collect_fixes_from_source("sample.spl", source)
+        var found = false
+        for fix in fixes:
+            val reps = easyfix_replacements(fix)
+            if reps.len() > 0 and reps[0].new_text == "&:trim":
+                found = true
+        expect(found).to_equal(true)

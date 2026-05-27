@@ -1,52 +1,28 @@
 """
-# Async I/O Completion Driver
+# Async I/O Completion Driver — Pure Simple Implementation
 
 **Feature IDs:** #IO-100
 **Category:** Runtime
 **Status:** In Progress
 **Design:** doc/05_design/async_io_nginx_perf_optimization.md
-**Research:** doc/01_research/async_io_backend_comparison_2026-02-23.md
 
 ## Overview
 
-Unified completion-based I/O driver surface. The portable no-GC backend is a
-Simple-owned fallback that supports timeout completions and reports kernel I/O
-operations as unsupported. Platform-specific backends can replace this module
-with io_uring/epoll/kqueue/IOCP implementations without changing callers.
-
-| Platform     | Primary     | Fallback |
-|-------------|-------------|----------|
-| Linux 5.1+  | io_uring    | epoll    |
-| Linux <5.1  | epoll       | —        |
-| macOS       | kqueue      | —        |
-| FreeBSD     | kqueue+AIO  | —        |
-| Windows     | IOCP        | —        |
+Completion-based I/O driver implemented in pure Simple using existing
+sync TCP/file externs with short timeouts for non-blocking polling.
+Platform-specific native backends (epoll/kqueue/IOCP) can replace this
+as an optimize plugin for compiled mode.
 
 ## Usage
 
 ```simple
 val driver = IoDriver.new()
-print "Backend: {driver.backend_name()}"
-
-# Submit operations (queued until flush)
-val op1 = driver.submit_timeout(1000)
-val count = driver.flush()
-
-# Poll for completions
-val completions = driver.poll(64, 2000)
+val op = driver.submit_timeout(100)
+driver.flush()
+val completions = driver.poll(64, 200)
 for c in completions:
     print "Op {c.id} completed: result={c.result}"
-
 driver.close()
-```
-
-## Completion Struct
-
-```simple
-struct Completion:
-    id: i64       # operation ID from submit_*
-    result: i64   # bytes transferred (>=0) or negative errno
-    flags: i64    # platform-specific flags
 ```
 """
 
@@ -54,322 +30,439 @@ use std.io.net_backend.{NetBackendCapabilities, net_backend_capabilities}
 
 val ERR_UNSUPPORTED: i64 = -38
 
-# ============================================================================
-# C Runtime Externs (async_driver.c — epoll/kqueue/IOCP)
-#
-# When the native backend is linked, rt_driver_create returns a non-negative
-# handle. All subsequent rt_driver_* calls dispatch through the C vtable.
-# When native is unavailable (interpreter fallback), rt_driver_create returns
-# -1 and methods fall through to the portable stub path.
-# ============================================================================
+val _OP_ACCEPT: i64 = 1
+val _OP_RECV: i64 = 2
+val _OP_SEND: i64 = 3
+val _OP_SENDFILE: i64 = 4
+val _OP_OPEN: i64 = 5
+val _OP_CLOSE: i64 = 6
+val _OP_TIMEOUT: i64 = 7
+val _OP_CONNECT: i64 = 8
+val _OP_READ: i64 = 9
+val _OP_WRITE: i64 = 10
+val _OP_FSYNC: i64 = 11
 
-extern fn rt_driver_create(queue_depth: i64) -> i64
-extern fn rt_driver_destroy(handle: i64)
-extern fn rt_driver_submit_accept(handle: i64, listen_fd: i64) -> i64
-extern fn rt_driver_submit_connect(handle: i64, fd: i64, addr: text, port: i64) -> i64
-extern fn rt_driver_submit_recv(handle: i64, fd: i64, buf_size: i64) -> i64
-extern fn rt_driver_submit_send(handle: i64, fd: i64, data: text, len: i64) -> i64
-extern fn rt_driver_submit_sendfile(handle: i64, sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64
-extern fn rt_driver_submit_read(handle: i64, fd: i64, buf_size: i64, offset: i64) -> i64
-extern fn rt_driver_submit_write(handle: i64, fd: i64, data: text, len: i64, offset: i64) -> i64
-extern fn rt_driver_submit_open(handle: i64, path: text, flags: i64, mode: i64) -> i64
-extern fn rt_driver_submit_close(handle: i64, fd: i64) -> i64
-extern fn rt_driver_submit_fsync(handle: i64, fd: i64) -> i64
-extern fn rt_driver_submit_timeout(handle: i64, timeout_ms: i64) -> i64
-extern fn rt_driver_flush(handle: i64) -> i64
-extern fn rt_driver_poll(handle: i64, max: i64, timeout_ms: i64) -> i64
-extern fn rt_driver_poll_id(handle: i64, index: i64) -> i64
-extern fn rt_driver_poll_result(handle: i64, index: i64) -> i64
-extern fn rt_driver_poll_flags(handle: i64, index: i64) -> i64
-extern fn rt_driver_poll_data(handle: i64, index: i64) -> text
-extern fn rt_driver_poll_data_len(handle: i64, index: i64) -> i64
-extern fn rt_driver_cancel(handle: i64, op_id: i64) -> bool
-extern fn rt_driver_backend_name(handle: i64) -> text
-extern fn rt_driver_supports_sendfile(handle: i64) -> bool
-extern fn rt_driver_supports_zero_copy(handle: i64) -> bool
-
-# ============================================================================
-# Portable Fallback (interpreter mode / no C backend)
-# ============================================================================
-
-val _PORTABLE_HANDLE: i64 = -100
-
-var _g_next_driver_op_id: i64 = 1
-var _g_snapshot_id: i64 = 0
-var _g_snapshot_result: i64 = 0
-var _g_snapshot_flags: i64 = 0
-var _g_snapshot_data: text = ""
-var _g_snapshot_count: i64 = 0
-
-fn _driver_submit(result: i64, data: text) -> i64:
-    val op_id = _g_next_driver_op_id
-    _g_next_driver_op_id = _g_next_driver_op_id + 1
-    _g_snapshot_id = op_id
-    _g_snapshot_result = result
-    _g_snapshot_flags = 0
-    _g_snapshot_data = data
-    _g_snapshot_count = 1
-    op_id
-
-fn _driver_poll_count(max: i64) -> i64:
-    if max <= 0:
-        return 0
-    _g_snapshot_count
-
-# ============================================================================
-# Completion Struct
-# ============================================================================
+extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
+extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_flush(fd: i64) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 struct Completion:
-    """Result of a completed I/O operation."""
     id: i64
     result: i64
     flags: i64
 
-# ============================================================================
-# IoDriver Class
-# ============================================================================
-
 class IoDriver:
-    """Unified async I/O completion driver.
-
-    Wraps the C spl_driver layer with automatic backend selection.
-    Single-threaded (one per worker in thread-per-core model).
-
-    Example:
-        val driver = IoDriver.new()
-        val op = driver.submit_timeout(100)
-        driver.flush()
-        val completions = driver.poll(64, 200)
-        driver.close()
-    """
-    handle: i64
+    _p_id: [i64]
+    _p_type: [i64]
+    _p_fd: [i64]
+    _p_fd2: [i64]
+    _p_data: [text]
+    _p_size: [i64]
+    _p_offset: [i64]
+    _p_length: [i64]
+    _p_path: [text]
+    _p_time: [i64]
+    _c_id: [i64]
+    _c_result: [i64]
+    _c_flags: [i64]
+    _c_data: [text]
+    _next_id: i64
+    _next_fh: i64
+    _fh_ids: [i64]
+    _fh_data: [text]
 
     static fn new() -> IoDriver:
-        """Create driver with default queue depth (256)."""
-        val h = rt_driver_create(256)
-        if h >= 0:
-            return IoDriver(handle: h)
-        IoDriver(handle: _PORTABLE_HANDLE)
+        IoDriver(
+            _p_id: [], _p_type: [], _p_fd: [], _p_fd2: [],
+            _p_data: [], _p_size: [], _p_offset: [], _p_length: [],
+            _p_path: [], _p_time: [],
+            _c_id: [], _c_result: [], _c_flags: [], _c_data: [],
+            _next_id: 1, _next_fh: 10000,
+            _fh_ids: [], _fh_data: []
+        )
 
     static fn with_depth(depth: i64) -> IoDriver:
-        """Create driver with custom queue depth."""
-        val h = rt_driver_create(depth)
-        if h >= 0:
-            return IoDriver(handle: h)
-        IoDriver(handle: _PORTABLE_HANDLE)
+        IoDriver.new()
+
+    fn _alloc_id(self) -> i64:
+        val id = self._next_id
+        self._next_id = id + 1
+        id
+
+    fn _push_op(self, op_type: i64, fd: i64, fd2: i64, data: text, size: i64, offset: i64, length: i64, path: text, time_ms: i64) -> i64:
+        val id = self._alloc_id()
+        self._p_id.push(id)
+        self._p_type.push(op_type)
+        self._p_fd.push(fd)
+        self._p_fd2.push(fd2)
+        self._p_data.push(data)
+        self._p_size.push(size)
+        self._p_offset.push(offset)
+        self._p_length.push(length)
+        self._p_path.push(path)
+        self._p_time.push(time_ms)
+        id
+
+    fn _complete(self, id: i64, result: i64, flags: i64, data: text):
+        self._c_id.push(id)
+        self._c_result.push(result)
+        self._c_flags.push(flags)
+        self._c_data.push(data)
+
+    fn _now_ms(self) -> i64:
+        rt_time_now_unix_micros() / 1000
+
+    fn _find_file(self, handle: i64) -> text:
+        var i = 0
+        while i < self._fh_ids.len():
+            if self._fh_ids[i] == handle:
+                return self._fh_data[i]
+            i = i + 1
+        ""
+
+    fn _remove_file(self, handle: i64):
+        var new_ids: [i64] = []
+        var new_data: [text] = []
+        var i = 0
+        while i < self._fh_ids.len():
+            if self._fh_ids[i] != handle:
+                new_ids.push(self._fh_ids[i])
+                new_data.push(self._fh_data[i])
+            i = i + 1
+        self._fh_ids = new_ids
+        self._fh_data = new_data
+
+    # NOTE: _keep_pending was removed because arrays are value types in Simple.
+    # Passing arrays to a helper function and pushing onto them only modifies
+    # local copies. All keep-pending logic is now inlined at each call site.
 
     # ---- Network Operations ----
 
     fn submit_accept(self, listen_fd: i64) -> i64:
-        """Submit async accept on a listening socket. Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_accept(self.handle, listen_fd)
-        _driver_submit(ERR_UNSUPPORTED, "")
+        self._push_op(_OP_ACCEPT, listen_fd, 0, "", 0, 0, 0, "", 0)
 
     fn submit_connect(self, fd: i64, addr: text, port: i64) -> i64:
-        """Submit async connect. Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_connect(self.handle, fd, addr, port)
-        _driver_submit(ERR_UNSUPPORTED, "")
+        self._push_op(_OP_CONNECT, fd, port, addr, 0, 0, 0, "", 0)
 
     fn submit_recv(self, fd: i64, buf_size: i64) -> i64:
-        """Submit async receive. Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_recv(self.handle, fd, buf_size)
-        _driver_submit(ERR_UNSUPPORTED, "")
+        self._push_op(_OP_RECV, fd, 0, "", buf_size, 0, 0, "", 0)
 
     fn submit_send(self, fd: i64, data: text) -> i64:
-        """Submit async send. Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_send(self.handle, fd, data, data.len())
-        _driver_submit(data.len(), "")
+        self._push_op(_OP_SEND, fd, 0, data, 0, 0, data.len(), "", 0)
 
     fn submit_sendfile(self, sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
-        """Submit async sendfile (zero-copy file-to-socket). Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_sendfile(self.handle, sock_fd, file_fd, offset, len)
-        _driver_submit(ERR_UNSUPPORTED, "")
+        self._push_op(_OP_SENDFILE, sock_fd, file_fd, "", 0, offset, len, "", 0)
 
     # ---- File I/O Operations ----
 
     fn submit_read(self, fd: i64, buf_size: i64, offset: i64) -> i64:
-        """Submit async file read. Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_read(self.handle, fd, buf_size, offset)
-        _driver_submit(ERR_UNSUPPORTED, "")
+        self._push_op(_OP_READ, fd, 0, "", buf_size, offset, 0, "", 0)
 
     fn submit_write(self, fd: i64, data: text, offset: i64) -> i64:
-        """Submit async file write. Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_write(self.handle, fd, data, data.len(), offset)
-        _driver_submit(data.len(), "")
+        self._push_op(_OP_WRITE, fd, 0, data, 0, offset, data.len(), "", 0)
 
     fn submit_open(self, path: text, flags: i64, mode: i64) -> i64:
-        """Submit async file open. Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_open(self.handle, path, flags, mode)
-        _driver_submit(ERR_UNSUPPORTED, "")
+        self._push_op(_OP_OPEN, flags, mode, "", 0, 0, 0, path, 0)
 
     fn submit_close(self, fd: i64) -> i64:
-        """Submit async file close. Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_close(self.handle, fd)
-        _driver_submit(0, "")
+        self._push_op(_OP_CLOSE, fd, 0, "", 0, 0, 0, "", 0)
 
     fn submit_fsync(self, fd: i64) -> i64:
-        """Submit async fsync. Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_fsync(self.handle, fd)
-        _driver_submit(0, "")
+        self._push_op(_OP_FSYNC, fd, 0, "", 0, 0, 0, "", 0)
 
     # ---- Timer ----
 
     fn submit_timeout(self, timeout_ms: i64) -> i64:
-        """Submit a timeout. Completes after timeout_ms milliseconds. Returns op_id."""
-        if self.handle >= 0:
-            return rt_driver_submit_timeout(self.handle, timeout_ms)
-        _driver_submit(0, "")
+        val target = self._now_ms() + timeout_ms
+        self._push_op(_OP_TIMEOUT, 0, 0, "", 0, 0, 0, "", target)
 
     # ---- Batch Control ----
 
     fn flush(self) -> i64:
-        """Flush all queued operations to the kernel. Returns count submitted."""
-        if self.handle >= 0:
-            return rt_driver_flush(self.handle)
-        _g_snapshot_count
+        self._p_id.len()
 
     fn poll(self, max: i64, timeout_ms: i64) -> [Completion]:
-        """Poll for completions.
-
-        Args:
-            max: Maximum completions to return
-            timeout_ms: -1=block forever, 0=non-blocking, >0=timeout in ms
-
-        Returns:
-            Array of Completion structs
-        """
-        var count = 0
-        if self.handle >= 0:
-            count = rt_driver_poll(self.handle, max, timeout_ms)
-        else:
-            count = _driver_poll_count(max)
+        val count = self.poll_count(max, timeout_ms)
         var result: [Completion] = []
         var i = 0
         while i < count:
             val c = Completion(
-                id: self.poll_id(i),
-                result: self.poll_result(i),
-                flags: self.poll_flags(i)
+                id: self._c_id[i],
+                result: self._c_result[i],
+                flags: self._c_flags[i]
             )
             result.push(c)
             i = i + 1
         result
 
     fn poll_count(self, max: i64, timeout_ms: i64) -> i64:
-        """Poll for completions and keep them in the driver snapshot.
+        self._c_id = []
+        self._c_result = []
+        self._c_flags = []
+        self._c_data = []
 
-        This avoids allocating a `[Completion]` array on hot worker paths.
-        Call `poll_id`, `poll_result`, `poll_flags`, or `poll_data` with
-        indices from `0 .. count`.
-        """
-        if self.handle >= 0:
-            return rt_driver_poll(self.handle, max, timeout_ms)
-        _driver_poll_count(max)
+        var np_id: [i64] = []
+        var np_type: [i64] = []
+        var np_fd: [i64] = []
+        var np_fd2: [i64] = []
+        var np_data: [text] = []
+        var np_size: [i64] = []
+        var np_offset: [i64] = []
+        var np_length: [i64] = []
+        var np_path: [text] = []
+        var np_time: [i64] = []
+
+        var accept_idx: i64 = -1
+        var i = 0
+
+        while i < self._p_id.len():
+            if self._c_id.len() >= max:
+                np_id.push(self._p_id[i])
+                np_type.push(self._p_type[i])
+                np_fd.push(self._p_fd[i])
+                np_fd2.push(self._p_fd2[i])
+                np_data.push(self._p_data[i])
+                np_size.push(self._p_size[i])
+                np_offset.push(self._p_offset[i])
+                np_length.push(self._p_length[i])
+                np_path.push(self._p_path[i])
+                np_time.push(self._p_time[i])
+                i = i + 1
+                continue
+
+            val ot = self._p_type[i]
+            val fd = self._p_fd[i]
+            val oid = self._p_id[i]
+
+            if ot == _OP_ACCEPT:
+                accept_idx = i
+                i = i + 1
+                continue
+
+            elif ot == _OP_SEND:
+                val res = rt_io_tcp_write_text(fd, self._p_data[i])
+                self._complete(oid, res, 0, "")
+                i = i + 1
+                continue
+
+            elif ot == _OP_RECV:
+                rt_io_tcp_set_read_timeout(fd, 1)
+                val bytes = rt_io_tcp_read(fd, self._p_size[i])
+                if bytes.len() > 0:
+                    val txt = rt_bytes_to_text(bytes)
+                    self._complete(oid, bytes.len(), 0, txt)
+                    i = i + 1
+                    continue
+
+            elif ot == _OP_OPEN:
+                val path = self._p_path[i]
+                if rt_file_exists(path):
+                    val fh = self._next_fh
+                    self._next_fh = fh + 1
+                    val content = rt_file_read_text(path)
+                    self._fh_ids.push(fh)
+                    self._fh_data.push(content)
+                    self._complete(oid, fh, 0, "")
+                else:
+                    self._complete(oid, -2, 0, "")
+                i = i + 1
+                continue
+
+            elif ot == _OP_SENDFILE:
+                val content = self._find_file(self._p_fd2[i])
+                val off = self._p_offset[i]
+                var end_pos = off + self._p_length[i]
+                if end_pos > content.len():
+                    end_pos = content.len()
+                val chunk = content.slice(off, end_pos)
+                val res = rt_io_tcp_write_text(fd, chunk)
+                self._complete(oid, res, 0, "")
+                i = i + 1
+                continue
+
+            elif ot == _OP_CLOSE:
+                val is_file = self._find_file(fd).len() > 0
+                if is_file:
+                    self._remove_file(fd)
+                else:
+                    rt_io_tcp_close(fd)
+                self._complete(oid, 0, 0, "")
+                i = i + 1
+                continue
+
+            elif ot == _OP_TIMEOUT:
+                val now = self._now_ms()
+                if now >= self._p_time[i]:
+                    self._complete(oid, 0, 0, "")
+                    i = i + 1
+                    continue
+
+            elif ot == _OP_FSYNC:
+                self._complete(oid, 0, 0, "")
+                i = i + 1
+                continue
+
+            else:
+                self._complete(oid, ERR_UNSUPPORTED, 0, "")
+                i = i + 1
+                continue
+
+            np_id.push(self._p_id[i])
+            np_type.push(self._p_type[i])
+            np_fd.push(self._p_fd[i])
+            np_fd2.push(self._p_fd2[i])
+            np_data.push(self._p_data[i])
+            np_size.push(self._p_size[i])
+            np_offset.push(self._p_offset[i])
+            np_length.push(self._p_length[i])
+            np_path.push(self._p_path[i])
+            np_time.push(self._p_time[i])
+            i = i + 1
+
+        if accept_idx >= 0 and self._c_id.len() < max:
+            val a_oid = self._p_id[accept_idx]
+            val a_fd = self._p_fd[accept_idx]
+            val a_ms = if timeout_ms > 0: timeout_ms else: 1
+            val res = rt_io_tcp_accept_timeout(a_fd, a_ms)
+            if res >= 0:
+                self._complete(a_oid, res, 0, "")
+            else:
+                np_id.push(self._p_id[accept_idx])
+                np_type.push(self._p_type[accept_idx])
+                np_fd.push(self._p_fd[accept_idx])
+                np_fd2.push(self._p_fd2[accept_idx])
+                np_data.push(self._p_data[accept_idx])
+                np_size.push(self._p_size[accept_idx])
+                np_offset.push(self._p_offset[accept_idx])
+                np_length.push(self._p_length[accept_idx])
+                np_path.push(self._p_path[accept_idx])
+                np_time.push(self._p_time[accept_idx])
+
+        self._p_id = np_id
+        self._p_type = np_type
+        self._p_fd = np_fd
+        self._p_fd2 = np_fd2
+        self._p_data = np_data
+        self._p_size = np_size
+        self._p_offset = np_offset
+        self._p_length = np_length
+        self._p_path = np_path
+        self._p_time = np_time
+
+        self._c_id.len()
 
     fn poll_id(self, index: i64) -> i64:
-        """Get operation id for a completion by poll index."""
-        if self.handle >= 0:
-            return rt_driver_poll_id(self.handle, index)
-        if index == 0 and _g_snapshot_count > 0:
-            _g_snapshot_id
-        else:
-            0
+        if index < self._c_id.len():
+            return self._c_id[index]
+        0
 
     fn poll_result(self, index: i64) -> i64:
-        """Get result for a completion by poll index."""
-        if self.handle >= 0:
-            return rt_driver_poll_result(self.handle, index)
-        if index == 0 and _g_snapshot_count > 0:
-            _g_snapshot_result
-        else:
-            0
+        if index < self._c_result.len():
+            return self._c_result[index]
+        0
 
     fn poll_flags(self, index: i64) -> i64:
-        """Get flags for a completion by poll index."""
-        if self.handle >= 0:
-            return rt_driver_poll_flags(self.handle, index)
-        if index == 0 and _g_snapshot_count > 0:
-            _g_snapshot_flags
-        else:
-            0
+        if index < self._c_flags.len():
+            return self._c_flags[index]
+        0
 
     fn poll_data(self, index: i64) -> text:
-        """Get recv/read data for a completion by poll index.
-
-        Must be called before the next poll() — data is freed on next poll.
-        Returns empty string if no data for this completion.
-        """
-        if self.handle >= 0:
-            return rt_driver_poll_data(self.handle, index)
-        if index == 0 and _g_snapshot_count > 0:
-            _g_snapshot_data
-        else:
-            ""
+        if index < self._c_data.len():
+            return self._c_data[index]
+        ""
 
     fn poll_data_len(self, index: i64) -> i64:
-        """Get the byte length of recv/read data for a completion."""
-        if self.handle >= 0:
-            return rt_driver_poll_data_len(self.handle, index)
-        val data = self.poll_data(index)
-        data.len()
+        if index < self._c_data.len():
+            return self._c_data[index].len()
+        0
 
     # ---- Cancel ----
 
     fn cancel(self, op_id: i64) -> bool:
-        """Cancel a pending operation. Returns true if cancellation submitted."""
-        if self.handle >= 0:
-            return rt_driver_cancel(self.handle, op_id)
-        false
+        var nid: [i64] = []
+        var nty: [i64] = []
+        var nfd: [i64] = []
+        var nf2: [i64] = []
+        var nda: [text] = []
+        var nsz: [i64] = []
+        var nof: [i64] = []
+        var nle: [i64] = []
+        var npa: [text] = []
+        var nti: [i64] = []
+        var found = false
+        var i = 0
+        while i < self._p_id.len():
+            if self._p_id[i] == op_id:
+                found = true
+            else:
+                nid.push(self._p_id[i])
+                nty.push(self._p_type[i])
+                nfd.push(self._p_fd[i])
+                nf2.push(self._p_fd2[i])
+                nda.push(self._p_data[i])
+                nsz.push(self._p_size[i])
+                nof.push(self._p_offset[i])
+                nle.push(self._p_length[i])
+                npa.push(self._p_path[i])
+                nti.push(self._p_time[i])
+            i = i + 1
+        self._p_id = nid
+        self._p_type = nty
+        self._p_fd = nfd
+        self._p_fd2 = nf2
+        self._p_data = nda
+        self._p_size = nsz
+        self._p_offset = nof
+        self._p_length = nle
+        self._p_path = npa
+        self._p_time = nti
+        found
 
     # ---- Query ----
 
     fn backend_name(self) -> text:
-        """Return backend name: 'io_uring', 'epoll', 'kqueue', or 'iocp'."""
-        if self.handle >= 0:
-            return rt_driver_backend_name(self.handle)
-        "simple-fallback"
+        "pure-simple"
 
     fn supports_sendfile(self) -> bool:
-        """Check if backend supports zero-copy sendfile."""
-        if self.handle >= 0:
-            return rt_driver_supports_sendfile(self.handle)
         false
 
     fn supports_zero_copy(self) -> bool:
-        """Check if backend supports zero-copy send."""
-        if self.handle >= 0:
-            return rt_driver_supports_zero_copy(self.handle)
         false
 
     fn net_capabilities(self) -> NetBackendCapabilities:
-        """Return network acceleration capabilities for this driver."""
         net_backend_capabilities(
-            self.backend_name(),
+            "pure-simple",
             true,
             true,
-            self.supports_sendfile(),
-            self.supports_zero_copy()
+            false,
+            false
         )
 
     # ---- Lifecycle ----
 
-    me close():
-        """Destroy the driver and release all resources."""
-        if self.handle >= 0:
-            rt_driver_destroy(self.handle)
-            self.handle = -1
-
-# ============================================================================
-# Exports
-# ============================================================================
+    fn close(self):
+        self._p_id = []
+        self._p_type = []
+        self._p_fd = []
+        self._p_fd2 = []
+        self._p_data = []
+        self._p_size = []
+        self._p_offset = []
+        self._p_length = []
+        self._p_path = []
+        self._p_time = []
+        self._c_id = []
+        self._c_result = []
+        self._c_flags = []
+        self._c_data = []
+        self._fh_ids = []
+        self._fh_data = []

@@ -14,6 +14,36 @@
 #include <stdio.h>
 
 /* ================================================================
+ * RuntimeValue tagging (must match runtime/src/value/tags.rs)
+ *
+ * 64-bit word layout:
+ *   [ payload (61 bits) | tag (3 bits) ]
+ *
+ * TAG_INT     = 0b000  →  from_int(i) = (uint64_t)i << 3
+ *                         as_int(v)   = (int64_t)v >> 3   (arithmetic)
+ * TAG_HEAP    = 0b001  →  pointer with low bit set
+ * TAG_FLOAT   = 0b010
+ * TAG_SPECIAL = 0b011  →  nil=0, true=1, false=2, error=3
+ * ================================================================ */
+
+#define TAG_MASK     0x7ULL
+#define TAG_INT      0x0ULL
+#define TAG_HEAP     0x1ULL
+#define TAG_SPECIAL  0x3ULL
+
+#define SPECIAL_NIL  (TAG_SPECIAL | (0ULL << 3))
+
+/* Box a C int64_t into a RuntimeValue */
+static inline int64_t box_int(int64_t v) {
+    return (int64_t)((uint64_t)v << 3);
+}
+
+/* Unbox a RuntimeValue into a C int64_t */
+static inline int64_t unbox_int(int64_t rv) {
+    return rv >> 3;  /* arithmetic shift */
+}
+
+/* ================================================================
  * Constants
  * ================================================================ */
 
@@ -257,10 +287,12 @@ static void free_row(DbRow* r, int64_t num_cols) {
  * Public API: rt_db_* functions
  * ================================================================ */
 
-int64_t rt_db_table_create(const char* name, int64_t num_cols, int64_t pk_col) {
+int64_t rt_db_table_create(const char* name, int64_t num_cols_rv, int64_t pk_col_rv) {
     ensure_init();
-    if (num_cols <= 0 || num_cols > DB_MAX_COLS) return -1;
-    if (pk_col < 0 || pk_col >= num_cols) return -1;
+    int64_t num_cols = unbox_int(num_cols_rv);
+    int64_t pk_col = unbox_int(pk_col_rv);
+    if (num_cols <= 0 || num_cols > DB_MAX_COLS) return box_int(-1);
+    if (pk_col < 0 || pk_col >= num_cols) return box_int(-1);
 
     for (int i = 0; i < DB_MAX_TABLES; i++) {
         if (!g_tables[i].in_use) {
@@ -277,14 +309,15 @@ int64_t rt_db_table_create(const char* name, int64_t num_cols, int64_t pk_col) {
             t->scan_count = 0;
             pk_index_init(t, DB_INIT_CAP);
             t->in_use = 1;
-            return (int64_t)i;
+            return box_int((int64_t)i);
         }
     }
-    return -1; /* no free table slots */
+    return box_int(-1); /* no free table slots */
 }
 
-void rt_db_table_destroy(int64_t handle) {
+void rt_db_table_destroy(int64_t handle_rv) {
     ensure_init();
+    int64_t handle = unbox_int(handle_rv);
     if (handle < 0 || handle >= DB_MAX_TABLES) return;
     DbTable* t = &g_tables[handle];
     if (!t->in_use) return;
@@ -307,31 +340,35 @@ void rt_db_table_destroy(int64_t handle) {
     memset(t, 0, sizeof(DbTable));
 }
 
-int64_t rt_db_put(int64_t handle, const char* pk_text, int64_t num_values) {
+int64_t rt_db_put(int64_t handle_rv, const char* pk_text, int64_t num_values_rv) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return -1;
+    int64_t handle = unbox_int(handle_rv);
+    int64_t num_values = unbox_int(num_values_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(-1);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return -1;
+    if (!t->in_use) return box_int(-1);
     (void)num_values; /* reserved for future use */
 
     /* Check if PK already exists */
     int64_t existing = pk_lookup(t, pk_text ? pk_text : "");
     if (existing >= 0) {
         /* Update existing row — return its index */
-        return existing;
+        return box_int(existing);
     }
 
     /* Allocate new row */
     int64_t row = alloc_row(t);
     t->rows[row].pk_text = strdup(pk_text ? pk_text : "");
     pk_insert(t, pk_text ? pk_text : "", row);
-    return row;
+    return box_int(row);
 }
 
-void rt_db_put_value_int(int64_t handle, int64_t row, int64_t col, int64_t value) {
+void rt_db_put_value_int(int64_t handle_rv, int64_t row_rv, int64_t col_rv, int64_t value_rv) {
     ensure_init();
-    FILE* dbg = fopen("/tmp/rt_db_c_trace.log", "a");
-    if (dbg) { fprintf(dbg, "put_value_int: h=%ld row=%ld col=%ld val=%ld in_use=%d\n", handle, row, col, value, (handle >= 0 && handle < DB_MAX_TABLES) ? g_tables[handle].in_use : -1); fclose(dbg); }
+    int64_t handle = unbox_int(handle_rv);
+    int64_t row = unbox_int(row_rv);
+    int64_t col = unbox_int(col_rv);
+    int64_t value = unbox_int(value_rv);
     if (handle < 0 || handle >= DB_MAX_TABLES) return;
     DbTable* t = &g_tables[handle];
     if (!t->in_use) return;
@@ -341,11 +378,13 @@ void rt_db_put_value_int(int64_t handle, int64_t row, int64_t col, int64_t value
     if (!r->alive) return;
     r->int_values[col] = value;
     r->col_types[col] = COL_INT;
-    if (dbg) { dbg = fopen("/tmp/rt_db_c_trace.log", "a"); if (dbg) { fprintf(dbg, "put_value_int: stored OK col_type=%d\n", r->col_types[col]); fclose(dbg); } }
 }
 
-void rt_db_put_value_text(int64_t handle, int64_t row, int64_t col, const char* value) {
+void rt_db_put_value_text(int64_t handle_rv, int64_t row_rv, int64_t col_rv, const char* value) {
     ensure_init();
+    int64_t handle = unbox_int(handle_rv);
+    int64_t row = unbox_int(row_rv);
+    int64_t col = unbox_int(col_rv);
     if (handle < 0 || handle >= DB_MAX_TABLES) return;
     DbTable* t = &g_tables[handle];
     if (!t->in_use) return;
@@ -358,33 +397,35 @@ void rt_db_put_value_text(int64_t handle, int64_t row, int64_t col, const char* 
     r->col_types[col] = COL_TEXT;
 }
 
-int64_t rt_db_get(int64_t handle, const char* pk_text) {
+int64_t rt_db_get(int64_t handle_rv, const char* pk_text) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return -1;
+    int64_t handle = unbox_int(handle_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(-1);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return -1;
-    return pk_lookup(t, pk_text ? pk_text : "");
+    if (!t->in_use) return box_int(-1);
+    return box_int(pk_lookup(t, pk_text ? pk_text : ""));
 }
 
-int64_t rt_db_get_int(int64_t handle, int64_t row, int64_t col) {
+int64_t rt_db_get_int(int64_t handle_rv, int64_t row_rv, int64_t col_rv) {
     ensure_init();
-    FILE* dbg = fopen("/tmp/rt_db_c_trace.log", "a");
-    if (dbg) { fprintf(dbg, "get_int: h=%ld row=%ld col=%ld in_use=%d\n", handle, row, col, (handle >= 0 && handle < DB_MAX_TABLES) ? g_tables[handle].in_use : -1); fclose(dbg); }
-    if (handle < 0 || handle >= DB_MAX_TABLES) return 0;
+    int64_t handle = unbox_int(handle_rv);
+    int64_t row = unbox_int(row_rv);
+    int64_t col = unbox_int(col_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(0);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return 0;
-    if (row < 0 || row >= t->row_count) return 0;
-    if (col < 0 || col >= t->num_cols) return 0;
+    if (!t->in_use) return box_int(0);
+    if (row < 0 || row >= t->row_count) return box_int(0);
+    if (col < 0 || col >= t->num_cols) return box_int(0);
     DbRow* r = &t->rows[row];
-    if (!r->alive) return 0;
-    int64_t result = r->int_values[col];
-    dbg = fopen("/tmp/rt_db_c_trace.log", "a");
-    if (dbg) { fprintf(dbg, "get_int: returning %ld col_type=%d\n", result, r->col_types[col]); fclose(dbg); }
-    return result;
+    if (!r->alive) return box_int(0);
+    return box_int(r->int_values[col]);
 }
 
-const char* rt_db_get_text(int64_t handle, int64_t row, int64_t col) {
+const char* rt_db_get_text(int64_t handle_rv, int64_t row_rv, int64_t col_rv) {
     ensure_init();
+    int64_t handle = unbox_int(handle_rv);
+    int64_t row = unbox_int(row_rv);
+    int64_t col = unbox_int(col_rv);
     if (handle < 0 || handle >= DB_MAX_TABLES) return "";
     DbTable* t = &g_tables[handle];
     if (!t->in_use) return "";
@@ -398,12 +439,16 @@ const char* rt_db_get_text(int64_t handle, int64_t row, int64_t col) {
     return "";
 }
 
-int64_t rt_db_scan_range(int64_t handle, int64_t col, int64_t low, int64_t high) {
+int64_t rt_db_scan_range(int64_t handle_rv, int64_t col_rv, int64_t low_rv, int64_t high_rv) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return 0;
+    int64_t handle = unbox_int(handle_rv);
+    int64_t col = unbox_int(col_rv);
+    int64_t low = unbox_int(low_rv);
+    int64_t high = unbox_int(high_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(0);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return 0;
-    if (col < 0 || col >= t->num_cols) return 0;
+    if (!t->in_use) return box_int(0);
+    if (col < 0 || col >= t->num_cols) return box_int(0);
 
     t->scan_count = 0;
     for (int64_t i = 0; i < t->row_count && t->scan_count < DB_SCAN_MAX; i++) {
@@ -416,48 +461,53 @@ int64_t rt_db_scan_range(int64_t handle, int64_t col, int64_t low, int64_t high)
             }
         }
     }
-    return t->scan_count;
+    return box_int(t->scan_count);
 }
 
-int64_t rt_db_scan_result(int64_t handle, int64_t result_idx) {
+int64_t rt_db_scan_result(int64_t handle_rv, int64_t result_idx_rv) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return -1;
+    int64_t handle = unbox_int(handle_rv);
+    int64_t result_idx = unbox_int(result_idx_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(-1);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return -1;
-    if (result_idx < 0 || result_idx >= t->scan_count) return -1;
-    return t->scan_results[result_idx];
+    if (!t->in_use) return box_int(-1);
+    if (result_idx < 0 || result_idx >= t->scan_count) return box_int(-1);
+    return box_int(t->scan_results[result_idx]);
 }
 
-int64_t rt_db_delete(int64_t handle, const char* pk_text) {
+int64_t rt_db_delete(int64_t handle_rv, const char* pk_text) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return 0;
+    int64_t handle = unbox_int(handle_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(0);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return 0;
+    if (!t->in_use) return box_int(0);
 
     int64_t row = pk_lookup(t, pk_text ? pk_text : "");
-    if (row < 0) return 0;
+    if (row < 0) return box_int(0);
 
     pk_remove(t, pk_text ? pk_text : "");
     free_row(&t->rows[row], t->num_cols);
     t->rows[row].alive = 2; /* tombstone */
     t->alive_count--;
-    return 1;
+    return box_int(1);
 }
 
-int64_t rt_db_row_count(int64_t handle) {
+int64_t rt_db_row_count(int64_t handle_rv) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return 0;
+    int64_t handle = unbox_int(handle_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(0);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return 0;
-    return t->alive_count;
+    if (!t->in_use) return box_int(0);
+    return box_int(t->alive_count);
 }
 
-int64_t rt_db_col_count(int64_t handle) {
+int64_t rt_db_col_count(int64_t handle_rv) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return 0;
+    int64_t handle = unbox_int(handle_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(0);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return 0;
-    return t->num_cols;
+    if (!t->in_use) return box_int(0);
+    return box_int(t->num_cols);
 }
 
 /* ================================================================
@@ -468,17 +518,19 @@ int64_t rt_db_col_count(int64_t handle) {
  * type_mask encodes column types: bit i = 1 means text, 0 means int.
  * For type_mask=0b010 (=2): col0=int, col1=text, col2=int.
  * v0,v1,v2 are i64 values; for text cols the value is a char* cast to i64. */
-int64_t rt_db_put_row3(int64_t handle, const char* pk,
-                       int64_t type_mask,
-                       int64_t v0, int64_t v1, int64_t v2) {
+int64_t rt_db_put_row3(int64_t handle_rv, const char* pk,
+                       int64_t type_mask_rv,
+                       int64_t v0_rv, int64_t v1_rv, int64_t v2_rv) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return -1;
+    int64_t handle = unbox_int(handle_rv);
+    int64_t type_mask = unbox_int(type_mask_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(-1);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use || t->num_cols < 3) return -1;
+    if (!t->in_use || t->num_cols < 3) return box_int(-1);
 
     const char* key = pk ? pk : "";
     int64_t existing = pk_lookup(t, key);
-    if (existing >= 0) return existing;
+    if (existing >= 0) return box_int(existing);
 
     int64_t row_idx = t->row_count;
     if (row_idx >= t->row_cap) {
@@ -497,10 +549,10 @@ int64_t rt_db_put_row3(int64_t handle, const char* pk,
     r->col_types = (ColType*)calloc((size_t)t->num_cols, sizeof(ColType));
     r->alive = 1;
 
-    int64_t vals[3] = {v0, v1, v2};
+    int64_t vals[3] = {unbox_int(v0_rv), unbox_int(v1_rv), unbox_int(v2_rv)};
     for (int c = 0; c < 3; c++) {
         if (type_mask & (1 << c)) {
-            const char* s = (const char*)vals[c];
+            const char* s = (const char*)(uintptr_t)vals[c];
             r->text_values[c] = strdup(s ? s : "");
             r->col_types[c] = COL_TEXT;
         } else {
@@ -512,61 +564,69 @@ int64_t rt_db_put_row3(int64_t handle, const char* pk,
     pk_insert(t, key, row_idx);
     t->row_count++;
     t->alive_count++;
-    return row_idx;
+    return box_int(row_idx);
 }
 
 /* Lookup by PK and return an int column value in one call.
  * Returns the value, or default_val if not found. */
-int64_t rt_db_get_int_by_pk(int64_t handle, const char* pk, int64_t col,
-                            int64_t default_val) {
+int64_t rt_db_get_int_by_pk(int64_t handle_rv, const char* pk, int64_t col_rv,
+                            int64_t default_val_rv) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return default_val;
+    int64_t handle = unbox_int(handle_rv);
+    int64_t col = unbox_int(col_rv);
+    int64_t default_val = unbox_int(default_val_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(default_val);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return default_val;
+    if (!t->in_use) return box_int(default_val);
 
     int64_t row = pk_lookup(t, pk ? pk : "");
-    if (row < 0 || row >= t->row_count) return default_val;
-    if (col < 0 || col >= t->num_cols) return default_val;
+    if (row < 0 || row >= t->row_count) return box_int(default_val);
+    if (col < 0 || col >= t->num_cols) return box_int(default_val);
     DbRow* r = &t->rows[row];
-    if (!r->alive || r->col_types[col] != COL_INT) return default_val;
-    return r->int_values[col];
+    if (!r->alive || r->col_types[col] != COL_INT) return box_int(default_val);
+    return box_int(r->int_values[col]);
 }
 
 /* Update an int column by PK in one call. Returns 1 on success, 0 on not found. */
-int64_t rt_db_update_int(int64_t handle, const char* pk, int64_t col,
-                         int64_t value) {
+int64_t rt_db_update_int(int64_t handle_rv, const char* pk, int64_t col_rv,
+                         int64_t value_rv) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return 0;
+    int64_t handle = unbox_int(handle_rv);
+    int64_t col = unbox_int(col_rv);
+    int64_t value = unbox_int(value_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(0);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return 0;
+    if (!t->in_use) return box_int(0);
 
     int64_t row = pk_lookup(t, pk ? pk : "");
-    if (row < 0 || row >= t->row_count) return 0;
-    if (col < 0 || col >= t->num_cols) return 0;
+    if (row < 0 || row >= t->row_count) return box_int(0);
+    if (col < 0 || col >= t->num_cols) return box_int(0);
     DbRow* r = &t->rows[row];
-    if (!r->alive) return 0;
+    if (!r->alive) return box_int(0);
     r->int_values[col] = value;
     r->col_types[col] = COL_INT;
-    return 1;
+    return box_int(1);
 }
 
 /* Update a text column by PK in one call. Returns 1 on success, 0 on not found. */
-int64_t rt_db_update_text(int64_t handle, const char* pk, int64_t col,
+int64_t rt_db_update_text(int64_t handle_rv, const char* pk, int64_t col_rv,
                           const char* value) {
     ensure_init();
-    if (handle < 0 || handle >= DB_MAX_TABLES) return 0;
+    int64_t handle = unbox_int(handle_rv);
+    int64_t col = unbox_int(col_rv);
+    if (handle < 0 || handle >= DB_MAX_TABLES) return box_int(0);
     DbTable* t = &g_tables[handle];
-    if (!t->in_use) return 0;
+    if (!t->in_use) return box_int(0);
 
     int64_t row = pk_lookup(t, pk ? pk : "");
-    if (row < 0 || row >= t->row_count) return 0;
-    if (col < 0 || col >= t->num_cols) return 0;
+    if (row < 0 || row >= t->row_count) return box_int(0);
+    if (col < 0 || col >= t->num_cols) return box_int(0);
     DbRow* r = &t->rows[row];
-    if (!r->alive) return 0;
+    if (!r->alive) return box_int(0);
     if (r->text_values[col]) free(r->text_values[col]);
     r->text_values[col] = strdup(value ? value : "");
     r->col_types[col] = COL_TEXT;
-    return 1;
+    return box_int(1);
 }
 
 /* ================================================================
@@ -577,29 +637,34 @@ static inline void ipk_to_str(int64_t pk, char buf[32]) {
     snprintf(buf, 32, "%ld", (long)pk);
 }
 
-int64_t rt_db_iput3(int64_t handle, int64_t pk_int,
-                    int64_t v0, int64_t v1, int64_t v2) {
+/* Integer-PK variants: all params are already boxed RuntimeValues.
+ * We unbox pk_int for the string conversion, then delegate to the
+ * string-PK variants which also expect boxed params. Since the
+ * string-PK variants unbox handle/col/value themselves, we pass
+ * the original boxed values through. */
+int64_t rt_db_iput3(int64_t handle_rv, int64_t pk_int_rv,
+                    int64_t v0_rv, int64_t v1_rv, int64_t v2_rv) {
     char buf[32];
-    ipk_to_str(pk_int, buf);
-    return rt_db_put_row3(handle, buf, 0, v0, v1, v2);
+    ipk_to_str(unbox_int(pk_int_rv), buf);
+    return rt_db_put_row3(handle_rv, buf, box_int(0), v0_rv, v1_rv, v2_rv);
 }
 
-int64_t rt_db_iget_int(int64_t handle, int64_t pk_int, int64_t col,
-                       int64_t default_val) {
+int64_t rt_db_iget_int(int64_t handle_rv, int64_t pk_int_rv, int64_t col_rv,
+                       int64_t default_val_rv) {
     char buf[32];
-    ipk_to_str(pk_int, buf);
-    return rt_db_get_int_by_pk(handle, buf, col, default_val);
+    ipk_to_str(unbox_int(pk_int_rv), buf);
+    return rt_db_get_int_by_pk(handle_rv, buf, col_rv, default_val_rv);
 }
 
-int64_t rt_db_iupdate_int(int64_t handle, int64_t pk_int, int64_t col,
-                          int64_t value) {
+int64_t rt_db_iupdate_int(int64_t handle_rv, int64_t pk_int_rv, int64_t col_rv,
+                          int64_t value_rv) {
     char buf[32];
-    ipk_to_str(pk_int, buf);
-    return rt_db_update_int(handle, buf, col, value);
+    ipk_to_str(unbox_int(pk_int_rv), buf);
+    return rt_db_update_int(handle_rv, buf, col_rv, value_rv);
 }
 
-int64_t rt_db_idelete(int64_t handle, int64_t pk_int) {
+int64_t rt_db_idelete(int64_t handle_rv, int64_t pk_int_rv) {
     char buf[32];
-    ipk_to_str(pk_int, buf);
-    return rt_db_delete(handle, buf);
+    ipk_to_str(unbox_int(pk_int_rv), buf);
+    return rt_db_delete(handle_rv, buf);
 }
