@@ -28,7 +28,10 @@ use os.drivers.nvme.nvme_storage_model.{
     nvme_filesystem_lease_set_acceptance_reason,
     nvme_filesystem_lease_same_assignment
 }
-use os.drivers.real_device_readiness.{real_device_q35_pure_simple_access_marker}
+use os.drivers.real_device_readiness.{
+    real_device_q35_pure_simple_access_marker,
+    real_device_q35_pure_simple_perf_marker_from_measurements
+}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_class_i64, pcimgr_grant_device}
 use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
@@ -472,6 +475,86 @@ fn _vfs_boot_q35_relative_4k_offset(lease: NvmeFilesystemLease, run: u32, op: u3
     val slot = 1u64 + (((run.to_u64() * 13u64) + (op.to_u64() * 17u64)) % (slot_count - 1u64))
     (slot * 4096u64) as i64
 
+fn _vfs_boot_q35_perf_u64_field(text_value: text, prefix: text) -> Result<u64, text>:
+    var normalized = text_value.replace("\n", " ")
+    normalized = normalized.replace("\r", " ")
+    normalized = normalized.replace("\t", " ")
+    for part in normalized.split(" "):
+        val token = part.trim()
+        if token.starts_with(prefix):
+            val value_text = token.substring(prefix.len(), token.len()).trim()
+            if value_text.len() == 0:
+                return Err("invalid-" + prefix)
+            var value: u64 = 0u64
+            for ch in value_text:
+                if ch < "0" or ch > "9":
+                    return Err("invalid-" + prefix)
+                val digit = ch.to_i32() - "0".to_i32()
+                value = value * 10u64 + digit.to_u64()
+            if value == 0u64:
+                return Err("invalid-" + prefix)
+            return Ok(value)
+    Err("missing-" + prefix)
+
+fn _vfs_boot_q35_read_cfat_baseline_text() -> text:
+    if g_root_fat32 == nil:
+        return ""
+    val bytes = _g_vfs_root_read_file_bytes_once(g_root_fat32.unwrap(), "/SYS/PERF/CFAT4K.TXT")
+    if bytes.len() == 0:
+        return ""
+    _vfs_bytes_to_text(bytes, bytes.len().to_u64())
+
+fn _vfs_boot_q35_perf_marker_with_cfat_baseline(
+    simple_read_iops: u64,
+    simple_write_iops: u64,
+    read_p99_us: u64,
+    write_p99_us: u64,
+    queue_depth: u16
+) -> text:
+    val baseline = _vfs_boot_q35_read_cfat_baseline_text()
+    if baseline.len() == 0:
+        return "nvme_perf reason=c-baseline-missing-iops simple_provider=simple-driver " +
+            "workload=4k-random-read-write io_size_bytes=4096 " +
+            "direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs " +
+            "c_bridge_used=false common_logic_shared=true allocation_per_io=false " +
+            "simple_read_iops=" + simple_read_iops.to_text() +
+            " simple_write_iops=" + simple_write_iops.to_text() +
+            " simple_read_p99_us=" + read_p99_us.to_text() +
+            " simple_write_p99_us=" + write_p99_us.to_text() +
+            " c_read_iops=0 c_write_iops=0 c_read_p99_us=0 c_write_p99_us=0 " +
+            "queue_depth=" + queue_depth.to_text() + " warm_runs=3 max_rss_kib=1"
+
+    val c_read = _vfs_boot_q35_perf_u64_field(baseline, "c_read_iops=")
+    val c_write = _vfs_boot_q35_perf_u64_field(baseline, "c_write_iops=")
+    val c_read_p99 = _vfs_boot_q35_perf_u64_field(baseline, "c_read_p99_us=")
+    val c_write_p99 = _vfs_boot_q35_perf_u64_field(baseline, "c_write_p99_us=")
+    if c_read.is_err() or c_write.is_err() or c_read_p99.is_err() or c_write_p99.is_err():
+        return "nvme_perf reason=c-baseline-missing-iops simple_provider=simple-driver " +
+            "workload=4k-random-read-write io_size_bytes=4096 " +
+            "direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs " +
+            "c_bridge_used=false common_logic_shared=true allocation_per_io=false " +
+            "simple_read_iops=" + simple_read_iops.to_text() +
+            " simple_write_iops=" + simple_write_iops.to_text() +
+            " simple_read_p99_us=" + read_p99_us.to_text() +
+            " simple_write_p99_us=" + write_p99_us.to_text() +
+            " c_read_iops=0 c_write_iops=0 c_read_p99_us=0 c_write_p99_us=0 " +
+            "queue_depth=" + queue_depth.to_text() + " warm_runs=3 max_rss_kib=1"
+
+    real_device_q35_pure_simple_perf_marker_from_measurements(
+        simple_read_iops,
+        simple_write_iops,
+        read_p99_us,
+        write_p99_us,
+        c_read.unwrap(),
+        c_write.unwrap(),
+        c_read_p99.unwrap(),
+        c_write_p99.unwrap(),
+        queue_depth,
+        3u32,
+        1u64,
+        false
+    )
+
 fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
     """Emit fail-closed q35 pure-Simple NVMe evidence from real shared-DMA 4K I/O."""
     val storage_reason = vfs_boot_storage_acceptance_reason(
@@ -544,16 +627,13 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
     val simple_read_iops = _vfs_boot_q35_iops(read_ops, read_total_us)
     val simple_write_iops = _vfs_boot_q35_iops(write_ops, write_total_us)
     val access = real_device_q35_pure_simple_access_marker(lease.grant_kind, "resource-grant-set:tok=net0")
-    val perf = "nvme_perf reason=c-baseline-missing-iops simple_provider=simple-driver " +
-        "workload=4k-random-read-write io_size_bytes=4096 " +
-        "direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs " +
-        "c_bridge_used=false common_logic_shared=true allocation_per_io=false " +
-        "simple_read_iops=" + simple_read_iops.to_text() +
-        " simple_write_iops=" + simple_write_iops.to_text() +
-        " simple_read_p99_us=" + read_p99_us.to_text() +
-        " simple_write_p99_us=" + write_p99_us.to_text() +
-        " c_read_iops=0 c_write_iops=0 c_read_p99_us=0 c_write_p99_us=0 " +
-        "queue_depth=" + lease.queue.max_depth.to_text() + " warm_runs=3 max_rss_kib=1"
+    val perf = _vfs_boot_q35_perf_marker_with_cfat_baseline(
+        simple_read_iops,
+        simple_write_iops,
+        read_p99_us,
+        write_p99_us,
+        lease.queue.max_depth
+    )
     [access, perf]
 
 fn vfs_boot_nvme_assign_user_namespace_lease(

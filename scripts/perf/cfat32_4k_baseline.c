@@ -143,6 +143,12 @@ int main(void) {
 
     printf("c_fat_direct_read4k: p50=%ldus p99=%ldus\n", percentile(read_lat, iters, 50), percentile(read_lat, iters, 99));
     printf("c_fat_direct_write4k: p50=%ldus p99=%ldus\n", percentile(write_lat, iters, 50), percentile(write_lat, iters, 99));
+    long read_p99 = percentile(read_lat, iters, 99);
+    long write_p99 = percentile(write_lat, iters, 99);
+    long read_iops = read_p99 > 0 ? 1000000L / read_p99 : 1L;
+    long write_iops = write_p99 > 0 ? 1000000L / write_p99 : 1L;
+    printf("cfat4k_baseline c_read_iops=%ld c_write_iops=%ld c_read_p99_us=%ld c_write_p99_us=%ld\n",
+           read_iops, write_iops, read_p99, write_p99);
     close(fd);
     return 0;
 }
