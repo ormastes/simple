@@ -5,6 +5,27 @@
 Probe current SimpleOS hardening and real-board bring-up state for the active
 real-board/QEMU hardening goal.
 
+## Verification Scope - QEMU vs Physical Board
+
+As of 2026-05-27, SimpleOS board-readiness claims must distinguish QEMU or
+platform-lane evidence from physical-board evidence:
+
+| Architecture / target | Current coverage | Physical-board claim |
+| --- | --- | --- |
+| `x86_64-q35` | QEMU q35 smoke passes with PCI, NVMe, virtio-net, and paging hardening markers. | No physical-board script is registered; this is QEMU platform evidence only. |
+| `riscv64-virt` | QEMU board command and RISC-V virt scenario mapping exist. | No physical-board script is registered for this QEMU target. |
+| `mps2-an505` Cortex-M33 | Faithful QEMU board smoke exists and emits MPU/fault-test markers. | QEMU board evidence only; not proof of a separate physical board. |
+| `ra4m1-uno-r4` ARM32/M-profile | Physical build/capture script exists; no faithful QEMU target is registered. | Requires real board UART capture before marking physical readiness. |
+| `stm32u585-uno-q` ARM32/M-profile | Physical build/capture script exists; QEMU coverage is CPU-class-only through AN505. | Requires real board UART capture before marking physical readiness. |
+| `xck26-ml-carrier` RISC-V 64 FPGA | Physical/generated wrapper script exists; no faithful QEMU board target is registered. | Requires the generated wrapper or physical FPGA flow before marking physical readiness. |
+| ARM64, x86_32, RISC-V32 platform lanes | QEMU/platform lanes exist for architecture behavior. | No physical-board entry in the board-hardening catalog yet. |
+
+Rule: QEMU validates the architecture or modeled board lane that it actually
+runs. It does not verify real-board readiness for targets without a faithful
+QEMU board model plus matching board/serial marker contract. Physical board
+readiness requires a board catalog entry, a physical script, and accepted
+real-board serial evidence for the selected protection mode.
+
 ## Commands Run
 
 - `timeout 20s sh scripts/run_simpleos_cortex_m33_qemu.shs`
