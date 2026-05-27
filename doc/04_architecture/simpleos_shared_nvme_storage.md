@@ -79,6 +79,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - The fail-closed production boot entry is exported through the VFS public
   surface so production boot code can select it instead of the development
   fallback initializer.
+- Kernel boot service initialization and the FAT32 root fallback in
+  `boot_fs.spl` now select the production VFS boot gate, so those production
+  paths no longer treat C-backed VFS readiness as acceptable storage.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
