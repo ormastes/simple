@@ -22,10 +22,12 @@ describe "short grammar easy fix":
             case Err(e):
                 expect(e).to_equal("")
 
-    it "does not rewrite lambdas with additional expression logic":
+    it "rewrites no-arg receiver method expressions to placeholder grammar":
         val source = "fn sample():\n    val adjusted = words.map(\\w: w.len() + 1)\n"
         val fixes = check_short_grammar_refactor(source, "sample.spl")
-        expect(fixes.len()).to_equal(0)
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("_.len() + 1")
 
     it "rewrites arithmetic lambdas to placeholder grammar":
         val source = "fn sample():\n    val doubled = nums.map(\\x: x * 2)\n"
@@ -60,3 +62,28 @@ describe "short grammar easy fix":
             if reps.len() > 0 and reps[0].new_text == "_ * 2":
                 found = true
         expect(found).to_equal(true)
+
+    it "rewrites receiver method predicates to placeholder grammar":
+        val source = "fn sample():\n    val evens = values.filter(\\x: x.parse_int() % 2 == 0)\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("_.parse_int() % 2 == 0")
+
+    it "does not rewrite calls with explicit arguments":
+        val source = "fn sample():\n    val values = items.map(\\x: x.adjust(1) + 1)\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(0)
+
+    it "applies replacements after non-ascii text":
+        val source = "# unicode before fix — keeps text offsets honest\nfn sample():\n    val values = items.map(\\x: x.trim())\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        var sources: Dict<text, text> = {}
+        sources["sample.spl"] = source
+        val result = FixApplicator.apply(fixes, sources)
+        match result:
+            case Ok(updated):
+                expect(updated["sample.spl"]).to_contain("items.map(&:trim)")
+                expect(updated["sample.spl"]).to_contain("# unicode before fix — keeps text offsets honest")
+            case Err(e):
+                expect(e).to_equal("")

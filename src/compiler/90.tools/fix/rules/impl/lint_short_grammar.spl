@@ -3,6 +3,7 @@
 # Conservative rewrites from explicit long grammar to proven short grammar:
 #   L:short_grammar_method_ref — `\x: x.method()` -> `&:method`
 #   L:short_grammar_placeholder — `\x: x * 2` -> `_ * 2`
+#                               — `\x: x.method() > 0` -> `_.method() > 0`
 
 use std.tooling.easy_fix.*
 use compiler.tools.fix.rules.helpers.*
@@ -63,7 +64,7 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
 
 fn _find_next_collection_lambda_start(line: text, search_from: i64) -> i64:
     var best = -1
-    for marker in [".map(", ".filter(", ".any(", ".all(", ".then("]:
+    for marker in [".map(", ".mapped(", ".filter(", ".reject(", ".any(", ".all(", ".flat_map(", ".compact_map(", ".map_err(", ".then("]:
         val marker_start = _find_text_from(line, marker, search_from)
         if marker_start >= 0:
             val candidate = marker_start + marker.len()
@@ -147,10 +148,13 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
     if expr_end <= body_start:
         return nil
     val expr = line[body_start:expr_end].trim()
-    val param_prefix = param + " "
-    if not expr.starts_with(param_prefix):
+    val value_prefix = param + " "
+    val member_prefix = param + "."
+    if not expr.starts_with(value_prefix) and not expr.starts_with(member_prefix):
         return nil
-    if expr.contains("(") or expr.contains("[") or expr.contains("\""):
+    if expr.contains("[") or expr.contains("\""):
+        return nil
+    if expr.contains("(") and not _placeholder_calls_are_empty(expr):
         return nil
     if not _placeholder_expr_is_safe(expr):
         return nil
@@ -160,9 +164,16 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
 
 fn _scan_simple_lambda_expr_end(line: text, start: i64) -> i64:
     var i = start
+    var paren_depth = 0
     while i < line.len():
         val ch = line[i:i + 1]
-        if ch == ")" or ch == ",":
+        if ch == "(":
+            paren_depth = paren_depth + 1
+        elif ch == ")":
+            if paren_depth == 0:
+                return i
+            paren_depth = paren_depth - 1
+        elif ch == "," and paren_depth == 0:
             return i
         i = i + 1
     i
@@ -179,6 +190,17 @@ fn _find_text_from(line: text, needle: text, search_from: i64) -> i64:
 
 fn _placeholder_expr_is_safe(expr: text) -> bool:
     expr.contains(" + ") or expr.contains(" - ") or expr.contains(" * ") or expr.contains(" / ") or expr.contains(" % ") or expr.contains(" > ") or expr.contains(" < ") or expr.contains(" == ") or expr.contains(" != ") or expr.contains(" >= ") or expr.contains(" <= ")
+
+fn _placeholder_calls_are_empty(expr: text) -> bool:
+    var i = 0
+    while i < expr.len():
+        if expr[i:i + 1] == "(":
+            if i + 1 >= expr.len() or expr[i + 1:i + 2] != ")":
+                return false
+            i = i + 2
+        else:
+            i = i + 1
+    true
 
 fn _scan_identifier_end(line: text, start: i64) -> i64:
     var i = start
