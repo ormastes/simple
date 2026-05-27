@@ -343,7 +343,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   lane uses a smaller measured batch window when that is faster on QEMU. The
   standalone q35 lane also submits through `NvmeBlockAdapter` DirectIo requests,
   so the filesystem-facing adapter surface is measured against the in-guest C
-  baseline instead of a raw `NvmeDriver` shortcut.
+  baseline instead of a raw `NvmeDriver` shortcut. The `fs_consumers` marker is
+  emitted only after the measured loop has routed DirectIo batches for FAT32,
+  NVFS, and DBFS through that shared adapter surface.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.

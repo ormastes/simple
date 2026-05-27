@@ -5,9 +5,7 @@
 # net, and hosted-service dependencies that are unrelated to this proof.
 
 use os.drivers.nvme.nvme_driver.{NvmeDriver}
-use os.drivers.nvme.nvme_storage_model.{
-    NvmeFilesystemConsumer, nvme_transfer_readiness_reason
-}
+use os.drivers.nvme.nvme_storage_model.{nvme_transfer_readiness_reason}
 use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class_i64, pcimgr_grant_device}
 use os.kernel.types.capability_types.{SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
@@ -54,6 +52,14 @@ fn _access_marker(storage_grant: text, network_grant: text) -> text:
         "storage_namespace=non-secure-resource-namespace network_namespace=non-secure-resource-namespace " +
         "storage_grant=" + storage_grant + " network_grant=" + network_grant + " common_driver_logic=shared"
 
+fn _consumer_for_measurement(run: u32, op: u32) -> text:
+    val selector = (run + op) % 3u32
+    if selector == 0u32:
+        return "fat32"
+    if selector == 1u32:
+        return "nvfs"
+    "dbfs"
+
 fn _perf_reason(
     simple_read_iops: u64,
     simple_write_iops: u64,
@@ -85,11 +91,12 @@ fn _perf_marker(
     c_write_iops: u64,
     c_read_p99_us: u64,
     c_write_p99_us: u64,
+    fs_consumers: text,
     queue_depth: u16
 ) -> text:
     "nvme_perf reason=" + _perf_reason(simple_read_iops, simple_write_iops, read_p99_us, write_p99_us, c_read_iops, c_write_iops, c_read_p99_us, c_write_p99_us) +
         " simple_provider=simple-driver workload=4k-random-read-write io_size_bytes=4096" +
-        " direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs" +
+        " direct_io_path=nvme-lease-shared-dma-4k fs_consumers=" + fs_consumers +
         " c_bridge_used=false common_logic_shared=true allocation_per_io=false" +
         " simple_read_iops=" + simple_read_iops.to_text() +
         " simple_write_iops=" + simple_write_iops.to_text() +
@@ -211,6 +218,9 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
     var read_p99_us: u64 = 1u64
     var write_p99_us: u64 = 1u64
     var all_lbas: [u64] = []
+    var saw_fat32: bool = false
+    var saw_nvfs: bool = false
+    var saw_dbfs: bool = false
     var run: u32 = 0u32
     while run < 3u32:
         var op: u32 = 0u32
@@ -225,9 +235,16 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
                 all_lbas.push(lba)
                 batch_op = batch_op + 1u32
 
+            val consumer_name = _consumer_for_measurement(run, op)
+            if consumer_name == "fat32":
+                saw_fat32 = true
+            if consumer_name == "nvfs":
+                saw_nvfs = true
+            if consumer_name == "dbfs":
+                saw_dbfs = true
             val read_req = direct_io_read_batch_request(1u64, offsets, shared, 200000u32)
             val read_start = rt_time_now_unix_micros()
-            val read_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_identified_namespace(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, sector_size, sector_count, read_req)
+            val read_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_identified_namespace(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer_name, sector_size, sector_count, read_req)
             val read_elapsed = _elapsed_us(read_start, rt_time_now_unix_micros())
             if read_result.is_err():
                 dma_free(dma)
@@ -240,7 +257,7 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
 
             val write_req = direct_io_write_batch_request(1u64, offsets, shared, 200000u32)
             val write_start = rt_time_now_unix_micros()
-            val write_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_identified_namespace(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, sector_size, sector_count, write_req)
+            val write_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_identified_namespace(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer_name, sector_size, sector_count, write_req)
             val write_elapsed = _elapsed_us(write_start, rt_time_now_unix_micros())
             if write_result.is_err():
                 dma_free(dma)
@@ -253,6 +270,10 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
             op = op + lbas.len().to_u32()
         run = run + 1u32
 
+    if not saw_fat32 or not saw_nvfs or not saw_dbfs:
+        dma_free(dma)
+        return ["[q35-pure-nvme-perf] skipped reason=fs-consumer-direct-io-incomplete"]
+    val fs_consumers = "fat32,nvfs,dbfs"
     val c_baseline = _measure_c_bridge_4k_baseline(all_lbas, sector_size, shared.cpu_virt_addr)
     dma_free(dma)
     var c_read_iops: u64 = 0u64
@@ -275,6 +296,7 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
         c_write_iops,
         c_read_p99_us,
         c_write_p99_us,
+        fs_consumers,
         128u16
     )
     [access, perf]
