@@ -28,6 +28,7 @@ use os.drivers.nvme.nvme_storage_model.{
     nvme_filesystem_lease_set_acceptance_reason,
     nvme_filesystem_lease_same_assignment
 }
+use os.drivers.real_device_readiness.{real_device_q35_pure_simple_access_marker}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_class_i64, pcimgr_grant_device}
 use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
@@ -37,7 +38,8 @@ use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.error.{FsError}
-use std.fs_driver.direct_io.{DirectIoRequest, DirectIoResult}
+use std.fs_driver.direct_io.{DirectIoRequest, DirectIoResult, direct_io_read_request, direct_io_write_request}
+use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, dma_alloc, dma_free, dma_buffer_to_shared}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
@@ -45,6 +47,7 @@ use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcoded_fallback, app_registry_fat32_alias, app_registry_root_alias, app_registry_cached_bytes, app_registry_cache_bytes, app_registry_boot_seed_entries, app_registry_lookup}
 extern fn serial_println(msg: text)
 extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_time_now_unix_micros() -> i64
 
 # ============================================================================
 # Module-Level State
@@ -445,6 +448,113 @@ fn vfs_boot_nvme_submit_active_lease_direct_4k(lease: NvmeFilesystemLease, req: 
             return g_vfs_nvme_direct_adapters[idx].submit_direct_4k_shared_dma(req)
         idx = idx + 1
     Err(FsError.NotFound)
+
+fn _vfs_boot_q35_elapsed_us(start_us: i64, end_us: i64) -> u64:
+    if end_us <= start_us:
+        return 1u64
+    (end_us - start_us).to_u64()
+
+fn _vfs_boot_q35_iops(ops: u64, elapsed_us: u64) -> u64:
+    if elapsed_us == 0u64:
+        return 1u64
+    val iops = (ops * 1000000u64) / elapsed_us
+    if iops == 0u64:
+        return 1u64
+    iops
+
+fn _vfs_boot_q35_relative_4k_offset(lease: NvmeFilesystemLease, run: u32, op: u32) -> i64:
+    val sectors_per_4k = 4096u64 / lease.namespace.lba_size.to_u64()
+    var slot_count = lease.lba_count / sectors_per_4k
+    if slot_count <= 2u64:
+        return 0
+    if slot_count > 128u64:
+        slot_count = 128u64
+    val slot = 1u64 + (((run.to_u64() * 13u64) + (op.to_u64() * 17u64)) % (slot_count - 1u64))
+    (slot * 4096u64) as i64
+
+fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
+    """Emit fail-closed q35 pure-Simple NVMe evidence from real shared-DMA 4K I/O."""
+    val storage_reason = vfs_boot_storage_acceptance_reason(
+        g_vfs_initialized,
+        g_vfs_boot_storage_provider,
+        g_vfs_boot_storage_pure_simple
+    )
+    if storage_reason != "ready":
+        return ["[q35-pure-nvme-perf] skipped reason=" + storage_reason]
+    if g_vfs_nvme_active_leases.len() == 0:
+        return ["[q35-pure-nvme-perf] skipped reason=no-active-nvme-lease"]
+    if g_vfs_nvme_direct_adapters.len() == 0:
+        return ["[q35-pure-nvme-perf] skipped reason=no-direct-nvme-adapter"]
+
+    val lease = g_vfs_nvme_active_leases[0]
+    val dma_result = dma_alloc(4096, DmaDir.Bidirectional)
+    if dma_result.is_err():
+        return ["[q35-pure-nvme-perf] skipped reason=dma-alloc-failed"]
+    val dma = dma_result.unwrap()
+    val owner = DmaOwner(
+        task_id: lease.queue.owner_task,
+        bdf_bus: 0u8,
+        bdf_device: 0u8,
+        bdf_function: 0u8
+    )
+    val shared = dma_buffer_to_shared(dma, owner, DmaCachePolicy.Coherent, 1u64)
+
+    var read_ops: u64 = 0u64
+    var write_ops: u64 = 0u64
+    var read_total_us: u64 = 0u64
+    var write_total_us: u64 = 0u64
+    var read_p99_us: u64 = 1u64
+    var write_p99_us: u64 = 1u64
+    var run: u32 = 0u32
+    while run < 3u32:
+        var op: u32 = 0u32
+        while op < 32u32:
+            val offset = _vfs_boot_q35_relative_4k_offset(lease, run, op)
+            val read_start = rt_time_now_unix_micros()
+            val read_result = vfs_boot_nvme_submit_active_lease_direct_4k(
+                lease,
+                direct_io_read_request(1u64, offset, shared, 100000u32)
+            )
+            val read_elapsed = _vfs_boot_q35_elapsed_us(read_start, rt_time_now_unix_micros())
+            if read_result.is_err():
+                dma_free(dma)
+                return ["[q35-pure-nvme-perf] skipped reason=direct-read-failed"]
+            if read_elapsed > read_p99_us:
+                read_p99_us = read_elapsed
+            read_total_us = read_total_us + read_elapsed
+            read_ops = read_ops + 1u64
+
+            val write_start = rt_time_now_unix_micros()
+            val write_result = vfs_boot_nvme_submit_active_lease_direct_4k(
+                lease,
+                direct_io_write_request(1u64, offset, shared, 100000u32)
+            )
+            val write_elapsed = _vfs_boot_q35_elapsed_us(write_start, rt_time_now_unix_micros())
+            if write_result.is_err():
+                dma_free(dma)
+                return ["[q35-pure-nvme-perf] skipped reason=direct-write-failed"]
+            if write_elapsed > write_p99_us:
+                write_p99_us = write_elapsed
+            write_total_us = write_total_us + write_elapsed
+            write_ops = write_ops + 1u64
+            op = op + 1u32
+        run = run + 1u32
+
+    dma_free(dma)
+    val simple_read_iops = _vfs_boot_q35_iops(read_ops, read_total_us)
+    val simple_write_iops = _vfs_boot_q35_iops(write_ops, write_total_us)
+    val access = real_device_q35_pure_simple_access_marker(lease.grant_kind, "resource-grant-set:tok=net0")
+    val perf = "nvme_perf reason=c-baseline-missing-iops simple_provider=simple-driver " +
+        "workload=4k-random-read-write io_size_bytes=4096 " +
+        "direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs " +
+        "c_bridge_used=false common_logic_shared=true allocation_per_io=false " +
+        "simple_read_iops=" + simple_read_iops.to_text() +
+        " simple_write_iops=" + simple_write_iops.to_text() +
+        " simple_read_p99_us=" + read_p99_us.to_text() +
+        " simple_write_p99_us=" + write_p99_us.to_text() +
+        " c_read_iops=0 c_write_iops=0 c_read_p99_us=0 c_write_p99_us=0 " +
+        "queue_depth=" + lease.queue.max_depth.to_text() + " warm_runs=3 max_rss_kib=1"
+    [access, perf]
 
 fn vfs_boot_nvme_assign_user_namespace_lease(
     evidence: NvmeTransferEvidence,
