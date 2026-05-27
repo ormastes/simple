@@ -106,6 +106,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   notification waiting lives in a separate companion module, so freestanding
   system-driver boot code can reuse SQ/CQ ring mechanics without importing the
   user/hosted `NotificationWait` path.
+- Freestanding queue construction has a syscall-free resource builder that
+  validates platform-owned BAR0, DMA queue memory, queue depth, DMA alignment,
+  and doorbell stride before constructing the shared `NvmeQueuePair`.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -126,6 +129,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Freestanding queue use still needs platform-owned timeout and interrupt policy
   once it has real MMIO/DMA ownership; the reusable queue module currently
   provides polling mechanics only.
+- The queue resource builder does not allocate memory or map BARs; those remain
+  responsibilities of the system boot allocator or user-space grant broker.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
@@ -151,3 +156,6 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `test/unit/os/drivers/nvme/nvme_queue_boundary_spec.spl` guards that the
   reusable queue submission/polling module does not import hosted syscalls or
   notification waits.
+- `test/unit/os/drivers/nvme/nvme_queue_resources_spec.spl` covers syscall-free
+  construction of `NvmeQueuePair` from owned BAR/DMA resources and rejects
+  invalid depth, missing BAR mapping, invalid doorbell stride, and unaligned DMA.

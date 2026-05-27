@@ -1,0 +1,64 @@
+# Syscall-free NVMe queue resource builder.
+#
+# Freestanding/system boot code owns BAR mapping and DMA memory before it can
+# construct a queue. This module turns those owned resources into the common
+# NvmeQueuePair without importing DeviceGrant, hosted allocation, or syscalls.
+
+use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
+
+val NVME_DOORBELL_BASE_OFFSET: u64 = 0x1000
+val NVME_QUEUE_DMA_ALIGNMENT: u64 = 4096
+
+struct NvmeQueueResources:
+    qid: u16
+    depth: u16
+    sq_phys: u64
+    sq_virt: u64
+    cq_phys: u64
+    cq_virt: u64
+    bar0_virt: u64
+    doorbell_stride_bytes: u32
+
+fn nvme_sq_doorbell_addr(bar0_virt: u64, qid: u16, doorbell_stride_bytes: u32) -> u64:
+    bar0_virt + NVME_DOORBELL_BASE_OFFSET + 2u64 * qid.to_u64() * doorbell_stride_bytes.to_u64()
+
+fn nvme_cq_doorbell_addr(bar0_virt: u64, qid: u16, doorbell_stride_bytes: u32) -> u64:
+    bar0_virt + NVME_DOORBELL_BASE_OFFSET + (2u64 * qid.to_u64() + 1u64) * doorbell_stride_bytes.to_u64()
+
+fn nvme_queue_resources_reason(r: NvmeQueueResources) -> text:
+    if r.depth == 0u16:
+        return "nvme-queue-depth-zero"
+    if r.bar0_virt == 0u64:
+        return "nvme-queue-bar0-unmapped"
+    if r.sq_phys == 0u64 or r.sq_virt == 0u64:
+        return "nvme-queue-sq-missing"
+    if r.cq_phys == 0u64 or r.cq_virt == 0u64:
+        return "nvme-queue-cq-missing"
+    if r.doorbell_stride_bytes < 4u32 or r.doorbell_stride_bytes > 512u32:
+        return "nvme-queue-invalid-doorbell-stride"
+    if (r.doorbell_stride_bytes % 4u32) != 0u32:
+        return "nvme-queue-invalid-doorbell-stride"
+    if (r.sq_phys % NVME_QUEUE_DMA_ALIGNMENT) != 0u64:
+        return "nvme-queue-sq-phys-unaligned"
+    if (r.cq_phys % NVME_QUEUE_DMA_ALIGNMENT) != 0u64:
+        return "nvme-queue-cq-phys-unaligned"
+    "ready"
+
+fn nvme_queue_pair_from_resources(r: NvmeQueueResources) -> Result<NvmeQueuePair, text>:
+    val reason = nvme_queue_resources_reason(r)
+    if reason != "ready":
+        return Err(reason)
+    Ok(NvmeQueuePair(
+        sq_phys: r.sq_phys,
+        sq_virt: r.sq_virt,
+        cq_phys: r.cq_phys,
+        cq_virt: r.cq_virt,
+        depth: r.depth,
+        sq_tail: 0u16,
+        cq_head: 0u16,
+        phase: 1u8,
+        qid: r.qid,
+        sq_doorbell: nvme_sq_doorbell_addr(r.bar0_virt, r.qid, r.doorbell_stride_bytes),
+        cq_doorbell: nvme_cq_doorbell_addr(r.bar0_virt, r.qid, r.doorbell_stride_bytes),
+        next_cmd_id: 0u16
+    ))
