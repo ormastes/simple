@@ -1,6 +1,6 @@
 # Test Specification Index
 
-*Generated: 2026-05-27 14:56:25*
+*Generated: 2026-05-27 16:17:33*
 
 ## Quick Stats
 
@@ -16,7 +16,7 @@
 
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
-| [Vfs Boot Nvme Lease Specification](vfs_boot_nvme_lease_spec.md) | ❌ Stub | Stub | N/A | 12 | Summary not provided in the doc blocks. |
+| [Vfs Boot Nvme Lease Specification](vfs_boot_nvme_lease_spec.md) | ❌ Stub | Stub | N/A | 13 | Summary not provided in the doc blocks. |
 
 ## Residual Files
 

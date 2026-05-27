@@ -12,8 +12,8 @@
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -56,7 +56,8 @@ Documentation was generated from executable SPipe scenarios.
 - assigns user namespaces through the active VFS lease registry
 - creates user namespace driver instances only after active-lease admission
 - routes production user namespace mounts through the pure Simple NVMe block adapter
-- rejects hardware user namespace mounts before the shared boot NVMe driver is ready
+- keeps concrete NVMe adapters addressable for admitted lease direct I/O
+- checks shared driver readiness before constructing hardware user namespace adapters
 - releases active user namespace leases so reassignment can proceed
 - accepts only pure Simple NVMe boot storage as production-ready
 - exports fail-closed production readiness through the VFS public surface
