@@ -128,7 +128,7 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> Option<DuplicateTyp
     if not ctx.trimmed.contains("("):
         return nil
 
-    val paren_start = ctx.trimmed.find("(")
+    val paren_start = _short_find_text_from(line: ctx.trimmed, needle: "(", search_from: 0)
     if paren_start < 0:
         return nil
     val paren_end = _find_matching_paren_on_line(text: ctx.trimmed, open_paren: paren_start)
@@ -450,7 +450,7 @@ fn _stub_is_trivial(body: text) -> bool:
 
 # ============================================================================
 # Rule 13: short grammar refactors
-# Rewrites simple collection lambdas to method-reference or placeholder grammar.
+# Rewrites simple lambdas to method-reference or numbered placeholder grammar.
 # Confidence: Safe
 # ============================================================================
 
@@ -511,14 +511,35 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
     fixes
 
 fn _find_next_collection_lambda_start(line: text, search_from: i64) -> i64:
-    var best = -1
-    for marker in [".map(", ".mapped(", ".filter(", ".reject(", ".any(", ".all(", ".flat_map(", ".compact_map(", ".map_err(", ".then("]:
-        val marker_start = _short_find_text_from(line: line, needle: marker, search_from: search_from)
-        if marker_start >= 0:
-            val candidate = marker_start + marker.len()
-            if best < 0 or candidate < best:
-                best = candidate
-    best
+    val candidate = _short_find_text_from(line: line, needle: "\\", search_from: search_from)
+    if candidate < 0:
+        return -1
+    if _short_line_has_comment_before(line: line, pos: candidate) or _short_position_is_inside_string(line: line, pos: candidate):
+        return _find_next_collection_lambda_start(line: line, search_from: candidate + 1)
+    if candidate + 1 >= line.len():
+        return -1
+    val next = line.slice(candidate + 1, candidate + 2)
+    if _short_is_identifier_start(next) or next == "(":
+        return candidate
+    _find_next_collection_lambda_start(line: line, search_from: candidate + 1)
+
+fn _short_line_has_comment_before(line: text, pos: i64) -> bool:
+    var i = 0
+    while i < pos:
+        if line.slice(i, i + 1) == "#":
+            return true
+        i = i + 1
+    false
+
+fn _short_position_is_inside_string(line: text, pos: i64) -> bool:
+    var i = 0
+    var in_string = false
+    while i < pos:
+        val ch = line.slice(i, i + 1)
+        if ch == "\"":
+            in_string = not in_string
+        i = i + 1
+    in_string
 
 fn _parse_method_ref_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarMethodRefCandidate>:
     val colon_abs = _short_find_text_from(line: line, needle: ":", search_from: lambda_start)
@@ -714,7 +735,7 @@ fn _short_placeholder_call_args_are_safe(inner: text, param: text) -> bool:
         val comma = _short_find_text_from(line: inner, needle: ",", search_from: start)
         val end = if comma < 0: inner.len() else: comma
         val arg = inner.slice(start, end).trim()
-        if _short_expr_contains_plain_identifier(expr: arg, param: param) and arg != param:
+        if _short_expr_contains_plain_identifier(expr: arg, param: param):
             return false
         if comma < 0:
             return true
