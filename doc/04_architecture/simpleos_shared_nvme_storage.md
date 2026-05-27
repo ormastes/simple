@@ -250,6 +250,11 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   namespace currently identified by `NvmeDriver` before issuing read/write
   commands. This keeps multi-namespace user assignments fail-closed until the
   driver can identify and submit I/O to each assigned namespace explicitly.
+- NVMe transfer command construction and `NvmeDriver` now expose namespace-aware
+  read/write entry points. Existing namespace-1 I/O delegates through those
+  entry points, while non-identified namespaces still fail closed; this gives
+  the user/system namespace assignment path the correct hardware API shape
+  before enabling true multi-namespace submission.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.
@@ -300,8 +305,12 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   pure-Simple boot FAT32 lease helper and rejects invalid namespace geometry
   before mounting.
 - `test/unit/os/drivers/nvme/nvme_transfer_command_spec.spl` covers shared
-  syscall-free NVMe transfer command construction, zero-count rejection, NLB
-  limit rejection, DMA pointer validation, and completion-status decoding.
+  syscall-free NVMe transfer command construction, namespace-aware read/write
+  command construction, zero-count rejection, NLB limit rejection, DMA pointer
+  validation, and completion-status decoding.
+- `test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl` covers that
+  the driver exposes namespace-aware sector methods and keeps non-identified
+  namespaces fail-closed before hardware submission.
 - `test/unit/os/drivers/nvme/nvme_queue_boundary_spec.spl` guards that the
   reusable queue submission/polling module does not import hosted syscalls or
   notification waits.
