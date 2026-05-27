@@ -41,7 +41,7 @@ use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.error.{FsError}
-use std.fs_driver.direct_io.{DirectIoRequest, DirectIoResult, direct_io_read_request, direct_io_write_request}
+use std.fs_driver.direct_io.{DirectIoRequest, DirectIoBatchRequest, DirectIoResult, direct_io_read_request, direct_io_write_request, direct_io_read_batch_request, direct_io_write_batch_request}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, dma_alloc, dma_free, dma_buffer_to_shared}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
@@ -452,6 +452,17 @@ fn vfs_boot_nvme_submit_active_lease_direct_4k(lease: NvmeFilesystemLease, req: 
         idx = idx + 1
     Err(FsError.NotFound)
 
+fn vfs_boot_nvme_submit_active_lease_direct_4k_batch(lease: NvmeFilesystemLease, req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>:
+    """Submit batched 4KiB direct I/O through the concrete adapter for an admitted NVMe filesystem lease."""
+    var idx: i32 = 0
+    for active in g_vfs_nvme_active_leases:
+        if nvme_filesystem_lease_same_assignment(active, lease):
+            if idx >= g_vfs_nvme_direct_adapters.len():
+                return Err(FsError.StaleHandle)
+            return g_vfs_nvme_direct_adapters[idx].submit_direct_4k_shared_dma_batch(req)
+        idx = idx + 1
+    Err(FsError.NotFound)
+
 fn _vfs_boot_q35_elapsed_us(start_us: i64, end_us: i64) -> u64:
     if end_us <= start_us:
         return 1u64
@@ -570,7 +581,9 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
         return ["[q35-pure-nvme-perf] skipped reason=no-direct-nvme-adapter"]
 
     val lease = g_vfs_nvme_active_leases[0]
-    val dma_result = dma_alloc(4096, DmaDir.Bidirectional)
+    val batch_4k_ops: u32 = 3u32
+    val batch_bytes = batch_4k_ops.to_u64() * 4096u64
+    val dma_result = dma_alloc(batch_bytes as i64, DmaDir.Bidirectional)
     if dma_result.is_err():
         return ["[q35-pure-nvme-perf] skipped reason=dma-alloc-failed"]
     val dma = dma_result.unwrap()
@@ -580,7 +593,7 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
         bdf_device: 0u8,
         bdf_function: 0u8
     )
-    val shared = dma_buffer_to_shared(dma, owner, DmaCachePolicy.Coherent, 1u64)
+    val shared = dma_buffer_to_shared(dma, owner, DmaCachePolicy.Coherent, batch_bytes)
 
     var read_ops: u64 = 0u64
     var write_ops: u64 = 0u64
@@ -592,11 +605,15 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
     while run < 3u32:
         var op: u32 = 0u32
         while op < 32u32:
-            val offset = _vfs_boot_q35_relative_4k_offset(lease, run, op)
+            var offsets: [i64] = []
+            var batch_op: u32 = 0u32
+            while batch_op < batch_4k_ops and op + batch_op < 32u32:
+                offsets.push(_vfs_boot_q35_relative_4k_offset(lease, run, op + batch_op))
+                batch_op = batch_op + 1u32
             val read_start = rt_time_now_unix_micros()
-            val read_result = vfs_boot_nvme_submit_active_lease_direct_4k(
+            val read_result = vfs_boot_nvme_submit_active_lease_direct_4k_batch(
                 lease,
-                direct_io_read_request(1u64, offset, shared, 100000u32)
+                direct_io_read_batch_request(1u64, offsets, shared, 100000u32)
             )
             val read_elapsed = _vfs_boot_q35_elapsed_us(read_start, rt_time_now_unix_micros())
             if read_result.is_err():
@@ -605,12 +622,12 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
             if read_elapsed > read_p99_us:
                 read_p99_us = read_elapsed
             read_total_us = read_total_us + read_elapsed
-            read_ops = read_ops + 1u64
+            read_ops = read_ops + offsets.len().to_u64()
 
             val write_start = rt_time_now_unix_micros()
-            val write_result = vfs_boot_nvme_submit_active_lease_direct_4k(
+            val write_result = vfs_boot_nvme_submit_active_lease_direct_4k_batch(
                 lease,
-                direct_io_write_request(1u64, offset, shared, 100000u32)
+                direct_io_write_batch_request(1u64, offsets, shared, 100000u32)
             )
             val write_elapsed = _vfs_boot_q35_elapsed_us(write_start, rt_time_now_unix_micros())
             if write_result.is_err():
@@ -619,8 +636,8 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
             if write_elapsed > write_p99_us:
                 write_p99_us = write_elapsed
             write_total_us = write_total_us + write_elapsed
-            write_ops = write_ops + 1u64
-            op = op + 1u32
+            write_ops = write_ops + offsets.len().to_u64()
+            op = op + (offsets.len() as u32)
         run = run + 1u32
 
     dma_free(dma)

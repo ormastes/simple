@@ -23,6 +23,8 @@ use std.fs_driver.extension.{
     CompressExt, EncryptExt, QuotaExt, ReflinkExt, PosixCompatExt,
     DirectIoExt, DirectIoBuffer
 }
+use std.fs_driver.direct_io.{DIRECT_IO_READ, DIRECT_IO_WRITE, direct_io_read_batch_request, direct_io_write_batch_request}
+use std.io.dma.{SharedDmaBuffer, DmaOwner, DmaCachePolicy}
 
 
 # ============================================================================
@@ -191,3 +193,23 @@ describe "Extension — DirectIo variant":
         val buf = DirectIoBuffer(cpu_virt_addr: 0x1000, device_addr: 0x2000, byte_len: 1024, allocation_id: 5)
         val result = ext.validate_buffer(7, buf)
         expect(result.is_err()).to_equal(true)
+
+    it "DirectIo batch requests preserve random 4K offsets and operation":
+        val owner = DmaOwner(task_id: 42u64, bdf_bus: 0u8, bdf_device: 1u8, bdf_function: 0u8)
+        val buf = SharedDmaBuffer(
+            cpu_virt_addr: 0x1000u64,
+            host_phys_addr: 0x2000u64,
+            device_addr: 0x3000u64,
+            byte_len: 12288u64,
+            cache_policy: DmaCachePolicy.Coherent,
+            owner: owner,
+            allocation_id: 9u64
+        )
+        val read_req = direct_io_read_batch_request(7u64, [0, 4096, 8192], buf, 100u32)
+        expect(read_req.handle_id).to_equal(7u64)
+        expect(read_req.op).to_equal(DIRECT_IO_READ)
+        expect(read_req.file_offsets.len()).to_equal(3)
+        expect(read_req.buffer.byte_len).to_equal(12288u64)
+        val write_req = direct_io_write_batch_request(7u64, [12288, 16384], buf, 100u32)
+        expect(write_req.op).to_equal(DIRECT_IO_WRITE)
+        expect(write_req.file_offsets[1]).to_equal(16384)

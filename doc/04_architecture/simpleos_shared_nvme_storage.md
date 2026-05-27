@@ -287,6 +287,12 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   DBFS. The common filesystem mount surface stays `BlockDevice`, while
   production random-I/O runners and future filesystem direct-I/O hooks can bypass
   byte-array bounce copies with caller-owned DMA buffers.
+- The filesystem DirectIo contract now includes a bounded batch request shape,
+  and the lease-backed NVMe adapter routes those batches to the same
+  namespace/queue-aware shared-DMA 4KiB batch driver path used by q35
+  performance evidence. This makes the no-per-I/O-allocation path available
+  through the shared FAT32/NVFS/DBFS storage surface instead of only a benchmark
+  helper.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.
@@ -311,8 +317,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `test/unit/os/services/vfs/nvme_block_adapter_spec.spl` covers adapter-visible
   lease translation, out-of-range rejection, and fail-closed rejection when a
   lease NSID is not the driver's identified namespace, and guards that
-  lease-backed I/O calls namespace-aware driver methods without requiring real
-  hardware.
+  lease-backed I/O calls namespace-aware single and batched direct-I/O driver
+  methods without requiring real hardware.
 - `test/unit/lib/fs_driver/nvfs_device_backed_spec.spl` covers NVFS opening on
   the same shared `BlockDevice` surface used by FAT32 and DBFS.
 - `test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl` covers producing
