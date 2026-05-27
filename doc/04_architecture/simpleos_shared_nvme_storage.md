@@ -232,6 +232,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - The filesystem-facing NVMe `BlockDevice` sector path now has behavioral
   coverage for the same lease-window translation used at runtime: sector access
   maps through `base_lba` and rejects the first LBA beyond `lba_count`.
+- Production VFS root mounting now has a checked NVMe lease entry point that
+  constructs FAT32/NVFS/DBFS from `NvmeFilesystemLease` plus `BlockDevice`
+  before mounting `/`; the arbitrary-driver root mount helper remains a
+  low-level compatibility path for tests and explicitly constructed drivers.
 
 ### Negative
 - This is still a contract/model layer; it does not by itself prove real hardware

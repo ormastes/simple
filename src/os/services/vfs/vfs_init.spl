@@ -41,6 +41,8 @@ use os.services.vfs.vfs_write_ops.{
     g_vfs_delete_file, g_vfs_readdir, g_vfs_file_exists,
     vfs_mount_removable, vfs_unmount_removable
 }
+use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease_checked}
+use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemLease, NvmeFilesystemConsumer}
 use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
@@ -111,7 +113,7 @@ pub fn _clear_vfs_rootfs_for_test():
     g_mount_table = MountTable.new()
 
 pub fn vfs_mount_rootfs(driver: DriverInstance) -> Result<(), text>:
-    """Mount driver at VFS root in the production mount table and mark VFS initialized."""
+    """Mount an already constructed root driver; production NVMe callers should use vfs_mount_rootfs_from_nvme_lease_checked."""
     match driver:
         case NvfsPosix(d):
             g_root_nvfs_hosted = Some(d)
@@ -121,6 +123,19 @@ pub fn vfs_mount_rootfs(driver: DriverInstance) -> Result<(), text>:
                 return Err("vfs_mount_rootfs: mount failed")
     g_vfs_initialized = true
     Ok(())
+
+pub fn vfs_mount_rootfs_from_nvme_lease_checked(
+    name: text,
+    dev: BlockDevice,
+    lease: NvmeFilesystemLease,
+    consumer: NvmeFilesystemConsumer,
+    active_leases: [NvmeFilesystemLease]
+) -> Result<(), text>:
+    """Build and mount a root filesystem only through the checked NVMe lease contract."""
+    val driver_r = vfs_nvme_driver_instance_for_lease_checked(name, dev, lease, consumer, active_leases)
+    if driver_r.is_err():
+        return Err(driver_r.unwrap_err())
+    vfs_mount_rootfs(driver_r.unwrap())
 
 pub fn _mount_hosted_rootfs_for_test(driver: DriverInstance) -> bool:
     """Mount a hosted driver at `/` for SimpleOS rootfs helper tests."""
