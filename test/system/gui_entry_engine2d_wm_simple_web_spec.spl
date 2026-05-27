@@ -6,8 +6,7 @@
 use std.spec.*
 
 use os.qemu_runner.{OsTarget, build_os, get_wm_simple_web_check_target}
-use os.compositor.qemu_capture.{capture_qemu_vm}
-use std.nogc_sync_mut.ffi.io.{dir_create_all}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 
 use test.qemu.os.common.qemu_os_harness.{
     can_run_target, file_exists, spawn_guest_with_qmp, stop_guest,
@@ -15,6 +14,7 @@ use test.qemu.os.common.qemu_os_harness.{
 
 extern fn rt_get_cwd() -> text
 extern fn rt_thread_sleep(ms: i64)
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 fn _build_once(target: OsTarget) -> bool:
     if file_exists(target.output):
@@ -39,25 +39,35 @@ fn _capture_hold_target(target: OsTarget) -> OsTarget:
     )
 
 fn _capture_and_assert_web_ppm(qmp_socket: text, output_path: text) -> bool:
-    val result = capture_qemu_vm(qmp_socket, output_path)
-    if not result.success:
-        print "[gui_entry_engine2d_wm_simple_web_spec] QMP capture failed: {result.error}"
-        return false
-    if result.width != 1024 or result.height != 768:
-        print "[gui_entry_engine2d_wm_simple_web_spec] unexpected capture size {result.width}x{result.height}"
-        return false
-
-    var nonblack = 0
-    for pixel in result.pixels:
-        if pixel != 0xFF000000:
-            nonblack = nonblack + 1
-
-    val mmio_probe_red = _pixel_near(result.pixels, result.width, result.height, 10, 0, 0xFFFF0000, 8)
-    val header_blue = _pixel_near(result.pixels, result.width, result.height, 270, 136, 0xFF2050A0, 8)
-    val body_dark_a = _pixel_near(result.pixels, result.width, result.height, 270, 190, 0xFF182230, 8)
-    val body_dark_b = _pixel_near(result.pixels, result.width, result.height, 270, 270, 0xFF1F2937, 8)
-    print "[gui_entry_engine2d_wm_simple_web_spec] qmp ppm dims={result.width}x{result.height} nonblack={nonblack} checks=[probe={mmio_probe_red},header={header_blue},bodyA={body_dark_a},bodyB={body_dark_b}]"
-    nonblack > 100000 and mmio_probe_red and header_blue and body_dark_a and body_dark_b and file_exists(output_path)
+    val script = "import json,os,socket,sys,time;" +
+        "sock,out=sys.argv[1],sys.argv[2];" +
+        "s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sock);" +
+        "f=s.makefile('rwb',buffering=0);" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n');f.flush();f.readline();" +
+        "f.write(json.dumps(dict(execute='human-monitor-command',arguments=dict([('command-line','screendump '+out)]))).encode()+b'\\n');f.flush();" +
+        "f.readline();" +
+        "ok=any((time.sleep(0.1) or (os.path.exists(out) and os.path.getsize(out)>0)) for _ in range(100));" +
+        "b=open(out,'rb').read() if ok else b'';" +
+        "lines=b.splitlines()[:3];" +
+        "w,h=map(int,lines[1].split()) if ok and len(lines)>=3 else (0,0);" +
+        "p=b.find(b'\\n255\\n')+5;" +
+        "pix=b[p:];" +
+        "rgb=lambda x,y: pix[(y*w+x)*3:(y*w+x)*3+3];" +
+        "near=lambda g,e,t: len(g)==3 and all(abs(g[i]-e[i])<=t for i in range(3));" +
+        "non=sum(1 for i in range(0,len(pix),3) if pix[i:i+3] != b'\\x00\\x00\\x00');" +
+        "probe=near(rgb(10,0),bytes([255,0,0]),8);" +
+        "head=near(rgb(270,136),bytes([0x20,0x50,0xA0]),8);" +
+        "bodya=near(rgb(270,190),bytes([0x18,0x22,0x30]),8);" +
+        "bodyb=near(rgb(270,270),bytes([0x1F,0x29,0x37]),8);" +
+        "print('dims=%dx%d nonblack=%d checks=[probe=%s,header=%s,bodyA=%s,bodyB=%s]' % (w,h,non,probe,head,bodya,bodyb));" +
+        "sys.exit(0 if ok and w==1024 and h==768 and non>100000 and probe and head and bodya and bodyb else 4)"
+    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 20000)
+    if result[0] != "":
+        print "[gui_entry_engine2d_wm_simple_web_spec] qmp ppm {result[0]}"
+    if result[1] != "":
+        print "[gui_entry_engine2d_wm_simple_web_spec] qmp ppm stderr: {result[1]}"
+    result[2] == 0 and file_exists(output_path)
 
 fn _capture_and_assert_web_ppm_retry(qmp_socket: text, output_path: text, max_attempts: i64) -> bool:
     var attempt: i64 = 0
@@ -67,26 +77,6 @@ fn _capture_and_assert_web_ppm_retry(qmp_socket: text, output_path: text, max_at
         rt_thread_sleep(50)
         attempt = attempt + 1
     false
-
-fn _abs_i32(v: i32) -> i32:
-    if v < 0:
-        return 0 - v
-    v
-
-fn _pixel_near(pixels: [u32], width: i32, height: i32, x: i32, y: i32, expected: u32, tolerance: i32) -> bool:
-    if x < 0 or y < 0 or x >= width or y >= height:
-        return false
-    val idx = (y * width + x).to_u64()
-    if idx >= pixels.len():
-        return false
-    val got = pixels[idx]
-    val gr = ((got >> 16) & 0xFF).to_i32()
-    val gg = ((got >> 8) & 0xFF).to_i32()
-    val gb = (got & 0xFF).to_i32()
-    val er = ((expected >> 16) & 0xFF).to_i32()
-    val eg = ((expected >> 8) & 0xFF).to_i32()
-    val eb = (expected & 0xFF).to_i32()
-    _abs_i32(gr - er) <= tolerance and _abs_i32(gg - eg) <= tolerance and _abs_i32(gb - eb) <= tolerance
 
 fn _print_guest_diagnostics(prefix: text, serial: text, stderr: text):
     print "{prefix} serial_len={serial.len()} stderr_len={stderr.len()}"
