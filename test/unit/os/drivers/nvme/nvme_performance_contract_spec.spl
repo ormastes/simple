@@ -5,6 +5,7 @@ use os.drivers.nvme.nvme_performance_contract.{
     nvme_c_parity_perf_reason,
     nvme_production_perf_report,
     nvme_production_perf_report_line,
+    nvme_production_perf_report_line_from_measurements,
     nvme_production_perf_report_ready,
     nvme_production_perf_serial_acceptance_reason,
     nvme_random_io_perf_sample,
@@ -93,6 +94,62 @@ describe "NVMe production performance contract":
         expect(line).to_contain("simple_read_iops=120000")
         expect(line).to_contain("c_write_iops=80000")
         expect(nvme_production_perf_serial_acceptance_reason(line)).to_equal("ready")
+
+    it "builds the canonical hardware-runner report line from measured counters":
+        val line = nvme_production_perf_report_line_from_measurements(
+            120000u64,
+            90000u64,
+            800u64,
+            1000u64,
+            100000u64,
+            80000u64,
+            900u64,
+            1100u64,
+            64u16,
+            5u32,
+            32768u64,
+            false
+        )
+
+        expect(line).to_contain("nvme_perf reason=ready")
+        expect(line).to_contain("queue_depth=64")
+        expect(line).to_contain("warm_runs=5")
+        expect(nvme_production_perf_serial_acceptance_reason(line)).to_equal("ready")
+
+    it "keeps measured-counter report lines fail-closed when Simple is not faster or allocates per I/O":
+        val slower = nvme_production_perf_report_line_from_measurements(
+            100000u64,
+            90000u64,
+            800u64,
+            1000u64,
+            100000u64,
+            80000u64,
+            900u64,
+            1100u64,
+            64u16,
+            5u32,
+            32768u64,
+            false
+        )
+        val alloc = nvme_production_perf_report_line_from_measurements(
+            120000u64,
+            90000u64,
+            800u64,
+            1000u64,
+            100000u64,
+            80000u64,
+            900u64,
+            1100u64,
+            64u16,
+            5u32,
+            32768u64,
+            true
+        )
+
+        expect(slower).to_contain("reason=simple-read-iops-not-faster-than-c")
+        expect(alloc).to_contain("reason=simple-sample-not-ready:nvme-perf-allocation-per-io")
+        expect(nvme_production_perf_serial_acceptance_reason(slower)).to_equal("nvme-perf-report-not-ready")
+        expect(nvme_production_perf_serial_acceptance_reason(alloc)).to_equal("nvme-perf-report-not-ready")
 
     it "rejects incomplete or non-ready serial benchmark reports":
         expect(nvme_production_perf_serial_acceptance_reason("boot ok")).to_equal("missing-nvme-perf-report")
