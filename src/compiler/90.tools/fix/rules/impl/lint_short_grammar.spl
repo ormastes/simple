@@ -15,12 +15,9 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
     var fixes: [EasyFix] = []
     var search_from = 0
     while search_from < ctx.line.len():
-        val tail = ctx.line.slice(search_from)
-        val rel = tail.find("\\")
-        if rel < 0:
+        val lambda_start = _find_next_collection_lambda_start(ctx.line, search_from)
+        if lambda_start < 0:
             return fixes
-
-        val lambda_start = search_from + rel
         val parsed = _parse_method_ref_candidate(ctx.line, lambda_start)
         match parsed:
             case Some(candidate):
@@ -44,26 +41,42 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
 
     fixes
 
+fn _find_next_collection_lambda_start(line: text, search_from: i64) -> i64:
+    var best = -1
+    for marker in [".map(", ".filter(", ".any(", ".all(", ".then("]:
+        val rel = line[search_from:line.len()].find(marker)
+        if rel >= 0:
+            val candidate = search_from + rel + marker.len()
+            if best < 0 or candidate < best:
+                best = candidate
+    best
+
 struct ShortGrammarMethodRefCandidate:
     method: text
     end_offset: i64
 
 fn _parse_method_ref_candidate(line: text, lambda_start: i64) -> Option<ShortGrammarMethodRefCandidate>:
-    val after_lambda = line.slice(lambda_start + 1)
+    val after_lambda = line[lambda_start:line.len()]
     val colon_rel = after_lambda.find(":")
     if colon_rel < 0:
         return nil
 
-    val param = after_lambda.slice(0, colon_rel).trim()
+    val raw_param = after_lambda[0:colon_rel].trim()
+    if raw_param.len() < 2:
+        return nil
+    val introducer = raw_param[0:1]
+    if _is_identifier_char(introducer):
+        return nil
+    val param = raw_param[1:raw_param.len()].trim()
     if not _is_plain_identifier(param):
         return nil
 
-    var body_start = lambda_start + 1 + colon_rel + 1
-    while body_start < line.len() and line.slice(body_start, body_start + 1) == " ":
+    var body_start = lambda_start + colon_rel + 1
+    while body_start < line.len() and line[body_start:body_start + 1] == " ":
         body_start = body_start + 1
 
     val receiver_prefix = param + "."
-    if not line.slice(body_start).starts_with(receiver_prefix):
+    if not line[body_start:line.len()].starts_with(receiver_prefix):
         return nil
 
     val method_start = body_start + receiver_prefix.len()
@@ -71,15 +84,15 @@ fn _parse_method_ref_candidate(line: text, lambda_start: i64) -> Option<ShortGra
     if method_end <= method_start:
         return nil
 
-    val method = line.slice(method_start, method_end)
+    val method = line[method_start:method_end]
     if method.starts_with("_"):
         return nil
 
     val call_end = method_end + 2
-    if call_end > line.len() or line.slice(method_end, call_end) != "()":
+    if call_end > line.len() or line[method_end:call_end] != "()":
         return nil
 
-    val suffix = line.slice(call_end).trim()
+    val suffix = line[call_end:line.len()].trim()
     if suffix != "" and not suffix.starts_with(")") and not suffix.starts_with(","):
         return nil
 
@@ -88,7 +101,7 @@ fn _parse_method_ref_candidate(line: text, lambda_start: i64) -> Option<ShortGra
 fn _scan_identifier_end(line: text, start: i64) -> i64:
     var i = start
     while i < line.len():
-        val ch = line.slice(i, i + 1)
+        val ch = line[i:i + 1]
         if not _is_identifier_char(ch):
             return i
         i = i + 1
@@ -99,7 +112,7 @@ fn _is_plain_identifier(value: text) -> bool:
         return false
     var i = 0
     while i < value.len():
-        val ch = value.slice(i, i + 1)
+        val ch = value[i:i + 1]
         if i == 0:
             if not _is_identifier_start(ch):
                 return false
@@ -109,7 +122,7 @@ fn _is_plain_identifier(value: text) -> bool:
     true
 
 fn _is_identifier_start(ch: text) -> bool:
-    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_".contains(ch)
 
 fn _is_identifier_char(ch: text) -> bool:
-    _is_identifier_start(ch) or (ch >= "0" and ch <= "9")
+    _is_identifier_start(ch) or "0123456789".contains(ch)
