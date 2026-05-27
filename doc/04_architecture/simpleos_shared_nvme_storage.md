@@ -293,6 +293,13 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   performance evidence. This makes the no-per-I/O-allocation path available
   through the shared FAT32/NVFS/DBFS storage surface instead of only a benchmark
   helper.
+- The 4KiB shared-DMA driver path now encodes each 4KiB slot as one NVMe
+  multi-sector command when the namespace LBA size is smaller than 4KiB. The
+  batch path therefore spends queue entries on filesystem 4KiB operations, not
+  on internal 512-byte sectors.
+- The q35 performance probe now exercises a 32-operation 4KiB random batch over
+  that shared lease path, so the evidence lane measures the production
+  filesystem-facing adapter rather than a sector-by-sector benchmark shortcut.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.
