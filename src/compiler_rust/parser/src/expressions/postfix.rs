@@ -1,10 +1,59 @@
 use crate::ast::{Argument, BinOp, Expr, LambdaParam, MoveMode, Type, UnaryOp};
 use crate::error::ParseError;
 use crate::error_recovery::{ErrorHint, ErrorHintLevel};
+use crate::expressions::placeholder::{force_transform_placeholder_lambda, is_exact_placeholder_expr};
 use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
 
 impl<'a> Parser<'a> {
+    fn transform_exact_placeholder_args_for_hof(&self, callee: &Expr, args: &mut [Argument]) {
+        if !Self::expr_is_higher_order_callee(callee) {
+            return;
+        }
+        for arg in args {
+            if is_exact_placeholder_expr(&arg.value) {
+                let value = std::mem::replace(&mut arg.value, Expr::Nil);
+                arg.value = force_transform_placeholder_lambda(value);
+            }
+        }
+    }
+
+    fn expr_is_higher_order_callee(callee: &Expr) -> bool {
+        match callee {
+            Expr::Identifier(name) => Self::name_is_higher_order_callback_callee(name),
+            Expr::FieldAccess { field, .. } => Self::name_is_higher_order_callback_callee(field),
+            Expr::Path(parts) => parts
+                .last()
+                .is_some_and(|name| Self::name_is_higher_order_callback_callee(name)),
+            _ => false,
+        }
+    }
+
+    fn name_is_higher_order_callback_callee(name: &str) -> bool {
+        matches!(
+            name,
+            "map"
+                | "mapped"
+                | "filter"
+                | "reject"
+                | "any"
+                | "all"
+                | "each"
+                | "for_each"
+                | "flat_map"
+                | "compact_map"
+                | "map_err"
+                | "and_then"
+                | "then"
+                | "reduce"
+                | "fold"
+        ) || name.ends_with("_map")
+            || name.ends_with("_filter")
+            || name.ends_with("_any")
+            || name.ends_with("_all")
+            || name.ends_with("_each")
+    }
+
     /// Convert an expression to a qualified name (e.g., a.b.c -> "a.b.c")
     fn expr_to_qualified_name(&self, expr: Expr) -> Result<String, ParseError> {
         match expr {
@@ -316,6 +365,8 @@ impl<'a> Parser<'a> {
 
                         if self.check(&TokenKind::LParen) {
                             let mut args = self.parse_arguments()?;
+                            let method_callee = Expr::Identifier(field.clone());
+                            self.transform_exact_placeholder_args_for_hof(&method_callee, &mut args);
                             // Check for trailing block: obj.method(args) \x: body
                             if self.check(&TokenKind::Backslash) {
                                 let trailing_lambda = self.parse_trailing_lambda()?;
@@ -748,6 +799,7 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_call(&mut self, callee: Expr) -> Result<Expr, ParseError> {
         let mut args = self.parse_arguments()?;
+        self.transform_exact_placeholder_args_for_hof(&callee, &mut args);
         // Check for trailing block: func(args) \x: body
         if self.check(&TokenKind::Backslash) {
             let trailing_lambda = self.parse_trailing_lambda()?;

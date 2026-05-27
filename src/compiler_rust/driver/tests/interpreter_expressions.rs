@@ -76,6 +76,27 @@ main = calc(2, z=4, y=3)
 }
 
 #[test]
+fn interpreter_placeholder_lambda_in_call_argument() {
+    let code = r#"
+main = ["2"].map(int(_1))[0]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2);
+}
+
+#[test]
+fn interpreter_placeholder_lambda_in_multi_arg_call() {
+    let code = r#"
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+
+main = [1].map(add(_1, 1))[0]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2);
+}
+
+#[test]
 fn interpreter_functional_update_array_concat() {
     let code = r#"
 arr = [1, 2]

@@ -34,6 +34,17 @@ fn numbered_placeholder_index(name: &str) -> Option<usize> {
 ///
 /// If no placeholders are found, returns the expression unchanged.
 pub fn transform_placeholder_lambda(expr: Expr) -> Expr {
+    if is_exact_placeholder_expr(&expr) {
+        return expr;
+    }
+    force_transform_placeholder_lambda(expr)
+}
+
+/// Transform placeholder lambda syntax even when the whole expression is a
+/// single placeholder. This is used for known higher-order call sites such as
+/// `.map(_1)`, while ordinary calls like `int(_1)` keep `_1` available for the
+/// enclosing placeholder expression.
+pub fn force_transform_placeholder_lambda(expr: Expr) -> Expr {
     // Check for numbered placeholders first (_1, _2, etc.)
     let max_numbered = find_max_numbered(&expr);
 
@@ -80,6 +91,14 @@ pub fn transform_placeholder_lambda(expr: Expr) -> Expr {
         body: Box::new(transformed_body),
         move_mode: MoveMode::Copy,
         capture_all: false,
+    }
+}
+
+/// Return true for a bare placeholder expression (`_`, `_1`, `_2`, ...).
+pub fn is_exact_placeholder_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(name) => name == "_" || is_numbered_placeholder(name),
+        _ => false,
     }
 }
 
