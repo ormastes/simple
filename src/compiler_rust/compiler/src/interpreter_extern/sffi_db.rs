@@ -372,3 +372,120 @@ pub fn rt_db_col_count_fn(args: &[Value]) -> Result<Value, CompileError> {
     };
     Ok(Value::Int(t.num_cols))
 }
+
+// ============================================================================
+// rt_db_put_row3(handle, pk, type_mask, v0, v1, v2) -> row_index
+// type_mask bits: 0=int, 1=text per column (cols 0,1,2)
+// ============================================================================
+
+pub fn rt_db_put_row3_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = arg_int(args, 0, "rt_db_put_row3")? as usize;
+    let pk = arg_str(args, 1, "rt_db_put_row3")?;
+    let type_mask = arg_int(args, 2, "rt_db_put_row3")?;
+    let v0 = arg_int(args, 3, "rt_db_put_row3")?;
+    let v1 = arg_int(args, 4, "rt_db_put_row3")?;
+    let v2 = arg_int(args, 5, "rt_db_put_row3")?;
+
+    let mut tables = TABLES.lock().unwrap();
+    let t = match tables.get_mut(handle).and_then(|s| s.as_mut()) {
+        Some(t) => t,
+        None => return Ok(Value::Int(-1)),
+    };
+    if t.num_cols < 3 {
+        return Ok(Value::Int(-1));
+    }
+
+    if let Some(&existing) = t.pk_index.get(&pk) {
+        return Ok(Value::Int(existing as i64));
+    }
+
+    let row_idx = t.rows.len();
+    let mut values = vec![ColValue::Unset; t.num_cols as usize];
+    let vals = [v0, v1, v2];
+    for i in 0..3 {
+        if (type_mask >> i) & 1 == 1 {
+            values[i] = ColValue::Text(format!("{}", vals[i]));
+        } else {
+            values[i] = ColValue::Int(vals[i]);
+        }
+    }
+    let row = DbRow { pk_text: pk.clone(), values, alive: true };
+    t.rows.push(row);
+    t.pk_index.insert(pk, row_idx);
+    t.alive_count += 1;
+    Ok(Value::Int(row_idx as i64))
+}
+
+// ============================================================================
+// rt_db_get_int_by_pk(handle, pk, col, default_val) -> i64
+// ============================================================================
+
+pub fn rt_db_get_int_by_pk_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = arg_int(args, 0, "rt_db_get_int_by_pk")? as usize;
+    let pk = arg_str(args, 1, "rt_db_get_int_by_pk")?;
+    let col = arg_int(args, 2, "rt_db_get_int_by_pk")? as usize;
+    let default_val = arg_int(args, 3, "rt_db_get_int_by_pk")?;
+
+    let tables = TABLES.lock().unwrap();
+    let t = match tables.get(handle).and_then(|s| s.as_ref()) {
+        Some(t) => t,
+        None => return Ok(Value::Int(default_val)),
+    };
+    match t.pk_index.get(&pk) {
+        Some(&idx) if idx < t.rows.len() && t.rows[idx].alive && col < t.num_cols as usize => {
+            match &t.rows[idx].values[col] {
+                ColValue::Int(v) => Ok(Value::Int(*v)),
+                _ => Ok(Value::Int(default_val)),
+            }
+        }
+        _ => Ok(Value::Int(default_val)),
+    }
+}
+
+// ============================================================================
+// rt_db_update_int(handle, pk, col, value) -> 0/1
+// ============================================================================
+
+pub fn rt_db_update_int_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = arg_int(args, 0, "rt_db_update_int")? as usize;
+    let pk = arg_str(args, 1, "rt_db_update_int")?;
+    let col = arg_int(args, 2, "rt_db_update_int")? as usize;
+    let value = arg_int(args, 3, "rt_db_update_int")?;
+
+    let mut tables = TABLES.lock().unwrap();
+    let t = match tables.get_mut(handle).and_then(|s| s.as_mut()) {
+        Some(t) => t,
+        None => return Ok(Value::Int(0)),
+    };
+    match t.pk_index.get(&pk) {
+        Some(&idx) if idx < t.rows.len() && t.rows[idx].alive && col < t.num_cols as usize => {
+            t.rows[idx].values[col] = ColValue::Int(value);
+            Ok(Value::Int(1))
+        }
+        _ => Ok(Value::Int(0)),
+    }
+}
+
+// ============================================================================
+// rt_db_update_text(handle, pk, col, value) -> 0/1
+// ============================================================================
+
+pub fn rt_db_update_text_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = arg_int(args, 0, "rt_db_update_text")? as usize;
+    let pk = arg_str(args, 1, "rt_db_update_text")?;
+    let col = arg_int(args, 2, "rt_db_update_text")? as usize;
+    let value = arg_str(args, 3, "rt_db_update_text")?;
+
+    let mut tables = TABLES.lock().unwrap();
+    let t = match tables.get_mut(handle).and_then(|s| s.as_mut()) {
+        Some(t) => t,
+        None => return Ok(Value::Int(0)),
+    };
+    match t.pk_index.get(&pk) {
+        Some(&idx) if idx < t.rows.len() && t.rows[idx].alive && col < t.num_cols as usize => {
+            t.rows[idx].values[col] = ColValue::Text(value);
+            Ok(Value::Int(1))
+        }
+        _ => Ok(Value::Int(0)),
+    }
+}

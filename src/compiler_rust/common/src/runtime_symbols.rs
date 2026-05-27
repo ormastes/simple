@@ -400,6 +400,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_db_delete",
     "rt_db_row_count",
     "rt_db_col_count",
+    // Batched DB operations (reduce extern call overhead)
+    "rt_db_put_row3",
+    "rt_db_get_int_by_pk",
+    "rt_db_update_int",
+    "rt_db_update_text",
     // Index/slice operations
     "rt_index_get",
     "rt_index_set",

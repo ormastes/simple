@@ -451,3 +451,112 @@ int64_t rt_db_col_count(int64_t handle) {
     if (!t->in_use) return 0;
     return t->num_cols;
 }
+
+/* ================================================================
+ * Batched operations — reduce interpreter dispatch overhead
+ * ================================================================ */
+
+/* Insert a 3-column row: (int, text, int) in one call.
+ * type_mask encodes column types: bit i = 1 means text, 0 means int.
+ * For type_mask=0b010 (=2): col0=int, col1=text, col2=int.
+ * v0,v1,v2 are i64 values; for text cols the value is a char* cast to i64. */
+int64_t rt_db_put_row3(int64_t handle, const char* pk,
+                       int64_t type_mask,
+                       int64_t v0, int64_t v1, int64_t v2) {
+    ensure_init();
+    if (handle < 0 || handle >= DB_MAX_TABLES) return -1;
+    DbTable* t = &g_tables[handle];
+    if (!t->in_use || t->num_cols < 3) return -1;
+
+    const char* key = pk ? pk : "";
+    int64_t existing = pk_lookup(t, key);
+    if (existing >= 0) return existing;
+
+    int64_t row_idx = t->row_count;
+    if (row_idx >= t->row_cap) {
+        int64_t new_cap = t->row_cap * 2;
+        t->rows = (DbRow*)realloc(t->rows, (size_t)new_cap * sizeof(DbRow));
+        for (int64_t i = t->row_cap; i < new_cap; i++) {
+            memset(&t->rows[i], 0, sizeof(DbRow));
+        }
+        t->row_cap = new_cap;
+    }
+
+    DbRow* r = &t->rows[row_idx];
+    r->pk_text = strdup(key);
+    r->int_values = (int64_t*)calloc((size_t)t->num_cols, sizeof(int64_t));
+    r->text_values = (char**)calloc((size_t)t->num_cols, sizeof(char*));
+    r->col_types = (ColType*)calloc((size_t)t->num_cols, sizeof(ColType));
+    r->alive = 1;
+
+    int64_t vals[3] = {v0, v1, v2};
+    for (int c = 0; c < 3; c++) {
+        if (type_mask & (1 << c)) {
+            const char* s = (const char*)vals[c];
+            r->text_values[c] = strdup(s ? s : "");
+            r->col_types[c] = COL_TEXT;
+        } else {
+            r->int_values[c] = vals[c];
+            r->col_types[c] = COL_INT;
+        }
+    }
+
+    pk_insert(t, key, row_idx);
+    t->row_count++;
+    t->alive_count++;
+    return row_idx;
+}
+
+/* Lookup by PK and return an int column value in one call.
+ * Returns the value, or default_val if not found. */
+int64_t rt_db_get_int_by_pk(int64_t handle, const char* pk, int64_t col,
+                            int64_t default_val) {
+    ensure_init();
+    if (handle < 0 || handle >= DB_MAX_TABLES) return default_val;
+    DbTable* t = &g_tables[handle];
+    if (!t->in_use) return default_val;
+
+    int64_t row = pk_lookup(t, pk ? pk : "");
+    if (row < 0 || row >= t->row_count) return default_val;
+    if (col < 0 || col >= t->num_cols) return default_val;
+    DbRow* r = &t->rows[row];
+    if (!r->alive || r->col_types[col] != COL_INT) return default_val;
+    return r->int_values[col];
+}
+
+/* Update an int column by PK in one call. Returns 1 on success, 0 on not found. */
+int64_t rt_db_update_int(int64_t handle, const char* pk, int64_t col,
+                         int64_t value) {
+    ensure_init();
+    if (handle < 0 || handle >= DB_MAX_TABLES) return 0;
+    DbTable* t = &g_tables[handle];
+    if (!t->in_use) return 0;
+
+    int64_t row = pk_lookup(t, pk ? pk : "");
+    if (row < 0 || row >= t->row_count) return 0;
+    if (col < 0 || col >= t->num_cols) return 0;
+    DbRow* r = &t->rows[row];
+    if (!r->alive) return 0;
+    r->int_values[col] = value;
+    r->col_types[col] = COL_INT;
+    return 1;
+}
+
+/* Update a text column by PK in one call. Returns 1 on success, 0 on not found. */
+int64_t rt_db_update_text(int64_t handle, const char* pk, int64_t col,
+                          const char* value) {
+    ensure_init();
+    if (handle < 0 || handle >= DB_MAX_TABLES) return 0;
+    DbTable* t = &g_tables[handle];
+    if (!t->in_use) return 0;
+
+    int64_t row = pk_lookup(t, pk ? pk : "");
+    if (row < 0 || row >= t->row_count) return 0;
+    if (col < 0 || col >= t->num_cols) return 0;
+    DbRow* r = &t->rows[row];
+    if (!r->alive) return 0;
+    if (r->text_values[col]) free(r->text_values[col]);
+    r->text_values[col] = strdup(value ? value : "");
+    r->col_types[col] = COL_TEXT;
+    return 1;
+}

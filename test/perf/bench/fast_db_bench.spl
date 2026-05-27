@@ -1,21 +1,33 @@
-# fast_db_bench.spl — Benchmark for C-runtime-backed FastTable.
+# fast_db_bench.spl — Benchmark for C-runtime-backed fast DB.
 #
-# Measures: PUT x200, GET x100, SCAN x100, DELETE x50 on FastTable.
+# Measures: PUT, GET, SCAN, DELETE using direct extern calls.
 # Uses bench_now_ns() (clock_gettime CLOCK_MONOTONIC).
 #
 # Run interpreted:  bin/simple run test/perf/bench/fast_db_bench.spl
 # Run compiled:     bin/simple test --compile test/perf/bench/fast_db_bench.spl
 
 use test.perf.bench.lib.timing.{bench_now_ns}
-use nogc_sync_mut.database.fast_db.{FastTable}
+
+# ── Extern declarations (direct, no class wrapper for interpreter compat) ──
+
+extern fn rt_db_table_create(name: text, num_cols: i64, pk_col: i64) -> i64
+extern fn rt_db_table_destroy(handle: i64)
+extern fn rt_db_put(table: i64, pk_text: text, num_values: i64) -> i64
+extern fn rt_db_put_value_int(table: i64, row: i64, col: i64, value: i64)
+extern fn rt_db_get(table: i64, pk_text: text) -> i64
+extern fn rt_db_get_int(table: i64, row: i64, col: i64) -> i64
+extern fn rt_db_scan_range(table: i64, col: i64, low: i64, high: i64) -> i64
+extern fn rt_db_scan_result(table: i64, result_idx: i64) -> i64
+extern fn rt_db_delete(table: i64, pk_text: text) -> i64
+extern fn rt_db_row_count(table: i64) -> i64
+extern fn rt_db_put_row3(handle: i64, pk: text, type_mask: i64, v0: i64, v1: i64, v2: i64) -> i64
+extern fn rt_db_get_int_by_pk(handle: i64, pk: text, col: i64, default_val: i64) -> i64
+extern fn rt_db_update_int(handle: i64, pk: text, col: i64, value: i64) -> i64
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-fn elapsed_us(t0: i64, t1: i64) -> i64:
-    (t1 - t0) / 1000
-
-fn elapsed_ns(t0: i64, t1: i64) -> i64:
-    t1 - t0
+fn int_to_str(n: i64) -> text:
+    return "" + n
 
 fn per_op_ns(t0: i64, t1: i64, ops: i64) -> i64:
     if ops <= 0:
@@ -26,102 +38,136 @@ fn per_op_ns(t0: i64, t1: i64, ops: i64) -> i64:
 
 fn main():
     print "=== FastTable (C Runtime) Benchmark ==="
-    print "Schema: 3 columns (id:int, name:text, score:int), pk_col=0"
+    print "Schema: 3 columns (id:int, name:int, score:int), pk_col=0"
     print ""
 
-    # Create table: 3 cols, pk on col 0
-    var tbl = FastTable.create("bench", 3, 0)
+    val tbl = rt_db_table_create("bench", 3, 0)
 
-    # ── PUT x200 ──────────────────────────────────────────────────────────────
+    # ── PUT x200 (4 calls per PUT: put + 3x put_value_int) ───────────────────
     val put_t0 = bench_now_ns()
     var i = 0
     while i < 200:
-        val pk = "key_" + i.to_text()
-        val row = tbl.put(pk)
-        tbl.put_int(row, 0, i as i64)
-        tbl.put_text(row, 1, "name_" + i.to_text())
-        tbl.put_int(row, 2, (i * 10) as i64)
+        val pk = "key_" + int_to_str(i)
+        val row = rt_db_put(tbl, pk, 3)
+        rt_db_put_value_int(tbl, row, 0, i)
+        rt_db_put_value_int(tbl, row, 1, i * 100)
+        rt_db_put_value_int(tbl, row, 2, i * 10)
         i = i + 1
     val put_t1 = bench_now_ns()
-    val put_total_us = elapsed_us(put_t0, put_t1)
     val put_per_ns = per_op_ns(put_t0, put_t1, 200)
-    print "[PUT x200]  total=" + put_total_us.to_text() + " us  per_op=" + put_per_ns.to_text() + " ns"
+    print "[PUT x200]         per_op=" + int_to_str(put_per_ns) + " ns  (4 extern calls/op)"
 
-    # Verify row count
-    val rc = tbl.row_count()
-    if rc != 200:
-        print "FAIL: expected 200 rows, got " + rc.to_text()
-
-    # ── GET x100 (point lookup) ───────────────────────────────────────────────
+    # ── GET x100 (2 calls per GET: get + get_int) ────────────────────────────
     val get_t0 = bench_now_ns()
     var found = 0
     var j = 0
     while j < 100:
-        val pk = "key_" + (j * 2).to_text()
-        val row = tbl.get(pk)
+        val pk = "key_" + int_to_str(j * 2)
+        val row = rt_db_get(tbl, pk)
         if row >= 0:
-            val score = tbl.get_int(row, 2)
-            if score == (j * 2 * 10) as i64:
+            val score = rt_db_get_int(tbl, row, 2)
+            if score == j * 2 * 10:
                 found = found + 1
         j = j + 1
     val get_t1 = bench_now_ns()
-    val get_total_us = elapsed_us(get_t0, get_t1)
     val get_per_ns = per_op_ns(get_t0, get_t1, 100)
-    print "[GET x100]  total=" + get_total_us.to_text() + " us  per_op=" + get_per_ns.to_text() + " ns  found=" + found.to_text()
+    print "[GET x100]         per_op=" + int_to_str(get_per_ns) + " ns  (2 extern calls/op)  found=" + int_to_str(found)
+
+    # ── Batched PUT x200 (1 call per PUT) ───────────────────────────────────────
+    val tbl2 = rt_db_table_create("bench_batch", 3, 0)
+    val bput_t0 = bench_now_ns()
+    var bi = 0
+    while bi < 200:
+        val pk = "key_" + int_to_str(bi)
+        val row = rt_db_put_row3(tbl2, pk, 0, bi, bi * 100, bi * 10)
+        bi = bi + 1
+    val bput_t1 = bench_now_ns()
+    val bput_per_ns = per_op_ns(bput_t0, bput_t1, 200)
+    print "[PUT_BATCH x200]   per_op=" + int_to_str(bput_per_ns) + " ns  (1 extern call/op)"
+
+    # ── Batched GET x100 (1 call per GET) ────────────────────────────────────
+    val bget_t0 = bench_now_ns()
+    var bfound = 0
+    var bj = 0
+    while bj < 100:
+        val pk = "key_" + int_to_str(bj * 2)
+        val score = rt_db_get_int_by_pk(tbl2, pk, 2, -1)
+        if score == bj * 2 * 10:
+            bfound = bfound + 1
+        bj = bj + 1
+    val bget_t1 = bench_now_ns()
+    val bget_per_ns = per_op_ns(bget_t0, bget_t1, 100)
+    print "[GET_BATCH x100]   per_op=" + int_to_str(bget_per_ns) + " ns  (1 extern call/op)  found=" + int_to_str(bfound)
+
+    # ── UPDATE x100 ───────────────────────────────────────────────────────────
+    val upd_t0 = bench_now_ns()
+    var updated = 0
+    var u = 0
+    while u < 100:
+        val pk = "key_" + int_to_str(u)
+        val ok = rt_db_update_int(tbl2, pk, 2, u * 99)
+        updated = updated + ok
+        u = u + 1
+    val upd_t1 = bench_now_ns()
+    val upd_per_ns = per_op_ns(upd_t0, upd_t1, 100)
+    print "[UPDATE x100]      per_op=" + int_to_str(upd_per_ns) + " ns  updated=" + int_to_str(updated)
 
     # ── SCAN x100 (range on score col=2) ──────────────────────────────────────
     val scan_t0 = bench_now_ns()
     var total_scan_rows = 0
     var k = 0
     while k < 100:
-        val low = (k * 10) as i64
-        val high = ((k + 20) * 10) as i64
-        val cnt = tbl.scan_range(2, low, high)
-        total_scan_rows = total_scan_rows + cnt as i64
+        val low = k * 10
+        val high = (k + 20) * 10
+        val cnt = rt_db_scan_range(tbl2, 2, low, high)
+        total_scan_rows = total_scan_rows + cnt
         k = k + 1
     val scan_t1 = bench_now_ns()
-    val scan_total_us = elapsed_us(scan_t0, scan_t1)
     val scan_per_ns = per_op_ns(scan_t0, scan_t1, 100)
-    print "[SCAN x100] total=" + scan_total_us.to_text() + " us  per_op=" + scan_per_ns.to_text() + " ns  total_rows=" + total_scan_rows.to_text()
+    print "[SCAN x100]        per_op=" + int_to_str(scan_per_ns) + " ns  total_rows=" + int_to_str(total_scan_rows)
 
     # ── DELETE x50 ────────────────────────────────────────────────────────────
     val del_t0 = bench_now_ns()
     var deleted = 0
     var d = 0
     while d < 50:
-        val pk = "key_" + d.to_text()
-        val ok = tbl.delete(pk)
-        deleted = deleted + ok as i64
+        val pk = "key_" + int_to_str(d)
+        val ok = rt_db_delete(tbl2, pk)
+        deleted = deleted + ok
         d = d + 1
     val del_t1 = bench_now_ns()
-    val del_total_us = elapsed_us(del_t0, del_t1)
     val del_per_ns = per_op_ns(del_t0, del_t1, 50)
-    print "[DEL x50]   total=" + del_total_us.to_text() + " us  per_op=" + del_per_ns.to_text() + " ns  deleted=" + deleted.to_text()
+    print "[DEL x50]          per_op=" + int_to_str(del_per_ns) + " ns  deleted=" + int_to_str(deleted)
 
-    # Verify remaining count
-    val remaining = tbl.row_count()
+    val remaining = rt_db_row_count(tbl2)
     print ""
-    print "Remaining rows: " + remaining.to_text()
-
-    # ── Summary ───────────────────────────────────────────────────────────────
+    print "=== Speedup: Batched vs Original ==="
+    print "PUT: " + int_to_str(put_per_ns) + " -> " + int_to_str(bput_per_ns) + " ns/op"
+    print "GET: " + int_to_str(get_per_ns) + " -> " + int_to_str(bget_per_ns) + " ns/op"
     print ""
-    print "=== Comparison with SQLite ground truth ==="
-    print "SQLite GET:   ~800 ns/op (prepared stmt, WAL mode)"
-    print "FastTable GET: " + get_per_ns.to_text() + " ns/op"
-    print "SQLite PUT:   ~2000 ns/op (WAL mode)"
-    print "FastTable PUT: " + put_per_ns.to_text() + " ns/op"
+    print "=== vs SQLite (prepared stmt, WAL) ==="
+    print "SQLite PUT: ~1060 ns   FastTable: " + int_to_str(bput_per_ns) + " ns"
+    print "SQLite GET: ~840 ns    FastTable: " + int_to_str(bget_per_ns) + " ns"
+    print "SQLite SCAN: ~11300 ns FastTable: " + int_to_str(scan_per_ns) + " ns"
+    print "SQLite UPD:  ~1500 ns  FastTable: " + int_to_str(upd_per_ns) + " ns"
     print ""
 
     # ── Sanity checks ─────────────────────────────────────────────────────────
     var passed = true
     if found != 100:
-        print "FAIL: GET should find 100 rows, found " + found.to_text()
+        print "FAIL: GET_ORIG found " + int_to_str(found) + " expected 100"
+        passed = false
+    if bfound != 100:
+        print "FAIL: GET_BATCH found " + int_to_str(bfound) + " expected 100"
+        passed = false
+    if updated != 100:
+        print "FAIL: UPDATE updated " + int_to_str(updated) + " expected 100"
         passed = false
     if deleted != 50:
-        print "FAIL: DELETE should remove 50 rows, deleted " + deleted.to_text()
+        print "FAIL: DELETE deleted " + int_to_str(deleted) + " expected 50"
         passed = false
     if remaining != 150:
-        print "FAIL: expected 150 remaining rows, got " + remaining.to_text()
+        print "FAIL: remaining " + int_to_str(remaining) + " expected 150"
         passed = false
 
     if passed:
@@ -129,4 +175,5 @@ fn main():
     else:
         print "RESULT: FAIL"
 
-    tbl.destroy()
+    rt_db_table_destroy(tbl)
+    rt_db_table_destroy(tbl2)

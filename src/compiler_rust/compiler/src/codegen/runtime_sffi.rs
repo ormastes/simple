@@ -268,6 +268,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_db_delete", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_row_count", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_col_count", &[I64], &[I64]),
+    // Batched DB operations (reduce extern call overhead)
+    RuntimeFuncSpec::new("rt_db_put_row3", &[I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_get_int_by_pk", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_update_int", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_update_text", &[I64, I64, I64, I64], &[I64]),
     // =========================================================================
     // Index/slice operations
     // =========================================================================
