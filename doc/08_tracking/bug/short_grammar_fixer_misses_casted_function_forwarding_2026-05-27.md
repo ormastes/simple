@@ -1,11 +1,12 @@
 # Short Grammar Fixer Misses Casted Function Forwarding
 
 Date: 2026-05-27
+Status: Resolved
 
 ## Summary
 
-The short-grammar fixer does not currently rewrite casted function-forwarding
-callbacks of the form:
+The short-grammar fixer previously missed casted function-forwarding callbacks
+of the form:
 
 ```spl
 \v: callback(v as T)
@@ -18,7 +19,10 @@ callback(_1 as T)
 ```
 
 as verified in `src/lib/nogc_sync_mut/src/future.spl`, but
-`check_short_grammar_refactor` returns no fix for the long form.
+`check_short_grammar_refactor` returned no fix for the long form.
+
+Resolved by the regression `rewrites casted function forwarding calls` in
+`test/unit/app/fix/short_grammar_fix_spec.spl`.
 
 ## Expected
 
