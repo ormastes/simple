@@ -231,6 +231,8 @@ describe "SimpleOS physical NVMe serial checker app":
         val preflight_report = "/tmp/simpleos_nvme_identity_compare_preflight.sdn"
         val invalid_report = "/tmp/simpleos_nvme_identity_compare_invalid.sdn"
         val not_accepted_report = "/tmp/simpleos_nvme_identity_compare_not_accepted.sdn"
+        val missing_schema_report = "/tmp/simpleos_nvme_identity_compare_missing_schema.sdn"
+        val bad_checker_report = "/tmp/simpleos_nvme_identity_compare_bad_checker.sdn"
         val model_report = "/tmp/simpleos_nvme_identity_compare_model.sdn"
         val mismatch_report = "/tmp/simpleos_nvme_identity_compare_mismatch.sdn"
         val prefix_report = "/tmp/simpleos_nvme_identity_compare_prefix.sdn"
@@ -240,6 +242,8 @@ describe "SimpleOS physical NVMe serial checker app":
         val _ = rt_file_delete(preflight_report)
         val _ = rt_file_delete(invalid_report)
         val _ = rt_file_delete(not_accepted_report)
+        val _ = rt_file_delete(missing_schema_report)
+        val _ = rt_file_delete(bad_checker_report)
         val _ = rt_file_delete(model_report)
         val _ = rt_file_delete(mismatch_report)
         val _ = rt_file_delete(prefix_report)
@@ -254,9 +258,27 @@ describe "SimpleOS physical NVMe serial checker app":
             "    model: Samsung PM9A3\n" +
             "    serial: SN123456\n" +
             "    namespace_nsid: 1\n"
+        val missing_schema_preflight =
+            "physical_nvme_preflight:\n" +
+            "  accepted: true\n" +
+            "  device: /dev/nvme9n1\n" +
+            "    model: Samsung PM9A3\n" +
+            "    serial: SN123456\n" +
+            "    namespace_nsid: 1\n"
+        val bad_checker_preflight =
+            "physical_nvme_preflight:\n" +
+            "  accepted: true\n" +
+            "  nvme_device_glob: /dev/nvme9n1\n" +
+            "  checker: /tmp/not-the-simpleos-checker.spl\n" +
+            "  device: /dev/nvme9n1\n" +
+            "    model: Samsung PM9A3\n" +
+            "    serial: SN123456\n" +
+            "    namespace_nsid: 1\n"
         val model_mismatch_preflight =
             "physical_nvme_preflight:\n" +
             "  accepted: true\n" +
+            "  nvme_device_glob: /dev/nvme9n1\n" +
+            "  checker: src/app/simpleos_nvme_serial_check/main.spl\n" +
             "  device: /dev/nvme9n1\n" +
             "    model: DIFFERENT\n" +
             "    serial: SN123456\n" +
@@ -264,6 +286,8 @@ describe "SimpleOS physical NVMe serial checker app":
         val mismatch_preflight =
             "physical_nvme_preflight:\n" +
             "  accepted: true\n" +
+            "  nvme_device_glob: /dev/nvme9n1\n" +
+            "  checker: src/app/simpleos_nvme_serial_check/main.spl\n" +
             "  device: /dev/nvme9n1\n" +
             "    model: Samsung PM9A3\n" +
             "    serial: DIFFERENT\n" +
@@ -271,6 +295,8 @@ describe "SimpleOS physical NVMe serial checker app":
         val prefix_preflight =
             "physical_nvme_preflight:\n" +
             "  accepted: true\n" +
+            "  nvme_device_glob: /dev/nvme9n1\n" +
+            "  checker: src/app/simpleos_nvme_serial_check/main.spl\n" +
             "  device: /dev/nvme9n1\n" +
             "    model: Samsung PM9A3\n" +
             "    serial: SN1234567\n" +
@@ -278,6 +304,8 @@ describe "SimpleOS physical NVMe serial checker app":
         val matching_preflight =
             "physical_nvme_preflight:\n" +
             "  accepted: true\n" +
+            "  nvme_device_glob: /dev/nvme9n1\n" +
+            "  checker: src/app/simpleos_nvme_serial_check/main.spl\n" +
             "  device: /dev/nvme9n1\n" +
             "    model: Samsung PM9A3\n" +
             "    serial: SN123456\n" +
@@ -285,6 +313,8 @@ describe "SimpleOS physical NVMe serial checker app":
         val multi_preflight =
             "physical_nvme_preflight:\n" +
             "  accepted: true\n" +
+            "  nvme_device_glob: /dev/nvme*n1\n" +
+            "  checker: src/app/simpleos_nvme_serial_check/main.spl\n" +
             "  device: /dev/nvme9n1\n" +
             "    model: Samsung PM9A3\n" +
             "    serial: SN123456\n" +
@@ -308,6 +338,20 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(not_accepted_code).to_equal(1)
         expect(not_accepted_text).to_contain("reason: physical-nvme-preflight-not-accepted")
         expect(not_accepted_text).to_contain("preflight_identity_match: false")
+
+        expect(rt_file_write_text(preflight_report, missing_schema_preflight)).to_equal(true)
+        val (_schema_stdout, _schema_stderr, schema_code) = _run_checker_with_preflight(ready_path, preflight_report, missing_schema_report)
+        val schema_text = rt_file_read_text(missing_schema_report) ?? ""
+        expect(schema_code).to_equal(1)
+        expect(schema_text).to_contain("reason: physical-nvme-preflight-glob-missing")
+        expect(schema_text).to_contain("preflight_identity_match: false")
+
+        expect(rt_file_write_text(preflight_report, bad_checker_preflight)).to_equal(true)
+        val (_checker_stdout, _checker_stderr, checker_code) = _run_checker_with_preflight(ready_path, preflight_report, bad_checker_report)
+        val checker_text = rt_file_read_text(bad_checker_report) ?? ""
+        expect(checker_code).to_equal(1)
+        expect(checker_text).to_contain("reason: physical-nvme-preflight-checker-invalid")
+        expect(checker_text).to_contain("preflight_identity_match: false")
 
         expect(rt_file_write_text(preflight_report, model_mismatch_preflight)).to_equal(true)
         val (_model_stdout, _model_stderr, model_code) = _run_checker_with_preflight(ready_path, preflight_report, model_report)
@@ -355,6 +399,8 @@ describe "SimpleOS physical NVMe serial checker app":
         val matching_preflight =
             "physical_nvme_preflight:\n" +
             "  accepted: true\n" +
+            "  nvme_device_glob: /dev/nvme9n1\n" +
+            "  checker: src/app/simpleos_nvme_serial_check/main.spl\n" +
             "  device: /dev/nvme9n1\n" +
             "    model: Samsung PM9A3\n" +
             "    serial: SN123456\n" +
@@ -381,6 +427,8 @@ describe "SimpleOS physical NVMe serial checker app":
         val matching_preflight =
             "physical_nvme_preflight:\n" +
             "  accepted: true\n" +
+            "  nvme_device_glob: /dev/nvme9n1\n" +
+            "  checker: src/app/simpleos_nvme_serial_check/main.spl\n" +
             "  device: /dev/nvme9n1\n" +
             "    model: Samsung PM9A3\n" +
             "    serial: SN123456\n" +
@@ -420,6 +468,8 @@ describe "SimpleOS physical NVMe serial checker app":
 
         expect(code).to_equal(0)
         expect(preflight_text).to_contain("physical_nvme_preflight:")
+        expect(preflight_text).to_contain("nvme_device_glob: " + fake_dev)
+        expect(preflight_text).to_contain("checker: ")
         expect(preflight_text).to_contain("serial: SN123456")
         expect(preflight_text).to_contain("namespace_nsid: 1")
         expect(report_text).to_contain("preflight_report: " + preflight_out)
@@ -462,6 +512,8 @@ describe "SimpleOS physical NVMe serial checker app":
         val matching_preflight =
             "physical_nvme_preflight:\n" +
             "  accepted: true\n" +
+            "  nvme_device_glob: /dev/nvme9n1\n" +
+            "  checker: src/app/simpleos_nvme_serial_check/main.spl\n" +
             "  device: /dev/nvme9n1\n" +
             "    model: Samsung PM9A3\n" +
             "    serial: SN123456\n" +
@@ -560,6 +612,8 @@ describe "SimpleOS physical NVMe serial checker app":
 
         expect(code).to_equal(0)
         expect(report_text).to_contain("physical_nvme_preflight:")
+        expect(report_text).to_contain("nvme_device_glob: " + fake_dev)
+        expect(report_text).to_contain("checker: ")
         expect(report_text).to_contain("model: Samsung PM9A3")
         expect(report_text).to_contain("serial: SN123456")
         expect(report_text).to_contain("namespace_nsid: 1")
