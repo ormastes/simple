@@ -25,6 +25,7 @@ use os.drivers.nvme.nvme_storage_model.{
     NvmeNamespaceIdentity, NvmeQueueAssignment, NvmeFilesystemLease,
     NvmeTransferEvidence,
     nvme_filesystem_lease, nvme_filesystem_lease_from_transfer_evidence,
+    nvme_filesystem_lease_reason,
     nvme_filesystem_lease_set_acceptance_reason,
     nvme_filesystem_lease_same_identity
 }
@@ -532,13 +533,14 @@ fn _vfs_boot_q35_perf_marker_with_cfat_baseline(
     simple_write_iops: u64,
     read_p99_us: u64,
     write_p99_us: u64,
+    fs_consumers: text,
     queue_depth: u16
 ) -> text:
     val baseline = _vfs_boot_q35_read_cfat_baseline_text()
     if baseline.len() == 0:
         return "nvme_perf reason=c-baseline-missing-iops simple_provider=simple-driver " +
             "workload=4k-random-read-write io_size_bytes=4096 " +
-            "direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs " +
+            "direct_io_path=nvme-lease-shared-dma-4k fs_consumers=" + fs_consumers + " " +
             "c_bridge_used=false common_logic_shared=true allocation_per_io=false " +
             "simple_read_iops=" + simple_read_iops.to_text() +
             " simple_write_iops=" + simple_write_iops.to_text() +
@@ -554,7 +556,7 @@ fn _vfs_boot_q35_perf_marker_with_cfat_baseline(
     if c_read.is_err() or c_write.is_err() or c_read_p99.is_err() or c_write_p99.is_err():
         return "nvme_perf reason=c-baseline-missing-iops simple_provider=simple-driver " +
             "workload=4k-random-read-write io_size_bytes=4096 " +
-            "direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs " +
+            "direct_io_path=nvme-lease-shared-dma-4k fs_consumers=" + fs_consumers + " " +
             "c_bridge_used=false common_logic_shared=true allocation_per_io=false " +
             "simple_read_iops=" + simple_read_iops.to_text() +
             " simple_write_iops=" + simple_write_iops.to_text() +
@@ -578,6 +580,18 @@ fn _vfs_boot_q35_perf_marker_with_cfat_baseline(
         false
     )
 
+fn _vfs_boot_q35_ready_fs_consumers(lease: NvmeFilesystemLease) -> Result<text, text>:
+    val fat = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)
+    if fat != "ready":
+        return Err("fat32:" + fat)
+    val nvfs = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Nvfs)
+    if nvfs != "ready":
+        return Err("nvfs:" + nvfs)
+    val dbfs = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Dbfs)
+    if dbfs != "ready":
+        return Err("dbfs:" + dbfs)
+    Ok("fat32,nvfs,dbfs")
+
 fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
     """Emit fail-closed q35 pure-Simple NVMe evidence from real shared-DMA 4K I/O."""
     val storage_reason = vfs_boot_storage_acceptance_reason(
@@ -593,6 +607,9 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
         return ["[q35-pure-nvme-perf] skipped reason=no-direct-nvme-adapter"]
 
     val lease = g_vfs_nvme_active_leases[0]
+    val fs_consumers = _vfs_boot_q35_ready_fs_consumers(lease)
+    if fs_consumers.is_err():
+        return ["[q35-pure-nvme-perf] skipped reason=fs-consumer-lease-not-ready detail=" + fs_consumers.unwrap_err()]
     val batch_4k_ops: u32 = 32u32
     val batch_bytes = batch_4k_ops.to_u64() * 4096u64
     val dma_result = dma_alloc(batch_bytes as i64, DmaDir.Bidirectional)
@@ -661,6 +678,7 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
         simple_write_iops,
         read_p99_us,
         write_p99_us,
+        fs_consumers.unwrap(),
         lease.queue.max_depth
     )
     [access, perf]

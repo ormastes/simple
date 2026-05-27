@@ -345,7 +345,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   so the filesystem-facing adapter surface is measured against the in-guest C
   baseline instead of a raw `NvmeDriver` shortcut. The `fs_consumers` marker is
   emitted only after the measured loop has routed DirectIo batches for FAT32,
-  NVFS, and DBFS through that shared adapter surface.
+  NVFS, and DBFS through that shared adapter surface. The full VFS boot perf
+  helper also derives the same marker from lease readiness for FAT32, NVFS, and
+  DBFS instead of printing a static consumer list.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.
