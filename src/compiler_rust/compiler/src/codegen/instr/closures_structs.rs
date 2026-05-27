@@ -279,6 +279,22 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 .copied()
         })
         .or_else(|| {
+            if !lookup_name.contains('.') {
+                return None;
+            }
+            let mapped = ctx
+                .use_map
+                .get(lookup_name)
+                .or_else(|| ctx.import_map.get(lookup_name))
+                .or_else(|| ctx.use_map.get(&sanitized_name))
+                .or_else(|| ctx.import_map.get(&sanitized_name))?;
+            ctx.func_ids
+                .get(mapped.as_str())
+                .or_else(|| ctx.func_ids.get(&mapped.replace('.', "_dot_")))
+                .filter(|_| !is_self(mapped))
+                .copied()
+        })
+        .or_else(|| {
             // Search for a function ending with ".func_name" or "_dot_func_name"
             // If func_name is already qualified (contains '.'), extract the method part only
             let method_part = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
