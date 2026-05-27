@@ -77,3 +77,7 @@ NVFS/DBFS device-backed extent tests, not by the q35 freestanding image.
 Representative real-NVMe hardware validation is still required before claiming
 production throughput outside q35: queue depth, warm 4K random read/write
 latency, and max RSS need measurement on actual target devices.
+The acceptance gate for that evidence now rejects emulator-only reports unless
+they also carry real-device identity fields: `hardware_target=real-nvme`,
+`qemu=false`, `device_model=...`, `device_serial=...`, `namespace_nsid=...`,
+and `measured_on=real-device`.

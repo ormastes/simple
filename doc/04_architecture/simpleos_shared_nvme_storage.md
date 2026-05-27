@@ -199,6 +199,11 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   and rejects missing fields, invalid values, insufficient warm/queue settings,
   and Simple-not-faster-than-C counters before release gates can treat the run
   as production evidence.
+- Physical-NVMe production claims must pass the stricter real-hardware serial
+  gate as well. That gate layers on top of the `nvme_perf` parser and requires
+  `hardware_target=real-nvme`, `qemu=false`, nonempty device model/serial,
+  namespace identity, and `measured_on=real-device`; q35/emulator reports are
+  rejected even when their counters are faster than the C baseline.
 - The q35 pure-Simple real-device marker contract now lists `nvme_perf
   reason=ready`, and serial acceptance validates the detailed performance fields
   in addition to provider, grant, namespace, and transfer markers.

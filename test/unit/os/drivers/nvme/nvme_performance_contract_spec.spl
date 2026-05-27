@@ -8,6 +8,7 @@ use os.drivers.nvme.nvme_performance_contract.{
     nvme_production_perf_report_line_from_measurements,
     nvme_production_perf_report_ready,
     nvme_production_perf_serial_acceptance_reason,
+    nvme_real_hardware_perf_serial_acceptance_reason,
     nvme_random_io_perf_sample,
     nvme_random_io_perf_sample_ready,
     nvme_random_io_perf_sample_reason
@@ -184,3 +185,14 @@ describe "NVMe production performance contract":
     it "parses perf fields from full serial output with later lines":
         val serial = _serial_perf_prefix() + "simple_read_iops=120000 simple_write_iops=90000 simple_read_p99_us=800 simple_write_p99_us=1000 c_read_iops=100000 c_write_iops=80000 c_read_p99_us=900 c_write_p99_us=1100 queue_depth=64 warm_runs=5 max_rss_kib=32768\nTEST PASSED\n"
         expect(nvme_production_perf_serial_acceptance_reason(serial)).to_equal("ready")
+
+    it "requires physical NVMe identity before accepting real-hardware throughput evidence":
+        val perf = _serial_perf_prefix() + "simple_read_iops=120000 simple_write_iops=90000 simple_read_p99_us=800 simple_write_p99_us=1000 c_read_iops=100000 c_write_iops=80000 c_read_p99_us=900 c_write_p99_us=1100 queue_depth=64 warm_runs=5 max_rss_kib=32768"
+        val real = perf + " hardware_target=real-nvme qemu=false device_model=Samsung-MZQL2960HCJR device_serial=SIMPLE123 namespace_nsid=1 measured_on=real-device"
+        val q35 = perf + " hardware_target=q35 qemu=true device_model=qemu-nvme device_serial=pure-simple-perf namespace_nsid=1 measured_on=emulator"
+        val spoofed = perf + " hardware_target=real-nvme qemu=true device_model=qemu-nvme device_serial=pure-simple-perf namespace_nsid=1 measured_on=emulator"
+
+        expect(nvme_real_hardware_perf_serial_acceptance_reason(perf)).to_equal("nvme-real-hardware-target-missing")
+        expect(nvme_real_hardware_perf_serial_acceptance_reason(q35)).to_equal("nvme-real-hardware-target-missing")
+        expect(nvme_real_hardware_perf_serial_acceptance_reason(spoofed)).to_equal("nvme-real-hardware-emulator-report")
+        expect(nvme_real_hardware_perf_serial_acceptance_reason(real)).to_equal("ready")
