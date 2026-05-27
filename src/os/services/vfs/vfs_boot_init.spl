@@ -84,6 +84,13 @@ var g_mount_table: MountTable = MountTable.new()
 # Boot Init
 # ============================================================================
 
+fn _vfs_boot_reset_storage_state():
+    g_vfs_boot_storage_provider = "not-mounted"
+    g_vfs_boot_storage_pure_simple = false
+    g_vfs_nvme_active_leases = []
+    g_vfs_nvme_direct_adapter_leases = []
+    g_vfs_nvme_direct_adapters = []
+
 pub fn vfs_boot_init() -> bool:
     """Initialize the full storage stack: PCI -> NVMe -> FAT32 -> VFS.
 
@@ -94,11 +101,7 @@ pub fn vfs_boot_init() -> bool:
     Returns true if VFS is ready to serve file requests.
     """
     log_raw_println("[vfs-init] Starting storage stack initialization...")
-    g_vfs_boot_storage_provider = "not-mounted"
-    g_vfs_boot_storage_pure_simple = false
-    g_vfs_nvme_active_leases = []
-    g_vfs_nvme_direct_adapter_leases = []
-    g_vfs_nvme_direct_adapters = []
+    _vfs_boot_reset_storage_state()
 
     pcimgr_init()
     log_raw_println("[vfs-init] PCI cache ready")
@@ -185,9 +188,21 @@ pub fn vfs_boot_init() -> bool:
     return true
 
 pub fn vfs_boot_init_production() -> bool:
-    """Initialize VFS for production NVMe boot and fail closed on fallback storage."""
-    if not vfs_boot_init():
+    """Initialize production VFS without entering C bridge or virtio fallback storage."""
+    log_raw_println("[vfs-init] Starting production NVMe storage initialization...")
+    _vfs_boot_reset_storage_state()
+    pcimgr_init()
+    log_raw_println("[vfs-init] PCI cache ready")
+    val nvme_class: i64 = 1
+    val nvme_sub: i64 = 8
+    val nvme_idx = pcimgr_find_by_class_i64(nvme_class, nvme_sub)
+    if nvme_idx < 0:
+        log_raw_println("[vfs-init] production boot storage rejected: no NVMe device")
         return false
+    if not _vfs_boot_init_pure_nvme_fat32(nvme_idx.to_u64()):
+        log_raw_println("[vfs-init] production boot storage rejected: pure-Simple NVMe unavailable")
+        return false
+    
     val reason = vfs_boot_storage_acceptance_reason(
         g_vfs_initialized,
         g_vfs_boot_storage_provider,
