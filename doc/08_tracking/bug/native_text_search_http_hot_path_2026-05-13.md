@@ -1,6 +1,7 @@
 # Native text search blocks exact HTTP parser perf benchmark
 
 Date: 2026-05-13
+Status: Resolved
 
 ## Symptom
 

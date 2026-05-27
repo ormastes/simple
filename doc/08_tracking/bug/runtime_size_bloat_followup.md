@@ -1,6 +1,7 @@
 # Runtime Size Bloat — Architectural Follow-up Plan
 
 *Written: 2026-04-28. Track T3 of executable-size-bloat-analysis Phase 5.*
+Status: Open
 *Evidence base: `.sstack/executable-size-bloat-analysis/research_local.md`, `research_measure.md`.*
 
 ---

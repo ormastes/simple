@@ -1,16 +1,19 @@
 //! Utility SFFI functions for Simple runtime.
 //!
-//! - FNV-1a hash: implementation in src/runtime/runtime_hash.c
-
-mod c_sffi {
-    extern "C" {
-        pub(super) fn rt_fnv_hash(data_ptr: *const u8, data_len: u64) -> u64;
-    }
-}
+//! - FNV-1a hash: native Rust implementation matching the legacy C helper.
 
 #[inline(always)]
 pub unsafe fn rt_fnv_hash(data_ptr: *const u8, data_len: u64) -> u64 {
-    c_sffi::rt_fnv_hash(data_ptr, data_len)
+    if data_ptr.is_null() {
+        return 0;
+    }
+    let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in data {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x00000100000001b3u64);
+    }
+    hash
 }
 
 #[cfg(test)]

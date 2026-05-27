@@ -1,6 +1,7 @@
 # C Runtime Exclusion Analysis
 
 **Date:** 2026-05-18
+**Status:** Open — audit still tracks removable C runtime candidates and blocked removals.
 **Context:** Pure Simple conversion project — which C files can be removed
 
 ## Removed (zero callers)
@@ -62,8 +63,16 @@ or Rust-only replacement is wired through the same symbol name.
 
 | C File | Symbols | Status | Blocker |
 |--------|---------|--------|---------|
-| `runtime_crypto.c` | `rt_constant_time_compare` | **Candidate** — interpreter has pure-Rust duplicate in `interpreter_extern/crypto.rs`; NOT in `runtime_sffi.rs`, NOT in `elf_utils.rs`, zero spl callers; runtime crate wrapper in `value/sffi/crypto_compare.rs` calls C but the interpreter override shadows it | Before deleting: verify native codegen never links `rt_constant_time_compare` directly (check `nm` on `libsimple_runtime.a`) |
-| `runtime_hash.c` | `rt_fnv_hash` | **Candidate** — only caller is `value/sffi/utils.rs` test block (lines 153–170); NOT in `runtime_sffi.rs`, NOT in `elf_utils.rs`, NOT in runtime symbol exports, zero spl callers | Replace `c_sffi::rt_fnv_hash` in `utils.rs` with `fnv_hash_pure` in Rust; delete C file |
+| `runtime_crypto.c` | `rt_constant_time_compare` | **Partially resolved 2026-05-27** — `simple-runtime` now implements this helper in Rust (`value/sffi/crypto_compare.rs`) and no longer compiles `runtime_crypto.c` in `runtime/build.rs`. Interpreter still has its Rust duplicate in `interpreter_extern/crypto.rs`. | Core-C/native-project archive still includes `runtime_crypto.c`; remove there only after confirming no native SPL/runtime-bundle extern surface still requires the C symbol. |
+| `runtime_hash.c` | `rt_fnv_hash` | **Partially resolved 2026-05-27** — `simple-runtime` now implements FNV-1a in Rust (`value/sffi/utils.rs`) and no longer compiles `runtime_hash.c` in `runtime/build.rs`. | Core-C/native-project archive still includes `runtime_hash.c`; `src/compiler_rust/lib/std/src/infra/hash.spl` still declares `extern fn rt_fnv_hash`, so that lane needs a separate migration before deleting the C file. |
+
+Verification for the 2026-05-27 simple-runtime reduction:
+
+```bash
+cargo check -p simple-runtime --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::utils --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::crypto_compare --manifest-path src/compiler_rust/Cargo.toml
+```
 
 ## Path to C Removal for Remaining Modules
 

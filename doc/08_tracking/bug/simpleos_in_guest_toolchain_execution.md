@@ -1,6 +1,7 @@
 # SimpleOS In-Guest Toolchain Execution Gap
 
 Date: 2026-05-05
+Status: Open
 
 ## Problem
 

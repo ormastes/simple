@@ -1,6 +1,7 @@
 # SLH-DSA-192s/256s — Hash + n Parameterization Refactor Required
 
 *Written: 2026-05-02. Blocker for W14-D Phase 2 (SLH-DSA-SHA2-192s + 256s).*
+Status: Closed 2026-05-20
 
 ---
 

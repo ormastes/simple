@@ -1,6 +1,7 @@
 # Simple Web Renderer TTF Glyph Metrics Gap
 
 Date: 2026-05-06
+Status: Resolved 2026-05-27
 
 ## Summary
 

@@ -11,11 +11,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_ctype.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_random.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_hash.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_equality.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_config.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_crypto.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_contracts.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_env.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_format.c");
@@ -120,11 +118,9 @@ fn compile_c_runtime_sources() {
         "runtime_time.c",
         "runtime_ctype.c",
         "runtime_random.c",
-        "runtime_hash.c",
         "runtime_value.c",
         "runtime_equality.c",
         "runtime_config.c",
-        "runtime_crypto.c",
         "runtime_contracts.c",
         "runtime_env.c",
         "runtime_format.c",
