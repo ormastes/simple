@@ -176,7 +176,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   namespace before it is mounted. VFS also exposes a user-assignment entry point
   that records the user lease after successful active-lease admission, plus a
   driver-instance entry point that records only after FAT32/NVFS/DBFS driver
-  construction succeeds. Active user leases can be released by the exact
+  construction succeeds. The production hardware entry point builds a
+  lease-backed `NvmeBlockAdapter` from the shared `g_nvme` driver and initializes
+  its DMA bounce buffer before constructing the filesystem driver. Active user
+  leases can be released by the exact
   namespace/mode/grant/owner/queue assignment so unmount can make the namespace
   assignable again.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -263,7 +266,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   pure-Simple boot path calls the hardware probe before mounting, then records
   the boot lease for later system/user conflict admission and records accepted
   user namespace assignments in the same active lease registry after driver
-  construction succeeds, including release/reassignment coverage.
+  construction succeeds, including hardware-adapter routing and
+  release/reassignment coverage.
 - `test/unit/os/kernel/ipc/dma_alloc_contract_spec.spl` covers the DMA syscall
   result layout used by the pure Simple NVMe driver and VFS adapter.
 - `test/unit/os/kernel/types/device_mem_types_spec.spl` covers DeviceGrant

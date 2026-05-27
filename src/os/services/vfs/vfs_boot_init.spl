@@ -478,6 +478,52 @@ fn vfs_boot_nvme_assign_user_namespace_driver_instance(
     g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)
     driver_result
 
+fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
+    name: text,
+    evidence: NvmeTransferEvidence,
+    grant: DeviceGrant,
+    controller_id: u32,
+    nsid: u32,
+    namespace_lba_size: u32,
+    namespace_lba_count: u64,
+    base_lba: u64,
+    lease_lba_count: u64,
+    queue_id: u16,
+    owner_task: u64,
+    max_depth: u16,
+    consumer: NvmeFilesystemConsumer
+) -> Result<DriverInstance, text>:
+    val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(
+        evidence,
+        grant,
+        controller_id,
+        nsid,
+        namespace_lba_size,
+        namespace_lba_count,
+        base_lba,
+        lease_lba_count,
+        queue_id,
+        owner_task,
+        max_depth,
+        consumer,
+        g_vfs_nvme_active_leases
+    )
+    if lease_result.is_err():
+        return Err(lease_result.unwrap_err())
+    val lease = lease_result.unwrap()
+    val adapter_result = NvmeBlockAdapter.for_filesystem_lease(g_nvme, lease, consumer)
+    if adapter_result.is_err():
+        return Err(adapter_result.unwrap_err())
+    var adapter = adapter_result.unwrap()
+    val bounce = adapter.init_bounce_buffer()
+    if bounce.is_err():
+        return Err(bounce.unwrap_err())
+    val driver_result = vfs_nvme_driver_instance_for_lease(name, adapter, lease, consumer)
+    if driver_result.is_err():
+        return driver_result
+    g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)
+    driver_result
+
 # Module-level VFS service instance for cooperative scheduling
 var g_vfs_service: VfsService? = nil
 
