@@ -29,6 +29,7 @@ use os.drivers.nvme.nvme_queue_notify.*
 use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_pair_from_resources, nvme_cq_doorbell_addr, nvme_sq_doorbell_addr, nvme_dstrd_to_doorbell_stride_bytes}
 use os.drivers.nvme.nvme_transfer_command.{nvme_read_io_command, nvme_write_io_command, nvme_flush_io_command, nvme_io_status_code}
 use os.drivers.nvme.nvme_admin_command.{nvme_admin_identify_controller, nvme_admin_identify_namespace, nvme_admin_set_num_queues, nvme_admin_create_io_completion_queue, nvme_admin_create_io_submission_queue}
+use os.drivers.nvme.nvme_controller_contract.{nvme_namespace_facts, nvme_namespace_refusal_reason}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
@@ -356,22 +357,21 @@ impl NvmeDriver:
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
             return Result.Err("NVMe: identify namespace timeout")
 
-        # Parse NSZE (Namespace Size in LBAs) at offset 0
-        self.sector_count = mmio_read64(buf.virt + IDENTITY_NAMESPACE_NSZE_OFFSET)
+        val nsze = mmio_read64(buf.virt + IDENTITY_NAMESPACE_NSZE_OFFSET)
 
         # Parse FLBAS (Formatted LBA Size) at offset 26 to find active LBA format index
         val flbas_raw = mmio_read32(buf.virt + IDENTITY_NAMESPACE_FLBAS_OFFSET)
-        val flbas = flbas_raw & 0x0F  # Lower 4 bits = LBA format index
+        val flbas = (flbas_raw & 0x0F).to_u8()
 
         # Read LBA Format descriptor: LBAF0 is at offset 128, each LBAF is 4 bytes
         val lbaf_offset = IDENTITY_NAMESPACE_LBAF0_OFFSET + flbas.to_u64() * 4
         val lbaf = mmio_read32(buf.virt + lbaf_offset)
-        # LBAF bits 16-23: LBADS (LBA Data Size as power of 2)
-        val lbads = (lbaf >> 16) & 0xFF
-        if lbads >= 9 and lbads <= 16:
-            self.sector_size = 1 << lbads
-        else:
-            self.sector_size = 512  # Default fallback
+        val facts = nvme_namespace_facts(1u32, nsze, flbas, lbaf)
+        val reason = nvme_namespace_refusal_reason(facts)
+        if reason != "ready":
+            return Result.Err("NVMe: namespace identify " + reason)
+        self.sector_count = facts.lba_count
+        self.sector_size = facts.formatted_lba_size
 
         Result.Ok(true)
 

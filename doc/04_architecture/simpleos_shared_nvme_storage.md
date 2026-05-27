@@ -117,6 +117,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   I/O queue creation now lives in a syscall-free shared module. Hosted,
   user-space, and freestanding/system driver paths can submit the same encoded
   controller setup commands after their own BAR/DMA ownership is established.
+- Namespace identify parsing now uses the shared controller contract and refuses
+  invalid namespace geometry instead of silently falling back to 512-byte
+  sectors. FAT32, NVFS, and DBFS leases must be backed by the same proven
+  namespace LBA count and formatted LBA size.
 - Freestanding controller readiness now has an explicit resource contract that
   binds system-driver or user-space-driver placement, grant/namespace mode,
   admin queue resources, I/O queue resources, DMA isolation, and IOMMU/broker
@@ -149,6 +153,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Controller resource readiness still does not claim production transfer by
   itself. The evidence path remains fail-closed until real hardware completion
   plus read/write/restore sector probes are supplied.
+- Invalid namespace identify data is a hard driver error for production paths;
+  it is not converted into a fake default sector size.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
