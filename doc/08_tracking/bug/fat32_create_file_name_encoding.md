@@ -44,13 +44,14 @@ method.
 
 Identical `ch.len().to_u8()` pattern.
 
-## Fix Applied
+## Status
 
-Both bugs fixed in working tree (not yet verified — interpreter exit-code-3
-issue prevents testing).
+**RESOLVED** — all three bugs fixed in both `nogc_async_mut` and `nogc_sync_mut` versions.
+All 7/7 benchmark workloads pass. Array value-type semantics required inlining
+8.3 encoding directly (no helper function — arrays are copied into function params).
 
-## Impact
+## Impact (before fix)
 
-- fat32_microbench.spl seq_write/seq_read benchmarks produce bogus results
+- fat32_microbench.spl seq_write/seq_read benchmarks produced bogus results
 - fat32_vs_cfat_bench.spl: 5 of 7 workloads SKIP
-- Any code path using Fat32Core.create_file in interpreter mode is broken
+- Any code path using Fat32Core.create_file in interpreter mode was broken

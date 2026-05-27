@@ -1,10 +1,9 @@
-# test/perf/bench/fat32_vs_cfat_bench.spl — FAT32 vs C FAT (host POSIX) benchmark.
+# test/perf/bench/fat32_vs_cfat_bench.spl — FAT32 vs C FAT benchmark.
 # 7 workloads: lookup, sequential_read, create, append, delete, stat, directory_scan.
 # Simple FAT32: in-memory Fat32Core via BlockDevice trait.
-# C FAT baseline: host kernel POSIX filesystem via std.io_runtime.
+# POSIX baseline: host kernel filesystem via std.io_runtime.
+# VFAT baseline: 64 MiB loopback FAT32 image via Linux VFAT mount (optional, needs sudo).
 # Run: bin/simple run test/perf/bench/fat32_vs_cfat_bench.spl
-#
-# All 7 workloads produce results in interpreter mode.
 
 use std.io_runtime.{
     time_now_unix_micros, write_file, read_file, file_exists,
@@ -328,19 +327,19 @@ fn bench_append_simple(iters: i64) -> BenchResult:
         j = j + 1
     BenchResult(workload_name: "append", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
-fn bench_append_posix(iters: i64, total_bytes: i64) -> BenchResult:
-    _posix_setup()
+fn bench_append_host(iters: i64, total_bytes: i64, base_dir: text, driver_name: text) -> BenchResult:
+    _host_setup(base_dir)
     val content = _fill_text(total_bytes)
     var latencies: [i64] = []
     var j: i64 = 0
     while j < iters:
-        val path = _posix_base() + "/a" + j.to_text() + ".txt"
+        val path = base_dir + "/a" + j.to_text() + ".txt"
         val t0 = time_now_unix_micros()
         write_file(path, content)
         latencies = latencies.push(time_now_unix_micros() - t0)
         j = j + 1
-    _posix_clean()
-    BenchResult(workload_name: "append", driver_name: "c_fat_posix", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
+    _host_clean(base_dir)
+    BenchResult(workload_name: "append", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
 # ══════════════════════════════════════════════════════════════════════════
 # Workload 5: Delete — unlink files
@@ -365,21 +364,21 @@ fn bench_delete_simple(count: i64) -> BenchResult:
         return skipped_result("delete", "simple_fat32")
     BenchResult(workload_name: "delete", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
-fn bench_delete_posix(count: i64) -> BenchResult:
-    _posix_setup()
+fn bench_delete_host(count: i64, base_dir: text, driver_name: text) -> BenchResult:
+    _host_setup(base_dir)
     var i: i64 = 0
     while i < count:
-        write_file(_posix_base() + "/d" + i.to_text() + ".txt", "")
+        write_file(base_dir + "/d" + i.to_text() + ".txt", "")
         i = i + 1
     var latencies: [i64] = []
     var j: i64 = 0
     while j < count:
-        val path = _posix_base() + "/d" + j.to_text() + ".txt"
+        val path = base_dir + "/d" + j.to_text() + ".txt"
         val t0 = time_now_unix_micros()
         file_delete(path)
         latencies = latencies.push(time_now_unix_micros() - t0)
         j = j + 1
-    BenchResult(workload_name: "delete", driver_name: "c_fat_posix", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
+    BenchResult(workload_name: "delete", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
 # ══════════════════════════════════════════════════════════════════════════
 # Workload 6: Stat — resolve file metadata
@@ -400,9 +399,9 @@ fn bench_stat_simple(iters: i64) -> BenchResult:
         return skipped_result("stat", "simple_fat32")
     BenchResult(workload_name: "stat", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
-fn bench_stat_posix(iters: i64) -> BenchResult:
-    _posix_setup()
-    val path = _posix_base() + "/stat.txt"
+fn bench_stat_host(iters: i64, base_dir: text, driver_name: text) -> BenchResult:
+    _host_setup(base_dir)
+    val path = base_dir + "/stat.txt"
     write_file(path, _fill_text(1024))
     var latencies: [i64] = []
     var i: i64 = 0
@@ -411,8 +410,8 @@ fn bench_stat_posix(iters: i64) -> BenchResult:
         val _sz = file_size(path)
         latencies = latencies.push(time_now_unix_micros() - t0)
         i = i + 1
-    _posix_clean()
-    BenchResult(workload_name: "stat", driver_name: "c_fat_posix", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
+    _host_clean(base_dir)
+    BenchResult(workload_name: "stat", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
 # ══════════════════════════════════════════════════════════════════════════
 # Workload 7: Directory Scan — list directory entries
@@ -436,49 +435,71 @@ fn bench_dirscan_simple(file_count: i64, iters: i64) -> BenchResult:
         return skipped_result("directory_scan", "simple_fat32")
     BenchResult(workload_name: "directory_scan", driver_name: "simple_fat32", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
-fn bench_dirscan_posix(file_count: i64, iters: i64) -> BenchResult:
-    _posix_setup()
+fn bench_dirscan_host(file_count: i64, iters: i64, base_dir: text, driver_name: text) -> BenchResult:
+    _host_setup(base_dir)
     var i: i64 = 0
     while i < file_count:
-        write_file(_posix_base() + "/s" + i.to_text() + ".txt", "")
+        write_file(base_dir + "/s" + i.to_text() + ".txt", "")
         i = i + 1
     var latencies: [i64] = []
     var j: i64 = 0
     while j < iters:
         val t0 = time_now_unix_micros()
-        val _files = list_dir(_posix_base())
+        val _files = list_dir(base_dir)
         latencies = latencies.push(time_now_unix_micros() - t0)
         j = j + 1
-    _posix_clean()
-    BenchResult(workload_name: "directory_scan", driver_name: "c_fat_posix", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
+    _host_clean(base_dir)
+    BenchResult(workload_name: "directory_scan", driver_name: driver_name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99))
 
 # ══════════════════════════════════════════════════════════════════════════
 # Report Generation
 # ══════════════════════════════════════════════════════════════════════════
-fn _md_row(s: BenchResult, p: BenchResult) -> text:
-    if s.p50_us < 0:
-        return "| " + s.workload_name + " | SKIP | SKIP | " + p.p50_us.to_text() + " | " + p.p99_us.to_text() + " | N/A |"
-    val ratio = if p.p50_us > 0: (s.p50_us * 100) / p.p50_us else: 0
-    "| " + s.workload_name + " | " + s.p50_us.to_text() + " | " + s.p99_us.to_text() + " | " + p.p50_us.to_text() + " | " + p.p99_us.to_text() + " | " + ratio.to_text() + "% |"
+fn _fmt_cell(r: BenchResult) -> text:
+    if r.p50_us < 0:
+        return "SKIP | SKIP"
+    r.p50_us.to_text() + " | " + r.p99_us.to_text()
 
-fn write_report(pairs: [[BenchResult]]):
-    var md = "# FAT32 vs C FAT (POSIX) Benchmark Results\n\n"
-    md = md + "**Date:** 2026-05-26\n"
+fn _ratio_text(s: BenchResult, b: BenchResult) -> text:
+    if s.p50_us < 0 or b.p50_us <= 0:
+        return "N/A"
+    val ratio = (s.p50_us * 100) / b.p50_us
+    ratio.to_text() + "%"
+
+fn _md_row(results: [BenchResult], has_vfat: bool) -> text:
+    val s = results[0]
+    val p = results[1]
+    var row = "| " + s.workload_name + " | " + _fmt_cell(s) + " | " + _fmt_cell(p) + " | " + _ratio_text(s, p)
+    if has_vfat:
+        val v = results[2]
+        row = row + " | " + _fmt_cell(v) + " | " + _ratio_text(s, v)
+    row + " |"
+
+fn write_report(rows: [[BenchResult]], has_vfat: bool):
+    var md = "# FAT32 vs C FAT Benchmark Results\n\n"
+    md = md + "**Date:** 2026-05-27\n"
     md = md + "**Mode:** interpreter (`bin/simple run`)\n"
     md = md + "**Simple FAT32:** in-memory Fat32Core, 4096 sectors x 512 B\n"
-    md = md + "**C FAT baseline:** host kernel POSIX filesystem via std.io_runtime\n\n"
-    md = md + "## Per-Workload Comparison\n\n"
-    md = md + "| Workload | Simple p50 (us) | Simple p99 (us) | POSIX p50 (us) | POSIX p99 (us) | Ratio p50 |\n"
-    md = md + "|----------|----------------|----------------|----------------|----------------|-----------|\n"
-    for pair in pairs:
-        md = md + _md_row(pair[0], pair[1]) + "\n"
+    md = md + "**POSIX baseline:** host kernel filesystem (ext4/btrfs) via std.io_runtime\n"
+    if has_vfat:
+        md = md + "**VFAT baseline:** 64 MiB loopback FAT32 image via Linux VFAT mount\n"
+    md = md + "\n## Per-Workload Comparison\n\n"
+    var hdr = "| Workload | Simple p50 | Simple p99 | POSIX p50 | POSIX p99 | S/P Ratio"
+    var sep = "|----------|-----------|-----------|----------|----------|----------"
+    if has_vfat:
+        hdr = hdr + " | VFAT p50 | VFAT p99 | S/V Ratio"
+        sep = sep + "|---------|---------|----------"
+    md = md + hdr + " |\n" + sep + "|\n"
+    for row in rows:
+        md = md + _md_row(row, has_vfat) + "\n"
     md = md + "\n## Interpretation\n\n"
-    md = md + "- **Ratio** = (Simple p50 / POSIX p50) x 100. Values > 100% mean Simple is slower.\n"
-    md = md + "- **SKIP** = workload could not complete (directory full or other runtime error).\n"
+    md = md + "- **S/P Ratio** = (Simple p50 / POSIX p50) x 100. Values > 100% mean Simple is slower.\n"
+    if has_vfat:
+        md = md + "- **S/V Ratio** = (Simple p50 / VFAT p50) x 100. True FAT32-vs-FAT32 comparison.\n"
     md = md + "- Simple FAT32 runs entirely in-process with in-memory block device.\n"
     md = md + "- POSIX baseline uses host kernel file operations (ext4/btrfs, not VFAT).\n"
+    if has_vfat:
+        md = md + "- VFAT baseline uses Linux kernel VFAT driver on loopback FAT32 image.\n"
     md = md + "- Both measurements include Simple interpreter dispatch overhead.\n"
-    md = md + "- For compiled-mode estimates, see fs_driver_vfat_comparison.md.\n"
     md = md + "\n## Known Limitations\n\n"
     md = md + "- Interpreter overhead dominates Simple FAT32 timings (~120ms for path resolve).\n"
     md = md + "- Sequential read is faster on Simple due to in-memory block device (no syscalls).\n"
@@ -492,68 +513,113 @@ fn write_report(pairs: [[BenchResult]]):
 # Main
 # ══════════════════════════════════════════════════════════════════════════
 fn main():
-    print "=== FAT32 vs C FAT (POSIX) Benchmark ==="
+    print "=== FAT32 vs C FAT Benchmark ==="
     print "Simple FAT32: in-memory Fat32Core, 4096 sectors x 512 B"
-    print "C FAT baseline: host POSIX filesystem via std.io_runtime"
+    print "POSIX baseline: host filesystem via std.io_runtime"
+
+    val has_vfat = _vfat_setup()
+    if has_vfat:
+        print "VFAT baseline: 64 MiB loopback FAT32 image (mounted)"
+    else:
+        print "VFAT baseline: SKIPPED (mount failed)"
     print ""
 
     val iters: i64 = 30
     val file_count: i64 = 30
     val total_bytes: i64 = 10240
+    val pb = _posix_base()
+    val vb = _vfat_base()
 
-    var pairs: [[BenchResult]] = []
+    var rows: [[BenchResult]] = []
 
     print "[1/7] create"
     val r1s = bench_create_simple(file_count)
-    val r1p = bench_create_posix(file_count)
+    val r1p = bench_create_host(file_count, pb, "c_fat_posix")
     print result_line(r1s)
     print result_line(r1p)
-    pairs = pairs.push([r1s, r1p])
+    var row1 = [r1s, r1p]
+    if has_vfat:
+        val r1v = bench_create_host(file_count, vb, "c_fat_vfat")
+        print result_line(r1v)
+        row1 = row1.push(r1v)
+    rows = rows.push(row1)
 
     print "[2/7] lookup"
     val r2s = bench_lookup_simple(iters)
-    val r2p = bench_lookup_posix(iters)
+    val r2p = bench_lookup_host(iters, pb, "c_fat_posix")
     print result_line(r2s)
     print result_line(r2p)
-    pairs = pairs.push([r2s, r2p])
+    var row2 = [r2s, r2p]
+    if has_vfat:
+        val r2v = bench_lookup_host(iters, vb, "c_fat_vfat")
+        print result_line(r2v)
+        row2 = row2.push(r2v)
+    rows = rows.push(row2)
 
     print "[3/7] sequential_read"
     val r3s = bench_seq_read_simple(iters)
-    val r3p = bench_seq_read_posix(iters, total_bytes)
+    val r3p = bench_seq_read_host(iters, total_bytes, pb, "c_fat_posix")
     print result_line(r3s)
     print result_line(r3p)
-    pairs = pairs.push([r3s, r3p])
+    var row3 = [r3s, r3p]
+    if has_vfat:
+        val r3v = bench_seq_read_host(iters, total_bytes, vb, "c_fat_vfat")
+        print result_line(r3v)
+        row3 = row3.push(r3v)
+    rows = rows.push(row3)
 
     print "[4/7] append"
     val r4s = bench_append_simple(iters)
-    val r4p = bench_append_posix(iters, total_bytes)
+    val r4p = bench_append_host(iters, total_bytes, pb, "c_fat_posix")
     print result_line(r4s)
     print result_line(r4p)
-    pairs = pairs.push([r4s, r4p])
+    var row4 = [r4s, r4p]
+    if has_vfat:
+        val r4v = bench_append_host(iters, total_bytes, vb, "c_fat_vfat")
+        print result_line(r4v)
+        row4 = row4.push(r4v)
+    rows = rows.push(row4)
 
     print "[5/7] delete"
     val r5s = bench_delete_simple(file_count)
-    val r5p = bench_delete_posix(file_count)
+    val r5p = bench_delete_host(file_count, pb, "c_fat_posix")
     print result_line(r5s)
     print result_line(r5p)
-    pairs = pairs.push([r5s, r5p])
+    var row5 = [r5s, r5p]
+    if has_vfat:
+        val r5v = bench_delete_host(file_count, vb, "c_fat_vfat")
+        print result_line(r5v)
+        row5 = row5.push(r5v)
+    rows = rows.push(row5)
 
     print "[6/7] stat"
     val r6s = bench_stat_simple(iters)
-    val r6p = bench_stat_posix(iters)
+    val r6p = bench_stat_host(iters, pb, "c_fat_posix")
     print result_line(r6s)
     print result_line(r6p)
-    pairs = pairs.push([r6s, r6p])
+    var row6 = [r6s, r6p]
+    if has_vfat:
+        val r6v = bench_stat_host(iters, vb, "c_fat_vfat")
+        print result_line(r6v)
+        row6 = row6.push(r6v)
+    rows = rows.push(row6)
 
     print "[7/7] directory_scan"
     val r7s = bench_dirscan_simple(file_count, iters)
-    val r7p = bench_dirscan_posix(file_count, iters)
+    val r7p = bench_dirscan_host(file_count, iters, pb, "c_fat_posix")
     print result_line(r7s)
     print result_line(r7p)
-    pairs = pairs.push([r7s, r7p])
+    var row7 = [r7s, r7p]
+    if has_vfat:
+        val r7v = bench_dirscan_host(file_count, iters, vb, "c_fat_vfat")
+        print result_line(r7v)
+        row7 = row7.push(r7v)
+    rows = rows.push(row7)
 
     print ""
-    write_report(pairs)
+    write_report(rows, has_vfat)
 
-    _posix_clean()
+    _host_clean(pb)
+    if has_vfat:
+        _vfat_teardown()
     print "=== done ==="

@@ -13,7 +13,7 @@ use nogc_sync_mut.db.dbfs_engine.sql_parser.{
     SqlJoin, JoinKind, SqlOrderDir
 }
 use nogc_sync_mut.db.dbfs_engine.mvcc.{
-    MvccTable, MvccTxnManager, MvccSnapshot
+    MvccTable, MvccTxnManager, MvccSnapshot, MvccTuple, mvcc_is_visible
 }
 use nogc_sync_mut.db.dbfs_engine.fts.search.{FtsEngine}
 use nogc_sync_mut.db.db_query.{query_fts_match, query_page_summary_scan}
@@ -1041,6 +1041,9 @@ class PureDatabase:
     _snap_tbl_rowids: [i64]
     _snap_indexes: [[[text]]]
     _snap_index_unique: [[bool]]
+    _tbl_typed: [[[DbValue]]]
+    _tbl_pk_col: [i32]
+    _tbl_pk_map: [Dict<text, i32>]
 
     static fn memory() -> Result<PureDatabase, DbError>:
         Ok(PureDatabase(
@@ -1069,7 +1072,10 @@ class PureDatabase:
             _snap_row_data: [],
             _snap_tbl_rowids: [],
             _snap_indexes: [],
-            _snap_index_unique: []
+            _snap_index_unique: [],
+            _tbl_typed: [],
+            _tbl_pk_col: [],
+            _tbl_pk_map: []
         ))
 
     static fn memory_deferred() -> Result<PureDatabase, DbError>:
@@ -1172,6 +1178,11 @@ class PureDatabase:
                     self._index_unique.push([])
                     self._tbl_fts_next_doc_id.push(0)
                     self._tbl_fts_doc_ids.push([])
+                    var empty_typed: [[DbValue]] = []
+                    self._tbl_typed.push(empty_typed)
+                    self._tbl_pk_col.push(-1)
+                    var empty_pk: Dict<text, i32> = Dict()
+                    self._tbl_pk_map.push(empty_pk)
                 elif kind == "fts":
                     val ti = _find_idx(self._tbl_names, table_name)
                     if ti >= 0:
@@ -1186,6 +1197,10 @@ class PureDatabase:
                         tbl.insert(tid, parts[2])
                         self._tbl_data[ti] = tbl
                         self._txn.commit(tid)
+                        val row_vals = _deserialize_row(parts[2])
+                        var typed_load = self._tbl_typed[ti]
+                        typed_load.push(row_vals)
+                        self._tbl_typed[ti] = typed_load
                         self._tbl_rowids[ti] = self._tbl_rowids[ti] + 1
                         self._last_rowid = self._tbl_rowids[ti]
             i = i + 1
@@ -1774,6 +1789,18 @@ class PureDatabase:
         self._index_unique.push([])
         self._tbl_fts_next_doc_id.push(0)
         self._tbl_fts_doc_ids.push([])
+        var empty_typed: [[DbValue]] = []
+        self._tbl_typed.push(empty_typed)
+        var pk_ci: i32 = -1
+        var pki: i32 = 0
+        while pki < ct.columns.len() as i32:
+            val cdef = ct.columns[pki]
+            if cdef.is_primary_key:
+                pk_ci = pki
+            pki = pki + 1
+        self._tbl_pk_col.push(pk_ci)
+        var empty_pk_map: Dict<text, i32> = Dict()
+        self._tbl_pk_map.push(empty_pk_map)
         self._last_changes = 0
         self._mark_dirty()?
         Ok(0)
@@ -1819,6 +1846,20 @@ class PureDatabase:
         self._fts_columns = new_fts_columns
         self._indexes = new_indexes
         self._index_unique = new_index_unique
+        # Rebuild typed storage + pk index without the dropped table
+        var new_typed: [[[DbValue]]] = []
+        var new_pk_col: [i32] = []
+        var new_pk_map: [Dict<text, i32>] = []
+        var dti: i32 = 0
+        while dti < self._tbl_typed.len() as i32:
+            if dti != ti:
+                new_typed.push(self._tbl_typed[dti])
+                new_pk_col.push(self._tbl_pk_col[dti])
+                new_pk_map.push(self._tbl_pk_map[dti])
+            dti = dti + 1
+        self._tbl_typed = new_typed
+        self._tbl_pk_col = new_pk_col
+        self._tbl_pk_map = new_pk_map
         # Rebuild FTS doc_id arrays without the dropped table
         var new_fts_next_doc_id: [i64] = []
         var new_fts_doc_ids: [[i64]] = []
@@ -1872,6 +1913,15 @@ class PureDatabase:
             var tbl = self._tbl_data[ti]
             tbl.insert(tid, ser)
             self._tbl_data[ti] = tbl
+            val tuple_pos = tbl.tuples.len() as i32 - 1
+            var typed = self._tbl_typed[ti]
+            typed.push(row_vals)
+            self._tbl_typed[ti] = typed
+            val pk_ci = self._tbl_pk_col[ti]
+            if pk_ci >= 0 and pk_ci < row_vals.len() as i32:
+                var pkm = self._tbl_pk_map[ti]
+                pkm[row_vals[pk_ci].to_text()] = tuple_pos
+                self._tbl_pk_map[ti] = pkm
             self._tbl_rowids[ti] = self._tbl_rowids[ti] + 1
             self._last_rowid = self._tbl_rowids[ti]
             # Incremental FTS: add document if FTS index is built
@@ -1971,19 +2021,45 @@ class PureDatabase:
         var col_names = self._tbl_cols[ti]
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
-        val visible = tbl.scan(snap)
-        self._tbl_data[ti] = tbl
         val col_map = _build_col_map(col_names)
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
 
-        # ── JOIN support ─────────────────────────────────────────────
-        var base_rows: [[DbValue]] = []
+        # ── Hash index fast path for point lookups ───────────────────
+        val pk_ci = self._tbl_pk_col[ti]
         val has_join = sel.joins.len() > 0
-        var ri: i32 = 0
-        while ri < visible.len() as i32:
-            val row_vals = _deserialize_row(visible[ri])
-            if has_join or _check_where_fast(sel.where_expr, col_map, row_vals, params):
-                base_rows.push(row_vals)
-            ri = ri + 1
+        var base_rows: [[DbValue]] = []
+        var used_pk_path = false
+        if use_typed and not has_join and pk_ci >= 0:
+            val pk_eq = _extract_pk_eq(sel.where_expr, col_names, pk_ci)
+            if pk_eq != "":
+                val pkm = self._tbl_pk_map[ti]
+                if pkm.has(pk_eq):
+                    val tidx = pkm[pk_eq]
+                    if tidx >= 0 and tidx < tbl.tuples.len() as i32:
+                        if mvcc_is_visible(tbl.tuples[tidx], snap):
+                            base_rows.push(typed[tidx])
+                used_pk_path = true
+
+        # ── Full scan path (typed or fallback) ───────────────────────
+        if not used_pk_path:
+            if use_typed:
+                var ti2: i32 = 0
+                while ti2 < tbl.tuples.len() as i32:
+                    if mvcc_is_visible(tbl.tuples[ti2], snap):
+                        val row_vals = typed[ti2]
+                        if has_join or _check_where_fast(sel.where_expr, col_map, row_vals, params):
+                            base_rows.push(row_vals)
+                    ti2 = ti2 + 1
+            else:
+                val visible = tbl.scan(snap)
+                var ri: i32 = 0
+                while ri < visible.len() as i32:
+                    val row_vals = _deserialize_row(visible[ri])
+                    if has_join or _check_where_fast(sel.where_expr, col_map, row_vals, params):
+                        base_rows.push(row_vals)
+                    ri = ri + 1
+        self._tbl_data[ti] = tbl
 
         val joins_arr = sel.joins
         if joins_arr.len() > 0:
@@ -2238,27 +2314,54 @@ class PureDatabase:
         val tid = handle.txn_id
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
-        val visible = tbl.scan(snap)
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
         var updated: i64 = 0
-        var ri: i32 = 0
-        while ri < visible.len() as i32:
-            val old_data = visible[ri]
-            val row_vals = _deserialize_row(old_data)
-            if _check_where(upd.where_expr, col_names, row_vals, params):
-                var new_vals: [DbValue] = []
-                var ci: i32 = 0
-                while ci < col_names.len() as i32:
-                    val col = col_names[ci]
-                    if upd.assignments.contains_key(col):
-                        val aexpr = upd.assignments[col]
-                        new_vals.push(_eval_expr(aexpr, col_names, row_vals, params))
-                    else:
-                        new_vals.push(row_vals[ci])
-                    ci = ci + 1
-                tbl.delete_matching(tid, old_data)
-                tbl.insert(tid, _serialize_row(new_vals))
-                updated = updated + 1
-            ri = ri + 1
+        if use_typed:
+            var ui: i32 = 0
+            while ui < tbl.tuples.len() as i32:
+                if mvcc_is_visible(tbl.tuples[ui], snap):
+                    val row_vals = typed[ui]
+                    if _check_where(upd.where_expr, col_names, row_vals, params):
+                        var new_vals: [DbValue] = []
+                        var ci: i32 = 0
+                        while ci < col_names.len() as i32:
+                            val col = col_names[ci]
+                            if upd.assignments.contains_key(col):
+                                val aexpr = upd.assignments[col]
+                                new_vals.push(_eval_expr(aexpr, col_names, row_vals, params))
+                            else:
+                                new_vals.push(row_vals[ci])
+                            ci = ci + 1
+                        val old_data = tbl.tuples[ui].data
+                        tbl.delete_matching(tid, old_data)
+                        tbl.insert(tid, _serialize_row(new_vals))
+                        var typed2 = self._tbl_typed[ti]
+                        typed2.push(new_vals)
+                        self._tbl_typed[ti] = typed2
+                        updated = updated + 1
+                ui = ui + 1
+        else:
+            val visible = tbl.scan(snap)
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                val old_data = visible[ri]
+                val row_vals = _deserialize_row(old_data)
+                if _check_where(upd.where_expr, col_names, row_vals, params):
+                    var new_vals: [DbValue] = []
+                    var ci: i32 = 0
+                    while ci < col_names.len() as i32:
+                        val col = col_names[ci]
+                        if upd.assignments.contains_key(col):
+                            val aexpr = upd.assignments[col]
+                            new_vals.push(_eval_expr(aexpr, col_names, row_vals, params))
+                        else:
+                            new_vals.push(row_vals[ci])
+                        ci = ci + 1
+                    tbl.delete_matching(tid, old_data)
+                    tbl.insert(tid, _serialize_row(new_vals))
+                    updated = updated + 1
+                ri = ri + 1
         self._tbl_data[ti] = tbl
         self._txn.commit(tid)
         if updated > 0:
@@ -2281,16 +2384,28 @@ class PureDatabase:
         val tid = handle.txn_id
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
-        val visible = tbl.scan(snap)
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
         var deleted: i64 = 0
-        var ri: i32 = 0
-        while ri < visible.len() as i32:
-            val row_data = visible[ri]
-            val row_vals = _deserialize_row(row_data)
-            if _check_where(del.where_expr, col_names, row_vals, params):
-                tbl.delete_matching(tid, row_data)
-                deleted = deleted + 1
-            ri = ri + 1
+        if use_typed:
+            var di: i32 = 0
+            while di < tbl.tuples.len() as i32:
+                if mvcc_is_visible(tbl.tuples[di], snap):
+                    val row_vals = typed[di]
+                    if _check_where(del.where_expr, col_names, row_vals, params):
+                        tbl.delete_matching(tid, tbl.tuples[di].data)
+                        deleted = deleted + 1
+                di = di + 1
+        else:
+            val visible = tbl.scan(snap)
+            var ri: i32 = 0
+            while ri < visible.len() as i32:
+                val row_data = visible[ri]
+                val row_vals = _deserialize_row(row_data)
+                if _check_where(del.where_expr, col_names, row_vals, params):
+                    tbl.delete_matching(tid, row_data)
+                    deleted = deleted + 1
+                ri = ri + 1
         self._tbl_data[ti] = tbl
         self._txn.commit(tid)
         if deleted > 0:
