@@ -16,7 +16,6 @@ use nogc_sync_mut.db.dbfs_engine.mvcc.{
     MvccTable, MvccTxnManager, MvccSnapshot, MvccTuple, mvcc_is_visible
 }
 use nogc_sync_mut.db.dbfs_engine.fts.search.{FtsEngine}
-use nogc_sync_mut.db.accel.{RowBitmap, row_bitmap_indices, ScanPredicate, ScanPredicateKind, key_matches_predicate, FilterStats}
 use nogc_sync_mut.db.db_query.{query_fts_match, query_page_summary_scan}
 use nogc_sync_mut.db.page_summary.{PageSummaryIndex}
 
@@ -178,6 +177,187 @@ fn _extract_pk_eq(where_expr: SqlExpr?, col_names: [text], pk_ci: i32) -> text:
     if not where_expr.?:
         return ""
     _extract_pk_eq_inner(where_expr, col_names, pk_ci)
+
+# ── Range predicate extraction for fast SELECT WHERE ────────────────────────
+
+# Resolve a Literal to an integer value.
+# Returns [value] on success, [] on failure.
+fn _resolve_int_literal(expr: SqlExpr) -> [i64]:
+    if expr.kind == SqlExprKind.Literal:
+        if not _is_numeric_text(expr.value):
+            return []
+        val v = expr.value.to_int() ?? 0
+        var result: [i64] = []
+        result.push(v as i64)
+        return result
+    []
+
+# Returns [col_index, low_value, high_value, low_inclusive, high_inclusive]
+# as a flat i64 array, or empty if the WHERE is not a simple int range.
+# low_inclusive/high_inclusive: 1 = inclusive, 0 = exclusive.
+
+fn _extract_int_range(where_expr: SqlExpr?, col_map: Dict<text, i32>) -> [i64]:
+    if not where_expr.?:
+        return []
+    val expr = where_expr
+    # BETWEEN col low AND high
+    if expr.kind == SqlExprKind.Between:
+        if not expr.left.?:
+            return []
+        if expr.left.kind != SqlExprKind.Column:
+            return []
+        val ci = _col_idx(col_map, expr.left.value)
+        if ci < 0:
+            return []
+        if expr.args.len() < 2:
+            return []
+        val lo_expr = expr.args[0]
+        val hi_expr = expr.args[1]
+        val lo_v = _resolve_int_literal(lo_expr)
+        val hi_v = _resolve_int_literal(hi_expr)
+        if lo_v.len() == 0 or hi_v.len() == 0:
+            return []
+        var result: [i64] = []
+        result.push(ci as i64)
+        result.push(lo_v[0])
+        result.push(hi_v[0])
+        result.push(1)
+        result.push(1)
+        return result
+    # AND of two binary comparisons on the same column
+    if expr.kind != SqlExprKind.BinaryOp:
+        return []
+    if expr.value != "AND":
+        return []
+    if not expr.left.? or not expr.right.?:
+        return []
+    val left = expr.left
+    val right = expr.right
+    if left.kind != SqlExprKind.BinaryOp or right.kind != SqlExprKind.BinaryOp:
+        return []
+    # Try to extract (col OP literal) from each side
+    val b1 = _extract_bound(left, col_map)
+    val b2 = _extract_bound(right, col_map)
+    if b1.len() != 3 or b2.len() != 3:
+        return []
+    # Both must reference the same column
+    if b1[0] != b2[0]:
+        return []
+    val ci = b1[0]
+    # b[1] = value, b[2] = kind (0=col>=val, 1=col>val, 2=col<=val, 3=col<val)
+    var lo: i64 = 0
+    var hi: i64 = 0
+    var lo_inc: i64 = 1
+    var hi_inc: i64 = 1
+    var has_lo = false
+    var has_hi = false
+    # Process b1
+    if b1[2] == 0:
+        lo = b1[1]
+        lo_inc = 1
+        has_lo = true
+    elif b1[2] == 1:
+        lo = b1[1]
+        lo_inc = 0
+        has_lo = true
+    elif b1[2] == 2:
+        hi = b1[1]
+        hi_inc = 1
+        has_hi = true
+    elif b1[2] == 3:
+        hi = b1[1]
+        hi_inc = 0
+        has_hi = true
+    # Process b2
+    if b2[2] == 0:
+        lo = b2[1]
+        lo_inc = 1
+        has_lo = true
+    elif b2[2] == 1:
+        lo = b2[1]
+        lo_inc = 0
+        has_lo = true
+    elif b2[2] == 2:
+        hi = b2[1]
+        hi_inc = 1
+        has_hi = true
+    elif b2[2] == 3:
+        hi = b2[1]
+        hi_inc = 0
+        has_hi = true
+    if not has_lo or not has_hi:
+        return []
+    var result: [i64] = []
+    result.push(ci)
+    result.push(lo)
+    result.push(hi)
+    result.push(lo_inc)
+    result.push(hi_inc)
+    result
+
+# Returns [col_index, literal_value, kind] where kind:
+# 0 = col >= val, 1 = col > val, 2 = col <= val, 3 = col < val
+# Returns [] if not a simple column-literal/placeholder comparison.
+fn _extract_bound(expr: SqlExpr, col_map: Dict<text, i32>) -> [i64]:
+    if expr.kind != SqlExprKind.BinaryOp:
+        return []
+    val op = expr.value
+    if not expr.left.? or not expr.right.?:
+        return []
+    val left = expr.left
+    val right = expr.right
+    # col OP value (literal or placeholder)
+    if left.kind == SqlExprKind.Column:
+        val ci = _col_idx(col_map, left.value)
+        if ci < 0:
+            return []
+        val resolved = _resolve_int_literal(right)
+        if resolved.len() == 0:
+            return []
+        val v = resolved[0]
+        var kind: i64 = -1
+        if op == ">=":
+            kind = 0
+        elif op == ">":
+            kind = 1
+        elif op == "<=":
+            kind = 2
+        elif op == "<":
+            kind = 3
+        if kind < 0:
+            return []
+        var result: [i64] = []
+        result.push(ci as i64)
+        result.push(v)
+        result.push(kind)
+        return result
+    # value OP col (reversed)
+    if right.kind == SqlExprKind.Column:
+        val ci = _col_idx(col_map, right.value)
+        if ci < 0:
+            return []
+        val resolved = _resolve_int_literal(left)
+        if resolved.len() == 0:
+            return []
+        val v = resolved[0]
+        var kind: i64 = -1
+        # Flip: "50 <= col" means col >= 50
+        if op == "<=":
+            kind = 0
+        elif op == "<":
+            kind = 1
+        elif op == ">=":
+            kind = 2
+        elif op == ">":
+            kind = 3
+        if kind < 0:
+            return []
+        var result: [i64] = []
+        result.push(ci as i64)
+        result.push(v)
+        result.push(kind)
+        return result
+    []
 
 fn _dbval_is_int(v: DbValue) -> bool:
     match v:
@@ -1075,6 +1255,8 @@ class PureDatabase:
     _tbl_pk_col: [i32]
     _tbl_pk_map: [Dict<text, i32>]
     _tbl_dirty: [bool]
+    _tbl_name_idx: Dict<text, i32>
+    _tbl_col_idx: [Dict<text, i32>]
 
     static fn memory() -> Result<PureDatabase, DbError>:
         Ok(PureDatabase(
@@ -1107,7 +1289,9 @@ class PureDatabase:
             _tbl_typed: [],
             _tbl_pk_col: [],
             _tbl_pk_map: [],
-            _tbl_dirty: []
+            _tbl_dirty: [],
+            _tbl_name_idx: {},
+            _tbl_col_idx: []
         ))
 
     static fn memory_deferred() -> Result<PureDatabase, DbError>:
@@ -1170,11 +1354,23 @@ class PureDatabase:
     me get(table: text, key_col: text, key_val: DbValue) -> Result<DbRow?, DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
-        val ti = _find_idx(self._tbl_names, table)
+        # Fast table lookup via Dict cache
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(table):
+            ti = self._tbl_name_idx[table]
+        else:
+            ti = _find_idx(self._tbl_names, table)
         if ti < 0:
             return Err(DbError.QueryFailed(sql: "GET", message: "no such table: {table}"))
         val col_names = self._tbl_cols[ti]
-        val kci = _find_idx(col_names, key_col)
+        # Fast column lookup via Dict cache
+        var kci: i32 = -1
+        if ti < self._tbl_col_idx.len() as i32:
+            val cm = self._tbl_col_idx[ti]
+            if cm.has(key_col):
+                kci = cm[key_col]
+        if kci < 0:
+            kci = _find_idx(col_names, key_col)
         if kci < 0:
             return Err(DbError.QueryFailed(sql: "GET", message: "no such column: {key_col}"))
         val snap = self._txn.snapshot()
@@ -1188,9 +1384,7 @@ class PureDatabase:
                 val tidx = pkm[key_txt]
                 if tidx >= 0 and tidx < tbl.tuples.len() as i32:
                     if mvcc_is_visible(tbl.tuples[tidx], snap):
-                        self._tbl_data[ti] = tbl
                         return Ok(Some(DbRow(columns: col_names, values: typed[tidx])))
-            self._tbl_data[ti] = tbl
             return Ok(nil)
         if use_typed:
             var gi: i32 = 0
@@ -1198,32 +1392,36 @@ class PureDatabase:
                 if mvcc_is_visible(tbl.tuples[gi], snap):
                     val rv = typed[gi]
                     if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
-                        self._tbl_data[ti] = tbl
                         return Ok(Some(DbRow(columns: col_names, values: rv)))
                 gi = gi + 1
         else:
             val visible = tbl.scan(snap)
+            self._tbl_data[ti] = tbl
             var ri: i32 = 0
             while ri < visible.len() as i32:
                 val rv = _deserialize_row(visible[ri])
                 if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
-                    self._tbl_data[ti] = tbl
                     return Ok(Some(DbRow(columns: col_names, values: rv)))
                 ri = ri + 1
-        self._tbl_data[ti] = tbl
         Ok(nil)
 
     me put(table: text, values: [DbValue]) -> Result<i64, DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
-        val ti = _find_idx(self._tbl_names, table)
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(table):
+            ti = self._tbl_name_idx[table]
+        else:
+            ti = _find_idx(self._tbl_names, table)
         if ti < 0:
             return Err(DbError.QueryFailed(sql: "PUT", message: "no such table: {table}"))
         val handle = self._txn.begin()
         val tid = handle.txn_id
-        val ser = _serialize_row(values)
+        # Skip expensive _serialize_row — use unique index placeholder.
+        # _persist and typed reads use _tbl_typed[ti], not tuples[].data.
         var tbl = self._tbl_data[ti]
-        tbl.insert(tid, ser)
+        val row_idx = tbl.tuples.len() as i32
+        tbl.insert(tid, "{row_idx}")
         self._tbl_data[ti] = tbl
         var typed_put = self._tbl_typed[ti]
         typed_put.push(values)
@@ -1231,7 +1429,7 @@ class PureDatabase:
         val pk_ci = self._tbl_pk_col[ti]
         if pk_ci >= 0 and pk_ci < values.len() as i32:
             var pkm = self._tbl_pk_map[ti]
-            pkm[values[pk_ci].to_text()] = tbl.tuples.len() as i32 - 1
+            pkm[values[pk_ci].to_text()] = row_idx
             self._tbl_pk_map[ti] = pkm
         self._tbl_rowids[ti] = self._tbl_rowids[ti] + 1
         self._last_rowid = self._tbl_rowids[ti]
@@ -1243,11 +1441,21 @@ class PureDatabase:
     me delete_by_key(table: text, key_col: text, key_val: DbValue) -> Result<i64, DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
-        val ti = _find_idx(self._tbl_names, table)
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(table):
+            ti = self._tbl_name_idx[table]
+        else:
+            ti = _find_idx(self._tbl_names, table)
         if ti < 0:
             return Err(DbError.QueryFailed(sql: "DELETE_BY_KEY", message: "no such table: {table}"))
         val col_names = self._tbl_cols[ti]
-        val kci = _find_idx(col_names, key_col)
+        var kci: i32 = -1
+        if ti < self._tbl_col_idx.len() as i32:
+            val cm = self._tbl_col_idx[ti]
+            if cm.has(key_col):
+                kci = cm[key_col]
+        if kci < 0:
+            kci = _find_idx(col_names, key_col)
         if kci < 0:
             return Err(DbError.QueryFailed(sql: "DELETE_BY_KEY", message: "no such column: {key_col}"))
         val handle = self._txn.begin()
@@ -1287,7 +1495,11 @@ class PureDatabase:
     me scan_all(table: text) -> Result<[DbRow], DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
-        val ti = _find_idx(self._tbl_names, table)
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(table):
+            ti = self._tbl_name_idx[table]
+        else:
+            ti = _find_idx(self._tbl_names, table)
         if ti < 0:
             return Err(DbError.QueryFailed(sql: "SCAN", message: "no such table: {table}"))
         val col_names = self._tbl_cols[ti]
@@ -1314,11 +1526,21 @@ class PureDatabase:
     me scan_range(table: text, col: text, low: DbValue, high: DbValue) -> Result<[DbRow], DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
-        val ti = _find_idx(self._tbl_names, table)
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(table):
+            ti = self._tbl_name_idx[table]
+        else:
+            ti = _find_idx(self._tbl_names, table)
         if ti < 0:
             return Err(DbError.QueryFailed(sql: "SCAN_RANGE", message: "no such table: {table}"))
         val col_names = self._tbl_cols[ti]
-        val cci = _find_idx(col_names, col)
+        var cci: i32 = -1
+        if ti < self._tbl_col_idx.len() as i32:
+            val cm = self._tbl_col_idx[ti]
+            if cm.has(col):
+                cci = cm[col]
+        if cci < 0:
+            cci = _find_idx(col_names, col)
         if cci < 0:
             return Err(DbError.QueryFailed(sql: "SCAN_RANGE", message: "no such column: {col}"))
         val snap = self._txn.snapshot()
@@ -1329,30 +1551,16 @@ class PureDatabase:
         if use_typed:
             val low_i = _dbval_as_i64(low)
             val high_i = _dbval_as_i64(high)
-            var visible_keys: [i64] = []
-            var visible_idxs: [i32] = []
+            val n = tbl.tuples.len() as i32
             var si: i32 = 0
-            while si < tbl.tuples.len() as i32:
+            while si < n:
                 if mvcc_is_visible(tbl.tuples[si], snap):
                     val rv = typed[si]
                     if cci < rv.len() as i32:
                         val cv = _dbval_as_i64(rv[cci])
-                        visible_keys.push(cv)
-                        visible_idxs.push(si)
+                        if cv >= low_i and cv < high_i:
+                            rows.push(DbRow(columns: col_names, values: rv))
                 si = si + 1
-            var bm = RowBitmap.empty(visible_keys.len() as i64)
-            var ki: i32 = 0
-            while ki < visible_keys.len() as i32:
-                val kv = visible_keys[ki]
-                if kv >= low_i and kv < high_i:
-                    bm.set(ki as i64)
-                ki = ki + 1
-            val matched = row_bitmap_indices(bm)
-            var mi: i32 = 0
-            while mi < matched.len() as i32:
-                val row_idx = visible_idxs[matched[mi] as i32]
-                rows.push(DbRow(columns: col_names, values: typed[row_idx]))
-                mi = mi + 1
         else:
             val visible = tbl.scan(snap)
             var ri: i32 = 0
@@ -1421,8 +1629,10 @@ class PureDatabase:
                 val kind = parts[0]
                 val table_name = parts[1]
                 if kind == "table":
+                    val load_ti = self._tbl_names.len() as i32
+                    val load_cols = _split_csv(parts[2])
                     self._tbl_names.push(table_name)
-                    self._tbl_cols.push(_split_csv(parts[2]))
+                    self._tbl_cols.push(load_cols)
                     self._tbl_data.push(MvccTable.new())
                     self._tbl_rowids.push(0)
                     self._fts_indexes.push(FtsEngine.new())
@@ -1438,6 +1648,9 @@ class PureDatabase:
                     var empty_pk: Dict<text, i32> = {}
                     self._tbl_pk_map.push(empty_pk)
                     self._tbl_dirty.push(false)
+                    # Update name→index and column→index caches
+                    self._tbl_name_idx[table_name] = load_ti
+                    self._tbl_col_idx.push(_build_col_map(load_cols))
                 elif kind == "fts":
                     val ti = _find_idx(self._tbl_names, table_name)
                     if ti >= 0:
@@ -1575,6 +1788,8 @@ class PureDatabase:
     fn table_exists(name: text) -> bool:
         if not self.is_open:
             return false
+        if self._tbl_name_idx.has(name):
+            return true
         _find_idx(self._tbl_names, name) >= 0
 
     fn last_insert_rowid() -> i64:
@@ -1610,7 +1825,11 @@ class PureDatabase:
     me search(table: text, columns: [text], query: text, algorithm: PureSearchAlgorithm, limit: i64) -> Result<[PureSearchResult], DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
-        val ti = _find_idx(self._tbl_names, table)
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(table):
+            ti = self._tbl_name_idx[table]
+        else:
+            ti = _find_idx(self._tbl_names, table)
         if ti < 0:
             return Err(DbError.QueryFailed(
                 sql: "SEARCH",
@@ -1735,6 +1954,8 @@ class PureDatabase:
         self._fts_columns = []
         self._indexes = []
         self._index_unique = []
+        var restore_ni: Dict<text, i32> = {}
+        var restore_ci: [Dict<text, i32>] = []
         var ti: i32 = 0
         while ti < self._snap_tbl_names.len() as i32:
             self._tbl_names.push(self._snap_tbl_names[ti])
@@ -1746,7 +1967,11 @@ class PureDatabase:
             self._fts_columns.push([])
             self._indexes.push(self._snap_indexes[ti])
             self._index_unique.push(self._snap_index_unique[ti])
+            restore_ni[self._snap_tbl_names[ti]] = ti
+            restore_ci.push(_build_col_map(self._snap_tbl_cols[ti]))
             ti = ti + 1
+        self._tbl_name_idx = restore_ni
+        self._tbl_col_idx = restore_ci
         # Re-insert snapshot rows using parallel arrays
         var ri: i32 = 0
         while ri < self._snap_row_tidx.len() as i32:
@@ -1811,8 +2036,14 @@ class PureDatabase:
             ))
         # Add the new column name
         var cols = self._tbl_cols[ti]
+        val new_col_idx = cols.len() as i32
         cols.push(col_name)
         self._tbl_cols[ti] = cols
+        # Update column→index cache
+        if ti < self._tbl_col_idx.len() as i32:
+            var acm = self._tbl_col_idx[ti]
+            acm[col_name] = new_col_idx
+            self._tbl_col_idx[ti] = acm
         # Rewrite existing rows to append NULL for the new column
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
@@ -2057,6 +2288,7 @@ class PureDatabase:
         while ci < ct.columns.len() as i32:
             col_names.push(ct.columns[ci].name)
             ci = ci + 1
+        val new_ti = self._tbl_names.len() as i32
         self._tbl_names.push(ct.table)
         self._tbl_cols.push(col_names)
         self._tbl_data.push(MvccTable.new())
@@ -2081,6 +2313,10 @@ class PureDatabase:
         var empty_pk_map: Dict<text, i32> = {}
         self._tbl_pk_map.push(empty_pk_map)
         self._tbl_dirty.push(true)
+        # Update name→index cache
+        self._tbl_name_idx[ct.table] = new_ti
+        # Build column→index cache for new table
+        self._tbl_col_idx.push(_build_col_map(col_names))
         self._last_changes = 0
         self._mark_dirty()?
         Ok(0)
@@ -2151,6 +2387,16 @@ class PureDatabase:
             di = di + 1
         self._tbl_fts_next_doc_id = new_fts_next_doc_id
         self._tbl_fts_doc_ids = new_fts_doc_ids
+        # Rebuild name→index and column→index caches
+        var drop_ni: Dict<text, i32> = {}
+        var drop_ci: [Dict<text, i32>] = []
+        var dri: i32 = 0
+        while dri < self._tbl_names.len() as i32:
+            drop_ni[self._tbl_names[dri]] = dri
+            drop_ci.push(_build_col_map(self._tbl_cols[dri]))
+            dri = dri + 1
+        self._tbl_name_idx = drop_ni
+        self._tbl_col_idx = drop_ci
         self._last_changes = 0
         self._mark_dirty()?
         Ok(0)
@@ -2189,11 +2435,11 @@ class PureDatabase:
             if uq_check.is_err():
                 self._txn.commit(tid)
                 return uq_check
-            val ser = _serialize_row(row_vals)
+            # Skip expensive _serialize_row — use unique index placeholder.
             var tbl = self._tbl_data[ti]
-            tbl.insert(tid, ser)
+            val tuple_pos = tbl.tuples.len() as i32
+            tbl.insert(tid, "{tuple_pos}")
             self._tbl_data[ti] = tbl
-            val tuple_pos = tbl.tuples.len() as i32 - 1
             var typed = self._tbl_typed[ti]
             typed.push(row_vals)
             self._tbl_typed[ti] = typed
@@ -2292,7 +2538,11 @@ class PureDatabase:
     # ── Internal: SELECT ─────────────────────────────────────────────────
 
     me _do_select(sel: SqlSelect, params: [DbValue]) -> Result<[DbRow], DbError>:
-        val ti = _find_idx(self._tbl_names, sel.from_table)
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(sel.from_table):
+            ti = self._tbl_name_idx[sel.from_table]
+        else:
+            ti = _find_idx(self._tbl_names, sel.from_table)
         if ti < 0:
             return Err(DbError.QueryFailed(
                 sql: "SELECT",
@@ -2321,8 +2571,41 @@ class PureDatabase:
                             base_rows.push(typed[tidx])
                 used_pk_path = true
 
+        # ── Integer range fast path for WHERE col >= L AND col < H ────
+        var used_range_path = false
+        if not used_pk_path and use_typed and not has_join:
+            val rng = _extract_int_range(sel.where_expr, col_map)
+            if rng.len() == 5:
+                val rng_ci = rng[0] as i32
+                val rng_lo = rng[1]
+                val rng_hi = rng[2]
+                val rng_lo_inc = rng[3] == 1
+                val rng_hi_inc = rng[4] == 1
+                val n = tbl.tuples.len() as i32
+                var ri: i32 = 0
+                while ri < n:
+                    if mvcc_is_visible(tbl.tuples[ri], snap):
+                        val rv = typed[ri]
+                        if rng_ci < rv.len() as i32:
+                            val cv = _dbval_as_i64(rv[rng_ci])
+                            var lo_ok = false
+                            if rng_lo_inc:
+                                lo_ok = cv >= rng_lo
+                            else:
+                                lo_ok = cv > rng_lo
+                            if lo_ok:
+                                var hi_ok = false
+                                if rng_hi_inc:
+                                    hi_ok = cv <= rng_hi
+                                else:
+                                    hi_ok = cv < rng_hi
+                                if hi_ok:
+                                    base_rows.push(rv)
+                    ri = ri + 1
+                used_range_path = true
+
         # ── Full scan path (typed or fallback) ───────────────────────
-        if not used_pk_path:
+        if not used_pk_path and not used_range_path:
             if use_typed:
                 var ti2: i32 = 0
                 while ti2 < tbl.tuples.len() as i32:
