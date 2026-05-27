@@ -46,9 +46,17 @@ Identical `ch.len().to_u8()` pattern.
 
 ## Status
 
-**RESOLVED** — all three bugs fixed in both `nogc_async_mut` and `nogc_sync_mut` versions.
-All 7/7 benchmark workloads pass. Array value-type semantics required inlining
-8.3 encoding directly (no helper function — arrays are copied into function params).
+**RESOLVED** — the original three bugs are fixed in both `nogc_async_mut` and
+`nogc_sync_mut` versions. The sync implementation also now invalidates the
+new path and parent directory cache after `create_file`, so a cached
+`readdir("/")` cannot hide the newly-created 8.3 entry from a later `open`.
+Array value-type semantics required inlining 8.3 encoding directly (no helper
+function — arrays are copied into function params).
+
+## Verification (2026-05-27)
+
+- `rg -n "ch\\.len\\(\\)\\.to_u8|str_char_at\\(" src/lib/nogc_sync_mut/fs_driver/fat32_dir_ops.spl src/lib/nogc_async_mut/fs_driver/fat32_dir_ops.spl` finds no remaining bad filename-byte encoding.
+- `bin/simple test test/unit/lib/driver/fat32_file_io_spec.spl --mode=interpreter --clean` passes 14/14, including `create_file invalidates cached directory entries before reopen`.
 
 ## Impact (before fix)
 

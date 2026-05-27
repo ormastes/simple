@@ -5,16 +5,7 @@
 
 use std.spipe.*
 use std.fs_driver.block_device.{BlockDevice}
-use std.fs_driver.fat32_core.{Fat32Core,
-                              fat32_register_test_device,
-                              fat32_test_device_mount,
-                              fat32_test_device_open,
-                              fat32_test_device_close,
-                              fat32_test_device_read_bytes,
-                              fat32_test_device_write,
-                              fat32_test_device_readdir,
-                              fat32_test_device_truncate,
-                              fat32_test_device_is_mounted}
+use std.fs_driver.fat32_core.{Fat32Core}
 use std.fs_driver.types.{FileHandle}
 
 # --- Mock block device with a minimal FAT32 image ---
@@ -214,25 +205,25 @@ impl BlockDevice for FileMockBlockDevice:
 
 describe "fat32 file I/O (FR-DRIVER-0007)":
     it "open returns a valid handle for an existing file":
-        val dev = fat32_register_test_device(FileMockBlockDevice.new())
-        val mount_rc = fat32_test_device_mount(dev)
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
         expect(mount_rc.is_ok()).to_equal(true)
-        expect(fat32_test_device_is_mounted(dev).unwrap()).to_equal(true)
+        expect(core.mounted).to_equal(true)
 
-        val open_rc = fat32_test_device_open(dev, "/hello.txt")
+        val open_rc = core.open("/hello.txt")
         expect(open_rc.is_ok()).to_equal(true)
         val handle = open_rc.unwrap()
         expect(handle.id).to_be_greater_than(0)
 
-        val close_rc = fat32_test_device_close(dev, handle)
+        val close_rc = core.close(handle)
         expect(close_rc.is_ok()).to_equal(true)
 
     it "open returns error for non-existent file":
-        val dev = fat32_register_test_device(FileMockBlockDevice.new())
-        val mount_rc = fat32_test_device_mount(dev)
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
         expect(mount_rc.is_ok()).to_equal(true)
 
-        val open_rc = fat32_test_device_open(dev, "/missing.txt")
+        val open_rc = core.open("/missing.txt")
         expect(open_rc.is_err()).to_equal(true)
 
     it "global mock banks sector35 byte0 is H":
@@ -264,12 +255,12 @@ describe "fat32 file I/O (FR-DRIVER-0007)":
         expect(cdata[4].to_i64()).to_equal(111)
 
     it "read returns file contents via read_bytes":
-        val dev = fat32_register_test_device(FileMockBlockDevice.new())
-        val mount_rc = fat32_test_device_mount(dev)
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
         expect(mount_rc.is_ok()).to_equal(true)
 
-        val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
-        val read_rc = fat32_test_device_read_bytes(dev, handle, 5)
+        val handle = core.open("/hello.txt").unwrap()
+        val read_rc = core.read_bytes(handle, 5)
         expect(read_rc.is_ok()).to_equal(true)
         val data = read_rc.unwrap()
         expect(data.len()).to_equal(5)
@@ -280,40 +271,40 @@ describe "fat32 file I/O (FR-DRIVER-0007)":
         expect(data[3].to_i64()).to_equal(108)
         expect(data[4].to_i64()).to_equal(111)
 
-        fat32_test_device_close(dev, handle)
+        core.close(handle)
 
     it "read past EOF returns empty":
-        val dev = fat32_register_test_device(FileMockBlockDevice.new())
-        val mount_rc = fat32_test_device_mount(dev)
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
         expect(mount_rc.is_ok()).to_equal(true)
 
-        val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
+        val handle = core.open("/hello.txt").unwrap()
         # Read the full file first
-        val r1 = fat32_test_device_read_bytes(dev, handle, 8)
+        val r1 = core.read_bytes(handle, 8)
         expect(r1.unwrap().len()).to_equal(5)
         # Now read again — should return empty (at EOF)
-        val r2 = fat32_test_device_read_bytes(dev, handle, 4)
+        val r2 = core.read_bytes(handle, 4)
         expect(r2.unwrap().len()).to_equal(0)
 
-        fat32_test_device_close(dev, handle)
+        core.close(handle)
 
     it "write stores data and read retrieves it":
-        val dev = fat32_register_test_device(FileMockBlockDevice.new())
-        val mount_rc = fat32_test_device_mount(dev)
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
         expect(mount_rc.is_ok()).to_equal(true)
 
-        val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
+        val handle = core.open("/hello.txt").unwrap()
         # Write "AB" at position 0 (after open, position is 0)
         var wbuf: [u8] = [0x41, 0x42]
-        val write_rc = fat32_test_device_write(dev, handle, wbuf, 2)
+        val write_rc = core.write(handle, wbuf, 2)
         expect(write_rc.is_ok()).to_equal(true)
         expect(write_rc.unwrap()).to_equal(2)
 
-        fat32_test_device_close(dev, handle)
+        core.close(handle)
 
         # Re-open and read back
-        val handle2 = fat32_test_device_open(dev, "/hello.txt").unwrap()
-        val read_rc = fat32_test_device_read_bytes(dev, handle2, 5)
+        val handle2 = core.open("/hello.txt").unwrap()
+        val read_rc = core.read_bytes(handle2, 5)
         expect(read_rc.is_ok()).to_equal(true)
         val data = read_rc.unwrap()
         # First two bytes should be overwritten
@@ -322,14 +313,40 @@ describe "fat32 file I/O (FR-DRIVER-0007)":
         # Remaining bytes from original "llo"
         expect(data[2].to_i64()).to_equal(108)
 
-        fat32_test_device_close(dev, handle2)
+        core.close(handle2)
 
-    it "readdir lists root directory entries":
-        val dev = fat32_register_test_device(FileMockBlockDevice.new())
-        val mount_rc = fat32_test_device_mount(dev)
+    it "create_file invalidates cached directory entries before reopen":
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
         expect(mount_rc.is_ok()).to_equal(true)
 
-        val dir_rc = fat32_test_device_readdir(dev, "/")
+        val cached_root_rc = core.readdir("/")
+        expect(cached_root_rc.is_ok()).to_equal(true)
+        expect(cached_root_rc.unwrap().len()).to_equal(2)
+
+        val created_rc = core.create_file("/new.txt")
+        expect(created_rc.is_ok()).to_equal(true)
+        val created = created_rc.unwrap()
+        expect(created.id).to_be_greater_than(0)
+
+        var wbuf: [u8] = [0x4F, 0x4B]
+        val write_rc = core.write(created, wbuf, 2)
+        expect(write_rc.is_ok()).to_equal(true)
+        expect(write_rc.unwrap()).to_equal(2)
+        expect(core.close(created).is_ok()).to_equal(true)
+
+        val open_rc = core.open("/new.txt")
+        expect(open_rc.is_ok()).to_equal(true)
+        val reopened = open_rc.unwrap()
+        expect(reopened.id).to_be_greater_than(0)
+        expect(core.close(reopened).is_ok()).to_equal(true)
+
+    it "readdir lists root directory entries":
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val dir_rc = core.readdir("/")
         expect(dir_rc.is_ok()).to_equal(true)
         val entries = dir_rc.unwrap()
         expect(entries.len()).to_equal(2)
@@ -339,41 +356,41 @@ describe "fat32 file I/O (FR-DRIVER-0007)":
         expect(entries[1].is_dir).to_equal(true)
 
     it "readdir on non-directory returns error":
-        val dev = fat32_register_test_device(FileMockBlockDevice.new())
-        val mount_rc = fat32_test_device_mount(dev)
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
         expect(mount_rc.is_ok()).to_equal(true)
 
-        val dir_rc = fat32_test_device_readdir(dev, "/hello.txt")
+        val dir_rc = core.readdir("/hello.txt")
         expect(dir_rc.is_err()).to_equal(true)
 
     it "truncate to zero clears file":
-        val dev = fat32_register_test_device(FileMockBlockDevice.new())
-        val mount_rc = fat32_test_device_mount(dev)
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
         expect(mount_rc.is_ok()).to_equal(true)
 
-        val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
-        val trunc_rc = fat32_test_device_truncate(dev, handle, 0)
+        val handle = core.open("/hello.txt").unwrap()
+        val trunc_rc = core.truncate(handle, 0)
         expect(trunc_rc.is_ok()).to_equal(true)
 
         # Read should return 0 after truncation
-        val read_rc = fat32_test_device_read_bytes(dev, handle, 4)
+        val read_rc = core.read_bytes(handle, 4)
         expect(read_rc.is_ok()).to_equal(true)
         expect(read_rc.unwrap().len()).to_equal(0)
 
-        fat32_test_device_close(dev, handle)
+        core.close(handle)
 
     it "truncate to smaller size preserves prefix":
-        val dev = fat32_register_test_device(FileMockBlockDevice.new())
-        val mount_rc = fat32_test_device_mount(dev)
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
         expect(mount_rc.is_ok()).to_equal(true)
 
-        val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
+        val handle = core.open("/hello.txt").unwrap()
         # Truncate 5-byte file to 3 bytes
-        val trunc_rc = fat32_test_device_truncate(dev, handle, 3)
+        val trunc_rc = core.truncate(handle, 3)
         expect(trunc_rc.is_ok()).to_equal(true)
 
         # Read should only return 3 bytes
-        val read_rc = fat32_test_device_read_bytes(dev, handle, 8)
+        val read_rc = core.read_bytes(handle, 8)
         expect(read_rc.is_ok()).to_equal(true)
         val data = read_rc.unwrap()
         expect(data.len()).to_equal(3)
@@ -381,12 +398,12 @@ describe "fat32 file I/O (FR-DRIVER-0007)":
         expect(data[1].to_i64()).to_equal(0x65)
         expect(data[2].to_i64()).to_equal(0x6C)
 
-        fat32_test_device_close(dev, handle)
+        core.close(handle)
 
     it "close on invalid handle returns error":
-        val dev = fat32_register_test_device(FileMockBlockDevice.new())
-        val mount_rc = fat32_test_device_mount(dev)
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mount_rc = core.mount()
         expect(mount_rc.is_ok()).to_equal(true)
 
-        val close_rc = fat32_test_device_close(dev, FileHandle(id: 9999))
+        val close_rc = core.close(FileHandle(id: 9999))
         expect(close_rc.is_err()).to_equal(true)
