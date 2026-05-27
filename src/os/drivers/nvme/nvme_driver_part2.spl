@@ -863,6 +863,96 @@ impl NvmeDriver:
         dma_shared_sync_cpu_to_device(buf)
         self.write_sectors_in_namespace_on_queue(nsid, queue_id, lba, count, buf.device_addr)
 
+    me read_4k_shared_dma_burst_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Read one 4KiB operation as a burst of single-sector commands with one SQ doorbell."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        if queue_id != self.io_queue.qid:
+            return Result.Err("NVMe: burst queue not ready")
+        if not buf.is_valid():
+            return Result.Err("NVMe: invalid shared DMA buffer")
+        val sector_size = self.namespace_sector_size(nsid)
+        if sector_size.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        if sector_size.unwrap() == 0u32 or (4096u32 % sector_size.unwrap()) != 0u32:
+            return Result.Err("NVMe: burst sector size not 4K divisible")
+        if buf.byte_len < 4096u64:
+            return Result.Err("NVMe: shared DMA buffer too small")
+        val sectors_per_4k = 4096u32 / sector_size.unwrap()
+        val namespace_sectors = self.namespace_sector_count(nsid)
+        if namespace_sectors.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        if lba + sectors_per_4k.to_u64() > namespace_sectors.unwrap():
+            return Result.Err("NVMe: burst beyond namespace capacity")
+
+        var sector: u32 = 0u32
+        while sector < sectors_per_4k:
+            val sector_lba = lba + sector.to_u64()
+            val sector_addr = buf.device_addr + (sector.to_u64() * sector_size.unwrap().to_u64())
+            val cmd_result = nvme_read_io_command_for_namespace(nsid, sector_lba, 1u32, sector_addr, namespace_sectors.unwrap())
+            if cmd_result.is_err():
+                return Result.Err("NVMe: burst read " + cmd_result.unwrap_err())
+            val cmd = cmd_result.unwrap()
+            val cmd_id = self.io_queue.submit_command(
+                cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                cmd.cdw10, cmd.cdw11, cmd.cdw12
+            )
+            if cmd_id == 0xFFFFu16:
+                return Result.Err("NVMe: burst read submit failed")
+            sector = sector + 1u32
+        val status = self.io_queue.wait_completions(sectors_per_4k, CMD_TIMEOUT)
+        if status.is_err():
+            return Result.Err("NVMe: burst read " + status.unwrap_err())
+        if status.unwrap() != 0u32:
+            return Result.Err("NVMe: burst read error, status=" + status.unwrap().to_u64().to_text())
+        dma_shared_sync_device_to_cpu(buf)
+        Result.Ok(true)
+
+    me write_4k_shared_dma_burst_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
+        """Write one 4KiB operation as a burst of single-sector commands with one SQ doorbell."""
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        if queue_id != self.io_queue.qid:
+            return Result.Err("NVMe: burst queue not ready")
+        if not buf.is_valid():
+            return Result.Err("NVMe: invalid shared DMA buffer")
+        val sector_size = self.namespace_sector_size(nsid)
+        if sector_size.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        if sector_size.unwrap() == 0u32 or (4096u32 % sector_size.unwrap()) != 0u32:
+            return Result.Err("NVMe: burst sector size not 4K divisible")
+        if buf.byte_len < 4096u64:
+            return Result.Err("NVMe: shared DMA buffer too small")
+        val sectors_per_4k = 4096u32 / sector_size.unwrap()
+        val namespace_sectors = self.namespace_sector_count(nsid)
+        if namespace_sectors.is_err():
+            return Result.Err("NVMe: namespace not identified")
+        if lba + sectors_per_4k.to_u64() > namespace_sectors.unwrap():
+            return Result.Err("NVMe: burst beyond namespace capacity")
+
+        dma_shared_sync_cpu_to_device(buf)
+        var sector: u32 = 0u32
+        while sector < sectors_per_4k:
+            val sector_lba = lba + sector.to_u64()
+            val sector_addr = buf.device_addr + (sector.to_u64() * sector_size.unwrap().to_u64())
+            val cmd_result = nvme_write_io_command_for_namespace(nsid, sector_lba, 1u32, sector_addr, namespace_sectors.unwrap())
+            if cmd_result.is_err():
+                return Result.Err("NVMe: burst write " + cmd_result.unwrap_err())
+            val cmd = cmd_result.unwrap()
+            val cmd_id = self.io_queue.submit_command(
+                cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                cmd.cdw10, cmd.cdw11, cmd.cdw12
+            )
+            if cmd_id == 0xFFFFu16:
+                return Result.Err("NVMe: burst write submit failed")
+            sector = sector + 1u32
+        val status = self.io_queue.wait_completions(sectors_per_4k, CMD_TIMEOUT)
+        if status.is_err():
+            return Result.Err("NVMe: burst write " + status.unwrap_err())
+        if status.unwrap() != 0u32:
+            return Result.Err("NVMe: burst write error, status=" + status.unwrap().to_u64().to_text())
+        Result.Ok(true)
+
     me run_reversible_sector_probe(lba: u64) -> Result<NvmeSectorProbeResult, text>:
         """Execute read/write/verify/restore on one sector and return readiness evidence."""
         if not self.initialized:

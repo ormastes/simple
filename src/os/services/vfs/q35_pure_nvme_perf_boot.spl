@@ -96,7 +96,6 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
         return ["[q35-pure-nvme-perf] skipped reason=nvme-sector-count-missing detail=" + sector_count_result.unwrap_err()]
     val sector_size = sector_size_result.unwrap()
     val sector_count = sector_count_result.unwrap()
-    val sectors_per_4k = 4096u32 / sector_size
     val dma_result = dma_alloc(8192, DmaDir.Bidirectional)
     if dma_result.is_err():
         return ["[q35-pure-nvme-perf] skipped reason=dma-alloc-failed"]
@@ -128,50 +127,32 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
         while op < 32u32:
             val relative_lba = _relative_4k_lba(sector_size, sector_count, run, op)
             val read_start = rt_time_now_unix_micros()
-            var read_failed = false
-            var read_detail = ""
-            var read_sector: u32 = 0u32
-            while read_sector < sectors_per_4k and not read_failed:
-                val read_result = nvme.read_shared_dma_in_namespace_on_queue(
-                    1u32,
-                    SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
-                    relative_lba + read_sector.to_u64(),
-                    1u32,
-                    shared
-                )
-                if read_result.is_err():
-                    read_failed = true
-                    read_detail = read_result.unwrap_err()
-                read_sector = read_sector + 1u32
+            val read_result = nvme.read_4k_shared_dma_burst_in_namespace_on_queue(
+                1u32,
+                SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+                relative_lba,
+                shared
+            )
             val read_elapsed = _elapsed_us(read_start, rt_time_now_unix_micros())
-            if read_failed:
+            if read_result.is_err():
                 dma_free(dma)
-                return ["[q35-pure-nvme-perf] skipped reason=direct-read-failed detail=" + read_detail]
+                return ["[q35-pure-nvme-perf] skipped reason=direct-read-failed detail=" + read_result.unwrap_err()]
             if read_elapsed > read_p99_us:
                 read_p99_us = read_elapsed
             read_total_us = read_total_us + read_elapsed
             read_ops = read_ops + 1u64
 
             val write_start = rt_time_now_unix_micros()
-            var write_failed = false
-            var write_detail = ""
-            var write_sector: u32 = 0u32
-            while write_sector < sectors_per_4k and not write_failed:
-                val write_result = nvme.write_shared_dma_in_namespace_on_queue(
-                    1u32,
-                    SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
-                    relative_lba + write_sector.to_u64(),
-                    1u32,
-                    shared
-                )
-                if write_result.is_err():
-                    write_failed = true
-                    write_detail = write_result.unwrap_err()
-                write_sector = write_sector + 1u32
+            val write_result = nvme.write_4k_shared_dma_burst_in_namespace_on_queue(
+                1u32,
+                SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+                relative_lba,
+                shared
+            )
             val write_elapsed = _elapsed_us(write_start, rt_time_now_unix_micros())
-            if write_failed:
+            if write_result.is_err():
                 dma_free(dma)
-                return ["[q35-pure-nvme-perf] skipped reason=direct-write-failed detail=" + write_detail]
+                return ["[q35-pure-nvme-perf] skipped reason=direct-write-failed detail=" + write_result.unwrap_err()]
             if write_elapsed > write_p99_us:
                 write_p99_us = write_elapsed
             write_total_us = write_total_us + write_elapsed
