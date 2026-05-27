@@ -16,6 +16,8 @@ use os.services.vfs.vfs_boot_init.{
     vfs_boot_nvme_direct_adapter_count_for_test,
     vfs_boot_storage_acceptance_reason,
     vfs_boot_storage_production_ready,
+    vfs_boot_nvme_map_filesystem_direct_4k_request,
+    vfs_boot_nvme_map_filesystem_direct_4k_batch,
     vfs_boot_nvme_submit_filesystem_direct_4k,
     vfs_boot_nvme_submit_filesystem_direct_4k_batch
 }
@@ -23,6 +25,7 @@ use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease}
 use os.services.vfs.vfs_init.{vfs_boot_storage_acceptance_ready}
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{Path, OpenFlags}
 use std.fs_driver.direct_io.{direct_io_read_request, direct_io_read_batch_request}
 use std.fs_driver.error.{FsError}
 use std.io.dma.{SharedDmaBuffer, DmaOwner, DmaCachePolicy}
@@ -279,12 +282,44 @@ describe "VFS boot NVMe lease contract":
     it "resolves filesystem DirectIo through file extents before lease adapter submission":
         val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
 
+        expect(source.contains("fn vfs_boot_nvme_map_filesystem_direct_4k_request(driver: DriverInstance, req: DirectIoRequest) -> Result<DirectIoRequest, FsError>:")).to_equal(true)
+        expect(source.contains("fn vfs_boot_nvme_map_filesystem_direct_4k_batch(driver: DriverInstance, req: DirectIoBatchRequest) -> Result<DirectIoBatchRequest, FsError>:")).to_equal(true)
         expect(source.contains("driver.direct_io_extent_for_handle(FileHandle(id: req.handle_id), req.file_offset, 4096u64)")).to_equal(true)
         expect(source.contains("val storage_offset = (mapped.storage_lba * mapped.sector_size.to_u64()) as i64")).to_equal(true)
         expect(source.contains("file_offset: storage_offset")).to_equal(true)
         expect(source.contains("for offset in req.file_offsets:\n        val extent = driver.direct_io_extent_for_handle(FileHandle(id: req.handle_id), offset, 4096u64)")).to_equal(true)
         expect(source.contains("storage_offsets.push((mapped.storage_lba * mapped.sector_size.to_u64()) as i64)")).to_equal(true)
         expect(source.contains("file_offsets: storage_offsets")).to_equal(true)
+
+    it "maps DBFS filesystem DirectIo batches to arena storage offsets before adapter lookup":
+        val lease = _user_lease_for_boot_nsid(19u32)
+        val mounted = vfs_nvme_driver_instance_for_lease("user-dbfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs).unwrap()
+        val handle = mounted.open_path(Path(raw: "/hot.db"), OpenFlags.read_write().with_create())
+        expect(handle.is_ok()).to_equal(true)
+        val batch = direct_io_read_batch_request(handle.unwrap().id, [0i64, 4096i64], SharedDmaBuffer(
+            cpu_virt_addr: 0x1000u64,
+            host_phys_addr: 0x2000u64,
+            device_addr: 0x2000u64,
+            byte_len: 8192u64,
+            cache_policy: DmaCachePolicy.Coherent,
+            owner: DmaOwner(task_id: 42u64, bdf_bus: 0u8, bdf_device: 4u8, bdf_function: 0u8),
+            allocation_id: 11u64
+        ), 100u32)
+        val mapped = vfs_boot_nvme_map_filesystem_direct_4k_batch(mounted, batch)
+        expect(mapped.is_ok()).to_equal(true)
+        val req = mapped.unwrap()
+        expect(req.file_offsets[0]).to_equal(512i64)
+        expect(req.file_offsets[1]).to_equal(4608i64)
+
+    it "maps NVFS filesystem DirectIo batches to arena storage offsets before adapter lookup":
+        val lease = _user_lease_for_boot_nsid(20u32)
+        val mounted = vfs_nvme_driver_instance_for_lease("user-nvfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Nvfs).unwrap()
+        val handle = mounted.open_path(Path(raw: "/hot.nvfs"), OpenFlags.read_write().with_create())
+        expect(handle.is_ok()).to_equal(true)
+        val single = direct_io_read_request(handle.unwrap().id, 4096i64, _valid_shared_dma_4k(), 100u32)
+        val mapped = vfs_boot_nvme_map_filesystem_direct_4k_request(mounted, single)
+        expect(mapped.is_ok()).to_equal(true)
+        expect(mapped.unwrap().file_offset).to_equal(4608i64)
 
     it "wires q35 pure Simple perf evidence to real shared-DMA direct I/O":
         val source = read_file("src/os/services/vfs/vfs_boot_init.spl")

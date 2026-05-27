@@ -487,8 +487,8 @@ fn vfs_boot_nvme_filesystem_direct_io_extension(driver: DriverInstance) -> Resul
         case _:
             Err(FsError.Unsupported)
 
-fn vfs_boot_nvme_submit_filesystem_direct_4k(driver: DriverInstance, lease: NvmeFilesystemLease, req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
-    """Resolve a filesystem DirectIo request to a storage extent before NVMe submission."""
+fn vfs_boot_nvme_map_filesystem_direct_4k_request(driver: DriverInstance, req: DirectIoRequest) -> Result<DirectIoRequest, FsError>:
+    """Resolve a filesystem DirectIo request to a storage-offset request."""
     val ext = vfs_boot_nvme_filesystem_direct_io_extension(driver)
     if ext.is_err():
         return Err(ext.unwrap_err())
@@ -509,10 +509,10 @@ fn vfs_boot_nvme_submit_filesystem_direct_4k(driver: DriverInstance, lease: Nvme
         buffer: req.buffer,
         timeout_polls: req.timeout_polls
     )
-    vfs_boot_nvme_submit_active_lease_direct_4k(lease, storage_req)
+    Ok(storage_req)
 
-fn vfs_boot_nvme_submit_filesystem_direct_4k_batch(driver: DriverInstance, lease: NvmeFilesystemLease, req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>:
-    """Resolve filesystem DirectIo batch offsets to storage extents before NVMe submission."""
+fn vfs_boot_nvme_map_filesystem_direct_4k_batch(driver: DriverInstance, req: DirectIoBatchRequest) -> Result<DirectIoBatchRequest, FsError>:
+    """Resolve filesystem DirectIo batch offsets to storage-offset requests."""
     val ext = vfs_boot_nvme_filesystem_direct_io_extension(driver)
     if ext.is_err():
         return Err(ext.unwrap_err())
@@ -535,7 +535,21 @@ fn vfs_boot_nvme_submit_filesystem_direct_4k_batch(driver: DriverInstance, lease
         buffer: req.buffer,
         timeout_polls: req.timeout_polls
     )
-    vfs_boot_nvme_submit_active_lease_direct_4k_batch(lease, storage_req)
+    Ok(storage_req)
+
+fn vfs_boot_nvme_submit_filesystem_direct_4k(driver: DriverInstance, lease: NvmeFilesystemLease, req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
+    """Resolve a filesystem DirectIo request to a storage extent before NVMe submission."""
+    val storage_req = vfs_boot_nvme_map_filesystem_direct_4k_request(driver, req)
+    if storage_req.is_err():
+        return Err(storage_req.unwrap_err())
+    vfs_boot_nvme_submit_active_lease_direct_4k(lease, storage_req.unwrap())
+
+fn vfs_boot_nvme_submit_filesystem_direct_4k_batch(driver: DriverInstance, lease: NvmeFilesystemLease, req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>:
+    """Resolve filesystem DirectIo batch offsets to storage extents before NVMe submission."""
+    val storage_req = vfs_boot_nvme_map_filesystem_direct_4k_batch(driver, req)
+    if storage_req.is_err():
+        return Err(storage_req.unwrap_err())
+    vfs_boot_nvme_submit_active_lease_direct_4k_batch(lease, storage_req.unwrap())
 
 fn _vfs_boot_q35_elapsed_us(start_us: i64, end_us: i64) -> u64:
     if end_us <= start_us:
