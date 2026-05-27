@@ -47,6 +47,7 @@ impl NvmeDriver:
             io_queue: NvmeQueuePair.new(1, 64),
             notif_id: 0,
             identified_nsid: 1u32,
+            identified_namespaces: [],
             sector_count: 0,
             sector_size: 512,
             db_stride: 0,
@@ -381,6 +382,7 @@ impl NvmeDriver:
         if reason != "ready":
             return Result.Err("NVMe: namespace identify " + reason)
         self.identified_nsid = facts.nsid
+        self.remember_namespace_facts(facts)
         self.sector_count = facts.lba_count
         self.sector_size = facts.formatted_lba_size
 
@@ -503,12 +505,13 @@ impl NvmeDriver:
         self.read_sectors_in_namespace(self.get_namespace_id(), lba, count, buf_phys)
 
     me read_sectors_in_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
-        """Read sectors from the currently identified namespace."""
+        """Read sectors from an identified namespace."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
-        if nsid != self.get_namespace_id():
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
             return Result.Err("NVMe: namespace not identified")
-        val cmd_result = nvme_read_io_command_for_namespace(nsid, lba, count, buf_phys, self.sector_count)
+        val cmd_result = nvme_read_io_command_for_namespace(nsid, lba, count, buf_phys, sector_count.unwrap())
         if cmd_result.is_err():
             return Result.Err("NVMe: read " + cmd_result.unwrap_err())
         val cmd = cmd_result.unwrap()
@@ -546,12 +549,13 @@ impl NvmeDriver:
         self.write_sectors_in_namespace(self.get_namespace_id(), lba, count, buf_phys)
 
     me write_sectors_in_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
-        """Write sectors to the currently identified namespace."""
+        """Write sectors to an identified namespace."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
-        if nsid != self.get_namespace_id():
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
             return Result.Err("NVMe: namespace not identified")
-        val cmd_result = nvme_write_io_command_for_namespace(nsid, lba, count, buf_phys, self.sector_count)
+        val cmd_result = nvme_write_io_command_for_namespace(nsid, lba, count, buf_phys, sector_count.unwrap())
         if cmd_result.is_err():
             return Result.Err("NVMe: write " + cmd_result.unwrap_err())
         val cmd = cmd_result.unwrap()
@@ -617,12 +621,13 @@ impl NvmeDriver:
         self.read_sectors_notify_in_namespace(self.get_namespace_id(), lba, count, buf_phys)
 
     me read_sectors_notify_in_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
-        """Read sectors from the currently identified namespace using IRQ notification."""
+        """Read sectors from an identified namespace using IRQ notification."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
-        if nsid != self.get_namespace_id():
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
             return Result.Err("NVMe: namespace not identified")
-        val cmd_result = nvme_read_io_command_for_namespace(nsid, lba, count, buf_phys, self.sector_count)
+        val cmd_result = nvme_read_io_command_for_namespace(nsid, lba, count, buf_phys, sector_count.unwrap())
         if cmd_result.is_err():
             return Result.Err("NVMe: read " + cmd_result.unwrap_err())
         val cmd = cmd_result.unwrap()
@@ -657,12 +662,13 @@ impl NvmeDriver:
         self.write_sectors_notify_in_namespace(self.get_namespace_id(), lba, count, buf_phys)
 
     me write_sectors_notify_in_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
-        """Write sectors to the currently identified namespace using IRQ notification."""
+        """Write sectors to an identified namespace using IRQ notification."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
-        if nsid != self.get_namespace_id():
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
             return Result.Err("NVMe: namespace not identified")
-        val cmd_result = nvme_write_io_command_for_namespace(nsid, lba, count, buf_phys, self.sector_count)
+        val cmd_result = nvme_write_io_command_for_namespace(nsid, lba, count, buf_phys, sector_count.unwrap())
         if cmd_result.is_err():
             return Result.Err("NVMe: write " + cmd_result.unwrap_err())
         val cmd = cmd_result.unwrap()
@@ -829,6 +835,31 @@ impl NvmeDriver:
     fn get_sector_count() -> u64:
         """Total number of sectors on namespace 1."""
         self.sector_count
+
+    me remember_namespace_facts(facts: NvmeNamespaceFacts):
+        var remembered: [NvmeNamespaceFacts] = []
+        var replaced = false
+        for existing in self.identified_namespaces:
+            if existing.nsid == facts.nsid:
+                remembered = remembered.push(facts)
+                replaced = true
+            else:
+                remembered = remembered.push(existing)
+        if not replaced:
+            remembered = remembered.push(facts)
+        self.identified_namespaces = remembered
+
+    fn namespace_sector_count(nsid: u32) -> Result<u64, text>:
+        for facts in self.identified_namespaces:
+            if facts.nsid == nsid:
+                return Ok(facts.lba_count)
+        Err("NVMe: namespace not identified")
+
+    fn namespace_sector_size(nsid: u32) -> Result<u32, text>:
+        for facts in self.identified_namespaces:
+            if facts.nsid == nsid:
+                return Ok(facts.formatted_lba_size)
+        Err("NVMe: namespace not identified")
 
     fn get_sector_size() -> u32:
         """Sector size in bytes."""

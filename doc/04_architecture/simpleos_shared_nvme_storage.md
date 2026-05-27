@@ -260,6 +260,17 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   still identifies NSID 1, but the driver now has an explicit
   `identify_namespace_id(nsid)` entry point needed for future user-assigned
   namespaces.
+- The VFS hardware user-assignment path now identifies the lease namespace
+  before constructing a hardware `NvmeBlockAdapter`, and the adapter stores the
+  lease NSID and uses namespace-aware driver read/write methods for FAT32, NVFS,
+  and DBFS block I/O.
+- The NVMe driver keeps identified namespace geometry per NSID, so a
+  lease-backed adapter can validate and submit I/O for its assigned namespace
+  without depending on a single mutable current-namespace check.
+- The lease-backed adapter rejects stale lease geometry when the identified
+  namespace sector count or sector size differs from the lease, and the VFS
+  user-assignment path restores the previous identified NSID after recording the
+  user namespace facts so legacy boot-namespace operations are not redirected.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.
@@ -283,7 +294,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   evidence line is missing.
 - `test/unit/os/services/vfs/nvme_block_adapter_spec.spl` covers adapter-visible
   lease translation, out-of-range rejection, and fail-closed rejection when a
-  lease NSID is not the driver's identified namespace, without requiring real
+  lease NSID is not the driver's identified namespace, and guards that
+  lease-backed I/O calls namespace-aware driver methods without requiring real
   hardware.
 - `test/unit/lib/fs_driver/nvfs_device_backed_spec.spl` covers NVFS opening on
   the same shared `BlockDevice` surface used by FAT32 and DBFS.
@@ -316,7 +328,7 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   decoding.
 - `test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl` covers that
   the driver exposes namespace-aware identify/sector methods, stores identified
-  NSID state, and keeps non-identified namespaces fail-closed before hardware
+  NSID geometry, and keeps non-identified namespaces fail-closed before hardware
   submission.
 - `test/unit/os/drivers/nvme/nvme_queue_boundary_spec.spl` guards that the
   reusable queue submission/polling module does not import hosted syscalls or
