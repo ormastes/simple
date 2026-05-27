@@ -1,0 +1,31 @@
+use std.spec.{describe, it, expect}
+use os.services.vfs.vfs_boot_init.{vfs_boot_nvme_system_fat32_lease}
+use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemConsumer, nvme_filesystem_lease_reason}
+use os.kernel.types.device_mem_types.{new_device_grant, device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id}
+
+fn _tokenized_boot_grant() -> os.kernel.types.device_mem_types.DeviceGrant:
+    var grant = new_device_grant()
+    grant.pci_bus = 0u8
+    grant.pci_dev = 2u8
+    grant.pci_func = 0u8
+    val base = device_grant_token_base(grant.pci_bus, grant.pci_dev, grant.pci_func, 0u64)
+    grant.bar0_cap = device_grant_bar_token(base)
+    grant.irq_cap = device_grant_irq_token(base)
+    grant.dma_cap = device_grant_dma_token(base)
+    grant.iommu_cap = device_grant_iommu_token(base)
+    grant.iommu_domain_id = device_grant_iommu_domain_id(grant.pci_bus, grant.pci_dev, grant.pci_func)
+    grant
+
+describe "VFS boot NVMe lease contract":
+    it "builds a filesystem-ready system FAT32 lease for pure Simple boot":
+        val lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
+        expect(lease.provider).to_equal("simple-driver")
+        expect(lease.shared_block_interface).to_equal(true)
+        expect(lease.namespace.nsid).to_equal(1u32)
+        expect(lease.lba_count).to_equal(65536u64)
+        expect(lease.grant_kind.to_start_with("resource-grant-set:tok=")).to_equal(true)
+        expect(nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)).to_equal("ready")
+
+    it "keeps invalid namespace geometry rejected before FAT32 can mount":
+        val lease = vfs_boot_nvme_system_fat32_lease(0u32, 65536u64, _tokenized_boot_grant())
+        expect(nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)).to_equal("nvme-fs-namespace-invalid-lba-size")

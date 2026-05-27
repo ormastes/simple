@@ -24,6 +24,9 @@ must not each grow separate NVMe access paths. The existing code already has:
 - `src/os/services/vfs/nvme_filesystem_mounts.spl` converts a validated
   `NvmeFilesystemLease` plus a lease-backed `BlockDevice` into the
   `DriverInstance` needed by the VFS mount table.
+- `src/os/services/vfs/vfs_boot_init.spl` builds the pure-Simple boot FAT32
+  adapter through the same `NvmeFilesystemLease` contract instead of a
+  whole-device `NvmeBlockAdapter`.
 - `src/os/kernel/ipc/dma_alloc_contract.spl` documents the syscall 84 layout:
   the syscall return is the CPU virtual address, result word 0 is the
   device-visible physical address, and result word 1 remains the allocation id.
@@ -59,6 +62,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   virtual address.
 - User-assigned namespace leases can consume a `DeviceGrant` resource-set label
   instead of a hand-written token string.
+- The pure-Simple boot FAT32 helper is now lease-bounded before FAT32 sees the
+  device, which keeps system boot storage on the same contract as NVFS and DBFS.
 - User-space namespace assignment is explicit and testable.
 - System boot/root storage and user-assigned storage are separated by queue role.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
@@ -70,6 +75,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - FAT32/NVFS/DBFS mounting still needs end-to-end hardware verification on real
   namespaces, but the VFS NVMe adapter now enforces the lease window before
   translating filesystem-relative LBAs to physical namespace LBAs.
+- The top-level baremetal boot entry still falls back to the C NVMe/FAT32 bridge
+  until the pure-Simple FAT32 mount path has hardware-safe failure behavior.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
@@ -86,3 +93,6 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `test/unit/os/kernel/types/device_mem_types_spec.spl` covers DeviceGrant
   BAR/IRQ/DMA/IOMMU token metadata, and the NVMe storage model spec covers using
   that label for a user-assigned namespace lease.
+- `test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl` covers the
+  pure-Simple boot FAT32 lease helper and rejects invalid namespace geometry
+  before mounting.
