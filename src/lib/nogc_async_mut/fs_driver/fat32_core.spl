@@ -7,6 +7,7 @@
 use std.driver.types.{DeviceId, DriverClass}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.types.{FileHandle, DirEntry, Inode}
+use std.fs_driver.direct_io.{DirectIoExtent}
 use std.fs_driver.fat32_parsers.{
     _to_lower_byte, _read_u32_le, _read_u16_le, _parse_short_name, _split_path, _lower_text
 }
@@ -582,6 +583,48 @@ impl Fat32Core:
         if not self.open_files[idx].is_open:
             return Err("file handle not open")
         Ok(self.open_files[idx])
+
+    me fn direct_io_extent_for_handle(handle: FileHandle, file_offset: i64, byte_len: u64) -> Result<DirectIoExtent, text>:
+        """Map a sector-aligned file range to the backing FAT32 cluster LBA."""
+        if not self.mounted:
+            return Err("filesystem not mounted")
+        if file_offset < 0:
+            return Err("invalid file offset")
+        if byte_len == 0u64:
+            return Err("invalid byte length")
+        if self.bytes_per_sector == 0 or self.sectors_per_cluster == 0:
+            return Err("invalid FAT32 geometry")
+        val of_rc = self.get_open_file(handle)
+        if of_rc.is_err():
+            return Err(of_rc.unwrap_err())
+        val of = of_rc.unwrap()
+        if of.is_dir:
+            return Err("direct I/O unsupported for directories")
+        val sector_size = self.bytes_per_sector.to_i64()
+        val len_i64 = byte_len as i64
+        if file_offset % sector_size != 0 or len_i64 % sector_size != 0:
+            return Err("direct I/O range must be sector aligned")
+        if file_offset + len_i64 > of.size:
+            return Err("direct I/O range exceeds file size")
+        val cluster_bytes = (self.bytes_per_sector * self.sectors_per_cluster).to_i64()
+        val offset_in_cluster = file_offset % cluster_bytes
+        if offset_in_cluster + len_i64 > cluster_bytes:
+            return Err("direct I/O range crosses FAT32 cluster")
+        val chain_rc = self.follow_chain(of.start_cluster)
+        if chain_rc.is_err():
+            return Err(chain_rc.unwrap_err())
+        val chain = chain_rc.unwrap()
+        val cluster_index = (file_offset / cluster_bytes).to_i32()
+        if cluster_index < 0 or cluster_index >= chain.len():
+            return Err("direct I/O cluster not found")
+        val storage_lba = self.cluster_to_sector(chain[cluster_index]) + (offset_in_cluster / sector_size).to_u64()
+        Ok(DirectIoExtent(
+            consumer: "fat32",
+            file_offset: file_offset,
+            storage_lba: storage_lba,
+            byte_len: byte_len,
+            sector_size: self.bytes_per_sector
+        ))
 
     # --- Public file I/O API (FR-DRIVER-0007) ---
 

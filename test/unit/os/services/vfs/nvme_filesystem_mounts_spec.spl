@@ -1,5 +1,6 @@
 use std.spec.{describe, it, expect}
 use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.types.{Path, OpenFlags}
 use std.fs_driver.capability.{Capability}
 use std.fs_driver.extension.{Extension}
 use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks}
@@ -84,6 +85,21 @@ describe "NVMe filesystem mount factory":
             case _:
                 expect(false).to_equal(true)
 
+    it "maps NVFS direct I/O file offsets onto the shared NVMe arena data region":
+        val lease = _mount_test_lease()
+        val nvfs = vfs_nvme_driver_instance_for_lease("nvfs-root", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Nvfs)
+        expect(nvfs.is_ok()).to_equal(true)
+        val driver = nvfs.unwrap()
+        val handle = driver.open_path(Path(raw: "/hot.dat"), OpenFlags.read_write().with_create())
+        expect(handle.is_ok()).to_equal(true)
+        val extent = driver.direct_io_extent_for_handle(handle.unwrap(), 4096i64, 4096u64)
+        expect(extent.is_ok()).to_equal(true)
+        val mapped = extent.unwrap()
+        expect(mapped.consumer).to_equal("nvfs")
+        expect(mapped.storage_lba).to_equal(9u64)
+        expect(mapped.byte_len).to_equal(4096u64)
+        expect(mapped.sector_size).to_equal(512u32)
+
     it "builds DBFS from the shared lease-backed BlockDevice surface":
         val lease = _mount_test_lease()
         val dbfs = vfs_nvme_driver_instance_for_lease("dbfs-root", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs)
@@ -96,6 +112,21 @@ describe "NVMe filesystem mount factory":
                 expect(ext.bounce_allowed).to_equal(false)
             case _:
                 expect(false).to_equal(true)
+
+    it "maps DBFS direct I/O file offsets onto the shared NVMe arena data region":
+        val lease = _mount_test_lease()
+        val dbfs = vfs_nvme_driver_instance_for_lease("dbfs-root", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs)
+        expect(dbfs.is_ok()).to_equal(true)
+        val driver = dbfs.unwrap()
+        val handle = driver.open_path(Path(raw: "/hot.db"), OpenFlags.read_write().with_create())
+        expect(handle.is_ok()).to_equal(true)
+        val extent = driver.direct_io_extent_for_handle(handle.unwrap(), 0i64, 4096u64)
+        expect(extent.is_ok()).to_equal(true)
+        val mapped = extent.unwrap()
+        expect(mapped.consumer).to_equal("dbfs")
+        expect(mapped.storage_lba).to_equal(1u64)
+        expect(mapped.byte_len).to_equal(4096u64)
+        expect(mapped.sector_size).to_equal(512u32)
 
     it "rejects consumers when the lease is not filesystem-ready":
         val ns = NvmeNamespaceIdentity(

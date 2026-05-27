@@ -11,6 +11,7 @@ use std.fs_driver.error.{FsError}
 use std.fs_driver.types.{FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo}
 use std.fs_driver.capability.{Capability, CapabilitySet}
 use std.fs_driver.extension.{Extension, PosixCompatExt, DirectIoExt}
+use std.fs_driver.direct_io.{DirectIoExtent}
 use std.db.dbfs_engine.wal.{DbfsWal, WalRecord, WAL_RECORD_DATA}
 use std.db.dbfs_engine.txn.{DbfsTxn, TxnId}
 use std.db.dbfs_engine.raw_nvme_arena.{RawNvmeArena}
@@ -276,6 +277,40 @@ impl DbFsDriver:
 
     fn has_write_zeroes_support() -> bool:
         self.write_zeroes_supported
+
+    fn direct_io_extent_for_consumer(handle: FileHandle, file_offset: i64, byte_len: u64, consumer: text) -> Result<DirectIoExtent, FsError>:
+        """Map a file-relative direct-I/O range onto the RawNvmeArena data region."""
+        if self.direct_io.is_none():
+            return Err(FsError.Unsupported)
+        if self.arena_base < 0 or self.arena_block_count <= 1:
+            return Err(FsError.Unsupported)
+        if self.io_unit_bytes <= 0:
+            return Err(FsError.InvalidArg)
+        if file_offset < 0 or byte_len == 0u64:
+            return Err(FsError.InvalidArg)
+        val len_i64 = byte_len as i64
+        if file_offset % self.io_unit_bytes != 0 or len_i64 % self.io_unit_bytes != 0:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        val fd_idx = _find_fd_idx(self.inst_id, handle.id as u64)
+        if fd_idx < 0 or _dbfs_fds[fd_idx].is_dir:
+            return Err(FsError.InvalidArg)
+        val max_data_bytes = (self.arena_block_count - 1) * self.io_unit_bytes
+        if file_offset + len_i64 > max_data_bytes:
+            return Err(FsError.TooLarge)
+        val relative_lba = file_offset / self.io_unit_bytes
+        Ok(DirectIoExtent(
+            consumer: consumer,
+            file_offset: file_offset,
+            storage_lba: (self.arena_base + 1 + relative_lba) as u64,
+            byte_len: byte_len,
+            sector_size: self.io_unit_bytes as u32
+        ))
+
+    fn direct_io_extent_for_handle(handle: FileHandle, file_offset: i64, byte_len: u64) -> Result<DirectIoExtent, FsError>:
+        self.direct_io_extent_for_consumer(handle, file_offset, byte_len, "dbfs")
 
     fn write_passthrough(data: [u8]) -> Result<i64, FsError>:
         """Write raw bytes directly to the backing BlockDevice via RawNvmeArena.
