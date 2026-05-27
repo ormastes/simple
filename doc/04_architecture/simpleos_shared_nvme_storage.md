@@ -147,6 +147,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - The VFS boot layer has an evidence-gated FAT32 lease constructor for
   production boot; the older geometry-only lease helper remains a compatibility
   path until real boot supplies hardware evidence directly.
+- The pure-Simple NVMe/FAT32 boot path now executes the driver's reversible
+  sector probe, converts it into system-driver transfer evidence, and mints the
+  boot FAT32 lease through the evidence-gated constructor before creating the
+  VFS block adapter.
 - Freestanding controller readiness now has an explicit resource contract that
   binds system-driver or user-space-driver placement, grant/namespace mode,
   admin queue resources, I/O queue resources, DMA isolation, and IOMMU/broker
@@ -194,9 +198,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   reject.
 - Queue assignment is part of filesystem readiness: leases without read, write,
   and queue-submit rights are rejected before FAT32, NVFS, or DBFS can mount.
-- The top-level boot sequence still needs to call the evidence-gated constructor
-  after executing the hardware probe; until that final wiring exists, production
-  readiness remains intentionally unproven.
+- Real-hardware performance validation is still required for production
+  throughput claims: queue depth, warm 4K random read/write latency, and max RSS
+  need measurement on representative NVMe devices.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
@@ -210,7 +214,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - `test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl` covers producing
   FAT32, NVFS, and DBFS `DriverInstance` values from one NVMe lease contract.
 - `test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl` covers the
-  evidence-gated production FAT32 boot lease constructor.
+  evidence-gated production FAT32 boot lease constructor and guards that the
+  pure-Simple boot path calls the hardware probe before mounting.
 - `test/unit/os/kernel/ipc/dma_alloc_contract_spec.spl` covers the DMA syscall
   result layout used by the pure Simple NVMe driver and VFS adapter.
 - `test/unit/os/kernel/types/device_mem_types_spec.spl` covers DeviceGrant

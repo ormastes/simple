@@ -190,7 +190,26 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     if nvme_init.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe init failed: {nvme_init.unwrap_err()}")
         return false
-    val lease = vfs_boot_nvme_system_fat32_lease(g_nvme.get_sector_size(), g_nvme.get_sector_count(), grant)
+    val transfer_evidence_result = g_nvme.transfer_evidence_from_reversible_probe(
+        0u64,
+        "system-driver",
+        "kernel-owned-resource",
+        "system-kernel-namespace",
+        device_grant_is_isolated(grant),
+        device_grant_is_isolated(grant)
+    )
+    if transfer_evidence_result.is_err():
+        log_raw_println("[vfs-init] pure-Simple NVMe transfer probe failed: {transfer_evidence_result.unwrap_err()}")
+        return false
+    val lease_result = vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(
+        g_nvme.get_sector_size(),
+        g_nvme.get_sector_count(),
+        transfer_evidence_result.unwrap()
+    )
+    if lease_result.is_err():
+        log_raw_println("[vfs-init] pure-Simple NVMe evidence lease failed: {lease_result.unwrap_err()}")
+        return false
+    val lease = lease_result.unwrap()
     val adapter_result = NvmeBlockAdapter.for_filesystem_lease(g_nvme, lease, NvmeFilesystemConsumer.Fat32)
     if adapter_result.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe lease adapter failed: {adapter_result.unwrap_err()}")
