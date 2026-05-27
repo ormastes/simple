@@ -340,7 +340,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   lease path, so the evidence lanes measure the production filesystem-facing
   adapter rather than a sector-by-sector benchmark shortcut. The full VFS probe
   advertises the queue-depth-sized 32-operation batch path; the standalone q35
-  lane uses a smaller measured batch window when that is faster on QEMU.
+  lane uses a smaller measured batch window when that is faster on QEMU. The
+  standalone q35 lane also submits through `NvmeBlockAdapter` DirectIo requests,
+  so the filesystem-facing adapter surface is measured against the in-guest C
+  baseline instead of a raw `NvmeDriver` shortcut.
 - Real-hardware performance validation is still required for production
   throughput claims: queue depth, warm 4K random read/write latency, and max RSS
   need measurement on representative NVMe devices.
