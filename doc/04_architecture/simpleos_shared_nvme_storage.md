@@ -174,7 +174,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Pure-Simple VFS boot records its system FAT32 NVMe lease as an active lease,
   so later user-space namespace assignment can be checked against the boot-owned
   namespace before it is mounted. VFS also exposes a user-assignment entry point
-  that records the user lease after successful active-lease admission.
+  that records the user lease after successful active-lease admission, plus a
+  driver-instance entry point that records only after FAT32/NVFS/DBFS driver
+  construction succeeds.
 - The contract is compatible with the existing DBFS `RawNvmeArena` and FAT/NVFS
   `BlockDevice` surfaces.
 - Production performance claims now have an explicit NVMe contract: measured
@@ -258,7 +260,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   evidence-gated production FAT32 boot lease constructor and guards that the
   pure-Simple boot path calls the hardware probe before mounting, then records
   the boot lease for later system/user conflict admission and records accepted
-  user namespace assignments in the same active lease registry.
+  user namespace assignments in the same active lease registry after driver
+  construction succeeds.
 - `test/unit/os/kernel/ipc/dma_alloc_contract_spec.spl` covers the DMA syscall
   result layout used by the pure Simple NVMe driver and VFS adapter.
 - `test/unit/os/kernel/types/device_mem_types_spec.spl` covers DeviceGrant

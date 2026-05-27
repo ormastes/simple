@@ -1,5 +1,6 @@
 use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
 use os.services.vfs.vfs_boot_init.{
     vfs_boot_nvme_system_fat32_lease,
     vfs_boot_nvme_system_fat32_lease_from_transfer_evidence,
@@ -8,6 +9,7 @@ use os.services.vfs.vfs_boot_init.{
     vfs_boot_nvme_record_active_lease_for_test,
     vfs_boot_nvme_reset_active_leases_for_test,
     vfs_boot_nvme_assign_user_namespace_lease,
+    vfs_boot_nvme_assign_user_namespace_driver_instance,
     vfs_boot_storage_acceptance_reason,
     vfs_boot_storage_production_ready
 }
@@ -161,6 +163,22 @@ describe "VFS boot NVMe lease contract":
 
         expect(conflict.unwrap_err()).to_equal("nvme-fs-namespace-mode-conflict:system:user-assigned")
         expect(assigned.is_ok()).to_equal(true)
+        expect(vfs_boot_nvme_active_lease_count_for_test()).to_equal(2u64)
+        vfs_boot_nvme_reset_active_leases_for_test()
+
+    it "creates user namespace driver instances only after active-lease admission":
+        vfs_boot_nvme_reset_active_leases_for_test()
+        val boot_lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
+        val grant = _tokenized_boot_grant()
+        val evidence = _user_evidence(grant)
+
+        expect(vfs_boot_nvme_record_active_lease_for_test(boot_lease)).to_equal("ready")
+        val conflict = vfs_boot_nvme_assign_user_namespace_driver_instance("user-fat", MemBlockDevice.new(1024u64, 512u32), evidence, grant, 0u32, 1u32, 512u32, 65536u64, 0u64, 1024u64, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID, 42u64, 64u16, NvmeFilesystemConsumer.Fat32)
+        expect(conflict.unwrap_err()).to_equal("nvme-fs-namespace-mode-conflict:system:user-assigned")
+        expect(vfs_boot_nvme_active_lease_count_for_test()).to_equal(1u64)
+
+        val mounted = vfs_boot_nvme_assign_user_namespace_driver_instance("user-fat", MemBlockDevice.new(1024u64, 512u32), evidence, grant, 0u32, 13u32, 512u32, 65536u64, 0u64, 1024u64, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID, 42u64, 64u16, NvmeFilesystemConsumer.Fat32)
+        expect(mounted.is_ok()).to_equal(true)
         expect(vfs_boot_nvme_active_lease_count_for_test()).to_equal(2u64)
         vfs_boot_nvme_reset_active_leases_for_test()
 
