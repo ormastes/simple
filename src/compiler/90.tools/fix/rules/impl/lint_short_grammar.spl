@@ -349,7 +349,7 @@ fn _placeholder_calls_are_safe(expr: text, param: text) -> bool:
     var i = 0
     while i < expr.len():
         if expr[i:i + 1] == "(":
-            val close = _find_text_from(expr, ")", i + 1)
+            val close = _find_matching_paren_on_line(expr, i)
             if close < 0:
                 return false
             val inner = expr[i + 1:close].trim()
@@ -378,7 +378,7 @@ fn _placeholder_call_arg_is_safe(arg: text, param: text) -> bool:
         return true
     if arg == param:
         return true
-    _placeholder_expr_is_safe(arg) or _placeholder_expr_is_single_param_call(arg, param) or _placeholder_expr_is_call_with_safe_args(arg, param) or _placeholder_expr_is_field_access(arg, param) or _placeholder_expr_is_unary_not_safe(arg, param)
+    _placeholder_expr_is_safe(arg) or _placeholder_expr_is_single_param_call(arg, param) or _placeholder_expr_is_receiver_no_arg_method_call(arg, param) or _placeholder_expr_is_call_with_safe_args(arg, param) or _placeholder_expr_is_field_access(arg, param) or _placeholder_expr_is_unary_not_safe(arg, param)
 
 fn _placeholder_brackets_are_param_free(expr: text, param: text) -> bool:
     var i = 0
@@ -418,6 +418,15 @@ fn _placeholder_expr_is_field_access(expr: text, param: text) -> bool:
     val field = expr[prefix.len():expr.len()]
     _is_plain_identifier(field)
 
+fn _placeholder_expr_is_receiver_no_arg_method_call(expr: text, param: text) -> bool:
+    val prefix = param + "."
+    if not expr.starts_with(prefix):
+        return false
+    if not expr.ends_with("()"):
+        return false
+    val method = expr[prefix.len():expr.len() - 2]
+    _is_plain_identifier(method)
+
 fn _placeholder_expr_has_unsafe_direct_field_predicate(expr: text, param: text) -> bool:
     val prefix = param + "."
     if not expr.starts_with(prefix):
@@ -440,7 +449,7 @@ fn _placeholder_expr_is_unary_not_safe(expr: text, param: text) -> bool:
     val field_prefix = param + "."
     if inner.starts_with(field_prefix):
         return _is_plain_identifier(inner[field_prefix.len():inner.len()])
-    _placeholder_expr_is_safe(inner) or _placeholder_expr_is_single_param_call(inner, param) or _placeholder_expr_is_call_with_safe_args(inner, param) or _placeholder_expr_is_field_access(inner, param)
+    _placeholder_expr_is_safe(inner) or _placeholder_expr_is_single_param_call(inner, param) or _placeholder_expr_is_receiver_no_arg_method_call(inner, param) or _placeholder_expr_is_call_with_safe_args(inner, param) or _placeholder_expr_is_field_access(inner, param)
 
 fn _placeholder_position_is_inside_brackets(expr: text, pos: i64) -> bool:
     var depth = 0
@@ -461,7 +470,7 @@ fn _placeholder_expr_is_single_param_call(expr: text, param: text) -> bool:
     val fn_name = expr[0:open].trim()
     if not _is_plain_identifier(fn_name):
         return false
-    val close = _find_text_from(expr, ")", open + 1)
+    val close = _find_matching_paren_on_line(expr, open)
     if close != expr.len() - 1:
         return false
     expr[open + 1:close].trim() == param
@@ -470,10 +479,28 @@ fn _placeholder_expr_is_call_with_safe_args(expr: text, param: text) -> bool:
     val open = _find_text_from(expr, "(", 0)
     if open <= 0:
         return false
-    val close = _find_text_from(expr, ")", open + 1)
+    val close = _find_matching_paren_on_line(expr, open)
     if close != expr.len() - 1:
         return false
     _placeholder_call_args_are_safe(expr[open + 1:close].trim(), param)
+
+fn _find_matching_paren_on_line(text_value: text, open_paren: i64) -> i64:
+    var i = open_paren
+    var depth = 0
+    var in_string = false
+    while i < text_value.len():
+        val ch = text_value[i:i + 1]
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string:
+            if ch == "(":
+                depth = depth + 1
+            elif ch == ")":
+                depth = depth - 1
+                if depth == 0:
+                    return i
+        i = i + 1
+    -1
 
 fn _expr_contains_plain_identifier(expr: text, param: text) -> bool:
     _replace_plain_identifier(expr, param, "_") != expr
