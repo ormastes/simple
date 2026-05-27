@@ -6,7 +6,7 @@
 
 use os.drivers.nvme.nvme_driver.{NvmeDriver}
 use os.drivers.nvme.nvme_namespace_assignment.{nvme_user_assigned_filesystem_lease_from_grant_checked}
-use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemConsumer, nvme_transfer_readiness_reason}
+use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemConsumer, nvme_filesystem_consumer_name, nvme_transfer_readiness_reason}
 use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class_i64, pcimgr_grant_device}
 use os.kernel.types.capability_types.{SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
@@ -123,13 +123,13 @@ fn _access_marker(storage_grant: text, network_grant: text) -> text:
         "storage_namespace=non-secure-resource-namespace network_namespace=non-secure-resource-namespace " +
         "storage_grant=" + storage_grant + " network_grant=" + network_grant + " common_driver_logic=shared"
 
-fn _consumer_for_measurement(run: u32, op: u32) -> text:
+fn _consumer_for_measurement(run: u32, op: u32) -> NvmeFilesystemConsumer:
     val selector = (run + op) % 3u32
     if selector == 0u32:
-        return "fat32"
+        return NvmeFilesystemConsumer.Fat32
     if selector == 1u32:
-        return "nvfs"
-    "dbfs"
+        return NvmeFilesystemConsumer.Nvfs
+    NvmeFilesystemConsumer.Dbfs
 
 fn _q35_user_namespace_assignment_marker(
     nvme: NvmeDriver,
@@ -402,7 +402,8 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
                 offsets.push((lba * sector_size.to_u64()) as i64)
                 batch_op = batch_op + 1u32
 
-            val consumer_name = _consumer_for_measurement(run, op)
+            val consumer = _consumer_for_measurement(run, op)
+            val consumer_name = nvme_filesystem_consumer_name(consumer)
             if consumer_name == "fat32":
                 saw_fat32 = true
                 var fat_idx: i32 = 0
@@ -428,7 +429,7 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
                 all_lbas.push(lba)
             val read_req = direct_io_read_batch_request(1u64, offsets, shared, 200000u32)
             val read_start = rt_time_now_unix_micros()
-            val read_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_identified_namespace(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer_name, sector_size, sector_count, read_req)
+            val read_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease_window(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer, 0u64, sector_count, sector_size, read_req)
             val read_elapsed = _elapsed_us(read_start, rt_time_now_unix_micros())
             if read_result.is_err():
                 dma_free(dma)
@@ -441,7 +442,7 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
 
             val write_req = direct_io_write_batch_request(1u64, offsets, shared, 200000u32)
             val write_start = rt_time_now_unix_micros()
-            val write_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_identified_namespace(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer_name, sector_size, sector_count, write_req)
+            val write_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease_window(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer, 0u64, sector_count, sector_size, write_req)
             val write_elapsed = _elapsed_us(write_start, rt_time_now_unix_micros())
             if write_result.is_err():
                 dma_free(dma)
