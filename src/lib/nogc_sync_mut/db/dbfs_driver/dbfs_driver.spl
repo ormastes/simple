@@ -10,7 +10,7 @@ use std.io_runtime
 use std.fs_driver.error.{FsError}
 use std.fs_driver.types.{FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo}
 use std.fs_driver.capability.{Capability, CapabilitySet}
-use std.fs_driver.extension.{Extension, PosixCompatExt}
+use std.fs_driver.extension.{Extension, PosixCompatExt, DirectIoExt}
 use std.db.dbfs_engine.wal.{DbfsWal, WalRecord, WAL_RECORD_DATA}
 use std.db.dbfs_engine.txn.{DbfsTxn, TxnId}
 use std.db.dbfs_engine.raw_nvme_arena.{RawNvmeArena}
@@ -92,6 +92,7 @@ struct DbFsDriver:
     batch_bytes      — preferred batch size for WAL/data writes.
     trim_supported   — backing namespace supports discard/deallocate.
     write_zeroes_supported — backing namespace supports write-zeroes.
+    direct_io        — present only for a SimpleOS NVMe lease-backed mount.
     """
     name:             text
     inst_id:          i64
@@ -105,6 +106,7 @@ struct DbFsDriver:
     batch_bytes:      i64
     trim_supported:   bool
     write_zeroes_supported: bool
+    direct_io:        Option<DirectIoExt>
 
 # --- Module-level store helpers ---
 
@@ -194,6 +196,7 @@ impl DbFsDriver:
             batch_bytes:       4096,
             trim_supported:    false,
             write_zeroes_supported: false,
+            direct_io:         None,
         )
 
     static fn open_on_device(dev: BlockDevice, base_block: i64, block_count: i64) -> Result<DbFsDriver, FsError>:
@@ -231,7 +234,16 @@ impl DbFsDriver:
             batch_bytes:       dev.sector_size() as i64,
             trim_supported:    false,
             write_zeroes_supported: false,
+            direct_io:         None,
         ))
+
+    static fn open_on_device_with_direct_io(dev: BlockDevice, base_block: i64, block_count: i64, direct_io: DirectIoExt) -> Result<DbFsDriver, FsError>:
+        val opened = DbFsDriver.open_on_device(dev, base_block, block_count)
+        if opened.is_err():
+            return opened
+        var driver = opened.unwrap()
+        driver.direct_io = Some(direct_io)
+        Ok(driver)
 
     static fn open_on_samsung_business_nvme(dev: BlockDevice, base_block: i64, block_count: i64) -> Result<DbFsDriver, FsError>:
         """Open DBFS on the attached Samsung business NVMe policy.
@@ -640,6 +652,11 @@ impl DbFsDriver:
     fn probe(cap: Capability) -> Option<Extension>:
         """Return capability extension handle for DBFS-supported capabilities."""
         match cap:
+            case DirectIo:
+                if self.direct_io.is_some():
+                    Some(Extension.DirectIo(ext: self.direct_io.unwrap()))
+                else:
+                    None
             case PosixCompat:
                 Some(Extension.PosixCompat(ext: PosixCompatExt(flags: 0, mode: 0)))
             case Xattr:
@@ -657,13 +674,16 @@ impl DbFsDriver:
 
     fn capabilities() -> CapabilitySet:
         """Return the set of capabilities this driver supports."""
-        CapabilitySet.empty()
+        var caps = CapabilitySet.empty()
             .with(Capability.PosixCompat)
             .with(Capability.Xattr)
             .with(Capability.Acl)
             .with(Capability.Snapshot)
             .with(Capability.COW)
             .with(Capability.LargeFiles)
+        if self.direct_io.is_some():
+            caps = caps.with(Capability.DirectIo)
+        caps
 
     # --- transaction ---
 

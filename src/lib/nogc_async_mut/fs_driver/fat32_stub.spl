@@ -7,7 +7,7 @@
 use std.fs_driver.error.{FsError}
 use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry, StatInfo}
 use std.fs_driver.capability.{Capability, CapabilitySet}
-use std.fs_driver.extension.{Extension}
+use std.fs_driver.extension.{Extension, DirectIoExt}
 use std.fs_driver.ops.{FsDriver}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.fat32_core.{Fat32Core, OpenFile}
@@ -17,20 +17,31 @@ struct FsFat32Driver:
     name:    text
     inner:   Fat32Core
     mounted: bool
+    direct_io: Option<DirectIoExt>
 
 impl FsFat32Driver:
     static fn new(name: text, device: BlockDevice) -> FsFat32Driver:
         FsFat32Driver(
             name: name,
             inner: Fat32Core.new(device),
-            mounted: false
+            mounted: false,
+            direct_io: None
+        )
+
+    static fn new_with_direct_io(name: text, device: BlockDevice, direct_io: DirectIoExt) -> FsFat32Driver:
+        FsFat32Driver(
+            name: name,
+            inner: Fat32Core.new(device),
+            mounted: false,
+            direct_io: Some(direct_io)
         )
 
 fn fat32_driver_new(name: text, device: BlockDevice) -> FsFat32Driver:
     FsFat32Driver(
         name: name,
         inner: Fat32Core.new(device),
-        mounted: false
+        mounted: false,
+        direct_io: None
     )
 
 impl FsDriver for FsFat32Driver:
@@ -258,12 +269,18 @@ impl FsDriver for FsFat32Driver:
         Err(FsError.Unsupported)
 
     fn capabilities() -> CapabilitySet:
-        CapabilitySet.empty()
+        var caps = CapabilitySet.empty()
             .with(Capability.CaseFold)
             .with(Capability.LargeFiles)
             .with(Capability.UnicodeNames)
+        if self.direct_io.is_some():
+            caps = caps.with(Capability.DirectIo)
+        caps
 
     fn probe(cap: Capability) -> Option<Extension>:
+        if cap == Capability.DirectIo:
+            if self.direct_io.is_some():
+                return Some(Extension.DirectIo(ext: self.direct_io.unwrap()))
         None
 
     fn stat_path(path: Path) -> Result<StatInfo, FsError>:
@@ -317,7 +334,8 @@ impl FsDriver for FsFat32Driver:
         FsFat32Driver(
             name:    "Fat32Driver",
             inner:   Fat32Core.new(RamBlockDevice.new_empty()),
-            mounted: false
+            mounted: false,
+            direct_io: None
         )
 
     static fn new_ram_backed_with_file(filename: text, content: text) -> FsFat32Driver:
@@ -325,7 +343,8 @@ impl FsDriver for FsFat32Driver:
         FsFat32Driver(
             name:    "Fat32Driver",
             inner:   Fat32Core.new(RamBlockDevice.new_with_file(filename, content)),
-            mounted: false
+            mounted: false,
+            direct_io: None
         )
 
 # --- RamBlockDevice — minimal in-memory block device for testing ---

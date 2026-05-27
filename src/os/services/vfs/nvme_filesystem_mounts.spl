@@ -12,6 +12,7 @@ use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.nvfs_driver.{NvfsDriver}
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.error.{FsError}
+use std.fs_driver.direct_io.{direct_io_nvme_filesystem_extension}
 
 fn vfs_nvme_fs_error_name(err: FsError) -> text:
     match err:
@@ -46,14 +47,29 @@ fn vfs_nvme_driver_instance_for_lease(
     val block_count = vfs_nvme_filesystem_region_blocks(lease)
     match consumer:
         case NvmeFilesystemConsumer.Fat32:
-            Ok(DriverInstance.Fat32(FsFat32Driver.new(name, dev)))
+            Ok(DriverInstance.Fat32(FsFat32Driver.new_with_direct_io(
+                name,
+                dev,
+                direct_io_nvme_filesystem_extension("fat32", lease.namespace.lba_size)
+            )))
         case NvmeFilesystemConsumer.Nvfs:
-            val opened = NvfsDriver.new_on_device(name, dev, 0i64, block_count)
+            val opened = NvfsDriver.new_on_device_with_direct_io(
+                name,
+                dev,
+                0i64,
+                block_count,
+                direct_io_nvme_filesystem_extension("nvfs", lease.namespace.lba_size)
+            )
             if opened.is_err():
                 return Err("nvfs-open-on-device:" + vfs_nvme_fs_error_name(opened.unwrap_err()))
             Ok(DriverInstance.Nvfs(opened.unwrap()))
         case NvmeFilesystemConsumer.Dbfs:
-            val opened = DbFsDriver.open_on_device(dev, 0i64, block_count)
+            val opened = DbFsDriver.open_on_device_with_direct_io(
+                dev,
+                0i64,
+                block_count,
+                direct_io_nvme_filesystem_extension("dbfs", lease.namespace.lba_size)
+            )
             if opened.is_err():
                 return Err("dbfs-open-on-device:" + vfs_nvme_fs_error_name(opened.unwrap_err()))
             Ok(DriverInstance.DbFs(opened.unwrap()))
