@@ -4,7 +4,8 @@
 #   L:short_grammar_method_ref — `\x: x.method()` -> `&:method`
 #   L:short_grammar_placeholder — `\x: x * 2` -> `_1 * 2`
 #                               — `\x: x.method() > 0` -> `_1.method() > 0`
-#                               — `\(a, b): "{a}: {b}"` -> `"{_.0}: {_.1}"`
+# Interpolation rewrites are intentionally not emitted until the parser
+# transforms placeholders inside interpolation expressions.
 
 use std.tooling.easy_fix.*
 use compiler.tools.fix.rules.helpers.*
@@ -192,7 +193,7 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
         if unary_new_text == expr:
             return nil
         return Some(ShortGrammarPlaceholderCandidate(new_text: unary_new_text, end_offset: expr_end))
-    if not _placeholder_expr_is_safe(expr) and not _placeholder_expr_is_single_param_call(expr, param) and not _placeholder_expr_is_call_with_safe_args(expr, param) and not _placeholder_expr_is_simple_param_interpolation(expr, param) and not _placeholder_expr_is_field_access(expr, param) and not _placeholder_expr_is_unary_not_safe(expr, param):
+    if not _placeholder_expr_is_safe(expr) and not _placeholder_expr_is_single_param_call(expr, param) and not _placeholder_expr_is_call_with_safe_args(expr, param) and not _placeholder_expr_is_field_access(expr, param) and not _placeholder_expr_is_unary_not_safe(expr, param):
         return nil
 
     val new_text = _replace_plain_identifier(expr, param, replacement)
@@ -227,6 +228,8 @@ fn _parse_tuple_placeholder_candidate(line: text, lambda_start: i64, colon_abs: 
         return nil
     val expr = line[body_start:expr_end].trim()
     if expr == "":
+        return nil
+    if expr.contains("\""):
         return nil
 
     var new_text = expr
@@ -308,7 +311,7 @@ fn _placeholder_call_arg_is_safe(arg: text, param: text) -> bool:
         return true
     if arg == param:
         return true
-    _placeholder_expr_is_safe(arg) or _placeholder_expr_is_single_param_call(arg, param) or _placeholder_expr_is_call_with_safe_args(arg, param) or _placeholder_expr_is_field_access(arg, param) or _placeholder_expr_is_simple_param_interpolation(arg, param) or _placeholder_expr_is_unary_not_safe(arg, param)
+    _placeholder_expr_is_safe(arg) or _placeholder_expr_is_single_param_call(arg, param) or _placeholder_expr_is_call_with_safe_args(arg, param) or _placeholder_expr_is_field_access(arg, param) or _placeholder_expr_is_unary_not_safe(arg, param)
 
 fn _placeholder_brackets_are_param_free(expr: text, param: text) -> bool:
     var i = 0
@@ -340,9 +343,6 @@ fn _placeholder_quotes_are_safe(expr: text, param: text) -> bool:
             return false
         i = i + 1
     true
-
-fn _placeholder_expr_is_simple_param_interpolation(expr: text, param: text) -> bool:
-    expr == "\"{" + param + "}\""
 
 fn _placeholder_expr_is_field_access(expr: text, param: text) -> bool:
     val prefix = param + "."
