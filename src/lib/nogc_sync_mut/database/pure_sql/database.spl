@@ -414,6 +414,41 @@ fn _like_prefix_str(where_expr: SqlExpr?) -> text:
         i = i + 1
     ""
 
+# Extract column index and full LIKE pattern from WHERE col LIKE 'pattern'.
+# Returns (col_index, pattern_string). col_index is -1 if not a simple LIKE.
+fn _extract_like_col(where_expr: SqlExpr?, col_map: Dict<text, i32>) -> i32:
+    if not where_expr.?:
+        return -1
+    val expr = where_expr
+    if expr.kind != SqlExprKind.BinaryOp:
+        return -1
+    if expr.value != "LIKE":
+        return -1
+    if not expr.left.? or not expr.right.?:
+        return -1
+    val left = expr.left
+    val right = expr.right
+    if left.kind != SqlExprKind.Column:
+        return -1
+    val ci = _col_idx(col_map, left.value)
+    if ci < 0:
+        return -1
+    if right.kind != SqlExprKind.Literal:
+        return -1
+    ci
+
+fn _extract_like_pattern(where_expr: SqlExpr?) -> text:
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if not expr.right.?:
+        return ""
+    val pattern = expr.right.value
+    var pat = pattern
+    if pat.starts_with("'") and pat.ends_with("'"):
+        pat = pat.slice(1, pat.len() - 1)
+    pat
+
 # Extract a single-sided integer comparison from a WHERE clause.
 # Returns [col_index, value, kind] where kind: 0=>=, 1=>, 2=<=, 3=<, 4==
 # Returns [] if not a simple single comparison.
@@ -1327,6 +1362,7 @@ class PureDatabase:
     _tbl_dirty: [bool]
     _tbl_name_idx: Dict<text, i32>
     _tbl_col_idx: [Dict<text, i32>]
+    _fts_rows: [[DbRow]]
 
     static fn memory() -> Result<PureDatabase, DbError>:
         Ok(PureDatabase(
@@ -1361,7 +1397,8 @@ class PureDatabase:
             _tbl_pk_map: [],
             _tbl_dirty: [],
             _tbl_name_idx: {},
-            _tbl_col_idx: []
+            _tbl_col_idx: [],
+            _fts_rows: []
         ))
 
     static fn memory_deferred() -> Result<PureDatabase, DbError>:
@@ -1853,6 +1890,7 @@ class PureDatabase:
                     self._fts_indexes.push(FtsEngine.new())
                     self._fts_valid.push(false)
                     self._fts_columns.push([])
+                    self._fts_rows.push([])
                     self._indexes.push([])
                     self._index_unique.push([])
                     self._tbl_fts_next_doc_id.push(0)
@@ -2075,6 +2113,76 @@ class PureDatabase:
         if terms.len() == 0:
             return Ok([])
         val col_names = self._tbl_cols[ti]
+        var results: [PureSearchResult] = []
+        # ── BM25 fast path: skip MVCC scan when FTS index is cached ──
+        if algorithm == PureSearchAlgorithm.Bm25:
+            val fts_cached = self._fts_valid[ti] and _same_text_list(self._fts_columns[ti], columns)
+            if not fts_cached:
+                # Build FTS index from scratch
+                val snap = self._txn.snapshot()
+                var tbl = self._tbl_data[ti]
+                val typed = self._tbl_typed[ti]
+                val use_typed = typed.len() == tbl.tuples.len()
+                var rows: [DbRow] = []
+                var visible_indices: [i32] = []
+                if use_typed:
+                    var ri: i32 = 0
+                    while ri < tbl.tuples.len() as i32:
+                        if mvcc_is_visible(tbl.tuples[ri], snap):
+                            val row_vals = typed[ri]
+                            rows.push(DbRow(columns: col_names, values: row_vals))
+                            visible_indices.push(ri)
+                        ri = ri + 1
+                    self._ensure_fts_index_typed(ti, col_names, columns, typed, visible_indices)
+                else:
+                    val visible = tbl.scan(snap)
+                    var ri: i32 = 0
+                    while ri < visible.len() as i32:
+                        val row_vals = _deserialize_row(visible[ri])
+                        rows.push(DbRow(columns: col_names, values: row_vals))
+                        ri = ri + 1
+                    self._ensure_fts_index(ti, col_names, columns, visible)
+                self._tbl_data[ti] = tbl
+                self._fts_rows[ti] = rows
+            val cached_rows = self._fts_rows[ti]
+            val engine = self._fts_indexes[ti]
+            val fts_results = engine.search(query)
+            # Build score map for O(1) lookup instead of O(n*m)
+            var score_map: Dict<text, f64> = {}
+            var fi: i32 = 0
+            while fi < fts_results.len() as i32:
+                val fr = fts_results[fi]
+                if fr.score > 0:
+                    score_map[fr.doc_id.to_text()] = fr.score as f64
+                fi = fi + 1
+            # Collect matched doc IDs for query_fts_match dispatch
+            var matched_ids: [i64] = []
+            fi = 0
+            while fi < fts_results.len() as i32:
+                val row_idx = fts_results[fi].doc_id
+                if row_idx >= 0 and row_idx < cached_rows.len():
+                    if fts_results[fi].score > 0:
+                        matched_ids.push(row_idx)
+                fi = fi + 1
+            val qr = query_fts_match(matched_ids)
+            # Build ranked results using cached rows and score map
+            var qi: i32 = 0
+            while qi < qr.ids.len() as i32:
+                val rid = qr.ids[qi]
+                if rid >= 0 and rid < cached_rows.len():
+                    var rscore = 1.0
+                    val rid_key = rid.to_text()
+                    if score_map.has(rid_key):
+                        rscore = score_map[rid_key]
+                    results = _push_ranked_result(results, PureSearchResult(
+                        row: cached_rows[rid as i32],
+                        score: rscore,
+                        row_index: rid
+                    ), limit)
+                qi = qi + 1
+            self._last_changes = 0
+            return Ok(results)
+        # ── Non-BM25 fallback: full scan + score ──
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
         val typed = self._tbl_typed[ti]
@@ -2082,7 +2190,6 @@ class PureDatabase:
         var docs: [[text]] = []
         var rows: [DbRow] = []
         var total_len: i64 = 0
-        var visible_indices: [i32] = []
         if use_typed:
             var ri: i32 = 0
             while ri < tbl.tuples.len() as i32:
@@ -2093,7 +2200,6 @@ class PureDatabase:
                     total_len = total_len + tokens.len()
                     docs.push(tokens)
                     rows.push(DbRow(columns: col_names, values: row_vals))
-                    visible_indices.push(ri)
                 ri = ri + 1
         else:
             val visible = tbl.scan(snap)
@@ -2107,45 +2213,6 @@ class PureDatabase:
                 rows.push(DbRow(columns: col_names, values: row_vals))
                 ri = ri + 1
         self._tbl_data[ti] = tbl
-        var results: [PureSearchResult] = []
-        if algorithm == PureSearchAlgorithm.Bm25:
-            if use_typed:
-                self._ensure_fts_index_typed(ti, col_names, columns, typed, visible_indices)
-            else:
-                val visible_fb = tbl.scan(snap)
-                self._ensure_fts_index(ti, col_names, columns, visible_fb)
-            val engine = self._fts_indexes[ti]
-            val fts_results = engine.search(query)
-            # Collect matched doc IDs for query_fts_match dispatch
-            var matched_ids: [i64] = []
-            var fi: i32 = 0
-            while fi < fts_results.len() as i32:
-                val row_idx = fts_results[fi].doc_id
-                if row_idx >= 0 and row_idx < rows.len():
-                    if fts_results[fi].score > 0:
-                        matched_ids.push(row_idx)
-                fi = fi + 1
-            val qr = query_fts_match(matched_ids)
-            # Build ranked results from the query result
-            var qi: i32 = 0
-            while qi < qr.ids.len() as i32:
-                val rid = qr.ids[qi]
-                if rid >= 0 and rid < rows.len():
-                    # Re-score from fts_results for ranking
-                    var rscore = 1.0
-                    var si: i32 = 0
-                    while si < fts_results.len() as i32:
-                        if fts_results[si].doc_id == rid:
-                            rscore = fts_results[si].score as f64
-                        si = si + 1
-                    results = _push_ranked_result(results, PureSearchResult(
-                        row: rows[rid as i32],
-                        score: rscore,
-                        row_index: rid
-                    ), limit)
-                qi = qi + 1
-            self._last_changes = 0
-            return Ok(results)
         var di: i32 = 0
         while di < docs.len() as i32:
             val score = _search_score(docs, di, terms, algorithm, total_len)
@@ -2208,6 +2275,7 @@ class PureDatabase:
         self._fts_indexes = []
         self._fts_valid = []
         self._fts_columns = []
+        self._fts_rows = []
         self._indexes = []
         self._index_unique = []
         var restore_ni: Dict<text, i32> = {}
@@ -2221,6 +2289,7 @@ class PureDatabase:
             self._fts_indexes.push(FtsEngine.new())
             self._fts_valid.push(false)
             self._fts_columns.push([])
+            self._fts_rows.push([])
             self._indexes.push(self._snap_indexes[ti])
             self._index_unique.push(self._snap_index_unique[ti])
             restore_ni[self._snap_tbl_names[ti]] = ti
@@ -2552,6 +2621,7 @@ class PureDatabase:
         self._fts_indexes.push(FtsEngine.new())
         self._fts_valid.push(false)
         self._fts_columns.push([])
+        self._fts_rows.push([])
         self._indexes.push([])
         self._index_unique.push([])
         self._tbl_fts_next_doc_id.push(0)
@@ -2594,6 +2664,7 @@ class PureDatabase:
         var new_fts_indexes: [FtsEngine] = []
         var new_fts_valid: [bool] = []
         var new_fts_columns: [[text]] = []
+        var new_fts_rows: [[DbRow]] = []
         var new_indexes: [[[text]]] = []
         var new_index_unique: [[bool]] = []
         var i: i32 = 0
@@ -2606,6 +2677,7 @@ class PureDatabase:
                 new_fts_indexes.push(self._fts_indexes[i])
                 new_fts_valid.push(self._fts_valid[i])
                 new_fts_columns.push(self._fts_columns[i])
+                new_fts_rows.push(self._fts_rows[i])
                 new_indexes.push(self._indexes[i])
                 new_index_unique.push(self._index_unique[i])
             i = i + 1
@@ -2616,6 +2688,7 @@ class PureDatabase:
         self._fts_indexes = new_fts_indexes
         self._fts_valid = new_fts_valid
         self._fts_columns = new_fts_columns
+        self._fts_rows = new_fts_rows
         self._indexes = new_indexes
         self._index_unique = new_index_unique
         # Rebuild typed storage + pk index without the dropped table
@@ -2718,6 +2791,10 @@ class PureDatabase:
                 var eng = self._fts_indexes[ti]
                 eng.add_document(doc_id, text_value)
                 self._fts_indexes[ti] = eng
+                # Keep cached rows in sync
+                var fts_r = self._fts_rows[ti]
+                fts_r.push(DbRow(columns: col_names, values: row_vals))
+                self._fts_rows[ti] = fts_r
             inserted = inserted + 1
             vi = vi + 1
         self._txn.commit(tid)
@@ -2910,8 +2987,27 @@ class PureDatabase:
                         ri = ri + 1
                     used_like_prefix = true
 
+        # ── Typed LIKE fast path (any pattern including _ wildcards) ──
+        var used_like_typed = false
+        if not used_pk_path and not used_range_path and not used_single_bound and not used_like_prefix and use_typed and not has_join:
+            val like_col = _extract_like_col(sel.where_expr, col_map)
+            if like_col >= 0:
+                val like_pat = _extract_like_pattern(sel.where_expr)
+                if like_pat != "":
+                    val n = tbl.tuples.len() as i32
+                    var ri: i32 = 0
+                    while ri < n:
+                        if mvcc_is_visible(tbl.tuples[ri], snap):
+                            val rv = typed[ri]
+                            if like_col < rv.len() as i32:
+                                val sv = rv[like_col].to_text()
+                                if _like_match(like_pat, sv):
+                                    base_rows.push(rv)
+                        ri = ri + 1
+                    used_like_typed = true
+
         # ── Full scan path (typed or fallback) ───────────────────────
-        if not used_pk_path and not used_range_path and not used_single_bound and not used_like_prefix:
+        if not used_pk_path and not used_range_path and not used_single_bound and not used_like_prefix and not used_like_typed:
             if use_typed:
                 var ti2: i32 = 0
                 while ti2 < tbl.tuples.len() as i32:
