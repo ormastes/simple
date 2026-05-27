@@ -35,7 +35,7 @@ still auto-persists (backward compatible).  `PureDatabase.open_deferred()`
 accumulates mutations without disk writes; caller explicitly calls
 `checkpoint()` to flush.
 
-**Result:** INSERT 200 rows — 954 ms (deferred) vs ~120s+ timeout (auto).
+**Result:** INSERT 200 rows — 688 ms (deferred) vs ~120s+ timeout (auto).
 Estimated 100x+ improvement for batch workloads.
 
 ### Optimization B: Incremental FTS on INSERT
@@ -48,18 +48,48 @@ bugs.
 **Result:** FTS search after single INSERT — 0 ms rebuild (incremental) vs
 full O(N) rebuild (pre-optimization).
 
+### Optimization C: Dict Column Lookup
+
+Replaced O(cols) `_find_idx` linear scan with O(1) `Dict<text, i32>` lookup
+via `_build_col_map`.  New fast-path functions: `_eval_expr_fast`,
+`_check_where_fast`, `_project_row_fast`.  Column map built once per
+`_do_select`, reused for all row evaluations.
+
+**Result:** 1.4x speedup on point SELECT, range scan, and prefix search.
+
+### Optimization D: Fused Scan + Filter
+
+Combined deserialize and WHERE-filter into a single pass in `_do_select`.
+Non-JOIN queries skip the separate filter loop entirely — rows that fail
+WHERE are never allocated into `base_rows`.
+
+**Result:** Eliminates redundant filter pass, reduces memory allocation.
+
 ## Micro-Benchmark Results (AC-1, AC-5)
 
 All measurements in interpreter mode (overhead dominates small operations).
 
+### Before Optimization (baseline, auto-checkpoint)
+
 | Workload | Rows | Iterations | Time (ms) |
 |----------|------|------------|-----------|
-| W1: INSERT (deferred) | 200 | 1 | 954 |
-| W2: Point SELECT | 200 | 100 | 5839 |
-| W3: Range scan | 200 | 100 | 6621 |
-| W4: Prefix search (LIKE) | 200 | 100 | 7783 |
-| W5: FTS5 search | 200 | 100 | 6464 |
+| W1: INSERT (auto-checkpoint) | 200 | 1 | >120,000 (timeout) |
+| W2: Point SELECT | 200 | 100 | 5,839 |
+| W3: Range scan | 200 | 100 | 6,621 |
+| W4: Prefix search (LIKE) | 200 | 100 | 7,783 |
+| W5: FTS5 search | 200 | 100 | 6,464 |
 | W6: Reopen | 100 | 10 | 220 |
+
+### After All Optimizations (A + B + C + D)
+
+| Workload | Rows | Iterations | Time (ms) | Speedup |
+|----------|------|------------|-----------|---------|
+| W1: INSERT (deferred) | 200 | 1 | 688 | **>100x** |
+| W2: Point SELECT | 200 | 100 | 4,069 | **1.4x** |
+| W3: Range scan | 200 | 100 | 4,629 | **1.4x** |
+| W4: Prefix search (LIKE) | 200 | 100 | 5,609 | **1.4x** |
+| W5: FTS5 search | 200 | 100 | 5,773 | **1.1x** |
+| W6: Reopen | 100 | 10 | 217 | same |
 
 ## SQLite Comparison (AC-2)
 
@@ -91,8 +121,13 @@ goes beyond this analysis scope.
 
 ## Remaining Improvement Opportunities
 
-1. **Hash index for UNIQUE checks** — replace O(N) full-scan with O(1) lookup
-2. **MVCC vacuum** — compact dead tuples to reduce scan cost over time
-3. **Typed row storage** — store columns as native types instead of text
+1. **Typed row storage** — store columns as native types instead of text;
+   eliminates `_deserialize_row` overhead (current #1 bottleneck after optimizations)
+2. **Hash index for UNIQUE checks** — replace O(N) full-scan with O(1) lookup
+3. **MVCC vacuum** — compact dead tuples to reduce scan cost over time
 4. **Incremental FTS for DELETE/UPDATE** — extend doc_id tracking to mutations
 5. **Page-level persistence** — write only changed pages instead of full file
+6. **Compiled-mode benchmarks** — interpreter overhead dominates small operations;
+   compiled mode would show true algorithm cost but has false-green issues
+7. **SQLite head-to-head** — requires compiled mode with libsqlite3 linked;
+   `rt_sqlite_*` externs exist but are not resolved in interpreter mode
