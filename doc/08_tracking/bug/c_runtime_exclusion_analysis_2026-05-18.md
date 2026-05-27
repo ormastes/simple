@@ -34,7 +34,7 @@ Cannot remove until native linker resolves them from Simple-compiled objects.
 | `runtime_native.c` | `rt_print`, `rt_println`, `rt_stdout_write`, `rt_stderr_write`, `rt_stdin_read_line`, `rt_string_new/len/data`, `rt_native_eq`, `rt_interp_call`, `rt_to_string`, etc. | `codegen/instr/calls.rs`, `linker/stubs.rs`, `elf_utils.rs`, interpreter dispatch | 0 direct (exposed via `use std.*`) | Foundation of the runtime ABI — strings, I/O, value boxing |
 | `runtime_string_index.c` | `rt_swi_build/char_to_byte/byte_to_char/free`, `rt_rank_select_build`, `rt_rank_query`, `rt_select_query`, `rt_rank_select_free` | `codegen/runtime_sffi.rs` (8 entries), `interpreter_extern/simd.rs` | 0 direct | Codegen SFFI table + interpreter extern; Unicode index structures |
 | `async_driver.c` | `rt_driver_create/destroy`, `rt_driver_submit_*` (13 variants), `rt_driver_poll*`, `rt_driver_cancel` | `codegen/runtime_sffi.rs` (15 entries), `codegen/instr/calls.rs`, `llvm/functions/calls.rs` | 0 direct spl; driven via codegen SFFI | Async I/O driver; codegen emits all submit/poll calls |
-| `runtime_config.c` | `rt_set_macro_trace`, `rt_is_macro_trace_enabled`, `rt_set_debug_mode`, `rt_is_debug_mode_enabled` | `codegen/runtime_sffi.rs` (4 entries), `interpreter_extern/system.rs` (imports + re-exports) | 0 direct | Compiler trace/debug flags; interpreter bridges C state to Rust |
+| `runtime_config.c` | `rt_set_macro_trace`, `rt_is_macro_trace_enabled`, `rt_set_debug_mode`, `rt_is_debug_mode_enabled` | codegen/core-C native-project archive | 0 direct | `simple-runtime` no longer calls the C file as of 2026-05-27; the core-C runtime bundle still compiles it for native SFFI exports. |
 | `runtime_env.c` | `__c_rt_env_get_i64`, `__c_rt_env_set/exists/remove/get_str/cwd/home/temp`, `__c_rt_exit`, `__c_rt_stdout/stderr_flush`, `__c_rt_platform_name`, `__c_rt_term_get_size` | `codegen/runtime_sffi.rs` (`rt_env_*` family), `interpreter_extern/system.rs` | 0 direct (wrapped by Rust `rt_env_*` shims) | Env/platform syscall wrappers; Rust shims expose as `rt_env_*` |
 
 ### Group B — SPL FFI surface (blocked by no Simple replacement yet)
@@ -85,6 +85,9 @@ Additional 2026-05-27 simple-runtime reductions:
 - `value/sffi/random.rs` now implements the legacy LCG state and random-hex
   helper directly in Rust, so `runtime/build.rs` no longer compiles
   `runtime_random.c`.
+- `value/sffi/config.rs` now implements the macro-trace and debug-mode flags as
+  Rust `AtomicBool` state, so `runtime/build.rs` no longer compiles
+  `runtime_config.c`.
 
 Verification:
 
@@ -92,6 +95,7 @@ Verification:
 cargo check -p simple-runtime --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::math --manifest-path src/compiler_rust/Cargo.toml
 cargo test -p simple-runtime sffi::random --manifest-path src/compiler_rust/Cargo.toml
+cargo test -p simple-runtime sffi::config --manifest-path src/compiler_rust/Cargo.toml
 ```
 
 ## Path to C Removal for Remaining Modules
@@ -100,7 +104,7 @@ For **math/random**: the Rust shim no longer calls these C files as of
 2026-05-27. Remaining removal requires migrating the core-C/native-project
 SFFI export path so native builds no longer need the archived C sources.
 
-For **contracts/error/equality/memory/value/format/native/string_index/async_driver/config/env**:
+For **contracts/error/equality/memory/value/format/native/string_index/async_driver/env**:
 codegen-emitted or ABI-layer symbols. Removal requires the native-build linker to
 resolve them from Simple-compiled objects instead of the C archive. Blocked by the
 cross-module ABI bug.

@@ -1,29 +1,25 @@
-//! Runtime configuration — implementation in src/runtime/runtime_config.c.
+//! Runtime configuration implemented directly in Rust.
 
-mod c_sffi {
-    extern "C" {
-        pub(super) fn rt_set_macro_trace(enabled: bool);
-        pub(super) fn rt_is_macro_trace_enabled() -> bool;
-        pub(super) fn rt_set_debug_mode(enabled: bool);
-        pub(super) fn rt_is_debug_mode_enabled() -> bool;
-    }
-}
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static MACRO_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+static DEBUG_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 #[inline(always)]
 pub fn rt_set_macro_trace(enabled: bool) {
-    unsafe { c_sffi::rt_set_macro_trace(enabled) }
+    MACRO_TRACE_ENABLED.store(enabled, Ordering::SeqCst);
 }
 #[inline(always)]
 pub fn rt_is_macro_trace_enabled() -> bool {
-    unsafe { c_sffi::rt_is_macro_trace_enabled() }
+    MACRO_TRACE_ENABLED.load(Ordering::SeqCst)
 }
 #[inline(always)]
 pub fn rt_set_debug_mode(enabled: bool) {
-    unsafe { c_sffi::rt_set_debug_mode(enabled) }
+    DEBUG_MODE_ENABLED.store(enabled, Ordering::SeqCst);
 }
 #[inline(always)]
 pub fn rt_is_debug_mode_enabled() -> bool {
-    unsafe { c_sffi::rt_is_debug_mode_enabled() }
+    DEBUG_MODE_ENABLED.load(Ordering::SeqCst)
 }
 
 #[cfg(test)]
