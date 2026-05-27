@@ -1,11 +1,12 @@
 use std.spec.{describe, it, expect}
 use os.services.vfs.vfs_boot_init.{
     vfs_boot_nvme_system_fat32_lease,
+    vfs_boot_nvme_system_fat32_lease_from_transfer_evidence,
     vfs_boot_storage_acceptance_reason,
     vfs_boot_storage_production_ready
 }
 use os.services.vfs.vfs_init.{vfs_boot_storage_acceptance_ready}
-use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemConsumer, nvme_filesystem_lease_reason}
+use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemConsumer, nvme_filesystem_lease_reason, nvme_transfer_evidence}
 use os.kernel.types.device_mem_types.{new_device_grant, device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id}
 
 fn _tokenized_boot_grant() -> os.kernel.types.device_mem_types.DeviceGrant:
@@ -34,6 +35,48 @@ describe "VFS boot NVMe lease contract":
     it "keeps invalid namespace geometry rejected before FAT32 can mount":
         val lease = vfs_boot_nvme_system_fat32_lease(0u32, 65536u64, _tokenized_boot_grant())
         expect(nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)).to_equal("nvme-fs-namespace-invalid-lba-size")
+
+    it "builds production boot FAT32 leases only from ready transfer evidence":
+        val ready = nvme_transfer_evidence(
+            "simple-driver",
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            "system-driver",
+            "kernel-owned-resource",
+            "system-kernel-namespace",
+            true,
+            true
+        )
+        val missing_write = nvme_transfer_evidence(
+            "simple-driver",
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            true,
+            "system-driver",
+            "kernel-owned-resource",
+            "system-kernel-namespace",
+            true,
+            true
+        )
+
+        val lease = vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(512u32, 65536u64, ready).unwrap()
+        val rejected = vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(512u32, 65536u64, missing_write)
+        expect(lease.provider).to_equal("simple-driver")
+        expect(nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)).to_equal("ready")
+        expect(rejected.unwrap_err()).to_equal("nvme-fs-transfer-not-ready:missing-nvme-sector-write")
 
     it "accepts only pure Simple NVMe boot storage as production-ready":
         expect(vfs_boot_storage_acceptance_reason(false, "not-mounted", false)).to_equal("not-mounted")

@@ -140,6 +140,13 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   standard `NvmeTransferEvidence` consumed by boot and VFS gates, using explicit
   placement, grant, namespace, DMA-isolation, and IOMMU/broker metadata supplied
   by the caller.
+- `NvmeTransferEvidence` is now the production precondition for minting a
+  filesystem lease: the storage model refuses FAT32/NVFS/DBFS leases when the
+  pure-Simple driver has not proved queue readiness, completion, reversible
+  sector I/O, shared logic, and the correct system/user namespace ownership.
+- The VFS boot layer has an evidence-gated FAT32 lease constructor for
+  production boot; the older geometry-only lease helper remains a compatibility
+  path until real boot supplies hardware evidence directly.
 - Freestanding controller readiness now has an explicit resource contract that
   binds system-driver or user-space-driver placement, grant/namespace mode,
   admin queue resources, I/O queue resources, DMA isolation, and IOMMU/broker
@@ -185,17 +192,25 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
 - Transfer evidence production remains fail-closed: probe precondition failures
   return errors, while probe I/O failures become evidence that the boot/VFS gates
   reject.
+- Queue assignment is part of filesystem readiness: leases without read, write,
+  and queue-submit rights are rejected before FAT32, NVFS, or DBFS can mount.
+- The top-level boot sequence still needs to call the evidence-gated constructor
+  after executing the hardware probe; until that final wiring exists, production
+  readiness remains intentionally unproven.
 
 ## Verification
 - `test/unit/os/drivers/nvme/nvme_storage_model_spec.spl` covers system leases,
-  user-assigned leases, grant failures, reserved queue rejection, and shared
-  FAT32/NVFS/DBFS block-interface readiness.
+  user-assigned leases, grant failures, reserved queue rejection, required queue
+  rights, evidence-gated lease minting, and shared FAT32/NVFS/DBFS
+  block-interface readiness.
 - `test/unit/os/services/vfs/nvme_block_adapter_spec.spl` covers adapter-visible
   lease translation and out-of-range rejection without requiring real hardware.
 - `test/unit/lib/fs_driver/nvfs_device_backed_spec.spl` covers NVFS opening on
   the same shared `BlockDevice` surface used by FAT32 and DBFS.
 - `test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl` covers producing
   FAT32, NVFS, and DBFS `DriverInstance` values from one NVMe lease contract.
+- `test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl` covers the
+  evidence-gated production FAT32 boot lease constructor.
 - `test/unit/os/kernel/ipc/dma_alloc_contract_spec.spl` covers the DMA syscall
   result layout used by the pure Simple NVMe driver and VFS adapter.
 - `test/unit/os/kernel/types/device_mem_types_spec.spl` covers DeviceGrant

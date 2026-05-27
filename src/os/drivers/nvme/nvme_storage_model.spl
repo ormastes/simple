@@ -3,7 +3,7 @@
 # This module is data-only. It names the architecture target for multi-namespace
 # NVMe and capability-backed storage without changing the current boot path.
 
-use os.kernel.types.capability_types.{SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
+use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 use os.drivers.user_space_driver_contract.{user_space_driver_all_direct_access_reason}
 
 enum NvmeQueueRole:
@@ -165,6 +165,12 @@ fn nvme_filesystem_lease_reason(lease: NvmeFilesystemLease, consumer: NvmeFilesy
         return "nvme-fs-queue-namespace-mismatch"
     if lease.queue.max_depth == 0u16:
         return "nvme-fs-queue-depth-zero"
+    if (lease.queue.rights & CAP_RIGHT_READ) == 0u32:
+        return "nvme-fs-queue-missing-read-right"
+    if (lease.queue.rights & CAP_RIGHT_WRITE) == 0u32:
+        return "nvme-fs-queue-missing-write-right"
+    if (lease.queue.rights & CAP_RIGHT_QUEUE_SUBMIT) == 0u32:
+        return "nvme-fs-queue-missing-submit-right"
     if lease.mode == NvmeNamespaceMode.System:
         if lease.queue.role != NvmeQueueRole.System:
             return "nvme-fs-system-namespace-not-system-queue"
@@ -199,6 +205,44 @@ fn nvme_filesystem_lease_absolute_lba(lease: NvmeFilesystemLease, relative_lba: 
     if relative_lba >= lease.lba_count:
         return Err("nvme-fs-lease-lba-out-of-range")
     Ok(lease.base_lba + relative_lba)
+
+fn nvme_namespace_mode_from_transfer_evidence(e: NvmeTransferEvidence) -> Result<NvmeNamespaceMode, text>:
+    if e.driver_placement == "system-driver" and e.namespace_mode == "system-kernel-namespace":
+        return Ok(NvmeNamespaceMode.System)
+    if e.driver_placement == "user-space-driver" and e.namespace_mode == "non-secure-resource-namespace":
+        return Ok(NvmeNamespaceMode.UserAssigned)
+    Err("nvme-fs-transfer-namespace-mode-invalid:" + e.driver_placement + ":" + e.namespace_mode)
+
+fn nvme_filesystem_lease_from_transfer_evidence(
+    evidence: NvmeTransferEvidence,
+    namespace: NvmeNamespaceIdentity,
+    base_lba: u64,
+    lba_count: u64,
+    queue: NvmeQueueAssignment,
+    consumer: NvmeFilesystemConsumer
+) -> Result<NvmeFilesystemLease, text>:
+    """Mint a FAT32/NVFS/DBFS lease only from ready pure-Simple transfer evidence."""
+    val transfer_reason = nvme_transfer_readiness_reason(evidence)
+    if transfer_reason != "ready":
+        return Err("nvme-fs-transfer-not-ready:" + transfer_reason)
+    val mode_result = nvme_namespace_mode_from_transfer_evidence(evidence)
+    if mode_result.is_err():
+        return Err(mode_result.unwrap_err())
+    val lease = nvme_filesystem_lease(
+        namespace,
+        base_lba,
+        lba_count,
+        mode_result.unwrap(),
+        queue,
+        evidence.provider,
+        evidence.grant_kind,
+        evidence.common_logic_shared,
+        evidence.iommu_or_broker
+    )
+    val lease_reason = nvme_filesystem_lease_reason(lease, consumer)
+    if lease_reason != "ready":
+        return Err(lease_reason)
+    Ok(lease)
 
 fn nvme_transfer_evidence(
     provider: text,
