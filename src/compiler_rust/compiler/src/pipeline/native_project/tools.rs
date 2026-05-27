@@ -284,18 +284,8 @@ pub(crate) fn runtime_archive_has_core_required_symbols(path: &Path) -> bool {
         .all(|symbol| symbols.contains(symbol.trim_start_matches('_')))
 }
 
-fn is_core_c_bootstrap_cache_archive(path: &Path) -> bool {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    normalized.starts_with("build/simple-core/")
-        || normalized.starts_with("build/simple_core/")
-        || normalized.contains("/build/simple-core/")
-        || normalized.contains("/build/simple_core/")
-}
-
 pub(crate) fn find_abi_complete_simple_core_runtime_library() -> Option<PathBuf> {
-    find_simple_core_runtime_library()
-        .filter(|path| !is_core_c_bootstrap_cache_archive(path))
-        .filter(|path| runtime_archive_has_core_required_symbols(path))
+    find_simple_core_runtime_library().filter(|path| runtime_archive_has_core_required_symbols(path))
 }
 
 /// Find the combined native_all library (runtime + compiler with Cranelift SFFI).

@@ -57,7 +57,16 @@ Simple LSP MCP package validation, but it is not a pure-Simple runtime archive.
 - `scripts/check-simple-core-runtime-smoke.shs` now builds the selectable
   `build/simple-core/libsimple_runtime.a` archive from the Simple source tree
   instead of compiling the C runtime sources into that lane.
-- Pure-Simple required-symbol coverage is now 41 of 41 symbols.
+- Pure-Simple required-symbol coverage is now complete for the current
+  core-required set. The Simple source archive builds cleanly, the generated
+  hello binary prints `Hello World`, and the standalone TUI smoke binary prints
+  the expected TUI output including `UI closed.`.
+- The full real TUI app smoke is not yet verified on `simple-core`. Current
+  native-build output still generates unresolved stubs for UI and terminal
+  symbols such as `rt_platform_name`, `rt_process_run`, `rt_term_enable_ansi`,
+  `rt_term_poll`, `rt_term_read_timeout`, `rt_dict_new`, `rt_tuple_get`, and
+  `rt_is_some`. The resulting app currently crashes before the simple-core
+  gate can be considered board-ready.
 
 ## Required Fix
 
@@ -79,8 +88,10 @@ Add a Simple-source runtime archive lane:
 
 ## Status
 
-Partially unblocked: Simple native archive output exists and is tested, and a
-`simple-core` Simple module tree can export exact lifecycle, tagged-value,
-memory, and process/time/panic symbols when built with `no_mangle`. Remaining
-blockers are the array, string, length/conversion/slice/equality, and stdio
-families needed to avoid using the C runtime archive as the implementation.
+Partially unblocked: Simple native archive output exists and is tested, and the
+`simple-core` Simple module tree can now export the core-required lifecycle,
+tagged-value, memory, process/time/panic, array, string, length, conversion,
+slice/equality, stdio, and print/write symbols needed by the hello and
+standalone TUI smoke gates. Remaining blockers are the full TUI app dependency
+closure and generated unresolved stubs noted above; do not treat this runtime
+lane as board-ready until that smoke gate also passes.

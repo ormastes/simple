@@ -795,11 +795,15 @@ impl<M: Module> CodegenBackend<M> {
         module: &mut M,
         target: &Target,
         referenced_names: &HashSet<String>,
+        locally_defined_names: &HashSet<String>,
     ) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
         let mut funcs = HashMap::new();
         let call_conv = super::shared::platform_call_conv();
 
         for spec in runtime_funcs_for_target(target) {
+            if locally_defined_names.contains(spec.name) {
+                continue;
+            }
             if !referenced_names.contains(spec.name) && !runtime_symbol_is_codegen_root(spec.name) {
                 continue;
             }
@@ -813,9 +817,18 @@ impl<M: Module> CodegenBackend<M> {
         Ok(funcs)
     }
 
-    fn ensure_runtime_functions_declared(&mut self, referenced_names: &HashSet<String>) -> BackendResult<()> {
+    fn ensure_runtime_functions_declared(
+        &mut self,
+        referenced_names: &HashSet<String>,
+        locally_defined_names: &HashSet<String>,
+    ) -> BackendResult<()> {
         if self.runtime_funcs.is_empty() {
-            self.runtime_funcs = Self::declare_runtime_functions(&mut self.module, &self.target, referenced_names)?;
+            self.runtime_funcs = Self::declare_runtime_functions(
+                &mut self.module,
+                &self.target,
+                referenced_names,
+                locally_defined_names,
+            )?;
         }
         Ok(())
     }
@@ -1313,8 +1326,13 @@ impl<M: Module> CodegenBackend<M> {
         }
         let functions = inline_small_pure_functions(mir, unique_functions);
         let referenced_names = referenced_call_names(&functions);
+        let locally_defined_names: HashSet<String> = functions
+            .iter()
+            .filter(|func| !func.blocks.is_empty())
+            .map(|func| func.name.clone())
+            .collect();
         if !Self::can_omit_runtime_imports(mir, &functions) {
-            self.ensure_runtime_functions_declared(&referenced_names)?;
+            self.ensure_runtime_functions_declared(&referenced_names, &locally_defined_names)?;
         }
 
         // First pass: declare functions, then globals.
