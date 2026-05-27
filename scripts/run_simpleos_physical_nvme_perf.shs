@@ -12,6 +12,7 @@ set -eu
 #   SERIAL_PORT                  Serial port to capture when not using --validate-log-only
 #   SERIAL_BAUD                  Serial baud rate (default: 115200)
 #   SIMPLEOS_NVME_DEVICE_GLOB    NVMe namespace device glob for preflight (default: /dev/nvme*n1)
+#   SIMPLEOS_NVME_SYSFS_ROOT     Sysfs block root for identity report (default: /sys/block)
 #   SIMPLEOS_NVME_SERIAL_LOG     Serial log path when --serial-log is omitted
 #   SIMPLEOS_NVME_REPORT_OUT     Optional validation report output path
 #   SIMPLEOS_NVME_SERIAL_SECONDS Capture duration in seconds (default: 30)
@@ -21,6 +22,7 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 SERIAL_PORT="${SERIAL_PORT:-}"
 SERIAL_BAUD="${SERIAL_BAUD:-115200}"
 NVME_DEVICE_GLOB="${SIMPLEOS_NVME_DEVICE_GLOB:-/dev/nvme*n1}"
+NVME_SYSFS_ROOT="${SIMPLEOS_NVME_SYSFS_ROOT:-/sys/block}"
 SERIAL_LOG="${SIMPLEOS_NVME_SERIAL_LOG:-}"
 REPORT_OUT="${SIMPLEOS_NVME_REPORT_OUT:-}"
 SERIAL_SECONDS="${SIMPLEOS_NVME_SERIAL_SECONDS:-30}"
@@ -80,6 +82,25 @@ if [ "$PREFLIGHT" -eq 1 ]; then
     if ! ls $NVME_DEVICE_GLOB >/dev/null 2>&1; then
         echo "[physical-nvme] no NVMe namespace device matched: $NVME_DEVICE_GLOB" >&2
         exit 1
+    fi
+    if [ -n "$REPORT_OUT" ]; then
+        mkdir -p "$(dirname "$REPORT_OUT")"
+        {
+            echo "physical_nvme_preflight:"
+            echo "  accepted: true"
+            echo "  nvme_device_glob: $NVME_DEVICE_GLOB"
+            echo "  checker: ${ROOT_DIR}/src/app/simpleos_nvme_serial_check/main.spl"
+            for dev in $NVME_DEVICE_GLOB; do
+                name="$(basename "$dev")"
+                model="$(cat "${NVME_SYSFS_ROOT}/${name}/device/model" 2>/dev/null || echo unknown)"
+                serial="$(cat "${NVME_SYSFS_ROOT}/${name}/device/serial" 2>/dev/null || echo unknown)"
+                nsid="$(cat "${NVME_SYSFS_ROOT}/${name}/nsid" 2>/dev/null || cat "${NVME_SYSFS_ROOT}/${name}/device/nsid" 2>/dev/null || echo unknown)"
+                echo "  device: $dev"
+                echo "    model: $(echo "$model" | xargs)"
+                echo "    serial: $(echo "$serial" | xargs)"
+                echo "    namespace_nsid: $(echo "$nsid" | xargs)"
+            done
+        } > "$REPORT_OUT"
     fi
     echo "[physical-nvme] preflight=ready nvme_device_glob=$NVME_DEVICE_GLOB checker=present"
     exit 0

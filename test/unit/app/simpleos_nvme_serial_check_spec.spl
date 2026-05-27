@@ -57,6 +57,18 @@ fn _run_lab_preflight(fake_nvme_path: text) -> (text, text, i32):
         15000
     )
 
+fn _run_lab_preflight_with_report(fake_nvme_path: text, fake_sysfs_root: text, report_path: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + fake_nvme_path + "\" " +
+                "SIMPLEOS_NVME_SYSFS_ROOT=\"" + fake_sysfs_root + "\" " +
+                "sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out \"" + report_path + "\""
+        ],
+        15000
+    )
+
 describe "SimpleOS physical NVMe serial checker app":
     it "exits zero for real NVMe evidence and nonzero for q35 emulator evidence":
         val ready_path = "/tmp/simpleos_nvme_serial_check_ready.log"
@@ -149,3 +161,24 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(code).to_equal(0)
         expect(stdout).to_contain("preflight=ready")
         expect(stdout).to_contain("checker=present")
+
+    it "writes physical NVMe preflight identity for lab comparison":
+        val fake_root = "/tmp/simpleos_nvme_preflight_sysfs"
+        val fake_dev = "/tmp/simpleos_nvme_preflight_device_identity/nvme9n1"
+        val fake_sysfs = fake_root + "/nvme9n1"
+        val report = "/tmp/simpleos_nvme_preflight_identity.sdn"
+        val _cleanup = rt_process_run_timeout("/bin/sh", ["-c", "rm -rf \"" + fake_root + "\" \"" + fake_dev + "\" \"" + report + "\""], 5000)
+        val _mkdir = rt_process_run_timeout("/bin/sh", ["-c", "mkdir -p \"" + fake_sysfs + "/device\" \"" + fake_dev + "\""], 5000)
+        expect(rt_file_write_text(fake_dev, "device")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs + "/device/model", "Samsung PM9A3\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs + "/device/serial", "SN123456\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs + "/nsid", "1\n")).to_equal(true)
+
+        val (_stdout, _stderr, code) = _run_lab_preflight_with_report(fake_dev, fake_root, report)
+        val report_text = rt_file_read_text(report) ?? ""
+
+        expect(code).to_equal(0)
+        expect(report_text).to_contain("physical_nvme_preflight:")
+        expect(report_text).to_contain("model: Samsung PM9A3")
+        expect(report_text).to_contain("serial: SN123456")
+        expect(report_text).to_contain("namespace_nsid: 1")
