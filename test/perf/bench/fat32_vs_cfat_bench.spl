@@ -15,6 +15,9 @@ use std.fs_driver.types.{FileHandle}
 
 # ── In-memory FAT32 image (from fat32_microbench.spl) ──────────────────────
 var __banks: [[[u8]]] = []
+var __vfat_mnt: text = "/tmp/simple_vfat_bench_mnt"
+var __vfat_loop: text = ""
+var __vfat_use_udisks: bool = false
 
 fn _alloc_bank() -> i32:
     var sectors: [[u8]] = []
@@ -155,7 +158,7 @@ fn _vfat_image() -> text:
     "/tmp/simple_vfat_bench.img"
 
 fn _vfat_base() -> text:
-    "/tmp/simple_vfat_bench_mnt"
+    __vfat_mnt
 
 fn _host_clean(base: text):
     val files = list_dir(base)
@@ -168,7 +171,6 @@ fn _host_setup(base: text):
 
 fn _vfat_setup() -> bool:
     val img = _vfat_image()
-    val mnt = _vfat_base()
     val r1 = shell("dd if=/dev/zero of=" + img + " bs=1M count=64 2>/dev/null")
     if r1.exit_code != 0:
         print "  VFAT: dd failed"
@@ -177,21 +179,50 @@ fn _vfat_setup() -> bool:
     if r2.exit_code != 0:
         print "  VFAT: mkfs.fat failed (install dosfstools)"
         return false
-    mkdir_p(mnt)
-    val r3 = shell("sudo -n mount -o loop " + img + " " + mnt + " 2>/dev/null")
-    if r3.exit_code != 0:
-        print "  VFAT: mount failed (needs passwordless sudo)"
+    mkdir_p("/tmp/simple_vfat_bench_mnt")
+    val r3 = shell("sudo -n mount -o loop " + img + " /tmp/simple_vfat_bench_mnt 2>/dev/null")
+    if r3.exit_code == 0:
+        val _ch = shell("sudo -n chmod 777 /tmp/simple_vfat_bench_mnt 2>/dev/null")
+        __vfat_mnt = "/tmp/simple_vfat_bench_mnt"
+        return true
+    val r4 = shell("udisksctl loop-setup --file " + img + " --no-user-interaction 2>/dev/null")
+    if r4.exit_code != 0:
+        print "  VFAT: sudo mount and udisksctl both failed"
         val _rm = shell("rm -f " + img)
         return false
-    val _ch = shell("sudo -n chmod 777 " + mnt + " 2>/dev/null")
+    val r5 = shell("losetup -j " + img + " 2>/dev/null | head -1 | cut -d: -f1 | tr -d '\\n'")
+    if r5.exit_code != 0 or r5.stdout.len() < 5:
+        print "  VFAT: cannot find loop device"
+        val _rm = shell("rm -f " + img)
+        return false
+    __vfat_loop = r5.stdout
+    __vfat_use_udisks = true
+    val r6 = shell("udisksctl mount -b " + __vfat_loop + " --no-user-interaction 2>/dev/null")
+    if r6.exit_code != 0:
+        print "  VFAT: udisksctl mount failed"
+        val _del = shell("udisksctl loop-delete -b " + __vfat_loop + " --no-user-interaction 2>/dev/null")
+        val _rm = shell("rm -f " + img)
+        return false
+    val r7 = shell("findmnt -n -o TARGET " + __vfat_loop + " 2>/dev/null | head -1 | tr -d '\\n'")
+    if r7.exit_code != 0 or r7.stdout.len() < 3:
+        print "  VFAT: cannot find mount point"
+        val _um = shell("udisksctl unmount -b " + __vfat_loop + " --no-user-interaction 2>/dev/null")
+        val _del = shell("udisksctl loop-delete -b " + __vfat_loop + " --no-user-interaction 2>/dev/null")
+        val _rm = shell("rm -f " + img)
+        return false
+    __vfat_mnt = r7.stdout
+    print "  VFAT: mounted via udisksctl at " + __vfat_mnt
     true
 
 fn _vfat_teardown():
-    val mnt = _vfat_base()
     val img = _vfat_image()
-    val _u = shell("sudo -n umount " + mnt + " 2>/dev/null")
-    val _r1 = shell("rmdir " + mnt + " 2>/dev/null")
-    val _r2 = shell("rm -f " + img)
+    if __vfat_use_udisks:
+        val _u = shell("udisksctl unmount -b " + __vfat_loop + " --no-user-interaction 2>/dev/null")
+        val _d = shell("udisksctl loop-delete -b " + __vfat_loop + " --no-user-interaction 2>/dev/null")
+    else:
+        val _u = shell("sudo -n umount " + __vfat_mnt + " 2>/dev/null")
+        val _r = shell("rmdir " + __vfat_mnt + " 2>/dev/null")
+    val _rm = shell("rm -f " + img)
 
 # ══════════════════════════════════════════════════════════════════════════
 # Workload 1: Create — create N files
