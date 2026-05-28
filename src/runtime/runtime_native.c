@@ -31,6 +31,10 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <poll.h>
+#include <pthread.h>
 #endif
 
 #define RT_VALUE_TAG_MASK 0x7ULL
@@ -2121,18 +2125,434 @@ int64_t rt_event_ports_register(int64_t h, int64_t fd, int64_t m) { (void)h; (vo
 int64_t rt_event_ports_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
 int64_t rt_event_ports_close(int64_t h) { (void)h; return -1; }
 
+
+/* ================================================================
+ * TCP Socket Functions — all params int64_t (tagged values from LLVM codegen)
+ * text = int64_t tagged heap pointer; extract via rt_core_as_string()
+ * ================================================================ */
+
+#if !defined(_WIN32)
+
+static const char* rt_extract_cstr(int64_t text_val) {
+    RtCoreString* s = rt_core_as_string(text_val);
+    return s ? s->data : NULL;
+}
+
+static int rt_parse_addr_port(const char* addr_str, struct sockaddr_in* sa) {
+    if (!addr_str || !sa) return -1;
+    memset(sa, 0, sizeof(*sa));
+    sa->sin_family = AF_INET;
+    char buf[256];
+    size_t alen = strlen(addr_str);
+    if (alen >= sizeof(buf)) return -1;
+    memcpy(buf, addr_str, alen + 1);
+    char* colon = strrchr(buf, ':');
+    if (!colon) return -1;
+    *colon = '\0';
+    int port = atoi(colon + 1);
+    sa->sin_port = htons((uint16_t)port);
+    if (buf[0] == '\0' || strcmp(buf, "0.0.0.0") == 0)
+        sa->sin_addr.s_addr = INADDR_ANY;
+    else if (inet_pton(AF_INET, buf, &sa->sin_addr) != 1)
+        return -1;
+    return 0;
+}
+
+static int64_t rt_make_addr_string(struct sockaddr_in* sa) {
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+    char buf[80];
+    int n = snprintf(buf, sizeof(buf), "%s:%d", ip, ntohs(sa->sin_port));
+    return rt_string_new((const uint8_t*)buf, (uint64_t)n);
+}
+
+int64_t rt_io_tcp_socket_create(int64_t family) {
+    int af = (family == 6) ? AF_INET6 : AF_INET;
+    return (int64_t)socket(af, SOCK_STREAM, 0);
+}
+
+int64_t rt_io_tcp_bind(int64_t addr_val) {
+    const char* a = rt_extract_cstr(addr_val);
+    if (!a) return -1;
+    struct sockaddr_in sa;
+    if (rt_parse_addr_port(a, &sa) < 0) return -1;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
+    return (int64_t)fd;
+}
+
+int64_t rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
+    const char* a = rt_extract_cstr(addr_val);
+    if (!a) return 0;
+    struct sockaddr_in sa;
+    if (rt_parse_addr_port(a, &sa) < 0) return 0;
+    return bind((int)fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_listen(int64_t fd, int64_t backlog) {
+    return listen((int)fd, (int)backlog) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_accept(int64_t fd) {
+    struct sockaddr_in cl;
+    socklen_t len = sizeof(cl);
+    return (int64_t)accept((int)fd, (struct sockaddr*)&cl, &len);
+}
+
+int64_t rt_io_tcp_accept_timeout(int64_t fd, int64_t ms) {
+    struct pollfd pfd;
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = (int)fd; pfd.events = POLLIN;
+    if (poll(&pfd, 1, (int)ms) <= 0) return -1;
+    return rt_io_tcp_accept(fd);
+}
+
+int64_t rt_io_tcp_connect(int64_t addr_val) {
+    const char* a = rt_extract_cstr(addr_val);
+    if (!a) return -1;
+    struct sockaddr_in sa;
+    if (rt_parse_addr_port(a, &sa) < 0) return -1;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    if (connect(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
+    return (int64_t)fd;
+}
+
+int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
+    (void)ms;
+    return rt_io_tcp_connect(addr_val);
+}
+
+int64_t rt_io_tcp_read(int64_t fd, int64_t size) {
+    SplArray* arr = rt_byte_array_new((uint64_t)size);
+    RtCoreArray* ca = rt_core_array_ptr(arr);
+    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
+    ssize_t n = read((int)fd, ca->data, (size_t)size);
+    ca->len = n > 0 ? n : 0;
+    return (int64_t)(uintptr_t)arr;
+}
+
+int64_t rt_io_tcp_read_line(int64_t fd) {
+    char buf[4096];
+    int pos = 0;
+    while (pos < (int)sizeof(buf) - 1) {
+        ssize_t n = read((int)fd, &buf[pos], 1);
+        if (n <= 0) break;
+        if (buf[pos] == '\n') { pos++; break; }
+        pos++;
+    }
+    if (pos == 0) return rt_core_nil();
+    return rt_string_new((const uint8_t*)buf, (uint64_t)pos);
+}
+
+int64_t rt_io_tcp_write(int64_t fd, int64_t data_val) {
+    RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
+    if (!ca || !ca->data || ca->len <= 0) return 0;
+    return (int64_t)write((int)fd, ca->data, (size_t)ca->len);
+}
+
+int64_t rt_io_tcp_write_text(int64_t fd, int64_t text_val) {
+    RtCoreString* s = rt_core_as_string(text_val);
+    if (!s || s->len == 0) return 0;
+    return (int64_t)write((int)fd, s->data, (size_t)s->len);
+}
+
+int64_t rt_io_tcp_write_bytes(int64_t fd, int64_t data_val) {
+    return rt_io_tcp_write(fd, data_val);
+}
+
+int64_t rt_io_tcp_flush(int64_t fd) {
+    int flag = 1;
+    setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    flag = 0;
+    setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    return 1;
+}
+
+int64_t rt_io_tcp_close(int64_t fd) {
+    return close((int)fd) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_local_addr(int64_t fd) {
+    struct sockaddr_in sa;
+    socklen_t len = sizeof(sa);
+    if (getsockname((int)fd, (struct sockaddr*)&sa, &len) < 0) return rt_core_nil();
+    return rt_make_addr_string(&sa);
+}
+
+int64_t rt_io_tcp_peer_addr(int64_t fd) {
+    struct sockaddr_in sa;
+    socklen_t len = sizeof(sa);
+    if (getpeername((int)fd, (struct sockaddr*)&sa, &len) < 0) return rt_core_nil();
+    return rt_make_addr_string(&sa);
+}
+
+int64_t rt_io_tcp_set_nonblocking(int64_t fd, int64_t enabled) {
+    int flags = fcntl((int)fd, F_GETFL, 0);
+    if (flags < 0) return 0;
+    if (enabled) flags |= O_NONBLOCK; else flags &= ~O_NONBLOCK;
+    return fcntl((int)fd, F_SETFL, flags) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_set_nodelay(int64_t fd, int64_t enabled) {
+    int flag = enabled ? 1 : 0;
+    return setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
+#ifdef SO_REUSEPORT
+    int flag = enabled ? 1 : 0;
+    return setsockopt((int)fd, SOL_SOCKET, SO_REUSEPORT, &flag, sizeof(flag)) == 0 ? 1 : 0;
+#else
+    (void)fd; (void)enabled; return 0;
+#endif
+}
+
+int64_t rt_io_tcp_set_reuseaddr(int64_t fd, int64_t enabled) {
+    int flag = enabled ? 1 : 0;
+    return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag)) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
+    struct timeval tv;
+    tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
+    return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
+    struct timeval tv;
+    tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
+    return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_shutdown(int64_t fd, int64_t how) {
+    return shutdown((int)fd, (int)how) == 0 ? 1 : 0;
+}
+
+/* ================================================================
+ * UDP Socket Functions
+ * ================================================================ */
+
+int64_t rt_io_udp_bind(int64_t addr_val) {
+    const char* a = rt_extract_cstr(addr_val);
+    if (!a) return -1;
+    struct sockaddr_in sa;
+    if (rt_parse_addr_port(a, &sa) < 0) return -1;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
+    return (int64_t)fd;
+}
+
+int64_t rt_io_udp_send_to(int64_t fd, int64_t data_val, int64_t addr_val) {
+    const char* a = rt_extract_cstr(addr_val);
+    if (!a) return -1;
+    RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
+    if (!ca || !ca->data || ca->len <= 0) return 0;
+    struct sockaddr_in sa;
+    if (rt_parse_addr_port(a, &sa) < 0) return -1;
+    return (int64_t)sendto((int)fd, ca->data, (size_t)ca->len, 0, (struct sockaddr*)&sa, sizeof(sa));
+}
+
+int64_t rt_io_udp_send(int64_t fd, int64_t data_val) {
+    RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
+    if (!ca || !ca->data || ca->len <= 0) return 0;
+    return (int64_t)send((int)fd, ca->data, (size_t)ca->len, 0);
+}
+
+int64_t rt_io_udp_recv(int64_t fd, int64_t size) {
+    SplArray* arr = rt_byte_array_new((uint64_t)size);
+    RtCoreArray* ca = rt_core_array_ptr(arr);
+    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
+    ssize_t n = recv((int)fd, ca->data, (size_t)size, 0);
+    ca->len = n > 0 ? n : 0;
+    return (int64_t)(uintptr_t)arr;
+}
+
+int64_t rt_io_udp_connect(int64_t fd, int64_t addr_val) {
+    const char* a = rt_extract_cstr(addr_val);
+    if (!a) return 0;
+    struct sockaddr_in sa;
+    if (rt_parse_addr_port(a, &sa) < 0) return 0;
+    return connect((int)fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_udp_local_addr(int64_t fd) { return rt_io_tcp_local_addr(fd); }
+int64_t rt_io_udp_set_broadcast(int64_t fd, int64_t e) {
+    int flag = e ? 1 : 0;
+    return setsockopt((int)fd, SOL_SOCKET, SO_BROADCAST, &flag, sizeof(flag)) == 0 ? 1 : 0;
+}
+int64_t rt_io_udp_set_read_timeout(int64_t fd, int64_t ms) { return rt_io_tcp_set_read_timeout(fd, ms); }
+int64_t rt_io_udp_close(int64_t fd) { return close((int)fd) == 0 ? 1 : 0; }
+int64_t rt_io_udp_set_nonblocking(int64_t fd, int64_t e) { return rt_io_tcp_set_nonblocking(fd, e); }
+
+int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
+    SplArray* arr = rt_byte_array_new((uint64_t)size);
+    RtCoreArray* ca = rt_core_array_ptr(arr);
+    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+    ssize_t n = recvfrom((int)fd, ca->data, (size_t)size, 0, (struct sockaddr*)&from, &fromlen);
+    ca->len = n > 0 ? n : 0;
+    return (int64_t)(uintptr_t)arr;
+}
+
+#else /* _WIN32 stubs */
+int64_t rt_io_tcp_socket_create(int64_t f) { (void)f; return -1; }
+int64_t rt_io_tcp_bind(int64_t a) { (void)a; return -1; }
+int64_t rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
+int64_t rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return 0; }
+int64_t rt_io_tcp_accept(int64_t f) { (void)f; return -1; }
+int64_t rt_io_tcp_accept_timeout(int64_t f, int64_t m) { (void)f; (void)m; return -1; }
+int64_t rt_io_tcp_connect(int64_t a) { (void)a; return -1; }
+int64_t rt_io_tcp_connect_timeout(int64_t a, int64_t m) { (void)a; (void)m; return -1; }
+int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
+int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
+int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
+int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
+int64_t rt_io_tcp_flush(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_close(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_tcp_set_nodelay(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_tcp_set_reuseport(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_tcp_set_reuseaddr(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
+int64_t rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
+int64_t rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return 0; }
+int64_t rt_io_udp_bind(int64_t a) { (void)a; return -1; }
+int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return 0; }
+int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
+int64_t rt_io_udp_recv(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
+int64_t rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
+int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return 0; }
+int64_t rt_io_udp_set_broadcast(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
+int64_t rt_io_udp_close(int64_t f) { (void)f; return 0; }
+int64_t rt_io_udp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
+#endif /* !_WIN32 */
+
+/* ================================================================
+ * Channel Functions (simple mutex-based queue)
+ * ================================================================ */
+
+#if !defined(_WIN32)
+
+#define RT_CHAN_MAX 64
+#define RT_CHAN_QSIZE 1024
+
+typedef struct {
+    pthread_mutex_t lock;
+    pthread_cond_t  not_empty;
+    int64_t         queue[RT_CHAN_QSIZE];
+    int             head, tail, count;
+    int             closed, in_use;
+} RtChannel;
+
+static RtChannel rt_channels[RT_CHAN_MAX];
+static int rt_chan_init_done = 0;
+
+int64_t rt_channel_new(void) {
+    if (!rt_chan_init_done) { rt_chan_init_done = 1; memset(rt_channels, 0, sizeof(rt_channels)); }
+    for (int i = 0; i < RT_CHAN_MAX; i++) {
+        if (!rt_channels[i].in_use) {
+            RtChannel* ch = &rt_channels[i];
+            pthread_mutex_init(&ch->lock, NULL);
+            pthread_cond_init(&ch->not_empty, NULL);
+            ch->head = ch->tail = ch->count = 0;
+            ch->closed = 0; ch->in_use = 1;
+            return (int64_t)i;
+        }
+    }
+    return -1;
+}
+
+void rt_channel_send(int64_t id, int64_t value) {
+    if (id < 0 || id >= RT_CHAN_MAX) return;
+    RtChannel* ch = &rt_channels[id];
+    if (!ch->in_use || ch->closed) return;
+    pthread_mutex_lock(&ch->lock);
+    if (ch->count < RT_CHAN_QSIZE) {
+        ch->queue[ch->tail] = value;
+        ch->tail = (ch->tail + 1) % RT_CHAN_QSIZE;
+        ch->count++;
+        pthread_cond_signal(&ch->not_empty);
+    }
+    pthread_mutex_unlock(&ch->lock);
+}
+
+int64_t rt_channel_recv(int64_t id) {
+    if (id < 0 || id >= RT_CHAN_MAX) return 0;
+    RtChannel* ch = &rt_channels[id];
+    if (!ch->in_use) return 0;
+    pthread_mutex_lock(&ch->lock);
+    while (ch->count == 0 && !ch->closed)
+        pthread_cond_wait(&ch->not_empty, &ch->lock);
+    int64_t val = 0;
+    if (ch->count > 0) {
+        val = ch->queue[ch->head];
+        ch->head = (ch->head + 1) % RT_CHAN_QSIZE;
+        ch->count--;
+    }
+    pthread_mutex_unlock(&ch->lock);
+    return val;
+}
+
+int64_t rt_channel_try_recv(int64_t id) {
+    if (id < 0 || id >= RT_CHAN_MAX) return 0;
+    RtChannel* ch = &rt_channels[id];
+    if (!ch->in_use) return 0;
+    pthread_mutex_lock(&ch->lock);
+    int64_t val = 0;
+    if (ch->count > 0) {
+        val = ch->queue[ch->head];
+        ch->head = (ch->head + 1) % RT_CHAN_QSIZE;
+        ch->count--;
+    }
+    pthread_mutex_unlock(&ch->lock);
+    return val;
+}
+
+void rt_channel_close(int64_t id) {
+    if (id < 0 || id >= RT_CHAN_MAX) return;
+    RtChannel* ch = &rt_channels[id];
+    if (!ch->in_use) return;
+    pthread_mutex_lock(&ch->lock);
+    ch->closed = 1;
+    pthread_cond_broadcast(&ch->not_empty);
+    pthread_mutex_unlock(&ch->lock);
+}
+
+int64_t rt_channel_is_closed(int64_t id) {
+    if (id < 0 || id >= RT_CHAN_MAX) return 1;
+    return rt_channels[id].closed ? 1 : 0;
+}
+
+#else
+int64_t rt_channel_new(void) { return -1; }
+void rt_channel_send(int64_t id, int64_t v) { (void)id; (void)v; }
+int64_t rt_channel_recv(int64_t id) { (void)id; return 0; }
+int64_t rt_channel_try_recv(int64_t id) { (void)id; return 0; }
+void rt_channel_close(int64_t id) { (void)id; }
+int64_t rt_channel_is_closed(int64_t id) { (void)id; return 1; }
+#endif
+
 /* ================================================================
  * Runtime Lifecycle (called by entry point)
  * ================================================================ */
 
 void __simple_runtime_init(void) {
-    /* Tiny core binaries should not retain optional text-SIMD code unless a
-     * text-SIMD API is referenced. runtime_simd_utf8.c initializes lazily. */
 }
 
 void __simple_runtime_shutdown(void) {
-    /* Cleanup runtime resources */
-    /* Flush stdout/stderr to ensure all output is visible */
     fflush(stdout);
     fflush(stderr);
 }

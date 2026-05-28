@@ -83,13 +83,7 @@ impl BlockDevice for BenchBlockDevice:
         val idx = lba.to_i32()
         if idx < 0 or idx >= 128:
             return Ok(_byte_buf(512, 0u8))
-        val base = idx * 512
-        var buffer: [u8] = []
-        var i = 0
-        while i < 512:
-            buffer.push(__bench_data[base + i])
-            i = i + 1
-        Ok(buffer)
+        Ok(_get_sec(__bench_active_bank, idx))
 
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
         val idx = lba.to_i32()
@@ -108,7 +102,8 @@ struct BenchResult:
     skipped: bool
 
 fn _make_core() -> Fat32Core:
-    var core: Fat32Core = Fat32Core.new(BenchBlockDevice.new())
+    val dev = BenchBlockDevice.new()
+    var core: Fat32Core = Fat32Core.new(dev)
     val rc = core.mount()
     if rc.is_err():
         print "FATAL: mount failed"
@@ -167,11 +162,22 @@ fn bench_simple_read(iters: i64, block_count: i64) -> BenchResult:
     if alloc_rc.is_err():
         print "FATAL: simple create failed: {alloc_rc.unwrap_err()}"
         return BenchResult(name: "simple_fat32_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
-    val h = core.alloc_file_handle(alloc_rc.unwrap(), 0, false)
+    val start_cluster = alloc_rc.unwrap()
+    val h = core.alloc_file_handle(start_cluster, 0, false)
     val block = _fill_bytes(4096, 0x52)
     var b: i64 = 0
     while b < block_count:
         val _w = core.write(h, block, 4096)
+        if _w.is_err():
+            print "FATAL: simple seed write failed: {_w.unwrap_err()}"
+            return BenchResult(name: "simple_fat32_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+        if _w.unwrap() != 4096:
+            print "FATAL: simple seed write short: {_w.unwrap()}"
+            val of_rc = core.get_open_file(h)
+            if of_rc.is_ok():
+                val of = of_rc.unwrap()
+                print "debug: seed file size={of.size} pos={of.position}"
+            return BenchResult(name: "simple_fat32_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
         b = b + 1
     var latencies: [i64] = []
     var read_buf = _fill_bytes(4096, 0)
@@ -195,20 +201,30 @@ fn bench_simple_write(iters: i64, block_count: i64) -> BenchResult:
     if alloc_rc.is_err():
         print "FATAL: simple create failed: {alloc_rc.unwrap_err()}"
         return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
-    val h = core.alloc_file_handle(alloc_rc.unwrap(), 0, false)
+    val start_cluster = alloc_rc.unwrap()
+    val h = core.alloc_file_handle(start_cluster, 0, false)
     val seed = _fill_bytes(4096, 0x41)
     val patch = _fill_bytes(4096, 0x57)
     var b: i64 = 0
     while b < block_count:
         val _w = core.write(h, seed, 4096)
+        if _w.is_err():
+            print "FATAL: simple seed write failed: {_w.unwrap_err()}"
+            return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+        if _w.unwrap() != 4096:
+            print "FATAL: simple seed write short: {_w.unwrap()}"
+            val of_rc = core.get_open_file(h)
+            if of_rc.is_ok():
+                val of = of_rc.unwrap()
+                print "debug: seed file size={of.size} pos={of.position}"
+            return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
         b = b + 1
     var latencies: [i64] = []
     var i: i64 = 0
     while i < iters:
         val offset = _rand_block(i, block_count) * 4096
-        val _s = core.seek(h, offset)
         val t0 = time_now_unix_micros()
-        val _w2 = core.write_4k_overwrite(h, patch)
+        val _w2 = core.write_4k_overwrite_cluster_at(start_cluster, offset, patch)
         if _w2.is_err():
             print "FATAL: simple write failed: {_w2.unwrap_err()}"
             return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
