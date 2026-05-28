@@ -42,7 +42,7 @@ Date: 2026-05-28
 |---|---:|
 | Browser smoke native file / dec section | 35200 / 27000 |
 | Browser simple render HTML native file / dec section | 19000 / 8500 |
-| Browser engine source | 49050 |
+| Browser engine source | 46960 |
 | x86_64 monolithic bare-metal stubs source | 555800 |
 | ARM64 monolithic bare-metal stubs source | 141800 |
 | ARM32 monolithic bare-metal stubs source | 64200 |
@@ -183,7 +183,7 @@ Date: 2026-05-28
 | `examples/browser/feature/dom` | 9 | 4854 | 181376 |
 | `examples/browser/feature/style` | 13 | 3914 | 150153 |
 | `src/lib/gc_async_mut/web` | 13 | 3928 | 170664 |
-| `src/lib/gc_async_mut/gpu/browser_engine` | 17 | 1356 | 49025 |
+| `src/lib/gc_async_mut/gpu/browser_engine` | 17 | 1296 | 46940 |
 
 ## Retention Checks
 
@@ -195,6 +195,7 @@ Date: 2026-05-28
 | Simple web file facade | 0 | 0 |
 | Simple web script placeholder facade | 0 | 0 |
 | Simple web script file facade expected retention | 0 | 3 |
+| Simple web script file facade script execution retention | n/a | 2 |
 | Simple web script file facade forbidden full renderer | 0 | 0 |
 | Bare-metal pure policy probe | 0 | 0 |
 | RV32 semihost trap capsule | 0 | n/a |
