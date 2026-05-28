@@ -6,10 +6,10 @@ Date: 2026-05-28
 
 | Artifact | Check | Native/ELF Build | Bytes | Dec Section Bytes | Log |
 |---|---|---|---:|---:|---|
-| Browser smoke | ok | ok | 43208 | 37316 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
-| Browser simple render HTML | ok | ok | 22632 | 15882 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
-| Simple web static facade | n/a | ok | 18528 | 12651 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
-| Simple web script URL facade | n/a | ok | 43160 | 34085 | `build/web_baremetal_size_audit/simple_web_script_native.log` |
+| Browser smoke | ok | ok | 34968 | 28499 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
+| Browser simple render HTML | ok | ok | 18512 | 9093 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
+| Simple web static facade | n/a | ok | 18456 | 6895 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
+| Simple web script URL facade | n/a | ok | 34904 | 25049 | `build/web_baremetal_size_audit/simple_web_script_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | x86_64 minimal boot/stdout capsule | n/a | ok | 2840 | 409 | `build/web_baremetal_size_audit/baremetal_boot_stdout.build.log` |
 
@@ -17,12 +17,12 @@ Date: 2026-05-28
 
 | Budget | Limit Bytes |
 |---|---:|
-| Browser smoke native | 45000 |
-| Browser simple render HTML native | 25000 |
-| Simple web static facade native | 20000 |
-| Simple web script URL facade native | 45000 |
-| RV32 semihost stdout ELF | 70000 |
-| x86_64 minimal boot/stdout object | 4096 |
+| Browser smoke native file / dec section | 36000 / 30000 |
+| Browser simple render HTML native file / dec section | 20000 / 10000 |
+| Simple web static facade native file / dec section | 19000 / 7500 |
+| Simple web script URL facade native file / dec section | 35500 / 26000 |
+| RV32 semihost stdout ELF file / dec section | 70000 / 9000 |
+| x86_64 minimal boot/stdout object file / dec section | 4096 / 512 |
 | x86_64 minimal boot/stdout source | 4096 |
 | Pure Simple console policy source | 2500 |
 
@@ -47,12 +47,13 @@ Date: 2026-05-28
 | `examples/browser/feature/dom` | 9 | 4854 | 181376 |
 | `examples/browser/feature/style` | 13 | 3914 | 150153 |
 | `src/lib/gc_async_mut/web` | 12 | 3784 | 160275 |
-| `src/lib/gc_async_mut/gpu/browser_engine` | 10 | 1534 | 58547 |
+| `src/lib/gc_async_mut/gpu/browser_engine` | 11 | 1547 | 59057 |
 
 ## Direction
 
 - Browser render size work should first split static render from script/session/network paths.
 - The static simple-web facade is measured separately from the script URL facade so script/runtime growth stays visible.
+- Corpus fixture compatibility lives in `simple_web_corpus_fixture_renderer`; production static render must not retain PPM baseline loading.
 - x86_64 SimpleOS size work should split `baremetal_stubs.c` into boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes.
 - `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple.
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
