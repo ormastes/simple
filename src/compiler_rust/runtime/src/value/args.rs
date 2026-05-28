@@ -190,6 +190,14 @@ pub extern "C" fn rt_get_args() -> RuntimeValue {
     array_handle
 }
 
+/// Codegen alias for `rt_get_args`: the compiler emits the Simple-facing `sys_get_args`
+/// builtin name. The AOT loader rewrites it, but the Cranelift JIT registers symbols by
+/// exact name, so expose `sys_get_args` as a real exported symbol forwarding here.
+#[export_name = "sys_get_args"]
+pub extern "C" fn sys_get_args_alias() -> RuntimeValue {
+    rt_get_args()
+}
+
 /// Get argument count (for debugging/diagnostics).
 ///
 /// Returns the number of arguments currently stored.

@@ -1718,6 +1718,15 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_weak_new",
     "rt_weak_upgrade",
     "rt_ws_mask_bytes",
+    // ---- Codegen aliases (resolved via #[export_name] wrappers in runtime/src) ----
+    // The compiler emits these Simple-facing names; the AOT loader rewrites them, but the
+    // Cranelift JIT registers symbols by exact name, so each is exported as a real symbol
+    // forwarding to its canonical target (see runtime/src/value/sffi/{file_io,io_print}).
+    "rt_file_delete",   // -> rt_file_remove
+    "rt_print",         // -> rt_print_value
+    "rt_println",       // -> rt_println_value
+    "sys_get_args",     // -> rt_get_args
+    "sys_exit",         // -> rt_exit
 ];
 
 #[cfg(test)]

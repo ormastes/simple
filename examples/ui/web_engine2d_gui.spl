@@ -1,9 +1,8 @@
-# web_engine2d_gui.spl — GUI app: Simple Web Renderer + Engine2D software (CPU) backend
+# web_engine2d_gui.spl — GUI app: Simple Web Renderer + Engine2D backend
 #
-# Renders HTML through SimpleWebRenderer with the "software" (CPU) engine2d
-# backend, then presents the resulting [u32] pixel buffer to a host winit
-# window via rt_winit_window_present_rgba. A headless PPM snapshot is also
-# written so the render can be verified without a display.
+# Renders HTML through SimpleWebRenderer with the explicit Engine2D backend
+# requested below, then presents the resulting [u32] pixel buffer to a host
+# winit window via rt_winit_window_present_rgba when SIMPLE_GUI=1.
 #
 # The renderer is corpus-driven, not a full layout engine: it maps recognized
 # HTML markers to colored rects (background color + wm-app-titlebar header +
@@ -27,10 +26,8 @@ extern fn rt_winit_event_free(ev: i64)
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
 extern fn rt_thread_sleep(ms: i64)
-extern fn rt_file_write_text(path: text, content: text) -> bool
-
-val SCREEN_W: i32 = 160
-val SCREEN_H: i32 = 120
+val SCREEN_W: i32 = 32
+val SCREEN_H: i32 = 24
 val EVT_CLOSE: i64 = 3
 
 fn demo_html() -> text:
@@ -52,40 +49,28 @@ fn pack_pixels(src: [u32]) -> [i64]:
         i = i + 1
     return out
 
-fn write_ppm(src: [u32], w: i32, h: i32, path: text):
-    var parts: [text] = ["P3\n{w} {h}\n255\n"]
-    var y = 0
-    while y < h:
-        var x = 0
-        while x < w:
-            val p = src[y * w + x].to_i64()
-            val r = (p >> 16) & 0xFF
-            val g = (p >> 8) & 0xFF
-            val b = p & 0xFF
-            parts = parts.push("{r} {g} {b} ")
-            x = x + 1
-        parts = parts.push("\n")
-        y = y + 1
-    rt_file_write_text(path, parts.join(""))
+fn render_backend(backend: text) -> [u32]:
+    val renderer = SimpleWebRenderer.create_with_backend(SCREEN_W, SCREEN_H, backend)
+    val pixels = renderer.render_html_to_pixels(demo_html())
+    print "Rendered {pixels.len()} px via backend '{renderer.backend_name}' sample={pixels[0]}/{pixels[6 + 6 * SCREEN_W]}/{pixels[pixels.len() - 1]}"
+    pixels
 
 fn main() -> i64:
-    print "Simple Web Renderer + Engine2D (software/CPU) GUI {SCREEN_W}x{SCREEN_H}"
-    val renderer = SimpleWebRenderer.create_with_backend(SCREEN_W, SCREEN_H, "software")
-    val pixels = renderer.render_html_to_pixels(demo_html())
-    print "Rendered {pixels.len()} px via backend '{renderer.backend_name}'"
-    write_ppm(pixels, SCREEN_W, SCREEN_H, "/tmp/web_engine2d_gui.ppm")
-    print "Wrote /tmp/web_engine2d_gui.ppm"
+    print "Simple Web Renderer + Engine2D GUI {SCREEN_W}x{SCREEN_H}"
+    val cpu_pixels = render_backend("cpu")
+    val metal_pixels = render_backend("metal")
+    print "CPU/Metal sample parity {cpu_pixels[0] == metal_pixels[0]}"
 
     val el = rt_winit_event_loop_new()
     if el == 0:
         print "No GUI runtime (set SIMPLE_GUI=1 to open a window); headless render only."
         return 0
-    val win = rt_winit_window_new(el, SCREEN_W.to_i64(), SCREEN_H.to_i64(), "Simple Web + Engine2D (CPU)")
+    val win = rt_winit_window_new(el, SCREEN_W.to_i64(), SCREEN_H.to_i64(), "Simple Web + Engine2D")
     if win == 0:
         print "Window creation failed."
         rt_winit_event_loop_free(el)
         return 0
-    val packed = pack_pixels(pixels)
+    val packed = pack_pixels(cpu_pixels)
     var frame = 0
     var running = true
     while running and frame < 200:

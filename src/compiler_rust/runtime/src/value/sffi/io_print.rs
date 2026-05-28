@@ -231,6 +231,14 @@ pub extern "C" fn rt_print_value(v: RuntimeValue) {
     }
 }
 
+/// Codegen alias for `rt_print_value`: the compiler emits `rt_print` for the `print`
+/// builtin. The AOT loader rewrites this name; the Cranelift JIT registers by exact
+/// name, so expose `rt_print` as a real exported symbol forwarding to `rt_print_value`.
+#[export_name = "rt_print"]
+pub extern "C" fn rt_print_alias(v: RuntimeValue) {
+    rt_print_value(v);
+}
+
 /// Print a RuntimeValue to stdout with newline.
 /// Nil values print just a newline (matching `print` with no args behavior).
 #[no_mangle]
@@ -245,6 +253,15 @@ pub extern "C" fn rt_println_value(v: RuntimeValue) {
     unsafe {
         rt_println_str(s.as_ptr(), s.len() as u64);
     }
+}
+
+/// Codegen alias for `rt_println_value`: the compiler emits `rt_println` for the
+/// `println` builtin. The AOT loader rewrites this name; the Cranelift JIT registers by
+/// exact name, so expose `rt_println` as a real exported symbol forwarding to
+/// `rt_println_value`.
+#[export_name = "rt_println"]
+pub extern "C" fn rt_println_alias(v: RuntimeValue) {
+    rt_println_value(v);
 }
 
 /// Print a RuntimeValue to stderr.
