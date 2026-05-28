@@ -1000,7 +1000,7 @@ impl Lowerer {
             return Err(LowerError::MemorySafetyViolation {
                 code: first_warning.code,
                 message: format!(
-                    "{}{}{}",
+                    "{}{}{} at {}:{}",
                     first_warning.code.description(),
                     first_warning
                         .name
@@ -1011,7 +1011,9 @@ impl Lowerer {
                         .context
                         .as_ref()
                         .map(|c| format!(": {}", c))
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    first_warning.span.line,
+                    first_warning.span.column
                 ),
                 span: first_warning.span,
                 all_warnings: std::mem::take(&mut self.memory_warnings),
@@ -1235,7 +1237,7 @@ impl Lowerer {
             return Err(LowerError::MemorySafetyViolation {
                 code: first_warning.code,
                 message: format!(
-                    "{}{}{}",
+                    "{}{}{} at {}:{}",
                     first_warning.code.description(),
                     first_warning
                         .name
@@ -1246,7 +1248,9 @@ impl Lowerer {
                         .context
                         .as_ref()
                         .map(|c| format!(": {}", c))
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    first_warning.span.line,
+                    first_warning.span.column
                 ),
                 span: first_warning.span,
                 all_warnings: warnings,
