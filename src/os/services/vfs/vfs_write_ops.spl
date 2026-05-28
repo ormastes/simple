@@ -8,7 +8,8 @@
 
 use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.services.vfs.vfs_boot_init.{
-    g_root_fat32, g_root_nvfs_hosted, g_vfs_initialized, g_mount_table, g_vfs
+    g_root_fat32, g_root_nvfs_hosted, g_vfs_initialized, g_mount_table, g_vfs,
+    vfs_boot_storage_is_pure_simple
 }
 use os.services.vfs.vfs_dispatch.{
     g_vfs_dispatch_write_file_text, g_vfs_dispatch_write_file_bytes,
@@ -29,6 +30,9 @@ use os.kernel.log.klog_api.{log_raw_println}
 extern fn serial_println(msg: text)
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn simpleos_fat32_read_path_size(path: text) -> i64
+
+fn _vfs_c_fat32_bridge_allowed() -> bool:
+    g_vfs_initialized and not vfs_boot_storage_is_pure_simple()
 
 fn _vfs_text_to_bytes(text_value: text) -> [u8]:
     rt_text_to_bytes(text_value)
@@ -286,17 +290,18 @@ pub fn g_vfs_file_exists(name: text) -> bool:
         if g_vfs_dispatch_file_exists(driver_first_r.unwrap(), Path(raw: rel_raw_first)):
             return true
     # Compatibility fallback for transitional C FAT32 bridge readers.
-    if simpleos_fat32_read_path_size(name) > 0:
-        return true
     val root_name = g_vfs_root_path(name)
-    if simpleos_fat32_read_path_size(root_name) > 0:
-        return true
-    val alias_name = _vfs_exec_disk_alias(name)
-    if alias_name != name and simpleos_fat32_read_path_size(alias_name) > 0:
-        return true
-    val root_alias = _vfs_exec_disk_alias(root_name)
-    if root_alias != root_name and simpleos_fat32_read_path_size(root_alias) > 0:
-        return true
+    if _vfs_c_fat32_bridge_allowed():
+        if simpleos_fat32_read_path_size(name) > 0:
+            return true
+        if simpleos_fat32_read_path_size(root_name) > 0:
+            return true
+        val alias_name = _vfs_exec_disk_alias(name)
+        if alias_name != name and simpleos_fat32_read_path_size(alias_name) > 0:
+            return true
+        val root_alias = _vfs_exec_disk_alias(root_name)
+        if root_alias != root_name and simpleos_fat32_read_path_size(root_alias) > 0:
+            return true
     val abs = g_vfs_abs_path(name)
     val entry_opt = g_mount_table.lookup(abs)
     if not entry_opt.?:

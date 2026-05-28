@@ -70,6 +70,9 @@ val FAT32_PATH_READ_BUFFER_MAX: u64 = 4194304
 # Private helpers
 # ============================================================================
 
+fn _vfs_c_fat32_bridge_allowed() -> bool:
+    g_vfs_initialized and not vfs_boot_storage_is_pure_simple()
+
 fn g_vfs_abs_path(name: text) -> Path:
     """Return an absolute Path for name, prepending '/' if bare."""
     if name.starts_with("/"):
@@ -235,6 +238,8 @@ fn _copy_bytes_from_addr(addr: u64, size: u64) -> [u8]:
     out
 
 fn _cache_c_fat32_exec_bytes(path: text) -> [u8]:
+    if not _vfs_c_fat32_bridge_allowed():
+        return []
     val signed_size = simpleos_fat32_read_path_size(path)
     if signed_size <= 4:
         return []
@@ -259,7 +264,7 @@ fn _cache_exec_bytes_if_valid(cache_key: text, path: text, bytes: [u8]) -> [u8]:
 
 pub fn g_vfs_read_fat32_path_bytes(path: text) -> [u8]:
     """Read arbitrary FAT32 bytes through the C-backed QEMU boot bridge."""
-    if not g_vfs_initialized:
+    if not _vfs_c_fat32_bridge_allowed():
         return []
     if path == "":
         return []
@@ -599,23 +604,24 @@ pub fn g_vfs_file_size(name: text) -> Option<VfsFileSize>:
         if mounted_size >= 0:
             return Some(VfsFileSize(bytes: mounted_size))
     # Compatibility fallback for transitional C FAT32 bridge readers.
-    val direct_size = simpleos_fat32_read_path_size(name)
-    if direct_size > 0:
-        return Some(VfsFileSize(bytes: direct_size))
     val root_name = g_vfs_root_path(name)
-    val root_size = simpleos_fat32_read_path_size(root_name)
-    if root_size > 0:
-        return Some(VfsFileSize(bytes: root_size))
-    val alias_name = _vfs_exec_disk_alias(name)
-    if alias_name != name:
-        val alias_size = simpleos_fat32_read_path_size(alias_name)
-        if alias_size > 0:
-            return Some(VfsFileSize(bytes: alias_size))
-    val root_alias = _vfs_exec_disk_alias(root_name)
-    if root_alias != root_name:
-        val root_alias_size = simpleos_fat32_read_path_size(root_alias)
-        if root_alias_size > 0:
-            return Some(VfsFileSize(bytes: root_alias_size))
+    if _vfs_c_fat32_bridge_allowed():
+        val direct_size = simpleos_fat32_read_path_size(name)
+        if direct_size > 0:
+            return Some(VfsFileSize(bytes: direct_size))
+        val root_size = simpleos_fat32_read_path_size(root_name)
+        if root_size > 0:
+            return Some(VfsFileSize(bytes: root_size))
+        val alias_name = _vfs_exec_disk_alias(name)
+        if alias_name != name:
+            val alias_size = simpleos_fat32_read_path_size(alias_name)
+            if alias_size > 0:
+                return Some(VfsFileSize(bytes: alias_size))
+        val root_alias = _vfs_exec_disk_alias(root_name)
+        if root_alias != root_name:
+            val root_alias_size = simpleos_fat32_read_path_size(root_alias)
+            if root_alias_size > 0:
+                return Some(VfsFileSize(bytes: root_alias_size))
     val abs = g_vfs_abs_path(name)
     val entry_opt = g_mount_table.lookup(abs)
     if not entry_opt.?:

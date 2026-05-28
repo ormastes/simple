@@ -2,6 +2,7 @@
 # @cover src/lib/nogc_sync_mut/fs_driver/mem_block_device.spl
 
 use std.spec
+use std.io_runtime.{read_file}
 use os.services.vfs.vfs_init.{
     _clear_vfs_rootfs_for_test,
     _mount_hosted_rootfs_for_test,
@@ -71,6 +72,17 @@ fn _make_elf64_rv64() -> [u8]:
     hdr
 
 describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
+    it "gates transitional C FAT32 bridge fallbacks when boot storage is pure Simple":
+        val init_source = read_file("src/os/services/vfs/vfs_init.spl")
+        val write_source = read_file("src/os/services/vfs/vfs_write_ops.spl")
+
+        expect(init_source.contains("fn _vfs_c_fat32_bridge_allowed() -> bool:")).to_equal(true)
+        expect(init_source.contains("g_vfs_initialized and not vfs_boot_storage_is_pure_simple()")).to_equal(true)
+        expect(init_source.contains("if not _vfs_c_fat32_bridge_allowed():\n        return []\n    val signed_size = simpleos_fat32_read_path_size(path)")).to_equal(true)
+        expect(init_source.contains("if _vfs_c_fat32_bridge_allowed():\n        val direct_size = simpleos_fat32_read_path_size(name)")).to_equal(true)
+        expect(write_source.contains("vfs_boot_storage_is_pure_simple")).to_equal(true)
+        expect(write_source.contains("if _vfs_c_fat32_bridge_allowed():\n        if simpleos_fat32_read_path_size(name) > 0:")).to_equal(true)
+
     it "DBFS rootfs can write, read, size, and existence-check through g_vfs_*":
         _clear_vfs_rootfs_for_test()
         expect(_mount_hosted_rootfs_for_test(_dbfs_root())).to_equal(true)
