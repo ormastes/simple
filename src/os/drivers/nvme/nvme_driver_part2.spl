@@ -62,6 +62,7 @@ impl NvmeDriver:
             notif_id: 0,
             identified_nsid: 1u32,
             identified_namespaces: [],
+            controller_namespace_count: 1u32,
             sector_count: 0,
             sector_size: 512,
             db_stride: 0,
@@ -363,6 +364,11 @@ impl NvmeDriver:
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
             return Result.Err("NVMe: identify controller timeout")
+        val namespace_count = mmio_read32(buf.virt + IDENTITY_CONTROLLER_NN_OFFSET)
+        if namespace_count > 0u32:
+            self.controller_namespace_count = namespace_count
+        else:
+            self.controller_namespace_count = 1u32
         Result.Ok(true)
 
     me identify_namespace() -> Result<bool, text>:
@@ -1454,6 +1460,24 @@ impl NvmeDriver:
             if facts.nsid == nsid and facts.formatted_lba_size >= 512u32:
                 return Ok(facts.formatted_lba_size)
         Err("NVMe: namespace not identified")
+
+    fn namespace_count() -> u32:
+        self.controller_namespace_count
+
+    me identify_first_assignable_user_namespace(excluded_nsid: u32) -> Result<NvmeNamespaceFacts, text>:
+        """Identify the first usable namespace that is not owned by the system lease."""
+        if self.controller_namespace_count <= 1u32:
+            return Err("NVMe: no assignable user namespace")
+        var nsid = 1u32
+        while nsid <= self.controller_namespace_count:
+            if nsid != excluded_nsid:
+                val identify = self.identify_namespace_id(nsid)
+                if identify.is_ok():
+                    for facts in self.identified_namespaces:
+                        if facts.nsid == nsid:
+                            return Ok(facts)
+            nsid = nsid + 1u32
+        Err("NVMe: no assignable user namespace identified")
 
     fn get_sector_size() -> u32:
         """Sector size in bytes."""
