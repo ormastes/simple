@@ -108,6 +108,9 @@ All edge-triggered where supported. io_uring available as alternative to epoll o
 
 - **`text.len()` native codegen**: Returns garbage (0x1FFFFFFFFFFFFFFF) instead of actual length.
   Workaround: `extern fn rt_string_len(s: text) -> i64`. See `doc/08_tracking/bug/native_codegen_text_len_garbage_2026-05-28.md`.
+- **Interpreter PEM constant**: `PEM_CERT_BEGIN` module-level val not found — blocks HTTPS server startup.
+- **Interpreter type cast**: `cannot cast object to HttpRequestData` — blocks embedded server request handling.
+- **Native full server**: 1842 internal stubs — need reduced stub count for native HttpServer.
 
 ## Feature Verification
 
@@ -136,4 +139,5 @@ All edge-triggered where supported. io_uring available as alternative to epoll o
 - UDP sink benchmark: `test/perf/bench/http_server/bench_udp_echo.spl`
 - C runtime additions: `src/runtime/runtime_native.c` (`rt_file_read_all_text`)
 - nginx config: `test/perf/bench/http_server/nginx_bench.conf`
+- HTTPS benchmark: `test/perf/bench/http_server/bench_server_https.spl`
 - Bug report: `doc/08_tracking/bug/native_codegen_text_len_garbage_2026-05-28.md`
