@@ -237,6 +237,49 @@ fn bench_update_multi(db: PureDatabase) -> i64:
         j = j + 1
     updated
 
+# ── UPDATE-SQL benchmark (exercises _do_update PK fast path) ────────────────
+# Uses bench_sql_kv (separate table) so it does not poison bench_kv's
+# all_visible flag, which would degrade the update_by_key measurement.
+
+fn setup_sql_bench_table(db: PureDatabase):
+    db.exec_sql("CREATE TABLE bench_sql_kv (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
+    var i = 0
+    while i < 200:
+        val score = (i * 10) as i64
+        db.exec_sql("INSERT INTO bench_sql_kv (id, name, score) VALUES (" + i.to_text() + ", 'user_" + i.to_text() + "', " + score.to_text() + ")").unwrap()
+        i = i + 1
+
+fn bench_update_sql_warmup(db: PureDatabase):
+    db.exec_sql("UPDATE bench_sql_kv SET score = 0 WHERE id = 0").unwrap()
+
+fn bench_update_sql_one(db: PureDatabase) -> i64:
+    val t0 = bench_now_ns()
+    var j = 0
+    while j < 100:
+        val idx = j * 2
+        val score = (idx * 99) as i64
+        db.exec_sql("UPDATE bench_sql_kv SET score = " + score.to_text() + " WHERE id = " + idx.to_text()).unwrap()
+        j = j + 1
+    val t1 = bench_now_ns()
+    per_op_ns(t0, t1, 100)
+
+fn bench_update_sql_multi(db: PureDatabase) -> i64:
+    var samples: [i64] = []
+    var run: i64 = 0
+    while run < BENCH_RUNS:
+        samples.push(bench_update_sql_one(db))
+        run = run + 1
+    print_stats("[UPD_SQL x100]", samples, BENCH_RUNS)
+    var updated: i64 = 0
+    var j = 0
+    while j < 100:
+        val idx = j * 2
+        val score = (idx * 99) as i64
+        val ok = db.exec_sql("UPDATE bench_sql_kv SET score = " + score.to_text() + " WHERE id = " + idx.to_text()).unwrap()
+        updated = updated + ok
+        j = j + 1
+    updated
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main():
@@ -249,6 +292,7 @@ fn main():
     var db = setup_db()
     val setup_t1 = bench_now_ns()
     print "[SETUP]      " + elapsed_us(setup_t0, setup_t1).to_text() + " us"
+    setup_sql_bench_table(db)
     print ""
 
     # ── Warmup phase ────────────────────────────────────────────────────────
@@ -267,14 +311,19 @@ fn main():
     val scan_cold_rows = bench_scan_cold(db)
     val scan_hot_rows = bench_scan_multi(db)
     val upd_count = bench_update_multi(db)
+    # SQL UPDATE benchmark runs after typed API — uses separate table to avoid
+    # poisoning bench_kv all_visible flag
+    bench_update_sql_warmup(db)
+    val upd_sql_count = bench_update_sql_multi(db)
     print ""
 
     # ── SQLite comparison ───────────────────────────────────────────────────
     print "--- vs SQLite (prepared stmt, WAL) ---"
-    print "SQLite PUT:  ~1060 ns    SimpleDB PUT:  see above"
-    print "SQLite GET:  ~840 ns     SimpleDB GET:  see above"
-    print "SQLite SCAN: ~11300 ns   SimpleDB SCAN: see above"
-    print "SQLite UPD:  ~1500 ns    SimpleDB UPD:  see above"
+    print "SQLite PUT:     ~1060 ns    SimpleDB PUT:     see above"
+    print "SQLite GET:     ~840 ns     SimpleDB GET:     see above"
+    print "SQLite SCAN:    ~11300 ns   SimpleDB SCAN:    see above"
+    print "SQLite UPD:     ~1500 ns    SimpleDB UPD:     see above (typed API, all_vis fast path)"
+    print "SQLite UPD:     ~1500 ns    SimpleDB UPD_SQL: see above (exec_sql, parser-bound per call)"
     print ""
 
     # ── Sanity checks ───────────────────────────────────────────────────────
@@ -293,6 +342,9 @@ fn main():
         passed = false
     if upd_count < 50:
         print "FAIL: update count too low: " + upd_count.to_text()
+        passed = false
+    if upd_sql_count < 50:
+        print "FAIL: update_sql count too low: " + upd_sql_count.to_text()
         passed = false
 
     if passed:
