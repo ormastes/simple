@@ -42,11 +42,11 @@ _start:
     .option pop
 
     # Exit with code 0 via semihosting
-    # SYS_EXIT = 0x18
+    # SYS_EXIT_EXTENDED = 0x20
     # a0 = operation number
-    # a1 = exit code
-    li a0, 0x18              # SYS_EXIT
-    li a1, 0                 # Exit code 0
+    # a1 = pointer to reason/status block
+    li a0, 0x20              # SYS_EXIT_EXTENDED
+    la a1, exit_block        # reason + status
 
     .option push
     .option norvc
@@ -67,8 +67,7 @@ hello_msg:
 success_msg:
     .asciz "[SEMIHOST TEST] Success - exit code 0\n"
 
-.section .bss
-.align 16
-stack_bottom:
-    .skip 8192               # 8 KB stack
-stack_top:
+.align 2
+exit_block:
+    .word 0x20026            # ADP_Stopped_ApplicationExit
+    .word 0                  # status 0

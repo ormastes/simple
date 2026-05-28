@@ -14,7 +14,7 @@ Date: 2026-05-28
 | Simple web script placeholder facade | n/a | ok | 14336 | 3905 | `build/web_baremetal_size_audit/simple_web_script_placeholder_native.log` |
 | Simple web script file facade | n/a | ok | 26712 | 16935 | `build/web_baremetal_size_audit/simple_web_script_file_native.log` |
 | Bare-metal pure policy probe | ok | ok | 14336 | 6581 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
-| RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
+| RV32 semihost stdout hello | n/a | ok | 4892 | 156 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
 | RV64 semihost trap capsule | n/a | ok | 912 | 48 | `build/web_baremetal_size_audit/riscv64_semihost_trap.build.log` |
 | ARM semihost trap capsule | n/a | ok | 568 | 20 | `build/web_baremetal_size_audit/arm_semihost_trap.build.log` |
@@ -50,7 +50,7 @@ Date: 2026-05-28
 | Simple web script file facade native file / dec section | 27000 / 17000 |
 | Bare-metal pure policy probe native file / dec section | 15000 / 6800 |
 | Bare-metal pure policy probe source | 1300 |
-| RV32 semihost stdout ELF file / dec section | 70000 / 9000 |
+| RV32 semihost stdout ELF file / dec section | 6000 / 512 |
 | RV32 semihost trap object file / dec section | 768 / 64 |
 | RV32 semihost trap source | 1024 |
 | RV64 semihost trap object file / dec section | 1024 / 64 |
