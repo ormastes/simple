@@ -823,22 +823,55 @@ impl NvmeDriver:
 
         NVMe Flush command (opcode 0x00) on the I/O queue.
         """
+        self.flush_in_namespace(self.get_namespace_id())
+
+    me flush_in_namespace(nsid: u32) -> Result<bool, text>:
+        """Flush write cache for an identified namespace."""
+        self.flush_in_namespace_on_queue(nsid, self.io_queue.qid)
+
+    me flush_in_namespace_on_queue(nsid: u32, queue_id: u16) -> Result<bool, text>:
+        """Flush write cache for an identified namespace on a concrete I/O queue."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
+            return Result.Err("NVMe: namespace not identified")
 
-        val cmd_result = nvme_flush_io_command_for_namespace(self.get_namespace_id())
+        val cmd_result = nvme_flush_io_command_for_namespace(nsid)
         if cmd_result.is_err():
             return Result.Err("NVMe: flush " + cmd_result.unwrap_err())
         val cmd = cmd_result.unwrap()
-        self.io_queue.submit_command(
-            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
-            cmd.cdw10, cmd.cdw11, cmd.cdw12
-        )
 
-        if not self.io_queue.wait_completion(CMD_TIMEOUT):
-            return Result.Err("NVMe: flush timeout")
+        var status_dw3: u32 = 0u32
+        if queue_id == self.io_queue.qid:
+            self.io_queue.submit_command(
+                cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                cmd.cdw10, cmd.cdw11, cmd.cdw12
+            )
+            if not self.io_queue.wait_completion(CMD_TIMEOUT):
+                return Result.Err("NVMe: flush timeout")
+            status_dw3 = self.io_queue.get_completion_status()
+        else:
+            var updated_queues: [NvmeQueuePair] = []
+            var matched_queue = false
+            for existing in self.user_io_queues:
+                if existing.qid == queue_id:
+                    var q = existing
+                    q.submit_command(
+                        cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+                        cmd.cdw10, cmd.cdw11, cmd.cdw12
+                    )
+                    if not q.wait_completion(CMD_TIMEOUT):
+                        return Result.Err("NVMe: flush timeout")
+                    status_dw3 = q.get_completion_status()
+                    updated_queues.push(q)
+                    matched_queue = true
+                else:
+                    updated_queues.push(existing)
+            self.user_io_queues = updated_queues
+            if not matched_queue:
+                return Result.Err("NVMe: I/O queue not ready")
 
-        val status_dw3 = self.io_queue.get_completion_status()
         val status_code = nvme_io_status_code(status_dw3)
         if status_code != 0:
             return Result.Err("NVMe: flush error, status={status_code}")
@@ -1401,12 +1434,23 @@ impl NvmeDriver:
 
         Same as flush() but uses wait_completion_notify() instead of spin-polling.
         """
+        self.flush_notify_in_namespace(self.get_namespace_id())
+
+    me flush_notify_in_namespace(nsid: u32) -> Result<bool, text>:
+        """Flush an identified namespace using notification-based completion."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val sector_count = self.namespace_sector_count(nsid)
+        if sector_count.is_err():
+            return Result.Err("NVMe: namespace not identified")
 
+        val cmd_result = nvme_flush_io_command_for_namespace(nsid)
+        if cmd_result.is_err():
+            return Result.Err("NVMe: flush " + cmd_result.unwrap_err())
+        val cmd = cmd_result.unwrap()
         self.io_queue.submit_command(
-            NVME_IO_OPCODE_FLUSH, self.get_namespace_id(), 0, 0,
-            0, 0, 0
+            cmd.opcode, cmd.nsid, cmd.prp1, cmd.prp2,
+            cmd.cdw10, cmd.cdw11, cmd.cdw12
         )
 
         # Wait using notification instead of spin-poll
@@ -1414,7 +1458,7 @@ impl NvmeDriver:
             return Result.Err("NVMe: flush timeout")
 
         val status_dw3 = self.io_queue.get_completion_status()
-        val status_code = (status_dw3 >> 17) & 0x7FF
+        val status_code = nvme_io_status_code(status_dw3)
         if status_code != 0:
             return Result.Err("NVMe: flush error, status={status_code}")
 

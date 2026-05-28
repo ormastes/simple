@@ -383,6 +383,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   queue, while the legacy shared-DMA methods delegate to the current system
   namespace queue. This is the no-per-I/O-allocation path production 4K random
   I/O benchmarks must exercise.
+- Flush is namespace- and queue-aware too. FAT32, NVFS, and DBFS direct-write
+  paths can flush the same assigned namespace queue used for read/write, instead
+  of flushing only the current system namespace.
 - The lease-backed VFS NVMe adapter exposes explicit 4KiB shared-DMA read/write
   entry points over the same lease NSID and queue ID used by FAT32, NVFS, and
   DBFS. The common filesystem mount surface stays `BlockDevice`, while
@@ -466,9 +469,10 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   rejection, NLB limit rejection, DMA pointer validation, and completion-status
   decoding.
 - `test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl` covers that
-  the driver exposes namespace-aware identify/sector methods, stores identified
-  NSID geometry, creates bounded user data queues for assigned namespaces, and
-  keeps non-identified namespaces fail-closed before hardware submission.
+  the driver exposes namespace-aware identify/read/write/flush methods, stores
+  identified NSID geometry, creates bounded user data queues for assigned
+  namespaces, and keeps non-identified namespaces fail-closed before hardware
+  submission.
 - `test/unit/os/drivers/nvme/nvme_queue_boundary_spec.spl` guards that the
   reusable queue submission/polling module does not import hosted syscalls or
   notification waits.
