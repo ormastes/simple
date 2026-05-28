@@ -13,7 +13,7 @@ Date: 2026-05-28
 | Simple web file facade | n/a | ok | 14344 | 6335 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
 | Simple web script placeholder facade | n/a | ok | 14336 | 3905 | `build/web_baremetal_size_audit/simple_web_script_placeholder_native.log` |
 | Simple web script file facade | n/a | ok | 26712 | 16126 | `build/web_baremetal_size_audit/simple_web_script_file_native.log` |
-| Bare-metal pure policy probe | ok | ok | 18432 | 6814 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
+| Bare-metal pure policy probe | ok | ok | 18432 | 6758 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 4892 | 156 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
 | RV64 semihost trap capsule | n/a | ok | 912 | 48 | `build/web_baremetal_size_audit/riscv64_semihost_trap.build.log` |
@@ -53,8 +53,8 @@ Date: 2026-05-28
 | Simple web file facade native file / dec section | 14500 / 6400 |
 | Simple web script placeholder facade native file / dec section | 14500 / 4200 |
 | Simple web script file facade native file / dec section | 27000 / 16500 |
-| Bare-metal pure policy probe native file / dec section | 18500 / 6900 |
-| Bare-metal pure policy probe source | 1300 |
+| Bare-metal pure policy probe native file / dec section | 18500 / 6850 |
+| Bare-metal pure policy probe source | 900 |
 | RV32 semihost stdout ELF file / dec section | 6000 / 512 |
 | RV32 semihost trap object file / dec section | 768 / 64 |
 | RV32 semihost trap source | 192 |
@@ -102,14 +102,14 @@ Date: 2026-05-28
 | Shared startup handoff RV64 object file / dec section | 3072 / 256 |
 | Shared startup handoff RV32 object file / dec section | 2048 / 256 |
 | Shared startup handoff source | 640 |
-| Pure Simple console policy source | 2500 |
-| Pure Simple stdout plan source | 2500 |
-| Pure Simple stdout policy plan source | 3000 |
-| Pure Simple interrupt policy source | 5000 |
-| Pure Simple startup policy source | 3000 |
-| Pure Simple startup plan source | 2500 |
-| Pure Simple semihost policy source | 1500 |
-| Pure Simple semihost stdout policy source | 1500 |
+| Pure Simple console policy source | 2000 |
+| Pure Simple stdout plan source | 2100 |
+| Pure Simple stdout policy plan source | 2200 |
+| Pure Simple interrupt policy source | 3200 |
+| Pure Simple startup policy source | 600 |
+| Pure Simple startup plan source | 1200 |
+| Pure Simple semihost policy source | 800 |
+| Pure Simple semihost stdout policy source | 900 |
 | Bare-metal aggregate policy facade source | 512 |
 | Bare-metal root facade source | 3587 |
 | Semihost transport source | 11500 |
@@ -156,7 +156,7 @@ Date: 2026-05-28
 | `src/lib/nogc_async_mut_noalloc/baremetal/console_policy.spl` | 1 | 56 | 1870 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/stdout_plan.spl` | 1 | 65 | 1999 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/stdout_policy_plan.spl` | 1 | 55 | 2129 |
-| `src/lib/nogc_async_mut_noalloc/baremetal/interrupt_policy.spl` | 1 | 72 | 3315 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/interrupt_policy.spl` | 1 | 65 | 3082 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/startup_policy.spl` | 1 | 15 | 458 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/startup_plan.spl` | 1 | 29 | 1097 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_policy.spl` | 1 | 19 | 658 |
