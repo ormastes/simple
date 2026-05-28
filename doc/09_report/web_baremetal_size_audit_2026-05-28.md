@@ -11,7 +11,7 @@ Date: 2026-05-28
 | Simple web static facade | n/a | ok | 14352 | 4696 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
 | Simple web placeholder URL facade | n/a | ok | 14336 | 3883 | `build/web_baremetal_size_audit/simple_web_placeholder_native.log` |
 | Simple web file facade | n/a | ok | 14344 | 6313 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
-| Bare-metal pure policy probe | ok | ok | 14336 | 6559 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
+| Bare-metal pure policy probe | ok | ok | 14336 | 6558 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
 | x86_64 minimal boot/stdout capsule | n/a | ok | 1968 | 250 | `build/web_baremetal_size_audit/baremetal_boot_stdout.build.log` |
@@ -46,6 +46,7 @@ Date: 2026-05-28
 | RV64 minimal 16550 startup/stdout source | 2200 |
 | RV32 minimal 16550 startup/stdout object file / dec section | 2300 / 260 |
 | RV32 minimal 16550 startup/stdout source | 2300 |
+| Shared minimal stdout helper source | 2200 |
 | x86_64 interrupt-control object file / dec section | 1536 / 64 |
 | x86_64 interrupt-control source | 1024 |
 | x86_64 startup handoff object file / dec section | 2048 / 128 |
@@ -63,10 +64,11 @@ Date: 2026-05-28
 | `examples/browser` | 304 | 75035 | 2850509 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15509 | 576503 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 107 | 2752 |
-| `examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c` | 1 | 83 | 2210 |
-| `examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c` | 1 | 94 | 2555 |
-| `examples/simple_os/arch/riscv64/boot/baremetal_uart_stdout.c` | 1 | 66 | 1710 |
-| `examples/simple_os/arch/riscv32/boot/baremetal_uart_stdout.c` | 1 | 85 | 2197 |
+| `examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c` | 1 | 57 | 1458 |
+| `examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c` | 1 | 50 | 1375 |
+| `examples/simple_os/arch/riscv64/boot/baremetal_uart_stdout.c` | 1 | 40 | 958 |
+| `examples/simple_os/arch/riscv32/boot/baremetal_uart_stdout.c` | 1 | 40 | 958 |
+| `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 62 | 1719 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 35 | 685 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv32/semihost_trap.S` | 1 | 30 | 867 |

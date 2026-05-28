@@ -6,27 +6,7 @@
  */
 
 #include <stdint.h>
-
-typedef int32_t RuntimeValue;
-
-#define TAG_MASK    0x7u
-#define TAG_INT     0x0u
-#define TAG_HEAP    0x1u
-#define ENCODE_INT(v) ((RuntimeValue)(((uint32_t)(int32_t)(v) << 3) | TAG_INT))
-#define DECODE_PTR(v) ((void *)((uint32_t)(v) & ~TAG_MASK))
-#define IS_HEAP(v)    (((uint32_t)(v) & TAG_MASK) == TAG_HEAP)
-#define HEAP_STRING 1u
-
-typedef struct {
-    uint32_t type;
-    uint32_t size;
-} HeapHeader;
-
-typedef struct {
-    HeapHeader hdr;
-    uint32_t len;
-    char data[];
-} RuntimeString;
+#include <stddef.h>
 
 #define PL011_BASE 0x09000000u
 #define PL011_DR   (*(volatile uint32_t *)(PL011_BASE + 0x000u))
@@ -56,31 +36,7 @@ void serial_putchar(char c)
     PL011_DR = (uint32_t)(uint8_t)c;
 }
 
-static RuntimeValue serial_write_value(RuntimeValue data)
-{
-    if (IS_HEAP(data)) {
-        RuntimeString *s = (RuntimeString *)DECODE_PTR(data);
-        if (s && s->hdr.type == HEAP_STRING && s->len < 0x100000u) {
-            for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
-            return ENCODE_INT((int32_t)s->len);
-        }
-    }
-    return ENCODE_INT(0);
-}
-
-RuntimeValue rt_stdout_write(RuntimeValue data)
-{
-    return serial_write_value(data);
-}
-
-RuntimeValue rt_stdout_flush(RuntimeValue data)
-{
-    (void)data;
-    return ENCODE_INT(0);
-}
-
-RuntimeValue rt_stderr_write(RuntimeValue data) __attribute__((alias("rt_stdout_write")));
-RuntimeValue rt_stderr_flush(RuntimeValue data) __attribute__((alias("rt_stdout_flush")));
+#include "../../common/baremetal_min_stdout.h"
 
 extern void spl_start(void) __attribute__((weak));
 
