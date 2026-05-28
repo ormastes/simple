@@ -132,6 +132,14 @@ struct DynamicPassDescriptor:
     cost_class: text
     entry_symbol: text
 
+struct DynamicPassBackendDecision:
+    pass_name: text
+    backend_name: text
+    max_cost_class: text
+    cost_class: text
+    applies: bool
+    reason: text
+
 fn manifest_cost_rank(cost_class: text) -> i64:
     if cost_class == "free":
         0
@@ -286,6 +294,13 @@ fn dynamic_pass_descriptor_applies_to_backend(desc: DynamicPassDescriptor, backe
 fn dynamic_pass_descriptor_cost_allowed(desc: DynamicPassDescriptor, max_cost_class: text) -> bool:
     manifest_cost_allowed(desc.cost_class, max_cost_class)
 
+fn dynamic_pass_descriptor_backend_decision(desc: DynamicPassDescriptor, backend_name: text, max_cost_class: text) -> DynamicPassBackendDecision:
+    if not dynamic_pass_descriptor_applies_to_backend(desc, backend_name):
+        return DynamicPassBackendDecision(desc.name, backend_name, max_cost_class, desc.cost_class, false, desc.provider.backend_policy.reason)
+    if not dynamic_pass_descriptor_cost_allowed(desc, max_cost_class):
+        return DynamicPassBackendDecision(desc.name, backend_name, max_cost_class, desc.cost_class, false, "cost budget exceeded")
+    DynamicPassBackendDecision(desc.name, backend_name, max_cost_class, desc.cost_class, true, "ready")
+
 fn dynamic_pass_registry_for_backend(registry: DynamicPassRegistry, backend_name: text) -> DynamicPassRegistry:
     """Return a registry containing only descriptors that apply to backend_name."""
     var selected: [DynamicPassDescriptor] = []
@@ -329,6 +344,19 @@ fn dynamic_pass_registry_skipped_names_for_backend_budget(registry: DynamicPassR
         if not dynamic_pass_descriptor_applies_to_backend(desc, backend_name) or not dynamic_pass_descriptor_cost_allowed(desc, max_cost_class):
             names = names.push(desc.name)
     names
+
+fn dynamic_pass_registry_decisions_for_backend_budget(registry: DynamicPassRegistry, backend_name: text, max_cost_class: text) -> [DynamicPassBackendDecision]:
+    var decisions: [DynamicPassBackendDecision] = []
+    for desc in registry.descriptors:
+        decisions = decisions.push(dynamic_pass_descriptor_backend_decision(desc, backend_name, max_cost_class))
+    decisions
+
+fn dynamic_pass_registry_skipped_decisions_for_backend_budget(registry: DynamicPassRegistry, backend_name: text, max_cost_class: text) -> [DynamicPassBackendDecision]:
+    var skipped: [DynamicPassBackendDecision] = []
+    for decision in dynamic_pass_registry_decisions_for_backend_budget(registry, backend_name, max_cost_class):
+        if not decision.applies:
+            skipped = skipped.push(decision)
+    skipped
 
 # ============================================================================
 # Built-in name conflict guard
@@ -491,6 +519,26 @@ fn manifest_registered_pass_applies_to_backend(
                 return true
     false
 
+fn manifest_registered_pass_applies_to_backend_budget(
+    registry: DynamicPassRegistry,
+    manifest: OptimizerManifest,
+    backend_name: text,
+    max_cost_class: text
+) -> bool:
+    """Return true when at least one registered manifest pass applies to backend_name within max_cost_class.
+
+    Rules-only manifests have no pass policy anchor, so they remain
+    backend-neutral and are allowed to run.
+    """
+    if manifest.passes.len() == 0:
+        return true
+    val filtered = dynamic_pass_registry_for_backend_budget(registry, backend_name, max_cost_class)
+    for entry in manifest.passes:
+        for desc in filtered.descriptors:
+            if desc.name == entry.stable_name:
+                return true
+    false
+
 fn run_manifest_pattern_rules_for_backend(
     module: MirModule,
     registry: DynamicPassRegistry,
@@ -501,6 +549,22 @@ fn run_manifest_pattern_rules_for_backend(
     if manifest.rules.len() == 0:
         return module
     if not manifest_registered_pass_applies_to_backend(registry, manifest, backend_name):
+        return module
+    val rule_set = manifest_to_pattern_rule_set(manifest)
+    val rule_pass = pattern_rule_pass_add_rule_set(pattern_rule_pass_new(), rule_set)
+    pattern_rule_pass_run(rule_pass, module)
+
+fn run_manifest_pattern_rules_for_backend_budget(
+    module: MirModule,
+    registry: DynamicPassRegistry,
+    manifest: OptimizerManifest,
+    backend_name: text,
+    max_cost_class: text
+) -> MirModule:
+    """Run a manifest's pattern rules only when registered passes match backend and compile-cost budget."""
+    if manifest.rules.len() == 0:
+        return module
+    if not manifest_registered_pass_applies_to_backend_budget(registry, manifest, backend_name, max_cost_class):
         return module
     val rule_set = manifest_to_pattern_rule_set(manifest)
     val rule_pass = pattern_rule_pass_add_rule_set(pattern_rule_pass_new(), rule_set)
@@ -540,21 +604,26 @@ export ManifestPassEntry, manifest_pass_entry_new
 export manifest_pass_entry_with_backend_policy, manifest_pass_entry_new_with_backend_policy
 export manifest_pass_entry_with_cost_class, manifest_pass_entry_new_with_backend_policy_and_cost
 export OptimizerManifest
-export DynamicPassDescriptor, dynamic_pass_descriptor_from_entry
+export DynamicPassDescriptor, DynamicPassBackendDecision, dynamic_pass_descriptor_from_entry
 export DynamicPassRegistry, dynamic_pass_registry_new
 export dynamic_pass_registry_lookup, dynamic_pass_registry_register
 export dynamic_pass_descriptor_applies_to_backend
 export dynamic_pass_descriptor_cost_allowed
+export dynamic_pass_descriptor_backend_decision
 export dynamic_pass_registry_for_backend
 export dynamic_pass_registry_names_for_backend
 export dynamic_pass_registry_skipped_names_for_backend
 export dynamic_pass_registry_for_backend_budget
 export dynamic_pass_registry_names_for_backend_budget
 export dynamic_pass_registry_skipped_names_for_backend_budget
+export dynamic_pass_registry_decisions_for_backend_budget
+export dynamic_pass_registry_skipped_decisions_for_backend_budget
 export manifest_cost_allowed
 export load_manifest_v1, load_manifest_v1_from_parsed, load_manifest_v1_from_parsed_with_rules
 export validate_manifest, validate_manifest_pass
 export is_builtin_stable_name, is_builtin_alias
 export manifest_to_pattern_rule_set
 export manifest_registered_pass_applies_to_backend
+export manifest_registered_pass_applies_to_backend_budget
 export run_manifest_pattern_rules_for_backend
+export run_manifest_pattern_rules_for_backend_budget

@@ -1,17 +1,9 @@
 use os.compositor.cursor.{CursorState}
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.input_backend.{InputBackend}
 use os.drivers.framebuffer.fb_driver.{Color}
 use os.kernel.boot.cpu.{port_inb, port_outb}
 use common.window_protocol.geometry.{WindowId}
-
-extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
-
-fn _comp_pack(hi: i32, lo: i32) -> u64:
-    (hi.to_u64() << 32) | (lo.to_u64() & 0xFFFFFFFF)
-
-fn _comp_fill(x: i32, y: i32, w: i32, h: i32, color: u32):
-    if w <= 0 or h <= 0:
-        return
-    rt_gui_fill4(_comp_pack(x, y), _comp_pack(w, h), color.to_u64(), 0)
 
 class WindowSurface:
     id: i32
@@ -30,9 +22,8 @@ class WindowSurface:
 class Compositor:
     surfaces: [WindowSurface]
     focused_idx: i32
-    fb: any
-    keyboard: any
-    mouse: any
+    backend: CompositorBackend
+    input: InputBackend?
     cursor: CursorState
     desktop_bg: Color
     next_id: i32
@@ -46,13 +37,12 @@ class Compositor:
     pending_meta_key: i32
     pending_shortcut: text
 
-    static fn with_backends(backend: any, input: any, width: i32, height: i32) -> Compositor:
+    static fn with_backends(backend: CompositorBackend, input: InputBackend?, width: i32, height: i32) -> Compositor:
         Compositor(
             surfaces: [],
             focused_idx: -1,
-            fb: backend,
-            keyboard: input,
-            mouse: input,
+            backend: backend,
+            input: input,
             cursor: CursorState(x: width / 2, y: height / 2, visible: true, hotspot_x: 1, hotspot_y: 1),
             desktop_bg: Color.rgb(0, 48, 96),
             next_id: 1,
@@ -320,6 +310,50 @@ class Compositor:
         out
 
     me handle_input():
+        if self.input != nil:
+            self._handle_input_backend()
+            return
+        self._handle_input_ps2()
+
+    me _handle_input_backend():
+        val inp = self.input
+        if inp == nil:
+            return
+        val key_event = inp.poll_key()
+        if key_event != nil:
+            if inp.alt_held():
+                self.pending_meta_key = 1
+            val ch = inp.key_to_char(key_event.key)
+            if ch != nil:
+                self.pending_shortcut = ch
+        val mouse_event = inp.poll_mouse()
+        if mouse_event != nil:
+            var new_x = mouse_event.dx
+            var new_y = mouse_event.dy
+            if new_x < 0:
+                new_x = 0
+            if new_x >= self.screen_width:
+                new_x = self.screen_width - 1
+            if new_y < 0:
+                new_y = 0
+            if new_y >= self.screen_height:
+                new_y = self.screen_height - 1
+            var cursor_ref = self.cursor
+            cursor_ref.x = new_x
+            cursor_ref.y = new_y
+            self.cursor = cursor_ref
+            if mouse_event.left:
+                var hit_idx = -1
+                var wi = 0
+                while wi < self.surfaces.len():
+                    val s = self.surfaces[wi]
+                    if (new_x >= s.x and new_x < s.x + s.width and new_y >= s.y and new_y < s.y + s.height):
+                        hit_idx = wi
+                    wi = wi + 1
+                if hit_idx >= 0:
+                    self.focus_window(self.surfaces[hit_idx].id)
+
+    me _handle_input_ps2():
         var alt_held = false
         var status = port_inb(0x64)
         while (status.to_i32() & 1) != 0:
@@ -399,25 +433,25 @@ class Compositor:
     me render_all():
         val bg = self.desktop_bg
         val bg_color: u32 = ((bg.a.to_u32() & 0xFF) << 24) | ((bg.r.to_u32() & 0xFF) << 16) | ((bg.g.to_u32() & 0xFF) << 8) | (bg.b.to_u32() & 0xFF)
-        _comp_fill(0, 0, self.screen_width, self.screen_height, bg_color)
+        self.backend.fill_rect(0, 0, self.screen_width, self.screen_height, bg_color)
         var i = 0
         while i < self.surfaces.len():
             val s = self.surfaces[i]
             if s.visible:
-                _comp_fill(s.x, s.y, s.width, 24, 0xFF4A90D9)
-                _comp_fill(s.x, s.y, s.width, 1, 0xFF2A70B9)
-                _comp_fill(s.x, s.y, 1, s.height, 0xFF2A70B9)
-                _comp_fill(s.x + s.width - 1, s.y, 1, s.height, 0xFF2A70B9)
-                _comp_fill(s.x, s.y + s.height - 1, s.width, 1, 0xFF2A70B9)
-                _comp_fill(s.x + s.width - 24, s.y, 24, 24, 0xFFCC3333)
+                self.backend.fill_rect(s.x, s.y, s.width, 24, 0xFF4A90D9)
+                self.backend.fill_rect(s.x, s.y, s.width, 1, 0xFF2A70B9)
+                self.backend.fill_rect(s.x, s.y, 1, s.height, 0xFF2A70B9)
+                self.backend.fill_rect(s.x + s.width - 1, s.y, 1, s.height, 0xFF2A70B9)
+                self.backend.fill_rect(s.x, s.y + s.height - 1, s.width, 1, 0xFF2A70B9)
+                self.backend.fill_rect(s.x + s.width - 24, s.y, 24, 24, 0xFFCC3333)
                 val body_y = s.y + 24
                 val body_h = s.height - 24
                 if body_h > 0:
-                    _comp_fill(s.x, body_y, s.width, body_h, 0xFF1A1A2E)
+                    self.backend.fill_rect(s.x, body_y, s.width, body_h, 0xFF1A1A2E)
             i = i + 1
         val cx = self.cursor.x
         val cy = self.cursor.y
-        _comp_fill(cx, cy, 8, 8, 0xFFFFFFFF)
+        self.backend.fill_rect(cx, cy, 8, 8, 0xFFFFFFFF)
 
     me consume_pending_meta_key() -> i32:
         val k = self.pending_meta_key
@@ -431,10 +465,12 @@ class Compositor:
 
     me render_frame():
         self.render_all()
+        self.backend.present()
 
     me run_loop():
         self.running = true
         while self.running:
             self.handle_input()
             self.render_all()
+            self.backend.present()
             self.running = false

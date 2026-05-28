@@ -1,5 +1,8 @@
 use common.window_protocol.geometry.{Size}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
+use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
+use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use os.compositor.simple_web_window_renderer.{render_simple_web_app_content}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_MINIMIZE, COMP_RESTORE}
 
@@ -13,6 +16,10 @@ enum HostBackendKind:
     Electron
     Tauri
     Tui
+    Sdl2
+    Cocoa
+    Win32
+    Headless
 
 class HostWmConfig:
     backend: HostBackendKind
@@ -378,8 +385,25 @@ fn host_wm_surface_failure_reason(cfg: HostWmConfig, event_loop_id: i64, window_
         return "host compositor surface must be nonzero"
     nil
 
-fn _host_backend_selector(kind: HostBackendKind) -> i32:
-    0
+fn _create_backend_for_kind(kind: HostBackendKind, w: i32, h: i32, title: text) -> CompositorBackend?:
+    if kind == HostBackendKind.Sdl2:
+        val sdl = HostedSdl2Backend.try_create(w, h, title)
+        if sdl != nil:
+            return sdl
+        return nil
+    if kind == HostBackendKind.Cocoa:
+        val cocoa = HostedCocoaBackend.try_create(0, w, h, 0xFF0F172Au32)
+        if cocoa != nil:
+            return cocoa
+        return nil
+    if kind == HostBackendKind.Win32:
+        val win32 = HostedWin32Backend.try_create(0, w, h, 0xFF0F172Au32)
+        if win32 != nil:
+            return win32
+        return nil
+    if kind == HostBackendKind.Tui:
+        return nil
+    HeadlessHostCompositorBackend.new(w, h)
 
 fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
     if cfg.backend == HostBackendKind.Tui:
@@ -389,10 +413,11 @@ fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
     val reason = host_wm_surface_failure_reason(cfg, event_loop_id, window_id)
     if reason != nil:
         return nil
-    val backend = HeadlessHostCompositorBackend.new(
-        cfg.initial_size.width.to_i32(),
-        cfg.initial_size.height.to_i32()
-    )
+    val w = cfg.initial_size.width.to_i32()
+    val h = cfg.initial_size.height.to_i32()
+    val backend = _create_backend_for_kind(cfg.backend, w, h, cfg.title)
+    if backend == nil:
+        return nil
     val comp = HostCompositor.new(backend, cfg.initial_size)
     HostWmHandle(
         compositor: comp,

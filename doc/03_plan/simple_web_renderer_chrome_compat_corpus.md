@@ -62,7 +62,10 @@ Acceptance:
 - `bin/simple run src/app/wm_compare/site_corpus_compat.spl -- --only=site_0_google --production-renderer --skip-simple-watchdog --simple-timeout-ms=60000`
   is the focused production-renderer contrast probe. It currently exits
   nonzero/divergent, while the same sample without `--production-renderer`
-  exits `0`/exact via the fixture-oracle path.
+  exits `0`/exact via the fixture-oracle path. Production mode writes
+  `simple.production.ppm` and `report.production.sdn` beside the normal
+  fixture artifacts so this probe cannot stale or overwrite the checked-in
+  fixture completion gate.
 - Future Chrome oracle work should use WPT reftest data, Playwright visual
   comparisons, pixelmatch-compatible PNG comparison, or CDP
   `Page.captureScreenshot` rather than live scraping. The current PPM analyzer
@@ -276,7 +279,9 @@ Measured blocker:
 - `src/app/wm_compare/site_corpus_compat.spl --production-renderer` bypasses
   corpus fixture/oracle fallbacks. Treat its current focused failure on
   `site_0_google` as the authoritative evidence that the fixture corpus PASS is
-  not yet production renderer Chrome compatibility.
+  not yet production renderer Chrome compatibility. Its output uses
+  production-specific artifact paths rather than the fixture `simple.ppm` and
+  `report.sdn` files consumed by the completion verifier.
 - `tools/electron-shell/summarize_famous_site_corpus_coverage.js --limit=5`
   ranks corpus samples by Chrome/Simple non-white text coverage deficit and
   dominant-background ink coverage deficit. The current worst overflow target

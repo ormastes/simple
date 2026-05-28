@@ -163,6 +163,14 @@ struct MirPassDescriptor:
     scope: PassScope
     cost_class: text
 
+struct MirPassBackendDecision:
+    pass_name: text
+    backend_name: text
+    max_cost_class: text
+    cost_class: text
+    applies: bool
+    reason: text
+
 fn mir_pipeline_provider(name: text, hot_path: bool) -> OptimizationRuleProvider:
     optimization_rule_provider_builtin_with_contract(
         "simple.opt.mir." + name,
@@ -498,6 +506,18 @@ fn mir_pass_applies_to_backend(pass_name: text, backend_name: text) -> bool:
 fn mir_pass_applies_to_backend_budget(pass_name: text, backend_name: text, max_cost_class: text) -> bool:
     mir_pass_applies_to_backend(pass_name, backend_name) and mir_pass_cost_allowed(mir_pass_cost_class(pass_name), max_cost_class)
 
+fn mir_pass_backend_decision(pass_name: text, backend_name: text, max_cost_class: text) -> MirPassBackendDecision:
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, "unknown", false, "unknown pass")
+    val desc = descriptor.unwrap()
+    val backend_applies = optimization_rule_provider_applies_to_backend_name(desc.provider, backend_name)
+    if not backend_applies:
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, desc.cost_class, false, desc.provider.backend_policy.reason)
+    if not mir_pass_cost_allowed(desc.cost_class, max_cost_class):
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, desc.cost_class, false, "cost budget exceeded")
+    MirPassBackendDecision(pass_name, backend_name, max_cost_class, desc.cost_class, true, "ready")
+
 fn optimizationpipeline_for_backend(level: OptLevel, backend_name: text) -> OptimizationPipeline:
     var pipeline = optimizationpipeline_for_level(level)
     var filtered: [text] = []
@@ -521,6 +541,20 @@ fn optimizationpipeline_for_backend_budget(level: OptLevel, backend_name: text, 
 
 fn optimizationpipeline_passes_for_backend_budget(level: OptLevel, backend_name: text, max_cost_class: text) -> [text]:
     optimizationpipeline_for_backend_budget(level, backend_name, max_cost_class).passes
+
+fn optimizationpipeline_decisions_for_backend_budget(level: OptLevel, backend_name: text, max_cost_class: text) -> [MirPassBackendDecision]:
+    var decisions: [MirPassBackendDecision] = []
+    val pipeline = optimizationpipeline_for_level(level)
+    for pass_name in pipeline.passes:
+        decisions = decisions.push(mir_pass_backend_decision(pass_name, backend_name, max_cost_class))
+    decisions
+
+fn optimizationpipeline_skipped_decisions_for_backend_budget(level: OptLevel, backend_name: text, max_cost_class: text) -> [MirPassBackendDecision]:
+    var skipped: [MirPassBackendDecision] = []
+    for decision in optimizationpipeline_decisions_for_backend_budget(level, backend_name, max_cost_class):
+        if not decision.applies:
+            skipped = skipped.push(decision)
+    skipped
 
 fn optimizationpipeline_inventory_lines() -> [text]:
     var lines: [text] = []
@@ -808,7 +842,7 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
 # ============================================================================
 
 export PassKind, PassScope
-export MirPass, MirPassDescriptor
+export MirPass, MirPassDescriptor, MirPassBackendDecision
 export TargetOptContext, target_opt_context_default
 export OptLevel, optlevel_name
 export PassManager, passmanager_new, passmanager_run_on_module
@@ -816,7 +850,8 @@ export PassStatistics, passstatistics_new
 export OptimizationPipeline, optimizationpipeline_for_level, optimizationpipeline_passes_for_level, optimizationpipeline_inventory_lines
 export optimizationpipeline_for_backend, optimizationpipeline_passes_for_backend, mir_pass_applies_to_backend
 export optimizationpipeline_for_backend_budget, optimizationpipeline_passes_for_backend_budget
-export mir_pass_cost_allowed, mir_pass_cost_class, mir_pass_applies_to_backend_budget
+export optimizationpipeline_decisions_for_backend_budget, optimizationpipeline_skipped_decisions_for_backend_budget
+export mir_pass_cost_allowed, mir_pass_cost_class, mir_pass_applies_to_backend_budget, mir_pass_backend_decision
 export optimize_module, optimize_module_for_backend, optimize_module_for_backend_budget, optimize_module_with_caps, optimize_module_with_context
 export optimize_function
 export mir_pipeline_provider, mir_pass_descriptor, mir_pass_descriptor_with_cost, mir_pass_descriptor_registry, mir_pass_descriptor_for_name

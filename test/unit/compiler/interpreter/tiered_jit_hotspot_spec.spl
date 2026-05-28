@@ -170,6 +170,11 @@ describe "Tiered JIT hotspot facts":
         expect(plan.passes.contains("loop_unroll")).to_equal(true)
         expect(plan.passes.contains("inline_aggressive")).to_equal(false)
         expect(plan.passes.contains("auto_vectorize")).to_equal(false)
+        var found_cost_skip = false
+        for decision in plan.skipped_passes:
+            if decision.pass_name == "inline_aggressive" and decision.reason == "cost budget exceeded":
+                found_cost_skip = true
+        expect(found_cost_skip).to_equal(true)
 
     it "builds LLVM hotspot optimization plans without Simple passes LLVM already owns":
         val plan = jit_hotspot_optimization_plan(hot_profile(256), hotspot_config(), true, true, "high")
@@ -182,12 +187,18 @@ describe "Tiered JIT hotspot facts":
         expect(plan.passes.contains("strength_reduction")).to_equal(false)
         expect(plan.passes.contains("loop_unroll")).to_equal(false)
         expect(plan.passes.contains("predicate_promote")).to_equal(false)
+        var found_llvm_skip = false
+        for decision in plan.skipped_passes:
+            if decision.pass_name == "auto_vectorize" and decision.reason == "llvm_runs_vectorizer_pipeline":
+                found_llvm_skip = true
+        expect(found_llvm_skip).to_equal(true)
 
     it "does not create optimization passes for ineligible hotspot rebuilds":
         val plan = jit_hotspot_optimization_plan(hot_profile(2), hotspot_config(), true, true, "high")
         expect(plan.eligible).to_equal(false)
         expect(plan.reason).to_equal("missing tier1 hot_count")
         expect(plan.passes.len()).to_equal(0)
+        expect(plan.skipped_passes.len()).to_equal(0)
 
     it "rejects rebuilds when no backend can satisfy heat and cost policy":
         val cold = jit_hotspot_rebuild_choice(hot_profile(2), hotspot_config(), true, true, "high")

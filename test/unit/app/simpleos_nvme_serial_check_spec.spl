@@ -353,12 +353,16 @@ describe "SimpleOS physical NVMe serial checker app":
     it "rejects duplicate critical NVMe perf fields in a single report":
         val qemu_path = "/tmp/simpleos_nvme_duplicate_qemu_field.log"
         val vfat_path = "/tmp/simpleos_nvme_duplicate_vfat_field.log"
+        val user_nsid_path = "/tmp/simpleos_nvme_duplicate_user_nsid_field.log"
         val qemu_report = "/tmp/simpleos_nvme_duplicate_qemu_field.sdn"
         val vfat_report = "/tmp/simpleos_nvme_duplicate_vfat_field.sdn"
+        val user_nsid_report = "/tmp/simpleos_nvme_duplicate_user_nsid_field.sdn"
         val _ = rt_file_delete(qemu_path)
         val _ = rt_file_delete(vfat_path)
+        val _user_nsid_cleanup = rt_file_delete(user_nsid_path)
         val _ = rt_file_delete(qemu_report)
         val _ = rt_file_delete(vfat_report)
+        val _user_nsid_report_cleanup = rt_file_delete(user_nsid_report)
         val ready_perf = _physical_nvme_perf_marker("real-nvme", "false", "real-device")
         val qemu_spoof_log = _physical_nvme_access_marker() +
             ready_perf.replace("\n", " qemu=true\n") +
@@ -366,13 +370,19 @@ describe "SimpleOS physical NVMe serial checker app":
         val vfat_spoof_log = _physical_nvme_access_marker() +
             ready_perf.replace("\n", " vfat_baseline_device=host-cache\n") +
             "TEST PASSED\n"
+        val user_nsid_spoof_log = _physical_nvme_access_marker().replace("\n", " user_namespace_nsid=1\n") +
+            ready_perf +
+            "TEST PASSED\n"
         expect(rt_file_write_text(qemu_path, qemu_spoof_log)).to_equal(true)
         expect(rt_file_write_text(vfat_path, vfat_spoof_log)).to_equal(true)
+        expect(rt_file_write_text(user_nsid_path, user_nsid_spoof_log)).to_equal(true)
 
         val (qemu_stdout, _qemu_stderr, qemu_code) = _run_checker_with_report(qemu_path, qemu_report)
         val (vfat_stdout, _vfat_stderr, vfat_code) = _run_checker_with_report(vfat_path, vfat_report)
+        val (user_nsid_stdout, _user_nsid_stderr, user_nsid_code) = _run_checker_with_report(user_nsid_path, user_nsid_report)
         val qemu_report_text = rt_file_read_text(qemu_report) ?? ""
         val vfat_report_text = rt_file_read_text(vfat_report) ?? ""
+        val user_nsid_report_text = rt_file_read_text(user_nsid_report) ?? ""
 
         expect(qemu_code).to_equal(1)
         expect(qemu_stdout).to_contain("duplicate-nvme-perf-field:qemu=")
@@ -382,6 +392,10 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(vfat_stdout).to_contain("duplicate-nvme-perf-field:vfat_baseline_device=")
         expect(vfat_report_text).to_contain("accepted: false")
         expect(vfat_report_text).to_contain("acceptance_reason: nvme-real-hardware-perf:duplicate-nvme-perf-field:vfat_baseline_device=")
+        expect(user_nsid_code).to_equal(1)
+        expect(user_nsid_stdout).to_contain("duplicate-nvme-perf-field:user_namespace_nsid=")
+        expect(user_nsid_report_text).to_contain("accepted: false")
+        expect(user_nsid_report_text).to_contain("acceptance_reason: nvme-real-hardware-perf:duplicate-nvme-perf-field:user_namespace_nsid=")
 
     it "rejects production perf evidence without same-device VFAT baseline markers":
         val missing_path = "/tmp/simpleos_nvme_missing_vfat_baseline.log"
@@ -479,6 +493,7 @@ describe "SimpleOS physical NVMe serial checker app":
         val user_model_report = "/tmp/simpleos_nvme_identity_compare_user_model.sdn"
         val user_serial_report = "/tmp/simpleos_nvme_identity_compare_user_serial.sdn"
         val prefix_report = "/tmp/simpleos_nvme_identity_compare_prefix.sdn"
+        val duplicate_preflight_report = "/tmp/simpleos_nvme_identity_compare_duplicate_preflight.sdn"
         val match_report = "/tmp/simpleos_nvme_identity_compare_match.sdn"
         val multi_report = "/tmp/simpleos_nvme_identity_compare_multi.sdn"
         val _ = rt_file_delete(ready_path)
@@ -497,6 +512,7 @@ describe "SimpleOS physical NVMe serial checker app":
         val _ = rt_file_delete(user_model_report)
         val _ = rt_file_delete(user_serial_report)
         val _ = rt_file_delete(prefix_report)
+        val _duplicate_preflight_report_cleanup = rt_file_delete(duplicate_preflight_report)
         val _ = rt_file_delete(match_report)
         val _ = rt_file_delete(multi_report)
         val ready_log = _physical_nvme_access_marker() + _physical_nvme_perf_marker("real-nvme", "false", "real-device") + "TEST PASSED\n"
@@ -653,6 +669,24 @@ describe "SimpleOS physical NVMe serial checker app":
             "    user_namespace_nsid: 2\n" +
             "    user_namespace_same_controller: true\n" +
             "    same_physical_device: true\n"
+        val duplicate_preflight =
+            "physical_nvme_preflight:\n" +
+            "  accepted: true\n" +
+            "  nvme_device_glob: /dev/nvme9n1\n" +
+            "  checker: src/app/simpleos_nvme_serial_check/main.spl\n" +
+            "  device: /dev/nvme9n1\n" +
+            "    controller: nvme9\n" +
+            "    model: Samsung PM9A3\n" +
+            "    serial: SN123456\n" +
+            "    serial: DIFFERENT\n" +
+            "    namespace_nsid: 1\n" +
+            "    user_namespace_device: /dev/nvme9n2\n" +
+            "    user_namespace_controller: nvme9\n" +
+            "    user_namespace_model: Samsung PM9A3\n" +
+            "    user_namespace_serial: SN123456\n" +
+            "    user_namespace_nsid: 2\n" +
+            "    user_namespace_same_controller: true\n" +
+            "    same_physical_device: true\n"
         val matching_preflight =
             "physical_nvme_preflight:\n" +
             "  accepted: true\n" +
@@ -777,6 +811,13 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(user_serial_code).to_equal(1)
         expect(user_serial_text).to_contain("reason: physical-nvme-preflight-user-namespace-serial-mismatch")
         expect(user_serial_text).to_contain("preflight_identity_match: false")
+
+        expect(rt_file_write_text(preflight_report, duplicate_preflight)).to_equal(true)
+        val (_duplicate_preflight_stdout, _duplicate_preflight_stderr, duplicate_preflight_code) = _run_checker_with_preflight(ready_path, preflight_report, duplicate_preflight_report)
+        val duplicate_preflight_text = rt_file_read_text(duplicate_preflight_report) ?? ""
+        expect(duplicate_preflight_code).to_equal(1)
+        expect(duplicate_preflight_text).to_contain("reason: physical-nvme-preflight-duplicate-field:serial")
+        expect(duplicate_preflight_text).to_contain("preflight_identity_match: false")
 
         expect(rt_file_write_text(preflight_report, matching_preflight)).to_equal(true)
         val (_match_stdout, _match_stderr, match_code) = _run_checker_with_preflight(ready_path, preflight_report, match_report)

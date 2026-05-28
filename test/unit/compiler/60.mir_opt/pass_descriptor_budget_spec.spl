@@ -3,9 +3,11 @@ use compiler.mir_opt.mir_opt.mod.{
     OptLevel,
     mir_pass_cost_allowed,
     mir_pass_cost_class,
+    mir_pass_backend_decision,
     mir_pass_applies_to_backend_budget,
     optimizationpipeline_passes_for_backend,
-    optimizationpipeline_passes_for_backend_budget
+    optimizationpipeline_passes_for_backend_budget,
+    optimizationpipeline_skipped_decisions_for_backend_budget
 }
 
 describe "MIR built-in pass backend cost budget":
@@ -37,3 +39,32 @@ describe "MIR built-in pass backend cost budget":
         expect(medium.contains("inline_aggressive")).to_equal(false)
         expect(mir_pass_applies_to_backend_budget("strength_reduction", "llvm", "high")).to_equal(false)
         expect(mir_pass_applies_to_backend_budget("inline_aggressive", "cranelift", "medium")).to_equal(false)
+
+    it "explains backend and cost decisions for individual passes":
+        val llvm_skip = mir_pass_backend_decision("auto_vectorize", "llvm", "high")
+        expect(llvm_skip.applies).to_equal(false)
+        expect(llvm_skip.reason).to_equal("llvm_runs_vectorizer_pipeline")
+        expect(llvm_skip.cost_class).to_equal("high")
+
+        val cost_skip = mir_pass_backend_decision("inline_aggressive", "cranelift", "medium")
+        expect(cost_skip.applies).to_equal(false)
+        expect(cost_skip.reason).to_equal("cost budget exceeded")
+
+        val ready = mir_pass_backend_decision("dead_code_elimination", "cranelift", "medium")
+        expect(ready.applies).to_equal(true)
+        expect(ready.reason).to_equal("ready")
+
+    it "reports skipped pipeline decisions with stable reasons":
+        val cranelift_skips = optimizationpipeline_skipped_decisions_for_backend_budget(OptLevel.Aggressive, "cranelift", "medium")
+        var found_cost_skip = false
+        for decision in cranelift_skips:
+            if decision.pass_name == "inline_aggressive" and decision.reason == "cost budget exceeded":
+                found_cost_skip = true
+        expect(found_cost_skip).to_equal(true)
+
+        val llvm_skips = optimizationpipeline_skipped_decisions_for_backend_budget(OptLevel.Aggressive, "llvm-lib", "high")
+        var found_llvm_skip = false
+        for decision in llvm_skips:
+            if decision.pass_name == "auto_vectorize" and decision.reason == "llvm_runs_vectorizer_pipeline":
+                found_llvm_skip = true
+        expect(found_llvm_skip).to_equal(true)

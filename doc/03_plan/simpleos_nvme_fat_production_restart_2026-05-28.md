@@ -41,6 +41,14 @@
   critical `nvme_perf` fields in a single report, so contradictory same-line
   markers such as `qemu=false ... qemu=true` or duplicate VFAT baseline device
   claims cannot be accepted by first-value parsing.
+- 2026-05-28 contract spoof-resistance follow-up: the lower-level NVMe
+  performance contract now rejects duplicate same-line evidence fields before
+  any first-value parsing, and the app checker also rejects duplicate
+  user-namespace evidence fields such as `user_namespace_nsid=`.
+- 2026-05-28 preflight spoof-resistance follow-up: supplied host preflight
+  reports now reject duplicate identity fields such as `serial:` before
+  comparing serial evidence, so contradictory preflight reports cannot pass by
+  first-value parsing.
 
 ## Known Remaining Work
 
@@ -114,9 +122,15 @@ bin/simple test test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl --
 bin/simple test test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl --mode=interpreter --clean
   PASSED: 14 examples, 0 failures
 bin/simple test test/unit/app/simpleos_nvme_serial_check_spec.spl --mode=interpreter --clean
-  PASSED: 26 examples, 0 failures
+  PASSED: 26 examples, 0 failures; includes duplicate critical-field rejection
+  for `qemu=`, `vfat_baseline_device=`, user-namespace evidence fields, and
+  supplied preflight identity fields such as `serial:`
 bin/simple check src/os/drivers/nvme/nvme_performance_contract.spl test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl
   PASSED: exit code 0
+bin/simple test test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl --mode=interpreter --clean
+  PASSED: 14 examples, 0 failures; lower-level production and real-hardware
+  perf parsers reject duplicate same-line fields such as `qemu=` and
+  `vfat_baseline_device=` instead of accepting first-value spoofing
 bin/simple test test/unit/os/drivers/real_device_readiness_spec.spl --mode=interpreter --clean
   PASSED: 8 examples, 0 failures
 SIMPLE_EXECUTION_MODE=interpret SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log bin/simple run src/app/simpleos_nvme_serial_check/main.spl
