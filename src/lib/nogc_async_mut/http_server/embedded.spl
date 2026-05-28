@@ -35,6 +35,7 @@ use std.nogc_sync_mut.io.tcp.{
     tcp_backend_set_nonblocking,
     tcp_backend_set_nodelay
 }
+use std.common.compress.{gzip_compress, brotli_compress}
 
 # ============================================================================
 # Request Struct
@@ -115,6 +116,18 @@ fn embedded_response(status: i64, body: text) -> text:
     val reason = _status_reason(status)
     val length = body.len()
     "HTTP/1.1 {status} {reason}\r\nContent-Length: {length}\r\nServer: SimpleEmbedded\r\nConnection: close\r\n\r\n{body}"
+
+fn embedded_negotiate_encoding(headers: [(text, text)]) -> text:
+    """Extract best encoding from Accept-Encoding header."""
+    for pair in headers:
+        val name = pair.0
+        if name.lower() == "accept-encoding":
+            val value = pair.1
+            if value.contains("br"):
+                return "br"
+            if value.contains("gzip"):
+                return "gzip"
+    ""
 
 fn _status_reason(status: i64) -> text:
     """Map common status codes to reason phrases."""
@@ -252,6 +265,25 @@ class EmbeddedHttpServer:
         for route in self.routes:
             if route.method == request.method and route.path == request.path:
                 val body = route.handler(request)
+                val encoding = embedded_negotiate_encoding(request.headers)
+                if encoding == "br" and body.len() > 256:
+                    val compressed = brotli_compress(body)
+                    match compressed:
+                        Ok(data):
+                            val reason = _status_reason(200)
+                            val length = data.len()
+                            return "HTTP/1.1 200 {reason}\r\nContent-Length: {length}\r\nContent-Encoding: br\r\nServer: SimpleEmbedded\r\nConnection: close\r\n\r\n{data}"
+                        Err(e):
+                            return embedded_response(200, body)
+                elif encoding == "gzip" and body.len() > 256:
+                    val compressed = gzip_compress(body)
+                    match compressed:
+                        Ok(data):
+                            val reason = _status_reason(200)
+                            val length = data.len()
+                            return "HTTP/1.1 200 {reason}\r\nContent-Length: {length}\r\nContent-Encoding: gzip\r\nServer: SimpleEmbedded\r\nConnection: close\r\n\r\n{data}"
+                        Err(e):
+                            return embedded_response(200, body)
                 return embedded_response(200, body)
 
         # Check if path exists but method doesn't match
