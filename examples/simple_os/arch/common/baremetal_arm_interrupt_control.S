@@ -1,5 +1,3 @@
-.section .text
-.align 2
 .macro AIC d,e,w
 .global \d
 \d:

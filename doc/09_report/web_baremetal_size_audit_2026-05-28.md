@@ -85,10 +85,10 @@ Date: 2026-05-28
 | x86_64 interrupt-control object file / dec section | 1536 / 64 |
 | x86_64 interrupt-control source | 440 |
 | ARM64 interrupt-control object file / dec section | 768 / 64 |
-| ARM64 interrupt-control source | 360 |
+| ARM64 interrupt-control source | 312 |
 | ARM32 interrupt-control object file / dec section | 768 / 64 |
-| ARM32 interrupt-control source | 360 |
-| Shared ARM interrupt-control source | 160 |
+| ARM32 interrupt-control source | 316 |
+| Shared ARM interrupt-control source | 104 |
 | RV64 interrupt-control object file / dec section | 768 / 64 |
 | RV64 interrupt-control source | 220 |
 | RV32 interrupt-control object file / dec section | 768 / 64 |
@@ -140,9 +140,9 @@ Date: 2026-05-28
 | `examples/simple_os/arch/common/baremetal_bump_heap.h` | 1 | 26 | 704 |
 | `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 43 | 1513 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 6 | 411 |
-| `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 14 | 313 |
-| `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 16 | 318 |
-| `examples/simple_os/arch/common/baremetal_arm_interrupt_control.S` | 1 | 16 | 122 |
+| `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 6 | 305 |
+| `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 8 | 310 |
+| `examples/simple_os/arch/common/baremetal_arm_interrupt_control.S` | 1 | 14 | 98 |
 | `examples/simple_os/arch/riscv64/boot/baremetal_interrupt_control.S` | 1 | 4 | 186 |
 | `examples/simple_os/arch/riscv32/boot/baremetal_interrupt_control.S` | 1 | 4 | 186 |
 | `examples/simple_os/arch/common/baremetal_riscv_interrupt_control.S` | 1 | 20 | 205 |
