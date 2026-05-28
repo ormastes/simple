@@ -108,7 +108,7 @@ class IoDriver:
             _fh_ids: [], _fh_data: [],
             _bytes_pending: {},
             _recv_bytes: {},
-            _ev_fd: rt_event_loop_create(),
+            _ev_fd: -2,
             _ev_registered: {}
         )
 
@@ -168,6 +168,8 @@ class IoDriver:
     # local copies. All keep-pending logic is now inlined at each call site.
 
     me _ev_register_read(fd: i64):
+        if self._ev_fd == -2:
+            self._ev_fd = rt_event_loop_create()
         if self._ev_fd < 0:
             return
         if self._ev_registered.get(fd).?:
@@ -306,11 +308,13 @@ class IoDriver:
 
         var ready: Dict<i64, bool> = {}
         var has_ev = self._ev_fd >= 0
+        var ev_has_results = false
         if has_ev:
             val raw_ev = rt_event_loop_poll(self._ev_fd, 64, 0)
             var ri = 0
             while ri + 2 < raw_ev.len():
                 ready[raw_ev[ri]] = true
+                ev_has_results = true
                 ri = ri + 3
 
         var np_id: [i64] = []
@@ -368,7 +372,7 @@ class IoDriver:
                 continue
 
             elif ot == _OP_RECV:
-                if (not has_ev) or ready.get(fd).?:
+                if (not ev_has_results) or ready.get(fd).?:
                     val bytes = rt_io_tcp_read(fd, self._p_size[i])
                     if bytes.len() > 0:
                         val txt = rt_bytes_to_text(bytes)
@@ -434,7 +438,7 @@ class IoDriver:
                 continue
 
             elif ot == _OP_UDP_RECV:
-                if (not has_ev) or ready.get(fd).?:
+                if (not ev_has_results) or ready.get(fd).?:
                     val udp_result = rt_io_udp_recv_from(fd, self._p_size[i])
                     if udp_result != nil:
                         val udp_data = udp_result.0
