@@ -11,7 +11,7 @@ Date: 2026-05-28
 | Simple web static facade | n/a | ok | 14352 | 4696 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
 | Simple web placeholder URL facade | n/a | ok | 14336 | 3883 | `build/web_baremetal_size_audit/simple_web_placeholder_native.log` |
 | Simple web file facade | n/a | ok | 14344 | 6313 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
-| Bare-metal pure policy probe | ok | ok | 14336 | 6199 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
+| Bare-metal pure policy probe | ok | ok | 14336 | 6559 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
 | x86_64 minimal boot/stdout capsule | n/a | ok | 2840 | 409 | `build/web_baremetal_size_audit/baremetal_boot_stdout.build.log` |
@@ -27,7 +27,7 @@ Date: 2026-05-28
 | Simple web static facade native file / dec section | 19000 / 7500 |
 | Simple web placeholder URL facade native file / dec section | 16000 / 5500 |
 | Simple web file facade native file / dec section | 15000 / 6500 |
-| Bare-metal pure policy probe native file / dec section | 15000 / 6500 |
+| Bare-metal pure policy probe native file / dec section | 15000 / 6800 |
 | Bare-metal pure policy probe source | 1300 |
 | RV32 semihost stdout ELF file / dec section | 70000 / 9000 |
 | RV32 semihost trap object file / dec section | 768 / 64 |
@@ -39,6 +39,7 @@ Date: 2026-05-28
 | x86_64 startup handoff object file / dec section | 2048 / 128 |
 | x86_64 startup handoff source | 1024 |
 | Pure Simple console policy source | 2500 |
+| Pure Simple stdout plan source | 2500 |
 | Pure Simple interrupt policy source | 5000 |
 | Pure Simple startup policy source | 3000 |
 | Pure Simple semihost policy source | 1500 |
@@ -53,8 +54,9 @@ Date: 2026-05-28
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 35 | 685 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv32/semihost_trap.S` | 1 | 30 | 867 |
-| `examples/09_embedded/baremetal/baremetal/pure_policy_probe.spl` | 1 | 31 | 1099 |
+| `examples/09_embedded/baremetal/baremetal/pure_policy_probe.spl` | 1 | 29 | 1018 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/console_policy.spl` | 1 | 56 | 1870 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/stdout_plan.spl` | 1 | 62 | 1905 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/interrupt_policy.spl` | 1 | 72 | 3315 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/startup_policy.spl` | 1 | 15 | 458 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_policy.spl` | 1 | 19 | 658 |
@@ -103,6 +105,7 @@ Date: 2026-05-28
 - `riscv32/semihost_trap.S` is the RV32 platform capsule baseline for the semihost magic sequence only; stdout operation policy stays in pure Simple.
 - `baremetal/console_policy.spl` is the pure-Simple policy surface for shared semihost/UART stdout selection.
 - `baremetal/semihost_policy.spl` is the pure-Simple policy surface for stdout semihost op selection before importing trap/transport code.
+- `baremetal/stdout_plan.spl` combines console and semihost stdout policy before importing syscall, semihost transport, or UART implementations.
 - `baremetal/interrupt_policy.spl` is the pure-Simple policy surface for interrupt controller selection and vector classification.
 - `baremetal/startup_policy.spl` is the pure-Simple policy surface for stack and hart startup defaults before importing architecture startup capsules.
 - `pure_policy_probe.spl` proves examples can import only pure policies without retaining transport or controller implementations.
