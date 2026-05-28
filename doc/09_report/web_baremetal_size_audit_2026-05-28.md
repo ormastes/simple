@@ -112,6 +112,8 @@ Date: 2026-05-28
 | Pure Simple semihost stdout policy source | 900 |
 | Bare-metal aggregate policy facade source | 512 |
 | Bare-metal root facade source | 3587 |
+| Bare-metal allocator source | 17450 |
+| Bare-metal interrupt implementation source | 15050 |
 | Semihost transport source | 11500 |
 | Bare-metal syscall source | 8100 |
 | Bare-metal system API source | 4300 |
@@ -163,6 +165,8 @@ Date: 2026-05-28
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_stdout_policy.spl` | 1 | 23 | 739 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/policy.spl` | 1 | 4 | 463 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/__init__.spl` | 1 | 14 | 3587 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/allocator.spl` | 1 | 561 | 17402 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/interrupt.spl` | 1 | 510 | 15013 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl` | 1 | 387 | 11239 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl` | 1 | 275 | 7832 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/system_api.spl` | 1 | 169 | 4139 |
