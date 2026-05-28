@@ -14,19 +14,9 @@ DOM mutations across the subprocess boundary are not supported in this iteration
 """
 
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use std.gc_async_mut.gpu.browser_engine.browser_script_execute.{execute_scripts_in_html}
 
-# ============================================================================
-# Externs
-# ============================================================================
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
 extern fn rt_bytes_alloc(n: i64) -> [u8]
-
-# ============================================================================
-# TreeBuilderResult — collected scripts from an HTML document
-# ============================================================================
 
 class TreeBuilderResult:
     """Scripts and src references extracted from an HTML document."""
@@ -138,76 +128,6 @@ impl BeScriptRenderResult:
         )
 
 # ============================================================================
-# Script execution helpers
-# ============================================================================
-
-fn _normalize_script_body(body: text) -> text:
-    """Wrap a bare script body in fn main() and normalise JS-compat syntax.
-
-    - Wraps the body in `fn main():` so `bin/simple` has an entry point.
-    - Replaces `const ` with `val ` to handle JavaScript-style scripts.
-    """
-    val normalized = body.replace("const ", "val ")
-    var lines: [text] = []
-    lines.push("fn main():")
-    # Indent every line of the body by 4 spaces
-    var remaining = normalized
-    while remaining.len() > 0:
-        val nl = remaining.index_of("\n")
-        if nl < 0:
-            val line = remaining.trim()
-            if line.len() > 0:
-                lines.push("    " + line)
-            remaining = ""
-        else:
-            val line = remaining.substring(0, nl).trim()
-            if line.len() > 0:
-                lines.push("    " + line)
-            remaining = remaining.substring(nl + 1, remaining.len())
-    var result = ""
-    var li: i64 = 0
-    while li < lines.len():
-        if li == 0:
-            result = lines[li]
-        else:
-            result = result + "\n" + lines[li]
-        li = li + 1
-    result
-
-fn _run_script_source(source: text) -> (bool, text):
-    """Write source to a temp file wrapped in fn main() and run via bin/simple.
-
-    Returns (success, stdout) where stdout is the captured console output.
-    """
-    val wrapped = _normalize_script_body(source)
-    val tmp = "/tmp/browser_script_exec_tmp.spl"
-    rt_file_write_text(tmp, wrapped)
-    var out = ""
-    var err = ""
-    var rc: i64 = 0
-    (out, err, rc) = rt_process_run("bin/simple", [tmp])
-    rt_file_delete(tmp)
-    val ok = rc == 0
-    (ok, out)
-
-fn _split_lines(s: text) -> [text]:
-    """Split a string on newline into a list of non-empty lines."""
-    var lines: [text] = []
-    var remaining = s
-    while remaining.len() > 0:
-        val nl = remaining.index_of("\n")
-        if nl < 0:
-            val trimmed = remaining.trim()
-            if trimmed.len() > 0:
-                lines.push(trimmed)
-            return lines
-        val line = remaining.substring(0, nl).trim()
-        if line.len() > 0:
-            lines.push(line)
-        remaining = remaining.substring(nl + 1, remaining.len())
-    lines
-
-# ============================================================================
 # render_html_to_pixels_with_scripts
 # ============================================================================
 
@@ -223,25 +143,7 @@ fn render_html_to_pixels_with_scripts(html: text, width: i32, height: i32) -> Be
     val render = renderer.render_html(html)
 
     val parsed = browser_renderer_parse_html_with_scripts(html)
-    val n_collected = parsed.scripts.len()
-
-    var co: [text] = []
-    var executed: i64 = 0
-
-    var idx: i64 = 0
-    while idx < parsed.scripts.len():
-        val body = parsed.scripts[idx]
-        var run_ok = false
-        var run_stdout = ""
-        (run_ok, run_stdout) = _run_script_source(body)
-        if run_ok:
-            executed = executed + 1
-        val output_lines = _split_lines(run_stdout)
-        var li: i64 = 0
-        while li < output_lines.len():
-            co.push(output_lines[li])
-            li = li + 1
-        idx = idx + 1
+    val execution = execute_scripts_in_html(html)
 
     BeScriptRenderResult(
         pixels: render.pixels,
@@ -250,7 +152,7 @@ fn render_html_to_pixels_with_scripts(html: text, width: i32, height: i32) -> Be
         title: render.title,
         ok: render.ok,
         error: render.error,
-        scripts_collected: n_collected,
-        scripts_executed: executed,
-        console_output: co
+        scripts_collected: parsed.scripts.len(),
+        scripts_executed: execution.scripts_executed,
+        console_output: execution.console_output
     )
