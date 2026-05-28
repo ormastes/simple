@@ -1311,6 +1311,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
         interpreter_native_net::rt_io_tcp_write_interp as ExternFn,
     );
     m.insert(
+        "rt_io_tcp_write_bytes",
+        interpreter_native_net::rt_io_tcp_write_interp as ExternFn,
+    );
+    m.insert(
         "rt_io_tcp_write_text",
         interpreter_native_net::rt_io_tcp_write_text_interp as ExternFn,
     );

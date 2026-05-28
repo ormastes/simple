@@ -210,6 +210,7 @@ const RT_KEEP: &[&str] = &[
     "rt_io_tcp_read_exact_len",
     "rt_io_tcp_read_line",
     "rt_io_tcp_write",
+    "rt_io_tcp_write_bytes",
     "rt_io_tcp_write_text",
     "rt_io_tcp_write_text_read_exact_len",
     "rt_io_tcp_flush",

@@ -44,10 +44,12 @@ val _OP_FSYNC: i64 = 11
 val _OP_UDP_RECV: i64 = 12
 val _OP_UDP_SEND: i64 = 13
 val _OP_UDP_BIND: i64 = 14
+val _OP_SEND_BYTES: i64 = 15
 
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_write_bytes(fd: i64, data: [u8]) -> i64
 extern fn rt_io_tcp_close(fd: i64) -> bool
 extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
 extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
@@ -85,6 +87,7 @@ class IoDriver:
     _next_fh: i64
     _fh_ids: [i64]
     _fh_data: [text]
+    _bytes_pending: Dict<i64, [u8]>
 
     static fn new() -> IoDriver:
         IoDriver(
@@ -93,7 +96,8 @@ class IoDriver:
             _p_path: [], _p_time: [],
             _c_id: [], _c_result: [], _c_flags: [], _c_data: [],
             _next_id: 1, _next_fh: 10000,
-            _fh_ids: [], _fh_data: []
+            _fh_ids: [], _fh_data: [],
+            _bytes_pending: {}
         )
 
     static fn with_depth(depth: i64) -> IoDriver:
@@ -164,6 +168,11 @@ class IoDriver:
 
     me submit_send(fd: i64, data: text) -> i64:
         self._push_op(_OP_SEND, fd, 0, data, 0, 0, data.len(), "", 0)
+
+    me submit_send_bytes(fd: i64, data: [u8]) -> i64:
+        val id = self._push_op(_OP_SEND_BYTES, fd, 0, "", 0, 0, data.len(), "", 0)
+        self._bytes_pending[id] = data
+        id
 
     me submit_sendfile(sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
         self._push_op(_OP_SENDFILE, sock_fd, file_fd, "", 0, offset, len, "", 0)
@@ -303,6 +312,16 @@ class IoDriver:
             elif ot == _OP_SEND:
                 val res = rt_io_tcp_write_text(fd, self._p_data[i])
                 self._complete(oid, res, 0, "")
+                i = i + 1
+                continue
+
+            elif ot == _OP_SEND_BYTES:
+                val bdata = self._bytes_pending.get(oid)
+                var bres: i64 = 0
+                if bdata.?:
+                    bres = rt_io_tcp_write_bytes(fd, bdata)
+                    self._bytes_pending.remove(oid)
+                self._complete(oid, bres, 0, "")
                 i = i + 1
                 continue
 
@@ -534,3 +553,4 @@ class IoDriver:
         self._c_data = []
         self._fh_ids = []
         self._fh_data = []
+        self._bytes_pending = {}

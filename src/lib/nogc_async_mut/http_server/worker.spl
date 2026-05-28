@@ -72,8 +72,6 @@ use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.http_server.protocol_handler.{ProtocolKind, protocol_from_alpn, protocol_handler_label}
 use std.http_server.h2_connection.{H2Connection}
 use std.http_server.compression.{compress_response}
-use std.crypto.types.{rt_bytes_to_text}
-
 fn _http_time_now_ms() -> i64:
     current_time_ms()
 
@@ -580,18 +578,28 @@ class Worker:
 
         var c = conn
         val keepalive_s = self.config.keepalive_timeout_ms / 1000
-        c.set_response(response, keepalive_s)
-        self.connections[fd] = c
-
-        val bytes = c.get_response_bytes()
 
         if worker_static_file_route(self.net_capabilities, response) == "sendfile":
-            # Send headers first, then chain sendfile on completion
+            # Send headers first (text path), then chain sendfile on completion
+            c.set_response(response, keepalive_s)
+            self.connections[fd] = c
+            val bytes = c.get_response_bytes()
             self.sendfile_pending[fd] = (response.body_file, response.body_offset, response.body_length)
             val op = self.driver.submit_send(fd, bytes)
             self.op_to_fd[op] = fd
             self.op_type[op] = OP_SEND
+        elif response.body_bytes.len() > 0:
+            # Compressed or binary body — use bytes path to avoid text corruption
+            c.set_response_bytes(response, keepalive_s)
+            self.connections[fd] = c
+            val buf = c.get_response_bytes_buf()
+            val op = self.driver.submit_send_bytes(fd, buf)
+            self.op_to_fd[op] = fd
+            self.op_type[op] = OP_SEND
         else:
+            c.set_response(response, keepalive_s)
+            self.connections[fd] = c
+            val bytes = c.get_response_bytes()
             val op = self.driver.submit_send(fd, bytes)
             self.op_to_fd[op] = fd
             self.op_type[op] = OP_SEND
@@ -654,14 +662,9 @@ class Worker:
         var h2conn = H2Connection.new(fd, peer, now)
 
         # Send server preface (SETTINGS frame queued by H2Connection.new)
-        # FIXME(submit_send_bytes): rt_bytes_to_text uses from_utf8_lossy
-        # which corrupts H2 binary frames containing bytes >= 0x80 that are
-        # not valid UTF-8 sequences. Wire-level H2 requires a future
-        # submit_send_bytes on IoDriver to send raw [u8] without text conversion.
         val initial_bytes = h2conn.take_pending_writes()
         if initial_bytes.len() > 0:
-            val send_data = rt_bytes_to_text(initial_bytes)
-            val send_op = self.driver.submit_send(fd, send_data)
+            val send_op = self.driver.submit_send_bytes(fd, initial_bytes)
             self.op_to_fd[send_op] = fd
             self.op_type[send_op] = OP_SEND
 
@@ -674,11 +677,7 @@ class Worker:
         self.op_type[recv_op] = OP_RECV
 
     me handle_h2_recv(fd: i64, data: text, now: i64):
-        """Feed received data to an H2 connection and flush outbound frames.
-
-        FIXME(submit_send_bytes): Outbound bytes pass through rt_bytes_to_text
-        which corrupts non-UTF-8 byte sequences. See handle_h2_accept FIXME.
-        """
+        """Feed received data to an H2 connection and flush outbound frames."""
         val h2conn = self.h2_connections.get(fd)
         if not h2conn.?:
             return
@@ -706,8 +705,7 @@ class Worker:
         self.h2_connections[fd] = conn
 
         if out_bytes.len() > 0:
-            val send_data = rt_bytes_to_text(out_bytes)
-            val send_op = self.driver.submit_send(fd, send_data)
+            val send_op = self.driver.submit_send_bytes(fd, out_bytes)
             self.op_to_fd[send_op] = fd
             self.op_type[send_op] = OP_SEND
 
