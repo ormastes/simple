@@ -392,23 +392,28 @@ fn vfs_boot_nvme_release_active_lease(lease: NvmeFilesystemLease) -> text:
         return "nvme-fs-active-lease-not-found"
 
     var adapter_idx: i32 = 0
+    var removed_direct_adapter = false
     for adapter_lease in g_vfs_nvme_direct_adapter_leases:
         if not nvme_filesystem_lease_same_identity(adapter_lease, lease):
             remaining_adapter_leases = remaining_adapter_leases.push(adapter_lease)
             if adapter_idx < g_vfs_nvme_direct_adapters.len():
                 remaining_adapters = remaining_adapters.push(g_vfs_nvme_direct_adapters[adapter_idx])
+        else:
+            removed_direct_adapter = true
         adapter_idx = adapter_idx + 1
 
     g_vfs_nvme_active_leases = remaining
     g_vfs_nvme_direct_adapter_leases = remaining_adapter_leases
     g_vfs_nvme_direct_adapters = remaining_adapters
-    if lease.mode == NvmeNamespaceMode.UserAssigned:
-        val _released_queue_owner = g_nvme.release_user_data_queue_owner(
+    if lease.mode == NvmeNamespaceMode.UserAssigned and removed_direct_adapter:
+        val released_queue_owner = g_nvme.release_user_data_queue_owner(
             lease.queue.queue_id,
             lease.namespace.controller_id,
             lease.namespace.nsid,
             lease.queue.owner_task
         )
+        if not released_queue_owner:
+            return "nvme-fs-user-queue-owner-release-failed"
     "ready"
 
 fn vfs_boot_nvme_submit_active_lease_direct_4k(lease: NvmeFilesystemLease, req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
