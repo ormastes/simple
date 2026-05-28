@@ -8,6 +8,7 @@ same bounded namespace window used by FAT32, NVFS, and DBFS.
 
 use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file}
+use std.fs_driver.error.{FsError}
 use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
 use os.drivers.nvme.nvme_driver.{NvmeDriver}
 use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmeQueueAssignment, nvme_filesystem_lease}
@@ -83,6 +84,21 @@ describe "NVMe VFS block adapter lease helpers":
         expect(adapter.sector_io_absolute_lba_for_test(3u64).unwrap()).to_equal(131u64)
         expect(adapter.sector_io_absolute_lba_for_test(4u64).unwrap_err()).to_equal("NvmeBlockAdapter: lba beyond filesystem lease")
 
+    it "rejects single and batched 4K DirectIo that would cross the filesystem lease":
+        val adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
+            NvmeDriver.new(),
+            7u32,
+            SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+            128u64,
+            8u64,
+            512u32,
+            "fat32"
+        )
+
+        expect(adapter.direct_4k_relative_lba_for_test(0i64).unwrap()).to_equal(0u64)
+        expect(adapter.direct_4k_relative_lba_for_test(512i64).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(adapter.direct_4k_relative_lba_for_test(4096i64).unwrap_err()).to_equal(FsError.InvalidArg)
+
     it "routes lease-backed I/O through namespace-aware driver methods":
         val source = read_file("src/os/services/vfs/vfs_block_adapters.spl")
         expect(source.contains("lease_nsid: lease.namespace.nsid")).to_equal(true)
@@ -113,9 +129,9 @@ describe "NVMe VFS block adapter lease helpers":
         expect(source.contains("bounce_allowed: false")).to_equal(true)
         expect(source.contains("me submit_direct_4k_shared_dma(req: DirectIoRequest) -> Result<DirectIoResult, FsError>")).to_equal(true)
         expect(source.contains("val valid = ext.validate_shared_buffer(req.file_offset, req.buffer)")).to_equal(true)
-        expect(source.contains("val relative_lba = (req.file_offset as u64) / self.lease_sector_size.to_u64()")).to_equal(true)
-        expect(source.contains("self.read_4k_shared_dma(relative_lba, req.buffer)")).to_equal(true)
-        expect(source.contains("self.write_4k_shared_dma(relative_lba, req.buffer)")).to_equal(true)
+        expect(source.contains("val relative_lba = self.direct_4k_relative_lba(req.file_offset)")).to_equal(true)
+        expect(source.contains("self.read_4k_shared_dma(relative_lba.unwrap(), req.buffer)")).to_equal(true)
+        expect(source.contains("self.write_4k_shared_dma(relative_lba.unwrap(), req.buffer)")).to_equal(true)
         expect(source.contains("buffered_copy_bytes: 0u64")).to_equal(true)
         expect(source.contains("direct_dma_copy_bytes: 0u64")).to_equal(true)
 
@@ -126,6 +142,7 @@ describe "NVMe VFS block adapter lease helpers":
         expect(source.contains("backend_tag: \"simpleos-nvme-lease-shared-dma-4k-batch\"")).to_equal(true)
         expect(source.contains("me submit_direct_4k_shared_dma_batch(req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>")).to_equal(true)
         expect(source.contains("direct_io_validate_batch(ext, req, 4096u64)")).to_equal(true)
+        expect(source.contains("val relative_lba = self.direct_4k_relative_lba(offset)")).to_equal(true)
         expect(source.contains("bytes: expected_bytes.unwrap()")).to_equal(true)
         expect(source.contains("self.read_4k_shared_dma_batch(relative_lbas, req.buffer)")).to_equal(true)
         expect(source.contains("self.write_4k_shared_dma_batch(relative_lbas, req.buffer)")).to_equal(true)

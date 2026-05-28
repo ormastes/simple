@@ -238,6 +238,26 @@ impl NvmeBlockAdapter:
         """Expose the same lease translation used by BlockDevice sector I/O."""
         self.translate_lba(lba)
 
+    fn direct_4k_relative_lba(offset: i64) -> Result<u64, FsError>:
+        """Map a file offset to a lease-relative LBA and prove the full 4KiB fits."""
+        if offset < 0:
+            return Err(FsError.InvalidArg)
+        if self.lease_sector_size == 0u32 or (4096u32 % self.lease_sector_size) != 0u32:
+            return Err(FsError.InvalidArg)
+        val sector_size = self.lease_sector_size.to_u64()
+        val offset_u = offset as u64
+        if (offset_u % sector_size) != 0u64:
+            return Err(FsError.InvalidArg)
+        val relative_lba = offset_u / sector_size
+        val sectors_per_4k = 4096u64 / sector_size
+        if relative_lba + sectors_per_4k > self.lease_lba_count:
+            return Err(FsError.InvalidArg)
+        Ok(relative_lba)
+
+    fn direct_4k_relative_lba_for_test(offset: i64) -> Result<u64, FsError>:
+        """Expose DirectIo lease-window validation for unit tests."""
+        self.direct_4k_relative_lba(offset)
+
     me init_bounce_buffer() -> Result<bool, text>:
         """Allocate a DMA bounce buffer for sector transfers."""
         var result_buf = DmaAddrs(virt: 0, phys: 0)
@@ -342,13 +362,13 @@ impl NvmeBlockAdapter:
         val valid = ext.validate_shared_buffer(req.file_offset, req.buffer)
         if val Err(e) = valid:
             return Err(e)
-        if self.lease_sector_size == 0u32:
-            return Err(FsError.InvalidArg)
-        val relative_lba = (req.file_offset as u64) / self.lease_sector_size.to_u64()
+        val relative_lba = self.direct_4k_relative_lba(req.file_offset)
+        if relative_lba.is_err():
+            return Err(relative_lba.unwrap_err())
         val io_result = if req.op == DIRECT_IO_READ:
-            self.read_4k_shared_dma(relative_lba, req.buffer)
+            self.read_4k_shared_dma(relative_lba.unwrap(), req.buffer)
         else:
-            self.write_4k_shared_dma(relative_lba, req.buffer)
+            self.write_4k_shared_dma(relative_lba.unwrap(), req.buffer)
         if io_result.is_err():
             return Err(FsError.IoError(code: 5u32))
         Ok(DirectIoResult(
@@ -377,11 +397,12 @@ impl NvmeBlockAdapter:
         val expected_bytes = direct_io_validate_batch(ext, req, 4096u64)
         if expected_bytes.is_err():
             return Err(expected_bytes.unwrap_err())
-        if self.lease_sector_size == 0u32:
-            return Err(FsError.InvalidArg)
         var relative_lbas: [u64] = []
         for offset in req.file_offsets:
-            relative_lbas.push((offset as u64) / self.lease_sector_size.to_u64())
+            val relative_lba = self.direct_4k_relative_lba(offset)
+            if relative_lba.is_err():
+                return Err(relative_lba.unwrap_err())
+            relative_lbas.push(relative_lba.unwrap())
         val io_result = if req.op == DIRECT_IO_READ:
             self.read_4k_shared_dma_batch(relative_lbas, req.buffer)
         else:
