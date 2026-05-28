@@ -78,9 +78,10 @@ Date: 2026-05-28
 | ARM32 interrupt-control object file / dec section | 768 / 64 |
 | ARM32 interrupt-control source | 1024 |
 | RV64 interrupt-control object file / dec section | 768 / 64 |
-| RV64 interrupt-control source | 1024 |
+| RV64 interrupt-control source | 512 |
 | RV32 interrupt-control object file / dec section | 768 / 64 |
-| RV32 interrupt-control source | 1024 |
+| RV32 interrupt-control source | 512 |
+| Shared RISC-V interrupt-control source | 768 |
 | x86_64 startup handoff object file / dec section | 2048 / 128 |
 | x86_64 startup handoff source | 1024 |
 | Shared startup handoff x86_64 object file / dec section | 2048 / 256 |
@@ -114,8 +115,9 @@ Date: 2026-05-28
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
 | `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 23 | 753 |
 | `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 25 | 770 |
-| `examples/simple_os/arch/riscv64/boot/baremetal_interrupt_control.S` | 1 | 23 | 740 |
-| `examples/simple_os/arch/riscv32/boot/baremetal_interrupt_control.S` | 1 | 23 | 740 |
+| `examples/simple_os/arch/riscv64/boot/baremetal_interrupt_control.S` | 1 | 4 | 217 |
+| `examples/simple_os/arch/riscv32/boot/baremetal_interrupt_control.S` | 1 | 4 | 217 |
+| `examples/simple_os/arch/common/baremetal_riscv_interrupt_control.S` | 1 | 20 | 442 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 1 | 52 |
 | `examples/simple_os/arch/common/baremetal_startup_handoff.c` | 1 | 35 | 685 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv32/semihost_trap.S` | 1 | 30 | 867 |
@@ -199,8 +201,9 @@ Date: 2026-05-28
 - `baremetal_interrupt_control.c` is the x86_64 platform capsule baseline for CLI/STI/HLT and PIC masking only; APIC policy stays in pure Simple until controller code is explicitly imported.
 - `arm64/boot/baremetal_interrupt_control.S` is the ARM64 platform capsule baseline for DAIF mask/unmask and WFE only; GIC policy stays in pure Simple until controller code is explicitly imported.
 - `arm32/boot/baremetal_interrupt_control.S` is the ARM32 platform capsule baseline for CPSID/CPSIE and WFE only; GIC/NVIC policy stays in pure Simple until controller code is explicitly imported.
-- `riscv64/boot/baremetal_interrupt_control.S` is the RV64 platform capsule baseline for mstatus.MIE mask/unmask and WFI only; PLIC/CLINT policy stays in pure Simple until controller code is explicitly imported.
-- `riscv32/boot/baremetal_interrupt_control.S` is the RV32 platform capsule baseline for mstatus.MIE mask/unmask and WFI only; PLIC/CLINT policy stays in pure Simple until controller code is explicitly imported.
+- `common/baremetal_riscv_interrupt_control.S` is the shared RV32/RV64 interrupt-control capsule for mstatus.MIE mask/unmask and WFI only.
+- `riscv64/boot/baremetal_interrupt_control.S` is a thin RV64 compatibility wrapper over the shared RISC-V interrupt-control capsule.
+- `riscv32/boot/baremetal_interrupt_control.S` is a thin RV32 compatibility wrapper over the shared RISC-V interrupt-control capsule.
 - `common/baremetal_startup_handoff.c` is the shared multiplatform capsule baseline for module-init and `spl_start` handoff only; stack/hart policy stays in pure Simple.
 - `x86_64/boot/baremetal_startup_handoff.c` is a thin compatibility wrapper over the shared startup handoff capsule.
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
