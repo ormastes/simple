@@ -410,8 +410,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   advertises the queue-depth-sized 32-operation batch path; the standalone q35
   lane uses a smaller measured batch window when that is faster on QEMU. The
   standalone q35 lane also submits through `NvmeBlockAdapter` DirectIo requests,
-  so the filesystem-facing adapter surface is measured against the in-guest C
-  baseline instead of a raw `NvmeDriver` shortcut. The `fs_consumers` marker is
+  and its write probes use the write-through lease helpers, so the
+  filesystem-facing adapter surface is measured against the in-guest C baseline
+  instead of a raw `NvmeDriver` shortcut. The `fs_consumers` marker is
   emitted only after the measured loop has routed DirectIo batches for FAT32,
   NVFS, and DBFS through that shared adapter surface. The full VFS boot perf
   helper also derives the same marker from lease readiness for FAT32, NVFS, and
