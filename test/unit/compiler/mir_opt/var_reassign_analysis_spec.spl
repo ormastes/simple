@@ -7,7 +7,8 @@ use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
 use compiler.mir_opt.mir_opt.var_reassign_analysis.{
     analyze_var_reassign_blocks,
     var_reassign_analysis_to_jit_facts,
-    ssa_var_transform_blocks
+    ssa_var_transform_blocks,
+    ssa_phi_plans_for_blocks
 }
 use compiler.interp.execution.tiered_jit.{
     FunctionProfile, JitTier, TieredJitConfig,
@@ -188,3 +189,38 @@ describe "var reassignment analysis":
         expect(result.reason).to_equal("requires phi nodes")
         expect(result.phi_required_count).to_equal(1)
         expect(result.phi_required_locals[0]).to_equal(0)
+
+    it "builds a concrete phi insertion plan for an if/else merge":
+        val entry = MirBlock(
+            id: BlockId.new(0),
+            label: "entry",
+            instructions: [],
+            terminator: MirTerminator.If(copy_operand(9), BlockId.new(1), BlockId.new(2))
+        )
+        val then_block = MirBlock(
+            id: BlockId.new(1),
+            label: "then",
+            instructions: [inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64()))],
+            terminator: MirTerminator.Goto(BlockId.new(3))
+        )
+        val else_block = MirBlock(
+            id: BlockId.new(2),
+            label: "else",
+            instructions: [inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))],
+            terminator: MirTerminator.Goto(BlockId.new(3))
+        )
+        val join = MirBlock(
+            id: BlockId.new(3),
+            label: "join",
+            instructions: [inst(MirInstKind.BinOp(local(1), MirBinOp.Add, copy_operand(0), int_operand(1)))],
+            terminator: MirTerminator.Return(Some(copy_operand(1)))
+        )
+        val plans = ssa_phi_plans_for_blocks([entry, then_block, else_block, join])
+        expect(plans.len()).to_equal(1)
+        expect(plans[0].join_block_id).to_equal(3)
+        expect(plans[0].original_local_id).to_equal(0)
+        expect(plans[0].then_block_id).to_equal(1)
+        expect(plans[0].else_block_id).to_equal(2)
+        expect(plans[0].then_value_local_id).to_equal(10)
+        expect(plans[0].else_value_local_id).to_equal(11)
+        expect(plans[0].phi_dest_local_id).to_equal(12)
