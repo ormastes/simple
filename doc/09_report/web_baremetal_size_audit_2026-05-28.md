@@ -6,9 +6,9 @@ Date: 2026-05-28
 
 | Artifact | Check | Native/ELF Build | Bytes | Dec Section Bytes | Log |
 |---|---|---|---:|---:|---|
-| Browser smoke | ok | ok | 34968 | 26269 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
-| Browser simple render HTML | ok | ok | 18480 | 8171 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
-| Simple web static facade | n/a | ok | 14352 | 4702 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
+| Browser smoke | ok | ok | 34968 | 26189 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
+| Browser simple render HTML | ok | ok | 18480 | 7923 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
+| Simple web static facade | n/a | ok | 14352 | 4090 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
 | Simple web placeholder URL facade | n/a | ok | 14336 | 3889 | `build/web_baremetal_size_audit/simple_web_placeholder_native.log` |
 | Simple web file facade | n/a | ok | 14344 | 6335 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
 | Simple web script placeholder facade | n/a | ok | 14336 | 3905 | `build/web_baremetal_size_audit/simple_web_script_placeholder_native.log` |
@@ -30,6 +30,11 @@ Date: 2026-05-28
 | RV64 interrupt-control capsule | n/a | ok | 736 | 24 | `build/web_baremetal_size_audit/rv64_baremetal_interrupt_control.build.log` |
 | RV32 interrupt-control capsule | n/a | ok | 552 | 24 | `build/web_baremetal_size_audit/rv32_baremetal_interrupt_control.build.log` |
 | x86_64 startup handoff capsule | n/a | ok | 1936 | 118 | `build/web_baremetal_size_audit/baremetal_startup_handoff.build.log` |
+| Shared startup handoff x86_64 capsule | n/a | ok | 1936 | 118 | `build/web_baremetal_size_audit/shared_x86_64_startup_handoff.build.log` |
+| Shared startup handoff ARM64 capsule | n/a | ok | 2232 | 164 | `build/web_baremetal_size_audit/shared_arm64_startup_handoff.build.log` |
+| Shared startup handoff ARM32 capsule | n/a | ok | 2252 | 180 | `build/web_baremetal_size_audit/shared_arm32_startup_handoff.build.log` |
+| Shared startup handoff RV64 capsule | n/a | ok | 2920 | 140 | `build/web_baremetal_size_audit/shared_rv64_startup_handoff.build.log` |
+| Shared startup handoff RV32 capsule | n/a | ok | 1976 | 140 | `build/web_baremetal_size_audit/shared_rv32_startup_handoff.build.log` |
 
 ## Default Regression Budgets
 
@@ -77,6 +82,12 @@ Date: 2026-05-28
 | RV32 interrupt-control source | 1024 |
 | x86_64 startup handoff object file / dec section | 2048 / 128 |
 | x86_64 startup handoff source | 1024 |
+| Shared startup handoff x86_64 object file / dec section | 2048 / 256 |
+| Shared startup handoff ARM64 object file / dec section | 2300 / 256 |
+| Shared startup handoff ARM32 object file / dec section | 2300 / 256 |
+| Shared startup handoff RV64 object file / dec section | 3072 / 256 |
+| Shared startup handoff RV32 object file / dec section | 2048 / 256 |
+| Shared startup handoff source | 1024 |
 | Pure Simple console policy source | 2500 |
 | Pure Simple stdout plan source | 2500 |
 | Pure Simple stdout policy plan source | 3000 |
@@ -100,10 +111,11 @@ Date: 2026-05-28
 | `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 62 | 1719 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
 | `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 23 | 753 |
-| `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 24 | 770 |
+| `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 25 | 770 |
 | `examples/simple_os/arch/riscv64/boot/baremetal_interrupt_control.S` | 1 | 23 | 740 |
 | `examples/simple_os/arch/riscv32/boot/baremetal_interrupt_control.S` | 1 | 23 | 740 |
-| `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 35 | 685 |
+| `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 1 | 52 |
+| `examples/simple_os/arch/common/baremetal_startup_handoff.c` | 1 | 35 | 685 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv32/semihost_trap.S` | 1 | 30 | 867 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv/semihost_trap.S` | 1 | 30 | 867 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/arm/semihost_trap.S` | 1 | 27 | 786 |
@@ -129,8 +141,8 @@ Date: 2026-05-28
 | `examples/browser/feature/layout` | 10 | 4526 | 170086 |
 | `examples/browser/feature/dom` | 9 | 4854 | 181376 |
 | `examples/browser/feature/style` | 13 | 3914 | 150153 |
-| `src/lib/gc_async_mut/web` | 12 | 3784 | 160275 |
-| `src/lib/gc_async_mut/gpu/browser_engine` | 16 | 1701 | 64945 |
+| `src/lib/gc_async_mut/web` | 13 | 3928 | 170664 |
+| `src/lib/gc_async_mut/gpu/browser_engine` | 17 | 1716 | 62320 |
 
 ## Retention Checks
 
@@ -159,6 +171,11 @@ Date: 2026-05-28
 | RV64 interrupt-control capsule | 0 | n/a |
 | RV32 interrupt-control capsule | 0 | n/a |
 | x86_64 startup handoff capsule | 0 | n/a |
+| Shared startup handoff x86_64 capsule | 0 | n/a |
+| Shared startup handoff ARM64 capsule | 0 | n/a |
+| Shared startup handoff ARM32 capsule | 0 | n/a |
+| Shared startup handoff RV64 capsule | 0 | n/a |
+| Shared startup handoff RV32 capsule | 0 | n/a |
 
 ## Direction
 
@@ -181,7 +198,8 @@ Date: 2026-05-28
 - `arm32/boot/baremetal_interrupt_control.S` is the ARM32 platform capsule baseline for CPSID/CPSIE and WFE only; GIC/NVIC policy stays in pure Simple until controller code is explicitly imported.
 - `riscv64/boot/baremetal_interrupt_control.S` is the RV64 platform capsule baseline for mstatus.MIE mask/unmask and WFI only; PLIC/CLINT policy stays in pure Simple until controller code is explicitly imported.
 - `riscv32/boot/baremetal_interrupt_control.S` is the RV32 platform capsule baseline for mstatus.MIE mask/unmask and WFI only; PLIC/CLINT policy stays in pure Simple until controller code is explicitly imported.
-- `baremetal_startup_handoff.c` is the x86_64 platform capsule baseline for module-init and `spl_start` handoff only; stack/hart policy stays in pure Simple.
+- `common/baremetal_startup_handoff.c` is the shared multiplatform capsule baseline for module-init and `spl_start` handoff only; stack/hart policy stays in pure Simple.
+- `x86_64/boot/baremetal_startup_handoff.c` is a thin compatibility wrapper over the shared startup handoff capsule.
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
 - `riscv32/semihost_trap.S` is the RV32 platform capsule baseline for the semihost magic sequence only; stdout operation policy stays in pure Simple.
 - `riscv/semihost_trap.S` is the RV64 platform capsule baseline for the semihost magic sequence only; stdout operation policy stays in pure Simple.
