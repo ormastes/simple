@@ -1,18 +1,28 @@
 """
 # Event Loop
 
-Portable event loop using epoll (Linux) or kqueue (macOS/FreeBSD) for
+Portable event loop using platform-native I/O notification mechanisms for
 efficient file descriptor readiness notification. Falls back to cooperative
 polling on unsupported platforms.
 
 Uses extern stubs (`rt_event_loop_*`) that delegate to the native backend.
 Until the Rust runtime implements those externs, the polling fallback is used.
 
+## Platform Backends
+
+| Backend | Platform | Characteristics |
+|---------|----------|----------------|
+| epoll | Linux | Level/edge-triggered, O(1) readiness notification |
+| kqueue | BSD/macOS | Edge-triggered by default, filters for fine-grained events |
+| IOCP | Windows | Completion-based (proactor pattern), not readiness-based |
+| event_port | Solaris/illumos | port_create/port_associate/port_get, one-shot by default |
+| poll | Other | Cooperative fallback, O(n) per poll call |
+
 ## Components
 
 | Type | Description |
 |------|-------------|
-| EventLoop | Core event loop (epoll/kqueue/poll) |
+| EventLoop | Core event loop (epoll/kqueue/iocp/event_port/poll) |
 | Event | Readiness event with fd, interest, and token |
 | Waker | Callback to wake a pending future |
 
@@ -66,7 +76,11 @@ fn event_loop_platform() -> text:
     """Detect the event notification backend for the current OS.
 
     Returns:
-        "epoll" on Linux, "kqueue" on macOS/FreeBSD, "poll" otherwise
+        "epoll" on Linux (level/edge-triggered, O(1) readiness)
+        "kqueue" on macOS/FreeBSD (edge-triggered, filter-based)
+        "iocp" on Windows (completion-based proactor pattern)
+        "event_port" on Solaris/illumos (one-shot port_create/port_get)
+        "poll" otherwise (cooperative fallback)
 
     Example:
         val backend = event_loop_platform()
@@ -77,6 +91,10 @@ fn event_loop_platform() -> text:
         "epoll"
     else if platform == "macos" or platform == "freebsd":
         "kqueue"
+    else if platform == "windows":
+        "iocp"
+    else if platform == "solaris" or platform == "illumos":
+        "event_port"
     else:
         "poll"
 
@@ -200,7 +218,7 @@ class EventLoop:
             Ok(EventLoop(loop_fd: fd, _platform: event_loop_platform(), _closed: false))
 
     fn platform() -> text:
-        """Return the backend name: "epoll", "kqueue", or "poll".
+        """Return the backend name: "epoll", "kqueue", "iocp", "event_port", or "poll".
 
         Returns:
             Backend name string

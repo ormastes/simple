@@ -1,7 +1,13 @@
 //! Event loop externs for the Simple interpreter
 //!
-//! Implements `rt_event_loop_*` extern functions using epoll on Linux
-//! and kqueue on macOS/FreeBSD. Unsupported platforms return error values.
+//! Implements `rt_event_loop_*` extern functions using the platform-native
+//! I/O notification mechanism:
+//!
+//! - **epoll** on Linux — level/edge-triggered, O(1) readiness notification
+//! - **kqueue** on macOS/FreeBSD — edge-triggered by default, filter-based
+//! - **IOCP** on Windows — completion-based (proactor), stub with WSAPoll fallback
+//! - **event ports** on Solaris/illumos — port_create/port_associate/port_get, one-shot
+//! - **poll fallback** on other platforms — returns error values
 //!
 //! Handle pool starts at 3000 to avoid collisions with SOCKET_HANDLES (1000+).
 
@@ -171,6 +177,8 @@ mod platform {
             }
         });
     }
+
+    pub fn backend_name() -> &'static str { "epoll" }
 }
 
 // ---------------------------------------------------------------------------
@@ -401,12 +409,161 @@ mod platform {
             }
         });
     }
+
+    pub fn backend_name() -> &'static str { "kqueue" }
+}
+
+// ---------------------------------------------------------------------------
+// Windows — IOCP stub
+// ---------------------------------------------------------------------------
+// IOCP is completion-based (proactor pattern), not readiness-based like
+// epoll/kqueue. A full implementation requires an adaptation layer to
+// provide readiness semantics to the Simple event loop API. For now this
+// is a stub that allocates handles but returns error values from I/O
+// operations, with TODO for full proactor-to-reactor adaptation using
+// WSAPoll as a transitional fallback.
+#[cfg(target_os = "windows")]
+mod platform {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        /// Maps handle id -> unit (no native fd yet; IOCP handle TBD)
+        static IOCP_LOOPS: RefCell<HashMap<i64, ()>> = RefCell::new(HashMap::new());
+    }
+
+    pub fn create() -> i64 {
+        // TODO: CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0)
+        // For now, allocate a handle so callers can distinguish "created
+        // but unsupported ops" from "couldn't create at all".
+        let handle = NEXT_EVENT_LOOP_HANDLE.fetch_add(1, Ordering::SeqCst);
+        IOCP_LOOPS.with(|loops| {
+            loops.borrow_mut().insert(handle, ());
+        });
+        eprintln!("[event_loop] IOCP backend: stub — I/O operations not yet implemented");
+        handle
+    }
+
+    pub fn register(_loop_fd: i64, _fd: i64, _interest: i64, _token: i64, _edge: bool) -> bool {
+        // TODO: WSAPoll registration or CreateIoCompletionPort association
+        eprintln!("[event_loop] IOCP register: not yet implemented");
+        false
+    }
+
+    pub fn deregister(_loop_fd: i64, _fd: i64) -> bool {
+        // TODO: CancelIoEx or disassociate from completion port
+        eprintln!("[event_loop] IOCP deregister: not yet implemented");
+        false
+    }
+
+    pub fn poll(_loop_fd: i64, _max_events: i64, _timeout_ms: i64) -> Vec<Value> {
+        // TODO: GetQueuedCompletionStatusEx or WSAPoll fallback
+        eprintln!("[event_loop] IOCP poll: not yet implemented");
+        vec![]
+    }
+
+    pub fn close(loop_fd: i64) -> bool {
+        IOCP_LOOPS.with(|loops| {
+            let mut loops = loops.borrow_mut();
+            if loops.remove(&loop_fd).is_some() {
+                // TODO: CloseHandle on the real IOCP handle
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    pub fn clear_state() {
+        IOCP_LOOPS.with(|loops| {
+            loops.borrow_mut().clear();
+        });
+    }
+
+    pub fn backend_name() -> &'static str { "iocp" }
+}
+
+// ---------------------------------------------------------------------------
+// Solaris / illumos — event ports stub
+// ---------------------------------------------------------------------------
+// Event ports use port_create(), port_associate(), port_get()/port_getn()
+// for I/O notification. One-shot semantics — must re-associate after each
+// event. For now this is a stub that allocates handles but returns error
+// values from I/O operations.
+#[cfg(any(target_os = "solaris", target_os = "illumos"))]
+mod platform {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        /// Maps handle id -> unit (port fd TBD)
+        static PORT_LOOPS: RefCell<HashMap<i64, ()>> = RefCell::new(HashMap::new());
+    }
+
+    pub fn create() -> i64 {
+        // TODO: libc::port_create()
+        // Allocate a handle for API consistency.
+        let handle = NEXT_EVENT_LOOP_HANDLE.fetch_add(1, Ordering::SeqCst);
+        PORT_LOOPS.with(|loops| {
+            loops.borrow_mut().insert(handle, ());
+        });
+        eprintln!("[event_loop] event_port backend: stub — I/O operations not yet implemented");
+        handle
+    }
+
+    pub fn register(_loop_fd: i64, _fd: i64, _interest: i64, _token: i64, _edge: bool) -> bool {
+        // TODO: port_associate(port, PORT_SOURCE_FD, fd, events, user)
+        eprintln!("[event_loop] event_port register: not yet implemented");
+        false
+    }
+
+    pub fn deregister(_loop_fd: i64, _fd: i64) -> bool {
+        // TODO: port_dissociate(port, PORT_SOURCE_FD, fd)
+        eprintln!("[event_loop] event_port deregister: not yet implemented");
+        false
+    }
+
+    pub fn poll(_loop_fd: i64, _max_events: i64, _timeout_ms: i64) -> Vec<Value> {
+        // TODO: port_getn(port, list, max, &nget, timeout)
+        // Must re-associate fds after receiving events (one-shot semantics)
+        eprintln!("[event_loop] event_port poll: not yet implemented");
+        vec![]
+    }
+
+    pub fn close(loop_fd: i64) -> bool {
+        PORT_LOOPS.with(|loops| {
+            let mut loops = loops.borrow_mut();
+            if loops.remove(&loop_fd).is_some() {
+                // TODO: libc::close(port_fd)
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    pub fn clear_state() {
+        PORT_LOOPS.with(|loops| {
+            loops.borrow_mut().clear();
+        });
+    }
+
+    pub fn backend_name() -> &'static str { "event_port" }
 }
 
 // ---------------------------------------------------------------------------
 // Unsupported platforms — stub returning errors
 // ---------------------------------------------------------------------------
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows",
+    target_os = "solaris",
+    target_os = "illumos",
+)))]
 mod platform {
     use super::*;
 
@@ -416,6 +573,7 @@ mod platform {
     pub fn poll(_loop_fd: i64, _max_events: i64, _timeout_ms: i64) -> Vec<Value> { vec![] }
     pub fn close(_loop_fd: i64) -> bool { false }
     pub fn clear_state() {}
+    pub fn backend_name() -> &'static str { "poll" }
 }
 
 // ---------------------------------------------------------------------------
@@ -456,4 +614,11 @@ pub fn rt_event_loop_close_interp(args: &[Value]) -> Result<Value, CompileError>
 /// Clear all event loop handles (call between test runs).
 pub fn clear_event_loop_state() {
     platform::clear_state();
+}
+
+/// Return which event loop backend is active on this platform.
+///
+/// Returns one of: `"epoll"`, `"kqueue"`, `"iocp"`, `"event_port"`, `"poll"`.
+pub fn event_loop_backend_name() -> &'static str {
+    platform::backend_name()
 }

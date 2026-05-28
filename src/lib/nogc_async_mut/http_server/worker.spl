@@ -62,7 +62,12 @@ use std.http_server.security_context.{dispatch_with_task_remote_security_context
 use std.async_host.task_identity.{allocate_scheduler_task_id, current_unified_task_key, enter_scheduler_task_id, exit_scheduler_task_id}
 use std.nogc_async_mut.io.tls.{AsyncTlsListener, AsyncTlsStream, TlsConfig}
 use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
-use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists, file_size}
+use std.http_server.range.{
+    find_header, parse_range_header,
+    build_range_response, build_multipart_range_response,
+    generate_boundary
+}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.http_server.protocol_handler.{ProtocolKind, protocol_from_alpn, protocol_handler_label}
 use std.http_server.h2_connection.{H2Connection}
@@ -455,27 +460,78 @@ class Worker:
         val root = location.root
         val path = request.path
         val full_path = root + path
-        if file_exists(full_path):
-            val content = file_read_text(full_path)
-            var ctype = "application/octet-stream"
-            if path.ends_with(".html") or path.ends_with(".htm"):
-                ctype = "text/html; charset=utf-8"
-            elif path.ends_with(".txt"):
-                ctype = "text/plain; charset=utf-8"
-            elif path.ends_with(".css"):
-                ctype = "text/css"
-            elif path.ends_with(".js"):
-                ctype = "application/javascript"
-            elif path.ends_with(".json"):
-                ctype = "application/json"
-            elif path.ends_with(".png"):
-                ctype = "image/png"
-            elif path.ends_with(".jpg") or path.ends_with(".jpeg"):
-                ctype = "image/jpeg"
-            var resp = default_response_data(200, "OK", content)
-            resp.headers = [("Content-Type", ctype), ("Server", "SimpleServer")]
-            return resp
-        build_not_found()
+        if not file_exists(full_path):
+            return build_not_found()
+
+        val size = file_size(full_path)
+        var ctype = "application/octet-stream"
+        if path.ends_with(".html") or path.ends_with(".htm"):
+            ctype = "text/html; charset=utf-8"
+        elif path.ends_with(".txt"):
+            ctype = "text/plain; charset=utf-8"
+        elif path.ends_with(".css"):
+            ctype = "text/css"
+        elif path.ends_with(".js"):
+            ctype = "application/javascript"
+        elif path.ends_with(".json"):
+            ctype = "application/json"
+        elif path.ends_with(".png"):
+            ctype = "image/png"
+        elif path.ends_with(".jpg") or path.ends_with(".jpeg"):
+            ctype = "image/jpeg"
+
+        # ETag based on file size (weak but consistent)
+        val etag = "\"{size}\""
+
+        # Check for Range header
+        val range_hdr = find_header(request.headers, "Range")
+        if range_hdr.?:
+            # If-Range: only honor Range when ETag matches
+            var honor_range = true
+            val if_range_val = find_header(request.headers, "If-Range")
+            if if_range_val.?:
+                val ir = "" + if_range_val
+                if ir != etag:
+                    honor_range = false
+
+            if honor_range:
+                val parsed = parse_range_header(range_hdr, size)
+                match parsed:
+                    Ok(ranges):
+                        if ranges.len() == 1:
+                            return build_range_response(ranges, size, ctype, full_path, etag)
+                        else:
+                            val boundary = generate_boundary()
+                            return build_multipart_range_response(ranges, size, ctype, boundary, full_path, etag)
+                    Err(e):
+                        # 416 Range Not Satisfiable
+                        return HttpResponseData(
+                            status: 416,
+                            reason: "Range Not Satisfiable",
+                            headers: [
+                                ("Content-Range", "bytes */{size}"),
+                                ("Accept-Ranges", "bytes"),
+                                ("Server", "SimpleServer")
+                            ],
+                            body: "",
+                            body_bytes: [],
+                            body_file: "",
+                            body_offset: 0,
+                            body_length: 0,
+                            chunked: false
+                        )
+
+        # Full 200 response with Accept-Ranges and ETag
+        val content = file_read_text(full_path)
+        var resp = default_response_data(200, "OK", content)
+        resp.headers = [
+            ("Content-Type", ctype),
+            ("Content-Length", "{size}"),
+            ("Accept-Ranges", "bytes"),
+            ("ETag", etag),
+            ("Server", "SimpleServer")
+        ]
+        resp
 
     me execute_handler(location: LocationConfig,
                        request: HttpRequestData) -> HttpResponseData:

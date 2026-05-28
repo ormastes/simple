@@ -78,12 +78,21 @@ int64_t __c_rt_platform_name(const uint8_t **out_ptr) {
 #elif defined(__APPLE__)
     static const uint8_t name[] = "macos";
     *out_ptr = name; return 5;
+#elif defined(__FreeBSD__)
+    static const uint8_t name[] = "freebsd";
+    *out_ptr = name; return 7;
 #elif defined(__linux__)
     static const uint8_t name[] = "linux";
     *out_ptr = name; return 5;
+#elif defined(__illumos__)
+    static const uint8_t name[] = "illumos";
+    *out_ptr = name; return 7;
+#elif defined(__sun) && defined(__SVR4)
+    static const uint8_t name[] = "solaris";
+    *out_ptr = name; return 7;
 #else
-    static const uint8_t name[] = "unix";
-    *out_ptr = name; return 4;
+    static const uint8_t name[] = "unknown";
+    *out_ptr = name; return 7;
 #endif
 }
 

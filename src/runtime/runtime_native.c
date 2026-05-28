@@ -1576,6 +1576,10 @@ const char* rt_platform_name(void) {
     return "freebsd";
 #elif defined(__linux__)
     return "linux";
+#elif defined(__illumos__)
+    return "illumos";
+#elif defined(__sun) && defined(__SVR4)
+    return "solaris";
 #else
     return "unknown";
 #endif
