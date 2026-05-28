@@ -75,7 +75,7 @@ Date: 2026-05-28
 | Shared RISC-V 16550 startup/stdout source | 1400 |
 | Shared minimal stdout helper source | 2000 |
 | x86_64 interrupt-control object file / dec section | 1536 / 64 |
-| x86_64 interrupt-control source | 1024 |
+| x86_64 interrupt-control source | 640 |
 | ARM64 interrupt-control object file / dec section | 768 / 64 |
 | ARM64 interrupt-control source | 1024 |
 | ARM32 interrupt-control object file / dec section | 768 / 64 |
@@ -118,7 +118,7 @@ Date: 2026-05-28
 | `examples/simple_os/arch/riscv32/boot/baremetal_uart_stdout.c` | 1 | 1 | 60 |
 | `examples/simple_os/arch/common/baremetal_riscv_16550_uart_stdout.c` | 1 | 41 | 1017 |
 | `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 66 | 1806 |
-| `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
+| `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 18 | 515 |
 | `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 18 | 479 |
 | `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 21 | 493 |
 | `examples/simple_os/arch/common/baremetal_arm_interrupt_control.S` | 1 | 19 | 436 |
