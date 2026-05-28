@@ -7,6 +7,7 @@ val HOST_WM_IDLE_SLEEP_MS: i32 = 16
 enum HostBackendKind:
     Browser
     Electron
+    Tauri
     Tui
 
 class HostWmConfig:
@@ -164,8 +165,8 @@ class HostCompositor:
             i = i + 1
         0
 
-    me handle_mouse_move(x: i32, y: i32):
-        if self.resizing:
+    me pointer_move(x: i32, y: i32):
+        if self.resize_window_id != 0:
             val idx = self._find_window_index(self.resize_window_id)
             if idx >= 0:
                 var win = self.windows[idx]
@@ -179,7 +180,7 @@ class HostCompositor:
                 win.h = nh
                 self.windows[idx] = win
             return
-        if self.dragging:
+        if self.drag_window_id != 0:
             val idx = self._find_window_index(self.drag_window_id)
             if idx >= 0:
                 var win = self.windows[idx]
@@ -203,6 +204,9 @@ class HostCompositor:
                 self.resize_start_w = win.w
                 self.resize_start_h = win.h
             i = i + 1
+
+    me handle_mouse_move(x: i32, y: i32):
+        self.pointer_move(x, y)
 
     me handle_left_button(down: bool):
         if down:
@@ -251,6 +255,66 @@ fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
     if cfg.backend == HostBackendKind.Tui:
         return nil
     nil
+
+fn host_compositor_find_window_index(comp: HostCompositor, window_id: i64) -> i32:
+    var i = 0
+    while i < comp.windows.len():
+        if comp.windows[i].id == window_id:
+            return i
+        i = i + 1
+    -1
+
+fn host_compositor_pointer_move(comp: HostCompositor, x: i32, y: i32) -> HostCompositor:
+    var out = comp
+    if out.resize_window_id != 0:
+        val idx = host_compositor_find_window_index(out, out.resize_window_id)
+        if idx >= 0:
+            var win = out.windows[idx]
+            var nw = out.resize_start_w + (x - out.resize_start_x)
+            var nh = out.resize_start_h + (y - out.resize_start_y)
+            if nw < 160:
+                nw = 160
+            if nh < 120:
+                nh = 120
+            win.w = nw
+            win.h = nh
+            out.windows[idx] = win
+        return out
+    if out.drag_window_id != 0:
+        val idx = host_compositor_find_window_index(out, out.drag_window_id)
+        if idx >= 0:
+            var win = out.windows[idx]
+            var nx = x - out.drag_offset_x
+            var ny = y - out.drag_offset_y
+            if nx < 0:
+                nx = 0
+            if ny < 48:
+                ny = 48
+            win.x = nx
+            win.y = ny
+            out.windows[idx] = win
+        return out
+    var i = 0
+    while i < out.windows.len():
+        val win = out.windows[i]
+        if x >= win.x + win.w - 8 and x <= win.x + win.w and y >= win.y + win.h - 8 and y <= win.y + win.h:
+            out.resize_window_id = win.id
+            out.resize_start_x = x
+            out.resize_start_y = y
+            out.resize_start_w = win.w
+            out.resize_start_h = win.h
+        i = i + 1
+    out
+
+fn host_compositor_left_button(comp: HostCompositor, down: bool) -> HostCompositor:
+    var out = comp
+    if down:
+        if out.resize_window_id != 0:
+            out.resizing = true
+    else:
+        out.resizing = false
+        out.resize_window_id = 0
+    out
 
 fn host_taskbar_item_width(screen_width: i32, count: i32) -> i32:
     if count <= 0:

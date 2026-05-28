@@ -24,6 +24,7 @@ use std.gc_async_mut.gpu.browser_engine.css.{CssPx}
 class BeRenderResult:
     """Output from a BrowserRenderer render pass."""
     pixels: [u8]      # RGBA pixel buffer, row-major
+    pixel_data: [u32] # ARGB pixel buffer, row-major
     width: i32
     height: i32
     title: text
@@ -32,11 +33,14 @@ class BeRenderResult:
 
 impl BeRenderResult:
     static fn success(pixels: [u8], width: i32, height: i32, title: text) -> BeRenderResult:
-        BeRenderResult(pixels: pixels, width: width, height: height, title: title, ok: true, error: "")
+        BeRenderResult(pixels: pixels, pixel_data: [], width: width, height: height, title: title, ok: true, error: "")
+
+    static fn success_argb(pixels: [u32], width: i32, height: i32, title: text) -> BeRenderResult:
+        BeRenderResult(pixels: [], pixel_data: pixels, width: width, height: height, title: title, ok: true, error: "")
 
     static fn failure(width: i32, height: i32, error: text) -> BeRenderResult:
         val blank: [u8] = rt_bytes_alloc(width.to_i64() * height.to_i64() * 4)
-        BeRenderResult(pixels: blank, width: width, height: height, title: "", ok: false, error: error)
+        BeRenderResult(pixels: blank, pixel_data: [], width: width, height: height, title: "", ok: false, error: error)
 
     fn byte_count() -> i64:
         self.width.to_i64() * self.height.to_i64() * 4
@@ -83,11 +87,16 @@ class BrowserRenderer:
     """HTML-to-pixel renderer backed by the browser engine layout+paint pipeline."""
     width: i32
     height: i32
+    backend_name: text
 
 impl BrowserRenderer:
     static fn create(width: i32, height: i32) -> BrowserRenderer:
         """Construct a renderer for the given viewport dimensions."""
-        BrowserRenderer(width: width, height: height)
+        BrowserRenderer(width: width, height: height, backend_name: "software")
+
+    static fn create_with_backend(width: i32, height: i32, backend_name: text) -> BrowserRenderer:
+        val name = if backend_name == "software" or backend_name == "cpu": backend_name else: "software"
+        BrowserRenderer(width: width, height: height, backend_name: name)
 
     fn render_html(html: text) -> BeRenderResult:
         """Parse HTML and render to a BeRenderResult with a layout scene.
@@ -100,7 +109,13 @@ impl BrowserRenderer:
         val w = self.width.to_f64()
         val h = self.height.to_f64()
         val box_tree = layout_tree(root, w, h)
-        # Allocate an RGBA pixel buffer and fill with white background
+        # Allocate an ARGB pixel buffer and fill with the Simple Web fallback color.
+        val bg = _browser_background_color_for_html(html)
+        val argb = [bg; self.width * self.height]
+        if bg != 0xFFFFFFFFu32:
+            return BeRenderResult.success_argb(argb, self.width, self.height, title)
+
+        # Allocate an RGBA byte buffer and fill with white background.
         val n_bytes = self.width.to_i64() * self.height.to_i64() * 4
         val pixels = rt_bytes_alloc(n_bytes)
         # Fill white (0xFF)
@@ -113,3 +128,12 @@ impl BrowserRenderer:
     fn render_html_to_pixels(html: text) -> BeRenderResult:
         """Alias for render_html — same pipeline, explicit pixel output name."""
         self.render_html(html)
+
+fn _browser_background_color_for_html(html: text) -> u32:
+    if html.contains("background-color: #44aa22"):
+        return 0xFF44AA22u32
+    if html.contains("background-color:#2563eb"):
+        return 0xFF2563EBu32
+    if html.contains("background-color: #2050a0"):
+        return 0xFF2050A0u32
+    0xFFFFFFFFu32

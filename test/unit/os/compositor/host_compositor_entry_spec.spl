@@ -21,6 +21,8 @@ use os.compositor.host_compositor_entry.{
     host_taskbar_dock_width,
     host_taskbar_item_width,
     host_taskbar_item_x,
+    host_compositor_left_button,
+    host_compositor_pointer_move,
     host_wm_surface_failure_reason,
     init_host_wm,
 }
@@ -81,10 +83,27 @@ describe "HostWmConfig":
         )
         expect(cfg.title).to_equal("electron-test")
 
+    it "can name Tauri as a host WM shell adapter":
+        val cfg = HostWmConfig(
+            backend: HostBackendKind.Tauri,
+            initial_size: Size.wh(1280, 800),
+            title: "tauri-test"
+        )
+        expect(cfg.backend == HostBackendKind.Tauri).to_equal(true)
+
 describe "host surface failure boundaries":
 
     it "accepts a nonzero event loop and window surface":
         val reason = host_wm_surface_failure_reason(_browser_config(), 10, 20)
+        expect(reason == nil).to_equal(true)
+
+    it "accepts Tauri at the host surface contract boundary":
+        val cfg = HostWmConfig(
+            backend: HostBackendKind.Tauri,
+            initial_size: Size.wh(1280, 800),
+            title: "tauri-wm"
+        )
+        val reason = host_wm_surface_failure_reason(cfg, 10, 20)
         expect(reason == nil).to_equal(true)
 
     it "documents the TUI stub boundary":
@@ -119,7 +138,7 @@ describe "HostWmHandle loop behavior":
     it "runs one tick without host event polling when no event loop is attached":
         _fake_present_count = 0
         val backend = FakeCompositorBackend(w: 320, h: 240)
-        val comp = HostCompositor.new(backend, Size.wh(320, 240))
+        var comp = HostCompositor.new(backend, Size.wh(320, 240))
         val handle = HostWmHandle(
             compositor: comp,
             wm: WmService.new(),
@@ -220,33 +239,33 @@ describe "HostCompositor hosted window state":
         comp.drag_window_id = wid
         comp.drag_offset_x = 60
         comp.drag_offset_y = 40
-        comp.handle_mouse_move(-20, 10)
+        comp = host_compositor_pointer_move(comp, -20, 10)
         expect(comp.windows[0].x).to_equal(0)
         expect(comp.windows[0].y).to_equal(48)
 
     it "resizes windows from the visible bottom-right grip":
         val backend = FakeCompositorBackend(w: 640, h: 480)
-        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        var comp = HostCompositor.new(backend, Size.wh(640, 480))
         comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Resize", 40, 70, 200, 160, "", 1, "/sys/apps/resize")
-        comp.handle_mouse_move(238, 228)
-        comp.handle_left_button(true)
+        comp = host_compositor_pointer_move(comp, 238, 228)
+        comp = host_compositor_left_button(comp, true)
         expect(comp.resizing).to_equal(true)
-        comp.handle_mouse_move(280, 260)
+        comp = host_compositor_pointer_move(comp, 280, 260)
         expect(comp.windows[0].w).to_equal(242)
         expect(comp.windows[0].h).to_equal(192)
-        comp.handle_left_button(false)
+        comp = host_compositor_left_button(comp, false)
         expect(comp.resizing).to_equal(false)
 
     it "clamps user resize to the hosted WM minimum size":
         val backend = FakeCompositorBackend(w: 640, h: 480)
-        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        var comp = HostCompositor.new(backend, Size.wh(640, 480))
         comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Resize Min", 40, 70, 200, 160, "", 1, "/sys/apps/resize")
-        comp.handle_mouse_move(238, 228)
-        comp.handle_left_button(true)
-        comp.handle_mouse_move(0, 0)
+        comp = host_compositor_pointer_move(comp, 238, 228)
+        comp = host_compositor_left_button(comp, true)
+        comp = host_compositor_pointer_move(comp, 0, 0)
         expect(comp.windows[0].w).to_equal(160)
         expect(comp.windows[0].h).to_equal(120)
-        comp.handle_left_button(false)
+        comp = host_compositor_left_button(comp, false)
 
     it "records a visible failure window for a child that exits before creating a window":
         val backend = FakeCompositorBackend(w: 640, h: 480)
