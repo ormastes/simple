@@ -662,6 +662,29 @@ fn ssa_replace_inst_dest_for_local(inst: MirInst, original_id: i64, replacement_
                 MirInst(kind: MirInstKind.CheckedBinOp(ssa_local(replacement_id), op, new_left, new_right), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.CheckedBinOp(dest, op, new_left, new_right), span: inst.span)
+        case Load(dest, ptr):
+            val new_ptr = ssa_replace_operand_local(ptr, original_id, replacement_id)
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.Load(ssa_local(replacement_id), new_ptr), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.Load(dest, new_ptr), span: inst.span)
+        case GetElementPtr(dest, base, indices):
+            val new_base = ssa_replace_operand_local(base, original_id, replacement_id)
+            var new_indices: [MirOperand] = []
+            for index in indices:
+                new_indices = new_indices.push(ssa_replace_operand_local(index, original_id, replacement_id))
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.GetElementPtr(ssa_local(replacement_id), new_base, new_indices), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.GetElementPtr(dest, new_base, new_indices), span: inst.span)
+        case Aggregate(dest, kind, operands):
+            var new_operands: [MirOperand] = []
+            for operand in operands:
+                new_operands = new_operands.push(ssa_replace_operand_local(operand, original_id, replacement_id))
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.Aggregate(ssa_local(replacement_id), kind, new_operands), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.Aggregate(dest, kind, new_operands), span: inst.span)
         case GetField(dest, base, field):
             val new_base = ssa_replace_operand_local(base, original_id, replacement_id)
             if dest.id == original_id:
@@ -691,6 +714,18 @@ fn ssa_replace_inst_operands_for_local(inst: MirInst, original_id: i64, replacem
             MirInst(kind: MirInstKind.UnaryOp(dest, op, ssa_replace_operand_local(operand, original_id, replacement_id)), span: inst.span)
         case CheckedBinOp(dest, op, left, right):
             MirInst(kind: MirInstKind.CheckedBinOp(dest, op, ssa_replace_operand_local(left, original_id, replacement_id), ssa_replace_operand_local(right, original_id, replacement_id)), span: inst.span)
+        case Load(dest, ptr):
+            MirInst(kind: MirInstKind.Load(dest, ssa_replace_operand_local(ptr, original_id, replacement_id)), span: inst.span)
+        case GetElementPtr(dest, base, indices):
+            var new_indices: [MirOperand] = []
+            for index in indices:
+                new_indices = new_indices.push(ssa_replace_operand_local(index, original_id, replacement_id))
+            MirInst(kind: MirInstKind.GetElementPtr(dest, ssa_replace_operand_local(base, original_id, replacement_id), new_indices), span: inst.span)
+        case Aggregate(dest, kind, operands):
+            var new_operands: [MirOperand] = []
+            for operand in operands:
+                new_operands = new_operands.push(ssa_replace_operand_local(operand, original_id, replacement_id))
+            MirInst(kind: MirInstKind.Aggregate(dest, kind, new_operands), span: inst.span)
         case GetField(dest, base, field):
             MirInst(kind: MirInstKind.GetField(dest, ssa_replace_operand_local(base, original_id, replacement_id), field), span: inst.span)
         case Cast(dest, operand, target):
@@ -880,7 +915,17 @@ fn ssa_var_transform_blocks(blocks: [MirBlock]) -> SsaVarTransformResult:
     if blocks.len() != 1:
         val phi_locals = ssa_phi_required_locals_for_blocks(blocks)
         if phi_locals.len() > 0:
-            return ssa_var_transform_reject("requires phi nodes", blocks, phi_locals)
+            val analysis = analyze_var_reassign_blocks(blocks)
+            if not analysis.ssa_transform_safe:
+                return ssa_var_transform_reject(analysis.reason, blocks, phi_locals)
+            for block in blocks:
+                for inst in block.instructions:
+                    if not ssa_var_transform_inst_supported(inst):
+                        return ssa_var_transform_reject("unsupported instruction", blocks, phi_locals)
+            val materialized = ssa_materialize_phi_plans_for_blocks(blocks)
+            if materialized.applied:
+                return SsaVarTransformResult(true, "ready", materialized.blocks, materialized.phi_count, materialized.next_local_id, 0, [])
+            return ssa_var_transform_reject(materialized.reason, blocks, phi_locals)
         return ssa_var_transform_reject("unsupported cfg", blocks, [])
     val analysis = analyze_var_reassign_blocks(blocks)
     if not analysis.has_var_reassignment:

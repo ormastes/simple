@@ -194,7 +194,7 @@ describe "var reassignment analysis":
         expect(result.reason).to_equal("unsupported cfg")
         expect(result.phi_required_count).to_equal(0)
 
-    it "reports phi-required locals for an if/else merge":
+    it "applies pseudo-phi SSA transform for a safe if/else merge":
         val entry = MirBlock(
             id: BlockId.new(0),
             label: "entry",
@@ -220,8 +220,49 @@ describe "var reassignment analysis":
             terminator: MirTerminator.Return(Some(copy_operand(1)))
         )
         val result = ssa_var_transform_blocks([entry, then_block, else_block, join])
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        expect(result.renamed_count).to_equal(1)
+        expect(result.phi_required_count).to_equal(0)
+        match result.blocks[3].instructions[0].kind:
+            case Intrinsic(dest, name, _):
+                expect(dest.?).to_equal(true)
+                expect(name).to_equal("__simple_ssa_phi")
+            case _:
+                expect(false).to_equal(true)
+
+    it "rejects if/else phi transform when a branch reassignment violates borrow safety":
+        val entry = MirBlock(
+            id: BlockId.new(0),
+            label: "entry",
+            instructions: [],
+            terminator: MirTerminator.If(copy_operand(9), BlockId.new(1), BlockId.new(2))
+        )
+        val then_block = MirBlock(
+            id: BlockId.new(1),
+            label: "then",
+            instructions: [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
+                inst(MirInstKind.Ref(local(5), MirBorrowKind.Shared, MirPlace.local_place(local(0)))),
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(3), MirType.i64()))
+            ],
+            terminator: MirTerminator.Goto(BlockId.new(3))
+        )
+        val else_block = MirBlock(
+            id: BlockId.new(2),
+            label: "else",
+            instructions: [inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))],
+            terminator: MirTerminator.Goto(BlockId.new(3))
+        )
+        val join = MirBlock(
+            id: BlockId.new(3),
+            label: "join",
+            instructions: [inst(MirInstKind.BinOp(local(1), MirBinOp.Add, copy_operand(0), int_operand(1)))],
+            terminator: MirTerminator.Return(Some(copy_operand(1)))
+        )
+        val result = ssa_var_transform_blocks([entry, then_block, else_block, join])
         expect(result.applied).to_equal(false)
-        expect(result.reason).to_equal("requires phi nodes")
+        expect(result.reason).to_equal("borrow.reassign_unsafe")
         expect(result.phi_required_count).to_equal(1)
         expect(result.phi_required_locals[0]).to_equal(0)
 

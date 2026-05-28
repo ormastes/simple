@@ -8,6 +8,8 @@ use compiler.interp.execution.tiered_jit.{
     FunctionProfile, JitTier, TieredJitConfig,
     jit_hotspot_plan_from_profile,
     jit_hotspot_plan_invalidate,
+    jit_hotspot_rebuild_choice,
+    jit_hotspot_optimization_plan,
     jit_hotspot_specialization_provider,
     jit_hotspot_consume_plan_with_provider
 }
@@ -104,8 +106,55 @@ fn bench_hotspot_specialized_decision(iters: i64) -> BenchResult:
         i = i + 1
     hotspot_bench_result("jit_hotspot_specialized_decision", iters, bench_now_ns() - t0, checksum)
 
+fn bench_hotspot_cranelift_medium_optimization_plan(iters: i64) -> BenchResult:
+    val config = hotspot_bench_config()
+    val profile = hotspot_bench_profile("cranelift_plan_loop", 4096)
+    var checksum: i64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val plan = jit_hotspot_optimization_plan(profile, config, true, true, "medium")
+        if plan.eligible and plan.backend == "cranelift":
+            checksum = checksum + 1
+        checksum = checksum + plan.passes.len() as i64
+        checksum = checksum + plan.plugin_recommendations.len() as i64
+        checksum = checksum + plan.skipped_plugin_recommendations.len() as i64
+        i = i + 1
+    hotspot_bench_result("jit_hotspot_cranelift_medium_optimization_plan", iters, bench_now_ns() - t0, checksum)
+
+fn bench_hotspot_llvm_high_optimization_plan(iters: i64) -> BenchResult:
+    val config = hotspot_bench_config()
+    val profile = hotspot_bench_profile("llvm_plan_loop", 4096)
+    var checksum: i64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val plan = jit_hotspot_optimization_plan(profile, config, true, true, "high")
+        if plan.eligible and plan.backend == "llvm":
+            checksum = checksum + 1
+        checksum = checksum + plan.passes.len() as i64
+        checksum = checksum + plan.plugin_recommendations.len() as i64
+        checksum = checksum + plan.skipped_plugin_recommendations.len() as i64
+        i = i + 1
+    hotspot_bench_result("jit_hotspot_llvm_high_optimization_plan", iters, bench_now_ns() - t0, checksum)
+
+fn bench_hotspot_medium_budget_backend_choice(iters: i64) -> BenchResult:
+    val config = hotspot_bench_config()
+    val profile = hotspot_bench_profile("budget_choice_loop", 4096)
+    var checksum: i64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val choice = jit_hotspot_rebuild_choice(profile, config, true, true, "medium")
+        if choice.eligible and choice.selected_backend == "cranelift":
+            checksum = checksum + 1
+        checksum = checksum + choice.attempted_backends.len() as i64
+        checksum = checksum + choice.required_count
+        i = i + 1
+    hotspot_bench_result("jit_hotspot_medium_budget_backend_choice", iters, bench_now_ns() - t0, checksum)
+
 fn main():
-    val iters: i64 = 50000
+    val iters: i64 = 500
     print "=== JIT hotspot plan benchmark ==="
     print "note: pure planning only; no native JIT compilation is invoked."
 
@@ -113,11 +162,17 @@ fn main():
     val ready = bench_hotspot_ready_plan(iters)
     val invalidated = bench_hotspot_invalidated_plan(iters)
     val specialized = bench_hotspot_specialized_decision(iters)
+    val cranelift_medium = bench_hotspot_cranelift_medium_optimization_plan(iters)
+    val llvm_high = bench_hotspot_llvm_high_optimization_plan(iters)
+    val budget_choice = bench_hotspot_medium_budget_backend_choice(iters)
 
     bench_print(cold)
     bench_print(ready)
     bench_print(invalidated)
     bench_print(specialized)
+    bench_print(cranelift_medium)
+    bench_print(llvm_high)
+    bench_print(budget_choice)
 
     print ""
     print bench_csv_header()
@@ -125,3 +180,6 @@ fn main():
     print bench_csv(ready)
     print bench_csv(invalidated)
     print bench_csv(specialized)
+    print bench_csv(cranelift_medium)
+    print bench_csv(llvm_high)
+    print bench_csv(budget_choice)

@@ -57,3 +57,34 @@ Simple-side `ssa-var-canon`, while general high-level MIR optimizations such as
 bounds-check elimination, delimiter scan recognition, and checksum reduction
 remain useful for both LLVM and Cranelift because those facts are easiest to
 prove before lowering into backend IR or runtime calls.
+
+## 2026-05-28 Web Research Refresh
+
+Primary-source refresh:
+
+- LLVM's pass documentation lists `mem2reg`, SROA, GVN, LICM, loop unroll,
+  vectorization-adjacent scalar passes, alias analyses, memory dependence, and
+  scalar-evolution based analysis in the standard optimization surface. Source:
+  https://llvm.org/docs/Passes.html
+- LLVM's mutable-variable frontend tutorial states that `mem2reg` is
+  alloca-driven, entry-block limited, direct-load/store limited, and that SROA
+  handles aggregates that plain `mem2reg` cannot. It also recommends this
+  alloca-plus-promotion approach for LLVM frontends unless there is a strong
+  reason to construct SSA directly. Source:
+  https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl07.html
+- Cranelift's 2026 acyclic-egraph mid-end writeup describes a modern Cranelift
+  pipeline that composes GVN, LICM, DCE, rematerialization, and algebraic
+  rewrites, with explicit compile-time/execution-time tradeoffs. Source:
+  https://cfallin.org/blog/2026/04/09/aegraph/
+
+Implications for Simple:
+
+- Keep LLVM plans focused on frontend IR shape and high-level semantic facts;
+  do not duplicate LLVM-owned scalar promotion, inlining, vectorization, and
+  loop-unroll pipelines in medium-budget JIT rebuilds.
+- Keep Cranelift plans willing to run Simple-side SSA-var, bounds, delimiter
+  scan, checksum, and local loop optimizations when those facts are available
+  before backend lowering.
+- Dynamic manifest rule execution must be gated by the same backend and
+  compile-cost policy as descriptor selection, otherwise a skipped LLVM pass can
+  still mutate MIR through generic pattern execution.

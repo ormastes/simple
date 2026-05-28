@@ -9,7 +9,8 @@ use compiler.mir_opt.optimizer_manifest.{
     dynamic_pass_registry_skipped_names_for_backend_budget,
     manifest_cost_allowed,
     load_manifest_v1_from_parsed, load_manifest_v1_from_parsed_with_rules,
-    run_manifest_pattern_rules_for_backend
+    run_manifest_pattern_rules_for_backend,
+    run_manifest_pattern_rules_for_backend_budget
 }
 use compiler.mir_opt.mir_opt.mod.{PassScope}
 use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass.{
@@ -265,3 +266,37 @@ describe "optimizer manifest backend policy":
 
         expect(cranelift_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)
         expect(llvm_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
+
+    it "does not run high-cost manifest pattern rules when JIT budget is medium":
+        val entry = manifest_pass_entry_new_with_backend_policy_and_cost(
+            "backend_rule_budget_high_test_pass",
+            [],
+            PassScope.Function,
+            [],
+            ManifestPassContract(["typed_mir"], ["canonical_mir"], "pure"),
+            optimization_backend_policy_only([OptimizerBackendKind.Llvm], "llvm_only"),
+            "high",
+            "backend_rule_budget_high_test_pass_entry"
+        )
+        val manifest_result = load_manifest_v1_from_parsed_with_rules(
+            1,
+            "simple.opt.mir.v1",
+            "backend_rule_budget_test_plugin",
+            "1.0.0",
+            "0.9.0",
+            [entry],
+            [remove_copy_rule()]
+        )
+        expect(manifest_result.?).to_equal(true)
+        val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest_result.unwrap())
+        expect(registry_result.?).to_equal(true)
+
+        val registry = registry_result.unwrap()
+        val manifest = manifest_result.unwrap()
+        val llvm_medium_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "llvm", "medium")
+        val llvm_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "llvm", "high")
+        val cranelift_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "cranelift", "high")
+
+        expect(llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
+        expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)
+        expect(cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
