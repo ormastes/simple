@@ -58,9 +58,11 @@ use std.http_server.response.{
 }
 use std.http_server.handler.{HandlerRegistry}
 use std.http_server.error.{HttpServerError}
+use std.http_server.server.{load_tls_config}
 use std.http_server.security_context.{dispatch_with_task_remote_security_context}
 use std.async_host.task_identity.{allocate_scheduler_task_id, current_unified_task_key, enter_scheduler_task_id, exit_scheduler_task_id}
 use std.nogc_async_mut.io.tls.{AsyncTlsListener, AsyncTlsStream, TlsConfig}
+use std.nogc_async_mut.io.tls_handshake.{perform_server_handshake}
 use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
 use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists, file_size}
 use std.http_server.range.{
@@ -146,6 +148,21 @@ class Worker:
 
         tcp_backend_set_nonblocking(listen_fd, true)
 
+        # Build TLS listener when TLS is enabled
+        var tls_listen: AsyncTlsListener? = nil
+        if config.tls_enabled:
+            val tls_cfg_result = load_tls_config(config)
+            match tls_cfg_result:
+                Ok(tls_cfg):
+                    val tls_bind_result = AsyncTlsListener.bind(driver, config.listen_addr, tls_cfg)
+                    match tls_bind_result:
+                        Ok(listener):
+                            tls_listen = listener
+                        Err(io_err):
+                            return Err(HttpServerError.TlsError("Worker {worker_id}: TLS bind failed: {io_err.message}"))
+                Err(e):
+                    return Err(e)
+
         Ok(Worker(
             worker_id: worker_id,
             driver: driver,
@@ -169,7 +186,7 @@ class Worker:
             accept_op_id: 0,
             static_file_sendfile_count: 0,
             static_file_fallback_count: 0,
-            tls_listener: nil
+            tls_listener: tls_listen
         ))
 
     me run():
@@ -224,7 +241,11 @@ class Worker:
     # ========================================================================
 
     me handle_accept(client_fd: i64, now: i64):
-        """Handle a new connection accept completion."""
+        """Handle a new connection accept completion.
+
+        When TLS is enabled, performs TLS handshake and dispatches
+        by ALPN protocol. Plain TCP otherwise.
+        """
         self.accept_op_id = self.driver.submit_accept(self.listener_fd)
 
         if client_fd < 0:
@@ -237,6 +258,11 @@ class Worker:
         tcp_backend_set_nonblocking(client_fd, true)
         tcp_backend_set_nodelay(client_fd, true)
 
+        # TLS path: handshake then ALPN dispatch
+        if self.tls_listener.?:
+            self.handle_tls_accept(client_fd, now)
+            return
+
         val peer = tcp_backend_local_addr(client_fd) ?? "unknown"
         val conn = Connection.new(client_fd, peer, now)
 
@@ -246,6 +272,36 @@ class Worker:
         val recv_op = self.driver.submit_recv(client_fd, 8192)
         self.op_to_fd[recv_op] = client_fd
         self.op_type[recv_op] = OP_RECV
+
+    me handle_tls_accept(client_fd: i64, now: i64):
+        """Perform TLS handshake on an accepted fd and dispatch by ALPN.
+
+        Uses perform_server_handshake from the TLS module to complete the
+        handshake synchronously. On success, dispatches via dispatch_by_alpn
+        for HTTP/1.1 or HTTP/2. On failure, closes the fd.
+
+        Note: current TLS 1.2 implementation does not negotiate ALPN,
+        so all connections default to HTTP/1.1. When ALPN support
+        lands in tls_handshake.spl, extract it from the handshake
+        state and pass to dispatch_by_alpn.
+        """
+        var listener = self.tls_listener
+        val hs_result = perform_server_handshake(
+            self.driver,
+            client_fd,
+            listener.tls_config
+        )
+        match hs_result:
+            Ok(state):
+                val keys = state.session_keys
+                if keys == nil:
+                    tcp_backend_close(client_fd)
+                    return
+                # TLS handshake succeeded — dispatch as HTTP/1.1
+                # TODO: extract ALPN from handshake state when ALPN is implemented
+                self.dispatch_by_alpn("", client_fd, now)
+            Err(e):
+                tcp_backend_close(client_fd)
 
     # ========================================================================
     # I/O Completions
@@ -287,7 +343,8 @@ class Worker:
                     self.close_connection(fd)
             else:
                 val data = self.driver.poll_data(completion_index)
-                self.handle_recv(fd, data, now)
+                val raw_bytes = self.driver.poll_recv_bytes(completion_index)
+                self.handle_recv(fd, data, raw_bytes, now)
 
         elif typ == OP_SEND:
             # Check if there's a pending sendfile for this fd
@@ -329,12 +386,12 @@ class Worker:
         elif typ == OP_CLOSE_SENDFILE:
             self.handle_send_complete(fd, now)
 
-    me handle_recv(fd: i64, data: text, now: i64):
+    me handle_recv(fd: i64, data: text, raw_bytes: [u8], now: i64):
         """Handle data received on a connection."""
-        # H2 connections are routed separately from H1
+        # H2 connections are routed separately — feed raw bytes to avoid UTF-8 corruption
         val h2conn = self.h2_connections.get(fd)
         if h2conn.?:
-            self.handle_h2_recv(fd, data, now)
+            self.handle_h2_recv(fd, raw_bytes, now)
             return
 
         val conn = self.connections.get(fd)
@@ -676,8 +733,8 @@ class Worker:
         self.op_to_fd[recv_op] = fd
         self.op_type[recv_op] = OP_RECV
 
-    me handle_h2_recv(fd: i64, data: text, now: i64):
-        """Feed received data to an H2 connection and flush outbound frames."""
+    me handle_h2_recv(fd: i64, data: [u8], now: i64):
+        """Feed received raw bytes to an H2 connection and flush outbound frames."""
         val h2conn = self.h2_connections.get(fd)
         if not h2conn.?:
             return

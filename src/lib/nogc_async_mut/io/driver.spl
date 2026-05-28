@@ -88,6 +88,7 @@ class IoDriver:
     _fh_ids: [i64]
     _fh_data: [text]
     _bytes_pending: Dict<i64, [u8]>
+    _recv_bytes: Dict<i64, [u8]>
 
     static fn new() -> IoDriver:
         IoDriver(
@@ -97,7 +98,8 @@ class IoDriver:
             _c_id: [], _c_result: [], _c_flags: [], _c_data: [],
             _next_id: 1, _next_fh: 10000,
             _fh_ids: [], _fh_data: [],
-            _bytes_pending: {}
+            _bytes_pending: {},
+            _recv_bytes: {}
         )
 
     static fn with_depth(depth: i64) -> IoDriver:
@@ -270,6 +272,7 @@ class IoDriver:
         self._c_result = []
         self._c_flags = []
         self._c_data = []
+        self._recv_bytes = {}
 
         var np_id: [i64] = []
         var np_type: [i64] = []
@@ -329,6 +332,7 @@ class IoDriver:
                 val bytes = rt_io_tcp_read(fd, self._p_size[i])
                 if bytes.len() > 0:
                     val txt = rt_bytes_to_text(bytes)
+                    self._recv_bytes[oid] = bytes
                     self._complete(oid, bytes.len(), 0, txt)
                     i = i + 1
                     continue
@@ -472,6 +476,18 @@ class IoDriver:
             return self._c_data[index].len()
         0
 
+    # Return raw received bytes for a completion at `index`.
+    # Only populated for _OP_RECV completions; returns [] for all other ops.
+    # Use this instead of poll_data when binary-safe access is needed (e.g. H2 frames).
+    fn poll_recv_bytes(self, index: i64) -> [u8]:
+        if index >= self._c_id.len():
+            return []
+        val oid = self._c_id[index]
+        val opt = self._recv_bytes.get(oid)
+        if opt.?:
+            return opt
+        []
+
     # ---- Cancel ----
 
     fn cancel(self, op_id: i64) -> bool:
@@ -554,3 +570,4 @@ class IoDriver:
         self._fh_ids = []
         self._fh_data = []
         self._bytes_pending = {}
+        self._recv_bytes = {}
