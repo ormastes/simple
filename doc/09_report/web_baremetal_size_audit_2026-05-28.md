@@ -43,9 +43,9 @@ Date: 2026-05-28
 | Browser smoke native file / dec section | 35200 / 27000 |
 | Browser simple render HTML native file / dec section | 19000 / 8500 |
 | Browser engine source | 58000 |
-| x86_64 monolithic bare-metal stubs source | 558100 |
-| ARM64 monolithic bare-metal stubs source | 142800 |
-| ARM32 monolithic bare-metal stubs source | 65100 |
+| x86_64 monolithic bare-metal stubs source | 555800 |
+| ARM64 monolithic bare-metal stubs source | 141800 |
+| ARM32 monolithic bare-metal stubs source | 64200 |
 | RV64 monolithic bare-metal stubs source | 60723 |
 | RV32 monolithic bare-metal stubs source | 20336 |
 | Simple web static facade native file / dec section | 14500 / 5000 |
@@ -121,9 +121,9 @@ Date: 2026-05-28
 | Surface | Files | Lines | Bytes |
 |---|---:|---:|---:|
 | `examples/browser` | 304 | 75035 | 2850509 |
-| `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15131 | 558077 |
-| `examples/simple_os/arch/arm64/boot/baremetal_stubs.c` | 1 | 3504 | 142742 |
-| `examples/simple_os/arch/arm32/boot/baremetal_stubs.c` | 1 | 1937 | 65023 |
+| `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15079 | 555747 |
+| `examples/simple_os/arch/arm64/boot/baremetal_stubs.c` | 1 | 3472 | 141741 |
+| `examples/simple_os/arch/arm32/boot/baremetal_stubs.c` | 1 | 1906 | 64107 |
 | `examples/simple_os/arch/riscv64/boot/baremetal_stubs.c` | 1 | 1806 | 60723 |
 | `examples/simple_os/arch/riscv32/boot/baremetal_stubs.c` | 1 | 628 | 20336 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 83 | 2045 |

@@ -736,20 +736,17 @@ RuntimeValue rt_is_some(RuntimeValue value)
 #define V1(n) void n(RuntimeValue a) { (void)a; }
 #define V2(n) void n(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
 
-/* --- Arithmetic / comparison --- */
 S2(rt_add) S2(rt_sub) S2(rt_mul) S2(rt_div) S2(rt_mod) S2(rt_pow)
 S2(rt_eq) S2(rt_ne) S2(rt_lt) S2(rt_gt) S2(rt_le) S2(rt_ge)
 S2(rt_and) S2(rt_or) S1(rt_not)
 S2(rt_shl) S2(rt_shr) S2(rt_bitand) S2(rt_bitor) S2(rt_bitxor)
 S1(rt_bitnot) S1(rt_neg)
 
-/* --- Type introspection / conversion --- */
 S1(rt_type_of) S1(rt_is_nil) S1(rt_is_int) S1(rt_is_float)
 S1(rt_is_string) S1(rt_is_bool) S1(rt_is_array) S1(rt_is_map)
 S1(rt_is_object) S1(rt_to_int) S1(rt_to_float) S1(rt_to_string)
 S1(rt_to_bool) S1(rt_clone) S1(rt_freeze) S1(rt_is_frozen)
 
-/* --- String extras --- */
 S2(rt_string_contains) S2(rt_string_starts_with) S2(rt_string_ends_with)
 S2(rt_string_index_of) S2(rt_string_last_index_of)
 S2(rt_string_substr) S2(rt_string_split)
@@ -760,7 +757,6 @@ S2(rt_string_pad_start) S2(rt_string_pad_end)
 S1(rt_string_reverse) S1(rt_string_chars) S1(rt_string_bytes)
 S1(rt_string_is_empty) S2(rt_string_compare) S2(rt_string_format)
 
-/* --- Array --- */
 RuntimeValue rt_array_new(RuntimeValue cap_val)
 {
     int32_t cap = DECODE_INT(cap_val);
@@ -864,30 +860,25 @@ S2(rt_array_concat) S1(rt_array_clear) S1(rt_array_flatten)
 S2(rt_array_fill) S1(rt_array_clone) S2(rt_array_zip)
 S1(rt_array_uniq) S1(rt_array_compact)
 
-/* --- Map / Dictionary --- */
 S0(rt_map_new) S3(rt_map_set) S2(rt_map_get) S2(rt_map_has)
 S2(rt_map_remove) S1(rt_map_keys) S1(rt_map_values)
 S1(rt_map_entries) S1(rt_map_len) S1(rt_map_clear)
 S1(rt_map_clone) S2(rt_map_merge) S2(rt_map_for_each)
 
-/* --- File I/O --- */
 S1(rt_file_read) S2(rt_file_write) S1(rt_file_exists) S1(rt_file_delete)
 S2(rt_file_append) S1(rt_file_size) S2(rt_file_copy) S2(rt_file_move)
 S2(rt_file_rename) S1(rt_file_is_dir) S1(rt_file_is_file)
 S1(rt_file_read_bytes) S2(rt_file_write_bytes) S1(rt_file_stat) S1(rt_file_realpath)
 
-/* --- Directory I/O --- */
 S1(rt_dir_list) S1(rt_dir_create) S1(rt_dir_create_all)
 S1(rt_dir_exists) S1(rt_dir_remove) S1(rt_dir_remove_all)
 S0(rt_dir_cwd) S1(rt_dir_chdir) S0(rt_dir_home) S0(rt_dir_temp)
 
-/* --- Process --- */
 S2(rt_process_run) S3(rt_process_run_timeout) S1(rt_process_spawn)
 S1(rt_process_kill) S1(rt_process_wait) S0(rt_process_pid)
 S1(rt_cli_get_args) S0(rt_cli_args) S0(rt_exit_code)
 S1(rt_exit) S1(rt_env_get) S2(rt_env_set) S0(rt_env_all)
 
-/* --- Math --- */
 S1(rt_math_sqrt) S1(rt_math_sin) S1(rt_math_cos) S1(rt_math_tan)
 S1(rt_math_asin) S1(rt_math_acos) S1(rt_math_atan) S2(rt_math_atan2)
 S1(rt_math_abs) S1(rt_math_floor) S1(rt_math_ceil) S1(rt_math_round)
@@ -896,32 +887,25 @@ S2(rt_math_min) S2(rt_math_max) S2(rt_math_pow) S0(rt_math_random)
 S0(rt_math_pi) S0(rt_math_e) S0(rt_math_inf) S0(rt_math_nan)
 S1(rt_math_is_nan) S1(rt_math_is_inf)
 
-/* --- Interrupts --- */
 S2(rt_register_isr) S1(rt_send_eoi) S0(rt_get_interrupt_flag)
 
-/* --- Timer / Clock --- */
 S1(rt_time_now_ms) S0(rt_time_now_nanos) S0(rt_time_monotonic)
 S1(rt_sleep_ms) S1(rt_timer_create) S1(rt_timer_cancel)
 
-/* --- Network --- */
 S2(rt_net_connect) S1(rt_net_listen) S2(rt_net_send) S1(rt_net_recv)
 S1(rt_net_close) S2(rt_net_bind) S1(rt_net_accept)
 S2(rt_net_set_timeout) S1(rt_net_get_addr)
 
-/* --- HTTP --- */
 S2(rt_http_get) S3(rt_http_post) S3(rt_http_put) S3(rt_http_patch)
 S2(rt_http_delete) S2(rt_http_request) S3(rt_http_request_full)
 S2(rt_http_set_header)
 
-/* --- JSON --- */
 S1(rt_json_parse) S1(rt_json_stringify) S2(rt_json_get) S3(rt_json_set)
 S1(rt_json_keys) S1(rt_json_values) S1(rt_json_is_object) S1(rt_json_is_array)
 
-/* --- Regex --- */
 S2(ffi_regex_is_match) S2(ffi_regex_find) S2(ffi_regex_find_all)
 S2(ffi_regex_replace) S3(ffi_regex_replace_all) S1(ffi_regex_compile)
 
-/* --- Test / BDD --- */
 S1(rt_bdd_describe_start) S1(rt_bdd_describe_end)
 S2(rt_bdd_it_start) S1(rt_bdd_it_end)
 S1(rt_expect) S2(rt_expect_eq) S2(rt_expect_ne)
@@ -931,48 +915,38 @@ S1(rt_expect_true) S1(rt_expect_false)
 S2(rt_expect_contains) S2(rt_expect_throws)
 S0(rt_bdd_suite_start) S0(rt_bdd_suite_end) S0(rt_bdd_report)
 
-/* --- Misc / Debug --- */
 S1(rt_hash) S2(rt_hash_combine) S1(rt_debug_print) S1(rt_debug_dump)
 S0(rt_debug_break) S1(rt_panic) S1(rt_assert) S2(rt_assert_eq)
 S2(rt_assert_ne) S1(rt_abort)
 S0(rt_gc_collect) S0(rt_gc_disable) S0(rt_gc_enable) S0(rt_gc_stats)
 S1(rt_typeof)
 
-/* --- Threading --- */
 S1(rt_thread_create) S1(rt_thread_join) S0(rt_thread_yield)
 S0(rt_thread_current) S1(rt_thread_sleep)
 S0(rt_mutex_new) S1(rt_mutex_lock) S1(rt_mutex_unlock) S1(rt_mutex_try_lock)
 S0(rt_condvar_new) S1(rt_condvar_wait) S1(rt_condvar_notify) S1(rt_condvar_notify_all)
 
-/* --- Channels --- */
 S0(rt_channel_new) S2(rt_channel_send) S1(rt_channel_recv)
 S1(rt_channel_try_recv) S1(rt_channel_close)
 
-/* --- Async --- */
 S1(rt_async_spawn) S1(rt_async_await) S0(rt_async_yield) S2(rt_async_select)
 
-/* --- Encoding --- */
 S1(rt_base64_encode) S1(rt_base64_decode) S1(rt_hex_encode) S1(rt_hex_decode)
 S1(rt_utf8_encode) S1(rt_utf8_decode) S1(rt_url_encode) S1(rt_url_decode)
 
-/* --- Crypto --- */
 S1(rt_sha256) S1(rt_sha512) S1(rt_md5) S2(rt_hmac_sha256) S1(rt_random_bytes)
 
-/* --- Object / Struct --- */
 S1(rt_object_new) S2(rt_object_get) S3(rt_object_set) S2(rt_object_has)
 S2(rt_object_delete) S1(rt_object_keys) S1(rt_object_values)
 S1(rt_object_freeze) S1(rt_object_clone)
 
-/* --- Error handling --- */
 S1(rt_error_new) S1(rt_error_message) S1(rt_error_code) S1(rt_error_stack)
 S2(rt_result_ok) S2(rt_result_err) S1(rt_result_is_ok) S1(rt_result_is_err)
 S1(rt_result_unwrap) S2(rt_result_unwrap_or)
 
-/* --- Weak references & closures --- */
 S1(rt_weak_ref) S1(rt_weak_deref)
 S1(rt_closure_new) S2(rt_closure_call) S1(rt_closure_bind)
 
-/* --- MMIO: real ARM32 implementations --- */
 
 RuntimeValue rt_mmio_read_u8_real(RuntimeValue addr)
 {
@@ -1095,7 +1069,6 @@ RuntimeValue rt_arm_virtio_blk_mmio_write_u32(RuntimeValue off, RuntimeValue val
     return NIL_VALUE;
 }
 
-/* --- CPU: real ARM32 implementations --- */
 
 RuntimeValue rt_hlt_real(void)
 {
@@ -1135,12 +1108,10 @@ RuntimeValue rt_enable_interrupts(void)
 RuntimeValue rt_disable_interrupts(void)
     __attribute__((alias("rt_disable_interrupts_real")));
 
-/* ARM32 does not have port I/O -- provide no-op stubs */
 S2(rt_port_outb) S2(rt_port_outw) S2(rt_port_outl)
 S1(rt_port_inb) S1(rt_port_inw) S1(rt_port_inl)
 S0(rt_port_io_wait)
 
-/* ARM32 does not have invlpg/rdtsc/lgdt/lidt/ltr/cr2/cr3 -- no-op stubs */
 S1(rt_invlpg) S0(rt_rdtsc)
 S1(rt_lgdt) S1(rt_lidt) S1(rt_ltr)
 S1(rt_read_cr3) S1(rt_write_cr3) S1(rt_read_cr2)
@@ -1933,5 +1904,3 @@ int __modsi3(int a, int b)
 #define RV_INT int32_t
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
-
-/* End of arm32 baremetal_stubs.c */

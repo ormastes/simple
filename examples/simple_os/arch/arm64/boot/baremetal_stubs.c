@@ -107,7 +107,6 @@ typedef struct {
     RuntimeValue payload;
 } RuntimeEnum;
 
-/* Forward declaration */
 typedef struct {
     HeapHeader    hdr;
     uint32_t      len;
@@ -116,7 +115,6 @@ typedef struct {
     RuntimeValue *values;
 } RuntimeMap;
 
-/* Forward declarations for functions used before definition */
 RuntimeValue rt_map_clone(RuntimeValue map);
 RuntimeValue rt_map_new(void);
 RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
@@ -685,7 +683,6 @@ static void _pci_scan(void)
     }
 }
 
-/* PCI enumeration handler (same protocol as x86_64) */
 int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
 {
     if (_pci_cache_count < 0) _pci_scan();
@@ -785,7 +782,6 @@ int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
     return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
-/* c_pcimgr_init — extern C wrapper for PCI scan, called from vfs_init.spl */
 void c_pcimgr_init(void)
 {
     _pci_scan();
@@ -895,7 +891,6 @@ RuntimeValue rt_bitxor(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECOD
 RuntimeValue rt_bitnot(RuntimeValue a) { return ENCODE_INT(~DECODE_INT(a)); }
 RuntimeValue rt_neg(RuntimeValue a) { return ENCODE_INT(-DECODE_INT(a)); }
 
-/* Type introspection */
 RuntimeValue rt_type_of(RuntimeValue val) {
     if (IS_NIL(val)) return rt_string_from_cstr("nil");
     if (IS_INT(val)) return rt_string_from_cstr("int");
@@ -1557,7 +1552,6 @@ RuntimeValue rt_value_compare(RuntimeValue a, RuntimeValue b) {
 RuntimeValue rt_profiler_record_call(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
 RuntimeValue rt_profiler_record_return(RuntimeValue a) { (void)a; return NIL_VALUE; }
 
-/* serial_println — called by compiled Simple code (extern fn serial_println) */
 RuntimeValue serial_println(RuntimeValue val) {
     rt_print(val);
     serial_puts("\r\n");
@@ -1616,7 +1610,6 @@ RuntimeValue rt_qemu_exit_success(void) {
 
 S1(rt_to_float)
 
-/* Remaining stubs for array ops not fully implemented */
 S3(rt_array_insert)
 S1(rt_array_reverse)
 S1(rt_array_sort)
@@ -1635,7 +1628,6 @@ S2(rt_array_zip)
 S1(rt_array_uniq)
 S1(rt_array_compact)
 
-/* --- File I/O --- */
 S1(rt_file_read)
 S2(rt_file_write)
 S1(rt_file_exists)
@@ -1652,7 +1644,6 @@ S2(rt_file_write_bytes)
 S1(rt_file_stat)
 S1(rt_file_realpath)
 
-/* --- Directory I/O --- */
 S1(rt_dir_list)
 S1(rt_dir_create)
 S1(rt_dir_create_all)
@@ -1664,7 +1655,6 @@ S1(rt_dir_chdir)
 S0(rt_dir_home)
 S0(rt_dir_temp)
 
-/* --- Process --- */
 S2(rt_process_run)
 S3(rt_process_run_timeout)
 S1(rt_process_spawn)
@@ -1744,7 +1734,6 @@ RuntimeValue rt_stdin_read_line(RuntimeValue a, RuntimeValue b) { (void)a; (void
 RuntimeValue rt_terminal_clear(RuntimeValue a)  { (void)a; return NIL_VALUE; }
 RuntimeValue rt_terminal_set_cursor(RuntimeValue a, RuntimeValue b, RuntimeValue c) { (void)a; (void)b; (void)c; return NIL_VALUE; }
 
-/* --- Math --- */
 S1(rt_math_sqrt) S1(rt_math_sin) S1(rt_math_cos) S1(rt_math_tan)
 S1(rt_math_asin) S1(rt_math_acos) S1(rt_math_atan) S2(rt_math_atan2)
 S1(rt_math_abs) S1(rt_math_floor) S1(rt_math_ceil) S1(rt_math_round)
@@ -1753,7 +1742,6 @@ S2(rt_math_min) S2(rt_math_max) S2(rt_math_pow)
 S0(rt_math_random) S0(rt_math_pi) S0(rt_math_e) S0(rt_math_inf) S0(rt_math_nan)
 S1(rt_math_is_nan) S1(rt_math_is_inf)
 
-/* --- Port I/O (no-op on ARM64) --- */
 RuntimeValue rt_port_outb(RuntimeValue p, RuntimeValue v) { (void)p; (void)v; return NIL_VALUE; }
 RuntimeValue rt_port_outw(RuntimeValue p, RuntimeValue v) { (void)p; (void)v; return NIL_VALUE; }
 RuntimeValue rt_port_outl(RuntimeValue p, RuntimeValue v) { (void)p; (void)v; return NIL_VALUE; }
@@ -1762,7 +1750,6 @@ RuntimeValue rt_port_inw(RuntimeValue p) { (void)p; return ENCODE_INT(0); }
 RuntimeValue rt_port_inl(RuntimeValue p) { (void)p; return ENCODE_INT(0); }
 RuntimeValue rt_port_io_wait(void) { return NIL_VALUE; }
 
-/* --- CPU control (x86 stubs, ARM64 equivalents in section 16) --- */
 RuntimeValue rt_hlt(void) { __asm__ volatile("wfe"); return NIL_VALUE; }
 RuntimeValue rt_sti(void) { __asm__ volatile("msr daifclr, #0xF"); return NIL_VALUE; }
 RuntimeValue rt_cli(void) { __asm__ volatile("msr daifset, #0xF"); return NIL_VALUE; }
@@ -1770,37 +1757,29 @@ S1(rt_lgdt) S1(rt_lidt) S1(rt_ltr) S1(rt_invlpg)
 S0(rt_read_cr0) S1(rt_write_cr0) S1(rt_read_cr2) S1(rt_read_cr3) S1(rt_write_cr3)
 S0(rt_read_cr4) S1(rt_write_cr4) S1(rt_read_msr) S2(rt_write_msr) S0(rt_cpuid) S0(rt_rdtsc)
 
-/* --- Interrupts --- */
 S2(rt_register_isr) S1(rt_send_eoi) S0(rt_get_interrupt_flag)
 
-/* --- Timer / Clock --- */
 S1(rt_time_now_ms) S0(rt_time_now_nanos) S0(rt_time_monotonic)
 S1(rt_sleep_ms) S1(rt_timer_create) S1(rt_timer_cancel)
 
-/* --- Network --- */
 S2(rt_net_connect) S1(rt_net_listen) S2(rt_net_send) S1(rt_net_recv) S1(rt_net_close)
 S2(rt_net_bind) S1(rt_net_accept) S2(rt_net_set_timeout) S1(rt_net_get_addr)
 
-/* --- HTTP --- */
 S2(rt_http_get) S3(rt_http_post) S3(rt_http_put) S3(rt_http_patch)
 S2(rt_http_delete) S2(rt_http_request) S3(rt_http_request_full) S2(rt_http_set_header)
 
-/* --- JSON --- */
 S1(rt_json_parse) S1(rt_json_stringify) S2(rt_json_get) S3(rt_json_set)
 S1(rt_json_keys) S1(rt_json_values) S1(rt_json_is_object) S1(rt_json_is_array)
 
-/* --- Regex --- */
 S2(ffi_regex_is_match) S2(ffi_regex_find) S2(ffi_regex_find_all)
 S2(ffi_regex_replace) S3(ffi_regex_replace_all) S1(ffi_regex_compile)
 
-/* --- Test / BDD --- */
 S1(rt_bdd_describe_start) S1(rt_bdd_describe_end) S2(rt_bdd_it_start) S1(rt_bdd_it_end)
 S1(rt_expect) S2(rt_expect_eq) S2(rt_expect_ne) S2(rt_expect_gt) S2(rt_expect_lt)
 S1(rt_expect_nil) S1(rt_expect_not_nil) S1(rt_expect_true) S1(rt_expect_false)
 S2(rt_expect_contains) S2(rt_expect_throws)
 S0(rt_bdd_suite_start) S0(rt_bdd_suite_end) S0(rt_bdd_report)
 
-/* --- Misc / Debug --- */
 RuntimeValue rt_hash(RuntimeValue val) {
     uint64_t h = 14695981039346656037ULL;
     if (IS_INT(val)) { int64_t n = DECODE_INT(val); for (int i = 0; i < 8; i++) { h ^= (uint8_t)(n & 0xFF); h *= 1099511628211ULL; n >>= 8; } }
@@ -1869,7 +1848,6 @@ RuntimeValue rt_gc_disable(void) { return NIL_VALUE; }
 RuntimeValue rt_gc_enable(void) { return NIL_VALUE; }
 RuntimeValue rt_gc_stats(void) { return NIL_VALUE; }
 
-/* Threading */
 S1(rt_thread_create) S1(rt_thread_join)
 RuntimeValue rt_thread_yield(void) { return NIL_VALUE; }
 RuntimeValue rt_thread_current(void) { return ENCODE_INT(0); }
@@ -1877,31 +1855,24 @@ RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }
 S0(rt_mutex_new) S1(rt_mutex_lock) S1(rt_mutex_unlock) S1(rt_mutex_try_lock)
 S0(rt_condvar_new) S1(rt_condvar_wait) S1(rt_condvar_notify) S1(rt_condvar_notify_all)
 
-/* Channels */
 S0(rt_channel_new) S2(rt_channel_send) S1(rt_channel_recv) S1(rt_channel_try_recv) S1(rt_channel_close)
 
-/* Async */
 S1(rt_async_spawn) S1(rt_async_await)
 RuntimeValue rt_async_yield(void) { return NIL_VALUE; }
 S2(rt_async_select)
 
-/* Encoding */
 S1(rt_base64_encode) S1(rt_base64_decode) S1(rt_hex_encode) S1(rt_hex_decode)
 S1(rt_utf8_encode) S1(rt_utf8_decode) S1(rt_url_encode) S1(rt_url_decode)
 
-/* Crypto */
 S1(rt_sha256) S1(rt_sha512) S1(rt_md5) S2(rt_hmac_sha256) S1(rt_random_bytes)
 
-/* Object / Struct */
 S1(rt_object_new) S2(rt_object_get) S3(rt_object_set) S2(rt_object_has) S2(rt_object_delete)
 S1(rt_object_keys) S1(rt_object_values) S1(rt_object_freeze) S1(rt_object_clone)
 
-/* Error handling */
 S1(rt_error_new) S1(rt_error_message) S1(rt_error_code) S1(rt_error_stack)
 S2(rt_result_ok) S2(rt_result_err) S1(rt_result_is_ok) S1(rt_result_is_err)
 S1(rt_result_unwrap) S2(rt_result_unwrap_or)
 
-/* Weak references & closures */
 S1(rt_weak_ref) S1(rt_weak_deref) S1(rt_closure_new) S2(rt_closure_call) S1(rt_closure_bind)
 
 /* MMIO — use RAW addresses (not DECODE_INT) to match x86_64 convention.
@@ -2003,7 +1974,6 @@ RuntimeValue rt_arm_virtio_blk_mmio_write_u32(RuntimeValue off, RuntimeValue val
     return NIL_VALUE;
 }
 
-/* ARM64-specific CPU operations */
 RuntimeValue rt_wfe(void) { __asm__ volatile("wfe"); return NIL_VALUE; }
 RuntimeValue rt_wfi(void) { __asm__ volatile("wfi"); return NIL_VALUE; }
 RuntimeValue rt_sev(void) { __asm__ volatile("sev"); return NIL_VALUE; }
@@ -3500,5 +3470,3 @@ void cap_init_task_record(RuntimeValue task, RuntimeValue full)
 #define CRYPTO_HAS_SERIAL_PUTHEX
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
-
-/* End of ARM64 baremetal_stubs.c */

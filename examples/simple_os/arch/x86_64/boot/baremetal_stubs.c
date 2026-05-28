@@ -411,7 +411,6 @@ typedef struct {
     RuntimeValue payload;
 } RuntimeEnum;
 
-/* Forward declaration — full definition in the Map section */
 typedef struct {
     HeapHeader    hdr;
     uint32_t      len;
@@ -420,7 +419,6 @@ typedef struct {
     RuntimeValue *values;
 } RuntimeMap;
 
-/* Forward declarations for functions used before definition */
 RuntimeValue rt_map_clone(RuntimeValue map);
 RuntimeValue rt_map_new(void);
 RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
@@ -1009,7 +1007,6 @@ void rt_println_bool(RuntimeValue val)
     serial_putchar('\n');
 }
 
-/* --- rt_print: generic print to serial --- */
 RuntimeValue rt_print(RuntimeValue val)
 {
     if (IS_INT(val)) {
@@ -1174,7 +1171,6 @@ static void _pci_scan(void)
     }
 }
 
-/* --- MMIO helpers (volatile, raw physical addresses) --- */
 #define nvme_rd32(addr) (*(volatile uint32_t *)(uintptr_t)(addr))
 #define nvme_wr32(addr, val) (*(volatile uint32_t *)(uintptr_t)(addr) = (val))
 #define nvme_rd64(addr) (*(volatile uint64_t *)(uintptr_t)(addr))
@@ -2804,26 +2800,21 @@ static int64_t _fat32_read_file_syscall(uint64_t name_addr, uint64_t buf_addr,
     return (int64_t)bytes_read;
 }
 
-/* Forward declaration for serial_puthex (defined in section 9d) */
 static void serial_puthex(uint32_t v);
 
-/* --- VirtIO status bits --- */
 #define VIRTIO_STATUS_ACK        1
 #define VIRTIO_STATUS_DRIVER     2
 #define VIRTIO_STATUS_FEATURES_OK 8
 #define VIRTIO_STATUS_DRIVER_OK  4
 #define VIRTIO_STATUS_FAILED     128
 
-/* --- VirtIO feature bits --- */
 #define VIRTIO_NET_F_MAC         (1u << 5)
 #define VIRTIO_NET_F_STATUS      (1u << 16)
 #define VIRTIO_NET_F_CSUM        (1u << 0)
 
-/* --- Virtqueue descriptor flags --- */
 #define VRING_DESC_F_NEXT     1
 #define VRING_DESC_F_WRITE    2
 
-/* --- VirtIO-net header (legacy, 10 bytes) --- */
 struct virtio_net_hdr {
     uint8_t  flags;
     uint8_t  gso_type;
@@ -2835,7 +2826,6 @@ struct virtio_net_hdr {
 
 #define VIRTIO_NET_HDR_SIZE 10
 
-/* --- Virtqueue structures --- */
 struct vring_desc {
     uint64_t addr;
     uint32_t len;
@@ -2860,7 +2850,6 @@ struct vring_used {
     struct vring_used_elem ring[];
 } __attribute__((packed));
 
-/* --- Ethernet / ARP / IP / ICMP protocol constants --- */
 #define ETH_ALEN       6
 #define ETH_HLEN       14
 #define ETH_P_IP       0x0800
@@ -2874,14 +2863,12 @@ struct vring_used {
 #define ICMP_ECHO_REQ   8
 #define ICMP_ECHO_REPLY 0
 
-/* --- Ethernet header --- */
 struct eth_hdr {
     uint8_t  dst[ETH_ALEN];
     uint8_t  src[ETH_ALEN];
     uint16_t ethertype;   /* big-endian */
 } __attribute__((packed));
 
-/* --- ARP packet (Ethernet + IPv4) --- */
 struct arp_pkt {
     uint16_t hw_type;     /* big-endian */
     uint16_t proto_type;  /* big-endian */
@@ -2894,7 +2881,6 @@ struct arp_pkt {
     uint8_t  target_ip[4];
 } __attribute__((packed));
 
-/* --- IPv4 header (minimal, no options) --- */
 struct ipv4_hdr {
     uint8_t  ver_ihl;     /* version(4) + IHL(4) */
     uint8_t  tos;
@@ -2908,7 +2894,6 @@ struct ipv4_hdr {
     uint8_t  dst_ip[4];
 } __attribute__((packed));
 
-/* --- ICMP header --- */
 struct icmp_hdr {
     uint8_t  type;
     uint8_t  code;
@@ -2917,7 +2902,6 @@ struct icmp_hdr {
     uint16_t seq;
 } __attribute__((packed));
 
-/* --- Byte-order helpers --- */
 static inline uint16_t _net_htons(uint16_t h) {
     return (uint16_t)((h >> 8) | (h << 8));
 }
@@ -2932,7 +2916,6 @@ static inline uint32_t __attribute__((unused)) _net_ntohl(uint32_t n) {
     return _net_htonl(n);
 }
 
-/* --- Internet checksum (RFC 1071) --- */
 static uint16_t _inet_checksum(const void *data, size_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
@@ -2948,7 +2931,6 @@ static uint16_t _inet_checksum(const void *data, size_t len)
     return _net_htons((uint16_t)~sum);
 }
 
-/* --- MAC address print helper --- */
 static void _net_print_mac(const uint8_t *mac) {
     static const char hex[] = "0123456789abcdef";
     for (int i = 0; i < 6; i++) {
@@ -2958,7 +2940,6 @@ static void _net_print_mac(const uint8_t *mac) {
     }
 }
 
-/* --- IP address print helper --- */
 static void _net_print_ip(const uint8_t *ip) {
     for (int i = 0; i < 4; i++) {
         if (i) serial_putchar('.');
@@ -2966,7 +2947,6 @@ static void _net_print_ip(const uint8_t *ip) {
     }
 }
 
-/* --- VirtIO-net driver state --- */
 #define VIRTIO_NET_QUEUE_SIZE 256  /* must match QEMU's vring-num-default */
 #define VIRTIO_NET_BUF_SIZE  2048  /* per-buffer size for RX/TX */
 
@@ -3002,7 +2982,6 @@ static struct {
     uint32_t icmp_replies;  /* ICMP echo replies sent */
 } _vnet;
 
-/* --- VirtIO BAR0 I/O register access --- */
 static inline uint32_t _vnet_rd32(uint16_t off) {
     return inl(_vnet.iobase + off);
 }
@@ -3381,7 +3360,6 @@ static void _vnet_handle_icmp(const uint8_t *frame, uint16_t frame_len)
 /* -----------------------------------------------------------
  * _vnet_handle_frame — dispatch incoming Ethernet frame
  * ----------------------------------------------------------- */
-/* Forward declaration — defined after TCP stack */
 static void _vnet_handle_ipv4(const uint8_t *frame, uint16_t frame_len);
 
 static void _vnet_handle_frame(const uint8_t *frame, uint16_t frame_len)
@@ -7564,7 +7542,6 @@ RuntimeValue rt_value_compare(RuntimeValue a, RuntimeValue b) {
 RuntimeValue rt_profiler_record_call(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
 RuntimeValue rt_profiler_record_return(RuntimeValue a) { (void)a; return NIL_VALUE; }
 
-/* serial_println — called by compiled Simple code (extern fn serial_println) */
 RuntimeValue serial_println(RuntimeValue val) {
     rt_print(val);
     serial_puts("\r\n");
@@ -8660,7 +8637,6 @@ RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val)
     return rt_string_concat(fmt, val_str);
 }
 
-/* --- Helper: integer to decimal string in buffer, returns length --- */
 static int int_to_buf(char *buf, int buf_size, int64_t n)
 {
     if (n == 0) { buf[0] = '0'; return 1; }
@@ -8681,7 +8657,6 @@ static int int_to_buf(char *buf, int buf_size, int64_t n)
     return out;
 }
 
-/* --- Helper: integer to hex string in buffer, returns length --- */
 static int int_to_hex_buf(char *buf, int buf_size, uint64_t v, int uppercase)
 {
     const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
@@ -8697,7 +8672,6 @@ static int int_to_hex_buf(char *buf, int buf_size, uint64_t v, int uppercase)
     return out;
 }
 
-/* --- Helper: integer to octal string in buffer, returns length --- */
 static int int_to_oct_buf(char *buf, int buf_size, uint64_t v)
 {
     if (v == 0) { buf[0] = '0'; return 1; }
@@ -8712,7 +8686,6 @@ static int int_to_oct_buf(char *buf, int buf_size, uint64_t v)
     return out;
 }
 
-/* --- Helper: integer to binary string in buffer, returns length --- */
 static int int_to_bin_buf(char *buf, int buf_size, uint64_t v)
 {
     if (v == 0) { buf[0] = '0'; return 1; }
@@ -8972,7 +8945,6 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
     return rt_string_new((RuntimeValue)(uintptr_t)raw_buf, (RuntimeValue)raw_len);
 }
 
-/* --- Array --- */
 
 /* rt_array_new: create a new array with given capacity.
  * Cranelift codegen passes RAW capacity (iconst.i64 N), NOT tagged.
@@ -12558,7 +12530,6 @@ RuntimeValue rt_map_for_each(RuntimeValue map, RuntimeValue callback)
 #define TRAP_SUPPRESS_2  (void)_a; (void)_b;
 #define TRAP_SUPPRESS_3  (void)_a; (void)_b; (void)_c;
 
-/* --- File I/O (no filesystem on baremetal) --- */
 TRAP_STUB_RET(rt_file_read, 1)
 TRAP_STUB_RET(rt_file_write, 2)
 TRAP_STUB_RET(rt_file_exists, 1)
@@ -12575,7 +12546,6 @@ TRAP_STUB_RET(rt_file_write_bytes, 2)
 TRAP_STUB_RET(rt_file_stat, 1)
 TRAP_STUB_RET(rt_file_realpath, 1)
 
-/* --- Directory I/O (no filesystem on baremetal) --- */
 TRAP_STUB_RET(rt_dir_list, 1)
 TRAP_STUB_RET(rt_dir_create, 1)
 TRAP_STUB_RET(rt_dir_create_all, 1)
@@ -12587,7 +12557,6 @@ TRAP_STUB_RET(rt_dir_chdir, 1)
 TRAP_STUB_RET(rt_dir_home, 0)
 TRAP_STUB_RET(rt_dir_temp, 0)
 
-/* --- Process (no OS on baremetal) --- */
 TRAP_STUB_RET(rt_process_run, 2)
 TRAP_STUB_RET(rt_process_run_timeout, 3)
 TRAP_STUB_RET(rt_process_spawn, 1)
@@ -12632,7 +12601,6 @@ RuntimeValue rt_env_get(RuntimeValue key_rv)
 TRAP_STUB_RET(rt_env_set, 2)
 TRAP_STUB_RET(rt_env_all, 0)
 
-/* --- Math --- */
 S1(rt_math_sqrt)
 S1(rt_math_sin)
 S1(rt_math_cos)
@@ -12666,7 +12634,6 @@ S2(rt_register_isr)
 S1(rt_send_eoi)
 S0(rt_get_interrupt_flag)
 
-/* --- Timer / Clock --- */
 S1(rt_time_now_ms)
 S0(rt_time_now_nanos)
 S0(rt_time_monotonic)
@@ -12674,7 +12641,6 @@ S1(rt_sleep_ms)
 S1(rt_timer_create)
 S1(rt_timer_cancel)
 
-/* --- Network: socket/bind/listen/accept/close now have real impls above --- */
 TRAP_STUB_RET(rt_net_send, 2)
 TRAP_STUB_RET(rt_net_recv, 1)
 /* rt_net_socket, rt_net_bind, rt_net_listen, rt_net_accept, rt_net_close
@@ -12682,7 +12648,6 @@ TRAP_STUB_RET(rt_net_recv, 1)
 TRAP_STUB_RET(rt_net_set_timeout, 2)
 TRAP_STUB_RET(rt_net_get_addr, 1)
 
-/* --- HTTP (no network stack on baremetal) --- */
 TRAP_STUB_RET(rt_http_get, 2)
 TRAP_STUB_RET(rt_http_post, 3)
 TRAP_STUB_RET(rt_http_put, 3)
@@ -12692,7 +12657,6 @@ TRAP_STUB_RET(rt_http_request, 2)
 TRAP_STUB_RET(rt_http_request_full, 3)
 TRAP_STUB_RET(rt_http_set_header, 2)
 
-/* --- JSON --- */
 S1(rt_json_parse)
 S1(rt_json_stringify)
 S2(rt_json_get)
@@ -12702,7 +12666,6 @@ S1(rt_json_values)
 S1(rt_json_is_object)
 S1(rt_json_is_array)
 
-/* --- Regex --- */
 S2(ffi_regex_is_match)
 S2(ffi_regex_find)
 S2(ffi_regex_find_all)
@@ -12710,7 +12673,6 @@ S2(ffi_regex_replace)
 S3(ffi_regex_replace_all)
 S1(ffi_regex_compile)
 
-/* --- Test / BDD --- */
 S1(rt_bdd_describe_start)
 S1(rt_bdd_describe_end)
 S2(rt_bdd_it_start)
@@ -12730,7 +12692,6 @@ S0(rt_bdd_suite_start)
 S0(rt_bdd_suite_end)
 S0(rt_bdd_report)
 
-/* --- Misc / Debug --- */
 
 /* rt_hash: FNV-1a-like hash for integers and strings */
 RuntimeValue rt_hash(RuntimeValue val)
@@ -12893,7 +12854,6 @@ RuntimeValue rt_gc_stats(void)   { return NIL_VALUE; }
 
 /* rt_typeof already implemented above in type introspection section */
 
-/* --- Threading (no scheduler on bare metal) --- */
 TRAP_STUB_RET(rt_thread_create, 1)
 TRAP_STUB_RET(rt_thread_join, 1)
 /* Safe no-ops on single-threaded bare metal */
@@ -12909,21 +12869,18 @@ TRAP_STUB_RET(rt_condvar_wait, 1)
 TRAP_STUB_RET(rt_condvar_notify, 1)
 TRAP_STUB_RET(rt_condvar_notify_all, 1)
 
-/* --- Channels (no IPC on bare metal) --- */
 TRAP_STUB_RET(rt_channel_new, 0)
 TRAP_STUB_RET(rt_channel_send, 2)
 TRAP_STUB_RET(rt_channel_recv, 1)
 TRAP_STUB_RET(rt_channel_try_recv, 1)
 TRAP_STUB_RET(rt_channel_close, 1)
 
-/* --- Async (no async runtime on bare metal) --- */
 TRAP_STUB_RET(rt_async_spawn, 1)
 TRAP_STUB_RET(rt_async_await, 1)
 /* Safe no-op on single-threaded bare metal */
 RuntimeValue rt_async_yield(void) { return NIL_VALUE; }
 TRAP_STUB_RET(rt_async_select, 2)
 
-/* --- Encoding --- */
 S1(rt_base64_encode)
 S1(rt_base64_decode)
 S1(rt_hex_encode)
@@ -12933,14 +12890,12 @@ S1(rt_utf8_decode)
 S1(rt_url_encode)
 S1(rt_url_decode)
 
-/* --- Crypto (no-ops on bare metal) --- */
 S1(rt_sha256)
 S1(rt_sha512)
 S1(rt_md5)
 S2(rt_hmac_sha256)
 /* rt_random_bytes: real implementation in section 8d-tcp */
 
-/* --- Object / Struct --- */
 S1(rt_object_new)
 S2(rt_object_get)
 S3(rt_object_set)
@@ -12951,7 +12906,6 @@ S1(rt_object_values)
 S1(rt_object_freeze)
 S1(rt_object_clone)
 
-/* --- Error handling --- */
 S1(rt_error_new)
 S1(rt_error_message)
 S1(rt_error_code)
@@ -12963,7 +12917,6 @@ S1(rt_result_is_err)
 S1(rt_result_unwrap)
 S2(rt_result_unwrap_or)
 
-/* --- Weak references & closures --- */
 S1(rt_weak_ref)
 S1(rt_weak_deref)
 S1(rt_closure_new)
@@ -12971,7 +12924,6 @@ S2(rt_closure_call)
 S1(rt_closure_bind)
 
 #if defined(__x86_64__) || defined(__i386__)
-/* --- Port I/O: real x86 implementations --- */
 
 /* Port I/O: Cranelift passes RAW (untagged) i64 for extern fn args.
  * PCI enumeration uses kernel syscall 80 (not port I/O), so these
@@ -13107,7 +13059,6 @@ __attribute__((naked)) RuntimeValue rt_debug_naked_show_return_hang(void)
                      "jmp 1b\n\t");
 }
 
-/* --- MMIO: real x86_64 implementations (raw i64 args) --- */
 
 RuntimeValue rt_mmio_read_u8_real(RuntimeValue addr)
 {
@@ -13274,7 +13225,6 @@ RuntimeValue rt_virtio_gpu_write_ctrl_hdr(RuntimeValue addr, RuntimeValue cmd_ty
     return 0;
 }
 
-/* --- CPU: real x86_64 implementations --- */
 
 RuntimeValue rt_hlt_real(void)
 {
@@ -15127,5 +15077,3 @@ __attribute__((weak)) void arm_fs_exec_trace(RuntimeValue id) { (void)id; }
 /* End of Wave 11: missing-symbol stubs */
 
 #endif /* __x86_64__ || __i386__ */
-
-/* End of x86_64 baremetal_stubs.c */
