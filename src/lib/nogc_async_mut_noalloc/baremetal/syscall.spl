@@ -22,15 +22,6 @@ val MODE_READ: i32 = 0
 val MODE_WRITE: i32 = 4
 val MODE_APPEND: i32 = 8
 
-/*
- * Semihosting Call
- *
- * Execute a semihosting operation using platform-specific instruction:
- * - ARM Thumb: BKPT #0xAB
- * - ARM mode: SVC #0x123456
- * - RISC-V: EBREAK with magic sequence
- * - x86_64: Not supported (falls back to stub)
- */
 fn semi_host_call(operation: i32, param: u32) -> i32:
     0
 
@@ -64,28 +55,28 @@ fn semi_time() -> i32:
 
 
 struct UartConfig:
-    base_addr: u32     # UART peripheral base address
-    baudrate: u32      # Baud rate (e.g., 115200)
-    data_bits: u8      # Data bits (7 or 8)
-    stop_bits: u8      # Stop bits (1 or 2)
-    parity: u8         # Parity (0=none, 1=odd, 2=even)
+    base_addr: u32
+    baudrate: u32
+    data_bits: u8
+    stop_bits: u8
+    parity: u8
 
-val UART_RBR: u32 = 0x00  # Receiver Buffer Register (read)
-val UART_THR: u32 = 0x00  # Transmitter Holding Register (write)
-val UART_IER: u32 = 0x04  # Interrupt Enable Register
-val UART_FCR: u32 = 0x08  # FIFO Control Register
-val UART_LCR: u32 = 0x0C  # Line Control Register
-val UART_MCR: u32 = 0x10  # Modem Control Register
-val UART_LSR: u32 = 0x14  # Line Status Register
-val UART_MSR: u32 = 0x18  # Modem Status Register
+val UART_RBR: u32 = 0x00
+val UART_THR: u32 = 0x00
+val UART_IER: u32 = 0x04
+val UART_FCR: u32 = 0x08
+val UART_LCR: u32 = 0x0C
+val UART_MCR: u32 = 0x10
+val UART_LSR: u32 = 0x14
+val UART_MSR: u32 = 0x18
 
-val LSR_DATA_READY: u8 = 0x01      # Data ready
-val LSR_OVERRUN_ERROR: u8 = 0x02   # Overrun error
-val LSR_PARITY_ERROR: u8 = 0x04    # Parity error
-val LSR_FRAMING_ERROR: u8 = 0x08   # Framing error
-val LSR_BREAK_INTERRUPT: u8 = 0x10 # Break interrupt
-val LSR_THR_EMPTY: u8 = 0x20       # Transmitter holding register empty
-val LSR_TRANSMITTER_EMPTY: u8 = 0x40 # Transmitter empty
+val LSR_DATA_READY: u8 = 0x01
+val LSR_OVERRUN_ERROR: u8 = 0x02
+val LSR_PARITY_ERROR: u8 = 0x04
+val LSR_FRAMING_ERROR: u8 = 0x08
+val LSR_BREAK_INTERRUPT: u8 = 0x10
+val LSR_THR_EMPTY: u8 = 0x20
+val LSR_TRANSMITTER_EMPTY: u8 = 0x40
 
 # reason: positional baremetal syscall API
 fn uart_init(base_addr: u32, baudrate: u32):
@@ -104,20 +95,18 @@ fn uart_init(base_addr: u32, baudrate: u32):
 
     mem_write_u8(base_addr + UART_FCR, 0x07)
 
-fn uart_write_byte(base_addr: u32, byte: u8):
+fn uart_wait_lsr(base_addr: u32, mask: u8):
     while true:
         val lsr = mem_read_u8(base_addr + UART_LSR)
-        if (lsr & LSR_THR_EMPTY) != 0:
+        if (lsr & mask) != 0:
             break
 
+fn uart_write_byte(base_addr: u32, byte: u8):
+    uart_wait_lsr(base_addr, LSR_THR_EMPTY)
     mem_write_u8(base_addr + UART_THR, byte)
 
 fn uart_read_byte(base_addr: u32) -> u8:
-    while true:
-        val lsr = mem_read_u8(base_addr + UART_LSR)
-        if (lsr & LSR_DATA_READY) != 0:
-            break
-
+    uart_wait_lsr(base_addr, LSR_DATA_READY)
     mem_read_u8(base_addr + UART_RBR)
 
 fn uart_write_string(base_addr: u32, message: text):
@@ -137,14 +126,14 @@ fn uart_write_ready(base_addr: u32) -> bool:
 
 
 struct TimerConfig:
-    base_addr: u32     # Timer peripheral base address
-    frequency: u32     # Timer frequency in Hz
-    prescaler: u32     # Prescaler value
+    base_addr: u32
+    frequency: u32
+    prescaler: u32
 
-val TIMER_CNT: u32 = 0x24     # Counter value
-val TIMER_PSC: u32 = 0x28     # Prescaler
-val TIMER_ARR: u32 = 0x2C     # Auto-reload register
-val TIMER_CR1: u32 = 0x00     # Control register 1
+val TIMER_CNT: u32 = 0x24
+val TIMER_PSC: u32 = 0x28
+val TIMER_ARR: u32 = 0x2C
+val TIMER_CR1: u32 = 0x00
 
 # reason: positional baremetal syscall API
 fn timer_init(base_addr: u32, frequency: u32):
@@ -186,29 +175,22 @@ fn debug_putc(c: u8):
 fn debug_puts(message: text):
     semi_write_string(message)
 
-fn debug_printf_u32_to_dec(value: u32) -> text:
+fn debug_printf_u32_to_base(value: u32, base: u32, digits: text) -> text:
     if value == 0:
         return "0"
     var result = ""
     var remaining = value
     while remaining > 0:
-        val digit = remaining % 10
-        val hex_chars = "0123456789"
-        result = "{hex_chars[digit]}" + result
-        remaining = remaining / 10
+        val digit = remaining % base
+        result = "{digits[digit]}" + result
+        remaining = remaining / base
     result
 
+fn debug_printf_u32_to_dec(value: u32) -> text:
+    debug_printf_u32_to_base(value, 10, "0123456789")
+
 fn debug_printf_u32_to_hex(value: u32) -> text:
-    if value == 0:
-        return "0"
-    var result = ""
-    var remaining = value
-    while remaining > 0:
-        val nibble = remaining % 16
-        val hex_chars = "0123456789ABCDEF"
-        result = "{hex_chars[nibble]}" + result
-        remaining = remaining / 16
-    result
+    debug_printf_u32_to_base(value, 16, "0123456789ABCDEF")
 
 fn debug_printf(format: text, args: [u32]):
     val fmt_bytes = format.bytes()

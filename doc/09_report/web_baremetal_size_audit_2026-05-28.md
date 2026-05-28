@@ -113,7 +113,7 @@ Date: 2026-05-28
 | Bare-metal aggregate policy facade source | 512 |
 | Bare-metal root facade source | 3587 |
 | Semihost transport source | 11500 |
-| Bare-metal syscall source | 17344 |
+| Bare-metal syscall source | 8100 |
 | Bare-metal system API source | 8193 |
 
 ## Source Size Surfaces
@@ -164,7 +164,7 @@ Date: 2026-05-28
 | `src/lib/nogc_async_mut_noalloc/baremetal/policy.spl` | 1 | 4 | 463 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/__init__.spl` | 1 | 14 | 3587 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl` | 1 | 387 | 11239 |
-| `src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl` | 1 | 293 | 8926 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl` | 1 | 275 | 7832 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/system_api.spl` | 1 | 183 | 4813 |
 
 ## Browser Cluster Source Sizes
