@@ -120,6 +120,18 @@ describe "NVMe storage model":
             expect(nvme_filesystem_lease_ready(lease, NvmeFilesystemConsumer.Nvfs)).to_equal(true)
             expect(nvme_filesystem_lease_ready(lease, NvmeFilesystemConsumer.Dbfs)).to_equal(true)
 
+            val wrong_role = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+                role: NvmeQueueRole.Data,
+                controller_id: 0,
+                nsid: 1,
+                owner_task: 0,
+                max_depth: 128,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val wrong_role_lease = nvme_filesystem_lease(ns, 0u64, 2048u64, NvmeNamespaceMode.System, wrong_role, "simple-driver", "none", true, true)
+            expect(nvme_filesystem_lease_reason(wrong_role_lease, NvmeFilesystemConsumer.Fat32)).to_equal("nvme-fs-system-namespace-not-system-queue-role")
+
         it "requires user-assigned namespaces to use data queues and issued user-space grants":
             val ns = NvmeNamespaceIdentity(
                 controller_id: 0,
@@ -150,10 +162,21 @@ describe "NVMe storage model":
                 max_depth: 64,
                 rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
             )
+            val wrong_role_queue = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID,
+                role: NvmeQueueRole.System,
+                controller_id: 0,
+                nsid: 2,
+                owner_task: 42,
+                max_depth: 64,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
             val bad_queue = nvme_filesystem_lease(ns, 128u64, 1024u64, NvmeNamespaceMode.UserAssigned, system_queue, "simple-driver", "resource-grant-set:tok=99", true, true)
+            val wrong_role = nvme_filesystem_lease(ns, 128u64, 1024u64, NvmeNamespaceMode.UserAssigned, wrong_role_queue, "simple-driver", "resource-grant-set:tok=99", true, true)
             val missing_token = nvme_filesystem_lease(ns, 128u64, 1024u64, NvmeNamespaceMode.UserAssigned, data_queue, "simple-driver", "resource-grant-set", true, true)
             val ready = nvme_filesystem_lease(ns, 128u64, 1024u64, NvmeNamespaceMode.UserAssigned, data_queue, "simple-driver", "resource-grant-set:tok=100", true, true)
             expect(nvme_filesystem_lease_reason(bad_queue, NvmeFilesystemConsumer.Nvfs)).to_equal("nvme-fs-user-namespace-uses-reserved-queue")
+            expect(nvme_filesystem_lease_reason(wrong_role, NvmeFilesystemConsumer.Nvfs)).to_equal("nvme-fs-user-namespace-not-data-queue-role")
             expect(nvme_filesystem_lease_reason(missing_token, NvmeFilesystemConsumer.Dbfs)).to_contain("missing-issued-device-grant-token")
             expect(nvme_filesystem_lease_ready(ready, NvmeFilesystemConsumer.Fat32)).to_equal(true)
 
