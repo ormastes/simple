@@ -43,6 +43,11 @@ Date: 2026-05-28
 | Browser smoke native file / dec section | 35200 / 27000 |
 | Browser simple render HTML native file / dec section | 19000 / 8500 |
 | Browser engine source | 60000 |
+| x86_64 monolithic bare-metal stubs source | 576503 |
+| ARM64 monolithic bare-metal stubs source | 149948 |
+| ARM32 monolithic bare-metal stubs source | 69243 |
+| RV64 monolithic bare-metal stubs source | 61613 |
+| RV32 monolithic bare-metal stubs source | 20899 |
 | Simple web static facade native file / dec section | 14500 / 5000 |
 | Simple web placeholder URL facade native file / dec section | 14500 / 4100 |
 | Simple web file facade native file / dec section | 14500 / 6400 |
@@ -110,6 +115,10 @@ Date: 2026-05-28
 |---|---:|---:|---:|
 | `examples/browser` | 304 | 75035 | 2850509 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15509 | 576503 |
+| `examples/simple_os/arch/arm64/boot/baremetal_stubs.c` | 1 | 3677 | 149948 |
+| `examples/simple_os/arch/arm32/boot/baremetal_stubs.c` | 1 | 2043 | 69243 |
+| `examples/simple_os/arch/riscv64/boot/baremetal_stubs.c` | 1 | 1844 | 61613 |
+| `examples/simple_os/arch/riscv32/boot/baremetal_stubs.c` | 1 | 654 | 20899 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 83 | 2045 |
 | `examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c` | 1 | 7 | 252 |
 | `examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c` | 1 | 7 | 249 |
@@ -201,7 +210,7 @@ Date: 2026-05-28
 - `simple_web_script_placeholder_renderer` is the unloaded/about: script-mode lane and must not retain BrowserRenderer, process, file, or script execution code.
 - `simple_web_script_renderer` is the explicit file:// script-capable lane; its BrowserRenderer/process/file stub cost is measured separately from static and placeholder facades.
 - Corpus fixture compatibility lives in `simple_web_corpus_fixture_renderer`; production static render must not retain PPM baseline loading.
-- x86_64 SimpleOS size work should split `baremetal_stubs.c` into boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes.
+- SimpleOS size work should keep each architecture's monolithic `baremetal_stubs.c` under its source ceiling while splitting boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes into measured capsules.
 - `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; stdout ABI handling is shared through `baremetal_min_stdout.h`.
 - `common/baremetal_pl011_uart_stdout.c` is the shared ARM32/ARM64 PL011 startup/stdout capsule; interrupt controllers, framebuffer, filesystem, network, and GUI stay out of this lane.
 - `arm64/boot/baremetal_uart_stdout.c` is a thin ARM64 compatibility wrapper over the shared PL011 capsule.
