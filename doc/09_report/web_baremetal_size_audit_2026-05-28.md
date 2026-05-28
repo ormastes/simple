@@ -6,14 +6,14 @@ Date: 2026-05-28
 
 | Artifact | Check | Native/ELF Build | Bytes | Dec Section Bytes | Log |
 |---|---|---|---:|---:|---|
-| Browser smoke | ok | ok | 34968 | 26263 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
-| Browser simple render HTML | ok | ok | 18480 | 8165 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
-| Simple web static facade | n/a | ok | 14352 | 4696 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
-| Simple web placeholder URL facade | n/a | ok | 14336 | 3883 | `build/web_baremetal_size_audit/simple_web_placeholder_native.log` |
-| Simple web file facade | n/a | ok | 14344 | 6329 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
-| Simple web script placeholder facade | n/a | ok | 14336 | 3899 | `build/web_baremetal_size_audit/simple_web_script_placeholder_native.log` |
-| Simple web script file facade | n/a | ok | 26712 | 16929 | `build/web_baremetal_size_audit/simple_web_script_file_native.log` |
-| Bare-metal pure policy probe | ok | ok | 14336 | 6575 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
+| Browser smoke | ok | ok | 34968 | 26277 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
+| Browser simple render HTML | ok | ok | 18480 | 8179 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
+| Simple web static facade | n/a | ok | 14352 | 4702 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
+| Simple web placeholder URL facade | n/a | ok | 14336 | 3897 | `build/web_baremetal_size_audit/simple_web_placeholder_native.log` |
+| Simple web file facade | n/a | ok | 14344 | 6343 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
+| Simple web script placeholder facade | n/a | ok | 14336 | 3913 | `build/web_baremetal_size_audit/simple_web_script_placeholder_native.log` |
+| Simple web script file facade | n/a | ok | 26712 | 16943 | `build/web_baremetal_size_audit/simple_web_script_file_native.log` |
+| Bare-metal pure policy probe | ok | ok | 14336 | 6581 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
 | RV64 semihost trap capsule | n/a | ok | 912 | 48 | `build/web_baremetal_size_audit/riscv64_semihost_trap.build.log` |
@@ -31,13 +31,14 @@ Date: 2026-05-28
 
 | Budget | Limit Bytes |
 |---|---:|
-| Browser smoke native file / dec section | 36000 / 30000 |
-| Browser simple render HTML native file / dec section | 20000 / 10000 |
-| Simple web static facade native file / dec section | 19000 / 7500 |
-| Simple web placeholder URL facade native file / dec section | 16000 / 5500 |
-| Simple web file facade native file / dec section | 15000 / 6500 |
-| Simple web script placeholder facade native file / dec section | 16000 / 5500 |
-| Simple web script file facade native file / dec section | 28000 / 17000 |
+| Browser smoke native file / dec section | 35200 / 27000 |
+| Browser simple render HTML native file / dec section | 19000 / 8500 |
+| Browser engine source | 65000 |
+| Simple web static facade native file / dec section | 14500 / 5000 |
+| Simple web placeholder URL facade native file / dec section | 14500 / 4100 |
+| Simple web file facade native file / dec section | 14500 / 6400 |
+| Simple web script placeholder facade native file / dec section | 14500 / 4200 |
+| Simple web script file facade native file / dec section | 27000 / 17000 |
 | Bare-metal pure policy probe native file / dec section | 15000 / 6800 |
 | Bare-metal pure policy probe source | 1300 |
 | RV32 semihost stdout ELF file / dec section | 70000 / 9000 |
