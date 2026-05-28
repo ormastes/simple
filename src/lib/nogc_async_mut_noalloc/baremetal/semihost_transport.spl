@@ -1,31 +1,3 @@
-# Semihost Transport - Output Strategy Abstraction
-#
-# Eight output strategies for semihosting, selectable at runtime:
-#   WRITEC      (0x03) - 1 byte per syscall, null-safe, slowest
-#   WRITE0      (0x04) - null-terminated string, 1 syscall, not null-safe
-#   WRITE       (0x05) - fd + buffer + length, 1 syscall, null-safe, fastest
-#   BATCH_N     - SYS_WRITE in fixed N-byte chunks
-#   BUFFERED    - ring buffer, flush on newline or full
-#   UART        - direct UART register writes (no debugger needed)
-#   RAW_BINARY  - framed binary: [magic:1][len_lo:1][len_hi:1][data:N]
-#   INTERNED    - SYS_WRITE_HANDLE extension for string interning
-#
-# Compile-time selection convention:
-#   Use @cfg("semihost_transport", "buffered") blocks in startup code
-#   to select transport at build time. The compiler supports arbitrary
-#   @cfg string keys — no compiler changes needed.
-#
-# Usage:
-#   semihost_set_transport(TRANSPORT_WRITE0)   # select strategy
-#   semihost_send_bytes(data_addr, len)         # dispatch to current strategy
-#   semihost_probe_capabilities()               # detect HW support
-#   semihost_auto_select()                      # pick best available
-
-
-# ============================================================================
-# Transport Strategy Constants
-# ============================================================================
-
 val TRANSPORT_WRITEC: i32 = 1        # SYS_WRITEC (0x03) — 1 byte/syscall, null-safe
 val TRANSPORT_WRITE0: i32 = 2        # SYS_WRITE0 (0x04) — null-terminated string
 val TRANSPORT_WRITE: i32 = 3         # SYS_WRITE  (0x05) — fd + buffer + length
@@ -35,15 +7,10 @@ val TRANSPORT_UART: i32 = 6          # Direct UART register writes (no debugger 
 val TRANSPORT_RAW_BINARY: i32 = 7    # Framed binary: [magic:1][len_lo:1][len_hi:1][data:N]
 val TRANSPORT_INTERNED: i32 = 8      # SYS_WRITE_HANDLE extension for string interning
 
-# Semihosting operation codes (duplicated from system_api for standalone use)
 val OP_WRITEC: i32 = 0x03
 val OP_WRITE0: i32 = 0x04
 val OP_WRITE: i32 = 0x05
 val OP_OPEN: i32 = 0x01
-
-# ============================================================================
-# Capability Detection Constants
-# ============================================================================
 
 val CAP_WRITEC: i32 = 1
 val CAP_WRITE0: i32 = 2
@@ -51,17 +18,11 @@ val CAP_WRITE: i32 = 4
 val CAP_UART: i32 = 8
 val CAP_INTERNED: i32 = 16
 
-# ============================================================================
-# Global Transport State
-# ============================================================================
-
 var current_transport: i32 = 1     # Default: WRITEC (safest, always works)
 var semihost_fd: i32 = -1          # fd for TRANSPORT_WRITE mode
 
-# Batch mode state
 var semihost_batch_size: i32 = 3
 
-# Buffered mode state (ring buffer)
 var semihost_buf_data: [i32] = []
 var semihost_buf_head: i32 = 0
 var semihost_buf_tail: i32 = 0
@@ -70,30 +31,20 @@ var semihost_buf_capacity: i32 = 0
 var semihost_buf_mask: i32 = 0
 var semihost_buf_initialized: bool = false
 
-# UART mode state
 var semihost_uart_base: i32 = 0x10000000  # QEMU virt UART0
 var semihost_uart_initialized: bool = false
 
-# Raw binary protocol
 val RAW_BINARY_MAGIC: i32 = 0x53          # 'S' frame magic
 
-# Capability detection
 var semihost_capabilities: i32 = 0
 
-# ============================================================================
-# Transport Configuration
-# ============================================================================
-
 fn semihost_set_transport(t: i32):
-    """Set the active semihosting output strategy."""
     current_transport = t
 
 fn semihost_get_transport() -> i32:
-    """Get the currently active transport strategy."""
     current_transport
 
 fn semihost_set_batch_size(n: i32):
-    """Set batch size for TRANSPORT_BATCH_N mode (clamped to 1..64)."""
     if n < 1:
         semihost_batch_size = 1
     else:
@@ -103,16 +54,10 @@ fn semihost_set_batch_size(n: i32):
             semihost_batch_size = n
 
 fn semihost_set_uart_base(addr: i32):
-    """Set UART base address for TRANSPORT_UART mode."""
     semihost_uart_base = addr
     semihost_uart_initialized = false
 
-# ============================================================================
-# Ring Buffer Management (for TRANSPORT_BUFFERED)
-# ============================================================================
-
 fn next_power_of_2(n: i32) -> i32:
-    """Round up to the next power of 2."""
     if n <= 1:
         return 1
     var v = n - 1
@@ -124,11 +69,6 @@ fn next_power_of_2(n: i32) -> i32:
     v + 1
 
 fn semihost_buffer_init(capacity: i32):
-    """Allocate ring buffer for TRANSPORT_BUFFERED mode.
-
-    Capacity is rounded up to the next power of 2 for fast
-    bitmask-based index wrapping.
-    """
     val actual_cap = next_power_of_2(capacity)
     semihost_buf_data = []
     var i = 0
@@ -143,7 +83,6 @@ fn semihost_buffer_init(capacity: i32):
     semihost_buf_initialized = true
 
 fn semihost_buffer_enqueue(byte_val: i32):
-    """Enqueue a single byte into the ring buffer."""
     if semihost_buf_count >= semihost_buf_capacity:
         # Buffer full — force flush before enqueue
         semihost_buffer_flush()
@@ -152,18 +91,12 @@ fn semihost_buffer_enqueue(byte_val: i32):
     semihost_buf_count = semihost_buf_count + 1
 
 fn semihost_buffer_flush():
-    """Drain ring buffer via WRITEC, sending all queued bytes."""
     while semihost_buf_count > 0:
         val byte_val = semihost_buf_data[semihost_buf_head]
         semi_host_call(OP_WRITEC, byte_val, 0)
         semihost_buf_head = (semihost_buf_head + 1) & semihost_buf_mask
         semihost_buf_count = semihost_buf_count - 1
 
-# ============================================================================
-# UART Support (for TRANSPORT_UART)
-# ============================================================================
-
-# UART 16550 register offsets
 val UART_THR: i32 = 0     # Transmitter Holding Register
 val UART_LSR: i32 = 5     # Line Status Register
 val UART_IER: i32 = 1     # Interrupt Enable Register
@@ -171,11 +104,6 @@ val UART_LCR: i32 = 3     # Line Control Register
 val LSR_THR_EMPTY: i32 = 0x20   # Transmitter holding register empty
 
 fn semihost_uart_init():
-    """Initialize UART at configured base address (16550-compatible, 38400 baud).
-
-    Uses per-architecture volatile memory access or port I/O.
-    Follows pattern from riscv32/startup.spl:362.
-    """
     # Disable interrupts
     semihost_uart_write_reg(UART_IER, 0x00)
     # Enable DLAB (Divisor Latch Access Bit)
@@ -190,10 +118,6 @@ fn semihost_uart_init():
 
 # reason: positional baremetal semihost_transport API
 fn semihost_uart_write_reg(offset: i32, value: i32):
-    """Write a byte to a UART register at base+offset.
-
-    Architecture-specific volatile memory-mapped I/O.
-    """
     var addr = semihost_uart_base + offset
 
     # @cfg("target_arch", "riscv32")
@@ -217,7 +141,6 @@ fn semihost_uart_write_reg(offset: i32, value: i32):
     """
 
 fn semihost_uart_read_reg(offset: i32) -> i32:
-    """Read a byte from a UART register at base+offset."""
     var addr = semihost_uart_base + offset
     var result = 0
 
@@ -244,11 +167,6 @@ fn semihost_uart_read_reg(offset: i32) -> i32:
     result
 
 fn semihost_uart_write_byte(byte_val: i32):
-    """Write a single byte to UART TX with LSR polling.
-
-    Waits until the transmitter holding register is empty (LSR bit 5),
-    then writes the byte to the data register.
-    """
     if not semihost_uart_initialized:
         semihost_uart_init()
     # Poll LSR until THR empty
@@ -258,39 +176,18 @@ fn semihost_uart_write_byte(byte_val: i32):
     # Write byte to transmit register
     semihost_uart_write_reg(UART_THR, byte_val)
 
-# ============================================================================
-# Convenience Functions
-# ============================================================================
-
 # reason: positional baremetal semihost_transport API
 fn semihost_write_raw_string(text_addr: i32, len: i32):
-    """Universal raw write — delegates to semihost_send_bytes."""
     semihost_send_bytes(text_addr, len)
 
-# ============================================================================
-# Output Functions
-# ============================================================================
-
 fn semihost_send_byte(byte_val: i32):
-    """Send a single byte via SYS_WRITEC.
-
-    Always uses WRITEC regardless of current transport.
-    """
     semi_host_call(OP_WRITEC, byte_val, 0)
 
 fn semihost_send_string(str_addr: i32):
-    """Send a null-terminated string via SYS_WRITE0.
-
-    Caller must ensure no embedded null bytes in the string.
-    """
     semi_host_call(OP_WRITE0, str_addr, 0)
 
 # reason: positional baremetal semihost_transport API
 fn semihost_send_bytes(data_addr: i32, len: i32) -> i32:
-    """Send bytes using the current transport strategy.
-
-    Returns 0 on success, non-zero on error.
-    """
     if current_transport == TRANSPORT_WRITEC:
         # Loop: send each byte individually
         var offset = 0
@@ -381,28 +278,13 @@ fn semihost_send_bytes(data_addr: i32, len: i32) -> i32:
     0
 
 fn semihost_open_stdout() -> i32:
-    """Open :tt (stdout) for TRANSPORT_WRITE mode.
-
-    Returns fd on success, -1 on failure. The fd is stored
-    internally for use by semihost_send_bytes.
-    """
     # SYS_OPEN with ":tt" path and mode 4 (write) opens stdout
     val fd = semi_host_call(OP_OPEN, 0, 4)
     if fd >= 0:
         semihost_fd = fd
     fd
 
-# ============================================================================
-# Capability Detection
-# ============================================================================
-
 fn uart_probe_lsr(base: i32) -> i32:
-    """Read UART LSR register at base+5.
-
-    Returns byte value. 0xFF = no hardware present.
-    0x00 may also indicate no UART. Valid LSR typically has
-    bit 5 or bit 6 set when idle.
-    """
     var addr = base + UART_LSR
     var result = 0xFF
 
@@ -429,12 +311,6 @@ fn uart_probe_lsr(base: i32) -> i32:
     result
 
 fn semihost_probe_capabilities() -> i32:
-    """Probe which transport capabilities the host supports.
-
-    Tests in safe order to avoid crashing on unsupported operations.
-    Returns bitmask of CAP_* flags. Also stores result in
-    semihost_capabilities global.
-    """
     var caps = CAP_WRITEC  # WRITEC always assumed available
 
     # Try SYS_OPEN ":tt" — if fd >= 0, host supports WRITE0 and WRITE
@@ -458,10 +334,6 @@ fn semihost_probe_capabilities() -> i32:
     caps
 
 fn semihost_auto_select():
-    """Pick the best available transport based on detected capabilities.
-
-    Priority: WRITE > INTERNED > WRITE0 > UART > WRITEC
-    """
     if (semihost_capabilities & CAP_WRITE) != 0:
         current_transport = TRANSPORT_WRITE
         return
@@ -477,23 +349,10 @@ fn semihost_auto_select():
     current_transport = TRANSPORT_WRITEC
 
 fn semihost_get_capabilities() -> i32:
-    """Return the last probed capability bitmask."""
     semihost_capabilities
-
-# ============================================================================
-# Low-Level Semihosting Call (architecture-specific)
-# ============================================================================
 
 # reason: positional baremetal semihost_transport API
 fn semi_host_call(op: i32, arg0: i32, arg1: i32) -> i32:
-    """Architecture-specific semihosting call.
-
-    Dispatches to correct instruction based on target:
-    - ARM Thumb: BKPT #0xAB
-    - ARM mode: SVC #0x123456
-    - RISC-V: EBREAK with magic NOP sequence
-    - Interpreter: no-op stub (returns 0)
-    """
     var result = 0
 
     # @cfg("target_arch", "thumbv7m")

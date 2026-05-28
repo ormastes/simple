@@ -163,7 +163,7 @@ Date: 2026-05-28
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_stdout_policy.spl` | 1 | 23 | 739 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/policy.spl` | 1 | 8 | 1971 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/__init__.spl` | 1 | 14 | 3587 |
-| `src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl` | 1 | 541 | 17567 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl` | 1 | 400 | 11687 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl` | 1 | 562 | 17344 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/system_api.spl` | 1 | 183 | 4813 |
 
