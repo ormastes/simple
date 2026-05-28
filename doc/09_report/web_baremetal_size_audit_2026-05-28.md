@@ -42,7 +42,7 @@ Date: 2026-05-28
 |---|---:|
 | Browser smoke native file / dec section | 35200 / 27000 |
 | Browser simple render HTML native file / dec section | 19000 / 8500 |
-| Browser engine source | 60000 |
+| Browser engine source | 70000 |
 | x86_64 monolithic bare-metal stubs source | 576503 |
 | ARM64 monolithic bare-metal stubs source | 148311 |
 | ARM32 monolithic bare-metal stubs source | 68177 |
@@ -52,56 +52,56 @@ Date: 2026-05-28
 | Simple web placeholder URL facade native file / dec section | 14500 / 4100 |
 | Simple web file facade native file / dec section | 14500 / 6400 |
 | Simple web script placeholder facade native file / dec section | 14500 / 4200 |
-| Simple web script file facade native file / dec section | 27000 / 17000 |
+| Simple web script file facade native file / dec section | 27000 / 16500 |
 | Bare-metal pure policy probe native file / dec section | 15000 / 6800 |
 | Bare-metal pure policy probe source | 1300 |
 | RV32 semihost stdout ELF file / dec section | 6000 / 512 |
 | RV32 semihost trap object file / dec section | 768 / 64 |
-| RV32 semihost trap source | 256 |
+| RV32 semihost trap source | 192 |
 | RV64 semihost trap object file / dec section | 1024 / 64 |
-| RV64 semihost trap source | 256 |
-| Shared RISC-V semihost trap source | 768 |
+| RV64 semihost trap source | 192 |
+| Shared RISC-V semihost trap source | 320 |
 | ARM semihost trap object file / dec section | 768 / 64 |
-| ARM semihost trap source | 640 |
-| Shared ARM semihost trap source | 768 |
+| ARM semihost trap source | 360 |
+| Shared ARM semihost trap source | 160 |
 | ARM64 semihost trap object file / dec section | 768 / 64 |
-| ARM64 semihost trap source | 640 |
+| ARM64 semihost trap source | 340 |
 | x86_64 minimal boot/stdout object file / dec section | 2300 / 320 |
 | x86_64 minimal boot/stdout source | 2300 |
 | ARM64 minimal PL011 startup/stdout object file / dec section | 2400 / 360 |
 | ARM64 minimal PL011 startup/stdout source | 512 |
 | ARM32 minimal PL011 startup/stdout object file / dec section | 2200 / 340 |
 | ARM32 minimal PL011 startup/stdout source | 512 |
-| Shared PL011 startup/stdout source | 1600 |
-| Shared PL011 serial helper source | 1392 |
+| Shared PL011 startup/stdout source | 1320 |
+| Shared PL011 serial helper source | 1390 |
 | RV64 minimal 16550 startup/stdout object file / dec section | 2800 / 220 |
 | RV64 minimal 16550 startup/stdout source | 256 |
 | RV32 minimal 16550 startup/stdout object file / dec section | 2300 / 260 |
 | RV32 minimal 16550 startup/stdout source | 256 |
-| Shared RISC-V 16550 startup/stdout source | 1400 |
-| Shared RISC-V 16550 serial helper source | 602 |
-| Shared bare-metal bump heap source | 706 |
-| Shared minimal stdout helper source | 2000 |
+| Shared RISC-V 16550 startup/stdout source | 800 |
+| Shared RISC-V 16550 serial helper source | 610 |
+| Shared bare-metal bump heap source | 720 |
+| Shared minimal stdout helper source | 1600 |
 | x86_64 interrupt-control object file / dec section | 1536 / 64 |
-| x86_64 interrupt-control source | 640 |
+| x86_64 interrupt-control source | 440 |
 | ARM64 interrupt-control object file / dec section | 768 / 64 |
-| ARM64 interrupt-control source | 1024 |
+| ARM64 interrupt-control source | 360 |
 | ARM32 interrupt-control object file / dec section | 768 / 64 |
-| ARM32 interrupt-control source | 1024 |
-| Shared ARM interrupt-control source | 768 |
+| ARM32 interrupt-control source | 360 |
+| Shared ARM interrupt-control source | 160 |
 | RV64 interrupt-control object file / dec section | 768 / 64 |
-| RV64 interrupt-control source | 512 |
+| RV64 interrupt-control source | 220 |
 | RV32 interrupt-control object file / dec section | 768 / 64 |
-| RV32 interrupt-control source | 512 |
-| Shared RISC-V interrupt-control source | 768 |
+| RV32 interrupt-control source | 220 |
+| Shared RISC-V interrupt-control source | 240 |
 | x86_64 startup handoff object file / dec section | 2048 / 128 |
-| x86_64 startup handoff source | 1024 |
+| x86_64 startup handoff source | 80 |
 | Shared startup handoff x86_64 object file / dec section | 2048 / 256 |
 | Shared startup handoff ARM64 object file / dec section | 2300 / 256 |
 | Shared startup handoff ARM32 object file / dec section | 2300 / 256 |
 | Shared startup handoff RV64 object file / dec section | 3072 / 256 |
 | Shared startup handoff RV32 object file / dec section | 2048 / 256 |
-| Shared startup handoff source | 1024 |
+| Shared startup handoff source | 640 |
 | Pure Simple console policy source | 2500 |
 | Pure Simple stdout plan source | 2500 |
 | Pure Simple stdout policy plan source | 3000 |
@@ -179,7 +179,7 @@ Date: 2026-05-28
 | `examples/browser/feature/dom` | 9 | 4854 | 181376 |
 | `examples/browser/feature/style` | 13 | 3914 | 150153 |
 | `src/lib/gc_async_mut/web` | 13 | 3928 | 170664 |
-| `src/lib/gc_async_mut/gpu/browser_engine` | 17 | 1519 | 55010 |
+| `src/lib/gc_async_mut/gpu/browser_engine` | 17 | 1759 | 69155 |
 
 ## Retention Checks
 
