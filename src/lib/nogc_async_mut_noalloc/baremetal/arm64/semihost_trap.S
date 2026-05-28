@@ -1,25 +1,20 @@
-    .section .text
-    .align 2
-
-    .global simpleos_arm64_semihost_call
-    .type simpleos_arm64_semihost_call, %function
-simpleos_arm64_semihost_call:
+    .macro SIMPLEOS_ARM_SEMIHOST_CALL
     hlt #0xF000
-    ret
-    .size simpleos_arm64_semihost_call, . - simpleos_arm64_semihost_call
+    .endm
 
-    .global simpleos_arm64_semihost_write0
-    .type simpleos_arm64_semihost_write0, %function
-simpleos_arm64_semihost_write0:
+    .macro SIMPLEOS_ARM_SEMIHOST_RETURN
+    ret
+    .endm
+
+    .macro SIMPLEOS_ARM_SEMIHOST_ARG_WRITE0
     mov x1, x0
     mov x0, #0x04
-    b simpleos_arm64_semihost_call
-    .size simpleos_arm64_semihost_write0, . - simpleos_arm64_semihost_write0
+    .endm
 
-    .global simpleos_arm64_semihost_exit
-    .type simpleos_arm64_semihost_exit, %function
-simpleos_arm64_semihost_exit:
+    .macro SIMPLEOS_ARM_SEMIHOST_ARG_EXIT
     mov x1, x0
     mov x0, #0x18
-    b simpleos_arm64_semihost_call
-    .size simpleos_arm64_semihost_exit, . - simpleos_arm64_semihost_exit
+    .endm
+
+    .include "src/lib/nogc_async_mut_noalloc/baremetal/common/arm_semihost_trap.S"
+    SIMPLEOS_ARM_SEMIHOST_TRAP simpleos_arm64_semihost_call, simpleos_arm64_semihost_write0, simpleos_arm64_semihost_exit
