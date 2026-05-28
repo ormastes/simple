@@ -609,3 +609,214 @@ pub fn clear_event_loop_state() {
 pub fn event_loop_backend_name() -> &'static str {
     platform::backend_name()
 }
+
+// ---------------------------------------------------------------------------
+// Per-backend extern stubs for cross-platform dispatch from Simple
+// ---------------------------------------------------------------------------
+// These provide named entry points for each backend so the Simple-side
+// PlatformEvent class can dispatch by backend enum. On the active platform,
+// they delegate to platform::*; on all others they return stub values.
+
+// ---- kqueue ----
+
+pub fn rt_kqueue_create_interp(_args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    { return Ok(Value::Int(platform::create())); }
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+    { Ok(Value::Int(-1)) }
+}
+
+pub fn rt_kqueue_register_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let fd = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let interest = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0);
+        let token = args.get(3).and_then(|v| v.as_int().ok()).unwrap_or(0);
+        let edge = args.get(4).map(|v| v.truthy()).unwrap_or(false);
+        return Ok(Value::Bool(platform::register(loop_fd, fd, interest, token, edge)));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+    {
+        let _ = args;
+        Ok(Value::Bool(false))
+    }
+}
+
+pub fn rt_kqueue_deregister_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let fd = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        return Ok(Value::Bool(platform::deregister(loop_fd, fd)));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+    {
+        let _ = args;
+        Ok(Value::Bool(false))
+    }
+}
+
+pub fn rt_kqueue_poll_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let max_events = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(64);
+        let timeout_ms = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        return Ok(Value::array(platform::poll(loop_fd, max_events, timeout_ms)));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+    {
+        let _ = args;
+        Ok(Value::array(vec![]))
+    }
+}
+
+pub fn rt_kqueue_close_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        return Ok(Value::Bool(platform::close(loop_fd)));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+    {
+        let _ = args;
+        Ok(Value::Bool(false))
+    }
+}
+
+// ---- IOCP ----
+
+pub fn rt_iocp_create_interp(_args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(target_os = "windows")]
+    { return Ok(Value::Int(platform::create())); }
+    #[cfg(not(target_os = "windows"))]
+    { Ok(Value::Int(-1)) }
+}
+
+pub fn rt_iocp_register_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(target_os = "windows")]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let fd = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let interest = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0);
+        let token = args.get(3).and_then(|v| v.as_int().ok()).unwrap_or(0);
+        let edge = args.get(4).map(|v| v.truthy()).unwrap_or(false);
+        return Ok(Value::Bool(platform::register(loop_fd, fd, interest, token, edge)));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = args;
+        Ok(Value::Bool(false))
+    }
+}
+
+pub fn rt_iocp_deregister_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(target_os = "windows")]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let fd = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        return Ok(Value::Bool(platform::deregister(loop_fd, fd)));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = args;
+        Ok(Value::Bool(false))
+    }
+}
+
+pub fn rt_iocp_poll_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(target_os = "windows")]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let max_events = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(64);
+        let timeout_ms = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        return Ok(Value::array(platform::poll(loop_fd, max_events, timeout_ms)));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = args;
+        Ok(Value::array(vec![]))
+    }
+}
+
+pub fn rt_iocp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(target_os = "windows")]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        return Ok(Value::Bool(platform::close(loop_fd)));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = args;
+        Ok(Value::Bool(false))
+    }
+}
+
+// ---- event ports ----
+
+pub fn rt_event_ports_create_interp(_args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    { return Ok(Value::Int(platform::create())); }
+    #[cfg(not(any(target_os = "solaris", target_os = "illumos")))]
+    { Ok(Value::Int(-1)) }
+}
+
+pub fn rt_event_ports_register_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let fd = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let interest = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0);
+        let token = args.get(3).and_then(|v| v.as_int().ok()).unwrap_or(0);
+        let edge = args.get(4).map(|v| v.truthy()).unwrap_or(false);
+        return Ok(Value::Bool(platform::register(loop_fd, fd, interest, token, edge)));
+    }
+    #[cfg(not(any(target_os = "solaris", target_os = "illumos")))]
+    {
+        let _ = args;
+        Ok(Value::Bool(false))
+    }
+}
+
+pub fn rt_event_ports_deregister_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let fd = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        return Ok(Value::Bool(platform::deregister(loop_fd, fd)));
+    }
+    #[cfg(not(any(target_os = "solaris", target_os = "illumos")))]
+    {
+        let _ = args;
+        Ok(Value::Bool(false))
+    }
+}
+
+pub fn rt_event_ports_poll_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        let max_events = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(64);
+        let timeout_ms = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        return Ok(Value::array(platform::poll(loop_fd, max_events, timeout_ms)));
+    }
+    #[cfg(not(any(target_os = "solaris", target_os = "illumos")))]
+    {
+        let _ = args;
+        Ok(Value::array(vec![]))
+    }
+}
+
+pub fn rt_event_ports_close_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    {
+        let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+        return Ok(Value::Bool(platform::close(loop_fd)));
+    }
+    #[cfg(not(any(target_os = "solaris", target_os = "illumos")))]
+    {
+        let _ = args;
+        Ok(Value::Bool(false))
+    }
+}

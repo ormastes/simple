@@ -65,45 +65,41 @@ expect woken_id == 42
 """
 
 use std.io.types.{IoError, IoErrorKind, Interest}
+use std.io.platform_event.{PlatformEvent, EventMode}
 
 # ============================================================================
 # Platform Detection
 # ============================================================================
 
-extern fn rt_platform_name() -> text
-
 fn event_loop_platform() -> text:
     """Detect the event notification backend for the current OS.
+
+    Delegates to PlatformEvent's detect_backend() and returns a string name.
 
     Returns:
         "epoll" on Linux (level/edge-triggered, O(1) readiness)
         "kqueue" on macOS/FreeBSD (edge-triggered, filter-based)
         "iocp" on Windows (completion-based proactor pattern)
-        "event_port" on Solaris/illumos (one-shot port_create/port_get)
+        "event_ports" on Solaris/illumos (one-shot port_create/port_get)
         "poll" otherwise (cooperative fallback)
 
     Example:
         val backend = event_loop_platform()
         # Returns "epoll" on Linux
     """
-    val platform = rt_platform_name()
-    if platform == "linux":
-        "epoll"
-    else if platform == "macos" or platform == "freebsd":
-        "kqueue"
-    else if platform == "windows":
-        "iocp"
-    else if platform == "solaris" or platform == "illumos":
-        "event_port"
-    else:
-        "poll"
+    val pe = PlatformEvent.new()
+    pe.backend_name()
 
 # ============================================================================
-# Interest <-> i64 Mapping
+# Interest <-> EventMode Mapping
 # ============================================================================
-# Extern ABI encodes Interest as i64:
-#   0 = Read, 1 = Write, 2 = ReadWrite
-# Both Simple and Rust sides must agree on this mapping.
+
+fn _interest_to_mode(interest: Interest) -> EventMode:
+    """Convert Interest enum to EventMode for PlatformEvent dispatch."""
+    match interest:
+        case Interest.Read: EventMode.Read
+        case Interest.Write: EventMode.Write
+        case Interest.ReadWrite: EventMode.ReadWrite
 
 fn _interest_to_i64(interest: Interest) -> i64:
     """Convert Interest enum to extern ABI integer."""
@@ -178,10 +174,11 @@ class Waker:
 # ============================================================================
 
 class EventLoop:
-    """Portable event loop backed by epoll/kqueue via extern stubs.
+    """Portable event loop backed by PlatformEvent abstraction.
 
     Creates a native event notification fd on construction and delegates
-    registration, modification, and polling to `rt_event_loop_*` externs.
+    registration, modification, and polling to PlatformEvent which dispatches
+    to the appropriate platform backend (epoll/kqueue/iocp/event_ports).
 
     NOTE: Arrays are value types in Simple — passing an array to a function
     copies it, so poll() returns a new [Event] rather than filling a caller
@@ -201,21 +198,24 @@ class EventLoop:
     loop_fd: i64
     _platform: text
     _closed: bool
+    _pe: PlatformEvent
 
     static fn new() -> Result<EventLoop, IoError>:
         """Create event loop via the native backend.
 
-        Calls rt_event_loop_create() which returns an epoll/kqueue fd.
+        Delegates to PlatformEvent.create() which dispatches to the
+        platform-appropriate backend (epoll/kqueue/iocp/event_ports).
         Returns error if creation fails (fd < 0).
 
         Returns:
             Result with EventLoop or IoError
         """
-        val fd = rt_event_loop_create()
+        val pe = PlatformEvent.new()
+        val fd = pe.create()
         if fd < 0:
             Err(IoError(kind: IoErrorKind.Other, message: "failed to create event loop", source: nil))
         else:
-            Ok(EventLoop(loop_fd: fd, _platform: event_loop_platform(), _closed: false))
+            Ok(EventLoop(loop_fd: fd, _platform: pe.backend_name(), _closed: false, _pe: pe))
 
     fn platform() -> text:
         """Return the backend name: "epoll", "kqueue", "iocp", "event_port", or "poll".
@@ -238,7 +238,8 @@ class EventLoop:
         """
         if self._closed:
             return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
-        val ok = rt_event_loop_register(self.loop_fd, fd, _interest_to_i64(interest), token, false)
+        val mode = _interest_to_mode(interest)
+        val ok = self._pe.register_with_token(self.loop_fd, fd, mode, token, false)
         if ok:
             Ok(())
         else:
@@ -260,7 +261,8 @@ class EventLoop:
         """
         if self._closed:
             return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
-        val ok = rt_event_loop_register(self.loop_fd, fd, _interest_to_i64(interest), token, true)
+        val mode = _interest_to_mode(interest)
+        val ok = self._pe.register_with_token(self.loop_fd, fd, mode, token, true)
         if ok:
             Ok(())
         else:
@@ -279,8 +281,9 @@ class EventLoop:
         """
         if self._closed:
             return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
-        # Deregister + re-register via the extern (EPOLL_CTL_MOD / kevent EV_ADD)
-        val ok = rt_event_loop_register(self.loop_fd, fd, _interest_to_i64(interest), token, false)
+        # Deregister + re-register via PlatformEvent (EPOLL_CTL_MOD / kevent EV_ADD)
+        val mode = _interest_to_mode(interest)
+        val ok = self._pe.register_with_token(self.loop_fd, fd, mode, token, false)
         if ok:
             Ok(())
         else:
@@ -303,7 +306,8 @@ class EventLoop:
         """
         if self._closed:
             return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
-        val ok = rt_event_loop_register(self.loop_fd, fd, _interest_to_i64(interest), token, true)
+        val mode = _interest_to_mode(interest)
+        val ok = self._pe.register_with_token(self.loop_fd, fd, mode, token, true)
         if ok:
             Ok(())
         else:
@@ -320,7 +324,7 @@ class EventLoop:
         """
         if self._closed:
             return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
-        val ok = rt_event_loop_deregister(self.loop_fd, fd)
+        val ok = self._pe.deregister(self.loop_fd, fd)
         if ok:
             Ok(())
         else:
@@ -342,7 +346,7 @@ class EventLoop:
         if self._closed:
             return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
         val max_events: i64 = 64
-        val raw = rt_event_loop_poll(self.loop_fd, max_events, timeout_ms)
+        val raw = self._pe.poll(self.loop_fd, max_events, timeout_ms)
         # raw is a flat array: [fd1, ready1, token1, fd2, ready2, token2, ...]
         var events: [Event] = []
         var i = 0
@@ -377,7 +381,7 @@ class EventLoop:
         """
         if self._closed:
             return Ok(())
-        val ok = rt_event_loop_close(self.loop_fd)
+        val ok = self._pe.close(self.loop_fd)
         self._closed = true
         if ok:
             Ok(())
@@ -387,19 +391,5 @@ class EventLoop:
 # ============================================================================
 # Extern Stubs — Native Backend
 # ============================================================================
-# Implemented in Rust runtime. Returns epoll/kqueue fd or -1 on error.
-
-extern fn rt_event_loop_create() -> i64
-
-# Register fd for monitoring. edge=true for edge-triggered mode.
-# interest encoding: 0=Read, 1=Write, 2=ReadWrite
-extern fn rt_event_loop_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
-
-# Remove fd from monitoring.
-extern fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> bool
-
-# Block until events or timeout. Returns flat array [fd, ready, token, ...].
-extern fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]
-
-# Close the event loop fd.
-extern fn rt_event_loop_close(loop_fd: i64) -> bool
+# Event loop externs are now declared in platform_event.spl and dispatched
+# via PlatformEvent. The EventLoop class delegates through self._pe.
