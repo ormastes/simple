@@ -359,8 +359,29 @@ fn jit_hotspot_rebuild_choice(
     llvm_available: bool,
     max_cost_class: text
 ) -> JitHotspotRebuildChoice:
-    var attempted: [text] = []
     val llvm_heat_preferred = profile.call_count >= jit_hotspot_llvm_preference_threshold(config)
+    if cranelift_available and profile.call_count >= config.tier1_threshold and jit_hotspot_cost_allowed("medium", max_cost_class):
+        if llvm_available and llvm_heat_preferred and jit_hotspot_cost_allowed("high", max_cost_class):
+            return JitHotspotRebuildChoice(
+                function_name: profile.name,
+                selected_backend: "llvm",
+                eligible: true,
+                reason: "ready",
+                cost_class: "high",
+                required_count: config.tier2_threshold,
+                attempted_backends: ["llvm"]
+            )
+        return JitHotspotRebuildChoice(
+            function_name: profile.name,
+            selected_backend: "cranelift",
+            eligible: true,
+            reason: "ready",
+            cost_class: "medium",
+            required_count: config.tier1_threshold,
+            attempted_backends: ["llvm", "cranelift"]
+        )
+
+    var attempted: [text] = []
     val llvm_plan = jit_hotspot_rebuild_plan_with_cost_budget(profile, config, "llvm", llvm_available and ((not cranelift_available) or llvm_heat_preferred), max_cost_class)
     attempted = attempted.push("llvm")
     if llvm_plan.eligible:
@@ -409,12 +430,6 @@ fn jit_hotspot_rebuild_choice(
 
 fn jit_hotspot_rebuild_opt_level(choice: JitHotspotRebuildChoice) -> OptLevel:
     OptLevel.Aggressive
-
-fn jit_hotspot_skipped_pass(pass_name: text, backend: text, max_cost_class: text, cost_class: text, reason: text) -> MirPassBackendDecision:
-    MirPassBackendDecision(pass_name, backend, max_cost_class, cost_class, false, reason)
-
-fn jit_hotspot_skipped_plugin(stable_name: text, backend: text, max_cost_class: text, cost_class: text, reason: text) -> BackendOptimizationDecision:
-    BackendOptimizationDecision(stable_name, backend, max_cost_class, cost_class, false, reason)
 
 fn jit_hotspot_aggressive_passes_for_backend_budget(backend: text, max_cost_class: text) -> [text]?:
     if backend == "cranelift" and max_cost_class == "medium":
@@ -465,20 +480,20 @@ fn jit_hotspot_aggressive_passes_for_backend_budget(backend: text, max_cost_clas
 fn jit_hotspot_aggressive_skipped_passes_for_backend_budget(backend: text, max_cost_class: text) -> [MirPassBackendDecision]?:
     if backend == "cranelift" and max_cost_class == "medium":
         return Some([
-            jit_hotspot_skipped_pass("inline_aggressive", backend, max_cost_class, "high", "cost budget exceeded"),
-            jit_hotspot_skipped_pass("auto_vectorize", backend, max_cost_class, "high", "cost budget exceeded"),
-            jit_hotspot_skipped_pass("predicate_promote", backend, max_cost_class, "high", "cost budget exceeded")
+            MirPassBackendDecision("inline_aggressive", backend, max_cost_class, "high", false, "cost budget exceeded"),
+            MirPassBackendDecision("auto_vectorize", backend, max_cost_class, "high", false, "cost budget exceeded"),
+            MirPassBackendDecision("predicate_promote", backend, max_cost_class, "high", false, "cost budget exceeded")
         ])
     if backend == "llvm" and max_cost_class == "high":
         return Some([
-            jit_hotspot_skipped_pass("global_value_numbering", backend, max_cost_class, "medium", "llvm_runs_gvn_and_scalar_cleanup"),
-            jit_hotspot_skipped_pass("common_subexpr_elim", backend, max_cost_class, "medium", "llvm_runs_gvn_and_scalar_cleanup"),
-            jit_hotspot_skipped_pass("inline_aggressive", backend, max_cost_class, "high", "llvm_runs_inliner_pipeline"),
-            jit_hotspot_skipped_pass("loop_unroll", backend, max_cost_class, "medium", "llvm_runs_loop_unroll_pipeline"),
-            jit_hotspot_skipped_pass("strength_reduction", backend, max_cost_class, "medium", "llvm_runs_scalar_strength_reduction"),
-            jit_hotspot_skipped_pass("global_value_numbering", backend, max_cost_class, "medium", "llvm_runs_gvn_and_scalar_cleanup"),
-            jit_hotspot_skipped_pass("auto_vectorize", backend, max_cost_class, "high", "llvm_runs_vectorizer_pipeline"),
-            jit_hotspot_skipped_pass("predicate_promote", backend, max_cost_class, "high", "llvm_runs_if_conversion_and_select_promotion")
+            MirPassBackendDecision("global_value_numbering", backend, max_cost_class, "medium", false, "llvm_runs_gvn_and_scalar_cleanup"),
+            MirPassBackendDecision("common_subexpr_elim", backend, max_cost_class, "medium", false, "llvm_runs_gvn_and_scalar_cleanup"),
+            MirPassBackendDecision("inline_aggressive", backend, max_cost_class, "high", false, "llvm_runs_inliner_pipeline"),
+            MirPassBackendDecision("loop_unroll", backend, max_cost_class, "medium", false, "llvm_runs_loop_unroll_pipeline"),
+            MirPassBackendDecision("strength_reduction", backend, max_cost_class, "medium", false, "llvm_runs_scalar_strength_reduction"),
+            MirPassBackendDecision("global_value_numbering", backend, max_cost_class, "medium", false, "llvm_runs_gvn_and_scalar_cleanup"),
+            MirPassBackendDecision("auto_vectorize", backend, max_cost_class, "high", false, "llvm_runs_vectorizer_pipeline"),
+            MirPassBackendDecision("predicate_promote", backend, max_cost_class, "high", false, "llvm_runs_if_conversion_and_select_promotion")
         ])
     nil
 
@@ -506,13 +521,13 @@ fn jit_hotspot_plugin_recommendations_for_backend_budget(backend: text, max_cost
 fn jit_hotspot_skipped_plugins_for_backend_budget(backend: text, max_cost_class: text) -> [BackendOptimizationDecision]?:
     if backend == "cranelift" and max_cost_class == "medium":
         return Some([
-            jit_hotspot_skipped_plugin("llvm-entry-alloca-shaping", backend, max_cost_class, "low", "llvm_frontend_alloca_promotion_shape"),
-            jit_hotspot_skipped_plugin("llvm-default-pipeline", backend, max_cost_class, "high", "llvm_default_pipeline_only")
+            BackendOptimizationDecision("llvm-entry-alloca-shaping", backend, max_cost_class, "low", false, "llvm_frontend_alloca_promotion_shape"),
+            BackendOptimizationDecision("llvm-default-pipeline", backend, max_cost_class, "high", false, "llvm_default_pipeline_only")
         ])
     if backend == "llvm" and max_cost_class == "high":
         return Some([
-            jit_hotspot_skipped_plugin("ssa-var-canon", backend, max_cost_class, "low", "llvm_backend_runs_mem2reg_sroa_pipeline"),
-            jit_hotspot_skipped_plugin("cranelift-local-licm", backend, max_cost_class, "medium", "backend_not_simple_low_tier_jit")
+            BackendOptimizationDecision("ssa-var-canon", backend, max_cost_class, "low", false, "llvm_backend_runs_mem2reg_sroa_pipeline"),
+            BackendOptimizationDecision("cranelift-local-licm", backend, max_cost_class, "medium", false, "backend_not_simple_low_tier_jit")
         ])
     nil
 
@@ -523,6 +538,45 @@ fn jit_hotspot_optimization_plan(
     llvm_available: bool,
     max_cost_class: text
 ) -> JitHotspotOptimizationPlan:
+    val llvm_heat_preferred = profile.call_count >= jit_hotspot_llvm_preference_threshold(config)
+    if cranelift_available and profile.call_count >= config.tier1_threshold and max_cost_class == "medium":
+        val fast_passes = jit_hotspot_aggressive_passes_for_backend_budget("cranelift", max_cost_class)
+        val fast_skipped_passes = jit_hotspot_aggressive_skipped_passes_for_backend_budget("cranelift", max_cost_class)
+        val fast_plugin_recommendations = jit_hotspot_plugin_recommendations_for_backend_budget("cranelift", max_cost_class)
+        val fast_skipped_plugins = jit_hotspot_skipped_plugins_for_backend_budget("cranelift", max_cost_class)
+        if fast_passes.? and fast_skipped_passes.? and fast_plugin_recommendations.? and fast_skipped_plugins.?:
+            return JitHotspotOptimizationPlan(
+                function_name: profile.name,
+                backend: "cranelift",
+                eligible: true,
+                reason: "ready",
+                cost_class: "medium",
+                max_cost_class: max_cost_class,
+                opt_level: "aggressive",
+                passes: fast_passes.unwrap(),
+                skipped_passes: fast_skipped_passes.unwrap(),
+                plugin_recommendations: fast_plugin_recommendations.unwrap(),
+                skipped_plugin_recommendations: fast_skipped_plugins.unwrap()
+            )
+    if llvm_available and llvm_heat_preferred and jit_hotspot_cost_allowed("high", max_cost_class):
+        val fast_passes = jit_hotspot_aggressive_passes_for_backend_budget("llvm", max_cost_class)
+        val fast_skipped_passes = jit_hotspot_aggressive_skipped_passes_for_backend_budget("llvm", max_cost_class)
+        val fast_plugin_recommendations = jit_hotspot_plugin_recommendations_for_backend_budget("llvm", max_cost_class)
+        val fast_skipped_plugins = jit_hotspot_skipped_plugins_for_backend_budget("llvm", max_cost_class)
+        if fast_passes.? and fast_skipped_passes.? and fast_plugin_recommendations.? and fast_skipped_plugins.?:
+            return JitHotspotOptimizationPlan(
+                function_name: profile.name,
+                backend: "llvm",
+                eligible: true,
+                reason: "ready",
+                cost_class: "high",
+                max_cost_class: max_cost_class,
+                opt_level: "aggressive",
+                passes: fast_passes.unwrap(),
+                skipped_passes: fast_skipped_passes.unwrap(),
+                plugin_recommendations: fast_plugin_recommendations.unwrap(),
+                skipped_plugin_recommendations: fast_skipped_plugins.unwrap()
+            )
     val choice = jit_hotspot_rebuild_choice(profile, config, cranelift_available, llvm_available, max_cost_class)
     if not choice.eligible:
         return JitHotspotOptimizationPlan(
