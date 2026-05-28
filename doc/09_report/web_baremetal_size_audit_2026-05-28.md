@@ -42,7 +42,7 @@ Date: 2026-05-28
 |---|---:|
 | Browser smoke native file / dec section | 35200 / 27000 |
 | Browser simple render HTML native file / dec section | 19000 / 8500 |
-| Browser engine source | 70000 |
+| Browser engine source | 58000 |
 | x86_64 monolithic bare-metal stubs source | 576503 |
 | ARM64 monolithic bare-metal stubs source | 148311 |
 | ARM32 monolithic bare-metal stubs source | 68177 |
@@ -179,7 +179,7 @@ Date: 2026-05-28
 | `examples/browser/feature/dom` | 9 | 4854 | 181376 |
 | `examples/browser/feature/style` | 13 | 3914 | 150153 |
 | `src/lib/gc_async_mut/web` | 13 | 3928 | 170664 |
-| `src/lib/gc_async_mut/gpu/browser_engine` | 17 | 1759 | 69155 |
+| `src/lib/gc_async_mut/gpu/browser_engine` | 17 | 1574 | 57258 |
 
 ## Retention Checks
 
