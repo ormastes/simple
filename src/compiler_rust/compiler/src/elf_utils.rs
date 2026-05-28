@@ -528,6 +528,7 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
 
         // Enum operations
         "rt_enum_new" => simple_runtime::rt_enum_new as *const () as usize,
+        "rt_enum_check_discriminant" => simple_runtime::rt_enum_check_discriminant as *const () as usize,
         "rt_enum_discriminant" => simple_runtime::rt_enum_discriminant as *const () as usize,
         "rt_enum_payload" => simple_runtime::rt_enum_payload as *const () as usize,
 

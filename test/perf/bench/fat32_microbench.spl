@@ -11,12 +11,12 @@ extern fn rt_byte_array_new_len(len: u64) -> [u8]
 extern fn rt_bytes_u8_set(array: [u8], index: i64, value: i64) -> bool
 extern fn rt_typed_bytes_u8_unchecked(array: [u8], index: i64) -> i64
 
-# ── Mock block device (512 sectors x 512 B) ─────────────────────────────────
+# ── Mock block device (4096 sectors x 512 B) ────────────────────────────────
 var __bench_data: [u8] = []
 var __bench_active_bank: i32 = 0
 
 fn _alloc_bank() -> i32:
-    __bench_data = rt_byte_array_new_len(262144u64)
+    __bench_data = rt_byte_array_new_len(2097152u64)
     0
 
 fn _set_sec(bid: i32, sec: i32, data: [u8]):
@@ -35,30 +35,33 @@ fn _get_sec(bid: i32, sec: i32) -> [u8]:
         i = i + 1
     out
 
-fn _w32(mut buf: [u8], off: i64, v: u32):
+fn _w32(mut buf: [u8], off: i64, v: i64):
     val _s0 = rt_bytes_u8_set(buf, off, (v & 0xFF).to_i64())
     val _s1 = rt_bytes_u8_set(buf, off + 1, ((v >> 8) & 0xFF).to_i64())
     val _s2 = rt_bytes_u8_set(buf, off + 2, ((v >> 16) & 0xFF).to_i64())
     val _s3 = rt_bytes_u8_set(buf, off + 3, ((v >> 24) & 0xFF).to_i64())
 
+fn _u8(mut buf: [u8], off: i64, v: i64):
+    val _s = rt_bytes_u8_set(buf, off, v)
+
 fn _init_image(bid: i32):
     var bpb = _get_sec(bid, 0)
-    bpb[11] = 0x00
-    bpb[12] = 0x02
-    bpb[13] = 0x01
-    bpb[14] = 0x20
-    bpb[15] = 0x00
-    bpb[16] = 0x02
-    _w32(bpb, 32, 512u32)
-    _w32(bpb, 36, 1u32)
-    _w32(bpb, 44, 2u32)
-    bpb[510] = 0x55
-    bpb[511] = 0xAA
+    _u8(bpb, 11, 0x00)
+    _u8(bpb, 12, 0x02)
+    _u8(bpb, 13, 0x01)
+    _u8(bpb, 14, 0x20)
+    _u8(bpb, 15, 0x00)
+    _u8(bpb, 16, 2)
+    _w32(bpb, 32, 4096)
+    _w32(bpb, 36, 1)
+    _w32(bpb, 44, 2)
+    _u8(bpb, 510, 0x55)
+    _u8(bpb, 511, 0xAA)
     _set_sec(bid, 0, bpb)
     var fat = _get_sec(bid, 32)
-    _w32(fat, 0, 0x0FFFFFF8u32)
-    _w32(fat, 4, 0x0FFFFFFFu32)
-    _w32(fat, 8, 0x0FFFFFF8u32)
+    _w32(fat, 0, 0x0FFFFFF8)
+    _w32(fat, 4, 0x0FFFFFFF)
+    _w32(fat, 8, 0x0FFFFFF8)
     _set_sec(bid, 32, fat)
 
 class BenchBlockDevice:
@@ -74,7 +77,7 @@ impl BenchBlockDevice:
 impl BlockDevice for BenchBlockDevice:
     fn read_sector(lba: u64, mut buffer: [u8]) -> Result<bool, text>:
         val idx = lba.to_i32()
-        if idx < 0 or idx >= 512:
+        if idx < 0 or idx >= 4096:
             return Ok(true)
         val src = _get_sec(__bench_active_bank, idx)
         var i = 0
@@ -84,7 +87,7 @@ impl BlockDevice for BenchBlockDevice:
         Ok(true)
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
         val idx = lba.to_i32()
-        if idx < 0 or idx >= 512:
+        if idx < 0 or idx >= 4096:
             return Err("sector out of range")
         _set_sec(__bench_active_bank, idx, data)
         Ok(true)

@@ -632,6 +632,18 @@ pub(crate) fn generate_stub_object(
         ));
     }
 
+    let forbidden_core_runtime: Vec<&str> = needs_stub
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| matches!(*s, "rt_enum_new" | "rt_enum_check_discriminant" | "rt_enum_discriminant" | "rt_enum_payload"))
+        .collect();
+    if !forbidden_core_runtime.is_empty() {
+        return Err(format!(
+            "refusing to weak-stub core enum runtime symbols: {}",
+            forbidden_core_runtime.join(", ")
+        ));
+    }
+
     if std::env::var("SIMPLE_TRACE_STUBS").is_ok() {
         for s in &needs_stub {
             eprintln!("  STUB: {}", s);

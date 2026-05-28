@@ -1239,7 +1239,6 @@ static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap) {
 int64_t rt_bytes_u8_at(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
     return (int64_t)((uint8_t*)array->data)[idx];
@@ -1276,7 +1275,6 @@ int64_t rt_bytes_u64_le_at(SplArray* a, int64_t idx) {
 int8_t rt_bytes_u8_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     val = rt_core_numeric_arg(val) & 0xff;
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
@@ -1304,7 +1302,7 @@ int8_t rt_typed_bytes_u8_push(SplArray* a, int64_t val) {
 int64_t rt_typed_bytes_u8_unchecked(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    return (int64_t)((uint8_t*)array->data)[rt_core_numeric_arg(idx)];
+    return (int64_t)((uint8_t*)array->data)[idx];
 }
 
 int64_t rt_typed_bytes_u32_le_at(SplArray* a, int64_t idx) {

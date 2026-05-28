@@ -183,8 +183,7 @@ fn compile_inline_bytes_u8_at<M: Module>(
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let raw_index = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let index = inline_numeric_arg(builder, raw_index);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let zero = builder.ins().iconst(types::I64, 0);
     let tag_mask = builder.ins().iconst(types::I64, 7);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
