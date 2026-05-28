@@ -802,6 +802,12 @@ fn vfs_boot_nvme_assign_user_namespace_driver_instance(
     g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)
     driver_result
 
+fn vfs_boot_nvme_system_namespace_nsid_for_user_assignment() -> u32:
+    for lease in g_vfs_nvme_active_leases:
+        if lease.mode == NvmeNamespaceMode.System:
+            return lease.namespace.nsid
+    g_nvme.get_namespace_id()
+
 fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
     name: text,
     evidence: NvmeTransferEvidence,
@@ -877,6 +883,36 @@ fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
     g_vfs_nvme_direct_adapter_leases = g_vfs_nvme_direct_adapter_leases.push(lease)
     g_vfs_nvme_direct_adapters = g_vfs_nvme_direct_adapters.push(adapter)
     driver_result
+
+fn vfs_boot_nvme_assign_discovered_user_namespace_hardware_driver_instance(
+    name: text,
+    evidence: NvmeTransferEvidence,
+    grant: DeviceGrant,
+    queue_id: u16,
+    owner_task: u64,
+    max_depth: u16,
+    consumer: NvmeFilesystemConsumer
+) -> Result<DriverInstance, text>:
+    val system_nsid = vfs_boot_nvme_system_namespace_nsid_for_user_assignment()
+    val user_namespace = g_nvme.identify_first_assignable_user_namespace(system_nsid)
+    if user_namespace.is_err():
+        return Err("nvme-user-assign-namespace-discovery-failed:" + user_namespace.unwrap_err())
+    val facts = user_namespace.unwrap()
+    vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
+        name,
+        evidence,
+        grant,
+        0u32,
+        facts.nsid,
+        facts.formatted_lba_size,
+        facts.lba_count,
+        0u64,
+        facts.lba_count,
+        queue_id,
+        owner_task,
+        max_depth,
+        consumer
+    )
 
 # Module-level VFS service instance for cooperative scheduling
 var g_vfs_service: VfsService? = nil
