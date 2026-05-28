@@ -1,27 +1,3 @@
-/*
- * SimpleOS x86_64 Baremetal Runtime Stubs
- *
- * Provides a complete freestanding runtime for the Simple language compiler
- * targeting x86_64 bare-metal (QEMU isa-debug-exit, COM1 serial).
- *
- * Sections:
- *   1. Includes and types
- *   2. Serial I/O (COM1 0x3F8)
- *   3. RuntimeValue tagging
- *   4. Heap allocator (bump, 512 MB)
- *   5. Memory functions
- *   6. String operations
- *   7. Print functions
- *   8. Framebuffer copy
- *  8a. PCI device scan/cache
- *  8b. NVMe controller + sector read
- *  8b-fat32. FAT32 file system driver
- *  8c-net. VirtIO-net driver + ARP/ICMP responder
- *   9. _start (serial init, call spl_start, isa-debug-exit)
- *  10. No-op stubs (~200 runtime functions)
- *  11. Real x86_64 port-I/O and MMIO overrides
- */
-
 /* ===================================================================
  * 1. Includes and types
  * =================================================================== */

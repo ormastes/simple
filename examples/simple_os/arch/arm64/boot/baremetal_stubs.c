@@ -1,31 +1,3 @@
-/*
- * SimpleOS ARM64 (AArch64) Baremetal Runtime Stubs
- *
- * Provides a complete freestanding runtime for the Simple language compiler
- * targeting ARM64 bare-metal (QEMU virt machine, PL011 UART).
- *
- * Ported from x86_64/boot/baremetal_stubs.c — all shared runtime functions
- * are identical; only serial I/O, PCI enumeration, and CPU control differ.
- *
- * Sections:
- *   1. Includes and types
- *   2. Serial I/O (PL011 UART at 0x09000000)
- *   3. RuntimeValue tagging
- *   4. Heap allocator (bump, 160 MB)
- *   5. Memory functions
- *   6. String operations
- *   7. Print functions
- *   8. Framebuffer, native comparison, PCI, syscall
- *   9. _c_start (PL011 init, call spl_start, wfe loop)
- *  10. Arithmetic, type introspection, conversion
- *  11. String extras (full implementations)
- *  12. Array operations (full implementations)
- *  13. Map/Dict operations (full implementations)
- *  14. Additional runtime stubs (OS boot path)
- *  15. Fatal-panic stubs (~200 runtime functions)
- *  16. Real ARM64 MMIO and CPU overrides
- */
-
 /* ===================================================================
  * 1. Includes and types
  * =================================================================== */

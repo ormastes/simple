@@ -1,28 +1,3 @@
-/*
- * SimpleOS ARM32 (ARMv7) Baremetal Runtime Stubs
- *
- * Provides a complete freestanding runtime for the Simple language compiler
- * targeting ARM32 bare-metal (QEMU virt, PL011 UART).
- *
- * Differences from arm64:
- *   - RuntimeValue is int32_t (32-bit pointers)
- *   - Heap is 4MB (not 16MB)
- *   - Same PL011 UART at 0x09000000 as arm64
- *
- * Sections:
- *   1. Includes and types
- *   2. Serial I/O (PL011 UART at 0x09000000)
- *   3. RuntimeValue tagging
- *   4. Heap allocator (bump, 4 MB)
- *   5. Memory functions
- *   6. String operations
- *   7. Print functions
- *   8. Framebuffer copy
- *   9. _start (UART init, call spl_start)
- *  10. No-op stubs (~200 runtime functions)
- *  11. Real ARM32 MMIO and CPU overrides
- */
-
 /* ===================================================================
  * 1. Includes and types
  * =================================================================== */
