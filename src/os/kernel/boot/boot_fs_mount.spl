@@ -66,6 +66,9 @@ struct BootStorageAcceptanceEvidence:
 
 var _fs_mount_done: bool = false
 var _fs_mount_type: FsMountType = FsMountType.None_
+var _production_nvme_devices: [BlockDevice] = []
+var _production_nvme_evidence: [NvmeTransferEvidence] = []
+var _production_nvme_leases: [NvmeFilesystemLease] = []
 
 fn fs_mount_done() -> bool:
     _fs_mount_done
@@ -103,12 +106,30 @@ fn boot_fs_mount_freestanding_development_c_bridge() -> Result<FsMountResult, te
     Err("boot-fs-mount: no freestanding-safe root filesystem found")
 
 fn boot_fs_mount_freestanding_production() -> Result<FsMountResult, text>:
-    """Production freestanding root probe requires a pure-Simple NVMe entry.
+    """Production freestanding root probe through a provisioned pure-Simple NVMe lease.
     The C bridge remains available only through the explicit development entry."""
     _fs_mount_done = false
     _fs_mount_type = FsMountType.None_
-    log_raw_println("[boot-fs-mount] production storage rejected: pure NVMe lease entry required")
-    Err("boot-fs-mount: pure-nvme-production-entry-required")
+    if _production_nvme_devices.len() == 0 or _production_nvme_evidence.len() == 0 or _production_nvme_leases.len() == 0:
+        log_raw_println("[boot-fs-mount] production storage rejected: pure NVMe lease device not provisioned")
+        return Err("boot-fs-mount: pure-nvme-production-device-not-provisioned")
+    boot_fs_mount_pure_nvme_from_lease_device(
+        _production_nvme_devices[0],
+        _production_nvme_evidence[0],
+        _production_nvme_leases[0]
+    )
+
+fn boot_fs_mount_provision_production_nvme_lease_device(dev: BlockDevice, evidence: NvmeTransferEvidence, lease: NvmeFilesystemLease):
+    """Provision the production boot entry with a pure-Simple NVMe lease-backed device.
+    This is the freestanding handoff point from the real NVMe hardware driver."""
+    _production_nvme_devices = [dev]
+    _production_nvme_evidence = [evidence]
+    _production_nvme_leases = [lease]
+
+fn boot_fs_mount_clear_production_nvme_lease_device():
+    _production_nvme_devices = []
+    _production_nvme_evidence = []
+    _production_nvme_leases = []
 
 fn boot_fs_mount_from_device(dev: BlockDevice, provider: text, pure_simple: bool) -> Result<FsMountResult, text>:
     """Probe supported root filesystems from one provider-neutral BlockDevice."""

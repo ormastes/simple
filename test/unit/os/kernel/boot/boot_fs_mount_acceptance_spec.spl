@@ -6,6 +6,8 @@ use os.kernel.boot.boot_fs_mount.{
     boot_fs_mount_from_device,
     boot_fs_mount_freestanding,
     boot_fs_mount_freestanding_production,
+    boot_fs_mount_provision_production_nvme_lease_device,
+    boot_fs_mount_clear_production_nvme_lease_device,
     boot_fs_mount_pure_nvme_from_device,
     boot_fs_mount_pure_nvme_from_lease_device,
     boot_fs_mount_lease_acceptance_reason,
@@ -125,14 +127,15 @@ fn ready_boot_lease(provider: text):
     nvme_filesystem_lease(ns, 0u64, 2048u64, NvmeNamespaceMode.UserAssigned, queue, provider, "resource-grant-set:tok=boot-nvme", true, true)
 
 describe "boot filesystem mount acceptance":
-    it "default and production freestanding entries refuse C bridge probing":
+    it "default and production freestanding entries require provisioned pure NVMe lease device":
+        boot_fs_mount_clear_production_nvme_lease_device()
         val default_rejected = boot_fs_mount_freestanding()
         expect(default_rejected.is_err()).to_equal(true)
-        expect(default_rejected.unwrap_err()).to_equal("boot-fs-mount: pure-nvme-production-entry-required")
+        expect(default_rejected.unwrap_err()).to_equal("boot-fs-mount: pure-nvme-production-device-not-provisioned")
 
         val rejected = boot_fs_mount_freestanding_production()
         expect(rejected.is_err()).to_equal(true)
-        expect(rejected.unwrap_err()).to_equal("boot-fs-mount: pure-nvme-production-entry-required")
+        expect(rejected.unwrap_err()).to_equal("boot-fs-mount: pure-nvme-production-device-not-provisioned")
 
     it "rejects C bridge mounts as pure Simple boot storage":
         val c_bridge = FsMountResult(
@@ -363,3 +366,16 @@ describe "boot filesystem mount acceptance":
         expect(mounted.fs_type).to_equal(FsMountType.Fat32)
         expect(mounted.provider).to_equal("simple-driver")
         expect(mounted.pure_simple).to_equal(true)
+
+    it "production freestanding entry consumes provisioned pure NVMe lease device":
+        boot_fs_mount_clear_production_nvme_lease_device()
+        val dev = MemBlockDevice.new(2048u64, 512u32)
+        expect(dev.write_sector(0u64, fat32_boot_sector()).is_ok()).to_equal(true)
+        val lease = ready_boot_lease("simple-driver")
+        boot_fs_mount_provision_production_nvme_lease_device(dev, ready_transfer_evidence(), lease)
+
+        val mounted = boot_fs_mount_freestanding_production().unwrap()
+        expect(mounted.fs_type).to_equal(FsMountType.Fat32)
+        expect(mounted.provider).to_equal("simple-driver")
+        expect(mounted.pure_simple).to_equal(true)
+        boot_fs_mount_clear_production_nvme_lease_device()
