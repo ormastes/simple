@@ -38,7 +38,7 @@ STATIC_WEB_ENTRY="$BUILD_DIR/simple_web_static_entry.spl"
 SCRIPT_WEB_ENTRY="$BUILD_DIR/simple_web_script_entry.spl"
 
 cat >"$STATIC_WEB_ENTRY" <<'EOF'
-use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_renderer.{simple_web_render_html_to_pixels}
 
 fn main() -> i64:
     val pixels = simple_web_render_html_to_pixels("<html><body style='background:#0f8'>static</body></html>", 64, 48)
@@ -325,7 +325,9 @@ SCRIPT_WEB_DEC_BYTES="$(section_dec "$BUILD_DIR/simple_web_script_native")"
 PURE_POLICY_DEC_BYTES="$(section_dec "$BUILD_DIR/pure_policy_probe_native")"
 RV32_SEMIHOST_DEC_BYTES="$(section_dec "$BUILD_DIR/hello_riscv32_semihost.elf")"
 X86_64_MIN_BOOT_STDOUT_DEC_BYTES="$(section_dec "$X86_64_MIN_BOOT_STDOUT_OBJ")"
+STATIC_WEB_FORBIDDEN_MARKERS="$(marker_count "$BUILD_DIR/simple_web_static_native" 'rt_file_|rt_bytes_alloc|render_html_to_pixels_with_scripts|simple_web_corpus|chrome\.ppm|rt_file_read_bytes')"
 PURE_POLICY_FORBIDDEN_MARKERS="$(marker_count "$BUILD_DIR/pure_policy_probe_native" 'semihost_|uart_write|nvic_|plic_|apic_|rt_mmio|rt_file|OPENSSL|SSL_')"
+STATIC_WEB_FORBIDDEN_LOG_MARKERS="$(text_marker_count "$BUILD_DIR/simple_web_static_native.log" 'Generating .*stub functions|rt_file_|rt_bytes_alloc|render_html_to_pixels_with_scripts|simple_web_corpus')"
 PURE_POLICY_FORBIDDEN_LOG_MARKERS="$(text_marker_count "$BUILD_DIR/pure_policy_probe_native.log" 'Generating .*stub functions|OPENSSL|SSL_')"
 
 require_le "browser_example_source_exceeds_budget" "$BROWSER_EXAMPLE_SOURCE_BYTES" "$MAX_BROWSER_EXAMPLE_SOURCE_BYTES"
@@ -336,6 +338,8 @@ require_le "browser_render_binary_exceeds_budget" "$BROWSER_RENDER_BYTES" "$MAX_
 require_le "browser_render_dec_section_exceeds_budget" "$BROWSER_RENDER_DEC_BYTES" "$MAX_BROWSER_RENDER_DEC_BYTES"
 require_le "simple_web_static_binary_exceeds_budget" "$STATIC_WEB_BYTES" "$MAX_SIMPLE_WEB_STATIC_BYTES"
 require_le "simple_web_static_dec_section_exceeds_budget" "$STATIC_WEB_DEC_BYTES" "$MAX_SIMPLE_WEB_STATIC_DEC_BYTES"
+require_zero "simple_web_static_forbidden_markers" "$STATIC_WEB_FORBIDDEN_MARKERS"
+require_zero "simple_web_static_forbidden_log_markers" "$STATIC_WEB_FORBIDDEN_LOG_MARKERS"
 require_le "simple_web_script_binary_exceeds_budget" "$SCRIPT_WEB_BYTES" "$MAX_SIMPLE_WEB_SCRIPT_BYTES"
 require_le "simple_web_script_dec_section_exceeds_budget" "$SCRIPT_WEB_DEC_BYTES" "$MAX_SIMPLE_WEB_SCRIPT_DEC_BYTES"
 require_le "baremetal_pure_policy_binary_exceeds_budget" "$PURE_POLICY_BYTES" "$MAX_BAREMETAL_PURE_POLICY_BYTES"
@@ -408,11 +412,13 @@ require_le "startup_policy_source_exceeds_budget" "$STARTUP_POLICY_BYTES" "$MAX_
     echo
     echo "| Artifact | Forbidden Binary Marker Matches | Forbidden Build Log Marker Matches |"
     echo "|---|---:|---:|"
+    echo "| Simple web static facade | $STATIC_WEB_FORBIDDEN_MARKERS | $STATIC_WEB_FORBIDDEN_LOG_MARKERS |"
     echo "| Bare-metal pure policy probe | $PURE_POLICY_FORBIDDEN_MARKERS | $PURE_POLICY_FORBIDDEN_LOG_MARKERS |"
     echo
     echo "## Direction"
     echo
     echo "- Browser render size work should first split static render from script/session/network paths."
+    echo "- \`simple_web_html_renderer\` is the HTML-only core; URL/file loading, script execution, and corpus fixtures must stay in separate facades."
     echo "- The static simple-web facade is measured separately from the script URL facade so script/runtime growth stays visible."
     echo "- Corpus fixture compatibility lives in \`simple_web_corpus_fixture_renderer\`; production static render must not retain PPM baseline loading."
     echo "- x86_64 SimpleOS size work should split \`baremetal_stubs.c\` into boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes."
@@ -435,6 +441,8 @@ echo "browser_render_build=$BROWSER_RENDER_BUILD"
 echo "browser_render_bytes=$BROWSER_RENDER_BYTES"
 echo "simple_web_static_build=$STATIC_WEB_BUILD"
 echo "simple_web_static_bytes=$STATIC_WEB_BYTES"
+echo "simple_web_static_forbidden_markers=$STATIC_WEB_FORBIDDEN_MARKERS"
+echo "simple_web_static_forbidden_log_markers=$STATIC_WEB_FORBIDDEN_LOG_MARKERS"
 echo "simple_web_script_build=$SCRIPT_WEB_BUILD"
 echo "simple_web_script_bytes=$SCRIPT_WEB_BYTES"
 echo "baremetal_pure_policy_check=$PURE_POLICY_CHECK"
