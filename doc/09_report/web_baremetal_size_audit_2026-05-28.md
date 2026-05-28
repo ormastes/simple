@@ -16,6 +16,7 @@ Date: 2026-05-28
 | Bare-metal pure policy probe | ok | ok | 14336 | 6575 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
+| RV64 semihost trap capsule | n/a | ok | 912 | 48 | `build/web_baremetal_size_audit/riscv64_semihost_trap.build.log` |
 | ARM semihost trap capsule | n/a | ok | 568 | 20 | `build/web_baremetal_size_audit/arm_semihost_trap.build.log` |
 | ARM64 semihost trap capsule | n/a | ok | 704 | 32 | `build/web_baremetal_size_audit/arm64_semihost_trap.build.log` |
 | x86_64 minimal boot/stdout capsule | n/a | ok | 1968 | 250 | `build/web_baremetal_size_audit/baremetal_boot_stdout.build.log` |
@@ -42,6 +43,8 @@ Date: 2026-05-28
 | RV32 semihost stdout ELF file / dec section | 70000 / 9000 |
 | RV32 semihost trap object file / dec section | 768 / 64 |
 | RV32 semihost trap source | 1024 |
+| RV64 semihost trap object file / dec section | 1024 / 64 |
+| RV64 semihost trap source | 1024 |
 | ARM semihost trap object file / dec section | 768 / 64 |
 | ARM semihost trap source | 1024 |
 | ARM64 semihost trap object file / dec section | 768 / 64 |
@@ -85,6 +88,7 @@ Date: 2026-05-28
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 35 | 685 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv32/semihost_trap.S` | 1 | 30 | 867 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/riscv/semihost_trap.S` | 1 | 30 | 867 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/arm/semihost_trap.S` | 1 | 27 | 786 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/arm64/semihost_trap.S` | 1 | 25 | 787 |
 | `examples/09_embedded/baremetal/baremetal/pure_policy_probe.spl` | 1 | 29 | 1018 |
@@ -124,6 +128,7 @@ Date: 2026-05-28
 | Simple web script file facade forbidden full renderer | 0 | 0 |
 | Bare-metal pure policy probe | 0 | 0 |
 | RV32 semihost trap capsule | 0 | n/a |
+| RV64 semihost trap capsule | 0 | n/a |
 | ARM semihost trap capsule | 0 | n/a |
 | ARM64 semihost trap capsule | 0 | n/a |
 | x86_64 minimal boot/stdout capsule | 0 | n/a |
@@ -154,6 +159,7 @@ Date: 2026-05-28
 - `baremetal_startup_handoff.c` is the x86_64 platform capsule baseline for module-init and `spl_start` handoff only; stack/hart policy stays in pure Simple.
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
 - `riscv32/semihost_trap.S` is the RV32 platform capsule baseline for the semihost magic sequence only; stdout operation policy stays in pure Simple.
+- `riscv/semihost_trap.S` is the RV64 platform capsule baseline for the semihost magic sequence only; stdout operation policy stays in pure Simple.
 - `arm/semihost_trap.S` is the ARM/Thumb platform capsule baseline for the BKPT semihost trap only; stdout operation policy stays in pure Simple.
 - `arm64/semihost_trap.S` is the AArch64 platform capsule baseline for the HLT semihost trap only; stdout operation policy stays in pure Simple.
 - `baremetal/console_policy.spl` is the pure-Simple policy surface for shared semihost/UART stdout selection.
