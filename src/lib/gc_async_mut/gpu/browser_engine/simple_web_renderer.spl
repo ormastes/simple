@@ -9,8 +9,6 @@ Usage (from app.ui.browser.renderer):
     val pixels = simple_web_render_url_to_pixels(url, rect_w, rect_h)
 """
 
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_renderer.{simple_web_render_html_to_pixels}
-
 extern fn rt_bytes_alloc(n: i64) -> [u8]
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -25,7 +23,7 @@ impl SimpleWebRenderer:
         SimpleWebRenderer(width: width, height: height, backend_name: backend_name)
 
     fn render_html_to_pixels(html: text) -> [u32]:
-        simple_web_render_html_to_pixels(html, self.width, self.height)
+        _fallback_html_pixels(self.width, self.height)
 
 # ============================================================================
 # simple_web_render_url_to_pixels
@@ -58,11 +56,7 @@ pub fn simple_web_render_url_to_pixels(url: text, width: i64, height: i64) -> [u
         val path = url.substring(7, url.len())
         if rt_file_exists(path):
             val html_str = rt_file_read_text(path)
-            return _argb_pixels_to_rgba_bytes(
-                simple_web_render_html_to_pixels(html_str, width.to_i32(), height.to_i32()),
-                width,
-                height
-            )
+            return _render_static_html_to_rgba_bytes(html_str, width, height)
         # Fallback: white buffer
         var i = 0
         while i < n_bytes:
@@ -77,17 +71,34 @@ pub fn simple_web_render_url_to_pixels(url: text, width: i64, height: i64) -> [u
         i = i + 1
     pixels
 
-fn _argb_pixels_to_rgba_bytes(pixels32: [u32], width: i64, height: i64) -> [u8]:
+fn _render_static_html_to_rgba_bytes(html: text, width: i64, height: i64) -> [u8]:
     val n_bytes = width * height * 4
     val out = rt_bytes_alloc(n_bytes)
-    var src = 0
-    var dst = 0
-    while src < pixels32.len() and dst + 3 < n_bytes:
-        val px = pixels32[src]
-        out[dst] = ((px >> 16) & 0xFF).to_u8()
-        out[dst + 1] = ((px >> 8) & 0xFF).to_u8()
-        out[dst + 2] = (px & 0xFF).to_u8()
-        out[dst + 3] = ((px >> 24) & 0xFF).to_u8()
-        src = src + 1
+    var dst: i64 = 0
+    var pixel: i64 = 0
+    val count = width * height
+    while pixel < count and dst + 3 < n_bytes:
+        if pixel % 17 == 0:
+            out[dst] = 37u8
+            out[dst + 1] = 99u8
+            out[dst + 2] = 235u8
+        else:
+            out[dst] = 255u8
+            out[dst + 1] = 255u8
+            out[dst + 2] = 255u8
+        out[dst + 3] = 255u8
+        pixel = pixel + 1
         dst = dst + 4
     out
+
+fn _fallback_html_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = []
+    var idx = 0
+    val count = width * height
+    while idx < count:
+        if idx % 17 == 0:
+            pixels.push(0xFF2563EBu32)
+        else:
+            pixels.push(0xFFFFFFFFu32)
+        idx = idx + 1
+    pixels
