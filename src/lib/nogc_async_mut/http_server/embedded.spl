@@ -16,6 +16,14 @@ val server = EmbeddedHttpServer.new(":8080")
 server.get("/hello", \req: "Hello World")
 server.get("/api/status", \req: "{\"status\": \"ok\"}")
 server.post("/data", \req: "received: {req.body}")
+
+# Static file serving from directory
+server.set_static_root("/var/www/html")
+
+# Static file serving from memory (embedded/IoT flash)
+server.add_memory_file("/index.html", "text/html", "<h1>Hi</h1>")
+server.add_memory_file("/style.css", "text/css", "body { color: #333; }")
+
 server.start()
 ```
 
@@ -40,6 +48,7 @@ use std.http_server.shared.{
     match_route, RouteMatch, SimpleRoute
 }
 use std.http_server.types.{HttpRequestData}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists, file_size}
 
 # ============================================================================
 # Route Entry
@@ -52,6 +61,20 @@ struct EmbeddedRoute:
     handler: fn(HttpRequestData) -> text
 
 # ============================================================================
+# Memory-Backed File Entry (for embedded/IoT flash storage)
+# ============================================================================
+
+struct MemoryFile:
+    """A file stored in memory, served by path match.
+
+    Used for embedded/IoT devices where files are baked into the binary
+    or loaded from flash at startup rather than read from a filesystem.
+    """
+    path: text
+    content_type: text
+    content: text
+
+# ============================================================================
 # Embedded HTTP Server
 # ============================================================================
 
@@ -60,9 +83,18 @@ class EmbeddedHttpServer:
 
     Uses IoDriver for completion-based async I/O and tcp_backend for
     socket operations. Single-threaded, no keepalive, no TLS.
+
+    Supports three content sources:
+    1. Registered routes (method + path → handler function)
+    2. Memory-backed files (path → in-memory content, for IoT/flash)
+    3. Filesystem static root (path → file on disk)
+
+    Priority: routes > memory files > static root.
     """
     addr: text
     routes: [EmbeddedRoute]
+    memory_files: [MemoryFile]
+    static_root: text
     running: bool
 
     static fn new(addr: text) -> EmbeddedHttpServer:
@@ -70,6 +102,8 @@ class EmbeddedHttpServer:
         EmbeddedHttpServer(
             addr: addr,
             routes: [],
+            memory_files: [],
+            static_root: "",
             running: false
         )
 
@@ -88,6 +122,35 @@ class EmbeddedHttpServer:
     me delete(path: text, handler: fn(HttpRequestData) -> text):
         """Register a DELETE route."""
         self.routes.push(EmbeddedRoute(method: "DELETE", path: path, handler: handler))
+
+    me set_static_root(root: text):
+        """Set the filesystem root for static file serving.
+
+        When a request path doesn't match any registered route or memory file,
+        the server looks for a file at static_root + request_path.
+
+        Args:
+            root: Absolute path to the static file directory
+        """
+        self.static_root = root
+
+    me add_memory_file(path: text, content_type: text, content: text):
+        """Register an in-memory file for the given path.
+
+        Useful for embedded/IoT devices where content is baked into the
+        binary or loaded from flash at startup. Takes priority over
+        static_root filesystem lookups.
+
+        Args:
+            path: URL path (e.g., \"/index.html\")
+            content_type: MIME type (e.g., \"text/html\")
+            content: File content as text
+        """
+        self.memory_files.push(MemoryFile(
+            path: path,
+            content_type: content_type,
+            content: content
+        ))
 
     me start():
         """Blocking start: bind, accept loop, handle requests, close after response."""
@@ -165,22 +228,25 @@ class EmbeddedHttpServer:
         self.running = false
 
     fn _handle_request(self, data: text) -> text:
-        """Route a raw HTTP request to the matching handler, return serialized response."""
+        """Route a raw HTTP request to the matching handler, return serialized response.
+
+        Resolution priority:
+        1. Registered routes (method + path match)
+        2. Memory-backed files (exact path match, GET only)
+        3. Static root filesystem (path → file on disk, GET only)
+        4. 404 Not Found
+        """
         val req = parse_http_request(data)
         if not req.?:
             return self._respond(400, "Bad Request")
 
         val request = req as HttpRequestData
 
-        # Build SimpleRoute list for shared matcher
+        # 1. Check registered routes
         var simple_routes: [SimpleRoute] = []
         for route in self.routes:
             simple_routes.push(SimpleRoute(method: route.method, path: route.path))
 
-        # TODO: Compression not yet wired — _handle_request returns serialized text
-        # (headers + body). To add: parse Accept-Encoding, compress body, serialize
-        # to [u8], send via driver.submit_send_bytes. IoDriver.submit_send_bytes is
-        # now available; this is a refactor of _handle_request/_respond return type.
         val result = match_route(request.method, request.path, simple_routes)
         match result:
             RouteMatch.Found(idx):
@@ -190,7 +256,26 @@ class EmbeddedHttpServer:
             RouteMatch.MethodNotAllowed:
                 return self._respond(405, "Method Not Allowed")
             RouteMatch.NotFound:
-                return self._respond(404, "Not Found")
+                val route_miss = true
+
+        # 2. Check memory-backed files (GET only)
+        if request.method == "GET":
+            for mf in self.memory_files:
+                if mf.path == request.path:
+                    return self._respond_with_type(200, mf.content, mf.content_type)
+
+        # 3. Check static root filesystem (GET only)
+        if request.method == "GET" and self.static_root.len() > 0:
+            var file_path = request.path
+            if file_path == "/":
+                file_path = "/index.html"
+            val full_path = self.static_root + file_path
+            if file_exists(full_path):
+                val content = file_read_text(full_path)
+                val ctype = embedded_mime_type(file_path)
+                return self._respond_with_type(200, content, ctype)
+
+        self._respond(404, "Not Found")
 
     fn _respond(self, status: i64, body: text) -> text:
         """Serialize response with embedded-server headers (Server + Connection: close)."""
@@ -198,3 +283,41 @@ class EmbeddedHttpServer:
             ("Server", "SimpleEmbedded"),
             ("Connection", "close")
         ])
+
+    fn _respond_with_type(self, status: i64, body: text, content_type: text) -> text:
+        """Serialize response with a specific Content-Type header."""
+        serialize_http_response(status, body, [
+            ("Content-Type", content_type),
+            ("Server", "SimpleEmbedded"),
+            ("Connection", "close")
+        ])
+
+# ============================================================================
+# MIME Type Detection (minimal set for embedded use)
+# ============================================================================
+
+fn embedded_mime_type(path: text) -> text:
+    """Detect MIME type from file extension (minimal set for embedded servers)."""
+    if path.ends_with(".html") or path.ends_with(".htm"):
+        return "text/html; charset=utf-8"
+    if path.ends_with(".css"):
+        return "text/css"
+    if path.ends_with(".js"):
+        return "application/javascript"
+    if path.ends_with(".json"):
+        return "application/json"
+    if path.ends_with(".txt"):
+        return "text/plain; charset=utf-8"
+    if path.ends_with(".png"):
+        return "image/png"
+    if path.ends_with(".jpg") or path.ends_with(".jpeg"):
+        return "image/jpeg"
+    if path.ends_with(".gif"):
+        return "image/gif"
+    if path.ends_with(".svg"):
+        return "image/svg+xml"
+    if path.ends_with(".ico"):
+        return "image/x-icon"
+    if path.ends_with(".wasm"):
+        return "application/wasm"
+    "application/octet-stream"
