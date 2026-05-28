@@ -35,58 +35,9 @@
 
 typedef int64_t RuntimeValue;
 
-/* ===================================================================
- * 2. Serial I/O — PL011 UART at MMIO 0x09000000 (QEMU virt)
- * =================================================================== */
-
 #define PL011_BASE   0x09000000ULL
-
-/* PL011 register offsets */
-#define PL011_DR     0x000   /* Data Register */
-#define PL011_FR     0x018   /* Flag Register */
-#define PL011_IBRD   0x024   /* Integer Baud Rate Divisor */
-#define PL011_FBRD   0x028   /* Fractional Baud Rate Divisor */
-#define PL011_LCRH   0x02C   /* Line Control Register */
-#define PL011_CR     0x030   /* Control Register */
-#define PL011_IMSC   0x038   /* Interrupt Mask Set/Clear */
-#define PL011_ICR    0x044   /* Interrupt Clear Register */
-
-/* Flag Register bits */
-#define PL011_FR_TXFF  (1 << 5)  /* Transmit FIFO full */
-#define PL011_FR_RXFE  (1 << 4)  /* Receive FIFO empty */
-#define PL011_FR_BUSY  (1 << 3)  /* UART busy */
-
-static inline volatile uint32_t *pl011_reg(uint32_t offset)
-{
-    return (volatile uint32_t *)(PL011_BASE + offset);
-}
-
-static void serial_putchar(char c)
-{
-    /* Wait briefly until transmit FIFO is not full. Some QEMU loader boot
-     * paths leave PL011 flags in a state that should not block boot logs
-     * forever, so fall through and write the byte after a bounded spin.
-     */
-    for (uint32_t spin = 0; spin < 100000; spin++) {
-        if ((*pl011_reg(PL011_FR) & PL011_FR_TXFF) == 0) break;
-    }
-    *pl011_reg(PL011_DR) = (uint32_t)(unsigned char)c;
-}
-
-static void serial_puts(const char *s)
-{
-    while (*s) {
-        if (*s == '\n') serial_putchar('\r');
-        serial_putchar(*s++);
-    }
-}
-
-static void serial_puts_direct(const char *s)
-{
-    while (*s) {
-        *pl011_reg(PL011_DR) = (uint32_t)(unsigned char)(*s++);
-    }
-}
+#define BAREMETAL_PL011_ENABLE_DIRECT_PUTS 1
+#include "../../common/baremetal_pl011_serial.h"
 
 static void serial_put_hex(uint64_t v)
 {

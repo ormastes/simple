@@ -32,38 +32,8 @@
 
 typedef int32_t RuntimeValue;
 
-/* ===================================================================
- * 2. Serial I/O — PL011 UART at 0x09000000 (QEMU virt ARM32)
- * =================================================================== */
-
-#define UART_BASE 0x09000000U
-
-#define UART_DR   (*(volatile uint32_t *)(UART_BASE + 0x000))
-#define UART_FR   (*(volatile uint32_t *)(UART_BASE + 0x018))
-#define UART_IBRD (*(volatile uint32_t *)(UART_BASE + 0x024))
-#define UART_FBRD (*(volatile uint32_t *)(UART_BASE + 0x028))
-#define UART_LCRH (*(volatile uint32_t *)(UART_BASE + 0x02C))
-#define UART_CR   (*(volatile uint32_t *)(UART_BASE + 0x030))
-#define UART_ICR  (*(volatile uint32_t *)(UART_BASE + 0x044))
-
-static void serial_putchar(char c)
-{
-    /* Wait briefly until TX FIFO is not full (bit 5 of FR). Keep boot logs
-     * non-blocking on QEMU loader paths that expose stale UART flags.
-     */
-    for (uint32_t spin = 0; spin < 100000; spin++) {
-        if ((UART_FR & (1U << 5)) == 0) break;
-    }
-    UART_DR = (uint32_t)c;
-}
-
-static void serial_puts(const char *s)
-{
-    while (*s) {
-        if (*s == '\n') serial_putchar('\r');
-        serial_putchar(*s++);
-    }
-}
+#define PL011_BASE 0x09000000U
+#include "../../common/baremetal_pl011_serial.h"
 
 static void serial_put_hex(uint32_t v)
 {
