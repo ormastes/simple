@@ -262,28 +262,12 @@ class EmbeddedHttpServer:
         val request = req as EmbeddedRequest
 
         # Find matching route
+        # NOTE: Compression disabled — submit_send uses text I/O which
+        # corrupts binary compressed output via from_utf8_lossy. Enable
+        # when IoDriver gains submit_send_bytes for raw [u8] paths.
         for route in self.routes:
             if route.method == request.method and route.path == request.path:
                 val body = route.handler(request)
-                val encoding = embedded_negotiate_encoding(request.headers)
-                if encoding == "br" and body.len() > 256:
-                    val compressed = brotli_compress(body)
-                    match compressed:
-                        Ok(data):
-                            val reason = _status_reason(200)
-                            val length = data.len()
-                            return "HTTP/1.1 200 {reason}\r\nContent-Length: {length}\r\nContent-Encoding: br\r\nServer: SimpleEmbedded\r\nConnection: close\r\n\r\n{data}"
-                        Err(e):
-                            return embedded_response(200, body)
-                elif encoding == "gzip" and body.len() > 256:
-                    val compressed = gzip_compress(body)
-                    match compressed:
-                        Ok(data):
-                            val reason = _status_reason(200)
-                            val length = data.len()
-                            return "HTTP/1.1 200 {reason}\r\nContent-Length: {length}\r\nContent-Encoding: gzip\r\nServer: SimpleEmbedded\r\nConnection: close\r\n\r\n{data}"
-                        Err(e):
-                            return embedded_response(200, body)
                 return embedded_response(200, body)
 
         # Check if path exists but method doesn't match
