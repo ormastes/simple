@@ -29,6 +29,10 @@ use os.compositor.host_compositor_entry.{
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_MINIMIZE, COMP_RESTORE}
 
 var _fake_present_count: i64 = 0
+var _capture_present_count: i64 = 0
+var _capture_blue_count: i64 = 0
+var _capture_white_count: i64 = 0
+var _capture_clear_color: u32 = 0u32
 
 class FakeCompositorBackend:
     w: i32
@@ -65,6 +69,79 @@ impl CompositorBackend for FakeCompositorBackend:
 
     fn as_glass_capable() -> CompositorGlassCapable?:
         nil
+
+class CaptureCompositorBackend:
+    w: i32
+    h: i32
+    pixels: [u32]
+    present_count: i64
+
+    static fn with_color(width: i32, height: i32, color: u32) -> CaptureCompositorBackend:
+        CaptureCompositorBackend(w: width, h: height, pixels: [color; width * height], present_count: 0)
+
+impl CompositorBackend for CaptureCompositorBackend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        _capture_clear_color = color
+        var i = 0
+        while i < self.pixels.len():
+            self.pixels[i] = color
+            i = i + 1
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if color == 0xFF2563EBu32:
+            _capture_blue_count = _capture_blue_count + 1
+        if color == 0xFFFFFFFFu32:
+            _capture_white_count = _capture_white_count + 1
+        var yy = y
+        while yy < y + h:
+            var xx = x
+            while xx < x + w:
+                self.put_pixel(xx, yy, color)
+                xx = xx + 1
+            yy = yy + 1
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        if text_str.len() > 0:
+            self.fill_rect(x, y, text_str.len().to_i32() * 8, 16, bg)
+            self.put_pixel(x, y, fg)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.fill_rect(x, y, 8, 16, bg)
+        self.put_pixel(x, y, fg)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return
+        val idx = y * self.w + x
+        if idx >= 0 and idx < self.pixels.len():
+            self.pixels[idx] = color
+
+    me present():
+        _capture_present_count = _capture_present_count + 1
+        self.present_count = self.present_count + 1
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        _capture_present_count = _capture_present_count + 1
+        self.present_count = self.present_count + 1
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] == color:
+            count = count + 1
+        i = i + 1
+    count
 
 fn _browser_config() -> HostWmConfig:
     HostWmConfig(
@@ -181,6 +258,20 @@ describe "HostWmHandle loop behavior":
         handle.run_once()
         expect(pumped).to_equal(0)
         expect(_fake_present_count).to_equal(1)
+
+    it "renders hosted windows through the Simple Web app content path":
+        _capture_present_count = 0
+        _capture_blue_count = 0
+        _capture_white_count = 0
+        _capture_clear_color = 0u32
+        val backend = CaptureCompositorBackend.with_color(160, 120, 0xFF000000u32)
+        val comp = HostCompositor.new(backend, Size.wh(160, 120))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Simple Browser", 12, 16, 120, 80, "", 900, "/sys/apps/browser")
+        comp.render_frame()
+        expect(_capture_present_count).to_equal(1)
+        expect(_capture_blue_count).to_be_greater_than(0)
+        expect(_capture_white_count).to_be_greater_than(0)
+        expect(_capture_clear_color).to_equal(0xFF0F172Au32)
 
     it "records compositor resize dimensions":
         val backend = FakeCompositorBackend(w: 320, h: 240)
