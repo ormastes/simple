@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-28 00:22:38*
+*Generated: 2026-05-28 08:47:30*
 
-## test/unit/os/services/vfs
+## test/unit/app/ui
 
-❌ **nvme_filesystem_mounts_spec.spl** (56115ms)
-  - Source: `test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl`
-  - Generated doc: `spec/nvme_filesystem_mounts_spec.md`
+❌ **ipc_spec.spl** (193ms)
+  - Source: `test/unit/app/ui/ipc_spec.spl`
+  - Generated doc: `spec/ipc_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 16 ✅
-- **Failed:** 1 ❌
-- **Duration:** 56128ms
+- **Passed:** 14 ✅
+- **Failed:** 5 ❌
+- **Duration:** 197ms

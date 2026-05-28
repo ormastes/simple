@@ -1828,6 +1828,19 @@ char* rt_file_read_bytes(const char* path) {
     return spl_file_read(path);
 }
 
+int64_t rt_file_read_all_text(int64_t path_tagged) {
+    char* path = rt_core_string_to_cpath(path_tagged);
+    if (!path) return rt_string_new(NULL, 0);
+    char* content = spl_file_read(path);
+    free(path);
+    if (!content) return rt_string_new(NULL, 0);
+    size_t len = strlen(content);
+    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
+    free(content);
+    return result;
+}
+
+
 int rt_file_write_bytes(const char* path, const void* data, int64_t len) {
     if (!path || !data) return 0;
     FILE* f = fopen(path, "wb");

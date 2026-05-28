@@ -1,6 +1,6 @@
 # Test Specification Index
 
-*Generated: 2026-05-28 00:22:38*
+*Generated: 2026-05-28 08:47:30*
 
 ## Quick Stats
 
@@ -12,11 +12,11 @@
 
 ---
 
-## Hardware & OS (1 features)
+## Application (1 features)
 
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
-| [Nvme Filesystem Mounts Specification](nvme_filesystem_mounts_spec.md) | ❌ Stub | Stub | N/A | 17 | Summary not provided in the doc blocks. |
+| [Ipc Specification](ipc_spec.md) | ❌ Stub | Stub | N/A | 19 | Summary not provided in the doc blocks. |
 
 ## Residual Files
 
@@ -26,7 +26,9 @@ These files are present in `doc/06_spec` but were not regenerated in this run.
 |------|------|
 | hal_types_spec.md | Legacy markdown |
 | hpack_huffman_spec.md | Legacy markdown |
+| ipc_protocol_spec.md | Legacy markdown |
 | kms_vendor_adapters_spec.md | Legacy markdown |
+| nvme_filesystem_mounts_spec.md | Legacy markdown |
 | pattern_rule_spec.md | Legacy markdown |
 | vfs_boot_nvme_lease_spec.md | Legacy markdown |
 
