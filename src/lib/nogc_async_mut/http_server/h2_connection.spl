@@ -5,23 +5,24 @@
 # framing layer (h2_frame, h2_parser, h2_writer, h2_preface) with the
 # async IoDriver-based worker.
 #
-# Scope (framing-only wiring — AC-4):
+# Scope (HPACK wiring — W16):
 #   - Connection preface validation (RFC 9113 §3.4)
 #   - SETTINGS exchange (server SETTINGS + client SETTINGS ACK)
 #   - PING echo
 #   - WINDOW_UPDATE tracking (connection-level)
 #   - GOAWAY on unimplemented stream paths
 #   - Stream creation and frame routing to H2Stream
+#   - HPACK decode of request HEADERS → HttpRequestData
+#   - HPACK encode of response HttpResponseData → HEADERS+DATA frames
 #
-# Out of scope (W16+ / HPACK milestone):
-#   - HPACK decode/encode — cannot extract :method/:path/:status
-#   - Full request→response cycle through HttpRequestData/HttpResponseData
+# Out of scope (follow-up milestones):
 #   - CONTINUATION frame header-block merging
 #   - Server push (PUSH_PROMISE)
 #   - Priority / weighted scheduling
+#   - Dynamic table updates (static-table-only HPACK)
 #
-# Once HPACK lands, the TODO(HPACK) sites in this file wire directly
-# into the existing process_request pipeline in worker.spl.
+# Worker drains decoded requests via take_decoded_requests() and feeds
+# responses back via queue_h2_response(stream_id, resp).
 
 use std.http.h2.h2_frame.{
     H2Frame, H2DataFrame, H2HeadersFrame, H2SettingsFrame,
@@ -31,12 +32,18 @@ use std.http.h2.h2_frame.{
     H2_FLAG_END_STREAM, H2_FLAG_END_HEADERS, H2_FLAG_ACK,
     H2_SETTINGS_MAX_CONCURRENT_STREAMS, H2_SETTINGS_INITIAL_WINDOW_SIZE,
     H2_SETTINGS_MAX_FRAME_SIZE,
-    H2_ERR_NO_ERROR, H2_ERR_PROTOCOL_ERROR, H2_ERR_INTERNAL_ERROR
+    H2_ERR_NO_ERROR, H2_ERR_PROTOCOL_ERROR, H2_ERR_INTERNAL_ERROR,
+    H2_ERR_COMPRESSION_ERROR
 }
 use std.http.h2.h2_parser.{h2_parse_frame, h2_parse_frame_header, H2FrameHeader}
 use std.http.h2.h2_writer.{h2_write_frame}
 use std.http.h2.h2_preface.{h2_validate_preface, H2_CONNECTION_PREFACE_LEN}
+use std.http.h2.h2_hpack.{
+    hpack_static_table, hpack_encode, hpack_decode,
+    HpackEntry, HpackTable, HpackEncodeResult, HpackDecodeResult
+}
 use std.http_server.h2_stream.{H2Stream, H2StreamState}
+use std.http_server.types.{HttpRequestData, HttpResponseData}
 
 # ============================================================================
 # Connection-level defaults (RFC 9113 §6.5.2)
@@ -96,6 +103,12 @@ class H2Connection:
     # Outbound frame buffer — worker drains this after each on_data_received
     pending_writes: [u8]
 
+    # HPACK static table (shared across all streams on this connection)
+    hpack_table: HpackTable
+
+    # Decoded requests waiting for worker to drain via take_decoded_requests()
+    pending_requests: [(i64, HttpRequestData)]
+
     static fn new(fd: i64, peer_addr: text, now: i64) -> H2Connection:
         """Create a new H2 connection after ALPN negotiation selects h2.
 
@@ -126,7 +139,9 @@ class H2Connection:
             send_window: DEFAULT_CONNECTION_WINDOW,
             recv_window: DEFAULT_CONNECTION_WINDOW,
             streams: {},
-            pending_writes: []
+            pending_writes: [],
+            hpack_table: hpack_static_table(),
+            pending_requests: []
         )
         # Server MUST send its SETTINGS as connection preface (RFC 9113 §3.4).
         conn.queue_server_settings()
@@ -188,6 +203,89 @@ class H2Connection:
     fn is_idle_timeout(now: i64, timeout_ms: i64) -> bool:
         """Check if connection has exceeded idle timeout."""
         (now - self.last_activity) > timeout_ms
+
+    me take_decoded_requests() -> [(i64, HttpRequestData)]:
+        """Drain and return all decoded H2 requests ready for processing.
+
+        Each entry is (stream_id, request). Worker should call
+        queue_h2_response(stream_id, response) for each entry after
+        routing through the middleware/handler pipeline.
+        """
+        val out = self.pending_requests
+        self.pending_requests = []
+        return out
+
+    me queue_h2_response(stream_id: i64, resp: HttpResponseData):
+        """Encode and queue an HTTP response for a specific H2 stream.
+
+        Encodes response headers via HPACK, then queues:
+          - HEADERS frame (END_HEADERS; END_STREAM if no body)
+          - DATA frame with END_STREAM (when body is non-empty)
+
+        Transitions the stream to Closed via on_local_end_stream().
+
+        Args:
+            stream_id: H2 stream to respond on
+            resp: Response data to encode and send
+        """
+        # Build response pseudo-headers + regular headers
+        var resp_headers: [HpackEntry] = []
+        resp_headers.push(HpackEntry(name: ":status", value: "{resp.status}"))
+        var hi = 0
+        while hi < resp.headers.len():
+            val hpair = resp.headers[hi]
+            resp_headers.push(HpackEntry(name: hpair.0, value: hpair.1))
+            hi = hi + 1
+
+        val enc = hpack_encode(resp_headers, self.hpack_table)
+
+        # Determine body bytes
+        var body_bytes: [u8] = []
+        if resp.body_bytes.len() > 0:
+            body_bytes = resp.body_bytes
+        elif resp.body.len() > 0:
+            # Convert body text to bytes via byte_at
+            var bi = 0
+            while bi < resp.body.len():
+                body_bytes.push(resp.body.byte_at(bi))
+                bi = bi + 1
+
+        if body_bytes.len() == 0:
+            # No body — HEADERS with END_HEADERS | END_STREAM
+            val hframe = H2Frame.Headers(H2HeadersFrame(
+                stream_id: stream_id,
+                flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
+                header_block: enc.bytes
+            ))
+            val bytes = h2_write_frame(hframe)
+            _append_to(self.pending_writes, bytes)
+        else:
+            # HEADERS with END_HEADERS (no END_STREAM yet)
+            val hframe = H2Frame.Headers(H2HeadersFrame(
+                stream_id: stream_id,
+                flags: H2_FLAG_END_HEADERS,
+                header_block: enc.bytes
+            ))
+            val hbytes = h2_write_frame(hframe)
+            _append_to(self.pending_writes, hbytes)
+            # DATA with END_STREAM
+            # TODO: chunk by peer_max_frame_size for large bodies
+            val dframe = H2Frame.Data(H2DataFrame(
+                stream_id: stream_id,
+                flags: H2_FLAG_END_STREAM,
+                data: body_bytes
+            ))
+            val dbytes = h2_write_frame(dframe)
+            _append_to(self.pending_writes, dbytes)
+
+        # Transition stream state
+        val stream = self.streams.get(stream_id)
+        if stream.?:
+            var s = stream
+            s.on_local_end_stream()
+            if not s.is_open():
+                s.close()
+            self.streams[stream_id] = s
 
     # ========================================================================
     # Frame consumption loop
@@ -286,8 +384,14 @@ class H2Connection:
                 return false
 
             H2Frame.Continuation(cf):
-                # TODO(HPACK): merge continuation header blocks into stream
-                # For now, without HPACK we cannot process these
+                # Merge continuation header block into the stream accumulator
+                val cstream = self.streams.get(cf.stream_id)
+                if cstream.?:
+                    var cs = cstream
+                    cs.on_headers(cf.header_block, cf.flags)
+                    self.streams[cf.stream_id] = cs
+                    if cs.is_request_complete():
+                        self._decode_and_buffer_request(cf.stream_id, cs)
                 return true
 
     # ========================================================================
@@ -387,10 +491,9 @@ class H2Connection:
     me handle_headers(hf: H2HeadersFrame):
         """Process a HEADERS frame — create or update a stream.
 
-        Without HPACK (W16+), we cannot decode the header block into
-        :method/:path/:authority pseudo-headers. We track the stream
-        state but respond with GOAWAY(NO_ERROR) for now — once HPACK
-        lands, this will route to process_request in the worker.
+        Accumulates header blocks, then when END_HEADERS + END_STREAM are
+        both received, decodes via HPACK and buffers an HttpRequestData in
+        pending_requests for worker to drain and route.
         """
         val sid = hf.stream_id
         if sid > self.last_stream_id:
@@ -407,27 +510,99 @@ class H2Connection:
             s.on_headers(hf.header_block, hf.flags)
             self.streams[sid] = s
 
-        # Check if request is complete
+        # Check if request is complete (END_HEADERS + END_STREAM received)
         val stream = self.streams.get(sid)
         if stream.?:
             if stream.is_request_complete():
-                # TODO(HPACK): Decode header_block → HttpRequestData, route
-                # through worker.process_request, encode response headers via
-                # HPACK, send HEADERS+DATA frames back.
-                #
-                # For now (framing-only milestone): send RST_STREAM to cleanly
-                # reject the stream without tearing down the connection.
-                self.queue_rst_stream(sid, H2_ERR_INTERNAL_ERROR)
-                var s2 = stream
-                s2.close()
-                self.streams[sid] = s2
+                self._decode_and_buffer_request(sid, stream)
+
+    me _decode_and_buffer_request(sid: i64, stream: H2Stream):
+        """Decode HPACK header blocks and build an HttpRequestData.
+
+        Concatenates all received header block fragments, decodes via HPACK
+        static table, extracts pseudo-headers (:method, :path, :authority)
+        and regular headers, then buffers result in pending_requests.
+
+        On HPACK decode failure sends GOAWAY(COMPRESSION_ERROR) per RFC 7541 §6.
+        """
+        # Concatenate all header block fragments
+        val combined = stream.combined_header_block()
+
+        # HPACK decode
+        val decode_result = hpack_decode(combined, self.hpack_table)
+
+        if decode_result.bytes_consumed == 0 and decode_result.headers.len() == 0 and combined.len() > 0:
+            # Decode produced nothing from non-empty input — compression error
+            self.queue_goaway(self.last_stream_id, H2_ERR_COMPRESSION_ERROR)
+            return
+
+        # Extract pseudo-headers and regular headers
+        var method = "GET"
+        var path = "/"
+        var query = ""
+        var authority = ""
+        var req_headers: [(text, text)] = []
+
+        var di = 0
+        while di < decode_result.headers.len():
+            val entry = decode_result.headers[di]
+            if entry.name == ":method":
+                method = entry.value
+            elif entry.name == ":path":
+                # Split path on first '?' into path + query
+                val qpos = _find_char(entry.value, 63)  # 63 = '?'
+                if qpos >= 0:
+                    path = _slice_text(entry.value, 0, qpos)
+                    query = _slice_text(entry.value, qpos + 1, entry.value.len())
+                else:
+                    path = entry.value
+            elif entry.name == ":authority":
+                authority = entry.value
+            elif entry.name == ":scheme":
+                pass_dn  # Ignore :scheme pseudo-header
+            else:
+                # Regular header — skip any remaining pseudo-headers defensively
+                if entry.name.len() > 0 and entry.name.byte_at(0) != 58:  # 58 = ':'
+                    req_headers.push((entry.name, entry.value))
+            di = di + 1
+
+        # Synthesize Host header from :authority (RFC 7540 §8.1.2.3)
+        if authority.len() > 0:
+            req_headers.push(("Host", authority))
+
+        # Assemble body from accumulated DATA frames
+        val body_bytes = stream.combined_data()
+        var body = ""
+        var bk = 0
+        while bk < body_bytes.len():
+            # text is byte-transparent — append byte as char
+            body = body + _byte_to_text(body_bytes[bk])
+            bk = bk + 1
+
+        # Build HttpRequestData
+        val request = HttpRequestData(
+            method: method,
+            path: path,
+            query: query,
+            version: "HTTP/2",
+            headers: req_headers,
+            body: body,
+            params: {},
+            peer_addr: self.peer_addr
+        )
+
+        self.pending_requests.push((sid, request))
 
     # ========================================================================
     # DATA handling
     # ========================================================================
 
     me handle_data(df: H2DataFrame):
-        """Process a DATA frame — append to stream body."""
+        """Process a DATA frame — append to stream body.
+
+        When END_STREAM arrives on DATA and END_HEADERS was already received,
+        the request is complete — decode and buffer it for worker to drain.
+        """
         val sid = df.stream_id
         val stream = self.streams.get(sid)
         if not stream.?:
@@ -447,6 +622,13 @@ class H2Connection:
                 val increment = DEFAULT_CONNECTION_WINDOW - self.recv_window
                 self.queue_window_update(0, increment)
                 self.recv_window = self.recv_window + increment
+
+        # If DATA completed the request (END_STREAM after prior END_HEADERS),
+        # decode headers + body and buffer in pending_requests.
+        val updated_stream = self.streams.get(sid)
+        if updated_stream.?:
+            if updated_stream.is_request_complete():
+                self._decode_and_buffer_request(sid, updated_stream)
 
     # ========================================================================
     # RST_STREAM handling
@@ -513,3 +695,29 @@ fn _append_to(dst: [u8], src: [u8]):
     while i < src.len():
         dst.push(src[i])
         i = i + 1
+
+fn _find_char(s: text, byte_val: i64) -> i64:
+    """Return index of first occurrence of byte_val in s, or -1."""
+    var i = 0
+    while i < s.len():
+        if s.byte_at(i) == byte_val:
+            return i
+        i = i + 1
+    return -1
+
+fn _slice_text(s: text, start: i64, end: i64) -> text:
+    """Return s[start..end) as a new text string."""
+    var out = ""
+    var i = start
+    while i < end and i < s.len():
+        out = out + _byte_to_text(s.byte_at(i))
+        i = i + 1
+    return out
+
+fn _byte_to_text(b: i64) -> text:
+    """Convert a single byte value to a one-character text string."""
+    var scratch: [u8] = []
+    scratch.push(b)
+    return rt_bytes_to_text(scratch)
+
+extern fn rt_bytes_to_text(bytes: [u8]) -> text

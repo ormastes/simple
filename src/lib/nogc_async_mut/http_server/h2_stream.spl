@@ -1,19 +1,15 @@
 # HTTP/2 Stream — Per-stream state for async H2 connections
 #
-# Tracks a single H2 stream through its lifecycle. HPACK decoding is
-# deferred (W16+) — header_block payloads stay opaque [u8]. Without
-# HPACK, we cannot extract :method/:path/:status pseudo-headers, so
-# request/response assembly is stubbed.
+# Tracks a single H2 stream through its lifecycle.
 #
 # Scope:
 #   - Stream state machine (idle → open → half-closed → closed)
 #   - Accumulate HEADERS + DATA frame payloads per stream
 #   - Track per-stream flow-control window
+#   - combined_header_block() / combined_data() accessors for HPACK wiring
 #
-# Out of scope (W16+ / HPACK milestone):
-#   - HPACK decode of header_block → HttpRequestData
-#   - HPACK encode of HttpResponseData → header_block
-#   - CONTINUATION frame assembly (requires header-block buffer merging)
+# Out of scope (follow-up milestones):
+#   - Dynamic HPACK table updates
 #   - Server push (PUSH_PROMISE)
 
 use std.http.h2.h2_frame.{
@@ -138,3 +134,44 @@ class H2Stream:
     me adjust_send_window(increment: i64):
         """Credit the send window by increment bytes."""
         self.send_window = self.send_window + increment
+
+    fn combined_header_block() -> [u8]:
+        """Return all received header block fragments concatenated into one [u8].
+
+        Used by H2Connection to feed the complete HPACK block to hpack_decode().
+        Multiple fragments arise from HEADERS + CONTINUATION frame sequences.
+        """
+        var out: [u8] = []
+        var i = 0
+        while i < self.recv_header_blocks.len():
+            val block = self.recv_header_blocks[i]
+            var j = 0
+            while j < block.len():
+                out.push(block[j])
+                j = j + 1
+            i = i + 1
+        return out
+
+    fn combined_data() -> [u8]:
+        """Return all received DATA frame payloads concatenated into one [u8].
+
+        Used by H2Connection to build the request body after END_STREAM.
+        """
+        var out: [u8] = []
+        var i = 0
+        while i < self.recv_data.len():
+            val chunk = self.recv_data[i]
+            var j = 0
+            while j < chunk.len():
+                out.push(chunk[j])
+                j = j + 1
+            i = i + 1
+        return out
+
+    fn is_open() -> bool:
+        """True when stream is in Open state (both sides active)."""
+        match self.state:
+            H2StreamState.Open:
+                return true
+            _:
+                return false

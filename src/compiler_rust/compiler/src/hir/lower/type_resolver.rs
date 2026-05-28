@@ -151,6 +151,19 @@ impl Lowerer {
                         return Ok(id);
                     }
                 }
+                // Bare type names from inference / cross-module signatures.
+                match name.as_ref() {
+                    "list" => {
+                        return Ok(self.module.types.register(HirType::Array {
+                            element: TypeId::ANY,
+                            size: None,
+                        }))
+                    }
+                    "tuple" => return Ok(self.module.types.register(HirType::Tuple(vec![]))),
+                    "dict" | "set" => return Ok(TypeId::ANY),
+                    "usize" | "isize" => return Ok(TypeId::I64),
+                    _ => {}
+                }
                 if self.lenient_types {
                     // In lenient mode, treat unknown types as ANY to allow compilation to proceed
                     return Ok(TypeId::ANY);

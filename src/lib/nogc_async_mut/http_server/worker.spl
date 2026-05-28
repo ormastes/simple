@@ -71,6 +71,7 @@ use std.http_server.range.{
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.http_server.protocol_handler.{ProtocolKind, protocol_from_alpn, protocol_handler_label}
 use std.http_server.h2_connection.{H2Connection}
+use std.http_server.compression.{compress_response}
 use std.crypto.types.{rt_bytes_to_text}
 
 fn _http_time_now_ms() -> i64:
@@ -447,7 +448,8 @@ class Worker:
         val route_result = self.router.route(request)
         match route_result:
             Ok((location, params)):
-                val resp = self.inline_static_handler(location, request)
+                var resp = self.inline_static_handler(location, request)
+                resp = compress_response(request, resp)
                 self.send_response(fd, resp, now)
 
             Err(e):
@@ -684,7 +686,22 @@ class Worker:
         var conn = h2conn
         val keep_going = conn.on_data_received(data, now)
 
-        # Drain any pending outbound frames (SETTINGS ACK, PING echo, etc.)
+        # Process fully decoded H2 requests through the pipeline
+        val decoded = conn.take_decoded_requests()
+        for pair in decoded:
+            val stream_id = pair.0
+            val request = pair.1
+            var resp = build_not_found()
+            val route_result = self.router.route(request)
+            match route_result:
+                Ok((location, params)):
+                    resp = self.inline_static_handler(location, request)
+                Err(e):
+                    resp = build_not_found()
+            resp = compress_response(request, resp)
+            conn.queue_h2_response(stream_id, resp)
+
+        # Drain any pending outbound frames (SETTINGS ACK, PING echo, responses)
         val out_bytes = conn.take_pending_writes()
         self.h2_connections[fd] = conn
 
