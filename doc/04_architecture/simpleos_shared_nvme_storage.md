@@ -388,7 +388,8 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   assigned namespace queue used for read/write, instead of flushing only the
   current system namespace. The adapter also exposes write-through DirectIo
   submission helpers that pair a direct write or write batch with that same
-  lease-queue flush and report `submitted-flushed` on durable completion.
+  lease-queue flush and report `submitted-flushed` plus `durable=true` on
+  durable completion.
 - The lease-backed VFS NVMe adapter exposes explicit 4KiB shared-DMA read/write
   entry points over the same lease NSID and queue ID used by FAT32, NVFS, and
   DBFS. The common filesystem mount surface stays `BlockDevice`, while
