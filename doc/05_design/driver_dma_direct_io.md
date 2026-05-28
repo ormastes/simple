@@ -6,8 +6,9 @@ Feature: FR-DRIVER-0010.
 
 - `DirectIoRequest`: handle id, file offset, operation, shared DMA buffer, and
   timeout budget.
-- `DirectIoResult`: submitted flag, byte count, backend tag, status,
-  buffered-copy bytes, direct-DMA copy bytes, and cleanup requirement.
+- `DirectIoResult`: submitted flag, byte count, backend tag, status, durable
+  completion flag, buffered-copy bytes, direct-DMA copy bytes, and cleanup
+  requirement.
 - `DirectIoBenchmarkReport`: deterministic same-fixture copy-cost comparison.
 
 ## Semantics
@@ -17,7 +18,8 @@ Feature: FR-DRIVER-0010.
 - If `bounce_allowed` is true, an otherwise unaligned valid buffer returns a
   `bounce-buffered` result rather than silently pretending to be zero-copy.
 - Aligned reads and writes synchronize the shared DMA buffer at the request
-  boundary and return a `submitted` result.
+  boundary and return a non-durable `submitted` result unless the caller uses a
+  write-through path that has also completed the backing queue flush.
 - Cleanup uses `validate_shared_dma_release` so task id, BDF, allocation id,
   size, and double-free state remain enforced.
 
