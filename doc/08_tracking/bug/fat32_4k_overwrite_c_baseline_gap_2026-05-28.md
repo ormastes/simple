@@ -64,6 +64,30 @@ The C gate now passes with:
 PASS: simple_fat32 is faster than direct C FAT32 for 4K random read/write p50
 ```
 
+Current re-probe on 2026-05-28 shows the direct-C comparison is still noisy:
+
+- First run failed: Simple FAT32 read/write p50 13us/44us versus direct C FAT32
+  read/write p50 28us/34us.
+- Immediate rerun passed: Simple FAT32 read/write p50 13us/38us versus direct C
+  FAT32 read/write p50 38us/45us.
+- VFAT remains unavailable: no active mount exists at either benchmark mount
+  path, and `VFAT_MNT=/tmp/simple_vfat_bench_mnt_codex
+  scripts/perf/prepare-fat32-4k-vfat.shs` still fails because sudo is
+  unavailable and udisksctl loop setup is denied by polkit.
+
+Single-run direct-C success should therefore be treated as weak evidence. The
+release proof still needs a writable VFAT mount and repeated same-device runs.
+
+Follow-up: `scripts/perf/run-fat32-4k-cfat-baseline.shs` now defaults to
+`FAT32_4K_RUNS=3` and compares median p50 values across runs. The first
+repeated-run gate passed direct C with:
+
+- Simple FAT32 read/write median p50: 13us/34us.
+- Direct C FAT32 read/write median p50: 37us/43us.
+
+The script also validates `FAT32_4K_RUNS` as a positive integer and preserves
+the VFAT-required clean failure when VFAT rows are missing.
+
 ## Likely Cause
 
 The clean overwrite fast path avoids dirty-cache bookkeeping for full-cluster
@@ -76,3 +100,5 @@ latest run; it is lack of VFAT same-device evidence in this local environment.
   remount the local loop device with `uid=$(id -u),gid=$(id -g)`.
 - Re-run `REQUIRE_VFAT_BASELINE=1 scripts/perf/run-fat32-4k-cfat-baseline.shs`
   and record p50/p99 read and write results.
+- Keep the repeated-run gate for direct-C evidence, then collect the final
+  VFAT-required run on a writable same-device mount.

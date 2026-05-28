@@ -59,6 +59,10 @@ Acceptance:
   final corpus acceptance command: it must exit `0` only when all 132 reports
   are fresh, exact, accepted, and non-divergent. It currently exits `0` for the
   checked-in fixture artifacts.
+- `bin/simple run src/app/wm_compare/site_corpus_compat.spl -- --only=site_0_google --production-renderer --skip-simple-watchdog --simple-timeout-ms=60000`
+  is the focused production-renderer contrast probe. It currently exits
+  nonzero/divergent, while the same sample without `--production-renderer`
+  exits `0`/exact via the fixture-oracle path.
 - Future Chrome oracle work should use WPT reftest data, Playwright visual
   comparisons, pixelmatch-compatible PNG comparison, or CDP
   `Page.captureScreenshot` rather than live scraping. The current PPM analyzer
@@ -77,6 +81,9 @@ Measured blocker:
   and accepted; the next renderer implementation work is replacing the
   fixture-specific oracle-backed text fast paths with Chrome-compatible
   DOM/style/layout/font paint output.
+- `test/system/wm_compare/famous_site_corpus_spec.spl` now keeps that boundary
+  explicit by parsing `--production-renderer` and asserting `site_0_google`
+  fixture pixels equal Chrome while production-renderer pixels do not.
 - `02_block_boxes` now renders the expected four rectangles and reaches
   `different_pixels: 2831` with `max_channel_diff: 16`; the remaining mismatch
   is Chrome edge antialiasing, so this fixture uses the perceptual gate.
@@ -266,6 +273,10 @@ Measured blocker:
   and requires every report to be exact/accepted with `divergent == 0`. It
   currently exits `0` with `status: "PASS"` for the checked-in fixture
   artifacts.
+- `src/app/wm_compare/site_corpus_compat.spl --production-renderer` bypasses
+  corpus fixture/oracle fallbacks. Treat its current focused failure on
+  `site_0_google` as the authoritative evidence that the fixture corpus PASS is
+  not yet production renderer Chrome compatibility.
 - `tools/electron-shell/summarize_famous_site_corpus_coverage.js --limit=5`
   ranks corpus samples by Chrome/Simple non-white text coverage deficit and
   dominant-background ink coverage deficit. The current worst overflow target

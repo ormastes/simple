@@ -102,6 +102,37 @@ describe "var reassignment analysis":
         expect(analysis.ssa_transform_safe).to_equal(false)
         expect(analysis.reason).to_equal("escape.reassigned_storage")
 
+    it "rejects reassigned locals that escape through a copied alias":
+        val blocks = one_block(
+            [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64())),
+                inst(MirInstKind.Copy(local(2), local(0)))
+            ],
+            MirTerminator.Return(Some(copy_operand(2)))
+        )
+        val analysis = analyze_var_reassign_blocks(blocks)
+        expect(analysis.has_var_reassignment).to_equal(true)
+        expect(analysis.no_escape).to_equal(false)
+        expect(analysis.ssa_transform_safe).to_equal(false)
+        expect(analysis.reason).to_equal("escape.reassigned_storage")
+
+    it "rejects reassignment after a borrow through a copied alias":
+        val blocks = one_block(
+            [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
+                inst(MirInstKind.Copy(local(2), local(0))),
+                inst(MirInstKind.Ref(local(3), MirBorrowKind.Shared, MirPlace.local_place(local(2)))),
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))
+            ],
+            MirTerminator.Return(Some(copy_operand(3)))
+        )
+        val analysis = analyze_var_reassign_blocks(blocks)
+        expect(analysis.has_var_reassignment).to_equal(true)
+        expect(analysis.borrow_reassign_safe).to_equal(false)
+        expect(analysis.ssa_transform_safe).to_equal(false)
+        expect(analysis.reason).to_equal("borrow.reassign_unsafe")
+
     it "feeds analyzer output into JIT var hotspot planning":
         val blocks = one_block(
             [

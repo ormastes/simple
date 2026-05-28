@@ -5,8 +5,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CC_BIN="${CC:-cc}"
 OUT="${TMPDIR:-/tmp}/cfat32_4k_baseline"
 VFAT_MNT="${VFAT_MNT:-/tmp/simple_vfat_bench_mnt}"
+RUNS="${FAT32_4K_RUNS:-3}"
 BENCH_SRC="$ROOT/test/perf/bench/fat32_4k_compare.spl"
 BENCH_RUN="$BENCH_SRC"
+
+case "$RUNS" in
+    ''|*[!0-9]*)
+        echo "FAILED: FAT32_4K_RUNS must be a positive integer" >&2
+        exit 1
+        ;;
+esac
+if [ "$RUNS" -lt 1 ]; then
+    echo "FAILED: FAT32_4K_RUNS must be a positive integer" >&2
+    exit 1
+fi
 
 if [ "$VFAT_MNT" != "/tmp/simple_vfat_bench_mnt" ]; then
     mkdir -p "$ROOT/build/os/perf"
@@ -16,21 +28,6 @@ if [ "$VFAT_MNT" != "/tmp/simple_vfat_bench_mnt" ]; then
 fi
 
 "$CC_BIN" -O2 "$ROOT/scripts/perf/cfat32_4k_baseline.c" -o "$OUT"
-
-echo "=== Simple FAT32 4K benchmark ==="
-SIMPLE_OUT="$(SIMPLE_LIB="$ROOT/src" "$ROOT/src/compiler_rust/target/debug/simple" "$BENCH_RUN")"
-printf '%s\n' "$SIMPLE_OUT"
-
-echo
-echo "=== C FAT32 direct-image baseline ==="
-C_OUT="$("$OUT")"
-printf '%s\n' "$C_OUT"
-BASELINE_LINE="$(printf '%s\n' "$C_OUT" | awk '/^cfat4k_baseline / { print; exit }')"
-if [ -n "$BASELINE_LINE" ]; then
-    mkdir -p "$ROOT/build/os/perf"
-    printf '%s\n' "$BASELINE_LINE" > "$ROOT/build/os/perf/CFAT4K.TXT"
-    echo "baseline artifact: build/os/perf/CFAT4K.TXT"
-fi
 
 extract_p50() {
     local name="$1"
@@ -45,16 +42,96 @@ extract_p50() {
     '
 }
 
-simple_read="$(extract_p50 simple_fat32_read4k "$SIMPLE_OUT")"
-simple_write="$(extract_p50 simple_fat32_write4k "$SIMPLE_OUT")"
-vfat_read="$(extract_p50 c_fat_vfat_read4k "$SIMPLE_OUT")"
-vfat_write="$(extract_p50 c_fat_vfat_write4k "$SIMPLE_OUT")"
-c_read="$(extract_p50 c_fat_direct_read4k "$C_OUT")"
-c_write="$(extract_p50 c_fat_direct_write4k "$C_OUT")"
+median_values() {
+    printf '%s\n' "$1" | awk 'NF > 0 { print $1 }' | sort -n | awk '
+        { values[++n] = $1 }
+        END {
+            if (n == 0) {
+                exit 1
+            }
+            print values[int((n + 1) / 2)]
+        }
+    '
+}
+
+simple_read_values=""
+simple_write_values=""
+vfat_read_values=""
+vfat_write_values=""
+c_read_values=""
+c_write_values=""
+vfat_missing=0
+run=1
+while [ "$run" -le "$RUNS" ]; do
+    echo "=== Simple FAT32 4K benchmark (run $run/$RUNS) ==="
+    SIMPLE_OUT="$(SIMPLE_LIB="$ROOT/src" "$ROOT/src/compiler_rust/target/debug/simple" "$BENCH_RUN")"
+    printf '%s\n' "$SIMPLE_OUT"
+
+    echo
+    echo "=== C FAT32 direct-image baseline (run $run/$RUNS) ==="
+    C_OUT="$("$OUT")"
+    printf '%s\n' "$C_OUT"
+    BASELINE_LINE="$(printf '%s\n' "$C_OUT" | awk '/^cfat4k_baseline / { print; exit }')"
+    if [ -n "$BASELINE_LINE" ]; then
+        mkdir -p "$ROOT/build/os/perf"
+        printf '%s\n' "$BASELINE_LINE" > "$ROOT/build/os/perf/CFAT4K.TXT"
+        echo "baseline artifact: build/os/perf/CFAT4K.TXT"
+    fi
+
+    sr="$(extract_p50 simple_fat32_read4k "$SIMPLE_OUT")"
+    sw="$(extract_p50 simple_fat32_write4k "$SIMPLE_OUT")"
+    vr="$(extract_p50 c_fat_vfat_read4k "$SIMPLE_OUT")"
+    vw="$(extract_p50 c_fat_vfat_write4k "$SIMPLE_OUT")"
+    cr="$(extract_p50 c_fat_direct_read4k "$C_OUT")"
+    cw="$(extract_p50 c_fat_direct_write4k "$C_OUT")"
+    if [ -z "$sr" ] || [ -z "$sw" ] || [ -z "$cr" ] || [ -z "$cw" ]; then
+        echo "FAILED: could not parse benchmark p50 values" >&2
+        exit 1
+    fi
+    simple_read_values="${simple_read_values}${sr}
+"
+    simple_write_values="${simple_write_values}${sw}
+"
+    c_read_values="${c_read_values}${cr}
+"
+    c_write_values="${c_write_values}${cw}
+"
+    if [ -z "$vr" ] || [ -z "$vw" ]; then
+        vfat_missing=1
+    else
+        vfat_read_values="${vfat_read_values}${vr}
+"
+        vfat_write_values="${vfat_write_values}${vw}
+"
+    fi
+    run=$((run + 1))
+    echo
+done
+
+simple_read="$(median_values "$simple_read_values")"
+simple_write="$(median_values "$simple_write_values")"
+c_read="$(median_values "$c_read_values")"
+c_write="$(median_values "$c_write_values")"
+vfat_read=""
+vfat_write=""
+if [ "$vfat_missing" = "0" ]; then
+    vfat_read="$(median_values "$vfat_read_values")"
+    vfat_write="$(median_values "$vfat_write_values")"
+fi
 
 if [ -z "$simple_read" ] || [ -z "$simple_write" ] || [ -z "$c_read" ] || [ -z "$c_write" ]; then
     echo "FAILED: could not parse benchmark p50 values" >&2
     exit 1
+fi
+
+echo "=== Median p50 across $RUNS run(s) ==="
+echo "simple_fat32_read4k_median_p50=${simple_read}us"
+echo "simple_fat32_write4k_median_p50=${simple_write}us"
+echo "c_fat_direct_read4k_median_p50=${c_read}us"
+echo "c_fat_direct_write4k_median_p50=${c_write}us"
+if [ -n "$vfat_read" ] && [ -n "$vfat_write" ]; then
+    echo "c_fat_vfat_read4k_median_p50=${vfat_read}us"
+    echo "c_fat_vfat_write4k_median_p50=${vfat_write}us"
 fi
 
 if [ "${REQUIRE_VFAT_BASELINE:-0}" = "1" ]; then

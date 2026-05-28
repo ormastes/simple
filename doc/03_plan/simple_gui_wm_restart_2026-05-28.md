@@ -135,14 +135,16 @@ Current result on this Linux host:
 ## Remaining Work
 
 1. Add macOS validation for Cocoa-backed host WM when a macOS host is available.
-2. Update architecture docs if implementation reveals a different adapter boundary.
+2. Promote the current x86_64 live QEMU WM input/framebuffer smoke into broader
+   SimpleOS GUI coverage for additional display backends or architectures.
+3. Update architecture docs if implementation reveals a different adapter boundary.
 
 ## Known Blockers
 
-- `jj status` has failed or hung in this repo because of repository metadata problems. Use scoped `git` fallback if needed.
 - GitHub SSH fetch/push failed with `Permission denied (publickey)`.
-- Rebase against `origin/main` was blocked by unrelated dirty worktree changes.
-- Live SimpleOS QEMU GUI proof was not completed; earlier system spec timed out around 120 seconds.
+- The current live SimpleOS GUI proof is a bounded x86_64 WM input/framebuffer
+  smoke. It proves the focused QEMU lane, shared compositor adapter path, and
+  marker pixels, but not a full desktop session or multi-architecture GUI run.
 - Real macOS Cocoa proof was not possible on this Linux host.
 
 ## Scoped Commit Discipline

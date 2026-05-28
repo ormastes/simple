@@ -163,6 +163,18 @@ VFAT_MNT=/tmp/simple_vfat_bench_mnt_codex scripts/perf/prepare-fat32-4k-vfat.shs
   polkit without a controlling terminal; this proves the repo gate can use a
   non-default mount path, but local VFAT seeding still requires external mount
   authorization
+2026-05-28 current re-probe:
+  findmnt shows no active VFAT mount at /tmp/simple_vfat_bench_mnt or
+  /tmp/simple_vfat_bench_mnt_codex, and
+  VFAT_MNT=/tmp/simple_vfat_bench_mnt_codex scripts/perf/prepare-fat32-4k-vfat.shs
+  still fails because sudo is unavailable and udisksctl loop setup is denied by
+  polkit without a controlling terminal.
+FAT32_4K_RUNS=1 REQUIRE_VFAT_BASELINE=1 VFAT_MNT=/tmp/simple_vfat_bench_mnt_codex scripts/perf/run-fat32-4k-cfat-baseline.shs
+  FAILED cleanly after median-summary output because VFAT baseline rows remain
+  missing or unseeded at the configured mount path.
+FAT32_4K_RUNS=0 scripts/perf/run-fat32-4k-cfat-baseline.shs
+  FAILED cleanly with a positive-integer validation error for the repeated-run
+  count knob.
 sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_nvme_preflight_probe.sdn
   FAILED locally: default /dev/nvme*n1 matched 3 real NVMe namespaces, and
   standalone preflight now fails closed before identity probing when the device
@@ -170,6 +182,11 @@ sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/sim
 SIMPLEOS_NVME_DEVICE_GLOB=/dev/nvme{0,1,2}n1 sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_<dev>_preflight.sdn
   FAILED for each visible namespace: nvme0n1, nvme1n1, and nvme2n1 all report
   namespace_nsid=1 only, with no distinct user namespace on the same controller
+2026-05-28 current re-probe:
+  sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_nvme_preflight_probe_current.sdn
+  still fails because /dev/nvme*n1 matches three namespace devices.
+  Explicit per-device preflight for /dev/nvme0n1, /dev/nvme1n1, and
+  /dev/nvme2n1 still fails with no distinct assignable user namespace.
 bin/simple check test/unit/app/simpleos_nvme_serial_check_spec.spl src/app/simpleos_nvme_serial_check/main.spl
   PASSED: exit code 0
 bin/simple check src/app/simpleos_nvme_serial_check/main.spl test/unit/app/simpleos_nvme_serial_check_spec.spl
@@ -244,6 +261,17 @@ SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/ta
      p50 38us/46us.
      Tracked in
      `doc/08_tracking/bug/fat32_4k_overwrite_c_baseline_gap_2026-05-28.md`.
+   - 2026-05-28 current re-probe: the focused direct C gate remains noisy. One
+     run failed with Simple write p50 44us versus direct C write p50 34us; the
+     immediate rerun passed with Simple write p50 38us versus direct C write
+     p50 45us. Treat single-run direct-C success as weak evidence until VFAT is
+     mounted and repeated same-device runs are collected.
+   - 2026-05-28 repeated-run gate follow-up:
+     `scripts/perf/run-fat32-4k-cfat-baseline.shs` now defaults to
+     `FAT32_4K_RUNS=3` and compares median p50 across runs. The first median
+     run passed direct C with Simple read/write median p50 13us/34us versus
+     direct C read/write median p50 37us/43us. VFAT is still required for the
+     stronger same-device baseline claim.
    - 2026-05-28 VFAT follow-up: the preparation script exists, but the local
      mount is root-owned and cannot be reseeded without passwordless sudo or a
      remount with `uid=$(id -u),gid=$(id -g)`. The script now also attempts a
