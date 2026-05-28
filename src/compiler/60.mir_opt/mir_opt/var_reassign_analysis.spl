@@ -20,6 +20,15 @@ struct SsaVarTransformResult:
     phi_required_count: i64
     phi_required_locals: [i64]
 
+struct SsaPhiPlan:
+    join_block_id: i64
+    original_local_id: i64
+    then_block_id: i64
+    then_value_local_id: i64
+    else_block_id: i64
+    else_value_local_id: i64
+    phi_dest_local_id: i64
+
 fn local_list_contains(locals: [i64], local_id: i64) -> bool:
     var i = 0
     while i < locals.len():
@@ -480,6 +489,59 @@ fn ssa_phi_required_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
                             if then_join.id != else_join.id:
                                 return []
                             ssa_common_locals(ssa_block_written_locals(then_body), ssa_block_written_locals(else_body))
+                        case _:
+                            []
+                case _:
+                    []
+        case _:
+            []
+
+fn ssa_max_local_from_blocks(blocks: [MirBlock]) -> i64:
+    var max_local = -1
+    for block in blocks:
+        for inst in block.instructions:
+            max_local = ssa_max_local_from_inst(max_local, inst)
+        max_local = ssa_max_local_from_term(max_local, block.terminator)
+    max_local
+
+fn ssa_phi_plans_for_blocks(blocks: [MirBlock]) -> [SsaPhiPlan]:
+    if blocks.len() < 4:
+        return []
+    val entry = blocks[0]
+    match entry.terminator:
+        case If(_, then_block, else_block):
+            val then_opt = ssa_block_by_id(blocks, then_block.id)
+            val else_opt = ssa_block_by_id(blocks, else_block.id)
+            if not then_opt.?:
+                return []
+            if not else_opt.?:
+                return []
+            val then_body = then_opt.unwrap()
+            val else_body = else_opt.unwrap()
+            match then_body.terminator:
+                case Goto(then_join):
+                    match else_body.terminator:
+                        case Goto(else_join):
+                            if then_join.id != else_join.id:
+                                return []
+                            val locals = ssa_common_locals(ssa_block_written_locals(then_body), ssa_block_written_locals(else_body))
+                            var plans: [SsaPhiPlan] = []
+                            var next_local = ssa_max_local_from_blocks(blocks) + 1
+                            for local_id in locals:
+                                val then_value = next_local
+                                val else_value = next_local + 1
+                                val phi_dest = next_local + 2
+                                plans = plans.push(SsaPhiPlan(
+                                    join_block_id: then_join.id,
+                                    original_local_id: local_id,
+                                    then_block_id: then_block.id,
+                                    then_value_local_id: then_value,
+                                    else_block_id: else_block.id,
+                                    else_value_local_id: else_value,
+                                    phi_dest_local_id: phi_dest
+                                ))
+                                next_local = next_local + 3
+                            plans
                         case _:
                             []
                 case _:
