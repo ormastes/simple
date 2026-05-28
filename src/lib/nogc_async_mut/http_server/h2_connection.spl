@@ -278,13 +278,11 @@ class H2Connection:
             val dbytes = h2_write_frame(dframe)
             _append_to(self.pending_writes, dbytes)
 
-        # Transition stream state
+        # Transition stream state via on_local_end_stream (handles all transitions)
         val stream = self.streams.get(stream_id)
         if stream.?:
             var s = stream
             s.on_local_end_stream()
-            if not s.is_open():
-                s.close()
             self.streams[stream_id] = s
 
     # ========================================================================
@@ -390,7 +388,7 @@ class H2Connection:
                     var cs = cstream
                     cs.on_headers(cf.header_block, cf.flags)
                     self.streams[cf.stream_id] = cs
-                    if cs.is_request_complete():
+                    if cs.is_request_complete() and not cs.request_dispatched:
                         self._decode_and_buffer_request(cf.stream_id, cs)
                 return true
 
@@ -513,7 +511,7 @@ class H2Connection:
         # Check if request is complete (END_HEADERS + END_STREAM received)
         val stream = self.streams.get(sid)
         if stream.?:
-            if stream.is_request_complete():
+            if stream.is_request_complete() and not stream.request_dispatched:
                 self._decode_and_buffer_request(sid, stream)
 
     me _decode_and_buffer_request(sid: i64, stream: H2Stream):
@@ -572,12 +570,7 @@ class H2Connection:
 
         # Assemble body from accumulated DATA frames
         val body_bytes = stream.combined_data()
-        var body = ""
-        var bk = 0
-        while bk < body_bytes.len():
-            # text is byte-transparent — append byte as char
-            body = body + _byte_to_text(body_bytes[bk])
-            bk = bk + 1
+        val body = rt_bytes_to_text(body_bytes)
 
         # Build HttpRequestData
         val request = HttpRequestData(
@@ -592,6 +585,13 @@ class H2Connection:
         )
 
         self.pending_requests.push((sid, request))
+
+        # Mark stream so stray frames do not re-trigger decode
+        val done_stream = self.streams.get(sid)
+        if done_stream.?:
+            var ds = done_stream
+            ds.request_dispatched = true
+            self.streams[sid] = ds
 
     # ========================================================================
     # DATA handling
@@ -627,7 +627,7 @@ class H2Connection:
         # decode headers + body and buffer in pending_requests.
         val updated_stream = self.streams.get(sid)
         if updated_stream.?:
-            if updated_stream.is_request_complete():
+            if updated_stream.is_request_complete() and not updated_stream.request_dispatched:
                 self._decode_and_buffer_request(sid, updated_stream)
 
     # ========================================================================
@@ -707,12 +707,12 @@ fn _find_char(s: text, byte_val: i64) -> i64:
 
 fn _slice_text(s: text, start: i64, end: i64) -> text:
     """Return s[start..end) as a new text string."""
-    var out = ""
+    var buf: [u8] = []
     var i = start
     while i < end and i < s.len():
-        out = out + _byte_to_text(s.byte_at(i))
+        buf.push(s.byte_at(i))
         i = i + 1
-    return out
+    return rt_bytes_to_text(buf)
 
 fn _byte_to_text(b: i64) -> text:
     """Convert a single byte value to a one-character text string."""
