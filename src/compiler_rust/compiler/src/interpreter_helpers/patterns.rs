@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use super::super::{
     evaluate_expr, evaluate_method_call_with_self_update, find_and_exec_method_with_self,
-    find_and_exec_method_with_self_owned, lookup_class_method_index, lookup_impl_method_index,
-    Enums, ImplMethods, CONST_NAMES, MODULE_GLOBALS,
+    find_and_exec_method_with_self_owned, lookup_class_method_index, lookup_impl_method_index, Enums, ImplMethods,
+    CONST_NAMES, MODULE_GLOBALS,
 };
 
 use super::collections::bind_sequence_pattern;
@@ -361,10 +361,12 @@ pub(crate) fn handle_method_call_with_self_update(
             if let Some(Value::Object { ref class, .. }) = env.get(obj_name) {
                 let class_name = class.clone();
                 // Pre-check method exists via cached index before taking from env
-                let method_found = classes.get(&class_name)
+                let method_found = classes
+                    .get(&class_name)
                     .map(|cd| lookup_class_method_index(cd, &class_name, method).is_some())
                     .unwrap_or(false)
-                    || impl_methods.get(&class_name)
+                    || impl_methods
+                        .get(&class_name)
                         .map(|ms| lookup_impl_method_index(ms, &class_name, method).is_some())
                         .unwrap_or(false);
 
@@ -372,8 +374,15 @@ pub(crate) fn handle_method_call_with_self_update(
                     // Take ownership: Arc refcount drops to 1 → zero-copy mutations
                     if let Some(Value::Object { class, fields }) = env.remove(obj_name) {
                         match find_and_exec_method_with_self_owned(
-                            method, args, &class, fields,
-                            env, functions, classes, enums, impl_methods,
+                            method,
+                            args,
+                            &class,
+                            fields,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
                         ) {
                             Ok(Some((result, updated_self))) => {
                                 return Ok((result, Some((obj_name.clone(), updated_self))));
@@ -385,7 +394,14 @@ pub(crate) fn handle_method_call_with_self_update(
                 } else {
                     // Method not in class/impl — use full dispatch for method_missing/UFCS/lambdas
                     let (result, updated_self) = evaluate_method_call_with_self_update(
-                        receiver, method, args, env, functions, classes, enums, impl_methods,
+                        receiver,
+                        method,
+                        args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
                     )?;
                     if let Some(new_self) = updated_self {
                         return Ok((result, Some((obj_name.clone(), new_self))));

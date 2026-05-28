@@ -31,7 +31,10 @@ pub fn clear_pinned_strings() {
 }
 
 // Re-export the with-self-update functions
-pub(crate) use special::{exec_function_with_self_return, find_and_exec_method_with_self, find_and_exec_method_with_self_owned, lookup_class_method_index, lookup_impl_method_index};
+pub(crate) use special::{
+    exec_function_with_self_return, find_and_exec_method_with_self, find_and_exec_method_with_self_owned,
+    lookup_class_method_index, lookup_impl_method_index,
+};
 
 /// Main entry point for method call evaluation
 #[allow(clippy::borrowed_box, clippy::too_many_arguments)] // reason: Box<dyn Trait> dispatch with ABI-locked entry; refactoring deferred

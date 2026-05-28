@@ -37,8 +37,7 @@ struct DbTable {
     scan_results: Vec<i64>,
 }
 
-static TABLES: std::sync::LazyLock<Mutex<Vec<Option<DbTable>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+static TABLES: std::sync::LazyLock<Mutex<Vec<Option<DbTable>>>> = std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
 
 // ============================================================================
 // Helpers
@@ -162,21 +161,55 @@ pub fn rt_db_put_value_int_fn(args: &[Value]) -> Result<Value, CompileError> {
     let col = arg_int(args, 2, "rt_db_put_value_int")? as usize;
     let value = arg_int(args, 3, "rt_db_put_value_int")?;
     use std::io::Write;
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "put_value_int: h={handle} row={row} col={col} val={value} args={:?}", args); });
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/sffi_db_trace.log")
+        .map(|mut f| {
+            let _ = writeln!(
+                f,
+                "put_value_int: h={handle} row={row} col={col} val={value} args={:?}",
+                args
+            );
+        });
 
     let mut tables = TABLES.lock().unwrap();
     let t = match tables.get_mut(handle).and_then(|s| s.as_mut()) {
         Some(t) => t,
         None => {
-            let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "put_value_int: table not found for handle={handle}"); });
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/sffi_db_trace.log")
+                .map(|mut f| {
+                    let _ = writeln!(f, "put_value_int: table not found for handle={handle}");
+                });
             return Ok(Value::Nil);
         }
     };
     if row < t.rows.len() && col < t.num_cols as usize && t.rows[row].alive {
         t.rows[row].values[col] = ColValue::Int(value);
-        let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "put_value_int: stored OK"); });
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/sffi_db_trace.log")
+            .map(|mut f| {
+                let _ = writeln!(f, "put_value_int: stored OK");
+            });
     } else {
-        let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "put_value_int: bounds check failed row={row} rows_len={} col={col} num_cols={} alive={}", t.rows.len(), t.num_cols, t.rows.get(row).map(|r| r.alive).unwrap_or(false)); });
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/sffi_db_trace.log")
+            .map(|mut f| {
+                let _ = writeln!(
+                    f,
+                    "put_value_int: bounds check failed row={row} rows_len={} col={col} num_cols={} alive={}",
+                    t.rows.len(),
+                    t.num_cols,
+                    t.rows.get(row).map(|r| r.alive).unwrap_or(false)
+                );
+            });
     }
     Ok(Value::Nil)
 }
@@ -231,27 +264,57 @@ pub fn rt_db_get_int_fn(args: &[Value]) -> Result<Value, CompileError> {
     let row = arg_int(args, 1, "rt_db_get_int")? as usize;
     let col = arg_int(args, 2, "rt_db_get_int")? as usize;
     use std::io::Write;
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "get_int: h={handle} row={row} col={col} args={:?}", args); });
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/sffi_db_trace.log")
+        .map(|mut f| {
+            let _ = writeln!(f, "get_int: h={handle} row={row} col={col} args={:?}", args);
+        });
 
     let tables = TABLES.lock().unwrap();
     let t = match tables.get(handle).and_then(|s| s.as_ref()) {
         Some(t) => t,
         None => {
-            let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "get_int: table not found"); });
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/sffi_db_trace.log")
+                .map(|mut f| {
+                    let _ = writeln!(f, "get_int: table not found");
+                });
             return Ok(Value::Int(0));
         }
     };
     if row >= t.rows.len() || col >= t.num_cols as usize || !t.rows[row].alive {
-        let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "get_int: bounds check failed"); });
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/sffi_db_trace.log")
+            .map(|mut f| {
+                let _ = writeln!(f, "get_int: bounds check failed");
+            });
         return Ok(Value::Int(0));
     }
     let result = match &t.rows[row].values[col] {
         ColValue::Int(v) => {
-            let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "get_int: returning {v}"); });
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/sffi_db_trace.log")
+                .map(|mut f| {
+                    let _ = writeln!(f, "get_int: returning {v}");
+                });
             Ok(Value::Int(*v))
         }
         other => {
-            let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/sffi_db_trace.log").map(|mut f| { let _ = writeln!(f, "get_int: col value is {:?}, returning 0", other); });
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/sffi_db_trace.log")
+                .map(|mut f| {
+                    let _ = writeln!(f, "get_int: col value is {:?}, returning 0", other);
+                });
             Ok(Value::Int(0))
         }
     };
@@ -423,7 +486,11 @@ pub fn rt_db_put_row3_fn(args: &[Value]) -> Result<Value, CompileError> {
             values[i] = ColValue::Int(vals[i]);
         }
     }
-    let row = DbRow { pk_text: pk.clone(), values, alive: true };
+    let row = DbRow {
+        pk_text: pk.clone(),
+        values,
+        alive: true,
+    };
     t.rows.push(row);
     t.pk_index.insert(pk, row_idx);
     t.alive_count += 1;

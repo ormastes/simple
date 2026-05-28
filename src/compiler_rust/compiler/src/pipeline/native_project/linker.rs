@@ -7,8 +7,7 @@ use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports,
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     find_archive_tool, find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_native_all_library,
-    find_objcopy_tool,
-    is_system_symbol, strip_llvm_constructors,
+    find_objcopy_tool, is_system_symbol, strip_llvm_constructors,
 };
 
 impl NativeProjectBuilder {
@@ -161,12 +160,7 @@ impl NativeProjectBuilder {
     }
 
     fn normalize_relocation_symbol(raw_name: &str) -> String {
-        let mut name = raw_name
-            .split('@')
-            .next()
-            .unwrap_or(raw_name)
-            .trim()
-            .to_string();
+        let mut name = raw_name.split('@').next().unwrap_or(raw_name).trim().to_string();
         for marker in ["+0x", "-0x", "+0X", "-0X"] {
             if let Some((base, _)) = name.split_once(marker) {
                 name = base.to_string();
@@ -314,7 +308,12 @@ impl NativeProjectBuilder {
         // generated C stubs or unresolved-call paths and may not appear as
         // direct object undefineds. Other runtime functions should be retained
         // only when entry objects reference them.
-        for root in ["__simple_runtime_init", "__simple_runtime_shutdown", "rt_set_args", "rt_function_not_found"] {
+        for root in [
+            "__simple_runtime_init",
+            "__simple_runtime_shutdown",
+            "rt_set_args",
+            "rt_function_not_found",
+        ] {
             if runtime_defined.contains(root) {
                 required.insert(root.to_string());
             }
@@ -1586,7 +1585,11 @@ mod linker_tests {
         let math_o = temp.path().join("math.o");
 
         std::fs::write(&plain_c, "int plain(void) { return 1; }\n").unwrap();
-        std::fs::write(&math_c, "extern double sqrt(double); double mathy(double x) { return sqrt(x); }\n").unwrap();
+        std::fs::write(
+            &math_c,
+            "extern double sqrt(double); double mathy(double x) { return sqrt(x); }\n",
+        )
+        .unwrap();
 
         let plain_status = std::process::Command::new("cc")
             .args(["-c", "-O0"])

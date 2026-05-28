@@ -291,7 +291,8 @@ impl Lowerer {
 
     /// Handle math/conversion builtins
     ///
-    /// Includes: abs, min, max, sqrt, floor, ceil, pow, to_string, to_int
+    /// Includes: abs, min, max, sqrt, floor, ceil, pow, to_string, to_int,
+    /// and cast-style calls: int(x), text(x), bool(x), char(x), i8(x)..u64(x), f32(x), f64(x).
     /// Returns Some(HirExpr) if the name matches a builtin, None otherwise.
     fn lower_utility_builtin(
         &mut self,
@@ -299,6 +300,35 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
+        if args.len() == 1 {
+            let cast_target = match name {
+                "i8" => Some(TypeId::I8),
+                "i16" => Some(TypeId::I16),
+                "i32" => Some(TypeId::I32),
+                "i64" | "int" => Some(TypeId::I64),
+                "u8" => Some(TypeId::U8),
+                "u16" => Some(TypeId::U16),
+                "u32" => Some(TypeId::U32),
+                "u64" => Some(TypeId::U64),
+                "f32" => Some(TypeId::F32),
+                "f64" | "float" => Some(TypeId::F64),
+                "bool" => Some(TypeId::BOOL),
+                "text" | "str" | "String" => Some(TypeId::STRING),
+                "char" => Some(TypeId::CHAR),
+                _ => None,
+            };
+            if let Some(target) = cast_target {
+                let inner = self.lower_expr(&args[0].value, ctx)?;
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::Cast {
+                        expr: Box::new(inner),
+                        target,
+                    },
+                    ty: target,
+                }));
+            }
+        }
+
         match name {
             "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => {
                 Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?))

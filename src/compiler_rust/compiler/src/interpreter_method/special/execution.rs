@@ -31,7 +31,10 @@ pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_
         // Cold path: first lookup for this class — allocate key and populate index
         let mut cache_mut = cache.borrow_mut();
         let class_cache = cache_mut.entry(class_name.to_string()).or_insert_with(|| {
-            class_def.methods.iter().enumerate()
+            class_def
+                .methods
+                .iter()
+                .enumerate()
                 .map(|(i, m)| (m.name.clone(), i))
                 .collect()
         });
@@ -50,11 +53,9 @@ pub fn lookup_impl_method_index(methods: &[Arc<FunctionDef>], class_name: &str, 
         }
         // Cold path: first lookup for this class — allocate key and populate index
         let mut cache_mut = cache.borrow_mut();
-        let class_cache = cache_mut.entry(class_name.to_string()).or_insert_with(|| {
-            methods.iter().enumerate()
-                .map(|(i, m)| (m.name.clone(), i))
-                .collect()
-        });
+        let class_cache = cache_mut
+            .entry(class_name.to_string())
+            .or_insert_with(|| methods.iter().enumerate().map(|(i, m)| (m.name.clone(), i)).collect());
         class_cache.get(method_name).copied()
     })
 }
@@ -142,7 +143,15 @@ pub fn find_and_exec_method_with_self_owned(
         if let Some(idx) = lookup_class_method_index(&class_def, class, method) {
             let func = &class_def.methods[idx];
             let (result, updated_self) = exec_function_with_self_return(
-                func, args, env, functions, classes, enums, impl_methods, class, fields,
+                func,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                class,
+                fields,
             )?;
             return Ok(Some((result, updated_self)));
         }
@@ -151,7 +160,15 @@ pub fn find_and_exec_method_with_self_owned(
         if let Some(idx) = lookup_impl_method_index(methods, class, method) {
             let func = &methods[idx];
             let (result, updated_self) = exec_function_with_self_return(
-                func, args, env, functions, classes, enums, impl_methods, class, fields,
+                func,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                class,
+                fields,
             )?;
             return Ok(Some((result, updated_self)));
         }

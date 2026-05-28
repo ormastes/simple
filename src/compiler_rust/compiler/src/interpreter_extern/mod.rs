@@ -106,6 +106,7 @@ pub mod dynamic_sffi;
 #[cfg(feature = "gui")]
 pub mod winit_sffi;
 pub mod rapier2d_sffi;
+pub mod io_driver;
 pub mod qmp_socket;
 pub mod host_wm_bridge;
 
@@ -2286,6 +2287,12 @@ pub(crate) fn call_extern_function(
         #[cfg(feature = "gui")]
         _ if name.starts_with("rt_winit_") => winit_sffi::dispatch(name, &evaluated),
         _ if name.starts_with("rt_rapier2d_") => rapier2d_sffi::dispatch(name, &evaluated),
+        _ if name.starts_with("rt_driver_") => {
+            if let Some(result) = io_driver::dispatch(name, &evaluated) {
+                return result;
+            }
+            Err(common::unknown_function(name))
+        }
 
         _ => {
             // Try dynamic SFFI dispatch via the runtime shared library.

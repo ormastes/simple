@@ -46,7 +46,10 @@ fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
 }
 
 fn runtime_bundle_requests_hosted(value: &str) -> bool {
-    matches!(value, "all" | "hosted" | "rust-hosted" | "hosted-runtime" | "rust-runtime")
+    matches!(
+        value,
+        "all" | "hosted" | "rust-hosted" | "hosted-runtime" | "rust-runtime"
+    )
 }
 
 fn runtime_bundle_requests_hosted_runtime(value: &str) -> bool {

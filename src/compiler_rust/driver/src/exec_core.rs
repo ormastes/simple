@@ -657,8 +657,8 @@ impl ExecCore {
         set_current_file(Some(path.to_path_buf()));
 
         // Load with import resolution (handles `use` statements)
-        let ast = load_module_with_imports(path, &mut HashSet::new())
-            .map_err(|e| format!("module load error: {}", e))?;
+        let ast =
+            load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("module load error: {}", e))?;
 
         // Lower to HIR
         let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;

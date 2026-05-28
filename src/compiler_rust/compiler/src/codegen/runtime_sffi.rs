@@ -655,6 +655,33 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_thread_sleep", &[I64], &[]),
     RuntimeFuncSpec::new("rt_thread_yield", &[], &[]),
     // =========================================================================
+    // Async I/O driver (epoll/kqueue/IOCP backend)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_driver_create", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_destroy", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_driver_submit_accept", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_connect", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_recv", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_send", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_sendfile", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_read", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_write", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_open", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_close", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_fsync", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_submit_timeout", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_flush", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll_id", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll_result", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll_flags", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll_data", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_poll_data_len", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_cancel", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_backend_name", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_supports_sendfile", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_supports_zero_copy", &[I64], &[I64]),
+    // =========================================================================
     // Generator operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_generator_new", &[I64, I64, I64], &[I64]),
@@ -1306,7 +1333,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
     RuntimeFuncSpec::new("rt_file_fsync", &[I64, I64], &[I8]),         // path -> bool
     RuntimeFuncSpec::new("rt_file_fsync_cached", &[I64, I64], &[I8]),  // path -> bool, prefer write-at cache
-    RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),         // text -> i64 (CRC32 checksum)
+    RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),        // text -> i64 (CRC32 checksum)
     RuntimeFuncSpec::new("rt_file_sync", &[I64, I64], &[I8]),          // path -> bool (alias for fsync)
     RuntimeFuncSpec::new("rt_file_create_excl", &[I64, I64, I64, I64], &[I8]), // path, content -> bool (O_EXCL)
     RuntimeFuncSpec::new("rt_file_write_text_at", &[I64, I64, I64], &[I64]), // path RuntimeValue, offset, data RuntimeValue -> bytes written

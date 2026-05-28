@@ -2157,15 +2157,15 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_cuda_launch_kernel" => Some(&[1]),
         "rt_cuda_module_load_data" => Some(&[0]),
         // Fast in-memory DB: C functions accept const char* for string params
-        "rt_db_table_create" => Some(&[0]),       // name
-        "rt_db_put" => Some(&[1]),                 // pk_text
-        "rt_db_get" => Some(&[1]),                 // pk_text
-        "rt_db_delete" => Some(&[1]),              // pk_text
-        "rt_db_put_row3" => Some(&[1]),            // pk
-        "rt_db_get_int_by_pk" => Some(&[1]),       // pk
-        "rt_db_update_int" => Some(&[1]),          // pk
-        "rt_db_update_text" => Some(&[1, 3]),      // pk, value
-        "rt_db_put_value_text" => Some(&[3]),      // value
+        "rt_db_table_create" => Some(&[0]),   // name
+        "rt_db_put" => Some(&[1]),            // pk_text
+        "rt_db_get" => Some(&[1]),            // pk_text
+        "rt_db_delete" => Some(&[1]),         // pk_text
+        "rt_db_put_row3" => Some(&[1]),       // pk
+        "rt_db_get_int_by_pk" => Some(&[1]),  // pk
+        "rt_db_update_int" => Some(&[1]),     // pk
+        "rt_db_update_text" => Some(&[1, 3]), // pk, value
+        "rt_db_put_value_text" => Some(&[3]), // value
         _ => None,
     }
 }
