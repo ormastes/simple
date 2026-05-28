@@ -59,6 +59,14 @@ the resulting binary still reports `FATAL: simple read failed` and
 result. This means the pure Simple FAT microbenchmark is unblocked, but the 4K
 random read/write superiority claim is not verified yet.
 
+Update 2026-05-28 (4K simple path unblocked): the focused 4K comparison harness
+now uses the stateful FAT test-device registry for Simple FAT operations and
+resets that registry explicitly before registering its in-memory block device.
+The Simple FAT random 4K read/write path completes under native-build and emits
+p50/p99 latency numbers. Host POSIX and VFAT baselines are still skipped in the
+self-contained native build because host file SFFI functions are unresolved and
+stubbed, so the C-FAT superiority claim remains unproven.
+
 ## Reproduce
 
 ```bash
@@ -71,8 +79,9 @@ src/compiler_rust/target/debug/simple test/perf/bench/fat32_microbench.spl
 - `bin/simple check test/perf/bench/fat32_microbench.spl --mode=interpreter`
   passes.
 - Native `fat32_microbench.spl` completes all workloads.
-- Native `fat32_4k_compare.spl` builds but the simple read/write comparison
-  path still fails and times out.
+- Native `fat32_4k_compare.spl` builds and the Simple FAT 4K read/write path
+  completes, but host/VFAT baselines are skipped in the self-contained native
+  build due unresolved host file SFFI stubs.
 
 ## Expected
 
