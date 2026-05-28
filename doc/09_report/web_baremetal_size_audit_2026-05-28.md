@@ -62,9 +62,10 @@ Date: 2026-05-28
 | x86_64 minimal boot/stdout object file / dec section | 2300 / 320 |
 | x86_64 minimal boot/stdout source | 3000 |
 | ARM64 minimal PL011 startup/stdout object file / dec section | 2400 / 360 |
-| ARM64 minimal PL011 startup/stdout source | 2600 |
+| ARM64 minimal PL011 startup/stdout source | 512 |
 | ARM32 minimal PL011 startup/stdout object file / dec section | 2200 / 340 |
-| ARM32 minimal PL011 startup/stdout source | 2800 |
+| ARM32 minimal PL011 startup/stdout source | 512 |
+| Shared PL011 startup/stdout source | 1600 |
 | RV64 minimal 16550 startup/stdout object file / dec section | 2800 / 220 |
 | RV64 minimal 16550 startup/stdout source | 256 |
 | RV32 minimal 16550 startup/stdout object file / dec section | 2300 / 260 |
@@ -106,8 +107,9 @@ Date: 2026-05-28
 | `examples/browser` | 304 | 75035 | 2850509 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15509 | 576503 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 107 | 2752 |
-| `examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c` | 1 | 57 | 1458 |
-| `examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c` | 1 | 50 | 1375 |
+| `examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c` | 1 | 7 | 252 |
+| `examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c` | 1 | 7 | 249 |
+| `examples/simple_os/arch/common/baremetal_pl011_uart_stdout.c` | 1 | 49 | 1283 |
 | `examples/simple_os/arch/riscv64/boot/baremetal_uart_stdout.c` | 1 | 1 | 60 |
 | `examples/simple_os/arch/riscv32/boot/baremetal_uart_stdout.c` | 1 | 1 | 60 |
 | `examples/simple_os/arch/common/baremetal_riscv_16550_uart_stdout.c` | 1 | 41 | 1017 |
@@ -193,8 +195,9 @@ Date: 2026-05-28
 - Corpus fixture compatibility lives in `simple_web_corpus_fixture_renderer`; production static render must not retain PPM baseline loading.
 - x86_64 SimpleOS size work should split `baremetal_stubs.c` into boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes.
 - `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple.
-- `arm64/boot/baremetal_uart_stdout.c` is the ARM64 PL011 capsule baseline for startup/stdout only; GIC, PCI, filesystem, network, and GUI stay out of this lane.
-- `arm32/boot/baremetal_uart_stdout.c` is the ARM32 PL011 capsule baseline for startup/stdout only; GIC, framebuffer, filesystem, and GUI stay out of this lane.
+- `common/baremetal_pl011_uart_stdout.c` is the shared ARM32/ARM64 PL011 startup/stdout capsule; interrupt controllers, framebuffer, filesystem, network, and GUI stay out of this lane.
+- `arm64/boot/baremetal_uart_stdout.c` is a thin ARM64 compatibility wrapper over the shared PL011 capsule.
+- `arm32/boot/baremetal_uart_stdout.c` is a thin ARM32 compatibility wrapper over the shared PL011 capsule.
 - `common/baremetal_riscv_16550_uart_stdout.c` is the shared RV32/RV64 16550 startup/stdout capsule; PLIC, CLINT, virtio, filesystem, and GUI stay out of this lane.
 - `riscv64/boot/baremetal_uart_stdout.c` is a thin RV64 compatibility wrapper over the shared RISC-V 16550 capsule.
 - `riscv32/boot/baremetal_uart_stdout.c` is a thin RV32 compatibility wrapper over the shared RISC-V 16550 capsule.
