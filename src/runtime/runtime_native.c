@@ -1161,7 +1161,7 @@ void rt_array_set(SplArray* a, int64_t idx, int64_t val) {
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return;
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
-        ((uint8_t*)array->data)[idx] = (uint8_t)(val & 0xff);
+        ((uint8_t*)array->data)[idx] = (uint8_t)(rt_core_numeric_arg(val) & 0xff);
     } else {
         ((int64_t*)array->data)[idx] = val;
     }

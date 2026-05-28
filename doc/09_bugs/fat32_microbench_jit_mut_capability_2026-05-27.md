@@ -28,6 +28,19 @@ falls back with `Memory safety error [W1006]: mutation without mut capability`.
 The remaining blocker is the trait/capability mutation analysis, not enum
 constructor lowering.
 
+Update 2026-05-28 (later): the perf benchmarks no longer depend on interpreter
+SFFI pointer-style byte buffer mutation for their fake disk image; they use
+ordinary pure Simple `[u8]` push/index assignment so the same source is shared
+with native lowering. The native C runtime byte-array `rt_array_set` path now
+normalizes tagged numeric values before storing into packed byte arrays. A
+native-build of `fat32_microbench.spl` links and no longer segfaults, but FAT
+mount still fails with `FAT32 boot sector must be at least 512 bytes`, which
+points at the known `BlockDevice` trait dispatch path returning the wrong
+`sector_size()`. A MIR lowering patch now gates virtual trait dispatch on the
+recovered receiver type instead of the original `Any` receiver type; it still
+needs verification with a rebuilt driver once unrelated networking worktree
+changes stop blocking `cargo build -p simple-driver`.
+
 ## Reproduce
 
 ```bash

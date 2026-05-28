@@ -448,12 +448,14 @@ impl<'a> MirLowerer<'a> {
             method.to_string()
         };
 
-        let _receiver_ty = receiver.ty;
+        let dispatch_receiver_ty = receiver_local_ty.unwrap_or(receiver.ty);
         match dispatch {
             DispatchMode::Dynamic => {
                 // Try to find the method in a registered trait (vtable dispatch)
                 if let Some((vtable_slot, param_types, return_type)) =
-                    (receiver.ty != TypeId::ANY).then(|| self.find_trait_for_method(method)).flatten()
+                    (dispatch_receiver_ty != TypeId::ANY)
+                        .then(|| self.find_trait_for_method(method))
+                        .flatten()
                 {
                     let dest = self.with_func(|func, current_block| {
                         let dest = func.new_vreg();

@@ -275,6 +275,8 @@ fn test_byte_array_packed_storage_fast_path() {
     assert_eq!(rt_bytes_u64_le_at(array, 0), 0);
     assert!(rt_bytes_u8_set(array, 0, 0x102));
     assert_eq!(rt_array_get(array, 0).as_int(), 2);
+    assert!(rt_array_set(array, 1, RuntimeValue::from_int(0x105)));
+    assert_eq!(rt_array_get(array, 1).as_int(), 5);
     assert_eq!(rt_array_pop(array).as_int(), 4);
     rt_array_free(second);
     rt_array_free(array);
