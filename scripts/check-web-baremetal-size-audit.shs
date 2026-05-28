@@ -12,7 +12,14 @@ SKIP_NATIVE_BUILDS="${SKIP_NATIVE_BUILDS:-0}"
 
 MAX_BROWSER_EXAMPLE_SOURCE_BYTES="${MAX_BROWSER_EXAMPLE_SOURCE_BYTES:-}"
 MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES="${MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES:-}"
-MAX_RV32_SEMIHOST_ELF_BYTES="${MAX_RV32_SEMIHOST_ELF_BYTES:-}"
+MAX_BROWSER_SMOKE_BYTES="${MAX_BROWSER_SMOKE_BYTES:-45000}"
+MAX_BROWSER_RENDER_BYTES="${MAX_BROWSER_RENDER_BYTES:-25000}"
+MAX_SIMPLE_WEB_STATIC_BYTES="${MAX_SIMPLE_WEB_STATIC_BYTES:-20000}"
+MAX_SIMPLE_WEB_SCRIPT_BYTES="${MAX_SIMPLE_WEB_SCRIPT_BYTES:-45000}"
+MAX_RV32_SEMIHOST_ELF_BYTES="${MAX_RV32_SEMIHOST_ELF_BYTES:-70000}"
+MAX_X86_64_MIN_BOOT_STDOUT_OBJ_BYTES="${MAX_X86_64_MIN_BOOT_STDOUT_OBJ_BYTES:-4096}"
+MAX_X86_64_MIN_BOOT_STDOUT_SOURCE_BYTES="${MAX_X86_64_MIN_BOOT_STDOUT_SOURCE_BYTES:-4096}"
+MAX_CONSOLE_POLICY_SOURCE_BYTES="${MAX_CONSOLE_POLICY_SOURCE_BYTES:-2500}"
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
@@ -164,6 +171,17 @@ section_dec() {
     fi
 }
 
+require_le() {
+    label="$1"
+    actual="$2"
+    limit="$3"
+    if [ -n "$limit" ] && [ "$actual" != "n/a" ] && [ "$actual" -gt "$limit" ]; then
+        echo "web_baremetal_size_audit_ready=false"
+        echo "error=${label}:$actual>$limit"
+        exit 1
+    fi
+}
+
 browser_cluster_rows="$BUILD_DIR/browser_cluster_rows.md"
 : >"$browser_cluster_rows"
 for dir in \
@@ -225,25 +243,16 @@ SCRIPT_WEB_BYTES="$(bytes_of "$BUILD_DIR/simple_web_script_native")"
 RV32_SEMIHOST_BYTES="$(bytes_of "$BUILD_DIR/hello_riscv32_semihost.elf")"
 X86_64_MIN_BOOT_STDOUT_OBJ_BYTES="$(bytes_of "$X86_64_MIN_BOOT_STDOUT_OBJ")"
 
-if [ -n "$MAX_BROWSER_EXAMPLE_SOURCE_BYTES" ] && [ "$BROWSER_EXAMPLE_SOURCE_BYTES" -gt "$MAX_BROWSER_EXAMPLE_SOURCE_BYTES" ]; then
-    echo "web_baremetal_size_audit_ready=false"
-    echo "error=browser_example_source_exceeds_budget:$BROWSER_EXAMPLE_SOURCE_BYTES>$MAX_BROWSER_EXAMPLE_SOURCE_BYTES"
-    exit 1
-fi
-
-if [ -n "$MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES" ] && [ "$X86_64_STUB_BYTES" != "n/a" ] \
-    && [ "$X86_64_STUB_BYTES" -gt "$MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES" ]; then
-    echo "web_baremetal_size_audit_ready=false"
-    echo "error=x86_64_baremetal_stub_source_exceeds_budget:$X86_64_STUB_BYTES>$MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES"
-    exit 1
-fi
-
-if [ -n "$MAX_RV32_SEMIHOST_ELF_BYTES" ] && [ "$RV32_SEMIHOST_BYTES" != "n/a" ] \
-    && [ "$RV32_SEMIHOST_BYTES" -gt "$MAX_RV32_SEMIHOST_ELF_BYTES" ]; then
-    echo "web_baremetal_size_audit_ready=false"
-    echo "error=rv32_semihost_elf_exceeds_budget:$RV32_SEMIHOST_BYTES>$MAX_RV32_SEMIHOST_ELF_BYTES"
-    exit 1
-fi
+require_le "browser_example_source_exceeds_budget" "$BROWSER_EXAMPLE_SOURCE_BYTES" "$MAX_BROWSER_EXAMPLE_SOURCE_BYTES"
+require_le "x86_64_baremetal_stub_source_exceeds_budget" "$X86_64_STUB_BYTES" "$MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES"
+require_le "browser_smoke_binary_exceeds_budget" "$BROWSER_SMOKE_BYTES" "$MAX_BROWSER_SMOKE_BYTES"
+require_le "browser_render_binary_exceeds_budget" "$BROWSER_RENDER_BYTES" "$MAX_BROWSER_RENDER_BYTES"
+require_le "simple_web_static_binary_exceeds_budget" "$STATIC_WEB_BYTES" "$MAX_SIMPLE_WEB_STATIC_BYTES"
+require_le "simple_web_script_binary_exceeds_budget" "$SCRIPT_WEB_BYTES" "$MAX_SIMPLE_WEB_SCRIPT_BYTES"
+require_le "rv32_semihost_elf_exceeds_budget" "$RV32_SEMIHOST_BYTES" "$MAX_RV32_SEMIHOST_ELF_BYTES"
+require_le "x86_64_min_boot_stdout_obj_exceeds_budget" "$X86_64_MIN_BOOT_STDOUT_OBJ_BYTES" "$MAX_X86_64_MIN_BOOT_STDOUT_OBJ_BYTES"
+require_le "x86_64_min_boot_stdout_source_exceeds_budget" "$X86_64_MIN_BOOT_STDOUT_BYTES" "$MAX_X86_64_MIN_BOOT_STDOUT_SOURCE_BYTES"
+require_le "console_policy_source_exceeds_budget" "$CONSOLE_POLICY_BYTES" "$MAX_CONSOLE_POLICY_SOURCE_BYTES"
 
 {
     echo "# Web And Bare-Metal Binary Size Audit"
@@ -260,6 +269,19 @@ fi
     echo "| Simple web script URL facade | n/a | $SCRIPT_WEB_BUILD | $SCRIPT_WEB_BYTES | $(section_dec "$BUILD_DIR/simple_web_script_native") | \`$BUILD_DIR/simple_web_script_native.log\` |"
     echo "| RV32 semihost stdout hello | n/a | $RV32_SEMIHOST_BUILD | $RV32_SEMIHOST_BYTES | $(section_dec "$BUILD_DIR/hello_riscv32_semihost.elf") | \`$BUILD_DIR/hello_riscv32_semihost.build.log\` |"
     echo "| x86_64 minimal boot/stdout capsule | n/a | $X86_64_MIN_BOOT_STDOUT_BUILD | $X86_64_MIN_BOOT_STDOUT_OBJ_BYTES | $(section_dec "$X86_64_MIN_BOOT_STDOUT_OBJ") | \`$X86_64_MIN_BOOT_STDOUT_LOG\` |"
+    echo
+    echo "## Default Regression Budgets"
+    echo
+    echo "| Budget | Limit Bytes |"
+    echo "|---|---:|"
+    echo "| Browser smoke native | $MAX_BROWSER_SMOKE_BYTES |"
+    echo "| Browser simple render HTML native | $MAX_BROWSER_RENDER_BYTES |"
+    echo "| Simple web static facade native | $MAX_SIMPLE_WEB_STATIC_BYTES |"
+    echo "| Simple web script URL facade native | $MAX_SIMPLE_WEB_SCRIPT_BYTES |"
+    echo "| RV32 semihost stdout ELF | $MAX_RV32_SEMIHOST_ELF_BYTES |"
+    echo "| x86_64 minimal boot/stdout object | $MAX_X86_64_MIN_BOOT_STDOUT_OBJ_BYTES |"
+    echo "| x86_64 minimal boot/stdout source | $MAX_X86_64_MIN_BOOT_STDOUT_SOURCE_BYTES |"
+    echo "| Pure Simple console policy source | $MAX_CONSOLE_POLICY_SOURCE_BYTES |"
     echo
     echo "## Source Size Surfaces"
     echo
@@ -284,7 +306,7 @@ fi
     echo "- \`baremetal_boot_stdout.c\` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple."
     echo "- Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule."
     echo "- \`baremetal/console_policy.spl\` is the pure-Simple policy surface for shared semihost/UART stdout selection."
-    echo "- Set \`MAX_BROWSER_EXAMPLE_SOURCE_BYTES\`, \`MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES\`, or \`MAX_RV32_SEMIHOST_ELF_BYTES\` to turn this audit into a budget gate."
+    echo "- The split lanes now have default regression budgets. Set any \`MAX_...\` environment value higher, lower, or empty to tune a specific gate."
 } >"$REPORT_PATH"
 
 echo "web_baremetal_size_audit_ready=true"

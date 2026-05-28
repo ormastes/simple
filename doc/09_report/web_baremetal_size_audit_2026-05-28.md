@@ -13,6 +13,19 @@ Date: 2026-05-28
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | x86_64 minimal boot/stdout capsule | n/a | ok | 2840 | 409 | `build/web_baremetal_size_audit/baremetal_boot_stdout.build.log` |
 
+## Default Regression Budgets
+
+| Budget | Limit Bytes |
+|---|---:|
+| Browser smoke native | 45000 |
+| Browser simple render HTML native | 25000 |
+| Simple web static facade native | 20000 |
+| Simple web script URL facade native | 45000 |
+| RV32 semihost stdout ELF | 70000 |
+| x86_64 minimal boot/stdout object | 4096 |
+| x86_64 minimal boot/stdout source | 4096 |
+| Pure Simple console policy source | 2500 |
+
 ## Source Size Surfaces
 
 | Surface | Files | Lines | Bytes |
@@ -44,4 +57,4 @@ Date: 2026-05-28
 - `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple.
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
 - `baremetal/console_policy.spl` is the pure-Simple policy surface for shared semihost/UART stdout selection.
-- Set `MAX_BROWSER_EXAMPLE_SOURCE_BYTES`, `MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES`, or `MAX_RV32_SEMIHOST_ELF_BYTES` to turn this audit into a budget gate.
+- The split lanes now have default regression budgets. Set any `MAX_...` environment value higher, lower, or empty to tune a specific gate.
