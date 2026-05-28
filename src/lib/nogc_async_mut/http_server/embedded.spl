@@ -1,0 +1,262 @@
+"""
+Embedded HTTP Server — Lightweight Single-File Variant
+
+A minimal HTTP/1.1 server sharing IoDriver and TCP backend with the full
+async server but without middleware, TLS, H2, keepalive, or security contexts.
+
+Single-threaded, connection-close-after-response. Suitable for embedded
+devices, internal APIs, health endpoints, and development servers.
+
+## Usage
+
+```simple
+use std.http_server.embedded.{EmbeddedHttpServer}
+
+val server = EmbeddedHttpServer.new(":8080")
+server.get("/hello", \req: "Hello World")
+server.get("/api/status", \req: "{\"status\": \"ok\"}")
+server.post("/data", \req: "received: {req.body}")
+server.start()
+```
+
+## Limitations
+
+- HTTP/1.1 only, no keepalive (Connection: close after every response)
+- Single recv buffer (8 KB max request size per read)
+- No TLS, no middleware pipeline, no H2 multiplexing
+- No chunked transfer encoding
+- Single-threaded accept loop
+"""
+
+use std.io.driver.{IoDriver}
+use std.nogc_sync_mut.io.tcp.{
+    tcp_backend_bind,
+    tcp_backend_close,
+    tcp_backend_set_nonblocking,
+    tcp_backend_set_nodelay
+}
+
+# ============================================================================
+# Request Struct
+# ============================================================================
+
+struct EmbeddedRequest:
+    """Parsed HTTP request from the inline parser."""
+    method: text
+    path: text
+    headers: [(text, text)]
+    body: text
+
+# ============================================================================
+# Route Entry
+# ============================================================================
+
+struct EmbeddedRoute:
+    """A registered route: HTTP method + path + handler."""
+    method: text
+    path: text
+    handler: fn(EmbeddedRequest) -> text
+
+# ============================================================================
+# Inline HTTP/1.1 Parser
+# ============================================================================
+
+fn parse_embedded_request(data: text) -> EmbeddedRequest?:
+    """Parse raw HTTP data into an EmbeddedRequest.
+    Splits on \\r\\n\\r\\n, parses request line + headers. Body = remainder.
+    Returns nil if malformed.
+    """
+    val separator = "\r\n\r\n"
+    val sep_pos = data.index_of(separator)
+    if sep_pos < 0:
+        return nil
+
+    val head = data.slice(0, sep_pos)
+    val body = data.slice(sep_pos + 4, data.len())
+
+    val lines = head.split("\r\n")
+    if lines.len() < 1:
+        return nil
+
+    # Parse request line: "GET /path HTTP/1.1"
+    val request_line = lines.at(0)
+    val parts = request_line.split(" ")
+    if parts.len() < 2:
+        return nil
+
+    val method = parts.at(0)
+    val path = parts.at(1)
+
+    # Parse headers
+    var headers: [(text, text)] = []
+    var i = 1
+    while i < lines.len():
+        val line = lines.at(i)
+        val colon = line.index_of(":")
+        if colon > 0:
+            val name = line.slice(0, colon).trim()
+            val value = line.slice(colon + 1, line.len()).trim()
+            headers.push((name, value))
+        i = i + 1
+
+    EmbeddedRequest(
+        method: method,
+        path: path,
+        headers: headers,
+        body: body
+    )
+
+# ============================================================================
+# Response Serializer
+# ============================================================================
+
+fn embedded_response(status: i64, body: text) -> text:
+    """Serialize an HTTP/1.1 response with Content-Length, Server, Connection: close."""
+    val reason = _status_reason(status)
+    val length = body.len()
+    "HTTP/1.1 {status} {reason}\r\nContent-Length: {length}\r\nServer: SimpleEmbedded\r\nConnection: close\r\n\r\n{body}"
+
+fn _status_reason(status: i64) -> text:
+    """Map common status codes to reason phrases."""
+    if status == 200: return "OK"
+    if status == 201: return "Created"
+    if status == 204: return "No Content"
+    if status == 400: return "Bad Request"
+    if status == 404: return "Not Found"
+    if status == 405: return "Method Not Allowed"
+    if status == 500: return "Internal Server Error"
+    "Unknown"
+
+# ============================================================================
+# Embedded HTTP Server
+# ============================================================================
+
+class EmbeddedHttpServer:
+    """Lightweight embedded HTTP/1.1 server.
+
+    Uses IoDriver for completion-based async I/O and tcp_backend for
+    socket operations. Single-threaded, no keepalive, no TLS.
+    """
+    addr: text
+    routes: [EmbeddedRoute]
+    running: bool
+
+    static fn new(addr: text) -> EmbeddedHttpServer:
+        """Create a new embedded server for the given address (\"host:port\" or \":port\")."""
+        EmbeddedHttpServer(
+            addr: addr,
+            routes: [],
+            running: false
+        )
+
+    me get(path: text, handler: fn(EmbeddedRequest) -> text):
+        """Register a GET route."""
+        self.routes.push(EmbeddedRoute(method: "GET", path: path, handler: handler))
+
+    me post(path: text, handler: fn(EmbeddedRequest) -> text):
+        """Register a POST route."""
+        self.routes.push(EmbeddedRoute(method: "POST", path: path, handler: handler))
+
+    me put(path: text, handler: fn(EmbeddedRequest) -> text):
+        """Register a PUT route."""
+        self.routes.push(EmbeddedRoute(method: "PUT", path: path, handler: handler))
+
+    me delete(path: text, handler: fn(EmbeddedRequest) -> text):
+        """Register a DELETE route."""
+        self.routes.push(EmbeddedRoute(method: "DELETE", path: path, handler: handler))
+
+    me start():
+        """Blocking start: bind, accept loop, handle requests, close after response."""
+        # tcp_backend_bind wraps TcpListener::bind which does socket+bind+listen
+        val listen_fd = tcp_backend_bind(self.addr)
+        if listen_fd < 0:
+            print "EmbeddedHttpServer: failed to bind {self.addr}"
+            return
+
+        tcp_backend_set_nonblocking(listen_fd, true)
+
+        val driver = IoDriver.new()
+        var accept_op = driver.submit_accept(listen_fd)
+        driver.flush()
+
+        self.running = true
+        print "EmbeddedHttpServer listening on {self.addr}"
+
+        # op_id -> client_fd tracking
+        var op_to_fd: Dict<i64, i64> = {}
+        # Track whether op is recv (true) or send (false)
+        var op_is_recv: Dict<i64, bool> = {}
+
+        while self.running:
+            driver.flush()
+            val count = driver.poll_count(64, 50)
+
+            var idx = 0
+            while idx < count:
+                val op_id = driver.poll_id(idx)
+                val result = driver.poll_result(idx)
+
+                if op_id == accept_op:
+                    # Accept completion — new connection
+                    accept_op = driver.submit_accept(listen_fd)
+
+                    if result >= 0:
+                        val client_fd = result
+                        tcp_backend_set_nonblocking(client_fd, true)
+                        tcp_backend_set_nodelay(client_fd, true)
+
+                        # Submit recv to read the HTTP request
+                        val recv_op = driver.submit_recv(client_fd, 8192)
+                        op_to_fd[recv_op] = client_fd
+                        op_is_recv[recv_op] = true
+                else:
+                    val fd_opt = op_to_fd.get(op_id)
+                    if fd_opt.?:
+                        val fd = fd_opt as i64
+                        val is_recv = op_is_recv.get(op_id) ?? false
+                        op_to_fd.remove(op_id)
+                        op_is_recv.remove(op_id)
+
+                        if is_recv:
+                            # Recv completion — parse and respond
+                            if result <= 0:
+                                tcp_backend_close(fd)
+                            else:
+                                val data = driver.poll_data(idx)
+                                val response = self._handle_request(data)
+                                val send_op = driver.submit_send(fd, response)
+                                op_to_fd[send_op] = fd
+                                op_is_recv[send_op] = false
+                        else:
+                            # Send completion — close connection
+                            tcp_backend_close(fd)
+
+                idx = idx + 1
+
+        tcp_backend_close(listen_fd)
+        driver.close()
+
+    me stop():
+        """Signal the server to stop after the current poll cycle."""
+        self.running = false
+
+    fn _handle_request(self, data: text) -> text:
+        """Route a raw HTTP request to the matching handler, return serialized response."""
+        val req = parse_embedded_request(data)
+        if not req.?:
+            return embedded_response(400, "Bad Request")
+
+        val request = req as EmbeddedRequest
+
+        # Find matching route
+        for route in self.routes:
+            if route.method == request.method and route.path == request.path:
+                val body = route.handler(request)
+                return embedded_response(200, body)
+
+        # Check if path exists but method doesn't match
+        for route in self.routes:
+            if route.path == request.path:
+                return embedded_response(405, "Method Not Allowed")
+
+        embedded_response(404, "Not Found")
