@@ -129,6 +129,18 @@ fn _run_lab_preflight_with_report(fake_nvme_path: text, fake_sysfs_root: text, r
         15000
     )
 
+fn _run_lab_wrapper_live_capture_settings(serial_path: text, serial_baud: text, serial_seconds: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SERIAL_PORT=/tmp/simpleos_nvme_missing_serial_port SERIAL_BAUD=\"" + serial_baud + "\" " +
+                "sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log \"" + serial_path +
+                "\" --serial-seconds=\"" + serial_seconds + "\""
+        ],
+        15000
+    )
+
 describe "SimpleOS physical NVMe serial checker app":
     it "exits zero for real NVMe evidence and nonzero for q35 emulator evidence":
         val ready_path = "/tmp/simpleos_nvme_serial_check_ready.log"
@@ -240,6 +252,21 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(q35_stdout).to_contain("reason=missing-physical-nvme-marker:hardware_target=real-nvme")
         expect(empty_code).to_equal(1)
         expect(empty_stderr).to_contain("serial log is empty")
+
+    it "rejects invalid live serial capture settings before capture":
+        val serial_path = "/tmp/simpleos_nvme_invalid_capture_settings.log"
+        val _ = rt_file_delete(serial_path)
+
+        val (_bad_baud_stdout, bad_baud_stderr, bad_baud_code) = _run_lab_wrapper_live_capture_settings(serial_path, "fast", "30")
+        val (_zero_seconds_stdout, zero_seconds_stderr, zero_seconds_code) = _run_lab_wrapper_live_capture_settings(serial_path, "115200", "0")
+        val (_bad_seconds_stdout, bad_seconds_stderr, bad_seconds_code) = _run_lab_wrapper_live_capture_settings(serial_path, "115200", "many")
+
+        expect(bad_baud_code).to_equal(2)
+        expect(bad_baud_stderr).to_contain("SERIAL_BAUD must be a positive integer")
+        expect(zero_seconds_code).to_equal(2)
+        expect(zero_seconds_stderr).to_contain("SIMPLEOS_NVME_SERIAL_SECONDS must be a positive integer")
+        expect(bad_seconds_code).to_equal(2)
+        expect(bad_seconds_stderr).to_contain("SIMPLEOS_NVME_SERIAL_SECONDS must be a positive integer")
 
     it "passes report output through the physical NVMe lab wrapper":
         val ready_path = "/tmp/simpleos_nvme_lab_wrapper_report_ready.log"
