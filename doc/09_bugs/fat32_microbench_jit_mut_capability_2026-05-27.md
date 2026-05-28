@@ -90,6 +90,17 @@ calls, but `fat32_4k_compare.spl` still segfaults after the banner, so the
 remaining blocker is native virtual trait call execution for this returned array
 path, not the old mutable sector buffer contract.
 
+Update 2026-05-28 (hosted crash cleared, write proof still blocked): hosted
+`src/compiler_rust/target/debug/simple run
+test/perf/bench/fat32_4k_compare.spl` no longer segfaults. The benchmark now
+uses the shared returned-sector helper for its in-memory block device and
+validates seed writes against FAT open-file state because native
+`Result<i64>.unwrap()` can report `512` even after the file position and size
+advance by `4096`. The read path can produce a faster-than-host-POSIX focused
+number in this in-memory harness, but the write path still skips with
+`failed to write FAT entry`; VFAT/C-FAT same-device baselines remain skipped.
+The faster-than-C FAT claim is therefore still unproven.
+
 ## Reproduce
 
 ```bash
@@ -105,9 +116,9 @@ src/compiler_rust/target/debug/simple test/perf/bench/fat32_microbench.spl
 - Native `fat32_4k_compare.spl` builds and the Simple FAT 4K read/write path
   completes, but host/VFAT baselines are skipped in the self-contained native
   build due unresolved host file SFFI stubs.
-- Hosted `bin/simple run test/perf/bench/fat32_4k_compare.spl` currently
-  segfaults at benchmark startup after virtual trait dispatch is selected for
-  the returned-sector block-device methods.
+- Hosted `src/compiler_rust/target/debug/simple run
+  test/perf/bench/fat32_4k_compare.spl` no longer segfaults, but write setup
+  still fails before a 4K random-write comparison can be proven.
 
 ## Expected
 
