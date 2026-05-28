@@ -14,6 +14,7 @@ Date: 2026-05-28
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | x86_64 minimal boot/stdout capsule | n/a | ok | 2840 | 409 | `build/web_baremetal_size_audit/baremetal_boot_stdout.build.log` |
 | x86_64 interrupt-control capsule | n/a | ok | 1272 | 33 | `build/web_baremetal_size_audit/baremetal_interrupt_control.build.log` |
+| x86_64 startup handoff capsule | n/a | ok | 1936 | 118 | `build/web_baremetal_size_audit/baremetal_startup_handoff.build.log` |
 
 ## Default Regression Budgets
 
@@ -30,6 +31,8 @@ Date: 2026-05-28
 | x86_64 minimal boot/stdout source | 4096 |
 | x86_64 interrupt-control object file / dec section | 1536 / 64 |
 | x86_64 interrupt-control source | 1024 |
+| x86_64 startup handoff object file / dec section | 2048 / 128 |
+| x86_64 startup handoff source | 1024 |
 | Pure Simple console policy source | 2500 |
 | Pure Simple interrupt policy source | 5000 |
 | Pure Simple startup policy source | 3000 |
@@ -43,6 +46,7 @@ Date: 2026-05-28
 | `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15509 | 576503 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 126 | 2982 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
+| `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 35 | 685 |
 | `examples/09_embedded/baremetal/baremetal/pure_policy_probe.spl` | 1 | 31 | 1099 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/console_policy.spl` | 1 | 56 | 1870 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/interrupt_policy.spl` | 1 | 72 | 3315 |
@@ -73,6 +77,7 @@ Date: 2026-05-28
 | Bare-metal pure policy probe | 0 | 0 |
 | x86_64 minimal boot/stdout capsule | 0 | n/a |
 | x86_64 interrupt-control capsule | 0 | n/a |
+| x86_64 startup handoff capsule | 0 | n/a |
 
 ## Direction
 
@@ -84,6 +89,7 @@ Date: 2026-05-28
 - x86_64 SimpleOS size work should split `baremetal_stubs.c` into boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes.
 - `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple.
 - `baremetal_interrupt_control.c` is the x86_64 platform capsule baseline for CLI/STI/HLT and PIC masking only; APIC policy stays in pure Simple until controller code is explicitly imported.
+- `baremetal_startup_handoff.c` is the x86_64 platform capsule baseline for module-init and `spl_start` handoff only; stack/hart policy stays in pure Simple.
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
 - `baremetal/console_policy.spl` is the pure-Simple policy surface for shared semihost/UART stdout selection.
 - `baremetal/semihost_policy.spl` is the pure-Simple policy surface for stdout semihost op selection before importing trap/transport code.
