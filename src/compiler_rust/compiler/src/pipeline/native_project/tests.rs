@@ -25,6 +25,46 @@ fn runtime_bundle_env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn archive_members(path: &Path) -> Option<Vec<String>> {
+    let output = std::process::Command::new(find_archive_tool()).arg("t").arg(path).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    )
+}
+
+fn test_host_object_extension() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "obj"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "o"
+    }
+}
+
+fn with_core_c_https_openssl_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+    let previous = std::env::var("SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL").ok();
+    match value {
+        Some(value) => std::env::set_var("SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL", value),
+        None => std::env::remove_var("SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL"),
+    }
+    let result = f();
+    match previous.as_deref() {
+        Some(value) => std::env::set_var("SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL", value),
+        None => std::env::remove_var("SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL"),
+    }
+    result
+}
+
 fn no_stub_fallback_env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -590,7 +630,9 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
 
-    let core_c = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
+    let core_c = with_core_c_https_openssl_env(None, || {
+        build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build")
+    });
     assert!(
         runtime_archive_has_core_required_symbols(&core_c),
         "core-c runtime archive is missing one or more core-required ABI symbols: {}",
@@ -600,6 +642,23 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(
         core_c_symbols.contains("simd_text_init"),
         "core-c runtime archive must include runtime_simd_utf8.c because runtime_native.c calls simd_text_init"
+    );
+    let core_c_members = archive_members(&core_c).expect("core-c runtime archive members should be readable");
+    let https_object = format!("runtime_https_openssl_core.{}", test_host_object_extension());
+    assert!(
+        !core_c_members.contains(&https_object),
+        "core-c runtime archive should not retain hosted OpenSSL/HTTPS by default"
+    );
+
+    let https_temp = tempfile::tempdir().unwrap();
+    let core_c_with_https = with_core_c_https_openssl_env(Some("1"), || {
+        build_core_c_runtime_library(https_temp.path()).expect("core-c HTTPS runtime archive should build")
+    });
+    let core_c_https_members =
+        archive_members(&core_c_with_https).expect("core-c HTTPS runtime archive members should be readable");
+    assert!(
+        core_c_https_members.contains(&https_object),
+        "SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL=1 should include the hosted OpenSSL/HTTPS capsule"
     );
 
     if let Some(simple_core) = find_abi_complete_simple_core_runtime_library() {

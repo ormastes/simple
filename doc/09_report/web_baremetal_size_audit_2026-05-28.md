@@ -6,10 +6,10 @@ Date: 2026-05-28
 
 | Artifact | Check | Native/ELF Build | Bytes | Dec Section Bytes | Log |
 |---|---|---|---:|---:|---|
-| Browser smoke | ok | ok | 34968 | 28499 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
+| Browser smoke | ok | ok | 34968 | 28427 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
 | Browser simple render HTML | ok | ok | 18512 | 9093 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
-| Simple web static facade | n/a | ok | 18456 | 6895 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
-| Simple web script URL facade | n/a | ok | 34904 | 25049 | `build/web_baremetal_size_audit/simple_web_script_native.log` |
+| Simple web static facade | n/a | ok | 18456 | 6823 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
+| Simple web script URL facade | n/a | ok | 34904 | 24977 | `build/web_baremetal_size_audit/simple_web_script_native.log` |
 | Bare-metal pure policy probe | ok | ok | 14336 | 5796 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | x86_64 minimal boot/stdout capsule | n/a | ok | 2840 | 409 | `build/web_baremetal_size_audit/baremetal_boot_stdout.build.log` |
@@ -57,9 +57,9 @@ Date: 2026-05-28
 
 ## Retention Checks
 
-| Artifact | Forbidden Marker Matches |
-|---|---:|
-| Bare-metal pure policy probe | 0 |
+| Artifact | Forbidden Binary Marker Matches | Forbidden Build Log Marker Matches |
+|---|---:|---:|
+| Bare-metal pure policy probe | 0 | 0 |
 
 ## Direction
 

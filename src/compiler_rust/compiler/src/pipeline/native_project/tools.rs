@@ -149,11 +149,10 @@ fn find_core_c_runtime_source_root() -> Option<PathBuf> {
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root()?;
-    let runtime_inputs = [
+    let mut runtime_inputs = vec![
         "runtime_native.c",
         "runtime_legacy_core.c",
         "runtime_mcp_core.c",
-        "runtime_https_openssl_core.c",
         "runtime_simd_utf8.c",
         "runtime_value.h",
         "runtime.h",
@@ -163,6 +162,9 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         "runtime_thread.h",
         "platform/platform.h",
     ];
+    if std::env::var("SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL").ok().as_deref() == Some("1") {
+        runtime_inputs.push("runtime_https_openssl_core.c");
+    }
 
     if has_nonempty_archive_payload(&archive)
         && archive_is_fresh_for_runtime_inputs(&archive, &runtime_root, &runtime_inputs)
