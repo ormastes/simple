@@ -28,6 +28,8 @@ use std.io.quic.quic_connection.{
 use std.io.quic.quic_stream.{QuicStream}
 use std.io.quic.quic_crypto.{QuicEncryptionLevel}
 
+extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
+
 # ============================================================================
 # Connection ID generation — stub
 # ============================================================================
@@ -224,8 +226,9 @@ class QuicTransport:
                     val action = actions[i]
                     match action:
                         case SendPacket(pkt_data, addr):
-                            # In a real impl, call rt_io_udp_send_to here
-                            pass
+                            # Binary-safe: send directly via extern
+                            if self.udp_fd >= 0:
+                                rt_io_udp_send_to(self.udp_fd, pkt_data, addr)
                         case StreamReady(stream_id):
                             events.push(TransportEvent.StreamReady(
                                 conn_key: key, stream_id: stream_id
@@ -267,14 +270,16 @@ class QuicTransport:
     # Outbound operations
     # ------------------------------------------------------------------
 
-    me send_packet(conn_key: text, packet: [u8], peer_addr: text):
+    me send_packet(conn_key: text, packet: [u8], peer_addr: text) -> i64:
         """Send a raw QUIC packet via the UDP socket.
 
-        In a real implementation this calls rt_io_udp_send_to on self.udp_fd.
-        Stubbed for now — the packet bytes are ready to transmit.
+        Binary-safe: calls rt_io_udp_send_to directly, bypassing
+        IoDriver's text-based send path to avoid byte corruption.
+        Returns bytes sent, or -1 on error.
         """
-        # TODO: [transport][P2] wire rt_io_udp_send_to(self.udp_fd, packet, peer_addr)
-        pass
+        if self.udp_fd < 0:
+            return -1
+        return rt_io_udp_send_to(self.udp_fd, packet, peer_addr)
 
     me send_stream_data(conn_key: text, stream_id: i64, data: [u8]) -> [u8]:
         """Send data on a stream. Returns the raw packet bytes produced.
