@@ -56,8 +56,8 @@ Current required q35 serial evidence shape:
 
 ```text
 [real-device] storage_provider=simple-driver network_provider=simple-driver storage_placement=user-space-driver system_storage_placement=system-driver network_placement=user-space-driver storage_namespace=non-secure-resource-namespace network_namespace=non-secure-resource-namespace storage_grant=resource-grant-set:tok=nvme0 network_grant=resource-grant-set:tok=net0 common_driver_logic=shared
-user_namespace_assignment=hardware-data-queue user_namespace_mode=user-assigned user_namespace_nsid=2 user_namespace_queue_id=2 user_namespace_active_lease_count=1 user_namespace_direct_io=read-write user_namespace_shared_interface=fat32,nvfs,dbfs user_namespace_conflict_policy=active-lease-checked
-nvme_perf reason=ready simple_provider=simple-driver workload=4k-random-read-write io_size_bytes=4096 direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs fat32_direct_io=read-write nvfs_direct_io=read-write dbfs_direct_io=read-write fat32_extent_source=freestanding-fat32-extents nvfs_extent_source=freestanding-dbfs-arena dbfs_extent_source=freestanding-dbfs-arena c_bridge_used=false c_baseline_device=same-nvme c_baseline_scope=in-guest c_baseline_cache=direct common_logic_shared=true allocation_per_io=false simple_read_iops=1393 simple_write_iops=1488 simple_read_p99_us=7548 simple_write_p99_us=2732 c_read_iops=80 c_write_iops=130 c_read_p99_us=38520 c_write_p99_us=90928 queue_depth=128 warm_runs=3 max_rss_kib=1
+user_namespace_assignment=hardware-data-queue user_namespace_mode=user-assigned user_namespace_nsid=2 user_namespace_queue_id=2 user_namespace_active_lease_count=1 user_namespace_direct_io=read-write-through user_namespace_shared_interface=fat32,nvfs,dbfs user_namespace_conflict_policy=active-lease-checked
+nvme_perf reason=ready simple_provider=simple-driver workload=4k-random-read-write io_size_bytes=4096 direct_io_path=nvme-lease-shared-dma-4k fs_consumers=fat32,nvfs,dbfs fat32_direct_io=read-write-through nvfs_direct_io=read-write-through dbfs_direct_io=read-write-through fat32_extent_source=freestanding-fat32-extents nvfs_extent_source=freestanding-dbfs-arena dbfs_extent_source=freestanding-dbfs-arena c_bridge_used=false c_baseline_device=same-nvme c_baseline_scope=in-guest c_baseline_cache=direct common_logic_shared=true allocation_per_io=false simple_read_iops=1393 simple_write_iops=1488 simple_read_p99_us=7548 simple_write_p99_us=2732 c_read_iops=80 c_write_iops=130 c_read_p99_us=38520 c_write_p99_us=90928 queue_depth=128 warm_runs=3 max_rss_kib=1
 TEST PASSED
 ```
 
@@ -98,11 +98,11 @@ identity fields and user namespace evidence:
 `user_namespace_assignment=hardware-data-queue`,
 `user_namespace_mode=user-assigned`, `user_namespace_nsid=...`,
 `user_namespace_queue_id=...`, `user_namespace_active_lease_count=...`,
-`user_namespace_direct_io=read-write`,
+`user_namespace_direct_io=read-write-through`,
 `user_namespace_shared_interface=fat32,nvfs,dbfs`,
 `user_namespace_conflict_policy=active-lease-checked`,
-`fat32_direct_io=read-write`, `nvfs_direct_io=read-write`,
-`dbfs_direct_io=read-write`, `c_baseline_device=same-nvme`,
+`fat32_direct_io=read-write-through`, `nvfs_direct_io=read-write-through`,
+`dbfs_direct_io=read-write-through`, `c_baseline_device=same-nvme`,
 `c_baseline_scope=in-guest`, and `c_baseline_cache=direct`.
 Real-device runners now have the canonical helper
 `nvme_real_hardware_perf_report_line_from_measurements` to produce that accepted
