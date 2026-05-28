@@ -349,6 +349,9 @@ fn jit_hotspot_rebuild_plan_with_cost_budget(
         )
     plan
 
+fn jit_hotspot_llvm_preference_threshold(config: TieredJitConfig) -> i64:
+    config.tier2_threshold * 2
+
 fn jit_hotspot_rebuild_choice(
     profile: FunctionProfile,
     config: TieredJitConfig,
@@ -357,7 +360,8 @@ fn jit_hotspot_rebuild_choice(
     max_cost_class: text
 ) -> JitHotspotRebuildChoice:
     var attempted: [text] = []
-    val llvm_plan = jit_hotspot_rebuild_plan_with_cost_budget(profile, config, "llvm", llvm_available, max_cost_class)
+    val llvm_heat_preferred = profile.call_count >= jit_hotspot_llvm_preference_threshold(config)
+    val llvm_plan = jit_hotspot_rebuild_plan_with_cost_budget(profile, config, "llvm", llvm_available and ((not cranelift_available) or llvm_heat_preferred), max_cost_class)
     attempted = attempted.push("llvm")
     if llvm_plan.eligible:
         return JitHotspotRebuildChoice(
@@ -387,6 +391,8 @@ fn jit_hotspot_rebuild_choice(
         "no backend available"
     elif llvm_plan.reason == "cost budget exceeded":
         "llvm cost budget exceeded"
+    elif llvm_available and cranelift_available and profile.call_count >= config.tier2_threshold and not llvm_heat_preferred:
+        "llvm heat margin not reached"
     elif profile.call_count < config.tier1_threshold:
         "missing tier1 hot_count"
     else:
