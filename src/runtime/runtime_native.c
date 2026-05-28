@@ -1549,6 +1549,81 @@ int64_t rt_dict_len(SplDict* d) {
  * rt_file_copy, rt_file_size, rt_file_stat, rt_file_append
  * are already defined in runtime.c */
 
+static char* rt_core_string_to_cpath(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return NULL;
+    char* out = (char*)malloc((size_t)s->len + 1);
+    if (!out) return NULL;
+    if (s->len > 0) memcpy(out, s->data, (size_t)s->len);
+    out[s->len] = '\0';
+    return out;
+}
+
+static const uint8_t* rt_core_string_bytes(int64_t value, uint64_t* len_out) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) {
+        *len_out = 0;
+        return NULL;
+    }
+    *len_out = s->len;
+    return (const uint8_t*)s->data;
+}
+
+const char* rt_file_read_text_at(const char* path_value, int64_t offset, int64_t size) {
+    char* path = rt_core_string_to_cpath((int64_t)(uintptr_t)path_value);
+    if (!path || offset < 0) {
+        if (path) free(path);
+        return "";
+    }
+    if (size <= 0) {
+        free(path);
+        return "";
+    }
+
+    int fd = open(path, O_RDONLY);
+    free(path);
+    if (fd < 0) return "";
+
+    char* buffer = (char*)malloc((size_t)size + 1);
+    if (!buffer) {
+        close(fd);
+        return "";
+    }
+
+    ssize_t bytes_read = pread(fd, buffer, (size_t)size, (off_t)offset);
+    close(fd);
+    if (bytes_read < 0) {
+        free(buffer);
+        return "";
+    }
+
+    buffer[bytes_read] = '\0';
+    return buffer;
+}
+
+int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value) {
+    char* path = rt_core_string_to_cpath(path_value);
+    uint64_t data_len = 0;
+    const uint8_t* data = rt_core_string_bytes(data_value, &data_len);
+    int64_t offset = rt_core_is_int(offset_value) ? rt_core_as_int(offset_value) : offset_value;
+    if (!path || !data || offset < 0) {
+        if (path) free(path);
+        return -1;
+    }
+    if (data_len == 0) {
+        free(path);
+        return 0;
+    }
+
+    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    free(path);
+    if (fd < 0) return -1;
+
+    ssize_t bytes_written = pwrite(fd, data, (size_t)data_len, (off_t)offset);
+    close(fd);
+    return (int64_t)bytes_written;
+}
+
 void* rt_file_open(const char* path, const char* mode) {
     if (!path || !mode) return NULL;
     return (void*)fopen(path, mode);

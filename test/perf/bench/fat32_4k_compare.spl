@@ -130,14 +130,24 @@ fn _fill_bytes(n: i64, value: u8) -> [u8]:
     _byte_buf(n, value)
 
 fn _fill_text(n: i64) -> text:
-    var chunk = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    var s = ""
-    while s.len() < n:
-        s = s + chunk
-    s
+    val chunk = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    if n <= 256:
+        chunk
+    else:
+        chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk + chunk
 
 fn _rand_block(i: i64, block_count: i64) -> i64:
     ((i * 1103515245 + 12345) & 0x7FFFFFFF) % block_count
+
+fn prepare_host_file(path: text, block_count: i64) -> bool:
+    val block = _fill_text(4096)
+    var b: i64 = 0
+    while b < block_count:
+        val wrote = file_write_text_at(path, b * 4096, block)
+        if wrote < 4096:
+            return false
+        b = b + 1
+    true
 
 fn percentile(latencies: [i64], pct: i64) -> i64:
     val n = latencies.len()
@@ -228,8 +238,6 @@ fn bench_host_read_at(iters: i64, block_count: i64, path: text, name: text) -> B
         val offset = _rand_block(i, block_count) * 4096
         val t0 = time_now_unix_micros()
         val _r = file_read_text_at(path, offset, 4096)
-        if _r.len() < 4096:
-            return BenchResult(name: name, p50_us: 999999999, p99_us: 999999999, skipped: true)
         latencies.push(time_now_unix_micros() - t0)
         i = i + 1
     BenchResult(name: name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99), skipped: false)
@@ -249,10 +257,16 @@ fn bench_host_write_at(iters: i64, block_count: i64, path: text, name: text) -> 
     BenchResult(name: name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99), skipped: false)
 
 fn bench_host_read(iters: i64, block_count: i64) -> BenchResult:
-    bench_host_read_at(iters, block_count, "/tmp/simple_fat32_4k_host_read.bin", "host_posix_read4k")
+    val path = "/tmp/simple_fat32_4k_host_read.bin"
+    if not prepare_host_file(path, block_count):
+        return BenchResult(name: "host_posix_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    bench_host_read_at(iters, block_count, path, "host_posix_read4k")
 
 fn bench_host_write(iters: i64, block_count: i64) -> BenchResult:
-    bench_host_write_at(iters, block_count, "/tmp/simple_fat32_4k_host_write.bin", "host_posix_write4k")
+    val path = "/tmp/simple_fat32_4k_host_write.bin"
+    if not prepare_host_file(path, block_count):
+        return BenchResult(name: "host_posix_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    bench_host_write_at(iters, block_count, path, "host_posix_write4k")
 
 fn bench_vfat_read(iters: i64, block_count: i64) -> BenchResult:
     bench_host_read_at(iters, block_count, "/tmp/simple_vfat_bench_mnt/simple_fat32_4k_vfat_read.bin", "c_fat_vfat_read4k")
@@ -271,16 +285,16 @@ fn main():
     val blocks: i64 = 8
     print "=== FAT32 4K focused comparison ==="
     val sr = bench_simple_read(iters, blocks)
+    print_result(sr)
     val sw = bench_simple_write(iters, blocks)
-    val hr = BenchResult(name: "host_posix_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
-    val hw = BenchResult(name: "host_posix_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    print_result(sw)
+    val hr = bench_host_read(iters, blocks)
+    print_result(hr)
+    val hw = bench_host_write(iters, blocks)
+    print_result(hw)
     val vr = BenchResult(name: "c_fat_vfat_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
     val vw = BenchResult(name: "c_fat_vfat_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
-    print_result(sr)
-    print_result(hr)
     print_result(vr)
-    print_result(sw)
-    print_result(hw)
     print_result(vw)
     if not hr.skipped and sr.p50_us < hr.p50_us:
         print "read4k: simple_fat32 faster"
