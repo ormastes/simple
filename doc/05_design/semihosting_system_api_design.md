@@ -14,7 +14,7 @@ This document designs a minimal semihosting-based system API for bare-metal targ
 - Minimal API: Limited file I/O + byte-saved system print
 - Compile-time print string to handle_id conversion
 - Host-side `semi_host_reader` reconstructs strings from SMF
-- Support for ARM, RISC-V, and x86 semihosting methods
+- Support for ARM/Thumb, AArch64, RISC-V, and x86 semihosting methods
 - 10-100x reduction in print-related code size (similar to defmt)
 
 ---
@@ -100,7 +100,29 @@ srai zero, zero, 0x7    # Magic: Exit NOP
 - SEGGER Ozone: Native RISC-V semihosting support (Oct 2024+)
 - Trace32: `SYStem.Option SemiHost ON`
 
-### 1.3 x86 Semihosting (QEMU)
+### 1.3 AArch64 Semihosting
+
+**Mechanism**: HLT instruction with the semihost immediate value detected by
+QEMU or debugger semihosting support.
+
+**Instruction Sequence (AArch64):**
+```asm
+# AArch64 semihosting trigger
+mov x0, #operation
+ldr x1, =params
+hlt #0xF000
+
+# x0 = operation number
+# x1 = parameter block pointer
+# Return value in x0
+```
+
+**Measured Capsule**:
+`src/lib/nogc_async_mut_noalloc/baremetal/arm64/semihost_trap.S` keeps only
+the HLT trap and write0/exit register shims in the platform capsule. Stdout
+operation selection remains in pure Simple policy.
+
+### 1.4 x86 Semihosting (QEMU)
 
 **Mechanism**: Port I/O to ISA debug exit device or special CPUID calls.
 
@@ -123,16 +145,16 @@ mov al, character
 out dx, al
 ```
 
-### 1.4 Comparison Summary
+### 1.5 Comparison Summary
 
-| Feature | ARM | RISC-V | x86 (QEMU) |
-|---------|-----|--------|------------|
-| Trigger | SVC/BKPT | EBREAK + magic | Port I/O |
-| Detection | DCC/JTAG | Debug Module | Emulator trap |
-| Ops | 20+ standard | Same as ARM | Limited |
-| Overhead | ~100 cycles | ~50-100 cycles | Varies |
-| Real HW | Yes | Yes | Emulator only |
-| Trace32 | Yes | Yes | N/A |
+| Feature | ARM/Thumb | AArch64 | RISC-V | x86 (QEMU) |
+|---------|-----------|---------|--------|------------|
+| Trigger | SVC/BKPT | HLT #0xF000 | EBREAK + magic | Port I/O |
+| Detection | DCC/JTAG | Debugger/QEMU | Debug Module | Emulator trap |
+| Ops | 20+ standard | Same as ARM | Same as ARM | Limited |
+| Overhead | ~100 cycles | Debug trap | ~50-100 cycles | Varies |
+| Real HW | Yes | Yes | Yes | Emulator only |
+| Trace32 | Yes | Target-dependent | Yes | N/A |
 
 ---
 
