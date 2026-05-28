@@ -672,7 +672,7 @@ Tests are classified by platform compatibility:
 
 ### Shared Test Requirements
 
-A test is shared (`# @platform: all`) when it has zero imports, uses only built-in `describe`/`it`/`expect` matchers, uses only core language features, and does NOT use file I/O, networking, threading, or timers.
+A test is shared (`# @platform: all`) when it has zero imports, uses only built-in `describe`/`context`/`it`/`expect` matchers, uses only core language features, and does NOT use file I/O, networking, threading, or timers.
 
 ### Runtime Skip Helpers
 

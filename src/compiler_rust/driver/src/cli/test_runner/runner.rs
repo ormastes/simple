@@ -650,6 +650,9 @@ fn platform_tags_match(path: &Path, mode: &TestExecutionMode) -> bool {
 }
 
 fn platform_tag_matches_mode(tag: &str, mode: &TestExecutionMode) -> bool {
+    if tag == "all" {
+        return true;
+    }
     match mode {
         TestExecutionMode::Composite(spec) => tag == "composite" || spec.contains(tag),
         _ => false,
@@ -1567,8 +1570,8 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::handle_run_management_with_db;
-    use crate::cli::test_runner::types::{OutputFormat, TestOptions};
+    use super::{handle_run_management_with_db, platform_tag_matches_mode};
+    use crate::cli::test_runner::types::{OutputFormat, TestExecutionMode, TestOptions};
     use crate::test_db::{TestRunRecord, TestRunStatus, list_runs};
     use crate::unified_db::Database;
 
@@ -1598,5 +1601,19 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, "run_stale_for_list");
         assert_eq!(runs[0].status, TestRunStatus::Crashed);
+    }
+
+    #[test]
+    fn platform_all_tag_matches_default_interpreter_mode() {
+        assert!(platform_tag_matches_mode("all", &TestExecutionMode::Interpreter));
+    }
+
+    #[test]
+    fn platform_specific_tag_still_requires_matching_composite_mode() {
+        assert!(!platform_tag_matches_mode("baremetal", &TestExecutionMode::Interpreter));
+        assert!(platform_tag_matches_mode(
+            "baremetal",
+            &TestExecutionMode::Composite("interpreter(remote(baremetal(riscv32)))".to_string())
+        ));
     }
 }

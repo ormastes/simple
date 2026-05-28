@@ -166,6 +166,7 @@ baseline and reports improvements or regressions:
 | Category | Directory | Purpose |
 |----------|-----------|---------|
 | Unit | `test/unit/` | Single module/function tests |
+| Shared | `test/shared/` | Import-free cross-platform specs marked `# @platform: all` |
 | Integration | `test/integration/` | Cross-module tests |
 | Feature | `test/feature/` | Language feature BDD specs |
 | System | `test/system/` | End-to-end pipeline tests |
@@ -174,18 +175,19 @@ baseline and reports improvements or regressions:
 
 - Keep one scenario source per behavior-oriented `*_spec.spl` file.
 - Put unit tests under `test/unit/<source-area>/...`.
+- Put import-free cross-platform specs under `test/shared/<domain>/...`; shared specs may use built-in `describe`/`context`/`it`/`expect` only.
 - Put cross-module tests under `test/integration/<source-area>/...`.
 - Put user-visible feature BDD tests under `test/feature/<domain>/...`.
 - Put end-to-end workflows under `test/system/<domain>/...`.
 - Generated manual/spec docs live at the matching `doc/06_spec/<same path>.md`.
 - Requirement, research, design, plan, implementation, guide, and generated spec
   links should use the same feature slug so traceability scans can match them.
-- Treat older executable top-level suites outside `unit/`, `integration/`,
-  `feature/`, and `system/` as transitional unless maintaining an existing
-  suite in place. Do not add a new top-level test category without documenting
-  why it cannot fit the canonical buckets.
-- Keep support assets such as baselines, fixtures, generated data, and shared
-  helpers separate from executable scenario placement decisions.
+- Treat older executable top-level suites outside `unit/`, `shared/`,
+  `integration/`, `feature/`, and `system/` as transitional unless maintaining
+  an existing suite in place. Do not add a new top-level test category without
+  documenting why it cannot fit the canonical buckets.
+- Keep support assets such as baselines, fixtures, generated data, and helper
+  modules separate from executable scenario placement decisions.
 
 ## Known Limitations
 

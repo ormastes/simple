@@ -1,16 +1,49 @@
-# SSPEC Traceability Migration Map
+# SPipe Traceability Migration Map
 
 Date: 2026-05-28
 
-Scope: planning only. Do not move files from this map until the source SPipe
-owner is confirmed and the generated markdown path can be regenerated or moved
-without losing traceability metadata.
+Scope: planning and restart map for the former `sspec` documentation/test
+layout. `sspec` is obsolete; use SPipe names for new work. Do not move files
+from this map until the source SPipe owner is confirmed and the generated
+markdown path can be regenerated or moved without losing traceability metadata.
+
+## Status
+
+**Map current; migration incomplete.** This map now reflects the current tree,
+including completed batches and remaining root/legacy files requiring
+decisions. Resolve the open items below before more broad `doc/06_spec/` or
+`test/` movement.
+
+Current root/legacy audit from the worktree:
+
+| Area | Current state | Required action |
+|---|---|---|
+| Root navigation | `doc/06_spec/INDEX.md`, `doc/06_spec/README.md` | Keep at root. |
+| Root data/catalog | `bootstrap_test_gate.sdn`, `feature.md`, `feature_db.sdn`, `pending_feature.md` | Trace producers/consumers before moving. |
+| Root generated math docs | `loss_nograd_blocks_spec.md`, `math_blocks_spec.md`, `math_render_spec.md` | Compare with mirrored `doc/06_spec/feature/usage/*` and compiler legacy copies; keep one canonical generated doc per source spec. |
+| Legacy generated index | `legacy/test-spec.md`, `legacy/test-spec.html` | Delete or archive after confirming no doc-nav fixture depends on them. |
+| Legacy live TRACE32 doc | `legacy/trace32_stm32h7_jit_e2e_spec.md` | Regenerate/move to `doc/06_spec/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.md`. |
+| Runtime manual contract | `runtime/rt_gui_glass_contract.md` | Decide whether it is a manual runtime contract or needs an executable source spec. |
+| Generated/category folders | `generated/pending_feature.md`, `categories/*.md`, `diagrams/.gitkeep` | Leave until generator ownership is traced. |
+
+Current `test/` top-level roots still needing policy/migration review:
+`test/app`, `test/browser_engine`, `test/compiler`, `test/dbfs`, `test/fuzz`,
+`test/hal`, `test/js`, `test/kernel`, `test/lib`, `test/nvfs`, `test/os`,
+`test/qemu`, `test/reftest`, `test/riscv64_fpga`, `test/rtl`,
+`test/runtime`, `test/sffi`, `test/tools`, and
+`test/web_platform`. `test/baselines`, `test/fixtures`, `test/perf`,
+`test/shared`, `test/system`, `test/unit`, `test/integration`, and
+`test/feature` already have an explicit role.
 
 ## Current Shape
 
-- Canonical spec docs already mostly live under `doc/06_spec/app/...`: 422 files.
-- Root-level `doc/06_spec` still has 34 files, including indexes, SDN data, and
-  generated or legacy markdown.
+- Canonical spec docs mostly live under mirrored subtrees, but legacy
+  `doc/06_spec/app/compiler/...` docs still coexist with newer
+  `doc/06_spec/feature/...`, `unit/...`, `integration/...`, and `system/...`
+  docs.
+- Root-level `doc/06_spec` currently has nine files: two navigation docs, four
+  catalog/data files, and three generated math docs that still need a duplicate
+  comparison decision.
 - Additional legacy buckets: `doc/06_spec/legacy/*` and
   `doc/06_spec/runtime/rt_gui_glass_contract.md`.
 - `doc/06_spec/README.md` now defines mirrored layout from `test/...` to
@@ -33,12 +66,14 @@ without losing traceability metadata.
 ### 2026-05-28 Batch 1
 
 Moved high-confidence one-to-one generated/manual specs whose executable source
-path was known and whose mirrored target did not already exist:
+path was known and whose mirrored target did not already exist. Current audit:
+the root math docs from this batch still exist and are non-identical to their
+mirrored copies, so they remain open duplicate-resolution items.
 
 | Old path | New mirrored path |
 |---|---|
-| `doc/06_spec/loss_nograd_blocks_spec.md` | `doc/06_spec/feature/usage/loss_nograd_blocks_spec.md` |
-| `doc/06_spec/math_render_spec.md` | `doc/06_spec/feature/usage/math_render_spec.md` |
+| `doc/06_spec/loss_nograd_blocks_spec.md` | `doc/06_spec/feature/usage/loss_nograd_blocks_spec.md` (open duplicate; root still exists) |
+| `doc/06_spec/math_render_spec.md` | `doc/06_spec/feature/usage/math_render_spec.md` (open duplicate; root still exists) |
 | `doc/06_spec/ch32v307_composite_runner_path_spec.md` | `doc/06_spec/integration/remote_jit/ch32v307_composite_runner_path_spec.md` |
 | `doc/06_spec/qemu_rv32_raw_injected_regression_spec.md` | `doc/06_spec/integration/remote_jit/qemu_rv32_raw_injected_regression_spec.md` |
 | `doc/06_spec/legacy/command_dispatch_spec.md` | `doc/06_spec/unit/app/tooling/command_dispatch_spec.md` |
@@ -95,14 +130,13 @@ comparison pass.
 ### 2026-05-28 Batch 4
 
 Resolved high-confidence root docs whose executable specs already live in
-canonical `test/feature/...` paths. The `math_blocks_spec` duplicate copies
-under `doc/06_spec/app/compiler/...` were byte-for-byte identical to the root
-copy, so the mirrored `feature/usage` doc was kept and the duplicates were
-removed.
+canonical `test/feature/...` paths. Current audit: the root
+`math_blocks_spec.md` still exists and is non-identical to the mirrored
+`feature/usage` copy, so it remains an open duplicate-resolution item.
 
 | Old path | New mirrored path |
 |---|---|
-| `doc/06_spec/math_blocks_spec.md` | `doc/06_spec/feature/usage/math_blocks_spec.md` |
+| `doc/06_spec/math_blocks_spec.md` | `doc/06_spec/feature/usage/math_blocks_spec.md` (open duplicate; root still exists) |
 | `doc/06_spec/remote_baremetal_library_spec.md` | `doc/06_spec/feature/app/remote_baremetal/remote_baremetal_library_spec.md` |
 | `doc/06_spec/remote_baremetal_runtime_spec.md` | `doc/06_spec/feature/app/remote_baremetal/remote_baremetal_runtime_spec.md` |
 
@@ -299,14 +333,28 @@ agent roundtrip fixture, now under `test/fixtures/data/agents/`.
 |---|---|
 | `test/data/agents/test_roundtrip_001.txt` | `test/fixtures/data/agents/test_roundtrip_001.txt` |
 
-`test/shared` was inspected during the next slice and should not be treated as
-a fixture bucket. It contains executable `# @platform: all` SPipe specs. The
-restart decision is either:
+`test/shared` was inspected during the next slice and is now kept as the
+canonical executable cross-platform tier for `# @platform: all` SPipe specs.
+It is not a fixture bucket and should not be moved to `test/unit/shared`.
 
 | Option | Consequence |
 |---|---|
-| Keep `test/shared` | Finish/rebuild runner discovery support so single-file and directory runs discover these specs. |
-| Move to `test/unit/shared` | Update platform docs and move each `summary.txt` evidence directory with its spec. |
+| Keep `test/shared` | Done; single-file and directory runs now discover and execute these specs. |
+| Move to `test/unit/shared` | Rejected; this would contradict the platform-tier guide and existing evidence layout. |
+
+### 2026-05-28 Batch 19
+
+Resolved the only imported spec in `test/shared`. The contract testing helper
+coverage imports `lib.common.contract` and exercises mock-server/provider/broker
+surfaces, so it is unit coverage for `lib/common/contracts`, not shared/core
+cross-platform coverage. The shared guide now explicitly allows the built-in
+`context` BDD helper used by otherwise import-free shared specs.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/shared/types/contract_spec.spl` | `test/unit/lib/common/contracts/contract_testing_spec.spl` |
+| `test/shared/types/contract/summary.txt` | `test/unit/lib/common/contracts/contract/summary.txt` |
+| - | `doc/06_spec/unit/lib/common/contracts/contract_testing_spec.md` |
 
 ## Root-Level Files
 
@@ -324,10 +372,10 @@ restart decision is either:
 | `doc/06_spec/feature.md` | Feature category inventory | generated/catalog TBD | Do not move until inventory generator ownership is known. |
 | `doc/06_spec/feature_db.sdn` | `test/unit/app/tooling/feature_db_spec.spl` plus stats tooling | data owner TBD | Leave in place; document consumer before moving. |
 | `doc/06_spec/feature/language/functions_spec.md` | `test/feature/language/functions_spec.spl` | `doc/06_spec/feature/language/functions_spec.md` | Confirm `test/feature/language` destination; regenerate. |
-| `doc/06_spec/loss_nograd_blocks_spec.md` | `test/feature/usage/loss_nograd_blocks_spec.spl` | `doc/06_spec/feature/usage/loss_nograd_blocks_spec.md` | Done in Batch 1. |
+| `doc/06_spec/loss_nograd_blocks_spec.md` | `test/feature/usage/loss_nograd_blocks_spec.spl` | `doc/06_spec/feature/usage/loss_nograd_blocks_spec.md` | Safe root cleanup after regenerating/updating canonical mirrored doc; audit found only the `Updated` date differs from the mirrored copy. |
 | `doc/06_spec/feature/language/macro_spec.md` | `test/feature/language/macro_spec.spl` | `doc/06_spec/feature/language/macro_spec.md` | Confirm `test/feature/language` destination; regenerate. |
-| `doc/06_spec/feature/usage/math_blocks_spec.md` | `test/feature/usage/math_blocks_spec.spl`; removed identical duplicates under `app/compiler/feature` and `app/compiler/feature/usage` | `doc/06_spec/feature/usage/math_blocks_spec.md` | Done in Batch 4. |
-| `doc/06_spec/math_render_spec.md` | `test/feature/usage/math_render_spec.spl` | `doc/06_spec/feature/usage/math_render_spec.md` | Done in Batch 1. |
+| `doc/06_spec/feature/usage/math_blocks_spec.md` | `test/feature/usage/math_blocks_spec.spl`; root duplicate still exists | `doc/06_spec/feature/usage/math_blocks_spec.md` | Safe root cleanup after canonical regeneration; keep the richer mirrored doc, not the shorter root scenario list. |
+| `doc/06_spec/math_render_spec.md` | `test/feature/usage/math_render_spec.spl` | `doc/06_spec/feature/usage/math_render_spec.md` | Safe root cleanup after regenerating/updating canonical mirrored doc; audit found only the `Updated` date differs from the mirrored copy. |
 | `doc/06_spec/feature/language/memory_spec.md` | `test/feature/language/memory_spec.spl` | `doc/06_spec/feature/language/memory_spec.md` | Confirm `test/feature/language` destination; regenerate. |
 | `doc/06_spec/metaprogramming.md` | `test/feature/usage/metaprogramming_spec.spl`; also `test/feature/language/macro_spec.spl` hints | `doc/06_spec/feature/usage/metaprogramming_spec.md` | Done in Batch 3; macro overlap remains a later comparison task. |
 | `doc/06_spec/feature/language/modules_spec.md` | `test/feature/language/modules_spec.spl` | `doc/06_spec/feature/language/modules_spec.md` | Confirm `test/feature/language` destination; regenerate. |
@@ -351,10 +399,10 @@ restart decision is either:
 
 | File | Likely owner | Canonical target | Safe next move |
 |---|---|---|---|
-| `doc/06_spec/legacy/INDEX.md` | Legacy navigation | keep or delete after legacy bucket empties | Keep until all legacy children are migrated. |
+| `doc/06_spec/legacy/INDEX.md` | Legacy navigation | delete after legacy bucket empties | Stale; safe to delete after the TRACE32 legacy doc is migrated. |
 | `doc/06_spec/legacy/command_dispatch_spec.md` | `test/unit/app/tooling/command_dispatch_spec.spl` | `doc/06_spec/unit/app/tooling/command_dispatch_spec.md` | Done in Batch 1. |
-| `doc/06_spec/legacy/test-spec.html` | Old docgen fixture/output | archive/delete candidate | Confirm no doc navigation or fixture test depends on it. |
-| `doc/06_spec/legacy/test-spec.md` | Old docgen fixture/output | archive/delete candidate | Confirm no doc navigation or fixture test depends on it. |
+| `doc/06_spec/legacy/test-spec.html` | Old docgen fixture/output | archive/delete candidate | Exact-path search found only migration-map references; safe after doc-nav fixture confirmation. |
+| `doc/06_spec/legacy/test-spec.md` | Old docgen fixture/output | archive/delete candidate | Exact-path search found only migration-map references; safe after doc-nav fixture confirmation. |
 | `doc/06_spec/legacy/test_runner_simple_spec.md` | `test/unit/app/tooling/test_runner_simple_spec.spl` | `doc/06_spec/unit/app/tooling/test_runner_simple_spec.md` | Done in Batch 1. |
 | `doc/06_spec/legacy/trace32_stm32h7_jit_e2e_spec.md` | `test/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.spl` | `doc/06_spec/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.md` | Regenerate from feature spec. |
 | `doc/06_spec/runtime/rt_gui_glass_contract.md` | Runtime GUI manual contract; no direct source spec found | `doc/06_spec/runtime/gui/rt_gui_glass_contract.md` or design doc | Manual review; add source spec if this remains a release contract. |
@@ -379,4 +427,6 @@ restart decision is either:
    `test/reftest`, `test/riscv64_fpga`, `test/rtl`, `test/runtime`,
    `test/sffi`, `test/tools`, `test/web_platform`). Treat these as separate
    batches because CI and baseline paths may call them directly. `test/shared`
-   is a separate cross-platform runner decision, not a fixture cleanup.
+   is now resolved as a canonical cross-platform runner tier, not a fixture
+   cleanup; its known imported contract spec has moved to the unit contract
+   helper bucket.

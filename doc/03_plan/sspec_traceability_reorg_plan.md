@@ -105,27 +105,25 @@ Generated/manual SPipe docs mirror executable test paths:
 - Removed top-level `test/data/` by moving the agent roundtrip support fixture
   to `test/fixtures/data/agents/` and changing the synthetic IO path in
   `test/integration/app/io_intensive_spec.spl` to the fixture namespace.
-- Interrupted checkpoint: inspected `test/shared/` and found executable
-  `# @platform: all` SPipe specs, not fixtures. Source changes were started so
-  shared paths are runner-visible cross-platform coverage:
-  `src/compiler_rust/driver/src/cli/test_discovery.rs`,
-  `src/app/test_runner_new/*`, and copied `src/lib/*/test_runner/*` files.
-  Unit coverage was added in `test/unit/app/test_runner/...`, but the installed
-  `bin/simple` still discovers zero files for
-  `test/shared/core/primitives_spec.spl` until the Rust CLI path is rebuilt or
-  the shared-tier policy is finalized.
+- Kept `test/shared/` as the canonical executable cross-platform tier for
+  `# @platform: all` SPipe specs. Runner discovery now treats shared specs as
+  unit-level coverage, the platform filter accepts `# @platform: all` in normal
+  interpreter mode, and focused single-file/directory runs discover and execute
+  shared specs.
+- Moved the non-shared contract testing spec out of `test/shared/` to
+  `test/unit/lib/common/contracts/contract_testing_spec.spl`, preserved its
+  summary evidence, added the mirrored
+  `doc/06_spec/unit/lib/common/contracts/contract_testing_spec.md`, and
+  clarified that shared specs may use the built-in `context` BDD helper.
 
 ## Restart Checkpoint
 
-- Current safe stopping point: `test/data/` is cleared and verified.
-- Do not move `test/shared/` blindly. Decide first whether the canonical
-  destination remains `test/shared/` or becomes a runner-visible bucket such as
-  `test/unit/shared/`.
-- If keeping `test/shared/`, finish/rebuild runner discovery support so
-  single-file and directory runs discover these specs.
-- If migrating `test/shared/`, move specs and `summary.txt` evidence together,
-  update `doc/07_guide/testing/testing.md`, and add mirrored `doc/06_spec/...`
-  docs.
+- Current safe stopping point: `test/shared/` is canonical and runner-visible.
+- Do not move `test/shared/` into `test/unit/shared/`; it is a documented
+  platform tier, not a fixture or generic unit bucket.
+- Shared zero-import follow-up is resolved for the known hard violation:
+  `test/shared/` now has no `use` imports. The strict guide wording now
+  includes built-in `context`, matching existing shared BDD usage.
 - Obsolete SStack skill install check: active `.claude`, `.codex`, and
   `.agents` skill trees no longer expose `sstack`; stale cached
   `.spipe/spipe/.../sstack*` copies were removed. Historical tracking docs
@@ -141,8 +139,7 @@ Generated/manual SPipe docs mirror executable test paths:
 3. Reorganize `test/` outliers after identifying source-area ownership:
    `test/lib/` executable files and transitional top-level suites such as
    `test/app`, `test/dbfs`, `test/browser_engine`, and `test/web_platform`.
-   Resume with the `test/shared/` decision above before starting another broad
-   top-level suite.
+   `test/shared/` is resolved and should remain in place.
 4. Add release/verify guidance for when `TRC231`/`TRC232` should be hard
    failures instead of warnings.
 5. Compare or regenerate non-identical legacy docs for placeholder lambda,
@@ -175,6 +172,10 @@ Generated/manual SPipe docs mirror executable test paths:
 - Data fixture cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/integration/app/io_intensive_spec.spl`
 - Shared runner unit coverage: `SIMPLE_LIB=src bin/simple test --force-rebuild test/unit/app/test_runner/execution_strategy_reclassify_spec.spl`
 - Shared runner unit coverage: `SIMPLE_LIB=src bin/simple test --force-rebuild test/unit/app/test_runner_new/test_categorization_spec.spl`
-- Known unresolved after source change: `SIMPLE_LIB=src bin/simple test --force-rebuild test/shared/core/primitives_spec.spl` still discovers zero files with the current installed `bin/simple`.
+- Shared runner single-file coverage: `SIMPLE_LIB=src bin/simple test --force-rebuild test/shared/core/primitives_spec.spl`
+- Shared runner directory coverage: `SIMPLE_LIB=src bin/simple test --force-rebuild test/shared/core`
+- Shared import audit: `rg -n '^use ' test/shared` returned no matches.
+- Moved contract unit coverage: `SIMPLE_LIB=src bin/simple test --force-rebuild test/unit/lib/common/contracts/contract_testing_spec.spl`
+- Shared types coverage after contract move: `SIMPLE_LIB=src bin/simple test --force-rebuild test/shared/types`
 - Broader `bin/simple check` was attempted for docgen files but hung in the
   workspace check/test path and was terminated.
