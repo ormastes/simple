@@ -19,8 +19,8 @@ pub fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
 pub fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     value_compare(a, b)
 }
-#[inline(always)]
-pub fn rt_native_eq(a: i64, b: i64) -> i64 {
+#[no_mangle]
+pub extern "C" fn rt_native_eq(a: i64, b: i64) -> i64 {
     if a == b {
         return 1;
     }
@@ -36,8 +36,8 @@ pub fn rt_native_eq(a: i64, b: i64) -> i64 {
     }
     0
 }
-#[inline(always)]
-pub fn rt_native_neq(a: i64, b: i64) -> i64 {
+#[no_mangle]
+pub extern "C" fn rt_native_neq(a: i64, b: i64) -> i64 {
     if rt_native_eq(a, b) == 1 {
         0
     } else {
