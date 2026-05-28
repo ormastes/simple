@@ -307,7 +307,7 @@ typedef struct {
 
 typedef struct {
     HeapHeader hdr;
-    uint32_t   len;
+    uint64_t   len;
     char       data[];
 } RuntimeString;
 
