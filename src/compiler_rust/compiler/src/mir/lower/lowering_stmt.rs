@@ -330,8 +330,7 @@ impl<'a> MirLowerer<'a> {
                         let receiver_reg = self.lower_expr(receiver)?;
                         let index_reg = self.lower_expr(index)?;
 
-                        let is_u8_array_set = value.ty == TypeId::U8
-                            && matches!(
+                        let is_u8_array_set = matches!(
                                 index.ty,
                                 TypeId::I16
                                     | TypeId::I32
@@ -719,8 +718,7 @@ impl<'a> MirLowerer<'a> {
                             return Ok(());
                         }
 
-                        let typed_push_target = if args[0].ty == TypeId::U8
-                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                        let typed_push_target = if self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
                                 |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8),
                             ) {
                             Some("rt_typed_bytes_u8_push")

@@ -390,6 +390,7 @@ pub use value::{
     // Generic collection operations
     rt_array_new_with_cap_u64,
     rt_byte_array_new,
+    rt_byte_array_new_len,
     rt_bytes_u32_le_at,
     rt_bytes_u64_le_at,
     rt_bytes_u8_at,

@@ -14,6 +14,10 @@ use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.fat32_core.{Fat32Core, fat32_close, fat32_write}
 use std.nogc_sync_mut.io.file_ops.{file_read_text_at, file_write_text_at}
 
+extern fn rt_byte_array_new_len(len: u64) -> [u8]
+extern fn rt_bytes_u8_set(array: [u8], index: i64, value: i64) -> bool
+extern fn rt_typed_bytes_u8_unchecked(array: [u8], index: i64) -> i64
+
 # ── In-memory FAT32 image (from fat32_microbench.spl) ──────────────────────
 var __bench_data: [u8] = []
 var __bench_active_bank: i32 = 0
@@ -22,34 +26,30 @@ var __vfat_loop: text = ""
 var __vfat_use_udisks: bool = false
 
 fn _alloc_bank() -> i32:
-    __bench_data = []
-    var i: i32 = 0
-    while i < 2097152:
-        __bench_data.push(0)
-        i = i + 1
+    __bench_data = rt_byte_array_new_len(2097152u64)
     0
 
 fn _set_sec(bid: i32, sec: i32, data: [u8]):
     val base = sec * 512
     var i: i32 = 0
     while i < 512 and i < data.len():
-        __bench_data[base + i] = data[i]
+        val _s = rt_bytes_u8_set(__bench_data, (base + i).to_i64(), data[i].to_i64())
         i = i + 1
 
 fn _get_sec(bid: i32, sec: i32) -> [u8]:
     val base = sec * 512
-    var out: [u8] = []
+    var out: [u8] = rt_byte_array_new_len(512u64)
     var i: i32 = 0
     while i < 512:
-        out.push(__bench_data[base + i])
+        val _s = rt_bytes_u8_set(out, i.to_i64(), rt_typed_bytes_u8_unchecked(__bench_data, (base + i).to_i64()))
         i = i + 1
     out
 
-fn _w32(buf: [u8], off: i64, v: u32):
-    buf[off] = (v & 0xFF).to_u8()
-    buf[off + 1] = ((v >> 8) & 0xFF).to_u8()
-    buf[off + 2] = ((v >> 16) & 0xFF).to_u8()
-    buf[off + 3] = ((v >> 24) & 0xFF).to_u8()
+fn _w32(mut buf: [u8], off: i64, v: u32):
+    val _s0 = rt_bytes_u8_set(buf, off, (v & 0xFF).to_i64())
+    val _s1 = rt_bytes_u8_set(buf, off + 1, ((v >> 8) & 0xFF).to_i64())
+    val _s2 = rt_bytes_u8_set(buf, off + 2, ((v >> 16) & 0xFF).to_i64())
+    val _s3 = rt_bytes_u8_set(buf, off + 3, ((v >> 24) & 0xFF).to_i64())
 
 fn _init_image(bid: i32):
     var bpb = _get_sec(bid, 0)
@@ -82,14 +82,14 @@ impl BMBlockDev:
         BMBlockDev(bank_id: bid)
 
 impl BlockDevice for BMBlockDev:
-    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+    fn read_sector(lba: u64, mut buffer: [u8]) -> Result<bool, text>:
         val idx = lba.to_i32()
         if idx < 0 or idx >= 4096:
             return Ok(true)
         val src = _get_sec(__bench_active_bank, idx)
         var i = 0
         while i < buffer.len() and i < src.len():
-            buffer[i] = src[i]
+            val _s = rt_bytes_u8_set(buffer, i.to_i64(), rt_typed_bytes_u8_unchecked(src, i.to_i64()))
             i = i + 1
         Ok(true)
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
@@ -116,10 +116,10 @@ fn _fill_text(n: i64) -> text:
     s
 
 fn _fill_bytes(n: i64, value: u8) -> [u8]:
-    var out: [u8] = []
+    var out: [u8] = rt_byte_array_new_len(n.to_u64())
     var i: i64 = 0
     while i < n:
-        out.push(value)
+        val _s = rt_bytes_u8_set(out, i, value.to_i64())
         i = i + 1
     out
 

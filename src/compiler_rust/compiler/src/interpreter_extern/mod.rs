@@ -621,6 +621,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     );
     m.insert("__rt_btreeset_union", collections::__rt_btreeset_union as ExternFn);
     m.insert("rt_byte_array_new", sffi_array::rt_byte_array_new_fn as ExternFn);
+    m.insert("rt_byte_array_new_len", sffi_array::rt_byte_array_new_fn as ExternFn);
     m.insert("rt_byte_char", conversion::rt_byte_char_fn as ExternFn);
     m.insert("rt_bytes_alloc", file_io::rt_bytes_alloc as ExternFn);
     m.insert("rt_bytes_from_raw", file_io::rt_bytes_from_raw as ExternFn);

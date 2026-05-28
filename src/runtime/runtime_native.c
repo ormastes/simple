@@ -1124,6 +1124,15 @@ SplArray* rt_byte_array_new(uint64_t cap) {
     return rt_core_array_new((int64_t)cap, RT_CORE_ARRAY_FLAG_BYTES);
 }
 
+SplArray* rt_byte_array_new_len(uint64_t len) {
+    SplArray* a = rt_byte_array_new(len);
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (array) {
+        array->len = (int64_t)len;
+    }
+    return a;
+}
+
 int64_t rt_array_len(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? array->len : 0;
@@ -1170,7 +1179,7 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
     if (!array) return 0;
     if (!rt_core_array_reserve(a, array->len + 1)) return 0;
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
-        ((uint8_t*)array->data)[array->len++] = (uint8_t)(val & 0xff);
+        ((uint8_t*)array->data)[array->len++] = (uint8_t)(rt_core_numeric_arg(val) & 0xff);
     } else {
         ((int64_t*)array->data)[array->len++] = val;
     }
@@ -1268,17 +1277,27 @@ int8_t rt_bytes_u8_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
     idx = rt_core_numeric_arg(idx);
+    val = rt_core_numeric_arg(val) & 0xff;
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
-    ((uint8_t*)array->data)[idx] = (uint8_t)(val & 0xff);
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        ((uint8_t*)array->data)[idx] = (uint8_t)val;
+    } else {
+        ((int64_t*)array->data)[idx] = val << 3;
+    }
     return 1;
 }
 
 int8_t rt_typed_bytes_u8_push(SplArray* a, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
+    val = rt_core_numeric_arg(val) & 0xff;
     if (!rt_core_array_reserve(a, array->len + 1)) return 0;
-    ((uint8_t*)array->data)[array->len++] = (uint8_t)(val & 0xff);
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        ((uint8_t*)array->data)[array->len++] = (uint8_t)val;
+    } else {
+        ((int64_t*)array->data)[array->len++] = val << 3;
+    }
     return 1;
 }
 

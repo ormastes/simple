@@ -194,7 +194,6 @@ impl<'a> MirLowerer<'a> {
 
         if is_array_append_method
             && args.len() == 1
-            && args[0].ty == TypeId::U8
             && self
                 .type_registry
                 .and_then(|tr| tr.get(receiver.ty))
@@ -453,7 +452,9 @@ impl<'a> MirLowerer<'a> {
         match dispatch {
             DispatchMode::Dynamic => {
                 // Try to find the method in a registered trait (vtable dispatch)
-                if let Some((vtable_slot, param_types, return_type)) = self.find_trait_for_method(method) {
+                if let Some((vtable_slot, param_types, return_type)) =
+                    (receiver.ty != TypeId::ANY).then(|| self.find_trait_for_method(method)).flatten()
+                {
                     let dest = self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();

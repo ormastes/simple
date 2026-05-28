@@ -125,6 +125,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_memset",
     "rt_array_new",
     "rt_byte_array_new",
+    "rt_byte_array_new_len",
     "rt_array_get",
     "rt_array_get_text",
     "rt_array_data_ptr_text",
@@ -352,6 +353,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Array operations
     "rt_array_new",
     "rt_byte_array_new",
+    "rt_byte_array_new_len",
     "rt_array_push",
     "rt_array_get",
     "rt_array_get_text",

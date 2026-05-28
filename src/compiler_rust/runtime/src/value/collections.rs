@@ -402,6 +402,19 @@ pub extern "C" fn rt_byte_array_new(capacity: u64) -> RuntimeValue {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_byte_array_new_len(len: u64) -> RuntimeValue {
+    let array = rt_byte_array_new(len);
+    if array.is_nil() {
+        return array;
+    }
+    let ptr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    unsafe {
+        (*ptr).len = len;
+    }
+    array
+}
+
 /// Get the length of an array
 #[no_mangle]
 pub extern "C" fn rt_array_len(array: RuntimeValue) -> i64 {

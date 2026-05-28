@@ -23,6 +23,18 @@ fn is_profiler_function(name: &str) -> bool {
     name.starts_with("rt_profiler_")
 }
 
+fn inline_numeric_arg(builder: &mut FunctionBuilder, value: Value) -> Value {
+    let zero = builder.ins().iconst(types::I64, 0);
+    let eight = builder.ins().iconst(types::I64, 8);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
+    let tag = builder.ins().band(value, tag_mask);
+    let is_int_tag = builder.ins().icmp(IntCC::Equal, tag, zero);
+    let is_tagged_payload = builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, value, eight);
+    let is_tagged_int = builder.ins().band(is_int_tag, is_tagged_payload);
+    let payload = builder.ins().sshr_imm(value, 3);
+    builder.ins().select(is_tagged_int, payload, value)
+}
+
 // create_cstring_constant is now imported from helpers
 
 /// Emit profiler call/return instrumentation around a function call.
@@ -171,7 +183,8 @@ fn compile_inline_bytes_u8_at<M: Module>(
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let raw_index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let index = inline_numeric_arg(builder, raw_index);
     let zero = builder.ins().iconst(types::I64, 0);
     let tag_mask = builder.ins().iconst(types::I64, 7);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
@@ -1443,8 +1456,10 @@ fn compile_inline_typed_words_u32_set<M: Module>(
     }
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let value = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let raw_index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let index = inline_numeric_arg(builder, raw_index);
+    let raw_value = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let value = inline_numeric_arg(builder, raw_value);
     let zero = builder.ins().iconst(types::I64, 0);
     let false_value = builder.ins().iconst(types::I8, 0);
     let true_value = builder.ins().iconst(types::I8, 1);
@@ -1668,7 +1683,8 @@ fn compile_inline_array_set_len_known<M: Module>(
         return Ok(false);
     }
     let header_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let len = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let raw_len = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let len = inline_numeric_arg(builder, raw_len);
     builder.ins().store(MemFlags::new(), len, header_ptr, 8);
     if let Some(dest) = dest {
         let true_value = builder.ins().iconst(types::I8, 1);
@@ -1691,7 +1707,8 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let value = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let raw_value = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let value = inline_numeric_arg(builder, raw_value);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
     let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
@@ -1826,7 +1843,8 @@ fn compile_inline_typed_bytes_le_set_unchecked<M: Module>(
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let value = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let raw_value = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let value = inline_numeric_arg(builder, raw_value);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
@@ -2558,7 +2576,7 @@ pub fn compile_call<M: Module>(
     if sffi_name == "rt_bytes_u64_le_at" && compile_inline_bytes_le_at(ctx, builder, dest, args, 8)? {
         return Ok(());
     }
-    if sffi_name == "rt_typed_bytes_u8_set" && compile_inline_bytes_u8_set(ctx, builder, dest, args, true)? {
+    if sffi_name == "rt_typed_bytes_u8_set" && compile_inline_bytes_u8_set(ctx, builder, dest, args, false)? {
         return Ok(());
     }
     if sffi_name == "rt_bytes_u8_set" && compile_inline_bytes_u8_set(ctx, builder, dest, args, false)? {
