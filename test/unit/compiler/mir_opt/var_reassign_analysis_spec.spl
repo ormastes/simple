@@ -231,6 +231,45 @@ describe "var reassignment analysis":
             case _:
                 expect(false).to_equal(true)
 
+    it "returns the pseudo-phi value when an if/else merge returns the reassigned var":
+        val entry = MirBlock(
+            id: BlockId.new(0),
+            label: "entry",
+            instructions: [],
+            terminator: MirTerminator.If(copy_operand(9), BlockId.new(1), BlockId.new(2))
+        )
+        val then_block = MirBlock(
+            id: BlockId.new(1),
+            label: "then",
+            instructions: [inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64()))],
+            terminator: MirTerminator.Goto(BlockId.new(3))
+        )
+        val else_block = MirBlock(
+            id: BlockId.new(2),
+            label: "else",
+            instructions: [inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))],
+            terminator: MirTerminator.Goto(BlockId.new(3))
+        )
+        val join = MirBlock(
+            id: BlockId.new(3),
+            label: "join",
+            instructions: [],
+            terminator: MirTerminator.Return(Some(copy_operand(0)))
+        )
+        val result = ssa_var_transform_blocks([entry, then_block, else_block, join])
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        match result.blocks[3].terminator:
+            case Return(value):
+                expect(value.?).to_equal(true)
+                match value.unwrap().kind:
+                    case Copy(local_id):
+                        expect(local_id.id).to_equal(12)
+                    case _:
+                        expect(false).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+
     it "rejects if/else phi transform when a branch reassignment violates borrow safety":
         val entry = MirBlock(
             id: BlockId.new(0),
