@@ -136,7 +136,7 @@ Date: 2026-05-28
 | `examples/simple_os/arch/common/baremetal_riscv_16550_uart_stdout.c` | 1 | 41 | 1017 |
 | `examples/simple_os/arch/common/baremetal_16550_serial.h` | 1 | 29 | 602 |
 | `examples/simple_os/arch/common/baremetal_bump_heap.h` | 1 | 28 | 706 |
-| `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 66 | 1806 |
+| `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 43 | 1513 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 6 | 411 |
 | `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 14 | 313 |
 | `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 16 | 318 |

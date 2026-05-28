@@ -1,11 +1,3 @@
-/*
- * SimpleOS minimal stdout ABI helper.
- *
- * Platform capsules provide only serial_putchar() and startup mechanics.
- * This shared header owns the tagged string decode and stdout/stderr hooks
- * used by the tiny UART capsules.
- */
-
 #ifndef SIMPLEOS_BAREMETAL_MIN_STDOUT_H
 #define SIMPLEOS_BAREMETAL_MIN_STDOUT_H
 
@@ -23,22 +15,14 @@ typedef intptr_t RuntimeValue;
 #define IS_HEAP(v)    (((uintptr_t)(v) & TAG_MASK) == TAG_HEAP)
 #define HEAP_STRING 1u
 
-typedef struct {
-    uint32_t type;
-    uint32_t size;
-} BaremetalHeapHeader;
+typedef struct{uint32_t type,size;} BaremetalHeapHeader;
 
-typedef struct {
-    BaremetalHeapHeader hdr;
-    uint32_t len;
-    char data[];
-} BaremetalRuntimeString;
+typedef struct{BaremetalHeapHeader hdr;uint32_t len;char data[];} BaremetalRuntimeString;
 #else
 typedef RuntimeString BaremetalRuntimeString;
 #endif
 
-static RuntimeValue baremetal_serial_write_value(RuntimeValue data)
-{
+static RuntimeValue baremetal_serial_write_value(RuntimeValue data){
     if (IS_HEAP(data)) {
         BaremetalRuntimeString *s = (BaremetalRuntimeString *)DECODE_PTR(data);
         if (s && s->hdr.type == HEAP_STRING && s->len < 0x100000u) {
@@ -49,16 +33,9 @@ static RuntimeValue baremetal_serial_write_value(RuntimeValue data)
     return ENCODE_INT(0);
 }
 
-RuntimeValue rt_stdout_write(RuntimeValue data)
-{
-    return baremetal_serial_write_value(data);
-}
+RuntimeValue rt_stdout_write(RuntimeValue data){return baremetal_serial_write_value(data);}
 
-RuntimeValue rt_stdout_flush(RuntimeValue data)
-{
-    (void)data;
-    return ENCODE_INT(0);
-}
+RuntimeValue rt_stdout_flush(RuntimeValue data){(void)data;return ENCODE_INT(0);}
 
 RuntimeValue rt_stderr_write(RuntimeValue data) __attribute__((alias("rt_stdout_write")));
 RuntimeValue rt_stderr_flush(RuntimeValue data) __attribute__((alias("rt_stdout_flush")));
