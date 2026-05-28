@@ -2010,6 +2010,118 @@ int rt_str_is_ascii_cached(RtCoreString* s) {
 }
 
 /* ================================================================
+ * Event Loop (epoll/kqueue/IOCP/event_ports)
+ * ================================================================ */
+
+#if defined(__linux__)
+#include <sys/epoll.h>
+
+int64_t rt_event_loop_create(void) {
+    return (int64_t)epoll_create1(0);
+}
+
+int64_t rt_event_loop_register(int64_t epfd, int64_t fd, int64_t mode) {
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLET;
+    if (mode == 1) ev.events = EPOLLOUT | EPOLLET;
+    else if (mode == 2) ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+    ev.data.fd = (int)fd;
+    return (int64_t)epoll_ctl((int)epfd, EPOLL_CTL_ADD, (int)fd, &ev);
+}
+
+int64_t rt_event_loop_deregister(int64_t epfd, int64_t fd) {
+    return (int64_t)epoll_ctl((int)epfd, EPOLL_CTL_DEL, (int)fd, NULL);
+}
+
+static int64_t poll_results[256];
+
+int64_t rt_event_loop_poll(int64_t epfd, int64_t max_events, int64_t timeout_ms) {
+    struct epoll_event events[256];
+    if (max_events > 256) max_events = 256;
+    int n = epoll_wait((int)epfd, events, (int)max_events, (int)timeout_ms);
+    if (n < 0) return 0;
+    for (int i = 0; i < n; i++) {
+        poll_results[i] = (int64_t)events[i].data.fd;
+    }
+    return (int64_t)n;
+}
+
+int64_t rt_event_loop_close(int64_t epfd) {
+    return (int64_t)close((int)epfd);
+}
+
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/event.h>
+
+int64_t rt_event_loop_create(void) {
+    return (int64_t)kqueue();
+}
+
+int64_t rt_event_loop_register(int64_t kqfd, int64_t fd, int64_t mode) {
+    struct kevent ev;
+    EV_SET(&ev, (uintptr_t)fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+    return (int64_t)kevent((int)kqfd, &ev, 1, NULL, 0, NULL);
+}
+
+int64_t rt_event_loop_deregister(int64_t kqfd, int64_t fd) {
+    struct kevent ev;
+    EV_SET(&ev, (uintptr_t)fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    return (int64_t)kevent((int)kqfd, &ev, 1, NULL, 0, NULL);
+}
+
+static int64_t poll_results[256];
+
+int64_t rt_event_loop_poll(int64_t kqfd, int64_t max_events, int64_t timeout_ms) {
+    struct kevent events[256];
+    if (max_events > 256) max_events = 256;
+    struct timespec ts;
+    ts.tv_sec = timeout_ms / 1000;
+    ts.tv_nsec = (timeout_ms % 1000) * 1000000;
+    int n = kevent((int)kqfd, NULL, 0, events, (int)max_events, &ts);
+    if (n < 0) return 0;
+    for (int i = 0; i < n; i++) {
+        poll_results[i] = (int64_t)events[i].ident;
+    }
+    return (int64_t)n;
+}
+
+int64_t rt_event_loop_close(int64_t kqfd) {
+    return (int64_t)close((int)kqfd);
+}
+
+#else
+
+int64_t rt_event_loop_create(void) { return -1; }
+int64_t rt_event_loop_register(int64_t h, int64_t fd, int64_t mode) { (void)h; (void)fd; (void)mode; return -1; }
+int64_t rt_event_loop_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return -1; }
+static int64_t poll_results[256];
+int64_t rt_event_loop_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
+int64_t rt_event_loop_close(int64_t h) { (void)h; return -1; }
+
+#endif
+
+int64_t rt_event_loop_poll_get_fd(int64_t index) {
+    if (index < 0 || index >= 256) return -1;
+    return poll_results[index];
+}
+
+int64_t rt_kqueue_create(void) { return rt_event_loop_create(); }
+int64_t rt_kqueue_register(int64_t h, int64_t fd, int64_t m) { return rt_event_loop_register(h, fd, m); }
+int64_t rt_kqueue_deregister(int64_t h, int64_t fd) { return rt_event_loop_deregister(h, fd); }
+int64_t rt_kqueue_poll(int64_t h, int64_t max, int64_t ms) { return rt_event_loop_poll(h, max, ms); }
+int64_t rt_kqueue_close(int64_t h) { return rt_event_loop_close(h); }
+
+int64_t rt_iocp_create(void) { return -1; }
+int64_t rt_iocp_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+int64_t rt_iocp_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
+int64_t rt_iocp_close(int64_t h) { (void)h; return -1; }
+
+int64_t rt_event_ports_create(void) { return -1; }
+int64_t rt_event_ports_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+int64_t rt_event_ports_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
+int64_t rt_event_ports_close(int64_t h) { (void)h; return -1; }
+
+/* ================================================================
  * Runtime Lifecycle (called by entry point)
  * ================================================================ */
 
