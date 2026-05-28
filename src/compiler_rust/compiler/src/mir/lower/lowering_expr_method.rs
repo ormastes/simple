@@ -452,10 +452,13 @@ impl<'a> MirLowerer<'a> {
         match dispatch {
             DispatchMode::Dynamic => {
                 // Try to find the method in a registered trait (vtable dispatch)
-                if let Some((vtable_slot, param_types, return_type)) = (dispatch_receiver_ty != TypeId::ANY)
-                    .then(|| self.find_trait_for_method(method))
-                    .flatten()
-                {
+                if let Some((vtable_slot, param_types, return_type)) = self.find_trait_for_method(method) {
+                    if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                        eprintln!(
+                            "[MIR-METHOD-DISPATCH] '{}' lowered as virtual trait call at slot {}",
+                            method, vtable_slot
+                        );
+                    }
                     let dest = self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();

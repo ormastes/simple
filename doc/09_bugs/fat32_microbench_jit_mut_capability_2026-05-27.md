@@ -78,6 +78,18 @@ to the sectors actually used by the 4K workload, but the hosted JIT trait buffer
 write crash remains open. This blocks a fresh hosted `bin/simple run` proof of
 4K random read/write superiority.
 
+Update 2026-05-28 (returned-sector BlockDevice): the shared stdlib
+`BlockDevice.read_sector` contract now returns `Result<[u8], text>` instead of
+mutating a caller-provided byte buffer. FAT32, NVFS, DBFS, the shared intent log
+and checkpoint ring, the SimpleOS NVMe/VFS adapters, VirtIO adapter, host raw
+image adapters, and the FAT benchmarks were moved to the returned-sector API so
+the pure Simple filesystem interface no longer depends on trait out-parameter
+mutation. Focused `bin/simple check` runs pass. A rebuilt debug driver also
+confirms `sector_size`, `read_sector`, and `write_sector` lower as virtual trait
+calls, but `fat32_4k_compare.spl` still segfaults after the banner, so the
+remaining blocker is native virtual trait call execution for this returned array
+path, not the old mutable sector buffer contract.
+
 ## Reproduce
 
 ```bash
@@ -94,7 +106,8 @@ src/compiler_rust/target/debug/simple test/perf/bench/fat32_microbench.spl
   completes, but host/VFAT baselines are skipped in the self-contained native
   build due unresolved host file SFFI stubs.
 - Hosted `bin/simple run test/perf/bench/fat32_4k_compare.spl` currently
-  segfaults at benchmark startup in the JIT trait-buffer sector read path.
+  segfaults at benchmark startup after virtual trait dispatch is selected for
+  the returned-sector block-device methods.
 
 ## Expected
 
