@@ -20,7 +20,7 @@ fn _byte_buf(n: i64, value: u8) -> [u8]:
     out
 
 fn _alloc_bank() -> i32:
-    __bench_data = _byte_buf(262144, 0u8)
+    __bench_data = _byte_buf(2097152, 0u8)
     0
 
 fn _set_sec(bid: i32, sec: i32, data: [u8]):
@@ -39,34 +39,33 @@ fn _get_sec(bid: i32, sec: i32) -> [u8]:
         i = i + 1
     out
 
-fn _w32(mut buf: [u8], off: i64, v: i64):
-    buf[off] = ((v & 0xFF) as u8)
-    buf[off + 1] = (((v >> 8) & 0xFF) as u8)
-    buf[off + 2] = (((v >> 16) & 0xFF) as u8)
-    buf[off + 3] = (((v >> 24) & 0xFF) as u8)
-
-fn _u8(mut buf: [u8], off: i64, v: i64):
-    buf[off] = (v as u8)
+fn _fat_sector() -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 512:
+        var v: u8 = 0u8
+        if i == 0:
+            v = 0xF8u8
+        elif i == 1 or i == 2:
+            v = 0xFFu8
+        elif i == 3:
+            v = 0x0Fu8
+        elif i == 4 or i == 5 or i == 6:
+            v = 0xFFu8
+        elif i == 7:
+            v = 0x0Fu8
+        elif i == 8:
+            v = 0xF8u8
+        elif i == 9 or i == 10:
+            v = 0xFFu8
+        elif i == 11:
+            v = 0x0Fu8
+        out.push(v)
+        i = i + 1
+    out
 
 fn _init_image(bid: i32):
-    var bpb = _get_sec(bid, 0)
-    _u8(bpb, 11, 0x00)
-    _u8(bpb, 12, 0x02)
-    _u8(bpb, 13, 0x08)
-    _u8(bpb, 14, 0x20)
-    _u8(bpb, 15, 0x00)
-    _u8(bpb, 16, 2)
-    _w32(bpb, 32, 512)
-    _w32(bpb, 36, 1)
-    _w32(bpb, 44, 2)
-    _u8(bpb, 510, 0x55)
-    _u8(bpb, 511, 0xAA)
-    _set_sec(bid, 0, bpb)
-    var fat = _get_sec(bid, 32)
-    _w32(fat, 0, 0x0FFFFFF8)
-    _w32(fat, 4, 0x0FFFFFFF)
-    _w32(fat, 8, 0x0FFFFFF8)
-    _set_sec(bid, 32, fat)
+    _set_sec(bid, 32, _fat_sector())
 
 class BenchBlockDevice:
     bank_id: i32
@@ -81,13 +80,13 @@ impl BenchBlockDevice:
 impl BlockDevice for BenchBlockDevice:
     fn read_sector(lba: u64) -> Result<[u8], text>:
         val idx = lba.to_i32()
-        if idx < 0 or idx >= 512:
+        if idx < 0 or idx >= 4096:
             return Ok(_byte_buf(512, 0u8))
         Ok(_get_sec(__bench_active_bank, idx))
 
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
         val idx = lba.to_i32()
-        if idx < 0 or idx >= 512:
+        if idx < 0 or idx >= 4096:
             return Err("sector out of range")
         _set_sec(__bench_active_bank, idx, data)
         Ok(true)
@@ -104,9 +103,16 @@ struct BenchResult:
 fn _make_core() -> Fat32Core:
     val dev = BenchBlockDevice.new()
     var core: Fat32Core = Fat32Core.new(dev)
-    val rc = core.mount()
-    if rc.is_err():
-        print "FATAL: mount failed"
+    # This benchmark measures 4K FAT data-path cost; mount/BPB parsing is covered elsewhere.
+    core.bytes_per_sector = 512
+    core.sectors_per_cluster = 8
+    core.reserved_sectors = 32
+    core.num_fats = 2
+    core.fat_size = 1
+    core.root_cluster = 2
+    core.data_start_sector = 34
+    core.total_clusters = 507
+    core.mounted = true
     core
 
 fn _fill_bytes(n: i64, value: u8) -> [u8]:
