@@ -11,7 +11,7 @@ contracts used by capability-backed storage.
 """
 
 use std.spec.{describe, it, expect}
-use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmePartitionIdentity, NvmeQueueAssignment, nvme_queue_role_for_id, nvme_queue_is_system_reserved, nvme_first_data_queue_id, nvme_transfer_evidence, nvme_transfer_readiness_reason, nvme_transfer_ready, nvme_filesystem_lease, nvme_filesystem_lease_from_transfer_evidence, nvme_filesystem_lease_reason, nvme_filesystem_lease_ready, nvme_filesystem_consumer_name, nvme_namespace_mode_name, nvme_filesystem_lease_sector_size, nvme_filesystem_lease_sector_count, nvme_filesystem_lease_absolute_lba, nvme_filesystem_lease_conflict_reason, nvme_filesystem_lease_set_acceptance_reason, nvme_filesystem_lease_same_assignment}
+use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmePartitionIdentity, NvmeQueueAssignment, nvme_queue_role_for_id, nvme_queue_is_system_reserved, nvme_first_data_queue_id, nvme_transfer_evidence, nvme_transfer_readiness_reason, nvme_transfer_ready, nvme_filesystem_lease, nvme_filesystem_lease_from_transfer_evidence, nvme_filesystem_lease_reason, nvme_filesystem_lease_ready, nvme_filesystem_consumer_name, nvme_namespace_mode_name, nvme_shared_filesystem_interface, nvme_shared_filesystem_interface_reason, nvme_shared_filesystem_interface_consumers, nvme_shared_filesystem_interface_acceptance_reason, nvme_filesystem_lease_sector_size, nvme_filesystem_lease_sector_count, nvme_filesystem_lease_absolute_lba, nvme_filesystem_lease_conflict_reason, nvme_filesystem_lease_set_acceptance_reason, nvme_filesystem_lease_same_assignment}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id, device_grant_resource_set_label, device_grant_is_isolated}
 
@@ -131,6 +131,74 @@ describe "NVMe storage model":
             )
             val wrong_role_lease = nvme_filesystem_lease(ns, 0u64, 2048u64, NvmeNamespaceMode.System, wrong_role, "simple-driver", "none", true, true)
             expect(nvme_filesystem_lease_reason(wrong_role_lease, NvmeFilesystemConsumer.Fat32)).to_equal("nvme-fs-system-namespace-not-system-queue-role")
+
+        it "mints one shared interface proof for FAT32 NVFS and DBFS on the same lease":
+            val ns = NvmeNamespaceIdentity(
+                controller_id: 0,
+                nsid: 7,
+                lba_size: 4096,
+                lba_count: 8192,
+                eui64: 0,
+                nguid_lo: 0,
+                nguid_hi: 0,
+                uuid_lo: 0,
+                uuid_hi: 0
+            )
+            val queue = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+                role: NvmeQueueRole.System,
+                controller_id: 0,
+                nsid: 7,
+                owner_task: 0,
+                max_depth: 128,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val lease = nvme_filesystem_lease(ns, 0u64, 4096u64, NvmeNamespaceMode.System, queue, "simple-driver", "kernel-owned-resource", true, true)
+            val iface = nvme_shared_filesystem_interface(lease)
+
+            expect(nvme_shared_filesystem_interface_reason(lease)).to_equal("ready")
+            expect(nvme_shared_filesystem_interface_consumers()).to_equal("fat32,nvfs,dbfs")
+            expect(iface.is_ok()).to_equal(true)
+            expect(iface.unwrap().provider).to_equal("simple-driver")
+            expect(iface.unwrap().queue_id).to_equal(SIMPLEOS_NVME_SYSTEM_QUEUE_ID)
+            expect(iface.unwrap().fat32_ready).to_equal(true)
+            expect(iface.unwrap().nvfs_ready).to_equal(true)
+            expect(iface.unwrap().dbfs_ready).to_equal(true)
+
+        it "rejects shared interface admission when a user lease conflicts with a system namespace":
+            val ns = NvmeNamespaceIdentity(
+                controller_id: 0,
+                nsid: 8,
+                lba_size: 4096,
+                lba_count: 8192,
+                eui64: 0,
+                nguid_lo: 0,
+                nguid_hi: 0,
+                uuid_lo: 0,
+                uuid_hi: 0
+            )
+            val system_queue = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+                role: NvmeQueueRole.System,
+                controller_id: 0,
+                nsid: 8,
+                owner_task: 0,
+                max_depth: 128,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val data_queue = NvmeQueueAssignment(
+                queue_id: SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID,
+                role: NvmeQueueRole.Data,
+                controller_id: 0,
+                nsid: 8,
+                owner_task: 42,
+                max_depth: 64,
+                rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+            )
+            val system_lease = nvme_filesystem_lease(ns, 0u64, 8192u64, NvmeNamespaceMode.System, system_queue, "simple-driver", "kernel-owned-resource", true, true)
+            val user_lease = nvme_filesystem_lease(ns, 0u64, 8192u64, NvmeNamespaceMode.UserAssigned, data_queue, "simple-driver", "resource-grant-set:tok=42", true, true)
+
+            expect(nvme_shared_filesystem_interface_acceptance_reason([system_lease], user_lease)).to_equal("nvme-fs-namespace-mode-conflict:system:user-assigned")
 
         it "requires user-assigned namespaces to use data queues and issued user-space grants":
             val ns = NvmeNamespaceIdentity(

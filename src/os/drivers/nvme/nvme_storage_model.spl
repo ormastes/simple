@@ -89,6 +89,22 @@ struct NvmeTransferEvidence:
     common_logic_shared: bool
     iommu_or_broker: bool
 
+struct NvmeSharedFilesystemInterface:
+    """One lease-backed interface shared by FAT32, NVFS, and DBFS.
+
+    This is the filesystem-facing proof object for the production SimpleOS
+    storage target: the hardware driver owns namespace/queue submission, and
+    all three filesystems consume the same bounded BlockDevice-compatible
+    namespace window instead of owning separate NVMe hardware paths.
+    """
+    lease: NvmeFilesystemLease
+    provider: text
+    mode: NvmeNamespaceMode
+    queue_id: u16
+    fat32_ready: bool
+    nvfs_ready: bool
+    dbfs_ready: bool
+
 fn nvme_queue_role_for_id(queue_id: u16) -> NvmeQueueRole:
     """Return the architectural role for a queue ID."""
     if queue_id == SIMPLEOS_NVME_ADMIN_QUEUE_ID:
@@ -199,6 +215,45 @@ fn nvme_filesystem_lease_reason(lease: NvmeFilesystemLease, consumer: NvmeFilesy
 
 fn nvme_filesystem_lease_ready(lease: NvmeFilesystemLease, consumer: NvmeFilesystemConsumer) -> bool:
     nvme_filesystem_lease_reason(lease, consumer) == "ready"
+
+fn nvme_shared_filesystem_interface_consumers() -> text:
+    "fat32,nvfs,dbfs"
+
+fn nvme_shared_filesystem_interface_reason(lease: NvmeFilesystemLease) -> text:
+    val fat_reason = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)
+    if fat_reason != "ready":
+        return "shared-nvme-fat32-not-ready:" + fat_reason
+    val nvfs_reason = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Nvfs)
+    if nvfs_reason != "ready":
+        return "shared-nvme-nvfs-not-ready:" + nvfs_reason
+    val dbfs_reason = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Dbfs)
+    if dbfs_reason != "ready":
+        return "shared-nvme-dbfs-not-ready:" + dbfs_reason
+    if lease.provider != "simple-driver":
+        return "shared-nvme-provider-not-simple:" + lease.provider
+    if not lease.shared_block_interface:
+        return "shared-nvme-block-interface-missing"
+    "ready"
+
+fn nvme_shared_filesystem_interface(lease: NvmeFilesystemLease) -> Result<NvmeSharedFilesystemInterface, text>:
+    val reason = nvme_shared_filesystem_interface_reason(lease)
+    if reason != "ready":
+        return Err(reason)
+    Ok(NvmeSharedFilesystemInterface(
+        lease: lease,
+        provider: lease.provider,
+        mode: lease.mode,
+        queue_id: lease.queue.queue_id,
+        fat32_ready: true,
+        nvfs_ready: true,
+        dbfs_ready: true
+    ))
+
+fn nvme_shared_filesystem_interface_acceptance_reason(active_leases: [NvmeFilesystemLease], requested: NvmeFilesystemLease) -> text:
+    val shared_reason = nvme_shared_filesystem_interface_reason(requested)
+    if shared_reason != "ready":
+        return shared_reason
+    nvme_filesystem_lease_set_acceptance_reason(active_leases, requested)
 
 fn nvme_filesystem_lease_sector_size(lease: NvmeFilesystemLease) -> u32:
     lease.namespace.lba_size

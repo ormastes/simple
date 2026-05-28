@@ -15,6 +15,8 @@ use os.drivers.nvme.nvme_storage_model.{
     NvmeQueueRole,
     nvme_filesystem_consumer_name,
     nvme_filesystem_lease,
+    nvme_shared_filesystem_interface,
+    nvme_shared_filesystem_interface_consumers,
     nvme_transfer_readiness_reason
 }
 use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
@@ -210,6 +212,13 @@ fn _q35_user_namespace_assignment_marker(
                 return Err("user-namespace-restore:" + restore_after_lease.unwrap_err())
         return Err("user-lease:" + lease_result.unwrap_err())
     val lease = lease_result.unwrap()
+    val shared_interface = nvme_shared_filesystem_interface(lease)
+    if shared_interface.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_shared = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_shared.is_err():
+                return Err("user-namespace-restore:" + restore_after_shared.unwrap_err())
+        return Err("user-shared-interface:" + shared_interface.unwrap_err())
     val direct_read_probe = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease(
         nvme,
         lease,
@@ -240,10 +249,10 @@ fn _q35_user_namespace_assignment_marker(
             return Err("user-namespace-restore:" + restore_after_probe.unwrap_err())
     Ok(
         "user_namespace_assignment=hardware-data-queue user_namespace_mode=user-assigned " +
-            "user_namespace_nsid=" + lease.namespace.nsid.to_u64().to_text() + " " +
-            "user_namespace_queue_id=" + lease.queue.queue_id.to_u64().to_text() +
-            " user_namespace_active_lease_count=" + active_leases.len().to_u64().to_text() +
-            " user_namespace_direct_io=read-write-through user_namespace_shared_interface=fat32,nvfs,dbfs" +
+        "user_namespace_nsid=" + lease.namespace.nsid.to_u64().to_text() + " " +
+        "user_namespace_queue_id=" + lease.queue.queue_id.to_u64().to_text() +
+        " user_namespace_active_lease_count=" + active_leases.len().to_u64().to_text() +
+            " user_namespace_direct_io=read-write-through user_namespace_shared_interface=" + nvme_shared_filesystem_interface_consumers() +
             " user_namespace_conflict_policy=active-lease-checked"
     )
 
