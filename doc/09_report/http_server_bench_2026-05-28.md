@@ -100,7 +100,9 @@ All edge-triggered where supported. io_uring available as alternative to epoll o
 
 ## Design Decisions
 
-- **TLS/HTTPS delegates to Rust rustls** — not a pure Simple path. This is a deliberate performance/security trade-off: TLS implementations require constant-time operations, side-channel resistance, and audit rigor that make a pure Simple reimplementation impractical. All HTTP/2, HTTP/3, QUIC framing above TLS is pure Simple.
+- **TLS/HTTPS delegates to Rust rustls** — not a pure Simple path. Deliberate security trade-off: constant-time operations, side-channel resistance, and audit rigor. All HTTP/2, HTTP/3, QUIC framing above TLS is pure Simple.
+- **Pure Simple TLS 1.2/1.3 handshake exists** (`src/os/tls12/`, 6 files) but the production path uses rustls for security.
+- **Interpreter vs native gap**: Full server runs in interpreter (~382 RPS) but not natively (1842 stubs). Raw TCP native proves 50K+ RPS is achievable. Closing this gap requires resolving native codegen class method dispatch + reducing stub count.
 
 ## Known Bugs
 
@@ -118,10 +120,12 @@ All edge-triggered where supported. io_uring available as alternative to epoll o
 | QUIC transport | Pure Simple | Source-only, runtime unverified | `src/lib/nogc_async_mut/io/quic/` (~3 files) |
 | HPACK + Huffman | Pure Simple | Source-only, runtime unverified | `h2_hpack.spl`, `hpack_huffman.spl` |
 | QPACK encode/decode | Pure Simple | Source-only, runtime unverified | `qpack_encoder.spl`, `qpack_decoder.spl` |
-| TLS handshake/record | Delegates to Rust rustls | N/A (by design) | `src/lib/nogc_sync_mut/tls/tls_sffi.spl` |
+| Full async HttpServer | Pure Simple | **Benchmarked** (interpreter, 382 RPS) | `http_server/server.spl` |
+| HTTPS config | Wired (rustls) | Blocked (interpreter PEM const bug) | `http_server/server.spl:tls_enabled` |
+| TLS handshake/record | Delegates to Rust rustls + pure TLS 1.2 | N/A (rustls for prod) | `tls_sffi.spl` + `src/os/tls12/` |
 | Cross-platform events | Pure Simple dispatch, C backends | 5/6 code-verified, epoll benchmarked | epoll/io_uring/kqueue(BSD+Mac)/IOCP/poll |
-| Embedded HTTP server | Pure Simple | Blocked (no serve loop) | `http_server/embedded.spl` |
-| Static file serving | Pure Simple | Source-only | `http_server/static_file.spl` |
+| Embedded HTTP server | Pure Simple | Starts (interpreter), type-cast error on request | `http_server/embedded.spl` |
+| Static file serving | Pure Simple | **Benchmarked** (multi-file, interpreter) | `http_server/static_file.spl` |
 | Response cache (LRU) | Pure Simple | Source-only | `http_server/response_cache.spl` |
 | Range requests | Pure Simple | Source-only | `http_server/range.spl` |
 | Multipart/ZIP/TAR | Pure Simple | Source-only | `http_server/multipart_response.spl` |
