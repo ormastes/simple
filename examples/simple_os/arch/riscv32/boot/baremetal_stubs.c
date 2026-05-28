@@ -4,9 +4,7 @@
 typedef intptr_t RuntimeValue;
 
 #define UART_BASE 0x10000000UL
-#define UART_THR 0x00UL
-#define UART_LSR 0x05UL
-#define UART_LSR_THRE 0x20U
+#include "../../common/baremetal_16550_serial.h"
 #define SIFIVE_TEST_BASE 0x100000UL
 #define VIRTIO_MMIO_BASE 0x10001000UL
 #define VIRTIO_MMIO_STRIDE 0x1000UL
@@ -65,23 +63,6 @@ static void *rv_alloc(size_t size)
     void *p = &g_heap[g_heap_off];
     g_heap_off += size;
     return p;
-}
-
-static void uart_putc(char c)
-{
-    volatile uint8_t *uart = (volatile uint8_t *)UART_BASE;
-    for (uint32_t spin = 0; spin < 100000; spin++) {
-        if ((uart[UART_LSR] & UART_LSR_THRE) != 0) break;
-    }
-    uart[UART_THR] = (uint8_t)c;
-}
-
-static void uart_puts(const char *s)
-{
-    while (*s) {
-        if (*s == '\n') uart_putc('\r');
-        uart_putc(*s++);
-    }
 }
 
 static void uart_put_u32(uint32_t v)
