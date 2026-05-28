@@ -130,6 +130,18 @@ fn _run_lab_preflight(fake_nvme_path: text) -> (text, text, i32):
         15000
     )
 
+fn _run_lab_preflight_with_two_outputs(fake_nvme_path: text, report_path: text, preflight_out_path: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + fake_nvme_path + "\" " +
+                "sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out \"" + report_path +
+                "\" --preflight-out \"" + preflight_out_path + "\""
+        ],
+        15000
+    )
+
 fn _run_lab_preflight_with_report(fake_nvme_path: text, fake_sysfs_root: text, report_path: text) -> (text, text, i32):
     rt_process_run_timeout(
         "/bin/sh",
@@ -852,6 +864,30 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(code).to_equal(0)
         expect(stdout).to_contain("preflight=ready")
         expect(stdout).to_contain("checker=present")
+
+    it "rejects standalone preflight when output reports would be overwritten":
+        val fake_nvme = "/tmp/simpleos_nvme_preflight_existing_output_device"
+        val report = "/tmp/simpleos_nvme_preflight_existing_report.sdn"
+        val preflight_out = "/tmp/simpleos_nvme_preflight_existing_out.sdn"
+        val _ = rt_file_delete(fake_nvme)
+        val _report_cleanup = rt_file_delete(report)
+        val _preflight_cleanup = rt_file_delete(preflight_out)
+        expect(rt_file_write_text(fake_nvme, "device")).to_equal(true)
+
+        val (_same_stdout, same_stderr, same_code) = _run_lab_preflight_with_two_outputs(fake_nvme, report, report)
+        expect(same_code).to_equal(2)
+        expect(same_stderr).to_contain("--preflight report outputs must differ")
+
+        expect(rt_file_write_text(report, "old report\n")).to_equal(true)
+        val (_report_stdout, report_stderr, report_code) = _run_lab_preflight_with_two_outputs(fake_nvme, report, preflight_out)
+        expect(report_code).to_equal(2)
+        expect(report_stderr).to_contain("preflight report already exists")
+        val _report_delete = rt_file_delete(report)
+
+        expect(rt_file_write_text(preflight_out, "old preflight\n")).to_equal(true)
+        val (_preflight_stdout, preflight_stderr, preflight_code) = _run_lab_preflight_with_two_outputs(fake_nvme, report, preflight_out)
+        expect(preflight_code).to_equal(2)
+        expect(preflight_stderr).to_contain("preflight output already exists")
 
     it "writes physical NVMe preflight identity for lab comparison":
         val fake_root = "/tmp/simpleos_nvme_preflight_sysfs"
