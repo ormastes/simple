@@ -83,6 +83,9 @@ write_preflight_report() {
                 exit 1
             fi
             controller="$(printf '%s\n' "$name" | sed 's/n[0-9][0-9]*$//')"
+            user_device_path="unknown"
+            user_model_trimmed="unknown"
+            user_serial_trimmed="unknown"
             user_nsid_trimmed="unknown"
             for user_entry in "${NVME_SYSFS_ROOT}/${controller}"n*; do
                 if [ ! -e "$user_entry" ]; then
@@ -92,6 +95,19 @@ write_preflight_report() {
                 user_nsid="$(cat "${NVME_SYSFS_ROOT}/${user_name}/nsid" 2>/dev/null || cat "${NVME_SYSFS_ROOT}/${user_name}/device/nsid" 2>/dev/null || echo unknown)"
                 user_nsid_candidate="$(echo "$user_nsid" | xargs)"
                 if [ "$user_nsid_candidate" != "unknown" ] && [ "$user_nsid_candidate" != "$nsid_trimmed" ]; then
+                    user_model="$(cat "${NVME_SYSFS_ROOT}/${user_name}/device/model" 2>/dev/null || echo unknown)"
+                    user_serial="$(cat "${NVME_SYSFS_ROOT}/${user_name}/device/serial" 2>/dev/null || echo unknown)"
+                    user_model_trimmed="$(echo "$user_model" | xargs)"
+                    user_serial_trimmed="$(echo "$user_serial" | xargs)"
+                    if [ "$user_model_trimmed" = "unknown" ] || [ "$user_serial_trimmed" = "unknown" ]; then
+                        echo "[physical-nvme] incomplete user namespace sysfs identity for ${user_name}" >&2
+                        exit 1
+                    fi
+                    if [ "$user_model_trimmed" != "$model_trimmed" ] || [ "$user_serial_trimmed" != "$serial_trimmed" ]; then
+                        echo "[physical-nvme] user namespace identity does not match system namespace controller for ${user_name}" >&2
+                        exit 1
+                    fi
+                    user_device_path="$(dirname "$dev")/${user_name}"
                     user_nsid_trimmed="$user_nsid_candidate"
                     break
                 fi
@@ -104,6 +120,9 @@ write_preflight_report() {
             echo "    model: $model_trimmed"
             echo "    serial: $serial_trimmed"
             echo "    namespace_nsid: $nsid_trimmed"
+            echo "    user_namespace_device: $user_device_path"
+            echo "    user_namespace_model: $user_model_trimmed"
+            echo "    user_namespace_serial: $user_serial_trimmed"
             echo "    user_namespace_nsid: $user_nsid_trimmed"
         done
     } > "$report_path"
