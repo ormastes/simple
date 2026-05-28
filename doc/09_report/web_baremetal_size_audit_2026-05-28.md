@@ -46,8 +46,8 @@ Date: 2026-05-28
 | x86_64 monolithic bare-metal stubs source | 576503 |
 | ARM64 monolithic bare-metal stubs source | 148311 |
 | ARM32 monolithic bare-metal stubs source | 68177 |
-| RV64 monolithic bare-metal stubs source | 61210 |
-| RV32 monolithic bare-metal stubs source | 20496 |
+| RV64 monolithic bare-metal stubs source | 60723 |
+| RV32 monolithic bare-metal stubs source | 20336 |
 | Simple web static facade native file / dec section | 14500 / 5000 |
 | Simple web placeholder URL facade native file / dec section | 14500 / 4100 |
 | Simple web file facade native file / dec section | 14500 / 6400 |
@@ -80,6 +80,7 @@ Date: 2026-05-28
 | RV32 minimal 16550 startup/stdout source | 256 |
 | Shared RISC-V 16550 startup/stdout source | 1400 |
 | Shared RISC-V 16550 serial helper source | 602 |
+| Shared bare-metal bump heap source | 706 |
 | Shared minimal stdout helper source | 2000 |
 | x86_64 interrupt-control object file / dec section | 1536 / 64 |
 | x86_64 interrupt-control source | 640 |
@@ -119,8 +120,8 @@ Date: 2026-05-28
 | `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15509 | 576503 |
 | `examples/simple_os/arch/arm64/boot/baremetal_stubs.c` | 1 | 3628 | 148311 |
 | `examples/simple_os/arch/arm32/boot/baremetal_stubs.c` | 1 | 2013 | 68177 |
-| `examples/simple_os/arch/riscv64/boot/baremetal_stubs.c` | 1 | 1825 | 61210 |
-| `examples/simple_os/arch/riscv32/boot/baremetal_stubs.c` | 1 | 635 | 20496 |
+| `examples/simple_os/arch/riscv64/boot/baremetal_stubs.c` | 1 | 1806 | 60723 |
+| `examples/simple_os/arch/riscv32/boot/baremetal_stubs.c` | 1 | 628 | 20336 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 83 | 2045 |
 | `examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c` | 1 | 7 | 252 |
 | `examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c` | 1 | 7 | 249 |
@@ -130,6 +131,7 @@ Date: 2026-05-28
 | `examples/simple_os/arch/riscv32/boot/baremetal_uart_stdout.c` | 1 | 1 | 60 |
 | `examples/simple_os/arch/common/baremetal_riscv_16550_uart_stdout.c` | 1 | 41 | 1017 |
 | `examples/simple_os/arch/common/baremetal_16550_serial.h` | 1 | 29 | 602 |
+| `examples/simple_os/arch/common/baremetal_bump_heap.h` | 1 | 28 | 706 |
 | `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 66 | 1806 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 18 | 515 |
 | `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 18 | 479 |
@@ -169,7 +171,7 @@ Date: 2026-05-28
 | `examples/browser/feature/dom` | 9 | 4854 | 181376 |
 | `examples/browser/feature/style` | 13 | 3914 | 150153 |
 | `src/lib/gc_async_mut/web` | 13 | 3928 | 170664 |
-| `src/lib/gc_async_mut/gpu/browser_engine` | 17 | 1618 | 58980 |
+| `src/lib/gc_async_mut/gpu/browser_engine` | 17 | 1612 | 58834 |
 
 ## Retention Checks
 
@@ -222,6 +224,7 @@ Date: 2026-05-28
 - `arm32/boot/baremetal_uart_stdout.c` is a thin ARM32 compatibility wrapper over the shared PL011 capsule.
 - `common/baremetal_riscv_16550_uart_stdout.c` is the shared RV32/RV64 16550 startup/stdout capsule; PLIC, CLINT, virtio, filesystem, and GUI stay out of this lane.
 - `common/baremetal_16550_serial.h` is the shared 16550 register and serial helper for RISC-V monolithic stubs until those stubs are split further.
+- `common/baremetal_bump_heap.h` is the shared RISC-V bump allocator helper; platform stubs provide storage and opt into aligned allocation only when needed.
 - `riscv64/boot/baremetal_uart_stdout.c` is a thin RV64 compatibility wrapper over the shared RISC-V 16550 capsule.
 - `riscv32/boot/baremetal_uart_stdout.c` is a thin RV32 compatibility wrapper over the shared RISC-V 16550 capsule.
 - `baremetal_interrupt_control.c` is the x86_64 platform capsule baseline for CLI/STI/HLT and PIC masking only; APIC policy stays in pure Simple until controller code is explicitly imported.

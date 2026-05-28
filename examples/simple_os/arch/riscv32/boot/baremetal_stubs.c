@@ -56,14 +56,7 @@ static uint16_t g_last_used_idx = 0;
 extern RuntimeValue spl_start(void);
 extern char _stack_top[];
 
-static void *rv_alloc(size_t size)
-{
-    size = (size + 15U) & ~(size_t)15U;
-    if (g_heap_off + size > sizeof(g_heap)) return 0;
-    void *p = &g_heap[g_heap_off];
-    g_heap_off += size;
-    return p;
-}
+#include "../../common/baremetal_bump_heap.h"
 
 static void uart_put_u32(uint32_t v)
 {
