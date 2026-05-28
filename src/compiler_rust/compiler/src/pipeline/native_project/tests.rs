@@ -26,7 +26,11 @@ fn runtime_bundle_env_lock() -> &'static Mutex<()> {
 }
 
 fn archive_members(path: &Path) -> Option<Vec<String>> {
-    let output = std::process::Command::new(find_archive_tool()).arg("t").arg(path).output().ok()?;
+    let output = std::process::Command::new(find_archive_tool())
+        .arg("t")
+        .arg(path)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }

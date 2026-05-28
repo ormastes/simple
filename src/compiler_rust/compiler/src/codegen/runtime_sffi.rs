@@ -1382,33 +1382,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_path_relative", &[I64, I64, I64, I64], &[I64]), // from, to -> RuntimeValue
     RuntimeFuncSpec::new("rt_path_join", &[I64, I64, I64, I64], &[I64]), // path1, path2 -> RuntimeValue
     // =========================================================================
-    // Async I/O Driver
-    // =========================================================================
-    RuntimeFuncSpec::new("rt_driver_create", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_destroy", &[I64], &[]),
-    RuntimeFuncSpec::new("rt_driver_submit_accept", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_submit_connect", &[I64, I64, I64, I64, I64], &[I64]), // handle, fd, addr_ptr, addr_len, port
-    RuntimeFuncSpec::new("rt_driver_submit_recv", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_submit_send", &[I64, I64, I64, I64], &[I64]), // handle, fd, data_ptr, data_len
-    RuntimeFuncSpec::new("rt_driver_submit_sendfile", &[I64, I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_submit_read", &[I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_submit_write", &[I64, I64, I64, I64, I64], &[I64]), // handle, fd, data_ptr, data_len, offset
-    RuntimeFuncSpec::new("rt_driver_submit_open", &[I64, I64, I64, I64, I64], &[I64]), // handle, path_ptr, path_len, flags, mode
-    RuntimeFuncSpec::new("rt_driver_submit_close", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_submit_fsync", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_submit_timeout", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_flush", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_poll", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_poll_id", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_poll_result", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_poll_flags", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_poll_data", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_poll_data_len", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_cancel", &[I64, I64], &[I8]),
-    RuntimeFuncSpec::new("rt_driver_backend_name", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_supports_sendfile", &[I64], &[I8]),
-    RuntimeFuncSpec::new("rt_driver_supports_zero_copy", &[I64], &[I8]),
-    // =========================================================================
     // Runtime Configuration
     // =========================================================================
     RuntimeFuncSpec::new("rt_set_macro_trace", &[I8], &[]), // enable -> ()

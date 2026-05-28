@@ -45,10 +45,13 @@ mod platform {
         }
         let handle = NEXT_EVENT_LOOP_HANDLE.fetch_add(1, Ordering::SeqCst);
         EPOLL_LOOPS.with(|loops| {
-            loops.borrow_mut().insert(handle, EpollState {
-                epfd,
-                tokens: HashMap::new(),
-            });
+            loops.borrow_mut().insert(
+                handle,
+                EpollState {
+                    epfd,
+                    tokens: HashMap::new(),
+                },
+            );
         });
         handle
     }
@@ -72,19 +75,12 @@ mod platform {
             }
 
             // Store fd in data.u64 so poll() knows which descriptor fired
-            let mut ev = libc::epoll_event {
-                events,
-                u64: fd as u64,
-            };
+            let mut ev = libc::epoll_event { events, u64: fd as u64 };
 
-            let ret = unsafe {
-                libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_ADD, fd as i32, &mut ev)
-            };
+            let ret = unsafe { libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_ADD, fd as i32, &mut ev) };
             if ret < 0 {
                 // Try MOD in case it was already registered
-                let ret2 = unsafe {
-                    libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_MOD, fd as i32, &mut ev)
-                };
+                let ret2 = unsafe { libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_MOD, fd as i32, &mut ev) };
                 if ret2 != 0 {
                     return false;
                 }
@@ -102,9 +98,7 @@ mod platform {
                 return false;
             };
             state.tokens.remove(&(fd as i32));
-            let ret = unsafe {
-                libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_DEL, fd as i32, std::ptr::null_mut())
-            };
+            let ret = unsafe { libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_DEL, fd as i32, std::ptr::null_mut()) };
             ret == 0
         })
     }
@@ -117,14 +111,9 @@ mod platform {
             };
 
             let max = max_events.clamp(1, 1024) as usize;
-            let mut events: Vec<libc::epoll_event> = vec![
-                libc::epoll_event { events: 0, u64: 0 };
-                max
-            ];
+            let mut events: Vec<libc::epoll_event> = vec![libc::epoll_event { events: 0, u64: 0 }; max];
 
-            let n = unsafe {
-                libc::epoll_wait(state.epfd, events.as_mut_ptr(), max as i32, timeout_ms as i32)
-            };
+            let n = unsafe { libc::epoll_wait(state.epfd, events.as_mut_ptr(), max as i32, timeout_ms as i32) };
             if n < 0 {
                 return vec![];
             }
@@ -134,19 +123,15 @@ mod platform {
                 let ev = &events[i];
                 let stored_fd = ev.u64 as i64;
                 // Look up full i64 token from side-table
-                let stored_token = state
-                    .tokens
-                    .get(&(stored_fd as i32))
-                    .copied()
-                    .unwrap_or(0);
+                let stored_token = state.tokens.get(&(stored_fd as i32)).copied().unwrap_or(0);
 
                 // Map epoll event flags back to interest encoding
                 let readable = (ev.events & libc::EPOLLIN as u32) != 0;
                 let writable = (ev.events & libc::EPOLLOUT as u32) != 0;
                 let ready: i64 = match (readable, writable) {
-                    (true, true) => 2,   // ReadWrite
-                    (false, true) => 1,  // Write
-                    _ => 0,              // Read (or error/hup treated as read-ready)
+                    (true, true) => 2,  // ReadWrite
+                    (false, true) => 1, // Write
+                    _ => 0,             // Read (or error/hup treated as read-ready)
                 };
 
                 result.push(Value::Int(stored_fd));
@@ -178,7 +163,9 @@ mod platform {
         });
     }
 
-    pub fn backend_name() -> &'static str { "epoll" }
+    pub fn backend_name() -> &'static str {
+        "epoll"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -288,16 +275,7 @@ mod platform {
             ];
 
             // Best-effort: at least one delete should succeed
-            let ret = unsafe {
-                libc::kevent(
-                    kqfd,
-                    changes.as_ptr(),
-                    2,
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null(),
-                )
-            };
+            let ret = unsafe { libc::kevent(kqfd, changes.as_ptr(), 2, std::ptr::null_mut(), 0, std::ptr::null()) };
             // ret < 0 with ENOENT is acceptable (filter wasn't registered)
             let _ = ret;
             true
@@ -333,16 +311,7 @@ mod platform {
                 } as *const libc::timespec
             };
 
-            let n = unsafe {
-                libc::kevent(
-                    kqfd,
-                    std::ptr::null(),
-                    0,
-                    events.as_mut_ptr(),
-                    max as i32,
-                    timeout,
-                )
-            };
+            let n = unsafe { libc::kevent(kqfd, std::ptr::null(), 0, events.as_mut_ptr(), max as i32, timeout) };
             if n < 0 {
                 return vec![];
             }
@@ -410,7 +379,9 @@ mod platform {
         });
     }
 
-    pub fn backend_name() -> &'static str { "kqueue" }
+    pub fn backend_name() -> &'static str {
+        "kqueue"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -481,7 +452,9 @@ mod platform {
         });
     }
 
-    pub fn backend_name() -> &'static str { "iocp" }
+    pub fn backend_name() -> &'static str {
+        "iocp"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -550,7 +523,9 @@ mod platform {
         });
     }
 
-    pub fn backend_name() -> &'static str { "event_port" }
+    pub fn backend_name() -> &'static str {
+        "event_port"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -567,13 +542,25 @@ mod platform {
 mod platform {
     use super::*;
 
-    pub fn create() -> i64 { -1 }
-    pub fn register(_loop_fd: i64, _fd: i64, _interest: i64, _token: i64, _edge: bool) -> bool { false }
-    pub fn deregister(_loop_fd: i64, _fd: i64) -> bool { false }
-    pub fn poll(_loop_fd: i64, _max_events: i64, _timeout_ms: i64) -> Vec<Value> { vec![] }
-    pub fn close(_loop_fd: i64) -> bool { false }
+    pub fn create() -> i64 {
+        -1
+    }
+    pub fn register(_loop_fd: i64, _fd: i64, _interest: i64, _token: i64, _edge: bool) -> bool {
+        false
+    }
+    pub fn deregister(_loop_fd: i64, _fd: i64) -> bool {
+        false
+    }
+    pub fn poll(_loop_fd: i64, _max_events: i64, _timeout_ms: i64) -> Vec<Value> {
+        vec![]
+    }
+    pub fn close(_loop_fd: i64) -> bool {
+        false
+    }
     pub fn clear_state() {}
-    pub fn backend_name() -> &'static str { "poll" }
+    pub fn backend_name() -> &'static str {
+        "poll"
+    }
 }
 
 // ---------------------------------------------------------------------------

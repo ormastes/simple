@@ -660,8 +660,8 @@ impl ExecCore {
         let ast =
             load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("module load error: {}", e))?;
 
-        // Lower to HIR
-        let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;
+        // Lower to HIR with context so imported types (enums, classes) are resolved
+        let hir_module = hir::lower_with_context(&ast, path).map_err(|e| format!("HIR lowering error: {}", e))?;
 
         // Lower to MIR
         let mir_module = lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;

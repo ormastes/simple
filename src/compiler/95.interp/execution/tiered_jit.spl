@@ -7,6 +7,9 @@
 # Policy, profiling, and tier decisions live here in Simple.
 # Actual machine code emission uses Cranelift via rt_jit_* externs (Rust bridge).
 
+use compiler.mir_opt.mir_opt.pattern.rules_clib_parity.{CLibParityRule, clib_parity_rule_table}
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{get_eligible_rules_for_function}
+
 # Native JIT externs — bridge to Rust LocalExecutionManager (Cranelift)
 extern fn rt_jit_create() -> i64
 extern fn rt_jit_compile_source(handle: i64, source: text) -> text
@@ -72,6 +75,7 @@ struct JitHotspotSpecializationProvider:
     enabled: bool
     specialized_source: text
     semantic_proof: bool
+    eligible_rules: [CLibParityRule]
 
 # ============================================================================
 # Hotspot optimization facts
@@ -172,8 +176,29 @@ fn jit_hotspot_specialization_provider(
         name: name,
         enabled: true,
         specialized_source: specialized_source,
-        semantic_proof: semantic_proof
+        semantic_proof: semantic_proof,
+        eligible_rules: []
     )
+
+fn jit_hotspot_specialization_provider_with_rules(
+    name: text,
+    specialized_source: text,
+    semantic_proof: bool,
+    fn_name: text,
+    facts: [text],
+    proofs: [text]
+) -> JitHotspotSpecializationProvider:
+    val rules = get_eligible_rules_for_function(fn_name, clib_parity_rule_table(), facts, proofs)
+    JitHotspotSpecializationProvider(
+        name: name,
+        enabled: true,
+        specialized_source: specialized_source,
+        semantic_proof: semantic_proof,
+        eligible_rules: rules
+    )
+
+fn jit_hotspot_provider_get_eligible_rules(provider: JitHotspotSpecializationProvider) -> [CLibParityRule]:
+    provider.eligible_rules
 
 fn jit_hotspot_consume_plan_with_provider(
     plan: JitHotspotPlan,
@@ -331,6 +356,30 @@ class TieredJitManager:
         else:
             val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false)
             jit_hotspot_plan_from_profile(profile, self.config, typed_mir, safe_deopt)
+
+    fn get_hotspot_plan_with_rules(
+        name: text,
+        typed_mir: bool,
+        safe_deopt: bool,
+        facts: [text],
+        proofs: [text]
+    ) -> JitHotspotPlan:
+        val plan = self.get_hotspot_plan(name, typed_mir, safe_deopt)
+        val extended_facts = get_eligible_rules_for_function(name, clib_parity_rule_table(), facts, proofs)
+        val extra_count = extended_facts.len()
+        if extra_count > 0:
+            val enriched_facts = plan.facts.push("clib_parity_eligible")
+            JitHotspotPlan(
+                function_name: plan.function_name,
+                call_count: plan.call_count,
+                threshold: plan.threshold,
+                eligible: plan.eligible,
+                invalidated: plan.invalidated,
+                reason: plan.reason,
+                facts: enriched_facts
+            )
+        else:
+            plan
 
     fn get_stats() -> JitStats:
         JitStats(tier1_compilations: self.tier1_compilations, tier2_compilations: self.tier2_compilations, total_compile_time_ms: self.total_compile_time_ms, hotspot_plans: self.hotspot_plans)

@@ -331,18 +331,18 @@ impl<'a> MirLowerer<'a> {
                         let index_reg = self.lower_expr(index)?;
 
                         let is_u8_array_set = matches!(
-                                index.ty,
-                                TypeId::I16
-                                    | TypeId::I32
-                                    | TypeId::I64
-                                    | TypeId::U8
-                                    | TypeId::U16
-                                    | TypeId::U32
-                                    | TypeId::U64
-                            )
-                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
-                                |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8),
-                            );
+                            index.ty,
+                            TypeId::I16
+                                | TypeId::I32
+                                | TypeId::I64
+                                | TypeId::U8
+                                | TypeId::U16
+                                | TypeId::U32
+                                | TypeId::U64
+                        ) && self
+                            .type_registry
+                            .and_then(|tr| tr.get(receiver.ty))
+                            .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8));
                         let is_u32_array_set = value.ty == TypeId::U32
                             && matches!(
                                 index.ty,
@@ -718,25 +718,26 @@ impl<'a> MirLowerer<'a> {
                             return Ok(());
                         }
 
-                        let typed_push_target = if self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                        let typed_push_target =
+                            if self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
                                 |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8),
                             ) {
-                            Some("rt_typed_bytes_u8_push")
-                        } else if args[0].ty == TypeId::U32
-                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
-                                |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U32),
-                            )
-                        {
-                            Some("rt_typed_words_u32_push")
-                        } else if args[0].ty == TypeId::U64
-                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
-                                |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U64),
-                            )
-                        {
-                            Some("rt_typed_words_u64_push")
-                        } else {
-                            None
-                        };
+                                Some("rt_typed_bytes_u8_push")
+                            } else if args[0].ty == TypeId::U32
+                                && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                                    |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U32),
+                                )
+                            {
+                                Some("rt_typed_words_u32_push")
+                            } else if args[0].ty == TypeId::U64
+                                && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                                    |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U64),
+                                )
+                            {
+                                Some("rt_typed_words_u64_push")
+                            } else {
+                                None
+                            };
 
                         if let Some(target) = typed_push_target {
                             let receiver_reg = self.lower_expr(receiver)?;
