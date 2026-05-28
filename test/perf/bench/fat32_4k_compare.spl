@@ -3,7 +3,7 @@
 #   scripts/perf/prepare-fat32-4k-vfat.shs
 
 use std.io_runtime.{time_now_unix_micros}
-use std.nogc_sync_mut.io.file_ops.{file_read_text_at, file_write_text_at}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text_at, file_write_text_at}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.types.{FileHandle}
 use std.fs_driver.fat32_core.{Fat32Core}
@@ -245,6 +245,8 @@ fn bench_host_read_at(iters: i64, block_count: i64, path: text, name: text) -> B
         val offset = _rand_block(i, block_count) * 4096
         val t0 = time_now_unix_micros()
         val _r = file_read_text_at(path, offset, 4096)
+        if _r.len() < 4096:
+            return BenchResult(name: name, p50_us: 999999999, p99_us: 999999999, skipped: true)
         latencies.push(time_now_unix_micros() - t0)
         i = i + 1
     BenchResult(name: name, p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99), skipped: false)
@@ -276,10 +278,16 @@ fn bench_host_write(iters: i64, block_count: i64) -> BenchResult:
     bench_host_write_at(iters, block_count, path, "host_posix_write4k")
 
 fn bench_vfat_read(iters: i64, block_count: i64) -> BenchResult:
-    bench_host_read_at(iters, block_count, "/tmp/simple_vfat_bench_mnt/simple_fat32_4k_vfat_read.bin", "c_fat_vfat_read4k")
+    val path = "/tmp/simple_vfat_bench_mnt/simple_fat32_4k_vfat_read.bin"
+    if not file_exists(path):
+        return BenchResult(name: "c_fat_vfat_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    bench_host_read_at(iters, block_count, path, "c_fat_vfat_read4k")
 
 fn bench_vfat_write(iters: i64, block_count: i64) -> BenchResult:
-    bench_host_write_at(iters, block_count, "/tmp/simple_vfat_bench_mnt/simple_fat32_4k_vfat_write.bin", "c_fat_vfat_write4k")
+    val path = "/tmp/simple_vfat_bench_mnt/simple_fat32_4k_vfat_write.bin"
+    if not file_exists(path):
+        return BenchResult(name: "c_fat_vfat_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    bench_host_write_at(iters, block_count, path, "c_fat_vfat_write4k")
 
 fn print_result(r: BenchResult):
     if r.skipped:
@@ -299,10 +307,12 @@ fn main():
     print_result(hr)
     val hw = bench_host_write(iters, blocks)
     print_result(hw)
-    val vr = BenchResult(name: "c_fat_vfat_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
-    val vw = BenchResult(name: "c_fat_vfat_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
+    val vr = bench_vfat_read(iters, blocks)
+    val vw = bench_vfat_write(iters, blocks)
     print_result(vr)
     print_result(vw)
+    if vr.skipped or vw.skipped:
+        print "vfat_baseline: missing run scripts/perf/prepare-fat32-4k-vfat.shs"
     if not hr.skipped and sr.p50_us < hr.p50_us:
         print "read4k: simple_fat32 faster"
     else:
