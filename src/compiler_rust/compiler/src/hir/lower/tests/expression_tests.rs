@@ -218,6 +218,38 @@ fn test_lenient_unresolved_uppercase_field_access_becomes_static_variant_global(
 }
 
 #[test]
+fn test_lower_static_enum_variant_constructor_call() {
+    let module = parse_and_lower(
+        "enum FsError:\n    InvalidArg\n    Transient(code: i32)\n\nfn test() -> FsError:\n    return FsError.Transient(code: 110)\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "test").unwrap();
+    let HirStmt::Return(Some(expr)) = &func.body[0] else {
+        panic!("Expected return statement");
+    };
+    let HirExprKind::Call { func, args } = &expr.kind else {
+        panic!("Expected enum variant constructor call");
+    };
+    assert_eq!(func.kind, HirExprKind::Global("FsError::Transient".to_string()));
+    assert_eq!(args.len(), 1);
+}
+
+#[test]
+fn test_lower_static_enum_unit_variant_value() {
+    let module = parse_and_lower(
+        "enum FsError:\n    InvalidArg\n    Transient(code: i32)\n\nfn test() -> FsError:\n    return FsError.InvalidArg\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "test").unwrap();
+    let HirStmt::Return(Some(expr)) = &func.body[0] else {
+        panic!("Expected return statement");
+    };
+    assert_eq!(expr.kind, HirExprKind::Global("FsError::InvalidArg".to_string()));
+}
+
+#[test]
 fn test_lower_ambiguous_global_field_chain_as_field_access() {
     let source = "fn test(s: Holder) -> text:\n    return s.suggestion.new_text\n";
     let mut parser = Parser::new(source);

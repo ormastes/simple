@@ -21,6 +21,13 @@ entering `Fat32Core.write`. With `SIMPLE_DEBUG_METHOD_DISPATCH=1`, the compiler
 reports several bare method calls in the FAT block-device path with `receiver ty
 = Any`, including `read_sector`, `write_sector`, `sector_size`, and `get`.
 
+Update 2026-05-28: the native HIR lowering blockers for exact enum static
+constructor syntax (`Result.Err(...)` and `FsError.Transient(...)`) were cleared
+for this path. The rebuilt compiler now reaches the memory-capability gate and
+falls back with `Memory safety error [W1006]: mutation without mut capability`.
+The remaining blocker is the trait/capability mutation analysis, not enum
+constructor lowering.
+
 ## Reproduce
 
 ```bash

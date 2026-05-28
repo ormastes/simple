@@ -71,7 +71,7 @@ fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> 
     while current >= 2 and max_iter > 0:
         val data_result = write_ctx.read_cluster(current)
         if data_result.is_err():
-            return Result.Err(_fat32_unwrap_err(data_result))
+            return Err(_fat32_unwrap_err(data_result))
         var data = data_result.unwrap()
 
         val entries_per_cluster = (write_ctx.sectors_per_cluster * write_ctx.bytes_per_sector) / 32
@@ -80,7 +80,7 @@ fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> 
             val off = (idx * 32).to_i32()
             val first_byte = data[off]
             if first_byte == 0x00:
-                return Result.Err("entry not found: {name}")
+                return Err("entry not found: {name}")
             if first_byte == 0xE5 or data[off + 11] == FAT32_ATTR_LFN:
                 idx = idx + 1
                 continue
@@ -115,7 +115,7 @@ fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> 
             fat_i = fat_i + 1
         val fat_result = write_ctx.device.read_sector(fat_sector, fat_buf)
         if fat_result.is_err():
-            return Result.Err("failed to read FAT sector")
+            return Err("failed to read FAT sector")
         val next = (((fat_buf[entry_offset + 3].to_u32() << 24) |
                      (fat_buf[entry_offset + 2].to_u32() << 16) |
                      (fat_buf[entry_offset + 1].to_u32() << 8) |
@@ -125,7 +125,7 @@ fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> 
         current = next
         max_iter = max_iter - 1
 
-    Result.Err("entry not found: {name}")
+    Err("entry not found: {name}")
 
 # ============================================================================
 # Filesystem trait implementation for Fat32Driver
@@ -137,7 +137,7 @@ impl Filesystem for Fat32Driver:
     me fn mount(device: text, options: text) -> Result<bool, text>:
         val bpb_result = self.read_bpb()
         if bpb_result.is_err():
-            return Result.Err(_fat32_unwrap_err(bpb_result))
+            return Err(_fat32_unwrap_err(bpb_result))
 
         val bpb = bpb_result.unwrap()
         self.bytes_per_sector = bpb.bytes_per_sector.to_u32()
@@ -148,29 +148,29 @@ impl Filesystem for Fat32Driver:
         self.root_cluster = bpb.root_cluster
 
         if self.bytes_per_sector == 0:
-            return Result.Err("invalid BPB: bytes_per_sector=0")
+            return Err("invalid BPB: bytes_per_sector=0")
         if self.sectors_per_cluster == 0:
-            return Result.Err("invalid BPB: sectors_per_cluster=0")
+            return Err("invalid BPB: sectors_per_cluster=0")
         if self.num_fats == 0:
-            return Result.Err("invalid BPB: num_fats=0")
+            return Err("invalid BPB: num_fats=0")
         if self.fat_size == 0:
-            return Result.Err("invalid BPB: fat_size=0")
+            return Err("invalid BPB: fat_size=0")
 
         self.data_start_sector = self.reserved_sectors + (self.num_fats * self.fat_size)
 
         val total_sectors = bpb.total_sectors_32
         if total_sectors <= self.data_start_sector:
-            return Result.Err("invalid BPB: total_sectors <= data_start_sector")
+            return Err("invalid BPB: total_sectors <= data_start_sector")
         val data_sectors = total_sectors - self.data_start_sector
         self.total_clusters = data_sectors / self.sectors_per_cluster
 
         self.mounted = true
-        Result.Ok(true)
+        Ok(true)
 
     me fn unmount() -> Result<bool, text>:
         self.open_files = []
         self.mounted = false
-        Result.Ok(true)
+        Ok(true)
 
     me fn open(path: text, flags: FileFlags) -> Result<u64, text>:
         """Open a file by traversing directory tree.
@@ -179,10 +179,10 @@ impl Filesystem for Fat32Driver:
         a new file at the given path using Fat32WriteContext.
         """
         if not self.mounted:
-            return Result.Err("filesystem not mounted")
+            return Err("filesystem not mounted")
         val result = self.resolve_path(path)
         if result.is_err():
-            return Result.Err(_fat32_unwrap_err(result))
+            return Err(_fat32_unwrap_err(result))
         val entry_opt = result.unwrap()
         if not entry_opt.?:
             if flags.create:
@@ -191,16 +191,16 @@ impl Filesystem for Fat32Driver:
                 val file_name = parent_and_name.name
                 val parent_result = self.resolve_path(parent_path)
                 if parent_result.is_err():
-                    return Result.Err(_fat32_unwrap_err(parent_result))
+                    return Err(_fat32_unwrap_err(parent_result))
                 val parent_opt = parent_result.unwrap()
                 if not parent_opt.?:
-                    return Result.Err("parent directory not found: {parent_path}")
+                    return Err("parent directory not found: {parent_path}")
                 val parent_entry = parent_opt
                 val parent_cluster = self.entry_first_cluster(parent_entry)
                 var ctx = Fat32WriteContext.new(self)
                 val create_result = ctx.create_file(parent_cluster, file_name, false)
                 if create_result.is_err():
-                    return Result.Err(_fat32_unwrap_err(create_result))
+                    return Err(_fat32_unwrap_err(create_result))
                 val new_cluster = create_result.unwrap()
                 self.device = ctx.device
                 val handle = self.next_handle
@@ -216,16 +216,16 @@ impl Filesystem for Fat32Driver:
                     flags: flags
                 )
                 self.open_files.push(open_file)
-                return Result.Ok(handle)
-            return Result.Err("file not found: {path}")
+                return Ok(handle)
+            return Err("file not found: {path}")
         val entry = entry_opt
         val parent_and_name = _split_path_parent(path)
         val parent_result = self.resolve_path(parent_and_name.parent)
         if parent_result.is_err():
-            return Result.Err(_fat32_unwrap_err(parent_result))
+            return Err(_fat32_unwrap_err(parent_result))
         val parent_opt = parent_result.unwrap()
         if not parent_opt.?:
-            return Result.Err("parent directory not found: {parent_and_name.parent}")
+            return Err("parent directory not found: {parent_and_name.parent}")
         val parent_cluster = self.entry_first_cluster(parent_opt)
         val cluster = self.entry_first_cluster(entry)
         val handle = self.next_handle
@@ -241,7 +241,7 @@ impl Filesystem for Fat32Driver:
             flags: flags
         )
         self.open_files.push(open_file)
-        Result.Ok(handle)
+        Ok(handle)
 
     me fn read(handle: u64, size: u64) -> Result<[u8], text>:
         """Read data from open file following cluster chain."""
@@ -254,12 +254,12 @@ impl Filesystem for Fat32Driver:
             scan = scan + 1
 
         if open_idx < 0:
-            return Result.Err("invalid file handle")
+            return Err("invalid file handle")
         val f = self.open_files[open_idx]
         val remaining = f.file_size - f.current_offset
         val read_size = if size < remaining: size else: remaining
         if read_size == 0:
-            return Result.Ok([])
+            return Ok([])
 
         var result_buf: [u8] = []
         var bytes_read: u64 = 0
@@ -270,7 +270,7 @@ impl Filesystem for Fat32Driver:
         while bytes_read < read_size and not self.is_eoc(current_cluster):
             val data_result = self.read_cluster(current_cluster)
             if data_result.is_err():
-                return Result.Err(_fat32_unwrap_err(data_result))
+                return Err(_fat32_unwrap_err(data_result))
             val data = data_result.unwrap()
 
             var i = offset_in_cluster
@@ -297,7 +297,7 @@ impl Filesystem for Fat32Driver:
                 name: old.name,
                 flags: old.flags
             )
-        Result.Ok(result_buf)
+        Ok(result_buf)
 
     me fn write(handle: u64, data: [u8]) -> Result<u64, text>:
         """Write data to an open file at the current offset."""
@@ -309,16 +309,16 @@ impl Filesystem for Fat32Driver:
                 break
             scan = scan + 1
         if open_idx < 0:
-            return Result.Err("invalid file handle")
+            return Err("invalid file handle")
         val f = self.open_files[open_idx]
         if not f.flags.write:
-            return Result.Err("file not opened for writing")
+            return Err("file not opened for writing")
 
         var ctx = Fat32WriteContext.new(self)
 
         val write_result = ctx.write_file_data(f.first_cluster, f.current_offset, data)
         if write_result.is_err():
-            return Result.Err(_fat32_unwrap_err(write_result))
+            return Err(_fat32_unwrap_err(write_result))
         val bytes_written = write_result.unwrap()
         self.device = ctx.device
 
@@ -341,7 +341,7 @@ impl Filesystem for Fat32Driver:
                 break
             i = i + 1
 
-        Result.Ok(bytes_written)
+        Ok(bytes_written)
 
     me fn close(handle: u64) -> Result<bool, text>:
         """Close an open file handle."""
@@ -353,12 +353,12 @@ impl Filesystem for Fat32Driver:
                     var ctx = Fat32WriteContext.new(self)
                     val update_result = ctx.update_file_size(file.dir_cluster, file.name, file.file_size.to_u32())
                     if update_result.is_err():
-                        return Result.Err(_fat32_unwrap_err(update_result))
+                        return Err(_fat32_unwrap_err(update_result))
                     self.device = ctx.device
                 self.open_files.remove(i)
-                return Result.Ok(true)
+                return Ok(true)
             i = i + 1
-        Result.Err("invalid file handle")
+        Err("invalid file handle")
 
     me fn seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
         """Seek to position in file."""
@@ -370,16 +370,16 @@ impl Filesystem for Fat32Driver:
                 break
             scan = scan + 1
         if open_idx < 0:
-            return Result.Err("invalid file handle")
+            return Err("invalid file handle")
         val f = self.open_files[open_idx]
         val new_offset = match whence:
             case SeekWhence.Set: offset.to_u64()
             case SeekWhence.Cur: (f.current_offset.to_i64() + offset).to_u64()
             case SeekWhence.End: (f.file_size.to_i64() + offset).to_u64()
         if new_offset > f.file_size:
-            return Result.Err("seek beyond end of file")
+            return Err("seek beyond end of file")
         if new_offset > 0 and self.sectors_per_cluster == 0:
-            return Result.Err("invalid filesystem geometry")
+            return Err("invalid filesystem geometry")
         var cluster = f.first_cluster
         if new_offset > 0:
             val cluster_size = (self.sectors_per_cluster * self.bytes_per_sector).to_u64()
@@ -389,10 +389,10 @@ impl Filesystem for Fat32Driver:
             while clusters_to_skip > 0:
                 val next_result = self.read_fat_entry(cluster)
                 if next_result.is_err():
-                    return Result.Err(_fat32_unwrap_err(next_result))
+                    return Err(_fat32_unwrap_err(next_result))
                 val next = next_result.unwrap()
                 if next >= FAT32_EOC:
-                    return Result.Err("seek beyond cluster chain")
+                    return Err("seek beyond cluster chain")
                 cluster = next
                 clusters_to_skip = clusters_to_skip - 1
         self.open_files[open_idx] = Fat32OpenFile(
@@ -405,37 +405,37 @@ impl Filesystem for Fat32Driver:
             name: f.name,
             flags: f.flags
         )
-        Result.Ok(new_offset)
+        Ok(new_offset)
 
     fn stat(path: text) -> Result<FsNode, text>:
         """Get file metadata by path."""
         if not self.mounted:
-            return Result.Err("filesystem not mounted")
+            return Err("filesystem not mounted")
         val result = self.resolve_path(path)
         if result.is_err():
-            return Result.Err(_fat32_unwrap_err(result))
+            return Err(_fat32_unwrap_err(result))
         val entry_opt = result.unwrap()
         if not entry_opt.?:
-            return Result.Err("not found: {path}")
+            return Err("not found: {path}")
         val entry = entry_opt
-        Result.Ok(self.entry_to_fs_node(entry, path))
+        Ok(self.entry_to_fs_node(entry, path))
 
     fn chmod(path: text, mode: u16) -> Result<bool, text>:
-        Result.Err("chmod: FAT32 only supports read-only attribute, not full POSIX permissions")
+        Err("chmod: FAT32 only supports read-only attribute, not full POSIX permissions")
 
     fn symlink(target: text, link_path: text) -> Result<bool, text>:
-        Result.Err("symlinks not supported on FAT32")
+        Err("symlinks not supported on FAT32")
 
     me fn mkdir(path: text) -> Result<bool, text>:
         """Create a directory with . and .. entries."""
         if not self.mounted:
-            return Result.Err("filesystem not mounted")
+            return Err("filesystem not mounted")
 
         val existing = self.resolve_path(path)
         if existing.is_ok():
             val ex = existing.unwrap()
             if ex.?:
-                return Result.Err("path already exists: {path}")
+                return Err("path already exists: {path}")
 
         val parent_and_name = _split_path_parent(path)
         val parent_path = parent_and_name.parent
@@ -443,42 +443,42 @@ impl Filesystem for Fat32Driver:
 
         val parent_result = self.resolve_path(parent_path)
         if parent_result.is_err():
-            return Result.Err(_fat32_unwrap_err(parent_result))
+            return Err(_fat32_unwrap_err(parent_result))
         val parent_opt = parent_result.unwrap()
         if not parent_opt.?:
-            return Result.Err("parent directory not found: {parent_path}")
+            return Err("parent directory not found: {parent_path}")
         val parent_entry = parent_opt
         if (parent_entry.attr & FAT32_ATTR_DIRECTORY) == 0:
-            return Result.Err("parent is not a directory: {parent_path}")
+            return Err("parent is not a directory: {parent_path}")
         val parent_cluster = self.entry_first_cluster(parent_entry)
 
         var ctx = Fat32WriteContext.new(self)
         val create_result = ctx.create_directory(parent_cluster, dir_name)
         if create_result.is_err():
-            return Result.Err(_fat32_unwrap_err(create_result))
+            return Err(_fat32_unwrap_err(create_result))
         self.device = ctx.device
-        Result.Ok(true)
+        Ok(true)
 
     me fn rmdir(path: text) -> Result<bool, text>:
         """Remove an empty directory."""
         if not self.mounted:
-            return Result.Err("filesystem not mounted")
+            return Err("filesystem not mounted")
 
         val dir_result = self.resolve_path(path)
         if dir_result.is_err():
-            return Result.Err(_fat32_unwrap_err(dir_result))
+            return Err(_fat32_unwrap_err(dir_result))
         val dir_opt = dir_result.unwrap()
         if not dir_opt.?:
-            return Result.Err("directory not found: {path}")
+            return Err("directory not found: {path}")
         val dir_entry = dir_opt
         if (dir_entry.attr & FAT32_ATTR_DIRECTORY) == 0:
-            return Result.Err("not a directory: {path}")
+            return Err("not a directory: {path}")
 
         val contents = self.readdir(path)
         if contents.is_err():
-            return Result.Err(_fat32_unwrap_err(contents))
+            return Err(_fat32_unwrap_err(contents))
         if contents.unwrap().len() > 0:
-            return Result.Err("directory not empty: {path}")
+            return Err("directory not empty: {path}")
 
         val parent_and_name = _split_path_parent(path)
         val parent_path = parent_and_name.parent
@@ -486,44 +486,44 @@ impl Filesystem for Fat32Driver:
 
         val parent_result = self.resolve_path(parent_path)
         if parent_result.is_err():
-            return Result.Err(_fat32_unwrap_err(parent_result))
+            return Err(_fat32_unwrap_err(parent_result))
         val parent_opt = parent_result.unwrap()
         if not parent_opt.?:
-            return Result.Err("parent not found: {parent_path}")
+            return Err("parent not found: {parent_path}")
         val parent_cluster = self.entry_first_cluster(parent_opt)
 
         var ctx = Fat32WriteContext.new(self)
         val delete_result = ctx.delete_file(parent_cluster, dir_name)
         if delete_result.is_err():
-            return Result.Err(_fat32_unwrap_err(delete_result))
+            return Err(_fat32_unwrap_err(delete_result))
         self.device = ctx.device
         delete_result
 
     fn readdir(path: text) -> Result<[DirEntry], text>:
         """List directory contents."""
         if not self.mounted:
-            return Result.Err("filesystem not mounted")
+            return Err("filesystem not mounted")
         val result = self.resolve_path(path)
         if result.is_err():
-            return Result.Err(_fat32_unwrap_err(result))
+            return Err(_fat32_unwrap_err(result))
         val entry_opt = result.unwrap()
         if not entry_opt.?:
-            return Result.Err("directory not found: {path}")
+            return Err("directory not found: {path}")
         val entry = entry_opt
         if (entry.attr & FAT32_ATTR_DIRECTORY) == 0:
-            return Result.Err("not a directory: {path}")
+            return Err("not a directory: {path}")
 
         val dir_cluster = self.entry_first_cluster(entry)
         val chain_result = self.follow_cluster_chain(dir_cluster)
         if chain_result.is_err():
-            return Result.Err(_fat32_unwrap_err(chain_result))
+            return Err(_fat32_unwrap_err(chain_result))
         val chain = chain_result.unwrap()
 
         var entries: [DirEntry] = []
         for cluster in chain:
             val data_result = self.read_cluster(cluster)
             if data_result.is_err():
-                return Result.Err(_fat32_unwrap_err(data_result))
+                return Err(_fat32_unwrap_err(data_result))
             val data = data_result.unwrap()
 
             val entries_per_cluster = (self.sectors_per_cluster * self.bytes_per_sector) / 32
@@ -533,7 +533,7 @@ impl Filesystem for Fat32Driver:
                 val off = (idx * 32).to_i32()
                 val first_byte = data[off]
                 if first_byte == 0x00:
-                    return Result.Ok(entries)
+                    return Ok(entries)
                 if first_byte == 0xE5:
                     pending_lfn = ""
                     idx = idx + 1
@@ -565,22 +565,22 @@ impl Filesystem for Fat32Driver:
                 entries.push(DirEntry(name: name, node: node))
                 pending_lfn = ""
                 idx = idx + 1
-        Result.Ok(entries)
+        Ok(entries)
 
     me fn unlink(path: text) -> Result<bool, text>:
         """Delete a file."""
         if not self.mounted:
-            return Result.Err("filesystem not mounted")
+            return Err("filesystem not mounted")
 
         val file_result = self.resolve_path(path)
         if file_result.is_err():
-            return Result.Err(_fat32_unwrap_err(file_result))
+            return Err(_fat32_unwrap_err(file_result))
         val file_opt = file_result.unwrap()
         if not file_opt.?:
-            return Result.Err("file not found: {path}")
+            return Err("file not found: {path}")
         val file_entry = file_opt
         if (file_entry.attr & FAT32_ATTR_DIRECTORY) != 0:
-            return Result.Err("cannot unlink directory (use rmdir): {path}")
+            return Err("cannot unlink directory (use rmdir): {path}")
 
         val parent_and_name = _split_path_parent(path)
         val parent_path = parent_and_name.parent
@@ -588,55 +588,55 @@ impl Filesystem for Fat32Driver:
 
         val parent_result = self.resolve_path(parent_path)
         if parent_result.is_err():
-            return Result.Err(_fat32_unwrap_err(parent_result))
+            return Err(_fat32_unwrap_err(parent_result))
         val parent_opt = parent_result.unwrap()
         if not parent_opt.?:
-            return Result.Err("parent not found: {parent_path}")
+            return Err("parent not found: {parent_path}")
         val parent_cluster = self.entry_first_cluster(parent_opt)
 
         var ctx = Fat32WriteContext.new(self)
         val delete_result = ctx.delete_file(parent_cluster, file_name)
         if delete_result.is_err():
-            return Result.Err(_fat32_unwrap_err(delete_result))
+            return Err(_fat32_unwrap_err(delete_result))
         self.device = ctx.device
         delete_result
 
     me fn rename(old_path: text, new_path: text) -> Result<bool, text>:
         """Rename or move a file/directory."""
         if not self.mounted:
-            return Result.Err("filesystem not mounted")
+            return Err("filesystem not mounted")
 
         val src_result = self.resolve_path(old_path)
         if src_result.is_err():
-            return Result.Err(_fat32_unwrap_err(src_result))
+            return Err(_fat32_unwrap_err(src_result))
         val src_opt = src_result.unwrap()
         if not src_opt.?:
-            return Result.Err("source not found: {old_path}")
+            return Err("source not found: {old_path}")
         val src_entry = src_opt
 
         val dst_check = self.resolve_path(new_path)
         if dst_check.is_ok():
             val dc = dst_check.unwrap()
             if dc.?:
-                return Result.Err("destination already exists: {new_path}")
+                return Err("destination already exists: {new_path}")
 
         val old_parent_and_name = _split_path_parent(old_path)
         val new_parent_and_name = _split_path_parent(new_path)
 
         val old_parent_result = self.resolve_path(old_parent_and_name.parent)
         if old_parent_result.is_err():
-            return Result.Err(_fat32_unwrap_err(old_parent_result))
+            return Err(_fat32_unwrap_err(old_parent_result))
         val old_parent_opt = old_parent_result.unwrap()
         if not old_parent_opt.?:
-            return Result.Err("source parent not found")
+            return Err("source parent not found")
         val old_parent_cluster = self.entry_first_cluster(old_parent_opt)
 
         val new_parent_result = self.resolve_path(new_parent_and_name.parent)
         if new_parent_result.is_err():
-            return Result.Err(_fat32_unwrap_err(new_parent_result))
+            return Err(_fat32_unwrap_err(new_parent_result))
         val new_parent_opt = new_parent_result.unwrap()
         if not new_parent_opt.?:
-            return Result.Err("destination parent not found")
+            return Err("destination parent not found")
         val new_parent_cluster = self.entry_first_cluster(new_parent_opt)
 
         var ctx = Fat32WriteContext.new(self)
@@ -644,7 +644,7 @@ impl Filesystem for Fat32Driver:
         val new_name_bytes = format_8_3_name(new_parent_and_name.name)
         val slot_result = ctx.find_free_dir_slot(new_parent_cluster)
         if slot_result.is_err():
-            return Result.Err(_fat32_unwrap_err(slot_result))
+            return Err(_fat32_unwrap_err(slot_result))
         val slot = slot_result.unwrap()
 
         val new_entry = Fat32DirEntry(
@@ -663,13 +663,13 @@ impl Filesystem for Fat32Driver:
         )
         val write_result = ctx.write_dir_entry(slot, new_entry)
         if write_result.is_err():
-            return Result.Err(_fat32_unwrap_err(write_result))
+            return Err(_fat32_unwrap_err(write_result))
 
         val del_result = _mark_entry_deleted(ctx, old_parent_cluster, old_parent_and_name.name)
         if del_result.is_err():
-            return Result.Err(_fat32_unwrap_err(del_result))
+            return Err(_fat32_unwrap_err(del_result))
 
-        Result.Ok(true)
+        Ok(true)
 
 # ============================================================================
 # Fat32Driver test-harness constructors

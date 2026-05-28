@@ -377,6 +377,39 @@ impl Lowerer {
             .find(|candidate| self.static_member_return_type(type_name, candidate).is_some())
     }
 
+    fn static_enum_variant_type(&self, type_name: &str, member: &str) -> Option<TypeId> {
+        let type_id = self
+            .module
+            .types
+            .lookup(type_name)
+            .or_else(|| self.globals.get(type_name).copied())?;
+        match self.module.types.get(type_id) {
+            Some(HirType::Enum { variants, .. }) if variants.iter().any(|(name, _)| name == member) => Some(type_id),
+            _ => None,
+        }
+    }
+
+    fn lower_static_enum_variant_call(
+        &mut self,
+        type_name: &str,
+        member: &str,
+        type_id: TypeId,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let args_hir = self.lower_call_args(args, ctx)?;
+        Ok(HirExpr {
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    kind: HirExprKind::Global(format!("{}::{}", type_name, member)),
+                    ty: type_id,
+                }),
+                args: args_hir,
+            },
+            ty: type_id,
+        })
+    }
+
     fn unknown_wrapper_static_member_error(&self, type_name: &str, member: &str) -> LowerError {
         let tried = Self::wrapper_static_member_candidates(member)
             .into_iter()
@@ -401,6 +434,9 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        if let Some(type_id) = self.static_enum_variant_type(type_name, member) {
+            return self.lower_static_enum_variant_call(type_name, member, type_id, args, ctx);
+        }
         if let Some(canonical_member) = self.resolve_static_member_name(type_name, member) {
             return self.lower_static_method_call(type_name, &canonical_member, args, ctx);
         }

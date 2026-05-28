@@ -61,7 +61,7 @@ fn parse_bpb(sector0: [u8]) -> Result<Fat32Bpb, i32>:
     val sig0 = sector0[510]
     val sig1 = sector0[511]
     if sig0 != FAT32_BOOT_SIG_0 or sig1 != FAT32_BOOT_SIG_1:
-        return Result.Err(EINVAL)
+        return Err(EINVAL)
 
     # Validate FAT32 type label at offset 82 (8 bytes: "FAT32   ")
     val l0 = sector0[82]
@@ -71,7 +71,7 @@ fn parse_bpb(sector0: [u8]) -> Result<Fat32Bpb, i32>:
     val l4 = sector0[86]
     if (l0 != 0x46 or l1 != 0x41 or l2 != 0x54 or
         l3 != 0x33 or l4 != 0x32):
-        return Result.Err(EIO)
+        return Err(EIO)
 
     val bpb = Fat32Bpb(
         bytes_per_sector:   (sector0[12].to_u16() << 8) | sector0[11].to_u16(),
@@ -91,7 +91,7 @@ fn parse_bpb(sector0: [u8]) -> Result<Fat32Bpb, i32>:
                              sector0[79], sector0[80], sector0[81]],
         bs_fat32_signature: [sector0[510], sector0[511]]
     )
-    Result.Ok(bpb)
+    Ok(bpb)
 
 # -- Cluster arithmetic --------------------------------------------------------
 
@@ -209,11 +209,11 @@ impl Fat32Filesystem:
 
         val read_result = dev.read_sector(0u64, buf)
         if read_result.is_err():
-            return Result.Err(EIO)
+            return Err(EIO)
 
         val bpb_result = parse_bpb(buf)
         if bpb_result.is_err():
-            return Result.Err(bpb_result.unwrap_err())
+            return Err(bpb_result.unwrap_err())
 
         val bpb = bpb_result.unwrap()
         self.bpb_parsed          = true
@@ -235,14 +235,14 @@ impl Fat32Filesystem:
                 bi = bi + 1
             val r = dev.read_sector(root_lba + sec_idx.to_u64(), sec_buf)
             if r.is_err():
-                return Result.Err(EIO)
+                return Err(EIO)
             var ci = 0
             while ci < 512:
                 self.root_dir_data.push(sec_buf[ci])
                 ci = ci + 1
             sec_idx = sec_idx + 1
 
-        Result.Ok(())
+        Ok(())
 
     fn unmount(self) -> i32:
         """Flush dirty FAT sectors and release the block device."""
@@ -257,17 +257,17 @@ impl Fat32Filesystem:
         """
         val entry_result = self._find_root_entry(path)
         if entry_result.is_err():
-            return Result.Err(entry_result.unwrap_err())
+            return Err(entry_result.unwrap_err())
         val entry_opt = entry_result.unwrap()
         if not entry_opt.?:
-            return Result.Err(ENOENT)
+            return Err(ENOENT)
         val off = entry_opt.unwrap()
         val cluster_high = (self.root_dir_data[off + 21].to_u32() << 8) | self.root_dir_data[off + 20].to_u32()
         val cluster_low  = (self.root_dir_data[off + 27].to_u32() << 8) | self.root_dir_data[off + 26].to_u32()
         val start = (cluster_high << 16) | cluster_low
         val fsize = ((self.root_dir_data[off + 31].to_u32() << 24) | (self.root_dir_data[off + 30].to_u32() << 16) |
                      (self.root_dir_data[off + 29].to_u32() << 8)  |  self.root_dir_data[off + 28].to_u32())
-        Result.Ok(FileHandle(
+        Ok(FileHandle(
             fd: 0u64,
             start_cluster: start,
             current_cluster: start,
@@ -287,7 +287,7 @@ impl Fat32Filesystem:
         if remaining < to_read:
             to_read = remaining
         if to_read == 0u64:
-            return Result.Ok(0u64)
+            return Ok(0u64)
         val cluster_bytes = self.cluster_size.to_u64()
         var copied: u64 = 0u64
         var bi: u64 = h.offset % cluster_bytes
@@ -296,7 +296,7 @@ impl Fat32Filesystem:
             copied = copied + 1u64
             bi = bi + 1u64
         h.offset = h.offset + copied
-        Result.Ok(copied)
+        Ok(copied)
 
     fn stat(self, path: text) -> Result<FileStat, i32>:
         """Return metadata for a root-dir 8.3 path (wave-4c).
@@ -305,14 +305,14 @@ impl Fat32Filesystem:
         """
         val entry_result = self._find_root_entry(path)
         if entry_result.is_err():
-            return Result.Err(entry_result.unwrap_err())
+            return Err(entry_result.unwrap_err())
         val entry_opt = entry_result.unwrap()
         if not entry_opt.?:
-            return Result.Err(ENOENT)
+            return Err(ENOENT)
         val off = entry_opt.unwrap()
         val fsize = ((self.root_dir_data[off + 31].to_u32() << 24) | (self.root_dir_data[off + 30].to_u32() << 16) |
                      (self.root_dir_data[off + 29].to_u32() << 8)  |  self.root_dir_data[off + 28].to_u32())
-        Result.Ok(FileStat(
+        Ok(FileStat(
             size: fsize.to_u64(),
             is_dir: false,
             mtime: 0u64
@@ -336,7 +336,7 @@ impl Fat32Filesystem:
             val off = idx * 32
             val first_byte = self.root_dir_data[off]
             if first_byte == 0x00u8:
-                return Result.Ok(nil)   # end of directory
+                return Ok(nil)   # end of directory
             if first_byte == 0xE5u8:
                 lfn_name = ""           # orphan any pending LFN
                 idx = idx + 1
@@ -351,7 +351,7 @@ impl Fat32Filesystem:
             # 8.3 entry. Match accumulated LFN first (the long name),
             # then fall back to the 8.3 short name.
             if lfn_name.len() > 0 and lfn_name.upper() == upper:
-                return Result.Ok(off)
+                return Ok(off)
             # Build 8.3 name string
             var entry_name = ""
             var ni = 0
@@ -370,10 +370,10 @@ impl Fat32Filesystem:
             if ext.len() > 0:
                 entry_name = entry_name + "." + ext
             if entry_name.upper() == upper:
-                return Result.Ok(off)
+                return Ok(off)
             lfn_name = ""
             idx = idx + 1
-        Result.Ok(nil)
+        Ok(nil)
 
     fn write(self, fd: u64, offset: u64, length: u64) -> i64:
         """Write — wave-4d."""
