@@ -537,6 +537,7 @@ fn real_device_physical_nvme_boot_markers() -> [text]:
         "measured_on=real-device",
         "user_namespace_assignment=hardware-data-queue",
         "user_namespace_mode=user-assigned",
+        "user_namespace_nsid=",
         "user_namespace_queue_id=",
         "user_namespace_active_lease_count=",
         "user_namespace_direct_io=read-write",
@@ -587,12 +588,35 @@ fn _real_device_serial_u16_field(serial_output: text, prefix: text) -> Result<u1
         return Err("invalid")
     Ok(value as u16)
 
+fn _real_device_serial_u32_field(serial_output: text, prefix: text) -> Result<u32, text>:
+    val value_text = _real_device_serial_text_field(serial_output, prefix)
+    if value_text.len() == 0:
+        return Err("missing")
+    for ch in value_text:
+        if ch < "0" or ch > "9":
+            return Err("invalid")
+    var value: u64 = 0u64
+    for ch in value_text:
+        val digit = ch.to_i32() - "0".to_i32()
+        value = value * 10u64 + digit.to_u64()
+    if value > 4294967295u64:
+        return Err("invalid")
+    Ok(value as u32)
+
 fn real_device_physical_nvme_serial_acceptance_reason(serial_output: text) -> text:
     if serial_output.contains("storage_provider=c-boot-bridge"):
         return "storage-not-pure-simple:c-boot-bridge"
     for marker in real_device_physical_nvme_boot_markers():
         if not _real_device_serial_marker_present(serial_output, marker):
             return "missing-physical-nvme-marker:" + marker
+    val system_nsid = _real_device_serial_u32_field(serial_output, "namespace_nsid=")
+    if system_nsid.is_err():
+        return "physical-nvme-system-nsid-invalid"
+    val user_nsid = _real_device_serial_u32_field(serial_output, "user_namespace_nsid=")
+    if user_nsid.is_err():
+        return "physical-nvme-user-nsid-invalid"
+    if user_nsid.unwrap() == system_nsid.unwrap():
+        return "physical-nvme-user-namespace-conflicts-system"
     val user_queue = _real_device_serial_u16_field(serial_output, "user_namespace_queue_id=")
     if user_queue.is_err():
         return "physical-nvme-user-queue-invalid"

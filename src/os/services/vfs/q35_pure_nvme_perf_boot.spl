@@ -144,15 +144,40 @@ fn _consumer_for_measurement(run: u32, op: u32) -> NvmeFilesystemConsumer:
 fn _q35_user_namespace_assignment_marker(
     nvme: NvmeDriver,
     grant: DeviceGrant,
-    sector_size: u32,
-    sector_count: u64,
     shared: SharedDmaBuffer,
-    proof_offset: i64,
     active_leases: [NvmeFilesystemLease]
 ) -> Result<text, text>:
     val queue_id = SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID
+    val user_nsid = 2u32
     val owner_task = 0u64
     val max_depth = 64u16
+    val previous_nsid = nvme.get_namespace_id()
+    val identify_user = nvme.identify_namespace_id(user_nsid)
+    if identify_user.is_err():
+        return Err("user-namespace-identify:" + identify_user.unwrap_err())
+    val user_sector_size_result = nvme.namespace_sector_size(user_nsid)
+    if user_sector_size_result.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_size = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_size.is_err():
+                return Err("user-namespace-restore:" + restore_after_size.unwrap_err())
+        return Err("user-namespace-sector-size:" + user_sector_size_result.unwrap_err())
+    val user_sector_count_result = nvme.namespace_sector_count(user_nsid)
+    if user_sector_count_result.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_count = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_count.is_err():
+                return Err("user-namespace-restore:" + restore_after_count.unwrap_err())
+        return Err("user-namespace-sector-count:" + user_sector_count_result.unwrap_err())
+    val user_sector_size = user_sector_size_result.unwrap()
+    val user_sector_count = user_sector_count_result.unwrap()
+    if user_sector_count < 8u64:
+        if previous_nsid != user_nsid:
+            val restore_after_capacity = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_capacity.is_err():
+                return Err("user-namespace-restore:" + restore_after_capacity.unwrap_err())
+        return Err("user-namespace-too-small")
+    val proof_offset = 0 as i64
     val grant_label = device_grant_resource_set_label(grant)
     val evidence_result = nvme.transfer_evidence_from_reversible_probe(
         0u64,
@@ -168,18 +193,22 @@ fn _q35_user_namespace_assignment_marker(
     val transfer_reason = nvme_transfer_readiness_reason(evidence)
     if transfer_reason != "ready":
         return Err("user-transfer-not-ready:" + transfer_reason)
-    val queue_ready = nvme.ensure_user_data_queue_for_assignment(queue_id, max_depth, 0u32, 1u32, owner_task)
+    val queue_ready = nvme.ensure_user_data_queue_for_assignment(queue_id, max_depth, 0u32, user_nsid, owner_task)
     if queue_ready.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_queue = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_queue.is_err():
+                return Err("user-namespace-restore:" + restore_after_queue.unwrap_err())
         return Err("user-data-queue:" + queue_ready.unwrap_err())
     val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(
         evidence,
         grant,
         0u32,
-        1u32,
-        sector_size,
-        sector_count,
+        user_nsid,
+        user_sector_size,
+        user_sector_count,
         0u64,
-        sector_count,
+        user_sector_count,
         queue_id,
         owner_task,
         max_depth,
@@ -187,6 +216,10 @@ fn _q35_user_namespace_assignment_marker(
         active_leases
     )
     if lease_result.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_lease = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_lease.is_err():
+                return Err("user-namespace-restore:" + restore_after_lease.unwrap_err())
         return Err("user-lease:" + lease_result.unwrap_err())
     val lease = lease_result.unwrap()
     val direct_read_probe = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease(
@@ -196,6 +229,10 @@ fn _q35_user_namespace_assignment_marker(
         direct_io_read_batch_request(1u64, [proof_offset], shared, 200000u32)
     )
     if direct_read_probe.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_read = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_read.is_err():
+                return Err("user-namespace-restore:" + restore_after_read.unwrap_err())
         return Err("user-direct-read")
     val direct_write_probe = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease(
         nvme,
@@ -204,9 +241,18 @@ fn _q35_user_namespace_assignment_marker(
         direct_io_write_batch_request(1u64, [proof_offset], shared, 200000u32)
     )
     if direct_write_probe.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_write = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_write.is_err():
+                return Err("user-namespace-restore:" + restore_after_write.unwrap_err())
         return Err("user-direct-write")
+    if previous_nsid != user_nsid:
+        val restore_after_probe = nvme.identify_namespace_id(previous_nsid)
+        if restore_after_probe.is_err():
+            return Err("user-namespace-restore:" + restore_after_probe.unwrap_err())
     Ok(
         "user_namespace_assignment=hardware-data-queue user_namespace_mode=user-assigned " +
+            "user_namespace_nsid=" + lease.namespace.nsid.to_u64().to_text() + " " +
             "user_namespace_queue_id=" + lease.queue.queue_id.to_u64().to_text() +
             " user_namespace_active_lease_count=" + active_leases.len().to_u64().to_text() +
             " user_namespace_direct_io=read-write user_namespace_conflict_policy=active-lease-checked"
@@ -418,7 +464,7 @@ fn q35_pure_nvme_perf_serial_lines() -> [text]:
         return ["[q35-pure-nvme-perf] skipped reason=dbfs-arena-direct-extent-failed detail=" + dbfs_offsets_result.unwrap_err()]
     val dbfs_offsets = dbfs_offsets_result.unwrap()
     val active_system_lease = _q35_system_namespace_lease(sector_size, sector_count)
-    val user_namespace_marker = _q35_user_namespace_assignment_marker(nvme, grant, sector_size, sector_count, shared, fat32_offsets[0], [active_system_lease])
+    val user_namespace_marker = _q35_user_namespace_assignment_marker(nvme, grant, shared, [active_system_lease])
     if user_namespace_marker.is_err():
         dma_free(dma)
         return ["[q35-pure-nvme-perf] skipped reason=user-namespace-assignment-failed detail=" + user_namespace_marker.unwrap_err()]
