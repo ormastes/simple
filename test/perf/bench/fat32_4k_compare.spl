@@ -7,12 +7,6 @@ use std.nogc_sync_mut.io.file_ops.{file_read_text_at, file_write_text_at}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.types.{FileHandle}
 use std.fs_driver.fat32_core.{Fat32Core}
-use std.fs_driver.fat32_test_device.{
-    fat32_reset_test_devices, fat32_register_test_device, fat32_active_mount,
-    fat32_active_create_read4k_file, fat32_active_create_write4k_file,
-    fat32_active_close, fat32_active_seek,
-    fat32_active_read, fat32_active_write, fat32_active_write_4k_overwrite
-}
 
 var __bench_data: [u8] = []
 var __bench_active_bank: i32 = 0
@@ -26,7 +20,7 @@ fn _byte_buf(n: i64, value: u8) -> [u8]:
     out
 
 fn _alloc_bank() -> i32:
-    __bench_data = _byte_buf(2097152, 0u8)
+    __bench_data = _byte_buf(65536, 0u8)
     0
 
 fn _set_sec(bid: i32, sec: i32, data: [u8]):
@@ -62,7 +56,7 @@ fn _init_image(bid: i32):
     _u8(bpb, 14, 0x20)
     _u8(bpb, 15, 0x00)
     _u8(bpb, 16, 2)
-    _w32(bpb, 32, 4096)
+    _w32(bpb, 32, 128)
     _w32(bpb, 36, 1)
     _w32(bpb, 44, 2)
     _u8(bpb, 510, 0x55)
@@ -87,18 +81,18 @@ impl BenchBlockDevice:
 impl BlockDevice for BenchBlockDevice:
     fn read_sector(lba: u64, mut buffer: [u8]) -> Result<bool, text>:
         val idx = lba.to_i32()
-        if idx < 0 or idx >= 4096:
+        if idx < 0 or idx >= 128:
             return Ok(true)
-        val src = _get_sec(__bench_active_bank, idx)
+        val base = idx * 512
         var i = 0
-        while i < buffer.len() and i < src.len():
-            buffer[i] = src[i]
+        while i < buffer.len() and i < 512:
+            buffer[i] = __bench_data[base + i]
             i = i + 1
         Ok(true)
 
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
         val idx = lba.to_i32()
-        if idx < 0 or idx >= 4096:
+        if idx < 0 or idx >= 128:
             return Err("sector out of range")
         _set_sec(__bench_active_bank, idx, data)
         Ok(true)
@@ -118,13 +112,6 @@ fn _make_core() -> Fat32Core:
     if rc.is_err():
         print "FATAL: mount failed"
     core
-
-fn _make_dev():
-    fat32_reset_test_devices()
-    val _registered = fat32_register_test_device(BenchBlockDevice.new())
-    val rc = fat32_active_mount()
-    if rc.is_err():
-        print "FATAL: mount failed: {rc.unwrap_err()}"
 
 fn _fill_bytes(n: i64, value: u8) -> [u8]:
     _byte_buf(n, value)
@@ -174,61 +161,59 @@ fn percentile(latencies: [i64], pct: i64) -> i64:
     latencies[n - 1]
 
 fn bench_simple_read(iters: i64, block_count: i64) -> BenchResult:
-    _make_dev()
-    val cr = fat32_active_create_read4k_file()
-    if cr.is_err():
-        print "FATAL: simple create failed: {cr.unwrap_err()}"
+    var core = _make_core()
+    val alloc_rc = core.alloc_cluster()
+    if alloc_rc.is_err():
+        print "FATAL: simple create failed: {alloc_rc.unwrap_err()}"
         return BenchResult(name: "simple_fat32_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
-    val _created = cr.unwrap()
-    val h = FileHandle(id: 1)
+    val h = core.alloc_file_handle(alloc_rc.unwrap(), 0, false)
     val block = _fill_bytes(4096, 0x52)
     var b: i64 = 0
     while b < block_count:
-        val _w = fat32_active_write(h, block, 4096)
+        val _w = core.write(h, block, 4096)
         b = b + 1
     var latencies: [i64] = []
     var read_buf = _fill_bytes(4096, 0)
     var i: i64 = 0
     while i < iters:
         val offset = _rand_block(i, block_count) * 4096
-        val _s = fat32_active_seek(h, offset)
+        val _s = core.seek(h, offset)
         val t0 = time_now_unix_micros()
-        val _r = fat32_active_read(h, read_buf, 4096)
+        val _r = core.read(h, read_buf, 4096)
         if _r.is_err():
             print "FATAL: simple read failed: {_r.unwrap_err()}"
             return BenchResult(name: "simple_fat32_read4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
         latencies.push(time_now_unix_micros() - t0)
         i = i + 1
-    val _c = fat32_active_close(h)
+    val _c = core.close(h)
     BenchResult(name: "simple_fat32_read4k", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99), skipped: false)
 
 fn bench_simple_write(iters: i64, block_count: i64) -> BenchResult:
-    _make_dev()
-    val cr = fat32_active_create_write4k_file()
-    if cr.is_err():
-        print "FATAL: simple create failed: {cr.unwrap_err()}"
+    var core = _make_core()
+    val alloc_rc = core.alloc_cluster()
+    if alloc_rc.is_err():
+        print "FATAL: simple create failed: {alloc_rc.unwrap_err()}"
         return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
-    val _created = cr.unwrap()
-    val h = FileHandle(id: 1)
+    val h = core.alloc_file_handle(alloc_rc.unwrap(), 0, false)
     val seed = _fill_bytes(4096, 0x41)
     val patch = _fill_bytes(4096, 0x57)
     var b: i64 = 0
     while b < block_count:
-        val _w = fat32_active_write(h, seed, 4096)
+        val _w = core.write(h, seed, 4096)
         b = b + 1
     var latencies: [i64] = []
     var i: i64 = 0
     while i < iters:
         val offset = _rand_block(i, block_count) * 4096
-        val _s = fat32_active_seek(h, offset)
+        val _s = core.seek(h, offset)
         val t0 = time_now_unix_micros()
-        val _w2 = fat32_active_write_4k_overwrite(h, patch)
+        val _w2 = core.write_4k_overwrite(h, patch)
         if _w2.is_err():
             print "FATAL: simple write failed: {_w2.unwrap_err()}"
             return BenchResult(name: "simple_fat32_write4k", p50_us: 999999999, p99_us: 999999999, skipped: true)
         latencies.push(time_now_unix_micros() - t0)
         i = i + 1
-    val _c = fat32_active_close(h)
+    val _c = core.close(h)
     BenchResult(name: "simple_fat32_write4k", p50_us: percentile(latencies, 50), p99_us: percentile(latencies, 99), skipped: false)
 
 fn bench_host_read_at(iters: i64, block_count: i64, path: text, name: text) -> BenchResult:

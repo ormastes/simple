@@ -67,6 +67,17 @@ p50/p99 latency numbers. Host POSIX and VFAT baselines are still skipped in the
 self-contained native build because host file SFFI functions are unresolved and
 stubbed, so the C-FAT superiority claim remains unproven.
 
+Update 2026-05-28 (hosted run crash): `bin/simple run
+test/perf/bench/fat32_4k_compare.spl` segfaults with rc=139 immediately after
+printing the benchmark banner. Temporary instrumentation localized the crash to
+`Fat32Core.mount() -> read_boot_sector() -> BenchBlockDevice.read_sector()`,
+while copying bytes into the trait-supplied mutable sector buffer. The harness
+was changed to exercise `Fat32Core` directly instead of the global test-device
+registry, deduplicate dirty cluster tracking, and shrink the in-memory FAT image
+to the sectors actually used by the 4K workload, but the hosted JIT trait buffer
+write crash remains open. This blocks a fresh hosted `bin/simple run` proof of
+4K random read/write superiority.
+
 ## Reproduce
 
 ```bash
@@ -82,6 +93,8 @@ src/compiler_rust/target/debug/simple test/perf/bench/fat32_microbench.spl
 - Native `fat32_4k_compare.spl` builds and the Simple FAT 4K read/write path
   completes, but host/VFAT baselines are skipped in the self-contained native
   build due unresolved host file SFFI stubs.
+- Hosted `bin/simple run test/perf/bench/fat32_4k_compare.spl` currently
+  segfaults at benchmark startup in the JIT trait-buffer sector read path.
 
 ## Expected
 
