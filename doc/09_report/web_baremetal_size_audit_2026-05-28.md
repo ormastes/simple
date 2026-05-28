@@ -138,9 +138,9 @@ Date: 2026-05-28
 | `examples/simple_os/arch/common/baremetal_bump_heap.h` | 1 | 28 | 706 |
 | `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 66 | 1806 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 18 | 515 |
-| `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 18 | 479 |
-| `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 21 | 493 |
-| `examples/simple_os/arch/common/baremetal_arm_interrupt_control.S` | 1 | 19 | 436 |
+| `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 14 | 313 |
+| `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 16 | 318 |
+| `examples/simple_os/arch/common/baremetal_arm_interrupt_control.S` | 1 | 16 | 122 |
 | `examples/simple_os/arch/riscv64/boot/baremetal_interrupt_control.S` | 1 | 4 | 217 |
 | `examples/simple_os/arch/riscv32/boot/baremetal_interrupt_control.S` | 1 | 4 | 217 |
 | `examples/simple_os/arch/common/baremetal_riscv_interrupt_control.S` | 1 | 20 | 442 |

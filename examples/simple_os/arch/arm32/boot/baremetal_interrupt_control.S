@@ -1,21 +1,16 @@
-    .syntax unified
-    .arm
-
-    .macro SIMPLEOS_ARM_DISABLE_INTERRUPTS
+.syntax unified
+.arm
+.macro A_DI
     cpsid if
-    .endm
-
-    .macro SIMPLEOS_ARM_ENABLE_INTERRUPTS
+.endm
+.macro A_EI
     cpsie if
-    .endm
-
-    .macro SIMPLEOS_ARM_WAIT_FOR_INTERRUPT
+.endm
+.macro A_WI
     wfe
-    .endm
-
-    .macro SIMPLEOS_ARM_RETURN
+.endm
+.macro A_RT
     bx lr
-    .endm
-
-    .include "examples/simple_os/arch/common/baremetal_arm_interrupt_control.S"
-    SIMPLEOS_ARM_INTERRUPT_CONTROL simpleos_arm32_interrupt_disable, simpleos_arm32_interrupt_enable, simpleos_arm32_wait_for_interrupt
+.endm
+.include "examples/simple_os/arch/common/baremetal_arm_interrupt_control.S"
+AIC simpleos_arm32_interrupt_disable, simpleos_arm32_interrupt_enable, simpleos_arm32_wait_for_interrupt
