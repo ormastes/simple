@@ -67,6 +67,7 @@ Date: 2026-05-28
 | Simple web static facade | 0 | 0 |
 | Simple web placeholder URL facade | 0 | 0 |
 | Bare-metal pure policy probe | 0 | 0 |
+| x86_64 minimal boot/stdout capsule | 0 | n/a |
 
 ## Direction
 
