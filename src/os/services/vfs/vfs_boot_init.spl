@@ -442,11 +442,15 @@ fn vfs_boot_nvme_filesystem_direct_io_extension(driver: DriverInstance) -> Resul
         case _:
             Err(FsError.Unsupported)
 
-fn vfs_boot_nvme_direct_io_extent_matches_backend(ext: DirectIoExt, mapped: DirectIoExtent) -> bool:
-    """Ensure the filesystem extent came from the same DirectIo backend that was probed."""
+fn vfs_boot_nvme_direct_io_extent_matches_request(ext: DirectIoExt, mapped: DirectIoExtent, file_offset: i64, byte_len: u64) -> bool:
+    """Ensure a filesystem extent answers the exact DirectIo request that was probed."""
     if mapped.consumer == "":
         return false
-    ext.backend_tag == "simpleos-nvme-fs-direct-io:" + mapped.consumer
+    if ext.backend_tag != "simpleos-nvme-fs-direct-io:" + mapped.consumer:
+        return false
+    if mapped.file_offset != file_offset:
+        return false
+    mapped.byte_len == byte_len
 
 fn vfs_boot_nvme_map_filesystem_direct_4k_request(driver: DriverInstance, req: DirectIoRequest) -> Result<DirectIoRequest, FsError>:
     """Resolve a filesystem DirectIo request to a storage-offset request."""
@@ -461,9 +465,7 @@ fn vfs_boot_nvme_map_filesystem_direct_4k_request(driver: DriverInstance, req: D
     if extent.is_err():
         return Err(extent.unwrap_err())
     val mapped = extent.unwrap()
-    if mapped.byte_len != 4096u64:
-        return Err(FsError.InvalidArg)
-    if not vfs_boot_nvme_direct_io_extent_matches_backend(direct, mapped):
+    if not vfs_boot_nvme_direct_io_extent_matches_request(direct, mapped, req.file_offset, 4096u64):
         return Err(FsError.InvalidArg)
     val storage_offset = (mapped.storage_lba * mapped.sector_size.to_u64()) as i64
     val storage_req = DirectIoRequest(
@@ -490,9 +492,7 @@ fn vfs_boot_nvme_map_filesystem_direct_4k_batch(driver: DriverInstance, req: Dir
         if extent.is_err():
             return Err(extent.unwrap_err())
         val mapped = extent.unwrap()
-        if mapped.byte_len != 4096u64:
-            return Err(FsError.InvalidArg)
-        if not vfs_boot_nvme_direct_io_extent_matches_backend(direct, mapped):
+        if not vfs_boot_nvme_direct_io_extent_matches_request(direct, mapped, offset, 4096u64):
             return Err(FsError.InvalidArg)
         storage_offsets.push((mapped.storage_lba * mapped.sector_size.to_u64()) as i64)
     val storage_req = DirectIoBatchRequest(
