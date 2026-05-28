@@ -11,7 +11,7 @@ use common.text_advanced.{escape_json}
 # IPC Message Types
 # =========================================================================
 
-enum IpcMessageKind:
+pub enum IpcMessageKind:
     Render
     Event
     Dialog
@@ -33,35 +33,42 @@ val IPC_MAX_MESSAGE_LEN = 1048576
 ## Maximum allowed field value length (8KB).
 val IPC_MAX_FIELD_LEN = 8192
 
-fn validate_ipc_message(json_str: text) -> Result<text, text>:
+fn _normalize_ipc_json(json_str: text) -> text:
+    if json_str.contains("\\\""):
+        return json_str.replace("\\\"", "\"")
+    json_str
+
+pub fn validate_ipc_message(json_str: text) -> Result<text, text>:
     """Validate IPC message size and structure before parsing."""
-    if json_str.len() > IPC_MAX_MESSAGE_LEN:
-        return Err("IPC message too long: {json_str.len()} > {IPC_MAX_MESSAGE_LEN}")
-    if json_str.len() == 0:
+    val normalized = _normalize_ipc_json(json_str)
+    if normalized.len() > IPC_MAX_MESSAGE_LEN:
+        return Err("IPC message too long: {normalized.len()} > {IPC_MAX_MESSAGE_LEN}")
+    if normalized.len() == 0:
         return Err("empty IPC message")
     # Basic structural check — must look like JSON object
-    val trimmed = json_str.trim()
+    val trimmed = normalized.trim()
     if not trimmed.starts_with("{") or not trimmed.ends_with("}"):
         return Err("IPC message is not a JSON object")
     Ok(trimmed)
 
-fn validate_ipc_field(value: text, field_name: text) -> text:
+pub fn validate_ipc_field(value: text, field_name: text) -> text:
     """Validate and sanitize an IPC field value."""
     if value.len() > IPC_MAX_FIELD_LEN:
         return value.slice(0, IPC_MAX_FIELD_LEN)
     value
 
-fn parse_ipc_message(json_str: text) -> UIEvent?:
+pub fn parse_ipc_message(json_str: text) -> UIEvent?:
     """Parse a JSON IPC message from the Electron shell."""
     # Validate message before parsing
     val validation = validate_ipc_message(json_str)
     match validation:
         Err(_): return nil
         _: pass_dn
-    val msg_type = extract_json_field(json_str, "type")
+    val json = _normalize_ipc_json(json_str)
+    val msg_type = extract_json_field(json, "type")
     if msg_type == "keypress":
-        val key = extract_json_field(json_str, "key")
-        val kp_win = extract_json_field(json_str, "windowId")
+        val key = extract_json_field(json, "key")
+        val kp_win = extract_json_field(json, "windowId")
         if key != "":
             # "main" is the default sentinel meaning the host window —
             # treat it as no windowId so single-window apps see KeyPress
@@ -71,15 +78,15 @@ fn parse_ipc_message(json_str: text) -> UIEvent?:
                 return UIEvent.Action(name: "win:" + kp_win + ":keypress:" + key)
             return UIEvent.KeyPress(key: key)
     if msg_type == "action":
-        val name = extract_json_field(json_str, "name")
-        val act_win = extract_json_field(json_str, "windowId")
+        val name = extract_json_field(json, "name")
+        val act_win = extract_json_field(json, "windowId")
         if name != "":
             if act_win != "" and act_win != "main":
                 return UIEvent.Action(name: "win:" + act_win + ":action:" + name)
             return UIEvent.Action(name: name)
     if msg_type == "resize":
-        val w_str = extract_json_field(json_str, "width")
-        val h_str = extract_json_field(json_str, "height")
+        val w_str = extract_json_field(json, "width")
+        val h_str = extract_json_field(json, "height")
         if w_str != "" and h_str != "":
             return UIEvent.Resize(width: w_str.to_int(), height: h_str.to_int())
     if msg_type == "quit":
@@ -89,60 +96,60 @@ fn parse_ipc_message(json_str: text) -> UIEvent?:
     if msg_type == "focusprev":
         return UIEvent.FocusPrev
     if msg_type == "windowOpened":
-        val window_id = extract_json_field(json_str, "windowId")
+        val window_id = extract_json_field(json, "windowId")
         if window_id != "":
             return UIEvent.Action(name: "window_opened:" + window_id)
     if msg_type == "windowClosed":
-        val window_id = extract_json_field(json_str, "windowId")
+        val window_id = extract_json_field(json, "windowId")
         if window_id != "":
             return UIEvent.Action(name: "window_closed:" + window_id)
     if msg_type == "windowMoved":
-        val window_id = extract_json_field(json_str, "windowId")
-        val wx = extract_json_field(json_str, "x")
-        val wy = extract_json_field(json_str, "y")
+        val window_id = extract_json_field(json, "windowId")
+        val wx = extract_json_field(json, "x")
+        val wy = extract_json_field(json, "y")
         if window_id != "":
             return UIEvent.Action(name: "wm_move:" + window_id + ":" + wx + ":" + wy)
     if msg_type == "windowResized":
-        val window_id = extract_json_field(json_str, "windowId")
-        val ww = extract_json_field(json_str, "width")
-        val wh = extract_json_field(json_str, "height")
+        val window_id = extract_json_field(json, "windowId")
+        val ww = extract_json_field(json, "width")
+        val wh = extract_json_field(json, "height")
         if window_id != "":
             return UIEvent.Action(name: "wm_resize:" + window_id + ":" + ww + ":" + wh)
     if msg_type == "windowFocused":
-        val window_id = extract_json_field(json_str, "windowId")
+        val window_id = extract_json_field(json, "windowId")
         if window_id != "":
             return UIEvent.Action(name: "wm_focus:" + window_id)
     if msg_type == "windowBlurred":
-        val window_id = extract_json_field(json_str, "windowId")
+        val window_id = extract_json_field(json, "windowId")
         if window_id != "":
             return UIEvent.Action(name: "wm_blur:" + window_id)
     if msg_type == "touchpress":
-        val x_str = extract_json_field(json_str, "x")
-        val y_str = extract_json_field(json_str, "y")
+        val x_str = extract_json_field(json, "x")
+        val y_str = extract_json_field(json, "y")
         if x_str != "" and y_str != "":
             return UIEvent.TouchPress(x: x_str.to_int(), y: y_str.to_int())
     if msg_type == "touchmove":
-        val x_str = extract_json_field(json_str, "x")
-        val y_str = extract_json_field(json_str, "y")
+        val x_str = extract_json_field(json, "x")
+        val y_str = extract_json_field(json, "y")
         if x_str != "" and y_str != "":
             return UIEvent.TouchMove(x: x_str.to_int(), y: y_str.to_int())
     if msg_type == "touchrelease":
-        val x_str = extract_json_field(json_str, "x")
-        val y_str = extract_json_field(json_str, "y")
+        val x_str = extract_json_field(json, "x")
+        val y_str = extract_json_field(json, "y")
         if x_str != "" and y_str != "":
             return UIEvent.TouchRelease(x: x_str.to_int(), y: y_str.to_int())
     if msg_type == "mouse":
-        val x_str = extract_json_field(json_str, "x")
-        val y_str = extract_json_field(json_str, "y")
-        val button = extract_json_field(json_str, "button")
-        val kind = extract_json_field(json_str, "kind")
+        val x_str = extract_json_field(json, "x")
+        val y_str = extract_json_field(json, "y")
+        val button = extract_json_field(json, "button")
+        val kind = extract_json_field(json, "kind")
         if x_str != "" and y_str != "":
             return UIEvent.MouseEvent(x: x_str.to_f64(), y: y_str.to_f64(), button: button, kind: kind)
     if msg_type == "scroll":
-        val x_str = extract_json_field(json_str, "x")
-        val y_str = extract_json_field(json_str, "y")
-        val dx_str = extract_json_field(json_str, "dx")
-        val dy_str = extract_json_field(json_str, "dy")
+        val x_str = extract_json_field(json, "x")
+        val y_str = extract_json_field(json, "y")
+        val dx_str = extract_json_field(json, "dx")
+        val dy_str = extract_json_field(json, "dy")
         if dx_str != "" or dy_str != "":
             val px = if x_str != "": x_str.to_f64() else: 0.0
             val py = if y_str != "": y_str.to_f64() else: 0.0
@@ -150,26 +157,26 @@ fn parse_ipc_message(json_str: text) -> UIEvent?:
             val pdy = if dy_str != "": dy_str.to_f64() else: 0.0
             return UIEvent.ScrollEvent(x: px, y: py, dx: pdx, dy: pdy)
     if msg_type == "focus":
-        var tid = extract_json_field(json_str, "targetId")
+        var tid = extract_json_field(json, "targetId")
         if tid == "":
-            tid = extract_json_field(json_str, "id")
-        val kind = extract_json_field(json_str, "kind")
+            tid = extract_json_field(json, "id")
+        val kind = extract_json_field(json, "kind")
         if tid != "":
             return UIEvent.FocusEvent(target_id: tid, kind: kind)
     if msg_type == "input":
-        var tid = extract_json_field(json_str, "targetId")
+        var tid = extract_json_field(json, "targetId")
         if tid == "":
-            tid = extract_json_field(json_str, "id")
-        val val_str = extract_json_field(json_str, "value")
+            tid = extract_json_field(json, "id")
+        val val_str = extract_json_field(json, "value")
         if tid != "":
             return UIEvent.InputChange(target_id: tid, value: val_str)
     if msg_type == "fetch_result":
-        val req_id = extract_json_field(json_str, "requestId")
-        val url = extract_json_field(json_str, "url")
-        val status_str = extract_json_field(json_str, "status")
-        val headers = extract_json_field(json_str, "headers")
-        val body = extract_json_field(json_str, "body")
-        val error = extract_json_field(json_str, "error")
+        val req_id = extract_json_field(json, "requestId")
+        val url = extract_json_field(json, "url")
+        val status_str = extract_json_field(json, "status")
+        val headers = extract_json_field(json, "headers")
+        val body = extract_json_field(json, "body")
+        val error = extract_json_field(json, "error")
         val status: i32 = if status_str != "":
             status_str.to_int().to_i32()
         else:
@@ -181,11 +188,11 @@ fn parse_ipc_message(json_str: text) -> UIEvent?:
 # IPC Message Building (Simple → Electron)
 # =========================================================================
 
-fn build_ipc_render(html: text) -> text:
+pub fn build_ipc_render(html: text) -> text:
     """Build an IPC render message."""
     return "{\"type\":\"render\",\"html\":\"" + escape_json(html) + "\"}"
 
-fn build_ipc_paint_canvas(ops_json: text, viewport_w: i32, viewport_h: i32) -> text:
+pub fn build_ipc_paint_canvas(ops_json: text, viewport_w: i32, viewport_h: i32) -> text:
     """Build a paint_canvas IPC message carrying a JSON ops array.
     `ops_json` is expected to already be a valid JSON array (e.g.
     "[{\"op\":\"fillRect\",...}]") produced by
@@ -194,7 +201,7 @@ fn build_ipc_paint_canvas(ops_json: text, viewport_w: i32, viewport_h: i32) -> t
     JSON.parse on the renderer side."""
     return "{\"type\":\"paint_canvas\",\"ops\":" + ops_json + ",\"width\":" + str(viewport_w) + ",\"height\":" + str(viewport_h) + "}"
 
-fn build_ipc_request_http(url: text, request_id: text, method: text, headers: text, body: text, content_type: text) -> text:
+pub fn build_ipc_request_http(url: text, request_id: text, method: text, headers: text, body: text, content_type: text) -> text:
     """Ask the host to perform an HTTP request. GET callers should pass an
     empty body/content_type. The reply arrives as a `fetch_result`
     message decoded into UIEvent.FetchResult."""
@@ -211,25 +218,25 @@ fn build_ipc_request_http(url: text, request_id: text, method: text, headers: te
     msg = msg + "}"
     msg
 
-fn build_ipc_request_fetch(url: text, request_id: text) -> text:
+pub fn build_ipc_request_fetch(url: text, request_id: text) -> text:
     """Ask the host to perform an HTTP GET. The reply arrives as a
     `fetch_result` message decoded into UIEvent.FetchResult. `request_id`
     is an opaque string the caller can use to correlate."""
     build_ipc_request_http(url, request_id, "GET", "", "", "")
 
-fn build_ipc_dialog(dialog_type: text, title: text, message: text) -> text:
+pub fn build_ipc_dialog(dialog_type: text, title: text, message: text) -> text:
     """Build an IPC dialog request."""
     return "{\"type\":\"dialog\",\"dialogType\":\"{dialog_type}\",\"title\":\"{title}\",\"message\":\"{message}\"}"
 
-fn build_ipc_notification(title: text, body: text) -> text:
+pub fn build_ipc_notification(title: text, body: text) -> text:
     """Build an IPC notification message."""
     return "{\"type\":\"notification\",\"title\":\"{title}\",\"body\":\"{body}\"}"
 
-fn build_ipc_window_control(action: text) -> text:
+pub fn build_ipc_window_control(action: text) -> text:
     """Build an IPC window control message (minimize/maximize/close)."""
     return "{\"type\":\"windowControl\",\"action\":\"{action}\"}"
 
-fn build_ipc_file_dialog(dialog_type: text, filters: text) -> text:
+pub fn build_ipc_file_dialog(dialog_type: text, filters: text) -> text:
     """Build an IPC file dialog request (open/save)."""
     return "{\"type\":\"fileDialog\",\"dialogType\":\"{dialog_type}\",\"filters\":\"{filters}\"}"
 
@@ -237,7 +244,7 @@ fn build_ipc_file_dialog(dialog_type: text, filters: text) -> text:
 # Surface Lifecycle Messages
 # =========================================================================
 
-fn build_ipc_open_window(window_id: text, title: text, html: text, x: i32, y: i32, width: i32, height: i32) -> text:
+pub fn build_ipc_open_window(window_id: text, title: text, html: text, x: i32, y: i32, width: i32, height: i32) -> text:
     """Build IPC message to open a new window with position and size."""
     var msg = "{\"type\":\"openWindow\",\"windowId\":\"" + window_id + "\""
     msg = msg + ",\"title\":\"" + escape_json(title) + "\""
@@ -249,31 +256,31 @@ fn build_ipc_open_window(window_id: text, title: text, html: text, x: i32, y: i3
     msg = msg + "}"
     return msg
 
-fn build_ipc_close_window(window_id: text) -> text:
+pub fn build_ipc_close_window(window_id: text) -> text:
     """Build IPC message to close a window."""
     return "{\"type\":\"closeWindow\",\"windowId\":\"" + window_id + "\"}"
 
-fn build_ipc_render_window(window_id: text, html: text) -> text:
+pub fn build_ipc_render_window(window_id: text, html: text) -> text:
     """Build IPC message to update a specific window."""
     return "{\"type\":\"renderWindow\",\"windowId\":\"" + window_id + "\",\"html\":\"" + escape_json(html) + "\"}"
 
-fn build_ipc_surface_state(window_id: text, state_json: text) -> text:
+pub fn build_ipc_surface_state(window_id: text, state_json: text) -> text:
     """Build IPC message with surface state snapshot."""
     return "{\"type\":\"surfaceState\",\"windowId\":\"" + window_id + "\",\"state\":\"" + escape_json(state_json) + "\"}"
 
-fn build_ipc_move_window(window_id: text, x: i32, y: i32) -> text:
+pub fn build_ipc_move_window(window_id: text, x: i32, y: i32) -> text:
     """Build IPC message to move a window."""
     return "{\"type\":\"moveWindow\",\"windowId\":\"" + window_id + "\",\"x\":" + str(x) + ",\"y\":" + str(y) + "}"
 
-fn build_ipc_resize_window(window_id: text, width: i32, height: i32) -> text:
+pub fn build_ipc_resize_window(window_id: text, width: i32, height: i32) -> text:
     """Build IPC message to resize a window."""
     return "{\"type\":\"resizeWindow\",\"windowId\":\"" + window_id + "\",\"width\":" + str(width) + ",\"height\":" + str(height) + "}"
 
-fn build_ipc_focus_window(window_id: text) -> text:
+pub fn build_ipc_focus_window(window_id: text) -> text:
     """Build IPC message to focus a window."""
     return "{\"type\":\"focusWindow\",\"windowId\":\"" + window_id + "\"}"
 
-fn build_ipc_minimize_window(window_id: text) -> text:
+pub fn build_ipc_minimize_window(window_id: text) -> text:
     """Build IPC message to minimize a window."""
     return "{\"type\":\"minimizeWindow\",\"windowId\":\"" + window_id + "\"}"
 
@@ -380,35 +387,46 @@ fn _codepoint_to_text(cp: i64) -> text:
     # land later.
     "?"
 
-fn extract_json_field(json_str: text, field: text) -> text:
+pub fn extract_json_field(json_str: text, field_name: text) -> text:
     """Extract a field value (string OR number) from simple JSON.
     Strings are scanned escape-aware so embedded `\"` doesn't truncate;
     numbers are returned as text up to the next comma/brace/whitespace."""
-    val quote = "\""
-    val key = quote + field + quote + ":"
-    val key_idx = _s_find(json_str, key)
+    val json = _normalize_ipc_json(json_str)
+    val search = "\"{field_name}\""
+    val key_idx = json.find(search)
     if key_idx < 0:
         return ""
-    var pos = key_idx + key.len()
-    val total = json_str.len()
+    val total = json.len()
+    var pos = key_idx + search.len()
+    while pos < total:
+        val ch = json.substring(pos, pos + 1)
+        if ch == ":":
+            break
+        pos = pos + 1
+    if pos >= total:
+        return ""
+    pos = pos + 1
     # Skip whitespace after the colon.
     while pos < total:
-        val ch = json_str.substring(pos, pos + 1)
+        val ch = json.substring(pos, pos + 1)
         if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
             pos = pos + 1
         else:
             break
     if pos >= total:
         return ""
-    val first = json_str.substring(pos, pos + 1)
+    val first = json.substring(pos, pos + 1)
     if first == "\"":
         # Quoted string — scan with escape handling.
-        return _scan_string_value(json_str.substring(pos + 1))
+        return _scan_string_value(json.substring(pos + 1))
     # Bare value (number, true, false, null) — read until terminator.
     var end = pos
     while end < total:
-        val ch = json_str.substring(end, end + 1)
+        val ch = json.substring(end, end + 1)
         if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
             break
         end = end + 1
-    json_str.substring(pos, end)
+    json.substring(pos, end)
+
+pub fn escape_ipc_json(value: text) -> text:
+    escape_json(value)
