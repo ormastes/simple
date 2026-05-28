@@ -21,7 +21,7 @@ mod pty_process {
         let mut master_fd: libc::c_int = -1;
         let mut slave_fd: libc::c_int = -1;
 
-        let ws = libc::winsize {
+        let mut ws = libc::winsize {
             ws_row: rows.max(1) as libc::c_ushort,
             ws_col: cols.max(1) as libc::c_ushort,
             ws_xpixel: 0,
@@ -33,8 +33,8 @@ mod pty_process {
                 &mut master_fd,
                 &mut slave_fd,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &ws,
+                std::ptr::null_mut(),
+                &mut ws,
             )
         };
 
@@ -89,7 +89,7 @@ mod pty_process {
                     libc::_exit(1);
                 }
 
-                libc::ioctl(slave_fd, libc::TIOCSCTTY, 0 as libc::c_int);
+                libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0 as libc::c_int);
                 libc::dup2(slave_fd, libc::STDIN_FILENO);
                 libc::dup2(slave_fd, libc::STDOUT_FILENO);
                 libc::dup2(slave_fd, libc::STDERR_FILENO);

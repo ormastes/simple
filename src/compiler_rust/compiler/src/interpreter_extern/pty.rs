@@ -51,7 +51,7 @@ mod unix_impl {
         let mut master_fd: libc::c_int = -1;
         let mut slave_fd: libc::c_int = -1;
 
-        let ws = libc::winsize {
+        let mut ws = libc::winsize {
             ws_row: rows.max(1) as libc::c_ushort,
             ws_col: cols.max(1) as libc::c_ushort,
             ws_xpixel: 0,
@@ -63,8 +63,8 @@ mod unix_impl {
                 &mut master_fd,
                 &mut slave_fd,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &ws,
+                std::ptr::null_mut(),
+                &mut ws,
             )
         };
 
@@ -130,7 +130,7 @@ mod unix_impl {
                 // TIOCSCTTY is available on Linux, macOS, and BSDs via libc.
                 #[cfg(not(target_os = "windows"))]
                 {
-                    libc::ioctl(slave_fd, libc::TIOCSCTTY, 0 as libc::c_int);
+                    libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0 as libc::c_int);
                 }
 
                 // Wire stdio.

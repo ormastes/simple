@@ -10,7 +10,9 @@ use common.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{update_state}
 use common.ui.event.{process_event}
 use app.ui.web.html.{generate_html_page, generate_wm_html_page}
-use app.ui.web.ws_handler.{handle_ws_upgrade, handle_ws_wm_upgrade, is_ws_upgrade_request}
+use app.ui.web.ws_handler.{handle_ws_upgrade, handle_ws_wm_upgrade, is_ws_upgrade_request, extract_ws_key, compute_ws_accept}
+use app.ui.web.async_ws.{read_ws_frame, parse_ws_event, ws_send_render}
+use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{SessionToken, load_secret, TOKEN_TTL_DEFAULT_MS}
 use std.nogc_sync_mut.io.tls_sffi.{rt_tls_server_create}
@@ -160,7 +162,7 @@ class WebServer:
                     if self.wm_mode:
                         handle_ws_wm_upgrade(ConnStream.from_tcp(stream), path, headers, self.origin_guard, self.token_secret)
                     else:
-                        handle_ws_upgrade(ConnStream.from_tcp(stream), path, headers, self.origin_guard, self.token_secret)
+                        self.serve_ws_tcp(stream, headers)
                     return
 
                 if path.starts_with("/wm/native_window"):
@@ -252,6 +254,45 @@ class WebServer:
                         print "Close error: {e}"
                     Ok(()):
                         pass_dn
+
+    me serve_ws_tcp(stream: TcpStream, headers: text):
+        """Complete the WebSocket handshake on the raw TcpStream, then run the
+        interactive loop: read client action frames, apply them via update_state,
+        and push the re-rendered widget tree back. Operates on TcpStream directly
+        (not ConnStream) and skips token auth: this is the localhost dev server
+        and the served page connects to /ws without a token."""
+        val key = extract_ws_key(headers)
+        if key == "":
+            return
+        val accept = compute_ws_accept(key)
+        var response = "HTTP/1.1 101 Switching Protocols\r\n"
+        response = "{response}Upgrade: websocket\r\n"
+        response = "{response}Connection: Upgrade\r\n"
+        response = "{response}Sec-WebSocket-Accept: {accept}\r\n"
+        response = "{response}\r\n"
+        match stream.write_text(response):
+            Err(_):
+                return
+            Ok(()):
+                pass_dn
+
+        # Initial snapshot, then process client events until disconnect.
+        self.push_ws_render(stream)
+        loop:
+            val msg = read_ws_frame(stream)
+            if msg == nil:
+                break
+            val event = parse_ws_event(msg)
+            if event != nil:
+                self.check_file_changes()
+                self.state = update_state(self.state, event)
+                self.push_ws_render(stream)
+
+    me push_ws_render(stream: TcpStream):
+        """Render the current widget tree and push it as a {type:render} frame."""
+        val body = render_html_tree(self.state.tree.root_node(), self.state)
+        val msg = "{\"type\":\"render\",\"html\":\"" + escape_json(body) + "\"}"
+        ws_send_render(stream, msg)
 
     fn handle_login(stream: TcpStream, headers: text):
         """POST /ui/login — issue a bearer token for a pre-minted capability grant.
