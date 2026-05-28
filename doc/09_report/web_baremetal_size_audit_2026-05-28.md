@@ -10,7 +10,7 @@ Date: 2026-05-28
 | Browser simple render HTML | ok | ok | 18480 | 8165 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
 | Simple web static facade | n/a | ok | 14352 | 4696 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
 | Simple web placeholder URL facade | n/a | ok | 14336 | 3883 | `build/web_baremetal_size_audit/simple_web_placeholder_native.log` |
-| Simple web file facade | n/a | ok | 14344 | 6181 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
+| Simple web file facade | n/a | ok | 14344 | 6313 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
 | Bare-metal pure policy probe | ok | ok | 14336 | 6199 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
@@ -71,7 +71,7 @@ Date: 2026-05-28
 | `examples/browser/feature/dom` | 9 | 4854 | 181376 |
 | `examples/browser/feature/style` | 13 | 3914 | 150153 |
 | `src/lib/gc_async_mut/web` | 12 | 3784 | 160275 |
-| `src/lib/gc_async_mut/gpu/browser_engine` | 14 | 1586 | 60117 |
+| `src/lib/gc_async_mut/gpu/browser_engine` | 14 | 1587 | 60159 |
 
 ## Retention Checks
 
