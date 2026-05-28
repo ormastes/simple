@@ -384,8 +384,9 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   namespace queue. This is the no-per-I/O-allocation path production 4K random
   I/O benchmarks must exercise.
 - Flush is namespace- and queue-aware too. FAT32, NVFS, and DBFS direct-write
-  paths can flush the same assigned namespace queue used for read/write, instead
-  of flushing only the current system namespace.
+  paths call the lease-backed adapter's explicit flush hook for the same
+  assigned namespace queue used for read/write, instead of flushing only the
+  current system namespace.
 - The lease-backed VFS NVMe adapter exposes explicit 4KiB shared-DMA read/write
   entry points over the same lease NSID and queue ID used by FAT32, NVFS, and
   DBFS. The common filesystem mount surface stays `BlockDevice`, while
