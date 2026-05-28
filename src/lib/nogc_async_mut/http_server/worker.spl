@@ -58,10 +58,9 @@ use std.http_server.response.{
 }
 use std.http_server.handler.{HandlerRegistry}
 use std.http_server.error.{HttpServerError}
-use std.http_server.server.{load_tls_config}
 use std.http_server.security_context.{dispatch_with_task_remote_security_context}
 use std.async_host.task_identity.{allocate_scheduler_task_id, current_unified_task_key, enter_scheduler_task_id, exit_scheduler_task_id}
-use std.nogc_async_mut.io.tls.{AsyncTlsListener, AsyncTlsStream, TlsConfig}
+use std.nogc_async_mut.io.tls.{TlsConfig}
 use std.nogc_async_mut.io.tls_handshake.{perform_server_handshake}
 use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
 use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists, file_size}
@@ -117,7 +116,7 @@ class Worker:
     accept_op_id: i64
     static_file_sendfile_count: i64
     static_file_fallback_count: i64
-    tls_listener: AsyncTlsListener?
+    tls_config: TlsConfig?
 
     static fn create(worker_id: i64, config: ServerConfig,
                      router: AsyncRouter, pipeline: MiddlewarePipeline,
@@ -148,20 +147,24 @@ class Worker:
 
         tcp_backend_set_nonblocking(listen_fd, true)
 
-        # Build TLS listener when TLS is enabled
-        var tls_listen: AsyncTlsListener? = nil
+        # Build TLS config when TLS is enabled (no separate bind — reuse TCP listener fd)
+        var tls_cfg: TlsConfig? = nil
         if config.tls_enabled:
-            val tls_cfg_result = load_tls_config(config)
-            match tls_cfg_result:
-                Ok(tls_cfg):
-                    val tls_bind_result = AsyncTlsListener.bind(driver, config.listen_addr, tls_cfg)
-                    match tls_bind_result:
-                        Ok(listener):
-                            tls_listen = listener
-                        Err(io_err):
-                            return Err(HttpServerError.TlsError("Worker {worker_id}: TLS bind failed: {io_err.message}"))
-                Err(e):
-                    return Err(e)
+            val chain_result = TlsCertificateChain.from_pem_file(config.tls_cert_path)
+            var chain: TlsCertificateChain
+            match chain_result:
+                Ok(c):
+                    chain = c
+                Err(msg):
+                    return Err(HttpServerError.TlsError("Worker {worker_id}: certificate load failed: {msg}"))
+            val key_result = TlsPrivateKey.from_pem_file(config.tls_key_path)
+            var key: TlsPrivateKey
+            match key_result:
+                Ok(k):
+                    key = k
+                Err(msg):
+                    return Err(HttpServerError.TlsError("Worker {worker_id}: private key load failed: {msg}"))
+            tls_cfg = TlsConfig.server(chain, key)
 
         Ok(Worker(
             worker_id: worker_id,
@@ -186,7 +189,7 @@ class Worker:
             accept_op_id: 0,
             static_file_sendfile_count: 0,
             static_file_fallback_count: 0,
-            tls_listener: tls_listen
+            tls_config: tls_cfg
         ))
 
     me run():
@@ -259,7 +262,7 @@ class Worker:
         tcp_backend_set_nodelay(client_fd, true)
 
         # TLS path: handshake then ALPN dispatch
-        if self.tls_listener.?:
+        if self.tls_config.?:
             self.handle_tls_accept(client_fd, now)
             return
 
@@ -285,11 +288,11 @@ class Worker:
         lands in tls_handshake.spl, extract it from the handshake
         state and pass to dispatch_by_alpn.
         """
-        var listener = self.tls_listener
+        var cfg = self.tls_config
         val hs_result = perform_server_handshake(
             self.driver,
             client_fd,
-            listener.tls_config
+            cfg
         )
         match hs_result:
             Ok(state):
@@ -298,7 +301,7 @@ class Worker:
                     tcp_backend_close(client_fd)
                     return
                 # TLS handshake succeeded — dispatch as HTTP/1.1
-                # TODO: extract ALPN from handshake state when ALPN is implemented
+                # TODO: [stdlib][P2] extract ALPN from handshake state when ALPN is implemented
                 self.dispatch_by_alpn("", client_fd, now)
             Err(e):
                 tcp_backend_close(client_fd)
@@ -851,6 +854,7 @@ fn worker_static_file_fallback_response(resp: HttpResponseData) -> HttpResponseD
         reason: resp.reason,
         headers: resp.headers,
         body: body,
+        body_bytes: [],
         body_file: "",
         body_offset: 0,
         body_length: 0,

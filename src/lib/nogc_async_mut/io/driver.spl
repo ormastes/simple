@@ -63,6 +63,12 @@ extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
 extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
 
+extern fn rt_event_loop_create() -> i64
+extern fn rt_event_loop_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
+extern fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> bool
+extern fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]
+extern fn rt_event_loop_close(loop_fd: i64) -> bool
+
 struct Completion:
     id: i64
     result: i64
@@ -89,6 +95,8 @@ class IoDriver:
     _fh_data: [text]
     _bytes_pending: Dict<i64, [u8]>
     _recv_bytes: Dict<i64, [u8]>
+    _ev_fd: i64
+    _ev_registered: Dict<i64, bool>
 
     static fn new() -> IoDriver:
         IoDriver(
@@ -99,7 +107,9 @@ class IoDriver:
             _next_id: 1, _next_fh: 10000,
             _fh_ids: [], _fh_data: [],
             _bytes_pending: {},
-            _recv_bytes: {}
+            _recv_bytes: {},
+            _ev_fd: rt_event_loop_create(),
+            _ev_registered: {}
         )
 
     static fn with_depth(depth: i64) -> IoDriver:
@@ -157,15 +167,33 @@ class IoDriver:
     # Passing arrays to a helper function and pushing onto them only modifies
     # local copies. All keep-pending logic is now inlined at each call site.
 
+    me _ev_register_read(fd: i64):
+        if self._ev_fd < 0:
+            return
+        if self._ev_registered.get(fd).?:
+            return
+        rt_event_loop_register(self._ev_fd, fd, 0, fd, false)
+        self._ev_registered[fd] = true
+
+    me _ev_deregister(fd: i64):
+        if self._ev_fd < 0:
+            return
+        if not self._ev_registered.get(fd).?:
+            return
+        rt_event_loop_deregister(self._ev_fd, fd)
+        self._ev_registered.remove(fd)
+
     # ---- Network Operations ----
 
     me submit_accept(listen_fd: i64) -> i64:
+        self._ev_register_read(listen_fd)
         self._push_op(_OP_ACCEPT, listen_fd, 0, "", 0, 0, 0, "", 0)
 
     me submit_connect(fd: i64, addr: text, port: i64) -> i64:
         self._push_op(_OP_CONNECT, fd, port, addr, 0, 0, 0, "", 0)
 
     me submit_recv(fd: i64, buf_size: i64) -> i64:
+        self._ev_register_read(fd)
         self._push_op(_OP_RECV, fd, 0, "", buf_size, 0, 0, "", 0)
 
     me submit_send(fd: i64, data: text) -> i64:
@@ -182,6 +210,7 @@ class IoDriver:
     # ---- UDP Operations ----
 
     me submit_udp_recv(fd: i64, buf_size: i64) -> i64:
+        self._ev_register_read(fd)
         self._push_op(_OP_UDP_RECV, fd, 0, "", buf_size, 0, 0, "", 0)
 
     me submit_udp_send(fd: i64, data: text, addr: text) -> i64:
@@ -213,6 +242,7 @@ class IoDriver:
     # ---- Cancellation ----
 
     me cancel_fd(fd: i64):
+        self._ev_deregister(fd)
         var new_id: [i64] = []
         var new_type: [i64] = []
         var new_fd: [i64] = []
@@ -274,6 +304,15 @@ class IoDriver:
         self._c_data = []
         self._recv_bytes = {}
 
+        var ready: Dict<i64, bool> = {}
+        var has_ev = self._ev_fd >= 0
+        if has_ev:
+            val raw_ev = rt_event_loop_poll(self._ev_fd, 64, 0)
+            var ri = 0
+            while ri + 2 < raw_ev.len():
+                ready[raw_ev[ri]] = true
+                ri = ri + 3
+
         var np_id: [i64] = []
         var np_type: [i64] = []
         var np_fd: [i64] = []
@@ -329,13 +368,14 @@ class IoDriver:
                 continue
 
             elif ot == _OP_RECV:
-                val bytes = rt_io_tcp_read(fd, self._p_size[i])
-                if bytes.len() > 0:
-                    val txt = rt_bytes_to_text(bytes)
-                    self._recv_bytes[oid] = bytes
-                    self._complete(oid, bytes.len(), 0, txt)
-                    i = i + 1
-                    continue
+                if (not has_ev) or ready.get(fd).?:
+                    val bytes = rt_io_tcp_read(fd, self._p_size[i])
+                    if bytes.len() > 0:
+                        val txt = rt_bytes_to_text(bytes)
+                        self._recv_bytes[oid] = bytes
+                        self._complete(oid, bytes.len(), 0, txt)
+                        i = i + 1
+                        continue
 
             elif ot == _OP_OPEN:
                 val path = self._p_path[i]
@@ -368,6 +408,7 @@ class IoDriver:
                 if is_file:
                     self._remove_file(fd)
                 else:
+                    self._ev_deregister(fd)
                     rt_io_tcp_close(fd)
                 self._complete(oid, 0, 0, "")
                 i = i + 1
@@ -393,14 +434,15 @@ class IoDriver:
                 continue
 
             elif ot == _OP_UDP_RECV:
-                val udp_result = rt_io_udp_recv_from(fd, self._p_size[i])
-                if udp_result != nil:
-                    val udp_data = udp_result.0
-                    val udp_addr = udp_result.1
-                    val udp_txt = rt_bytes_to_text(udp_data)
-                    self._complete(oid, udp_data.len(), 0, udp_addr + "\n" + udp_txt)
-                    i = i + 1
-                    continue
+                if (not has_ev) or ready.get(fd).?:
+                    val udp_result = rt_io_udp_recv_from(fd, self._p_size[i])
+                    if udp_result != nil:
+                        val udp_data = udp_result.0
+                        val udp_addr = udp_result.1
+                        val udp_txt = rt_bytes_to_text(udp_data)
+                        self._complete(oid, udp_data.len(), 0, udp_addr + "\n" + udp_txt)
+                        i = i + 1
+                        continue
 
             else:
                 self._complete(oid, ERR_UNSUPPORTED, 0, "")
@@ -571,3 +613,6 @@ class IoDriver:
         self._fh_data = []
         self._bytes_pending = {}
         self._recv_bytes = {}
+        if self._ev_fd >= 0:
+            rt_event_loop_close(self._ev_fd)
+        self._ev_registered = {}

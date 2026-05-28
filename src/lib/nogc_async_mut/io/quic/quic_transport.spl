@@ -26,6 +26,7 @@ use std.io.quic.quic_connection.{
     QuicConnection, QuicConnectionState, QuicAction
 }
 use std.io.quic.quic_stream.{QuicStream}
+use std.io.quic.quic_crypto.{QuicEncryptionLevel}
 
 # ============================================================================
 # Connection ID generation — stub
@@ -99,6 +100,12 @@ enum TransportEvent:
     StreamClosed(conn_key: text, stream_id: i64)
     # A connection was closed.
     ConnectionClosed(conn_key: text, reason: text)
+    # CRYPTO frame data received (for TLS handshake processing).
+    CryptoReceived(conn_key: text, level: QuicEncryptionLevel, data: [u8])
+    # A complete TLS handshake message was extracted.
+    HandshakeMessage(conn_key: text, level: QuicEncryptionLevel, msg_type: i64, data: [u8])
+    # Encryption keys are ready for a new level.
+    KeysReady(conn_key: text, level: QuicEncryptionLevel)
 
 # ============================================================================
 # QuicTransport — owns UDP socket, manages connections
@@ -236,8 +243,22 @@ class QuicTransport:
                                 conn_key: key, reason: reason
                             ))
                         case NeedCryptoHandshake:
-                            # Stub: crypto handshake not implemented
+                            # Initial crypto keys are now derived automatically
+                            # in QuicConnection.create_*; no additional action needed
                             pass
+                        case CryptoData(clevel, cdata):
+                            events.push(TransportEvent.CryptoReceived(
+                                conn_key: key, level: clevel, data: cdata
+                            ))
+                        case HandshakeMessage(hlevel, hmsg_type, hdata):
+                            events.push(TransportEvent.HandshakeMessage(
+                                conn_key: key, level: hlevel,
+                                msg_type: hmsg_type, data: hdata
+                            ))
+                        case KeysReady(klevel):
+                            events.push(TransportEvent.KeysReady(
+                                conn_key: key, level: klevel
+                            ))
                     i = i + 1
 
         return events

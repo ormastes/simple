@@ -24,6 +24,14 @@ use std.io.quic.quic_stream.{
     stream_id_is_client_initiated, stream_id_is_bidi,
     next_client_bidi_stream_id
 }
+use std.io.quic.quic_crypto.{
+    QuicCryptoState, QuicPacketKeys, QuicEncryptionLevel,
+    QuicTlsState, QuicCryptoEvent,
+    derive_initial_secrets, derive_quic_keys,
+    quic_aead_encrypt, quic_aead_decrypt,
+    crypto_buffer_append, extract_handshake_messages,
+    TLS_HS_CLIENT_HELLO, TLS_HS_SERVER_HELLO, TLS_HS_FINISHED
+}
 
 # ============================================================================
 # Connection state enum — RFC 9000 §5
@@ -60,6 +68,12 @@ enum QuicAction:
     ConnectionClosed(reason: text)
     # Crypto handshake data is needed (stub — TLS integration point).
     NeedCryptoHandshake
+    # CRYPTO frame data received at a given encryption level.
+    CryptoData(level: QuicEncryptionLevel, data: [u8])
+    # A complete TLS handshake message was extracted from CRYPTO frames.
+    HandshakeMessage(level: QuicEncryptionLevel, msg_type: i64, data: [u8])
+    # Encryption keys are ready for a new level.
+    KeysReady(level: QuicEncryptionLevel)
 
 # ============================================================================
 # QUIC frame type constants — RFC 9000 §19
@@ -102,9 +116,19 @@ class QuicConnection:
     next_stream_id: i64
     is_server: bool
     peer_addr: text
+    crypto: QuicCryptoState
 
     static fn create_client(local_cid: [u8], remote_cid: [u8], peer: text) -> QuicConnection:
-        """Create a new client-side connection in Initial state."""
+        """Create a new client-side connection in Initial state.
+
+        Derives Initial packet protection keys from the server's
+        connection ID (the client's destination CID) per RFC 9001 §5.2.
+        """
+        var cs = QuicCryptoState.create()
+        # Client derives Initial keys from the server's CID (remote_cid)
+        val (client_keys, server_keys) = derive_initial_secrets(remote_cid)
+        cs.client_initial_keys = client_keys
+        cs.server_initial_keys = server_keys
         return QuicConnection(
             local_conn_id: local_cid,
             remote_conn_id: remote_cid,
@@ -112,11 +136,21 @@ class QuicConnection:
             streams: {},
             next_stream_id: 0,
             is_server: false,
-            peer_addr: peer
+            peer_addr: peer,
+            crypto: cs
         )
 
     static fn create_server(local_cid: [u8], remote_cid: [u8], peer: text) -> QuicConnection:
-        """Create a new server-side connection in Initial state."""
+        """Create a new server-side connection in Initial state.
+
+        Derives Initial packet protection keys from the client's
+        destination connection ID (local_cid) per RFC 9001 §5.2.
+        """
+        var cs = QuicCryptoState.create()
+        # Server derives Initial keys from the client's DCID (its own local_cid)
+        val (client_keys, server_keys) = derive_initial_secrets(local_cid)
+        cs.client_initial_keys = client_keys
+        cs.server_initial_keys = server_keys
         return QuicConnection(
             local_conn_id: local_cid,
             remote_conn_id: remote_cid,
@@ -124,7 +158,8 @@ class QuicConnection:
             streams: {},
             next_stream_id: 1,
             is_server: true,
-            peer_addr: peer
+            peer_addr: peer,
+            crypto: cs
         )
 
     # ------------------------------------------------------------------
@@ -363,15 +398,45 @@ class QuicConnection:
 
                     if frame_type == QUIC_FRAME_CRYPTO:
                         # CRYPTO frame: offset(varint) + length(varint) + data
-                        # Skip for skeleton
+                        # Parse and buffer for TLS handshake reassembly
                         val off_r = quic_varint_decode(data, pos)
                         match off_r:
                             case Ok(or2):
+                                val crypto_offset = or2.value
                                 pos = pos + or2.consumed
                                 val len_r = quic_varint_decode(data, pos)
                                 match len_r:
                                     case Ok(lr):
-                                        pos = pos + lr.consumed + lr.value
+                                        val crypto_len = lr.value
+                                        pos = pos + lr.consumed
+                                        # Extract CRYPTO frame payload
+                                        var crypto_data: [u8] = []
+                                        var cdi = 0
+                                        loop:
+                                            if cdi >= crypto_len:
+                                                break
+                                            if pos + cdi >= data.len():
+                                                break
+                                            crypto_data.push(data[pos + cdi])
+                                            cdi = cdi + 1
+                                        pos = pos + crypto_len
+                                        # Determine encryption level from connection state
+                                        var level = QuicEncryptionLevel.Initial
+                                        match self.state:
+                                            case Handshake:
+                                                level = QuicEncryptionLevel.Handshake
+                                            case Connected:
+                                                level = QuicEncryptionLevel.Application
+                                            case _:
+                                                pass
+                                        # Buffer CRYPTO data and extract handshake messages
+                                        val crypto_events = self._process_crypto_data(level, crypto_data, crypto_offset)
+                                        var cei = 0
+                                        loop:
+                                            if cei >= crypto_events.len():
+                                                break
+                                            actions.push(crypto_events[cei])
+                                            cei = cei + 1
                                     case Err(msg):
                                         break
                             case Err(msg):
@@ -453,6 +518,91 @@ class QuicConnection:
                             actions.push(QuicAction.StreamClosed(stream_id: stream_id))
                         case _:
                             pass
+
+        return actions
+
+    # ------------------------------------------------------------------
+    # CRYPTO frame processing — TLS handshake message dispatch
+    # ------------------------------------------------------------------
+
+    me _process_crypto_data(level: QuicEncryptionLevel, data: [u8], offset: i64) -> [QuicAction]:
+        """Buffer CRYPTO frame data, extract complete TLS messages, and emit actions.
+
+        Appends data to the per-level CRYPTO reassembly buffer, then
+        scans for complete TLS handshake messages. Each complete message
+        is emitted as a QuicAction.HandshakeMessage.
+        """
+        var actions: [QuicAction] = []
+
+        # Append to the appropriate reassembly buffer, then extract
+        # only *new* handshake messages using the consumed-offset tracker.
+        match level:
+            case Initial:
+                self.crypto.initial_crypto_buf = crypto_buffer_append(
+                    self.crypto.initial_crypto_buf, data, offset
+                )
+                val (events, new_consumed) = extract_handshake_messages(
+                    self.crypto.initial_crypto_buf,
+                    self.crypto.initial_crypto_consumed
+                )
+                self.crypto.initial_crypto_consumed = new_consumed
+                var ei = 0
+                loop:
+                    if ei >= events.len():
+                        break
+                    val evt = events[ei]
+                    match evt:
+                        case HandshakeMessage(msg_type, msg_data):
+                            actions.push(QuicAction.HandshakeMessage(
+                                level: QuicEncryptionLevel.Initial,
+                                msg_type: msg_type,
+                                data: msg_data
+                            ))
+                            # Track TLS state transitions
+                            if msg_type == TLS_HS_CLIENT_HELLO:
+                                self.crypto.tls_state = QuicTlsState.WaitServerHello
+                            if msg_type == TLS_HS_SERVER_HELLO:
+                                self.crypto.tls_state = QuicTlsState.WaitEncryptedExtensions
+                        case _:
+                            pass
+                    ei = ei + 1
+            case Handshake:
+                self.crypto.handshake_crypto_buf = crypto_buffer_append(
+                    self.crypto.handshake_crypto_buf, data, offset
+                )
+                val (events, new_consumed) = extract_handshake_messages(
+                    self.crypto.handshake_crypto_buf,
+                    self.crypto.handshake_crypto_consumed
+                )
+                self.crypto.handshake_crypto_consumed = new_consumed
+                var ei = 0
+                loop:
+                    if ei >= events.len():
+                        break
+                    val evt = events[ei]
+                    match evt:
+                        case HandshakeMessage(msg_type, msg_data):
+                            actions.push(QuicAction.HandshakeMessage(
+                                level: QuicEncryptionLevel.Handshake,
+                                msg_type: msg_type,
+                                data: msg_data
+                            ))
+                            # Finished message completes the handshake
+                            if msg_type == TLS_HS_FINISHED:
+                                self.crypto.tls_state = QuicTlsState.Connected
+                                self.state = QuicConnectionState.Connected
+                                actions.push(QuicAction.KeysReady(
+                                    level: QuicEncryptionLevel.Application
+                                ))
+                        case _:
+                            pass
+                    ei = ei + 1
+            case _:
+                # Application-level CRYPTO frames are not expected in TLS 1.3
+                pass
+
+        # Also emit raw CryptoData for transport-level consumers
+        actions.push(QuicAction.CryptoData(level: level, data: data))
 
         return actions
 
