@@ -110,7 +110,7 @@ Date: 2026-05-28
 | Pure Simple startup plan source | 2500 |
 | Pure Simple semihost policy source | 1500 |
 | Pure Simple semihost stdout policy source | 1500 |
-| Bare-metal aggregate policy facade source | 2500 |
+| Bare-metal aggregate policy facade source | 1971 |
 
 ## Source Size Surfaces
 
@@ -157,7 +157,7 @@ Date: 2026-05-28
 | `src/lib/nogc_async_mut_noalloc/baremetal/startup_plan.spl` | 1 | 29 | 1097 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_policy.spl` | 1 | 19 | 658 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_stdout_policy.spl` | 1 | 23 | 739 |
-| `src/lib/nogc_async_mut_noalloc/baremetal/policy.spl` | 1 | 45 | 2103 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/policy.spl` | 1 | 8 | 1971 |
 
 ## Browser Cluster Source Sizes
 
