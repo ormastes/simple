@@ -101,6 +101,16 @@ number in this in-memory harness, but the write path still skips with
 `failed to write FAT entry`; VFAT/C-FAT same-device baselines remain skipped.
 The faster-than-C FAT claim is therefore still unproven.
 
+Update 2026-05-28 (hosted 4K read/write completes): `follow_chain` now bounds
+traversal by the mounted volume's `total_clusters + 2`, so native execution no
+longer treats a mis-decoded EOC marker as a real cluster and no longer attempts
+to write FAT entry `0x01ffffff`. Hosted
+`src/compiler_rust/target/debug/simple run
+test/perf/bench/fat32_4k_compare.spl` completes the Simple FAT read and write
+paths and reports the in-memory Simple FAT p50/p99 faster than the host POSIX
+baseline. VFAT/C-FAT same-device baselines remain skipped, so production
+faster-than-C FAT is still unproven.
+
 ## Reproduce
 
 ```bash
@@ -117,8 +127,9 @@ src/compiler_rust/target/debug/simple test/perf/bench/fat32_microbench.spl
   completes, but host/VFAT baselines are skipped in the self-contained native
   build due unresolved host file SFFI stubs.
 - Hosted `src/compiler_rust/target/debug/simple run
-  test/perf/bench/fat32_4k_compare.spl` no longer segfaults, but write setup
-  still fails before a 4K random-write comparison can be proven.
+  test/perf/bench/fat32_4k_compare.spl` completes Simple FAT 4K random read and
+  write in the focused in-memory harness; VFAT/C-FAT same-device proof remains
+  missing.
 
 ## Expected
 
