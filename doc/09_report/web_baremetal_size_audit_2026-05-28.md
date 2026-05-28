@@ -7,7 +7,7 @@ Date: 2026-05-28
 | Artifact | Check | Native/ELF Build | Bytes | Dec Section Bytes | Log |
 |---|---|---|---:|---:|---|
 | Browser smoke | ok | ok | 34968 | 28451 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
-| Browser simple render HTML | ok | ok | 18512 | 9127 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
+| Browser simple render HTML | ok | ok | 18480 | 8165 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
 | Simple web static facade | n/a | ok | 14352 | 4696 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
 | Simple web script URL facade | n/a | ok | 34904 | 25005 | `build/web_baremetal_size_audit/simple_web_script_native.log` |
 | Bare-metal pure policy probe | ok | ok | 14336 | 5967 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
@@ -35,7 +35,7 @@ Date: 2026-05-28
 
 | Surface | Files | Lines | Bytes |
 |---|---:|---:|---:|
-| `examples/browser` | 304 | 75023 | 2850254 |
+| `examples/browser` | 304 | 75035 | 2850509 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15509 | 576503 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 126 | 2982 |
 | `examples/09_embedded/baremetal/baremetal/pure_policy_probe.spl` | 1 | 30 | 1108 |
@@ -61,6 +61,7 @@ Date: 2026-05-28
 
 | Artifact | Forbidden Binary Marker Matches | Forbidden Build Log Marker Matches |
 |---|---:|---:|
+| Browser simple render HTML | n/a | 0 |
 | Simple web static facade | 0 | 0 |
 | Bare-metal pure policy probe | 0 | 0 |
 
