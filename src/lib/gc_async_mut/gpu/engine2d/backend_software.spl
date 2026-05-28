@@ -15,6 +15,7 @@
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
+use std.gpu.engine2d.simd_kernels.{fill_span, copy_span, alpha_blend_span}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -312,20 +313,21 @@ impl RenderBackend for SoftwareBackend:
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         var row = 0
         while row < h:
-            var col = 0
-            while col < w:
-                val src_idx = row * w + col
-                if src_idx < pixels.len():
-                    val px = x + col
-                    val py = y + row
-                    val c = pixels[src_idx]
-                    val a = color_a(c)
-                    if a == 255:
-                        _sw_set_pixel(self, px, py, c)
-                    else if a > 0:
-                        _sw_set_pixel_blend(self, px, py, c)
-                col = col + 1
+            val py = y + row
+            if py >= 0 and py < self.h:
+                val clipped = _clip_span(self, x, py, w)
+                val count = clipped.2
+                if count > 0:
+                    val src_off = row * w + (clipped.0 - x)
+                    val dst_off = py * self.w + clipped.0
+                    if src_off >= 0 and src_off + count <= pixels.len():
+                        copy_span(self.buf, dst_off.to_i64(), pixels, src_off.to_i64(), count.to_i64())
+                        _mark_span_dirty(self, clipped.0, py, count)
             row = row + 1
+
+    me blit_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        """Compatibility alias used by SIMD integration tests."""
+        self.draw_image(x, y, w, h, pixels)
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.clip_x = x
@@ -469,10 +471,7 @@ fn _clear_tile(backend: SoftwareBackend, tx: i32, ty: i32, color: u32):
     var y = start_y
     while y < end_y:
         val row_base = y * backend.w
-        var x = start_x
-        while x < end_x:
-            backend.buf[row_base + x] = color
-            x = x + 1
+        fill_span(backend.buf, (row_base + start_x).to_i64(), (end_x - start_x).to_i64(), color)
         y = y + 1
 
 fn _mark_dirty(backend: SoftwareBackend, tx: i32, ty: i32):
@@ -486,6 +485,44 @@ fn _mark_pixel_dirty(backend: SoftwareBackend, x: i32, y: i32):
     val tx = x / TILE_SIZE
     val ty = y / TILE_SIZE
     _mark_dirty(backend, tx, ty)
+
+fn _mark_span_dirty(backend: SoftwareBackend, x: i32, y: i32, length: i32):
+    """Mark all tiles touched by a horizontal span."""
+    if length <= 0:
+        return
+    val tx0 = x / TILE_SIZE
+    val tx1 = (x + length - 1) / TILE_SIZE
+    val ty = y / TILE_SIZE
+    var tx = tx0
+    while tx <= tx1:
+        _mark_dirty(backend, tx, ty)
+        tx = tx + 1
+
+fn _clip_span(backend: SoftwareBackend, x: i32, y: i32, length: i32) -> (i32, i32, i32):
+    """Clip a horizontal span to framebuffer and active clip rectangle.
+
+    Returns (start_x, end_x_exclusive, count). A zero count means no pixels
+    should be touched.
+    """
+    if length <= 0 or y < 0 or y >= backend.h:
+        return (0, 0, 0)
+    var start = x
+    var end = x + length
+    if start < 0:
+        start = 0
+    if end > backend.w:
+        end = backend.w
+    if backend.clip_enabled:
+        if y < backend.clip_y or y >= backend.clip_y + backend.clip_h:
+            return (0, 0, 0)
+        if start < backend.clip_x:
+            start = backend.clip_x
+        val clip_end = backend.clip_x + backend.clip_w
+        if end > clip_end:
+            end = clip_end
+    if end <= start:
+        return (0, 0, 0)
+    (start, end, end - start)
 
 # ============================================================================
 # Pixel Operations
@@ -530,16 +567,24 @@ fn _sw_set_pixel_blend(backend: SoftwareBackend, x: i32, y: i32, color: u32):
 # ============================================================================
 
 fn _sw_hline(backend: SoftwareBackend, x: i32, y: i32, length: i32, color: u32):
-    var i = 0
-    while i < length:
-        _sw_set_pixel(backend, x + i, y, color)
-        i = i + 1
+    val clipped = _clip_span(backend, x, y, length)
+    val count = clipped.2
+    if count <= 0:
+        return
+    val off = y * backend.w + clipped.0
+    fill_span(backend.buf, off.to_i64(), count.to_i64(), color)
+    _mark_span_dirty(backend, clipped.0, y, count)
 
 fn _sw_hline_blend(backend: SoftwareBackend, x: i32, y: i32, length: i32, color: u32):
-    var i = 0
-    while i < length:
-        _sw_set_pixel_blend(backend, x + i, y, color)
-        i = i + 1
+    val clipped = _clip_span(backend, x, y, length)
+    val count = clipped.2
+    if count <= 0:
+        return
+    val off = y * backend.w + clipped.0
+    var src: [u32] = [0u32; off + count]
+    fill_span(src, off.to_i64(), count.to_i64(), color)
+    alpha_blend_span(backend.buf, src, off.to_i64(), count.to_i64())
+    _mark_span_dirty(backend, clipped.0, y, count)
 
 fn _sw_vline(backend: SoftwareBackend, x: i32, y: i32, length: i32, color: u32):
     var i = 0

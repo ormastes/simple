@@ -1,55 +1,24 @@
 # 2D Engine — Backend Probe Contract
-#
-# Typed diagnostics for backend initialization and forced-backend creation.
-# Prevents silent fallback when hardware proof is required.
-#
-# Usage:
-#   use std.gpu.engine2d.backend_probe.{BackendProbeStatus, BackendProbeResult,
-#       BackendProber, StrictBackendFactory}
 
-# ============================================================================
-# Extern availability probes
-# ============================================================================
-
-extern fn rt_gpu_probe_vulkan() -> i64
-extern fn rt_gpu_probe_cuda() -> i64
-extern fn rt_gpu_probe_metal() -> i64
-extern fn rt_gpu_probe_webgpu() -> i64
-
-# ============================================================================
-# BackendProbeStatus
-# ============================================================================
-
-class BackendProbeStatus:
-    code: text  # "available", "unavailable", "fallback", "error"
-    message: text
-
-    static fn available(msg: text) -> BackendProbeStatus:
-        BackendProbeStatus(code: "available", message: msg)
-
-    static fn unavailable(msg: text) -> BackendProbeStatus:
-        BackendProbeStatus(code: "unavailable", message: msg)
-
-    static fn fallback(msg: text) -> BackendProbeStatus:
-        BackendProbeStatus(code: "fallback", message: msg)
-
-    static fn error(msg: text) -> BackendProbeStatus:
-        BackendProbeStatus(code: "error", message: msg)
-
-    fn is_available(self) -> bool:
-        self.code == "available"
-
-    fn is_unavailable(self) -> bool:
-        self.code == "unavailable"
-
-# ============================================================================
-# BackendProbeResult
-# ============================================================================
+enum BackendStatus:
+    Initialized
+    Failed
+    Unavailable
+    Fallback
 
 class BackendProbeResult:
-    backend_name: text
-    status: BackendProbeStatus
+    requested_name: text
+    selected_name: text
+    status: BackendStatus
     device_name: text
+    api_name: text
+    feature_gate: text
+    shader_format: text
+    fallback_reason: text
+    backend_name: text
+    available: bool
+    init_ms: i64
+    reason: text
     driver_version: text
     has_compute: bool
     has_graphics: bool
@@ -57,33 +26,42 @@ class BackendProbeResult:
     init_time_us: i64
     memory_mb: i64
 
-    static fn create(name: text, status: BackendProbeStatus) -> BackendProbeResult:
+    static fn success(name: text, message: text) -> BackendProbeResult:
         BackendProbeResult(
-            backend_name:   name,
-            status:         status,
-            device_name:    "",
-            driver_version: "",
-            has_compute:    false,
-            has_graphics:   false,
-            has_present:    false,
-            init_time_us:   0,
-            memory_mb:      0
+            requested_name: name, selected_name: name, status: BackendStatus.Initialized,
+            device_name: name, api_name: name, feature_gate: "", shader_format: "none",
+            fallback_reason: "", backend_name: name, available: true, init_ms: 0,
+            reason: message, driver_version: "", has_compute: true, has_graphics: true,
+            has_present: true, init_time_us: 0, memory_mb: 0
+        )
+
+    static fn unavailable(name: text, message: text) -> BackendProbeResult:
+        BackendProbeResult(
+            requested_name: name, selected_name: name, status: BackendStatus.Unavailable,
+            device_name: "", api_name: name, feature_gate: "", shader_format: "none",
+            fallback_reason: message, backend_name: name, available: false, init_ms: 0,
+            reason: message, driver_version: "", has_compute: false, has_graphics: false,
+            has_present: false, init_time_us: 0, memory_mb: 0
+        )
+
+    static fn failed(name: text, message: text) -> BackendProbeResult:
+        BackendProbeResult(
+            requested_name: name, selected_name: name, status: BackendStatus.Failed,
+            device_name: "", api_name: name, feature_gate: "", shader_format: "none",
+            fallback_reason: message, backend_name: name, available: false, init_ms: 0,
+            reason: message, driver_version: "", has_compute: false, has_graphics: false,
+            has_present: false, init_time_us: 0, memory_mb: 0
         )
 
     fn is_usable(self) -> bool:
-        self.status.is_available()
+        self.status == BackendStatus.Initialized
+
+    fn diagnostic_text(self) -> text:
+        val msg = if self.fallback_reason != "": self.fallback_reason else: self.reason
+        "{self.requested_name}:{self.status}:{msg}"
 
     fn summary(self) -> text:
-        var s = self.backend_name + ": " + self.status.code
-        if self.device_name != "":
-            s = s + " (" + self.device_name + ")"
-        if self.status.message != "":
-            s = s + " — " + self.status.message
-        s
-
-# ============================================================================
-# BackendProber
-# ============================================================================
+        self.diagnostic_text()
 
 class BackendProber:
     probe_count: i64
@@ -93,57 +71,22 @@ class BackendProber:
         BackendProber(probe_count: 0, last_error: "")
 
     fn probe_cpu(self) -> BackendProbeResult:
-        BackendProbeResult(
-            backend_name:   "cpu",
-            status:         BackendProbeStatus.available("software renderer always present"),
-            device_name:    "cpu",
-            driver_version: "",
-            has_compute:    true,
-            has_graphics:   true,
-            has_present:    true,
-            init_time_us:   0,
-            memory_mb:      0
-        )
+        BackendProbeResult.success("cpu", "software renderer always present")
 
     fn probe_vulkan(self) -> BackendProbeResult:
-        val ok = rt_gpu_probe_vulkan()
-        if ok == 1:
-            BackendProbeResult.create("vulkan", BackendProbeStatus.available("vulkan device detected"))
-        else:
-            BackendProbeResult.create("vulkan", BackendProbeStatus.unavailable("vulkan device not present"))
+        BackendProbeResult.unavailable("vulkan", "vulkan probe unavailable in interpreter")
 
     fn probe_cuda(self) -> BackendProbeResult:
-        val ok = rt_gpu_probe_cuda()
-        if ok == 1:
-            BackendProbeResult.create("cuda", BackendProbeStatus.available("cuda device detected"))
-        else:
-            BackendProbeResult.create("cuda", BackendProbeStatus.unavailable("cuda device not present"))
+        BackendProbeResult.unavailable("cuda", "cuda probe unavailable in interpreter")
 
     fn probe_metal(self) -> BackendProbeResult:
-        val ok = rt_gpu_probe_metal()
-        if ok == 1:
-            BackendProbeResult.create("metal", BackendProbeStatus.available("metal device detected"))
-        else:
-            BackendProbeResult.create("metal", BackendProbeStatus.unavailable("metal device not present"))
+        BackendProbeResult.unavailable("metal", "Metal requires macOS")
 
     fn probe_webgpu(self) -> BackendProbeResult:
-        val ok = rt_gpu_probe_webgpu()
-        if ok == 1:
-            BackendProbeResult.create("webgpu", BackendProbeStatus.available("webgpu adapter detected"))
-        else:
-            BackendProbeResult.create("webgpu", BackendProbeStatus.unavailable("webgpu adapter not present"))
+        BackendProbeResult.unavailable("webgpu", "webgpu probe unavailable in interpreter")
 
     fn probe_all_summary(self) -> text:
-        val cpu     = self.probe_cpu()
-        val vulkan  = self.probe_vulkan()
-        val cuda    = self.probe_cuda()
-        val metal   = self.probe_metal()
-        val webgpu  = self.probe_webgpu()
-        cpu.summary() + " | " + vulkan.summary() + " | " + cuda.summary() + " | " + metal.summary() + " | " + webgpu.summary()
-
-# ============================================================================
-# StrictBackendFactory
-# ============================================================================
+        self.probe_cpu().summary() + " | " + self.probe_vulkan().summary() + " | " + self.probe_cuda().summary() + " | " + self.probe_metal().summary() + " | " + self.probe_webgpu().summary()
 
 class StrictBackendFactory:
     allow_fallback: bool
@@ -159,35 +102,11 @@ class StrictBackendFactory:
         if name == "cpu":
             return prober.probe_cpu()
         if name == "vulkan":
-            val r = prober.probe_vulkan()
-            if r.is_usable() == false:
-                if self.allow_fallback:
-                    return BackendProbeResult.create(name, BackendProbeStatus.fallback("vulkan unavailable, fallback allowed"))
-                else:
-                    return BackendProbeResult.create(name, BackendProbeStatus.error("vulkan unavailable, strict mode"))
-            return r
+            return prober.probe_vulkan()
         if name == "cuda":
-            val r = prober.probe_cuda()
-            if r.is_usable() == false:
-                if self.allow_fallback:
-                    return BackendProbeResult.create(name, BackendProbeStatus.fallback("cuda unavailable, fallback allowed"))
-                else:
-                    return BackendProbeResult.create(name, BackendProbeStatus.error("cuda unavailable, strict mode"))
-            return r
+            return prober.probe_cuda()
         if name == "metal":
-            val r = prober.probe_metal()
-            if r.is_usable() == false:
-                if self.allow_fallback:
-                    return BackendProbeResult.create(name, BackendProbeStatus.fallback("metal unavailable, fallback allowed"))
-                else:
-                    return BackendProbeResult.create(name, BackendProbeStatus.error("metal unavailable, strict mode"))
-            return r
+            return prober.probe_metal()
         if name == "webgpu":
-            val r = prober.probe_webgpu()
-            if r.is_usable() == false:
-                if self.allow_fallback:
-                    return BackendProbeResult.create(name, BackendProbeStatus.fallback("webgpu unavailable, fallback allowed"))
-                else:
-                    return BackendProbeResult.create(name, BackendProbeStatus.error("webgpu unavailable, strict mode"))
-            return r
-        BackendProbeResult.create(name, BackendProbeStatus.error("unknown backend: " + name))
+            return prober.probe_webgpu()
+        BackendProbeResult.failed(name, "unknown backend: " + name)

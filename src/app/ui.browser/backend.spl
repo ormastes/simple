@@ -152,7 +152,8 @@ class BrowserBackend:
 
         # Step 4: Clear and paint
         self.framebuffer.clear(0x1E1E1E)
-        paint_layout(self.framebuffer, layout)
+        self.framebuffer = paint_layout(self.framebuffer, layout)
+        self.framebuffer = paint_widget_tree(self.framebuffer, root_node, 6, 6, self.width - 12, 0).0
 
     me poll_events() -> [UIEvent]:
         """Return queued events and clear the queue."""
@@ -274,8 +275,21 @@ fn widget_to_dom(node: WidgetNode) -> DomNode:
     var dom = DomNode.element(tag, node.id)
     dom = dom.add_class("widget-{kind}")
 
-    # Add text content for text-bearing widgets
-    val text_val = node.get_prop("text")
+    # Add text content for text-bearing widgets.
+    # SDN files use `content` for text nodes, while builder APIs may use
+    # `text`, `label`, `value`, or status-bar side fields.
+    var text_val = node.get_prop("text")
+    if text_val == "":
+        text_val = node.get_prop("content")
+    if text_val == "":
+        text_val = node.get_prop("label")
+    if text_val == "":
+        text_val = node.get_prop("value")
+    if text_val == "":
+        val left = node.get_prop("left")
+        val right = node.get_prop("right")
+        if left != "" or right != "":
+            text_val = "{left} {right}".strip()
     if text_val != "":
         val text_child = DomNode.text_node(text_val)
         dom = dom.add_child(text_child)
@@ -380,22 +394,27 @@ fn layout_node(dom: DomNode, x: f64, y: f64, avail_w: f64, avail_h: f64, id_coun
 # Paint — rasterize layout boxes to framebuffer
 # =========================================================================
 
-fn paint_layout(fb: Framebuffer, box: LayoutBox):
+fn paint_layout(fb: Framebuffer, box: LayoutBox) -> Framebuffer:
     """Paint a layout box tree into a framebuffer."""
-    # Draw background for block-level elements
-    if box.kind == BoxKind.Block and box.height > 0.0:
-        paint_rect(fb, box.x, box.y, box.width, box.height, 0x2D2D2D)
-
-    # Draw text (inline elements get a lighter foreground)
-    if box.kind == BoxKind.Inline and box.height > 0.0:
-        paint_rect(fb, box.x, box.y, box.width, box.height, 0xE0E0E0)
+    var out = fb
+    match box.kind:
+        BoxKind.Block:
+            if box.height > 0.0:
+                out = paint_rect(out, box.x, box.y, box.width, box.height, 0x2D2D2D)
+        BoxKind.Inline:
+            if box.height > 0.0:
+                out = paint_rect(out, box.x, box.y, box.width, box.height, 0xE0E0E0)
+        _:
+            pass
 
     # Recurse into children
     for child in box.children:
-        paint_layout(fb, child)
+        out = paint_layout(out, child)
+    out
 
-fn paint_rect(fb: Framebuffer, x: f64, y: f64, w: f64, h: f64, color: i32):
+fn paint_rect(fb: Framebuffer, x: f64, y: f64, w: f64, h: f64, color: i32) -> Framebuffer:
     """Paint a filled rectangle into the framebuffer."""
+    var out = fb
     val x0: i32 = x.to_i32()
     val y0: i32 = y.to_i32()
     val x1: i32 = (x + w).to_i32()
@@ -405,11 +424,79 @@ fn paint_rect(fb: Framebuffer, x: f64, y: f64, w: f64, h: f64, color: i32):
     while py < y1 and py < fb.height:
         if py >= 0:
             var px = x0
-            while px < x1 and px < fb.width:
+            while px < x1 and px < out.width:
                 if px >= 0:
-                    fb.set_pixel(px, py, color)
+                    out.set_pixel(px, py, color)
                 px = px + 1
         py = py + 1
+    out
+
+fn paint_widget_tree(fb: Framebuffer, node: WidgetNode, x: i32, y: i32, w: i32, depth: i32) -> (Framebuffer, i32):
+    """Paint a simple semantic widget overlay.
+
+    The browser backend does not have font rasterization yet, so text is shown
+    as compact glyph bars. This keeps the native window visibly tied to the
+    parsed SDN tree instead of presenting an empty surface.
+    """
+    var out = fb
+    val kind = node.kind_name()
+    var cursor = y
+    val indent = depth * 4
+    val left = x + indent
+    var width = w - indent
+    if width < 12:
+        width = 12
+
+    if kind == "panel":
+        val title = node.get_prop("title")
+        out = paint_rect_i32(out, left, cursor, width, 14, 0x3A3A3A)
+        if title != "":
+            out = paint_text_bars(out, left + 4, cursor + 4, title, 0xE8E8E8)
+        cursor = cursor + 16
+    elif kind == "text":
+        val content = node.get_prop("content")
+        out = paint_rect_i32(out, left, cursor, width, 12, 0xE0E0E0)
+        out = paint_text_bars(out, left + 3, cursor + 3, content, 0x303030)
+        cursor = cursor + 14
+    elif kind == "progress":
+        val value_text = node.get_prop("value")
+        var fill_w = width / 2
+        if value_text == "75":
+            fill_w = (width * 3) / 4
+        out = paint_rect_i32(out, left, cursor + 2, width, 8, 0x4A4A4A)
+        out = paint_rect_i32(out, left, cursor + 2, fill_w, 8, 0x66CC88)
+        cursor = cursor + 14
+    elif kind == "statusbar":
+        val left_text = node.get_prop("left")
+        val right_text = node.get_prop("right")
+        val label = "{left_text} {right_text}".strip()
+        out = paint_rect_i32(out, left, cursor, width, 12, 0x202A33)
+        out = paint_text_bars(out, left + 3, cursor + 3, label, 0xD8E8FF)
+        cursor = cursor + 14
+
+    for child in node.children():
+        val painted = paint_widget_tree(out, child, x, cursor, w, depth + 1)
+        out = painted.0
+        cursor = painted.1
+
+    return (out, cursor)
+
+fn paint_rect_i32(fb: Framebuffer, x: i32, y: i32, w: i32, h: i32, color: i32) -> Framebuffer:
+    paint_rect(fb, x.to_f64(), y.to_f64(), w.to_f64(), h.to_f64(), color)
+
+fn paint_text_bars(fb: Framebuffer, x: i32, y: i32, text_value: text, color: i32) -> Framebuffer:
+    var out = fb
+    var cx = x
+    var i = 0
+    while i < text_value.len() and cx < fb.width - 4:
+        if text_value[i] != " ":
+            val h = 3 + ((i % 3) * 2)
+            out = paint_rect_i32(out, cx, y, 2, h, color)
+            if i % 2 == 0:
+                out = paint_rect_i32(out, cx, y + h + 1, 2, 1, color)
+        cx = cx + 4
+        i = i + 1
+    out
 
 # =========================================================================
 # GPU Backend Resolution

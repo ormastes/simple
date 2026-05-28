@@ -69,10 +69,9 @@ impl SimdLevel:
 # Runtime externs for CPU feature detection
 # ============================================================================
 
-extern fn rt_cpu_has_sse42() -> bool
-extern fn rt_cpu_has_avx2() -> bool
-extern fn rt_cpu_has_avx512() -> bool
-extern fn rt_cpu_has_neon() -> bool
+extern fn rt_simd_has_sse() -> bool
+extern fn rt_simd_has_avx2() -> bool
+extern fn rt_simd_has_neon() -> bool
 
 # ============================================================================
 # Runtime externs for SIMD kernels
@@ -111,13 +110,11 @@ fn detect_simd_level() -> SimdLevel:
     if _simd_detected:
         return _cached_simd_level
 
-    if rt_cpu_has_avx512():
-        _cached_simd_level = SimdLevel.Avx512
-    elif rt_cpu_has_avx2():
+    if rt_simd_has_avx2():
         _cached_simd_level = SimdLevel.Avx2
-    elif rt_cpu_has_sse42():
+    elif rt_simd_has_sse():
         _cached_simd_level = SimdLevel.Sse42
-    elif rt_cpu_has_neon():
+    elif rt_simd_has_neon():
         _cached_simd_level = SimdLevel.Neon
     elif rt_cpu_has_rvv():
         _cached_simd_level = SimdLevel.Rvv
@@ -144,21 +141,7 @@ fn active_target_features() -> [text]:
 fn simd_fill_row(buf: [u32], offset: i64, count: i64, color: u32):
     if count <= 0:
         return
-
-    val level = detect_simd_level()
-    match level:
-        case Avx512:
-            rt_simd_fill_row_avx2(buf, offset, count, color)
-        case Avx2:
-            rt_simd_fill_row_avx2(buf, offset, count, color)
-        case Sse42:
-            rt_simd_fill_row_sse42(buf, offset, count, color)
-        case Neon:
-            rt_simd_fill_row_neon(buf, offset, count, color)
-        case Rvv:
-            rt_simd_fill_row_rvv(buf, offset, count, color)
-        case None_:
-            _scalar_fill_row(buf, offset, count, color)
+    _scalar_fill_row(buf, offset, count, color)
 
 fn _scalar_fill_row(buf: [u32], offset: i64, count: i64, color: u32):
     var i: i64 = 0
@@ -173,21 +156,7 @@ fn _scalar_fill_row(buf: [u32], offset: i64, count: i64, color: u32):
 fn simd_blend_row(dst: [u32], src: [u32], offset: i64, count: i64):
     if count <= 0:
         return
-
-    val level = detect_simd_level()
-    match level:
-        case Avx512:
-            rt_simd_blend_row_avx2(dst, src, offset, count)
-        case Avx2:
-            rt_simd_blend_row_avx2(dst, src, offset, count)
-        case Sse42:
-            rt_simd_blend_row_sse42(dst, src, offset, count)
-        case Neon:
-            rt_simd_blend_row_neon(dst, src, offset, count)
-        case Rvv:
-            rt_simd_blend_row_rvv(dst, src, offset, count)
-        case None_:
-            _scalar_blend_row(dst, src, offset, count)
+    _scalar_blend_row(dst, src, offset, count)
 
 fn _scalar_blend_row(dst: [u32], src: [u32], offset: i64, count: i64):
     var i: i64 = 0
@@ -219,21 +188,7 @@ fn _scalar_blend_row(dst: [u32], src: [u32], offset: i64, count: i64):
 fn simd_blit_row(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64):
     if count <= 0:
         return
-
-    val level = detect_simd_level()
-    match level:
-        case Avx512:
-            rt_simd_blit_row_avx2(dst, dst_offset, src, src_offset, count)
-        case Avx2:
-            rt_simd_blit_row_avx2(dst, dst_offset, src, src_offset, count)
-        case Sse42:
-            rt_simd_blit_row_sse42(dst, dst_offset, src, src_offset, count)
-        case Neon:
-            rt_simd_blit_row_neon(dst, dst_offset, src, src_offset, count)
-        case Rvv:
-            rt_simd_blit_row_rvv(dst, dst_offset, src, src_offset, count)
-        case None_:
-            _scalar_blit_row(dst, dst_offset, src, src_offset, count)
+    _scalar_blit_row(dst, dst_offset, src, src_offset, count)
 
 fn _scalar_blit_row(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64):
     var i: i64 = 0
@@ -250,7 +205,6 @@ fn fill_span(buf: [u32], offset: i64, count: i64, color: u32):
     if count <= 0:
         return
     simd_fill_row(buf, offset, count, color)
-    g_simd_hits.fill_hits = g_simd_hits.fill_hits + 1
 
 fn _scalar_fill_span(buf: [u32], offset: i64, count: i64, color: u32):
     """Scalar reference path for parity testing (identical output to SIMD)."""
@@ -265,7 +219,6 @@ fn copy_span(dst: [u32], dst_off: i64, src: [u32], src_off: i64, count: i64):
     if count <= 0:
         return
     simd_blit_row(dst, dst_off, src, src_off, count)
-    g_simd_hits.copy_hits = g_simd_hits.copy_hits + 1
 
 fn _scalar_copy_span(dst: [u32], dst_off: i64, src: [u32], src_off: i64, count: i64):
     """Scalar reference path for parity testing."""
@@ -280,7 +233,6 @@ fn alpha_blend_span(dst: [u32], src: [u32], offset: i64, count: i64):
     if count <= 0:
         return
     simd_blend_row(dst, src, offset, count)
-    g_simd_hits.alpha_hits = g_simd_hits.alpha_hits + 1
 
 fn _scalar_alpha_blend_span(dst: [u32], src: [u32], offset: i64, count: i64):
     """Scalar reference path for parity testing."""
@@ -302,7 +254,6 @@ fn blit_rect(dst: [u32], dst_stride: i64, dst_x: i64, dst_y: i64,
         val s_off = (src_y + row) * src_stride + src_x
         simd_blit_row(dst, d_off, src, s_off, w)
         row = row + 1
-    g_simd_hits.blit_hits = g_simd_hits.blit_hits + 1
 
 fn _scalar_blit_rect(dst: [u32], dst_stride: i64, dst_x: i64, dst_y: i64,
                      src: [u32], src_stride: i64, src_x: i64, src_y: i64,
@@ -351,7 +302,6 @@ fn scroll_region(buf: [u32], stride: i64, x: i64, y: i64, w: i64, h: i64, delta_
             simd_blit_row(buf, dst_off, buf, src_off, w)
             row = row - 1
 
-    g_simd_hits.scroll_hits = g_simd_hits.scroll_hits + 1
 
 fn _scalar_scroll_region(buf: [u32], stride: i64, x: i64, y: i64, w: i64, h: i64, delta_y: i64):
     """Scalar reference path for parity testing."""
