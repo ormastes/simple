@@ -34,13 +34,11 @@ use std.io.driver.{IoDriver}
 use std.io.net_backend.{NetBackendCapabilities, net_backend_summary, net_backend_static_file_route}
 use std.io.event_loop.{EventLoop, Waker}
 use std.nogc_sync_mut.io.tcp.{
-    tcp_backend_bind,
+    tcp_backend_bind_with_reuseport,
     tcp_backend_close,
     tcp_backend_local_addr,
     tcp_backend_set_nodelay,
-    tcp_backend_set_nonblocking,
-    tcp_backend_set_reuseaddr,
-    tcp_backend_set_reuseport
+    tcp_backend_set_nonblocking
 }
 use std.concurrent.channel.{Channel}
 use std.thread_sffi.{spl_thread_sleep}
@@ -66,6 +64,8 @@ use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
 use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.http_server.protocol_handler.{ProtocolKind, protocol_from_alpn, protocol_handler_label}
+use std.http_server.h2_connection.{H2Connection}
+use std.crypto.types.{rt_bytes_to_text}
 
 fn _http_time_now_ms() -> i64:
     current_time_ms()
@@ -94,6 +94,7 @@ class Worker:
     net_backend_summary: text
     listener_fd: i64
     connections: Dict<i64, Connection>
+    h2_connections: Dict<i64, H2Connection>
     op_to_fd: Dict<i64, i64>
     op_type: Dict<i64, i64>
     sendfile_pending: Dict<i64, (text, i64, i64)>
@@ -132,14 +133,12 @@ class Worker:
         val caps = driver.net_capabilities()
         val backend_summary = net_backend_summary(caps)
 
-        val listen_fd = tcp_backend_bind(config.listen_addr)
+        val listen_fd = tcp_backend_bind_with_reuseport(config.listen_addr)
         if listen_fd < 0:
             return Err(HttpServerError.BindFailed(
                 "Worker {worker_id}: failed to bind {config.listen_addr}"
             ))
 
-        tcp_backend_set_reuseport(listen_fd, true)
-        tcp_backend_set_reuseaddr(listen_fd, true)
         tcp_backend_set_nonblocking(listen_fd, true)
 
         Ok(Worker(
@@ -149,6 +148,7 @@ class Worker:
             net_backend_summary: backend_summary,
             listener_fd: listen_fd,
             connections: {},
+            h2_connections: {},
             op_to_fd: {},
             op_type: {},
             sendfile_pending: {},
@@ -258,6 +258,8 @@ class Worker:
         self.op_to_fd.remove(op_id)
         self.op_type.remove(op_id)
 
+        val is_h2 = self.h2_connections.get(fd).?
+
         if result < 0:
             if typ == OP_OPEN_SENDFILE:
                 self.sendfile_pending.remove(fd)
@@ -266,12 +268,18 @@ class Worker:
                 if open_file.?:
                     self.driver.submit_close(open_file)
                     self.sendfile_open_files.remove(fd)
-            self.close_connection(fd)
+            if is_h2:
+                self.close_h2_connection(fd)
+            else:
+                self.close_connection(fd)
             return
 
         if typ == OP_RECV:
             if result == 0:
-                self.close_connection(fd)
+                if is_h2:
+                    self.close_h2_connection(fd)
+                else:
+                    self.close_connection(fd)
             else:
                 val data = self.driver.poll_data(completion_index)
                 self.handle_recv(fd, data, now)
@@ -290,7 +298,10 @@ class Worker:
             val pending = self.sendfile_pending.get(fd)
             if not pending.?:
                 self.driver.submit_close(result)
-                self.close_connection(fd)
+                if is_h2:
+                    self.close_h2_connection(fd)
+                else:
+                    self.close_connection(fd)
                 return
             val offset = pending.1
             val length = pending.2
@@ -315,6 +326,12 @@ class Worker:
 
     me handle_recv(fd: i64, data: text, now: i64):
         """Handle data received on a connection."""
+        # H2 connections are routed separately from H1
+        val h2conn = self.h2_connections.get(fd)
+        if h2conn.?:
+            self.handle_h2_recv(fd, data, now)
+            return
+
         val conn = self.connections.get(fd)
         if not conn.?:
             return
@@ -549,7 +566,96 @@ class Worker:
         for fd in fds:
             tcp_backend_close(fd)
         self.connections = {}
+        # Close H2 connections
+        val h2_fds = self.h2_connections.keys()
+        for fd in h2_fds:
+            tcp_backend_close(fd)
+        self.h2_connections = {}
         self.active_count = 0
+
+    # ========================================================================
+    # HTTP/2 Connection Handling
+    # ========================================================================
+
+    me handle_h2_accept(fd: i64, now: i64):
+        """Accept a new HTTP/2 connection after ALPN negotiation.
+
+        Called from dispatch_by_alpn after TLS handshake. The fd is
+        already accepted — this sets up H2 framing, sends server
+        SETTINGS, and starts reading.
+        """
+        if self.active_count >= self.config.max_connections:
+            tcp_backend_close(fd)
+            return
+
+        tcp_backend_set_nonblocking(fd, true)
+        tcp_backend_set_nodelay(fd, true)
+
+        val peer = tcp_backend_local_addr(fd) ?? "unknown"
+        var h2conn = H2Connection.new(fd, peer, now)
+
+        # Send server preface (SETTINGS frame queued by H2Connection.new)
+        # FIXME(submit_send_bytes): rt_bytes_to_text uses from_utf8_lossy
+        # which corrupts H2 binary frames containing bytes >= 0x80 that are
+        # not valid UTF-8 sequences. Wire-level H2 requires a future
+        # submit_send_bytes on IoDriver to send raw [u8] without text conversion.
+        val initial_bytes = h2conn.take_pending_writes()
+        if initial_bytes.len() > 0:
+            val send_data = rt_bytes_to_text(initial_bytes)
+            val send_op = self.driver.submit_send(fd, send_data)
+            self.op_to_fd[send_op] = fd
+            self.op_type[send_op] = OP_SEND
+
+        self.h2_connections[fd] = h2conn
+        self.active_count = self.active_count + 1
+
+        # Start reading client preface + frames
+        val recv_op = self.driver.submit_recv(fd, 8192)
+        self.op_to_fd[recv_op] = fd
+        self.op_type[recv_op] = OP_RECV
+
+    me handle_h2_recv(fd: i64, data: text, now: i64):
+        """Feed received data to an H2 connection and flush outbound frames.
+
+        FIXME(submit_send_bytes): Outbound bytes pass through rt_bytes_to_text
+        which corrupts non-UTF-8 byte sequences. See handle_h2_accept FIXME.
+        """
+        val h2conn = self.h2_connections.get(fd)
+        if not h2conn.?:
+            return
+
+        var conn = h2conn
+        val keep_going = conn.on_data_received(data, now)
+
+        # Drain any pending outbound frames (SETTINGS ACK, PING echo, etc.)
+        val out_bytes = conn.take_pending_writes()
+        self.h2_connections[fd] = conn
+
+        if out_bytes.len() > 0:
+            val send_data = rt_bytes_to_text(out_bytes)
+            val send_op = self.driver.submit_send(fd, send_data)
+            self.op_to_fd[send_op] = fd
+            self.op_type[send_op] = OP_SEND
+
+        if keep_going and not conn.is_goaway_sent():
+            # Continue reading
+            val recv_op = self.driver.submit_recv(fd, 8192)
+            self.op_to_fd[recv_op] = fd
+            self.op_type[recv_op] = OP_RECV
+        else:
+            self.close_h2_connection(fd)
+
+    me close_h2_connection(fd: i64):
+        """Close an H2 connection and clean up tracking state."""
+        self.driver.cancel_fd(fd)
+        val op_ids = self.op_to_fd.keys()
+        for oid in op_ids:
+            if self.op_to_fd[oid] == fd:
+                self.op_to_fd.remove(oid)
+                self.op_type.remove(oid)
+        tcp_backend_close(fd)
+        self.h2_connections.remove(fd)
+        self.active_count = self.active_count - 1
 
     me dispatch_by_alpn(alpn: text, fd: i64, now: i64):
         """Dispatch a new TLS connection based on the negotiated ALPN protocol.
@@ -572,10 +678,8 @@ class Worker:
         val label = protocol_handler_label(kind)
         match kind:
             ProtocolKind.Http2:
-                # H2 connection detected via ALPN.
-                # TODO(AC-4): dispatch to h2_server_conn_new(fd, ...) once
-                #             h2_server.spl is wired. For now, fall through to H1.
-                self.handle_accept(fd, now)
+                # H2 connection via ALPN — create H2Connection and start recv.
+                self.handle_h2_accept(fd, now)
             ProtocolKind.Http3:
                 # H3 over TCP is a client error — reject immediately.
                 tcp_backend_close(fd)
@@ -595,6 +699,16 @@ class Worker:
 
         for fd in to_close:
             self.close_connection(fd)
+
+        # Reap idle H2 connections
+        var h2_to_close: [i64] = []
+        for fd in self.h2_connections.keys():
+            val h2conn = self.h2_connections[fd]
+            if h2conn.is_idle_timeout(now, self.config.idle_timeout_ms):
+                h2_to_close.push(fd)
+
+        for fd in h2_to_close:
+            self.close_h2_connection(fd)
 
 fn worker_static_file_route(caps: NetBackendCapabilities, resp: HttpResponseData) -> text:
     """Return the worker route for a response body."""

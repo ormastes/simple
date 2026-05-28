@@ -1,38 +1,47 @@
 """
 # Event Loop
 
-Portable Simple-level event loop fallback.
-Manages fd registration, interest tracking, and cooperative polling without
-requiring a POSIX epoll/kqueue backend in the default no-GC library surface.
+Portable event loop using epoll (Linux) or kqueue (macOS/FreeBSD) for
+efficient file descriptor readiness notification. Falls back to cooperative
+polling on unsupported platforms.
+
+Uses extern stubs (`rt_event_loop_*`) that delegate to the native backend.
+Until the Rust runtime implements those externs, the polling fallback is used.
 
 ## Components
 
 | Type | Description |
 |------|-------------|
-| EventLoop | Core event loop (epoll/kqueue) |
+| EventLoop | Core event loop (epoll/kqueue/poll) |
+| Event | Readiness event with fd, interest, and token |
 | Waker | Callback to wake a pending future |
 
 ## Creating an Event Loop
 
 ```simple
-val loop = EventLoop.new()?
-expect loop.epoll_fd >= 0
+val ev_loop = EventLoop.new()?
+expect ev_loop.loop_fd >= 0
 ```
 
 ## Registering and Polling
 
 ```simple
-val loop = EventLoop.new()?
-val waker = Waker.new(1, \\_: pass)
+val ev_loop = EventLoop.new()?
+ev_loop.register(socket_fd, Interest.Read, 1)?
 
-# Register fd for read interest:
-# loop.register(socket_fd, Interest.Read, waker)?
+val events = ev_loop.poll(100)?
+for event in events:
+    if event.ready == Interest.Read:
+        handle_read(event.fd)
 
-# Poll for events:
-# val events = loop.poll(100)?
-# for event in events:
-#     if event.ready == Interest.Read:
-#         handle_read(event.fd)
+ev_loop.close()?
+```
+
+## Edge-Triggered Mode
+
+```simple
+val ev_loop = EventLoop.new()?
+ev_loop.register_edge(socket_fd, Interest.ReadWrite, 1)?
 ```
 
 ## Waker Callback
@@ -45,7 +54,74 @@ expect woken_id == 42
 ```
 """
 
-use std.io.types.{IoError, IoErrorKind, Interest, IoEvent}
+use std.io.types.{IoError, IoErrorKind, Interest}
+
+# ============================================================================
+# Platform Detection
+# ============================================================================
+
+extern fn rt_platform_name() -> text
+
+fn event_loop_platform() -> text:
+    """Detect the event notification backend for the current OS.
+
+    Returns:
+        "epoll" on Linux, "kqueue" on macOS/FreeBSD, "poll" otherwise
+
+    Example:
+        val backend = event_loop_platform()
+        # Returns "epoll" on Linux
+    """
+    val platform = rt_platform_name()
+    if platform == "linux":
+        "epoll"
+    else if platform == "macos" or platform == "freebsd":
+        "kqueue"
+    else:
+        "poll"
+
+# ============================================================================
+# Interest <-> i64 Mapping
+# ============================================================================
+# Extern ABI encodes Interest as i64:
+#   0 = Read, 1 = Write, 2 = ReadWrite
+# Both Simple and Rust sides must agree on this mapping.
+
+fn _interest_to_i64(interest: Interest) -> i64:
+    """Convert Interest enum to extern ABI integer."""
+    match interest:
+        case Interest.Read: 0
+        case Interest.Write: 1
+        case Interest.ReadWrite: 2
+
+fn _i64_to_interest(value: i64) -> Interest:
+    """Convert extern ABI integer back to Interest enum."""
+    if value == 1:
+        Interest.Write
+    else if value == 2:
+        Interest.ReadWrite
+    else:
+        Interest.Read
+
+# ============================================================================
+# Event - Readiness Event with Token
+# ============================================================================
+
+struct Event:
+    """An I/O readiness event from the event loop.
+
+    Returned by EventLoop.poll(). Includes a user-supplied token
+    so callers can map events back to their resources without
+    scanning by fd.
+
+    Example:
+        val event = Event(fd: 42, ready: Interest.Read, token: 1)
+        expect event.fd == 42
+        expect event.token == 1
+    """
+    fd: i64
+    ready: Interest
+    token: i64
 
 # ============================================================================
 # Waker - Future Wake Callback
@@ -54,8 +130,8 @@ use std.io.types.{IoError, IoErrorKind, Interest, IoEvent}
 class Waker:
     """Wakes a pending future when I/O is ready.
 
-    Stored by EventLoop and invoked when a registered fd
-    becomes ready.
+    A higher-level abstraction that maps tokens to callbacks.
+    Can be used alongside EventLoop by maintaining a token -> Waker map.
 
     Example:
         val waker = Waker.new(task_id, scheduler.wake(_))
@@ -84,92 +160,160 @@ class Waker:
 # ============================================================================
 
 class EventLoop:
-    """Portable cooperative event loop.
+    """Portable event loop backed by epoll/kqueue via extern stubs.
 
-    Manages registration of file descriptors and polling for readiness.
+    Creates a native event notification fd on construction and delegates
+    registration, modification, and polling to `rt_event_loop_*` externs.
+
+    NOTE: Arrays are value types in Simple — passing an array to a function
+    copies it, so poll() returns a new [Event] rather than filling a caller
+    buffer.
 
     Example:
-        val loop = EventLoop.new()?
-        loop.register(socket_fd, Interest.ReadWrite, waker)?
+        val ev_loop = EventLoop.new()?
+        ev_loop.register(socket_fd, Interest.ReadWrite, 1)?
 
         while running:
-            val events = loop.poll(100)?
+            val events = ev_loop.poll(100)?
             for event in events:
                 dispatch(event)
+
+        ev_loop.close()?
     """
-    wakers: [WakerEntry]
+    loop_fd: i64
+    _platform: text
+    _closed: bool
 
     static fn new() -> Result<EventLoop, IoError>:
-        """Create event loop.
+        """Create event loop via the native backend.
+
+        Calls rt_event_loop_create() which returns an epoll/kqueue fd.
+        Returns error if creation fails (fd < 0).
 
         Returns:
-            Result with EventLoop or error
+            Result with EventLoop or IoError
         """
-        Ok(EventLoop(wakers: []))
+        val fd = rt_event_loop_create()
+        if fd < 0:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to create event loop", source: nil))
+        else:
+            Ok(EventLoop(loop_fd: fd, _platform: event_loop_platform(), _closed: false))
 
-    me register(fd: i64, interest: Interest, waker: Waker) -> Result<(), IoError>:
-        """Register fd for interest monitoring.
+    fn platform() -> text:
+        """Return the backend name: "epoll", "kqueue", or "poll".
+
+        Returns:
+            Backend name string
+        """
+        self._platform
+
+    me register(fd: i64, interest: Interest, token: i64) -> Result<(), IoError>:
+        """Register fd for level-triggered event monitoring.
 
         Args:
             fd: File descriptor to monitor
             interest: Read, Write, or ReadWrite
-            waker: Waker to invoke when ready
+            token: User-supplied token returned in Event on readiness
 
         Returns:
-            Result or error
+            Result or IoError
         """
-        self.wakers.push(WakerEntry(fd: fd, interest: interest, waker: waker))
-        Ok(())
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        val ok = rt_event_loop_register(self.loop_fd, fd, _interest_to_i64(interest), token, false)
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to register fd {fd}", source: nil))
+
+    me register_edge(fd: i64, interest: Interest, token: i64) -> Result<(), IoError>:
+        """Register fd for edge-triggered event monitoring.
+
+        Edge-triggered mode only notifies on state transitions, not while
+        the fd remains ready. Caller must drain the fd fully on each event.
+
+        Args:
+            fd: File descriptor to monitor
+            interest: Read, Write, or ReadWrite
+            token: User-supplied token returned in Event on readiness
+
+        Returns:
+            Result or IoError
+        """
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        val ok = rt_event_loop_register(self.loop_fd, fd, _interest_to_i64(interest), token, true)
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to register fd {fd} (edge)", source: nil))
+
+    me reregister(fd: i64, interest: Interest, token: i64) -> Result<(), IoError>:
+        """Modify registration for an already-registered fd.
+
+        Args:
+            fd: File descriptor already registered
+            interest: New interest flags
+            token: New or same token
+
+        Returns:
+            Result or IoError
+        """
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        # Deregister + re-register via the extern (EPOLL_CTL_MOD / kevent EV_ADD)
+        val ok = rt_event_loop_register(self.loop_fd, fd, _interest_to_i64(interest), token, false)
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to reregister fd {fd}", source: nil))
 
     me deregister(fd: i64) -> Result<(), IoError>:
-        """Remove fd from monitoring.
+        """Remove fd from event monitoring.
 
         Args:
             fd: File descriptor to remove
 
         Returns:
-            Result or error
+            Result or IoError
         """
-        self.wakers = self.wakers.filter(_.fd != fd)
-        Ok(())
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        val ok = rt_event_loop_deregister(self.loop_fd, fd)
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to deregister fd {fd}", source: nil))
 
-    me modify(fd: i64, interest: Interest) -> Result<(), IoError>:
-        """Modify interest for an already-registered fd.
+    fn poll(timeout_ms: i64) -> Result<[Event], IoError>:
+        """Wait for I/O events and return ready descriptors.
+
+        Calls the native poll extern which blocks up to timeout_ms.
+        Returns a flat [i64] array (fd, ready, token triples) that is
+        unpacked into Event structs here.
 
         Args:
-            fd: File descriptor
-            interest: New interest flags
+            timeout_ms: Max wait time in ms (-1 for infinite, 0 for non-blocking)
 
         Returns:
-            Result or error
+            Result with array of ready Events
         """
-        var updated: [WakerEntry] = []
-        for entry in self.wakers:
-            if entry.fd == fd:
-                updated.push(WakerEntry(fd: entry.fd, interest: interest, waker: entry.waker))
-            else:
-                updated.push(entry)
-        self.wakers = updated
-        Ok(())
-
-    fn poll(timeout_ms: i64) -> Result<[IoEvent], IoError>:
-        """Poll for ready events.
-
-        Args:
-            timeout_ms: Max wait time in ms (-1 for infinite)
-
-        Returns:
-            Result with array of ready IoEvents
-        """
-        var events: [IoEvent] = []
+        if self._closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
+        val max_events: i64 = 64
+        val raw = rt_event_loop_poll(self.loop_fd, max_events, timeout_ms)
+        # raw is a flat array: [fd1, ready1, token1, fd2, ready2, token2, ...]
+        var events: [Event] = []
         var i = 0
-        while i < self.wakers.len():
-            val entry = self.wakers[i]
-            events.push(IoEvent(fd: entry.fd, ready: entry.interest))
-            i = i + 1
+        while i + 2 < raw.len():
+            val ev_fd = raw[i]
+            val ev_ready = _i64_to_interest(raw[i + 1])
+            val ev_token = raw[i + 2]
+            events.push(Event(fd: ev_fd, ready: ev_ready, token: ev_token))
+            i = i + 3
         Ok(events)
 
-    fn poll_one(timeout_ms: i64) -> Result<IoEvent?, IoError>:
+    fn poll_one(timeout_ms: i64) -> Result<Event?, IoError>:
         """Poll for a single event.
 
         Args:
@@ -184,31 +328,37 @@ class EventLoop:
         else:
             Ok(nil)
 
-    me run() -> Result<(), IoError>:
-        """Run event loop, dispatching wakers until no fds registered.
+    me close() -> Result<(), IoError>:
+        """Close the event loop and release the native fd.
 
         Returns:
-            Result or error
+            Result or IoError
         """
-        while self.wakers.len() > 0:
-            val events = self.poll(100)?
-            for event in events:
-                # Find and wake matching waker
-                for entry in self.wakers:
-                    if entry.fd == event.fd:
-                        entry.waker.wake()
-        Ok(())
+        if self._closed:
+            return Ok(())
+        val ok = rt_event_loop_close(self.loop_fd)
+        self._closed = true
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(kind: IoErrorKind.Other, message: "failed to close event loop", source: nil))
 
 # ============================================================================
-# Internal Types
+# Extern Stubs — Native Backend
 # ============================================================================
+# Implemented in Rust runtime. Returns epoll/kqueue fd or -1 on error.
 
-struct WakerEntry:
-    """Internal: maps fd to waker."""
-    fd: i64
-    interest: Interest
-    waker: Waker
+extern fn rt_event_loop_create() -> i64
 
-# ============================================================================
-# Exports
-# ============================================================================
+# Register fd for monitoring. edge=true for edge-triggered mode.
+# interest encoding: 0=Read, 1=Write, 2=ReadWrite
+extern fn rt_event_loop_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
+
+# Remove fd from monitoring.
+extern fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> bool
+
+# Block until events or timeout. Returns flat array [fd, ready, token, ...].
+extern fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]
+
+# Close the event loop fd.
+extern fn rt_event_loop_close(loop_fd: i64) -> bool

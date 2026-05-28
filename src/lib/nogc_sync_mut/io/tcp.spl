@@ -400,17 +400,82 @@ class TcpStream with Read, Write, Close:
 fn tcp_backend_bind(addr: text) -> i64:
     rt_io_tcp_bind(addr)
 
+fn tcp_backend_socket_create(family: i64) -> i64:
+    """Create a raw TCP socket (not yet bound).
+
+    Args:
+        family: 0 = IPv4, 1 = IPv6
+
+    Returns:
+        Socket fd or -1 on failure
+    """
+    rt_io_tcp_socket_create(family)
+
+fn tcp_backend_bind_fd(fd: i64, addr: text) -> bool:
+    """Bind a pre-created socket to an address.
+
+    Args:
+        fd: Socket fd from tcp_backend_socket_create()
+        addr: Address in "host:port" format
+
+    Returns:
+        true on success
+    """
+    rt_io_tcp_bind_fd(fd, addr)
+
+fn tcp_backend_listen(fd: i64, backlog: i64) -> bool:
+    """Start listening on a bound socket.
+
+    Args:
+        fd: Socket fd that has been bound
+        backlog: Listen backlog size
+
+    Returns:
+        true on success
+    """
+    rt_io_tcp_listen(fd, backlog)
+
+fn tcp_backend_bind_with_reuseport(addr: text) -> i64:
+    """Create socket, set SO_REUSEPORT + SO_REUSEADDR, then bind + listen.
+
+    This is the correct sequence for multi-worker port sharing: socket
+    options must be set BEFORE bind() for SO_REUSEPORT to take effect.
+    Detects IPv6 addresses (containing '[') and creates the appropriate
+    socket family.
+
+    Args:
+        addr: Address in "host:port" format
+
+    Returns:
+        fd or -1 on failure
+    """
+    var family = 0
+    if addr.contains("["):
+        family = 1
+    val fd = rt_io_tcp_socket_create(family)
+    if fd < 0:
+        return -1
+    tcp_backend_set_reuseport(fd, true)
+    tcp_backend_set_reuseaddr(fd, true)
+    if not rt_io_tcp_bind_fd(fd, addr):
+        rt_io_tcp_close(fd)
+        return -1
+    if not rt_io_tcp_listen(fd, 128):
+        rt_io_tcp_close(fd)
+        return -1
+    fd
+
 fn tcp_backend_close(fd: i64) -> bool:
     rt_io_tcp_close(fd)
 
 fn tcp_backend_set_nonblocking(fd: i64, enabled: bool) -> bool:
-    false
+    rt_io_tcp_set_nonblocking(fd, enabled)
 
 fn tcp_backend_set_reuseport(fd: i64, enabled: bool) -> bool:
-    false
+    rt_io_tcp_set_reuseport(fd, enabled)
 
 fn tcp_backend_set_reuseaddr(fd: i64, enabled: bool) -> bool:
-    false
+    rt_io_tcp_set_reuseaddr(fd, enabled)
 
 fn tcp_backend_set_nodelay(fd: i64, enabled: bool) -> bool:
     rt_io_tcp_set_nodelay(fd, enabled)
@@ -424,6 +489,9 @@ fn tcp_backend_local_addr(fd: i64) -> text?:
 
 # TCP listener
 extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_socket_create(family: i64) -> i64
+extern fn rt_io_tcp_bind_fd(fd: i64, addr: text) -> bool
+extern fn rt_io_tcp_listen(fd: i64, backlog: i64) -> bool
 extern fn rt_io_tcp_accept(fd: i64) -> i64
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 
@@ -440,7 +508,10 @@ extern fn rt_io_tcp_close(fd: i64) -> bool
 # TCP metadata / options
 extern fn rt_io_tcp_local_addr(fd: i64) -> text?
 extern fn rt_io_tcp_peer_addr(fd: i64) -> text?
+extern fn rt_io_tcp_set_nonblocking(fd: i64, enabled: bool) -> bool
 extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_reuseport(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_reuseaddr(fd: i64, enabled: bool) -> bool
 extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
 extern fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64?) -> bool
 extern fn rt_io_tcp_shutdown(fd: i64, how: i64) -> bool

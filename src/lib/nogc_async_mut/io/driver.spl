@@ -41,6 +41,9 @@ val _OP_CONNECT: i64 = 8
 val _OP_READ: i64 = 9
 val _OP_WRITE: i64 = 10
 val _OP_FSYNC: i64 = 11
+val _OP_UDP_RECV: i64 = 12
+val _OP_UDP_SEND: i64 = 13
+val _OP_UDP_BIND: i64 = 14
 
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
@@ -54,6 +57,9 @@ extern fn rt_file_size(path: text) -> i64
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
+extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
 
 struct Completion:
     id: i64
@@ -161,6 +167,14 @@ class IoDriver:
 
     me submit_sendfile(sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
         self._push_op(_OP_SENDFILE, sock_fd, file_fd, "", 0, offset, len, "", 0)
+
+    # ---- UDP Operations ----
+
+    me submit_udp_recv(fd: i64, buf_size: i64) -> i64:
+        self._push_op(_OP_UDP_RECV, fd, 0, "", buf_size, 0, 0, "", 0)
+
+    me submit_udp_send(fd: i64, data: text, addr: text) -> i64:
+        self._push_op(_OP_UDP_SEND, fd, 0, data, 0, 0, data.len(), addr, 0)
 
     # ---- File I/O Operations ----
 
@@ -347,6 +361,23 @@ class IoDriver:
                 self._complete(oid, 0, 0, "")
                 i = i + 1
                 continue
+
+            elif ot == _OP_UDP_SEND:
+                val udp_bytes = rt_text_to_bytes(self._p_data[i])
+                val udp_sent = rt_io_udp_send_to(fd, udp_bytes, self._p_path[i])
+                self._complete(oid, udp_sent, 0, "")
+                i = i + 1
+                continue
+
+            elif ot == _OP_UDP_RECV:
+                val udp_result = rt_io_udp_recv_from(fd, self._p_size[i])
+                if udp_result != nil:
+                    val udp_data = udp_result.0
+                    val udp_addr = udp_result.1
+                    val udp_txt = rt_bytes_to_text(udp_data)
+                    self._complete(oid, udp_data.len(), 0, udp_addr + "\n" + udp_txt)
+                    i = i + 1
+                    continue
 
             else:
                 self._complete(oid, ERR_UNSUPPORTED, 0, "")

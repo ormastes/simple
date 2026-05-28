@@ -118,6 +118,7 @@ type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 use super::{evaluate_expr, is_debug_mode};
 use crate::interpreter::interpreter_call::exec_function_with_values;
 use crate::interpreter::interpreter_native_net;
+use crate::interpreter::interpreter_event_loop;
 
 // Import diagram tracing
 use simple_runtime::value::diagram_sffi;
@@ -1008,6 +1009,26 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert("rt_env_temp", system::rt_env_temp as ExternFn);
     m.insert("rt_env_var_count", env_sffi::rt_env_var_count as ExternFn);
     m.insert("rt_env_var_names", env_sffi::rt_env_var_names as ExternFn);
+    m.insert(
+        "rt_event_loop_close",
+        interpreter_event_loop::rt_event_loop_close_interp as ExternFn,
+    );
+    m.insert(
+        "rt_event_loop_create",
+        interpreter_event_loop::rt_event_loop_create_interp as ExternFn,
+    );
+    m.insert(
+        "rt_event_loop_deregister",
+        interpreter_event_loop::rt_event_loop_deregister_interp as ExternFn,
+    );
+    m.insert(
+        "rt_event_loop_poll",
+        interpreter_event_loop::rt_event_loop_poll_interp as ExternFn,
+    );
+    m.insert(
+        "rt_event_loop_register",
+        interpreter_event_loop::rt_event_loop_register_interp as ExternFn,
+    );
     m.insert("rt_error_arg_count", error_sffi::rt_error_arg_count as ExternFn);
     m.insert(
         "rt_error_division_by_zero",
@@ -1240,6 +1261,30 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternFn> {
     m.insert(
         "rt_io_tcp_set_nodelay",
         interpreter_native_net::rt_io_tcp_set_nodelay_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_set_nonblocking",
+        interpreter_native_net::rt_io_tcp_set_nonblocking_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_socket_create",
+        interpreter_native_net::rt_io_tcp_socket_create_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_bind_fd",
+        interpreter_native_net::rt_io_tcp_bind_fd_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_listen",
+        interpreter_native_net::rt_io_tcp_listen_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_set_reuseport",
+        interpreter_native_net::rt_io_tcp_set_reuseport_interp as ExternFn,
+    );
+    m.insert(
+        "rt_io_tcp_set_reuseaddr",
+        interpreter_native_net::rt_io_tcp_set_reuseaddr_interp as ExternFn,
     );
     m.insert(
         "rt_io_tcp_set_read_timeout",

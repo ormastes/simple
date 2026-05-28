@@ -1,0 +1,515 @@
+# HTTP/2 Connection — Async H2 connection multiplexer
+#
+# Manages a single HTTP/2 connection: preface validation, settings
+# exchange, stream tracking, and frame dispatch. Composes the sync
+# framing layer (h2_frame, h2_parser, h2_writer, h2_preface) with the
+# async IoDriver-based worker.
+#
+# Scope (framing-only wiring — AC-4):
+#   - Connection preface validation (RFC 9113 §3.4)
+#   - SETTINGS exchange (server SETTINGS + client SETTINGS ACK)
+#   - PING echo
+#   - WINDOW_UPDATE tracking (connection-level)
+#   - GOAWAY on unimplemented stream paths
+#   - Stream creation and frame routing to H2Stream
+#
+# Out of scope (W16+ / HPACK milestone):
+#   - HPACK decode/encode — cannot extract :method/:path/:status
+#   - Full request→response cycle through HttpRequestData/HttpResponseData
+#   - CONTINUATION frame header-block merging
+#   - Server push (PUSH_PROMISE)
+#   - Priority / weighted scheduling
+#
+# Once HPACK lands, the TODO(HPACK) sites in this file wire directly
+# into the existing process_request pipeline in worker.spl.
+
+use std.http.h2.h2_frame.{
+    H2Frame, H2DataFrame, H2HeadersFrame, H2SettingsFrame,
+    H2PingFrame, H2GoawayFrame, H2WindowUpdateFrame,
+    H2RstStreamFrame, H2Setting,
+    H2_FRAME_HEADER_LEN,
+    H2_FLAG_END_STREAM, H2_FLAG_END_HEADERS, H2_FLAG_ACK,
+    H2_SETTINGS_MAX_CONCURRENT_STREAMS, H2_SETTINGS_INITIAL_WINDOW_SIZE,
+    H2_SETTINGS_MAX_FRAME_SIZE,
+    H2_ERR_NO_ERROR, H2_ERR_PROTOCOL_ERROR, H2_ERR_INTERNAL_ERROR
+}
+use std.http.h2.h2_parser.{h2_parse_frame, h2_parse_frame_header, H2FrameHeader}
+use std.http.h2.h2_writer.{h2_write_frame}
+use std.http.h2.h2_preface.{h2_validate_preface, H2_CONNECTION_PREFACE_LEN}
+use std.http_server.h2_stream.{H2Stream, H2StreamState}
+
+# ============================================================================
+# Connection-level defaults (RFC 9113 §6.5.2)
+# ============================================================================
+
+val DEFAULT_MAX_CONCURRENT_STREAMS: i64 = 100
+val DEFAULT_INITIAL_WINDOW_SIZE: i64 = 65535
+val DEFAULT_MAX_FRAME_SIZE: i64 = 16384
+val DEFAULT_CONNECTION_WINDOW: i64 = 65535
+
+# ============================================================================
+# H2Connection
+# ============================================================================
+
+class H2Connection:
+    """Manages one HTTP/2 connection (multiple streams over a single TCP fd).
+
+    The worker feeds raw bytes via `on_data_received`; this class validates
+    the preface, parses frames, dispatches to per-stream H2Stream instances,
+    and accumulates outbound frame bytes in `pending_writes`.
+
+    Worker drains `pending_writes` via `take_pending_writes()` and submits
+    them through the IoDriver.
+    """
+    fd: i64
+    peer_addr: text
+    created_at: i64
+    last_activity: i64
+
+    # Receive buffer — bytes accumulate across on_data_received calls
+    recv_buf: [u8]
+
+    # Connection state
+    preface_validated: bool
+    settings_sent: bool
+    goaway_sent: bool
+    last_stream_id: i64
+    next_server_stream_id: i64
+
+    # Negotiated settings (peer values)
+    peer_max_concurrent_streams: i64
+    peer_initial_window_size: i64
+    peer_max_frame_size: i64
+
+    # Local settings (what we advertise)
+    local_max_concurrent_streams: i64
+    local_initial_window_size: i64
+    local_max_frame_size: i64
+
+    # Flow control — connection-level windows
+    send_window: i64
+    recv_window: i64
+
+    # Active streams
+    streams: Dict<i64, H2Stream>
+
+    # Outbound frame buffer — worker drains this after each on_data_received
+    pending_writes: [u8]
+
+    static fn new(fd: i64, peer_addr: text, now: i64) -> H2Connection:
+        """Create a new H2 connection after ALPN negotiation selects h2.
+
+        Immediately queues the server connection preface (SETTINGS frame).
+
+        Args:
+            fd: TCP socket file descriptor
+            peer_addr: Remote address string
+            now: Current epoch-ms timestamp
+        """
+        var conn = H2Connection(
+            fd: fd,
+            peer_addr: peer_addr,
+            created_at: now,
+            last_activity: now,
+            recv_buf: [],
+            preface_validated: false,
+            settings_sent: false,
+            goaway_sent: false,
+            last_stream_id: 0,
+            next_server_stream_id: 2,
+            peer_max_concurrent_streams: DEFAULT_MAX_CONCURRENT_STREAMS,
+            peer_initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            peer_max_frame_size: DEFAULT_MAX_FRAME_SIZE,
+            local_max_concurrent_streams: DEFAULT_MAX_CONCURRENT_STREAMS,
+            local_initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            local_max_frame_size: DEFAULT_MAX_FRAME_SIZE,
+            send_window: DEFAULT_CONNECTION_WINDOW,
+            recv_window: DEFAULT_CONNECTION_WINDOW,
+            streams: {},
+            pending_writes: []
+        )
+        # Server MUST send its SETTINGS as connection preface (RFC 9113 §3.4).
+        conn.queue_server_settings()
+        return conn
+
+    # ========================================================================
+    # Public interface — called by Worker
+    # ========================================================================
+
+    me on_data_received(data: text, now: i64) -> bool:
+        """Feed received bytes into the H2 connection.
+
+        Appends to internal buffer, validates preface if needed, then
+        parses and dispatches all complete frames.
+
+        Args:
+            data: Raw data from recv completion (text; converted to [u8])
+            now: Current epoch-ms timestamp
+
+        Returns:
+            true to keep reading, false to close the connection
+        """
+        self.last_activity = now
+
+        # Convert text to [u8] — text is byte-transparent in Simple
+        var i = 0
+        while i < data.len():
+            self.recv_buf.push(data.byte_at(i))
+            i = i + 1
+
+        # Step 1: Validate client connection preface (24-byte magic)
+        if not self.preface_validated:
+            if self.recv_buf.len() < H2_CONNECTION_PREFACE_LEN:
+                return true   # Need more data
+            if not h2_validate_preface(self.recv_buf):
+                self.queue_goaway(0, H2_ERR_PROTOCOL_ERROR)
+                return false
+            self.preface_validated = true
+            # Consume the 24-byte preface from the buffer
+            self.recv_buf = _slice_from(self.recv_buf, H2_CONNECTION_PREFACE_LEN)
+
+        # Step 2: Parse and dispatch frames
+        return self.consume_frames()
+
+    me take_pending_writes() -> [u8]:
+        """Drain and return all queued outbound bytes.
+
+        Worker calls this after on_data_received and submits via
+        IoDriver.submit_send.
+        """
+        val out = self.pending_writes
+        self.pending_writes = []
+        return out
+
+    fn is_goaway_sent() -> bool:
+        """True if GOAWAY has been sent (connection is shutting down)."""
+        self.goaway_sent
+
+    fn is_idle_timeout(now: i64, timeout_ms: i64) -> bool:
+        """Check if connection has exceeded idle timeout."""
+        (now - self.last_activity) > timeout_ms
+
+    # ========================================================================
+    # Frame consumption loop
+    # ========================================================================
+
+    me consume_frames() -> bool:
+        """Parse all complete frames from recv_buf.
+
+        Returns true to keep reading, false if the connection should close.
+        """
+        var offset = 0
+        loop:
+            # Check if we have at least a frame header (9 bytes)
+            if self.recv_buf.len() < offset + H2_FRAME_HEADER_LEN:
+                break
+
+            # Peek the frame header to know full frame length
+            val maybe_header = h2_parse_frame_header(self.recv_buf, offset)
+            if maybe_header == nil:
+                break
+            # Unwrap with fallback — safe because we checked nil above
+            val header = maybe_header ?? H2FrameHeader(length: 0, frame_type: 0, flags: 0, stream_id: 0)
+            val frame_len = H2_FRAME_HEADER_LEN + header.length
+            if self.recv_buf.len() < offset + frame_len:
+                break   # Incomplete frame — wait for more data
+
+            # Parse full frame
+            val maybe_frame = h2_parse_frame(self.recv_buf, offset)
+            offset = offset + frame_len
+
+            if maybe_frame == nil:
+                # Malformed frame — protocol error
+                self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+                self.recv_buf = []
+                return false
+
+            # Unwrap and dispatch — nil already handled above
+            match maybe_frame:
+                Some(frame):
+                    if not self.dispatch_frame(frame):
+                        self.recv_buf = _slice_from(self.recv_buf, offset)
+                        return false
+                nil:
+                    break
+
+        # Remove consumed bytes from buffer
+        if offset > 0:
+            self.recv_buf = _slice_from(self.recv_buf, offset)
+        return true
+
+    # ========================================================================
+    # Frame dispatch
+    # ========================================================================
+
+    me dispatch_frame(frame: H2Frame) -> bool:
+        """Route a parsed frame to the appropriate handler.
+
+        Returns true to continue, false to close.
+        """
+        match frame:
+            H2Frame.Settings(sf):
+                self.handle_settings(sf)
+                return true
+
+            H2Frame.Ping(pf):
+                self.handle_ping(pf)
+                return true
+
+            H2Frame.WindowUpdate(wf):
+                self.handle_window_update(wf)
+                return true
+
+            H2Frame.Goaway(gf):
+                # Peer is shutting down — stop accepting new streams
+                return false
+
+            H2Frame.Headers(hf):
+                self.handle_headers(hf)
+                return true
+
+            H2Frame.Data(df):
+                self.handle_data(df)
+                return true
+
+            H2Frame.RstStream(rf):
+                self.handle_rst_stream(rf)
+                return true
+
+            H2Frame.Priority(pr):
+                # Priority is deprecated in RFC 9113; ignore
+                return true
+
+            H2Frame.PushPromise(pp):
+                # Server does not receive PUSH_PROMISE; protocol error
+                self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+                return false
+
+            H2Frame.Continuation(cf):
+                # TODO(HPACK): merge continuation header blocks into stream
+                # For now, without HPACK we cannot process these
+                return true
+
+    # ========================================================================
+    # SETTINGS handling
+    # ========================================================================
+
+    me handle_settings(sf: H2SettingsFrame):
+        """Process a SETTINGS frame from the peer.
+
+        If ACK, this acknowledges our SETTINGS. If not ACK, apply peer
+        settings and send ACK back.
+        """
+        if (sf.flags & H2_FLAG_ACK) != 0:
+            # Peer acknowledged our SETTINGS — nothing to update
+            return
+
+        # Apply peer settings
+        var idx = 0
+        while idx < sf.settings.len():
+            val s = sf.settings[idx]
+            if s.identifier == H2_SETTINGS_MAX_CONCURRENT_STREAMS:
+                self.peer_max_concurrent_streams = s.value
+            elif s.identifier == H2_SETTINGS_INITIAL_WINDOW_SIZE:
+                self.peer_initial_window_size = s.value
+            elif s.identifier == H2_SETTINGS_MAX_FRAME_SIZE:
+                self.peer_max_frame_size = s.value
+            idx = idx + 1
+
+        # ACK the peer's SETTINGS
+        self.queue_settings_ack()
+
+    me queue_server_settings():
+        """Queue our initial SETTINGS frame (server connection preface)."""
+        var settings: [H2Setting] = []
+        settings.push(H2Setting(
+            identifier: H2_SETTINGS_MAX_CONCURRENT_STREAMS,
+            value: self.local_max_concurrent_streams
+        ))
+        settings.push(H2Setting(
+            identifier: H2_SETTINGS_INITIAL_WINDOW_SIZE,
+            value: self.local_initial_window_size
+        ))
+        val frame = H2Frame.Settings(H2SettingsFrame(
+            flags: 0,
+            settings: settings
+        ))
+        val bytes = h2_write_frame(frame)
+        _append_to(self.pending_writes, bytes)
+        self.settings_sent = true
+
+    me queue_settings_ack():
+        """Queue a SETTINGS ACK frame."""
+        var empty: [H2Setting] = []
+        val frame = H2Frame.Settings(H2SettingsFrame(
+            flags: H2_FLAG_ACK,
+            settings: empty
+        ))
+        val bytes = h2_write_frame(frame)
+        _append_to(self.pending_writes, bytes)
+
+    # ========================================================================
+    # PING handling
+    # ========================================================================
+
+    me handle_ping(pf: H2PingFrame):
+        """Echo a PING frame back with ACK flag set."""
+        if (pf.flags & H2_FLAG_ACK) != 0:
+            # This is a PING ACK — nothing to do
+            return
+        val ack_frame = H2Frame.Ping(H2PingFrame(
+            flags: H2_FLAG_ACK,
+            opaque_data: pf.opaque_data
+        ))
+        val bytes = h2_write_frame(ack_frame)
+        _append_to(self.pending_writes, bytes)
+
+    # ========================================================================
+    # WINDOW_UPDATE handling
+    # ========================================================================
+
+    me handle_window_update(wf: H2WindowUpdateFrame):
+        """Process a WINDOW_UPDATE frame (connection or stream level)."""
+        if wf.stream_id == 0:
+            # Connection-level window update
+            self.send_window = self.send_window + wf.increment
+        else:
+            val stream = self.streams.get(wf.stream_id)
+            if stream.?:
+                var s = stream
+                s.adjust_send_window(wf.increment)
+                self.streams[wf.stream_id] = s
+
+    # ========================================================================
+    # HEADERS handling
+    # ========================================================================
+
+    me handle_headers(hf: H2HeadersFrame):
+        """Process a HEADERS frame — create or update a stream.
+
+        Without HPACK (W16+), we cannot decode the header block into
+        :method/:path/:authority pseudo-headers. We track the stream
+        state but respond with GOAWAY(NO_ERROR) for now — once HPACK
+        lands, this will route to process_request in the worker.
+        """
+        val sid = hf.stream_id
+        if sid > self.last_stream_id:
+            self.last_stream_id = sid
+
+        # Create stream if new
+        val existing = self.streams.get(sid)
+        if not existing.?:
+            var new_stream = H2Stream.new(sid, self.local_initial_window_size)
+            new_stream.on_headers(hf.header_block, hf.flags)
+            self.streams[sid] = new_stream
+        else:
+            var s = existing
+            s.on_headers(hf.header_block, hf.flags)
+            self.streams[sid] = s
+
+        # Check if request is complete
+        val stream = self.streams.get(sid)
+        if stream.?:
+            if stream.is_request_complete():
+                # TODO(HPACK): Decode header_block → HttpRequestData, route
+                # through worker.process_request, encode response headers via
+                # HPACK, send HEADERS+DATA frames back.
+                #
+                # For now (framing-only milestone): send RST_STREAM to cleanly
+                # reject the stream without tearing down the connection.
+                self.queue_rst_stream(sid, H2_ERR_INTERNAL_ERROR)
+                var s2 = stream
+                s2.close()
+                self.streams[sid] = s2
+
+    # ========================================================================
+    # DATA handling
+    # ========================================================================
+
+    me handle_data(df: H2DataFrame):
+        """Process a DATA frame — append to stream body."""
+        val sid = df.stream_id
+        val stream = self.streams.get(sid)
+        if not stream.?:
+            # DATA on unknown stream — connection error
+            self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
+            return
+
+        var s = stream
+        s.on_data(df.data, df.flags)
+        self.streams[sid] = s
+
+        # Credit connection-level receive window
+        val data_len = df.data.len()
+        if data_len > 0:
+            self.recv_window = self.recv_window - data_len
+            if self.recv_window < DEFAULT_CONNECTION_WINDOW / 2:
+                val increment = DEFAULT_CONNECTION_WINDOW - self.recv_window
+                self.queue_window_update(0, increment)
+                self.recv_window = self.recv_window + increment
+
+    # ========================================================================
+    # RST_STREAM handling
+    # ========================================================================
+
+    me handle_rst_stream(rf: H2RstStreamFrame):
+        """Process a RST_STREAM — close the stream."""
+        val stream = self.streams.get(rf.stream_id)
+        if stream.?:
+            var s = stream
+            s.close()
+            self.streams[rf.stream_id] = s
+
+    # ========================================================================
+    # Outbound frame helpers
+    # ========================================================================
+
+    me queue_goaway(last_sid: i64, error_code: i64):
+        """Queue a GOAWAY frame and mark connection as shutting down."""
+        var empty: [u8] = []
+        val frame = H2Frame.Goaway(H2GoawayFrame(
+            last_stream_id: last_sid,
+            error_code: error_code,
+            debug_data: empty
+        ))
+        val bytes = h2_write_frame(frame)
+        _append_to(self.pending_writes, bytes)
+        self.goaway_sent = true
+
+    me queue_rst_stream(stream_id: i64, error_code: i64):
+        """Queue a RST_STREAM frame for a specific stream."""
+        val frame = H2Frame.RstStream(H2RstStreamFrame(
+            stream_id: stream_id,
+            error_code: error_code
+        ))
+        val bytes = h2_write_frame(frame)
+        _append_to(self.pending_writes, bytes)
+
+    me queue_window_update(stream_id: i64, increment: i64):
+        """Queue a WINDOW_UPDATE frame."""
+        val frame = H2Frame.WindowUpdate(H2WindowUpdateFrame(
+            stream_id: stream_id,
+            increment: increment
+        ))
+        val bytes = h2_write_frame(frame)
+        _append_to(self.pending_writes, bytes)
+
+# ============================================================================
+# Buffer helpers
+# ============================================================================
+
+fn _slice_from(buf: [u8], start: i64) -> [u8]:
+    """Return buf[start..] as a new [u8]."""
+    var out: [u8] = []
+    var i = start
+    while i < buf.len():
+        out.push(buf[i])
+        i = i + 1
+    return out
+
+fn _append_to(dst: [u8], src: [u8]):
+    """Append all bytes from src onto dst."""
+    var i = 0
+    while i < src.len():
+        dst.push(src[i])
+        i = i + 1

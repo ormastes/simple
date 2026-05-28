@@ -1,0 +1,298 @@
+# QUIC Transport Layer — RFC 9000
+#
+# Bridges UDP sockets with the QUIC connection/stream layer to provide
+# the transport substrate for HTTP/3.
+#
+# Responsibilities:
+#   - Own a UDP socket file descriptor
+#   - Demux incoming datagrams by connection ID → QuicConnection
+#   - Execute QuicAction instructions (send packets, signal events)
+#   - Manage connection lifecycle: creation, migration, close
+#   - Generate connection IDs
+#
+# This is the entry point for QUIC: higher layers (H3) create a
+# QuicTransport, then open connections and streams through it.
+#
+# Crypto (TLS 1.3) is STUBBED. Congestion control and loss detection
+# are deferred.
+#
+# Reference: RFC 9000 §5, §7, §8
+
+use std.io.quic.quic_packet.{
+    QuicPacketHeader, QuicHeaderResult,
+    parse_quic_header, QUIC_VERSION_1
+}
+use std.io.quic.quic_connection.{
+    QuicConnection, QuicConnectionState, QuicAction
+}
+use std.io.quic.quic_stream.{QuicStream}
+
+# ============================================================================
+# Connection ID generation — stub
+# ============================================================================
+
+val CONN_ID_LENGTH: i64 = 8
+
+fn _generate_conn_id(seed: i64) -> [u8]:
+    """Generate a connection ID from a seed value.
+
+    A real implementation would use a CSPRNG. This stub produces
+    deterministic IDs from the seed for testing.
+    """
+    var cid: [u8] = []
+    var s = seed
+    var i = 0
+    loop:
+        if i >= CONN_ID_LENGTH:
+            break
+        cid.push((s + i * 37) & 0xff)
+        s = s + 13
+        i = i + 1
+    return cid
+
+fn _conn_id_to_key(cid: [u8]) -> text:
+    """Convert a connection ID byte array to a text key for Dict lookup.
+
+    Encodes each byte as two hex chars.
+    """
+    var key = ""
+    var i = 0
+    loop:
+        if i >= cid.len():
+            break
+        val b = cid[i]
+        val hi = (b >> 4) & 0x0f
+        val lo = b & 0x0f
+        key = key + _hex_char(hi) + _hex_char(lo)
+        i = i + 1
+    return key
+
+fn _hex_char(nibble: i64) -> text:
+    """Convert a 0-15 value to a hex character."""
+    if nibble < 10:
+        return "{nibble}"
+    if nibble == 10:
+        return "a"
+    if nibble == 11:
+        return "b"
+    if nibble == 12:
+        return "c"
+    if nibble == 13:
+        return "d"
+    if nibble == 14:
+        return "e"
+    return "f"
+
+# ============================================================================
+# Transport event — high-level events surfaced to the application
+# ============================================================================
+
+enum TransportEvent:
+    """Events surfaced from the transport layer to the application."""
+    # A new connection was accepted (server) or established (client).
+    NewConnection(conn_key: text)
+    # Data arrived on a stream.
+    StreamData(conn_key: text, stream_id: i64, data: [u8])
+    # A stream became ready for I/O.
+    StreamReady(conn_key: text, stream_id: i64)
+    # A stream was closed.
+    StreamClosed(conn_key: text, stream_id: i64)
+    # A connection was closed.
+    ConnectionClosed(conn_key: text, reason: text)
+
+# ============================================================================
+# QuicTransport — owns UDP socket, manages connections
+# ============================================================================
+
+class QuicTransport:
+    """QUIC transport layer: UDP socket + connection map.
+
+    Server mode: bind a UDP socket, accept incoming connections.
+    Client mode: bind ephemeral, connect to a server.
+
+    Higher layers (H3) call open_connection / open_stream / send_data
+    and poll on_udp_data to drive the transport.
+    """
+    udp_fd: i64
+    connections: Dict<text, QuicConnection>
+    conn_id_seed: i64
+    local_addr: text
+    is_server: bool
+
+    static fn create_server(udp_fd: i64, local_addr: text) -> QuicTransport:
+        """Create a server-mode transport bound to the given UDP fd."""
+        return QuicTransport(
+            udp_fd: udp_fd,
+            connections: {},
+            conn_id_seed: 1,
+            local_addr: local_addr,
+            is_server: true
+        )
+
+    static fn create_client(udp_fd: i64, local_addr: text) -> QuicTransport:
+        """Create a client-mode transport bound to the given UDP fd."""
+        return QuicTransport(
+            udp_fd: udp_fd,
+            connections: {},
+            conn_id_seed: 100,
+            local_addr: local_addr,
+            is_server: false
+        )
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle
+    # ------------------------------------------------------------------
+
+    me open_connection(peer_addr: text) -> text:
+        """Open a new outgoing (client) connection to peer_addr.
+
+        Returns the connection key (hex-encoded local CID) for future
+        operations on this connection.
+        """
+        val local_cid = _generate_conn_id(self.conn_id_seed)
+        self.conn_id_seed = self.conn_id_seed + 1
+        val remote_cid = _generate_conn_id(self.conn_id_seed)
+        self.conn_id_seed = self.conn_id_seed + 1
+
+        val conn = QuicConnection.create_client(local_cid, remote_cid, peer_addr)
+        val key = _conn_id_to_key(local_cid)
+        self.connections[key] = conn
+        return key
+
+    me close_connection(conn_key: text, reason: text):
+        """Initiate graceful close of a connection by key."""
+        if self.connections.contains(conn_key):
+            var conn = self.connections[conn_key]
+            conn.close_connection(reason)
+
+    # ------------------------------------------------------------------
+    # Inbound datagram processing
+    # ------------------------------------------------------------------
+
+    me on_udp_data(data: [u8], peer_addr: text) -> [TransportEvent]:
+        """Process an incoming UDP datagram.
+
+        Parses the QUIC header, looks up the connection by destination
+        connection ID, creates a new server connection if needed, then
+        delegates to QuicConnection.on_packet and translates QuicActions
+        to TransportEvents.
+        """
+        var events: [TransportEvent] = []
+
+        if data.len() < 1:
+            return events
+
+        # Parse header to extract dest connection ID
+        val header_r = parse_quic_header(data)
+        match header_r:
+            case Err(msg):
+                return events
+            case Ok(header):
+                val key = _conn_id_to_key(header.dest_conn_id)
+
+                # Look up existing connection
+                if not self.connections.contains(key):
+                    if self.is_server:
+                        # Accept new connection
+                        val local_cid = header.dest_conn_id
+                        val remote_cid = header.src_conn_id
+                        val conn = QuicConnection.create_server(
+                            local_cid, remote_cid, peer_addr
+                        )
+                        self.connections[key] = conn
+                        events.push(TransportEvent.NewConnection(conn_key: key))
+                    else:
+                        # Client: unknown connection ID — drop
+                        return events
+
+                # Process packet through connection
+                var conn = self.connections[key]
+                val actions = conn.on_packet(data)
+
+                # Translate QuicActions to TransportEvents + send packets
+                var i = 0
+                loop:
+                    if i >= actions.len():
+                        break
+                    val action = actions[i]
+                    match action:
+                        case SendPacket(pkt_data, addr):
+                            # In a real impl, call rt_io_udp_send_to here
+                            pass
+                        case StreamReady(stream_id):
+                            events.push(TransportEvent.StreamReady(
+                                conn_key: key, stream_id: stream_id
+                            ))
+                        case StreamData(stream_id, sdata):
+                            events.push(TransportEvent.StreamData(
+                                conn_key: key, stream_id: stream_id, data: sdata
+                            ))
+                        case StreamClosed(stream_id):
+                            events.push(TransportEvent.StreamClosed(
+                                conn_key: key, stream_id: stream_id
+                            ))
+                        case ConnectionClosed(reason):
+                            events.push(TransportEvent.ConnectionClosed(
+                                conn_key: key, reason: reason
+                            ))
+                        case NeedCryptoHandshake:
+                            # Stub: crypto handshake not implemented
+                            pass
+                    i = i + 1
+
+        return events
+
+    # ------------------------------------------------------------------
+    # Outbound operations
+    # ------------------------------------------------------------------
+
+    me send_packet(conn_key: text, packet: [u8], peer_addr: text):
+        """Send a raw QUIC packet via the UDP socket.
+
+        In a real implementation this calls rt_io_udp_send_to on self.udp_fd.
+        Stubbed for now — the packet bytes are ready to transmit.
+        """
+        # TODO: [transport][P2] wire rt_io_udp_send_to(self.udp_fd, packet, peer_addr)
+        pass
+
+    me send_stream_data(conn_key: text, stream_id: i64, data: [u8]) -> [u8]:
+        """Send data on a stream. Returns the raw packet bytes produced.
+
+        Delegates to QuicConnection.send_data to build a STREAM frame
+        wrapped in a 1-RTT packet.
+        """
+        if not self.connections.contains(conn_key):
+            return []
+        var conn = self.connections[conn_key]
+        return conn.send_data(stream_id, data)
+
+    me open_stream(conn_key: text, stream_type: i64) -> i64:
+        """Open a new stream on a connection. Returns the stream ID.
+
+        stream_type: 0 = bidirectional, 1 = unidirectional.
+        Returns -1 if the connection key is not found.
+        """
+        if not self.connections.contains(conn_key):
+            return -1
+        var conn = self.connections[conn_key]
+        return conn.open_stream(stream_type)
+
+    me close_stream(conn_key: text, stream_id: i64):
+        """Close a stream on a connection."""
+        if self.connections.contains(conn_key):
+            var conn = self.connections[conn_key]
+            conn.close_stream(stream_id)
+
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
+
+    fn connection_count() -> i64:
+        """Number of active connections."""
+        return self.connections.len()
+
+    fn get_connection(conn_key: text) -> QuicConnection?:
+        """Look up a connection by key. Returns nil if not found."""
+        if self.connections.contains(conn_key):
+            return self.connections[conn_key]
+        return nil

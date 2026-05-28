@@ -194,6 +194,10 @@ pub use interpreter_native_io::*;
 mod interpreter_native_net;
 // Re-export all native networking functions
 pub use interpreter_native_net::*;
+#[path = "../interpreter_event_loop.rs"]
+mod interpreter_event_loop;
+// Re-export all event loop functions
+pub use interpreter_event_loop::*;
 #[path = "../interpreter_context.rs"]
 mod interpreter_context;
 use interpreter_context::dispatch_context_method;

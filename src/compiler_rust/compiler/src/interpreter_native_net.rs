@@ -30,6 +30,9 @@ enum SocketHandle {
     TcpListener(TcpListener),
     TcpStream(TcpStream),
     UdpSocket(UdpSocket),
+    /// Pre-bind raw socket created by rt_io_tcp_socket_create.
+    /// Holds a socket2::Socket that can have options set before bind/listen.
+    RawSocket(socket2::Socket),
 }
 
 thread_local! {
@@ -474,6 +477,63 @@ pub fn rt_io_tcp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+pub fn rt_io_tcp_socket_create_interp(args: &[Value]) -> Result<Value, CompileError> {
+    use socket2::{Domain, Protocol, Type};
+    // family: 0 = IPv4 (default), 1 = IPv6
+    let family = args.first().and_then(|v| v.as_int().ok()).unwrap_or(0);
+    let domain = if family == 1 { Domain::IPV6 } else { Domain::IPV4 };
+    match socket2::Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
+        Ok(socket) => Ok(Value::Int(allocate_socket(SocketHandle::RawSocket(socket)))),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_io_tcp_bind_fd_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let addr = extract_socket_addr(args, 1)?;
+    let addr2: socket2::SockAddr = addr.into();
+    let ok = SOCKET_HANDLES.with(|handles| {
+        let handles = handles.borrow();
+        match handles.get(&handle) {
+            Some(SocketHandle::RawSocket(socket)) => socket.bind(&addr2).is_ok(),
+            _ => false,
+        }
+    });
+    Ok(Value::Bool(ok))
+}
+
+pub fn rt_io_tcp_listen_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(unix)]
+    use std::os::unix::io::{FromRawFd, IntoRawFd};
+    #[cfg(windows)]
+    use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+
+    let handle = extract_handle(args, 0)?;
+    let backlog = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(128) as i32;
+
+    let ok = SOCKET_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        // Take the RawSocket out, listen, convert to TcpListener, reinsert
+        if let Some(SocketHandle::RawSocket(_)) = handles.get(&handle) {
+            if let Some(SocketHandle::RawSocket(socket)) = handles.remove(&handle) {
+                if socket.listen(backlog).is_ok() {
+                    // Convert socket2::Socket → std::net::TcpListener via raw fd
+                    #[cfg(unix)]
+                    let listener = unsafe { TcpListener::from_raw_fd(socket.into_raw_fd()) };
+                    #[cfg(windows)]
+                    let listener = unsafe { TcpListener::from_raw_socket(socket.into_raw_socket()) };
+                    handles.insert(handle, SocketHandle::TcpListener(listener));
+                    return true;
+                }
+                // listen failed — put socket back
+                handles.insert(handle, SocketHandle::RawSocket(socket));
+            }
+        }
+        false
+    });
+    Ok(Value::Bool(ok))
+}
+
 pub fn rt_io_tcp_accept_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     match with_tcp_listener(handle, |listener| listener.accept()) {
@@ -484,10 +544,31 @@ pub fn rt_io_tcp_accept_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_io_tcp_accept_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
-    let _timeout_ms = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
-    match with_tcp_listener(handle, |listener| listener.accept()) {
-        Ok((stream, _)) => Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
-        Err(_) => Ok(Value::Int(-1)),
+    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
+    let deadline = if timeout_ms <= 0 {
+        None
+    } else {
+        Some(std::time::Instant::now() + Duration::from_millis(timeout_ms as u64))
+    };
+    loop {
+        let accept_result = with_tcp_listener(handle, |listener| {
+            listener.set_nonblocking(true).ok();
+            let result = listener.accept();
+            listener.set_nonblocking(false).ok();
+            result
+        });
+        match accept_result {
+            Ok((stream, _)) => return Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Some(limit) = deadline {
+                    if std::time::Instant::now() >= limit {
+                        return Ok(Value::Int(-1));
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(_) => return Ok(Value::Int(-1)),
+        }
     }
 }
 
@@ -730,6 +811,118 @@ pub fn rt_io_tcp_set_nodelay_interp(args: &[Value]) -> Result<Value, CompileErro
     let enabled = args.get(1).map(|v| v.truthy()).unwrap_or(true);
     Ok(Value::Bool(
         with_tcp_stream(handle, |stream| stream.set_nodelay(enabled)).is_ok(),
+    ))
+}
+
+pub fn rt_io_tcp_set_nonblocking_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let flag = args.get(1).map(|v| v.truthy()).unwrap_or(true);
+    let stream_ok = with_tcp_stream(handle, |stream| stream.set_nonblocking(flag)).is_ok();
+    if stream_ok {
+        return Ok(Value::Bool(true));
+    }
+    Ok(Value::Bool(
+        with_tcp_listener(handle, |listener| listener.set_nonblocking(flag)).is_ok(),
+    ))
+}
+
+#[cfg(unix)]
+pub fn rt_io_tcp_set_reuseport_interp(args: &[Value]) -> Result<Value, CompileError> {
+    use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+    let handle = extract_handle(args, 0)?;
+    let enabled = args.get(1).map(|v| v.truthy()).unwrap_or(true);
+    // Try RawSocket first — pre-bind path needs this
+    let raw_ok = SOCKET_HANDLES.with(|handles| {
+        let handles = handles.borrow();
+        match handles.get(&handle) {
+            Some(SocketHandle::RawSocket(socket)) => socket.set_reuse_port(enabled).is_ok(),
+            _ => false,
+        }
+    });
+    if raw_ok {
+        return Ok(Value::Bool(true));
+    }
+    // Try listener — SO_REUSEPORT is primarily for listeners
+    let listener_ok = with_tcp_listener(handle, |listener| {
+        let fd = listener.as_raw_fd();
+        let socket = unsafe { socket2::Socket::from_raw_fd(fd) };
+        let result = socket.set_reuse_port(enabled);
+        // into_raw_fd() prevents Socket::drop from closing the fd
+        let _ = socket.into_raw_fd();
+        result
+    })
+    .is_ok();
+    if listener_ok {
+        return Ok(Value::Bool(true));
+    }
+    Ok(Value::Bool(
+        with_tcp_stream(handle, |stream| {
+            let fd = stream.as_raw_fd();
+            let socket = unsafe { socket2::Socket::from_raw_fd(fd) };
+            let result = socket.set_reuse_port(enabled);
+            let _ = socket.into_raw_fd();
+            result
+        })
+        .is_ok(),
+    ))
+}
+
+#[cfg(not(unix))]
+pub fn rt_io_tcp_set_reuseport_interp(_args: &[Value]) -> Result<Value, CompileError> {
+    // SO_REUSEPORT is not available on non-Unix platforms
+    Ok(Value::Bool(false))
+}
+
+pub fn rt_io_tcp_set_reuseaddr_interp(args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(unix)]
+    use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+    #[cfg(windows)]
+    use std::os::windows::io::{AsRawSocket, FromRawSocket, IntoRawSocket};
+
+    let handle = extract_handle(args, 0)?;
+    let enabled = args.get(1).map(|v| v.truthy()).unwrap_or(true);
+    // Try RawSocket first — pre-bind path needs this
+    let raw_ok = SOCKET_HANDLES.with(|handles| {
+        let handles = handles.borrow();
+        match handles.get(&handle) {
+            Some(SocketHandle::RawSocket(socket)) => socket.set_reuse_address(enabled).is_ok(),
+            _ => false,
+        }
+    });
+    if raw_ok {
+        return Ok(Value::Bool(true));
+    }
+    // Try listener — SO_REUSEADDR is primarily for listeners
+    let listener_ok = with_tcp_listener(handle, |listener| {
+        #[cfg(unix)]
+        let socket = unsafe { socket2::Socket::from_raw_fd(listener.as_raw_fd()) };
+        #[cfg(windows)]
+        let socket = unsafe { socket2::Socket::from_raw_socket(listener.as_raw_socket()) };
+        let result = socket.set_reuse_address(enabled);
+        #[cfg(unix)]
+        let _ = socket.into_raw_fd();
+        #[cfg(windows)]
+        let _ = socket.into_raw_socket();
+        result
+    })
+    .is_ok();
+    if listener_ok {
+        return Ok(Value::Bool(true));
+    }
+    Ok(Value::Bool(
+        with_tcp_stream(handle, |stream| {
+            #[cfg(unix)]
+            let socket = unsafe { socket2::Socket::from_raw_fd(stream.as_raw_fd()) };
+            #[cfg(windows)]
+            let socket = unsafe { socket2::Socket::from_raw_socket(stream.as_raw_socket()) };
+            let result = socket.set_reuse_address(enabled);
+            #[cfg(unix)]
+            let _ = socket.into_raw_fd();
+            #[cfg(windows)]
+            let _ = socket.into_raw_socket();
+            result
+        })
+        .is_ok(),
     ))
 }
 

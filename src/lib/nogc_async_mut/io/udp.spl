@@ -1,84 +1,88 @@
 """
-# Async UDP I/O
+# Async UDP I/O — Completion-Driver Implementation
 
-No-GC async UDP is a ready-future facade over the no-GC synchronous UDP
-backend. This keeps one runtime-facing UDP implementation while preserving the
-async API shape used by DNS and higher-level async networking code.
+**Feature IDs:** #IO-100
+**Category:** Runtime
+**Status:** In Progress
 
-## Components
+## Overview
 
-| Type | Traits | Description |
-|------|--------|-------------|
-| AsyncUdpSocket | AsyncClose | Future-returning UDP socket facade |
+Completion-based async UDP socket that submits operations to the IoDriver.
+Returns op_ids for send/recv so callers can poll for completion. This enables
+non-blocking UDP needed by QUIC/H3 transport.
 
-## Async Datagram Exchange
+## Usage
 
 ```simple
-# val socket = await AsyncUdpSocket.bind("127.0.0.1:0")?
-# await socket.send_to([72, 105], "127.0.0.1:9001")?
-# val (data, sender) = await socket.recv_from(1024)?
-# await socket.close()?
+val driver = IoDriver.new()
+val sock = AsyncUdpSocket.bind(driver, "127.0.0.1:0")
+match sock:
+    case Ok(s):
+        val send_op = s.send_to("hello", "127.0.0.1:9001")
+        val recv_op = s.recv_from(1024)
+        driver.flush()
+        val completions = driver.poll(64, 200)
+    case Err(e):
+        print "bind failed: {e.message}"
 ```
 """
 
-use std.async.future.{Future}
-use std.io.async_traits.{AsyncClose}
-use std.io.types.{IoError}
-use std.nogc_sync_mut.io.udp.{UdpSocket as SyncUdpSocket}
+use std.io.types.{IoError, IoErrorKind}
+use std.nogc_async_mut.io.driver.{IoDriver}
 
-class AsyncUdpSocket with AsyncClose:
-    """Future-returning UDP datagram socket backed by no-GC sync UDP."""
-    socket: SyncUdpSocket
+extern fn rt_io_udp_bind(addr: text) -> i64
+extern fn rt_io_udp_close(fd: i64) -> bool
 
-    static fn bind(addr: text) -> Future<Result<AsyncUdpSocket, IoError>>:
-        """Bind to address.
+class AsyncUdpSocket:
+    """Completion-based async UDP socket backed by IoDriver."""
+    _driver: IoDriver
+    _fd: i64
+
+    static fn bind(driver: IoDriver, addr: text) -> Result<AsyncUdpSocket, IoError>:
+        """Bind a UDP socket to address and return an async wrapper.
 
         Args:
+            driver: The IoDriver to submit operations to
             addr: Address in "host:port" format
 
         Returns:
-            Future with Result containing AsyncUdpSocket
+            Result with AsyncUdpSocket or error
         """
-        match SyncUdpSocket.bind(addr):
-            case Ok(socket):
-                Future.from_value(Ok(AsyncUdpSocket(socket: socket)))
-            case Err(e):
-                Future.from_value(Err(e))
+        val fd = rt_io_udp_bind(addr)
+        if fd < 0:
+            return Err(IoError(kind: IoErrorKind.AddrInUse, message: "udp bind failed: {addr}", source: nil))
+        Ok(AsyncUdpSocket(_driver: driver, _fd: fd))
 
-    fn recv_from(size: i64) -> Future<Result<([u8], text), IoError>>:
-        """Receive datagram with sender address."""
-        Future.from_value(self.socket.recv_from(size))
+    me send_to(data: text, addr: text) -> i64:
+        """Submit a UDP send_to operation.
 
-    fn send_to(data: [u8], addr: text) -> Future<Result<i64, IoError>>:
-        """Send datagram to address."""
-        Future.from_value(self.socket.send_to(data, addr))
+        Args:
+            data: Text data to send
+            addr: Destination address in "host:port" format
 
-    fn connect(addr: text) -> Result<(), IoError>:
-        """Set default peer address."""
-        self.socket.connect(addr)
+        Returns:
+            Op ID for polling completion
+        """
+        self._driver.submit_udp_send(self._fd, data, addr)
 
-    fn send(data: [u8]) -> Future<Result<i64, IoError>>:
-        """Send to connected peer."""
-        Future.from_value(self.socket.send(data))
+    me recv_from(buf_size: i64) -> i64:
+        """Submit a UDP recv_from operation.
 
-    fn recv(size: i64) -> Future<Result<[u8], IoError>>:
-        """Receive from connected peer."""
-        Future.from_value(self.socket.recv(size))
+        Args:
+            buf_size: Maximum bytes to receive
 
-    fn local_addr() -> Result<text, IoError>:
-        """Get local bound address."""
-        self.socket.local_addr()
+        Returns:
+            Op ID for polling completion
+        """
+        self._driver.submit_udp_recv(self._fd, buf_size)
 
-    fn set_broadcast(enabled: bool) -> Result<(), IoError>:
-        """Enable or disable broadcast."""
-        self.socket.set_broadcast(enabled)
+    fn fd() -> i64:
+        """Get the underlying socket file descriptor."""
+        self._fd
 
-    me close() -> Future<Result<(), IoError>>:
-        """Close socket."""
-        Future.from_value(self.socket.close())
-
-    fn is_open() -> bool:
-        """Check if socket is open."""
-        self.socket.is_open()
+    me close():
+        """Close the UDP socket and cancel pending driver ops."""
+        self._driver.cancel_fd(self._fd)
+        rt_io_udp_close(self._fd)
 
 export use std.nogc_sync_mut.io.udp.{UdpSocket}
