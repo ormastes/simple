@@ -313,79 +313,85 @@ class H2Connection:
             i = i + 1
 
     me queue_h2_response(stream_id: i64, resp: HttpResponseData):
-        """Encode and queue an HTTP response for a specific H2 stream.
-
-        Encodes response headers via HPACK, then queues:
-          - HEADERS frame (END_HEADERS; END_STREAM if no body)
-          - DATA frame with END_STREAM (when body is non-empty)
-
-        Transitions the stream to Closed via on_local_end_stream().
-
-        Args:
-            stream_id: H2 stream to respond on
-            resp: Response data to encode and send
-        """
-        # Build response pseudo-headers + regular headers
-        var resp_headers: [HpackEntry] = []
-        resp_headers.push(HpackEntry(name: ":status", value: "{resp.status}"))
+        # Build HPACK-encoded header block inline
+        var hpack: [u8] = []
+        val st = resp.status
+        if st == 200: hpack.push(136)
+        if st == 204: hpack.push(137)
+        if st == 304: hpack.push(139)
+        if st == 404: hpack.push(141)
+        if st == 500: hpack.push(142)
+        if st != 200 and st != 204 and st != 304 and st != 404 and st != 500:
+            hpack.push(72)
+            val ss = "{st}"
+            hpack.push(ss.len())
+            var si = 0
+            while si < ss.len():
+                hpack.push(ss.byte_at(si))
+                si = si + 1
         var hi = 0
         while hi < resp.headers.len():
-            val hpair = resp.headers[hi]
-            resp_headers.push(HpackEntry(name: hpair.0, value: hpair.1))
+            val pair = resp.headers[hi]
+            val hn = pair.0
+            val hv = pair.1
+            hpack.push(0)
+            hpack.push(hn.len())
+            var ni = 0
+            while ni < hn.len():
+                hpack.push(hn.byte_at(ni))
+                ni = ni + 1
+            hpack.push(hv.len())
+            var vi = 0
+            while vi < hv.len():
+                hpack.push(hv.byte_at(vi))
+                vi = vi + 1
             hi = hi + 1
 
-        val enc = hpack_encode(resp_headers, self.hpack_table)
-
-        # Determine body bytes
+        # Build body bytes
         var body_bytes: [u8] = []
         if resp.body_bytes.len() > 0:
             body_bytes = resp.body_bytes
         elif resp.body.len() > 0:
-            # Convert body text to bytes via byte_at
             var bi = 0
             while bi < resp.body.len():
                 body_bytes.push(resp.body.byte_at(bi))
                 bi = bi + 1
 
+        # Write HEADERS frame: type=1, flags=END_HEADERS(4) [+END_STREAM(1) if no body]
+        var hflags = 4
         if body_bytes.len() == 0:
-            val hframe = H2Frame.Headers(H2HeadersFrame(
-                stream_id: stream_id,
-                flags: H2_FLAG_END_HEADERS | H2_FLAG_END_STREAM,
-                header_block: enc.bytes
-            ))
-            val bytes = h2_write_frame(hframe)
-            var qi = 0
-            while qi < bytes.len():
-                self.pending_writes.push(bytes[qi])
-                qi = qi + 1
-        else:
-            val hframe = H2Frame.Headers(H2HeadersFrame(
-                stream_id: stream_id,
-                flags: H2_FLAG_END_HEADERS,
-                header_block: enc.bytes
-            ))
-            val hbytes = h2_write_frame(hframe)
-            var qi = 0
-            while qi < hbytes.len():
-                self.pending_writes.push(hbytes[qi])
-                qi = qi + 1
-            val dframe = H2Frame.Data(H2DataFrame(
-                stream_id: stream_id,
-                flags: H2_FLAG_END_STREAM,
-                data: body_bytes
-            ))
-            val dbytes = h2_write_frame(dframe)
-            qi = 0
-            while qi < dbytes.len():
-                self.pending_writes.push(dbytes[qi])
-                qi = qi + 1
+            hflags = 5
+        val hlen = hpack.len()
+        self.pending_writes.push((hlen >> 16) & 255)
+        self.pending_writes.push((hlen >> 8) & 255)
+        self.pending_writes.push(hlen & 255)
+        self.pending_writes.push(1)
+        self.pending_writes.push(hflags)
+        self.pending_writes.push((stream_id >> 24) & 127)
+        self.pending_writes.push((stream_id >> 16) & 255)
+        self.pending_writes.push((stream_id >> 8) & 255)
+        self.pending_writes.push(stream_id & 255)
+        var qi = 0
+        while qi < hpack.len():
+            self.pending_writes.push(hpack[qi])
+            qi = qi + 1
 
-        # Transition stream state via on_local_end_stream (handles all transitions)
-        val stream = self.streams.get(stream_id)
-        if stream.?:
-            var s = stream
-            s.on_local_end_stream()
-            self.streams[stream_id] = s
+        # Write DATA frame if body present: type=0, flags=END_STREAM(1)
+        if body_bytes.len() > 0:
+            val dlen = body_bytes.len()
+            self.pending_writes.push((dlen >> 16) & 255)
+            self.pending_writes.push((dlen >> 8) & 255)
+            self.pending_writes.push(dlen & 255)
+            self.pending_writes.push(0)
+            self.pending_writes.push(1)
+            self.pending_writes.push((stream_id >> 24) & 127)
+            self.pending_writes.push((stream_id >> 16) & 255)
+            self.pending_writes.push((stream_id >> 8) & 255)
+            self.pending_writes.push(stream_id & 255)
+            var di = 0
+            while di < body_bytes.len():
+                self.pending_writes.push(body_bytes[di])
+                di = di + 1
 
     # ========================================================================
     # Frame consumption loop
