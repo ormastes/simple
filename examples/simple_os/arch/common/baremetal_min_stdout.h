@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifndef BAREMETAL_RUNTIME_H
 typedef intptr_t RuntimeValue;
 
 #define TAG_MASK    ((uintptr_t)0x7)
@@ -32,6 +33,9 @@ typedef struct {
     uint32_t len;
     char data[];
 } BaremetalRuntimeString;
+#else
+typedef RuntimeString BaremetalRuntimeString;
+#endif
 
 static RuntimeValue baremetal_serial_write_value(RuntimeValue data)
 {

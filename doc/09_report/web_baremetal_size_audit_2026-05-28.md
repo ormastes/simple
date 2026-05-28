@@ -62,7 +62,7 @@ Date: 2026-05-28
 | ARM64 semihost trap object file / dec section | 768 / 64 |
 | ARM64 semihost trap source | 640 |
 | x86_64 minimal boot/stdout object file / dec section | 2300 / 320 |
-| x86_64 minimal boot/stdout source | 3000 |
+| x86_64 minimal boot/stdout source | 2300 |
 | ARM64 minimal PL011 startup/stdout object file / dec section | 2400 / 360 |
 | ARM64 minimal PL011 startup/stdout source | 512 |
 | ARM32 minimal PL011 startup/stdout object file / dec section | 2200 / 340 |
@@ -73,7 +73,7 @@ Date: 2026-05-28
 | RV32 minimal 16550 startup/stdout object file / dec section | 2300 / 260 |
 | RV32 minimal 16550 startup/stdout source | 256 |
 | Shared RISC-V 16550 startup/stdout source | 1400 |
-| Shared minimal stdout helper source | 2200 |
+| Shared minimal stdout helper source | 2000 |
 | x86_64 interrupt-control object file / dec section | 1536 / 64 |
 | x86_64 interrupt-control source | 1024 |
 | ARM64 interrupt-control object file / dec section | 768 / 64 |
@@ -110,14 +110,14 @@ Date: 2026-05-28
 |---|---:|---:|---:|
 | `examples/browser` | 304 | 75035 | 2850509 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15509 | 576503 |
-| `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 107 | 2752 |
+| `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 83 | 2045 |
 | `examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c` | 1 | 7 | 252 |
 | `examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c` | 1 | 7 | 249 |
 | `examples/simple_os/arch/common/baremetal_pl011_uart_stdout.c` | 1 | 49 | 1283 |
 | `examples/simple_os/arch/riscv64/boot/baremetal_uart_stdout.c` | 1 | 1 | 60 |
 | `examples/simple_os/arch/riscv32/boot/baremetal_uart_stdout.c` | 1 | 1 | 60 |
 | `examples/simple_os/arch/common/baremetal_riscv_16550_uart_stdout.c` | 1 | 41 | 1017 |
-| `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 62 | 1719 |
+| `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 66 | 1806 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
 | `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 18 | 479 |
 | `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 21 | 493 |
@@ -202,7 +202,7 @@ Date: 2026-05-28
 - `simple_web_script_renderer` is the explicit file:// script-capable lane; its BrowserRenderer/process/file stub cost is measured separately from static and placeholder facades.
 - Corpus fixture compatibility lives in `simple_web_corpus_fixture_renderer`; production static render must not retain PPM baseline loading.
 - x86_64 SimpleOS size work should split `baremetal_stubs.c` into boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes.
-- `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple.
+- `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; stdout ABI handling is shared through `baremetal_min_stdout.h`.
 - `common/baremetal_pl011_uart_stdout.c` is the shared ARM32/ARM64 PL011 startup/stdout capsule; interrupt controllers, framebuffer, filesystem, network, and GUI stay out of this lane.
 - `arm64/boot/baremetal_uart_stdout.c` is a thin ARM64 compatibility wrapper over the shared PL011 capsule.
 - `arm32/boot/baremetal_uart_stdout.c` is a thin ARM32 compatibility wrapper over the shared PL011 capsule.
