@@ -278,9 +278,12 @@ void *calloc(size_t n, size_t sz)
 
 RuntimeValue rt_alloc(RuntimeValue sz)
 {
-    /* compile_struct_init passes RAW size (not tagged): iconst.i64 16
-     * Return RAW pointer -- codegen uses it directly for store(val, ptr, offset). */
-    size_t bytes = (size_t)simpleos_raw_or_encoded_int(sz);
+    /* The freestanding extern ABI passes integer args RAW (untagged), same as
+     * rt_mmio_* which use addr directly. Do NOT run sz through
+     * simpleos_raw_or_encoded_int: with TAG_INT==0 it mis-detects any raw size
+     * divisible by 8 as a tagged int and right-shifts it by 3, under-allocating
+     * to 1/8 (e.g. a 3 MB framebuffer became ~384 KB, corrupting the heap). */
+    size_t bytes = (size_t)(uint64_t)sz;
     if (bytes == 0) return 0;
     if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
@@ -291,7 +294,8 @@ RuntimeValue rt_alloc(RuntimeValue sz)
 
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
-    size_t bytes = (size_t)simpleos_raw_or_encoded_int(sz);
+    /* RAW size — see rt_alloc above (no tag-decode heuristic). */
+    size_t bytes = (size_t)(uint64_t)sz;
     if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
     if (!p) return NIL_VALUE;
