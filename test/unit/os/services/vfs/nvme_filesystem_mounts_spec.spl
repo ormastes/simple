@@ -7,7 +7,7 @@ use std.fs_driver.extension.{Extension}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.direct_io.{direct_io_nvme_filesystem_extension}
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
-use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks}
+use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks, vfs_nvme_block_device_lease_reason}
 use os.services.vfs.vfs_init.{_clear_vfs_rootfs_for_test, vfs_mount_rootfs_from_nvme_lease_checked}
 use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmeQueueAssignment, NvmeFilesystemLease, nvme_filesystem_lease}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
@@ -85,6 +85,16 @@ describe "NVMe filesystem mount factory":
         expect(fat.probe(Capability.DirectIo).is_none()).to_equal(true)
         expect(nvfs.probe(Capability.DirectIo).is_none()).to_equal(true)
         expect(dbfs.probe(Capability.DirectIo).is_none()).to_equal(true)
+
+    it "rejects shared BlockDevice surfaces whose sector size does not match the NVMe lease":
+        val lease = _mount_test_lease()
+        val reason = vfs_nvme_block_device_lease_reason(MemBlockDevice.new(1024u64, 4096u32), lease)
+        val direct = vfs_nvme_driver_instance_for_lease("fat32-root", MemBlockDevice.new(1024u64, 4096u32), lease, NvmeFilesystemConsumer.Fat32)
+        val buffered = vfs_nvme_buffered_driver_instance_for_lease("user-dbfs", MemBlockDevice.new(1024u64, 4096u32), lease, NvmeFilesystemConsumer.Dbfs)
+
+        expect(reason).to_equal("nvme-fs-block-device-sector-size-mismatch device=4096 lease=512")
+        expect(direct.unwrap_err()).to_equal("nvme-fs-block-device-sector-size-mismatch device=4096 lease=512")
+        expect(buffered.unwrap_err()).to_equal("nvme-fs-block-device-sector-size-mismatch device=4096 lease=512")
 
     it "builds NVFS from the shared lease-backed BlockDevice surface":
         val lease = _mount_test_lease()

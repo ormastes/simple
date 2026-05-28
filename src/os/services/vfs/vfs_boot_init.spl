@@ -378,6 +378,17 @@ fn vfs_boot_nvme_shared_driver_ready_for_user_assignment() -> text:
         return "nvme-user-assign-driver-invalid-sector-size"
     "ready"
 
+fn vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease: NvmeFilesystemLease) -> text:
+    val released = g_nvme.release_user_data_queue_owner(
+        lease.queue.queue_id,
+        lease.namespace.controller_id,
+        lease.namespace.nsid,
+        lease.queue.owner_task
+    )
+    if not released:
+        return "nvme-user-assign-queue-owner-release-failed"
+    "ready"
+
 fn vfs_boot_nvme_release_active_lease(lease: NvmeFilesystemLease) -> text:
     var remaining: [NvmeFilesystemLease] = []
     var remaining_adapter_leases: [NvmeFilesystemLease] = []
@@ -885,7 +896,11 @@ fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
         if previous_nsid != lease.namespace.nsid:
             val restore_after_adapter = g_nvme.identify_namespace_id(previous_nsid)
             if restore_after_adapter.is_err():
+                val _release_after_restore_fail = vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)
                 return Err("nvme-user-assign-namespace-restore-failed:" + restore_after_adapter.unwrap_err())
+        val queue_release = vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)
+        if queue_release != "ready":
+            return Err(queue_release)
         return Err(adapter_result.unwrap_err())
     if previous_nsid != lease.namespace.nsid:
         val restore_identify = g_nvme.identify_namespace_id(previous_nsid)
@@ -894,9 +909,15 @@ fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
     var adapter = adapter_result.unwrap()
     val bounce = adapter.init_bounce_buffer()
     if bounce.is_err():
+        val queue_release = vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)
+        if queue_release != "ready":
+            return Err(queue_release)
         return Err(bounce.unwrap_err())
     val driver_result = vfs_nvme_driver_instance_for_lease(name, adapter, lease, consumer)
     if driver_result.is_err():
+        val queue_release = vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)
+        if queue_release != "ready":
+            return Err(queue_release)
         return driver_result
     g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)
     g_vfs_nvme_direct_adapter_leases = g_vfs_nvme_direct_adapter_leases.push(lease)
