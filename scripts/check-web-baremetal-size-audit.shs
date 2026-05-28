@@ -1,0 +1,278 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+BUILD_DIR="${BUILD_DIR:-build/web_baremetal_size_audit}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/web_baremetal_size_audit_2026-05-28.md}"
+BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-120}"
+SKIP_NATIVE_BUILDS="${SKIP_NATIVE_BUILDS:-0}"
+
+MAX_BROWSER_EXAMPLE_SOURCE_BYTES="${MAX_BROWSER_EXAMPLE_SOURCE_BYTES:-}"
+MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES="${MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES:-}"
+MAX_RV32_SEMIHOST_ELF_BYTES="${MAX_RV32_SEMIHOST_ELF_BYTES:-}"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+STATIC_WEB_ENTRY="$BUILD_DIR/simple_web_static_entry.spl"
+SCRIPT_WEB_ENTRY="$BUILD_DIR/simple_web_script_entry.spl"
+
+cat >"$STATIC_WEB_ENTRY" <<'EOF'
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+
+fn main() -> i64:
+    val pixels = simple_web_render_html_to_pixels("<html><body style='background:#0f8'>static</body></html>", 64, 48)
+    if pixels.len() != 64 * 48:
+        return 2
+    return 0
+EOF
+
+cat >"$SCRIPT_WEB_ENTRY" <<'EOF'
+use std.gc_async_mut.gpu.browser_engine.simple_web_script_renderer.{simple_web_render_url_to_pixels_with_scripts}
+
+fn main() -> i64:
+    val pixels = simple_web_render_url_to_pixels_with_scripts("about:blank", 64, 48)
+    if pixels.len() != 64 * 48 * 4:
+        return 2
+    return 0
+EOF
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+with_timeout() {
+    if have timeout; then
+        timeout "$BUILD_TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+bytes_of() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo "n/a"
+    fi
+}
+
+lines_of_tree() {
+    dir="$1"
+    if [ -d "$dir" ]; then
+        find "$dir" -type f -name '*.spl' -print0 | xargs -0 wc -l 2>/dev/null | awk 'END {print $1 + 0}'
+    else
+        echo 0
+    fi
+}
+
+bytes_of_tree() {
+    dir="$1"
+    if [ -d "$dir" ]; then
+        find "$dir" -type f -name '*.spl' -print0 | xargs -0 wc -c 2>/dev/null | awk 'END {print $1 + 0}'
+    else
+        echo 0
+    fi
+}
+
+file_count_tree() {
+    dir="$1"
+    if [ -d "$dir" ]; then
+        find "$dir" -type f -name '*.spl' | wc -l | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+check_simple_file() {
+    entry="$1"
+    log="$2"
+    if [ ! -x "$SIMPLE_BINARY" ] || [ "$SKIP_NATIVE_BUILDS" = "1" ]; then
+        echo "skipped"
+        return
+    fi
+    if SIMPLE_LIB="$ROOT_DIR/src" with_timeout "$SIMPLE_BINARY" check "$entry" >"$log" 2>&1; then
+        echo "ok"
+    else
+        echo "fail"
+    fi
+}
+
+build_simple_native() {
+    entry="$1"
+    output="$2"
+    log="$3"
+    if [ ! -x "$SIMPLE_BINARY" ] || [ "$SKIP_NATIVE_BUILDS" = "1" ]; then
+        echo "skipped"
+        return
+    fi
+    if SIMPLE_LIB="$ROOT_DIR/src" with_timeout "$SIMPLE_BINARY" native-build \
+        --runtime-bundle core-c-bootstrap \
+        --source src/lib \
+        --source examples/browser \
+        --entry-closure \
+        --entry "$entry" \
+        --strip \
+        --opt-level=aggressive \
+        -o "$output" >"$log" 2>&1; then
+        echo "ok"
+    else
+        echo "fail"
+    fi
+}
+
+build_rv32_semihost() {
+    src="examples/09_embedded/baremetal/baremetal/hello_riscv32_semihost.s"
+    out="$BUILD_DIR/hello_riscv32_semihost.elf"
+    log="$BUILD_DIR/hello_riscv32_semihost.build.log"
+    if [ ! -f "$src" ] || [ "$SKIP_NATIVE_BUILDS" = "1" ]; then
+        echo "skipped"
+        return
+    fi
+    if have clang; then
+        if with_timeout clang -target riscv32-unknown-none -march=rv32i -mabi=ilp32 \
+            -nostdlib -static -Wl,-Ttext=0x80000000 -Wl,--no-relax -fuse-ld=lld \
+            "$src" -o "$out" >"$log" 2>&1; then
+            echo "ok"
+            return
+        fi
+    fi
+    if have riscv64-unknown-elf-as && have riscv64-unknown-elf-ld; then
+        obj="$BUILD_DIR/hello_riscv32_semihost.o"
+        if with_timeout riscv64-unknown-elf-as -march=rv32i -mabi=ilp32 "$src" -o "$obj" >"$log" 2>&1 \
+            && riscv64-unknown-elf-ld -m elf32lriscv "$obj" -o "$out" -Ttext=0x80000000 --no-relax >>"$log" 2>&1; then
+            echo "ok"
+            return
+        fi
+    fi
+    if [ -f "examples/09_embedded/baremetal/baremetal/hello_riscv32_semihost.elf" ]; then
+        cp "examples/09_embedded/baremetal/baremetal/hello_riscv32_semihost.elf" "$out"
+        echo "existing"
+        return
+    fi
+    echo "fail"
+}
+
+section_dec() {
+    path="$1"
+    if [ -f "$path" ] && have size; then
+        size "$path" | awk 'NR == 2 {print $4}'
+    else
+        echo "n/a"
+    fi
+}
+
+browser_cluster_rows="$BUILD_DIR/browser_cluster_rows.md"
+: >"$browser_cluster_rows"
+for dir in \
+    examples/browser/feature/paint \
+    examples/browser/feature/script \
+    examples/browser/feature/net \
+    examples/browser/feature/parser \
+    examples/browser/feature/layout \
+    examples/browser/feature/dom \
+    examples/browser/feature/style \
+    src/lib/gc_async_mut/web \
+    src/lib/gc_async_mut/gpu/browser_engine
+do
+    printf '| `%s` | %s | %s | %s |\n' \
+        "$dir" \
+        "$(file_count_tree "$dir")" \
+        "$(lines_of_tree "$dir")" \
+        "$(bytes_of_tree "$dir")" >>"$browser_cluster_rows"
+done
+
+BROWSER_EXAMPLE_SOURCE_BYTES="$(bytes_of_tree examples/browser)"
+BROWSER_EXAMPLE_SOURCE_LINES="$(lines_of_tree examples/browser)"
+X86_64_STUB="examples/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+X86_64_STUB_BYTES="$(bytes_of "$X86_64_STUB")"
+X86_64_STUB_LINES="$(wc -l <"$X86_64_STUB" 2>/dev/null | tr -d ' ' || echo n/a)"
+
+BROWSER_SMOKE_CHECK="$(check_simple_file examples/browser/smoke_test.spl "$BUILD_DIR/browser_smoke_check.log")"
+BROWSER_RENDER_CHECK="$(check_simple_file examples/browser/test/compat/simple_render_html.spl "$BUILD_DIR/simple_render_html_check.log")"
+BROWSER_SMOKE_BUILD="$(build_simple_native examples/browser/smoke_test.spl "$BUILD_DIR/browser_smoke_native" "$BUILD_DIR/browser_smoke_native.log")"
+BROWSER_RENDER_BUILD="$(build_simple_native examples/browser/test/compat/simple_render_html.spl "$BUILD_DIR/simple_render_html_native" "$BUILD_DIR/simple_render_html_native.log")"
+STATIC_WEB_BUILD="$(build_simple_native "$STATIC_WEB_ENTRY" "$BUILD_DIR/simple_web_static_native" "$BUILD_DIR/simple_web_static_native.log")"
+SCRIPT_WEB_BUILD="$(build_simple_native "$SCRIPT_WEB_ENTRY" "$BUILD_DIR/simple_web_script_native" "$BUILD_DIR/simple_web_script_native.log")"
+RV32_SEMIHOST_BUILD="$(build_rv32_semihost)"
+
+BROWSER_SMOKE_BYTES="$(bytes_of "$BUILD_DIR/browser_smoke_native")"
+BROWSER_RENDER_BYTES="$(bytes_of "$BUILD_DIR/simple_render_html_native")"
+STATIC_WEB_BYTES="$(bytes_of "$BUILD_DIR/simple_web_static_native")"
+SCRIPT_WEB_BYTES="$(bytes_of "$BUILD_DIR/simple_web_script_native")"
+RV32_SEMIHOST_BYTES="$(bytes_of "$BUILD_DIR/hello_riscv32_semihost.elf")"
+
+if [ -n "$MAX_BROWSER_EXAMPLE_SOURCE_BYTES" ] && [ "$BROWSER_EXAMPLE_SOURCE_BYTES" -gt "$MAX_BROWSER_EXAMPLE_SOURCE_BYTES" ]; then
+    echo "web_baremetal_size_audit_ready=false"
+    echo "error=browser_example_source_exceeds_budget:$BROWSER_EXAMPLE_SOURCE_BYTES>$MAX_BROWSER_EXAMPLE_SOURCE_BYTES"
+    exit 1
+fi
+
+if [ -n "$MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES" ] && [ "$X86_64_STUB_BYTES" != "n/a" ] \
+    && [ "$X86_64_STUB_BYTES" -gt "$MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES" ]; then
+    echo "web_baremetal_size_audit_ready=false"
+    echo "error=x86_64_baremetal_stub_source_exceeds_budget:$X86_64_STUB_BYTES>$MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES"
+    exit 1
+fi
+
+if [ -n "$MAX_RV32_SEMIHOST_ELF_BYTES" ] && [ "$RV32_SEMIHOST_BYTES" != "n/a" ] \
+    && [ "$RV32_SEMIHOST_BYTES" -gt "$MAX_RV32_SEMIHOST_ELF_BYTES" ]; then
+    echo "web_baremetal_size_audit_ready=false"
+    echo "error=rv32_semihost_elf_exceeds_budget:$RV32_SEMIHOST_BYTES>$MAX_RV32_SEMIHOST_ELF_BYTES"
+    exit 1
+fi
+
+{
+    echo "# Web And Bare-Metal Binary Size Audit"
+    echo
+    echo "Date: $(date -u +%F)"
+    echo
+    echo "## Build Status"
+    echo
+    echo "| Artifact | Check | Native/ELF Build | Bytes | Dec Section Bytes | Log |"
+    echo "|---|---|---|---:|---:|---|"
+    echo "| Browser smoke | $BROWSER_SMOKE_CHECK | $BROWSER_SMOKE_BUILD | $BROWSER_SMOKE_BYTES | $(section_dec "$BUILD_DIR/browser_smoke_native") | \`$BUILD_DIR/browser_smoke_native.log\` |"
+    echo "| Browser simple render HTML | $BROWSER_RENDER_CHECK | $BROWSER_RENDER_BUILD | $BROWSER_RENDER_BYTES | $(section_dec "$BUILD_DIR/simple_render_html_native") | \`$BUILD_DIR/simple_render_html_native.log\` |"
+    echo "| Simple web static facade | n/a | $STATIC_WEB_BUILD | $STATIC_WEB_BYTES | $(section_dec "$BUILD_DIR/simple_web_static_native") | \`$BUILD_DIR/simple_web_static_native.log\` |"
+    echo "| Simple web script URL facade | n/a | $SCRIPT_WEB_BUILD | $SCRIPT_WEB_BYTES | $(section_dec "$BUILD_DIR/simple_web_script_native") | \`$BUILD_DIR/simple_web_script_native.log\` |"
+    echo "| RV32 semihost stdout hello | n/a | $RV32_SEMIHOST_BUILD | $RV32_SEMIHOST_BYTES | $(section_dec "$BUILD_DIR/hello_riscv32_semihost.elf") | \`$BUILD_DIR/hello_riscv32_semihost.build.log\` |"
+    echo
+    echo "## Source Size Surfaces"
+    echo
+    echo "| Surface | Files | Lines | Bytes |"
+    echo "|---|---:|---:|---:|"
+    echo "| \`examples/browser\` | $(file_count_tree examples/browser) | $BROWSER_EXAMPLE_SOURCE_LINES | $BROWSER_EXAMPLE_SOURCE_BYTES |"
+    echo "| \`$X86_64_STUB\` | 1 | $X86_64_STUB_LINES | $X86_64_STUB_BYTES |"
+    echo
+    echo "## Browser Cluster Source Sizes"
+    echo
+    echo "| Cluster | Files | Lines | Bytes |"
+    echo "|---|---:|---:|---:|"
+    cat "$browser_cluster_rows"
+    echo
+    echo "## Direction"
+    echo
+    echo "- Browser render size work should first split static render from script/session/network paths."
+    echo "- x86_64 SimpleOS size work should split \`baremetal_stubs.c\` into boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes."
+    echo "- Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule."
+    echo "- Set \`MAX_BROWSER_EXAMPLE_SOURCE_BYTES\`, \`MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES\`, or \`MAX_RV32_SEMIHOST_ELF_BYTES\` to turn this audit into a budget gate."
+} >"$REPORT_PATH"
+
+echo "web_baremetal_size_audit_ready=true"
+echo "report_path=$REPORT_PATH"
+echo "browser_smoke_check=$BROWSER_SMOKE_CHECK"
+echo "browser_smoke_build=$BROWSER_SMOKE_BUILD"
+echo "browser_smoke_bytes=$BROWSER_SMOKE_BYTES"
+echo "browser_render_check=$BROWSER_RENDER_CHECK"
+echo "browser_render_build=$BROWSER_RENDER_BUILD"
+echo "browser_render_bytes=$BROWSER_RENDER_BYTES"
+echo "simple_web_static_build=$STATIC_WEB_BUILD"
+echo "simple_web_static_bytes=$STATIC_WEB_BYTES"
+echo "simple_web_script_build=$SCRIPT_WEB_BUILD"
+echo "simple_web_script_bytes=$SCRIPT_WEB_BYTES"
+echo "rv32_semihost_build=$RV32_SEMIHOST_BUILD"
+echo "rv32_semihost_bytes=$RV32_SEMIHOST_BYTES"
+echo "browser_example_source_bytes=$BROWSER_EXAMPLE_SOURCE_BYTES"
+echo "x86_64_baremetal_stub_source_bytes=$X86_64_STUB_BYTES"

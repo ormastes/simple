@@ -246,3 +246,15 @@ B1: Minimal repro ──→ B2: HIR fix ──→ B3: Pattern→JIT bridge ─�
 - Same failure for all cast calls: `text(x)`, `bool(x)`, `char(x)`, `i8(x)`..`u64(x)`, `f32(x)`, `f64(x)`
 - Fix: Rust HIR lowerer only — either (A) intercept in `hir/lower/expr/calls.rs` when callee matches NumericType::from_name, or (B) register all builtin cast names as pseudo-globals at lowerer init
 - Minimal repro: `fn parse_int(s: text) -> i64: int(s)` + `fn main(): print(parse_int("42").to_text())`
+
+**B2: JIT HIR Lowering Fix — DONE (2026-05-28)**
+- Two blockers found and fixed:
+  1. **HIR cast lowering**: Added cast-style call interception in `lower_utility_builtin()` in `hir/lower/expr/calls.rs`
+     - All 15 cast names: `int`/`i64`, `i8`, `i16`, `i32`, `u8`-`u64`, `f32`, `f64`/`float`, `bool`, `text`/`str`/`String`, `char`
+     - Emits `HirExprKind::Cast { expr, target }` (not BuiltinCall) — proper downstream MIR/codegen handling
+     - Matches interpreter's `NumericType::from_name` + `cast_to_simple_type` mapping byte-for-byte
+  2. **JIT eligibility defaults**: `register_function()` in `tiered_jit.spl` hardcoded `typed_mir: false, safe_deopt: false`
+     - Simple is statically typed → `typed_mir: true` is correct for all functions
+     - Interpreter fallback is always safe → `safe_deopt: true` is correct
+     - Fixed all three registration paths: `register_function`, `record_call` fallback, `get_hotspot_plan` fallback
+- `cargo check --profile bootstrap` passes; `cargo build --release` rebuilding seed

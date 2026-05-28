@@ -1801,6 +1801,12 @@ int64_t rt_time_now_unix(void) {
     return (int64_t)time(NULL);
 }
 
+int64_t rt_time_now_unix_micros(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
+}
+
 int64_t rt_entropy_hardware_ready(void) {
     return 0;
 }
@@ -1809,6 +1815,14 @@ int64_t rt_time_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+int64_t rt_time_now_nanos(void) {
+    return rt_time_now_ns();
+}
+
+int64_t rt_time_now_micros(void) {
+    return rt_time_now_ns() / 1000LL;
 }
 
 void rt_sleep_ms(int64_t ms) {

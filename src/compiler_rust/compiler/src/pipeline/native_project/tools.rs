@@ -24,6 +24,34 @@ fn archive_is_fresh_for_runtime_inputs(archive: &Path, runtime_root: &Path, inpu
     })
 }
 
+fn archive_has_exact_runtime_members(archive: &Path, inputs: &[&str]) -> bool {
+    let output = std::process::Command::new(find_archive_tool())
+        .arg("t")
+        .arg(archive)
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let mut actual: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    let mut expected: Vec<String> = inputs
+        .iter()
+        .copied()
+        .filter(|input| input.ends_with(".c"))
+        .map(|input| format!("{}.{}", input.trim_end_matches(".c"), host_object_extension()))
+        .collect();
+    actual.sort();
+    expected.sort();
+    actual == expected
+}
+
 fn archive_from_dir(dir: &Path, stem: &str) -> Option<PathBuf> {
     let deps_lib = dir.join("deps").join(format!("{stem}.a"));
     if has_nonempty_archive_payload(&deps_lib) {
@@ -122,26 +150,11 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root()?;
     let runtime_inputs = [
-        "runtime.c",
         "runtime_native.c",
+        "runtime_legacy_core.c",
+        "runtime_mcp_core.c",
+        "runtime_https_openssl_core.c",
         "runtime_simd_utf8.c",
-        "runtime_thread.c",
-        "runtime_fork.c",
-        "runtime_process.c",
-        "runtime_math.c",
-        "runtime_memory.c",
-        "runtime_time.c",
-        "runtime_memtrack.c",
-        "runtime_random.c",
-        "runtime_value.c",
-        "runtime_equality.c",
-        "runtime_config.c",
-        "runtime_contracts.c",
-        "runtime_env.c",
-        "runtime_format.c",
-        "runtime_error.c",
-        "runtime_regex_stub.c",
-        "runtime_db.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_fork.h",
@@ -153,6 +166,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
 
     if has_nonempty_archive_payload(&archive)
         && archive_is_fresh_for_runtime_inputs(&archive, &runtime_root, &runtime_inputs)
+        && archive_has_exact_runtime_members(&archive, &runtime_inputs)
     {
         return Some(archive);
     }
@@ -168,9 +182,12 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
         let status = std::process::Command::new(&cc)
             .arg("-c")
-            .arg("-O2")
+            .arg("-Os")
             .arg("-ffunction-sections")
             .arg("-fdata-sections")
+            .arg("-fno-unwind-tables")
+            .arg("-fno-asynchronous-unwind-tables")
+            .arg("-fno-stack-protector")
             .arg("-fPIC")
             .arg("-std=gnu11")
             .arg(format!("-I{}", runtime_root.display()))

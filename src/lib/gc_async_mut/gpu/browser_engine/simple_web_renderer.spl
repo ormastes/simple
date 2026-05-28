@@ -1,14 +1,13 @@
 """
 Simple Web Renderer
 
-Provides simple_web_render_url_to_pixels: a one-shot URL-to-pixel-buffer
-function used by app.ui.browser.renderer for the ui.browser pipeline.
+Provides static HTML and placeholder URL pixel rendering without importing
+the script runtime. Use simple_web_script_renderer for script-enabled file://
+loads.
 
 Usage (from app.ui.browser.renderer):
     val pixels = simple_web_render_url_to_pixels(url, rect_w, rect_h)
 """
-
-use std.gc_async_mut.gpu.browser_engine.browser_script_render.{render_html_to_pixels_with_scripts}
 
 extern fn rt_bytes_alloc(n: i64) -> [u8]
 extern fn rt_file_exists(path: text) -> bool
@@ -53,13 +52,16 @@ pub fn simple_web_render_url_to_pixels(url: text, width: i64, height: i64) -> [u
         return pixels
 
     if url.starts_with("file://"):
-        # Try to read as HTML file and render (with script execution)
+        # Static file render only. Script-enabled file rendering lives in
+        # simple_web_script_renderer so static callers do not retain JS support.
         val path = url.substring(7, url.len())
         if rt_file_exists(path):
             val html_str = rt_file_read_text(path)
-            val result = render_html_to_pixels_with_scripts(html_str, width.to_i32(), height.to_i32())
-            if result.ok:
-                return result.pixels
+            return _argb_pixels_to_rgba_bytes(
+                simple_web_render_html_to_pixels(html_str, width.to_i32(), height.to_i32()),
+                width,
+                height
+            )
         # Fallback: white buffer
         var i = 0
         while i < n_bytes:
@@ -73,6 +75,21 @@ pub fn simple_web_render_url_to_pixels(url: text, width: i64, height: i64) -> [u
         pixels[i] = 255
         i = i + 1
     pixels
+
+fn _argb_pixels_to_rgba_bytes(pixels32: [u32], width: i64, height: i64) -> [u8]:
+    val n_bytes = width * height * 4
+    val out = rt_bytes_alloc(n_bytes)
+    var src = 0
+    var dst = 0
+    while src < pixels32.len() and dst + 3 < n_bytes:
+        val px = pixels32[src]
+        out[dst] = ((px >> 16) & 0xFF).to_u8()
+        out[dst + 1] = ((px >> 8) & 0xFF).to_u8()
+        out[dst + 2] = (px & 0xFF).to_u8()
+        out[dst + 3] = ((px >> 24) & 0xFF).to_u8()
+        src = src + 1
+        dst = dst + 4
+    out
 
 fn _load_p6_ppm_argb(path: text, width: i32, height: i32) -> [u32]:
     val data = rt_file_read_bytes(path) ?? []
