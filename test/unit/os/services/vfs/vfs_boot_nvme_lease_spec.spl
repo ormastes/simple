@@ -16,6 +16,7 @@ use os.services.vfs.vfs_boot_init.{
     vfs_boot_nvme_direct_adapter_count_for_test,
     vfs_boot_storage_acceptance_reason,
     vfs_boot_storage_production_ready,
+    vfs_boot_nvme_direct_io_extent_matches_backend,
     vfs_boot_nvme_map_filesystem_direct_4k_request,
     vfs_boot_nvme_map_filesystem_direct_4k_batch,
     vfs_boot_nvme_submit_filesystem_direct_4k,
@@ -26,7 +27,7 @@ use os.services.vfs.vfs_init.{vfs_boot_storage_acceptance_ready}
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, OpenFlags}
-use std.fs_driver.direct_io.{direct_io_read_request, direct_io_read_batch_request}
+use std.fs_driver.direct_io.{DirectIoExtent, direct_io_nvme_filesystem_extension, direct_io_read_request, direct_io_read_batch_request}
 use std.fs_driver.error.{FsError}
 use std.io.dma.{SharedDmaBuffer, DmaOwner, DmaCachePolicy}
 use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmeQueueAssignment, nvme_filesystem_lease, nvme_filesystem_lease_reason, nvme_transfer_evidence}
@@ -326,6 +327,35 @@ describe "VFS boot NVMe lease contract":
         expect(source.contains("for offset in req.file_offsets:\n        val extent = driver.direct_io_extent_for_handle(FileHandle(id: req.handle_id), offset, 4096u64)")).to_equal(true)
         expect(source.contains("storage_offsets.push((mapped.storage_lba * mapped.sector_size.to_u64()) as i64)")).to_equal(true)
         expect(source.contains("file_offsets: storage_offsets")).to_equal(true)
+        expect(source.contains("vfs_boot_nvme_direct_io_extent_matches_backend(direct, mapped)")).to_equal(true)
+
+    it "rejects DirectIo extents from a different filesystem backend":
+        val dbfs = direct_io_nvme_filesystem_extension("dbfs", 512u32)
+        val matching = DirectIoExtent(
+            consumer: "dbfs",
+            file_offset: 0i64,
+            storage_lba: 1u64,
+            byte_len: 4096u64,
+            sector_size: 512u32
+        )
+        val wrong_consumer = DirectIoExtent(
+            consumer: "nvfs",
+            file_offset: 0i64,
+            storage_lba: 1u64,
+            byte_len: 4096u64,
+            sector_size: 512u32
+        )
+        val missing_consumer = DirectIoExtent(
+            consumer: "",
+            file_offset: 0i64,
+            storage_lba: 1u64,
+            byte_len: 4096u64,
+            sector_size: 512u32
+        )
+
+        expect(vfs_boot_nvme_direct_io_extent_matches_backend(dbfs, matching)).to_equal(true)
+        expect(vfs_boot_nvme_direct_io_extent_matches_backend(dbfs, wrong_consumer)).to_equal(false)
+        expect(vfs_boot_nvme_direct_io_extent_matches_backend(dbfs, missing_consumer)).to_equal(false)
 
     it "exposes boot FAT DirectIo extents on the pure SimpleOS shared FAT driver":
         val source = read_file("src/os/services/fat32/shared_fat32_driver.spl")
