@@ -31,7 +31,7 @@ use os.drivers.nvme.nvme_transfer_command.{NVME_TRANSFER_OPCODE_READ, NVME_TRANS
 use os.drivers.nvme.nvme_admin_command.{nvme_admin_identify_controller, nvme_admin_identify_namespace, nvme_admin_set_num_queues, nvme_admin_create_io_completion_queue, nvme_admin_create_io_submission_queue}
 use os.drivers.nvme.nvme_controller_contract.{NvmeControllerRegs, nvme_controller_facts, nvme_controller_refusal_reason, nvme_cap_dstrd, nvme_namespace_facts, nvme_namespace_refusal_reason, nvme_controller_enable_cc}
 use os.drivers.nvme.nvme_sector_probe.{NvmeSectorProbeResult, nvme_sector_probe_result}
-use os.drivers.nvme.nvme_storage_model.{NvmeTransferEvidence, nvme_transfer_evidence}
+use os.drivers.nvme.nvme_storage_model.{NvmeTransferEvidence, nvme_queue_is_system_reserved, nvme_transfer_evidence}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
@@ -45,6 +45,7 @@ var g_nvme_user_queue_controller_ids: [u32] = []
 var g_nvme_user_queue_nsids: [u32] = []
 var g_nvme_user_queue_owner_tasks: [u64] = []
 var g_nvme_user_queue_depths: [u16] = []
+var g_nvme_system_queue_nsids: [u32] = []
 # Timeout for controller ready transitions (spin iterations)
 impl NvmeDriver:
     static fn new() -> NvmeDriver:
@@ -54,6 +55,7 @@ impl NvmeDriver:
         g_nvme_user_queue_nsids = []
         g_nvme_user_queue_owner_tasks = []
         g_nvme_user_queue_depths = []
+        g_nvme_system_queue_nsids = []
         NvmeDriver(
             bar0_virt: 0,
             admin_queue: NvmeQueuePair.new(0, 32),
@@ -538,6 +540,8 @@ impl NvmeDriver:
             return "NVMe: unsupported user data queue"
         if depth == 0u16:
             return "NVMe: user data queue depth zero"
+        if self.system_namespace_owned_for_raw_access(nsid):
+            return "NVMe: namespace mode conflict system/user"
         var idx: i32 = 0
         for existing_queue_id in g_nvme_user_queue_ids:
             if existing_queue_id == queue_id:
@@ -587,6 +591,43 @@ impl NvmeDriver:
         g_nvme_user_queue_nsids = nsids
         g_nvme_user_queue_owner_tasks = owner_tasks
         g_nvme_user_queue_depths = depths
+
+    me system_namespace_owned_for_raw_access(nsid: u32) -> bool:
+        var idx = 0
+        while idx < g_nvme_system_queue_nsids.len():
+            if g_nvme_system_queue_nsids[idx] == nsid:
+                return true
+            idx = idx + 1
+        false
+
+    me user_namespace_owned_for_raw_access(nsid: u32) -> bool:
+        var idx = 0
+        while idx < g_nvme_user_queue_nsids.len():
+            if g_nvme_user_queue_nsids[idx] == nsid:
+                return true
+            idx = idx + 1
+        false
+
+    me remember_system_namespace_raw_access(nsid: u32):
+        if self.system_namespace_owned_for_raw_access(nsid):
+            return
+        g_nvme_system_queue_nsids = g_nvme_system_queue_nsids.push(nsid)
+
+    me raw_namespace_queue_access_reason(nsid: u32, queue_id: u16) -> text:
+        if nvme_queue_is_system_reserved(queue_id):
+            if self.user_namespace_owned_for_raw_access(nsid):
+                return "NVMe: namespace mode conflict system/user"
+            return "ready"
+        if self.system_namespace_owned_for_raw_access(nsid):
+            return "NVMe: namespace mode conflict system/user"
+        var idx: i32 = 0
+        for existing_queue_id in g_nvme_user_queue_ids:
+            if existing_queue_id == queue_id:
+                if g_nvme_user_queue_nsids[idx] != nsid:
+                    return "NVMe: user data queue namespace conflict"
+                return "ready"
+            idx = idx + 1
+        "NVMe: user data queue owner missing"
 
     me release_user_data_queue_owner(queue_id: u16, controller_id: u32, nsid: u32, owner_task: u64) -> bool:
         """Release the remembered owner of a user data queue after its namespace lease is gone."""
@@ -706,6 +747,9 @@ impl NvmeDriver:
         """Read sectors from an identified namespace on a concrete I/O queue."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, queue_id)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
         val sector_count = self.namespace_sector_count(nsid)
         if sector_count.is_err():
             return Result.Err("NVMe: namespace not identified")
@@ -748,6 +792,8 @@ impl NvmeDriver:
         if status_code != 0:
             return Result.Err("NVMe: read error, status={status_code}")
 
+        if nvme_queue_is_system_reserved(queue_id):
+            self.remember_system_namespace_raw_access(nsid)
         Result.Ok(true)
 
     me write_sectors(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
@@ -774,6 +820,9 @@ impl NvmeDriver:
         """Write sectors to an identified namespace on a concrete I/O queue."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, queue_id)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
         val sector_count = self.namespace_sector_count(nsid)
         if sector_count.is_err():
             return Result.Err("NVMe: namespace not identified")
@@ -816,6 +865,8 @@ impl NvmeDriver:
         if status_code != 0:
             return Result.Err("NVMe: write error, status={status_code}")
 
+        if nvme_queue_is_system_reserved(queue_id):
+            self.remember_system_namespace_raw_access(nsid)
         Result.Ok(true)
 
     me flush() -> Result<bool, text>:
@@ -833,6 +884,9 @@ impl NvmeDriver:
         """Flush write cache for an identified namespace on a concrete I/O queue."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, queue_id)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
         val sector_count = self.namespace_sector_count(nsid)
         if sector_count.is_err():
             return Result.Err("NVMe: namespace not identified")
@@ -876,6 +930,8 @@ impl NvmeDriver:
         if status_code != 0:
             return Result.Err("NVMe: flush error, status={status_code}")
 
+        if nvme_queue_is_system_reserved(queue_id):
+            self.remember_system_namespace_raw_access(nsid)
         Result.Ok(true)
 
     # ========================================================================
@@ -899,6 +955,9 @@ impl NvmeDriver:
         """Read sectors from an identified namespace using IRQ notification."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, self.io_queue.qid)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
         val sector_count = self.namespace_sector_count(nsid)
         if sector_count.is_err():
             return Result.Err("NVMe: namespace not identified")
@@ -922,6 +981,7 @@ impl NvmeDriver:
         if status_code != 0:
             return Result.Err("NVMe: read error, status={status_code}")
 
+        self.remember_system_namespace_raw_access(nsid)
         Result.Ok(true)
 
     me write_sectors_notify(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
@@ -940,6 +1000,9 @@ impl NvmeDriver:
         """Write sectors to an identified namespace using IRQ notification."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, self.io_queue.qid)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
         val sector_count = self.namespace_sector_count(nsid)
         if sector_count.is_err():
             return Result.Err("NVMe: namespace not identified")
@@ -963,6 +1026,7 @@ impl NvmeDriver:
         if status_code != 0:
             return Result.Err("NVMe: write error, status={status_code}")
 
+        self.remember_system_namespace_raw_access(nsid)
         Result.Ok(true)
 
     me read_shared_dma(lba: u64, count: u32, buf: SharedDmaBuffer) -> Result<bool, text>:
@@ -1017,6 +1081,9 @@ impl NvmeDriver:
         """Read one 4KiB operation as one multi-sector NVMe command."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, queue_id)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
         if not buf.is_valid():
             return Result.Err("NVMe: invalid shared DMA buffer")
         val sector_size = self.namespace_sector_size(nsid)
@@ -1081,12 +1148,17 @@ impl NvmeDriver:
         if status.unwrap() != 0u32:
             return Result.Err("NVMe: burst read error, status=" + status.unwrap().to_u64().to_text())
         dma_shared_sync_device_to_cpu(buf)
+        if nvme_queue_is_system_reserved(queue_id):
+            self.remember_system_namespace_raw_access(nsid)
         Result.Ok(true)
 
     me write_4k_shared_dma_burst_in_namespace_on_queue(nsid: u32, queue_id: u16, lba: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
         """Write one 4KiB operation as one multi-sector NVMe command."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, queue_id)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
         if not buf.is_valid():
             return Result.Err("NVMe: invalid shared DMA buffer")
         val sector_size = self.namespace_sector_size(nsid)
@@ -1151,12 +1223,17 @@ impl NvmeDriver:
             return Result.Err("NVMe: burst write " + status.unwrap_err())
         if status.unwrap() != 0u32:
             return Result.Err("NVMe: burst write error, status=" + status.unwrap().to_u64().to_text())
+        if nvme_queue_is_system_reserved(queue_id):
+            self.remember_system_namespace_raw_access(nsid)
         Result.Ok(true)
 
     me read_4k_shared_dma_batch_in_namespace_on_queue(nsid: u32, queue_id: u16, lbas: [u64], sector_size: u32, namespace_sectors: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
         """Read multiple 4KiB operations into contiguous shared DMA slots."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, queue_id)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
         if lbas.len() == 0:
             return Result.Err("NVMe: empty read batch")
         if not buf.is_valid():
@@ -1243,12 +1320,17 @@ impl NvmeDriver:
         if status.unwrap() != 0u32:
             return Result.Err("NVMe: batch read error, status=" + status.unwrap().to_u64().to_text())
         dma_shared_sync_device_to_cpu(buf)
+        if nvme_queue_is_system_reserved(queue_id):
+            self.remember_system_namespace_raw_access(nsid)
         Result.Ok(true)
 
     me write_4k_shared_dma_batch_in_namespace_on_queue(nsid: u32, queue_id: u16, lbas: [u64], sector_size: u32, namespace_sectors: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
         """Write multiple 4KiB operations from contiguous shared DMA slots."""
         if not self.initialized:
             return Result.Err("NVMe: driver not initialized")
+        val access_reason = self.raw_namespace_queue_access_reason(nsid, queue_id)
+        if access_reason != "ready":
+            return Result.Err(access_reason)
         if lbas.len() == 0:
             return Result.Err("NVMe: empty write batch")
         if not buf.is_valid():
@@ -1335,6 +1417,8 @@ impl NvmeDriver:
             return Result.Err("NVMe: batch write " + status.unwrap_err())
         if status.unwrap() != 0u32:
             return Result.Err("NVMe: batch write error, status=" + status.unwrap().to_u64().to_text())
+        if nvme_queue_is_system_reserved(queue_id):
+            self.remember_system_namespace_raw_access(nsid)
         Result.Ok(true)
 
     me run_reversible_sector_probe(lba: u64) -> Result<NvmeSectorProbeResult, text>:

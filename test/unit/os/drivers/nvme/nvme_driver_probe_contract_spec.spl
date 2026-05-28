@@ -49,6 +49,10 @@ describe "NVMe driver reversible sector probe contract":
         expect(source.contains("nvme_flush_io_command_for_namespace(nsid)")).to_equal(true)
         expect(source.contains("var g_nvme_user_queue_ids: [u16] = []")).to_equal(true)
         expect(source.contains("var g_nvme_user_queue_nsids: [u32] = []")).to_equal(true)
+        expect(source.contains("var g_nvme_system_queue_nsids: [u32] = []")).to_equal(true)
+        expect(source.contains("me raw_namespace_queue_access_reason(nsid: u32, queue_id: u16) -> text:")).to_equal(true)
+        expect(source.contains("if nvme_queue_is_system_reserved(queue_id):")).to_equal(true)
+        expect(source.contains("self.remember_system_namespace_raw_access(nsid)")).to_equal(true)
         expect(source.contains("me ensure_user_data_queue_for_assignment(queue_id: u16, depth: u16, controller_id: u32, nsid: u32, owner_task: u64)")).to_equal(true)
         expect(source.contains("val owner_reason = self.user_data_queue_owner_reason(queue_id, depth, controller_id, nsid, owner_task)")).to_equal(true)
         expect(source.contains("identified_nsid: 1u32")).to_equal(true)
@@ -103,3 +107,18 @@ describe "NVMe driver reversible sector probe contract":
         expect(driver.user_data_queue_owner_reason(2u16, 64u16, 0u32, 5u32, 43u64)).to_equal("NVMe: user data queue owner conflict")
         expect(driver.release_user_data_queue_owner(2u16, 0u32, 5u32, 42u64)).to_equal(true)
         expect(driver.user_data_queue_owner_reason(2u16, 64u16, 0u32, 6u32, 43u64)).to_equal("ready")
+
+    it "rejects raw system and user queue access to the same namespace at the driver boundary":
+        var driver = NvmeDriver.new()
+
+        expect(driver.raw_namespace_queue_access_reason(5u32, 1u16)).to_equal("ready")
+        driver.remember_system_namespace_raw_access(5u32)
+        expect(driver.raw_namespace_queue_access_reason(5u32, 2u16)).to_equal("NVMe: namespace mode conflict system/user")
+        expect(driver.user_data_queue_owner_reason(2u16, 64u16, 0u32, 5u32, 42u64)).to_equal("NVMe: namespace mode conflict system/user")
+
+        var user_driver = NvmeDriver.new()
+        expect(user_driver.user_data_queue_owner_reason(2u16, 64u16, 0u32, 6u32, 42u64)).to_equal("ready")
+        user_driver.remember_user_data_queue_owner(2u16, 64u16, 0u32, 6u32, 42u64)
+        expect(user_driver.raw_namespace_queue_access_reason(6u32, 1u16)).to_equal("NVMe: namespace mode conflict system/user")
+        expect(user_driver.raw_namespace_queue_access_reason(6u32, 2u16)).to_equal("ready")
+        expect(user_driver.raw_namespace_queue_access_reason(7u32, 2u16)).to_equal("NVMe: user data queue namespace conflict")
