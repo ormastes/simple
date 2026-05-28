@@ -46,9 +46,9 @@ Verified during the session:
 - Desktop shortcut source-contract test passed.
 - GUI event pipeline contract and Tauri backend tests passed.
 
-## Current Uncommitted IPC Slice
+## Completed IPC Stabilization Slice
 
-Files currently modified for the IPC stabilization slice:
+Committed as `ea48a3470a` (`fix: stabilize shared ipc event parsing`):
 - `src/app/ui.ipc/protocol.spl`
 - `test/unit/app/ui/ipc_protocol_spec.spl`
 - `test/unit/app/ui/ipc_spec.spl`
@@ -72,23 +72,27 @@ SIMPLE_LIB=src bin/simple test test/unit/app/ui/gui_event_pipeline_contract_spec
 SIMPLE_LIB=src bin/simple test test/unit/app/ui/tauri_backend_spec.spl --mode=interpreter --clean
 ```
 
-Next restart action: inspect the diff, rerun the commands above, then commit only the four IPC files if still green.
+Additional restart evidence added after that commit:
 
-Suggested commit message:
-
-```text
-fix: stabilize shared ipc event parsing
+```bash
+SIMPLE_LIB=src bin/simple check src/os/compositor/host_compositor_entry.spl test/unit/os/compositor/host_compositor_entry_spec.spl
+SIMPLE_LIB=src bin/simple test test/unit/os/compositor/host_compositor_entry_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src bin/simple test test/unit/os/compositor/simple_web_window_renderer_spec.spl --mode=interpreter --clean
 ```
+
+The host WM handle now records the selected host backend and exposes the shared
+content renderer contract. The focused spec proves Browser, Electron, and Tauri
+shared-WM handles all report `simple_web` as the window-content renderer.
+The WM app-content renderer also uses a WM-local Simple Web stylesheet and the
+host compositor spec proves Terminal window content flows through Simple Web
+into Engine2D pixel colors before compositor blit.
 
 ## Remaining Work
 
-1. Commit/pull-rebase/push the IPC stabilization slice.
-2. Confirm Simple web renderer can be used as the backing engine for WM GUI on host across browser, Electron, and Tauri entrypoints.
-3. Add or update tests proving Simple web renderer can feed the Simple 2D renderer path for WM window content.
-4. Replace remaining SimpleOS GUI probe-only coverage with a real shared WM path where feasible.
-5. Add SimpleOS adapter proof for display/input/event delivery, preferably with QEMU smoke coverage.
-6. Add macOS validation for Cocoa-backed host WM when a macOS host is available.
-7. Update architecture docs if implementation reveals a different adapter boundary.
+1. Replace remaining SimpleOS GUI probe-only coverage with a real shared WM path where feasible.
+2. Add SimpleOS adapter proof for display/input/event delivery, preferably with QEMU smoke coverage.
+3. Add macOS validation for Cocoa-backed host WM when a macOS host is available.
+4. Update architecture docs if implementation reveals a different adapter boundary.
 
 ## Known Blockers
 

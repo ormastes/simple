@@ -311,6 +311,7 @@ class HostWmHandle:
     wm: WmService
     event_loop_id: i64
     window_id: i64
+    backend: HostBackendKind
 
     fn pump_host_events() -> i64:
         if self.event_loop_id == 0:
@@ -327,6 +328,46 @@ class HostWmHandle:
             self.pump_host_events()
             self.run_once()
             rt_sleep_ms(HOST_WM_IDLE_SLEEP_MS.to_i64())
+
+class SimpleOsGuiAdapter:
+    compositor: HostCompositor
+    delivered_input_events: i64
+    delivered_bridge_events: i64
+    presented_frames: i64
+
+    static fn new(backend: CompositorBackend, size: Size) -> SimpleOsGuiAdapter:
+        SimpleOsGuiAdapter(
+            compositor: HostCompositor.new(backend, size),
+            delivered_input_events: 0,
+            delivered_bridge_events: 0,
+            presented_frames: 0
+        )
+
+    me deliver_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):
+        self.delivered_bridge_events = self.delivered_bridge_events + 1
+        self.compositor.apply_bridge_request(seq, owner_port, method, window_id, title, x, y, w, h, content, process_id, app_id)
+
+    me deliver_pointer_move(x: i32, y: i32):
+        self.delivered_input_events = self.delivered_input_events + 1
+        self.compositor.pointer_move(x, y)
+
+    me deliver_left_button(down: bool):
+        self.delivered_input_events = self.delivered_input_events + 1
+        self.compositor.handle_left_button(down)
+
+    me render_framebuffer_frame():
+        self.compositor.render_frame()
+        self.presented_frames = self.presented_frames + 1
+
+fn simpleos_gui_adapter_display_path_name(adapter: SimpleOsGuiAdapter) -> text:
+    if adapter.compositor.width <= 0 or adapter.compositor.height <= 0:
+        return "invalid"
+    "simpleos-framebuffer"
+
+fn simpleos_gui_adapter_content_renderer_name(adapter: SimpleOsGuiAdapter) -> text:
+    if simpleos_gui_adapter_display_path_name(adapter) == "invalid":
+        return "unsupported"
+    "simple_web"
 
 fn host_wm_surface_failure_reason(cfg: HostWmConfig, event_loop_id: i64, window_id: i64) -> text?:
     if cfg.backend == HostBackendKind.Tui:
@@ -357,8 +398,14 @@ fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
         compositor: comp,
         wm: WmService.new(),
         event_loop_id: event_loop_id,
-        window_id: window_id
+        window_id: window_id,
+        backend: cfg.backend
     )
+
+fn host_wm_content_renderer_name(handle: HostWmHandle) -> text:
+    if handle.backend == HostBackendKind.Tui:
+        return "unsupported"
+    "simple_web"
 
 fn host_compositor_find_window_index(comp: HostCompositor, window_id: i64) -> i32:
     var i = 0

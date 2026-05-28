@@ -10,14 +10,13 @@ use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
 use os.services.block_device.{BlockDevice}
 use os.services.fat32.fat32_filesystem_ops.{_split_path_parent}
 use common.string_core.{str_char_at}
-use std.fs_driver.error.{FsError}
 
 # ============================================================================
 # FAT32 On-Disk Structures
 # ============================================================================
 
 pub struct Fat32Bpb:
-    """Core BPB fields used for validation (7 fields subset of on-disk layout)."""
+    """Core BPB fields used by legacy FAT32 unit coverage."""
     bytes_per_sector: u16
     sectors_per_cluster: u8
     reserved_sectors: u16
@@ -600,41 +599,3 @@ impl Fat32Driver:
                 )
             i = i + 1
         Ok(true)
-
-# ============================================================================
-# Hardening helpers — BPB validation and cluster-chain cycle detection
-# ============================================================================
-
-pub fn validate_bpb(bpb: Fat32Bpb) -> Result<(), FsError>:
-    """Validate core BPB fields for FAT32 correctness.
-
-    Rejects:
-      - bytes_per_sector == 0
-      - sectors_per_cluster that is not a power of two (or is zero)
-    """
-    if bpb.bytes_per_sector == 0u16:
-        return Err(FsError.Corrupt)
-    val spc = bpb.sectors_per_cluster as u32
-    if spc == 0u32:
-        return Err(FsError.Corrupt)
-    # Power-of-two check: spc & (spc - 1) == 0
-    val spc_minus_one = spc - 1u32
-    val mask = spc & spc_minus_one
-    if mask != 0u32:
-        return Err(FsError.Corrupt)
-    Ok(())
-
-pub fn detect_cluster_cycle(start_cluster: u32, max_clusters: u32) -> Result<bool, FsError>:
-    """Detect cycles in a FAT32 cluster chain using Floyd's algorithm.
-
-    Without access to the FAT table this function validates the starting
-    cluster and returns Ok(false) when no structural cycle is detectable
-    from the inputs alone.  The FAT32 driver's follow_cluster_chain already
-    enforces an iteration cap; this function exists as a callable entry point
-    for unit testing.
-    """
-    if start_cluster < 2u32:
-        return Err(FsError.Corrupt)
-    if max_clusters == 0u32:
-        return Err(FsError.Corrupt)
-    Ok(false)

@@ -1,6 +1,4 @@
-use std.cli.cli_util (get_cli_args)
-use os.drivers.real_device_readiness.{real_device_physical_nvme_serial_acceptance_reason}
-
+extern fn rt_cli_get_args() -> [text]
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
@@ -17,6 +15,9 @@ fn _arg_value(args: [text], name: text) -> text:
 
 fn _print_usage():
     print "Usage: simple run src/app/simpleos_nvme_serial_check/main.spl --serial-log <path> [--report-out <path>] [--preflight-report <path>]"
+
+fn _read_evidence_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
 
 fn _serial_field(serial_output: text, prefix: text) -> text:
     var normalized = serial_output.replace("\n", " ")
@@ -118,6 +119,210 @@ fn _preflight_field(preflight_report_text: text, name: text) -> text:
                 return value
     "unknown"
 
+fn _serial_marker_present(serial_output: text, marker: text) -> bool:
+    if marker.contains(" "):
+        return serial_output.contains(marker)
+    if not marker.contains("="):
+        return serial_output.contains(marker)
+    var normalized = serial_output.replace("\n", " ")
+    normalized = normalized.replace("\r", " ")
+    normalized = normalized.replace("\t", " ")
+    for part in normalized.split(" "):
+        val token = part.trim()
+        if marker.ends_with("="):
+            if token.starts_with(marker) and token.len() > marker.len():
+                return true
+        else:
+            if token == marker:
+                return true
+    false
+
+fn _serial_number_field(serial_output: text, prefix: text, missing_reason: text, invalid_reason: text) -> (bool, i64, text):
+    val value_text = _serial_field(serial_output, prefix)
+    if value_text == "unknown":
+        return (false, 0, missing_reason)
+    for ch in value_text:
+        if ch < "0" or ch > "9":
+            return (false, 0, invalid_reason)
+    (true, value_text.to_i64() ?? 0, "ready")
+
+fn _serial_exact_field_reason(serial_output: text, prefix: text, expected: text, missing_reason: text, invalid_reason: text) -> text:
+    val value = _serial_field(serial_output, prefix)
+    if value == "unknown":
+        return missing_reason
+    if value != expected:
+        return invalid_reason
+    "ready"
+
+fn _serial_real_identity_reason(serial_output: text, prefix: text, missing_reason: text, invalid_reason: text) -> text:
+    val value = _serial_field(serial_output, prefix)
+    if value == "unknown":
+        return missing_reason
+    if value == "unknown" or value == "qemu-nvme" or value == "pure-simple-perf":
+        return invalid_reason
+    "ready"
+
+fn _nvme_perf_report_count(serial_output: text) -> i32:
+    var count = 0
+    var rest = serial_output
+    while rest.contains("nvme_perf"):
+        count = count + 1
+        val idx = rest.find("nvme_perf")
+        if idx < 0:
+            return count
+        rest = rest.substring(idx + "nvme_perf".len(), rest.len())
+    count
+
+fn _nvme_perf_acceptance_reason(serial_output: text) -> text:
+    if not serial_output.contains("nvme_perf"):
+        return "missing-nvme-perf-report"
+    if _nvme_perf_report_count(serial_output) > 1:
+        return "multiple-nvme-perf-reports"
+    for check in [
+        _serial_exact_field_reason(serial_output, "reason=", "ready", "missing-nvme-perf-reason", "nvme-perf-report-not-ready"),
+        _serial_exact_field_reason(serial_output, "simple_provider=", "simple-driver", "nvme-perf-provider-not-simple", "nvme-perf-provider-not-simple"),
+        _serial_exact_field_reason(serial_output, "workload=", "4k-random-read-write", "nvme-perf-workload-not-4k-random", "nvme-perf-workload-not-4k-random"),
+        _serial_exact_field_reason(serial_output, "io_size_bytes=", "4096", "nvme-perf-io-size-not-4k", "nvme-perf-io-size-not-4k"),
+        _serial_exact_field_reason(serial_output, "direct_io_path=", "nvme-lease-shared-dma-4k", "nvme-perf-direct-io-path-not-shared-dma", "nvme-perf-direct-io-path-not-shared-dma"),
+        _serial_exact_field_reason(serial_output, "fs_consumers=", "fat32,nvfs,dbfs", "nvme-perf-filesystem-consumers-not-shared", "nvme-perf-filesystem-consumers-not-shared"),
+        _serial_exact_field_reason(serial_output, "fat32_direct_io=", "read-write-through", "nvme-perf-fat32-direct-io-missing", "nvme-perf-fat32-direct-io-invalid"),
+        _serial_exact_field_reason(serial_output, "nvfs_direct_io=", "read-write-through", "nvme-perf-nvfs-direct-io-missing", "nvme-perf-nvfs-direct-io-invalid"),
+        _serial_exact_field_reason(serial_output, "dbfs_direct_io=", "read-write-through", "nvme-perf-dbfs-direct-io-missing", "nvme-perf-dbfs-direct-io-invalid"),
+        _serial_exact_field_reason(serial_output, "c_bridge_used=", "false", "nvme-perf-c-bridge-used", "nvme-perf-c-bridge-used"),
+        _serial_exact_field_reason(serial_output, "c_baseline_device=", "same-nvme", "nvme-perf-c-baseline-not-same-device", "nvme-perf-c-baseline-not-same-device"),
+        _serial_exact_field_reason(serial_output, "c_baseline_scope=", "in-guest", "nvme-perf-c-baseline-not-in-guest", "nvme-perf-c-baseline-not-in-guest"),
+        _serial_exact_field_reason(serial_output, "c_baseline_cache=", "direct", "nvme-perf-c-baseline-not-direct", "nvme-perf-c-baseline-not-direct"),
+        _serial_exact_field_reason(serial_output, "common_logic_shared=", "true", "nvme-perf-common-logic-not-shared", "nvme-perf-common-logic-not-shared"),
+        _serial_exact_field_reason(serial_output, "allocation_per_io=", "false", "nvme-perf-allocation-per-io", "nvme-perf-allocation-per-io"),
+        _serial_exact_field_reason(serial_output, "hardware_target=", "real-nvme", "nvme-real-hardware-target-missing", "nvme-real-hardware-target-missing"),
+        _serial_exact_field_reason(serial_output, "qemu=", "false", "nvme-real-hardware-qemu-flag-missing", "nvme-real-hardware-emulator-report"),
+        _serial_real_identity_reason(serial_output, "device_model=", "nvme-real-hardware-device-model-missing", "nvme-real-hardware-device-model-invalid"),
+        _serial_real_identity_reason(serial_output, "device_serial=", "nvme-real-hardware-device-serial-missing", "nvme-real-hardware-device-serial-invalid"),
+        _serial_exact_field_reason(serial_output, "measured_on=", "real-device", "nvme-real-hardware-measurement-source-missing", "nvme-real-hardware-measurement-source-invalid")
+    ]:
+        if check != "ready":
+            return check
+    val (read_ok, simple_read, read_reason) = _serial_number_field(serial_output, "simple_read_iops=", "missing-simple-read-iops", "invalid-simple-read-iops")
+    if not read_ok:
+        return read_reason
+    val (write_ok, simple_write, write_reason) = _serial_number_field(serial_output, "simple_write_iops=", "missing-simple-write-iops", "invalid-simple-write-iops")
+    if not write_ok:
+        return write_reason
+    val (read_p99_ok, simple_read_p99, read_p99_reason) = _serial_number_field(serial_output, "simple_read_p99_us=", "missing-simple-read-p99", "invalid-simple-read-p99")
+    if not read_p99_ok:
+        return read_p99_reason
+    val (write_p99_ok, simple_write_p99, write_p99_reason) = _serial_number_field(serial_output, "simple_write_p99_us=", "missing-simple-write-p99", "invalid-simple-write-p99")
+    if not write_p99_ok:
+        return write_p99_reason
+    val (c_read_ok, c_read, c_read_reason) = _serial_number_field(serial_output, "c_read_iops=", "missing-c-read-iops", "invalid-c-read-iops")
+    if not c_read_ok:
+        return c_read_reason
+    val (c_write_ok, c_write, c_write_reason) = _serial_number_field(serial_output, "c_write_iops=", "missing-c-write-iops", "invalid-c-write-iops")
+    if not c_write_ok:
+        return c_write_reason
+    val (c_read_p99_ok, c_read_p99, c_read_p99_reason) = _serial_number_field(serial_output, "c_read_p99_us=", "missing-c-read-p99", "invalid-c-read-p99")
+    if not c_read_p99_ok:
+        return c_read_p99_reason
+    val (c_write_p99_ok, c_write_p99, c_write_p99_reason) = _serial_number_field(serial_output, "c_write_p99_us=", "missing-c-write-p99", "invalid-c-write-p99")
+    if not c_write_p99_ok:
+        return c_write_p99_reason
+    val (queue_ok, queue_depth, queue_reason) = _serial_number_field(serial_output, "queue_depth=", "missing-queue-depth", "invalid-queue-depth")
+    if not queue_ok:
+        return queue_reason
+    val (warm_ok, warm_runs, warm_reason) = _serial_number_field(serial_output, "warm_runs=", "missing-warm-runs", "invalid-warm-runs")
+    if not warm_ok:
+        return warm_reason
+    val (rss_ok, _max_rss, rss_reason) = _serial_number_field(serial_output, "max_rss_kib=", "missing-max-rss", "invalid-max-rss")
+    if not rss_ok:
+        return rss_reason
+    val (ns_ok, _namespace, ns_reason) = _serial_number_field(serial_output, "namespace_nsid=", "nvme-real-hardware-namespace-missing", "nvme-real-hardware-namespace-invalid")
+    if not ns_ok:
+        return ns_reason
+    val (runs_ok, physical_runs, runs_reason) = _serial_number_field(serial_output, "physical_runs=", "nvme-real-hardware-physical-runs-missing", "nvme-real-hardware-physical-runs-invalid")
+    if not runs_ok:
+        return runs_reason
+    if simple_read <= c_read:
+        return "simple-read-iops-not-faster-than-c"
+    if simple_write <= c_write:
+        return "simple-write-iops-not-faster-than-c"
+    if simple_read_p99 >= c_read_p99:
+        return "simple-read-p99-not-faster-than-c"
+    if simple_write_p99 >= c_write_p99:
+        return "simple-write-p99-not-faster-than-c"
+    if queue_depth < 32:
+        return "nvme-perf-queue-depth-too-low"
+    if warm_runs < 3:
+        return "nvme-perf-not-warm"
+    if physical_runs < 3:
+        return "nvme-real-hardware-physical-runs-too-low"
+    "ready"
+
+fn _physical_nvme_serial_acceptance_reason(serial_output: text) -> text:
+    if serial_output.contains("storage_provider=c-boot-bridge"):
+        return "storage-not-pure-simple:c-boot-bridge"
+    for marker in [
+        "storage_provider=simple-driver",
+        "storage_placement=user-space-driver",
+        "system_storage_placement=system-driver",
+        "storage_namespace=non-secure-resource-namespace",
+        "storage_grant=resource-grant-set:tok=",
+        "common_driver_logic=shared",
+        "nvme_perf reason=ready",
+        "direct_io_path=nvme-lease-shared-dma-4k",
+        "fs_consumers=fat32,nvfs,dbfs",
+        "fat32_direct_io=read-write-through",
+        "nvfs_direct_io=read-write-through",
+        "dbfs_direct_io=read-write-through",
+        "fat32_extent_source=freestanding-fat32-extents",
+        "nvfs_extent_source=freestanding-dbfs-arena",
+        "dbfs_extent_source=freestanding-dbfs-arena",
+        "c_bridge_used=false",
+        "c_baseline_device=same-nvme",
+        "c_baseline_scope=in-guest",
+        "c_baseline_cache=direct",
+        "allocation_per_io=false",
+        "hardware_target=real-nvme",
+        "qemu=false",
+        "device_model=",
+        "device_serial=",
+        "namespace_nsid=",
+        "physical_runs=",
+        "measured_on=real-device",
+        "user_namespace_assignment=hardware-data-queue",
+        "user_namespace_mode=user-assigned",
+        "user_namespace_nsid=",
+        "user_namespace_queue_id=",
+        "user_namespace_active_lease_count=",
+        "user_namespace_direct_io=read-write-through",
+        "user_namespace_shared_interface=fat32,nvfs,dbfs",
+        "user_namespace_conflict_policy=active-lease-checked",
+        "TEST PASSED"
+    ]:
+        if not _serial_marker_present(serial_output, marker):
+            return "missing-physical-nvme-marker:" + marker
+    val (system_ok, system_nsid, system_reason) = _serial_number_field(serial_output, "namespace_nsid=", "physical-nvme-system-nsid-invalid", "physical-nvme-system-nsid-invalid")
+    if not system_ok:
+        return system_reason
+    val (user_ok, user_nsid, user_reason) = _serial_number_field(serial_output, "user_namespace_nsid=", "physical-nvme-user-nsid-invalid", "physical-nvme-user-nsid-invalid")
+    if not user_ok:
+        return user_reason
+    if user_nsid == system_nsid:
+        return "physical-nvme-user-namespace-conflicts-system"
+    val (queue_ok, user_queue, queue_reason) = _serial_number_field(serial_output, "user_namespace_queue_id=", "physical-nvme-user-queue-invalid", "physical-nvme-user-queue-invalid")
+    if not queue_ok:
+        return queue_reason
+    if user_queue < 2:
+        return "physical-nvme-user-queue-not-data"
+    val (lease_ok, lease_count, lease_reason) = _serial_number_field(serial_output, "user_namespace_active_lease_count=", "physical-nvme-active-lease-count-invalid", "physical-nvme-active-lease-count-invalid")
+    if not lease_ok:
+        return lease_reason
+    if lease_count == 0:
+        return "physical-nvme-active-lease-check-empty"
+    val perf_reason = _nvme_perf_acceptance_reason(serial_output)
+    if perf_reason != "ready":
+        return "nvme-real-hardware-perf:" + perf_reason
+    "ready"
+
 fn _identity_token(value: text) -> text:
     var token = value.trim()
     token = token.replace(" ", "_")
@@ -177,18 +382,18 @@ fn _preflight_identity_match_reason(serial_output: text, preflight_report_text: 
     "ready"
 
 fn main() -> i64:
-    val args = get_cli_args()
+    val args = _checker_args()
     val serial_log = _arg_value(args, "--serial-log")
     val report_out = _arg_value(args, "--report-out")
     val preflight_report = _arg_value(args, "--preflight-report")
     if serial_log == "":
         _print_usage()
         return 2
-    val serial_output = rt_file_read_text(serial_log) ?? ""
-    var reason = real_device_physical_nvme_serial_acceptance_reason(serial_output)
+    val serial_output = _read_evidence_text(serial_log)
+    var reason = _physical_nvme_serial_acceptance_reason(serial_output)
     var preflight_report_text = ""
     if preflight_report != "":
-        preflight_report_text = rt_file_read_text(preflight_report) ?? ""
+        preflight_report_text = _read_evidence_text(preflight_report)
     if reason == "ready" and preflight_report != "":
         reason = _preflight_identity_match_reason(serial_output, preflight_report_text)
     if report_out != "":
@@ -203,3 +408,20 @@ fn main() -> i64:
     if reason == "ready":
         return 0
     1
+
+fn _checker_args() -> [text]:
+    val raw_args = rt_cli_get_args()
+    var all_args: [text] = []
+    if raw_args != nil:
+        all_args = raw_args
+    var start_idx = 1
+    if all_args.len() > 2 and all_args[1] == "run" and all_args[2].ends_with(".spl"):
+        start_idx = 3
+    elif all_args.len() > 1 and all_args[1].ends_with(".spl"):
+        start_idx = 2
+    var args: [text] = []
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args

@@ -14,7 +14,6 @@
 | **FILE.md** | Canonical structure definition | Check where files belong |
 | **README.md** | Project overview | Learn what Simple is |
 | **AGENTS.md** | Agent definitions | Using Task tool subagents |
-| **.sstack/** | Session state tracking | Local workflow state and phase handoff notes |
 | **bin/** | Executables & CLI | Running Simple commands |
 | **src/** | Source code | Core implementation |
 | **test/** | Test suites | Testing & verification |
@@ -206,7 +205,7 @@ extensionless VCS hook entrypoints under `scripts/hooks/`.
 | Path | Purpose |
 |------|---------|
 | `.claude/agents/` | Agent definitions (code, test, debug, explore, docs, vcs, infra, build, ml) |
-| `.claude/skills/` | Skills (/sstack, /dev, /coding, /test, /debug, etc.) |
+| `.claude/skills/` | Skills (/dev, /coding, /test, /debug, etc.) |
 | `.claude/templates/` | Code templates |
 | `.claude/rules/` | Project rules (language, testing, bootstrap, commands, structure, code-style, vcs) |
 | `.claude/memory/` | Persistent memory (auto-managed) |

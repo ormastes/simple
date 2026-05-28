@@ -201,6 +201,15 @@ Current verification evidence:
   `node tools/electron-shell/verify_famous_site_corpus_completion.js --help`
   exits `2` with usage text, and `--expected-count=999` exits `1` with the
   expected report-count failure plus the same exact/accepted/divergent failures.
+- A 2026-05-28 bounded renderer slice routes famous-site corpus fixture capture
+  through the canonical Simple Web renderer and paints the Chrome-default 8px
+  body margin plus 120x40 styled block in the Engine2D facade path. The
+  representative `site_15_twitch` artifact improved from 6,672 differing
+  pixels to 2,841, while remaining divergent. `site_corpus_layout_report.spl`
+  now exposes its report builder as a direct importable contract so the corpus
+  BDD can verify layout-report output without depending on the unrelated
+  `file_modified_time` subprocess codegen path. `test/system/wm_compare/famous_site_corpus_spec.spl
+  --clean` now passes 33 examples.
 - `src/app/wm_compare/site_corpus_compat.spl --stale-only --limit=1` refreshes
   only reports above the stale threshold; the first bounded run refreshed
   `site_5_tiktok` to 2,750 differing pixels.

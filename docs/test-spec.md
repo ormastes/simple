@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-05-28 08:47:30*
+*Generated: 2026-05-28 09:57:37*
 
-## test/unit/app/ui
+## test/dbfs
 
-❌ **ipc_spec.spl** (193ms)
-  - Source: `test/unit/app/ui/ipc_spec.spl`
-  - Generated doc: `spec/ipc_spec.md`
+❌ **pure_db_spec.spl** (1700ms)
+  - Source: `test/dbfs/pure_db_spec.spl`
+  - Generated doc: `spec/pure_db_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 14 ✅
-- **Failed:** 5 ❌
-- **Duration:** 197ms
+- **Passed:** 41 ✅
+- **Failed:** 18 ❌
+- **Duration:** 1705ms

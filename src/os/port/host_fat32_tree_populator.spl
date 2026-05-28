@@ -3,15 +3,14 @@
 ## Loads an already formatted FAT32 image, mirrors a host directory tree into the
 ## mounted filesystem using the FAT32 driver, then flushes the cached image.
 
-use os.kernel.types.fs_types.{FileFlags}
 use os.port.cached_raw_image_block_device.{CachedRawImageBlockDevice}
 use os.services.block_device.{BlockDevice}
-use os.services.fat32.fat32.{Fat32Driver}
-use std.process
+use std.fs_driver.fat32_core.{Fat32Core}
 
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn _read_host_bytes(path: text, label: text) -> Result<[u8], text>:
     match rt_file_read_bytes(path):
@@ -31,9 +30,32 @@ fn _join_guest_path(parent: text, child: text) -> text:
     parent + "/" + child
 
 fn _host_is_dir(path: text) -> bool:
-    process.run("test", ["-d", path]).exit_code == 0
+    val (_stdout, _stderr, code) = rt_process_run("test", ["-d", path])
+    code == 0
 
-fn _flush_driver_image(driver: Fat32Driver, image_path: text, image_len_bytes: i64, sector_size: u32) -> Result<(), text>:
+fn _sync_driver_image_state(driver: Fat32Core) -> Result<(), text>:
+    val cluster_result = driver.flush_dirty_clusters()
+    if cluster_result.is_err():
+        return Err(cluster_result.unwrap_err())
+    Ok(())
+
+fn _open_driver_from_image(image_path: text, sector_size: u32) -> Result<Fat32Core, text>:
+    val image_bytes_result = _read_host_bytes(image_path, "image")
+    if image_bytes_result.is_err():
+        return Err(image_bytes_result.unwrap_err())
+    val image_bytes = image_bytes_result.unwrap()
+    match CachedRawImageBlockDevice.from_bytes(image_path, image_bytes, sector_size):
+        case Err(e):
+            Err(e)
+        case Ok(raw_device):
+            var device = CachedRawImageBlockDeviceAdapter(backing: raw_device)
+            var driver = Fat32Core.new(device)
+            val mount_result = driver.mount()
+            if mount_result.is_err():
+                return Err("host_fat32_tree_populator: failed to mount image: " + mount_result.unwrap_err())
+            Ok(driver)
+
+fn _flush_driver_image(driver: Fat32Core, image_path: text, image_len_bytes: i64, sector_size: u32) -> Result<(), text>:
     val sector_bytes = sector_size.to_i64()
     if sector_bytes <= 0:
         return Err("host_fat32_tree_populator: invalid sector size")
@@ -49,9 +71,12 @@ fn _flush_driver_image(driver: Fat32Driver, image_path: text, image_len_bytes: i
         while i < sector_bytes:
             sector.push(0u8)
             i = i + 1
-        val read_result = driver.device.read_sector(lba.to_u64(), sector)
+        val read_result = driver.device.read_sector(lba.to_u64())
         if read_result.is_err():
             return Err("host_fat32_tree_populator: failed to read sector " + lba.to_text() + " during flush: " + read_result.unwrap_err())
+        sector = read_result.unwrap()
+        if sector.len().to_i64() < sector_bytes:
+            return Err("host_fat32_tree_populator: short sector read during flush")
         i = 0
         while i < sector_bytes:
             image_bytes.push(sector[i])
@@ -71,8 +96,13 @@ impl CachedRawImageBlockDeviceAdapter:
 
 impl BlockDevice for CachedRawImageBlockDeviceAdapter:
     fn read_sector(lba: u64) -> Result<[u8], text>:
+        var image_bytes = self.backing.image_bytes
+        if self.backing.image_path != "":
+            val live_bytes = _read_host_bytes(self.backing.image_path, "image")
+            if live_bytes.is_err():
+                return Err(live_bytes.unwrap_err())
+            image_bytes = live_bytes.unwrap()
         val sector_bytes = self.backing.sector_size_bytes.to_i64()
-        val image_bytes = self.backing.image_bytes
         val start = (lba * self.backing.sector_size_bytes).to_i64()
         val end = start + sector_bytes
         if end > image_bytes.len().to_i64():
@@ -87,9 +117,14 @@ impl BlockDevice for CachedRawImageBlockDeviceAdapter:
 
     me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
         val sector_bytes = self.backing.sector_size_bytes.to_i64()
+        var image_bytes = self.backing.image_bytes
+        if self.backing.image_path != "":
+            val live_bytes = _read_host_bytes(self.backing.image_path, "image")
+            if live_bytes.is_err():
+                return Err(live_bytes.unwrap_err())
+            image_bytes = live_bytes.unwrap()
         val start = (lba * self.backing.sector_size_bytes).to_i64()
         val end = start + sector_bytes
-        var image_bytes = self.backing.image_bytes
         if end > image_bytes.len().to_i64():
             return Err("host_fat32_tree_populator: sector out of range")
 
@@ -105,51 +140,65 @@ impl BlockDevice for CachedRawImageBlockDeviceAdapter:
 
         self.backing.image_bytes = image_bytes
         self.backing.dirty = true
+        if self.backing.image_path != "":
+            if not rt_file_write_bytes(self.backing.image_path, image_bytes):
+                return Err("host_fat32_tree_populator: failed to write sector to image")
+            self.backing.dirty = false
         Ok(true)
 
-    fn sector_size() -> u32:
+    me fn sector_size() -> u32:
         self.backing.sector_size_bytes.to_u32()
 
 class HostFat32TreePopulator:
-    driver: Fat32Driver
+    driver: Fat32Core
+    image_path: text
+    sector_size: u32
 
 impl HostFat32TreePopulator:
+    me fn reload_driver() -> Result<(), text>:
+        val next_driver = _open_driver_from_image(self.image_path, self.sector_size)
+        if next_driver.is_err():
+            return Err(next_driver.unwrap_err())
+        self.driver = next_driver.unwrap()
+        Ok(())
+
     me fn write_guest_file(guest_path: text, host_path: text) -> Result<(), text>:
         val payload_result = _read_host_bytes(host_path, "host file")
         if payload_result.is_err():
             return Err(payload_result.unwrap_err())
         val payload = payload_result.unwrap()
 
-        val flags = FileFlags(
-            read: false,
-            write: true,
-            append: false,
-            create: true,
-            truncate: false,
-            directory: false
-        )
         print("open:start guest=" + guest_path)
-        val open_result = self.driver.open(guest_path, flags)
+        val open_result = self.driver.create_file(guest_path)
         if open_result.is_err():
             return Err("host_fat32_tree_populator: failed to create guest file " + guest_path + ": " + open_result.unwrap_err())
         val handle = open_result.unwrap()
-        print("open:ok guest=" + guest_path + " handle=" + handle.to_text())
+        print("open:ok guest=" + guest_path + " handle=" + handle.id.to_text())
 
         print("write:start guest=" + guest_path + " bytes=" + payload.len().to_text())
-        val write_result = self.driver.write(handle, payload)
-        if write_result.is_err():
-            _ = self.driver.close(handle)
-            return Err("host_fat32_tree_populator: failed to write guest file " + guest_path + ": " + write_result.unwrap_err())
-        if write_result.unwrap() != payload.len().to_u64():
-            _ = self.driver.close(handle)
-            return Err("host_fat32_tree_populator: short write for guest file: " + guest_path)
-        print("write:ok guest=" + guest_path + " bytes=" + write_result.unwrap().to_text())
+        if payload.len() > 0:
+            val write_result = self.driver.write(handle, payload, payload.len().to_i64())
+            if write_result.is_err():
+                _ = self.driver.close(handle)
+                return Err("host_fat32_tree_populator: failed to write guest file " + guest_path + ": " + write_result.unwrap_err())
+            if write_result.unwrap() != payload.len().to_i64():
+                _ = self.driver.close(handle)
+                return Err("host_fat32_tree_populator: short write for guest file: " + guest_path)
+            print("write:ok guest=" + guest_path + " bytes=" + write_result.unwrap().to_text())
+        else:
+            print("write:ok guest=" + guest_path + " bytes=0")
 
-        print("close:start guest=" + guest_path + " handle=" + handle.to_text())
+        print("close:start guest=" + guest_path + " handle=" + handle.id.to_text())
         val close_result = self.driver.close(handle)
         if close_result.is_err():
             return Err("host_fat32_tree_populator: failed to close guest file " + guest_path + ": " + close_result.unwrap_err())
         print("close:ok guest=" + guest_path)
+        val sync_result = _sync_driver_image_state(self.driver)
+        if sync_result.is_err():
+            return Err("host_fat32_tree_populator: failed to sync guest file " + guest_path + ": " + sync_result.unwrap_err())
+        val reload_result = self.reload_driver()
+        if reload_result.is_err():
+            return reload_result
         Ok(())
 
     me fn populate_directory(host_dir: text, guest_dir: text) -> Result<(), text>:
@@ -175,6 +224,12 @@ impl HostFat32TreePopulator:
             if mkdir_result.is_err():
                 return Err("host_fat32_tree_populator: failed to create guest directory " + guest_child + ": " + mkdir_result.unwrap_err())
             print("mkdir:ok guest=" + guest_child)
+            val mkdir_sync = _sync_driver_image_state(self.driver)
+            if mkdir_sync.is_err():
+                return Err("host_fat32_tree_populator: failed to sync guest directory " + guest_child + ": " + mkdir_sync.unwrap_err())
+            val reload_result = self.reload_driver()
+            if reload_result.is_err():
+                return reload_result
             print("recurse:start guest=" + guest_child)
             val recurse_result = self.populate_directory(host_child, guest_child)
             if recurse_result.is_err():
@@ -199,23 +254,18 @@ fn populate_host_tree_into_fat32_image_with_sector_size(image_path: text, source
         return Err(image_bytes_result.unwrap_err())
     val image_bytes = image_bytes_result.unwrap()
 
-    match CachedRawImageBlockDevice.from_bytes(image_path, image_bytes, sector_size):
+    match _open_driver_from_image(image_path, sector_size):
         case Err(e):
             Err(e)
-        case Ok(raw_device):
-            var device = CachedRawImageBlockDeviceAdapter(
-                backing: raw_device
-            )
-            var driver = Fat32Driver.new(device)
-            val mount_result = driver.mount("", "")
-            if mount_result.is_err():
-                return Err("host_fat32_tree_populator: failed to mount image: " + mount_result.unwrap_err())
-
-            var populator = HostFat32TreePopulator(driver: driver)
+        case Ok(driver):
+            var populator = HostFat32TreePopulator(driver: driver, image_path: image_path, sector_size: sector_size)
             val populate_result = populator.populate_directory(source_root, "/")
             if populate_result.is_err():
                 return populate_result
 
+            val sync_result = _sync_driver_image_state(populator.driver)
+            if sync_result.is_err():
+                return Err("host_fat32_tree_populator: failed to sync image: " + sync_result.unwrap_err())
             val flush_result = _flush_driver_image(populator.driver, image_path, image_bytes.len().to_i64(), sector_size)
             if flush_result.is_err():
                 return Err(flush_result.unwrap_err())

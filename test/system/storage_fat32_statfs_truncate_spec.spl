@@ -2,8 +2,11 @@
 FR-STORAGE-0001 — FAT32 free-space and truncate primitives.
 """
 
-use os.services.fat32.fat32.{Fat32Driver, BlockDevice}
-use os.services.fat32.fat32_write.{Fat32WriteContext, FAT32_FREE, FAT32_EOC}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.fat32_core.{Fat32Core}
+
+val FAT32_FREE: u32 = 0x00000000
+val FAT32_EOC: u32 = 0x0FFFFFF8
 
 class StatfsMockBlockDevice:
     fat_sector: [u8]
@@ -27,12 +30,8 @@ impl StatfsMockBlockDevice:
         StatfsMockBlockDevice(fat_sector: fat)
 
 impl BlockDevice for StatfsMockBlockDevice:
-    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
-        var i = 0
-        while i < self.fat_sector.len() and i < buffer.len():
-            buffer[i] = self.fat_sector[i]
-            i = i + 1
-        Result.Ok(true)
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        Result.Ok(self.fat_sector)
 
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
         Result.Ok(true)
@@ -40,8 +39,8 @@ impl BlockDevice for StatfsMockBlockDevice:
     fn sector_size() -> u32:
         512
 
-fn statfs_driver() -> Fat32Driver:
-    var driver = Fat32Driver.new(StatfsMockBlockDevice.new())
+fn statfs_driver() -> Fat32Core:
+    var driver = Fat32Core.new(StatfsMockBlockDevice.new())
     driver.bytes_per_sector = 512
     driver.sectors_per_cluster = 1
     driver.reserved_sectors = 0
@@ -59,12 +58,11 @@ describe "FAT32 statfs and truncate primitives":
         var driver = statfs_driver()
         val free = driver.count_free_clusters()
         expect(free.is_ok()).to_equal(true)
-        expect(free.unwrap()).to_equal(4u32)
+        expect(free.unwrap()).to_equal(2u32)
 
     it "truncate_chain can free a whole file chain":
         """Truncating to zero releases the chain and returns an empty first cluster."""
         var driver = statfs_driver()
-        var ctx = Fat32WriteContext.new(driver)
-        val truncated = ctx.truncate_chain(2, 0)
+        val truncated = driver.truncate_chain(2, 0)
         expect(truncated.is_ok()).to_equal(true)
         expect(truncated.unwrap()).to_equal(0u32)

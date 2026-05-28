@@ -17,6 +17,7 @@ use os.compositor.host_compositor_entry.{
     HostWmAppProcess,
     HostWmConfig,
     HostWmHandle,
+    SimpleOsGuiAdapter,
     WmService,
     host_taskbar_dock_width,
     host_taskbar_item_width,
@@ -24,6 +25,9 @@ use os.compositor.host_compositor_entry.{
     host_compositor_left_button,
     host_compositor_pointer_move,
     host_wm_surface_failure_reason,
+    host_wm_content_renderer_name,
+    simpleos_gui_adapter_display_path_name,
+    simpleos_gui_adapter_content_renderer_name,
     init_host_wm,
 }
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_MINIMIZE, COMP_RESTORE}
@@ -32,6 +36,8 @@ var _fake_present_count: i64 = 0
 var _capture_present_count: i64 = 0
 var _capture_blue_count: i64 = 0
 var _capture_white_count: i64 = 0
+var _capture_engine_title_count: i64 = 0
+var _capture_engine_content_count: i64 = 0
 var _capture_clear_color: u32 = 0u32
 
 class FakeCompositorBackend:
@@ -99,6 +105,10 @@ impl CompositorBackend for CaptureCompositorBackend:
             _capture_blue_count = _capture_blue_count + 1
         if color == 0xFFFFFFFFu32:
             _capture_white_count = _capture_white_count + 1
+        if color == 0xFF2050A0u32:
+            _capture_engine_title_count = _capture_engine_title_count + 1
+        if color == 0xFF182230u32:
+            _capture_engine_content_count = _capture_engine_content_count + 1
         var yy = y
         while yy < y + h:
             var xx = x
@@ -252,7 +262,8 @@ describe "HostWmHandle loop behavior":
             compositor: comp,
             wm: WmService.new(),
             event_loop_id: 0,
-            window_id: 0
+            window_id: 0,
+            backend: HostBackendKind.Browser
         )
         val pumped = handle.pump_host_events()
         handle.run_once()
@@ -263,6 +274,8 @@ describe "HostWmHandle loop behavior":
         _capture_present_count = 0
         _capture_blue_count = 0
         _capture_white_count = 0
+        _capture_engine_title_count = 0
+        _capture_engine_content_count = 0
         _capture_clear_color = 0u32
         val backend = CaptureCompositorBackend.with_color(160, 120, 0xFF000000u32)
         val comp = HostCompositor.new(backend, Size.wh(160, 120))
@@ -272,6 +285,23 @@ describe "HostWmHandle loop behavior":
         expect(_capture_blue_count).to_be_greater_than(0)
         expect(_capture_white_count).to_be_greater_than(0)
         expect(_capture_clear_color).to_equal(0xFF0F172Au32)
+
+    it "feeds WM app content through Simple Web into the Engine2D pixel path":
+        _capture_present_count = 0
+        _capture_blue_count = 0
+        _capture_white_count = 0
+        _capture_engine_title_count = 0
+        _capture_engine_content_count = 0
+        _capture_clear_color = 0u32
+        val backend = CaptureCompositorBackend.with_color(180, 140, 0xFF000000u32)
+        val comp = HostCompositor.new(backend, Size.wh(180, 140))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 10, 14, 132, 96, "ready", 901, "/sys/apps/terminal")
+        comp.render_frame()
+
+        expect(_capture_present_count).to_equal(1)
+        expect(_capture_blue_count).to_be_greater_than(0)
+        expect(_capture_engine_title_count).to_be_greater_than(0)
+        expect(_capture_engine_content_count).to_be_greater_than(0)
 
     it "records compositor resize dimensions":
         val backend = FakeCompositorBackend(w: 320, h: 240)
@@ -290,7 +320,8 @@ describe "HostWmHandle loop behavior":
             compositor: comp,
             wm: wm,
             event_loop_id: 0,
-            window_id: 0
+            window_id: 0,
+            backend: HostBackendKind.Browser
         )
         handle.run_once()
         expect(_fake_present_count).to_equal(0)
@@ -305,13 +336,26 @@ describe "HostWmHandle loop behavior":
             compositor: comp,
             wm: wm,
             event_loop_id: 1,
-            window_id: 1
+            window_id: 1,
+            backend: HostBackendKind.Browser
         )
         handle.tick_forever()
         expect(_fake_present_count).to_equal(0)
 
     it "uses a nonzero idle sleep interval for tick_forever":
         expect(HOST_WM_IDLE_SLEEP_MS).to_be_greater_than(0)
+
+    it "keeps Browser Electron and Tauri on the shared Simple Web content renderer":
+        val browser = init_host_wm(HostWmConfig(backend: HostBackendKind.Browser, initial_size: Size.wh(320, 240), title: "browser-wm"))
+        val electron = init_host_wm(HostWmConfig(backend: HostBackendKind.Electron, initial_size: Size.wh(320, 240), title: "electron-wm"))
+        val tauri = init_host_wm(HostWmConfig(backend: HostBackendKind.Tauri, initial_size: Size.wh(320, 240), title: "tauri-wm"))
+
+        expect(browser != nil).to_equal(true)
+        expect(electron != nil).to_equal(true)
+        expect(tauri != nil).to_equal(true)
+        expect(host_wm_content_renderer_name(browser)).to_equal("simple_web")
+        expect(host_wm_content_renderer_name(electron)).to_equal("simple_web")
+        expect(host_wm_content_renderer_name(tauri)).to_equal("simple_web")
 
 describe "HostCompositor hosted window state":
 
@@ -420,3 +464,34 @@ describe "HostCompositor hosted window state":
         expect(comp.windows.len()).to_equal(1)
         expect(comp.windows[0].title).to_equal("Broken failed")
         expect(comp.windows[0].content).to_contain("failed to create a window")
+
+describe "SimpleOS GUI adapter proof":
+
+    it "delivers display app events and input through the shared WM path":
+        _capture_present_count = 0
+        _capture_blue_count = 0
+        _capture_engine_title_count = 0
+        _capture_engine_content_count = 0
+        _capture_clear_color = 0u32
+        val backend = CaptureCompositorBackend.with_color(200, 150, 0xFF000000u32)
+        val adapter = SimpleOsGuiAdapter.new(backend, Size.wh(200, 150))
+
+        adapter.deliver_bridge_request(1, 44, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 20, 30, 128, 92, "adapter-ready", 800, "/sys/apps/terminal")
+        val window_id = adapter.compositor.windows[0].id
+        adapter.deliver_pointer_move(146, 120)
+        adapter.deliver_left_button(true)
+        adapter.deliver_pointer_move(180, 145)
+        adapter.deliver_left_button(false)
+        adapter.render_framebuffer_frame()
+
+        expect(simpleos_gui_adapter_display_path_name(adapter)).to_equal("simpleos-framebuffer")
+        expect(simpleos_gui_adapter_content_renderer_name(adapter)).to_equal("simple_web")
+        expect(adapter.delivered_bridge_events).to_equal(1)
+        expect(adapter.delivered_input_events).to_equal(4)
+        expect(adapter.presented_frames).to_equal(1)
+        expect(adapter.compositor.windows[0].id).to_equal(window_id)
+        expect(adapter.compositor.windows[0].w).to_be_greater_than(128)
+        expect(adapter.compositor.windows[0].h).to_be_greater_than(92)
+        expect(_capture_present_count).to_equal(1)
+        expect(_capture_blue_count).to_be_greater_than(0)
+        expect(_capture_clear_color).to_equal(0xFF0F172Au32)
