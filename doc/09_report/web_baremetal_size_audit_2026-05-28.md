@@ -112,6 +112,9 @@ Date: 2026-05-28
 | Pure Simple semihost stdout policy source | 1500 |
 | Bare-metal aggregate policy facade source | 1971 |
 | Bare-metal root facade source | 3587 |
+| Semihost transport source | 17567 |
+| Bare-metal syscall source | 17344 |
+| Bare-metal system API source | 8193 |
 
 ## Source Size Surfaces
 
@@ -160,6 +163,9 @@ Date: 2026-05-28
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_stdout_policy.spl` | 1 | 23 | 739 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/policy.spl` | 1 | 8 | 1971 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/__init__.spl` | 1 | 14 | 3587 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl` | 1 | 541 | 17567 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl` | 1 | 562 | 17344 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/system_api.spl` | 1 | 262 | 8193 |
 
 ## Browser Cluster Source Sizes
 
@@ -255,5 +261,6 @@ Date: 2026-05-28
 - `baremetal/startup_plan.spl` composes startup defaults with interrupt-controller selection while keeping scalar startup policy importable for tiny native probes.
 - `baremetal/policy.spl` is the aggregate pure-policy import surface; it must not import semihost transport, syscall, UART, or controller implementations.
 - `baremetal/__init__.spl` is the full root facade, including transport/syscall re-exports; tiny examples should use `baremetal/policy.spl` instead.
+- `baremetal/semihost_transport.spl`, `baremetal/syscall.spl`, and `baremetal/system_api.spl` are full transport/API surfaces and are budgeted separately from pure policy imports.
 - `pure_policy_probe.spl` proves examples can import only pure policies without retaining transport or controller implementations.
 - The split lanes now have default regression budgets. Set any `MAX_...` environment value higher, lower, or empty to tune a specific gate.
