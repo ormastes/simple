@@ -85,8 +85,8 @@ Stdlib wiring (unchanged surface):
 
 **T0.4: Verify Auto-Vec Codegen Emits Correct SIMD** — DONE (codegen extended)
 - Modified: `auto_vectorize_codegen.spl` — extended vectorize_binop with And/Or/Xor/Cmp/Shift cases
-- Added: `test/compiler/auto_vec_string_test.spl`
-- Evidence: `src/compiler_rust/target/debug/simple test test/compiler/auto_vec_string_test.spl --mode=interpreter --no-cache` — 4/4 pass
+- Added: `test/unit/compiler/semantics/auto_vec_string_test.spl`
+- Evidence: `src/compiler_rust/target/debug/simple test test/unit/compiler/semantics/auto_vec_string_test.spl --mode=interpreter --no-cache` — 4/4 pass
 
 ### WAVE 1: C Runtime Foundations (Tier 2) — ALL DONE
 
@@ -121,13 +121,13 @@ Stdlib wiring (unchanged surface):
 ### WAVE 5: Quality
 
 **T5.1: Correctness Test Suite** — DONE (52/52 tests pass)
-- Evidence: `src/compiler_rust/target/debug/simple test test/runtime/simd_text_test.spl --mode=interpreter` — 52/52 pass
+- Evidence: `src/compiler_rust/target/debug/simple test test/unit/runtime/simd_text/simd_text_test.spl --mode=interpreter` — 52/52 pass
 
 **T5.2: Fuzz Testing** — DONE
-- Added: `test/runtime/simd_text_fuzz.spl` plan marker for the requested artifact path
-- Added: `test/runtime/simd_text_fuzz_test.spl`
+- Added: `test/fixtures/runtime/simd_text/simd_text_fuzz.spl` plan marker for the requested artifact path
+- Added: `test/unit/runtime/simd_text/simd_text_fuzz_test.spl`
 - Design: deterministic raw-byte UTF-8 validation fuzz plus valid-text SIMD comparisons
-- Evidence: `src/compiler_rust/target/debug/simple test test/runtime/simd_text_fuzz_test.spl --mode=interpreter --no-cache` — 3/3 pass, including 100K generated raw-byte cases
+- Evidence: `src/compiler_rust/target/debug/simple test test/unit/runtime/simd_text/simd_text_fuzz_test.spl --mode=interpreter --no-cache` — 3/3 pass, including 100K generated raw-byte cases
 
 **T5.3: Performance Regression Gate** — DONE
 - Fixed benchmark timing extern from missing `rt_clock_monotonic_ns` to available `rt_time_now_nanos`
@@ -173,7 +173,7 @@ Stdlib wiring (unchanged surface):
 **T7.2: Fast interpreter text codepoint count** — DONE
 - Modified: `src/compiler_rust/compiler/src/interpreter_extern/simd.rs`
 - `rt_text_count_codepoints_cached` now counts UTF-8 leading bytes over `as_bytes()` instead of iterating Unicode scalars
-- Evidence: `src/compiler_rust/target/debug/simple test test/runtime/simd_text_test.spl --mode=interpreter --no-cache` — 52/52 pass
+- Evidence: `src/compiler_rust/target/debug/simple test test/unit/runtime/simd_text/simd_text_test.spl --mode=interpreter --no-cache` — 52/52 pass
 
 ### WAVE 8: Facade/Interpreter Cleanup — ALL DONE
 
@@ -181,8 +181,8 @@ Stdlib wiring (unchanged surface):
 - Modified: `src/lib/common/encoding/utf8.spl`, `src/compiler_rust/compiler/src/interpreter_extern/simd.rs`
 - `Utf8Provider.count_codepoints_impl` now delegates to `rt_utf8_count_codepoints` instead of routing every detected SIMD tier to `_scalar_utf8_count_codepoints`
 - Interpreter-mode `rt_utf8_count_codepoints`, `rt_utf8_validate`, and `rt_utf8_find_invalid` now unpack `Value::Array` byte buffers directly instead of converting through runtime heap arrays
-- Added public byte-array regression coverage in `test/runtime/simd_text_test.spl`
-- Evidence: `src/compiler_rust/target/debug/simple test test/runtime/simd_text_test.spl --mode=interpreter --no-cache` — 52/52 pass
+- Added public byte-array regression coverage in `test/unit/runtime/simd_text/simd_text_test.spl`
+- Evidence: `src/compiler_rust/target/debug/simple test test/unit/runtime/simd_text/simd_text_test.spl --mode=interpreter --no-cache` — 52/52 pass
 
 ### WAVE 9: Rope Search/Case Wiring — ALL DONE
 
@@ -201,10 +201,10 @@ Stdlib wiring (unchanged surface):
 ### WAVE 10: Naming/Module Cleanup — ALL DONE
 
 **T10.1: Apply Simple/Ruby-style local naming and explicit module imports** — DONE
-- Modified: `test/runtime/simd_text_fuzz_test.spl`, `test/unit/lib/common/rope_simd_search_test.spl`, `src/lib/common/rope/utilities.spl`
+- Modified: `test/unit/runtime/simd_text/simd_text_fuzz_test.spl`, `test/unit/lib/common/rope_simd_search_test.spl`, `src/lib/common/rope/utilities.spl`
 - Renamed internal fuzz predicates from `is_cont`/`scalar_is_valid` to descriptive Simple-compatible names without `?` suffixes
 - Removed unused rope test imports and made `rope/utilities.spl` explicitly import `rope_create_from_string`
-- Evidence: `src/compiler_rust/target/debug/simple test test/runtime/simd_text_fuzz_test.spl --mode=interpreter --no-cache` — 3/3 pass
+- Evidence: `src/compiler_rust/target/debug/simple test test/unit/runtime/simd_text/simd_text_fuzz_test.spl --mode=interpreter --no-cache` — 3/3 pass
 - Evidence: `src/compiler_rust/target/debug/simple test test/unit/lib/common/rope_simd_search_test.spl --mode=interpreter --no-cache` — 4/4 pass
 
 ### WAVE 11: Replace-All Search Cleanup — ALL DONE
@@ -258,13 +258,13 @@ Stdlib wiring (unchanged surface):
 
 ## Verification
 
-1. `src/compiler_rust/target/debug/simple test test/runtime/simd_text_test.spl --mode=interpreter` — 52/52 pass
+1. `src/compiler_rust/target/debug/simple test test/unit/runtime/simd_text/simd_text_test.spl --mode=interpreter` — 52/52 pass
 2. `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` — self-hosted compiler bootstraps
 3. `src/compiler_rust/target/debug/simple run src/lib/nogc_sync_mut/benchmark/string_bench.spl --mode=compiled` — benchmark suite completes
-4. `src/compiler_rust/target/debug/simple test test/runtime/simd_text_fuzz_test.spl --mode=interpreter --no-cache` — no validation divergence on 100K generated raw-byte inputs
+4. `src/compiler_rust/target/debug/simple test test/unit/runtime/simd_text/simd_text_fuzz_test.spl --mode=interpreter --no-cache` — no validation divergence on 100K generated raw-byte inputs
 5. Manual spot-check: Korean/CJK/emoji strings for correct codepoint counting
-6. `src/compiler_rust/target/debug/simple test test/compiler/auto_vec_string_test.spl --mode=interpreter --no-cache` — L-SIMD-012/013/014 verified
+6. `src/compiler_rust/target/debug/simple test test/unit/compiler/semantics/auto_vec_string_test.spl --mode=interpreter --no-cache` — L-SIMD-012/013/014 verified
 7. `src/compiler_rust/target/debug/simple test test/unit/lib/common/string_core_simd_search_test.spl --mode=interpreter --no-cache` — common string search/equality/predicate/replacement wiring verified
 8. `cargo check -q -p simple-compiler` — Rust compiler crate validates after interpreter extern changes
 9. `src/compiler_rust/target/debug/simple test test/unit/lib/common/rope_simd_search_test.spl --mode=interpreter --no-cache` — rope search/comparison/case wiring verified
-10. `src/compiler_rust/target/debug/simple test test/runtime/simd_text_fuzz_test.spl --mode=interpreter --no-cache` — local naming cleanup preserved fuzz coverage
+10. `src/compiler_rust/target/debug/simple test test/unit/runtime/simd_text/simd_text_fuzz_test.spl --mode=interpreter --no-cache` — local naming cleanup preserved fuzz coverage

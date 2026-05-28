@@ -78,7 +78,7 @@ with C/provider baselines.
   passed with 33 tests.
 - 2026-05-26: `bin/simple test test/unit/compiler/60.mir_opt/general_patterns_spec.spl`
   passed with 42 tests (7 patterns: 4 original + 3 new general patterns).
-- 2026-05-26: `src/compiler_rust/target/debug/simple test test/compiler/mir_opt/clib_parity_hotspot_spec.spl --mode=interpreter`
+- 2026-05-26: `src/compiler_rust/target/debug/simple test test/unit/compiler/mir_opt/clib_parity_hotspot_spec.spl --mode=interpreter`
   passed with 19 tests.
 
 ## Verification Gates

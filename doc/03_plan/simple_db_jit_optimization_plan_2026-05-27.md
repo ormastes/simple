@@ -69,7 +69,7 @@ Arrays are value types in Simple — `val typed = self._tbl_typed[ti]` copies th
 Still 8-20x from SQLite — remaining gap is irreducible interpreter overhead.
 
 ### A2: MIR Optimization Pattern Registration
-**Files:** `src/compiler/60.mir_opt/mir_opt/pattern/rules_clib_parity.spl`, `test/compiler/mir_opt/clib_parity_hotspot_spec.spl` (EXCLUSIVE)
+**Files:** `src/compiler/60.mir_opt/mir_opt/pattern/rules_clib_parity.spl`, `test/unit/compiler/mir_opt/clib_parity_hotspot_spec.spl` (EXCLUSIVE)
 **Agent:** Sonnet + Opus advisor
 **Goal:** Register new general-purpose patterns for the optimizations applied in A1
 

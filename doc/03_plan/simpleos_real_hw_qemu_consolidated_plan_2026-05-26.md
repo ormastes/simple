@@ -73,8 +73,8 @@ hardware actions.
 
 - 2026-05-26: Added proof-gated `CLibParityHotspot` rewrite eligibility in
   `src/compiler/60.mir_opt/mir_opt/pattern/rules_clib_parity.spl` and focused
-  coverage in `test/compiler/mir_opt/clib_parity_hotspot_spec.spl`. Command:
-  `src/compiler_rust/target/debug/simple test test/compiler/mir_opt/clib_parity_hotspot_spec.spl --mode=interpreter`.
+  coverage in `test/unit/compiler/mir_opt/clib_parity_hotspot_spec.spl`. Command:
+  `src/compiler_rust/target/debug/simple test test/unit/compiler/mir_opt/clib_parity_hotspot_spec.spl --mode=interpreter`.
   Result: pass, 19 tests.
 - 2026-05-26: Ran safe board-validation lane without flashing hardware.
   Artifacts are under
@@ -122,4 +122,4 @@ hardware actions.
   or `synthetic pass` unless the test is explicitly negative.
 - Optimization-plugin changes for this track must preserve volatile ordering,
   marker-contract equivalence, or fail-closed provider-grant behavior and must
-  be covered by `test/compiler/mir_opt/clib_parity_hotspot_spec.spl`.
+  be covered by `test/unit/compiler/mir_opt/clib_parity_hotspot_spec.spl`.

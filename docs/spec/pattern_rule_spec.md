@@ -10,7 +10,7 @@ Validates the data-driven PatternRulePass which loads `.opt.json` rule files, ma
 | Category | Compiler / MIR Optimization — Rule Engine |
 | Difficulty | 3/5 |
 | Status | Draft |
-| Source | `test/compiler/mir_opt/pattern_rule_spec.spl` |
+| Source | `test/unit/compiler/mir_opt/pattern_rule_spec.spl` |
 | Updated | 2026-05-25 |
 | Generator | `simple spipe-docgen` (Rust) |
 

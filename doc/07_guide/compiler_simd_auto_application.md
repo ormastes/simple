@@ -55,8 +55,8 @@ Use syntax checks for changed compiler/runtime files, then run focused parity te
 
 ```bash
 bin/simple check src/compiler src/lib
-bin/simple test test/runtime/simd_text_test.spl --mode=interpreter --clean
-bin/simple test test/runtime/simd_text_fuzz_test.spl --mode=interpreter --clean
+bin/simple test test/unit/runtime/simd_text/simd_text_test.spl --mode=interpreter --clean
+bin/simple test test/unit/runtime/simd_text/simd_text_fuzz_test.spl --mode=interpreter --clean
 bin/simple test test/integration/rendering/simd_parity_spec.spl --mode=interpreter --clean
 bin/simple test test/perf/scilib_simd_ops_perf_spec.spl --mode=interpreter --clean
 ```
