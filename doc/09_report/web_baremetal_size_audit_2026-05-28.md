@@ -9,7 +9,7 @@ Date: 2026-05-28
 | Browser smoke | ok | ok | 34968 | 28451 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
 | Browser simple render HTML | ok | ok | 18480 | 8165 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
 | Simple web static facade | n/a | ok | 14352 | 4696 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
-| Simple web script URL facade | n/a | ok | 34904 | 25005 | `build/web_baremetal_size_audit/simple_web_script_native.log` |
+| Simple web placeholder URL facade | n/a | ok | 14336 | 3883 | `build/web_baremetal_size_audit/simple_web_placeholder_native.log` |
 | Bare-metal pure policy probe | ok | ok | 14336 | 5967 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | x86_64 minimal boot/stdout capsule | n/a | ok | 2840 | 409 | `build/web_baremetal_size_audit/baremetal_boot_stdout.build.log` |
@@ -21,7 +21,7 @@ Date: 2026-05-28
 | Browser smoke native file / dec section | 36000 / 30000 |
 | Browser simple render HTML native file / dec section | 20000 / 10000 |
 | Simple web static facade native file / dec section | 19000 / 7500 |
-| Simple web script URL facade native file / dec section | 35500 / 26000 |
+| Simple web placeholder URL facade native file / dec section | 16000 / 5500 |
 | Bare-metal pure policy probe native file / dec section | 15000 / 6500 |
 | Bare-metal pure policy probe source | 1300 |
 | RV32 semihost stdout ELF file / dec section | 70000 / 9000 |
@@ -55,7 +55,7 @@ Date: 2026-05-28
 | `examples/browser/feature/dom` | 9 | 4854 | 181376 |
 | `examples/browser/feature/style` | 13 | 3914 | 150153 |
 | `src/lib/gc_async_mut/web` | 12 | 3784 | 160275 |
-| `src/lib/gc_async_mut/gpu/browser_engine` | 12 | 1555 | 59357 |
+| `src/lib/gc_async_mut/gpu/browser_engine` | 13 | 1572 | 59842 |
 
 ## Retention Checks
 
@@ -63,13 +63,15 @@ Date: 2026-05-28
 |---|---:|---:|
 | Browser simple render HTML | n/a | 0 |
 | Simple web static facade | 0 | 0 |
+| Simple web placeholder URL facade | 0 | 0 |
 | Bare-metal pure policy probe | 0 | 0 |
 
 ## Direction
 
 - Browser render size work should first split static render from script/session/network paths.
 - `simple_web_html_renderer` is the HTML-only core; URL/file loading, script execution, and corpus fixtures must stay in separate facades.
-- The static simple-web facade is measured separately from the script URL facade so script/runtime growth stays visible.
+- The static simple-web facade and about:/unloaded URL facade are measured separately so file, script, and fixture growth stays visible.
+- `simple_web_url_placeholder_renderer` is the about:/unloaded URL lane and must not retain file I/O, BrowserRenderer, script execution, or corpus fixtures.
 - Corpus fixture compatibility lives in `simple_web_corpus_fixture_renderer`; production static render must not retain PPM baseline loading.
 - x86_64 SimpleOS size work should split `baremetal_stubs.c` into boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes.
 - `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple.
