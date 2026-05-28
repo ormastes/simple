@@ -22,6 +22,8 @@ For the next implementation step, use [pipeline_next_step_plan.md](pipeline_next
 
 When a new feature or layer expert is needed, copy the matching template from `template/`, create the expert directory, and update the new `skill.md` with links to the relevant project docs and source paths. When product knowledge changes during research, design, implementation, verification, or release, update the affected feature and layer expert skills.
 
+This expert tree plus the self-healing update step is Simple's realization of the LLM Wiki and Auto-Research patterns — see [llm_wiki_and_auto_research.md](llm_wiki_and_auto_research.md) for the concept mapping.
+
 ## SPipe submodule
 
 Reusable SPipe process assets are being moved to the `.spipe/spipe` submodule
