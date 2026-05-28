@@ -13,7 +13,7 @@ Date: 2026-05-28
 | Simple web file facade | n/a | ok | 14344 | 6335 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
 | Simple web script placeholder facade | n/a | ok | 14336 | 3905 | `build/web_baremetal_size_audit/simple_web_script_placeholder_native.log` |
 | Simple web script file facade | n/a | ok | 26712 | 16126 | `build/web_baremetal_size_audit/simple_web_script_file_native.log` |
-| Bare-metal pure policy probe | ok | ok | 14336 | 6581 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
+| Bare-metal pure policy probe | ok | ok | 18432 | 6814 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 4892 | 156 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
 | RV64 semihost trap capsule | n/a | ok | 912 | 48 | `build/web_baremetal_size_audit/riscv64_semihost_trap.build.log` |
@@ -53,7 +53,7 @@ Date: 2026-05-28
 | Simple web file facade native file / dec section | 14500 / 6400 |
 | Simple web script placeholder facade native file / dec section | 14500 / 4200 |
 | Simple web script file facade native file / dec section | 27000 / 16500 |
-| Bare-metal pure policy probe native file / dec section | 15000 / 6800 |
+| Bare-metal pure policy probe native file / dec section | 18500 / 6900 |
 | Bare-metal pure policy probe source | 1300 |
 | RV32 semihost stdout ELF file / dec section | 6000 / 512 |
 | RV32 semihost trap object file / dec section | 768 / 64 |
@@ -110,9 +110,9 @@ Date: 2026-05-28
 | Pure Simple startup plan source | 2500 |
 | Pure Simple semihost policy source | 1500 |
 | Pure Simple semihost stdout policy source | 1500 |
-| Bare-metal aggregate policy facade source | 1971 |
+| Bare-metal aggregate policy facade source | 512 |
 | Bare-metal root facade source | 3587 |
-| Semihost transport source | 17567 |
+| Semihost transport source | 11500 |
 | Bare-metal syscall source | 17344 |
 | Bare-metal system API source | 8193 |
 
@@ -161,9 +161,9 @@ Date: 2026-05-28
 | `src/lib/nogc_async_mut_noalloc/baremetal/startup_plan.spl` | 1 | 29 | 1097 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_policy.spl` | 1 | 19 | 658 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_stdout_policy.spl` | 1 | 23 | 739 |
-| `src/lib/nogc_async_mut_noalloc/baremetal/policy.spl` | 1 | 8 | 1971 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/policy.spl` | 1 | 4 | 463 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/__init__.spl` | 1 | 14 | 3587 |
-| `src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl` | 1 | 400 | 11687 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl` | 1 | 387 | 11239 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl` | 1 | 293 | 8926 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/system_api.spl` | 1 | 183 | 4813 |
 

@@ -186,15 +186,17 @@ fn semihost_send_byte(byte_val: i32):
 fn semihost_send_string(str_addr: i32):
     semi_host_call(OP_WRITE0, str_addr, 0)
 
+fn semihost_writec_range(data_addr: i32, len: i32) -> i32:
+    var offset = 0
+    while offset < len:
+        semi_host_call(OP_WRITEC, data_addr + offset, 0)
+        offset = offset + 1
+    0
+
 # reason: positional baremetal semihost_transport API
 fn semihost_send_bytes(data_addr: i32, len: i32) -> i32:
     if current_transport == TRANSPORT_WRITEC:
-        # Loop: send each byte individually
-        var offset = 0
-        while offset < len:
-            semi_host_call(OP_WRITEC, data_addr + offset, 0)
-            offset = offset + 1
-        return 0
+        return semihost_writec_range(data_addr, len)
 
     if current_transport == TRANSPORT_WRITE0:
         # Single call — string must be null-terminated, no embedded nulls
@@ -204,23 +206,13 @@ fn semihost_send_bytes(data_addr: i32, len: i32) -> i32:
     if current_transport == TRANSPORT_WRITE:
         # Single call with [fd, buffer, length] param block
         if semihost_fd == -1:
-            # No fd open — fall back to WRITEC
-            var offset = 0
-            while offset < len:
-                semi_host_call(OP_WRITEC, data_addr + offset, 0)
-                offset = offset + 1
-            return 0
+            return semihost_writec_range(data_addr, len)
         return semi_host_call(OP_WRITE, data_addr, len)
 
     if current_transport == TRANSPORT_BATCH_N:
         # Send in fixed-size chunks via SYS_WRITE
         if semihost_fd == -1:
-            # No fd — fall back to WRITEC per byte
-            var offset = 0
-            while offset < len:
-                semi_host_call(OP_WRITEC, data_addr + offset, 0)
-                offset = offset + 1
-            return 0
+            return semihost_writec_range(data_addr, len)
         var offset = 0
         while offset < len:
             var chunk = semihost_batch_size
@@ -270,12 +262,7 @@ fn semihost_send_bytes(data_addr: i32, len: i32) -> i32:
         semi_host_call(0x100, data_addr, len)
         return 0
 
-    # Unknown transport — fall back to WRITEC
-    var offset = 0
-    while offset < len:
-        semi_host_call(OP_WRITEC, data_addr + offset, 0)
-        offset = offset + 1
-    0
+    semihost_writec_range(data_addr, len)
 
 fn semihost_open_stdout() -> i32:
     # SYS_OPEN with ":tt" path and mode 4 (write) opens stdout
