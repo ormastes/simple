@@ -13,7 +13,7 @@ Date: 2026-05-28
 | Simple web file facade | n/a | ok | 14344 | 6335 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
 | Simple web script placeholder facade | n/a | ok | 14336 | 3905 | `build/web_baremetal_size_audit/simple_web_script_placeholder_native.log` |
 | Simple web script file facade | n/a | ok | 26712 | 16935 | `build/web_baremetal_size_audit/simple_web_script_file_native.log` |
-| Bare-metal pure policy probe | ok | ok | 14336 | 6581 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
+| Bare-metal pure policy probe | ok | ok | 14336 | 6577 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 4892 | 156 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
 | RV64 semihost trap capsule | n/a | ok | 912 | 48 | `build/web_baremetal_size_audit/riscv64_semihost_trap.build.log` |
@@ -66,9 +66,10 @@ Date: 2026-05-28
 | ARM32 minimal PL011 startup/stdout object file / dec section | 2200 / 340 |
 | ARM32 minimal PL011 startup/stdout source | 2800 |
 | RV64 minimal 16550 startup/stdout object file / dec section | 2800 / 220 |
-| RV64 minimal 16550 startup/stdout source | 2200 |
+| RV64 minimal 16550 startup/stdout source | 256 |
 | RV32 minimal 16550 startup/stdout object file / dec section | 2300 / 260 |
-| RV32 minimal 16550 startup/stdout source | 2300 |
+| RV32 minimal 16550 startup/stdout source | 256 |
+| Shared RISC-V 16550 startup/stdout source | 1400 |
 | Shared minimal stdout helper source | 2200 |
 | x86_64 interrupt-control object file / dec section | 1536 / 64 |
 | x86_64 interrupt-control source | 1024 |
@@ -106,8 +107,9 @@ Date: 2026-05-28
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 107 | 2752 |
 | `examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c` | 1 | 57 | 1458 |
 | `examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c` | 1 | 50 | 1375 |
-| `examples/simple_os/arch/riscv64/boot/baremetal_uart_stdout.c` | 1 | 40 | 958 |
-| `examples/simple_os/arch/riscv32/boot/baremetal_uart_stdout.c` | 1 | 40 | 958 |
+| `examples/simple_os/arch/riscv64/boot/baremetal_uart_stdout.c` | 1 | 1 | 60 |
+| `examples/simple_os/arch/riscv32/boot/baremetal_uart_stdout.c` | 1 | 1 | 60 |
+| `examples/simple_os/arch/common/baremetal_riscv_16550_uart_stdout.c` | 1 | 41 | 1017 |
 | `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 62 | 1719 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
 | `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 23 | 753 |
@@ -191,8 +193,9 @@ Date: 2026-05-28
 - `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple.
 - `arm64/boot/baremetal_uart_stdout.c` is the ARM64 PL011 capsule baseline for startup/stdout only; GIC, PCI, filesystem, network, and GUI stay out of this lane.
 - `arm32/boot/baremetal_uart_stdout.c` is the ARM32 PL011 capsule baseline for startup/stdout only; GIC, framebuffer, filesystem, and GUI stay out of this lane.
-- `riscv64/boot/baremetal_uart_stdout.c` is the RV64 16550 capsule baseline for startup/stdout only; PLIC, CLINT, virtio, filesystem, and GUI stay out of this lane.
-- `riscv32/boot/baremetal_uart_stdout.c` is the RV32 16550 capsule baseline for startup/stdout only; PLIC, CLINT, virtio, filesystem, and GUI stay out of this lane.
+- `common/baremetal_riscv_16550_uart_stdout.c` is the shared RV32/RV64 16550 startup/stdout capsule; PLIC, CLINT, virtio, filesystem, and GUI stay out of this lane.
+- `riscv64/boot/baremetal_uart_stdout.c` is a thin RV64 compatibility wrapper over the shared RISC-V 16550 capsule.
+- `riscv32/boot/baremetal_uart_stdout.c` is a thin RV32 compatibility wrapper over the shared RISC-V 16550 capsule.
 - `baremetal_interrupt_control.c` is the x86_64 platform capsule baseline for CLI/STI/HLT and PIC masking only; APIC policy stays in pure Simple until controller code is explicitly imported.
 - `arm64/boot/baremetal_interrupt_control.S` is the ARM64 platform capsule baseline for DAIF mask/unmask and WFE only; GIC policy stays in pure Simple until controller code is explicitly imported.
 - `arm32/boot/baremetal_interrupt_control.S` is the ARM32 platform capsule baseline for CPSID/CPSIE and WFE only; GIC/NVIC policy stays in pure Simple until controller code is explicitly imported.
