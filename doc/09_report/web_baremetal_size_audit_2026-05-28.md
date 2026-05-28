@@ -111,7 +111,7 @@ Date: 2026-05-28
 | Pure Simple semihost policy source | 800 |
 | Pure Simple semihost stdout policy source | 900 |
 | Bare-metal aggregate policy facade source | 512 |
-| Bare-metal root facade source | 3587 |
+| Bare-metal root facade source | 2020 |
 | Bare-metal allocator source | 17450 |
 | Bare-metal interrupt implementation source | 15050 |
 | Semihost transport source | 11500 |
@@ -164,7 +164,7 @@ Date: 2026-05-28
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_policy.spl` | 1 | 19 | 658 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_stdout_policy.spl` | 1 | 23 | 739 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/policy.spl` | 1 | 4 | 463 |
-| `src/lib/nogc_async_mut_noalloc/baremetal/__init__.spl` | 1 | 14 | 3587 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/__init__.spl` | 1 | 8 | 2018 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/allocator.spl` | 1 | 561 | 17402 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/interrupt.spl` | 1 | 510 | 15013 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl` | 1 | 387 | 11239 |
@@ -265,7 +265,7 @@ Date: 2026-05-28
 - `baremetal/startup_policy.spl` is the pure-Simple policy surface for stack and hart startup defaults before importing architecture startup capsules.
 - `baremetal/startup_plan.spl` composes startup defaults with interrupt-controller selection while keeping scalar startup policy importable for tiny native probes.
 - `baremetal/policy.spl` is the aggregate pure-policy import surface; it must not import semihost transport, syscall, UART, or controller implementations.
-- `baremetal/__init__.spl` is the full root facade, including transport/syscall re-exports; tiny examples should use `baremetal/policy.spl` instead.
+- `baremetal/__init__.spl` is the full implementation facade for allocator, interrupt, transport, syscall, and RISC-V helpers; pure policy symbols stay on `baremetal/policy.spl`.
 - `baremetal/semihost_transport.spl`, `baremetal/syscall.spl`, and `baremetal/system_api.spl` are full transport/API surfaces and are budgeted separately from pure policy imports.
 - `pure_policy_probe.spl` proves examples can import only pure policies without retaining transport or controller implementations.
 - The split lanes now have default regression budgets. Set any `MAX_...` environment value higher, lower, or empty to tune a specific gate.
