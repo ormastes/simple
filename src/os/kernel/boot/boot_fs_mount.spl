@@ -23,6 +23,14 @@ use os.kernel.boot.freestanding_nvme_adapter_contract.{
     freestanding_nvme_adapter_provider,
     freestanding_nvme_adapter_refusal_reason
 }
+use os.kernel.boot.boot_nvme_production_handoff.{
+    boot_nvme_production_handoff_provision,
+    boot_nvme_production_handoff_clear,
+    boot_nvme_production_handoff_ready,
+    boot_nvme_production_handoff_device,
+    boot_nvme_production_handoff_evidence,
+    boot_nvme_production_handoff_lease
+}
 use os.drivers.nvme.nvme_storage_model.{
     NvmeTransferEvidence, NvmeFilesystemLease, NvmeFilesystemConsumer,
     nvme_filesystem_lease_reason
@@ -66,9 +74,6 @@ struct BootStorageAcceptanceEvidence:
 
 var _fs_mount_done: bool = false
 var _fs_mount_type: FsMountType = FsMountType.None_
-var _production_nvme_devices: [BlockDevice] = []
-var _production_nvme_evidence: [NvmeTransferEvidence] = []
-var _production_nvme_leases: [NvmeFilesystemLease] = []
 
 fn fs_mount_done() -> bool:
     _fs_mount_done
@@ -110,26 +115,22 @@ fn boot_fs_mount_freestanding_production() -> Result<FsMountResult, text>:
     The C bridge remains available only through the explicit development entry."""
     _fs_mount_done = false
     _fs_mount_type = FsMountType.None_
-    if _production_nvme_devices.len() == 0 or _production_nvme_evidence.len() == 0 or _production_nvme_leases.len() == 0:
+    if not boot_nvme_production_handoff_ready():
         log_raw_println("[boot-fs-mount] production storage rejected: pure NVMe lease device not provisioned")
         return Err("boot-fs-mount: pure-nvme-production-device-not-provisioned")
     boot_fs_mount_pure_nvme_from_lease_device(
-        _production_nvme_devices[0],
-        _production_nvme_evidence[0],
-        _production_nvme_leases[0]
+        boot_nvme_production_handoff_device(),
+        boot_nvme_production_handoff_evidence(),
+        boot_nvme_production_handoff_lease()
     )
 
 fn boot_fs_mount_provision_production_nvme_lease_device(dev: BlockDevice, evidence: NvmeTransferEvidence, lease: NvmeFilesystemLease):
     """Provision the production boot entry with a pure-Simple NVMe lease-backed device.
     This is the freestanding handoff point from the real NVMe hardware driver."""
-    _production_nvme_devices = [dev]
-    _production_nvme_evidence = [evidence]
-    _production_nvme_leases = [lease]
+    boot_nvme_production_handoff_provision(dev, evidence, lease)
 
 fn boot_fs_mount_clear_production_nvme_lease_device():
-    _production_nvme_devices = []
-    _production_nvme_evidence = []
-    _production_nvme_leases = []
+    boot_nvme_production_handoff_clear()
 
 fn boot_fs_mount_from_device(dev: BlockDevice, provider: text, pure_simple: bool) -> Result<FsMountResult, text>:
     """Probe supported root filesystems from one provider-neutral BlockDevice."""
