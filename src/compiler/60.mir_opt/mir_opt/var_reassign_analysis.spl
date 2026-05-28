@@ -29,6 +29,13 @@ struct SsaPhiPlan:
     else_value_local_id: i64
     phi_dest_local_id: i64
 
+struct SsaPhiMaterializeResult:
+    applied: bool
+    reason: text
+    blocks: [MirBlock]
+    phi_count: i64
+    next_local_id: i64
+
 fn local_list_contains(locals: [i64], local_id: i64) -> bool:
     var i = 0
     while i < locals.len():
@@ -270,6 +277,21 @@ fn ssa_rewrite_operand(operand: MirOperand, keys: [i64], values: [i64]) -> MirOp
         case Const(value, type_):
             MirOperand(kind: MirOperandKind.Const(value, type_))
 
+fn ssa_replace_operand_local(operand: MirOperand, original_id: i64, replacement_id: i64) -> MirOperand:
+    match operand.kind:
+        case Copy(local):
+            if local.id == original_id:
+                MirOperand(kind: MirOperandKind.Copy(ssa_local(replacement_id)))
+            else:
+                operand
+        case Move(local):
+            if local.id == original_id:
+                MirOperand(kind: MirOperandKind.Move(ssa_local(replacement_id)))
+            else:
+                operand
+        case Const(_, _):
+            operand
+
 fn ssa_max_local_from_operand(current: i64, operand: MirOperand) -> i64:
     val local = var_reassign_operand_local(operand)
     if local.? and local.unwrap() > current:
@@ -447,6 +469,108 @@ fn ssa_rewrite_term(term: MirTerminator, keys: [i64], values: [i64]) -> MirTermi
         case _:
             term
 
+fn ssa_replace_inst_dest_for_local(inst: MirInst, original_id: i64, replacement_id: i64) -> MirInst:
+    match inst.kind:
+        case Const(dest, value, type_):
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.Const(ssa_local(replacement_id), value, type_), span: inst.span)
+            else:
+                inst
+        case Copy(dest, src):
+            val new_src = ssa_replace_operand_local(MirOperand(kind: MirOperandKind.Copy(src)), original_id, replacement_id)
+            val rewritten_src = match new_src.kind:
+                case Copy(local): local
+                case _: src
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.Copy(ssa_local(replacement_id), rewritten_src), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.Copy(dest, rewritten_src), span: inst.span)
+        case Move(dest, src):
+            val new_src = ssa_replace_operand_local(MirOperand(kind: MirOperandKind.Move(src)), original_id, replacement_id)
+            val rewritten_src = match new_src.kind:
+                case Move(local): local
+                case _: src
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.Move(ssa_local(replacement_id), rewritten_src), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.Move(dest, rewritten_src), span: inst.span)
+        case BinOp(dest, op, left, right):
+            val new_left = ssa_replace_operand_local(left, original_id, replacement_id)
+            val new_right = ssa_replace_operand_local(right, original_id, replacement_id)
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.BinOp(ssa_local(replacement_id), op, new_left, new_right), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.BinOp(dest, op, new_left, new_right), span: inst.span)
+        case UnaryOp(dest, op, operand):
+            val new_operand = ssa_replace_operand_local(operand, original_id, replacement_id)
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.UnaryOp(ssa_local(replacement_id), op, new_operand), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.UnaryOp(dest, op, new_operand), span: inst.span)
+        case CheckedBinOp(dest, op, left, right):
+            val new_left = ssa_replace_operand_local(left, original_id, replacement_id)
+            val new_right = ssa_replace_operand_local(right, original_id, replacement_id)
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.CheckedBinOp(ssa_local(replacement_id), op, new_left, new_right), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.CheckedBinOp(dest, op, new_left, new_right), span: inst.span)
+        case GetField(dest, base, field):
+            val new_base = ssa_replace_operand_local(base, original_id, replacement_id)
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.GetField(ssa_local(replacement_id), new_base, field), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.GetField(dest, new_base, field), span: inst.span)
+        case Cast(dest, operand, target):
+            val new_operand = ssa_replace_operand_local(operand, original_id, replacement_id)
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.Cast(ssa_local(replacement_id), new_operand, target), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.Cast(dest, new_operand, target), span: inst.span)
+        case Bitcast(dest, operand, target):
+            val new_operand = ssa_replace_operand_local(operand, original_id, replacement_id)
+            if dest.id == original_id:
+                MirInst(kind: MirInstKind.Bitcast(ssa_local(replacement_id), new_operand, target), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.Bitcast(dest, new_operand, target), span: inst.span)
+        case _:
+            inst
+
+fn ssa_replace_inst_operands_for_local(inst: MirInst, original_id: i64, replacement_id: i64) -> MirInst:
+    match inst.kind:
+        case BinOp(dest, op, left, right):
+            MirInst(kind: MirInstKind.BinOp(dest, op, ssa_replace_operand_local(left, original_id, replacement_id), ssa_replace_operand_local(right, original_id, replacement_id)), span: inst.span)
+        case UnaryOp(dest, op, operand):
+            MirInst(kind: MirInstKind.UnaryOp(dest, op, ssa_replace_operand_local(operand, original_id, replacement_id)), span: inst.span)
+        case CheckedBinOp(dest, op, left, right):
+            MirInst(kind: MirInstKind.CheckedBinOp(dest, op, ssa_replace_operand_local(left, original_id, replacement_id), ssa_replace_operand_local(right, original_id, replacement_id)), span: inst.span)
+        case GetField(dest, base, field):
+            MirInst(kind: MirInstKind.GetField(dest, ssa_replace_operand_local(base, original_id, replacement_id), field), span: inst.span)
+        case Cast(dest, operand, target):
+            MirInst(kind: MirInstKind.Cast(dest, ssa_replace_operand_local(operand, original_id, replacement_id), target), span: inst.span)
+        case Bitcast(dest, operand, target):
+            MirInst(kind: MirInstKind.Bitcast(dest, ssa_replace_operand_local(operand, original_id, replacement_id), target), span: inst.span)
+        case Intrinsic(dest, name, args):
+            var new_args: [MirOperand] = []
+            for arg in args:
+                new_args = new_args.push(ssa_replace_operand_local(arg, original_id, replacement_id))
+            MirInst(kind: MirInstKind.Intrinsic(dest, name, new_args), span: inst.span)
+        case _:
+            inst
+
+fn ssa_replace_term_operands_for_local(term: MirTerminator, original_id: i64, replacement_id: i64) -> MirTerminator:
+    match term:
+        case Return(value):
+            if value.?:
+                MirTerminator.Return(Some(ssa_replace_operand_local(value.unwrap(), original_id, replacement_id)))
+            else:
+                term
+        case If(cond, then_, else_):
+            MirTerminator.If(ssa_replace_operand_local(cond, original_id, replacement_id), then_, else_)
+        case Switch(value, targets, default):
+            MirTerminator.Switch(ssa_replace_operand_local(value, original_id, replacement_id), targets, default)
+        case _:
+            term
+
 fn ssa_block_by_id(blocks: [MirBlock], id: i64) -> MirBlock?:
     for block in blocks:
         if block.id.id == id:
@@ -548,6 +672,56 @@ fn ssa_phi_plans_for_blocks(blocks: [MirBlock]) -> [SsaPhiPlan]:
                     []
         case _:
             []
+
+fn ssa_phi_instruction(plan: SsaPhiPlan) -> MirInst:
+    MirInst(
+        kind: MirInstKind.Intrinsic(
+            Some(ssa_local(plan.phi_dest_local_id)),
+            "__simple_ssa_phi",
+            [
+                MirOperand(kind: MirOperandKind.Copy(ssa_local(plan.then_value_local_id))),
+                MirOperand(kind: MirOperandKind.Copy(ssa_local(plan.else_value_local_id)))
+            ]
+        ),
+        span: nil
+    )
+
+fn ssa_apply_phi_plan_to_block(block: MirBlock, plan: SsaPhiPlan) -> MirBlock:
+    if block.id.id == plan.then_block_id:
+        var new_insts: [MirInst] = []
+        for inst in block.instructions:
+            new_insts = new_insts.push(ssa_replace_inst_dest_for_local(inst, plan.original_local_id, plan.then_value_local_id))
+        return MirBlock(id: block.id, label: block.label, instructions: new_insts, terminator: block.terminator)
+    if block.id.id == plan.else_block_id:
+        var new_insts: [MirInst] = []
+        for inst in block.instructions:
+            new_insts = new_insts.push(ssa_replace_inst_dest_for_local(inst, plan.original_local_id, plan.else_value_local_id))
+        return MirBlock(id: block.id, label: block.label, instructions: new_insts, terminator: block.terminator)
+    if block.id.id == plan.join_block_id:
+        var join_insts: [MirInst] = [ssa_phi_instruction(plan)]
+        for inst in block.instructions:
+            join_insts = join_insts.push(ssa_replace_inst_operands_for_local(inst, plan.original_local_id, plan.phi_dest_local_id))
+        val new_term = ssa_replace_term_operands_for_local(block.terminator, plan.original_local_id, plan.phi_dest_local_id)
+        return MirBlock(id: block.id, label: block.label, instructions: join_insts, terminator: new_term)
+    block
+
+fn ssa_apply_phi_plan(blocks: [MirBlock], plan: SsaPhiPlan) -> [MirBlock]:
+    var result: [MirBlock] = []
+    for block in blocks:
+        result = result.push(ssa_apply_phi_plan_to_block(block, plan))
+    result
+
+fn ssa_materialize_phi_plans_for_blocks(blocks: [MirBlock]) -> SsaPhiMaterializeResult:
+    val plans = ssa_phi_plans_for_blocks(blocks)
+    if plans.len() == 0:
+        return SsaPhiMaterializeResult(false, "no phi plan", blocks, 0, ssa_max_local_from_blocks(blocks) + 1)
+    var rewritten = blocks
+    var max_next = ssa_max_local_from_blocks(blocks) + 1
+    for plan in plans:
+        rewritten = ssa_apply_phi_plan(rewritten, plan)
+        if plan.phi_dest_local_id >= max_next:
+            max_next = plan.phi_dest_local_id + 1
+    SsaPhiMaterializeResult(true, "ready", rewritten, plans.len(), max_next)
 
 fn ssa_var_transform_reject(reason: text, blocks: [MirBlock], phi_locals: [i64]) -> SsaVarTransformResult:
     SsaVarTransformResult(false, reason, blocks, 0, 0, phi_locals.len(), phi_locals)

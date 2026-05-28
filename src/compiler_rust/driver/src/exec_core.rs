@@ -689,30 +689,12 @@ impl ExecCore {
         // Create execution manager and compile
         let mut em = LocalExecutionManager::with_provider(jit_backend, self.symbol_provider.clone())?;
 
-        eprintln!("[JIT-DEBUG] Compiling module ({} functions)...", mir_module.functions.len());
         em.compile_module(&mir_module)?;
-        eprintln!("[JIT-DEBUG] Compilation succeeded. Executing main...");
 
-        // Execute main — wrap in catch_unwind to handle JIT codegen crashes gracefully
-        let exec_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            em.execute("main", &[])
-        }));
-        match exec_result {
-            Ok(Ok(exit_code)) => {
-                eprintln!("[JIT-DEBUG] Execution completed with code {}", exit_code);
-                set_current_file(None);
-                self.collect_gc();
-                Ok(exit_code as i32)
-            }
-            Ok(Err(e)) => {
-                set_current_file(None);
-                Err(format!("JIT execution error: {}", e))
-            }
-            Err(panic_info) => {
-                set_current_file(None);
-                Err(format!("JIT execution panicked: {:?}", panic_info.downcast_ref::<String>().cloned().unwrap_or_else(|| "unknown panic".to_string())))
-            }
-        }
+        let exit_code = em.execute("main", &[])?;
+        set_current_file(None);
+        self.collect_gc();
+        Ok(exit_code as i32)
     }
 
     /// Get the build path for a compiled SMF file

@@ -1,12 +1,26 @@
 use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file}
 
+extern fn rt_dir_walk(path: text) -> [text]
+
 fn _assert_no_legacy_fat_driver(path: text):
     val source = read_file(path)
     val legacy_type = "Fat32" + "Driver"
-    val legacy_ctor = legacy_type + ".new("
     expect(source.contains("use os.services.fat32.fat32")).to_equal(false)
-    expect(source.contains(legacy_ctor)).to_equal(false)
+    expect(source.contains(" " + legacy_type + ".new(")).to_equal(false)
+    expect(source.contains("=" + legacy_type + ".new(")).to_equal(false)
+    expect(source.contains("(" + legacy_type + ".new(")).to_equal(false)
+
+fn _is_legacy_fat_implementation(path: text) -> bool:
+    path == "src/os/services/fat32/fat32.spl" or
+        path == "src/os/services/fat32/fat32_write.spl" or
+        path == "src/os/services/fat32/fat32_filesystem_ops.spl" or
+        path == "src/os/services/fat32/fat32_write_helpers.spl"
+
+fn _assert_os_tree_no_production_legacy_fat_driver():
+    for path in rt_dir_walk("src/os"):
+        if path.ends_with(".spl") and not _is_legacy_fat_implementation(path):
+            _assert_no_legacy_fat_driver(path)
 
 describe "SimpleOS production FAT purity guard":
     it "keeps VFS and boot production paths on the shared pure Simple FAT core":
@@ -22,6 +36,11 @@ describe "SimpleOS production FAT purity guard":
         val shared_fat = "SharedFat32" + "Driver"
         val fs_fat = "FsFat32" + "Driver"
         expect(boot_source.contains("use os.services.fat32.shared_fat32_driver.{" + shared_fat + " as Fat32Core}")).to_equal(true)
+        expect(boot_source.contains("boot_nvme_production_handoff_provision(g_adapter, transfer_evidence, lease)\n    var root = Fat32Core.new(g_adapter)")).to_equal(true)
+        expect(boot_source.contains("g_vfs_nvme_active_leases = [lease]\n    g_vfs_nvme_direct_adapter_leases = [lease]\n    g_vfs_nvme_direct_adapters = [g_adapter]")).to_equal(true)
         expect(mount_source.contains("use std.fs_driver.fat32_stub.{" + fs_fat + "}")).to_equal(true)
         expect(shared_source.contains("me fn sync() -> Result<bool, text>:")).to_equal(true)
         expect(shared_source.contains("val rc = self.inner.sync()")).to_equal(true)
+
+    it "keeps the SimpleOS source tree off legacy FAT outside the isolated compatibility module":
+        _assert_os_tree_no_production_legacy_fat_driver()

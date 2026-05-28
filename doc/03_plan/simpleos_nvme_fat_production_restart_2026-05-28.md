@@ -64,7 +64,9 @@
 
 ```text
 bin/simple test test/unit/os/services/vfs/vfs_pure_fat_production_guard_spec.spl --mode=interpreter --clean
-  PASSED: 1 examples, 0 failures
+  PASSED: 2 examples, 0 failures; includes source-tree scan that rejects
+  legacy Fat32Driver imports/constructors outside the isolated compatibility
+  module
 bin/simple test test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl --mode=interpreter --clean
   PASSED: 27 examples, 0 failures
 bin/simple test test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl --mode=interpreter --clean
@@ -87,6 +89,11 @@ bin/simple check src/lib/nogc_async_mut/fs_driver/fat32_core.spl src/lib/nogc_sy
   PASSED: exit code 0
 bin/simple check src/lib
   PASSED: exit code 0, warnings only
+scripts/perf/run-fat32-4k-cfat-baseline.shs
+  FAILED after clean full-cluster overwrite optimization: Simple FAT32 read
+  p50/p99 13us/14us, write p50/p99 34us/37us; direct C FAT32 read p50/p99
+  27us/64us, write p50/p99 26us/53us; VFAT skipped because
+  scripts/perf/prepare-fat32-4k-vfat.shs is missing
 CARGO_TARGET_DIR=target_codex_text_eq cargo build -p simple-driver --bin simple
   PASSED: dev build from fixed Rust sources
 src/compiler_rust/target_codex_text_eq/debug/simple run src/app/simpleos_nvme_serial_check/main.spl
@@ -112,6 +119,9 @@ SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/ta
      legacy `Fat32Driver`.
    - DONE for debug coverage: `_debug_host_fat32_tree_populator.spl` now uses
      the shared `Fat32Core` image-population path for manual sector dumps.
+   - DONE for production-path enforcement: `vfs_pure_fat_production_guard_spec`
+     now walks `src/os` and rejects legacy FAT imports/constructors outside the
+     isolated compatibility module files.
    - 2026-05-28 follow-up: the debug helper now exits 0 with
      `Result::Ok(())` after removing a local `io` alias lowering blocker from
      the cached raw-image device and replacing JIT-incompatible `Result.Ok`
@@ -130,6 +140,12 @@ SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/ta
    - Keep `scripts/perf/run-fat32-4k-cfat-baseline.shs` as the focused gate.
    - Require VFAT baseline when making the stronger “faster than C FAT” claim.
    - Record median/p50/p99 evidence, not single-sample claims.
+   - 2026-05-28 follow-up: full aligned 4K FAT overwrites now use a clean
+     cluster write path that avoids dirty-cache bookkeeping, improving Simple
+     FAT32 write p99 from 41us to 37us in the host gate, but the focused gate
+     still fails because C write p50 remains faster at 26us versus Simple 34us.
+     Tracked in
+     `doc/08_tracking/bug/fat32_4k_overwrite_c_baseline_gap_2026-05-28.md`.
 
 5. Audit direct I/O for all three filesystem consumers.
    - FAT32 is wired through shared FAT extents.

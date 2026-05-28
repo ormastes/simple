@@ -46,6 +46,112 @@ use std.http_server.h2_stream.{H2Stream, H2StreamState}
 use std.http_server.types.{HttpRequestData, HttpResponseData}
 
 # ============================================================================
+# Minimal inline HPACK decoder (avoids match-on-Result bugs in interpreter)
+# ============================================================================
+
+fn _hpack_static_name(idx: i64) -> text:
+    if idx == 1: return ":authority"
+    if idx == 2: return ":method"
+    if idx == 3: return ":method"
+    if idx == 4: return ":path"
+    if idx == 5: return ":path"
+    if idx == 6: return ":scheme"
+    if idx == 7: return ":scheme"
+    if idx == 8: return ":status"
+    if idx == 15: return "accept-charset"
+    if idx == 16: return "accept-encoding"
+    if idx == 17: return "accept-language"
+    if idx == 19: return "accept"
+    if idx == 28: return "content-length"
+    if idx == 31: return "content-type"
+    if idx == 32: return "cookie"
+    if idx == 33: return "date"
+    if idx == 38: return "host"
+    if idx == 58: return "user-agent"
+    return "header-{idx}"
+
+fn _hpack_static_value(idx: i64) -> text:
+    if idx == 2: return "GET"
+    if idx == 3: return "POST"
+    if idx == 4: return "/"
+    if idx == 5: return "/index.html"
+    if idx == 6: return "http"
+    if idx == 7: return "https"
+    if idx == 8: return "200"
+    if idx == 9: return "204"
+    if idx == 10: return "206"
+    if idx == 11: return "304"
+    if idx == 12: return "400"
+    if idx == 13: return "404"
+    if idx == 14: return "500"
+    return ""
+
+fn _bytes_range_to_str(data: [u8], start: i64, count: i64) -> text:
+    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var result = ""
+    var i = 0
+    while i < count:
+        val b = data[start + i]
+        if b >= 32 and b <= 126:
+            val idx = b - 32
+            val c = chars[idx]
+            result = "{result}{c}"
+        i = i + 1
+    return result
+
+fn _mini_hpack_decode(data: [u8]) -> [(text, text)]:
+    print "[HPACK] _mini_hpack_decode called, data.len={data.len()}"
+    var headers: [(text, text)] = []
+    var pos = 0
+    while pos < data.len():
+        val b = data[pos]
+        print "[HPACK] pos={pos} byte={b}"
+        if (b & 128) != 0:
+            val idx = b & 127
+            if idx > 0 and idx <= 61:
+                val n = _hpack_static_name(idx)
+                val v = _hpack_static_value(idx)
+                headers.push((n, v))
+            pos = pos + 1
+        elif (b & 64) != 0:
+            val name_idx = b & 63
+            pos = pos + 1
+            var name = ""
+            if name_idx > 0:
+                name = _hpack_static_name(name_idx)
+            else:
+                if pos < data.len():
+                    val nlen = data[pos]
+                    pos = pos + 1
+                    name = _bytes_range_to_str(data, pos, nlen)
+                    pos = pos + nlen
+            if pos < data.len():
+                val vlen = data[pos]
+                pos = pos + 1
+                val vs = _bytes_range_to_str(data, pos, vlen)
+                headers.push((name, vs))
+                pos = pos + vlen
+        else:
+            val name_idx = b & 15
+            pos = pos + 1
+            var name = ""
+            if name_idx > 0:
+                name = _hpack_static_name(name_idx)
+            else:
+                if pos < data.len():
+                    val nlen = data[pos]
+                    pos = pos + 1
+                    name = _bytes_range_to_str(data, pos, nlen)
+                    pos = pos + nlen
+            if pos < data.len():
+                val vlen = data[pos]
+                pos = pos + 1
+                val vs = _bytes_range_to_str(data, pos, vlen)
+                headers.push((name, vs))
+                pos = pos + vlen
+    return headers
+
+# ============================================================================
 # Connection-level defaults (RFC 9113 §6.5.2)
 # ============================================================================
 
@@ -335,39 +441,32 @@ class H2Connection:
                                 val sid = header.stream_id
                                 val hblock = _slice_bytes(self.recv_buf, offset - header.length, header.length)
                                 print "[CF] HEADERS stream={sid} hblock_len={hblock.len()}"
-                                var hb_dbg = ""
-                                var hbi = 0
-                                while hbi < hblock.len():
-                                    val b = hblock[hbi]
-                                    hb_dbg = "{hb_dbg} {b}"
-                                    hbi = hbi + 1
-                                print "[CF] hblock bytes:{hb_dbg}"
-                                print "[CF] calling hpack_decode..."
-                                val dec = hpack_decode(hblock, self.hpack_table)
-                                print "[CF] HPACK decoded {dec.headers.len()} headers"
+                                val decoded_hdrs = _mini_hpack_decode(hblock)
+                                print "[CF] mini_hpack decoded {decoded_hdrs.len()} headers"
                                 var method = "GET"
                                 var path = "/"
                                 var authority = ""
                                 var di = 0
-                                while di < dec.headers.len():
-                                    val entry = dec.headers[di]
-                                    print "[CF]   header: {entry.name}={entry.value}"
-                                    if entry.name == ":method":
-                                        method = entry.value
-                                    elif entry.name == ":path":
-                                        path = entry.value
-                                    elif entry.name == ":authority":
-                                        authority = entry.value
+                                while di < decoded_hdrs.len():
+                                    val hpair = decoded_hdrs[di]
+                                    print "[CF]   header: {hpair.0}={hpair.1}"
+                                    if hpair.0 == ":method":
+                                        method = hpair.1
+                                    elif hpair.0 == ":path":
+                                        path = hpair.1
+                                    elif hpair.0 == ":authority":
+                                        authority = hpair.1
                                     di = di + 1
                                 print "[CF] request: {method} {path}"
                                 var req = HttpRequestData(
                                     method: method,
                                     path: path,
+                                    query: "",
                                     version: "HTTP/2",
                                     headers: [],
                                     body: "",
-                                    query_string: "",
-                                    remote_addr: self.peer_addr
+                                    params: {},
+                                    peer_addr: self.peer_addr
                                 )
                                 self.pending_requests.push((sid, req))
                                 print "[CF] pending_requests.len={self.pending_requests.len()}"

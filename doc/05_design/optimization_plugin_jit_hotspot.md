@@ -30,9 +30,13 @@ mem2reg/SROA scalar promotion.
 
 - Add `VarReassignAnalysis`.
 - Add `SsaVarTransformResult`.
+- Add `SsaPhiPlan`.
+- Add `SsaPhiMaterializeResult`.
 - Add `analyze_var_reassign_blocks`.
 - Add `var_reassign_analysis_to_jit_facts`.
 - Add `ssa_var_transform_blocks`.
+- Add `ssa_phi_plans_for_blocks`.
+- Add `ssa_materialize_phi_plans_for_blocks`.
 
 The analyzer treats repeated definitions of the same MIR `LocalId` as `var`
 reassignment candidates. It is conservative: a reassigned local is not eligible
@@ -48,6 +52,22 @@ branching terminators return `requires phi nodes` until phi insertion exists.
 For simple diamond-shaped `if`/`else` CFGs where both arms assign the same
 local before jumping to a shared join block, the rejection now includes
 `phi_required_count` and `phi_required_locals` in `SsaVarTransformResult`.
+`ssa_phi_plans_for_blocks` turns that same shape into concrete plan records:
+join block ID, original local ID, planned then/else value locals, and the
+planned phi destination local.
+`ssa_materialize_phi_plans_for_blocks` rewrites the branch definitions to those
+fresh value locals, inserts `Intrinsic(Some(phi_dest), "__simple_ssa_phi", ...)`
+at the join, and rewrites join-block uses to the phi destination. This avoids a
+new MIR opcode until backend-native phi lowering is implemented.
+
+`src/compiler/95.interp/mir_interpreter.spl`:
+
+- Add interpreter fallback handling for `__simple_ssa_phi`.
+
+The interpreter uses the first incoming pseudo-phi operand as a deterministic
+linear fallback. CFG-aware native backends should lower the pseudo-phi to
+backend phi/block-parameter semantics; the interpreter fallback keeps
+materialized optimizer MIR executable for tests and non-native paths.
 
 `src/compiler/95.interp/execution/tiered_jit.spl`:
 
@@ -108,7 +128,7 @@ threshold is reached and the LLVM backend is available.
 - Manifest-created passes default to all backends.
 - Dynamic provider descriptors can be given backend skip policies after loading.
 
-`test/compiler/mir_opt/var_reassign_analysis_spec.spl` adds MIR analyzer coverage:
+`test/unit/compiler/mir_opt/var_reassign_analysis_spec.spl` adds MIR analyzer coverage:
 
 - Repeated local definitions become SSA-transformable when local and
   borrow-safe.
@@ -120,6 +140,14 @@ threshold is reached and the LLVM backend is available.
 - Multi-block reassignment is rejected with `requires phi nodes`.
 - Simple branch-merge reassignment reports the affected local IDs that need phi
   construction.
+- Simple branch-merge reassignment produces a concrete `SsaPhiPlan`.
+- Simple branch-merge reassignment materializes branch-local values and a
+  `__simple_ssa_phi` pseudo-intrinsic in the join block.
+
+`test/unit/compiler/interpreter/mir_ssa_phi_intrinsic_spec.spl` adds interpreter coverage:
+
+- `__simple_ssa_phi` stores the first incoming value into the destination as a
+  deterministic linear fallback.
 
 `test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl` adds plan coverage:
 

@@ -158,28 +158,13 @@ impl Default for JitCompiler {
 /// This allows the JIT to resolve external function calls to runtime SFFI functions
 /// like print, array operations, etc. The symbols are obtained from the provider,
 /// which can be static (compiled-in) or dynamic (loaded from shared library).
-/// Trap stub for unresolved runtime symbols — aborts with a clear message instead of segfaulting.
-extern "C" fn jit_unresolved_symbol_trap() -> i64 {
-    eprintln!("[JIT-TRAP] Called unresolved runtime symbol — falling back to interpreter");
-    std::process::abort();
-}
-
 fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &dyn RuntimeSymbolProvider) {
     use simple_native_loader::RUNTIME_SYMBOL_NAMES;
 
-    let mut resolved = 0;
-    let mut missing = 0;
     for &name in RUNTIME_SYMBOL_NAMES {
         if let Some(ptr) = provider.get_symbol(name) {
             builder.symbol(name, ptr);
-            resolved += 1;
-        } else {
-            builder.symbol(name, jit_unresolved_symbol_trap as *const u8);
-            missing += 1;
         }
-    }
-    if missing > 0 {
-        eprintln!("[JIT-SYMBOL] Resolved {}/{} runtime symbols ({} stubbed with trap)", resolved, resolved + missing, missing);
     }
 }
 

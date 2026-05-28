@@ -9,6 +9,10 @@
 
 extern fn rt_port_inb(port: u64) -> u64
 extern fn rt_port_outb(port: u64, value: u64)
+extern fn rt_gui_set_fb(addr: u64, width: u64) -> u64
+extern fn rt_gui_begin_frame(w: u64, h: u64, u1: u64, u2: u64) -> u64
+extern fn rt_gui_blend_fill(xy: u64, wh: u64, color: u64, alpha: u64) -> u64
+extern fn rt_gui_present(u1: u64, u2: u64, u3: u64, u4: u64) -> u64
 
 fn serial_data_port() -> u64:
     0x3F8
@@ -18,6 +22,9 @@ fn serial_lsr_port() -> u64:
 
 fn debug_exit_port() -> u64:
     0xF4
+
+fn pack(hi: u64, lo: u64) -> u64:
+    (hi << 32) | (lo & 0xFFFFFFFF)
 
 fn serial_wait_ready():
     var guard: i64 = 100000
@@ -452,6 +459,61 @@ fn serial_write_pass():
     serial_put(68)
     serial_put(10)
 
+fn serial_write_framebuffer_ready():
+    serial_put(91)
+    serial_put(119)
+    serial_put(109)
+    serial_put(45)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(45)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(93)
+    serial_put(32)
+    serial_put(102)
+    serial_put(114)
+    serial_put(97)
+    serial_put(109)
+    serial_put(101)
+    serial_put(98)
+    serial_put(117)
+    serial_put(102)
+    serial_put(102)
+    serial_put(101)
+    serial_put(114)
+    serial_put(32)
+    serial_put(109)
+    serial_put(97)
+    serial_put(114)
+    serial_put(107)
+    serial_put(101)
+    serial_put(114)
+    serial_put(32)
+    serial_put(79)
+    serial_put(75)
+    serial_put(10)
+
+fn paint_framebuffer_marker():
+    rt_gui_set_fb(0xFD000000, 1024)
+    rt_gui_begin_frame(1024, 768, 0, 0)
+    rt_gui_blend_fill(pack(0, 0), pack(1024, 768), 0xFF101820, 255)
+    rt_gui_blend_fill(pack(80, 90), pack(220, 42), 0xFF2050A0, 255)
+    rt_gui_blend_fill(pack(444, 252), pack(96, 64), 0xFF44FF44, 255)
+    rt_gui_present(0, 0, 0, 0)
+    serial_write_framebuffer_ready()
+
+fn hold_for_capture():
+    var iter: u64 = 0
+    while iter < 5000000:
+        rt_port_outb(0x80, 0)
+        iter = iter + 1
+
 fn click_title_bar():
     serial_write_step1()
     serial_write_focus()
@@ -471,6 +533,8 @@ fn _start():
 
     click_title_bar()
     drag_window()
+    paint_framebuffer_marker()
 
     serial_write_pass()
+    hold_for_capture()
     rt_port_outb(debug_exit_port(), 0)

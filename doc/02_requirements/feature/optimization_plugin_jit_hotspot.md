@@ -34,3 +34,9 @@ REQ-OPJH-015: The MIR optimizer shall expose analyzer-derived JIT var facts from
 REQ-OPJH-016: The MIR optimizer shall provide a conservative SSA var transform for straight-line reassignment hot paths, and shall explicitly reject CFG cases that require phi-node insertion until phi construction is implemented.
 
 REQ-OPJH-017: SSA var transform rejection shall report simple branch-merge phi requirements with the affected local IDs so a later phi-insertion pass can consume concrete placement data.
+
+REQ-OPJH-018: SSA var analysis shall expose a concrete phi insertion plan for simple branch merges, including join block, original local, planned branch value locals, and phi destination local.
+
+REQ-OPJH-019: SSA var analysis shall be able to materialize simple branch-merge phi plans into MIR using a pseudo-phi intrinsic until backend-native phi lowering is implemented.
+
+REQ-OPJH-020: The interpreter shall consume the `__simple_ssa_phi` pseudo-intrinsic with a deterministic fallback so materialized SSA MIR remains executable outside native backends.

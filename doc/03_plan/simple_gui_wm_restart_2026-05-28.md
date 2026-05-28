@@ -117,24 +117,21 @@ Current result on this Linux host:
 
 - `check` passes for the new spec.
 - QEMU is installed at `/usr/bin/qemu-system-x86_64`.
-- The live boot is blocked before QEMU by a real kernel link failure. The
-  native build command does not produce
-  `build/os/simpleos_wm_input_test_x86_64.elf` because
-  `wm_input_test_entry.spl` leaves file-scope `val`/`var` symbols unresolved
-  in the freestanding link:
-  `SERIAL_LSR`, `SERIAL_DATA`, `focused`, `win_x`, `win_y`, and `DEBUG_EXIT`.
-- The targeted test currently reports `1 passed / 1 failed`; the failed
-  example is the focused build blocker, and the boot example is skip-safe
-  until the kernel artifact exists.
+- 2026-05-28 follow-up: the freestanding link blocker is fixed by removing the
+  file-scope data symbols from `wm_input_test_entry.spl`; serial port constants
+  are now local constant-return helpers and the serial marker path no longer
+  needs mutable file-scope state.
+- `SIMPLE_LIB=src bin/simple test test/system/gui/wm_input_qemu_smoke_spec.spl --mode=interpreter --clean --format json`
+  now passes `2/2` in 6367 ms and boots the live QEMU input smoke through the
+  init/focus/drag/pass serial-marker path.
 
 ## Remaining Work
 
-1. Fix the `wm_input_test_entry.spl` freestanding link blocker, then rerun
-   `test/system/gui/wm_input_qemu_smoke_spec.spl` to convert the focused
-   build blocker into a live QEMU input proof.
-2. Extend SimpleOS GUI shared-path proof from deterministic host-backed adapter coverage to a live QEMU framebuffer/input smoke.
-3. Add macOS validation for Cocoa-backed host WM when a macOS host is available.
-4. Update architecture docs if implementation reveals a different adapter boundary.
+1. Extend the live QEMU input proof from serial-marker input state to a
+   framebuffer-backed assertion when the guest can expose a stable screenshot
+   oracle for this entry.
+2. Add macOS validation for Cocoa-backed host WM when a macOS host is available.
+3. Update architecture docs if implementation reveals a different adapter boundary.
 
 ## Known Blockers
 
@@ -142,8 +139,6 @@ Current result on this Linux host:
 - GitHub SSH fetch/push failed with `Permission denied (publickey)`.
 - Rebase against `origin/main` was blocked by unrelated dirty worktree changes.
 - Live SimpleOS QEMU GUI proof was not completed; earlier system spec timed out around 120 seconds.
-- Live WM input QEMU proof is currently blocked before boot by the
-  `wm_input_test_entry.spl` freestanding link failure described above.
 - Real macOS Cocoa proof was not possible on this Linux host.
 
 ## Scoped Commit Discipline

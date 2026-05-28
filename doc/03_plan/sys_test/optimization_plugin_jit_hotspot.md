@@ -43,4 +43,7 @@ bin/simple test doc/06_spec/app/compiler/feature/optimization_plugin_jit_hotspot
 | REQ-OPJH-015 | MIR analyzer derives JIT var facts from reassignment, escape, and borrow evidence |
 | REQ-OPJH-016 | Straight-line SSA var transform plus explicit phi-needed rejection |
 | REQ-OPJH-017 | Branch-merge phi requirement diagnostics include affected locals |
+| REQ-OPJH-018 | Branch-merge phi insertion plans include join, branch values, and destination |
+| REQ-OPJH-019 | Branch-merge phi materialization uses pseudo-phi MIR intrinsic |
+| REQ-OPJH-020 | Interpreter consumes pseudo-phi MIR intrinsic deterministically |
 | NFR-OPJH-008 | Missing proof degrades to original-source compilation |

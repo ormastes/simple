@@ -19,6 +19,7 @@ fn _physical_nvme_perf_marker(hardware_target: text, qemu: text, measured_on: te
         "fs_consumers=fat32,nvfs,dbfs fat32_direct_io=read-write-through nvfs_direct_io=read-write-through dbfs_direct_io=read-write-through fat32_extent_source=freestanding-fat32-extents " +
         "nvfs_extent_source=freestanding-dbfs-arena dbfs_extent_source=freestanding-dbfs-arena " +
         "c_bridge_used=false c_baseline_device=same-nvme c_baseline_scope=in-guest c_baseline_cache=direct " +
+        "vfat_baseline_device=same-nvme vfat_baseline_scope=in-guest vfat_baseline_cache=direct vfat_baseline_filesystem=vfat " +
         "common_logic_shared=true " +
         "allocation_per_io=false simple_read_iops=120000 simple_write_iops=90000 " +
         "simple_read_p99_us=800 simple_write_p99_us=1000 c_read_iops=100000 " +
@@ -248,6 +249,8 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(ready_report_text).to_contain("device: same-nvme")
         expect(ready_report_text).to_contain("scope: in-guest")
         expect(ready_report_text).to_contain("cache: direct")
+        expect(ready_report_text).to_contain("vfat_baseline:")
+        expect(ready_report_text).to_contain("filesystem: vfat")
         expect(ready_report_text).to_contain("performance:")
         expect(ready_report_text).to_contain("simple_read_iops: 120000")
         expect(ready_report_text).to_contain("simple_write_iops: 90000")
@@ -334,6 +337,39 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(wrapper_stdout).to_contain("multiple-nvme-perf-reports")
         expect(report_text).to_contain("accepted: false")
         expect(report_text).to_contain("acceptance_reason: nvme-real-hardware-perf:multiple-nvme-perf-reports")
+
+    it "rejects production perf evidence without same-device VFAT baseline markers":
+        val missing_path = "/tmp/simpleos_nvme_missing_vfat_baseline.log"
+        val spoof_path = "/tmp/simpleos_nvme_spoofed_vfat_baseline.log"
+        val missing_report = "/tmp/simpleos_nvme_missing_vfat_baseline.sdn"
+        val spoof_report = "/tmp/simpleos_nvme_spoofed_vfat_baseline.sdn"
+        val _ = rt_file_delete(missing_path)
+        val _ = rt_file_delete(spoof_path)
+        val _ = rt_file_delete(missing_report)
+        val _ = rt_file_delete(spoof_report)
+        val ready_perf = _physical_nvme_perf_marker("real-nvme", "false", "real-device")
+        val missing_log = _physical_nvme_access_marker() +
+            ready_perf.replace("vfat_baseline_device=same-nvme ", "") +
+            "TEST PASSED\n"
+        val spoofed_log = _physical_nvme_access_marker() +
+            ready_perf.replace("vfat_baseline_device=same-nvme", "vfat_baseline_device=host-cache") +
+            "TEST PASSED\n"
+        expect(rt_file_write_text(missing_path, missing_log)).to_equal(true)
+        expect(rt_file_write_text(spoof_path, spoofed_log)).to_equal(true)
+
+        val (missing_stdout, _missing_stderr, missing_code) = _run_checker_with_report(missing_path, missing_report)
+        val (spoof_stdout, _spoof_stderr, spoof_code) = _run_checker_with_report(spoof_path, spoof_report)
+        val missing_report_text = rt_file_read_text(missing_report) ?? ""
+        val spoof_report_text = rt_file_read_text(spoof_report) ?? ""
+
+        expect(missing_code).to_equal(1)
+        expect(missing_stdout).to_contain("missing-physical-nvme-marker:vfat_baseline_device=same-nvme")
+        expect(missing_report_text).to_contain("accepted: false")
+        expect(missing_report_text).to_contain("device: unknown")
+        expect(spoof_code).to_equal(1)
+        expect(spoof_stdout).to_contain("missing-physical-nvme-marker:vfat_baseline_device=same-nvme")
+        expect(spoof_report_text).to_contain("accepted: false")
+        expect(spoof_report_text).to_contain("device: host-cache")
 
     it "rejects invalid live serial capture settings before capture":
         val serial_path = "/tmp/simpleos_nvme_invalid_capture_settings.log"

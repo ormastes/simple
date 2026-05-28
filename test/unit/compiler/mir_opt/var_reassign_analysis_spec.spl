@@ -8,7 +8,8 @@ use compiler.mir_opt.mir_opt.var_reassign_analysis.{
     analyze_var_reassign_blocks,
     var_reassign_analysis_to_jit_facts,
     ssa_var_transform_blocks,
-    ssa_phi_plans_for_blocks
+    ssa_phi_plans_for_blocks,
+    ssa_materialize_phi_plans_for_blocks
 }
 use compiler.interp.execution.tiered_jit.{
     FunctionProfile, JitTier, TieredJitConfig,
@@ -224,3 +225,65 @@ describe "var reassignment analysis":
         expect(plans[0].then_value_local_id).to_equal(10)
         expect(plans[0].else_value_local_id).to_equal(11)
         expect(plans[0].phi_dest_local_id).to_equal(12)
+
+    it "materializes a pseudo phi intrinsic for an if/else merge":
+        val entry = MirBlock(
+            id: BlockId.new(0),
+            label: "entry",
+            instructions: [],
+            terminator: MirTerminator.If(copy_operand(9), BlockId.new(1), BlockId.new(2))
+        )
+        val then_block = MirBlock(
+            id: BlockId.new(1),
+            label: "then",
+            instructions: [inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64()))],
+            terminator: MirTerminator.Goto(BlockId.new(3))
+        )
+        val else_block = MirBlock(
+            id: BlockId.new(2),
+            label: "else",
+            instructions: [inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))],
+            terminator: MirTerminator.Goto(BlockId.new(3))
+        )
+        val join = MirBlock(
+            id: BlockId.new(3),
+            label: "join",
+            instructions: [inst(MirInstKind.BinOp(local(1), MirBinOp.Add, copy_operand(0), int_operand(1)))],
+            terminator: MirTerminator.Return(Some(copy_operand(1)))
+        )
+        val result = ssa_materialize_phi_plans_for_blocks([entry, then_block, else_block, join])
+        expect(result.applied).to_equal(true)
+        expect(result.phi_count).to_equal(1)
+
+        match result.blocks[1].instructions[0].kind:
+            case Const(dest, _, _):
+                expect(dest.id).to_equal(10)
+            case _:
+                expect(false).to_equal(true)
+        match result.blocks[2].instructions[0].kind:
+            case Const(dest, _, _):
+                expect(dest.id).to_equal(11)
+            case _:
+                expect(false).to_equal(true)
+        match result.blocks[3].instructions[0].kind:
+            case Intrinsic(dest, name, args):
+                expect(dest.?).to_equal(true)
+                if dest:
+                    expect(dest.unwrap().id).to_equal(12)
+                expect(name).to_equal("__simple_ssa_phi")
+                match args[0].kind:
+                    case Copy(local_id):
+                        expect(local_id.id).to_equal(10)
+                    case _:
+                        expect(false).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+        match result.blocks[3].instructions[1].kind:
+            case BinOp(_, _, left, _):
+                match left.kind:
+                    case Copy(local_id):
+                        expect(local_id.id).to_equal(12)
+                    case _:
+                        expect(false).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
