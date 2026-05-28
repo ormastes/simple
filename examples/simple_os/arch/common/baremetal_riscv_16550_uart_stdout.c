@@ -1,11 +1,3 @@
-/*
- * Shared RISC-V 16550 startup/stdout capsule.
- *
- * RV32 and RV64 keep thin wrappers so target-specific build rules stay simple.
- * Policy stays in pure Simple; this file owns only UART writes, stdout/stderr
- * ABI hooks, stack handoff to spl_start, and WFI halt.
- */
-
 #include <stdint.h>
 #include <stddef.h>
 
@@ -14,8 +6,7 @@
 #define UART_LSR 0x05UL
 #define UART_LSR_THRE 0x20u
 
-void serial_putchar(char c)
-{
+void serial_putchar(char c){
     volatile uint8_t *uart = (volatile uint8_t *)UART_BASE;
     for (uint32_t spin = 0; spin < 100000u; spin++) {
         if ((uart[UART_LSR] & UART_LSR_THRE) != 0u) break;
@@ -28,8 +19,7 @@ void serial_putchar(char c)
 extern void spl_start(void) __attribute__((weak));
 extern char _stack_top[];
 
-__attribute__((naked, section(".text.entry"))) void _start(void)
-{
+__attribute__((naked, section(".text.entry"))) void _start(void){
     __asm__ volatile(
         "la sp, _stack_top\n"
         "la t0, spl_start\n"

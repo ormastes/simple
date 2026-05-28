@@ -11,8 +11,7 @@
 #define PL011_TXFF (1u << 5)
 #define PL011_REG(offset) (*(volatile uint32_t *)(PL011_BASE + (offset)))
 
-static void pl011_init(void)
-{
+static void pl011_init(void){
     PL011_REG(PL011_CR) = 0u;
     PL011_REG(PL011_ICR) = 0x7FFu;
     PL011_REG(PL011_IBRD) = PL011_IBRD_VALUE;
@@ -21,8 +20,7 @@ static void pl011_init(void)
     PL011_REG(PL011_CR) = (1u << 0) | (1u << 8) | (1u << 9);
 }
 
-void serial_putchar(char c)
-{
+void serial_putchar(char c){
     for (uint32_t spin = 0; spin < 100000u; spin++) {
         if ((PL011_REG(PL011_FR) & PL011_TXFF) == 0u) break;
     }
@@ -36,14 +34,11 @@ extern void spl_start(void) __attribute__((weak));
 extern void __simple_call_module_inits(void) __attribute__((weak));
 #endif
 
-void SIMPLEOS_PL011_ENTRY(void)
-{
+void SIMPLEOS_PL011_ENTRY(void){
     pl011_init();
 #if SIMPLEOS_CALL_MODULE_INITS
     if (__simple_call_module_inits) __simple_call_module_inits();
 #endif
     if (spl_start) spl_start();
-    for (;;) {
-        __asm__ volatile(SIMPLEOS_PL011_HALT);
-    }
+    for (;;) __asm__ volatile(SIMPLEOS_PL011_HALT);
 }
