@@ -45,8 +45,8 @@ Parent feature ship commits on `origin/main`:
   - [x] Cross-page spec: `_copy_in_bytes(vaddr_near_page_boundary, >PAGE_SIZE
         length)` returns the full byte sequence when both pages are mapped
         READ, returns `[]` when the tail page is unmapped
-  - [x] No regression in `test/os/kernel/ipc/` or
-        `test/os/kernel/fs/win_vfs/`
+  - [x] No regression in `test/unit/os/kernel/ipc/` or
+        `test/unit/os/kernel/fs/win_vfs/`
 - **Related-upfront:** `doc/04_architecture/mdsoc_architecture_tobe.md` (MDSOC+
   boundary rules around kernel ↔ user memory)
 - **Related-design-doc:** `doc/05_design/spm_pt_walk_user_copy.md`
@@ -85,7 +85,7 @@ Parent feature ship commits on `origin/main`:
   - [x] Handler returns `0` for no-mirror, mismatched path, or empty id-path
   - [x] Spec: register two tasks with different mirrors, call `sys_priv_check`
         from each, assert the result matches the respective mirror's coverage
-  - [x] No regression in `test/os/kernel/ipc/` or privilege_bridge specs
+  - [x] No regression in `test/unit/os/kernel/ipc/` or privilege_bridge specs
 - **Related-upfront:** `doc/04_architecture/privilege_id_system.md`
 - **Related-design-doc:** `doc/05_design/spm_priv_check_task_mirror.md`
 - **Related-issue:** none

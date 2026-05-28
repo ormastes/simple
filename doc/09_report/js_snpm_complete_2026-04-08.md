@@ -23,7 +23,7 @@ Promoted the browser's JavaScript engine from `examples/browser/` to `src/lib/co
 - Semver resolver
 - Flat spl_modules/ installer with hoisting
 
-### Conformance Tests (test/js/) — 3 files, 103 tests
+### Conformance Tests (test/feature/js/) — 3 files, 103 tests
 - ES5: 54 tests (types, coercion, scope, control flow, functions, objects, arrays)
 - ES2015: 38 tests (arrows, let/const, templates, destructuring, spread, classes, array HOMs)
 - Node API: 11 tests (path module)

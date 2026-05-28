@@ -473,7 +473,7 @@ Key paths:
 - **Shared traits:** `src/lib/nogc_sync_mut/simple_db_if/`, `src/lib/gc_async_mut/simple_db_if/`
 - **Embedded (stdlib):** `src/lib/nogc_sync_mut/database/` — BugDB, TestDB, FeatureDB, QueryBuilder, atomic I/O
 - **Full engine (submodule):** `examples/simple_db/` → `https://github.com/ormastes/simple-spostgre.git`
-- **DBFS tests:** `test/dbfs/` — btree, pager, WAL, checkpoint, intent log, NVMe, capability, recovery
+- **DBFS tests:** `test/integration/storage/dbfs/` — btree, pager, WAL, checkpoint, intent log, NVMe, capability, recovery
 - **Research:** `doc/01_research/simple_db_research.md`
 - **Design:** `doc/05_design/simple_db_design.md`, `doc/05_design/nvfs/from_simple_db.md`
 - **Accel / SIMD:** `doc/05_design/simple_db_shared_accel_simd.md`
@@ -482,7 +482,7 @@ Key paths:
 
 ## DBFS (Database Filesystem)
 
-A filesystem that uses database techniques (B-tree indexing, WAL journaling, page-level checkpointing, intent logging) to manage metadata and file nodes. Similar to how btrfs uses B-trees for filesystem metadata. Backed by NVFS arenas with NVMe passthrough support. DBFS is primarily a filesystem component — it applies DB logic to file/inode management. Because it uses DB-like data structures internally, it also provides a DB-optimized storage path that Simple DB Full can leverage for its page/WAL/index operations, sharing primitives rather than duplicating them. Tests in `test/dbfs/`. Design in `doc/03_plan/nvfs_dbfs_real_filesystem.md`.
+A filesystem that uses database techniques (B-tree indexing, WAL journaling, page-level checkpointing, intent logging) to manage metadata and file nodes. Similar to how btrfs uses B-trees for filesystem metadata. Backed by NVFS arenas with NVMe passthrough support. DBFS is primarily a filesystem component — it applies DB logic to file/inode management. Because it uses DB-like data structures internally, it also provides a DB-optimized storage path that Simple DB Full can leverage for its page/WAL/index operations, sharing primitives rather than duplicating them. Tests in `test/integration/storage/dbfs/`. Design in `doc/03_plan/nvfs_dbfs_real_filesystem.md`.
 
 ## SDN (Simple Data Notation)
 

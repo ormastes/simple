@@ -45,7 +45,7 @@ false-greens are a known project hazard (see project memory
 | T2 | Integration | `test/feature/simd/` | `<kernel>/<target>_<mode>_spec.spl` | `bin/simple test test/feature/simd/` | Blocks T3 on host |
 | T3 | Cross-target equivalence | `test/cross_target/simd/` | `<kernel>_equiv_spec.spl` | QEMU wrapper script per target | Blocks merge after M3/M4 |
 | T4 | Strict-emit goldens | `test/backend/simd_strict_emit/` | `<target>/<kernel>.golden` | `bin/simple test test/backend/` | SPOT-CHECK dev; MANDATORY at each phase exit |
-| T5 | Fuzz | `test/fuzz/simd/` | `<dimension>_fuzz_spec.spl` | `bin/simple test test/fuzz/` (nightly CI) | Nightly, not per-PR |
+| T5 | Fuzz | `test/feature/language/fuzz/simd/` | `<dimension>_fuzz_spec.spl` | `bin/simple test test/feature/language/fuzz/` (nightly CI) | Nightly, not per-PR |
 | T6 | Perf gates | `test/perf/simd/` | `<target>_<kernel>_gate_spec.spl` | `bin/simple test test/perf/` (weekly + on-demand) | Weekly + blocks release |
 
 ### 1.2 Compiled-Mode Requirement
@@ -607,8 +607,8 @@ themselves, pinned to the spec section cited.
 
 ## 8. T5 — Fuzz Tests
 
-**Path scheme:** `test/fuzz/simd/<dimension>_fuzz_spec.spl`
-**Runner:** `bin/simple test test/fuzz/simd/ --mode=compiled` (nightly CI only)
+**Path scheme:** `test/feature/language/fuzz/simd/<dimension>_fuzz_spec.spl`
+**Runner:** `bin/simple test test/feature/language/fuzz/simd/ --mode=compiled` (nightly CI only)
 **Oracle:** scalar reference loop — same kernel, same inputs, computed without SIMD.
 **Timeout:** 5 seconds per kernel invocation; hard-kill at 10 seconds.
 
@@ -625,9 +625,9 @@ Shape: `(load × N) → (op × M) → (store × N)` where:
 Default iteration count: **100,000** (env var `SIMD_FUZZ_ITERS` overrides).
 
 ```
-test/fuzz/simd/random_kernel_fuzz_spec.spl
-test/fuzz/simd/nan_injection_fuzz_spec.spl
-test/fuzz/simd/scalable_vec_fuzz_spec.spl
+test/feature/language/fuzz/simd/random_kernel_fuzz_spec.spl
+test/feature/language/fuzz/simd/nan_injection_fuzz_spec.spl
+test/feature/language/fuzz/simd/scalable_vec_fuzz_spec.spl
 ```
 
 ### 8.2 Errata-Driven Targeted Seeds (12 seeds — C1 §6 items A–L)
@@ -773,7 +773,7 @@ They MUST appear as SKIP in the test report, not as FAIL or PASS.
 | T2 (integration) | `bin/simple test test/feature/simd/ --mode=compiled` | Uses host target by default; pass `--target=<triple>` for cross |
 | T3 (equivalence) | `scripts/test/simd_cross_target_runner.shs` | Wraps QEMU per-target; calls `bin/simple test` internally |
 | T4 (goldens) | `bin/simple test test/backend/simd_strict_emit/ --mode=compiled` | Golden diff via `scripts/test/golden_diff.shs` |
-| T5 (fuzz) | `bin/simple test test/fuzz/simd/ --mode=compiled` (nightly only) | `SIMD_FUZZ_ITERS=100000` default |
+| T5 (fuzz) | `bin/simple test test/feature/language/fuzz/simd/ --mode=compiled` (nightly only) | `SIMD_FUZZ_ITERS=100000` default |
 | T6 (perf) | `bin/simple test test/perf/simd/ --mode=compiled` (weekly) | Requires `--perf` flag to enable; skipped by default |
 
 All tiers feed `doc/08_tracking/test/test_result.md` via the existing test-result

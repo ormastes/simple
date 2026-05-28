@@ -252,7 +252,7 @@ present at the correct register slot in `TrapFrame`.
 | SA-1 | `riscv64/sbi.spl`, `riscv32/sbi.spl` | None — runs first |
 | SA-2 | `riscv64/smp.spl`, `riscv32/smp.spl`, `riscv64/dtb_scan.spl`, `riscv32/dtb_scan.spl`, `baremetal/riscv/startup.spl`, `baremetal/riscv32/startup.spl`, `riscv64/mod.spl`, `riscv32/mod.spl` | SA-1 must land first |
 | SA-3 | `riscv64/cache.spl`, `riscv32/cache.spl` | None — parallel with SA-2 |
-| SA-4 | `test/os/kernel/arch/hal_riscv64_smp_cache_spec.spl`, `test/os/kernel/arch/hal_riscv32_smp_cache_spec.spl` | Parallel; uses stub impls |
+| SA-4 | `test/unit/os/kernel/arch/hal_riscv64_smp_cache_spec.spl`, `test/unit/os/kernel/arch/hal_riscv32_smp_cache_spec.spl` | Parallel; uses stub impls |
 
 **Execution order:** SA-1 → (SA-2 + SA-3 + SA-4 in parallel).
 

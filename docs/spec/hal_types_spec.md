@@ -11,7 +11,7 @@ Validates the typed HAL capsule module at src/lib/nogc_sync_mut/hal/ with MmioAd
 | Difficulty | 3/5 |
 | Status | Draft |
 | Plan | doc/03_plan/pure_simple_lib_standalone_hw_plan.md |
-| Source | `test/lib/hal/hal_types_spec.spl` |
+| Source | `test/unit/lib/hal/hal_types_spec.spl` |
 | Updated | 2026-05-25 |
 | Generator | `simple spipe-docgen` (Rust) |
 

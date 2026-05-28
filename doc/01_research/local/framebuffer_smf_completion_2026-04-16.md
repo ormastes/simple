@@ -115,7 +115,7 @@ This duplication is why fixes landed unevenly:
 ## Recommended completion direction
 
 1. First fix the shared QMP capture contract once, below the specs:
-   - `test/qemu/os/common/qemu_os_harness.spl`
+   - `test/system/qemu/os/common/qemu_os_harness.spl`
    - `src/os/compositor/qemu_capture.spl`
    - `src/lib/nogc_sync_mut/qemu/qmp_client.spl`
 

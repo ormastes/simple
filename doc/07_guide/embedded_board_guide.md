@@ -423,7 +423,7 @@ of truth for all 16 remote execution lanes.
 | Semihosting | `src/lib/nogc_async_mut_noalloc/baremetal/{arm,riscv,riscv32}/semihost.spl` |
 | SimpleOS Kernel | `src/os/kernel/arch/` |
 | Embedded Examples | `examples/09_embedded/` |
-| QEMU OS Tests | `test/qemu/os/` |
+| QEMU OS Tests | `test/system/qemu/os/` |
 | Integration Specs | `test/integration/remote_jit/` |
 
 ---

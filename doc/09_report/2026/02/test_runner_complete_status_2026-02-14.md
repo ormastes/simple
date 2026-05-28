@@ -92,7 +92,7 @@
 test/unit/         → Native (fast)
 test/integration/  → Safe (standard)
 test/system/       → Safe (slow)
-test/qemu/         → Container (intensive)
+test/system/qemu/         → Container (intensive)
 test/baremetal/    → Container (intensive)
 test/database/     → Process (slow)
 ```

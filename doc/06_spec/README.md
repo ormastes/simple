@@ -16,7 +16,7 @@
 
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
-| [Math Block Tensor Operations Specification](math_blocks_spec.md) | Implemented | Thin | 4/5 | 28 | The `m{}` math block supports torch-compatible tensor operations for numerical computing. Each math block is a self-con… |
+| [Math Block Tensor Operations Specification](feature/usage/math_blocks_spec.md) | Implemented | Thin | 4/5 | 28 | The `m{}` math block supports torch-compatible tensor operations for numerical computing. Each math block is a self-con… |
 
 ## Residual Files
 
@@ -34,9 +34,7 @@ These files are present in `doc/06_spec` but were not regenerated in this run.
 | feature.md | Legacy markdown |
 | feature_db.sdn | Data/config artifact |
 | functions.md | Legacy markdown |
-| loss_nograd_blocks_spec.md | Legacy markdown |
 | macro.md | Legacy markdown |
-| math_render_spec.md | Legacy markdown |
 | memory.md | Legacy markdown |
 | metaprogramming.md | Legacy markdown |
 | modules.md | Legacy markdown |

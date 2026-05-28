@@ -15,27 +15,27 @@ Out of scope until implementation exists: real browser GPU driver execution, pix
 | REQ | Requirement | Existing Evidence | Gap |
 |-----|-------------|-------------------|-----|
 | REQ-WGPU-001 | Secure pages expose `navigator.gpu` and insecure pages hide/block it. | `test/unit/browser/script/navigator_api_spec.spl`, `test/unit/lib/common/web/browser_session_spec.spl` | Add system spec example that asserts both secure and insecure JS page behavior in one flow. |
-| REQ-WGPU-002 | Secure canvas `getContext("webgpu")` configures, presents, creates shader modules and render/compute pipelines. | `test/unit/browser/script/canvas_api_spec.spl`, `test/web_platform/webgpu/webgpu_context_spec.spl` | Add system spec example that treats canvas as the browser API boundary. |
-| REQ-WGPU-003 | WebGPU resources and command queues validate usage, bounds, invalid ordering, and atomic submit behavior. | `test/web_platform/webgpu/webgpu_resources_spec.spl`, `test/web_platform/webgpu/webgpu_commands_spec.spl` | Add integrated resource + queue example from the Simple script path. |
-| REQ-WGPU-004 | Software executor deterministically replays writes, render/compute passes, copies, and rejects invalid sequencing. | `test/web_platform/webgpu/webgpu_software_executor_spec.spl`, `test/unit/browser/script/canvas_api_spec.spl` | Add end-to-end Simple script example that verifies checksums/counters after queue execution. |
-| REQ-WGPU-005 | Browser JS session exposes WebGPU globals without regressing regular JS execution. | `test/browser_engine/js_integration_spec.spl`, `test/unit/lib/common/web/browser_session_spec.spl` | Add JS expression examples for `requestAdapter` shape and secure metadata. |
+| REQ-WGPU-002 | Secure canvas `getContext("webgpu")` configures, presents, creates shader modules and render/compute pipelines. | `test/unit/browser/script/canvas_api_spec.spl`, `test/feature/web_platform/webgpu/webgpu_context_spec.spl` | Add system spec example that treats canvas as the browser API boundary. |
+| REQ-WGPU-003 | WebGPU resources and command queues validate usage, bounds, invalid ordering, and atomic submit behavior. | `test/feature/web_platform/webgpu/webgpu_resources_spec.spl`, `test/feature/web_platform/webgpu/webgpu_commands_spec.spl` | Add integrated resource + queue example from the Simple script path. |
+| REQ-WGPU-004 | Software executor deterministically replays writes, render/compute passes, copies, and rejects invalid sequencing. | `test/feature/web_platform/webgpu/webgpu_software_executor_spec.spl`, `test/unit/browser/script/canvas_api_spec.spl` | Add end-to-end Simple script example that verifies checksums/counters after queue execution. |
+| REQ-WGPU-005 | Browser JS session exposes WebGPU globals without regressing regular JS execution. | `test/unit/browser_engine/js_integration_spec.spl`, `test/unit/lib/common/web/browser_session_spec.spl` | Add JS expression examples for `requestAdapter` shape and secure metadata. |
 | REQ-WGPU-006 | WASM backend emits browser-compatible WAT/JS glue. | `test/integration/compiler/wasm_e2e_spec.spl`, `test/unit/compiler/wasm_codegen_spec.spl` | `test/feature/usage/wasm_compile_spec.spl` currently fails 3 target-helper assertions; direct WASM-to-WebGPU bridge is not implemented. |
 | REQ-WGPU-007 | A browser page can load WASM glue and then use JS WebGPU APIs in the same session. | Current-state gap is covered by `webgpu_js_wasm_simple_spec.spl`: BrowserSession exposes `navigator.gpu` but not `WebAssembly`. | Add implementation-backed positive test once page asset loading/instantiation exposes `WebAssembly.instantiate`. |
 
 ## Execution Order
 
 1. Core WebGPU primitives:
-   - `src/compiler_rust/target/debug/simple test test/web_platform/webgpu/webgpu_context_spec.spl --mode=interpreter`
-   - `src/compiler_rust/target/debug/simple test test/web_platform/webgpu/webgpu_resources_spec.spl --mode=interpreter`
-   - `src/compiler_rust/target/debug/simple test test/web_platform/webgpu/webgpu_commands_spec.spl --mode=interpreter`
-   - `src/compiler_rust/target/debug/simple test test/web_platform/webgpu/webgpu_status_errors_spec.spl --mode=interpreter`
-   - `src/compiler_rust/target/debug/simple test test/web_platform/webgpu/webgpu_software_executor_spec.spl --mode=interpreter`
+   - `src/compiler_rust/target/debug/simple test test/feature/web_platform/webgpu/webgpu_context_spec.spl --mode=interpreter`
+   - `src/compiler_rust/target/debug/simple test test/feature/web_platform/webgpu/webgpu_resources_spec.spl --mode=interpreter`
+   - `src/compiler_rust/target/debug/simple test test/feature/web_platform/webgpu/webgpu_commands_spec.spl --mode=interpreter`
+   - `src/compiler_rust/target/debug/simple test test/feature/web_platform/webgpu/webgpu_status_errors_spec.spl --mode=interpreter`
+   - `src/compiler_rust/target/debug/simple test test/feature/web_platform/webgpu/webgpu_software_executor_spec.spl --mode=interpreter`
 2. Script/browser API:
    - `src/compiler_rust/target/debug/simple test test/unit/browser/script/canvas_api_spec.spl --mode=interpreter`
    - `src/compiler_rust/target/debug/simple test test/unit/browser/script/navigator_api_spec.spl --mode=interpreter`
    - `src/compiler_rust/target/debug/simple test test/unit/browser/script/worker_api_spec.spl --mode=interpreter`
    - `src/compiler_rust/target/debug/simple test test/unit/lib/common/web/browser_session_spec.spl --mode=interpreter`
-   - `src/compiler_rust/target/debug/simple test test/browser_engine/js_integration_spec.spl --mode=interpreter`
+   - `src/compiler_rust/target/debug/simple test test/unit/browser_engine/js_integration_spec.spl --mode=interpreter`
 3. WASM backend:
    - `src/compiler_rust/target/debug/simple test test/integration/compiler/wasm_e2e_spec.spl --mode=interpreter`
    - `src/compiler_rust/target/debug/simple test test/unit/compiler/wasm_codegen_spec.spl --mode=interpreter`

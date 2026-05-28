@@ -59,8 +59,8 @@ arch-neutral import boundary and the kernel-path owned-C policy status.
 
 | Check | Artefact |
 |---|---|
-| HAL trait surface + per-arch file presence | `test/os/multiarch/hal_trait_surface_spec.spl` |
-| inventory + owned-C policy chain | `test/os/multiarch/c_port_inventory_spec.spl` |
+| HAL trait surface + per-arch file presence | `test/unit/os/multiarch/hal_trait_surface_spec.spl` |
+| inventory + owned-C policy chain | `test/unit/os/multiarch/c_port_inventory_spec.spl` |
 | platform/lane/board contract | `test/unit/os/port/simpleos_multiplatform_build_spec.spl` |
 
 ---
@@ -528,7 +528,7 @@ build/simpleos/riscv32imac/
 
 `bin/simple test --arch=<triple>` already exists. The new audit:
 `bin/simple test --arch=all` iterates all six. Phase 7 (Verify) wires this
-into the `test/os/port/e2e_qemu_smoke_spec.spl` parameterization.
+into the `test/system/os/port/e2e_qemu_smoke_spec.spl` parameterization.
 
 ---
 
@@ -632,11 +632,11 @@ Disjoint per-arch scope means the 6 agents can run in parallel.
 |---|---|
 | `scripts/bootstrap/bootstrap-from-scratch.sh` | MODIFY — add `--arch=` 5 new lanes |
 | `src/app/build/os_harden_audit.spl` | CREATE — §5.2 checks |
-| `test/os/port/e2e_qemu_smoke_spec.spl` | MODIFY — parameterize over 6 archs |
-| `test/os/kernel/arch/hal_x86_64_phase_a_spec.spl` | CREATE |
-| `test/os/kernel/arch/hal_x86_32_phase_a_spec.spl` | CREATE |
-| `test/os/kernel/arch/hal_arm32_phase_a_spec.spl` | CREATE |
-| `test/os/kernel/arch/hal_riscv32_phase_a_spec.spl` | CREATE |
+| `test/system/os/port/e2e_qemu_smoke_spec.spl` | MODIFY — parameterize over 6 archs |
+| `test/unit/os/kernel/arch/hal_x86_64_phase_a_spec.spl` | CREATE |
+| `test/unit/os/kernel/arch/hal_x86_32_phase_a_spec.spl` | CREATE |
+| `test/unit/os/kernel/arch/hal_arm32_phase_a_spec.spl` | CREATE |
+| `test/unit/os/kernel/arch/hal_riscv32_phase_a_spec.spl` | CREATE |
 | `doc/04_architecture/mdsoc_architecture_tobe.md` | MODIFY — link to this doc |
 
 ---
@@ -664,7 +664,7 @@ Disjoint per-arch scope means the 6 agents can run in parallel.
 [src/os/kernel/boot/kernel_entry.spl: kernel_main]             <-- arch-neutral
     │ services init: scheduler, vmm, ipc, vfs (NVFS mount)
     ▼
-[smoke harness: test/os/smoke/*.spl]
+[smoke harness: test/unit/os/smoke/*.spl]
     │ assertions via println → HalConsole::writeln
     │ exit via HalPower::system_reset(test_mode=true)
     ▼

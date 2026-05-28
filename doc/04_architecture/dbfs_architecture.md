@@ -76,7 +76,7 @@ Six gaps must be closed for AC-3. Each has a design, module path, and LoC budget
 
 **Design:** A test harness that wraps `Arena` and injects a configurable fault after N write calls. The fault causes all subsequent `arena_append` calls to return `Err(IoError::SimulatedPowerCut)`. The test then creates a fresh `DbFsEngine` from the same (partially-written) backend and runs mount recovery. Assertions: (a) all committed transactions are visible, (b) uncommitted transactions are absent, (c) no orphaned extents remain referenced. This is an interpreter-mode-only spec (per `feedback_compile_mode_false_greens`).
 
-**Module:** `test/dbfs/power_cut_harness.spl`
+**Module:** `test/fixtures/storage/dbfs/power_cut_harness.spl`
 **LoC budget:** ~180
 
 ---
@@ -437,21 +437,21 @@ All specs are interpreter-mode only (per `feedback_compile_mode_false_greens`). 
 
 | Spec file | Covers |
 |-----------|--------|
-| `test/dbfs/engine/pager_spec.spl` | Buffer manager: page eviction, dirty tracking, clock-sweep |
-| `test/dbfs/engine/btree_spec.spl` | Namespace B-tree: insert/lookup/delete/range-scan with Ino/DirEntryKey |
-| `test/dbfs/engine/wal_spec.spl` | WAL: append, flush, LSN monotonicity, CRC32C correctness |
-| `test/dbfs/engine/recovery_spec.spl` | Mount recovery: clean mount, crash-then-recover, orphan reclaim |
-| `test/dbfs/driver/dbfs_driver_spec.spl` | FsDriver trait: mount, open, read, write, stat, readdir, mkdir, unlink, rename |
-| `test/dbfs/driver/capability_spec.spl` | Extension probe: COW/Xattr/Acl/LargeFiles/PosixCompat reported correctly |
-| `test/dbfs/driver/nvfs_arena_backend_spec.spl` | NVFS-arena-as-backend: DbFsDriver with NVFS Arena impl (AC-4) |
-| `test/dbfs/driver/raw_nvme_backend_spec.spl` | RawNvmeArena: sector reads/writes, arena verbs on BlockDevice mock |
-| `test/dbfs/integration/fat32_nonregression_spec.spl` | FAT32 still mounts, reads dirs, opens files after DBFS code lands (AC-7) |
-| `test/dbfs/integration/mount_table_dispatch_spec.spl` | MountTable dispatches to DbFs variant; exhaustive match compiles |
-| `test/dbfs/power_cut_harness.spl` | Power-cut simulation: committed txns survive, uncommitted absent (AC-5) |
-| `test/dbfs/bench/metadata_storm_bench.spl` | Benchmark: 10K mkdir/stat ops; baseline latency recorded |
-| `test/dbfs/bench/append_log_bench.spl` | Benchmark: append-heavy log file; throughput MB/s |
-| `test/dbfs/bench/random_overwrite_bench.spl` | Benchmark: random 4K writes on 1 GiB file; IOPS |
-| `test/dbfs/bench/mmap_read_bench.spl` | Benchmark: sequential read via readv; throughput |
+| `test/integration/storage/dbfs/dbfs_engine_pager_spec.spl` | Buffer manager: page eviction, dirty tracking, clock-sweep |
+| `test/integration/storage/dbfs/dbfs_engine_btree_spec.spl` | Namespace B-tree: insert/lookup/delete/range-scan with Ino/DirEntryKey |
+| `test/integration/storage/dbfs/dbfs_engine_wal_spec.spl` | WAL: append, flush, LSN monotonicity, CRC32C correctness |
+| `test/integration/storage/dbfs/dbfs_recovery_spec.spl` | Mount recovery: clean mount, crash-then-recover, orphan reclaim |
+| `test/integration/storage/dbfs/dbfs_driver_spec.spl` | FsDriver trait: mount, open, read, write, stat, readdir, mkdir, unlink, rename |
+| `test/integration/storage/dbfs/dbfs_capability_spec.spl` | Extension probe: COW/Xattr/Acl/LargeFiles/PosixCompat reported correctly |
+| `test/integration/storage/dbfs/arena_as_blob_backend_spec.spl` | NVFS-arena-as-backend: DbFsDriver with NVFS Arena impl (AC-4) |
+| `test/integration/storage/dbfs/dbfs_hw_passthrough_spec.spl` | RawNvmeArena: sector reads/writes, arena verbs on BlockDevice mock |
+| `test/integration/storage/dbfs/fat32_no_regression_spec.spl` | FAT32 still mounts, reads dirs, opens files after DBFS code lands (AC-7) |
+| `test/integration/storage/dbfs/mount_table_dbfs_dispatch_spec.spl` | MountTable dispatches to DbFs variant; exhaustive match compiles |
+| `test/fixtures/storage/dbfs/power_cut_harness.spl` | Power-cut simulation: committed txns survive, uncommitted absent (AC-5) |
+| `test/fixtures/storage/dbfs/bench_harness.spl` | Benchmark: 10K mkdir/stat ops; baseline latency recorded |
+| `test/fixtures/storage/dbfs/bench_harness.spl` | Benchmark: append-heavy log file; throughput MB/s |
+| `test/fixtures/storage/dbfs/bench_harness.spl` | Benchmark: random 4K writes on 1 GiB file; IOPS |
+| `test/fixtures/storage/dbfs/bench_harness.spl` | Benchmark: sequential read via readv; throughput |
 
 ---
 
@@ -504,7 +504,7 @@ All specs are interpreter-mode only (per `feedback_compile_mode_false_greens`). 
 - `src/os/services/vfs/vfs_init.spl` — add DBFS mount for `/data`
 
 ### Test files (Phase 4 writes these, not Phase 5):
-- 15 spec files under `test/dbfs/` as listed in D11
+- 15 spec files under `test/integration/storage/dbfs/` as listed in D11
 
 **Total new LoC estimate:** ~2,230 (engine + stub) + ~1,800 (tests) = ~4,030
 

@@ -10,15 +10,15 @@ This plan defines the repeatable Web Platform Tests subset path for Simple brows
 
 | Spec File | Tests | Category |
 |-----------|-------|----------|
-| `test/web_platform/css/selector_color_subset_spec.spl` | 57 | Selectors, colors, backgrounds |
-| `test/web_platform/css/wpt_scorecard_spec.spl` | 20 | Cross-category scorecard |
-| `test/web_platform/css/transforms_wpt_spec.spl` | 5 | CSS transforms |
-| `test/web_platform/css/animations_wpt_spec.spl` | 5 | Animation math, timing |
-| `test/web_platform/css/custom_properties_wpt_spec.spl` | 4 | var(), fallback, inheritance |
-| `test/web_platform/css/object_fit_wpt_spec.spl` | 4 | object-fit modes |
-| `test/web_platform/css/at_supports_wpt_spec.spl` | 3 | @supports feature queries |
-| `test/web_platform/css/scrollbar_wpt_spec.spl` | 3 | Scrollbar rendering |
-| `test/web_platform/css/sticky_wpt_spec.spl` | 3 | Sticky positioning |
+| `test/feature/web_platform/css/selector_color_subset_spec.spl` | 57 | Selectors, colors, backgrounds |
+| `test/feature/web_platform/css/wpt_scorecard_spec.spl` | 20 | Cross-category scorecard |
+| `test/feature/web_platform/css/transforms_wpt_spec.spl` | 5 | CSS transforms |
+| `test/feature/web_platform/css/animations_wpt_spec.spl` | 5 | Animation math, timing |
+| `test/feature/web_platform/css/custom_properties_wpt_spec.spl` | 4 | var(), fallback, inheritance |
+| `test/feature/web_platform/css/object_fit_wpt_spec.spl` | 4 | object-fit modes |
+| `test/feature/web_platform/css/at_supports_wpt_spec.spl` | 3 | @supports feature queries |
+| `test/feature/web_platform/css/scrollbar_wpt_spec.spl` | 3 | Scrollbar rendering |
+| `test/feature/web_platform/css/sticky_wpt_spec.spl` | 3 | Sticky positioning |
 | **Total** | **104** | |
 
 ## Acceptance
@@ -31,5 +31,5 @@ This plan defines the repeatable Web Platform Tests subset path for Simple brows
 ## Verification
 
 ```bash
-bin/simple test test/web_platform/css/  # All 9 spec files, 104 tests
+bin/simple test test/feature/web_platform/css/  # All 9 spec files, 104 tests
 ```

@@ -2355,7 +2355,7 @@ Total modules: 5676
 - src/lib/nogc_async_mut/debug/remote/target/stm32wb.spl
 - src/lib/nogc_async_mut/debug/remote/target/target_info.spl
 - src/lib/nogc_async_mut/debug/remote/target/x86_64.spl
-- src/lib/nogc_async_mut/debug/remote/test/qemu_runner.spl
+- src/remote/test/qemu_runner.spl
 - src/lib/nogc_async_mut/debug/remote/types.spl
 - src/lib/nogc_async_mut/debug/smf_agent.spl
 - src/lib/nogc_async_mut/dependency_tracker/graph.spl
@@ -5331,7 +5331,7 @@ Total modules: 5676
 - src/lib/nogc_sync_mut/debug/remote/t32_sffi/t32_memory.spl
 - src/lib/nogc_sync_mut/debug/remote/t32_sffi/t32_register.spl
 - src/lib/nogc_sync_mut/debug/remote/t32_sffi/t32_trace.spl
-- src/lib/nogc_sync_mut/debug/remote/test/qemu_runner.spl
+- src/remote/test/qemu_runner.spl
 - src/lib/nogc_sync_mut/debug/smf_agent.spl
 - src/lib/nogc_sync_mut/desktop/dialog.spl
 - src/lib/nogc_sync_mut/desktop/display.spl

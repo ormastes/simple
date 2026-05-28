@@ -816,7 +816,7 @@ New wave-4 code citations for interfaces with real implementations this cycle:
   `vmm_cow_clone_pages(parent.address_space)` inside `clone_task`.
 - **IF-08 Phase-3 QEMU runner** — `src/os/qemu_runner.spl:1191`, commit `a08fe8f697` —
   `fn boot_disk_image_serial(image: text, timeout_ms: i64) -> (text, text, i32)` boots a raw disk
-  image and returns captured serial output; `test/os/port/e2e_qemu_smoke_spec.spl:46` dispatches
+  image and returns captured serial output; `test/system/os/port/e2e_qemu_smoke_spec.spl:46` dispatches
   all 6 Phase-3 steps by grepping the shared capture for `[phase-3-*]` markers.
 
 Cross-toolchain milestones (not IF-id changes, recorded here for traceability):

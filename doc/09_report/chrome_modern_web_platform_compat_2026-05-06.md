@@ -62,7 +62,7 @@ General sibling support now includes bounded fallback pixel matching for precedi
 
 ## WPT CSS Subset (2026-05-10)
 
-104/104 WPT-shaped CSS tests pass across 9 spec files in `test/web_platform/css/`. Categories: selectors and colors (57), scorecard (20), transforms (5), animations (5), custom properties (4), object-fit (4), @supports (3), scrollbar (3), sticky positioning (3). New coverage added for `@supports` feature queries with `br_flatten_supports_blocks`, CSS `var()` resolution across all CSS rule blocks (not just `:root`), and sticky positioning rendering.
+104/104 WPT-shaped CSS tests pass across 9 spec files in `test/feature/web_platform/css/`. Categories: selectors and colors (57), scorecard (20), transforms (5), animations (5), custom properties (4), object-fit (4), @supports (3), scrollbar (3), sticky positioning (3). New coverage added for `@supports` feature queries with `br_flatten_supports_blocks`, CSS `var()` resolution across all CSS rule blocks (not just `:root`), and sticky positioning rendering.
 
 ## Remaining Gaps
 

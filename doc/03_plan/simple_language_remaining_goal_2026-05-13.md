@@ -25,8 +25,8 @@ guidelines, stable error/warning messages, and final verification readiness.
 - Diagnostic gates:
   - `scripts/audit/diagnostic_code_audit.py`
   - `scripts/audit/diagnostic_catalog_audit.py`
-  - `test/app/check_diagnostics_contract_spec.spl`
-  - `test/app/run_diagnostics_contract_spec.spl`
+  - `test/integration/app/diagnostics/check_diagnostics_contract_spec.spl`
+  - `test/integration/app/diagnostics/run_diagnostics_contract_spec.spl`
   - `test/unit/compiler/diagnostic_formatter_contract_spec.spl`
 - Import warning debt: `doc/03_plan/import_warning_debt_2026-05-13.md`.
 

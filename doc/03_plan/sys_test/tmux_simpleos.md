@@ -59,7 +59,7 @@ Recommended adjacent checks once implementation exists:
 
 ```bash
 bin/simple test test/system/os_shell_spec.spl
-bin/simple test test/os/kernel/loader/executable_source_vfs_spec.spl
+bin/simple test test/unit/os/kernel/loader/executable_source_vfs_spec.spl
 ```
 
 ## Traceability

@@ -63,7 +63,7 @@ Create:
 
 - `tools/wpt_to_spipe/`
 - `doc/03_plan/sys_test/wpt_subset_migration.md`
-- `test/web_platform/`
+- `test/feature/web_platform/`
 
 Initial subset:
 

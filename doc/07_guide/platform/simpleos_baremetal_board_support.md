@@ -95,9 +95,9 @@ timeout 20s sh scripts/run_simpleos_cortex_m33_qemu.shs
 SPipe checks attempted:
 
 ```bash
-SIMPLE_LIB=src timeout 120s bin/simple test test/riscv64_fpga/preflight_spec.spl --mode=interpreter --clean
-SIMPLE_LIB=src timeout 120s bin/simple test test/riscv64_fpga/hardware_inventory_spec.spl --mode=interpreter --clean
-SIMPLE_LIB=src timeout 120s bin/simple test test/riscv64_fpga/jtag_unbind_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src timeout 120s bin/simple test test/system/hardware/riscv64_fpga/preflight_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src timeout 120s bin/simple test test/system/hardware/riscv64_fpga/hardware_inventory_spec.spl --mode=interpreter --clean
+SIMPLE_LIB=src timeout 120s bin/simple test test/system/hardware/riscv64_fpga/jtag_unbind_spec.spl --mode=interpreter --clean
 ```
 
 The three RISC-V FPGA SPipe checks failed in the current working tree even though the direct preflight script found the FT4232H and JTAG interface free. Treat the script output as the current hardware observation, and the SPipe results as regression evidence to investigate before claiming test-suite PASS.

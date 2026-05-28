@@ -688,13 +688,13 @@ Exit code 137  # Killed (OOM or timeout)
 - Started with no active/zombie `simple` processes and no tracked running test runs.
 - The old report paths for `test/unit/std/thread_sffi_spec.spl`, `test/unit/std/thread_pool_spec.spl`, `test/unit/lib/process_manager_spec.spl`, and `test/unit/lib/process_governor_spec.spl` are stale; each failed immediately as file-not-found and was not treated as runtime evidence.
 - Current equivalents completed without process kill or leaks:
-  - `test/os/kernel/wine/thread_sffi_extensions_spec.spl`: passed 19 examples.
+  - `test/unit/os/kernel/wine/thread_sffi_extensions_spec.spl`: passed 19 examples.
   - `test/integration/lib/thread_pool_async_spec.spl`: failed normally with 4 `Option::Some(...)` assertion mismatches.
   - `test/app/simple_process_manager`: failed normally with existing app assertions.
 - Historical crash-regression probes completed without process kill or leaks:
   - `test/system/stage3_segfault_fix_spec.spl`: passed.
   - `test/code_quality/warning_allow_root_cause_cleanup_spec.spl`: passed.
-  - `test/browser_engine/js_integration_spec.spl`: failed normally on unresolved module `std.gc_async_mut.gpu.browser_engine.script.script_host`.
+  - `test/unit/browser_engine/js_integration_spec.spl`: failed normally on unresolved module `std.gc_async_mut.gpu.browser_engine.script.script_host`.
   - `test/sys/wm_compare/famous_site_corpus_spec.spl`: failed normally on page-category assertion.
 - Final process check: `active_simple=0`, `zombie_simple=0`.
 - Final crashed-run check remains unchanged: 17 May 20 zero-count crashed runs, no new crashed run.

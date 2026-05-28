@@ -226,13 +226,13 @@ Simple Data Notation (SDN) is the storage format — human-readable and version-
 
 DBFS is a filesystem that uses database techniques to manage metadata and file nodes (like btrfs uses B-trees). Because it uses DB-like data structures internally (B-tree, WAL, pager), it also provides a DB-optimized storage path that Simple DB Full can leverage — sharing primitives rather than duplicating them. Key components:
 
-- B-tree indexing (`test/dbfs/dbfs_engine_btree_spec.spl`)
-- WAL journaling (`test/dbfs/dbfs_engine_wal_spec.spl`)
-- Page-level checkpointing (`test/dbfs/dbfs_engine_checkpoint_spec.spl`)
-- Intent logging (`test/dbfs/dbfs_engine_intent_log_spec.spl`)
-- NVMe passthrough (`test/dbfs/dbfs_nvme_callback_spec.spl`)
-- Capability-based access control (`test/dbfs/dbfs_capability_spec.spl`)
-- Power-cut recovery (`test/dbfs/dbfs_recovery_spec.spl`)
+- B-tree indexing (`test/integration/storage/dbfs/dbfs_engine_btree_spec.spl`)
+- WAL journaling (`test/integration/storage/dbfs/dbfs_engine_wal_spec.spl`)
+- Page-level checkpointing (`test/integration/storage/dbfs/dbfs_engine_checkpoint_spec.spl`)
+- Intent logging (`test/integration/storage/dbfs/dbfs_engine_intent_log_spec.spl`)
+- NVMe passthrough (`test/integration/storage/dbfs/dbfs_nvme_callback_spec.spl`)
+- Capability-based access control (`test/integration/storage/dbfs/dbfs_capability_spec.spl`)
+- Power-cut recovery (`test/integration/storage/dbfs/dbfs_recovery_spec.spl`)
 
 ## Shared Acceleration (SIMD)
 
@@ -258,7 +258,7 @@ src/lib/gc_sync_mut/io/sqlite_sffi.spl  # SQLite FFI bindings
 examples/simple_db/                   # full engine (MVCC, WAL, TOAST, buffer pool)
 
 # ── Tests ────────────────────────────────────────────────────────
-test/dbfs/                            # DBFS test suite (28+ specs)
+test/integration/storage/dbfs/                            # DBFS test suite (28+ specs)
 test/system/db_sdn_spec.spl           # embedded tier SDN spec
 test/system/simple_db_nvfs_constants_spec.spl  # full tier NVFS constants
 ```

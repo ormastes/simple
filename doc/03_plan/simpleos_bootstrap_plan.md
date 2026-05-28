@@ -74,7 +74,7 @@ Progress made in this pass:
   artifacts as invalid rather than built. Current status reports Stage 1 as
   `BUILT`, Stage 2 as `invalid-small (6176 bytes)`, and Stage 3 as `not built`
   after the failed staged run.
-- `test/os/port/bootstrap_cross_status_spec.spl` guards that status/audit
+- `test/integration/os/port/bootstrap_cross_status_spec.spl` guards that status/audit
   behavior so tiny placeholder outputs cannot regress to `BUILT`.
 
 Acceptance evidence captured or refreshed on 2026-05-05:
@@ -91,7 +91,7 @@ Acceptance evidence captured or refreshed on 2026-05-05:
 - `bin/simple run src/os/port/native_surface_policy_verify.spl` passed with
   `STATUS: PASS`.
 - `SIMPLE_LIB=src bin/simple test
-  test/os/port/bootstrap_cross_status_spec.spl --mode=interpreter` passed:
+  test/integration/os/port/bootstrap_cross_status_spec.spl --mode=interpreter` passed:
   2 tests, 0 failed.
 - `SIMPLE_BOOTSTRAP_REAL_LOWER=1 SIMPLE_BOOTSTRAP_REAL_LLVM=1 bin/simple run
   src/os/port/bootstrap_cross.spl -- --target simpleos-x86_64 --build-dir
@@ -180,7 +180,7 @@ Checklist against the objective:
 - Native-surface policy gate: current local evidence passes with `STATUS:
   PASS`.
 - Status regression guard: current local evidence passes
-  `test/os/port/bootstrap_cross_status_spec.spl` with 2 tests, 0 failed.
+  `test/integration/os/port/bootstrap_cross_status_spec.spl` with 2 tests, 0 failed.
 - Staged cross bootstrap: current local evidence does not pass. Stage 1 builds,
   Stage 2 is rejected as a 6,176-byte diagnostic stub, Stage 3 is not built,
   and convergence is not reached.

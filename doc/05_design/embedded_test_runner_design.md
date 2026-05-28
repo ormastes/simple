@@ -1032,8 +1032,8 @@ simple test --embedded --target=qemu-x86 --binary=test.elf
 ### QEMU Hardware Tests
 
 Use existing test binaries:
-- `src/baremetal/test/qemu_semihost_test.elf`
-- `src/baremetal/test/qemu_protocol_test.elf`
+- `src/baremetal/test/system/qemu_semihost_test.elf`
+- `src/baremetal/test/system/qemu_protocol_test.elf`
 
 ---
 

@@ -77,7 +77,7 @@ Conclusion:
 - `src/os/machine_profile.spl` defines `simple-rv64` and `simple-rv32`.
 - `src/app/sim/main.spl` and `src/app/sim/profile.spl` provide a source-level simulator CLI surface.
 - `src/os/qemu_runner.spl` is still the real execution backend behind current OS proof lanes.
-- `test/qemu/os/boot/riscv64_boot_qemu_spec.spl` and `test/qemu/os/boot/riscv32_boot_qemu_spec.spl` are the current boot smoke proofs.
+- `test/system/qemu/os/boot/riscv64_boot_qemu_spec.spl` and `test/system/qemu/os/boot/riscv32_boot_qemu_spec.spl` are the current boot smoke proofs.
 
 Current limitation:
 - `simple sim` is an oracle wrapper, not a repo-native system simulator

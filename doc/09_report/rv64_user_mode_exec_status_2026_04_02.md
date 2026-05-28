@@ -76,7 +76,7 @@ ELF program header segment sizes updated from 4 to 32 bytes.
 
 ### 6. QEMU end-to-end test spec
 
-**Created:** `test/qemu/os/usermode/rv64_user_exec_qemu_spec.spl`
+**Created:** `test/system/qemu/os/usermode/rv64_user_exec_qemu_spec.spl`
 
 Six test cases verifying:
 - Trap vector installation
@@ -173,7 +173,7 @@ next milestone.
 
 ### Created
 - `src/os/kernel/arch/riscv64/trap_vector.S` — trap entry/exit assembly
-- `test/qemu/os/usermode/rv64_user_exec_qemu_spec.spl` — e2e QEMU test
+- `test/system/qemu/os/usermode/rv64_user_exec_qemu_spec.spl` — e2e QEMU test
 
 ### Modified
 - `src/os/kernel/loader/executable_source.spl` — real proof binary instructions

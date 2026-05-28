@@ -2690,6 +2690,8 @@ pub fn compile_call<M: Module>(
                     result
                 };
                 ctx.vreg_values.insert(*d, final_result);
+            } else {
+                ctx.vreg_values.insert(*d, builder.ins().iconst(types::I64, 0));
             }
         }
         if !is_profiler_function(sffi_name) {
@@ -2711,6 +2713,8 @@ pub fn compile_call<M: Module>(
             let results = builder.inst_results(call);
             if !results.is_empty() {
                 ctx.vreg_values.insert(*d, results[0]);
+            } else {
+                ctx.vreg_values.insert(*d, builder.ins().iconst(types::I64, 0));
             }
         }
     } else {

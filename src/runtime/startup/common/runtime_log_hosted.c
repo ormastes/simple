@@ -4,7 +4,7 @@
  * When the log lib's extern symbols return false, the Simple-side code
  * falls through to its interpreter-safe path (println / stdio). These
  * stubs exist so log-lib consumers link cleanly on Linux/macOS/Windows
- * and the spec harness can load test/os/kernel/log/*_spec.spl.
+ * and the spec harness can load test/unit/os/kernel/logging/*_spec.spl.
  *
  * The baremetal implementations live in
  * src/runtime/startup/baremetal/runtime_log.c and are linked instead

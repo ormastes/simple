@@ -4,34 +4,14 @@
 
 ```
 test/
-  unit/                    # Unit tests (single module/function)
-    std/                   # Standard library tests
-    lib/                   # Library tests (database, etc.)
-      database/            # Database module tests
-    app/                   # Application module tests
-      build/               # Build system tests
-      desugar/             # Desugaring tests
-      io/                  # I/O module tests
-      tooling/             # Test runner, linter tests
-    compiler/              # Compiler unit tests (native backend)
-
-  integration/             # Cross-module integration tests
-    database_*/            # Database integration tests
-
-  feature/                 # Feature specification tests (BDD)
-    *_spec.spl             # One file per language feature
-
-  system/                  # System-level / end-to-end tests
-    features/              # Feature acceptance tests
-    compiler/              # Full compilation pipeline tests
-
-  specs/                   # Additional specification tests
-
-  lib/                     # Import symlinks (DO NOT MODIFY)
-    std/                   # -> src/lib/ (symlinks for module imports)
-    app/                   # -> src/app/
-    lib/                   # -> src/lib/
-    compiler/              # -> src/compiler/
+  unit/                    # Unit tests for one module/function/model
+  integration/             # Cross-module host-runner workflows
+  feature/                 # User-visible feature and compatibility specs
+  system/                  # End-to-end, QEMU, OS, hardware-gated specs
+  shared/                  # Import-free cross-platform specs
+  fixtures/                # Helper modules, scripts, generated inputs
+  baselines/               # Goldens and expected outputs
+  perf/                    # Benchmark and performance checks
 ```
 
 ## Running Tests
@@ -105,7 +85,7 @@ describe "std.my_module":
 
 ### Imports via Symlinks
 
-Test files import source modules via symlinks in `test/lib/`:
+Test files import source modules from the canonical test trees:
 
 ```simple
 # Import from src/lib/math.spl
@@ -188,6 +168,8 @@ baseline and reports improvements or regressions:
   documenting why it cannot fit the canonical buckets.
 - Keep support assets such as baselines, fixtures, generated data, and helper
   modules separate from executable scenario placement decisions.
+- See `doc/07_guide/testing/test_layout_traceability.md` for the move
+  checklist and current canonical-root policy.
 
 ## Known Limitations
 

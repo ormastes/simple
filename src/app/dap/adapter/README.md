@@ -241,16 +241,16 @@ To add support for a new debug backend:
 
 ## Testing
 
-Test suite: `test/lib/unified_execution_spec.spl`
+Test suite: `test/unit/lib/unified_execution_spec.spl`
 
 Run tests:
 ```bash
-bin/simple test test/lib/unified_execution_spec.spl
+bin/simple test test/unit/lib/unified_execution_spec.spl
 ```
 
 Run with QEMU (requires QEMU binaries):
 ```bash
-bin/simple test test/lib/unified_execution_spec.spl --only-skipped
+bin/simple test test/unit/lib/unified_execution_spec.spl --only-skipped
 ```
 
 ## See Also

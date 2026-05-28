@@ -20,21 +20,21 @@ Date: 2026-05-06
 ## Evidence Commands
 
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`
-- `bin/simple test test/lib/common/wine_vm_adapter_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_posix_adapter_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_thread_adapter_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_dynload_adapter_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_service_adapter_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_precondition_manifest_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_precondition_fixture_builder_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_nt_api_catalog_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_nt_virtual_memory_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_nt_file_io_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_nt_thread_wait_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_nt_process_env_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_nt_heap_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/wine_ntdll_bridge_spec.spl --mode=interpreter --clean`
-- `bin/simple test test/lib/common/ui/wine_x11_adapter_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_vm_adapter_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_posix_adapter_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_thread_adapter_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_dynload_adapter_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_service_adapter_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_precondition_manifest_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_precondition_fixture_builder_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_nt_api_catalog_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_nt_virtual_memory_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_nt_file_io_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_nt_thread_wait_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_nt_process_env_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_nt_heap_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/wine_ntdll_bridge_spec.spl --mode=interpreter --clean`
+- `bin/simple test test/unit/lib/common/ui/wine_x11_adapter_spec.spl --mode=interpreter --clean`
 - QEMU desktop process-backed app smoke command from existing SimpleOS desktop lane.
 - Renderer golden/pixel parity harness from `src/app/wm_compare/`.
 - PE fixture parser test once the parser module exists.

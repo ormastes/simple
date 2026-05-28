@@ -91,7 +91,7 @@ Fix:
 2. Updated `boot_fs_mount.spl` to import `CNvmeBlockAdapterFs` from the new
    module instead of `CNvmeBlockAdapter` from `vfs_block_adapters`.
    Also updated the comment block and `_make_c_adapter()` return type.
-3. Added `test/kernel/boot_fs_mount_spec.spl` — type and initial-state tests
+3. Added `test/system/kernel/boot_fs_mount_spec.spl` — type and initial-state tests
    for the freestanding mount path that import no hosted symbols.
 
 `os_main.spl` was already correct (calls `boot_fs_mount_freestanding()`, not

@@ -8,9 +8,9 @@
 - `test/unit/`, `test/integration/`, `test/feature/`, and `test/system/` are the
   documented canonical executable SPipe buckets.
 - The current tree also contains legacy executable top-level directories outside
-  those buckets, including `test/perf/`, `test/os/`, `test/app/`,
-  `test/tools/`, `test/dbfs/`, `test/qemu/`, `test/reftest/`,
-  `test/browser_engine/`, `test/web_platform/`, `test/code_quality/`,
+  those buckets, including `test/perf/`, `test/app/`,
+  `test/tools/`, `test/integration/storage/dbfs/`, `test/system/qemu/`, `test/system/reftest/`,
+  `test/unit/browser_engine/`, `test/feature/web_platform/`, `test/code_quality/`,
   `test/sys/`, and smaller single-purpose roots.
 - `test/lib/` is mixed: it supports source imports, but it also contains many
   executable `.spl` files today.
@@ -55,8 +55,8 @@
 
 ## Outliers To Handle In The Reorg
 
-- Decide whether legacy domain roots such as `test/perf/`, `test/qemu/`,
-  `test/reftest/`, `test/browser_engine/`, and `test/web_platform/` remain
+- Decide whether legacy domain roots such as `test/perf/`, `test/system/qemu/`,
+  `test/system/reftest/`, `test/unit/browser_engine/`, and `test/feature/web_platform/` remain
   named suites or migrate into canonical category buckets.
 - Separate import/support assets from executable specs under `test/lib/` and
   `test/fixtures/`. Treat `test/shared/` as a cross-platform executable tier

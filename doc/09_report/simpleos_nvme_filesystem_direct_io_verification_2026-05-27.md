@@ -27,7 +27,7 @@ src/compiler_rust/target/debug/simple test test/unit/os/services/vfs/nvme_block_
 src/compiler_rust/target/debug/simple test test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl --mode=interpreter --clean
 src/compiler_rust/target/debug/simple test test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl --mode=interpreter --clean
 src/compiler_rust/target/debug/simple test test/unit/os/kernel/boot/boot_fs_mount_acceptance_spec.spl --mode=interpreter --clean
-src/compiler_rust/target/debug/simple test test/kernel/boot_fs_spec.spl --mode=interpreter --clean
+src/compiler_rust/target/debug/simple test test/system/kernel/boot_fs_spec.spl --mode=interpreter --clean
 src/compiler_rust/target/debug/simple test test/unit/os/drivers/real_device_readiness_spec.spl --mode=interpreter --clean
 src/compiler_rust/target/debug/simple test test/unit/app/simpleos_nvme_serial_check_spec.spl --mode=interpreter --clean
 src/compiler_rust/target/debug/simple test test/unit/os/qemu_runner_spec.spl --mode=interpreter --clean

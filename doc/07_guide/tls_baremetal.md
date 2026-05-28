@@ -87,7 +87,7 @@ uses `rt_sha256_*` runtime externs):
 ## Testing
 
 ```bash
-bin/simple test test/lib/nogc_async_mut_noalloc/tls/tls_smoke_spec.spl
+bin/simple test test/unit/lib/nogc_async_mut_noalloc/tls/tls_smoke_spec.spl
 ```
 
 9 test cases covering: error types, content types, MemTransport round-trip,

@@ -22,13 +22,13 @@ Key decisions:
 ## Files
 
 - **Specs:**
-  - `test/browser_engine/html_tokenizer_spec.spl`
-  - `test/browser_engine/html_tree_builder_spec.spl`
-  - `test/browser_engine/margin_collapse_spec.spl`
-  - `test/browser_engine/anonymous_block_spec.spl`
-  - `test/browser_engine/ifc_linebox_spec.spl`
-  - `test/browser_engine/table_layout_spec.spl`
-  - `test/browser_engine/html5lib_tokenizer_spec.spl`
+  - `test/unit/browser_engine/html_tokenizer_spec.spl`
+  - `test/unit/browser_engine/html_tree_builder_spec.spl`
+  - `test/unit/browser_engine/margin_collapse_spec.spl`
+  - `test/unit/browser_engine/anonymous_block_spec.spl`
+  - `test/unit/browser_engine/ifc_linebox_spec.spl`
+  - `test/unit/browser_engine/table_layout_spec.spl`
+  - `test/unit/browser_engine/html5lib_tokenizer_spec.spl`
 - **Implementation (new):**
   - `src/lib/gc_async_mut/gpu/browser_engine/html_tokenizer.spl` (478 lines)
   - `src/lib/gc_async_mut/gpu/browser_engine/html_tree_builder.spl` (307 lines)

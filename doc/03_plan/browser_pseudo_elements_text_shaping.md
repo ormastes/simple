@@ -41,13 +41,13 @@ The browser engine's fallback pixel renderer needed CSS pseudo-element and text 
 | File | Action | Purpose |
 |------|--------|---------|
 | `src/lib/gc_async_mut/gpu/browser_engine/html_fallback_renderer.spl` | MOD | 6 new helpers + integration in `br_render_simple_block_fallback_pixels` |
-| `test/web_platform/css/pseudo_text_wpt_spec.spl` | NEW | 8 WPT tests for pseudo-elements and text layout |
+| `test/feature/web_platform/css/pseudo_text_wpt_spec.spl` | NEW | 8 WPT tests for pseudo-elements and text layout |
 | `src/compiler_rust/parser/src/parser_helpers.rs` | MOD | Domain-block keywords in path segments and method names |
 
 ## Verification
 
-1. `bin/simple test test/web_platform/css/pseudo_text_wpt_spec.spl` — 8/8 pass
-2. `bin/simple test test/web_platform/css/selector_color_subset_spec.spl` — 57/57 pass (no regression)
+1. `bin/simple test test/feature/web_platform/css/pseudo_text_wpt_spec.spl` — 8/8 pass
+2. `bin/simple test test/feature/web_platform/css/selector_color_subset_spec.spl` — 57/57 pass (no regression)
 3. `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/html_fallback_renderer.spl --source src` — type-check passes
-4. `bin/simple check test/web_platform/css/pseudo_text_wpt_spec.spl --source src` — type-check passes
+4. `bin/simple check test/feature/web_platform/css/pseudo_text_wpt_spec.spl --source src` — type-check passes
 5. `cargo check -p simple-parser` from `src/compiler_rust/` — parser crate check passes

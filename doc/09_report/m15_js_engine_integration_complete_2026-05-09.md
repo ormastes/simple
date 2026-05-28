@@ -24,11 +24,11 @@ Key decisions:
 ## Files
 
 **Specs:**
-- `test/browser_engine/script/dom_query_spec.spl` — 14 specs (AC-2)
-- `test/browser_engine/script/console_buffer_spec.spl` — 11 specs (AC-4)
-- `test/browser_engine/script/event_loop_spec.spl` — 5 specs (AC-3)
-- `test/browser_engine/script/script_host_spec.spl` — 9 specs (AC-1)
-- `test/browser_engine/js_integration_spec.spl` — 12 specs (AC-1, AC-2, AC-3, AC-4, AC-6)
+- `test/unit/browser_engine/script/dom_query_spec.spl` — 14 specs (AC-2)
+- `test/unit/browser_engine/script/console_buffer_spec.spl` — 11 specs (AC-4)
+- `test/unit/browser_engine/script/event_loop_spec.spl` — 5 specs (AC-3)
+- `test/unit/browser_engine/script/script_host_spec.spl` — 9 specs (AC-1)
+- `test/unit/browser_engine/js_integration_spec.spl` — 12 specs (AC-1, AC-2, AC-3, AC-4, AC-6)
 
 **Implementation (new):**
 - `src/lib/gc_async_mut/gpu/browser_engine/script/console_buffer.spl` — `ConsoleEntry`, `ConsoleBuffer` with 512-entry ring

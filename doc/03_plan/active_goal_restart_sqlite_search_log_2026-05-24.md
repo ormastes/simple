@@ -84,7 +84,7 @@ Known unrelated dirty items before this slice:
 - `.spipe/db-fts-engine/`
 - `examples/simple_db/`
 - `src/lib/nogc_sync_mut/database/pure_sql/`
-- `test/dbfs/pure_db_spec.spl`
+- `test/integration/storage/dbfs/pure_db_spec.spl`
 
 Do not revert these unless the user explicitly asks. Some are likely user or other-agent work.
 
@@ -93,7 +93,7 @@ Do not revert these unless the user explicitly asks. Some are likely user or oth
 Files edited:
 
 - `src/lib/nogc_sync_mut/database/pure_sql/database.spl`
-- `test/dbfs/pure_db_spec.spl`
+- `test/integration/storage/dbfs/pure_db_spec.spl`
 
 Temporary file created:
 
@@ -111,7 +111,7 @@ Implemented in `PureDatabase`:
 - Basic tokenization and ranked result ordering.
 - BM25 scoring formula using term frequency, document frequency, document length, and average document length.
 
-Tests added in `test/dbfs/pure_db_spec.spl`:
+Tests added in `test/integration/storage/dbfs/pure_db_spec.spl`:
 
 - BM25 ranking over text columns.
 - FTS5-compatible search alias.
@@ -120,7 +120,7 @@ Tests added in `test/dbfs/pure_db_spec.spl`:
 Additional progress on 2026-05-24:
 
 - Fixed `SUM(val)` aggregate collection for parsed aggregate arguments.
-- Split late extended SQL coverage into `test/dbfs/pure_db_sql_extended_spec.spl` because the legacy `std.spec` runner reports false failures after 21 cases in one file.
+- Split late extended SQL coverage into `test/integration/storage/dbfs/pure_db_sql_extended_spec.spl` because the legacy `std.spec` runner reports false failures after 21 cases in one file.
 - Added `debug_log_tree` `mode: "human" | "llm"` handling.
 - Added fold metadata to debug log JSON tree nodes: `has_children`, `child_count`, `collapsed_count`, `fold_state`, and `default_open`.
 - Added compact LLM text tree rendering.
@@ -141,7 +141,7 @@ Additional progress on 2026-05-24:
  Additional progress on 2026-05-24:
 
  - Fixed `SUM(val)` aggregate collection for parsed aggregate arguments.
- - Split late extended SQL coverage into `test/dbfs/pure_db_sql_extended_spec.spl` because the legacy `std.spec` runner reports false failures after 21 cases in one file.
+ - Split late extended SQL coverage into `test/integration/storage/dbfs/pure_db_sql_extended_spec.spl` because the legacy `std.spec` runner reports false failures after 21 cases in one file.
  - Added `debug_log_tree` `mode: "human" | "llm"` handling.
  - Added fold metadata to debug log JSON tree nodes: `has_children`, `child_count`, `collapsed_count`, `fold_state`, and `default_open`.
  - Added compact LLM text tree rendering.
@@ -221,11 +221,11 @@ Passed:
 - `SIMPLE_LIB=src bin/simple test test/integration/app/app_mcp_intensive_spec.spl --mode=interpreter` (passed; lifecycle/message/tool/logging sections now cover real source-mode initialize, tools/list, unknown tool, help/readiness/invalid-mode, and ping paths)
 - `bin/simple check src/lib/nogc_async_mut/mcp/bugdb_resource.spl src/lib/nogc_async_mut/mcp/resource_utils.spl src/lib/nogc_async_mut/mcp/featuredb_resource.spl src/lib/nogc_async_mut/mcp/testdb_resource.spl test/integration/app/mcp_bugdb_spec.spl` (passed with existing `gc_boundary_crossing` warning in `bugdb_resource.spl`)
 - `SIMPLE_LIB=src bin/simple test test/integration/app/mcp_bugdb_spec.spl --mode=interpreter` (6 passed after replacing stale compiled-only skip)
-- `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_spec.spl`
-- `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_spec.spl test/dbfs/pure_db_sql_extended_spec.spl`
-- `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (21 passed)
-- `bin/simple test test/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (6 passed)
-- `bin/simple test test/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed)
+- `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_spec.spl`
+- `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_spec.spl test/integration/storage/dbfs/pure_db_sql_extended_spec.spl`
+- `bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (21 passed)
+- `bin/simple test test/integration/storage/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (6 passed)
+- `bin/simple test test/integration/storage/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed)
 - `bin/simple check src/lib/nogc_async_mut/mcp/log_store.spl src/lib/nogc_async_mut/mcp/debug_log_tools.spl src/lib/nogc_async_mut/mcp/__init__.spl test/unit/app/mcp_unit/mcp_debug_log_modes_spec.spl test/integration/app/mcp_debug_log_tree_stdio_spec.spl`
 - `bin/simple test test/unit/app/mcp_unit/mcp_debug_log_modes_spec.spl --mode=interpreter --clean --force-rebuild` (3 passed)
 - `bin/simple test test/integration/app/mcp_debug_log_tree_stdio_spec.spl --mode=interpreter --clean --force-rebuild` (2 passed; source-mode MCP stdio)
@@ -237,17 +237,17 @@ Passed:
 - `bin/simple check src/app/simple_lsp_mcp scripts/setup.sh` (Simple sources passed; shell script ignored by checker)
 - `SIMPLE_LIB=src bin/simple test test/integration/app/simple_lsp_mcp_stdio_spec.spl --mode=interpreter --clean` (2 passed)
 - `sh scripts/check-mcp-native-smoke.shs` (exit 0; MCP tools JSON/schema valid, 144 tools; LSP tools JSON/schema valid, 0 tools)
-- `bin/simple check src/lib/nogc_sync_mut/db/dbfs_engine/sql_parser.spl src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_sql_extended_spec.spl`
-- `bin/simple test test/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (8 passed)
-- `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (21 passed)
-- `bin/simple test test/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed)
+- `bin/simple check src/lib/nogc_sync_mut/db/dbfs_engine/sql_parser.spl src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_sql_extended_spec.spl`
+- `bin/simple test test/integration/storage/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (8 passed)
+- `bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (21 passed)
+- `bin/simple test test/integration/storage/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed)
 - `bin/simple check src/app/cli/query_lint.spl src/app/cli/query_lint_checks.spl test/unit/app/cli/query_lint_print_to_log_spec.spl` (2 existing unresolved-import warnings in `query_lint.spl`)
 - `bin/simple test test/unit/app/cli/query_lint_print_to_log_spec.spl --mode=interpreter --clean --force-rebuild` (3 passed)
-- `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_spec.spl` (passed)
-- `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (22 passed)
-- `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_spec.spl` (passed after per-table FTS cache/invalidation change)
-- `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (23 passed after cache invalidation coverage)
-- `bin/simple test test/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed after cache integration)
+- `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_spec.spl` (passed)
+- `bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (22 passed)
+- `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_spec.spl` (passed after per-table FTS cache/invalidation change)
+- `bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (23 passed after cache invalidation coverage)
+- `bin/simple test test/integration/storage/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed after cache integration)
 - `bin/simple check src/compiler/10.frontend/core/aop_log_policy.spl test/unit/compiler/frontend/aop_log_policy_spec.spl` (passed)
 - `bin/simple test test/unit/compiler/frontend/aop_log_policy_spec.spl --mode=interpreter --clean --force-rebuild` (5 passed)
 - `bin/simple check src/compiler` (exit 0, 1521 warnings)
@@ -273,10 +273,10 @@ Native MCP/LSP verification update:
 
 - Default-triple `bin/release/x86_64-unknown-linux-gnu/simple_mcp_server` and `simple_lsp_mcp_server` now pass direct framed initialize smokes.
 - The paired `scripts/check-mcp-native-smoke.shs` check now passes against those default-triple artifacts with `MCP_SERVER` and `LSP_MCP_SERVER` set explicitly.
- - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_spec.spl test/dbfs/pure_db_sql_extended_spec.spl`
- - `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (21 passed)
- - `bin/simple test test/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (6 passed)
- - `bin/simple test test/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed)
+ - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_spec.spl test/integration/storage/dbfs/pure_db_sql_extended_spec.spl`
+ - `bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (21 passed)
+ - `bin/simple test test/integration/storage/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (6 passed)
+ - `bin/simple test test/integration/storage/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed)
  - `bin/simple check src/lib/nogc_async_mut/mcp/log_store.spl src/lib/nogc_async_mut/mcp/debug_log_tools.spl src/lib/nogc_async_mut/mcp/__init__.spl test/unit/app/mcp_unit/mcp_debug_log_modes_spec.spl test/integration/app/mcp_debug_log_tree_stdio_spec.spl`
  - `bin/simple test test/unit/app/mcp_unit/mcp_debug_log_modes_spec.spl --mode=interpreter --clean --force-rebuild` (3 passed)
  - `bin/simple test test/integration/app/mcp_debug_log_tree_stdio_spec.spl --mode=interpreter --clean --force-rebuild` (2 passed; source-mode MCP stdio)
@@ -333,10 +333,10 @@ Native MCP/LSP verification update:
  - `bin/simple check src/app/check_skip/main.spl test/integration/app/check_skip_log_modes_spec.spl` (passed)
  - `bin/simple test test/integration/app/check_skip_log_modes_spec.spl --mode=interpreter` (4 passed)
  - `bin/simple check src/app/brief/main.spl src/app/search/main.spl src/app/list/main.spl src/app/tree/main.spl src/app/update/main.spl src/app/lock/main.spl src/app/install/main.spl src/app/add/main.spl src/app/remove/main.spl src/app/init/main.spl src/app/publish/main.spl src/app/cache/main.spl src/app/pkg/main.spl src/app/info/main.spl src/app/targets/main.spl src/app/env/main.spl src/app/todo_scan/main.spl src/app/release/main.spl src/app/bug_gen/main.spl src/app/bug_add/main.spl src/app/bug_resolve/main.spl src/app/feature_doc/main.spl src/app/todo_gen/main.spl src/app/qualify_ignore/main.spl src/app/check_skip/main.spl src/lib/nogc_async_mut/cli/log_modes.spl test/integration/app/brief_log_modes_spec.spl test/integration/app/search_log_modes_spec.spl test/integration/app/list_log_modes_spec.spl test/integration/app/tree_log_modes_spec.spl test/integration/app/update_log_modes_spec.spl test/integration/app/lock_log_modes_spec.spl test/integration/app/install_log_modes_spec.spl test/integration/app/add_remove_log_modes_spec.spl test/integration/app/init_log_modes_spec.spl test/integration/app/publish_log_modes_spec.spl test/integration/app/cache_log_modes_spec.spl test/integration/app/pkg_log_modes_spec.spl test/integration/app/info_log_modes_spec.spl test/integration/app/targets_log_modes_spec.spl test/integration/app/env_log_modes_spec.spl test/integration/app/todo_scan_log_modes_spec.spl test/integration/app/release_log_modes_spec.spl test/integration/app/bug_gen_log_modes_spec.spl test/integration/app/bug_add_resolve_log_modes_spec.spl test/integration/app/feature_doc_log_modes_spec.spl test/integration/app/todo_gen_log_modes_spec.spl test/integration/app/qualify_ignore_log_modes_spec.spl test/integration/app/check_skip_log_modes_spec.spl` (49 files passed)
- - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_sql_extended_spec.spl` (passed)
- - `bin/simple test test/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (9 passed, including disk-backed FTS reopen coverage)
- - `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (23 passed)
- - `bin/simple test test/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed)
+ - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_sql_extended_spec.spl` (passed)
+ - `bin/simple test test/integration/storage/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (9 passed, including disk-backed FTS reopen coverage)
+ - `bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (23 passed)
+ - `bin/simple test test/integration/storage/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed)
  - Earlier default-triple MCP/LSP artifacts failed native smoke and were debugged with GDB; this is superseded by the regenerated default-triple artifacts that now pass direct and paired smoke checks.
  - `git diff --check -- .github/workflows/release.yml` (passed)
  - `cargo check -p simple-compiler` (passed; 2 existing unused-assignment warnings)
@@ -348,17 +348,17 @@ Native MCP/LSP verification update:
  - `cargo test -p simple-compiler test_core_lane_runtime_archives_expose_required_abi_symbols --lib` (failed only on stale/discovered `build/simple-core/libsimple_runtime.a` ABI incompleteness; the new core-C helper symbol gap no longer blocks this check)
  - `git diff --check -- src/runtime/runtime.h src/runtime/runtime_native.c src/app/simple_lsp_mcp/json_helpers.spl` (passed)
  - `bin/simple check src/app/brief/main.spl src/app/search/main.spl src/app/list/main.spl src/app/tree/main.spl src/app/update/main.spl src/app/lock/main.spl src/app/install/main.spl src/app/add/main.spl src/app/remove/main.spl src/app/init/main.spl src/app/publish/main.spl src/app/cache/main.spl src/app/pkg/main.spl src/app/info/main.spl src/app/targets/main.spl src/app/env/main.spl src/app/todo_scan/main.spl src/app/release/main.spl src/app/bug_gen/main.spl src/app/bug_add/main.spl src/app/bug_resolve/main.spl src/app/feature_doc/main.spl src/app/todo_gen/main.spl src/app/qualify_ignore/main.spl src/lib/nogc_async_mut/cli/log_modes.spl test/integration/app/brief_log_modes_spec.spl test/integration/app/search_log_modes_spec.spl test/integration/app/list_log_modes_spec.spl test/integration/app/tree_log_modes_spec.spl test/integration/app/update_log_modes_spec.spl test/integration/app/lock_log_modes_spec.spl test/integration/app/install_log_modes_spec.spl test/integration/app/add_remove_log_modes_spec.spl test/integration/app/init_log_modes_spec.spl test/integration/app/publish_log_modes_spec.spl test/integration/app/cache_log_modes_spec.spl test/integration/app/pkg_log_modes_spec.spl test/integration/app/info_log_modes_spec.spl test/integration/app/targets_log_modes_spec.spl test/integration/app/env_log_modes_spec.spl test/integration/app/todo_scan_log_modes_spec.spl test/integration/app/release_log_modes_spec.spl test/integration/app/bug_gen_log_modes_spec.spl test/integration/app/bug_add_resolve_log_modes_spec.spl test/integration/app/feature_doc_log_modes_spec.spl test/integration/app/todo_gen_log_modes_spec.spl test/integration/app/qualify_ignore_log_modes_spec.spl` (47 files passed)
- - `bin/simple check src/lib/nogc_sync_mut/db/dbfs_engine/sql_parser.spl src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_sql_extended_spec.spl`
- - `bin/simple test test/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (8 passed)
- - `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (21 passed)
- - `bin/simple test test/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed)
+ - `bin/simple check src/lib/nogc_sync_mut/db/dbfs_engine/sql_parser.spl src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_sql_extended_spec.spl`
+ - `bin/simple test test/integration/storage/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (8 passed)
+ - `bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (21 passed)
+ - `bin/simple test test/integration/storage/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed)
  - `bin/simple check src/app/cli/query_lint.spl src/app/cli/query_lint_checks.spl test/unit/app/cli/query_lint_print_to_log_spec.spl` (2 existing unresolved-import warnings in `query_lint.spl`)
  - `bin/simple test test/unit/app/cli/query_lint_print_to_log_spec.spl --mode=interpreter --clean --force-rebuild` (3 passed)
- - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_spec.spl` (passed)
- - `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (22 passed)
- - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_spec.spl` (passed after per-table FTS cache/invalidation change)
- - `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (23 passed after cache invalidation coverage)
- - `bin/simple test test/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed after cache integration)
+ - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_spec.spl` (passed)
+ - `bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (22 passed)
+ - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_spec.spl` (passed after per-table FTS cache/invalidation change)
+ - `bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (23 passed after cache invalidation coverage)
+ - `bin/simple test test/integration/storage/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed after cache integration)
  - `bin/simple check src/compiler/10.frontend/core/aop_log_policy.spl test/unit/compiler/frontend/aop_log_policy_spec.spl` (passed)
  - `bin/simple test test/unit/compiler/frontend/aop_log_policy_spec.spl --mode=interpreter --clean --force-rebuild` (5 passed)
  - `bin/simple check src/compiler` (exit 0, 1521 warnings)
@@ -379,10 +379,10 @@ Native MCP/LSP verification update:
  - `SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --clean` (3 passed)
  - `SIMPLE_LIB=src bin/simple test test/integration/app/simple_lsp_mcp_stdio_spec.spl --mode=interpreter --clean` (2 passed)
  - `sh scripts/check-mcp-native-smoke.shs` (exit 0; MCP tools JSON/schema valid, 144 tools; LSP tools JSON/schema valid, 0 tools)
- - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/dbfs/pure_db_sql_extended_spec.spl` (passed after explicit reopen persistence coverage)
- - `bin/simple test test/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (10 passed after explicit reopen persistence coverage)
- - `bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (40 passed after explicit reopen persistence coverage)
- - `bin/simple test test/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed after explicit reopen persistence coverage)
+ - `bin/simple check src/lib/nogc_sync_mut/database/pure_sql/database.spl test/integration/storage/dbfs/pure_db_sql_extended_spec.spl` (passed after explicit reopen persistence coverage)
+ - `bin/simple test test/integration/storage/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean --force-rebuild` (10 passed after explicit reopen persistence coverage)
+ - `bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean --force-rebuild` (40 passed after explicit reopen persistence coverage)
+ - `bin/simple test test/integration/storage/dbfs/fts_engine_spec.spl --mode=interpreter --clean --force-rebuild` (28 passed after explicit reopen persistence coverage)
  - `bin/simple check src/app/search/main.spl test/integration/app/search_log_modes_spec.spl` (passed after current-source `simple search` log option rollout)
  - `bin/simple test test/integration/app/search_log_modes_spec.spl --mode=interpreter --clean --force-rebuild` (4 passed after current-source `simple search` log option rollout)
  - `bin/simple test test/integration/app/brief_log_modes_spec.spl --mode=interpreter --clean --force-rebuild` (4 passed after current-source `simple search` log option rollout)
@@ -460,16 +460,16 @@ Search/DB explorer:
 
 - Existing `PureDatabase` CRUD exists and was previously passing 12 focused tests.
 - Existing untracked/shared FTS modules were reported under `src/lib/nogc_sync_mut/db/dbfs_engine/fts/`: tokenizer, inverted index, BM25, trigram.
-- Existing focused FTS shared module coverage now passes in `test/dbfs/fts_engine_spec.spl`.
+- Existing focused FTS shared module coverage now passes in `test/integration/storage/dbfs/fts_engine_spec.spl`.
 - SQL `MATCH` and `fts_match(...)` WHERE expressions now work in `PureDatabase`.
 - `PureDatabase` BM25/FTS5 facade search now uses the shared `FtsEngine`.
 - `PureDatabase` now keeps per-table in-memory FTS engine caches for facade search and invalidates them after insert/update/delete/drop.
-- Update/delete/cache-refresh visibility for facade search is covered by `test/dbfs/pure_db_spec.spl`; disk-persisted SQLite-style FTS indexes are still not implemented if that remains required.
- - Existing focused FTS shared module coverage now passes in `test/dbfs/fts_engine_spec.spl`.
+- Update/delete/cache-refresh visibility for facade search is covered by `test/integration/storage/dbfs/pure_db_spec.spl`; disk-persisted SQLite-style FTS indexes are still not implemented if that remains required.
+ - Existing focused FTS shared module coverage now passes in `test/integration/storage/dbfs/fts_engine_spec.spl`.
  - SQL `MATCH` and `fts_match(...)` WHERE expressions now work in `PureDatabase`.
  - `PureDatabase` BM25/FTS5 facade search now uses the shared `FtsEngine`.
  - `PureDatabase` now keeps per-table in-memory FTS engine caches for facade search and invalidates them after insert/update/delete/drop.
- - Disk-backed `PureDatabase.open(path)` now persists table rows and FTS column metadata, and rebuilds the BM25/FTS5 facade index after reopening. Update/delete/cache-refresh visibility for facade search is covered by `test/dbfs/pure_db_spec.spl`; reopen and post-reopen update visibility are covered by `test/dbfs/pure_db_sql_extended_spec.spl`.
+ - Disk-backed `PureDatabase.open(path)` now persists table rows and FTS column metadata, and rebuilds the BM25/FTS5 facade index after reopening. Update/delete/cache-refresh visibility for facade search is covered by `test/integration/storage/dbfs/pure_db_spec.spl`; reopen and post-reopen update visibility are covered by `test/integration/storage/dbfs/pure_db_sql_extended_spec.spl`.
  - Scope decision: accepted embedded-search persistence is corpus plus FTS metadata persistence with deterministic in-memory posting-list rebuild on first post-reopen search. Full on-disk posting-list persistence is not required by the current accepted artifacts; add a new requirement before implementing separate persisted posting-list files/tables.
 
 Logging/AOP explorer:
@@ -650,7 +650,7 @@ Logging/AOP explorer:
  - Final MCP production-wrapper reconciliation removed raw source-entrypoint dispatch from lazy MCP handlers: VCS helpers now call `bin/simple sj ...`, and Play helpers now call `bin/simple play ...` instead of `bin/simple run src/app/.../main.spl ...`.
  - Verification evidence added after MCP handler reconciliation: `bin/simple check src/app/mcp/main_lazy_vcs_tools.spl src/app/mcp/main_lazy_play_tools.spl src/app/mcp/main.spl` passed; `SIMPLE_LIB=src timeout 300s bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server` passed; `timeout 10 build/bootstrap/mcp-package/simple_mcp_server --version` passed with `Simple MCP Server v4.0.0`.
  - Final assertion-quality cleanup converted changed non-generated specs away from shorthand/no-op/placeholder assertions while keeping generated `.spipe_matchers_*` mirrors untouched. Focused static checks passed for the touched groups: MCP intensive/bug tracking/bugdb integration specs, database sync/T32/codegen feature specs, and pure DB specs.
- - Final focused regression evidence added: `SIMPLE_LIB=src timeout 240s bin/simple test test/dbfs/pure_db_spec.spl --mode=interpreter --clean` passed 40/40; `SIMPLE_LIB=src timeout 180s bin/simple test test/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean` passed 10/10; `SIMPLE_LIB=src timeout 240s bin/simple test test/feature/app/codegen_parity_completion_spec.spl --mode=interpreter --clean` passed 161/161; `SIMPLE_LIB=src timeout 180s bin/simple test test/feature/app/database_sync_spec.spl --mode=interpreter --clean` passed 36/36; `SIMPLE_LIB=src timeout 180s bin/simple test test/feature/app/t32_tools/t32_cmm_gui_spec.spl --mode=interpreter --clean` passed 27/27; `SIMPLE_LIB=src timeout 180s bin/simple test test/integration/app/app_mcp_intensive_spec.spl --mode=interpreter --clean` passed 5/5; `SIMPLE_LIB=src timeout 180s bin/simple test test/integration/app/bug_tracking_scenario_spec.spl --mode=interpreter --clean` passed 12/12; `SIMPLE_LIB=src timeout 180s bin/simple test test/integration/app/mcp_bugdb_spec.spl --mode=interpreter --clean` passed 6/6.
+ - Final focused regression evidence added: `SIMPLE_LIB=src timeout 240s bin/simple test test/integration/storage/dbfs/pure_db_spec.spl --mode=interpreter --clean` passed 40/40; `SIMPLE_LIB=src timeout 180s bin/simple test test/integration/storage/dbfs/pure_db_sql_extended_spec.spl --mode=interpreter --clean` passed 10/10; `SIMPLE_LIB=src timeout 240s bin/simple test test/feature/app/codegen_parity_completion_spec.spl --mode=interpreter --clean` passed 161/161; `SIMPLE_LIB=src timeout 180s bin/simple test test/feature/app/database_sync_spec.spl --mode=interpreter --clean` passed 36/36; `SIMPLE_LIB=src timeout 180s bin/simple test test/feature/app/t32_tools/t32_cmm_gui_spec.spl --mode=interpreter --clean` passed 27/27; `SIMPLE_LIB=src timeout 180s bin/simple test test/integration/app/app_mcp_intensive_spec.spl --mode=interpreter --clean` passed 5/5; `SIMPLE_LIB=src timeout 180s bin/simple test test/integration/app/bug_tracking_scenario_spec.spl --mode=interpreter --clean` passed 12/12; `SIMPLE_LIB=src timeout 180s bin/simple test test/integration/app/mcp_bugdb_spec.spl --mode=interpreter --clean` passed 6/6.
  - Final quality/hygiene evidence added: whole-tree `bin/simple verify quality --all` is not a usable gate in this checkout because generated `.spipe_matchers_*` mirrors currently produce 13027 findings; the scoped changed-source gate excluding generated mirrors and the removed temporary debug file passed with `Verify quality passed: 152 file(s) clean`. `git diff --check` over changed `.spl`/`.rs`/`.c`/`.h`/`.md` files passed, conflict-marker scan over the same changed file set was clean, and the non-generated app placeholder scan found no `expect(true).to_equal(true)`, `pass_todo`, or bare `pass` bodies outside intentional lint/verify fixtures.
  - Scoped VCS commit completed with `jj commit -m "feat: add app log modes and database search hardening"` for the active-goal implementation, tests, docs, runtime/native MCP support, and removal of `tmp_pure_search_debug.spl`. The resulting JJ change is `lz` with description `feat: add app log modes and database search hardening`; unrelated generated docs, submodule/example state, vendored changes, and SimpleOS Cortex-M33 files remain outside the commit.
 

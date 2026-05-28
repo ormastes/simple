@@ -47,7 +47,7 @@ use crate::exec_core::run_main;
 
 /// Default per-test timeout in seconds (overridable via SIMPLE_TEST_TIMEOUT env var).
 ///
-/// QEMU-tagged specs (path under test/qemu/, or files containing `@qemu` /
+/// QEMU-tagged specs (path under test/system/qemu/, or files containing `@qemu` /
 /// `@tag:qemu` in the first ~4 KB) get a longer budget because they typically
 /// run several `_run_qemu(arch)` invocations, each up to 15 s. Override the
 /// QEMU-specific budget with `SIMPLE_QEMU_TEST_TIMEOUT_SECS` (default 240).
@@ -75,7 +75,7 @@ fn per_test_timeout_secs(path: &Path) -> u64 {
     60
 }
 
-/// Returns true if the spec is a QEMU-driven test (path under `test/qemu/`,
+/// Returns true if the spec is a QEMU-driven test (path under `test/system/qemu/`,
 /// or first ~4 KB of the file contains `@qemu` / `@tag:qemu`).
 fn is_qemu_spec(path: &Path) -> bool {
     let mut saw_test = false;

@@ -21,7 +21,7 @@ The feature goal is not to invent a new backend. It is to document and then tigh
 
 - `src/os/qemu_runner.spl` already targets `Architecture.Riscv32` with `qemu-system-riscv32`, `virt`, `rv32`, and `build/os/simpleos_riscv32.elf`.
 - `src/os/kernel/arch/riscv32/boot.spl` is a real OpenSBI/QEMU `virt` boot layer.
-- The current smoke test, `test/qemu/os/boot/riscv32_boot_qemu_spec.spl`, checks for banner and boot markers.
+- The current smoke test, `test/system/qemu/os/boot/riscv32_boot_qemu_spec.spl`, checks for banner and boot markers.
 - The current proof is early boot, not full OS feature coverage.
 
 ### GHDL RV32 is a remote execution lane, not an OS boot lane

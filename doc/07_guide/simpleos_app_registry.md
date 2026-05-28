@@ -158,6 +158,6 @@ On COW fault, `vmm_handle_cow_fault`:
 
 | Spec File | Tests | Covers |
 |-----------|-------|--------|
-| `test/os/kernel/loader/app_registry_spec.spl` | 22 | Registry parse, lookup, alias, cache, fallback |
-| `test/os/kernel/loader/app_discovery_spec.spl` | 16 | Dynamic resolution, FAT32 fallback, canonicalization |
-| `test/os/port/x86_64_elf_load_spec.spl` | 1 | ELF load contract |
+| `test/unit/os/kernel/loader/app_registry_spec.spl` | 22 | Registry parse, lookup, alias, cache, fallback |
+| `test/unit/os/kernel/loader/app_discovery_spec.spl` | 16 | Dynamic resolution, FAT32 fallback, canonicalization |
+| `test/system/os/port/x86_64_elf_load_spec.spl` | 1 | ELF load contract |

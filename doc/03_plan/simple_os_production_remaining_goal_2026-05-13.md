@@ -14,7 +14,7 @@ performance, stability, and primitive API hygiene.
 - L4 IPC has a discovered regression gate in
   `test/perf/ipc_l4_logic_perf_spec.spl`; latest evidence showed queued IPC at
   about 11.5s for 20k iterations and L4 inline paths at about 1.1s.
-- Multiarch appscan specs exist under `test/qemu/os/appscan/` for ARM,
+- Multiarch appscan specs exist under `test/system/qemu/os/appscan/` for ARM,
   RISC-V, and x86.
 - ARM and RISC-V appscan lanes passed from fresh rebuilt artifacts.
 - x86 appscan passed in about 3.5s after the QEMU serial marker early-exit fix.

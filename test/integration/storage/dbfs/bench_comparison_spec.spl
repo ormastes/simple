@@ -1,0 +1,120 @@
+# Maps to: AC-6, AC-7
+# Run: bin/simple test test/integration/storage/dbfs/bench_comparison_spec.spl
+# @cover test/fixtures/storage/dbfs/bench_harness.spl 40%
+# @cover test/fixtures/storage/dbfs/posix_baseline.spl 60%
+
+"""
+Bench Comparison Specification
+
+Validates that the benchmark harness includes FAT32, RamFS in all
+4 workloads and that the POSIX baseline runner produces BenchResult
+with p50/p99 metrics for comparison reporting.
+"""
+
+use std.spipe.*
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{MountOptions}
+use std.fs_driver.mount_table.{MountTable}
+use std.db.dbfs_driver.{DbFsDriver}
+use os.services.fat32.fat32.{Fat32Driver}
+use test.fixtures.storage.dbfs.bench_harness.{BenchResult, run_all, make_fat32_table, make_ramfs_table}
+use test.fixtures.storage.dbfs.posix_baseline.{run_posix_metadata_storm, run_posix_append_log, run_posix_random_overwrite, run_posix_mmap_read}
+
+# ============================================================================
+# FAT32 Workload Coverage (AC-6)
+# ============================================================================
+
+describe "Bench Harness — FAT32 coverage":
+    it "AC-6: make_fat32_table returns a MountTable":
+        val mt = make_fat32_table()
+        val r = mt.stat("/fat32")
+        val ok = r.is_ok()
+        expect(ok).to_equal(true)
+
+    it "AC-6: FAT32 driver name present in run_all results":
+        val results = run_all()
+        val names = results.map(fn(r: BenchResult) -> text: r.driver_name)
+        expect(names).to_contain("fat32")
+
+# ============================================================================
+# RamFS Workload Coverage (AC-6)
+# ============================================================================
+
+describe "Bench Harness — RamFS coverage":
+    it "AC-6: make_ramfs_table returns a MountTable":
+        val mt = make_ramfs_table()
+        val r = mt.stat("/ramfs")
+        val ok = r.is_ok()
+        expect(ok).to_equal(true)
+
+    it "AC-6: RamFS driver name present in run_all results":
+        val results = run_all()
+        val names = results.map(fn(r: BenchResult) -> text: r.driver_name)
+        expect(names).to_contain("ramfs")
+
+# ============================================================================
+# All 4 Workloads Present (AC-6)
+# ============================================================================
+
+describe "Bench Harness — workload completeness":
+    it "AC-6: run_all includes metadata_storm workload":
+        val results = run_all()
+        val wl = results.map(fn(r: BenchResult) -> text: r.workload_name)
+        expect(wl).to_contain("metadata_storm")
+
+    it "AC-6: run_all includes append_heavy_log workload":
+        val results = run_all()
+        val wl = results.map(fn(r: BenchResult) -> text: r.workload_name)
+        expect(wl).to_contain("append_heavy_log")
+
+    it "AC-6: run_all includes random_overwrite workload":
+        val results = run_all()
+        val wl = results.map(fn(r: BenchResult) -> text: r.workload_name)
+        expect(wl).to_contain("random_overwrite")
+
+    it "AC-6: run_all includes mmap_read_mostly workload":
+        val results = run_all()
+        val wl = results.map(fn(r: BenchResult) -> text: r.workload_name)
+        expect(wl).to_contain("mmap_read_mostly")
+
+# ============================================================================
+# POSIX Baseline Runner (AC-6)
+# ============================================================================
+
+describe "POSIX Baseline — runner produces results":
+    it "AC-6: run_posix_metadata_storm returns BenchResult with p50":
+        val r = run_posix_metadata_storm()
+        expect(r.p50_us).to_be_greater_than(0)
+
+    it "AC-6: run_posix_append_log returns BenchResult with p99":
+        val r = run_posix_append_log()
+        expect(r.p99_us).to_be_greater_than(0)
+
+    it "AC-6: run_posix_random_overwrite returns BenchResult":
+        val r = run_posix_random_overwrite()
+        val name = r.driver_name
+        expect(name).to_equal("posix")
+
+    it "AC-6: run_posix_mmap_read returns BenchResult":
+        val r = run_posix_mmap_read()
+        val name = r.driver_name
+        expect(name).to_equal("posix")
+
+# ============================================================================
+# Comparison Report Shape (AC-6, AC-7 structure)
+# ============================================================================
+
+describe "Bench Comparison — report shape":
+    it "AC-6: run_all results contain p50_us and p99_us fields":
+        val results = run_all()
+        val first = results[0]
+        val has_p50 = first.p50_us >= 0
+        val has_p99 = first.p99_us >= 0
+        expect(has_p50).to_equal(true)
+        expect(has_p99).to_equal(true)
+
+    it "AC-6: POSIX baseline included alongside Simple drivers":
+        val results = run_all()
+        val names = results.map(fn(r: BenchResult) -> text: r.driver_name)
+        expect(names).to_contain("posix")

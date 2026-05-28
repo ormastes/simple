@@ -37,7 +37,7 @@ Check the newly connected FPGA board, research how to use it, inspect UART first
 
 - `bin/simple run examples/01_getting_started/hello_native.spl` printed `Hello World`.
 - Built `examples/09_embedded/baremetal/baremetal/hello_riscv64.s` with `riscv64-linux-gnu-as` / `riscv64-linux-gnu-ld`; `qemu-system-riscv64 -machine virt -bios none -kernel build/rv64_bringup_check/hello_riscv64.elf` printed `Hello, RISC-V 64!`.
-- `bin/simple test test/qemu/rv64gc_qemu_boot_spec.spl --mode=interpreter` passed 14 examples.
+- `bin/simple test test/system/qemu/rv64gc_qemu_boot_spec.spl --mode=interpreter` passed 14 examples.
 - RISC-V semihost hello passed in GHDL with `Hello, RISC-V 32!` and `[SEMIHOST TEST] Success - exit code 0`.
 - `bin/simple test test/unit/os/qemu_runner_spec.spl --mode=interpreter` passed 55 examples, including RV64 hosted and RV64 VirtIO FAT32 SMF scenario checks.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_rv64_hosted_qemu_spec.spl --mode=interpreter` passed 3 examples, proving the RV64 hosted QEMU command includes disk and SSH/HTTP host-forwarding.

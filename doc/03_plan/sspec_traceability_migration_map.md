@@ -9,10 +9,11 @@ markdown path can be regenerated or moved without losing traceability metadata.
 
 ## Status
 
-**Map current; migration incomplete.** This map now reflects the current tree,
-including completed batches and remaining root/legacy files requiring
-decisions. Resolve the open items below before more broad `doc/06_spec/` or
-`test/` movement.
+**Map current; broad root migration complete.** This map now reflects the
+current tree, including completed batches and remaining catalog/manual-doc
+follow-ups. No current top-level executable `test/` roots are known to need
+policy migration; keep the remaining `doc/06_spec` catalog/data items in place
+until their producers and consumers are traced.
 
 Current root/legacy audit from the worktree:
 
@@ -20,20 +21,26 @@ Current root/legacy audit from the worktree:
 |---|---|---|
 | Root navigation | `doc/06_spec/INDEX.md`, `doc/06_spec/README.md` | Keep at root. |
 | Root data/catalog | `bootstrap_test_gate.sdn`, `feature.md`, `feature_db.sdn`, `pending_feature.md` | Trace producers/consumers before moving. |
-| Root generated math docs | `loss_nograd_blocks_spec.md`, `math_blocks_spec.md`, `math_render_spec.md` | Compare with mirrored `doc/06_spec/feature/usage/*` and compiler legacy copies; keep one canonical generated doc per source spec. |
-| Legacy generated index | `legacy/test-spec.md`, `legacy/test-spec.html` | Delete or archive after confirming no doc-nav fixture depends on them. |
-| Legacy live TRACE32 doc | `legacy/trace32_stm32h7_jit_e2e_spec.md` | Regenerate/move to `doc/06_spec/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.md`. |
+| Root generated math docs | none | Resolved in Batch 20; canonical docs live under `doc/06_spec/feature/usage/`. |
+| Legacy generated index | none | Resolved in Batch 21. |
+| Legacy live TRACE32 doc | none | Resolved in Batch 21. |
 | Runtime manual contract | `runtime/rt_gui_glass_contract.md` | Decide whether it is a manual runtime contract or needs an executable source spec. |
 | Generated/category folders | `generated/pending_feature.md`, `categories/*.md`, `diagrams/.gitkeep` | Leave until generator ownership is traced. |
 
-Current `test/` top-level roots still needing policy/migration review:
-`test/app`, `test/browser_engine`, `test/compiler`, `test/dbfs`, `test/fuzz`,
-`test/hal`, `test/js`, `test/kernel`, `test/lib`, `test/nvfs`, `test/os`,
-`test/qemu`, `test/reftest`, `test/riscv64_fpga`, `test/rtl`,
-`test/runtime`, `test/sffi`, `test/tools`, and
-`test/web_platform`. `test/baselines`, `test/fixtures`, `test/perf`,
-`test/shared`, `test/system`, `test/unit`, `test/integration`, and
-`test/feature` already have an explicit role.
+Current `test/` top-level roots still needing policy/migration review: none
+known from the current audit.
+The low-risk `test/hal`, `test/rtl`, `test/runtime`, `test/sffi`, and shallow
+`test/compiler` slices are resolved in Batches 22 and 23. `test/kernel` is
+resolved in Batch 24. `test/fuzz` is resolved in Batch 25. `test/js` is
+resolved in Batch 26. `test/nvfs` is resolved in Batch 27. `test/tools` is
+resolved in Batch 28. `test/dbfs` is resolved in Batch 29.
+`test/browser_engine`, `test/web_platform`, and `test/reftest` are resolved in
+Batch 30. `test/qemu` and `test/riscv64_fpga` are resolved in Batch 31.
+`test/app` is resolved in Batch 32. `test/os` is resolved in Batch 33.
+`test/lib` is resolved in Batch 34.
+`test/baselines`, `test/fixtures`, `test/perf`, `test/shared`,
+`test/system`, `test/unit`, `test/integration`, and `test/feature` already
+have an explicit role.
 
 ## Current Shape
 
@@ -41,11 +48,10 @@ Current `test/` top-level roots still needing policy/migration review:
   `doc/06_spec/app/compiler/...` docs still coexist with newer
   `doc/06_spec/feature/...`, `unit/...`, `integration/...`, and `system/...`
   docs.
-- Root-level `doc/06_spec` currently has nine files: two navigation docs, four
-  catalog/data files, and three generated math docs that still need a duplicate
-  comparison decision.
-- Additional legacy buckets: `doc/06_spec/legacy/*` and
-  `doc/06_spec/runtime/rt_gui_glass_contract.md`.
+- Root-level `doc/06_spec` currently has six files: two navigation docs and
+  four catalog/data files. Generated spec docs should live under mirrored
+  subtrees, not the root.
+- Additional non-mirrored bucket: `doc/06_spec/runtime/rt_gui_glass_contract.md`.
 - `doc/06_spec/README.md` now defines mirrored layout from `test/...` to
   `doc/06_spec/...`; use that rule for all migrations below.
 
@@ -66,14 +72,13 @@ Current `test/` top-level roots still needing policy/migration review:
 ### 2026-05-28 Batch 1
 
 Moved high-confidence one-to-one generated/manual specs whose executable source
-path was known and whose mirrored target did not already exist. Current audit:
-the root math docs from this batch still exist and are non-identical to their
-mirrored copies, so they remain open duplicate-resolution items.
+path was known and whose mirrored target did not already exist. Root math
+duplicates from this batch were later resolved in Batch 20.
 
 | Old path | New mirrored path |
 |---|---|
-| `doc/06_spec/loss_nograd_blocks_spec.md` | `doc/06_spec/feature/usage/loss_nograd_blocks_spec.md` (open duplicate; root still exists) |
-| `doc/06_spec/math_render_spec.md` | `doc/06_spec/feature/usage/math_render_spec.md` (open duplicate; root still exists) |
+| `doc/06_spec/loss_nograd_blocks_spec.md` | `doc/06_spec/feature/usage/loss_nograd_blocks_spec.md` (root duplicate removed in Batch 20) |
+| `doc/06_spec/math_render_spec.md` | `doc/06_spec/feature/usage/math_render_spec.md` (root duplicate removed in Batch 20) |
 | `doc/06_spec/ch32v307_composite_runner_path_spec.md` | `doc/06_spec/integration/remote_jit/ch32v307_composite_runner_path_spec.md` |
 | `doc/06_spec/qemu_rv32_raw_injected_regression_spec.md` | `doc/06_spec/integration/remote_jit/qemu_rv32_raw_injected_regression_spec.md` |
 | `doc/06_spec/legacy/command_dispatch_spec.md` | `doc/06_spec/unit/app/tooling/command_dispatch_spec.md` |
@@ -130,13 +135,13 @@ comparison pass.
 ### 2026-05-28 Batch 4
 
 Resolved high-confidence root docs whose executable specs already live in
-canonical `test/feature/...` paths. Current audit: the root
-`math_blocks_spec.md` still exists and is non-identical to the mirrored
-`feature/usage` copy, so it remains an open duplicate-resolution item.
+canonical `test/feature/...` paths. The remaining root
+`math_blocks_spec.md` duplicate was later resolved in Batch 20 by keeping the
+richer mirrored `feature/usage` copy.
 
 | Old path | New mirrored path |
 |---|---|
-| `doc/06_spec/math_blocks_spec.md` | `doc/06_spec/feature/usage/math_blocks_spec.md` (open duplicate; root still exists) |
+| `doc/06_spec/math_blocks_spec.md` | `doc/06_spec/feature/usage/math_blocks_spec.md` (root duplicate removed in Batch 20) |
 | `doc/06_spec/remote_baremetal_library_spec.md` | `doc/06_spec/feature/app/remote_baremetal/remote_baremetal_library_spec.md` |
 | `doc/06_spec/remote_baremetal_runtime_spec.md` | `doc/06_spec/feature/app/remote_baremetal/remote_baremetal_runtime_spec.md` |
 
@@ -356,6 +361,341 @@ cross-platform coverage. The shared guide now explicitly allows the built-in
 | `test/shared/types/contract/summary.txt` | `test/unit/lib/common/contracts/contract/summary.txt` |
 | - | `doc/06_spec/unit/lib/common/contracts/contract_testing_spec.md` |
 
+### 2026-05-28 Batch 20
+
+Removed the remaining root-level generated math duplicates after confirming
+their mirrored `feature/usage` owners. `loss_nograd_blocks_spec.md` and
+`math_render_spec.md` differed from their mirrored copies only by the Updated
+date; the mirrored `math_blocks_spec.md` was richer than the shorter root
+scenario-list snapshot, so the mirrored file was kept.
+
+| Old path | New mirrored path |
+|---|---|
+| `doc/06_spec/loss_nograd_blocks_spec.md` | `doc/06_spec/feature/usage/loss_nograd_blocks_spec.md` |
+| `doc/06_spec/math_render_spec.md` | `doc/06_spec/feature/usage/math_render_spec.md` |
+| `doc/06_spec/math_blocks_spec.md` | `doc/06_spec/feature/usage/math_blocks_spec.md` |
+
+### 2026-05-28 Batch 21
+
+Cleared the legacy generated-doc bucket. The only live generated spec in the
+legacy bucket, TRACE32 STM32H7 JIT E2E, moved to the mirrored feature/app path.
+The old `test-spec` markdown/HTML outputs and the legacy bucket index were
+deleted after exact-path search found no consumers outside this migration map.
+
+| Old path | New mirrored path |
+|---|---|
+| `doc/06_spec/legacy/trace32_stm32h7_jit_e2e_spec.md` | `doc/06_spec/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.md` |
+| `doc/06_spec/legacy/INDEX.md` | deleted stale legacy navigation |
+| `doc/06_spec/legacy/test-spec.md` | deleted stale generated output |
+| `doc/06_spec/legacy/test-spec.html` | deleted stale generated output |
+
+### 2026-05-28 Batch 22
+
+Moved low-risk unit/API roots into canonical unit and fixture buckets.
+Focused discovery works at the new paths, but several migrated tests expose
+pre-existing or now-visible failures under interpreter verification.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/hal/hal_traits_spec.spl` | `test/unit/hal/hal_traits_spec.spl` |
+| `test/rtl/encode_riscv_spec.spl` | `test/unit/rtl/encode_riscv_spec.spl` |
+| `test/sffi/sffi_public_api_spec.spl` | `test/unit/sffi/sffi_public_api_spec.spl` |
+| `test/runtime/simd_text_test.spl` | `test/unit/runtime/simd_text/simd_text_test.spl` |
+| `test/runtime/simd_text_fuzz_test.spl` | `test/unit/runtime/simd_text/simd_text_fuzz_test.spl` |
+| `test/runtime/simd_text_fuzz.spl` | `test/fixtures/runtime/simd_text/simd_text_fuzz.spl` |
+
+Verification summary: `test/unit/hal/hal_traits_spec.spl` passed 30/30.
+`test/unit/rtl/encode_riscv_spec.spl`, `test/unit/sffi/sffi_public_api_spec.spl`,
+and the two runtime SIMD text specs were discovered at their new paths but did
+not pass focused interpreter verification.
+
+### 2026-05-28 Batch 23
+
+Moved the current shallow `test/compiler` slice into canonical compiler unit
+buckets. The move intentionally overwrote older same-name
+`test/unit/compiler/mir_opt/{bounds_check_elim,copy_propagation}_spec.spl`
+files with the active top-level versions, matching the migration worker result.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/compiler/auto_vec_string_test.spl` | `test/unit/compiler/semantics/auto_vec_string_test.spl` |
+| `test/compiler/mir_opt/bounds_check_elim_spec.spl` | `test/unit/compiler/mir_opt/bounds_check_elim_spec.spl` |
+| `test/compiler/mir_opt/clib_parity_hotspot_spec.spl` | `test/unit/compiler/mir_opt/clib_parity_hotspot_spec.spl` |
+| `test/compiler/mir_opt/copy_propagation_spec.spl` | `test/unit/compiler/mir_opt/copy_propagation_spec.spl` |
+| `test/compiler/mir_opt/loop_invariant_motion_spec.spl` | `test/unit/compiler/mir_opt/loop_invariant_motion_spec.spl` |
+| `test/compiler/mir_opt/pattern_rule_spec.spl` | `test/unit/compiler/mir_opt/pattern_rule_spec.spl` |
+| `test/compiler/mir_opt/typed_byte_canon_spec.spl` | `test/unit/compiler/mir_opt/typed_byte_canon_spec.spl` |
+| `test/compiler/vhdl/hardware_spawn_lower_spec.spl` | `test/unit/compiler/vhdl/hardware_spawn_lower_spec.spl` |
+
+Verification summary: auto-vector string and the six MIR optimization specs
+passed focused interpreter runs. `test/unit/compiler/vhdl/hardware_spawn_lower_spec.spl`
+is discovered at its new path but currently fails 17 examples with semantic
+errors such as missing `kind`, `label_count`, and `is_output` variables.
+
+### 2026-05-28 Batch 24
+
+Moved the top-level kernel boot/loader specs into the canonical system kernel
+bucket. These specs exercise boot filesystem, ELF loading, and NVFS-backed ELF
+load chains against OS/kernel modules rather than isolated unit helpers, so
+`test/system/kernel` is the conservative target.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/kernel/boot_fs_mount_spec.spl` | `test/system/kernel/boot_fs_mount_spec.spl` |
+| `test/kernel/boot_fs_spec.spl` | `test/system/kernel/boot_fs_spec.spl` |
+| `test/kernel/elf_load_chain_spec.spl` | `test/system/kernel/elf_load_chain_spec.spl` |
+| `test/kernel/nvfs_elf_load_spec.spl` | `test/system/kernel/nvfs_elf_load_spec.spl` |
+
+Verification:
+
+- `SIMPLE_LIB=src bin/simple test --force-rebuild test/system/kernel/boot_fs_mount_spec.spl` passed 8/8.
+- `SIMPLE_LIB=src bin/simple test --force-rebuild test/system/kernel/boot_fs_spec.spl` passed 11/11.
+- `SIMPLE_LIB=src bin/simple test --force-rebuild test/system/kernel/elf_load_chain_spec.spl` passed 6/6.
+- `SIMPLE_LIB=src bin/simple test --force-rebuild test/system/kernel/nvfs_elf_load_spec.spl` passed 3/3.
+
+### 2026-05-28 Batch 25
+
+Moved deterministic fuzz/property specs into the canonical language feature
+fuzz bucket. These specs exercise language primitives and parser/text/string
+behavior, not a multi-component system workflow, so `test/feature/language/fuzz`
+is the conservative target. Summary evidence directories moved with their
+specs.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/fuzz/numeric_robustness_fuzz_spec.spl` | `test/feature/language/fuzz/numeric_robustness_fuzz_spec.spl` |
+| `test/fuzz/numeric_robustness_fuzz/summary.txt` | `test/feature/language/fuzz/numeric_robustness_fuzz/summary.txt` |
+| `test/fuzz/parser_roundtrip_fuzz_spec.spl` | `test/feature/language/fuzz/parser_roundtrip_fuzz_spec.spl` |
+| `test/fuzz/parser_roundtrip_fuzz/summary.txt` | `test/feature/language/fuzz/parser_roundtrip_fuzz/summary.txt` |
+| `test/fuzz/string_operations_fuzz_spec.spl` | `test/feature/language/fuzz/string_operations_fuzz_spec.spl` |
+| `test/fuzz/string_operations_fuzz/summary.txt` | `test/feature/language/fuzz/string_operations_fuzz/summary.txt` |
+
+Verification: `bin/simple test test/feature/language/fuzz --mode=interpreter --no-cache`
+passed 33/33 across three files.
+
+### 2026-05-28 Batch 26
+
+Moved JS executable conformance specs to the canonical feature bucket and moved
+the shell compatibility harness to fixtures. The Simple spec files are
+byte-for-byte identical to their old top-level contents; the move exposes the
+same JS conformance failures at the new path.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/js/es5_conformance_spec.spl` | `test/feature/js/es5_conformance_spec.spl` |
+| `test/js/es2015_conformance_spec.spl` | `test/feature/js/es2015_conformance_spec.spl` |
+| `test/js/node_api_conformance_spec.spl` | `test/feature/js/node_api_conformance_spec.spl` |
+| `test/js/interpreter_vars_spec.spl` | `test/feature/js/interpreter_vars_spec.spl` |
+| `test/js/compat_test.sh` | `test/fixtures/js/compat_test.sh` |
+
+Verification: `bash -n test/fixtures/js/compat_test.sh` passed.
+`bin/simple test test/feature/js` discovered all four moved specs but failed
+existing JS conformance coverage with 0 passed and 114 failed. Focused
+`--fail-fast` checks also failed for `node_api_conformance_spec.spl` and
+`es5_conformance_spec.spl`. The full shell harness hung inside
+`bin/simple run src/app/js/main.spl -e ...` and was terminated by the worker.
+
+### 2026-05-28 Batch 27
+
+Moved NVFS host-side driver and persistence specs into the canonical storage
+integration bucket. These specs exercise NVFS arenas, POSIX wrapper behavior,
+superblock disk I/O, and remount persistence against a block-device-backed
+fixture, so `test/integration/storage/nvfs` is the conservative target.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/nvfs/nvfs_name_persistence_spec.spl` | `test/integration/storage/nvfs/nvfs_name_persistence_spec.spl` |
+| `test/nvfs/nvfs_nvme_arena_spec.spl` | `test/integration/storage/nvfs/nvfs_nvme_arena_spec.spl` |
+| `test/nvfs/nvfs_posix_nvme_spec.spl` | `test/integration/storage/nvfs/nvfs_posix_nvme_spec.spl` |
+| `test/nvfs/nvfs_remount_persistence_spec.spl` | `test/integration/storage/nvfs/nvfs_remount_persistence_spec.spl` |
+| `test/nvfs/nvfs_superblock_disk_spec.spl` | `test/integration/storage/nvfs/nvfs_superblock_disk_spec.spl` |
+
+Verification: `SIMPLE_LIB=src bin/simple test --force-rebuild test/integration/storage/nvfs`
+passed 21/21 across five files.
+
+### 2026-05-28 Batch 28
+
+Moved the top-level tools root into canonical unit, system, and fixture
+buckets. Pure command/model specs moved to unit coverage, platform/deploy
+behavior moved to system coverage, CI helper scripts moved to fixtures, and
+saved `summary.txt` evidence moved under `test/fixtures/tools/evidence`.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/tools/*_spec.spl` | `test/unit/tools/*_spec.spl` |
+| `test/tools/shell/*_spec.spl` | `test/unit/tools/shell/*_spec.spl` |
+| `test/tools/desktop/*_spec.spl` | `test/unit/tools/desktop/*_spec.spl` |
+| `test/tools/simple_os_primary_spec.spl` | `test/unit/tools/simple_os_primary_spec.spl` |
+| `test/tools/deploy/smoke_spec.spl` | `test/system/tools/deploy/smoke_spec.spl` |
+| `test/tools/manual/platform_spec_verification_spec.spl` | `test/system/tools/manual/platform_spec_verification_spec.spl` |
+| `test/tools/ci/*.spl` | `test/fixtures/tools/ci/*.spl` |
+| `test/tools/**/summary.txt` | `test/fixtures/tools/evidence/**` |
+
+Verification: representative moved specs passed:
+`test/unit/tools/echo_spec.spl` 5/5,
+`test/unit/tools/shell/seq_spec.spl` 3/3,
+`test/unit/tools/desktop/primary_cli_model_spec.spl` 3/3,
+`test/unit/tools/simple_os_primary_spec.spl` 4/4,
+`test/system/tools/manual/platform_spec_verification_spec.spl` 4/4, and
+`test/system/tools/deploy/smoke_spec.spl` 4/4. `test/unit/tools/cat_spec.spl`
+exited 0 with a 4/4 summary but also printed a contradictory per-file
+`FAILED` line, matching the existing runner-output anomaly noted in earlier
+tooling checks.
+
+### 2026-05-28 Batch 29
+
+Moved the top-level DBFS storage root into canonical storage integration and
+fixture buckets. Executable DBFS, hosted filesystem, parser, WAL, recovery, and
+benchmark smoke specs moved under `test/integration/storage/dbfs`. Shared
+benchmark harnesses, passthrough helpers, and hosted fixtures moved under
+`test/fixtures/storage/dbfs`.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/dbfs/*_spec.spl` | `test/integration/storage/dbfs/*_spec.spl` |
+| `test/dbfs/bench_*.spl` | `test/fixtures/storage/dbfs/bench/*.spl` |
+| `test/dbfs/*harness.spl` | `test/fixtures/storage/dbfs/harness/*.spl` |
+| `test/dbfs/*shared.spl` | `test/fixtures/storage/dbfs/*.spl` |
+
+Verification: representative moved specs passed:
+`test/integration/storage/dbfs/dbfs_recovery_spec.spl` 9/9,
+`test/integration/storage/dbfs/dbfs_no_regression_spec.spl` 5/5,
+`test/integration/storage/dbfs/dbfs_driver_spec.spl` 8/8,
+`test/integration/storage/dbfs/fts_engine_spec.spl` 28/28, and
+`test/integration/storage/dbfs/dbfs_engine_wal_spec.spl` 8/8. Existing DB/SQL
+coverage still fails after the move:
+`test/integration/storage/dbfs/pure_db_spec.spl` reported 41 passed and 18
+failed, and `test/integration/storage/dbfs/pure_db_sql_extended_spec.spl`
+reported 8 passed and 2 failed. `bench_comparison_spec.spl` exited 0 with an
+all-pass summary but printed the same contradictory runner failure anomaly seen
+in tooling checks.
+
+### 2026-05-28 Batch 30
+
+Moved browser and rendering compatibility roots into canonical unit, feature,
+and system buckets. Direct browser-engine module specs moved to
+`test/unit/browser_engine`, WPT-shaped web-platform coverage moved to
+`test/feature/web_platform`, and the reftest parity harness moved as a coupled
+system package under `test/system/reftest`.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/browser_engine/*` | `test/unit/browser_engine/*` |
+| `test/web_platform/*` | `test/feature/web_platform/*` |
+| `test/reftest/parity/*` | `test/system/reftest/parity/*` |
+
+Verification: discovery passed for the moved roots:
+`bin/simple test test/unit/browser_engine --list` listed 252 tests,
+`bin/simple test test/feature/web_platform --list` listed 398 tests, and
+`bin/simple test test/system/reftest --list` listed 35 tests. Focused
+`test/system/reftest/parity/pixel_diff_core_spec.spl` passed 15/15.
+Existing failures remain visible after the move: browser-engine net and
+web-platform scorecard checks crash on unresolved `rt_native_eq`, and reftest
+parity specs still fail behavior assertions despite their moved imports
+resolving.
+
+### 2026-05-28 Batch 31
+
+Moved QEMU and FPGA hardware-gated roots into canonical system buckets. QEMU
+specs, summaries, and the shared OS harness moved under `test/system/qemu` so
+runner classification and timeout logic still see a `/qemu/` path component.
+RISC-V FPGA preflight, manifest, inventory, JTAG, and payload checks moved
+under `test/system/hardware/riscv64_fpga`.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/qemu/**` | `test/system/qemu/**` |
+| `test/riscv64_fpga/*_spec.spl` | `test/system/hardware/riscv64_fpga/*_spec.spl` |
+
+Verification: focused moved and affected checks passed:
+`test/unit/lib/test_runner/test_classification_system_routing_spec.spl` 9/9,
+`test/system/qemu/qmp_screendump_spec.spl` 5/5,
+`test/unit/qemu/qemu_harness_acquire_or_spawn_spec.spl` 8/8, and
+`test/system/hardware/riscv64_fpga` 91/91. Exact old-path reference scans for
+`test/qemu`, `test/riscv64_fpga`, and `test.qemu.os` passed outside this
+migration map and its parent plan.
+
+### 2026-05-28 Batch 32
+
+Moved the top-level app test root into canonical unit and integration buckets.
+Module-level ITF, SVim, render type, and test API specs moved under
+`test/unit/app`; app workflow, service, process, UI-web, diagnostics, release,
+portal, MCP, optimizer, document navigation, and summary evidence moved under
+`test/integration/app`.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/app/itf/*_spec.spl` | `test/unit/app/itf/*_spec.spl` |
+| `test/app/svim/*_spec.spl` | `test/unit/app/svim/*_spec.spl` |
+| `test/app/ui.render/types*` | `test/unit/app/ui.render/types*` |
+| `test/app/ui.test_api/*` | `test/unit/app/ui.test_api/*` |
+| `test/app/**` | `test/integration/app/**` |
+
+Verification: discovery passed for `test/unit/app/itf` with 219 listed tests,
+`test/unit/app/svim` with 72 listed tests, `test/integration/app/ui.web` with
+158 listed tests, and `test/integration/app/diagnostics` with 13 listed tests.
+Focused checks passed for `test/unit/app/itf/itf_flags_spec.spl` 10/10 and
+`test/integration/app/ui.web/random_hex_test.spl` 8/8. Existing behavioral
+failures remain after the move:
+`test/unit/app/svim/core_spec.spl` reported 19 passed and 6 failed, and
+`test/unit/app/ui.test_api/handler_test.spl` reported 61 passed and 9 failed.
+
+### 2026-05-28 Batch 33
+
+Moved the top-level OS test root into canonical unit, integration, system, and
+fixture buckets. Direct compositor, driver, kernel, desktop manifest resolver,
+and non-boot multiarch checks moved under `test/unit/os`. Port/toolchain/static
+orchestration checks moved under `test/integration/os/port`. QEMU, E2E, boot,
+and runtime-gated checks moved under `test/system/os`. Port audit C fixtures
+moved under `test/fixtures/os/port`. Kernel logging specs use
+`test/unit/os/kernel/logging` because `log/` is ignored by `.gitignore`.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/os/compositor/*` | `test/unit/os/compositor/*` |
+| `test/os/desktop/app_manifest_resolver*` | `test/unit/os/desktop/app_manifest_resolver*` |
+| `test/os/drivers/*` | `test/unit/os/drivers/*` |
+| `test/os/kernel/**` | `test/unit/os/kernel/**` |
+| `test/os/multiarch/*` | `test/unit/os/multiarch/*` or `test/system/os/multiarch/*` by boot/runtime coupling |
+| `test/os/port/*` | `test/integration/os/port/*`, `test/system/os/port/*`, or `test/fixtures/os/port/*` by role |
+
+Verification: focused checks passed for
+`test/system/os/desktop/taskbar_shell_qemu_test.spl` 12/12 and
+`test/integration/os/port/disk_image_bake_spec.spl` 8/8. Discovery passed for
+`test/unit/os/kernel` with 1136 listed tests, `test/integration/os/port` with
+73 listed tests, and `test/system/os/port` with 36 listed tests. Existing
+failures remain after the move in stack builder, bootstrap cross status, disk
+boot, syscall shim, Simple-from-FS, and HAL trait-surface specs; compositor
+web-surface blit hung and was killed. The moved
+`test/unit/os/kernel/logging/marker_wire_format_spec.spl` exists but runner
+discovery reported 0 files, requiring follow-up.
+
+### 2026-05-28 Batch 34
+
+Moved the remaining top-level lib root into canonical unit and fixture buckets.
+Most library-domain specs moved under matching `test/unit/lib/...` subtrees.
+The transitive import executable spec and summary moved under
+`test/unit/lib/transitive`, while helper modules moved under
+`test/fixtures/lib/transitive` and imports were updated to the fixture module
+path.
+
+| Old path | New mirrored path |
+|---|---|
+| `test/lib/{blink,cc,common,content,ecs,editor,gui,hal,mcp,nogc_async_mut,nogc_async_mut_noalloc,nogc_sync_mut,skia,spec,text,viz}/**` | `test/unit/lib/...` |
+| `test/lib/transitive/transitive_import_spec.spl` | `test/unit/lib/transitive/transitive_import_spec.spl` |
+| `test/lib/transitive/summary.txt` | `test/unit/lib/transitive/summary.txt` |
+| `test/lib/transitive/module_b.spl` | `test/fixtures/lib/transitive/module_b.spl` |
+| `test/lib/transitive/module_c.spl` | `test/fixtures/lib/transitive/module_c.spl` |
+
+Verification: `test/unit/lib/blink --list` passed with 182 listed tests,
+`test/unit/lib/transitive --list` passed with 1 listed test, and
+`test/unit/lib/transitive/transitive_import_spec.spl` passed 1/1. Existing
+failures remain in moved common Wine substrate, MCP lazy loading, Skia matrix,
+HAL types, text length, bytes pointer, and ECS specs. The moved
+`.spipe_matchers_*` files under `test/unit/lib/nogc_async_mut/...` are ignored
+by `.gitignore`, so staging this slice will require force-adding those
+previously tracked matcher files.
+
 ## Root-Level Files
 
 | File | Likely owner | Canonical target | Safe next move |
@@ -372,10 +712,10 @@ cross-platform coverage. The shared guide now explicitly allows the built-in
 | `doc/06_spec/feature.md` | Feature category inventory | generated/catalog TBD | Do not move until inventory generator ownership is known. |
 | `doc/06_spec/feature_db.sdn` | `test/unit/app/tooling/feature_db_spec.spl` plus stats tooling | data owner TBD | Leave in place; document consumer before moving. |
 | `doc/06_spec/feature/language/functions_spec.md` | `test/feature/language/functions_spec.spl` | `doc/06_spec/feature/language/functions_spec.md` | Confirm `test/feature/language` destination; regenerate. |
-| `doc/06_spec/loss_nograd_blocks_spec.md` | `test/feature/usage/loss_nograd_blocks_spec.spl` | `doc/06_spec/feature/usage/loss_nograd_blocks_spec.md` | Safe root cleanup after regenerating/updating canonical mirrored doc; audit found only the `Updated` date differs from the mirrored copy. |
+| `doc/06_spec/feature/usage/loss_nograd_blocks_spec.md` | `test/feature/usage/loss_nograd_blocks_spec.spl` | `doc/06_spec/feature/usage/loss_nograd_blocks_spec.md` | Done in Batch 20; root duplicate removed. |
 | `doc/06_spec/feature/language/macro_spec.md` | `test/feature/language/macro_spec.spl` | `doc/06_spec/feature/language/macro_spec.md` | Confirm `test/feature/language` destination; regenerate. |
-| `doc/06_spec/feature/usage/math_blocks_spec.md` | `test/feature/usage/math_blocks_spec.spl`; root duplicate still exists | `doc/06_spec/feature/usage/math_blocks_spec.md` | Safe root cleanup after canonical regeneration; keep the richer mirrored doc, not the shorter root scenario list. |
-| `doc/06_spec/math_render_spec.md` | `test/feature/usage/math_render_spec.spl` | `doc/06_spec/feature/usage/math_render_spec.md` | Safe root cleanup after regenerating/updating canonical mirrored doc; audit found only the `Updated` date differs from the mirrored copy. |
+| `doc/06_spec/feature/usage/math_blocks_spec.md` | `test/feature/usage/math_blocks_spec.spl` | `doc/06_spec/feature/usage/math_blocks_spec.md` | Done in Batch 20; root duplicate removed and richer mirrored doc kept. |
+| `doc/06_spec/feature/usage/math_render_spec.md` | `test/feature/usage/math_render_spec.spl` | `doc/06_spec/feature/usage/math_render_spec.md` | Done in Batch 20; root duplicate removed. |
 | `doc/06_spec/feature/language/memory_spec.md` | `test/feature/language/memory_spec.spl` | `doc/06_spec/feature/language/memory_spec.md` | Confirm `test/feature/language` destination; regenerate. |
 | `doc/06_spec/metaprogramming.md` | `test/feature/usage/metaprogramming_spec.spl`; also `test/feature/language/macro_spec.spl` hints | `doc/06_spec/feature/usage/metaprogramming_spec.md` | Done in Batch 3; macro overlap remains a later comparison task. |
 | `doc/06_spec/feature/language/modules_spec.md` | `test/feature/language/modules_spec.spl` | `doc/06_spec/feature/language/modules_spec.md` | Confirm `test/feature/language` destination; regenerate. |
@@ -399,21 +739,21 @@ cross-platform coverage. The shared guide now explicitly allows the built-in
 
 | File | Likely owner | Canonical target | Safe next move |
 |---|---|---|---|
-| `doc/06_spec/legacy/INDEX.md` | Legacy navigation | delete after legacy bucket empties | Stale; safe to delete after the TRACE32 legacy doc is migrated. |
+| `doc/06_spec/legacy/INDEX.md` | Legacy navigation | deleted | Done in Batch 21. |
 | `doc/06_spec/legacy/command_dispatch_spec.md` | `test/unit/app/tooling/command_dispatch_spec.spl` | `doc/06_spec/unit/app/tooling/command_dispatch_spec.md` | Done in Batch 1. |
-| `doc/06_spec/legacy/test-spec.html` | Old docgen fixture/output | archive/delete candidate | Exact-path search found only migration-map references; safe after doc-nav fixture confirmation. |
-| `doc/06_spec/legacy/test-spec.md` | Old docgen fixture/output | archive/delete candidate | Exact-path search found only migration-map references; safe after doc-nav fixture confirmation. |
+| `doc/06_spec/legacy/test-spec.html` | Old docgen fixture/output | deleted | Done in Batch 21. |
+| `doc/06_spec/legacy/test-spec.md` | Old docgen fixture/output | deleted | Done in Batch 21. |
 | `doc/06_spec/legacy/test_runner_simple_spec.md` | `test/unit/app/tooling/test_runner_simple_spec.spl` | `doc/06_spec/unit/app/tooling/test_runner_simple_spec.md` | Done in Batch 1. |
-| `doc/06_spec/legacy/trace32_stm32h7_jit_e2e_spec.md` | `test/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.spl` | `doc/06_spec/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.md` | Regenerate from feature spec. |
+| `doc/06_spec/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.md` | `test/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.spl` | `doc/06_spec/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.md` | Done in Batch 21. |
 | `doc/06_spec/runtime/rt_gui_glass_contract.md` | Runtime GUI manual contract; no direct source spec found | `doc/06_spec/runtime/gui/rt_gui_glass_contract.md` or design doc | Manual review; add source spec if this remains a release contract. |
 
 ## Safe Next Moves
 
-1. Add or update docgen support to write mirrored destinations from source
-   `test/..._spec.spl` paths, including unit/integration/feature paths.
-2. Regenerate the high-confidence one-to-one files first:
-   remote JIT integration specs, remote baremetal feature specs, shell API,
-   sandboxing, math render, loss/nograd, command dispatch, test runner simple.
+1. Use the repaired pure-Simple `spipe-docgen` path for the next generated-doc
+   batches. Direct interpreter invocation now writes mirrored feature docs.
+2. Regenerate remaining high-confidence one-to-one files that still have stale
+   or non-identical legacy copies: placeholder lambda, decorators, and
+   type-checker specs are the current priority.
 3. Leave SDN/catalog files in place until their producers and consumers are
    explicitly traced.
 4. After a small migration batch, run traceability checks and doc navigation
@@ -423,10 +763,41 @@ cross-platform coverage. The shared guide now explicitly allows the built-in
    `test/spike`), duplicate category aliases (`test/features`, `test/sys`,
    `test/smoke`), and domain-first roots (`test/app`, `test/compiler`,
    `test/browser_engine`, `test/code_quality`, `test/dbfs`, `test/hal`,
-   `test/js`, `test/kernel`, `test/nvfs`, `test/os`, `test/qemu`,
-   `test/reftest`, `test/riscv64_fpga`, `test/rtl`, `test/runtime`,
-   `test/sffi`, `test/tools`, `test/web_platform`). Treat these as separate
-   batches because CI and baseline paths may call them directly. `test/shared`
-   is now resolved as a canonical cross-platform runner tier, not a fixture
-   cleanup; its known imported contract spec has moved to the unit contract
-   helper bucket.
+   `test/js`, `test/nvfs`, `test/os`, `test/qemu`, `test/reftest`,
+   `test/riscv64_fpga`, `test/rtl`, `test/runtime`, `test/sffi`,
+   `test/tools`, `test/web_platform`). Most listed roots are now resolved in
+   the completed batches above. `test/shared` is now resolved as a canonical
+   cross-platform runner tier, not a fixture cleanup; its known imported
+   contract spec has moved to the unit contract helper bucket.
+
+## Tooling Repair
+
+### 2026-05-28 Pure-Simple `spipe-docgen`
+
+The pure-Simple `spipe-docgen` implementation was structurally repaired by
+moving modules from `src/app/spipe_docgen/spipe_docgen/` to
+`src/app/spipe_docgen/`. This matches the existing command table path
+`src/app/spipe_docgen/main.spl` and imports such as
+`app.spipe_docgen.common`.
+
+Additional fixes in the same tooling slice:
+
+- `common.spl` imports filesystem/process primitives directly instead of
+  importing the compiler-driver-heavy `app.io.mod` surface.
+- `main.spl` normalizes direct script invocation arguments and computes the
+  fallback output filename after the file stem exists.
+- `parser.spl` avoids a shadowed `block_lines` binding that made a mutable
+  array look immutable under the current interpreter.
+- `generator.spl` creates nested output directories before writing mirrored
+  docs.
+
+Verification:
+
+- `SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpret bin/simple --interpret src/app/spipe_docgen/main.spl test/feature/language/placeholder_lambda_spec.spl --output /tmp/spipe-docgen-probe`
+  completed successfully and generated
+  `/tmp/spipe-docgen-probe/feature/language/placeholder_lambda_spec.md`.
+- `SIMPLE_LIB=src bin/simple test --force-rebuild test/unit/app/tooling/command_dispatch_spec.spl`
+  passed with 105 examples.
+- `SIMPLE_LIB=src bin/simple test --force-rebuild test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl`
+  reported 8 passed examples and process exit 0, but also printed an internal
+  `FAILED`/`Process exited with code 1` line.

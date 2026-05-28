@@ -31,6 +31,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [testing/coverage.md](testing/coverage.md) | Source coverage, doc coverage |
 | [testing/container_testing.md](testing/container_testing.md) | Container-based isolated testing |
 | [testing/benchmarking.md](testing/benchmarking.md) | Performance benchmarking |
+| [testing/test_layout_traceability.md](testing/test_layout_traceability.md) | Canonical test roots, mirrored SPipe docs, and move checklist |
 | [testing/mock_policy_system_test_ban.md](testing/mock_policy_system_test_ban.md) | Mock policy and system test ban rules |
 | [testing/tauri_backend_container_testing.md](testing/tauri_backend_container_testing.md) | Tauri backend container testing |
 

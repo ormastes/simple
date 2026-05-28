@@ -2,7 +2,7 @@
 
 `#![no_std]` Rust binary that targets `x86_64-unknown-simpleos`. Serves as the
 minimum viable fixture for the Rust cross-compile smoke (see
-`test/os/port/rust/smoke_rustc_spec.spl`).
+`test/integration/os/port/rust/smoke_rustc_spec.spl`).
 
 ## Build
 

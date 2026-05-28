@@ -54,7 +54,7 @@ Build a pixel-level visual consistency verification pipeline that renders the sa
 - `test/unit/os/compositor/diff_export_spec.spl` -- 5 specs (AC-6)
 - `test/unit/lib/common/png_decode_spec.spl` -- 8 specs (AC-2)
 - `test/unit/os/compositor/screenshot_compare_profile_spec.spl` -- 8 specs (AC-4)
-- `test/qemu/qmp_screendump_spec.spl` -- 5 specs (AC-3)
+- `test/system/qemu/qmp_screendump_spec.spl` -- 5 specs (AC-3)
 - `test/system/gui/wm_pixel_consistency_spec.spl` -- 19 specs (AC-1 through AC-7, unified capture model)
 
 ## Verification

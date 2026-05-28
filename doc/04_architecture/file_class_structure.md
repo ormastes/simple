@@ -264,7 +264,7 @@ No `.disabled` directories remain anywhere in the codebase.
 | `test/integration/` | 47 | Integration tests |
 | `test/system/` | 10 | System tests (including LLM live tests) |
 | `test/perf/` | 7 | Performance benchmarks |
-| `test/fuzz/` | 3 | Fuzz tests |
+| `test/feature/language/fuzz/` | 3 | Fuzz tests |
 | Other | 61 | Fixtures, examples, manual, deploy, benchmarks |
 
 ---

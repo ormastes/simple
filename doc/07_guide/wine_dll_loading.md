@@ -63,7 +63,7 @@ Supported reasons:
 ## Testing
 
 ```bash
-bin/simple test test/lib/common/wine_pe_loader_spec.spl
+bin/simple test test/unit/lib/common/wine_pe_loader_spec.spl
 ```
 
 The spec builds minimal PE64 fixtures programmatically and tests:

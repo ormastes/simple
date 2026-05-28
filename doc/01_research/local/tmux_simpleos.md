@@ -68,7 +68,7 @@ Implication:
 ### 4. Filesystem-backed executable loading exists
 
 `src/os/kernel/loader/executable_source.spl` and
-`test/os/kernel/loader/executable_source_vfs_spec.spl`.
+`test/unit/os/kernel/loader/executable_source_vfs_spec.spl`.
 
 Observed capabilities:
 

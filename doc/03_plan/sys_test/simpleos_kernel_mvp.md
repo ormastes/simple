@@ -17,7 +17,7 @@ scheduler, or loader code.
 
 - pure spec coverage in `doc/06_spec/app/os/feature/kernel_mvp_spec.spl`
 - runnable system smoke coverage in `test/system/kernel_mvp_spec.spl`
-- kernel log ring-buffer coverage in `test/unit/os/kernel/log/kernel_log_spec.spl`
+- kernel log ring-buffer coverage in `test/unit/os/kernel/logging/kernel_log_spec.spl`
 
 ## Gates
 
@@ -53,7 +53,7 @@ scheduler, or loader code.
 
 ### Gate MVP-5: Kernel log exposure remains ordered
 
-- run `test/unit/os/kernel/log/kernel_log_spec.spl`
+- run `test/unit/os/kernel/logging/kernel_log_spec.spl`
 - expect:
   - write order is preserved
   - min-level filtering works
@@ -64,6 +64,6 @@ scheduler, or loader code.
 ```sh
 bin/simple test doc/06_spec/app/os/feature/kernel_mvp_spec.spl
 bin/simple test test/system/kernel_mvp_spec.spl
-bin/simple test test/unit/os/kernel/log/kernel_log_spec.spl
+bin/simple test test/unit/os/kernel/logging/kernel_log_spec.spl
 ```
 

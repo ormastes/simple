@@ -40,13 +40,13 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 ## Verification Evidence
 
 - `bin/simple check` on 16 impacted Wine files: all checks passed.
-- `bin/simple test test/lib/common/ui/wine_simpleos_window_bridge_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
-- `bin/simple test test/lib/common/ui/wine_x11_adapter_spec.spl --mode=interpreter --clean`: 8 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_vm_adapter_spec.spl --mode=interpreter --clean`: 8 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_image_vm_map_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: 18 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/ui/wine_simpleos_window_bridge_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/ui/wine_x11_adapter_spec.spl --mode=interpreter --clean`: 8 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_vm_adapter_spec.spl --mode=interpreter --clean`: 8 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_image_vm_map_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: 18 examples, 0 failures.
 - `bin/simple test test/integration/app/wine_hello_command_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
-- `bin/simple test test/lib/common/wine_gui_hello_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_gui_hello_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
 - `bin/simple test test/integration/app/wine_gui_hello_command_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
 - Wine-scope source/test stub scan: pass.
 
@@ -57,11 +57,11 @@ The controlled non-GUI hello path now carries decoded x86_64 sequence metadata f
 Fresh evidence:
 
 - `bin/simple check` on 8 impacted source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl`: 14 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_cpu_exec_spec.spl`: 16 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_nt_bridge_spec.spl`: 14 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_hello_dispatch_spec.spl`: 11 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_hello_exe_spec.spl`: 13 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_x86_64_decode_spec.spl`: 14 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_cpu_exec_spec.spl`: 16 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_nt_bridge_spec.spl`: 14 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_hello_dispatch_spec.spl`: 11 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_hello_exe_spec.spl`: 13 examples, 0 failures.
 - `bin/simple test test/integration/app/wine_hello_command_spec.spl`: 1 example, 0 failures.
 - Wine-scope changed-file stub scan: pass.
 
@@ -77,7 +77,7 @@ sub rsp,imm8` without treating other REX MOV encodings as supported.
 Fresh evidence:
 
 - `bin/simple check` on x86_64 decoder source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: 16 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: 16 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_x86_64_frame_prologue_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
 - `bin/simple check` on generated matcher specs: all checks passed.
 - `bin/simple check src/lib`: 2706 files, all checks passed.
@@ -96,8 +96,8 @@ as supported.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_x86_64_decode.spl test/lib/common/wine_x86_64_decode_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_x86_64_frame_prologue_spec.spl` passed.
-- `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: 19 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_x86_64_decode.spl test/unit/lib/common/wine_x86_64_decode_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_x86_64_frame_prologue_spec.spl` passed.
+- `bin/simple test test/unit/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: 19 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_x86_64_frame_prologue_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
 - `bin/simple check` on generated matcher specs: all checks passed.
 - `bin/simple check src/lib`: 2707 files, all checks passed.
@@ -113,7 +113,7 @@ The KERNEL32 module-loader layer now models a basename-only DLL search order bef
 Fresh evidence:
 
 - `bin/simple check` on changed DLL-search source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl`: 7 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_kernel32_module_loader_spec.spl`: 7 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_search_order_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2693 files, all checks passed.
 - Wine DLL-search changed-file stub scan: pass.
@@ -125,7 +125,7 @@ The DLL image-loader handoff now composes modeled DLL search order with SimpleOS
 Fresh evidence:
 
 - `bin/simple check` on changed DLL image-map source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_image_loader_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_image_loader_spec.spl`: 3 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_image_map_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2694 files, all checks passed.
 - Wine DLL image-map changed-file stub scan: pass.
@@ -137,7 +137,7 @@ The DLL load-session layer now records modeled loaded-image state on top of the 
 Fresh evidence:
 
 - `bin/simple check` on changed DLL load-session source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_load_session_spec.spl`: 4 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_load_session_spec.spl`: 4 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_load_session_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2695 files, all checks passed.
 - Wine DLL load-session changed-file stub scan: pass.
@@ -149,7 +149,7 @@ The DLL entrypoint lifecycle gate now requires modeled loaded-image evidence bef
 Fresh evidence:
 
 - `bin/simple check` on changed DLL entrypoint lifecycle source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_entrypoint_lifecycle_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_entrypoint_lifecycle_spec.spl`: 3 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_entrypoint_lifecycle_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2696 files, all checks passed.
 - Wine DLL entrypoint lifecycle changed-file stub scan: pass.
@@ -161,7 +161,7 @@ The DLL file-bytes gate now validates supplied bytes for a selected DLL path bef
 Fresh evidence:
 
 - `bin/simple check` on changed DLL file-bytes source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_file_bytes_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_file_bytes_spec.spl`: 3 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_file_bytes_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2697 files, all checks passed.
 - Wine DLL file-bytes changed-file stub scan: pass.
@@ -173,7 +173,7 @@ The DLL file-probe layer now composes search-order candidate paths with a modele
 Fresh evidence:
 
 - `bin/simple check` on changed DLL file-probe source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_file_probe_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_file_probe_spec.spl`: 3 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_file_probe_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2698 files, all checks passed.
 - Wine DLL file-probe changed-file stub scan: pass.
@@ -185,7 +185,7 @@ The DLL file-backed view layer now maps validated DLL file-probe bytes into a re
 Fresh evidence:
 
 - `bin/simple check` on changed DLL file-view source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_file_view_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_file_view_spec.spl`: 2 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_file_view_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2699 files, all checks passed.
 - Wine DLL file-view changed-file stub scan: pass.
@@ -197,7 +197,7 @@ The DLL view relocation layer now applies bounded DIR64 relocation mutation evid
 Fresh evidence:
 
 - `bin/simple check` on changed DLL view-relocation source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_view_relocation_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_view_relocation_spec.spl`: 2 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_relocation_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2700 files, all checks passed.
 - Wine DLL view-relocation changed-file stub scan: pass.
@@ -209,7 +209,7 @@ The DLL view import-binding layer now composes relocated retained DLL views with
 Fresh evidence:
 
 - `bin/simple check` on changed DLL view import-binding source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_view_import_binding_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_view_import_binding_spec.spl`: 2 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_import_binding_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2701 files, all checks passed.
 - Wine DLL view import-binding changed-file stub scan: pass.
@@ -221,7 +221,7 @@ The DLL view TLS-dispatch layer now composes import-bound retained DLL views wit
 Fresh evidence:
 
 - `bin/simple check` on changed DLL view TLS-dispatch source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_view_tls_dispatch_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_view_tls_dispatch_spec.spl`: 2 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2702 files, all checks passed.
 - Wine DLL view TLS-dispatch changed-file stub scan: pass.
@@ -233,7 +233,7 @@ The DLL view DllMain-handoff layer now composes import-bound retained DLL views 
 Fresh evidence:
 
 - `bin/simple check` on changed DLL view DllMain-handoff source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_view_dllmain_handoff_spec.spl`: 2 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2703 files, all checks passed.
 - Wine DLL view DllMain-handoff changed-file stub scan: pass.
@@ -245,7 +245,7 @@ The DLL view startup-fault layer now composes the non-executing DllMain handoff 
 Fresh evidence:
 
 - `bin/simple check` on changed DLL view startup-fault source/spec files plus generated matcher specs: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2704 files, all checks passed.
 - Wine DLL view startup-fault changed-file stub scan: pass.
@@ -257,7 +257,7 @@ The process entrypoint startup-fault layer now composes import-loader VMA transa
 Fresh evidence:
 
 - `bin/simple check` on changed process entrypoint startup-fault source/spec files plus generated matcher specs: all checks passed.
-- `bin/simple test test/lib/common/wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2705 files, all checks passed.
 - Wine process entrypoint startup-fault changed-file stub scan: pass.
@@ -269,8 +269,8 @@ The SEH frame-chain planner now requires an active thread-local frame, stack-con
 Fresh evidence:
 
 - `bin/simple check` on changed SEH frame-chain source/spec files plus generated matcher specs: all checks passed.
-- `bin/simple test test/lib/common/wine_seh_frame_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_seh_frame_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_seh_frame_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
 - `bin/simple check src/lib`: 2706 files, all checks passed.
 - SEH frame-chain changed-file `git diff --check` and stub scan: pass.
@@ -287,7 +287,7 @@ NVFS rootfs evidence.
 Fresh evidence:
 
 - `bin/simple check` on executable-environment gate source/spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_simpleos_exec_env_gate_spec.spl --mode=interpreter --clean`: 7 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_simpleos_exec_env_gate_spec.spl --mode=interpreter --clean`: 7 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_exec_env_mdsoc_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
 - `bin/simple check` on generated executable-environment matcher specs: all checks passed.
 - `bin/simple check src/lib`: 2706 files, all checks passed.
@@ -305,7 +305,7 @@ ready.
 Fresh evidence:
 
 - `bin/simple check` on executable-environment gate source/spec/system files: all checks passed.
-- `bin/simple test test/lib/common/wine_simpleos_exec_env_gate_spec.spl --mode=interpreter --clean`: 8 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_simpleos_exec_env_gate_spec.spl --mode=interpreter --clean`: 8 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_exec_env_mdsoc_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
 - Generated matcher specs changed with the executable-environment specs and are included in this slice.
 - `bin/simple check src/lib`: 2706 files, all checks passed.
@@ -325,8 +325,8 @@ addresses through the modeled NTDLL process-info bridge.
 Fresh evidence:
 
 - `bin/simple check` on PEB/TEB and NTDLL process-info source/spec/system files: all checks passed.
-- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
 - `bin/simple check` on generated matcher specs: all checks passed.
 - `bin/simple check src/lib`: 2707 files, all checks passed.
@@ -343,10 +343,10 @@ PEB/TEB/TLS/process-parameter evidence before reporting startup readiness.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_peb_teb.spl test/lib/common/wine_peb_teb_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl` passed.
-- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_peb_teb.spl test/unit/lib/common/wine_peb_teb_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl` passed.
+- `bin/simple test test/unit/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
-- `bin/simple check test/lib/common/.spipe_matchers_wine_peb_teb_spec.spl doc/06_spec/app/simpleos/feature/.spipe_matchers_simpleos_wine_peb_teb_spec.spl` passed.
+- `bin/simple check test/unit/lib/common/.spipe_matchers_wine_peb_teb_spec.spl doc/06_spec/app/simpleos/feature/.spipe_matchers_simpleos_wine_peb_teb_spec.spl` passed.
 - `bin/simple check src/lib`: 2707 files, all checks passed.
 
 Conservative boundary: this models loader-lock ordering only. It still does not
@@ -362,8 +362,8 @@ parameters before reporting modeled mutation readiness.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_peb_teb.spl test/lib/common/wine_peb_teb_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl` passed.
-- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: 7 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_peb_teb.spl test/unit/lib/common/wine_peb_teb_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl` passed.
+- `bin/simple test test/unit/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: 7 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
 - `bin/simple check` on generated PEB/TEB matcher specs: all checks passed.
 - `bin/simple check src/lib`: 2707 files, all checks passed.
@@ -381,8 +381,8 @@ so process-info handoff can no longer rely only on aligned startup addresses.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_ntdll_process_info.spl test/lib/common/wine_ntdll_process_info_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl` passed.
-- `bin/simple test test/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_ntdll_process_info.spl test/unit/lib/common/wine_ntdll_process_info_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl` passed.
+- `bin/simple test test/unit/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
 - `bin/simple check` on generated NTDLL process-info and PEB/TEB matcher specs: all checks passed.
 - `bin/simple check src/lib`: 2707 files, all checks passed.
@@ -401,9 +401,9 @@ process-attach handoff readiness.
 Fresh evidence:
 
 - `bin/simple check` on changed DllMain handoff, critical-section, unit, and system spec files: all checks passed.
-- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_kernel32_critical_section_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_kernel32_critical_section_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
 - `bin/simple check` on generated DllMain-handoff matcher specs: all checks passed.
 - `bin/simple check src/lib`: 2707 files, all checks passed.
 
@@ -435,9 +435,9 @@ The top-level Wine substrate matrix now exposes the SimpleOS executable-environm
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_simpleos_exec_env_gate_spec.spl`: 5 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_substrate.spl test/unit/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_simpleos_exec_env_gate_spec.spl`: 5 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: `exec_env=verified` means the controlled Wine path has explicit SimpleOS VM/full-OS/container evidence. It does not by itself imply a complete Wine port or arbitrary PE compatibility.
@@ -448,10 +448,10 @@ The Wine-facing WM bridge now keeps X11 production binding blocked until SimpleO
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/ui/wine_simpleos_window_bridge.spl src/lib/common/ui/wine_x11_adapter.spl src/lib/common/wine_simpleos_exec_env_gate.spl test/lib/common/ui/wine_simpleos_window_bridge_spec.spl test/lib/common/ui/wine_x11_adapter_spec.spl test/lib/common/wine_simpleos_exec_env_gate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/ui/wine_simpleos_window_bridge_spec.spl`: 7 examples, 0 failures.
-- `bin/simple test test/lib/common/ui/wine_x11_adapter_spec.spl`: 11 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_simpleos_exec_env_gate_spec.spl`: 6 examples, 0 failures.
+- `bin/simple check src/lib/common/ui/wine_simpleos_window_bridge.spl src/lib/common/ui/wine_x11_adapter.spl src/lib/common/wine_simpleos_exec_env_gate.spl test/unit/lib/common/ui/wine_simpleos_window_bridge_spec.spl test/unit/lib/common/ui/wine_x11_adapter_spec.spl test/unit/lib/common/wine_simpleos_exec_env_gate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/ui/wine_simpleos_window_bridge_spec.spl`: 7 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/ui/wine_x11_adapter_spec.spl`: 11 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_simpleos_exec_env_gate_spec.spl`: 6 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is sharper X11-class and container/VM executable-environment evidence. It is still not a live full X server, complete container runtime, or arbitrary Wine/PE execution environment.
@@ -462,11 +462,11 @@ Conservative boundary: this is sharper X11-class and container/VM executable-env
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_pe_gate.spl src/lib/common/wine_substrate.spl test/lib/common/wine_pe_gate_spec.spl test/lib/common/wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_pe_gate_spec.spl`: 9 examples, 0 failures.
-- `bin/simple test test/lib/common/pe_coff_header_spec.spl`: 14 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_pe_loader_runtime_spec.spl`: 4 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_pe_gate.spl src/lib/common/wine_substrate.spl test/unit/lib/common/wine_pe_gate_spec.spl test/unit/lib/common/wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_pe_gate_spec.spl`: 9 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/pe_coff_header_spec.spl`: 14 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_pe_loader_runtime_spec.spl`: 4 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this verifies a bounded PE readiness gate for the controlled Wine path. It is still not an arbitrary PE loader, full relocation engine, full TLS callback dispatcher, or full Wine loader.
@@ -477,10 +477,10 @@ The dynamic-loader adapter now requires bounded NTDLL loader-resolution evidence
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_dynload_adapter.spl src/lib/common/wine_substrate.spl test/lib/common/wine_dynload_adapter_spec.spl test/lib/common/wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_dynload_adapter_spec.spl`: 8 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_ntdll_loader_spec.spl`: 3 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_dynload_adapter.spl src/lib/common/wine_substrate.spl test/unit/lib/common/wine_dynload_adapter_spec.spl test/unit/lib/common/wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_dynload_adapter_spec.spl`: 8 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_ntdll_loader_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded loader-resolution evidence for the Wine substrate. It does not provide a general Unix dynamic loader, arbitrary DLL loading, or full Wine loader behavior.
@@ -491,10 +491,10 @@ The thread adapter now requires modeled NT wait evidence before full adapter rea
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_thread_adapter.spl src/lib/common/wine_substrate.spl test/lib/common/wine_thread_adapter_spec.spl test/lib/common/wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_thread_adapter_spec.spl`: 8 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_nt_thread_wait_spec.spl`: 6 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_thread_adapter.spl src/lib/common/wine_substrate.spl test/unit/lib/common/wine_thread_adapter_spec.spl test/unit/lib/common/wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_thread_adapter_spec.spl`: 8 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_nt_thread_wait_spec.spl`: 6 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded thread/wait evidence for the Wine substrate. It does not provide real preemptive Windows thread semantics, APCs, fibers, full wait sets, or exception delivery.
@@ -505,10 +505,10 @@ The POSIX adapter now requires bounded KERNEL32 file-I/O evidence before full ad
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_posix_adapter.spl src/lib/common/wine_substrate.spl test/lib/common/wine_posix_adapter_spec.spl test/lib/common/wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_posix_adapter_spec.spl`: 9 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_kernel32_file_io_spec.spl`: 3 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_posix_adapter.spl src/lib/common/wine_substrate.spl test/unit/lib/common/wine_posix_adapter_spec.spl test/unit/lib/common/wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_posix_adapter_spec.spl`: 9 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_kernel32_file_io_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded file-I/O evidence for the Wine substrate. It does not provide complete POSIX semantics, sockets, poll/select, locking/sharing, async cancellation, or arbitrary filesystem behavior.
@@ -519,10 +519,10 @@ The service adapter now requires bounded ADVAPI32 service-control evidence befor
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_service_adapter.spl src/lib/common/wine_substrate.spl test/lib/common/wine_service_adapter_spec.spl test/lib/common/wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_service_adapter_spec.spl`: 8 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_advapi32_service_spec.spl`: 2 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_service_adapter.spl src/lib/common/wine_substrate.spl test/unit/lib/common/wine_service_adapter_spec.spl test/unit/lib/common/wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_service_adapter_spec.spl`: 8 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_advapi32_service_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded service-control evidence for the Wine substrate. It does not provide a real Windows service control manager, service process lifetime, service accounts, dependency ordering, recovery actions, or arbitrary service-host behavior.
@@ -533,9 +533,9 @@ The substrate matrix no longer marks `audio`, `fonts`, or `input` verified from 
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_service_adapter.spl src/lib/common/wine_substrate.spl test/lib/common/wine_service_adapter_spec.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_service_adapter_spec.spl`: 11 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_service_adapter.spl src/lib/common/wine_substrate.spl test/unit/lib/common/wine_service_adapter_spec.spl test/unit/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_service_adapter_spec.spl`: 11 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded peripheral evidence for the substrate matrix. It does not provide real DirectSound/MME devices, complete fontconfig/GDI font rendering, raw input, XInput, joystick support, or arbitrary multimedia behavior.
@@ -546,10 +546,10 @@ The top-level Wine substrate matrix now exposes registry readiness through a fir
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_advapi32_registry_spec.spl`: 2 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_ntdll_registry_spec.spl`: 3 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_substrate.spl test/unit/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_advapi32_registry_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_ntdll_registry_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded registry bridge evidence for startup probes. It does not provide a persistent Windows registry hive, ACL/security semantics, reflection, transactions, notifications, or full registry virtualization.
@@ -560,10 +560,10 @@ The top-level Wine substrate matrix now exposes `user32` and `gdi32` capability 
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_user32_window_spec.spl`: 4 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_gdi32_drawing_spec.spl`: 2 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_substrate.spl test/unit/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_user32_window_spec.spl`: 4 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_gdi32_drawing_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded USER32/GDI32 bridge evidence for controlled GUI probes. It does not provide a full USER32 window manager, complete message pump, menus/dialogs/controls, GDI object lifetime, region/clipping semantics, printer DCs, or arbitrary GUI application compatibility.
@@ -574,8 +574,8 @@ The substrate now has a separate `wine_substrate_full_wine_gate` in addition to 
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 18 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_substrate.spl test/unit/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 18 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 16 examples, 0 failures.
 
 Conservative boundary: this is a readiness classifier, not the missing implementations themselves. It makes incomplete full-Wine readiness explicit until every tracked row has concrete evidence.
@@ -586,9 +586,9 @@ The top-level Wine substrate matrix now exposes `kernel32_core` as a first-class
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple check src/lib/common/wine_substrate.spl test/unit/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
 - `bin/simple test` on the KERNEL32 core specs listed by the row: virtual memory 2/0, heap 3/0, TLS 4/0, FLS 4/0, sync event 3/0, error state 4/0, atom table 4/0, time/version 3/0, startup info 3/0, interlocked 4/0, process environment 5/0.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 18 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 18 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 16 examples, 0 failures.
 
 Conservative boundary: this is bounded KERNEL32 core API evidence. It does not provide every KERNEL32 export, true Windows object lifetime, complete virtual memory semantics, loader integration, or arbitrary process execution.
@@ -603,9 +603,9 @@ symbol.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_kernel32_process_env.spl test/lib/common/wine_kernel32_process_env_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_kernel32_process_env_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_nt_process_env_spec.spl --mode=interpreter --clean`: 9 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_kernel32_process_env.spl test/unit/lib/common/wine_kernel32_process_env_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_kernel32_process_env_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_nt_process_env_spec.spl --mode=interpreter --clean`: 9 examples, 0 failures.
 
 Conservative boundary: this makes the bounded KERNEL32 process-environment
 bridge dispatchable for the modeled startup calls. It does not implement the
@@ -622,8 +622,8 @@ ECS inner world.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 18 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_substrate.spl test/unit/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl`: 18 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 16 examples, 0 failures.
 
 Conservative boundary: this is an architecture constraint and documentation
@@ -640,8 +640,8 @@ esync-or-fsync evidence.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_proton_gate.spl test/lib/common/wine_proton_gate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_proton_gate_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_proton_gate.spl test/unit/lib/common/wine_proton_gate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_proton_gate_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
 
 Conservative boundary: this is a Proton readiness classifier, not Proton
@@ -658,11 +658,11 @@ loader, path, and process identity coverage.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_kernel32_file_management.spl src/lib/common/wine_kernel32_file_metadata.spl test/lib/common/wine_kernel32_file_management_spec.spl test/lib/common/wine_kernel32_file_metadata_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_kernel32_file_management_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_kernel32_file_metadata_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
-- Individual `bin/simple test` runs for every `test/lib/common/wine_kernel32_*_spec.spl`: all passing after the file-management and file-metadata helper fixes.
-- `bin/simple test test/lib/common/wine_substrate_spec.spl --mode=interpreter --clean`: 18 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_kernel32_file_management.spl src/lib/common/wine_kernel32_file_metadata.spl test/unit/lib/common/wine_kernel32_file_management_spec.spl test/unit/lib/common/wine_kernel32_file_metadata_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_kernel32_file_management_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_kernel32_file_metadata_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- Individual `bin/simple test` runs for every `test/unit/lib/common/wine_kernel32_*_spec.spl`: all passing after the file-management and file-metadata helper fixes.
+- `bin/simple test test/unit/lib/common/wine_substrate_spec.spl --mode=interpreter --clean`: 18 examples, 0 failures.
 
 Conservative boundary: this expands tracked bounded KERNEL32 startup evidence.
 It does not provide the full KERNEL32 export set, complete object lifetime,
@@ -678,11 +678,11 @@ failure without relaxing the X11 production gate.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_gui_hello.spl test/lib/common/wine_gui_hello_spec.spl src/app/wine_gui_hello/main.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_gui_hello_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_gui_hello.spl test/unit/lib/common/wine_gui_hello_spec.spl src/app/wine_gui_hello/main.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_gui_hello_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
 - `bin/simple run src/app/wine_gui_hello/main.spl`: emitted `window=SimpleOS Wine GUI Hello`, `text=Hello from SimpleOS Wine`, and checksum evidence.
 - `bin/simple test test/integration/app/wine_gui_hello_command_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
-- Individual `bin/simple test` runs for every `test/lib/common/wine_*_spec.spl`: 0 failing Wine specs.
+- Individual `bin/simple test` runs for every `test/unit/lib/common/wine_*_spec.spl`: 0 failing Wine specs.
 
 Conservative boundary: this completes the controlled GUI milestone evidence
 path only. It is not a full X11 server, complete USER32 message pump, Wine
@@ -699,9 +699,9 @@ esync-or-fsync evidence before deriving the legacy Proton feature string.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_proton_runtime.spl test/lib/common/wine_proton_runtime_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_proton_runtime_spec.spl --mode=interpreter --clean`: 6 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_proton_gate_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_proton_runtime.spl test/unit/lib/common/wine_proton_runtime_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_proton_runtime_spec.spl --mode=interpreter --clean`: 6 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_proton_gate_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl --mode=interpreter --clean`: includes structured runtime evidence coverage.
 
 Conservative boundary: this is still a Proton readiness contract and modeled
@@ -720,9 +720,9 @@ composes this non-Wine facade and adds only the outer full-Wine dependency.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/proton_runtime_subsystems.spl src/lib/common/wine_proton_runtime.spl test/lib/common/proton_runtime_subsystems_spec.spl test/lib/common/wine_proton_runtime_spec.spl doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/proton_runtime_subsystems_spec.spl --mode=interpreter --clean`: 6 examples, 0 failures.
-- `bin/simple test test/lib/common/wine_proton_runtime_spec.spl --mode=interpreter --clean`: 6 examples, 0 failures.
+- `bin/simple check src/lib/common/proton_runtime_subsystems.spl src/lib/common/wine_proton_runtime.spl test/unit/lib/common/proton_runtime_subsystems_spec.spl test/unit/lib/common/wine_proton_runtime_spec.spl doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/proton_runtime_subsystems_spec.spl --mode=interpreter --clean`: 6 examples, 0 failures.
+- `bin/simple test test/unit/lib/common/wine_proton_runtime_spec.spl --mode=interpreter --clean`: 6 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl --mode=interpreter --clean`: includes non-Wine subsystem evidence coverage.
 
 Conservative boundary: this completes the modeled non-Wine Proton prerequisite
@@ -739,8 +739,8 @@ planned launch command and runtime feature evidence.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/proton_session.spl test/lib/common/proton_session_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/proton_session_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple check src/lib/common/proton_session.spl test/unit/lib/common/proton_session_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/proton_session_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl --mode=interpreter --clean`: includes non-Wine launch-session planning coverage.
 
 Conservative boundary: this is a launch-session plan, not execution. It does
@@ -772,8 +772,8 @@ feature evidence. Calling it with `dry_run == false` remains blocked with
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/proton_session.spl test/lib/common/proton_session_spec.spl src/app/proton_session_plan/main.spl test/integration/app/proton_session_plan_command_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/proton_session_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple check src/lib/common/proton_session.spl test/unit/lib/common/proton_session_spec.spl src/app/proton_session_plan/main.spl test/integration/app/proton_session_plan_command_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/proton_session_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
 - `bin/simple run src/app/proton_session_plan/main.spl`: emitted `status=dry-run-ready`, a pressure-vessel container profile, and runtime feature evidence.
 
 Conservative boundary: this is still non-executing handoff evidence. Real
@@ -789,7 +789,7 @@ returns `exec-env:<missing-state>` and keeps the handoff blocked.
 Fresh evidence:
 
 - `bin/simple check` on Proton session/app/system spec files: all checks passed.
-- `bin/simple test test/lib/common/proton_session_spec.spl --mode=interpreter --clean`: includes MDSOC executable-environment rejection and ready handoff coverage.
+- `bin/simple test test/unit/lib/common/proton_session_spec.spl --mode=interpreter --clean`: includes MDSOC executable-environment rejection and ready handoff coverage.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl --mode=interpreter --clean`: includes Proton executable-environment composition coverage.
 - `bin/simple test test/integration/app/proton_session_plan_command_spec.spl --mode=interpreter --clean`: command prints `exec_env=mdsoc-ready`.
 - `bin/simple run src/app/proton_session_plan/main.spl`: emitted `exec_env=mdsoc-ready`.
@@ -810,8 +810,8 @@ only dry-run launch handoff records until real process execution exists.
 
 Fresh evidence:
 
-- `bin/simple check src/lib/common/wine_process_session.spl test/lib/common/wine_process_session_spec.spl`: all checks passed.
-- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple check src/lib/common/wine_process_session.spl test/unit/lib/common/wine_process_session_spec.spl`: all checks passed.
+- `bin/simple test test/unit/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes Wine process-session handoff coverage.
 
 Conservative boundary: this adds a process-session/handoff artifact, not a
@@ -842,7 +842,7 @@ returns `Hello from SimpleOS Wine` with exit code 0.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes controlled session execution and arbitrary-session rejection coverage.
+- `bin/simple test test/unit/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes controlled session execution and arbitrary-session rejection coverage.
 - `bin/simple run src/app/wine_process_session_plan/main.spl`: emits `command=hello.exe`, `readiness=controlled-hello-ready`, `handoff=dry-run-ready`, `execution=executed`, and hello stdout.
 - `bin/simple test test/integration/app/wine_process_session_plan_command_spec.spl --mode=interpreter --clean`: covers the command output.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-012 controlled session execution coverage.
@@ -861,7 +861,7 @@ import, relocation, TLS, and image-map gates before reporting
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes full-image validation, malformed-image rejection, and controlled-plan rejection coverage.
+- `bin/simple test test/unit/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes full-image validation, malformed-image rejection, and controlled-plan rejection coverage.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-013 process image validation coverage.
 
 Conservative boundary: this validates arbitrary process images only. It does
@@ -877,9 +877,9 @@ limit and returns the DLL name plus imported symbols.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes first-import inspection and invalid symbol-limit coverage.
+- `bin/simple test test/unit/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes first-import inspection and invalid symbol-limit coverage.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-014 import inspection coverage.
-- `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: keeps the underlying import parser covered.
+- `bin/simple test test/unit/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: keeps the underlying import parser covered.
 
 Conservative boundary: this is import inspection only. It does not perform
 arbitrary DLL loading, import binding, thunk patching, or arbitrary PE
@@ -895,9 +895,9 @@ sequence when the import table matches the existing NT import resolver plan.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes KERNEL32 binding-plan and rejected incomplete-binding coverage.
+- `bin/simple test test/unit/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes KERNEL32 binding-plan and rejected incomplete-binding coverage.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-015 process import binding-plan coverage.
-- `bin/simple test test/lib/common/wine_nt_import_spec.spl --mode=interpreter --clean`: keeps the underlying NT import binding planner covered.
+- `bin/simple test test/unit/lib/common/wine_nt_import_spec.spl --mode=interpreter --clean`: keeps the underlying NT import binding planner covered.
 
 Conservative boundary: this is a binding plan only. It does not load arbitrary
 DLLs, patch import thunks, dispatch imported functions for arbitrary code, or
@@ -913,9 +913,9 @@ and guarded IAT status.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes guarded thunk-patch planning and rejected binding coverage.
+- `bin/simple test test/unit/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes guarded thunk-patch planning and rejected binding coverage.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-016 guarded import-thunk patch plan coverage.
-- `bin/simple test test/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`: keeps the downstream CPU gate requirements covered.
+- `bin/simple test test/unit/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`: keeps the downstream CPU gate requirements covered.
 
 Conservative boundary: this is still a patch plan. It does not mutate import
 tables, map process memory writable, dispatch imported functions, or execute
@@ -931,9 +931,9 @@ CPU execution evidence, then runs both `wine_cpu_execution_gate(...)` and
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes CPU preflight acceptance and missing-evidence rejection coverage.
+- `bin/simple test test/unit/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes CPU preflight acceptance and missing-evidence rejection coverage.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-017 CPU dispatch preflight coverage.
-- `bin/simple test test/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`: keeps CPU and instruction dispatch gates covered.
+- `bin/simple test test/unit/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`: keeps CPU and instruction dispatch gates covered.
 
 Conservative boundary: this is a preflight gate only. It does not dispatch
 instructions, call imported functions, or execute arbitrary PE images.
@@ -947,9 +947,9 @@ returns the planned imported-call sequence and counts.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes known-console dispatch planning and CPU-preflight rejection coverage.
+- `bin/simple test test/unit/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes known-console dispatch planning and CPU-preflight rejection coverage.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-018 known-console dispatch plan coverage.
-- `bin/simple test test/lib/common/wine_hello_dispatch_spec.spl --mode=interpreter --clean`: keeps the downstream known-dispatch path covered.
+- `bin/simple test test/unit/lib/common/wine_hello_dispatch_spec.spl --mode=interpreter --clean`: keeps the downstream known-dispatch path covered.
 
 Conservative boundary: this is a decoded dispatch plan only. It does not step
 instructions, call imported functions, or execute arbitrary PE images.
@@ -964,9 +964,9 @@ dispatch plan before running the existing modeled NT bridge path.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: covers successful known-console process execution and missing-CPU-evidence rejection.
+- `bin/simple test test/unit/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: covers successful known-console process execution and missing-CPU-evidence rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_known_console_execution_spec.spl --mode=interpreter --clean`: includes REQ-019 known-console process execution coverage.
-- `bin/simple test test/lib/common/wine_hello_dispatch_spec.spl --mode=interpreter --clean`: keeps the modeled NT bridge dispatch path covered.
+- `bin/simple test test/unit/lib/common/wine_hello_dispatch_spec.spl --mode=interpreter --clean`: keeps the modeled NT bridge dispatch path covered.
 
 Conservative boundary: this executes only the decoded known-console sequence.
 It is not arbitrary PE execution, arbitrary DLL loading, general x86_64
@@ -1124,56 +1124,56 @@ instructions.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_module_loader_spec.spl --mode=interpreter --clean`: covers successful KERNEL32 procedure resolution through `LoadLibraryW` and `LoadLibraryExW`, unsupported module rejection, unsupported flag rejection, and controlled-session blocking.
+- `bin/simple test test/unit/lib/common/wine_process_session_module_loader_spec.spl --mode=interpreter --clean`: covers successful KERNEL32 procedure resolution through `LoadLibraryW` and `LoadLibraryExW`, unsupported module rejection, unsupported flag rejection, and controlled-session blocking.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_module_loader_spec.spl --mode=interpreter --clean`: includes REQ-020 process module-resolution coverage for both loader calls and rejection paths.
-- `bin/simple test test/lib/common/wine_process_session_first_import_module_spec.spl --mode=interpreter --clean`: covers first-import-module resolution and import-inspection gating.
+- `bin/simple test test/unit/lib/common/wine_process_session_first_import_module_spec.spl --mode=interpreter --clean`: covers first-import-module resolution and import-inspection gating.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_first_import_module_spec.spl --mode=interpreter --clean`: includes REQ-021 first-import module-loader bridge coverage.
-- `bin/simple test test/lib/common/wine_process_session_load_bind_spec.spl --mode=interpreter --clean`: covers load-before-bind composition and module-resolution rejection propagation.
+- `bin/simple test test/unit/lib/common/wine_process_session_load_bind_spec.spl --mode=interpreter --clean`: covers load-before-bind composition and module-resolution rejection propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_load_bind_spec.spl --mode=interpreter --clean`: includes REQ-022 load-then-bind coverage.
-- `bin/simple test test/lib/common/wine_process_session_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers thunk planning over loaded-and-bound import evidence.
+- `bin/simple test test/unit/lib/common/wine_process_session_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers thunk planning over loaded-and-bound import evidence.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_load_bind_spec.spl --mode=interpreter --clean`: includes REQ-023 thunk planning with module-loaded binding coverage.
-- `bin/simple test test/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`: covers the tightened CPU import-thunk gate requiring module-loader evidence.
-- `bin/simple test test/lib/common/wine_process_session_thunk_records_spec.spl --mode=interpreter --clean`: covers bounded known KERNEL32 thunk patch record planning.
+- `bin/simple test test/unit/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`: covers the tightened CPU import-thunk gate requiring module-loader evidence.
+- `bin/simple test test/unit/lib/common/wine_process_session_thunk_records_spec.spl --mode=interpreter --clean`: covers bounded known KERNEL32 thunk patch record planning.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_records_spec.spl --mode=interpreter --clean`: includes REQ-024 thunk patch record coverage.
-- `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers extraction of import lookup thunk RVAs separately from import symbol name RVAs.
-- `bin/simple test test/lib/common/wine_process_session_thunk_apply_spec.spl --mode=interpreter --clean`: covers bounded copied-image byte patching for the known KERNEL32 thunk slots plus no-patched-image rejection before thunk bytes are written.
+- `bin/simple test test/unit/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers extraction of import lookup thunk RVAs separately from import symbol name RVAs.
+- `bin/simple test test/unit/lib/common/wine_process_session_thunk_apply_spec.spl --mode=interpreter --clean`: covers bounded copied-image byte patching for the known KERNEL32 thunk slots plus no-patched-image rejection before thunk bytes are written.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_apply_spec.spl --mode=interpreter --clean`: includes REQ-025 bounded import thunk byte patching coverage and no-image rejection before copied-image handoff.
-- `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
-- `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers bounded multi-descriptor import table validation and descriptor summaries.
-- `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers full-Wine process-session import descriptor table inspection and descriptor-limit rejection.
+- `bin/simple test test/unit/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
+- `bin/simple test test/unit/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers bounded multi-descriptor import table validation and descriptor summaries.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers full-Wine process-session import descriptor table inspection and descriptor-limit rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-029 bounded multi-DLL import descriptor inspection coverage.
-- `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers descriptor-qualified import thunk binding extraction.
-- `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers REQ-030 process-session thunk inventory without DLL loading.
+- `bin/simple test test/unit/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers descriptor-qualified import thunk binding extraction.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers REQ-030 process-session thunk inventory without DLL loading.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-030 system coverage for descriptor-qualified thunk inventory.
-- `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers REQ-031 supported dependency planning and unsupported dependency rejection.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers REQ-031 supported dependency planning and unsupported dependency rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-031 system coverage for import dependency preflight without DLL loading.
-- `bin/simple test test/lib/common/wine_process_session_import_resolution_spec.spl --mode=interpreter --clean`: covers REQ-032 modeled import resolution and missing-export rejection.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_resolution_spec.spl --mode=interpreter --clean`: covers REQ-032 modeled import resolution and missing-export rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_resolution_spec.spl --mode=interpreter --clean`: includes REQ-032 system coverage for modeled module/procedure resolution without IAT patching.
-- `bin/simple test test/lib/common/wine_process_session_import_patch_records_spec.spl --mode=interpreter --clean`: covers REQ-033 descriptor-qualified thunk patch record planning and missing-export rejection without IAT writes.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_patch_records_spec.spl --mode=interpreter --clean`: covers REQ-033 descriptor-qualified thunk patch record planning and missing-export rejection without IAT writes.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_patch_records_spec.spl --mode=interpreter --clean`: includes REQ-033 system coverage for multi-DLL patch record planning.
-- `bin/simple test test/lib/common/wine_process_session_import_vma_patch_spec.spl --mode=interpreter --clean`: covers REQ-034 modeled multi-DLL VMA thunk patching and missing-export rejection.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_vma_patch_spec.spl --mode=interpreter --clean`: covers REQ-034 modeled multi-DLL VMA thunk patching and missing-export rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_vma_patch_spec.spl --mode=interpreter --clean`: includes REQ-034 system coverage for the bounded process VMA write window.
-- `bin/simple test test/lib/common/wine_process_session_loader_runtime_spec.spl --mode=interpreter --clean`: covers REQ-035 full-image loader runtime preflight and TLS support rejection.
+- `bin/simple test test/unit/lib/common/wine_process_session_loader_runtime_spec.spl --mode=interpreter --clean`: covers REQ-035 full-image loader runtime preflight and TLS support rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl --mode=interpreter --clean`: includes REQ-035 system coverage for composed image handoff, relocation, and TLS runtime evidence.
-- `bin/simple test test/lib/common/wine_process_session_vma_relocation_spec.spl --mode=interpreter --clean`: covers REQ-036 bounded DIR64 relocation mutation through a process VMA write window.
+- `bin/simple test test/unit/lib/common/wine_process_session_vma_relocation_spec.spl --mode=interpreter --clean`: covers REQ-036 bounded DIR64 relocation mutation through a process VMA write window.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_relocation_spec.spl --mode=interpreter --clean`: includes REQ-036 system coverage for loader-owned process-image relocation mutation without PE execution.
-- `bin/simple test test/lib/common/wine_process_session_tls_dispatch_spec.spl --mode=interpreter --clean`: covers REQ-037 loader-owned TLS callback dispatch recording and empty-table handling.
+- `bin/simple test test/unit/lib/common/wine_process_session_tls_dispatch_spec.spl --mode=interpreter --clean`: covers REQ-037 loader-owned TLS callback dispatch recording and empty-table handling.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.spl --mode=interpreter --clean`: includes REQ-037 system coverage for mapped TLS callback dispatch recording without PE execution.
-- `bin/simple test test/lib/common/wine_process_session_loader_state_spec.spl --mode=interpreter --clean`: covers REQ-038 modeled import-loader refcount release and missing-export rollback.
+- `bin/simple test test/unit/lib/common/wine_process_session_loader_state_spec.spl --mode=interpreter --clean`: covers REQ-038 modeled import-loader refcount release and missing-export rollback.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_loader_state_spec.spl --mode=interpreter --clean`: includes REQ-038 system coverage for modeled loader state without host DLL loading or PE execution.
-- `bin/simple test test/lib/common/wine_process_session_import_transaction_spec.spl --mode=interpreter --clean`: covers REQ-039 loader-state-gated VMA import patch transactions.
-- `bin/simple test test/lib/common/wine_process_session_import_transaction_rollback_spec.spl --mode=interpreter --clean`: covers REQ-039 rollback-before-patch rejection without crossing into the VMA write path.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_transaction_spec.spl --mode=interpreter --clean`: covers REQ-039 loader-state-gated VMA import patch transactions.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_transaction_rollback_spec.spl --mode=interpreter --clean`: covers REQ-039 rollback-before-patch rejection without crossing into the VMA write path.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_transaction_spec.spl --mode=interpreter --clean`: includes REQ-039 system coverage for composed loader state plus VMA patch evidence without host DLL loading or PE execution.
-- `bin/simple test test/lib/common/wine_process_session_import_entrypoint_handoff_spec.spl --mode=interpreter --clean`: covers REQ-040 patched-image entrypoint handoff after the import loader VMA transaction.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_entrypoint_handoff_spec.spl --mode=interpreter --clean`: covers REQ-040 patched-image entrypoint handoff after the import loader VMA transaction.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_entrypoint_handoff_spec.spl --mode=interpreter --clean`: includes REQ-040 system coverage for non-executing patched-image entrypoint handoff.
-- `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
-- `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
-- `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.
-- `bin/simple test test/lib/common/wine_process_session_mapped_image_spec.spl --mode=interpreter --clean`: covers the mapped patched-image preflight and missing CPU evidence rejection.
+- `bin/simple test test/unit/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
+- `bin/simple test test/unit/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
+- `bin/simple test test/unit/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.
+- `bin/simple test test/unit/lib/common/wine_process_session_mapped_image_spec.spl --mode=interpreter --clean`: covers the mapped patched-image preflight and missing CPU evidence rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_mapped_image_spec.spl --mode=interpreter --clean`: includes REQ-026 mapped patched process image coverage.
-- `bin/simple test test/lib/common/wine_process_session_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers the bounded process VMA write window for known thunk records.
+- `bin/simple test test/unit/lib/common/wine_process_session_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers the bounded process VMA write window for known thunk records.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_thunk_write_spec.spl --mode=interpreter --clean`: includes REQ-027 bounded process VMA thunk patch window coverage.
-- `bin/simple test test/lib/common/wine_process_session_full_image_handoff_spec.spl --mode=interpreter --clean`: covers the full-Wine image-to-VM handoff and rejection gates.
+- `bin/simple test test/unit/lib/common/wine_process_session_full_image_handoff_spec.spl --mode=interpreter --clean`: covers the full-Wine image-to-VM handoff and rejection gates.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_full_image_handoff_spec.spl --mode=interpreter --clean`: includes REQ-028 arbitrary process image VM handoff coverage.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
@@ -1199,7 +1199,7 @@ startup mapping blocks the handoff before any DllMain execution claim.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers loader-lock plus PEB/TEB write readiness and unmapped startup-write rejection.
+- `bin/simple test test/unit/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers loader-lock plus PEB/TEB write readiness and unmapped startup-write rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level DllMain handoff requiring PEB/TEB writes.
 
 ## 2026-05-07 DllMain Startup-Fault Write-Handoff Update
@@ -1211,7 +1211,7 @@ are ready; missing startup writes block before rollback evidence is emitted.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers write-gated startup rollback and unmapped PEB/TEB write rejection.
+- `bin/simple test test/unit/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers write-gated startup rollback and unmapped PEB/TEB write rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level startup rollback path requiring PEB/TEB writes.
 
 ## 2026-05-07 PEB/TEB Layout-Write Plan Update
@@ -1224,7 +1224,7 @@ reported.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers successful x64 layout record planning and write-readiness rejection.
+- `bin/simple test test/unit/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers successful x64 layout record planning and write-readiness rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level PEB/TEB layout-write plan.
 
 ## 2026-05-07 NTDLL PEB/TEB Layout-Handoff Update
@@ -1236,7 +1236,7 @@ propagates as a hard handoff rejection.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: covers layout-aware NTDLL process-info handoff and layout rejection.
+- `bin/simple test test/unit/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: covers layout-aware NTDLL process-info handoff and layout rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level PEB/TEB layout-to-NTDLL handoff.
 
 ## 2026-05-07 DllMain PEB/TEB Layout-Handoff Update
@@ -1248,7 +1248,7 @@ handoff before any DllMain execution claim.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers layout-gated DllMain handoff and layout rejection.
+- `bin/simple test test/unit/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers layout-gated DllMain handoff and layout rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level DllMain layout handoff.
 
 ## 2026-05-07 DllMain Startup-Fault Layout-Handoff Update
@@ -1260,7 +1260,7 @@ PEB/TEB layout-write plan are ready.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers layout-gated startup rollback and layout rejection.
+- `bin/simple test test/unit/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers layout-gated startup rollback and layout rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level startup rollback path requiring the PEB/TEB layout handoff.
 
 ## 2026-05-07 PEB/TEB Layout Byte-Payload Update
@@ -1271,7 +1271,7 @@ payload evidence only; it does not claim live VM memory mutation.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers successful layout byte payload generation and layout rejection.
+- `bin/simple test test/unit/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers successful layout byte payload generation and layout rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level layout byte payload handoff.
 
 ## 2026-05-07 PEB/TEB VM Byte-Write Readback Update
@@ -1284,8 +1284,8 @@ VM-backed startup mutation evidence.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_vm_adapter_spec.spl --mode=interpreter --clean`: covers modeled VM byte write/readback and write rejection.
-- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers PEB/TEB layout byte application plus read-only startup-memory rejection.
+- `bin/simple test test/unit/lib/common/wine_vm_adapter_spec.spl --mode=interpreter --clean`: covers modeled VM byte write/readback and write rejection.
+- `bin/simple test test/unit/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers PEB/TEB layout byte application plus read-only startup-memory rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level PEB/TEB VM byte-write/readback path.
 
 ## 2026-05-07 NTDLL PEB/TEB VM-Write Handoff Update
@@ -1297,7 +1297,7 @@ composition propagates as a hard handoff rejection.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated process-info handoff and failure propagation.
+- `bin/simple test test/unit/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated process-info handoff and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level VM-write/readback-to-NTDLL handoff.
 
 ## 2026-05-07 DllMain PEB/TEB VM-Write Handoff Update
@@ -1310,7 +1310,7 @@ mapped base, mapped size, entrypoint, callback, and dispatch counts.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated DllMain handoff, failure propagation, and stale mapped-state clearing.
+- `bin/simple test test/unit/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated DllMain handoff, failure propagation, and stale mapped-state clearing.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level DllMain VM-write/readback handoff before carrying mapped state.
 
 ## 2026-05-07 DllMain Startup-Fault VM-Write Handoff Update
@@ -1322,7 +1322,7 @@ and PEB/TEB VM write/readback evidence are ready.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated startup rollback and failure propagation.
+- `bin/simple test test/unit/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated startup rollback and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level startup rollback path requiring PEB/TEB VM write/readback evidence.
 
 ## 2026-05-07 Process Entrypoint Startup-Fault VM-Write Handoff Update
@@ -1337,7 +1337,7 @@ startup-fault handling cannot carry stale mapped-state evidence.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated imported entrypoint rollback, failure propagation, and stale mapped-state clearing.
+- `bin/simple test test/unit/lib/common/wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated imported entrypoint rollback, failure propagation, and stale mapped-state clearing.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level imported entrypoint rollback path requiring PEB/TEB VM write/readback evidence before carrying mapped state.
 
 Performance follow-up: the imported-entrypoint startup fault specs remain near
@@ -1355,7 +1355,7 @@ readback prefixes the handoff evidence before reporting readiness.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_full_image_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated full-image handoff and pre-mapping rejection with zero mapped/entry addresses.
+- `bin/simple test test/unit/lib/common/wine_process_session_full_image_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated full-image handoff and pre-mapping rejection with zero mapped/entry addresses.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_full_image_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level full-image handoff path requiring PEB/TEB VM write/readback evidence before image mapping.
 
 ## 2026-05-07 Full Image Loader Runtime VM-Write Update
@@ -1368,7 +1368,7 @@ reported.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_loader_runtime_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated full-image loader runtime planning and failure propagation.
+- `bin/simple test test/unit/lib/common/wine_process_session_loader_runtime_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated full-image loader runtime planning and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level loader runtime path requiring PEB/TEB VM write/readback evidence.
 
 ## 2026-05-07 Loader Relocation VMA VM-Write Update
@@ -1380,7 +1380,7 @@ composition blocks relocation mutation before copied image bytes are patched.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_vma_relocation_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated loader relocation mutation and failure propagation.
+- `bin/simple test test/unit/lib/common/wine_process_session_vma_relocation_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated loader relocation mutation and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_relocation_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level relocation mutation path requiring PEB/TEB VM write/readback evidence.
 
 ## 2026-05-07 TLS Callback Dispatch VM-Write Update
@@ -1392,7 +1392,7 @@ composition blocks dispatch evidence before TLS callback handoff is reported.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_tls_dispatch_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated TLS callback dispatch and failure propagation.
+- `bin/simple test test/unit/lib/common/wine_process_session_tls_dispatch_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated TLS callback dispatch and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level TLS callback dispatch path requiring PEB/TEB VM write/readback evidence.
 
 ## 2026-05-07 Import Thunk Planning VM-Write Update
@@ -1405,7 +1405,7 @@ reported.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated import thunk planning and failure propagation.
+- `bin/simple test test/unit/lib/common/wine_process_session_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated import thunk planning and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level import thunk planning path requiring PEB/TEB VM write/readback evidence.
 
 ## 2026-05-07 Import Thunk VMA VM-Write Update
@@ -1419,7 +1419,7 @@ image, no mapped region, and explicit no-VMA-write evidence.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated VMA import thunk mutation plus no-patched-image rejection before VMA thunk writes.
+- `bin/simple test test/unit/lib/common/wine_process_session_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated VMA import thunk mutation plus no-patched-image rejection before VMA thunk writes.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level VMA import thunk write path requiring PEB/TEB VM write/readback evidence and no-image rejection before VMA thunk writes.
 
 ## 2026-05-07 Mapped Image VM-Write Update
@@ -1434,7 +1434,7 @@ plain mapped-image preflight can proceed.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_mapped_image_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated mapped-image preflight, failure propagation, and no-mapped-image CPU evidence rejection.
+- `bin/simple test test/unit/lib/common/wine_process_session_mapped_image_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated mapped-image preflight, failure propagation, and no-mapped-image CPU evidence rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_mapped_image_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level mapped-image path requiring PEB/TEB VM write/readback evidence and rejecting missing CPU evidence without mapped image state.
 
 ## 2026-05-07 CPU Dispatch Preflight VM-Write Update
@@ -1446,10 +1446,10 @@ dispatch preflight before known-console dispatch planning is reported.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_cpu_preflight_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated CPU dispatch preflight and failure propagation.
+- `bin/simple test test/unit/lib/common/wine_process_session_cpu_preflight_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated CPU dispatch preflight and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_cpu_preflight_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level CPU dispatch preflight path requiring PEB/TEB VM write/readback evidence.
 
-Performance follow-up: `test/lib/common/wine_process_session_spec.spl` now
+Performance follow-up: `test/unit/lib/common/wine_process_session_spec.spl` now
 passes after moving known-console dispatch coverage into a focused spec, but it
 still runs near the 60s interpreter watchdog. Split the remaining import and
 CPU preflight examples into focused specs before adding more coverage to the
@@ -1464,7 +1464,7 @@ blocks dispatch planning before instruction decoding is reported.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_known_console_dispatch_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated known-console dispatch planning and failure propagation.
+- `bin/simple test test/unit/lib/common/wine_process_session_known_console_dispatch_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated known-console dispatch planning and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_known_console_dispatch_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level known-console dispatch path requiring PEB/TEB VM write/readback evidence.
 
 ## 2026-05-07 Known-Console Execution VM-Write Update
@@ -1477,7 +1477,7 @@ evidence is reported.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated known-console execution and failure propagation.
+- `bin/simple test test/unit/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated known-console execution and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_known_console_execution_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level known-console execution path requiring PEB/TEB VM write/readback evidence.
 
 ## 2026-05-07 Imported Entrypoint Handoff VM-Write Update
@@ -1491,8 +1491,8 @@ fault evidence is considered.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_import_entrypoint_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated imported entrypoint handoff.
-- `bin/simple test test/lib/common/wine_process_session_import_entrypoint_handoff_vm_write_failure_spec.spl --mode=interpreter --clean`: covers VM-write/readback failure propagation before imported entrypoint handoff readiness.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_entrypoint_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated imported entrypoint handoff.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_entrypoint_handoff_vm_write_failure_spec.spl --mode=interpreter --clean`: covers VM-write/readback failure propagation before imported entrypoint handoff readiness.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_entrypoint_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level imported entrypoint handoff requiring PEB/TEB VM write/readback evidence.
 
 ## 2026-05-07 DllMain Prepare VM-Write Handoff Update
@@ -1505,7 +1505,7 @@ before non-executing SEH rollback can be recorded.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers retained DllMain handoff preparation consuming the VM-readback import-binding record.
+- `bin/simple test test/unit/lib/common/wine_dll_view_dllmain_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers retained DllMain handoff preparation consuming the VM-readback import-binding record.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DllMain handoff consuming VM-readback import binding evidence.
 
 ## 2026-05-07 Import-Loader Transaction VM-Write Update
@@ -1520,11 +1520,11 @@ region, and explicit no-VMA-write evidence.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_import_descriptor_vma_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write and descriptor-planning rejection returning no patched image, no mapped region, and no VMA thunk-write evidence.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_descriptor_vma_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write and descriptor-planning rejection returning no patched image, no mapped region, and no VMA thunk-write evidence.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level descriptor VMA VM-write and descriptor-planning rejection before VMA thunk writes.
-- `bin/simple test test/lib/common/wine_process_session_import_loader_transaction_rejection_spec.spl --mode=interpreter --clean`: covers import-loader transaction aborts returning no patched image and no VMA thunk-write evidence.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_loader_transaction_rejection_spec.spl --mode=interpreter --clean`: covers import-loader transaction aborts returning no patched image and no VMA thunk-write evidence.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_loader_transaction_rejection_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level transaction abort boundary before patched image exposure.
-- `bin/simple test test/lib/common/wine_process_session_import_transaction_vm_write_spec.spl --mode=interpreter --clean`: verifies the transaction path still composes the VM-readback-gated descriptor patch path.
+- `bin/simple test test/unit/lib/common/wine_process_session_import_transaction_vm_write_spec.spl --mode=interpreter --clean`: verifies the transaction path still composes the VM-readback-gated descriptor patch path.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_loader_transaction_vm_write_spec.spl --mode=interpreter --clean`: verifies the SimpleOS transaction path still composes the VM-readback-gated descriptor patch path.
 
 Performance follow-up: the focused import-loader transaction and imported
@@ -1541,7 +1541,7 @@ TLS callback instructions, DllMain, and arbitrary PE code are still not run.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_tls_dispatch_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL TLS dispatch readiness.
+- `bin/simple test test/unit/lib/common/wine_dll_view_tls_dispatch_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL TLS dispatch readiness.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DLL TLS dispatch requiring PEB/TEB VM write/readback evidence.
 
 ## 2026-05-07 DLL Import Binding VM-Write Update
@@ -1554,9 +1554,9 @@ gate after import binding.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_import_binding_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL import binding readiness.
+- `bin/simple test test/unit/lib/common/wine_dll_view_import_binding_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL import binding readiness.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_import_binding_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DLL import binding requiring PEB/TEB VM write/readback evidence.
-- `bin/simple test test/lib/common/wine_dll_view_tls_dispatch_vm_write_spec.spl --mode=interpreter --clean`: verifies the TLS-dispatch VM path still passes through the gated import-binding record.
+- `bin/simple test test/unit/lib/common/wine_dll_view_tls_dispatch_vm_write_spec.spl --mode=interpreter --clean`: verifies the TLS-dispatch VM path still passes through the gated import-binding record.
 
 ## 2026-05-07 DLL Relocation VM-Write Update
 
@@ -1568,9 +1568,9 @@ readiness was already available.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_relocation_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL relocation readiness alongside existing relocation behavior.
+- `bin/simple test test/unit/lib/common/wine_dll_view_relocation_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL relocation readiness alongside existing relocation behavior.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_relocation_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DLL relocation requiring PEB/TEB VM write/readback evidence.
-- `bin/simple test test/lib/common/wine_dll_view_import_binding_vm_write_spec.spl --mode=interpreter --clean`: verifies import binding still passes through the gated relocation record.
+- `bin/simple test test/unit/lib/common/wine_dll_view_import_binding_vm_write_spec.spl --mode=interpreter --clean`: verifies import binding still passes through the gated relocation record.
 
 ## 2026-05-07 DLL File-View Mapping VM-Write Update
 
@@ -1582,9 +1582,9 @@ was already available.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_file_view_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL file-view mapping alongside existing file-view behavior.
+- `bin/simple test test/unit/lib/common/wine_dll_file_view_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL file-view mapping alongside existing file-view behavior.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_file_view_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DLL file view requiring PEB/TEB VM write/readback evidence.
-- `bin/simple test test/lib/common/wine_dll_view_relocation_spec.spl --mode=interpreter --clean`: verifies retained DLL relocation still passes through the gated file-view mapping record.
+- `bin/simple test test/unit/lib/common/wine_dll_view_relocation_spec.spl --mode=interpreter --clean`: verifies retained DLL relocation still passes through the gated file-view mapping record.
 
 ## 2026-05-07 Remaining Execution Plan Completion
 
