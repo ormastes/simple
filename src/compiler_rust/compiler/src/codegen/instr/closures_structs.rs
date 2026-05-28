@@ -2,7 +2,7 @@
 
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature};
 use cranelift_frontend::FunctionBuilder;
-use cranelift_module::{Linkage, Module};
+use cranelift_module::{FuncId, Linkage, Module};
 
 use crate::hir::TypeId;
 use crate::mir::VReg;
@@ -14,6 +14,41 @@ use super::helpers::{
     indirect_call_with_result, inline_runtime_len_value,
 };
 use super::{InstrContext, InstrResult};
+
+fn resolve_unique_module_qualified_func<M: Module>(ctx: &InstrContext<'_, M>, name: &str) -> Option<FuncId> {
+    let sanitized = name.replace('.', "_dot_");
+    let tail = sanitized.rsplit("__").next().unwrap_or(sanitized.as_str());
+    let suffix = format!("__{}", tail);
+    let mut ids: Vec<FuncId> = Vec::new();
+    for (candidate, id) in ctx.func_ids.iter() {
+        if candidate.ends_with(&suffix) && !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+    if ids.len() == 1 {
+        ids.first().copied()
+    } else {
+        None
+    }
+}
+
+fn resolve_unique_module_qualified_import<M: Module>(ctx: &InstrContext<'_, M>, name: &str) -> Option<String> {
+    let sanitized = name.replace('.', "_dot_");
+    let tail = sanitized.rsplit("__").next().unwrap_or(sanitized.as_str());
+    let suffix = format!("__{}", tail);
+    let mut names: Vec<String> = Vec::new();
+    for candidate in ctx.use_map.values().chain(ctx.import_map.values()) {
+        let candidate_sanitized = candidate.replace('.', "_dot_");
+        if candidate_sanitized.ends_with(&suffix) && !names.iter().any(|n| n == candidate) {
+            names.push(candidate.clone());
+        }
+    }
+    if names.len() == 1 {
+        names.first().cloned()
+    } else {
+        None
+    }
+}
 
 pub(crate) fn compile_closure_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -267,11 +302,13 @@ pub(crate) fn compile_method_call_static<M: Module>(
             || name.ends_with(&tail_san)
     };
 
-    let func_id = ctx
+    let func_id = resolve_unique_module_qualified_func(ctx, lookup_name)
+        .or_else(|| resolve_unique_module_qualified_func(ctx, &sanitized_name))
+        .or_else(|| ctx
         .func_ids
         .get(lookup_name)
         .filter(|_| !is_self(lookup_name))
-        .copied()
+        .copied())
         .or_else(|| {
             ctx.func_ids
                 .get(&sanitized_name)
@@ -559,6 +596,12 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
 
+        let suffix_resolved_storage;
+        if resolved_name.is_none() {
+            suffix_resolved_storage = resolve_unique_module_qualified_import(ctx, lookup_name);
+            resolved_name = suffix_resolved_storage.as_deref();
+        }
+
         if let Some(resolved) = resolved_name {
             let resolved = if resolved.contains('.') {
                 std::borrow::Cow::Owned(resolved.replace('.', "_dot_"))
@@ -570,33 +613,35 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 .get(resolved.as_ref())
                 .map(|&arity| arity == args.len())
                 .unwrap_or(false);
-            let fid = ctx.func_ids.get(resolved.as_ref()).copied().unwrap_or_else(|| {
-                let call_conv = platform_call_conv();
-                let mut sig = Signature::new(call_conv);
-                let param_count = if is_free_fn { args.len() } else { args.len() + 1 };
-                for _ in 0..param_count {
-                    sig.params.push(AbiParam::new(types::I64));
-                }
-                sig.returns.push(AbiParam::new(types::I64));
-                let id = ctx
-                    .module
-                    .declare_function(&resolved, Linkage::Import, &sig)
-                    .or_else(|_| {
-                        let mut sig2 = Signature::new(call_conv);
-                        let alt_count = if is_free_fn { args.len() + 1 } else { args.len() };
-                        for _ in 0..alt_count {
-                            sig2.params.push(AbiParam::new(types::I64));
-                        }
-                        sig2.returns.push(AbiParam::new(types::I64));
-                        ctx.module.declare_function(&resolved, Linkage::Import, &sig2)
-                    })
-                    .unwrap_or_else(|_| match ctx.module.get_name(&resolved) {
-                        Some(cranelift_module::FuncOrDataId::Func(id)) => id,
-                        _ => ctx.runtime_funcs["rt_function_not_found"],
-                    });
-                ctx.func_ids.insert(resolved.to_string(), id);
-                id
-            });
+            let fid = resolve_unique_module_qualified_func(ctx, resolved.as_ref())
+                .or_else(|| ctx.func_ids.get(resolved.as_ref()).copied())
+                .unwrap_or_else(|| {
+                    let call_conv = platform_call_conv();
+                    let mut sig = Signature::new(call_conv);
+                    let param_count = if is_free_fn { args.len() } else { args.len() + 1 };
+                    for _ in 0..param_count {
+                        sig.params.push(AbiParam::new(types::I64));
+                    }
+                    sig.returns.push(AbiParam::new(types::I64));
+                    let id = ctx
+                        .module
+                        .declare_function(&resolved, Linkage::Import, &sig)
+                        .or_else(|_| {
+                            let mut sig2 = Signature::new(call_conv);
+                            let alt_count = if is_free_fn { args.len() + 1 } else { args.len() };
+                            for _ in 0..alt_count {
+                                sig2.params.push(AbiParam::new(types::I64));
+                            }
+                            sig2.returns.push(AbiParam::new(types::I64));
+                            ctx.module.declare_function(&resolved, Linkage::Import, &sig2)
+                        })
+                        .unwrap_or_else(|_| match ctx.module.get_name(&resolved) {
+                            Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+                            _ => ctx.runtime_funcs["rt_function_not_found"],
+                        });
+                    ctx.func_ids.insert(resolved.to_string(), id);
+                    id
+                });
             let fref = ctx.module.declare_func_in_func(fid, builder.func);
             let mut call_args = if is_free_fn {
                 vec![]

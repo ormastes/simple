@@ -68,6 +68,22 @@ fn freestanding_unresolved_mode() -> FreestandingUnresolvedMode {
     }
 }
 
+fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
+    let sanitized = sym.replace('.', "_dot_");
+    let tail = sanitized.rsplit("__").next().unwrap_or(sanitized.as_str());
+    let suffix = format!("__{}", tail);
+    let mut matches = defined
+        .iter()
+        .filter(|candidate| candidate.as_str() != sym)
+        .filter(|candidate| candidate.replace('.', "_dot_").ends_with(&suffix));
+    let first = matches.next().cloned();
+    if matches.next().is_none() {
+        first
+    } else {
+        None
+    }
+}
+
 /// Generate a legacy stub object file for a FREESTANDING (cross) target.
 ///
 /// Unlike `generate_stub_object`, this does not emit asm using host instructions
@@ -635,7 +651,12 @@ pub(crate) fn generate_stub_object(
     let forbidden_core_runtime: Vec<&str> = needs_stub
         .iter()
         .map(|s| s.as_str())
-        .filter(|s| matches!(*s, "rt_enum_new" | "rt_enum_check_discriminant" | "rt_enum_discriminant" | "rt_enum_payload"))
+        .filter(|s| {
+            matches!(
+                *s,
+                "rt_enum_new" | "rt_enum_check_discriminant" | "rt_enum_discriminant" | "rt_enum_payload"
+            )
+        })
         .collect();
     if !forbidden_core_runtime.is_empty() {
         return Err(format!(
@@ -707,6 +728,11 @@ pub(crate) fn generate_stub_object(
             if cfg!(target_os = "macos") && sym.starts_with("___builtin_") {
                 let real_fn = format!("_{}", &sym["___builtin_".len()..]);
                 asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
+                continue;
+            }
+
+            if let Some(real_fn) = resolve_defined_suffix_alias(sym, &defined) {
+                asm_code.push_str(&format!(".weak {0}\n{0}:\n  {1} {2}\n\n", sym, jmp_prefix, real_fn));
                 continue;
             }
 

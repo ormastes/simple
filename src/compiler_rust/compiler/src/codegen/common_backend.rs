@@ -1287,11 +1287,33 @@ impl<M: Module> CodegenBackend<M> {
             // For each method slot, write a relocation pointing to the implementing function.
             for (slot, fn_name) in method_fns.iter().enumerate() {
                 // Look up the func_id — try both mangled and unmangled names.
-                let func_id_opt = self.func_ids.get(fn_name).copied().or_else(|| {
-                    // Try with _dot_ mangling (StructName_dot_methodName)
-                    let mangled = fn_name.replace('.', "_dot_");
-                    self.func_ids.get(&mangled).copied()
-                });
+                let func_id_opt = self
+                    .func_ids
+                    .get(fn_name)
+                    .copied()
+                    .or_else(|| {
+                        // Try with _dot_ mangling (StructName_dot_methodName)
+                        let mangled = fn_name.replace('.', "_dot_");
+                        self.func_ids.get(&mangled).copied()
+                    })
+                    .or_else(|| {
+                        // Native-build prefixes local symbols with their module path. Vtable
+                        // metadata is type-qualified but not module-qualified, so resolve a
+                        // unique module-qualified suffix before falling back to a zero slot.
+                        let mangled = fn_name.replace('.', "_dot_");
+                        let suffix = format!("__{}", mangled);
+                        let mut matches = self
+                            .func_ids
+                            .iter()
+                            .filter(|(name, _)| name.ends_with(&suffix))
+                            .map(|(_, id)| *id);
+                        let first = matches.next();
+                        if matches.next().is_none() {
+                            first
+                        } else {
+                            None
+                        }
+                    });
 
                 if let Some(func_id) = func_id_opt {
                     let func_ref = self.module.declare_func_in_data(func_id, &mut data_desc);

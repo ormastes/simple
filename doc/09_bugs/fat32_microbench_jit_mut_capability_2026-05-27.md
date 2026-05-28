@@ -41,6 +41,24 @@ recovered receiver type instead of the original `Any` receiver type; it still
 needs verification with a rebuilt driver once unrelated networking worktree
 changes stop blocking `cargo build -p simple-driver`.
 
+Update 2026-05-28 (native weak-stub blocker): `cargo build -p simple-driver`
+now succeeds, and native-build links the benchmark without segfaulting. The
+mount failure was not a real FAT geometry result. Disassembly showed
+`Fat32Core._device_sector_size` calling the generated weak stub
+`fat32_microbench__BenchBlockDevice_dot_sector_size`, which returned nil, while
+the real benchmark method was emitted as the module-qualified symbol
+`home__ormastes__dev__pub__simple__test__perf__bench__fat32_microbench__BenchBlockDevice_dot_sector_size`.
+The hosted native stub generator now emits a weak jump trampoline when an
+unresolved short Simple symbol has exactly one defined module-qualified symbol
+with the same `Type_dot_method` tail. After that change, the native
+`fat32_microbench.spl` completes all workloads.
+
+Update 2026-05-28 (4K comparison): `fat32_4k_compare.spl` native-builds, but
+the resulting binary still reports `FATAL: simple read failed` and
+`FATAL: simple write failed`, then times out before producing a valid comparison
+result. This means the pure Simple FAT microbenchmark is unblocked, but the 4K
+random read/write superiority claim is not verified yet.
+
 ## Reproduce
 
 ```bash
@@ -52,8 +70,9 @@ src/compiler_rust/target/debug/simple test/perf/bench/fat32_microbench.spl
 - `bin/simple check` passes for the sync and async FAT fs-driver files.
 - `bin/simple check test/perf/bench/fat32_microbench.spl --mode=interpreter`
   passes.
-- Native execution prints the file-create result, then segfaults during the
-  first write workload.
+- Native `fat32_microbench.spl` completes all workloads.
+- Native `fat32_4k_compare.spl` builds but the simple read/write comparison
+  path still fails and times out.
 
 ## Expected
 
