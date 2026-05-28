@@ -60,35 +60,29 @@ fn _col_idx(m: Dict<text, i32>, name: text) -> i32:
 # Each cell: TYPE_CHAR ":" value, cells separated by "\t".
 
 fn _serialize_row(values: [DbValue]) -> text:
-    var parts: [text] = []
+    var result = ""
     var i: i32 = 0
     while i < values.len() as i32:
+        if i > 0:
+            result = result + "\t"
         val v = values[i]
         match v:
             DbValue.Integer(value):
-                parts.push("I:{value}")
+                result = result + "I:{value}"
             DbValue.Real(value):
-                parts.push("R:{value}")
+                result = result + "R:{value}"
             DbValue.Text(value):
-                parts.push("T:{value}")
+                result = result + "T:{value}"
             DbValue.Null:
-                parts.push("N:")
+                result = result + "N:"
             DbValue.Bool(value):
                 if value:
-                    parts.push("B:1")
+                    result = result + "B:1"
                 else:
-                    parts.push("B:0")
+                    result = result + "B:0"
             DbValue.Blob(value):
-                parts.push("N:")
+                result = result + "N:"
         i = i + 1
-    var result = ""
-    var j: i32 = 0
-    while j < parts.len() as i32:
-        if j > 0:
-            result = result + "\t" + parts[j]
-        else:
-            result = parts[j]
-        j = j + 1
     result
 
 fn _deserialize_row(data: text) -> [DbValue]:
@@ -147,6 +141,8 @@ fn _dbval_eq(a: DbValue, b: DbValue) -> bool:
         return true
     if a.is_null() or b.is_null():
         return false
+    if _dbval_is_int(a) and _dbval_is_int(b):
+        return _dbval_as_i64(a) == _dbval_as_i64(b)
     a.to_text() == b.to_text()
 
 fn _check_pk_eq_operands(left: SqlExpr, right: SqlExpr, col_names: [text], pk_ci: i32) -> text:
@@ -177,6 +173,39 @@ fn _extract_pk_eq(where_expr: SqlExpr?, col_names: [text], pk_ci: i32) -> text:
     if not where_expr.?:
         return ""
     _extract_pk_eq_inner(where_expr, col_names, pk_ci)
+
+fn _check_pk_eq_op_params(left: SqlExpr, right: SqlExpr, col_names: [text], pk_ci: i32, params: [DbValue]) -> text:
+    if left.kind == SqlExprKind.Column:
+        val ci = _find_idx(col_names, left.value)
+        if ci == pk_ci:
+            if right.kind == SqlExprKind.Literal:
+                return right.value
+            if right.kind == SqlExprKind.Placeholder:
+                if params.len() > 0:
+                    return params[0].to_text()
+    if right.kind == SqlExprKind.Column:
+        val ci2 = _find_idx(col_names, right.value)
+        if ci2 == pk_ci:
+            if left.kind == SqlExprKind.Literal:
+                return left.value
+            if left.kind == SqlExprKind.Placeholder:
+                if params.len() > 0:
+                    return params[0].to_text()
+    ""
+
+fn _extract_pk_eq_params(where_expr: SqlExpr?, col_names: [text], pk_ci: i32, params: [DbValue]) -> text:
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if expr.kind != SqlExprKind.BinaryOp:
+        return ""
+    if expr.value != "=":
+        return ""
+    if not expr.left.?:
+        return ""
+    if not expr.right.?:
+        return ""
+    _check_pk_eq_op_params(expr.left, expr.right, col_names, pk_ci, params)
 
 # ── Range predicate extraction for fast SELECT WHERE ────────────────────────
 
@@ -666,13 +695,17 @@ fn _search_score(docs: [[text]], doc_index: i32, terms: [text], algorithm: PureS
             _bm25_score(docs, doc_index, terms, total_len)
 
 fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -> DbValue:
-    if expr.kind == SqlExprKind.Literal:
-        return _parse_literal(expr.value)
+    if expr.kind == SqlExprKind.BinaryOp:
+        val lv = _eval_expr(expr.left, cols, vals, params)
+        val rv = _eval_expr(expr.right, cols, vals, params)
+        return _apply_binop(expr.value, lv, rv)
     if expr.kind == SqlExprKind.Column:
         val idx = _find_idx(cols, expr.value)
         if idx >= 0:
             return vals[idx]
         return DbValue.Null
+    if expr.kind == SqlExprKind.Literal:
+        return _parse_literal(expr.value)
     if expr.kind == SqlExprKind.Placeholder:
         if _param_idx < params.len():
             val v = params[_param_idx]
@@ -699,10 +732,6 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
                 _:
                     return DbValue.Null
         return DbValue.Null
-    if expr.kind == SqlExprKind.BinaryOp:
-        val lv = _eval_expr(expr.left, cols, vals, params)
-        val rv = _eval_expr(expr.right, cols, vals, params)
-        return _apply_binop(expr.value, lv, rv)
     if expr.kind == SqlExprKind.Between:
         val bval = _eval_expr(expr.left, cols, vals, params)
         val lo = _eval_expr(expr.args[0], cols, vals, params)
@@ -872,20 +901,20 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
 fn _apply_binop(op: text, a: DbValue, b: DbValue) -> DbValue:
     if op == "=":
         return DbValue.Bool(value: _dbval_eq(a, b))
-    if op == "!=":
-        return DbValue.Bool(value: not _dbval_eq(a, b))
-    if op == ">":
-        return DbValue.Bool(value: _dbval_cmp(a, b) > 0)
-    if op == "<":
-        return DbValue.Bool(value: _dbval_cmp(a, b) < 0)
-    if op == ">=":
-        return DbValue.Bool(value: _dbval_cmp(a, b) >= 0)
-    if op == "<=":
-        return DbValue.Bool(value: _dbval_cmp(a, b) <= 0)
     if op == "AND":
         return DbValue.Bool(value: _dbval_truthy(a) and _dbval_truthy(b))
     if op == "OR":
         return DbValue.Bool(value: _dbval_truthy(a) or _dbval_truthy(b))
+    if op == ">":
+        return DbValue.Bool(value: _dbval_cmp(a, b) > 0)
+    if op == "<":
+        return DbValue.Bool(value: _dbval_cmp(a, b) < 0)
+    if op == "!=":
+        return DbValue.Bool(value: not _dbval_eq(a, b))
+    if op == ">=":
+        return DbValue.Bool(value: _dbval_cmp(a, b) >= 0)
+    if op == "<=":
+        return DbValue.Bool(value: _dbval_cmp(a, b) <= 0)
     if op == "+":
         if _dbval_is_int(a) and _dbval_is_int(b):
             return DbValue.Integer(value: _dbval_as_i64(a) + _dbval_as_i64(b))
@@ -913,13 +942,17 @@ fn _check_where(where_expr: SqlExpr?, cols: [text], vals: [DbValue], params: [Db
     _dbval_truthy(result)
 
 fn _eval_expr_fast(expr: SqlExpr, cm: Dict<text, i32>, vals: [DbValue], params: [DbValue]) -> DbValue:
-    if expr.kind == SqlExprKind.Literal:
-        return _parse_literal(expr.value)
+    if expr.kind == SqlExprKind.BinaryOp:
+        val lv = _eval_expr_fast(expr.left, cm, vals, params)
+        val rv = _eval_expr_fast(expr.right, cm, vals, params)
+        return _apply_binop(expr.value, lv, rv)
     if expr.kind == SqlExprKind.Column:
         val idx = _col_idx(cm, expr.value)
         if idx >= 0:
             return vals[idx]
         return DbValue.Null
+    if expr.kind == SqlExprKind.Literal:
+        return _parse_literal(expr.value)
     if expr.kind == SqlExprKind.Placeholder:
         if _param_idx < params.len():
             val v = params[_param_idx]
@@ -946,10 +979,6 @@ fn _eval_expr_fast(expr: SqlExpr, cm: Dict<text, i32>, vals: [DbValue], params: 
                 _:
                     return DbValue.Null
         return DbValue.Null
-    if expr.kind == SqlExprKind.BinaryOp:
-        val lv = _eval_expr_fast(expr.left, cm, vals, params)
-        val rv = _eval_expr_fast(expr.right, cm, vals, params)
-        return _apply_binop(expr.value, lv, rv)
     if expr.kind == SqlExprKind.Between:
         val bval = _eval_expr_fast(expr.left, cm, vals, params)
         val lo = _eval_expr_fast(expr.args[0], cm, vals, params)
@@ -996,6 +1025,88 @@ fn _eval_expr_fast(expr: SqlExpr, cm: Dict<text, i32>, vals: [DbValue], params: 
             if lwv.is_null():
                 return DbValue.Null
             return DbValue.Text(value: lwv.to_text().to_lower())
+        if fname == "trim":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val trv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if trv.is_null():
+                return DbValue.Null
+            return DbValue.Text(value: trv.to_text().trim())
+        if fname == "substr" or fname == "substring":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val sv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if sv.is_null():
+                return DbValue.Null
+            val st = sv.to_text()
+            val start_v = _eval_expr_fast(expr.args[1], cm, vals, params)
+            val start_i = _dbval_as_i64(start_v) - 1
+            if start_i < 0:
+                return DbValue.Text(value: st)
+            if expr.args.len() >= 3:
+                val len_v = _eval_expr_fast(expr.args[2], cm, vals, params)
+                val slen = _dbval_as_i64(len_v)
+                var end_i = start_i + slen
+                if end_i > st.len():
+                    end_i = st.len()
+                return DbValue.Text(value: st.slice(start_i, end_i))
+            return DbValue.Text(value: st.slice(start_i, st.len()))
+        if fname == "replace":
+            if expr.args.len() < 3:
+                return DbValue.Null
+            val rpv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if rpv.is_null():
+                return DbValue.Null
+            val rpt = rpv.to_text()
+            val from_v = _eval_expr_fast(expr.args[1], cm, vals, params)
+            val to_v = _eval_expr_fast(expr.args[2], cm, vals, params)
+            val from_t = from_v.to_text()
+            val to_t = to_v.to_text()
+            return DbValue.Text(value: rpt.replace(from_t, to_t))
+        if fname == "abs":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val abv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if abv.is_null():
+                return DbValue.Null
+            if _dbval_is_int(abv):
+                val ai = _dbval_as_i64(abv)
+                if ai < 0:
+                    return DbValue.Integer(value: 0 - ai)
+                return abv
+            return abv
+        if fname == "coalesce":
+            var ci: i32 = 0
+            while ci < expr.args.len() as i32:
+                val cv = _eval_expr_fast(expr.args[ci], cm, vals, params)
+                if not cv.is_null():
+                    return cv
+                ci = ci + 1
+            return DbValue.Null
+        if fname == "ifnull":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val ifv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if not ifv.is_null():
+                return ifv
+            return _eval_expr_fast(expr.args[1], cm, vals, params)
+        if fname == "case":
+            val nargs = expr.args.len() as i32
+            val has_else = (nargs % 2) != 0
+            var pair_count = nargs / 2
+            var cwi: i32 = 0
+            while cwi < pair_count:
+                val cond_idx = cwi * 2
+                val then_idx = cond_idx + 1
+                val cond_val = _eval_expr_fast(expr.args[cond_idx], cm, vals, params)
+                if _dbval_truthy(cond_val):
+                    return _eval_expr_fast(expr.args[then_idx], cm, vals, params)
+                cwi = cwi + 1
+            if has_else:
+                val else_idx = nargs - 1
+                return _eval_expr_fast(expr.args[else_idx], cm, vals, params)
+            return DbValue.Null
+        return DbValue.Null
     DbValue.Null
 
 fn _check_where_fast(where_expr: SqlExpr?, cm: Dict<text, i32>, vals: [DbValue], params: [DbValue]) -> bool:
@@ -1809,7 +1920,8 @@ class PureDatabase:
                 val tidx = pkm[key_txt]
                 if tidx >= 0 and tidx < tbl.tuples.len() as i32:
                     if mvcc_is_visible(tbl.tuples[tidx], snap):
-                        tbl.delete_matching(tid, tbl.tuples[tidx].data)
+                        val del_data_pk = tbl.tuples[tidx].data
+                        tbl.delete_matching(tid, del_data_pk)
                         deleted = 1
         elif use_typed:
             var dki: i32 = 0
@@ -1817,7 +1929,8 @@ class PureDatabase:
                 if mvcc_is_visible(tbl.tuples[dki], snap):
                     val rv = typed[dki]
                     if kci < rv.len() as i32 and rv[kci].to_text() == key_txt:
-                        tbl.delete_matching(tid, tbl.tuples[dki].data)
+                        val del_data_dki = tbl.tuples[dki].data
+                        tbl.delete_matching(tid, del_data_dki)
                         deleted = deleted + 1
                 dki = dki + 1
         else:
@@ -3695,7 +3808,7 @@ class PureDatabase:
             # Non-aggregate path — project each row
             var pri: i32 = 0
             while pri < filtered.len() as i32:
-                val proj = _project_row_fast(sel, col_map, col_names, filtered[pri])
+                val proj = _project_row(sel, col_names, filtered[pri])
                 rows.push(proj)
                 pri = pri + 1
 
@@ -3765,14 +3878,59 @@ class PureDatabase:
     # ── Internal: UPDATE ─────────────────────────────────────────────────
 
     me _do_update(upd: SqlUpdate, params: [DbValue]) -> Result<i64, DbError>:
-        val ti = _find_idx(self._tbl_names, upd.table)
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(upd.table):
+            ti = self._tbl_name_idx[upd.table]
+        else:
+            ti = _find_idx(self._tbl_names, upd.table)
         if ti < 0:
             return Err(DbError.QueryFailed(
                 sql: "UPDATE",
                 message: "no such table: {upd.table}"
             ))
-        self._ensure_mvcc_sync(ti)
         val col_names = self._tbl_cols[ti]
+        val pk_ci = self._tbl_pk_col[ti]
+        if pk_ci >= 0:
+            val pk_eq = _extract_pk_eq_params(upd.where_expr, col_names, pk_ci, params)
+            if pk_eq != "":
+                self._ensure_pk_map(ti)
+                val pkm = self._tbl_pk_map[ti]
+                if pkm.has(pk_eq):
+                    val tidx = pkm[pk_eq]
+                    val typed_rows = self._tbl_typed[ti]
+                    if tidx >= 0 and tidx < typed_rows.len() as i32:
+                        val row_vals = typed_rows[tidx]
+                        var new_vals: [DbValue] = []
+                        var ci: i32 = 0
+                        while ci < col_names.len() as i32:
+                            val col = col_names[ci]
+                            if upd.assignments.contains_key(col):
+                                val aexpr = upd.assignments[col]
+                                new_vals.push(_eval_expr(aexpr, col_names, row_vals, params))
+                            else:
+                                new_vals.push(row_vals[ci])
+                            ci = ci + 1
+                        val handle_f = self._txn.begin()
+                        val tid_f = handle_f.txn_id
+                        var tbl_f = self._tbl_data[ti]
+                        val old_data = tbl_f.tuples[tidx].data
+                        tbl_f.delete_matching(tid_f, old_data)
+                        tbl_f.insert(tid_f, _serialize_row(new_vals))
+                        val new_pos = tbl_f.tuples.len() as i32 - 1
+                        self._tbl_data[ti] = tbl_f
+                        var typed2 = self._tbl_typed[ti]
+                        typed2.push(new_vals)
+                        self._tbl_typed[ti] = typed2
+                        self._txn.commit(tid_f)
+                        self._invalidate_fts(ti)
+                        if ti < self._tbl_all_visible.len() as i32:
+                            self._tbl_all_visible[ti] = false
+                        self._tbl_pk_dirty[ti] = true
+                        self._last_changes = 1
+                        self._mark_dirty()?
+                        return Ok(1)
+                return Ok(0)
+        self._ensure_mvcc_sync(ti)
         val handle = self._txn.begin()
         val tid = handle.txn_id
         val snap = self._txn.snapshot()
@@ -3838,14 +3996,45 @@ class PureDatabase:
     # ── Internal: DELETE ─────────────────────────────────────────────────
 
     me _do_delete(del: SqlDelete, params: [DbValue]) -> Result<i64, DbError>:
-        val ti = _find_idx(self._tbl_names, del.table)
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(del.table):
+            ti = self._tbl_name_idx[del.table]
+        else:
+            ti = _find_idx(self._tbl_names, del.table)
         if ti < 0:
             return Err(DbError.QueryFailed(
                 sql: "DELETE",
                 message: "no such table: {del.table}"
             ))
-        self._ensure_mvcc_sync(ti)
         val col_names = self._tbl_cols[ti]
+        val pk_ci = self._tbl_pk_col[ti]
+        if pk_ci >= 0:
+            val pk_eq = _extract_pk_eq_params(del.where_expr, col_names, pk_ci, params)
+            if pk_eq != "":
+                self._ensure_pk_map(ti)
+                val pkm = self._tbl_pk_map[ti]
+                if pkm.has(pk_eq):
+                    val tidx = pkm[pk_eq]
+                    var tbl_f = self._tbl_data[ti]
+                    if tidx >= 0 and tidx < tbl_f.tuples.len() as i32:
+                        val handle_f = self._txn.begin()
+                        val tid_f = handle_f.txn_id
+                        val snap_f = self._txn.snapshot()
+                        if mvcc_is_visible(tbl_f.tuples[tidx], snap_f):
+                            val del_data_f = tbl_f.tuples[tidx].data
+                            tbl_f.delete_matching(tid_f, del_data_f)
+                            self._tbl_data[ti] = tbl_f
+                            self._txn.commit(tid_f)
+                            self._invalidate_fts(ti)
+                            if ti < self._tbl_all_visible.len() as i32:
+                                self._tbl_all_visible[ti] = false
+                            self._tbl_pk_dirty[ti] = true
+                            self._last_changes = 1
+                            self._mark_dirty()?
+                            return Ok(1)
+                        self._txn.commit(tid_f)
+                return Ok(0)
+        self._ensure_mvcc_sync(ti)
         val handle = self._txn.begin()
         val tid = handle.txn_id
         val snap = self._txn.snapshot()
@@ -3859,7 +4048,8 @@ class PureDatabase:
                 if mvcc_is_visible(tbl.tuples[di], snap):
                     val row_vals = typed[di]
                     if _check_where(del.where_expr, col_names, row_vals, params):
-                        tbl.delete_matching(tid, tbl.tuples[di].data)
+                        val del_data_di = tbl.tuples[di].data
+                        tbl.delete_matching(tid, del_data_di)
                         deleted = deleted + 1
                 di = di + 1
         else:
