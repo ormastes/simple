@@ -1,23 +1,18 @@
-    .section .text
-    .align 2
-
-    .global simpleos_arm64_interrupt_disable
-    .type simpleos_arm64_interrupt_disable, %function
-simpleos_arm64_interrupt_disable:
+    .macro SIMPLEOS_ARM_DISABLE_INTERRUPTS
     msr daifset, #0xf
-    ret
-    .size simpleos_arm64_interrupt_disable, . - simpleos_arm64_interrupt_disable
+    .endm
 
-    .global simpleos_arm64_interrupt_enable
-    .type simpleos_arm64_interrupt_enable, %function
-simpleos_arm64_interrupt_enable:
+    .macro SIMPLEOS_ARM_ENABLE_INTERRUPTS
     msr daifclr, #0xf
-    ret
-    .size simpleos_arm64_interrupt_enable, . - simpleos_arm64_interrupt_enable
+    .endm
 
-    .global simpleos_arm64_wait_for_interrupt
-    .type simpleos_arm64_wait_for_interrupt, %function
-simpleos_arm64_wait_for_interrupt:
+    .macro SIMPLEOS_ARM_WAIT_FOR_INTERRUPT
     wfe
+    .endm
+
+    .macro SIMPLEOS_ARM_RETURN
     ret
-    .size simpleos_arm64_wait_for_interrupt, . - simpleos_arm64_wait_for_interrupt
+    .endm
+
+    .include "examples/simple_os/arch/common/baremetal_arm_interrupt_control.S"
+    SIMPLEOS_ARM_INTERRUPT_CONTROL simpleos_arm64_interrupt_disable, simpleos_arm64_interrupt_enable, simpleos_arm64_wait_for_interrupt

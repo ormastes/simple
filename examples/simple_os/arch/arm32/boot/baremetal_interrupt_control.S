@@ -1,25 +1,21 @@
     .syntax unified
-    .section .text
     .arm
-    .align 2
 
-    .global simpleos_arm32_interrupt_disable
-    .type simpleos_arm32_interrupt_disable, %function
-simpleos_arm32_interrupt_disable:
+    .macro SIMPLEOS_ARM_DISABLE_INTERRUPTS
     cpsid if
-    bx lr
-    .size simpleos_arm32_interrupt_disable, . - simpleos_arm32_interrupt_disable
+    .endm
 
-    .global simpleos_arm32_interrupt_enable
-    .type simpleos_arm32_interrupt_enable, %function
-simpleos_arm32_interrupt_enable:
+    .macro SIMPLEOS_ARM_ENABLE_INTERRUPTS
     cpsie if
-    bx lr
-    .size simpleos_arm32_interrupt_enable, . - simpleos_arm32_interrupt_enable
+    .endm
 
-    .global simpleos_arm32_wait_for_interrupt
-    .type simpleos_arm32_wait_for_interrupt, %function
-simpleos_arm32_wait_for_interrupt:
+    .macro SIMPLEOS_ARM_WAIT_FOR_INTERRUPT
     wfe
+    .endm
+
+    .macro SIMPLEOS_ARM_RETURN
     bx lr
-    .size simpleos_arm32_wait_for_interrupt, . - simpleos_arm32_wait_for_interrupt
+    .endm
+
+    .include "examples/simple_os/arch/common/baremetal_arm_interrupt_control.S"
+    SIMPLEOS_ARM_INTERRUPT_CONTROL simpleos_arm32_interrupt_disable, simpleos_arm32_interrupt_enable, simpleos_arm32_wait_for_interrupt

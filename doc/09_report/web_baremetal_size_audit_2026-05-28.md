@@ -13,7 +13,7 @@ Date: 2026-05-28
 | Simple web file facade | n/a | ok | 14344 | 6335 | `build/web_baremetal_size_audit/simple_web_file_native.log` |
 | Simple web script placeholder facade | n/a | ok | 14336 | 3905 | `build/web_baremetal_size_audit/simple_web_script_placeholder_native.log` |
 | Simple web script file facade | n/a | ok | 26712 | 16935 | `build/web_baremetal_size_audit/simple_web_script_file_native.log` |
-| Bare-metal pure policy probe | ok | ok | 14336 | 6577 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
+| Bare-metal pure policy probe | ok | ok | 14336 | 6581 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 4892 | 156 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | RV32 semihost trap capsule | n/a | ok | 652 | 48 | `build/web_baremetal_size_audit/riscv32_semihost_trap.build.log` |
 | RV64 semihost trap capsule | n/a | ok | 912 | 48 | `build/web_baremetal_size_audit/riscv64_semihost_trap.build.log` |
@@ -78,6 +78,7 @@ Date: 2026-05-28
 | ARM64 interrupt-control source | 1024 |
 | ARM32 interrupt-control object file / dec section | 768 / 64 |
 | ARM32 interrupt-control source | 1024 |
+| Shared ARM interrupt-control source | 768 |
 | RV64 interrupt-control object file / dec section | 768 / 64 |
 | RV64 interrupt-control source | 512 |
 | RV32 interrupt-control object file / dec section | 768 / 64 |
@@ -115,8 +116,9 @@ Date: 2026-05-28
 | `examples/simple_os/arch/common/baremetal_riscv_16550_uart_stdout.c` | 1 | 41 | 1017 |
 | `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 62 | 1719 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
-| `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 23 | 753 |
-| `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 25 | 770 |
+| `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 18 | 479 |
+| `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 21 | 493 |
+| `examples/simple_os/arch/common/baremetal_arm_interrupt_control.S` | 1 | 19 | 436 |
 | `examples/simple_os/arch/riscv64/boot/baremetal_interrupt_control.S` | 1 | 4 | 217 |
 | `examples/simple_os/arch/riscv32/boot/baremetal_interrupt_control.S` | 1 | 4 | 217 |
 | `examples/simple_os/arch/common/baremetal_riscv_interrupt_control.S` | 1 | 20 | 442 |
@@ -202,8 +204,9 @@ Date: 2026-05-28
 - `riscv64/boot/baremetal_uart_stdout.c` is a thin RV64 compatibility wrapper over the shared RISC-V 16550 capsule.
 - `riscv32/boot/baremetal_uart_stdout.c` is a thin RV32 compatibility wrapper over the shared RISC-V 16550 capsule.
 - `baremetal_interrupt_control.c` is the x86_64 platform capsule baseline for CLI/STI/HLT and PIC masking only; APIC policy stays in pure Simple until controller code is explicitly imported.
-- `arm64/boot/baremetal_interrupt_control.S` is the ARM64 platform capsule baseline for DAIF mask/unmask and WFE only; GIC policy stays in pure Simple until controller code is explicitly imported.
-- `arm32/boot/baremetal_interrupt_control.S` is the ARM32 platform capsule baseline for CPSID/CPSIE and WFE only; GIC/NVIC policy stays in pure Simple until controller code is explicitly imported.
+- `common/baremetal_arm_interrupt_control.S` is the shared ARM interrupt-control symbol scaffold; target wrappers provide only DAIF or CPSID/CPSIE/WFE instructions.
+- `arm64/boot/baremetal_interrupt_control.S` is a thin ARM64 wrapper over the shared ARM interrupt-control scaffold; GIC policy stays in pure Simple until controller code is explicitly imported.
+- `arm32/boot/baremetal_interrupt_control.S` is a thin ARM32 wrapper over the shared ARM interrupt-control scaffold; GIC/NVIC policy stays in pure Simple until controller code is explicitly imported.
 - `common/baremetal_riscv_interrupt_control.S` is the shared RV32/RV64 interrupt-control capsule for mstatus.MIE mask/unmask and WFI only.
 - `riscv64/boot/baremetal_interrupt_control.S` is a thin RV64 compatibility wrapper over the shared RISC-V interrupt-control capsule.
 - `riscv32/boot/baremetal_interrupt_control.S` is a thin RV32 compatibility wrapper over the shared RISC-V interrupt-control capsule.
