@@ -55,6 +55,7 @@ struct CallFrame:
     """Saved state for nested function calls."""
     locals: {i64: i64}
     current_block: i64?
+    previous_block: i64?
     return_value: i64?
     has_returned: bool
     blocks: {i64: MirBlock}
@@ -78,6 +79,7 @@ class MirInterpreter:
     globals: {text: i64}     # Global name -> value
     blocks: {i64: MirBlock}  # BlockId.id -> block
     current_block: i64?      # Current block ID
+    previous_block: i64?     # Last block ID before the current block
     return_value: i64?       # Return value
     has_returned: bool       # Whether function has returned
     function_table: {text: MirFunction}  # Function name -> MirFunction
@@ -93,6 +95,7 @@ impl MirInterpreter:
             globals: {},
             blocks: {},
             current_block: nil,
+            previous_block: nil,
             return_value: nil,
             has_returned: false,
             function_table: {},
@@ -454,6 +457,7 @@ impl MirInterpreter:
         val frame = CallFrame(
             locals: self.locals,
             current_block: self.current_block,
+            previous_block: self.previous_block,
             return_value: self.return_value,
             has_returned: self.has_returned,
             blocks: self.blocks
@@ -465,6 +469,7 @@ impl MirInterpreter:
         self.blocks = {}
         self.has_returned = false
         self.return_value = nil
+        self.previous_block = nil
 
         # Initialize callee blocks
         for block in callee.blocks:
@@ -527,19 +532,29 @@ impl MirInterpreter:
             val frame = self.call_stack[stack_len - 1]
             self.locals = frame.locals
             self.current_block = frame.current_block
+            self.previous_block = frame.previous_block
             self.return_value = frame.return_value
             self.has_returned = frame.has_returned
             self.blocks = frame.blocks
             self.call_stack.pop()
 
+    me set_previous_block_for_phi(block_id: i64):
+        """Set predecessor metadata for testing/interpreter pseudo-phi fallback."""
+        self.previous_block = Some(block_id)
+
     me _execute_intrinsic(name: text, args: [MirOperand]) -> i64:
         """Execute a built-in intrinsic by name and return result."""
         match name:
             case "__simple_ssa_phi":
-                # Optimizer pseudo-phi fallback. A real CFG-aware interpreter
-                # should select by predecessor; linear fallback preserves the
-                # current value by taking the first incoming value.
+                # Pseudo-phi args are either plain values or predecessor/value pairs.
                 if args.len() >= 4:
+                    if self.previous_block.?:
+                        val pred = self.previous_block.unwrap()
+                        var i = 0
+                        while i + 1 < args.len():
+                            if self.get_operand(args[i]) == pred:
+                                return self.get_operand(args[i + 1])
+                            i = i + 2
                     self.get_operand(args[1])
                 elif args.len() > 0:
                     self.get_operand(args[0])
@@ -645,6 +660,7 @@ impl MirInterpreter:
 
         # Start at entry block
         self.current_block = Some(func.entry_block.id)
+        self.previous_block = nil
         self.has_returned = false
         self.return_value = nil
 
@@ -681,6 +697,7 @@ impl MirInterpreter:
         """Execute a block terminator."""
         match term:
             case Goto(target):
+                self.previous_block = self.current_block
                 self.current_block = Some(target.id)
                 nil
 
@@ -695,6 +712,7 @@ impl MirInterpreter:
 
             case If(cond, then_, else_):
                 val cond_val = self.get_operand(cond)
+                self.previous_block = self.current_block
                 self.current_block = Some(if cond_val != 0: then_.id else: else_.id)
                 nil
 
@@ -705,6 +723,7 @@ impl MirInterpreter:
                     if v == case_.value:
                         target = case_.target.id
                         break
+                self.previous_block = self.current_block
                 self.current_block = Some(target)
                 nil
 
@@ -727,6 +746,7 @@ impl MirInterpreter:
                         if call_result[1].?:
                             # Error during call - jump to unwind if available
                             if unwind.?:
+                                self.previous_block = self.current_block
                                 self.current_block = Some(unwind.unwrap().id)
                                 return nil
                             return call_result[1]
@@ -739,6 +759,7 @@ impl MirInterpreter:
                 else:
                     if dest.?:
                         self.set_local(dest.unwrap(), 0)
+                self.previous_block = self.current_block
                 self.current_block = Some(normal.id)
                 nil
 

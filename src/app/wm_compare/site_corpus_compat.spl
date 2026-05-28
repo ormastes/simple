@@ -12,6 +12,7 @@ use app.wm_compare.html_compat.{
     CaptureResult, capture_chrome, compare_exact, compare_perceptual,
     load_ppm_capture, write_ppm_local}
 use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{simple_web_render_html_to_pixels_with_corpus_fixtures}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -28,6 +29,7 @@ struct SiteCorpusCompatOpts:
     height: i32
     continue_on_fail: bool
     stale_only: bool
+    production_renderer: bool
     help: bool
 
 struct SiteCorpusPair:
@@ -56,6 +58,7 @@ fn default_site_corpus_compat_opts() -> SiteCorpusCompatOpts:
         height: 120,
         continue_on_fail: false,
         stale_only: false,
+        production_renderer: false,
         help: false
     )
 
@@ -80,6 +83,8 @@ fn parse_site_corpus_compat_opts(args: [text]) -> SiteCorpusCompatOpts:
             opts.continue_on_fail = true
         elif arg == "--stale-only":
             opts.stale_only = true
+        elif arg == "--production-renderer":
+            opts.production_renderer = true
         else:
             val v_only = _parse_kv(arg, "--only")
             if v_only != "":
@@ -120,6 +125,7 @@ fn print_site_corpus_compat_help():
     print "  --skip-simple-watchdog   Regenerate artifacts without child render guard"
     print "  --continue-on-fail       Write reports for every selected sample"
     print "  --stale-only             Run only report.sdn files above 10000 differing pixels"
+    print "  --production-renderer    Render Simple output without corpus fixture/oracle fallbacks"
     print "  --simple-timeout-ms=<n>  Bound Simple source-B render (default 60000)"
     print "  --width=<n>              Capture width (default 160)"
     print "  --height=<n>             Capture height (default 120)"
@@ -191,13 +197,19 @@ fn _capture_simple_for_sample(sample: SiteSample, opts: SiteCorpusCompatOpts) ->
                 success: false,
                 error: watchdog_error
             )
-    val pixels = simple_web_render_html_to_pixels_with_corpus_fixtures(sample.html, opts.width, opts.height)
+    var pixels: [u32] = []
+    var backend_name = "simple_browser_engine_fixture_compat"
+    if opts.production_renderer:
+        pixels = simple_web_render_html_to_pixels(sample.html, opts.width, opts.height)
+        backend_name = "simple_browser_engine_production"
+    else:
+        pixels = simple_web_render_html_to_pixels_with_corpus_fixtures(sample.html, opts.width, opts.height)
     if pixels.len() != opts.width * opts.height:
         return CaptureResult(
             pixels: pixels,
             width: opts.width,
             height: opts.height,
-            backend_name: "simple_browser_engine",
+            backend_name: backend_name,
             success: false,
             error: "in-process render returned {pixels.len()} pixels"
         )
@@ -205,7 +217,7 @@ fn _capture_simple_for_sample(sample: SiteSample, opts: SiteCorpusCompatOpts) ->
         pixels: pixels,
         width: opts.width,
         height: opts.height,
-        backend_name: "simple_browser_engine",
+        backend_name: backend_name,
         success: true,
         error: ""
     )

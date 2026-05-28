@@ -9,6 +9,7 @@
 
 use compiler.mir_opt.mir_opt.pattern.rules_clib_parity.{CLibParityRule, clib_parity_rule_table}
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{get_eligible_rules_for_function}
+use compiler.mir_opt.mir_opt.mod.{OptLevel, optlevel_name, optimizationpipeline_passes_for_backend_budget}
 
 # Native JIT externs — bridge to Rust LocalExecutionManager (Cranelift)
 extern fn rt_jit_create() -> i64
@@ -86,6 +87,16 @@ struct JitHotspotRebuildChoice:
     cost_class: text
     required_count: i64
     attempted_backends: [text]
+
+struct JitHotspotOptimizationPlan:
+    function_name: text
+    backend: text
+    eligible: bool
+    reason: text
+    cost_class: text
+    max_cost_class: text
+    opt_level: text
+    passes: [text]
 
 struct JitHotspotSpecializationProvider:
     name: text
@@ -379,6 +390,40 @@ fn jit_hotspot_rebuild_choice(
         attempted_backends: attempted
     )
 
+fn jit_hotspot_rebuild_opt_level(choice: JitHotspotRebuildChoice) -> OptLevel:
+    OptLevel.Aggressive
+
+fn jit_hotspot_optimization_plan(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    cranelift_available: bool,
+    llvm_available: bool,
+    max_cost_class: text
+) -> JitHotspotOptimizationPlan:
+    val choice = jit_hotspot_rebuild_choice(profile, config, cranelift_available, llvm_available, max_cost_class)
+    if not choice.eligible:
+        return JitHotspotOptimizationPlan(
+            function_name: choice.function_name,
+            backend: choice.selected_backend,
+            eligible: false,
+            reason: choice.reason,
+            cost_class: choice.cost_class,
+            max_cost_class: max_cost_class,
+            opt_level: "",
+            passes: []
+        )
+    val opt_level = jit_hotspot_rebuild_opt_level(choice)
+    JitHotspotOptimizationPlan(
+        function_name: choice.function_name,
+        backend: choice.selected_backend,
+        eligible: true,
+        reason: choice.reason,
+        cost_class: choice.cost_class,
+        max_cost_class: max_cost_class,
+        opt_level: optlevel_name(opt_level),
+        passes: optimizationpipeline_passes_for_backend_budget(opt_level, choice.selected_backend, max_cost_class)
+    )
+
 fn jit_hotspot_plan_invalidate(plan: JitHotspotPlan, reason: text) -> JitHotspotPlan:
     JitHotspotPlan(
         function_name: plan.function_name,
@@ -617,6 +662,18 @@ class TieredJitManager:
         else:
             val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false)
             jit_hotspot_rebuild_choice(profile, self.config, cranelift_available, llvm_available, max_cost_class)
+
+    fn get_hotspot_optimization_plan(
+        name: text,
+        cranelift_available: bool,
+        llvm_available: bool,
+        max_cost_class: text
+    ) -> JitHotspotOptimizationPlan:
+        if self.profiles.has(name):
+            jit_hotspot_optimization_plan(self.profiles[name], self.config, cranelift_available, llvm_available, max_cost_class)
+        else:
+            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false)
+            jit_hotspot_optimization_plan(profile, self.config, cranelift_available, llvm_available, max_cost_class)
 
     fn get_hotspot_plan_with_rules(
         name: text,

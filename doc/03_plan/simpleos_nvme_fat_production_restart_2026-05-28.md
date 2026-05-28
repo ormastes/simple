@@ -86,6 +86,14 @@ bin/simple test test/unit/os/services/vfs/vfs_pure_fat_production_guard_spec.spl
   PASSED: 2 examples, 0 failures; includes source-tree scan that rejects
   legacy Fat32Driver imports/constructors and legacy FAT helper-module imports
   outside the isolated compatibility module
+bin/simple check src/os/services/fat32/fat32.spl src/os/services/fat32/fat32_write.spl test/unit/os/services/fat32/fat32_spec.spl
+  PASSED: exit code 0; isolated legacy FAT implementation now uses the current
+  std BlockDevice read_sector(lba) return-buffer shape for cluster reads
+bin/simple test test/unit/os/services/fat32/fat32_spec.spl --mode=interpreter --clean
+  PASSED: 27 examples, 0 failures after removing stale buffer-style
+  read_sector calls, updating BPB constructor coverage to the current compact
+  legacy BPB shape, avoiding nested optional unwraps in the spec, and assigning
+  mutated BPB sector bytes back into the mock device
 bin/simple test test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl --mode=interpreter --clean
   PASSED: 18 examples, 0 failures; confirms NVMe FAT mount factory uses
   FsFat32Driver.new_with_direct_io for lease-backed direct I/O
@@ -205,10 +213,13 @@ SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/ta
    - Still open: the legacy FAT module's own internal tests still instantiate
      `Fat32Driver` until the legacy module is deleted or converted into a
      compatibility wrapper.
-   - Existing legacy-driver blocker: `test/unit/os/services/fat32/fat32_spec.spl`
-     reports 19 passed / 8 failed in this worktree and in a detached clean
-     `HEAD` worktree. Keep that as pre-existing legacy FAT debt while retiring
-     production dependencies on the old driver.
+   - 2026-05-28 legacy spec follow-up:
+     `test/unit/os/services/fat32/fat32_spec.spl` now passes 27 examples.
+     The isolated legacy implementation was updated away from stale
+     buffer-style `read_sector(lba, buf)` calls, and the spec was aligned with
+     the compact legacy BPB struct plus current optional-unwrapping behavior.
+     This does not re-admit legacy FAT into production paths; the production
+     guard remains the release-blocking evidence for that boundary.
    - 2026-05-28 follow-up: removed unused `Fat32Driver.new_ram_backed*`
      compatibility constructors from the legacy implementation island. Current
      DBFS/shared-driver coverage uses `FsFat32Driver.new_ram_backed*` directly;
@@ -255,6 +266,9 @@ SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/ta
 
 ```bash
 bin/simple test test/unit/os/services/vfs/vfs_pure_fat_production_guard_spec.spl --mode=interpreter --clean
+bin/simple test test/unit/os/services/fat32/fat32_spec.spl --mode=interpreter --clean
+bin/simple test test/integration/storage/dbfs/fat32_no_regression_spec.spl --mode=interpreter --clean
+bin/simple test test/integration/storage/dbfs/dbfs_hw_passthrough_spec.spl --mode=interpreter --clean
 bin/simple test test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl --mode=interpreter --clean
 bin/simple test test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl --mode=interpreter --clean
 bin/simple test test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl --mode=interpreter --clean
