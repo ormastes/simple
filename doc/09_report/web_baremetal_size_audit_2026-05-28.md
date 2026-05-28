@@ -59,6 +59,7 @@ Date: 2026-05-28
 | Pure Simple stdout plan source | 2500 |
 | Pure Simple interrupt policy source | 5000 |
 | Pure Simple startup policy source | 3000 |
+| Pure Simple startup plan source | 2500 |
 | Pure Simple semihost policy source | 1500 |
 
 ## Source Size Surfaces
@@ -81,6 +82,7 @@ Date: 2026-05-28
 | `src/lib/nogc_async_mut_noalloc/baremetal/stdout_plan.spl` | 1 | 62 | 1905 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/interrupt_policy.spl` | 1 | 72 | 3315 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/startup_policy.spl` | 1 | 15 | 458 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/startup_plan.spl` | 1 | 29 | 1097 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/semihost_policy.spl` | 1 | 19 | 658 |
 
 ## Browser Cluster Source Sizes
@@ -143,5 +145,6 @@ Date: 2026-05-28
 - `baremetal/stdout_plan.spl` combines console and semihost stdout policy before importing syscall, semihost transport, or UART implementations.
 - `baremetal/interrupt_policy.spl` is the pure-Simple policy surface for interrupt controller selection and vector classification.
 - `baremetal/startup_policy.spl` is the pure-Simple policy surface for stack and hart startup defaults before importing architecture startup capsules.
+- `baremetal/startup_plan.spl` composes startup defaults with interrupt-controller selection while keeping scalar startup policy importable for tiny native probes.
 - `pure_policy_probe.spl` proves examples can import only pure policies without retaining transport or controller implementations.
 - The split lanes now have default regression budgets. Set any `MAX_...` environment value higher, lower, or empty to tune a specific gate.
