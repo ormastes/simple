@@ -141,9 +141,9 @@ Date: 2026-05-28
 | `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 14 | 313 |
 | `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 16 | 318 |
 | `examples/simple_os/arch/common/baremetal_arm_interrupt_control.S` | 1 | 16 | 122 |
-| `examples/simple_os/arch/riscv64/boot/baremetal_interrupt_control.S` | 1 | 4 | 217 |
-| `examples/simple_os/arch/riscv32/boot/baremetal_interrupt_control.S` | 1 | 4 | 217 |
-| `examples/simple_os/arch/common/baremetal_riscv_interrupt_control.S` | 1 | 20 | 442 |
+| `examples/simple_os/arch/riscv64/boot/baremetal_interrupt_control.S` | 1 | 4 | 186 |
+| `examples/simple_os/arch/riscv32/boot/baremetal_interrupt_control.S` | 1 | 4 | 186 |
+| `examples/simple_os/arch/common/baremetal_riscv_interrupt_control.S` | 1 | 20 | 205 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 1 | 52 |
 | `examples/simple_os/arch/common/baremetal_startup_handoff.c` | 1 | 35 | 685 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv32/semihost_trap.S` | 1 | 2 | 206 |
