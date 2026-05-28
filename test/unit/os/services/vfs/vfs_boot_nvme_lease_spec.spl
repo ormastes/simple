@@ -382,7 +382,7 @@ describe "VFS boot NVMe lease contract":
         expect(source.contains("return Result.Err(\"invalid file handle\")")).to_equal(true)
         expect(source.contains("self.inner.direct_io_extent_for_handle(shared_opt.unwrap(), file_offset, byte_len)")).to_equal(true)
 
-    it "maps DBFS filesystem DirectIo batches to arena storage offsets before adapter lookup":
+    it "rejects uncommitted DBFS filesystem DirectIo batches before adapter lookup":
         val lease = _user_lease_for_boot_nsid(19u32)
         val mounted = vfs_nvme_driver_instance_for_lease("user-dbfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs).unwrap()
         val handle = mounted.open_path(Path(raw: "/hot.db"), OpenFlags.read_write().with_create())
@@ -397,20 +397,16 @@ describe "VFS boot NVMe lease contract":
             allocation_id: 11u64
         ), 100u32)
         val mapped = vfs_boot_nvme_map_filesystem_direct_4k_batch(mounted, batch)
-        expect(mapped.is_ok()).to_equal(true)
-        val req = mapped.unwrap()
-        expect(req.file_offsets[0]).to_equal(512i64)
-        expect(req.file_offsets[1]).to_equal(4608i64)
+        expect(mapped.unwrap_err()).to_equal(FsError.Unsupported)
 
-    it "maps NVFS filesystem DirectIo batches to arena storage offsets before adapter lookup":
+    it "rejects uncommitted NVFS filesystem DirectIo before adapter lookup":
         val lease = _user_lease_for_boot_nsid(20u32)
         val mounted = vfs_nvme_driver_instance_for_lease("user-nvfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Nvfs).unwrap()
         val handle = mounted.open_path(Path(raw: "/hot.nvfs"), OpenFlags.read_write().with_create())
         expect(handle.is_ok()).to_equal(true)
         val single = direct_io_read_request(handle.unwrap().id, 4096i64, _valid_shared_dma_4k(), 100u32)
         val mapped = vfs_boot_nvme_map_filesystem_direct_4k_request(mounted, single)
-        expect(mapped.is_ok()).to_equal(true)
-        expect(mapped.unwrap().file_offset).to_equal(4608i64)
+        expect(mapped.unwrap_err()).to_equal(FsError.Unsupported)
 
     it "wires q35 pure Simple perf evidence to real shared-DMA direct I/O":
         val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
@@ -495,6 +491,7 @@ describe "VFS boot NVMe lease contract":
         expect(source.contains("_q35_user_namespace_assignment_marker(nvme, grant, sector_size, sector_count, shared, fat32_offsets[0], [active_system_lease])")).to_equal(true)
         expect(source.contains("NvmeFilesystemConsumer.Fat32,\n        []")).to_equal(false)
         expect(source.contains("user_namespace_assignment=hardware-data-queue")).to_equal(true)
+        expect(source.contains("user_namespace_active_lease_count=\" + active_leases.len().to_u64().to_text()")).to_equal(true)
         expect(source.contains("user_namespace_direct_io=read-write")).to_equal(true)
         expect(source.contains("NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease(")).to_equal(true)
         expect(source.contains("nvme.read_4k_shared_dma_batch_in_namespace_on_queue(")).to_equal(false)
