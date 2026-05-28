@@ -312,6 +312,16 @@ impl NativeLinker {
             cmd.arg(obj);
         }
 
+        // SIMPLE_LINK_OBJECTS: extra object/archive files to link (colon-separated)
+        if let Ok(extra) = std::env::var("SIMPLE_LINK_OBJECTS") {
+            for path in extra.split(':') {
+                let p = path.trim();
+                if !p.is_empty() {
+                    cmd.arg(p);
+                }
+            }
+        }
+
         // Add library search paths (before libraries so -L paths are available for -l)
         for path in &options.library_paths {
             cmd.arg("-L").arg(path);

@@ -157,7 +157,10 @@ Current verification evidence:
   that fixture pixels match the Chrome baseline for this sample and production
   pixels do not. Production probes write `simple.production.ppm` and
   `report.production.sdn`, so they no longer overwrite fixture `simple.ppm` and
-  `report.sdn` artifacts used by the corpus completion gate.
+  `report.sdn` artifacts used by the corpus completion gate. The system spec
+  now quantifies the production miss with the shared `compare_exact` and
+  `compare_perceptual` comparators instead of only asserting
+  production-pixels-not-equal-Chrome.
 - A 2026-05-28 bounded renderer slice routes famous-site corpus fixture capture
   through the canonical Simple Web renderer and paints the Chrome-default 8px
   body margin plus 120x40 styled block in the Engine2D facade path. The

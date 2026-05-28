@@ -49,6 +49,10 @@
   reports now reject duplicate identity fields such as `serial:` before
   comparing serial evidence, so contradictory preflight reports cannot pass by
   first-value parsing.
+- 2026-05-28 VFAT gate follow-up: `REQUIRE_VFAT_BASELINE=1` now checks the
+  configured VFAT mount and seed files before compiling/running the repeated
+  Simple/C benchmark, so missing same-device VFAT setup fails immediately with
+  the exact mount path.
 
 ## Known Remaining Work
 
@@ -186,6 +190,10 @@ VFAT_MNT=/tmp/simple_vfat_bench_mnt_codex scripts/perf/prepare-fat32-4k-vfat.shs
 FAT32_4K_RUNS=1 REQUIRE_VFAT_BASELINE=1 VFAT_MNT=/tmp/simple_vfat_bench_mnt_codex scripts/perf/run-fat32-4k-cfat-baseline.shs
   FAILED cleanly after median-summary output because VFAT baseline rows remain
   missing or unseeded at the configured mount path.
+FAT32_4K_RUNS=1 REQUIRE_VFAT_BASELINE=1 VFAT_MNT=/tmp/simple_vfat_bench_mnt_codex scripts/perf/run-fat32-4k-cfat-baseline.shs
+  PASSED gate behavior follow-up: now fails immediately before compiling or
+  running benchmarks with `VFAT baseline is required but missing or unseeded at
+  /tmp/simple_vfat_bench_mnt_codex`
 FAT32_4K_RUNS=0 scripts/perf/run-fat32-4k-cfat-baseline.shs
   FAILED cleanly with a positive-integer validation error for the repeated-run
   count knob.
@@ -286,6 +294,12 @@ SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/ta
      run passed direct C with Simple read/write median p50 13us/34us versus
      direct C read/write median p50 37us/43us. VFAT is still required for the
      stronger same-device baseline claim.
+   - 2026-05-28 latest repeated run: direct-C median p50 still passes with
+     Simple read/write 13us/34us versus direct C read/write 39us/45us; VFAT was
+     skipped because no writable seeded same-device VFAT mount is present.
+   - 2026-05-28 VFAT-required gate follow-up: required VFAT mode now validates
+     seed-file presence and writability before benchmark compilation, so a
+     missing mount fails fast at the configured `VFAT_MNT` path.
    - 2026-05-28 VFAT follow-up: the preparation script exists, but the local
      mount is root-owned and cannot be reseeded without passwordless sudo or a
      remount with `uid=$(id -u),gid=$(id -g)`. The script now also attempts a

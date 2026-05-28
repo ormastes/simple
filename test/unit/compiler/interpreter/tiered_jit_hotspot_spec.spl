@@ -170,11 +170,19 @@ describe "Tiered JIT hotspot facts":
         expect(plan.passes.contains("loop_unroll")).to_equal(true)
         expect(plan.passes.contains("inline_aggressive")).to_equal(false)
         expect(plan.passes.contains("auto_vectorize")).to_equal(false)
+        expect(plan.plugin_recommendations.contains("ssa-var-canon")).to_equal(true)
+        expect(plan.plugin_recommendations.contains("cranelift-local-licm")).to_equal(true)
+        expect(plan.plugin_recommendations.contains("llvm-entry-alloca-shaping")).to_equal(false)
         var found_cost_skip = false
         for decision in plan.skipped_passes:
             if decision.pass_name == "inline_aggressive" and decision.reason == "cost budget exceeded":
                 found_cost_skip = true
         expect(found_cost_skip).to_equal(true)
+        var found_llvm_plugin_skip = false
+        for decision in plan.skipped_plugin_recommendations:
+            if decision.stable_name == "llvm-entry-alloca-shaping" and decision.reason == "llvm_frontend_alloca_promotion_shape":
+                found_llvm_plugin_skip = true
+        expect(found_llvm_plugin_skip).to_equal(true)
 
     it "builds LLVM hotspot optimization plans without Simple passes LLVM already owns":
         val plan = jit_hotspot_optimization_plan(hot_profile(256), hotspot_config(), true, true, "high")
@@ -187,11 +195,20 @@ describe "Tiered JIT hotspot facts":
         expect(plan.passes.contains("strength_reduction")).to_equal(false)
         expect(plan.passes.contains("loop_unroll")).to_equal(false)
         expect(plan.passes.contains("predicate_promote")).to_equal(false)
+        expect(plan.plugin_recommendations.contains("llvm-entry-alloca-shaping")).to_equal(true)
+        expect(plan.plugin_recommendations.contains("llvm-default-pipeline")).to_equal(true)
+        expect(plan.plugin_recommendations.contains("ssa-var-canon")).to_equal(false)
+        expect(plan.plugin_recommendations.contains("cranelift-local-licm")).to_equal(false)
         var found_llvm_skip = false
         for decision in plan.skipped_passes:
             if decision.pass_name == "auto_vectorize" and decision.reason == "llvm_runs_vectorizer_pipeline":
                 found_llvm_skip = true
         expect(found_llvm_skip).to_equal(true)
+        var found_llvm_owned_plugin_skip = false
+        for decision in plan.skipped_plugin_recommendations:
+            if decision.stable_name == "ssa-var-canon" and decision.reason == "llvm_backend_runs_mem2reg_sroa_pipeline":
+                found_llvm_owned_plugin_skip = true
+        expect(found_llvm_owned_plugin_skip).to_equal(true)
 
     it "does not create optimization passes for ineligible hotspot rebuilds":
         val plan = jit_hotspot_optimization_plan(hot_profile(2), hotspot_config(), true, true, "high")
@@ -199,6 +216,8 @@ describe "Tiered JIT hotspot facts":
         expect(plan.reason).to_equal("missing tier1 hot_count")
         expect(plan.passes.len()).to_equal(0)
         expect(plan.skipped_passes.len()).to_equal(0)
+        expect(plan.plugin_recommendations.len()).to_equal(0)
+        expect(plan.skipped_plugin_recommendations.len()).to_equal(0)
 
     it "rejects rebuilds when no backend can satisfy heat and cost policy":
         val cold = jit_hotspot_rebuild_choice(hot_profile(2), hotspot_config(), true, true, "high")

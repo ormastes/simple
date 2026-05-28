@@ -924,6 +924,34 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_io_tcp_read_exact_len", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_io_tcp_drain_line", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_io_tcp_write_text_read_exact_len", &[I64, I64], &[I64]),
+    // rt_io_tcp_socket_create(family: i64) -> fd: i64
+    RuntimeFuncSpec::new("rt_io_tcp_socket_create", &[I64], &[I64]),
+    // rt_io_tcp_set_reuseaddr(fd: i64, enabled: i64) -> ok: i64
+    RuntimeFuncSpec::new("rt_io_tcp_set_reuseaddr", &[I64, I64], &[I64]),
+    // rt_io_tcp_set_reuseport(fd: i64, enabled: i64) -> ok: i64
+    RuntimeFuncSpec::new("rt_io_tcp_set_reuseport", &[I64, I64], &[I64]),
+    // rt_io_tcp_set_nonblocking(fd: i64, enabled: i64) -> ok: i64
+    RuntimeFuncSpec::new("rt_io_tcp_set_nonblocking", &[I64, I64], &[I64]),
+    // rt_io_tcp_set_nodelay(fd: i64, enabled: i64) -> ok: i64
+    RuntimeFuncSpec::new("rt_io_tcp_set_nodelay", &[I64, I64], &[I64]),
+    // rt_io_tcp_bind_fd(fd: i64, addr_ptr: i64) -> ok: i64
+    RuntimeFuncSpec::new("rt_io_tcp_bind_fd", &[I64, I64], &[I64]),
+    // rt_io_tcp_listen(fd: i64, backlog: i64) -> ok: i64
+    RuntimeFuncSpec::new("rt_io_tcp_listen", &[I64, I64], &[I64]),
+    // rt_io_tcp_accept(fd: i64) -> client_fd: i64
+    RuntimeFuncSpec::new("rt_io_tcp_accept", &[I64], &[I64]),
+    // rt_io_tcp_read(fd: i64, size: i64) -> array_ptr: i64
+    RuntimeFuncSpec::new("rt_io_tcp_read", &[I64, I64], &[I64]),
+    // rt_io_tcp_write_text(fd: i64, data_ptr: i64) -> bytes_written: i64
+    RuntimeFuncSpec::new("rt_io_tcp_write_text", &[I64, I64], &[I64]),
+    // rt_io_tcp_close(fd: i64) -> ok: i64
+    RuntimeFuncSpec::new("rt_io_tcp_close", &[I64], &[I64]),
+    // rt_event_loop_create() -> epfd: i64
+    RuntimeFuncSpec::new("rt_event_loop_create", &[], &[I64]),
+    // rt_event_loop_register(epfd: i64, fd: i64, interest: i64, token: i64, edge: i64) -> ok: i64
+    RuntimeFuncSpec::new("rt_event_loop_register", &[I64, I64, I64, I64, I64], &[I64]),
+    // rt_event_loop_poll(epfd: i64, max_events: i64, timeout_ms: i64) -> array_ptr: i64
+    RuntimeFuncSpec::new("rt_event_loop_poll", &[I64, I64, I64], &[I64]),
     // =========================================================================
     // UDP networking operations
     // =========================================================================

@@ -296,6 +296,14 @@ struct BackendOptimizationRecommendation:
     source_hint: text
     cost_class: text
 
+struct BackendOptimizationDecision:
+    stable_name: text
+    backend_name: text
+    max_cost_class: text
+    cost_class: text
+    applies: bool
+    reason: text
+
 fn backend_optimization_cost_rank(cost_class: text) -> i64:
     if cost_class == "free":
         0
@@ -563,6 +571,26 @@ fn backend_optimization_recommendations_for_budget(backend_name: text, max_cost_
             selected = selected.push(rec)
     selected
 
+fn backend_optimization_decision(rec: BackendOptimizationRecommendation, backend_name: text, max_cost_class: text) -> BackendOptimizationDecision:
+    if not optimization_rule_provider_applies_to_backend_name(rec.provider, backend_name):
+        return BackendOptimizationDecision(rec.stable_name, backend_name, max_cost_class, rec.cost_class, false, rec.provider.backend_policy.reason)
+    if not backend_optimization_cost_allowed(rec.cost_class, max_cost_class):
+        return BackendOptimizationDecision(rec.stable_name, backend_name, max_cost_class, rec.cost_class, false, "cost budget exceeded")
+    BackendOptimizationDecision(rec.stable_name, backend_name, max_cost_class, rec.cost_class, true, "ready")
+
+fn backend_optimization_decisions_for_budget(backend_name: text, max_cost_class: text) -> [BackendOptimizationDecision]:
+    var decisions: [BackendOptimizationDecision] = []
+    for rec in all_backend_optimization_recommendations():
+        decisions = decisions.push(backend_optimization_decision(rec, backend_name, max_cost_class))
+    decisions
+
+fn backend_optimization_skipped_decisions_for_budget(backend_name: text, max_cost_class: text) -> [BackendOptimizationDecision]:
+    var skipped: [BackendOptimizationDecision] = []
+    for decision in backend_optimization_decisions_for_budget(backend_name, max_cost_class):
+        if not decision.applies:
+            skipped = skipped.push(decision)
+    skipped
+
 fn backend_optimization_recommendation_names_for_budget(backend_name: text, max_cost_class: text) -> [text]:
     var names: [text] = []
     for rec in backend_optimization_recommendations_for_budget(backend_name, max_cost_class):
@@ -594,11 +622,14 @@ export is_capability_guard, is_bit_unpack_loop
 export is_checksum_reducer_loop, is_prefix_scan_lookup, is_wal_batch_flush
 
 export OptimizationFact, web_hot_path_facts, fact_for_recognizer, all_fact_keys
-export BackendOptimizationRecommendation
+export BackendOptimizationRecommendation, BackendOptimizationDecision
 export backend_optimization_cost_allowed
 export all_backend_optimization_recommendations
 export backend_optimization_recommendations_for
 export backend_optimization_recommendation_names
 export backend_optimization_recommendations_for_budget
+export backend_optimization_decision
+export backend_optimization_decisions_for_budget
+export backend_optimization_skipped_decisions_for_budget
 export backend_optimization_recommendation_names_for_budget
 export backend_optimization_has_recommendation

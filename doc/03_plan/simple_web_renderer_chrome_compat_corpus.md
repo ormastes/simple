@@ -65,7 +65,9 @@ Acceptance:
   exits `0`/exact via the fixture-oracle path. Production mode writes
   `simple.production.ppm` and `report.production.sdn` beside the normal
   fixture artifacts so this probe cannot stale or overwrite the checked-in
-  fixture completion gate.
+  fixture completion gate. The corpus spec also keeps bounded numeric evidence
+  for this production miss: `different_pixels` must stay above `1000` and below
+  `6000`, while exact and perceptual match percentages remain below `9900`.
 - Future Chrome oracle work should use WPT reftest data, Playwright visual
   comparisons, pixelmatch-compatible PNG comparison, or CDP
   `Page.captureScreenshot` rather than live scraping. The current PPM analyzer
