@@ -137,7 +137,7 @@ Date: 2026-05-28
 | `examples/simple_os/arch/common/baremetal_16550_serial.h` | 1 | 29 | 602 |
 | `examples/simple_os/arch/common/baremetal_bump_heap.h` | 1 | 28 | 706 |
 | `examples/simple_os/arch/common/baremetal_min_stdout.h` | 1 | 66 | 1806 |
-| `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 18 | 515 |
+| `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 6 | 411 |
 | `examples/simple_os/arch/arm64/boot/baremetal_interrupt_control.S` | 1 | 14 | 313 |
 | `examples/simple_os/arch/arm32/boot/baremetal_interrupt_control.S` | 1 | 16 | 318 |
 | `examples/simple_os/arch/common/baremetal_arm_interrupt_control.S` | 1 | 16 | 122 |
@@ -145,7 +145,7 @@ Date: 2026-05-28
 | `examples/simple_os/arch/riscv32/boot/baremetal_interrupt_control.S` | 1 | 4 | 186 |
 | `examples/simple_os/arch/common/baremetal_riscv_interrupt_control.S` | 1 | 20 | 205 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 1 | 52 |
-| `examples/simple_os/arch/common/baremetal_startup_handoff.c` | 1 | 35 | 685 |
+| `examples/simple_os/arch/common/baremetal_startup_handoff.c` | 1 | 8 | 576 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv32/semihost_trap.S` | 1 | 2 | 206 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv/semihost_trap.S` | 1 | 2 | 206 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv_common/semihost_trap.S` | 1 | 26 | 471 |
