@@ -113,7 +113,7 @@ Date: 2026-05-28
 | `examples/browser/feature/dom` | 9 | 4854 | 181376 |
 | `examples/browser/feature/style` | 13 | 3914 | 150153 |
 | `src/lib/gc_async_mut/web` | 12 | 3784 | 160275 |
-| `src/lib/gc_async_mut/gpu/browser_engine` | 16 | 1709 | 65018 |
+| `src/lib/gc_async_mut/gpu/browser_engine` | 16 | 1701 | 64945 |
 
 ## Retention Checks
 
