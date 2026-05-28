@@ -12,10 +12,17 @@
 
 use compiler.mir_opt.pattern.rule_engine.{
     Rule, MatchHit, OptimizerRuleLoadMode, OptimizerRuleLookupKind, OptimizerProviderKind,
+    OptimizerBackendKind,
     OptimizationRuleProvider, create_rule, rule_summary,
     optimization_rule_provider_builtin_with_contract,
     optimization_rule_provider_dynamic, optimization_rule_provider_should_embed,
     optimization_rule_provider_uses_direct_lookup, create_exact_rule_binding,
+    optimization_backend_policy_only, optimization_backend_policy_skip,
+    optimization_backend_kind_from_text, optimization_backend_kind_name,
+    optimization_rule_provider_with_backend_policy,
+    optimization_rule_provider_applies_to_backend,
+    optimization_rule_provider_applies_to_backend_name,
+    optimization_rule_provider_skip_reason,
     optimization_rule_provider_is_pipeline_pass, optimization_rule_provider_has_required_fact,
     optimization_fact_list_contains, optimization_rule_provider_missing_fact,
     optimization_rule_provider_can_run,
@@ -177,6 +184,42 @@ describe "lookup_rule_for_callee — known software callees":
         expect(optimization_rule_provider_is_runtime_hotspot(provider)).to_equal(true)
         expect(optimization_rule_provider_can_run(provider, ["profile.hot_count", "typed_mir"])).to_equal(false)
         expect(optimization_rule_provider_can_run(provider, ["profile.hot_count", "typed_mir", "safe_deopt"])).to_equal(true)
+
+    it "backend policy keeps Simple-side canonicalization for Cranelift and skips it for LLVM":
+        val provider = optimization_rule_provider_builtin_jit_hotspot(
+            "simple.opt.jit.hotspot.ssa-var-canon",
+            ["profile.hot_count", "typed_mir", "safe_deopt"],
+            ["jit.hotspot_plan"],
+            "runtime-guarded"
+        )
+        val policy = optimization_backend_policy_skip(
+            [OptimizerBackendKind.Llvm],
+            "llvm_backend_runs_mem2reg_sroa_pipeline"
+        )
+        val planned = optimization_rule_provider_with_backend_policy(provider, policy)
+
+        expect(optimization_rule_provider_applies_to_backend(planned, OptimizerBackendKind.Cranelift)).to_equal(true)
+        expect(optimization_rule_provider_applies_to_backend(planned, OptimizerBackendKind.Llvm)).to_equal(false)
+        expect(optimization_rule_provider_applies_to_backend_name(planned, "cranlift")).to_equal(true)
+        val reason = optimization_rule_provider_skip_reason(planned, OptimizerBackendKind.Llvm)
+        expect(reason.?).to_equal(true)
+        expect(reason.unwrap()).to_equal("llvm_backend_runs_mem2reg_sroa_pipeline")
+
+    it "backend policy can restrict expensive hotspot rebuilds to one backend":
+        val provider = optimization_rule_provider_builtin_jit_hotspot(
+            "simple.opt.jit.hotspot.cranelift-rebuild",
+            ["profile.hot_count", "typed_mir", "safe_deopt"],
+            ["jit.hotspot_plan"],
+            "runtime-guarded"
+        )
+        val planned = optimization_rule_provider_with_backend_policy(
+            provider,
+            optimization_backend_policy_only([OptimizerBackendKind.Cranelift], "cranelift_needs_simple_preopt")
+        )
+
+        expect(optimization_rule_provider_applies_to_backend(planned, OptimizerBackendKind.Cranelift)).to_equal(true)
+        expect(optimization_rule_provider_applies_to_backend(planned, OptimizerBackendKind.Llvm)).to_equal(false)
+        expect(optimization_backend_kind_name(optimization_backend_kind_from_text("llvm"))).to_equal("llvm")
 
     it "exact lookup bindings support reusable non-cipher rule providers":
         val rule = create_rule("match_custom_abs", "math_abs", "scalar", -1)

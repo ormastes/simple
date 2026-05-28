@@ -70,12 +70,28 @@ struct JitHotspotCompileDecision:
     provider_used: bool
     reason: text
 
+struct JitHotspotRebuildPlan:
+    function_name: text
+    backend: text
+    eligible: bool
+    reason: text
+    cost_class: text
+    required_count: i64
+
 struct JitHotspotSpecializationProvider:
     name: text
     enabled: bool
     specialized_source: text
     semantic_proof: bool
     eligible_rules: [CLibParityRule]
+
+struct JitVarOptimizationFacts:
+    has_var_reassignment: bool
+    reassignment_count: i64
+    ssa_transform: bool
+    escape_analyzed: bool
+    no_escape: bool
+    borrow_reassign_safe: bool
 
 # ============================================================================
 # Hotspot optimization facts
@@ -129,6 +145,144 @@ fn jit_hotspot_plan_from_profile(
         reason: reason,
         facts: facts
     )
+
+fn jit_var_optimization_facts(
+    has_var_reassignment: bool,
+    reassignment_count: i64,
+    ssa_transform: bool,
+    escape_analyzed: bool,
+    no_escape: bool,
+    borrow_reassign_safe: bool
+) -> JitVarOptimizationFacts:
+    JitVarOptimizationFacts(
+        has_var_reassignment: has_var_reassignment,
+        reassignment_count: reassignment_count,
+        ssa_transform: ssa_transform,
+        escape_analyzed: escape_analyzed,
+        no_escape: no_escape,
+        borrow_reassign_safe: borrow_reassign_safe
+    )
+
+fn jit_var_optimization_fact_list(var_facts: JitVarOptimizationFacts) -> [text]:
+    var facts: [text] = []
+    if var_facts.has_var_reassignment:
+        facts = facts.push("var.reassignment")
+    if var_facts.ssa_transform:
+        facts = facts.push("ssa.var_transform")
+    if var_facts.escape_analyzed:
+        facts = facts.push("escape.analyzed")
+    if var_facts.no_escape:
+        facts = facts.push("escape.no_escape")
+    if var_facts.borrow_reassign_safe:
+        facts = facts.push("borrow.reassign_safe")
+    facts
+
+fn jit_var_optimization_reason(var_facts: JitVarOptimizationFacts) -> text:
+    if not var_facts.has_var_reassignment or var_facts.reassignment_count == 0:
+        return "ready"
+    if not var_facts.ssa_transform:
+        return "missing ssa.var_transform"
+    if not var_facts.escape_analyzed:
+        return "missing escape.analyzed"
+    if not var_facts.no_escape:
+        return "missing escape.no_escape"
+    if not var_facts.borrow_reassign_safe:
+        return "missing borrow.reassign_safe"
+    "ready"
+
+fn jit_hotspot_plan_with_var_facts(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool,
+    var_facts: JitVarOptimizationFacts
+) -> JitHotspotPlan:
+    val base = jit_hotspot_plan_from_profile(profile, config, typed_mir, safe_deopt)
+    val var_reason = jit_var_optimization_reason(var_facts)
+    var merged_facts = base.facts
+    for fact in jit_var_optimization_fact_list(var_facts):
+        merged_facts = merged_facts.push(fact)
+    if not base.eligible:
+        return JitHotspotPlan(
+            function_name: base.function_name,
+            call_count: base.call_count,
+            threshold: base.threshold,
+            eligible: false,
+            invalidated: base.invalidated,
+            reason: base.reason,
+            facts: merged_facts
+        )
+    if var_reason != "ready":
+        return JitHotspotPlan(
+            function_name: base.function_name,
+            call_count: base.call_count,
+            threshold: base.threshold,
+            eligible: false,
+            invalidated: base.invalidated,
+            reason: var_reason,
+            facts: merged_facts
+        )
+    JitHotspotPlan(
+        function_name: base.function_name,
+        call_count: base.call_count,
+        threshold: base.threshold,
+        eligible: true,
+        invalidated: base.invalidated,
+        reason: base.reason,
+        facts: merged_facts
+    )
+
+fn jit_hotspot_rebuild_backend_name(backend: text) -> text:
+    if backend == "cranlift":
+        "cranelift"
+    else:
+        backend
+
+fn jit_hotspot_rebuild_plan(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    backend: text,
+    backend_available: bool
+) -> JitHotspotRebuildPlan:
+    val normalized = jit_hotspot_rebuild_backend_name(backend)
+    if not backend_available:
+        return JitHotspotRebuildPlan(
+            function_name: profile.name,
+            backend: normalized,
+            eligible: false,
+            reason: "backend unavailable",
+            cost_class: "unavailable",
+            required_count: 0
+        )
+    if normalized == "cranelift":
+        val ready = profile.call_count >= config.tier1_threshold
+        JitHotspotRebuildPlan(
+            function_name: profile.name,
+            backend: normalized,
+            eligible: ready,
+            reason: if ready: "ready" else: "missing tier1 hot_count",
+            cost_class: "medium",
+            required_count: config.tier1_threshold
+        )
+    elif normalized == "llvm":
+        val ready = profile.call_count >= config.tier2_threshold
+        JitHotspotRebuildPlan(
+            function_name: profile.name,
+            backend: normalized,
+            eligible: ready,
+            reason: if ready: "ready" else: "missing tier2 hot_count",
+            cost_class: "high",
+            required_count: config.tier2_threshold
+        )
+    else:
+        JitHotspotRebuildPlan(
+            function_name: profile.name,
+            backend: normalized,
+            eligible: false,
+            reason: "unsupported backend",
+            cost_class: "unknown",
+            required_count: 0
+        )
 
 fn jit_hotspot_plan_invalidate(plan: JitHotspotPlan, reason: text) -> JitHotspotPlan:
     JitHotspotPlan(

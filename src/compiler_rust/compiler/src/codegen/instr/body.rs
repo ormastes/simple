@@ -85,6 +85,9 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                 MirInst::ConstBool { dest, .. } => {
                     types_map.insert(*dest, TypeId::BOOL);
                 }
+                MirInst::ConstString { dest, .. } => {
+                    types_map.insert(*dest, TypeId::STRING);
+                }
                 MirInst::Copy { dest, src } => {
                     if let Some(&ty) = types_map.get(src) {
                         types_map.insert(*dest, ty);
@@ -150,6 +153,10 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                     let ty = match base {
                         "spl_load_i64" => Some(TypeId::I64),
                         "spl_load_u8" => Some(TypeId::U8),
+                        "rt_env_get" | "rt_get_env" | "rt_file_read_text" | "rt_file_read_text_rv" => {
+                            Some(TypeId::STRING)
+                        }
+                        "rt_string_eq" | "rt_native_eq" | "rt_native_neq" => Some(TypeId::I64),
                         "rt_array_get_text" => Some(TypeId::STRING),
                         "rt_typed_bytes_u8_at" | "rt_typed_bytes_u8_data_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
                         "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" | "rt_typed_words_u32_data_at" => {

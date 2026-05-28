@@ -24,3 +24,13 @@ REQ-OPJH-010: JIT hotspot planning shall have a representative benchmark coverin
 REQ-OPJH-011: Tiered JIT tier-1 promotion shall consume eligible hotspot plans before native compilation while preserving original-source compilation when the provider is disabled or facts are missing.
 
 REQ-OPJH-012: JIT hotspot specialization providers shall only replace compile source when the plan is eligible, specialized source exists, and a semantic proof is declared.
+
+REQ-OPJH-013: JIT hotspot planning for reassigned `var` storage shall require explicit SSA transform, escape/no-escape, and borrow-reassignment-safe facts before accepting specialization.
+
+REQ-OPJH-014: Hotspot rebuild planning shall distinguish Cranelift tier-1 medium-cost rebuilds from LLVM tier-2 high-cost rebuilds and shall not schedule LLVM rebuilds before the tier-2 threshold or when the backend is unavailable.
+
+REQ-OPJH-015: The MIR optimizer shall expose analyzer-derived JIT var facts from repeated local definitions, escape evidence, and borrow-reassignment safety rather than requiring all `var` hotspot facts to be supplied manually.
+
+REQ-OPJH-016: The MIR optimizer shall provide a conservative SSA var transform for straight-line reassignment hot paths, and shall explicitly reject CFG cases that require phi-node insertion until phi construction is implemented.
+
+REQ-OPJH-017: SSA var transform rejection shall report simple branch-merge phi requirements with the affected local IDs so a later phi-insertion pass can consume concrete placement data.

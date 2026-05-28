@@ -614,6 +614,9 @@ impl ExecCore {
         match extension {
             "smf" => self.run_smf(path),
             "spl" | "simple" | "sscript" | "" => {
+                if self.execution_mode.is_jit() && should_force_interpreter_for_source(path) {
+                    return self.run_file_interpreted_with_args(path, args);
+                }
                 if self.execution_mode.is_jit() {
                     // Try JIT first, fall back to interpreter on failure
                     match self.run_file_jit(path) {
@@ -686,13 +689,30 @@ impl ExecCore {
         // Create execution manager and compile
         let mut em = LocalExecutionManager::with_provider(jit_backend, self.symbol_provider.clone())?;
 
+        eprintln!("[JIT-DEBUG] Compiling module ({} functions)...", mir_module.functions.len());
         em.compile_module(&mir_module)?;
+        eprintln!("[JIT-DEBUG] Compilation succeeded. Executing main...");
 
-        // Execute main
-        let exit_code = em.execute("main", &[])?;
-        set_current_file(None);
-        self.collect_gc();
-        Ok(exit_code as i32)
+        // Execute main — wrap in catch_unwind to handle JIT codegen crashes gracefully
+        let exec_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            em.execute("main", &[])
+        }));
+        match exec_result {
+            Ok(Ok(exit_code)) => {
+                eprintln!("[JIT-DEBUG] Execution completed with code {}", exit_code);
+                set_current_file(None);
+                self.collect_gc();
+                Ok(exit_code as i32)
+            }
+            Ok(Err(e)) => {
+                set_current_file(None);
+                Err(format!("JIT execution error: {}", e))
+            }
+            Err(panic_info) => {
+                set_current_file(None);
+                Err(format!("JIT execution panicked: {:?}", panic_info.downcast_ref::<String>().cloned().unwrap_or_else(|| "unknown panic".to_string())))
+            }
+        }
     }
 
     /// Get the build path for a compiled SMF file
@@ -772,6 +792,35 @@ impl ExecCore {
 
         self.collect_gc();
         Ok(exit_code)
+    }
+}
+
+fn should_force_interpreter_for_source(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized.ends_with("src/app/simpleos_nvme_serial_check/main.spl")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_force_interpreter_for_source;
+    use std::path::Path;
+
+    #[test]
+    fn forces_interpreter_for_physical_nvme_serial_checker() {
+        assert!(should_force_interpreter_for_source(Path::new(
+            "src/app/simpleos_nvme_serial_check/main.spl"
+        )));
+        assert!(should_force_interpreter_for_source(Path::new(
+            "/repo/src/app/simpleos_nvme_serial_check/main.spl"
+        )));
+    }
+
+    #[test]
+    fn keeps_other_sources_on_normal_execution_path() {
+        assert!(!should_force_interpreter_for_source(Path::new("src/app/os/main.spl")));
+        assert!(!should_force_interpreter_for_source(Path::new(
+            "src/app/simpleos_nvme_serial_check/helper.spl"
+        )));
     }
 }
 

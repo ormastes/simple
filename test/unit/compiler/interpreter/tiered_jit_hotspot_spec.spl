@@ -4,6 +4,12 @@ use compiler.interp.execution.tiered_jit.{
     FunctionProfile, JitTier, TieredJitConfig,
     jit_hotspot_profile_facts,
     jit_hotspot_plan_from_profile,
+    jit_hotspot_plan_with_var_facts,
+    jit_hotspot_rebuild_plan,
+    jit_hotspot_rebuild_backend_name,
+    jit_var_optimization_facts,
+    jit_var_optimization_fact_list,
+    jit_var_optimization_reason,
     jit_hotspot_plan_invalidate,
     jit_hotspot_consume_plan,
     jit_hotspot_specialization_provider,
@@ -52,6 +58,68 @@ describe "Tiered JIT hotspot facts":
         expect(plan.reason).to_equal("missing safe_deopt")
         expect(plan.facts.contains("profile.hot_count")).to_equal(true)
         expect(plan.facts.contains("safe_deopt")).to_equal(false)
+
+    it "emits var optimization facts for SSA and borrow-safe reassignment":
+        val facts = jit_var_optimization_facts(true, 3, true, true, true, true)
+        val fact_list = jit_var_optimization_fact_list(facts)
+        expect(fact_list.contains("var.reassignment")).to_equal(true)
+        expect(fact_list.contains("ssa.var_transform")).to_equal(true)
+        expect(fact_list.contains("escape.no_escape")).to_equal(true)
+        expect(fact_list.contains("borrow.reassign_safe")).to_equal(true)
+        expect(jit_var_optimization_reason(facts)).to_equal("ready")
+
+    it "rejects var reassignment hotspot plans without SSA transform":
+        val facts = jit_var_optimization_facts(true, 2, false, true, true, true)
+        val plan = jit_hotspot_plan_with_var_facts(hot_profile(64), hotspot_config(), true, true, facts)
+        expect(plan.eligible).to_equal(false)
+        expect(plan.reason).to_equal("missing ssa.var_transform")
+        expect(plan.facts.contains("var.reassignment")).to_equal(true)
+
+    it "rejects var reassignment hotspot plans when reassigned storage may escape":
+        val facts = jit_var_optimization_facts(true, 2, true, true, false, true)
+        val plan = jit_hotspot_plan_with_var_facts(hot_profile(64), hotspot_config(), true, true, facts)
+        expect(plan.eligible).to_equal(false)
+        expect(plan.reason).to_equal("missing escape.no_escape")
+        expect(plan.facts.contains("escape.analyzed")).to_equal(true)
+
+    it "rejects var reassignment hotspot plans without borrow reassignment safety":
+        val facts = jit_var_optimization_facts(true, 2, true, true, true, false)
+        val plan = jit_hotspot_plan_with_var_facts(hot_profile(64), hotspot_config(), true, true, facts)
+        expect(plan.eligible).to_equal(false)
+        expect(plan.reason).to_equal("missing borrow.reassign_safe")
+
+    it "accepts var reassignment hotspot plans only after SSA, escape, and borrow facts":
+        val facts = jit_var_optimization_facts(true, 2, true, true, true, true)
+        val plan = jit_hotspot_plan_with_var_facts(hot_profile(64), hotspot_config(), true, true, facts)
+        expect(plan.eligible).to_equal(true)
+        expect(plan.reason).to_equal("ready")
+        expect(plan.facts.contains("profile.hot_count")).to_equal(true)
+        expect(plan.facts.contains("ssa.var_transform")).to_equal(true)
+        expect(plan.facts.contains("borrow.reassign_safe")).to_equal(true)
+
+    it "plans Cranelift hotspot rebuilds at tier1 cost":
+        val plan = jit_hotspot_rebuild_plan(hot_profile(8), hotspot_config(), "cranlift", true)
+        expect(plan.backend).to_equal("cranelift")
+        expect(plan.eligible).to_equal(true)
+        expect(plan.cost_class).to_equal("medium")
+        expect(plan.required_count).to_equal(8)
+
+    it "defers LLVM hotspot rebuilds until tier2 because compile cost is high":
+        val plan = jit_hotspot_rebuild_plan(hot_profile(64), hotspot_config(), "llvm", true)
+        expect(plan.backend).to_equal("llvm")
+        expect(plan.eligible).to_equal(false)
+        expect(plan.reason).to_equal("missing tier2 hot_count")
+        expect(plan.cost_class).to_equal("high")
+        expect(plan.required_count).to_equal(128)
+
+    it "accepts LLVM hotspot rebuilds at tier2 only when the backend is available":
+        val unavailable = jit_hotspot_rebuild_plan(hot_profile(256), hotspot_config(), "llvm", false)
+        expect(unavailable.eligible).to_equal(false)
+        expect(unavailable.reason).to_equal("backend unavailable")
+        val ready = jit_hotspot_rebuild_plan(hot_profile(256), hotspot_config(), "llvm", true)
+        expect(ready.eligible).to_equal(true)
+        expect(ready.reason).to_equal("ready")
+        expect(jit_hotspot_rebuild_backend_name("cranlift")).to_equal("cranelift")
 
     it "invalidates an existing hotspot plan explicitly":
         val plan = jit_hotspot_plan_from_profile(hot_profile(64), hotspot_config(), true, true)

@@ -161,11 +161,18 @@ impl Default for JitCompiler {
 fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &dyn RuntimeSymbolProvider) {
     use simple_native_loader::RUNTIME_SYMBOL_NAMES;
 
+    let mut resolved = 0;
+    let mut missing = 0;
     for &name in RUNTIME_SYMBOL_NAMES {
         if let Some(ptr) = provider.get_symbol(name) {
             builder.symbol(name, ptr);
+            resolved += 1;
+        } else {
+            eprintln!("[JIT-SYMBOL] MISSING runtime symbol: {}", name);
+            missing += 1;
         }
     }
+    eprintln!("[JIT-SYMBOL] Resolved {}/{} runtime symbols ({} missing)", resolved, resolved + missing, missing);
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]

@@ -1,20 +1,10 @@
-extern fn rt_cli_get_args() -> [text]
+extern fn rt_env_get(name: text) -> text
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
-fn _arg_value(args: [text], name: text) -> text:
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
-        if arg.starts_with(name + "="):
-            return arg.slice((name + "=").len())
-        if arg == name and i + 1 < args.len():
-            return args[i + 1]
-        i = i + 1
-    ""
-
 fn _print_usage():
-    print "Usage: simple run src/app/simpleos_nvme_serial_check/main.spl --serial-log <path> [--report-out <path>] [--preflight-report <path>]"
+    print "Usage: SIMPLEOS_NVME_SERIAL_LOG=<path> simple run src/app/simpleos_nvme_serial_check/main.spl"
+    print "Optional: SIMPLEOS_NVME_REPORT_OUT=<path> SIMPLEOS_NVME_PREFLIGHT_REPORT=<path>"
 
 fn _read_evidence_text(path: text) -> text:
     rt_file_read_text(path) ?? ""
@@ -93,13 +83,17 @@ fn _validation_report_with_preflight(serial_log: text, serial_output: text, reas
         "  preflight_report_loaded: " + (if preflight_report_text.len() > 0: "true" else: "false") + "\n" +
         "  preflight_identity:\n" +
         "    device: " + _preflight_field(preflight_report_text, "device") + "\n" +
+        "    controller: " + _preflight_field(preflight_report_text, "controller") + "\n" +
         "    model: " + _preflight_field(preflight_report_text, "model") + "\n" +
         "    serial: " + _preflight_field(preflight_report_text, "serial") + "\n" +
         "    namespace_nsid: " + _preflight_field(preflight_report_text, "namespace_nsid") + "\n" +
         "    user_namespace_device: " + _preflight_field(preflight_report_text, "user_namespace_device") + "\n" +
+        "    user_namespace_controller: " + _preflight_field(preflight_report_text, "user_namespace_controller") + "\n" +
         "    user_namespace_model: " + _preflight_field(preflight_report_text, "user_namespace_model") + "\n" +
         "    user_namespace_serial: " + _preflight_field(preflight_report_text, "user_namespace_serial") + "\n" +
         "    user_namespace_nsid: " + _preflight_field(preflight_report_text, "user_namespace_nsid") + "\n" +
+        "    user_namespace_same_controller: " + _preflight_field(preflight_report_text, "user_namespace_same_controller") + "\n" +
+        "    same_physical_device: " + _preflight_field(preflight_report_text, "same_physical_device") + "\n" +
         "  preflight_identity_match: " + (if reason == "ready": "true" else: "false") + "\n"
 
 fn _preflight_device_count(preflight_report_text: text) -> i32:
@@ -375,6 +369,18 @@ fn _preflight_identity_match_reason(serial_output: text, preflight_report_text: 
         return "physical-nvme-preflight-user-namespace-device-missing"
     if preflight_user_device == preflight_device:
         return "physical-nvme-preflight-user-namespace-device-conflicts-system"
+    val preflight_controller = _preflight_field(preflight_report_text, "controller")
+    if preflight_controller == "unknown":
+        return "physical-nvme-preflight-controller-missing"
+    val preflight_user_controller = _preflight_field(preflight_report_text, "user_namespace_controller")
+    if preflight_user_controller == "unknown":
+        return "physical-nvme-preflight-user-namespace-controller-missing"
+    if preflight_user_controller != preflight_controller:
+        return "physical-nvme-preflight-user-namespace-controller-mismatch"
+    if _preflight_field(preflight_report_text, "user_namespace_same_controller") != "true":
+        return "physical-nvme-preflight-same-controller-marker-missing"
+    if _preflight_field(preflight_report_text, "same_physical_device") != "true":
+        return "physical-nvme-preflight-same-physical-device-marker-missing"
     if _identity_token(_preflight_field(preflight_report_text, "user_namespace_model")) != model:
         return "physical-nvme-preflight-user-namespace-model-mismatch"
     if _preflight_field(preflight_report_text, "user_namespace_serial") != serial:
@@ -382,10 +388,9 @@ fn _preflight_identity_match_reason(serial_output: text, preflight_report_text: 
     "ready"
 
 fn main() -> i64:
-    val args = _checker_args()
-    val serial_log = _arg_value(args, "--serial-log")
-    val report_out = _arg_value(args, "--report-out")
-    val preflight_report = _arg_value(args, "--preflight-report")
+    val serial_log = rt_env_get("SIMPLEOS_NVME_SERIAL_LOG") ?? ""
+    val report_out = rt_env_get("SIMPLEOS_NVME_REPORT_OUT") ?? ""
+    val preflight_report = rt_env_get("SIMPLEOS_NVME_PREFLIGHT_REPORT") ?? ""
     if serial_log == "":
         _print_usage()
         return 2
@@ -408,20 +413,3 @@ fn main() -> i64:
     if reason == "ready":
         return 0
     1
-
-fn _checker_args() -> [text]:
-    val raw_args = rt_cli_get_args()
-    var all_args: [text] = []
-    if raw_args != nil:
-        all_args = raw_args
-    var start_idx = 1
-    if all_args.len() > 2 and all_args[1] == "run" and all_args[2].ends_with(".spl"):
-        start_idx = 3
-    elif all_args.len() > 1 and all_args[1].ends_with(".spl"):
-        start_idx = 2
-    var args: [text] = []
-    var i = start_idx
-    while i < all_args.len():
-        args.push(all_args[i])
-        i = i + 1
-    args

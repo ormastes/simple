@@ -38,6 +38,19 @@ enum OptimizerProviderKind:
     BackendMetadata
     CLibParityHotspot
 
+enum OptimizerBackendKind:
+    Any
+    Interpreter
+    Cranelift
+    Llvm
+    C
+    Wasm
+
+struct OptimizationBackendPolicy:
+    allowed_backends: [OptimizerBackendKind]
+    skipped_backends: [OptimizerBackendKind]
+    reason: text
+
 struct OptimizationRuleProvider:
     name:        text
     version:     text
@@ -50,6 +63,7 @@ struct OptimizationRuleProvider:
     required_facts: [text]
     produced_facts: [text]
     safety_class: text
+    backend_policy: OptimizationBackendPolicy
 
 struct ExactRuleBinding:
     key:  text
@@ -71,6 +85,46 @@ fn create_rule(name: text, intrinsic: text, requires: text, cost_delta: i64) -> 
 fn create_rule_with_cost(name: text, intrinsic: text, requires: text, cost_delta: i64, software_cost: i64) -> Rule:
     Rule(name, intrinsic, requires, cost_delta, software_cost)
 
+fn optimization_backend_policy_all() -> OptimizationBackendPolicy:
+    OptimizationBackendPolicy([], [], "all_backends")
+
+fn optimization_backend_policy_only(backends: [OptimizerBackendKind], reason: text) -> OptimizationBackendPolicy:
+    OptimizationBackendPolicy(backends, [], reason)
+
+fn optimization_backend_policy_skip(backends: [OptimizerBackendKind], reason: text) -> OptimizationBackendPolicy:
+    OptimizationBackendPolicy([], backends, reason)
+
+fn optimization_backend_kind_name(kind: OptimizerBackendKind) -> text:
+    match kind:
+        case Any: "any"
+        case Interpreter: "interpreter"
+        case Cranelift: "cranelift"
+        case Llvm: "llvm"
+        case C: "c"
+        case Wasm: "wasm"
+
+fn optimization_backend_kind_from_text(name: text) -> OptimizerBackendKind:
+    if name == "cranelift" or name == "cranlift":
+        OptimizerBackendKind.Cranelift
+    elif name == "llvm":
+        OptimizerBackendKind.Llvm
+    elif name == "interpreter":
+        OptimizerBackendKind.Interpreter
+    elif name == "c":
+        OptimizerBackendKind.C
+    elif name == "wasm":
+        OptimizerBackendKind.Wasm
+    else:
+        OptimizerBackendKind.Any
+
+fn optimization_backend_list_contains(backends: [OptimizerBackendKind], backend: OptimizerBackendKind) -> bool:
+    var i = 0
+    while i < backends.len():
+        if backends[i] == OptimizerBackendKind.Any or backends[i] == backend:
+            return true
+        i = i + 1
+    false
+
 fn optimization_rule_provider_builtin(name: text, hot_path: bool) -> OptimizationRuleProvider:
     OptimizationRuleProvider(
         name: name,
@@ -83,7 +137,8 @@ fn optimization_rule_provider_builtin(name: text, hot_path: bool) -> Optimizatio
         enabled: true,
         required_facts: [],
         produced_facts: [],
-        safety_class: "pure"
+        safety_class: "pure",
+        backend_policy: optimization_backend_policy_all()
     )
 
 fn optimization_rule_provider_builtin_with_contract(
@@ -106,7 +161,8 @@ fn optimization_rule_provider_builtin_with_contract(
         enabled: true,
         required_facts: required_facts,
         produced_facts: produced_facts,
-        safety_class: safety_class
+        safety_class: safety_class,
+        backend_policy: optimization_backend_policy_all()
     )
 
 fn optimization_rule_provider_dynamic(name: text, path: text) -> OptimizationRuleProvider:
@@ -121,8 +177,42 @@ fn optimization_rule_provider_dynamic(name: text, path: text) -> OptimizationRul
         enabled: true,
         required_facts: [],
         produced_facts: [],
-        safety_class: "experimental"
+        safety_class: "experimental",
+        backend_policy: optimization_backend_policy_all()
     )
+
+fn optimization_rule_provider_with_backend_policy(provider: OptimizationRuleProvider, policy: OptimizationBackendPolicy) -> OptimizationRuleProvider:
+    OptimizationRuleProvider(
+        name: provider.name,
+        version: provider.version,
+        kind: provider.kind,
+        load_mode: provider.load_mode,
+        lookup_kind: provider.lookup_kind,
+        path: provider.path,
+        hot_path: provider.hot_path,
+        enabled: provider.enabled,
+        required_facts: provider.required_facts,
+        produced_facts: provider.produced_facts,
+        safety_class: provider.safety_class,
+        backend_policy: policy
+    )
+
+fn optimization_rule_provider_applies_to_backend(provider: OptimizationRuleProvider, backend: OptimizerBackendKind) -> bool:
+    val policy = provider.backend_policy
+    if optimization_backend_list_contains(policy.skipped_backends, backend):
+        return false
+    if policy.allowed_backends.len() > 0:
+        return optimization_backend_list_contains(policy.allowed_backends, backend)
+    true
+
+fn optimization_rule_provider_applies_to_backend_name(provider: OptimizationRuleProvider, backend_name: text) -> bool:
+    optimization_rule_provider_applies_to_backend(provider, optimization_backend_kind_from_text(backend_name))
+
+fn optimization_rule_provider_skip_reason(provider: OptimizationRuleProvider, backend: OptimizerBackendKind) -> text?:
+    if optimization_rule_provider_applies_to_backend(provider, backend):
+        nil
+    else:
+        Some(provider.backend_policy.reason)
 
 fn optimization_rule_provider_should_embed(provider: OptimizationRuleProvider) -> bool:
     provider.enabled and provider.hot_path and provider.load_mode == OptimizerRuleLoadMode.Builtin
@@ -153,7 +243,8 @@ fn optimization_rule_provider_builtin_jit_hotspot(
         enabled: true,
         required_facts: required_facts,
         produced_facts: produced_facts,
-        safety_class: safety_class
+        safety_class: safety_class,
+        backend_policy: optimization_backend_policy_all()
     )
 
 fn optimization_rule_provider_has_required_fact(provider: OptimizationRuleProvider, fact: text) -> bool:

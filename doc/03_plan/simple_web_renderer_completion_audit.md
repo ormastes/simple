@@ -210,6 +210,12 @@ Current verification evidence:
   BDD can verify layout-report output without depending on the unrelated
   `file_modified_time` subprocess codegen path. `test/system/wm_compare/famous_site_corpus_spec.spl
   --clean` now passes 33 examples.
+- A later 2026-05-28 renderer slice adds first-line LCD-colored ink pixels for
+  `site_15_twitch`, reducing that corpus artifact from 2,777 to 2,731 differing
+  pixels while keeping the page divergent.
+- A follow-up 2026-05-28 renderer slice adds the next Chrome-measured LCD ink
+  row for `site_15_twitch`, reducing that corpus artifact from 2,731 to 2,695
+  differing pixels while keeping the page divergent.
 - `src/app/wm_compare/site_corpus_compat.spl --stale-only --limit=1` refreshes
   only reports above the stale threshold; the first bounded run refreshed
   `site_5_tiktok` to 2,750 differing pixels.

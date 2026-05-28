@@ -20,6 +20,20 @@
   FAT32/NVFS/DBFS direct-I/O markers, same-device C baseline markers, and
   duplicate perf report rejection without the prior `file_modified_time`
   app-spec failure.
+- 2026-05-28 follow-up: the physical NVMe wrapper now invokes the checker with
+  `SIMPLE_EXECUTION_MODE=interpret` and environment-provided paths to avoid the
+  default JIT text-return extern crash while preserving production validation.
+- 2026-05-28 same-device follow-up: preflight reports now record controller,
+  user-namespace controller, `user_namespace_same_controller: true`, and
+  `same_physical_device: true`; the serial checker rejects supplied preflight
+  evidence that omits or contradicts those markers before accepting production
+  same-device claims.
+- 2026-05-28 follow-up: `ExecCore::run_file_with_args` now forces the
+  `src/app/simpleos_nvme_serial_check/main.spl` source path through the
+  interpreter when the default execution mode is JIT. The broader nil/text JIT
+  crash remains tracked separately, but direct checker invocation no longer
+  depends on callers remembering the environment override once the driver is
+  rebuilt.
 
 ## Known Remaining Work
 
@@ -34,15 +48,17 @@
    production-grade.
    - DONE for the production/release lane used by
      `scripts/run_simpleos_physical_nvme_perf.shs`: `test/unit/app/simpleos_nvme_serial_check_spec.spl`
-     passes 21 examples in interpreter-driven SPipe.
-   - The checker now owns a minimal local serial-evidence gate, reads evidence
-     through a shell-backed helper, and the direct app spec invokes the release
-     runtime to match production wrapper behavior.
-   - Still open outside this production lane: `bin/simple run
-     src/app/simpleos_nvme_serial_check/main.spl --serial-log <path>` from the
-     workspace debug/JIT runtime still exits 139 before output. Keep this as a
-     compiler/runtime bug, but do not use the debug runtime as production NVMe
-     evidence.
+     passes 22 examples in interpreter-driven SPipe.
+   - The checker now owns a minimal local serial-evidence gate and the wrapper
+     passes serial/preflight/report paths through `SIMPLEOS_NVME_*` environment
+     variables under `SIMPLE_EXECUTION_MODE=interpret`.
+   - Follow-up source fix: the Rust driver now forces this checker source path
+     through the interpreter in JIT mode. This needs a rebuilt `bin/simple`
+     before the currently installed workspace binary shows the new behavior.
+   - Still open outside this production lane: the default workspace JIT runtime
+     still exits 139 for general nil-coalescing/text paths such as
+     `"abc".len()` and `nil ?? ""`. Tracked as
+     `doc/08_tracking/bug/jit_text_extern_return_segfault_2026-05-28.md`.
 
 ## Restart Evidence — 2026-05-28
 
@@ -56,7 +72,9 @@ bin/simple test test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl --
 bin/simple test test/unit/os/drivers/nvme/nvme_performance_contract_spec.spl --mode=interpreter --clean
   PASSED: 14 examples, 0 failures
 bin/simple test test/unit/app/simpleos_nvme_serial_check_spec.spl --mode=interpreter --clean
-  PASSED: 21 examples, 0 failures
+  PASSED: 22 examples, 0 failures
+SIMPLE_EXECUTION_MODE=interpret SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log bin/simple run src/app/simpleos_nvme_serial_check/main.spl
+  PASSED: no crash, exits 1 with missing-marker rejection
 bin/simple test test/unit/lib/fs_driver/fs_hardening_spec.spl --mode=interpreter --clean
   PASSED: 15 examples, 0 failures
 bin/simple test test/system/storage_fat32_statfs_truncate_spec.spl --mode=interpreter --clean
@@ -69,6 +87,12 @@ bin/simple check src/lib/nogc_async_mut/fs_driver/fat32_core.spl src/lib/nogc_sy
   PASSED: exit code 0
 bin/simple check src/lib
   PASSED: exit code 0, warnings only
+CARGO_TARGET_DIR=target_codex_text_eq cargo build -p simple-driver --bin simple
+  PASSED: dev build from fixed Rust sources
+src/compiler_rust/target_codex_text_eq/debug/simple run src/app/simpleos_nvme_serial_check/main.spl
+  PASSED: no signal; prints usage and exits 2 when SIMPLEOS_NVME_SERIAL_LOG is unset
+SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/target_codex_text_eq/debug/simple run src/app/simpleos_nvme_serial_check/main.spl
+  PASSED: no signal; exits 1 with missing physical NVMe marker
 ```
 
 3. Retire duplicate legacy FAT implementation safely.
@@ -88,6 +112,12 @@ bin/simple check src/lib
      legacy `Fat32Driver`.
    - DONE for debug coverage: `_debug_host_fat32_tree_populator.spl` now uses
      the shared `Fat32Core` image-population path for manual sector dumps.
+   - 2026-05-28 follow-up: the debug helper now exits 0 with
+     `Result::Ok(())` after removing a local `io` alias lowering blocker from
+     the cached raw-image device and replacing JIT-incompatible `Result.Ok`
+     returns on that path. JIT still falls back on a broader wildcard-pattern
+     lowering limitation in the loaded library set, but the interpreter debug
+     evidence is usable.
    - Still open: the legacy FAT module's own internal tests still instantiate
      `Fat32Driver` until the legacy module is deleted or converted into a
      compatibility wrapper.

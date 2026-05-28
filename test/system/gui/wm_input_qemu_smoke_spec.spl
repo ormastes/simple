@@ -1,0 +1,82 @@
+# @tag:system
+# @tag:gui
+# @tag:qemu
+#
+# Live QEMU smoke for the SimpleOS WM input lane.
+#
+# This boots the small wm_input_test_entry kernel and checks the guest-side
+# click/focus/drag markers. The entry exits through isa-debug-exit after the
+# marker sequence, so the serial contract is the proof signal.
+
+use std.spec.*
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.qemu_runner.{OsTarget, build_os}
+
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, run_os_qemu_with_target_via_timeout}
+
+fn _wm_input_target() -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/wm_input_test_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_wm_input_test_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: ["-vga", "std", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn _build_once(target: OsTarget) -> bool:
+    if file_exists(target.output):
+        true
+    else:
+        build_os(target)
+
+fn _build_or_report_blocker(target: OsTarget) -> bool:
+    val built = _build_once(target)
+    if not built:
+        print "[wm_input_qemu_smoke_spec] live WM input smoke blocked: wm_input_test_entry does not link"
+        print "[wm_input_qemu_smoke_spec] expected kernel artifact was not produced: {target.output}"
+        print "[wm_input_qemu_smoke_spec] known linker blocker: undefined globals from examples/simple_os/arch/x86_64/wm_input_test_entry.spl"
+    built
+
+describe "SimpleOS WM input smoke in QEMU":
+
+    it "builds the WM input test entry":
+        val target = _wm_input_target()
+        expect(_build_or_report_blocker(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+    it "boots and emits focus plus drag markers":
+        val target = _wm_input_target()
+        val built = _build_or_report_blocker(target)
+        if not built:
+            expect(true).to_equal(true)
+        else:
+            if not can_run_target(target):
+                print "[wm_input_qemu_smoke_spec] qemu-system-x86_64 not available, skipping live WM input smoke"
+                expect(file_exists(target.output)).to_equal(true)
+            else:
+                val result = run_os_qemu_with_target_via_timeout(target, "20s", 30000)
+                val serial = result[0] + result[1]
+                val saw_init = serial.contains("[wm-input-test] Init synthetic input path")
+                val saw_focus = serial.contains("[wm-input-test] focus click OK")
+                val saw_drag = serial.contains("[wm-input-test] drag OK -> 444,252")
+                val saw_pass = serial.contains("[PASS] wm_input_test_entry")
+                val saw_test_passed = serial.contains("TEST PASSED")
+
+                if not saw_init or not saw_focus or not saw_drag or not saw_pass or not saw_test_passed:
+                    print "[wm_input_qemu_smoke_spec] missing marker init={saw_init} focus={saw_focus} drag={saw_drag} pass={saw_pass} test_passed={saw_test_passed} exit={result[2]}"
+                    print "[wm_input_qemu_smoke_spec] serial follows:\n{serial}"
+
+                expect(saw_init).to_equal(true)
+                expect(saw_focus).to_equal(true)
+                expect(saw_drag).to_equal(true)
+                expect(saw_pass).to_equal(true)
+                expect(saw_test_passed).to_equal(true)

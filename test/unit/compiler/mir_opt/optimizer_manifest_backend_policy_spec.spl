@@ -1,0 +1,43 @@
+use std.spec
+use compiler.mir_opt.optimizer_manifest.{
+    ManifestPassContract, manifest_pass_entry_new,
+    dynamic_pass_descriptor_from_entry
+}
+use compiler.mir_opt.mir_opt.mod.{PassScope}
+use compiler.mir_opt.pattern.rule_engine.{
+    OptimizerBackendKind,
+    optimization_backend_policy_skip,
+    optimization_rule_provider_applies_to_backend,
+    optimization_rule_provider_with_backend_policy
+}
+
+describe "optimizer manifest backend policy":
+    it "gives manifest-created passes an all-backend default":
+        val entry = manifest_pass_entry_new(
+            "ssa_var_canon",
+            [],
+            PassScope.Function,
+            [],
+            ManifestPassContract(["typed_mir"], ["canonical_mir"], "pure"),
+            "ssa_var_canon_entry"
+        )
+        val desc = dynamic_pass_descriptor_from_entry(entry, "jit_hotspot")
+
+        expect(optimization_rule_provider_applies_to_backend(desc.provider, OptimizerBackendKind.Cranelift)).to_equal(true)
+        expect(optimization_rule_provider_applies_to_backend(desc.provider, OptimizerBackendKind.Llvm)).to_equal(true)
+
+    it "preserves backend skip policies on dynamic descriptors":
+        val entry = manifest_pass_entry_new(
+            "simple_pre_sroa",
+            [],
+            PassScope.Function,
+            [],
+            ManifestPassContract(["typed_mir"], ["canonical_mir"], "pure"),
+            "simple_pre_sroa_entry"
+        )
+        val desc = dynamic_pass_descriptor_from_entry(entry, "jit_hotspot")
+        val policy = optimization_backend_policy_skip([OptimizerBackendKind.Llvm], "llvm_backend_runs_sroa")
+        val provider = optimization_rule_provider_with_backend_policy(desc.provider, policy)
+
+        expect(optimization_rule_provider_applies_to_backend(provider, OptimizerBackendKind.Cranelift)).to_equal(true)
+        expect(optimization_rule_provider_applies_to_backend(provider, OptimizerBackendKind.Llvm)).to_equal(false)

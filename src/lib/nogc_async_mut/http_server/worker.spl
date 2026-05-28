@@ -451,24 +451,28 @@ class Worker:
         # h2c (cleartext HTTP/2) preface detection
         val h2c_ok = raw_bytes.len() >= 5 and raw_bytes[0] == 80 and raw_bytes[1] == 82 and raw_bytes[2] == 73
         if h2c_ok:
-            print "[h2c] step1: preface detected fd={fd}"
             self.connections.remove(fd)
-            print "[h2c] step2: removed from h1 connections"
             val peer = tcp_backend_local_addr(fd) ?? "unknown"
-            print "[h2c] step3: peer={peer}, creating H2Connection"
             var h2conn = H2Connection.new(fd, peer, now)
-            print "[h2c] step4: H2Connection created"
-            val settings_bytes = h2conn.take_pending_writes()
-            print "[h2c] step5: settings bytes len={settings_bytes.len()}"
-            if settings_bytes.len() > 0:
-                val send_op = self.driver.submit_send_bytes(fd, settings_bytes)
-                self.op_to_fd[send_op] = fd
-                self.op_type[send_op] = OP_SEND
-            print "[h2c] step6: fd={h2conn.fd} peer={h2conn.peer_addr} goaway={h2conn.goaway_sent}"
-            print "[h2c] step7: recv_buf len={h2conn.recv_buf.len()} preface_ok={h2conn.preface_validated}"
-            print "[h2c] step8: calling h2_on_data_received with {raw_bytes.len()} bytes"
-            val ok1 = h2conn.h2_on_data_received(raw_bytes, now)
-            print "[h2c] step9: result={ok1}"
+            # Send server SETTINGS (empty = use defaults)
+            var server_settings: [u8] = [0, 0, 0, 4, 0, 0, 0, 0, 0]
+            val ss_op = self.driver.submit_send_bytes(fd, server_settings)
+            self.op_to_fd[ss_op] = fd
+            self.op_type[ss_op] = OP_SEND
+            h2conn.settings_sent = true
+            # Process initial bytes (preface + client SETTINGS)
+            h2conn.h2_on_data_received(raw_bytes, now)
+            h2conn.consume_frames()
+            # Flush pending writes (SETTINGS ACK from consume_frames)
+            val out = h2conn.take_pending_writes()
+            if out.len() > 0:
+                val out_op = self.driver.submit_send_bytes(fd, out)
+                self.op_to_fd[out_op] = fd
+                self.op_type[out_op] = OP_SEND
+            self.h2_connections[fd] = h2conn
+            val recv_op = self.driver.submit_recv(fd, 8192)
+            self.op_to_fd[recv_op] = fd
+            self.op_type[recv_op] = OP_RECV
             return
 
         val conn = self.connections.get(fd)
@@ -829,25 +833,33 @@ class Worker:
             return
 
         var conn = h2conn
-        val keep_going = conn.h2_on_data_received(data, now)
+        conn.h2_on_data_received(data, now)
+        val keep_going = conn.consume_frames()
 
         # Process fully decoded H2 requests through the pipeline
         val decoded = conn.take_decoded_requests()
+        print "[W] handle_h2_recv: decoded.len={decoded.len()} keep_going={keep_going}"
         for pair in decoded:
             val stream_id = pair.0
             val request = pair.1
+            print "[W] routing request: {request.method} {request.path} stream={stream_id}"
             var resp = build_not_found()
             val route_result = self.router.route(request)
             match route_result:
                 Ok((location, params)):
+                    print "[W] route matched: {location}"
                     resp = self.inline_static_handler(location, request)
                 Err(e):
+                    print "[W] route failed: {e}"
                     resp = build_not_found()
+            print "[W] response: status={resp.status} body_len={resp.body.len()} body_bytes_len={resp.body_bytes.len()}"
             resp = compress_response(request, resp)
             conn.queue_h2_response(stream_id, resp)
+            print "[W] queued h2 response for stream={stream_id}"
 
         # Drain any pending outbound frames (SETTINGS ACK, PING echo, responses)
         val out_bytes = conn.take_pending_writes()
+        print "[W] out_bytes.len={out_bytes.len()}"
         self.h2_connections[fd] = conn
 
         if out_bytes.len() > 0:

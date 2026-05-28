@@ -87,10 +87,52 @@ The WM app-content renderer also uses a WM-local Simple Web stylesheet and the
 host compositor spec proves Terminal window content flows through Simple Web
 into Engine2D pixel colors before compositor blit.
 
+Additional SimpleOS GUI proof added after the restart evidence:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/os/compositor/host_compositor_entry.spl test/unit/os/compositor/simpleos_gui_shared_wm_adapter_spec.spl
+SIMPLE_LIB=src bin/simple test test/unit/os/compositor/simpleos_gui_shared_wm_adapter_spec.spl --mode=interpreter --clean
+```
+
+The focused SimpleOS GUI adapter spec no longer stops at display/content-renderer name
+probes: it delivers a bridge create-window request and framebuffer render
+through the shared `HostCompositor` path, then asserts the shared window list
+preserves the app content while the captured framebuffer contains WM chrome
+before presentation.
+
+Additional live QEMU input proof lane added after the adapter proof:
+
+```bash
+SIMPLE_LIB=src bin/simple check test/system/gui/wm_input_qemu_smoke_spec.spl
+SIMPLE_LIB=src bin/simple test test/system/gui/wm_input_qemu_smoke_spec.spl --mode=interpreter --clean --format json
+```
+
+The new system spec is a bounded live WM input smoke for
+`examples/simple_os/arch/x86_64/wm_input_test_entry.spl`. It builds the
+standalone input-test kernel, boots it under `qemu-system-x86_64` when the
+kernel exists, and asserts the serial input markers for init, focus click,
+drag to `444,252`, `[PASS] wm_input_test_entry`, and `TEST PASSED`.
+
+Current result on this Linux host:
+
+- `check` passes for the new spec.
+- QEMU is installed at `/usr/bin/qemu-system-x86_64`.
+- The live boot is blocked before QEMU by a real kernel link failure. The
+  native build command does not produce
+  `build/os/simpleos_wm_input_test_x86_64.elf` because
+  `wm_input_test_entry.spl` leaves file-scope `val`/`var` symbols unresolved
+  in the freestanding link:
+  `SERIAL_LSR`, `SERIAL_DATA`, `focused`, `win_x`, `win_y`, and `DEBUG_EXIT`.
+- The targeted test currently reports `1 passed / 1 failed`; the failed
+  example is the focused build blocker, and the boot example is skip-safe
+  until the kernel artifact exists.
+
 ## Remaining Work
 
-1. Replace remaining SimpleOS GUI probe-only coverage with a real shared WM path where feasible.
-2. Add SimpleOS adapter proof for display/input/event delivery, preferably with QEMU smoke coverage.
+1. Fix the `wm_input_test_entry.spl` freestanding link blocker, then rerun
+   `test/system/gui/wm_input_qemu_smoke_spec.spl` to convert the focused
+   build blocker into a live QEMU input proof.
+2. Extend SimpleOS GUI shared-path proof from deterministic host-backed adapter coverage to a live QEMU framebuffer/input smoke.
 3. Add macOS validation for Cocoa-backed host WM when a macOS host is available.
 4. Update architecture docs if implementation reveals a different adapter boundary.
 
@@ -100,6 +142,8 @@ into Engine2D pixel colors before compositor blit.
 - GitHub SSH fetch/push failed with `Permission denied (publickey)`.
 - Rebase against `origin/main` was blocked by unrelated dirty worktree changes.
 - Live SimpleOS QEMU GUI proof was not completed; earlier system spec timed out around 120 seconds.
+- Live WM input QEMU proof is currently blocked before boot by the
+  `wm_input_test_entry.spl` freestanding link failure described above.
 - Real macOS Cocoa proof was not possible on this Linux host.
 
 ## Scoped Commit Discipline

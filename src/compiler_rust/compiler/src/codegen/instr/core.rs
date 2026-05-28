@@ -63,24 +63,7 @@ fn compile_text_eq_with_identity_fast_path<M: Module>(
     lhs: cranelift_codegen::ir::Value,
     rhs: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    let one = builder.ins().iconst(types::I64, 1);
-    let same_object = builder.ins().icmp(IntCC::Equal, lhs, rhs);
-    let string_eq_block = builder.create_block();
-    let done_block = builder.create_block();
-    builder.append_block_param(done_block, types::I64);
-    builder
-        .ins()
-        .brif(same_object, done_block, &[one], string_eq_block, &[]);
-
-    builder.switch_to_block(string_eq_block);
-    let eq = call_runtime_2(ctx, builder, "rt_string_eq", lhs, rhs);
-    builder.ins().jump(done_block, &[eq]);
-    builder.seal_block(string_eq_block);
-
-    builder.switch_to_block(done_block);
-    let result = builder.block_params(done_block)[0];
-    builder.seal_block(done_block);
-    result
+    call_runtime_2(ctx, builder, "rt_string_eq", lhs, rhs)
 }
 
 /// Ensure a value is i64, extending smaller integer types and bitcasting floats if needed.
