@@ -6,6 +6,7 @@
 # SimpleOS NVMe hardware; tests may pass MemBlockDevice to verify wiring.
 
 use os.services.block_device.{BlockDevice}
+use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
 use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemLease, NvmeFilesystemConsumer, nvme_filesystem_lease_reason, nvme_filesystem_lease_sector_count, nvme_filesystem_lease_set_acceptance_reason}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
@@ -110,6 +111,23 @@ fn vfs_nvme_driver_instance_for_lease(
             if opened.is_err():
                 return Err("dbfs-open-on-device:" + vfs_nvme_fs_error_name(opened.unwrap_err()))
             Ok(DriverInstance.DbFs(opened.unwrap()))
+
+fn vfs_nvme_driver_instance_for_adapter_lease(
+    name: text,
+    adapter: NvmeBlockAdapter,
+    lease: NvmeFilesystemLease,
+    consumer: NvmeFilesystemConsumer
+) -> Result<DriverInstance, text>:
+    val expected_consumer = match consumer:
+        case NvmeFilesystemConsumer.Fat32: "fat32"
+        case NvmeFilesystemConsumer.Nvfs: "nvfs"
+        case NvmeFilesystemConsumer.Dbfs: "dbfs"
+    if adapter.filesystem_consumer() != expected_consumer:
+        return Err("nvme-fs-adapter-consumer-mismatch adapter=" + adapter.filesystem_consumer() + " lease=" + expected_consumer)
+    val expected_sectors = nvme_filesystem_lease_sector_count(lease)
+    if adapter.sector_count() != expected_sectors:
+        return Err("nvme-fs-adapter-sector-count-mismatch adapter=" + adapter.sector_count().to_text() + " lease=" + expected_sectors.to_text())
+    vfs_nvme_driver_instance_for_lease(name, adapter, lease, consumer)
 
 fn vfs_nvme_driver_instance_for_lease_checked(
     name: text,

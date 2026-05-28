@@ -7,8 +7,10 @@ use std.fs_driver.extension.{Extension}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.direct_io.{direct_io_nvme_filesystem_extension}
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
-use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks, vfs_nvme_block_device_lease_reason}
+use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_adapter_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks, vfs_nvme_block_device_lease_reason}
+use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
 use os.services.vfs.vfs_init.{_clear_vfs_rootfs_for_test, vfs_mount_rootfs_from_nvme_lease_checked}
+use os.drivers.nvme.nvme_driver.{NvmeDriver}
 use os.drivers.nvme.nvme_storage_model.{NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer, NvmeNamespaceIdentity, NvmeQueueAssignment, NvmeFilesystemLease, nvme_filesystem_lease}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 
@@ -85,6 +87,44 @@ describe "NVMe filesystem mount factory":
         expect(fat.probe(Capability.DirectIo).is_none()).to_equal(true)
         expect(nvfs.probe(Capability.DirectIo).is_none()).to_equal(true)
         expect(dbfs.probe(Capability.DirectIo).is_none()).to_equal(true)
+
+    it "requires the production direct factory to receive the matching lease-backed NVMe adapter":
+        val lease = _mount_test_lease()
+        val adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
+            NvmeDriver.new(),
+            9u32,
+            SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+            128u64,
+            1024u64,
+            512u32,
+            "fat32"
+        )
+        val mounted = vfs_nvme_driver_instance_for_adapter_lease("fat32-root", adapter, lease, NvmeFilesystemConsumer.Fat32)
+        expect(mounted.is_ok()).to_equal(true)
+
+        val wrong_consumer = NvmeBlockAdapter.for_identified_namespace_unchecked(
+            NvmeDriver.new(),
+            9u32,
+            SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+            128u64,
+            1024u64,
+            512u32,
+            "nvfs"
+        )
+        val rejected_consumer = vfs_nvme_driver_instance_for_adapter_lease("fat32-root", wrong_consumer, lease, NvmeFilesystemConsumer.Fat32)
+        expect(rejected_consumer.unwrap_err()).to_equal("nvme-fs-adapter-consumer-mismatch adapter=nvfs lease=fat32")
+
+        val wrong_window = NvmeBlockAdapter.for_identified_namespace_unchecked(
+            NvmeDriver.new(),
+            9u32,
+            SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+            128u64,
+            512u64,
+            512u32,
+            "fat32"
+        )
+        val rejected_window = vfs_nvme_driver_instance_for_adapter_lease("fat32-root", wrong_window, lease, NvmeFilesystemConsumer.Fat32)
+        expect(rejected_window.unwrap_err()).to_equal("nvme-fs-adapter-sector-count-mismatch adapter=512 lease=1024")
 
     it "rejects shared BlockDevice surfaces whose sector size does not match the NVMe lease":
         val lease = _mount_test_lease()
