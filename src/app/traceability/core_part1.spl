@@ -122,12 +122,31 @@ fn analyze_virtual_files(files: [VirtualFile], scope: text, config: Traceability
     existing_paths = unique_texts(existing_paths)
 
     var warnings: [TraceabilityWarning] = []
+    warnings = extend_warnings(base: warnings, extra: analyze_generated_spec_layout(parsed, existing_paths, config, scope))
     warnings = extend_warnings(base: warnings, extra: analyze_specs(parsed, existing_paths, config, scope))
     warnings = extend_warnings(base: warnings, extra: analyze_requirements(parsed, existing_paths, config, scope))
     warnings = extend_warnings(base: warnings, extra: analyze_backwards_docs(parsed, existing_paths, config, scope))
     if enforce_source_roots:
         warnings = extend_warnings(base: warnings, extra: analyze_source_tests(parsed, existing_paths, config, scope))
 
+    warnings
+
+fn analyze_generated_spec_layout(parsed: [ParsedTraceFile], existing_paths: [text], config: TraceabilityConfig, scope: text) -> [TraceabilityWarning]:
+    if scope != "all" and scope != "spec":
+        return []
+
+    var warnings: [TraceabilityWarning] = []
+    for file in parsed:
+        if not is_executable_spec_kind(file.kind):
+            continue
+        val expected = expected_generated_spec_path(file.path, config)
+        if expected == "":
+            continue
+        if path_list_contains(existing_paths, expected) == false:
+            warnings.push(make_warning(code: "TRC231", path: file.path, line_num: 1, message: "Missing mirrored generated spec doc '{expected}'"))
+        val wrong = find_mismatched_generated_spec_path(expected: expected, source_path: file.path, parsed: parsed, config: config)
+        if wrong != "":
+            warnings.push(make_warning(code: "TRC232", path: wrong, line_num: 1, message: "Generated spec doc should mirror '{file.path}' at '{expected}'"))
     warnings
 
 fn count_virtual_file_warnings_by_code(files: [VirtualFile], scope: text, config: TraceabilityConfig, enforce_source_roots: bool, code: text) -> i64:
@@ -150,6 +169,7 @@ fn count_virtual_file_pair_warnings_by_code(file_pairs: [text], scope: text, con
     existing_paths = unique_texts(existing_paths)
 
     var count = 0
+    count = count + count_generated_spec_layout_pair_warnings_by_code(file_pairs: file_pairs, existing_paths: existing_paths, config: config, scope: scope, target_code: code)
     count = count + count_spec_pair_warnings_by_code(file_pairs: file_pairs, existing_paths: existing_paths, config: config, scope: scope, target_code: code)
     count = count + count_requirement_pair_warnings_by_code(file_pairs: file_pairs, existing_paths: existing_paths, config: config, scope: scope, target_code: code)
     count = count + count_backwards_doc_pair_warnings_by_code(file_pairs: file_pairs, existing_paths: existing_paths, config: config, scope: scope, target_code: code)

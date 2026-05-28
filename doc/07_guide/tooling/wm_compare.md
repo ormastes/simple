@@ -102,6 +102,13 @@ Typical files:
 - diff outputs such as `diff_A_vs_B.ppm`
 - `report.sdn`
 
+## Publishing To SSPEC
+
+When a WM comparison backs a TUI/GUI SSPEC, copy or emit the reviewable image
+evidence under `doc/06_spec/image/<spec-relative-path>/` and list it in the
+spec docblock with `**Screenshots:**` or `**TUI Captures:**`. Keep structured
+reports and logs under `build/test-artifacts/<spec-relative-path>/`.
+
 For phase-by-phase history and current blockers, see
 [doc/08_tracking/wm_compare/README.md](../../08_tracking/wm_compare/README.md).
 

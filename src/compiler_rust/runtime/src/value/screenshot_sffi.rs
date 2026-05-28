@@ -26,7 +26,7 @@ static FORCE_REFRESH: AtomicBool = AtomicBool::new(false);
 static OUTPUT_DIR: OnceLock<RwLock<String>> = OnceLock::new();
 
 fn get_output_dir() -> &'static RwLock<String> {
-    OUTPUT_DIR.get_or_init(|| RwLock::new("doc/spec/image".to_string()))
+    OUTPUT_DIR.get_or_init(|| RwLock::new("doc/06_spec/image".to_string()))
 }
 
 /// Current test context
@@ -386,7 +386,7 @@ mod tests {
             "simple/std_lib/test/unit/ui/widgets_spec.spl",
             "renders button",
             CaptureType::Before,
-            "doc/spec/image",
+            "doc/06_spec/image",
         );
         assert!(path.contains("unit/ui/widgets"));
         assert!(path.contains("renders_button"));

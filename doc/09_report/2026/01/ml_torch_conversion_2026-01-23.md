@@ -39,7 +39,7 @@ class MockRandomSampler:
 ---
 
 ### 2. Simple Math Integration Tests
-**File:** `test/lib/std/integration/ml/simple_math_integration_spec.spl`
+**File:** `test/integration/lib/std/ml/simple_math_integration_spec.spl`
 **Tests Converted:** 17
 
 | Test | Mock Class | Status |
@@ -248,7 +248,7 @@ Failed: 0
 ## Files Modified
 
 1. ✅ `test/lib/std/unit/ml/torch/dataset_spec.spl`
-2. ✅ `test/lib/std/integration/ml/simple_math_integration_spec.spl`
+2. ✅ `test/integration/lib/std/ml/simple_math_integration_spec.spl`
 3. ✅ `test/lib/std/unit/ml/torch/autograd_spec.spl`
 4. ✅ `test/lib/std/unit/ml/torch/linalg_spec.spl`
 5. ✅ `test/lib/std/unit/ml/torch/recurrent_spec.spl`

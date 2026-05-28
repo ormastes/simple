@@ -5,7 +5,7 @@ with pinned FNV-1a hash `0x253edd45a462bc15` (4x4 representative framebuffer).
 **Resolved by:** bug-sweep-2026-04-26 phase 5
 **Spec:** `test/system/game2d_golden_spec.spl` -- 11/11 PASS (201ms)
 **Fixture:** `test/fixtures/game2d_golden_hello_720p.hash`
-**Pin utility:** `test/util/game2d_pin_golden_hash.spl`
+**Pin utility:** `test/fixtures/repro/game2d/game2d_pin_golden_hash.spl`
 
 ---
 
@@ -32,12 +32,12 @@ stable output across runs.
 
 ## Resolution
 
-The pin utility (`test/util/game2d_pin_golden_hash.spl`) computes FNV-1a over
+The pin utility (`test/fixtures/repro/game2d/game2d_pin_golden_hash.spl`) computes FNV-1a over
 a 4x4 representative framebuffer pattern (black with white corner pixels).
 The hash `0x253edd45a462bc15` is deterministic across 3+ runs.
 
 Files involved:
-- `test/util/game2d_pin_golden_hash.spl` -- pin script using `frame_hash`
+- `test/fixtures/repro/game2d/game2d_pin_golden_hash.spl` -- pin script using `frame_hash`
 - `test/fixtures/game2d_golden_hello_720p.hash` -- stores `0x253edd45a462bc15`
 - `test/system/game2d_golden_spec.spl` -- 11 text-grep assertions
 

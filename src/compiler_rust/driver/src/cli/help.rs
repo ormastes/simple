@@ -275,7 +275,7 @@ Output:\n\
   --watch                 Watch and auto-rerun on changes\n\
   --screenshots           Capture GUI screenshots for tagged tests\n\
   --refresh-screenshots   Force recapture of GUI screenshots\n\
-  --screenshot-output <dir>  Screenshot output directory (default: doc/spec/image)\n\
+  --screenshot-output <dir>  Screenshot output directory (default: doc/06_spec/image)\n\
 \n\
 Doctests:\n\
   --doctest, --sdoctest   Run all doctest modes\n\
@@ -327,7 +327,7 @@ mod tests {
         assert!(help.contains("--sdoctest"));
         assert!(help.contains("--list-runs"));
         assert!(help.contains("--screenshots"));
-        assert!(help.contains("doc/spec/image"));
+        assert!(help.contains("doc/06_spec/image"));
         assert!(help.contains("simple test [path] [options]"));
     }
 }

@@ -29,15 +29,15 @@ performance, stability, and primitive API hygiene.
 ## Remaining Work
 
 - Fix primitive API lint regressions:
-  - `test/code_quality/primitive_api_lint_spec.spl` currently fails because the
+  - `test/system/code_quality/primitive_api_lint_spec.spl` currently fails because the
     text-scanner pure-math exemption is too broad.
   - `test/integration/app/primitive_api_lint_spec.spl` currently fails because
     `pub fn bad(x: i64) -> i64` is incorrectly exempted.
   - `src/compiler/90.tools/lint/main_part1.spl` still sets
     `levels["primitive_api"] = "warn"` while the spec expects `deny`.
 - Re-run primitive API lint gates after the scanner fix:
-  - `test/code_quality/primitive_api_lint_spec.spl`
-  - `test/code_quality/primitive_api_canary_spec.spl`
+  - `test/system/code_quality/primitive_api_lint_spec.spl`
+  - `test/system/code_quality/primitive_api_canary_spec.spl`
   - `test/integration/app/primitive_api_lint_spec.spl`
 - Run a final targeted production-readiness sweep after lint recovery:
   - IPC unit and perf gates.

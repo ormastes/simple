@@ -486,10 +486,10 @@ Runs the bootstrap compiler with `--deny-all` against code-quality canary specs:
 
 ```bash
 src/compiler_rust/target/bootstrap/simple lint \
-  test/code_quality/allow_suppressions_spec.spl \
-  test/code_quality/bare_bool_lint_spec.spl \
-  test/code_quality/primitive_api_lint_spec.spl \
-  test/code_quality/warning_allow_root_cause_cleanup_spec.spl \
+  test/system/code_quality/allow_suppressions_spec.spl \
+  test/system/code_quality/bare_bool_lint_spec.spl \
+  test/system/code_quality/primitive_api_lint_spec.spl \
+  test/system/code_quality/warning_allow_root_cause_cleanup_spec.spl \
   --deny-all
 ```
 
@@ -498,7 +498,7 @@ lint-wrapper segfault tracked in repo bug docs.
 
 ### Regression Canary
 
-`test/code_quality/warning_allow_root_cause_cleanup_spec.spl` guards:
+`test/system/code_quality/warning_allow_root_cause_cleanup_spec.spl` guards:
 - Rust workflow targets `src/compiler_rust` (not removed legacy `rust/` tree)
 - Simple strict workflow exists and uses `--deny-all`
 - Primitive-sort runtime defines NEON threshold constants

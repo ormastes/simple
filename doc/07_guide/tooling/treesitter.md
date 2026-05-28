@@ -221,6 +221,6 @@ Supported constructs: val/var declarations, fn/lambdas, generics (`<>`), AOP key
 ## Source Code
 
 - **Grammar/API**: `src/lib/std/src/parser/treesitter/`
-- **Tests**: `test/lib/std/unit/parser/treesitter/grammar_simple_spec.spl`
+- **Tests**: `test/unit/lib/std/parser/treesitter/grammar_simple_spec.spl`
 - **FFI spec**: `src/app/ffi_gen/specs/treesitter.spl`
 - **Verification**: `scripts/verify_treesitter_grammar.sh`

@@ -1,7 +1,7 @@
 # Type System Features - Design TODOs
 
 **Status:** Design Required
-**Related:** `doc/06_spec/traits.md`, `doc/06_spec/types.md`, `doc/06_spec/data_structures.md`
+**Related:** `doc/06_spec/feature/language/traits_spec.md`, `doc/06_spec/types.md`, `doc/06_spec/feature/language/data_structures_spec.md`
 
 ---
 
@@ -459,9 +459,9 @@ bitfield Color(u32):
 
 ## Related Documentation
 
-- `doc/06_spec/traits.md` - Trait specification
+- `doc/06_spec/feature/language/traits_spec.md` - Trait specification
 - `doc/06_spec/types.md` - Type system specification
-- `doc/06_spec/data_structures.md` - Struct/class/enum specification
+- `doc/06_spec/feature/language/data_structures_spec.md` - Struct/class/enum specification
 - `doc/features/feature.md` - Feature overview
 - `doc/FEATURE_STATUS.md` - Implementation status
 

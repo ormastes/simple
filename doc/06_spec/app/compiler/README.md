@@ -16,7 +16,7 @@ These specs have been completely migrated to executable test files. The original
 
 | Original File | _spec.spl File | Status | Examples |
 |--------------|----------------|--------|----------|
-| [syntax.md](syntax.md) | [syntax_spec.spl](../../tests/specs/syntax_spec.spl) | ⚠️ Migrated | 21 |
+| [syntax_spec.md](../../feature/usage/syntax_spec.md) | [syntax_spec.spl](../../../test/feature/usage/syntax_spec.spl) | ⚠️ Migrated | 21 |
 | [types.md](types.md) | [types_spec.spl](../../tests/specs/types_spec.spl) | ⚠️ Migrated | 17 |
 | [type_inference.md](type_inference.md) | [type_inference_spec.spl](../../tests/specs/type_inference_spec.spl) | ⚠️ Migrated | 24 |
 | [async_default.md](async_default.md) | [async_default_spec.spl](../../tests/specs/async_default_spec.spl) | ⚠️ Migrated | 37 |
@@ -65,7 +65,7 @@ These specs remain as architectural reference documentation. Test cases have bee
 
 | Spec | Status | Feature IDs | Description |
 |------|--------|-------------|-------------|
-| [Syntax](syntax.md) | ✅ | #10-19 | Execution modes, lexical structure, operators |
+| [Syntax](../../feature/usage/syntax_spec.md) | ✅ | #10-19 | Execution modes, lexical structure, operators |
 | [Types](types.md) | ✅ | #20-29 | Type system, mutability, unit types |
 | [Type Inference](type_inference.md) | ✅ | #13 | Hindley-Milner type inference, unification |
 | [Units](units.md) | 🔨 | #30-34 | Semantic unit types |

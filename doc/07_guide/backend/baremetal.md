@@ -39,7 +39,7 @@ For remote baremetal specifically, keep these lanes separate:
 - QEMU RV32 raw injected execution is covered by
   [qemu_rv32_raw_injected_regression_spec.md](doc/06_spec/qemu_rv32_raw_injected_regression_spec.md)
 - low-level remote runtime checks are covered by
-  [remote_baremetal_runtime_spec.md](doc/06_spec/remote_baremetal_runtime_spec.md)
+  [remote_baremetal_runtime_spec.md](doc/06_spec/feature/app/remote_baremetal/remote_baremetal_runtime_spec.md)
 
 ---
 

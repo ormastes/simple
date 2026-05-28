@@ -1,1 +1,0 @@
-../skills/sp_dev.md

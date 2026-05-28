@@ -27,7 +27,7 @@ Comprehensive tests for Simple's syntax, including literals, string interpolatio
 **Topics:** syntax, type-system
 **Symbols:** Token, Operator, Parser, Lexer
 **Module:** simple_parser
-**Migrated From:** doc/06_spec/syntax.md
+**Migrated From:** doc/06_spec/feature/usage/syntax_spec.md
 
 ## Overview
 

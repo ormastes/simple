@@ -15,8 +15,8 @@ Benchmarks are used to:
 | File | Description | Usage |
 |------|-------------|-------|
 | `compiler_runtime.spl` | Core benchmark framework and standard benchmarks (fibonacci, array operations, string concat, memory allocation) | Import and use BenchmarkRunner API |
-| `pure_dl_perf.spl` | Deep learning performance comparison (Pure Simple vs PyTorch FFI) | Run directly: `bin/simple test/benchmarks/pure_dl_perf.spl` |
-| `run_duplicate_check.spl` | Duplicate detection performance benchmark | `bin/simple test/benchmarks/run_duplicate_check.spl [path] [options]` |
+| `pure_dl_perf.spl` | Deep learning performance comparison (Pure Simple vs PyTorch FFI) | Run directly: `bin/simple test/perf/pure_dl_perf.spl` |
+| `run_duplicate_check.spl` | Duplicate detection performance benchmark | `bin/simple test/perf/run_duplicate_check.spl [path] [options]` |
 | `native_layout_performance_spec.spl` | Native code layout performance tests | Run with test runner |
 
 ## Quick Start
@@ -25,13 +25,13 @@ Benchmarks are used to:
 
 ```bash
 # Run compiler/runtime benchmarks
-bin/simple test/benchmarks/compiler_runtime.spl
+bin/simple test/perf/compiler_runtime.spl
 
 # Run DL performance benchmarks
-bin/simple test/benchmarks/pure_dl_perf.spl
+bin/simple test/perf/pure_dl_perf.spl
 
 # Run duplicate detection benchmarks
-bin/simple test/benchmarks/run_duplicate_check.spl src/ --iterations 5
+bin/simple test/perf/run_duplicate_check.spl src/ --iterations 5
 ```
 
 ### Using the Benchmark Framework
@@ -159,12 +159,12 @@ Benchmark: fibonacci_30
 ### Comparing Results
 ```bash
 # Save baseline
-bin/simple test/benchmarks/run_duplicate_check.spl src/ --save baseline.txt
+bin/simple test/perf/run_duplicate_check.spl src/ --save baseline.txt
 
 # Make changes...
 
 # Compare with baseline
-bin/simple test/benchmarks/run_duplicate_check.spl src/ --compare baseline.txt
+bin/simple test/perf/run_duplicate_check.spl src/ --compare baseline.txt
 ```
 
 ## Related Tools

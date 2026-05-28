@@ -83,6 +83,11 @@ describe "<Feature Name>":
 - Test descriptions start with "should" and describe behavior, not implementation
 - No test depends on external state or other tests
 - Error paths use `Result<T, E>` pattern, not exceptions
+- UI-facing specs include visible-state capture evidence when practical:
+  - TUI specs capture text or ANSI output under `build/test-artifacts/<spec-relative-path>/`.
+  - GUI specs capture screenshots/goldens/diffs under `doc/06_spec/image/<spec-relative-path>/`.
+  - Evidence paths appear in `**Screenshots:**` or `**TUI Captures:**` metadata so generated `doc/06_spec/...` docs embed them.
+  - Raster evidence (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.ppm`) is tracked by Git LFS.
 - Short grammar features must have runtime-specific coverage:
   - Interpreter specs may cover pipe-forward, composition, placeholder lambdas, method references, optional access, and compact DSL forms.
   - Native specs must cover only compact forms intended to work in native mode.
@@ -103,6 +108,20 @@ Create a traceability matrix linking requirements to tests:
 
 Any REQ with 0 test cases is a **FAIL** — must be addressed.
 
+### Layout and Traceability
+
+- Executable tests live under `test/`; generated/manual SPipe docs live under
+  `doc/06_spec/`.
+- Mirror the executable path after stripping `test/`, for example
+  `test/feature/usage/math_blocks_spec.spl` ->
+  `doc/06_spec/feature/usage/math_blocks_spec.md`.
+- Keep requirement, research, design, architecture, plan, generated spec,
+  implementation, guide, and executable test artifacts on the same feature slug.
+- Include both the generated spec/manual path and executable `test/...` path in
+  the traceability matrix.
+- For TUI/GUI specs, include the capture artifact path and generated embedded
+  evidence path in the traceability matrix or test plan.
+
 ## Phase 4: Test Plan Document
 
 Create test plan with:
@@ -118,7 +137,7 @@ Output: `doc/03_plan/sys_test/<feature>.md`
 
 | Artifact | Path |
 |----------|------|
-| System test specs | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` |
+| System test specs | `doc/06_spec/<mirrored-test-path>/<feature>_spec.spl` |
 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
 | Traceability matrix | Included in test plan |
 

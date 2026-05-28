@@ -298,6 +298,19 @@ long_mode_entry:
     movq $boot64_idt_msg, %rsi
     call boot64_serial_puts
 
+    /* Run Simple module-global initializers before the entry point.
+     * Freestanding builds have no C main wrapper to call this, so do it here.
+     * Weak: skip if the linker didn't provide an aggregator. Preserve the
+     * multiboot info pointer (ESI) in RBX (callee-saved) across the call. */
+    .weak __simple_call_module_inits
+    movl %esi, %ebx
+    leaq __simple_call_module_inits(%rip), %rax
+    testq %rax, %rax
+    jz .skip_module_inits
+    call __simple_call_module_inits
+.skip_module_inits:
+    movl %ebx, %esi
+
     /* Pass multiboot info pointer as first arg (rdi) -- zero-extend ESI */
     movl %esi, %edi
 

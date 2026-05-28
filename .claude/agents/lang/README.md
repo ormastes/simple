@@ -1,6 +1,6 @@
 # Language-Specific Coding Agents
 
-These agents are dispatched by the SStack orchestrator based on the programming
+These agents are dispatched by the SPipe orchestrator based on the programming
 language of the task. Each agent knows its language ecosystem, LSP server, build
 tools, and coding conventions.
 
@@ -39,7 +39,7 @@ sequentially or delegate to a general-purpose code agent.
 
 ## Usage
 
-From the SStack orchestrator or any parent agent:
+From the SPipe orchestrator or any parent agent:
 ```
 Read .claude/agents/lang/simple.md and use its rules to implement <feature>
 ```

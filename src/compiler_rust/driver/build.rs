@@ -1,7 +1,7 @@
 //! Build script that generates Rust test wrappers for Simple language tests.
 //!
 //! This script:
-//! 1. Discovers all .spl test files in `test/lib/std/` and `test/`
+//! 1. Discovers all .spl test files in `test/unit/lib/std/` and `test/`
 //! 2. Generates a Rust test function for each test file
 //! 3. Each test function calls `run_test_file()` and asserts success
 //!
@@ -43,7 +43,7 @@ fn main() {
     }
 
     // Generate tests for stdlib
-    let stdlib_test_root = project_root.join("test/lib/std");
+    let stdlib_test_root = project_root.join("test/unit/lib/std");
     let stdlib_dest = Path::new(&out_dir).join("simple_stdlib_tests.rs");
     generate_test_file(&stdlib_test_root, &stdlib_dest, "simple_stdlib");
 

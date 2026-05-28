@@ -15,7 +15,7 @@ Audit of the active short-grammar migration and compatibility work:
 
 Current focused verification passed:
 
-- `test/lib/std/features/placeholder_lambda_spec.spl`: 47 passed, 0 failed
+- `test/feature/language/placeholder_lambda_spec.spl`: 47 passed, 0 failed
 - `test/unit/compiler_core/parser/short_grammar_interpreter_spec.spl`: 19 passed, 0 failed
 - `test/unit/compiler_core/parser/short_grammar_native_spec.spl`: 1 passed, 0 failed
 - `test/unit/app/fix/short_grammar_fix_spec.spl`: 64 passed, 0 failed

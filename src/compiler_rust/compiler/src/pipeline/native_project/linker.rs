@@ -108,11 +108,18 @@ impl NativeProjectBuilder {
         if !output.status.success() {
             return Ok(Vec::new());
         }
+        // The leading-underscore prefix is a Mach-O convention. Only strip it
+        // when the *output* objects are Mach-O — for cross-compiled ELF objects
+        // (e.g. freestanding `x86_64-unknown-none` kernels) the symbols have no
+        // prefix, and stripping would turn `__module_init_X` into
+        // `_module_init_X`, breaking module-init discovery.
+        let strip_macho_underscore = cfg!(target_os = "macos")
+            && effective_target().os == simple_common::target::TargetOS::MacOS;
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| line.split_whitespace().last())
             .map(|raw_name| {
-                if cfg!(target_os = "macos") {
+                if strip_macho_underscore {
                     raw_name.strip_prefix('_').unwrap_or(raw_name).to_string()
                 } else {
                     raw_name.to_string()

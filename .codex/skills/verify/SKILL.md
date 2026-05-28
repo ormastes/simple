@@ -36,7 +36,12 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
 - Every `it` block has real assertions (not `pass_todo`, not `expect(true).to_equal(true)`)
 - Edge cases and error paths tested
 - Every REQ-NNN has at least one test
-- Every required SPipe spec exists at `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
+- Every required SPipe generated/manual spec exists under `doc/06_spec/` at the
+  path mirrored from the executable `test/...` spec
+- UI-facing specs include visible-state evidence when practical: TUI text/ANSI
+  captures under `build/test-artifacts/<spec-relative-path>/`, GUI screenshots
+  or goldens under `doc/06_spec/image/<spec-relative-path>/`, and embedded
+  `**Screenshots:**` / `**TUI Captures:**` entries in generated docs
 - Every BDD scenario has an executable or intentionally skipped SPipe `it` block with a concrete reason
 - SPipe files are current with the final requirements/design; stale specs are a FAIL, not a release task
 - Built-in matchers only: `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
@@ -64,7 +69,11 @@ Scan for stub patterns — any match is a **FAIL**:
 ### Phase 4: Requirements Tracing
 
 - Every REQ-NNN in `doc/02_requirements/feature/<feature>.md` traced to source code
-- Every BDD scenario in `doc/06_spec/` has matching `it` block in test files
+- Every BDD scenario in `doc/06_spec/` has a matching `it` block in the mirrored
+  executable `test/.../*_spec.spl` file
+- Requirement, research, architecture/design, generated spec, plan,
+  implementation, guide, and executable test links use the same feature slug or
+  an explicit documented alias
 - No orphan requirements (REQ without implementation)
 - No orphan tests (tests without corresponding REQ)
 
@@ -88,6 +97,7 @@ Scan for stub patterns — any match is a **FAIL**:
 
 - `doc/04_architecture/` updated for new modules
 - `doc/05_design/` updated for new features
+- `doc/06_spec/` generated/manual docs follow the mirrored `test/` layout
 - Cross-references between docs intact
 - CHANGELOG updated for user-facing changes
 

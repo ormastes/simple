@@ -8,7 +8,7 @@ Fixed deprecated `import` keyword usage in 3 test files. All files now use the c
 
 ## Files Fixed
 
-### 1. `test/lib/std/features/placeholder_lambda_spec.spl`
+### 1. `test/feature/language/placeholder_lambda_spec.spl`
 
 **Line 12:**
 ```diff
@@ -20,7 +20,7 @@ Fixed deprecated `import` keyword usage in 3 test files. All files now use the c
 
 ---
 
-### 2. `test/lib/std/type_checker/type_inference_v2_spec.spl`
+### 2. `test/unit/lib/std/type_checker/type_inference_v2_spec.spl`
 
 **Lines 50-51:**
 ```diff
@@ -130,8 +130,8 @@ Comprehensive import documentation created:
 All three files tested after fixes:
 ```bash
 bin/simple_runtime test \
-  test/lib/std/features/placeholder_lambda_spec.spl \
-  test/lib/std/type_checker/type_inference_v2_spec.spl \
+  test/feature/language/placeholder_lambda_spec.spl \
+  test/unit/lib/std/type_checker/type_inference_v2_spec.spl \
   test/lib/std/unit/compiler/loader/jit_context_spec.spl
 ```
 

@@ -5,7 +5,7 @@
 # - Index Module: Category inference, coverage calculation, index page generation
 
 use app.io.mod (file_write)
-use app.spipe_docgen.common.{SspecDoc, FeatureMetadata, FeatureEntry, DocStats, ValidationResult, native_fs_write_string, spipe_dbg}
+use app.spipe_docgen.common.{SspecDoc, FeatureMetadata, FeatureEntry, DocStats, ValidationResult, native_fs_write_string, native_fs_read_string, native_fs_exists, native_fs_create_dir, spipe_dbg}
 use app.spipe_docgen.parser.{extract_test_structure, extract_quoted_name}
 
 # ============================================================================
@@ -21,6 +21,70 @@ fn get_file_stem(path: text) -> text:
         name_parts[0]
     else:
         filename
+
+fn strip_markdown_ticks(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.starts_with("`") and trimmed.ends_with("`") and trimmed.len() >= 2:
+        trimmed[1:-1]
+    else:
+        trimmed
+
+fn output_file_stem(doc: SspecDoc) -> text:
+    if doc.metadata.source_doc != "":
+        val source = strip_markdown_ticks(doc.metadata.source_doc)
+        val stem = get_file_stem(source)
+        if stem != "":
+            return stem
+    get_file_stem(doc.file_path)
+
+fn normalize_spec_relative_path(path: text) -> text:
+    var p = path
+    if p.contains("/test/"):
+        val parts = p.split("/test/")
+        p = parts[-1]
+    elif p.contains("/tests/"):
+        val parts = p.split("/tests/")
+        p = parts[-1]
+    elif p.starts_with("test/"):
+        p = p[5:]
+    elif p.starts_with("tests/"):
+        p = p[6:]
+    elif p.starts_with("src/"):
+        p = p[4:]
+    p
+
+fn path_dirname(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1:
+        return ""
+    var dirs: [text] = []
+    var i = 0
+    while i + 1 < parts.len():
+        if parts[i] != "":
+            dirs.push(parts[i])
+        i = i + 1
+    dirs.join("/")
+
+fn output_relative_dir(doc: SspecDoc) -> text:
+    path_dirname(normalize_spec_relative_path(doc.file_path))
+
+fn output_relative_path(doc: SspecDoc) -> text:
+    val rel_dir = output_relative_dir(doc)
+    val file_name = output_file_stem(doc) + ".md"
+    if rel_dir == "":
+        file_name
+    else:
+        rel_dir + "/" + file_name
+
+fn output_path_for_doc(doc: SspecDoc, output_dir: text) -> text:
+    output_dir + "/" + output_relative_path(doc)
+
+fn relative_path_from_output(output_dir: text, path: text) -> text:
+    val prefix = output_dir + "/"
+    if path.starts_with(prefix):
+        path[prefix.len():]
+    else:
+        path
 
 fn humanize_filename(stem: text) -> text:
     # Convert file_name_spec -> "File Name Specification"
@@ -131,32 +195,166 @@ fn build_metadata_line(metadata: FeatureMetadata) -> text:
         result = result + "\n**Research:** {metadata.research}"
     result
 
+fn escape_table_cell(value: text) -> text:
+    value.replace("|", "\\|").replace("\n", " ")
+
+fn push_metadata_row(parts: [text], field: text, value: text) -> [text]:
+    var result = parts
+    if value != "":
+        result.push("| {escape_table_cell(field)} | {escape_table_cell(value)} |\n")
+    result
+
+fn append_at_a_glance_section(md_parts: [text], doc: SspecDoc, metadata: FeatureMetadata) -> [text]:
+    var parts = md_parts
+    parts.push("## At a Glance\n\n")
+    parts.push("| Field | Value |\n")
+    parts.push("|-------|-------|\n")
+    parts = push_metadata_row(parts, "Feature IDs", metadata.id)
+    parts = push_metadata_row(parts, "Category", metadata.category)
+    parts = push_metadata_row(parts, "Difficulty", metadata.difficulty)
+    parts = push_metadata_row(parts, "Status", metadata.status)
+    parts = push_metadata_row(parts, "Type", metadata.doc_type)
+    parts = push_metadata_row(parts, "Reference", metadata.source_doc)
+    parts = push_metadata_row(parts, "Requirements", metadata.requirement)
+    parts = push_metadata_row(parts, "Plan", metadata.plan)
+    parts = push_metadata_row(parts, "Design", metadata.design)
+    parts = push_metadata_row(parts, "Research", metadata.research)
+    if metadata.related.len() > 0:
+        parts = push_metadata_row(parts, "Related", metadata.related.join(", "))
+    if metadata.dependencies.len() > 0:
+        parts = push_metadata_row(parts, "Dependencies", metadata.dependencies.join(", "))
+    parts = push_metadata_row(parts, "Source", "`{doc.file_path}`")
+    parts = push_metadata_row(parts, "Updated", get_current_date())
+    parts = push_metadata_row(parts, "Generator", "`simple spipe-docgen` (Simple)")
+    parts.push("\n")
+    parts
+
+fn evidence_item_kind(title: text, item: text) -> text:
+    val lower = item.lower()
+    if title == "Artifacts":
+        if lower.ends_with(".json"):
+            "JSON artifact"
+        elif lower.ends_with(".txt"):
+            "Text artifact"
+        else:
+            "Artifact"
+    elif title == "Screenshots":
+        "Screenshot"
+    elif title == "TUI Captures":
+        "TUI capture"
+    elif title == "Logs":
+        "Log file"
+    else:
+        "Evidence"
+
+fn evidence_item_name(item: text) -> text:
+    val parts = item.split("/")
+    if parts.len() == 0:
+        item
+    else:
+        parts[-1]
+
+fn is_placeholder_evidence(item: text) -> bool:
+    val lower = item.trim().lower()
+    lower == "" or lower == "n/a" or lower == "na" or lower == "none"
+
+fn evidence_item_count(items: [text]) -> i64:
+    var count = 0
+    for item in items:
+        if not is_placeholder_evidence(item):
+            count = count + 1
+    count
+
+fn is_image_evidence_path(item: text) -> bool:
+    val lower = item.lower()
+    lower.ends_with(".png") or lower.ends_with(".jpg") or lower.ends_with(".jpeg") or lower.ends_with(".gif") or lower.ends_with(".webp") or lower.ends_with(".svg")
+
+fn is_text_capture_path(item: text) -> bool:
+    val lower = item.lower()
+    lower.ends_with(".txt") or lower.ends_with(".ansi") or lower.ends_with(".log")
+
+fn escape_markdown_alt(value: text) -> text:
+    value.replace("[", "(").replace("]", ")").replace("\n", " ")
+
+fn append_evidence_table_group(md_parts: [text], title: text, items: [text]) -> [text]:
+    var parts = md_parts
+    if items.len() == 0:
+        return parts
+    parts.push("### {title}\n\n")
+    parts.push("| Item | Kind | Path |\n")
+    parts.push("|------|------|------|\n")
+    for item in items:
+        if is_placeholder_evidence(item):
+            continue
+        parts.push("| `{escape_table_cell(evidence_item_name(item))}` | {evidence_item_kind(title, item)} | `{escape_table_cell(item)}` |\n")
+    parts.push("\n")
+    parts
+
+fn append_embedded_media_group(md_parts: [text], title: text, items: [text]) -> [text]:
+    var parts = md_parts
+    var wrote_heading = false
+    for item in items:
+        if is_placeholder_evidence(item):
+            continue
+        if not is_image_evidence_path(item):
+            continue
+        if not wrote_heading:
+            parts.push("#### Embedded {title}\n\n")
+            wrote_heading = true
+        val name = evidence_item_name(item)
+        parts.push("![{escape_markdown_alt(title + \": \" + name)}]({item})\n\n")
+    parts
+
+fn append_tui_text_capture_group(md_parts: [text], items: [text]) -> [text]:
+    var parts = md_parts
+    var wrote_heading = false
+    for item in items:
+        if is_placeholder_evidence(item) or is_image_evidence_path(item) or not is_text_capture_path(item):
+            continue
+        if not native_fs_exists(item):
+            continue
+        if not wrote_heading:
+            parts.push("#### Embedded TUI Text Captures\n\n")
+            wrote_heading = true
+        val content = native_fs_read_string(item)
+        parts.push("<details>\n")
+        parts.push("<summary>{escape_markdown_alt(evidence_item_name(item))}</summary>\n\n")
+        parts.push("```text\n")
+        parts.push(content)
+        if not content.ends_with("\n"):
+            parts.push("\n")
+        parts.push("```\n\n")
+        parts.push("</details>\n\n")
+    parts
+
 fn append_evidence_section(md_parts: [text], metadata: FeatureMetadata) -> [text]:
-    if metadata.artifacts.len() == 0 and metadata.screenshots.len() == 0 and metadata.tui_captures.len() == 0 and metadata.logs.len() == 0:
+    val artifact_count = evidence_item_count(metadata.artifacts)
+    val screenshot_count = evidence_item_count(metadata.screenshots)
+    val tui_capture_count = evidence_item_count(metadata.tui_captures)
+    val log_count = evidence_item_count(metadata.logs)
+    if artifact_count == 0 and screenshot_count == 0 and tui_capture_count == 0 and log_count == 0:
         return md_parts
 
     var parts = md_parts
     parts.push("## Evidence\n\n")
-    if metadata.artifacts.len() > 0:
-        parts.push("### Artifacts\n\n")
-        for item in metadata.artifacts:
-            parts.push("- {item}\n")
-        parts.push("\n")
-    if metadata.screenshots.len() > 0:
-        parts.push("### Screenshots\n\n")
-        for item in metadata.screenshots:
-            parts.push("- {item}\n")
-        parts.push("\n")
-    if metadata.tui_captures.len() > 0:
-        parts.push("### TUI Captures\n\n")
-        for item in metadata.tui_captures:
-            parts.push("- {item}\n")
-        parts.push("\n")
-    if metadata.logs.len() > 0:
-        parts.push("### Logs\n\n")
-        for item in metadata.logs:
-            parts.push("- {item}\n")
-        parts.push("\n")
+    parts.push("| Category | Count |\n")
+    parts.push("|----------|------:|\n")
+    if artifact_count > 0:
+        parts.push("| Artifacts | {artifact_count} |\n")
+    if screenshot_count > 0:
+        parts.push("| Screenshots | {screenshot_count} |\n")
+    if tui_capture_count > 0:
+        parts.push("| TUI Captures | {tui_capture_count} |\n")
+    if log_count > 0:
+        parts.push("| Logs | {log_count} |\n")
+    parts.push("\n")
+    parts = append_evidence_table_group(parts, "Artifacts", metadata.artifacts)
+    parts = append_evidence_table_group(parts, "Screenshots", metadata.screenshots)
+    parts = append_embedded_media_group(parts, "Screenshots", metadata.screenshots)
+    parts = append_evidence_table_group(parts, "TUI Captures", metadata.tui_captures)
+    parts = append_embedded_media_group(parts, "TUI Captures", metadata.tui_captures)
+    parts = append_tui_text_capture_group(parts, metadata.tui_captures)
+    parts = append_evidence_table_group(parts, "Logs", metadata.logs)
     parts
 
 fn extract_content_section(block_content: text) -> text:
@@ -201,6 +399,10 @@ fn extract_content_section(block_content: text) -> text:
             is_meta = true
         elif trimmed.starts_with("**Status"):
             is_meta = true
+        elif trimmed.starts_with("**Source"):
+            is_meta = true
+        elif trimmed.starts_with("**Type"):
+            is_meta = true
         elif trimmed.starts_with("**Requirements"):
             is_meta = true
         elif trimmed.starts_with("**Plan"):
@@ -208,6 +410,10 @@ fn extract_content_section(block_content: text) -> text:
         elif trimmed.starts_with("**Design"):
             is_meta = true
         elif trimmed.starts_with("**Research"):
+            is_meta = true
+        elif trimmed.starts_with("**Related"):
+            is_meta = true
+        elif trimmed.starts_with("**Dependencies"):
             is_meta = true
         elif trimmed.starts_with("**Artifacts"):
             is_meta = true
@@ -236,8 +442,79 @@ fn extract_content_section(block_content: text) -> text:
 
     parts.join("").trim()
 
+fn extract_summary_from_markdown(content: text) -> text:
+    var paragraph: [text] = []
+    var in_overview = false
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("## "):
+            in_overview = trimmed == "## Overview" or trimmed == "## Description"
+            if paragraph.len() > 0:
+                break
+            continue
+        if trimmed.starts_with("#") or trimmed.starts_with("```") or trimmed.starts_with("|"):
+            if paragraph.len() > 0:
+                break
+            continue
+        if trimmed.starts_with("**") and trimmed.contains(":**"):
+            if paragraph.len() > 0:
+                break
+            continue
+        if trimmed == "":
+            if paragraph.len() > 0:
+                break
+            continue
+        if (in_overview or paragraph.len() == 0) and not trimmed.starts_with("- ") and not trimmed.starts_with("* "):
+            paragraph.push(trimmed)
+    paragraph.join(" ")
+
+fn append_extracted_examples_section(md_parts: [text], content: text) -> [text]:
+    val lines = content.split("\n")
+    var parts = md_parts
+    var examples: [text] = []
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if not trimmed.starts_with("## Test:"):
+            i = i + 1
+            continue
+        val title = trimmed[8:].trim()
+        i = i + 1
+        while i < lines.len() and lines[i].trim() == "":
+            i = i + 1
+        var description = ""
+        if i < lines.len() and lines[i].trim() == "\"\"\"":
+            i = i + 1
+            var desc_lines: [text] = []
+            while i < lines.len() and lines[i].trim() != "\"\"\"":
+                desc_lines.push(lines[i])
+                i = i + 1
+            description = desc_lines.join("\n").trim()
+            if i < lines.len() and lines[i].trim() == "\"\"\"":
+                i = i + 1
+        while i < lines.len() and lines[i].trim() == "":
+            i = i + 1
+        var code_lines: [text] = []
+        while i < lines.len() and not lines[i].trim().starts_with("## Test:"):
+            code_lines.push(lines[i])
+            i = i + 1
+        var rendered = "### {title}\n\n"
+        if description != "":
+            rendered = rendered + description + "\n\n"
+        val code = code_lines.join("\n").trim()
+        if code != "":
+            rendered = rendered + "```simple\n" + code + "\n```\n"
+        examples.push(rendered)
+    if examples.len() == 0:
+        return parts
+    parts.push("## Example Details\n\n")
+    for example in examples:
+        parts.push(example + "\n")
+    parts
+
 fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
-    val file_name = get_file_stem(doc.file_path)
+    val file_name = output_file_stem(doc)
     val has_docstring = doc.doc_blocks.len() > 0
 
     # Title: from docstring, or auto-generate from filename
@@ -260,10 +537,14 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
             category: infer_category_from_path(doc.file_path),
             difficulty: meta.difficulty,
             status: meta.status,
+            doc_type: meta.doc_type,
+            source_doc: meta.source_doc,
             requirement: meta.requirement,
             plan: meta.plan,
             design: meta.design,
             research: meta.research,
+            related: meta.related,
+            dependencies: meta.dependencies,
             artifacts: meta.artifacts,
             screenshots: meta.screenshots,
             tui_captures: meta.tui_captures,
@@ -282,25 +563,28 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
             category: meta.category,
             difficulty: meta.difficulty,
             status: auto_status,
+            doc_type: meta.doc_type,
+            source_doc: meta.source_doc,
             requirement: meta.requirement,
             plan: meta.plan,
             design: meta.design,
             research: meta.research,
+            related: meta.related,
+            dependencies: meta.dependencies,
             artifacts: meta.artifacts,
             screenshots: meta.screenshots,
             tui_captures: meta.tui_captures,
             logs: meta.logs
         )
 
-    # Source reference
-    md_parts.push("*Source: `{doc.file_path}`*\n")
-    md_parts.push("*Last Updated: {get_current_date()}*\n\n")
+    if has_docstring:
+        val first_block = doc.doc_blocks[0]
+        val summary_source = extract_content_section(first_block.content)
+        val summary = extract_summary_from_markdown(summary_source)
+        if summary != "":
+            md_parts.push(summary + "\n\n")
 
-    val meta_line = build_metadata_line(meta)
-    if meta_line != "":
-        md_parts.push("{meta_line}\n\n")
-
-    md_parts.push("---\n\n")
+    md_parts = append_at_a_glance_section(md_parts, doc, meta)
 
     # Content from docstring OR auto-generated overview
     if has_docstring:
@@ -316,6 +600,7 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
             md_parts.push(overview + "\n\n")
 
     md_parts = append_evidence_section(md_parts, meta)
+    md_parts = append_extracted_examples_section(md_parts, doc.raw_content)
 
     # Test stats summary
     val counts = count_test_items(doc.raw_content)
@@ -324,28 +609,30 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
     val pending_tests = counts[2]
     val slow_tests = count_slow_items(doc.raw_content)
     if total_tests > 0 or skip_tests > 0 or pending_tests > 0:
-        md_parts.push("## Test Summary\n\n")
+        md_parts.push("## Scenario Summary\n\n")
         md_parts.push("| Metric | Count |\n")
-        md_parts.push("|--------|-------|\n")
-        md_parts.push("| Scenarios | {total_tests + skip_tests + pending_tests} |\n")
-        md_parts.push("| Slow Scenarios | {slow_tests} |\n")
-        md_parts.push("| Skipped Scenarios | {skip_tests} |\n")
-        if pending_tests > 0:
-            md_parts.push("| Pending Scenarios | {pending_tests} |\n")
+        md_parts.push("|--------|------:|\n")
+        md_parts.push("| Total scenarios | {total_tests + skip_tests + pending_tests} |\n")
+        md_parts.push("| Active scenarios | {total_tests} |\n")
+        md_parts.push("| Slow scenarios | {slow_tests} |\n")
+        md_parts.push("| Skipped scenarios | {skip_tests} |\n")
+        md_parts.push("| Pending scenarios | {pending_tests} |\n")
         md_parts.push("\n")
 
-    val scenarios = extract_scenario_list(doc.raw_content)
-    if scenarios.len() > 0:
-        md_parts.push("## Scenarios\n\n")
-        for scenario in scenarios:
-            md_parts.push("{scenario}\n")
-        md_parts.push("\n")
-
-    # Detailed test structure section
+    # Render scenarios with their executable bodies so generated specs read as
+    # examples, not just a table of contents.
     val structure = extract_test_structure(doc.raw_content)
     if structure != "":
-        md_parts.push("## Test Structure\n\n")
+        md_parts.push("## Scenarios\n\n")
         md_parts.push(structure + "\n")
+        md_parts.push("\n")
+    else:
+        val scenarios = extract_scenario_list(doc.raw_content)
+        if scenarios.len() > 0:
+            md_parts.push("## Scenarios\n\n")
+            for scenario in scenarios:
+                md_parts.push("{scenario}\n")
+            md_parts.push("\n")
 
     # Related Documentation cross-reference section
     val related = build_related_docs_section(meta)
@@ -354,7 +641,10 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
 
     # Write to file
     val md = md_parts.join("")
-    val output_path = "{output_dir}/{file_name}.md"
+    val rel_dir = output_relative_dir(doc)
+    if rel_dir != "":
+        native_fs_create_dir(output_dir + "/" + rel_dir)
+    val output_path = output_path_for_doc(doc, output_dir)
     val ok = native_fs_write_string(output_path, md)
     if not ok:
         return Err("Failed to write {output_path}")

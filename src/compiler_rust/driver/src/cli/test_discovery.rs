@@ -36,7 +36,9 @@ pub fn discover_tests_with_skip(dir: &Path, level: TestLevel, include_skip_files
                 // Filter by test level based on directory name
                 let should_include = match level {
                     TestLevel::All => true,
-                    TestLevel::Unit => dir_name == "unit" || !["integration", "system"].contains(&dir_name),
+                    TestLevel::Unit => {
+                        dir_name == "unit" || dir_name == "shared" || !["integration", "system"].contains(&dir_name)
+                    }
                     TestLevel::Integration => dir_name == "integration",
                     TestLevel::System => dir_name == "system",
                 };

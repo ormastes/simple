@@ -180,7 +180,7 @@ pub struct TestOptions {
     pub capture_screenshots: bool,
     /// Force refresh all GUI screenshots (recapture even if exists)
     pub refresh_gui_images: bool,
-    /// Output directory for GUI screenshots (default: doc/spec/image)
+    /// Output directory for GUI screenshots (default: doc/06_spec/image)
     pub screenshot_output: Option<PathBuf>,
     /// List tests without running them
     pub list: bool,

@@ -823,7 +823,7 @@ lake build  # Should succeed with all theorems proven
 
 ## 11. References
 
-- `doc/06_spec/traits.md` - Trait system specification
+- `doc/06_spec/feature/language/traits_spec.md` - Trait system specification
 - `doc/import_export_and__init__.md` - Module system specification
 - `src/verification/type_inference_compile/src/Traits.lean` - Trait Lean model
 - `src/verification/type_inference_compile/src/Classes.lean` - Class Lean model

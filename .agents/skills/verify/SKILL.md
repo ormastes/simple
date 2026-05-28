@@ -23,6 +23,10 @@ not create, rewrite, or weaken SPipe after verification.
 - Edge cases and error paths tested
 - Every REQ-NNN has test coverage
 - Required SPipe specs exist under `doc/06_spec/app/<app_name>/feature/`
+- UI-facing specs include visible-state evidence when practical: TUI captures
+  under `build/test-artifacts/<spec-relative-path>/`, GUI screenshots/goldens
+  under `doc/06_spec/image/<spec-relative-path>/`, and embedded generated-doc
+  metadata via `**Screenshots:**` or `**TUI Captures:**`
 - Every BDD scenario has an executable or intentionally skipped SPipe `it` block with a concrete reason
 - Stale, missing, placeholder, or requirement-disconnected SPipe is a FAIL
 

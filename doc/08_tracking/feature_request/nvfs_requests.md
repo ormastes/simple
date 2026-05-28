@@ -738,7 +738,7 @@ append under this heading.
 
 - **Filed-on:** 2026-04-18
 - **Filed-by:** bdd-wave7-8 agent (session simple-db-nvfs-storage)
-- **Target:** test/features/
+- **Target:** test/fixtures/feature_requests/
 - **Priority:** P1
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
@@ -751,14 +751,14 @@ append under this heading.
   were written covering 5 scenarios each (golden path + edge cases). Step wire-up
   is a separate track; these files are spec-only.
 - **Acceptance-criteria:**
-  - [x] `test/features/nvfs/encryption.feature` — 5 scenarios (N6a-001/002/003)
-  - [x] `test/features/nvfs/raw_send.feature` — 5 scenarios (N6b)
-  - [x] `test/features/nvfs/scrub_repair.feature` — 5 scenarios (N4a/N4b)
-  - [x] `test/features/simple_db/hot_slack.feature` — 5 scenarios (FR-HOT-001)
-  - [x] `test/features/simple_db/tier_cache.feature` — 5 scenarios (M4)
-  - [x] `test/features/simple_db/vacuum.feature` — 5 scenarios (M5)
-  - [x] `test/features/os/vfs_cursor.feature` — 5 scenarios (FR-SIMPLEOS-M5-001)
-  - [x] `test/features/bench/clock_extern.feature` — 5 scenarios (rt_time_now_ns)
+  - [x] `test/fixtures/feature_requests/nvfs/encryption.feature` — 5 scenarios (N6a-001/002/003)
+  - [x] `test/fixtures/feature_requests/nvfs/raw_send.feature` — 5 scenarios (N6b)
+  - [x] `test/fixtures/feature_requests/nvfs/scrub_repair.feature` — 5 scenarios (N4a/N4b)
+  - [x] `test/fixtures/feature_requests/simple_db/hot_slack.feature` — 5 scenarios (FR-HOT-001)
+  - [x] `test/fixtures/feature_requests/simple_db/tier_cache.feature` — 5 scenarios (M4)
+  - [x] `test/fixtures/feature_requests/simple_db/vacuum.feature` — 5 scenarios (M5)
+  - [x] `test/fixtures/feature_requests/os/vfs_cursor.feature` — 5 scenarios (FR-SIMPLEOS-M5-001)
+  - [x] `test/fixtures/feature_requests/bench/clock_extern.feature` — 5 scenarios (rt_time_now_ns)
   - [x] Step vocabulary consistent with existing wave 0–6 feature files
   - [x] No .spl step implementations (spec-only; wire-up is a separate track)
 - **Related-upfront:** none

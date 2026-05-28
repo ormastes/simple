@@ -205,7 +205,7 @@ features:
     coverage: 95.0
   
   - id: async_await
-    spec: "doc/06_spec/concurrency.md#async-await"
+    spec: "doc/06_spec/feature/language/concurrency_spec.md#async-await"
     status: partial
     tests:
       - "tests/async_spec.rs"
@@ -236,8 +236,8 @@ Output:
 # Find untested features
 simple spec-coverage --missing
 Output:
-  - Async generators (spec: doc/06_spec/concurrency.md#async-gen)
-  - Capability inference (spec: doc/06_spec/memory.md#capabilities)
+  - Async generators (spec: doc/06_spec/feature/language/concurrency_spec.md#async-gen)
+  - Capability inference (spec: doc/06_spec/feature/language/memory_spec.md#capabilities)
   - SIMD operations (spec: doc/06_spec/gpu_simd/README.md#simd)
 
 # Generate coverage report

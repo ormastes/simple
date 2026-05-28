@@ -94,7 +94,7 @@ Local structural checks:
 
 ```sh
 sh scripts/check-live-kms-security-workflow.shs
-bin/simple test test/code_quality/live_kms_security_workflow_spec.spl --mode=interpreter
+bin/simple test test/system/code_quality/live_kms_security_workflow_spec.spl --mode=interpreter
 ```
 
 Live provider check:

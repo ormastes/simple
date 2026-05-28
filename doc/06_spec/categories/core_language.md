@@ -34,7 +34,7 @@
 - **Tests:** 0 test cases
 - **Feature IDs:** **Source:** modules.md
 
-### 4. [Simple Language Syntax Specification](../syntax.md)
+### 4. [Simple Language Syntax Specification](../feature/usage/syntax_spec.md)
 - **Status:** Stable
 - **Tests:** 21 test cases
 - **Feature IDs:** #10-19

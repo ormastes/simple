@@ -1,6 +1,6 @@
-# SStack Dashboard Integration
+# SPipe Dashboard Integration
 
-SStack emits JSONL events that the LLM Agent Dashboard (`JsonlWatcher` + `AgentDashboardStore`) consumes to visualize orchestrator activity in the room grid.
+SPipe emits JSONL events that the LLM Agent Dashboard (`JsonlWatcher` + `AgentDashboardStore`) consumes to visualize orchestrator activity in the room grid.
 
 ---
 
@@ -17,7 +17,7 @@ scripts/spipe-dashboard-bridge.shs &
 bin/simple llm-dashboard --dir .agent/events --gui --port 3001
 ```
 
-Open `http://localhost:3001` to see SStack agents in the room grid.
+Open `http://localhost:3001` to see SPipe agents in the room grid.
 
 ---
 
@@ -55,7 +55,7 @@ Emitted on state transitions (working, idle, sleeping, crashed).
 
 ### phase_start
 
-Emitted when the orchestrator enters a named SStack phase.
+Emitted when the orchestrator enters a named SPipe phase.
 
 ```json
 {"type":"phase_start","agent_id":"spipe-orchestrator","task":"implement actor timeout","phase":"5-implement","role":"Engineer","timestamp":"2026-04-05T03:01:00Z"}
@@ -122,9 +122,9 @@ Both write to the same JSONL file. Events are append-only and idempotent for the
 
 ---
 
-## Viewing SStack Agents in the Room Grid
+## Viewing SPipe Agents in the Room Grid
 
-The dashboard renders one card per unique `agent_id`. SStack uses:
+The dashboard renders one card per unique `agent_id`. SPipe uses:
 
 | agent_id | Description |
 |----------|-------------|
@@ -153,6 +153,6 @@ Edit `POLL_INTERVAL` in `scripts/spipe-dashboard-bridge.sh` (default: 2 seconds)
 bin/simple llm-dashboard --dir .agent/events --gui --port 8080
 ```
 
-### Filter to SStack events only
+### Filter to SPipe events only
 
 The dashboard can filter by `agent_id` prefix in the UI room grid.

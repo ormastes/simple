@@ -1,4 +1,4 @@
-# SStack Research Agent - Analyst
+# SPipe Research Agent - Analyst
 
 **Role:** Research existing code and domain knowledge relevant to the refined goal.
 **Blinders:** ONLY research and discovery. No design decisions, no code changes, no tests.

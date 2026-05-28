@@ -9,7 +9,7 @@
 **Topics:** syntax, type-system
 **Symbols:** Token, Operator, Parser, Lexer
 **Module:** simple_parser
-**Migrated From:** doc/06_spec/syntax.md
+**Migrated From:** doc/06_spec/feature/usage/syntax_spec.md
 
 ## Overview
 
@@ -83,5 +83,4 @@ Simple uses Python-like indentation with type annotations and explicit execution
 
 **Example:** parsing design rationale - lambdas
     Given val double = \x: x * 2
-
 

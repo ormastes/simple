@@ -484,17 +484,28 @@ fn setup_ramfb(fb_addr: u64) -> u64:
     rt_mmio_write_u32(0x09020010, bswap32((dma_desc >> 32) & 0xFFFFFFFF))
     rt_mmio_write_u32(0x09020014, bswap32(dma_desc & 0xFFFFFFFF))
 
-    # Wait for DMA completion: control word becomes 0 when done
+    # Wait for DMA completion. The control word is the first 4 bytes of the
+    # descriptor in BIG-ENDIAN: read all four bytes, not just byte 0. (Byte 0 is
+    # the MSB, which is always 0 for the small etc/ramfb selector, so a byte-0
+    # check reports success immediately even when the DMA never ran or errored.)
+    # QEMU clears the control word to 0 on success and sets bit 0 on error.
     var timeout: u64 = 0
     while timeout < 1000000:
-        val status = rt_mmio_read_u8(dma_desc)
-        if status == 0:
+        val c0 = rt_mmio_read_u8(dma_desc + 0)
+        val c1 = rt_mmio_read_u8(dma_desc + 1)
+        val c2 = rt_mmio_read_u8(dma_desc + 2)
+        val c3 = rt_mmio_read_u8(dma_desc + 3)
+        val ctrl_now = (c0 << 24) | (c1 << 16) | (c2 << 8) | c3
+        if ctrl_now == 0:
             serial_println("[WM] ramfb configured successfully via fw_cfg DMA")
             return 1
+        if (ctrl_now & 0x01) != 0:
+            serial_println("[WM] ramfb DMA ERROR: fw_cfg rejected config (ctrl bit0 set)")
+            return 0
         timeout = timeout + 1
 
-    serial_println("[WM] ramfb DMA timeout -- framebuffer may not be visible")
-    return 1   # Continue anyway, rendering still works in shadow buffer
+    serial_println("[WM] ramfb DMA timeout -- DMA never completed (ctrl word nonzero)")
+    return 0   # Surface the failure instead of falsely reporting success
 
 # ===========================================================================
 # Easing / Animation Functions

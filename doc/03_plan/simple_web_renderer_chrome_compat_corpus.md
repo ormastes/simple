@@ -17,7 +17,7 @@ Acceptance:
 - `src/app/wm_compare/export_site_corpus.spl` materializes the corpus as 132
   HTML fixtures under `test/fixtures/famous_site_corpus/` plus matching
   baseline directories under `test/baselines/famous_site_corpus/`.
-- `test/sys/wm_compare/famous_site_corpus_spec.spl` verifies every exported
+- `test/system/wm_compare/famous_site_corpus_spec.spl` verifies every exported
   HTML fixture file matches the generated corpus HTML and the on-disk manifest
   matches `build_famous_site_sample_manifest_sdn()`.
 - The same BDD spec runs `tools/electron-shell/analyze_ppm_delta.js` against
@@ -113,7 +113,7 @@ Measured blocker:
   browser-wrapped line strings and canvas `TextMetrics` width/ascent/descent
   fields, so future text rendering changes can compare against Chrome text
   metrics directly rather than only PPM region diffs.
-- `test/sys/wm_compare/famous_site_corpus_spec.spl --clean` now renders all
+- `test/system/wm_compare/famous_site_corpus_spec.spl --clean` now renders all
   132 corpus pages through Simple Web Renderer, verifies all baseline/report
   artifacts exist with valid P3/P6 PPM headers and payloads, validates each
   Chrome metrics sidecar has the expected sample id, 160x120 viewport,
@@ -141,14 +141,14 @@ Measured blocker:
   11 examples and includes a boundary-width diagnostic for `Google Translate`
   and `Quora productivity`, the two phrases involved in the rejected
   layout-width experiment.
-- `test/sys/wm_compare/famous_site_engine2d_backend_spec.spl --clean` checks
+- `test/system/wm_compare/famous_site_engine2d_backend_spec.spl --clean` checks
   all 132 corpus pages against the explicit Engine2D software backend at 40x30,
   and also checks full-size parity for `site_0_google`,
   `site_44_the_new_york_times`, and `site_99_stack_exchange`, without pushing
   the main corpus spec over the 60s watchdog.
 - `src/app/wm_compare/emulated_capture.spl` provides the current in-process
   emulated screenshot capture adapter for the Simple Web Renderer and explicit
-  Engine2D software backend. `test/sys/wm_compare/emulated_capture_spec.spl
+  Engine2D software backend. `test/system/wm_compare/emulated_capture_spec.spl
   --clean` passes 3 examples and verifies that those captures compare bitwise
   through the shared `compare_exact` comparator.
 - The older `test/unit/os/compositor/*capture*` import hole has been narrowed:

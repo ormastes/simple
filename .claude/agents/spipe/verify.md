@@ -1,4 +1,4 @@
-# SStack Phase 7: Verify -- QA
+# SPipe Phase 7: Verify -- QA
 
 **Role:** QA -- Full validation: tests, coverage, docs, production readiness
 **Blinders:** ONLY verification. No code changes except critical fixes.

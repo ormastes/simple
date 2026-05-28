@@ -64,6 +64,12 @@ bin/simple test --mode=smf           # SMF compiled
 bin/simple test --mode=native        # Native compiled
 ```
 
+The executable tree is also the source of truth for generated scenario
+documentation. After removing the leading `test/` segment, generated SPipe docs
+must mirror the same path below `doc/06_spec/`. Example:
+`test/feature/usage/math_blocks_spec.spl` generates
+`doc/06_spec/feature/usage/math_blocks_spec.md`.
+
 `bin/simple test` now prefers fresh local driver builds from
 `src/compiler_rust/target/bootstrap`, `target/release`, and `target/debug`
 before older packaged binaries in `bin/release/`. That keeps focused test runs
@@ -112,10 +118,9 @@ use app.build.types.{BuildProfile, profile_to_string}
 use lib.database.stats.{calculate_mean, calculate_std_dev}
 ```
 
-If a module isn't importable, check that the symlink exists:
+If a module isn't importable, check that the source module exists:
 ```bash
-ls -la test/lib/std/module_name.spl
-# Should point to ../../../src/lib/module_name.spl
+ls -la src/lib/module_name.spl
 ```
 
 ## Coverage
@@ -164,6 +169,23 @@ baseline and reports improvements or regressions:
 | Integration | `test/integration/` | Cross-module tests |
 | Feature | `test/feature/` | Language feature BDD specs |
 | System | `test/system/` | End-to-end pipeline tests |
+
+## Traceability Rules
+
+- Keep one scenario source per behavior-oriented `*_spec.spl` file.
+- Put unit tests under `test/unit/<source-area>/...`.
+- Put cross-module tests under `test/integration/<source-area>/...`.
+- Put user-visible feature BDD tests under `test/feature/<domain>/...`.
+- Put end-to-end workflows under `test/system/<domain>/...`.
+- Generated manual/spec docs live at the matching `doc/06_spec/<same path>.md`.
+- Requirement, research, design, plan, implementation, guide, and generated spec
+  links should use the same feature slug so traceability scans can match them.
+- Treat older executable top-level suites outside `unit/`, `integration/`,
+  `feature/`, and `system/` as transitional unless maintaining an existing
+  suite in place. Do not add a new top-level test category without documenting
+  why it cannot fit the canonical buckets.
+- Keep support assets such as baselines, fixtures, generated data, and shared
+  helpers separate from executable scenario placement decisions.
 
 ## Known Limitations
 

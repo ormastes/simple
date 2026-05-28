@@ -25,7 +25,6 @@ pub mod qualify_ignore;
 pub mod repl;
 pub mod sandbox;
 pub mod security;
-pub mod spipe_docgen;
 pub mod test_discovery;
 pub mod test_output;
 pub mod test_runner;

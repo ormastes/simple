@@ -157,7 +157,7 @@ Tests named `*_spec.spl`. Structure mirrors src/ plus topic-based groupings.
 | `test/bug/` | Bug regression tests |
 | `test/cli/` | CLI tests |
 | `test/code_quality/` | Quality checks |
-| `test/data/` | Test fixtures |
+| `test/fixtures/data/` | Data fixtures |
 | `test/baselines/` | Baseline snapshots |
 
 **Run tests:** `bin/simple test` or `bin/simple test path/to/spec.spl`

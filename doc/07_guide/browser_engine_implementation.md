@@ -108,10 +108,10 @@ Float context is threaded through all layout functions as a parameter (reference
 
 ```bash
 # 132-page corpus regression gate (must remain pixel-exact)
-bin/simple test test/sys/wm_compare/famous_site_corpus_spec.spl
+bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl
 
 # Same, cache-busted (use after layout changes)
-bin/simple test test/sys/wm_compare/famous_site_corpus_spec.spl --clean
+bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --clean
 
 # Float layout unit tests
 bin/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/float_layout_spec.spl

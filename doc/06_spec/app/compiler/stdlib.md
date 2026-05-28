@@ -767,7 +767,7 @@ fn main() -> Int:
 
 ## Related Specifications
 
-- [Syntax](syntax.md)
+- [Syntax](../../feature/usage/syntax_spec.md)
 - [Types](types.md)
 - [Concurrency](concurrency.md)
 - [Memory](memory.md)

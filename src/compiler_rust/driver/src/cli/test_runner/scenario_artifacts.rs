@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn plan_uses_spec_relative_root_and_scenario_dirs() {
         let plan = build_scenario_artifact_plan(
-            Path::new("test/app/web_dashboard/tmux_rest_api_spec.spl"),
+            Path::new("test/feature/app/web_dashboard/tmux_rest_api_spec.spl"),
             &[sample_result("rendering", "shows dashboard")],
         );
 

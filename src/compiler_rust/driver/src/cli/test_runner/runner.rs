@@ -706,7 +706,7 @@ fn execute_test_files(
     if list_mode && test_files.len() > 100 && (options.only_slow || options.only_skipped) && !quiet {
         eprintln!("⚠️  Warning: Listing tests with filters scans all files (slow for large test suites)");
         eprintln!("   Tip: Limit scope with path argument, e.g.:");
-        eprintln!("        simple test test/lib/std/unit/ --only-skipped --list");
+        eprintln!("        simple test test/unit/lib/std/ --only-skipped --list");
         eprintln!("   Or use test database: cat doc/test/test_db.sdn | grep skip\n");
     }
 

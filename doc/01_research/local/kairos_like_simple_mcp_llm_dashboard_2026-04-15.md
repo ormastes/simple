@@ -46,8 +46,8 @@ Relevant evidence:
 - `src/app/dashboard.render/*`
 - `src/app/dashboard.views/status.spl`
 - `doc/10_metrics/dashboard/README.md`
-- `doc/spec/dashboard_render_spec.md`
-- `doc/spec/tmux_rest_api_spec.md`
+- `doc/06_spec/feature/app/web_dashboard/dashboard_render_spec.md`
+- `doc/06_spec/feature/app/web_dashboard/tmux_rest_api_spec.md`
 
 Observed local state:
 

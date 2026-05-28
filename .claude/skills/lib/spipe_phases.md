@@ -1,6 +1,6 @@
-# SStack Phase Definitions
+# SPipe Phase Definitions
 
-Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, exit criteria, context budget, and key actions.
+Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, exit criteria, context budget, and key actions.
 
 ---
 

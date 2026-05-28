@@ -22,7 +22,7 @@ description: "Codex implementation skill. 15-phase workflow from research throug
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Phase 4 |
 | Architecture | `doc/04_architecture/<feature>.md` | Phase 6 |
 | Design | `doc/05_design/<feature>.md` | Phase 6 |
-| System tests | `doc/06_spec/.../<feature>_spec.spl` | Phase 8 |
+| System tests | `doc/06_spec/<mirrored-test-path>/<feature>_spec.spl` | Phase 8 |
 
 **If ALL exist**, skip to Phase 8 (Implementation).
 
@@ -37,6 +37,8 @@ Skip if exist. See `design` skill for details.
 ### Phases 6-7: System Test + Doc Consistency
 - Write SPipe BDD tests from design
 - Verify doc cross-references are intact
+- Keep generated/manual SPipe docs under `doc/06_spec/` mirrored from the
+  executable `test/...` path after stripping the leading `test/` segment
 - Built-in matchers only (see `design` skill for list)
 
 ### Phase 8: Implementation

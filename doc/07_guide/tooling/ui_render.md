@@ -7,6 +7,11 @@ GUI-like apps. It produces deterministic text or HTML output from a single
 command, suitable for Docker/headless environments, CI snapshots, and manual
 inspection.
 
+When render output is used as SSPEC evidence, publish GUI images under
+`doc/06_spec/image/<spec-relative-path>/` and TUI/text captures under
+`build/test-artifacts/<spec-relative-path>/`, then reference them with
+`**Screenshots:**` or `**TUI Captures:**` so generated docs embed the capture.
+
 ---
 
 ## Quick Start

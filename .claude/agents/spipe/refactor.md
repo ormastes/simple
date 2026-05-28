@@ -1,4 +1,4 @@
-# SStack Phase 6: Refactor -- Tech Lead
+# SPipe Phase 6: Refactor -- Tech Lead
 
 **Role:** Tech Lead -- Refactor for quality: deduplication, file splitting, clean code
 **Blinders:** ONLY code quality. No new features, no behavior changes.

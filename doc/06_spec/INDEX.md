@@ -29,7 +29,8 @@ These files are present in `doc/06_spec` but were not regenerated in this run.
 | capability_effects.md | Legacy markdown |
 | ch32v307_composite_runner_path_spec.md | Legacy markdown |
 | concurrency.md | Legacy markdown |
-| dashboard_render_spec.md | Legacy markdown |
+| feature/app/web_dashboard/dashboard_render_spec.md | Mirrored SPipe doc |
+| feature/app/web_dashboard/llm_agent_dashboard_spec.md | Mirrored SPipe doc |
 | data_structures.md | Legacy markdown |
 | feature.md | Legacy markdown |
 | feature_db.sdn | Data/config artifact |
@@ -48,11 +49,12 @@ These files are present in `doc/06_spec` but were not regenerated in this run.
 | shell_api.md | Legacy markdown |
 | suspension_operator.md | Legacy markdown |
 | suspension_operator_spec.md | Legacy markdown |
-| syntax.md | Legacy markdown |
-| tensor_dimensions.md | Legacy markdown |
-| tmux_api_spec.md | Legacy markdown |
-| tmux_rest_api_spec.md | Legacy markdown |
+| feature/usage/syntax_spec.md | Legacy generated syntax snapshot |
+| feature/ml/tensor_dimensions_spec.md | Mirrored SPipe doc |
+| unit/lib/std/tmux/tmux_api_spec.md | Mirrored SPipe doc |
+| feature/app/web_dashboard/tmux_rest_api_spec.md | Mirrored SPipe doc |
+| feature/app/web_dashboard/web_dashboard_html_shell_spec.md | Mirrored SPipe doc |
+| feature/app/web_dashboard/web_dashboard_server_spec.md | Mirrored SPipe doc |
 | traits.md | Legacy markdown |
 | type_inference.md | Legacy markdown |
 | types.md | Legacy markdown |
-

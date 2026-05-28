@@ -131,12 +131,12 @@ describe "Feature":
 
 ### SPipe Document Format
 
-Embed markdown documentation in test files using triple-quoted strings. The `simple spipe-docgen` command extracts these blocks and generates markdown documentation in `doc/spec/`.
+Embed markdown documentation in test files using triple-quoted strings. The `simple spipe-docgen` command extracts these blocks and generates markdown documentation in `doc/06_spec/`.
 
 Optional metadata fields `**Artifacts:**`, `**Screenshots:**`, `**TUI Captures:**`, and `**Logs:**` let a spec publish evidence links into the generated markdown. List multiple items inline with `;` or `,`, or place them on bullet lines directly below the field.
-If those fields are omitted, `spipe-docgen` will also auto-discover evidence under the standard screenshot tree `doc/spec/image/<spec-relative-path>/` when files already exist there.
-The generated Evidence section now renders a compact category summary plus per-category tables with item name, evidence kind, and path. For non-image evidence, prefer `build/test-artifacts/<spec-relative-path>/` so logs, ANSI captures, JSON summaries, and text artifacts can be discovered automatically too.
-For CI/publication, use `simple spipe-docgen ... --output docs/spec` when you want a publishable static-doc tree under `docs/`. The `simple test --doc` flow writes summary pages to `docs/test-spec.md` and `docs/test-spec.html`, and also regenerates `docs/spec/` for the specs that were executed. Evidence roots stay separate: screenshots under `doc/spec/image/` and non-image evidence under `build/test-artifacts/`.
+UI-facing specs must capture visible state when practical: GUI screenshots or rendered-image captures go under `doc/06_spec/image/<spec-relative-path>/`; TUI text/ANSI captures, logs, JSON summaries, and other non-image artifacts go under `build/test-artifacts/<spec-relative-path>/`.
+The generated Evidence section renders a compact category summary plus per-category tables. Image paths in `**Screenshots:**` and `**TUI Captures:**` are embedded as Markdown images, and text TUI captures are embedded in details blocks when the file exists.
+For CI/publication, use `simple spipe-docgen ... --output docs/spec` when you want a publishable static-doc tree under `docs/`. The `simple test --doc` flow writes summary pages to `docs/test-spec.md` and `docs/test-spec.html`, and also regenerates `docs/spec/` for the specs that were executed. Evidence roots stay separate: screenshots under `doc/06_spec/image/` and non-image evidence under `build/test-artifacts/`.
 
 ```simple
 """
@@ -715,7 +715,7 @@ simple test --list                 # List tests
 simple test --only-slow            # Slow tests only
 simple test --screenshots          # Capture GUI screenshots
 simple test --refresh-screenshots  # Force recapture
-simple test --screenshot-output doc/spec/image/custom
+simple test --screenshot-output doc/06_spec/image/custom
 ```
 
 ### Exit Codes
@@ -738,7 +738,7 @@ Shared UI contract testing across the **web backend** and **TUI-web proxy** surf
 **Supported shared surfaces:** web backend (`ui.web`), TUI-web proxy (`ui.tui_web`).
 **Not part of shared claim:** native TUI, Electron, Tauri, headless (different transport/protocol).
 
-For screenshot-backed UI verification, the test runner writes captures to `doc/spec/image` by default. Specs can reference those paths through `**Screenshots:**` or `**Artifacts:**` metadata so generated markdown includes links to the captured evidence.
+For screenshot-backed UI verification, the test runner writes captures to `doc/06_spec/image` by default. Specs can reference those paths through `**Screenshots:**` or `**TUI Captures:**` metadata so generated markdown embeds the captured evidence.
 
 ### Architecture
 

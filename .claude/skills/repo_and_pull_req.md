@@ -169,5 +169,4 @@ Before any non-setup command:
 |-------|-----------|
 | `/sync` | File count guards during push and rebase |
 | `/release` | Suggested after merge for version bump |
-| `/sstack` | Lifecycle orchestrator; ship phase passes `--target` and `--review-level` through to `push`; state file used for richer PR descriptions |
-| `/spipe` | BDD/spec-writing skill used by the orchestrator's spec phase |
+| `/spipe` | BDD/spec-writing skill |

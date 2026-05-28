@@ -173,6 +173,12 @@ and caveats:
 Every new widget or renderer that needs visual parity should still land with a
 registered compare scene or an equivalent capture path.
 
+UI-facing SSPEC tests should publish visible-state evidence into generated docs:
+GUI captures under `doc/06_spec/image/<spec-relative-path>/`, and TUI text or
+ANSI captures under `build/test-artifacts/<spec-relative-path>/`. Reference
+those paths with `**Screenshots:**` or `**TUI Captures:**` metadata so
+`spipe-docgen` embeds them in `doc/06_spec/...`.
+
 ## 7. Authoring checklist for a new backend
 
 When a new renderer lands (e.g. a Fuchsia host, a terminal graphics

@@ -117,7 +117,7 @@ test/
 │
 ├── integration/    # Integration tests
 ├── system/         # System/end-to-end tests
-├── benchmarks/     # Performance benchmarks (executable, not test specs)
+├── perf/           # Performance benchmarks (executable, not test specs)
 └── lib/            # Test utilities & symlinks
 ```
 
@@ -125,7 +125,7 @@ test/
 - Writing tests for new features -> `test/unit/`
 - Testing integration -> `test/integration/`
 - End-to-end testing -> `test/system/`
-- Measuring performance -> `test/benchmarks/`
+- Measuring performance -> `test/perf/`
 
 ---
 

@@ -23,6 +23,11 @@ There are two related outputs:
 
 The HTML snapshot is the source of truth for the exported UI state. The PNG is the transport artifact for visual tools such as Stitch.
 
+For SSPEC-backed UI tests, store PNG evidence under
+`doc/06_spec/image/<spec-relative-path>/` and list it in the executable spec
+docblock with `**Screenshots:**`. Text or ANSI terminal captures belong under
+`build/test-artifacts/<spec-relative-path>/` and use `**TUI Captures:**`.
+
 ## Rendering Path
 
 The export tooling tries the live Electron render path first.

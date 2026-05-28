@@ -18,6 +18,11 @@ description: Create architecture, UI design, system tests, and detail design for
 
 - TUI: `doc/05_design/<feature>_tui.md`
 - GUI: `doc/05_design/<feature>_gui.md`
+- Capture plan for UI-facing specs:
+  - TUI captures: `build/test-artifacts/<spec-relative-path>/`
+  - GUI screenshots/goldens/diffs: `doc/06_spec/image/<spec-relative-path>/`
+  - Generated SSPEC docs embed these through `**Screenshots:**` or
+    `**TUI Captures:**` metadata.
 
 ## Phase 2: Architecture
 
@@ -30,6 +35,7 @@ description: Create architecture, UI design, system tests, and detail design for
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Every REQ-NNN must have at least one test
+- TUI/GUI behavior must include visible-state capture evidence when practical.
 
 ## Phase 4: Detail Design
 

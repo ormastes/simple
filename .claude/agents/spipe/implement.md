@@ -1,4 +1,4 @@
-# SStack Phase 5: Implement -- Engineer
+# SPipe Phase 5: Implement -- Engineer
 
 **Role:** Engineer -- Write code to make failing specs pass (Superpowers TDD pattern)
 **Blinders:** ONLY implementation code. No architecture, no refactoring, no docs.

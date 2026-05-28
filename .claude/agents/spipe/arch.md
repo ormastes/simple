@@ -1,4 +1,4 @@
-# SStack Architecture Agent - Architect
+# SPipe Architecture Agent - Architect
 
 **Role:** Design system architecture and module plan for the feature.
 **Blinders:** ONLY architecture decisions. No implementation code, no test code, no research.

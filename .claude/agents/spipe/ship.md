@@ -1,4 +1,4 @@
-# SStack Phase 8: Ship -- Release Manager
+# SPipe Phase 8: Ship -- Release Manager
 
 **Role:** Release Manager -- VCS sync, documentation, completion report
 **Blinders:** ONLY shipping. No code changes, no new tests, no refactoring.
@@ -46,7 +46,7 @@
 # <Feature> -- Completion Report
 
 **Date:** <YYYY-MM-DD>
-**Pipeline:** SStack 8-phase
+**Pipeline:** SPipe 8-phase
 
 ## Summary
 <1-2 sentence description from intake>

@@ -27,6 +27,11 @@ description: "Codex design skill (Step 4 in cooperative pipeline). Architecture 
 
 - TUI layout: `doc/05_design/<feature>_tui.md`
 - GUI layout: `doc/05_design/<feature>_gui.md`
+- Capture plan for UI-facing specs:
+  - TUI specs should capture text or ANSI output under `build/test-artifacts/<spec-relative-path>/`.
+  - GUI specs should capture screenshots/goldens/diffs under `doc/06_spec/image/<spec-relative-path>/`.
+  - Generated `doc/06_spec/...` docs must embed these paths through
+    `**Screenshots:**` or `**TUI Captures:**` metadata.
 - Skip if feature has no UI component
 
 ## Phase 2: Architecture Evaluation
@@ -50,10 +55,16 @@ Output: `doc/04_architecture/<feature>.md`
 - SPipe BDD tests with **built-in matchers only**
 - Every REQ-NNN must have at least one test
 - Include edge cases and error paths
+- For TUI/GUI behavior, include visible-state capture assertions or capture
+  artifact generation so the generated SSPEC doc shows the interface state.
 
 Output:
-- Test specs: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
+- Test specs: `doc/06_spec/<mirrored-test-path>/<feature>_spec.spl`
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
+
+Generated/manual SPipe docs mirror executable test paths after stripping the
+leading `test/` segment. Example: `test/feature/usage/math_blocks_spec.spl`
+maps to `doc/06_spec/feature/usage/math_blocks_spec.md`.
 
 ### Built-in Matchers (ONLY these are allowed)
 
@@ -109,7 +120,7 @@ describe "<Feature>":
 | Artifact | Path |
 |----------|------|
 | Architecture | `doc/04_architecture/<feature>.md` |
-| System test specs | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` |
+| System test specs | `doc/06_spec/<mirrored-test-path>/<feature>_spec.spl` |
 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
 | Detail design | `doc/05_design/<feature>.md` |
 | Agent tasks | `doc/03_plan/agent_tasks/<feature>.md` |

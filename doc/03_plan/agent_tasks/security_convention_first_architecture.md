@@ -36,13 +36,13 @@ Done:
 - Implement `scripts/check-live-kms-security-workflow.shs`.
 - Wire the checker into `scripts/check-repo-hygiene.shs`.
 - Add `doc/07_guide/security/live_kms_security_gates.md`.
-- Extend `test/code_quality/live_kms_security_workflow_spec.spl` to require the operator guide.
+- Extend `test/system/code_quality/live_kms_security_workflow_spec.spl` to require the operator guide.
 
 Verification:
 
 - `sh scripts/check-live-kms-security-workflow.shs`
 - `sh scripts/check-repo-hygiene.shs`
-- `bin/simple test test/code_quality/live_kms_security_workflow_spec.spl --mode=interpreter`
+- `bin/simple test test/system/code_quality/live_kms_security_workflow_spec.spl --mode=interpreter`
 
 ## 2026-05-23 Live KMS OIDC Tasks
 

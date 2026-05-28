@@ -90,7 +90,6 @@ use simple_driver::cli::verify::run_verify;
 #[cfg(feature = "tui")]
 use simple_driver::cli::tui::run_tui_repl;
 use simple_driver::cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen, run_todo_gen, run_todo_scan};
-use simple_driver::cli::spipe_docgen;
 use simple_driver::cli::qualify_ignore::{handle_qualify_ignore, parse_qualify_ignore_args};
 
 // Import our new command modules
@@ -558,11 +557,12 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "spipe-docgen",
-        // Keep Rust as the canonical entrypoint until direct file execution
-        // supports the file-level attributes used across the stdlib/app tree.
-        app_path: "",
-        rust_handler: Handler::Args(run_spipe_docgen_rust),
-        env_override: "SIMPLE_SPIPE_DOCGEN_RUST",
+        app_path: "src/app/spipe_docgen/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: pure Simple spipe-docgen app not found or failed to launch");
+            1
+        }),
+        env_override: "",
         needs_rust_flags: &[],
     },
     CommandEntry {
@@ -1018,6 +1018,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/plugin/main.spl"
         && app_relative_path != "src/app/wrapper_gen/mod.spl"
         && app_relative_path != "src/app/llm_process_gen/main.spl"
+        && app_relative_path != "src/app/spipe_docgen/main.spl"
     {
         return None;
     }
@@ -1037,6 +1038,12 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         }
 
         return Some(exit_code);
+    }
+
+    if app_relative_path == "src/app/spipe_docgen/main.spl" {
+        let mut full_args = vec![path.to_string_lossy().to_string()];
+        full_args.extend(args.iter().skip(1).cloned());
+        return Some(run_file_with_args(&path, gc_log, gc_off, full_args));
     }
 
     // Preserve the original command token in argv so src/app/ui/main.spl can
@@ -1267,63 +1274,6 @@ fn parse_file_execution_options(args: &[String]) -> Result<(Option<Target>, Vec<
     }
 
     Ok((target, program_args))
-}
-
-/// Current Rust spipe-docgen implementation.
-fn run_spipe_docgen_rust(args: &[String]) -> i32 {
-    // Parse arguments
-    let mut output_dir = PathBuf::from("doc/06_spec");
-    let mut spec_files: Vec<PathBuf> = Vec::new();
-
-    let mut i = 1; // Skip command name
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--output" || arg == "-o" {
-            if i + 1 < args.len() {
-                output_dir = PathBuf::from(&args[i + 1]);
-                i += 2;
-                continue;
-            }
-        } else if arg == "--help" || arg == "-h" {
-            println!("SPipe Documentation Generator");
-            println!();
-            println!("Usage: simple spipe-docgen <spec_file>... [--output <dir>]");
-            println!();
-            println!("Arguments:");
-            println!("  <spec_file>...    One or more spipe files (*_spec.spl)");
-            println!();
-            println!("Options:");
-            println!("  --output <dir>    Output directory (default: doc/06_spec)");
-            println!("  -o <dir>          Short form of --output");
-            println!("  --help, -h        Show this help message");
-            return 0;
-        } else if !arg.starts_with("-") {
-            spec_files.push(PathBuf::from(arg));
-        }
-        i += 1;
-    }
-
-    if spec_files.is_empty() {
-        eprintln!("error: No spec files provided");
-        eprintln!();
-        eprintln!("Usage: simple spipe-docgen <spec_file>... [--output <dir>]");
-        return 1;
-    }
-
-    // Call the spipe_docgen module
-    match spipe_docgen::generate_spipe_docs(&spec_files, &output_dir) {
-        Ok(stats) => {
-            println!(
-                "\n✓ Generated {} docs ({} complete, {} stubs)",
-                stats.total_specs, stats.specs_with_docs, stats.specs_without_docs
-            );
-            0
-        }
-        Err(e) => {
-            eprintln!("✗ Failed to generate documentation: {}", e);
-            1
-        }
-    }
 }
 
 #[cfg(test)]

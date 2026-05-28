@@ -424,7 +424,7 @@ graphics_3d/
 
 ## Files
 
-- [Syntax>(syntax.md)
+- [Syntax](../../feature/usage/syntax_spec.md)
 - [Types>(types.md)
 - [Functions>(functions.md)
 - [Memory>(memory.md)
@@ -437,7 +437,7 @@ graphics_3d/
 This section contains formal language specifications.
 ```
 
-### doc/06_spec/syntax.md
+### doc/06_spec/feature/usage/syntax_spec.md
 
 ```markdown
 <!--doctest:config
@@ -540,7 +540,7 @@ doc/
 ├── feature_index.md       # Linked file
 ├── spec/
 │   ├── README.md          # Subdir config
-│   ├── syntax.md          # Linked file
+│   ├── feature/usage/syntax_spec.md  # Linked file
 │   └── testing/
 │       ├── README.md      # Nested subdir config
 │       └── sdoctest.md    # Linked file

@@ -161,6 +161,55 @@ fn count_if_code(target_code: text, actual_code: text) -> i64:
         return 1
     0
 
+fn is_executable_spec_kind(kind: text) -> bool:
+    kind == "spec_feature" or kind == "spec_system" or kind == "spec_unit" or kind == "spec_integration"
+
+fn expected_generated_spec_path(source_path: text, config: TraceabilityConfig) -> text:
+    if not has_prefix(s: source_path, prefix: "test/"):
+        return ""
+    if not has_suffix(s: source_path, suffix: ".spl"):
+        return ""
+    val rel = source_path[5:source_path.len()]
+    val rel_md = remove_spl_extension(rel) + ".md"
+    config.generated_spec_root + "/" + rel_md
+
+fn find_mismatched_generated_spec_path(expected: text, source_path: text, parsed: [ParsedTraceFile], config: TraceabilityConfig) -> text:
+    val expected_base = basename(expected)
+    for file in parsed:
+        if file.kind != "spec_md":
+            continue
+        if file.path == expected:
+            continue
+        if not has_prefix(s: file.path, prefix: config.generated_spec_root + "/"):
+            continue
+        if basename(file.path) == expected_base:
+            return file.path
+    ""
+
+fn count_generated_spec_layout_pair_warnings_by_code(file_pairs: [text], existing_paths: [text], config: TraceabilityConfig, scope: text, target_code: text) -> i64:
+    if scope != "all" and scope != "spec":
+        return 0
+
+    var parsed: [ParsedTraceFile] = []
+    var file_idx = 0
+    while file_idx + 1 < file_pairs.len():
+        parsed.push(parse_trace_file(VirtualFile(path: file_pairs[file_idx], content: file_pairs[file_idx + 1])))
+        file_idx = file_idx + 2
+
+    var count = 0
+    for file in parsed:
+        if not is_executable_spec_kind(file.kind):
+            continue
+        val expected = expected_generated_spec_path(file.path, config)
+        if expected == "":
+            continue
+        if path_list_contains(existing_paths, expected) == false:
+            count = count + count_if_code(target_code: target_code, actual_code: "TRC231")
+        val wrong = find_mismatched_generated_spec_path(expected: expected, source_path: file.path, parsed: parsed, config: config)
+        if wrong != "":
+            count = count + count_if_code(target_code: target_code, actual_code: "TRC232")
+    count
+
 fn extend_warnings(base: [TraceabilityWarning], extra: [TraceabilityWarning]) -> [TraceabilityWarning]:
     var result = base
     var i = 0

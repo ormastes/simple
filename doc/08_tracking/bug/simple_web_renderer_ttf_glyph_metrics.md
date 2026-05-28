@@ -18,7 +18,7 @@ in interpreter mode.
 
 Current verification:
 
-- `bin/simple test test/sys/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --no-cache --timeout 80`
+- `bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --no-cache --timeout 80`
   passes 33/33.
 - `node tools/electron-shell/verify_famous_site_corpus_completion.js`
   reports `status: PASS`, `reportCount: 132`, `accepted: 132`, and
@@ -256,7 +256,7 @@ and canvas `TextMetrics` fields for every corpus sample. For `site_0_google`,
 Chrome wraps the text into `Google search`, `deterministic`, `compatibility`,
 and `fixture`; canvas metrics report widths `91.9609375`, `83.53125`,
 `85.3203125`, and `42.6484375`, with actual ascent `12` and font ascent `14`.
-`test/sys/wm_compare/famous_site_corpus_spec.spl` requires these fields for
+`test/system/wm_compare/famous_site_corpus_spec.spl` requires these fields for
 every metrics sidecar, so future renderer work can compare against line text,
 canvas width, ascent, and descent instead of inferring text behavior only from
 PPM regions.
@@ -474,7 +474,7 @@ oracles:
   reports `STATUS: PASS`, `reportCount: 132`, `exact: 132`, `accepted: 132`,
   `divergent: 0`, `staleSuspectCount: 0`, `staleReportCount: 0`, and no
   missing metric fonts.
-- `bin/simple test test/sys/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --no-cache`
+- `bin/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --no-cache`
   passes all 33 corpus checks, including the exact completion gate.
 - `bin/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl --mode=interpreter --no-cache`
   passes all 56 BrowserRenderer checks.

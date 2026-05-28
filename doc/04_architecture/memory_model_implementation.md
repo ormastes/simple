@@ -333,7 +333,7 @@ All criteria met:
 Updated files:
 - `doc/09_report/MEMORY_MODEL_IMPLEMENTATION_SUMMARY.md` (this file)
 - `CLAUDE.md` - Added memory model to current status
-- `doc/06_spec/memory.md` - Reference capability specification (pending)
+- `doc/06_spec/feature/language/memory_spec.md` - Reference capability specification (pending)
 - `doc/features/feature.md` - Marked features #1096-1103 as complete
 
 ---

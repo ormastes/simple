@@ -63,7 +63,7 @@ This document describes the proper workflow for implementing and verifying type 
 ┌─────────────────────────────────────────────────────────────┐
 │ INTENSIVE SPIPE TESTS                                       │
 ├─────────────────────────────────────────────────────────────┤
-│ test/lib/std/type_checker/type_inference_spec.spl          │
+│ test/unit/lib/std/type_checker/type_inference_spec.spl          │
 │                                                             │
 │ - 60+ test scenarios                                        │
 │ - 100% line + branch coverage target                       │
@@ -135,7 +135,7 @@ lake build
 cd 
 
 simple test \
-  test/lib/std/type_checker/type_inference_spec.spl \
+  test/unit/lib/std/type_checker/type_inference_spec.spl \
   --coverage \
   --coverage-format html \
   --output doc/test/type_inference_coverage.html
@@ -350,16 +350,16 @@ None - 100% coverage achieved!
 
 ```bash
 # Run all type inference tests
-simple test test/lib/std/type_checker/type_inference_spec.spl
+simple test test/unit/lib/std/type_checker/type_inference_spec.spl
 
 # Run with verbose output
-simple test test/lib/std/type_checker/type_inference_spec.spl --verbose
+simple test test/unit/lib/std/type_checker/type_inference_spec.spl --verbose
 
 # Run specific feature
-simple test test/lib/std/type_checker/type_inference_spec.spl --feature "DynTrait"
+simple test test/unit/lib/std/type_checker/type_inference_spec.spl --feature "DynTrait"
 
 # Run with coverage and generate HTML report
-simple test test/lib/std/type_checker/type_inference_spec.spl \
+simple test test/unit/lib/std/type_checker/type_inference_spec.spl \
   --coverage \
   --coverage-format html \
   --output doc/test/coverage.html
