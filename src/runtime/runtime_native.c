@@ -1462,6 +1462,11 @@ int64_t rt_enum_discriminant(int64_t value) {
     return e ? (int64_t)e->discriminant : -1;
 }
 
+bool rt_enum_check_discriminant(int64_t value, int64_t expected) {
+    RtCoreEnum* e = rt_core_as_enum(value);
+    return e && (int64_t)e->discriminant == expected;
+}
+
 int64_t rt_enum_payload(int64_t value) {
     RtCoreEnum* e = rt_core_as_enum(value);
     return e ? e->payload : rt_core_nil();

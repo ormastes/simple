@@ -6,11 +6,11 @@ Date: 2026-05-28
 
 | Artifact | Check | Native/ELF Build | Bytes | Dec Section Bytes | Log |
 |---|---|---|---:|---:|---|
-| Browser smoke | ok | ok | 34968 | 28427 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
-| Browser simple render HTML | ok | ok | 18512 | 9093 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
+| Browser smoke | ok | ok | 34968 | 28451 | `build/web_baremetal_size_audit/browser_smoke_native.log` |
+| Browser simple render HTML | ok | ok | 18512 | 9127 | `build/web_baremetal_size_audit/simple_render_html_native.log` |
 | Simple web static facade | n/a | ok | 18456 | 6823 | `build/web_baremetal_size_audit/simple_web_static_native.log` |
-| Simple web script URL facade | n/a | ok | 34904 | 24977 | `build/web_baremetal_size_audit/simple_web_script_native.log` |
-| Bare-metal pure policy probe | ok | ok | 14336 | 5796 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
+| Simple web script URL facade | n/a | ok | 34904 | 25005 | `build/web_baremetal_size_audit/simple_web_script_native.log` |
+| Bare-metal pure policy probe | ok | ok | 14336 | 5971 | `build/web_baremetal_size_audit/pure_policy_probe_native.log` |
 | RV32 semihost stdout hello | n/a | ok | 66268 | 8334 | `build/web_baremetal_size_audit/hello_riscv32_semihost.build.log` |
 | x86_64 minimal boot/stdout capsule | n/a | ok | 2840 | 409 | `build/web_baremetal_size_audit/baremetal_boot_stdout.build.log` |
 
@@ -23,12 +23,13 @@ Date: 2026-05-28
 | Simple web static facade native file / dec section | 19000 / 7500 |
 | Simple web script URL facade native file / dec section | 35500 / 26000 |
 | Bare-metal pure policy probe native file / dec section | 15000 / 6500 |
-| Bare-metal pure policy probe source | 1000 |
+| Bare-metal pure policy probe source | 1300 |
 | RV32 semihost stdout ELF file / dec section | 70000 / 9000 |
 | x86_64 minimal boot/stdout object file / dec section | 4096 / 512 |
 | x86_64 minimal boot/stdout source | 4096 |
 | Pure Simple console policy source | 2500 |
 | Pure Simple interrupt policy source | 5000 |
+| Pure Simple startup policy source | 3000 |
 
 ## Source Size Surfaces
 
@@ -37,9 +38,10 @@ Date: 2026-05-28
 | `examples/browser` | 304 | 75023 | 2850254 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15509 | 576503 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 126 | 2982 |
-| `examples/09_embedded/baremetal/baremetal/pure_policy_probe.spl` | 1 | 24 | 891 |
+| `examples/09_embedded/baremetal/baremetal/pure_policy_probe.spl` | 1 | 30 | 1108 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/console_policy.spl` | 1 | 56 | 1870 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/interrupt_policy.spl` | 1 | 72 | 3315 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/startup_policy.spl` | 1 | 15 | 458 |
 
 ## Browser Cluster Source Sizes
 
@@ -71,5 +73,6 @@ Date: 2026-05-28
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
 - `baremetal/console_policy.spl` is the pure-Simple policy surface for shared semihost/UART stdout selection.
 - `baremetal/interrupt_policy.spl` is the pure-Simple policy surface for interrupt controller selection and vector classification.
+- `baremetal/startup_policy.spl` is the pure-Simple policy surface for stack and hart startup defaults before importing architecture startup capsules.
 - `pure_policy_probe.spl` proves examples can import only pure policies without retaining transport or controller implementations.
 - The split lanes now have default regression budgets. Set any `MAX_...` environment value higher, lower, or empty to tune a specific gate.
