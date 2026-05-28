@@ -1,7 +1,3 @@
-/* ===================================================================
- * 1. Includes and types
- * =================================================================== */
-
 #include <stdint.h>
 #include <stddef.h>
 
@@ -85,10 +81,6 @@ static void arm32_harden_print_canary(void)
     serial_puts("\r\n");
 }
 
-/* ===================================================================
- * 3. RuntimeValue tagging (32-bit)
- * =================================================================== */
-
 #define TAG_MASK    0x7U
 #define TAG_INT     0x0U
 #define TAG_HEAP    0x1U
@@ -140,10 +132,6 @@ typedef struct {
     uint32_t     discriminant;
     RuntimeValue payload;
 } RuntimeEnum;
-
-/* ===================================================================
- * 4. Heap allocator — bump allocator, 4 MB
- * =================================================================== */
 
 static char   _heap[64 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
@@ -206,10 +194,6 @@ RuntimeValue rt_dealloc(RuntimeValue ptr)
     (void)ptr;
     return NIL_VALUE;
 }
-
-/* ===================================================================
- * 5. Memory functions — freestanding replacements
- * =================================================================== */
 
 void *memcpy(void *dst, const void *src, size_t n)
 {
@@ -341,10 +325,6 @@ char *strcat(char *dst, const char *src)
     while ((*d++ = *src++)) {}
     return dst;
 }
-
-/* ===================================================================
- * 6. String operations
- * =================================================================== */
 
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
 {
@@ -516,10 +496,6 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
     return NIL_VALUE;
 }
 
-/* ===================================================================
- * 7. Print functions
- * =================================================================== */
-
 void rt_print_str(RuntimeValue str)
 {
     const uint32_t max_serial_text = 512;
@@ -635,10 +611,6 @@ RuntimeValue arm_fs_exec_print_success_marker(void)
     return arm_fs_exec_print_pass();
 }
 
-/* ===================================================================
- * 8. Framebuffer copy
- * =================================================================== */
-
 void rt_framebuffer_copy(RuntimeValue dst, RuntimeValue src, RuntimeValue count)
 {
     if (!IS_HEAP(dst) || !IS_HEAP(src)) return;
@@ -657,10 +629,6 @@ void rt_framebuffer_write(RuntimeValue addr, RuntimeValue offset, RuntimeValue v
     int32_t v = DECODE_INT(val);
     base[off] = (uint8_t)v;
 }
-
-/* ===================================================================
- * 9. _start — PL011 UART init, spl_start
- * =================================================================== */
 
 static void _uart_init(void)
 {
@@ -706,10 +674,6 @@ void _start(void)
         __asm__ volatile("wfe");
     }
 }
-
-/* ===================================================================
- * 9b. Enum / Optional / Result operations
- * =================================================================== */
 
 RuntimeValue rt_enum_new(RuntimeValue enum_id_rv, RuntimeValue disc_rv, RuntimeValue payload)
 {
@@ -760,10 +724,6 @@ RuntimeValue rt_is_some(RuntimeValue value)
 {
     return rt_is_none(value) ? 0 : 1;
 }
-
-/* ===================================================================
- * 10. No-op stubs — macro-generated runtime function stubs
- * =================================================================== */
 
 #define S0(n) RuntimeValue n(void) { return 0; }
 #define S1(n) RuntimeValue n(RuntimeValue a) { (void)a; return 0; }
@@ -1011,10 +971,6 @@ S1(rt_result_unwrap) S2(rt_result_unwrap_or)
 /* --- Weak references & closures --- */
 S1(rt_weak_ref) S1(rt_weak_deref)
 S1(rt_closure_new) S2(rt_closure_call) S1(rt_closure_bind)
-
-/* ===================================================================
- * 11. Real ARM32 MMIO and CPU overrides
- * =================================================================== */
 
 /* --- MMIO: real ARM32 implementations --- */
 
@@ -1619,10 +1575,6 @@ RuntimeValue arm_fs_exec_trace(RuntimeValue id_val)
     return NIL_VALUE;
 }
 
-/* ===================================================================
- * ARM32 freestanding runtime extras used by fs-exec closure
- * =================================================================== */
-
 static int32_t arm32_raw_or_encoded_int(RuntimeValue value)
 {
     return IS_INT(value) ? DECODE_INT(value) : (int32_t)value;
@@ -1978,9 +1930,6 @@ int __modsi3(int a, int b)
     return (a < 0) ? -(int)r : (int)r;
 }
 
-/* ===================================================================
- * Crypto — shared portable implementation
- * =================================================================== */
 #define RV_INT int32_t
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"

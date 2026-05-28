@@ -1,7 +1,3 @@
-/* ===================================================================
- * 1. Includes and types
- * =================================================================== */
-
 #include <stdint.h>
 #include <stddef.h>
 
@@ -10,14 +6,6 @@
 
 typedef int64_t RuntimeValue;
 
-
-/* ===================================================================
- * 2. Serial I/O — COM1 at 0x3F8 via x86 outb / inb
- *
- * Note: These use x86-specific asm constraints ("a", "Nd") that are
- * only valid when compiling for x86/x86_64 targets. Guard with
- * __x86_64__ to suppress false diagnostics on non-x86 host compilers.
- * =================================================================== */
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -251,10 +239,6 @@ static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
     return _simpleos_log_write_bytes(level, msg, _cstr_len(msg));
 }
 
-/* ===================================================================
- * 3. RuntimeValue tagging
- * =================================================================== */
-
 #define TAG_MASK    0x7ULL
 #define TAG_INT     0x0ULL
 #define TAG_HEAP    0x1ULL
@@ -332,10 +316,6 @@ RuntimeValue rt_u32_alloc_filled(uint64_t len, uint32_t fill)
     }
     return ENCODE_PTR(a);
 }
-
-/* ===================================================================
- * 3a. x86_64 AP startup trampoline support
- * =================================================================== */
 
 #if defined(__x86_64__) || defined(__i386__)
 #define SIMPLEOS_AP_TRAMPOLINE_PHYS   0x8000ULL
@@ -460,20 +440,6 @@ RuntimeValue rt_value_to_string(RuntimeValue val);
 RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, RuntimeValue fmt_len);
 RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
-
-/* ===================================================================
- * 4. Heap allocator — bump allocator, 192 MB
- *
- * NOTE: keep this within the QEMU scenario RAM budget minus a safety
- * margin for kernel code/rodata/data, linker-script .heap/.stack, and
- * page tables. The desktop import/probe and desktop integration kernels
- * boot before `spl_start` and must survive the crt0 `.bss` clear under
- * 512M/2G QEMU guests used by the desktop/TLS system lanes can afford a
- * larger stub heap, while 512MB remains small enough to avoid the earlier
- * pre-boot `.bss` overrun caused by a 512MB arena. The pure-Simple TLS
- * X25519 path currently allocates heavily during baremetal system tests, so
- * keep this arena large enough for those flows.
- * =================================================================== */
 
 static const size_t BAREMETAL_HEAP_SIZE = 192ULL * 1024ULL * 1024ULL;
 static const size_t BAREMETAL_HEAP_WARN_SIZE = 144ULL * 1024ULL * 1024ULL;
@@ -611,10 +577,6 @@ RuntimeValue rt_dealloc(RuntimeValue ptr)
     return NIL_VALUE;
 }
 
-/* ===================================================================
- * 5. Memory functions — freestanding replacements
- * =================================================================== */
-
 void *memcpy(void *dst, const void *src, size_t n)
 {
     uint8_t       *d = (uint8_t *)dst;
@@ -696,10 +658,6 @@ char *strcat(char *dst, const char *src)
     while ((*d++ = *src++)) {}
     return dst;
 }
-
-/* ===================================================================
- * 6. String operations
- * =================================================================== */
 
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
 {
@@ -966,10 +924,6 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
     return 0;
 }
 
-/* ===================================================================
- * 7. Print functions
- * =================================================================== */
-
 void rt_print_str(RuntimeValue str)
 {
     if (IS_HEAP(str)) {
@@ -1087,10 +1041,6 @@ RuntimeValue rt_println(RuntimeValue val)
     return NIL_VALUE;
 }
 
-/* ===================================================================
- * 8. Framebuffer copy
- * =================================================================== */
-
 void rt_framebuffer_copy(RuntimeValue dst, RuntimeValue src, RuntimeValue count)
 {
     if (!IS_HEAP(dst) || !IS_HEAP(src)) return;
@@ -1144,11 +1094,6 @@ void rt_fb_blit_array32(RuntimeValue dst_addr, RuntimeValue dst_stride_pixels,
     }
 }
 
-/* ===================================================================
- * 8b. Native comparison — Cranelift emits calls to these for == and !=.
- *     Receives raw i64 values (Cranelift ABI), returns 1 or 0.
- * =================================================================== */
-
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
 {
     /* Fast path: bitwise identical (same int, same pointer, both nil) */
@@ -1174,13 +1119,6 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
 {
     return rt_native_eq(a, b) ? 0 : 1;
 }
-
-/* ===================================================================
- * 8a-pci. PCI device cache + scan (moved here for NVMe forward ref)
- *
- * Originally in the syscall 80 section; hoisted so the NVMe C driver
- * can reference _pci_cache[] and _pci_scan() directly.
- * =================================================================== */
 
 #define MAX_PCI_CACHED 64
 static struct {
@@ -1235,25 +1173,6 @@ static void _pci_scan(void)
         }
     }
 }
-
-/* ===================================================================
- * 8b-nvme. NVMe controller init + sector read (pure C, polling)
- *
- * The Simple-compiled NVMe driver calls MMIO read/write via extern fns,
- * but those are auto-stubbed and return 0.  This C implementation does
- * the full NVMe init + sector read directly with volatile pointers.
- * Exposed as syscall 85: NvmeReadSector(device_idx, lba, buf_addr).
- *
- * NVMe register layout (BAR0 offsets):
- *   0x00 CAP     Controller Capabilities (64-bit)
- *   0x08 VS      Version
- *   0x14 CC      Controller Configuration
- *   0x1C CSTS    Controller Status
- *   0x24 AQA     Admin Queue Attributes
- *   0x28 ASQ     Admin SQ Base Address (64-bit)
- *   0x30 ACQ     Admin CQ Base Address (64-bit)
- *   0x1000+      Doorbells
- * =================================================================== */
 
 /* --- MMIO helpers (volatile, raw physical addresses) --- */
 #define nvme_rd32(addr) (*(volatile uint32_t *)(uintptr_t)(addr))
@@ -1939,14 +1858,6 @@ int64_t simpleos_nvme_init(void)
 {
     return (int64_t)_nvme_init_and_read_sector0();
 }
-
-/* ===================================================================
- * 8b-fat32. FAT32 file system driver (C implementation)
- *
- * Bypasses the auto-stubbed Simple FAT32 driver (shift operators >>/<<
- * cause "Compose operator should be desugared" errors in Simple).
- * Uses _nvme_read_sector_impl() for sector reads.
- * =================================================================== */
 
 /* Public FAT32 API — callable from Simple via extern fn */
 int fat32_find_file(const char *name, uint32_t *out_cluster, uint32_t *out_size);
@@ -2895,31 +2806,6 @@ static int64_t _fat32_read_file_syscall(uint64_t name_addr, uint64_t buf_addr,
 
 /* Forward declaration for serial_puthex (defined in section 9d) */
 static void serial_puthex(uint32_t v);
-
-/* ===================================================================
- * 8c-net. VirtIO-net driver + ARP/ICMP (ping) responder
- *
- * Supports VirtIO-net PCI legacy transport (vendor 0x1AF4, device
- * 0x1000 with subsystem for network, or any device with PCI class
- * 02.00 from vendor 0x1AF4).
- *
- * Legacy BAR0 (I/O port) register layout:
- *   0x00  host_features   (u32, R)
- *   0x04  guest_features  (u32, W)
- *   0x08  queue_pfn       (u32, W)  — page frame number of virtqueue
- *   0x0C  queue_size      (u16, R)
- *   0x0E  queue_sel       (u16, W)
- *   0x10  queue_notify    (u16, W)
- *   0x12  status          (u8, RW)
- *   0x13  isr             (u8, R)
- *   0x14  mac[6]          (R)       — device MAC address
- *
- * Virtqueue memory layout (contiguous, page-aligned):
- *   Descriptors:   16 bytes * queue_size
- *   Available ring: 2+2+2*queue_size bytes
- *   (pad to 4096 boundary)
- *   Used ring:      2+2+8*queue_size bytes
- * =================================================================== */
 
 /* --- VirtIO status bits --- */
 #define VIRTIO_STATUS_ACK        1
@@ -3947,14 +3833,6 @@ int64_t simpleos_virtio_net_selftest(void)
     return 0;
 }
 
-/* ===================================================================
- * 8d-tcp. Minimal TCP stack for baremetal SSH
- *
- * Implements: TCP 3-way handshake, data transfer, connection close.
- * Socket table with IPC handlers (syscall 20/21) so the POSIX socket
- * layer in socket_compat.spl works without a microkernel.
- * =================================================================== */
-
 /* TCP header */
 struct tcp_hdr {
     uint16_t src_port;
@@ -4338,18 +4216,6 @@ static void _vnet_handle_ipv4(const uint8_t *frame, uint16_t frame_len)
     }
 }
 
-/* ===================================================================
- * 8d-tcp-ipc. IPC handlers for syscalls 20/21
- *
- * socket_compat.spl sends IPC requests (syscall 20) with:
- *   a0 = port (2 = netstack)
- *   a1 = method (NET_SOCKET=1, NET_BIND=2, etc.)
- *   a2 = flags (0)
- *   a3 = payload buffer address
- *   a4 = payload length
- * and expects replies via syscall 21.
- * =================================================================== */
-
 /* Pending IPC reply for socket operations */
 static struct {
     int      valid;
@@ -4638,15 +4504,6 @@ static int64_t _ipc_recv_handler(uint64_t port, uint64_t buf_addr, uint64_t max_
     return total;
 }
 
-/* ===================================================================
- * 8b. Bare-metal syscall stub
- *
- * On bare-metal, there is no kernel to syscall into. This stub handles
- * the syscall IDs that make sense on bare-metal (DebugWrite for serial)
- * and returns -ENOSYS for everything else. This allows POSIX layer code
- * to be compiled and linked without crashing on import.
- * =================================================================== */
-
 int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr);
 extern int64_t kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
     uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
@@ -4837,27 +4694,6 @@ int64_t os__userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
     return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
-/* ===================================================================
- * PCI enumeration via direct port I/O (syscall 80 handler)
- *
- * _pci_cache[] and _pci_scan() are defined in section 8a-pci above.
- *
- * Mode 0 (a0=0): Count PCI devices. Returns device count.
- * Mode 1 (a0=1): Get device info at index a1 into DeviceInfoBuf at a2.
- *                 DeviceInfoBuf layout (from device_mem_types.spl):
- *                   offset 0:  u8  bus
- *                   offset 1:  u8  device
- *                   offset 2:  u8  func
- *                   offset 3:  u8  padding
- *                   offset 4:  u16 vendor_id
- *                   offset 6:  u16 device_id
- *                   offset 8:  u8  class_code
- *                   offset 9:  u8  subclass
- *                   offset 10: u8  prog_if
- *                   offset 11: u8  header_type
- *                   offset 12: u8  irq_line
- * =================================================================== */
-
 int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
 {
     if (_pci_cache_count < 0) _pci_scan();
@@ -4953,14 +4789,6 @@ int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
     }
     return -38; /* ENOSYS */
 }
-
-/* ===================================================================
- * 8d. Crypto constant tables — C-side storage for baremetal
- *
- * Global val array literals in Simple aren't placed in .rodata by the
- * Cranelift baremetal backend. These C static const arrays are properly
- * placed. Simple code calls rt_sha512_K(i) etc. instead of K512[i].
- * =================================================================== */
 
 static const uint64_t _sha512_K[80] = {
     0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL, 0xe9b5dba58189dbbcULL,
@@ -5115,13 +4943,6 @@ int64_t rt_aes_sbox(int64_t i) { return (i >= 0 && i < 256) ? (int64_t)_aes_sbox
 int64_t rt_aes_inv_sbox(int64_t i) { return (i >= 0 && i < 256) ? (int64_t)_aes_inv_sbox[i] : 0; }
 int64_t rt_aes_rcon(int64_t i) { return (i >= 0 && i < 10) ? (int64_t)_aes_rcon[i] : 0; }
 
-/* ===================================================================
- * 8e. C-side SHA-512 — full implementation for baremetal
- *
- * Simple's array push/len are unreliable in baremetal. The entire
- * SHA-512 computation is done in C. Simple calls rt_sha512_hash().
- * =================================================================== */
-
 static inline uint64_t _sha512_rotr(uint64_t x, int n) { return (x >> n) | (x << (64 - n)); }
 static inline uint64_t _sha512_ch(uint64_t x, uint64_t y, uint64_t z) { return (x & y) ^ (~x & z); }
 static inline uint64_t _sha512_maj(uint64_t x, uint64_t y, uint64_t z) { return (x & y) ^ (x & z) ^ (y & z); }
@@ -5203,14 +5024,6 @@ int64_t rt_sha512_byte(int64_t index)
     if (index < 0 || index >= 64) return 0;
     return (int64_t)_sha512_result[index];
 }
-
-/* ===================================================================
- * 8f. Ed25519 — digital signatures (RFC 8032)
- *
- * Minimal but correct implementation based on ref10 / SUPERCOP design.
- * Uses the SHA-512 primitives from section 8e above.
- * All arithmetic is mod p = 2^255 - 19.
- * =================================================================== */
 
 /* ---------- SHA-512 helpers (reuse 8e internals) ---------- */
 
@@ -6745,10 +6558,6 @@ int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
     return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
-/* ===================================================================
- * Direct IPC send/recv — bypasses Cranelift-stubbed syscall function.
- * =================================================================== */
-
 int64_t rt_ipc_send(uint64_t port, uint64_t method, uint64_t flags,
                      uint64_t buf_addr, uint64_t buf_len)
 {
@@ -6832,16 +6641,6 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
     free(buf);
     return ENCODE_PTR(a);
 }
-
-/* ===================================================================
- * Direct socket API — bypasses IPC payload encoding entirely.
- *
- * The socket_compat.spl IPC path has issues on baremetal because:
- *   1. Cranelift can't compile inline asm (syscall instruction)
- *   2. unsafe_addr_of returns RuntimeArray header, not data pointer
- *
- * These functions take raw parameters and call the TCP stack directly.
- * =================================================================== */
 
 int64_t rt_net_socket(int64_t proto)
 {
@@ -7391,10 +7190,6 @@ int64_t rt_pci_read_bar0(int64_t index)
     return (int64_t)inl(0xCFC);
 }
 
-/* ===================================================================
- * 9. _start — serial init, spl_start, isa-debug-exit
- * =================================================================== */
-
 static void _serial_init(void)
 {
     /* Disable interrupts */
@@ -7411,10 +7206,6 @@ static void _serial_init(void)
     /* IRQs enabled, RTS/DSR set */
     outb(0x3F8 + 4, 0x0B);
 }
-
-/* ===================================================================
- * 9a. BGA framebuffer init — direct C, no runtime dependencies
- * =================================================================== */
 
 #define BGA_INDEX_PORT 0x01CE
 #define BGA_DATA_PORT  0x01CF
@@ -7529,13 +7320,6 @@ static void fb_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t fg, 
         text++;
     }
 }
-
-/* ===================================================================
- * 9b. Framebuffer rendering helpers for Pure Simple GUI
- *
- * These are called via extern fn from pure_gui.spl.
- * Cranelift passes RAW (untagged) u64 values for all args.
- * =================================================================== */
 
 uint64_t g_fb_addr = 0xFD000000;
 uint64_t g_fb_w = 1024;
@@ -7656,13 +7440,6 @@ RuntimeValue rt_gui_render_desktop(RuntimeValue unused1, RuntimeValue unused2)
     return 0;
 }
 
-/* ===================================================================
- * 9d. _start — serial init, then spl_start
- * =================================================================== */
-
-/* ===================================================================
- * Additional runtime stubs for OS boot path (PCI, VFS, NVMe)
- * =================================================================== */
 RuntimeValue rt_dict_new(void) { return NIL_VALUE; }
 RuntimeValue rt_dict_get(RuntimeValue d, RuntimeValue k) { (void)d; (void)k; return NIL_VALUE; }
 RuntimeValue rt_dict_set(RuntimeValue d, RuntimeValue k, RuntimeValue v) { (void)d; (void)k; (void)v; return NIL_VALUE; }
@@ -7793,10 +7570,6 @@ RuntimeValue serial_println(RuntimeValue val) {
     serial_puts("\r\n");
     return NIL_VALUE;
 }
-
-/* ===================================================================
- * Serial Input — COM1 RX polling + line editing
- * =================================================================== */
 
 /* Read a line from serial (blocks until newline or buffer full).
  * Returns length of line (excluding null terminator). Echoes characters. */
@@ -8094,19 +7867,6 @@ void _start(void)
         __asm__ volatile("hlt");
     }
 }
-
-/* ===================================================================
- * 10. Fatal-panic stubs — macro-generated runtime function stubs
- *
- * These provide link-time symbols for all runtime functions that the
- * Simple compiler may reference.  On bare metal, unimplemented stubs
- * print the function name to serial and halt (cli; hlt) instead of
- * silently returning 0, which would cause cascading silent failures.
- *
- * Functions that are intentionally safe as no-ops on bare metal
- * (GC, thread yield/current/sleep, async yield) are defined as
- * explicit inline implementations, NOT via the S* macros.
- * =================================================================== */
 
 #define S0(n) RuntimeValue n(void) { \
     serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
@@ -12494,15 +12254,6 @@ S2(rt_array_zip)
 S1(rt_array_uniq)
 S1(rt_array_compact)
 
-/* ===================================================================
- * Enum / Optional / Result runtime
- *
- * The compiler generates rt_enum_new / rt_enum_discriminant /
- * rt_enum_payload calls for Optional<T> (PciDevice?, Result, etc.).
- * Without these, --unresolved-symbols=ignore-all resolves them to 0
- * and Optional wrapping silently corrupts pointers.
- * =================================================================== */
-
 /* rt_enum_new(enum_id, discriminant, payload) → heap-allocated RuntimeEnum.
  * Calling convention: (i32, i32, i64) → i64 (ENCODE_PTR).
  * Matches Rust runtime RuntimeEnum layout (24 bytes). */
@@ -13218,16 +12969,6 @@ S1(rt_weak_deref)
 S1(rt_closure_new)
 S2(rt_closure_call)
 S1(rt_closure_bind)
-
-/* ===================================================================
- * 11. Real x86_64 port-I/O, MMIO, and CPU overrides
- *
- * These provide actual hardware access for x86_64-specific operations.
- * We define _real_ suffixed functions and then use them via linker
- * wrappers or direct calls.  In a single translation unit the last
- * definition of a symbol wins, but we use _real suffix + alias to
- * be explicit and avoid redefinition warnings.
- * =================================================================== */
 
 #if defined(__x86_64__) || defined(__i386__)
 /* --- Port I/O: real x86 implementations --- */
@@ -13945,11 +13686,6 @@ RuntimeValue rt_dump_fault_frame(RuntimeValue vec_rv, RuntimeValue rip_rv,
     return NIL_VALUE;
 }
 
-/* =========================================================================
- * SSH Auth Database — C-side workaround for Cranelift struct field access
- * bug that corrupts text comparisons in Simple-compiled authenticate_password.
- * Tests C2, C5, C6, C10, C11 depend on this.
- * ========================================================================= */
 static struct { char username[64]; char password[64]; } _auth_db[16];
 static int _auth_db_count = 0;
 
@@ -14100,15 +13836,6 @@ RuntimeValue rt_parse_auth_verify(RuntimeValue arr_rv, RuntimeValue exp_user_rv,
     return 1;
 }
 
-/* =========================================================================
- * SSH Channel Table — C-side workaround for Cranelift array-of-structs
- * codegen bug where array[0] loads correctly but array[1+] returns NIL.
- * Tests D5, D6, D11 depend on this.
- *
- * Uses int64_t (raw) params/returns matching PCI cache pattern —
- * Simple extern fn with i64 params passes raw integers, not tagged
- * RuntimeValue.
- * ========================================================================= */
 struct _ssh_channel {
     uint32_t local_id;
     uint32_t remote_id;
@@ -14221,14 +13948,6 @@ int64_t rt_ssh_ch_reset(void)
     return 0;
 }
 
-/* =========================================================================
- * rt_build_byte_range(count) -> [u8] array with values 0..count-1 (mod 256)
- *
- * Workaround for B12 test: rt_array_push reallocates when array grows past
- * capacity but codegen discards the returned new pointer (calls via
- * call_runtime_2_void), so the local var keeps a stale pointer. Building
- * the array in C bypasses the push growth bug entirely.
- * ========================================================================= */
 RuntimeValue rt_build_byte_range(RuntimeValue count_rv)
 {
     int64_t count = (int64_t)count_rv;  /* raw i64, not tagged */
@@ -14321,21 +14040,6 @@ RuntimeValue lib__nogc_sync_mut__replay__event_kinds__EventKind_dot_to_text(Runt
     return rt_string_from_cstr("event");
 }
 
-/* =========================================================================
- * rt_verify_kexinit_roundtrip(data [u8]) -> 0 on success, -1 on failure
- *
- * Workaround for E8 test: ssh_parse_kexinit chains 10 ssh_get_text calls
- * with offset tracking. Despite var locals, the chained offset accumulation
- * corrupts under Cranelift baremetal codegen. This C function verifies the
- * KEXINIT structure can be parsed without overrun.
- *
- * KEXINIT layout:
- *   byte 0      : type == 20 (SSH_MSG_KEXINIT)
- *   bytes 1-16  : cookie (16 bytes)
- *   10 name-lists: each is uint32 big-endian length + data
- *   1 byte      : first_kex_packet_follows (bool)
- *   4 bytes     : reserved (uint32)
- * ========================================================================= */
 int64_t rt_verify_kexinit_roundtrip(RuntimeValue data_rv)
 {
     if (!IS_HEAP(data_rv)) {
@@ -15088,23 +14792,6 @@ __attribute__((weak)) int64_t spl_handle_schedctl(uint64_t a0, uint64_t a1, uint
 
 /* End of Wave 10B: spl_handle_* weak shims and rt_syscall_dispatch */
 
-/* ===================================================================
- * === Test-only syscall shim stubs (kernel__abi__syscall_shim__*) ===
- *
- * These stubs allow TLS test kernels (tls_unit_entry.spl,
- * tls_system_test_entry.spl) to link without dragging in the full OS
- * syscall dispatch module.  They are no-ops — the test binaries never
- * invoke the syscall shim, and the linker script assigns strong T
- * aliases (spl_handle_X = kernel__abi__syscall_shim__spl_handle_X) so
- * the real kernel overrides these with its own compiled symbols.
- *
- * Marked __attribute__((weak)) so the real kernel-compiled W symbols
- * win when the full kernel is linked.  Return -38 (ENOSYS) to match
- * the existing spl_handle_* stub convention in this file.
- *
- * Real implementations live in src/os/kernel/abi/syscall_shim.spl.
- * =================================================================== */
-
 #define _SHIM_STUB(name) \
     __attribute__((weak)) int64_t \
     kernel__abi__syscall_shim__spl_handle_##name( \
@@ -15193,47 +14880,6 @@ _SHIM_STUB(schedctl)
 #undef _SHIM_STUB
 
 /* End of TLS test-only syscall shim stubs */
-
-/* ===================================================================
- * === Wave 11: Missing-symbol stubs to get kernel to link on x86_64 ===
- *
- * Split into buckets per doc/08_tracking/bug analysis:
- *
- *  A. Mangled-name weak aliases for klog_api: the Simple compiler emits
- *     calls to kernel__log__klog_api__rt_X but the C stubs above define
- *     rt_X without the module prefix. Add __attribute__((alias)) wrappers.
- *
- *  B. pmm_free_page alias: defined as kernel__memory__pmm__pmm_free_page
- *     by the compiler, but one call site uses the unmangled name.
- *
- *  C. log_raw_println / log_init_serial: Simple facade fns; one call site
- *     uses the unmangled C name. Stub to serial until real impls compile in.
- *     TODO: implement after smoke test green (klog_api module owns these).
- *
- *  D. ARM/ARM64/DMA/HostWM bucket: these symbols are only defined in
- *     ARM-specific C files.  The x86_64 build pulls them in via the shared
- *     virtio_blk / arm_fs_exec_spawn / dma modules which don't yet have
- *     @cfg(arm64) guards.  Weak no-op stubs satisfy the linker; they will
- *     never be called on x86_64 at runtime.
- *     TODO: gate call sites in src/os after smoke test green.
- *
- *  E. cap_init_task_record: extern fn in scheduler.spl with no x86_64 impl.
- *     Stub as no-op until capability module is ported.
- *     TODO: implement after smoke test green.
- *
- *  F. bytes_to_string / string_to_bytes / bytes_to_u32_le / u32_to_bytes_le:
- *     declared extern in binary_io.spl; no x86_64 freestanding impl.
- *     TODO: implement after smoke test green.
- *
- *  G. UITheme (glass_dark / glass_light / ios_dark / ios_light / theme_ui_theme):
- *     apps in src/os/apps/ pull in the UI theme library which calls these.
- *     UITheme struct is 32 bytes (0x20), UIThemeColors is 40 bytes (0x28).
- *     Return zero-initialised structs; never called by boot path.
- *     TODO: route through x86_64 display / GPU subsystem after smoke test green.
- *
- *  H. rt_memcpy / rt_memset / rt_reload_segments: missing from objects.
- *     rt_array_get_byte_raw: missing.
- * =================================================================== */
 
 /* --- A. klog_api mangled-name aliases -------------------------------- */
 

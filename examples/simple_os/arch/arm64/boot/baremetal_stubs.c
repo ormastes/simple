@@ -1,7 +1,3 @@
-/* ===================================================================
- * 1. Includes and types
- * =================================================================== */
-
 #include <stdint.h>
 #include <stddef.h>
 
@@ -53,10 +49,6 @@ static void serial_puthex(uint32_t v) {
     if (v > 0xFF) { serial_putchar(hex[(v>>12)&0xF]); serial_putchar(hex[(v>>8)&0xF]); }
     serial_putchar(hex[(v>>4)&0xF]); serial_putchar(hex[v&0xF]);
 }
-
-/* ===================================================================
- * 3. RuntimeValue tagging
- * =================================================================== */
 
 #define TAG_MASK    0x7ULL
 #define TAG_INT     0x0ULL
@@ -140,10 +132,6 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, Runt
 RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue end);
 void rt_print_value(RuntimeValue val);
-
-/* ===================================================================
- * 4. Heap allocator — bump allocator, 160 MB
- * =================================================================== */
 
 static char   _heap[160 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
@@ -232,10 +220,6 @@ RuntimeValue rt_dealloc(RuntimeValue ptr)
     return NIL_VALUE;
 }
 
-/* ===================================================================
- * 5. Memory functions — freestanding replacements
- * =================================================================== */
-
 void *memcpy(void *dst, const void *src, size_t n)
 {
     uint8_t       *d = (uint8_t *)dst;
@@ -316,10 +300,6 @@ char *strcat(char *dst, const char *src)
     while ((*d++ = *src++)) {}
     return dst;
 }
-
-/* ===================================================================
- * 6. String operations
- * =================================================================== */
 
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
 {
@@ -540,10 +520,6 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
     return NIL_VALUE;
 }
 
-/* ===================================================================
- * 7. Print functions
- * =================================================================== */
-
 void rt_print_str(RuntimeValue str)
 {
     if (IS_HEAP(str)) {
@@ -627,10 +603,6 @@ RuntimeValue rt_println(RuntimeValue val)
     return NIL_VALUE;
 }
 
-/* ===================================================================
- * 8. Framebuffer copy + native comparison
- * =================================================================== */
-
 void rt_framebuffer_copy(RuntimeValue dst, RuntimeValue src, RuntimeValue count)
 {
     if (!IS_HEAP(dst) || !IS_HEAP(src)) return;
@@ -673,12 +645,6 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
 {
     return rt_native_eq(a, b) ? 0 : 1;
 }
-
-/* ===================================================================
- * 8a. PCI device cache + scan via ECAM MMIO (ARM64)
- *
- * QEMU virt machine ARM64 ECAM base: 0x3f000000
- * =================================================================== */
 
 #define ECAM_BASE 0x4010000000ULL
 #define MAX_PCI_CACHED 32
@@ -785,10 +751,6 @@ int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
     return -38;
 }
 
-/* ===================================================================
- * 8b. Syscall dispatcher
- * =================================================================== */
-
 int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
                                        uint64_t a2, uint64_t a3, uint64_t a4)
 {
@@ -828,12 +790,6 @@ void c_pcimgr_init(void)
 {
     _pci_scan();
 }
-
-/* ===================================================================
- * 9. _c_start — PL011 init, PCI scan, spl_start, wfe loop
- *
- * Called from crt0.S after stack/BSS setup and vector table install.
- * =================================================================== */
 
 static void _pl011_init(void)
 {
@@ -897,11 +853,6 @@ void _c_start(void)
         __asm__ volatile("wfe");
     }
 }
-
-/* ===================================================================
- * 10. Arithmetic, type introspection, conversion
- *     (copied from x86_64 — identical logic)
- * =================================================================== */
 
 RuntimeValue rt_add(RuntimeValue a, RuntimeValue b)
 {
@@ -1024,10 +975,6 @@ RuntimeValue rt_clone(RuntimeValue val) {
 }
 RuntimeValue rt_freeze(RuntimeValue val) { return val; }
 RuntimeValue rt_is_frozen(RuntimeValue val) { (void)val; return 0; }
-
-/* ===================================================================
- * 11. String extras (full implementations from x86_64)
- * =================================================================== */
 
 static RuntimeString *decode_string(RuntimeValue v) {
     if (!IS_HEAP(v)) return (RuntimeString *)0;
@@ -1262,10 +1209,6 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
     return rt_value_to_string(val);
 }
 
-/* ===================================================================
- * 12. Array operations (full implementations from x86_64)
- * =================================================================== */
-
 RuntimeValue rt_array_new(RuntimeValue cap_val) {
     int64_t cap = (int64_t)simpleos_raw_or_encoded_int(cap_val);
     if (cap <= 0) cap = 64;
@@ -1410,10 +1353,6 @@ RuntimeValue rt_array_clone(RuntimeValue arr) {
     return result;
 }
 
-/* ===================================================================
- * 12b. Enum / Optional / Result operations
- * =================================================================== */
-
 RuntimeValue rt_enum_new(RuntimeValue enum_id_rv, RuntimeValue disc_rv, RuntimeValue payload)
 {
     RuntimeEnum *e = (RuntimeEnum *)malloc(sizeof(RuntimeEnum));
@@ -1463,10 +1402,6 @@ RuntimeValue rt_is_some(RuntimeValue value)
 {
     return rt_is_none(value) ? 0 : 1;
 }
-
-/* ===================================================================
- * 13. Map/Dict operations (full implementations from x86_64)
- * =================================================================== */
 
 static RuntimeMap *decode_map(RuntimeValue v) {
     if (!IS_HEAP(v)) return (RuntimeMap *)0;
@@ -1569,10 +1504,6 @@ RuntimeValue rt_map_merge(RuntimeValue map_a, RuntimeValue map_b) {
 
 RuntimeValue rt_map_for_each(RuntimeValue map, RuntimeValue callback) { (void)map; (void)callback; return NIL_VALUE; }
 
-/* ===================================================================
- * 14. Additional runtime stubs for OS boot path
- * =================================================================== */
-
 RuntimeValue rt_dict_new(void) { return NIL_VALUE; }
 RuntimeValue rt_dict_get(RuntimeValue d, RuntimeValue k) { (void)d; (void)k; return NIL_VALUE; }
 RuntimeValue rt_dict_set(RuntimeValue d, RuntimeValue k, RuntimeValue v) { (void)d; (void)k; (void)v; return NIL_VALUE; }
@@ -1646,10 +1577,6 @@ RuntimeValue rt_qemu_exit_success(void) {
     for (;;) __asm__ volatile("wfe");
     return NIL_VALUE;
 }
-
-/* ===================================================================
- * 15. Fatal-panic stubs — ARM64 version (wfe instead of cli;hlt)
- * =================================================================== */
 
 #define S0(n) RuntimeValue n(void) { \
     serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
@@ -1977,10 +1904,6 @@ S1(rt_result_unwrap) S2(rt_result_unwrap_or)
 /* Weak references & closures */
 S1(rt_weak_ref) S1(rt_weak_deref) S1(rt_closure_new) S2(rt_closure_call) S1(rt_closure_bind)
 
-/* ===================================================================
- * 16. Real ARM64 MMIO and CPU overrides
- * =================================================================== */
-
 /* MMIO — use RAW addresses (not DECODE_INT) to match x86_64 convention.
  * Simple code passes MMIO addresses as raw u64 values. */
 RuntimeValue rt_mmio_read_u8(RuntimeValue addr) { return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(uint64_t)addr; }
@@ -2090,18 +2013,6 @@ RuntimeValue rt_dmb(void) { __asm__ volatile("dmb sy"); return NIL_VALUE; }
 RuntimeValue rt_enable_interrupts(void) { __asm__ volatile("msr daifclr, #0xF"); return NIL_VALUE; }
 RuntimeValue rt_disable_interrupts(void) { __asm__ volatile("msr daifset, #0xF"); return NIL_VALUE; }
 S1(rt_read_sysreg) S2(rt_write_sysreg)
-
-/* ===================================================================
- * GUI support — framebuffer globals for glass_render.c
- *
- * glass_render.c (architecture-independent) references these externs:
- *   extern uint64_t g_fb_addr;
- *   extern uint64_t g_fb_w;
- *
- * rt_gui_set_fb() is called from Simple code to set the framebuffer
- * base address and width. On ARM64 QEMU virt, the framebuffer is
- * provided by the ramfb device or virtio-gpu.
- * =================================================================== */
 
 uint64_t g_fb_addr = 0;
 uint64_t g_fb_w = 0;
@@ -3384,10 +3295,6 @@ RuntimeValue rt_arm64_harden_canary_value(void)
     return (RuntimeValue)(mixed == 0 ? 1 : mixed);
 }
 
-/* ===================================================================
- * ARM64 freestanding runtime extras used by fs-exec closure
- * =================================================================== */
-
 RuntimeValue rt_contains(RuntimeValue haystack, RuntimeValue needle)
 {
     if (IS_HEAP(haystack)) {
@@ -3589,9 +3496,6 @@ void cap_init_task_record(RuntimeValue task, RuntimeValue full)
     (void)full;
 }
 
-/* ===================================================================
- * Crypto — shared portable implementation
- * =================================================================== */
 #define RV_INT int64_t
 #define CRYPTO_HAS_SERIAL_PUTHEX
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
