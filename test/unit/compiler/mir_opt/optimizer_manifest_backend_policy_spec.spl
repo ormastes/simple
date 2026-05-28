@@ -1,9 +1,13 @@
 use std.spec
 use compiler.mir_opt.optimizer_manifest.{
     ManifestPassContract, manifest_pass_entry_new, manifest_pass_entry_new_with_backend_policy,
+    manifest_pass_entry_new_with_backend_policy_and_cost,
     dynamic_pass_descriptor_from_entry, dynamic_pass_registry_new,
     dynamic_pass_registry_register, dynamic_pass_registry_names_for_backend,
     dynamic_pass_registry_skipped_names_for_backend,
+    dynamic_pass_registry_names_for_backend_budget,
+    dynamic_pass_registry_skipped_names_for_backend_budget,
+    manifest_cost_allowed,
     load_manifest_v1_from_parsed, load_manifest_v1_from_parsed_with_rules,
     run_manifest_pattern_rules_for_backend
 }
@@ -186,6 +190,50 @@ describe "optimizer manifest backend policy":
         expect(llvm_names.contains("backend_skip_llvm_test_pass")).to_equal(false)
         expect(llvm_skipped.contains("backend_cranelift_test_pass")).to_equal(true)
         expect(llvm_skipped.contains("backend_skip_llvm_test_pass")).to_equal(true)
+
+    it "filters registered dynamic pass descriptors by backend and compile-cost budget":
+        val contract = ManifestPassContract(["typed_mir"], ["canonical_mir"], "pure")
+        val low = manifest_pass_entry_new_with_backend_policy_and_cost(
+            "backend_low_test_pass",
+            [],
+            PassScope.Function,
+            [],
+            contract,
+            optimization_backend_policy_only([OptimizerBackendKind.Llvm], "llvm_only"),
+            "low",
+            "backend_low_test_pass_entry"
+        )
+        val high = manifest_pass_entry_new_with_backend_policy_and_cost(
+            "backend_high_test_pass",
+            [],
+            PassScope.Function,
+            [],
+            contract,
+            optimization_backend_policy_only([OptimizerBackendKind.Llvm], "llvm_only"),
+            "high",
+            "backend_high_test_pass_entry"
+        )
+        val manifest_result = load_manifest_v1_from_parsed(
+            1,
+            "simple.opt.mir.v1",
+            "backend_budget_test_plugin",
+            "1.0.0",
+            "0.9.0",
+            [low, high]
+        )
+        expect(manifest_result.?).to_equal(true)
+        val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest_result.unwrap())
+        expect(registry_result.?).to_equal(true)
+
+        val registry = registry_result.unwrap()
+        val llvm_medium = dynamic_pass_registry_names_for_backend_budget(registry, "llvm-lib", "medium")
+        val llvm_medium_skipped = dynamic_pass_registry_skipped_names_for_backend_budget(registry, "llvm-lib", "medium")
+
+        expect(manifest_cost_allowed("low", "medium")).to_equal(true)
+        expect(manifest_cost_allowed("high", "medium")).to_equal(false)
+        expect(llvm_medium.contains("backend_low_test_pass")).to_equal(true)
+        expect(llvm_medium.contains("backend_high_test_pass")).to_equal(false)
+        expect(llvm_medium_skipped.contains("backend_high_test_pass")).to_equal(true)
 
     it "runs manifest pattern rules only for backend-applicable dynamic passes":
         val entry = manifest_pass_entry_new_with_backend_policy(

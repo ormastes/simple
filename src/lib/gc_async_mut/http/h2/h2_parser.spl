@@ -83,12 +83,12 @@ fn h2_parse_frame_header(data: [u8], offset: i64) -> H2FrameHeader?:
     # R-bit masked off per RFC 9113 §4.1: receivers MUST ignore the reserved
     # bit. Symmetric to writer always sending it as 0.
     val stream_id = raw_sid & 0x7fffffff
-    return H2FrameHeader(
+    return Some(H2FrameHeader(
         length: length,
         frame_type: frame_type,
         flags: flags,
         stream_id: stream_id
-    )
+    ))
 
 # ============================================================================
 # Per-type payload parsers
@@ -100,11 +100,11 @@ fn _parse_data(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
         return nil
     if header.stream_id == 0:
         return nil   # DATA on stream 0 is a connection error (RFC 9113 §6.1).
-    return H2Frame.Data(H2DataFrame(
+    return Some(H2Frame.Data(H2DataFrame(
         stream_id: header.stream_id,
         flags: header.flags,
         data: payload
-    ))
+    )))
 
 fn _parse_headers(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     # PADDED + PRIORITY-in-HEADERS sub-payloads deferred to W16+.
@@ -114,11 +114,11 @@ fn _parse_headers(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
         return nil
     if header.stream_id == 0:
         return nil
-    return H2Frame.Headers(H2HeadersFrame(
+    return Some(H2Frame.Headers(H2HeadersFrame(
         stream_id: header.stream_id,
         flags: header.flags,
         header_block: payload
-    ))
+    )))
 
 fn _parse_priority(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     # PRIORITY payload MUST be exactly 5 bytes (RFC 9113 §6.3).
@@ -130,12 +130,12 @@ fn _parse_priority(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     val exclusive = (word & 0x80000000) != 0
     val dep = word & 0x7fffffff
     val weight = payload[4]
-    return H2Frame.Priority(H2PriorityFrame(
+    return Some(H2Frame.Priority(H2PriorityFrame(
         stream_id: header.stream_id,
         exclusive: exclusive,
         stream_dependency: dep,
         weight: weight
-    ))
+    )))
 
 fn _parse_rst_stream(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     if payload.len() != 4:
@@ -143,10 +143,10 @@ fn _parse_rst_stream(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     if header.stream_id == 0:
         return nil
     val ec = _read_u32_be(payload, 0)
-    return H2Frame.RstStream(H2RstStreamFrame(
+    return Some(H2Frame.RstStream(H2RstStreamFrame(
         stream_id: header.stream_id,
         error_code: ec
-    ))
+    )))
 
 fn _parse_settings(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     # SETTINGS stream_id MUST be 0 (RFC 9113 §6.5).
@@ -158,10 +158,10 @@ fn _parse_settings(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
         if payload.len() != 0:
             return nil
         var empty: [H2Setting] = []
-        return H2Frame.Settings(H2SettingsFrame(
+        return Some(H2Frame.Settings(H2SettingsFrame(
             flags: header.flags,
             settings: empty
-        ))
+        )))
     # Non-ACK: payload length MUST be a multiple of 6.
     if payload.len() % 6 != 0:
         return nil
@@ -174,10 +174,10 @@ fn _parse_settings(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
         val value = _read_u32_be(payload, i + 2)
         settings.push(H2Setting(identifier: ident, value: value))
         i = i + 6
-    return H2Frame.Settings(H2SettingsFrame(
+    return Some(H2Frame.Settings(H2SettingsFrame(
         flags: header.flags,
         settings: settings
-    ))
+    )))
 
 fn _parse_push_promise(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     if (header.flags & H2_FLAG_PADDED) != 0:
@@ -189,12 +189,12 @@ fn _parse_push_promise(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     val raw_pid = _read_u32_be(payload, 0)
     val pid = raw_pid & 0x7fffffff
     val hb = _slice_bytes(payload, 4, payload.len() - 4)
-    return H2Frame.PushPromise(H2PushPromiseFrame(
+    return Some(H2Frame.PushPromise(H2PushPromiseFrame(
         stream_id: header.stream_id,
         flags: header.flags,
         promised_stream_id: pid,
         header_block: hb
-    ))
+    )))
 
 fn _parse_ping(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     # PING stream_id MUST be 0; payload MUST be exactly 8 bytes (RFC 9113 §6.7).
@@ -202,10 +202,10 @@ fn _parse_ping(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
         return nil
     if payload.len() != 8:
         return nil
-    return H2Frame.Ping(H2PingFrame(
+    return Some(H2Frame.Ping(H2PingFrame(
         flags: header.flags,
         opaque_data: payload
-    ))
+    )))
 
 fn _parse_goaway(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     # GOAWAY stream_id MUST be 0 (RFC 9113 §6.8).
@@ -217,30 +217,30 @@ fn _parse_goaway(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     val sid = raw_sid & 0x7fffffff
     val ec = _read_u32_be(payload, 4)
     val debug = _slice_bytes(payload, 8, payload.len() - 8)
-    return H2Frame.Goaway(H2GoawayFrame(
+    return Some(H2Frame.Goaway(H2GoawayFrame(
         last_stream_id: sid,
         error_code: ec,
         debug_data: debug
-    ))
+    )))
 
 fn _parse_window_update(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     if payload.len() != 4:
         return nil
     val raw_inc = _read_u32_be(payload, 0)
     val inc = raw_inc & 0x7fffffff
-    return H2Frame.WindowUpdate(H2WindowUpdateFrame(
+    return Some(H2Frame.WindowUpdate(H2WindowUpdateFrame(
         stream_id: header.stream_id,
         increment: inc
-    ))
+    )))
 
 fn _parse_continuation(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
     if header.stream_id == 0:
         return nil
-    return H2Frame.Continuation(H2ContinuationFrame(
+    return Some(H2Frame.Continuation(H2ContinuationFrame(
         stream_id: header.stream_id,
         flags: header.flags,
         header_block: payload
-    ))
+    )))
 
 # ============================================================================
 # Public parser entry points
@@ -261,15 +261,25 @@ fn h2_parse_frame(data: [u8], offset: i64) -> H2Frame?:
     if data.len() < payload_offset + header.length:
         return nil   # Truncated payload.
     val payload = _slice_bytes(data, payload_offset, header.length)
-    match header.frame_type:
-        case H2_FRAME_DATA: _parse_data(header, payload)
-        case H2_FRAME_HEADERS: _parse_headers(header, payload)
-        case H2_FRAME_PRIORITY: _parse_priority(header, payload)
-        case H2_FRAME_RST_STREAM: _parse_rst_stream(header, payload)
-        case H2_FRAME_SETTINGS: _parse_settings(header, payload)
-        case H2_FRAME_PUSH_PROMISE: _parse_push_promise(header, payload)
-        case H2_FRAME_PING: _parse_ping(header, payload)
-        case H2_FRAME_GOAWAY: _parse_goaway(header, payload)
-        case H2_FRAME_WINDOW_UPDATE: _parse_window_update(header, payload)
-        case H2_FRAME_CONTINUATION: _parse_continuation(header, payload)
-        case _: nil
+    val ft = header.frame_type
+    if ft == 0:
+        return _parse_data(header, payload)
+    elif ft == 1:
+        return _parse_headers(header, payload)
+    elif ft == 2:
+        return _parse_priority(header, payload)
+    elif ft == 3:
+        return _parse_rst_stream(header, payload)
+    elif ft == 4:
+        return _parse_settings(header, payload)
+    elif ft == 5:
+        return _parse_push_promise(header, payload)
+    elif ft == 6:
+        return _parse_ping(header, payload)
+    elif ft == 7:
+        return _parse_goaway(header, payload)
+    elif ft == 8:
+        return _parse_window_update(header, payload)
+    elif ft == 9:
+        return _parse_continuation(header, payload)
+    return nil

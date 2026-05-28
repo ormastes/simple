@@ -6,7 +6,10 @@ use compiler.interp.execution.tiered_jit.{
     jit_hotspot_plan_from_profile,
     jit_hotspot_plan_with_var_facts,
     jit_hotspot_rebuild_plan,
+    jit_hotspot_rebuild_plan_with_cost_budget,
+    jit_hotspot_rebuild_choice,
     jit_hotspot_rebuild_backend_name,
+    jit_hotspot_cost_allowed,
     jit_var_optimization_facts,
     jit_var_optimization_fact_list,
     jit_var_optimization_reason,
@@ -120,6 +123,50 @@ describe "Tiered JIT hotspot facts":
         expect(ready.eligible).to_equal(true)
         expect(ready.reason).to_equal("ready")
         expect(jit_hotspot_rebuild_backend_name("cranlift")).to_equal("cranelift")
+
+    it "normalizes llvm-lib to the LLVM rebuild policy":
+        val ready = jit_hotspot_rebuild_plan(hot_profile(256), hotspot_config(), "llvm-lib", true)
+        expect(ready.backend).to_equal("llvm")
+        expect(ready.cost_class).to_equal("high")
+        expect(jit_hotspot_rebuild_backend_name("llvmlib")).to_equal("llvm")
+
+    it "rejects LLVM rebuilds when compile cost budget is below high":
+        val plan = jit_hotspot_rebuild_plan_with_cost_budget(hot_profile(256), hotspot_config(), "llvm", true, "medium")
+        expect(plan.eligible).to_equal(false)
+        expect(plan.reason).to_equal("cost budget exceeded")
+        expect(plan.cost_class).to_equal("high")
+        expect(jit_hotspot_cost_allowed("medium", "medium")).to_equal(true)
+        expect(jit_hotspot_cost_allowed("high", "medium")).to_equal(false)
+
+    it "selects Cranelift for tier1 heat and LLVM only for tier2 heat":
+        val tier1 = jit_hotspot_rebuild_choice(hot_profile(64), hotspot_config(), true, true, "high")
+        expect(tier1.eligible).to_equal(true)
+        expect(tier1.selected_backend).to_equal("cranelift")
+        expect(tier1.required_count).to_equal(8)
+
+        val tier2 = jit_hotspot_rebuild_choice(hot_profile(256), hotspot_config(), true, true, "high")
+        expect(tier2.eligible).to_equal(true)
+        expect(tier2.selected_backend).to_equal("llvm")
+        expect(tier2.required_count).to_equal(128)
+
+    it "falls back to Cranelift when LLVM is too expensive or unavailable":
+        val budgeted = jit_hotspot_rebuild_choice(hot_profile(256), hotspot_config(), true, true, "medium")
+        expect(budgeted.eligible).to_equal(true)
+        expect(budgeted.selected_backend).to_equal("cranelift")
+        expect(budgeted.cost_class).to_equal("medium")
+
+        val unavailable = jit_hotspot_rebuild_choice(hot_profile(256), hotspot_config(), true, false, "high")
+        expect(unavailable.eligible).to_equal(true)
+        expect(unavailable.selected_backend).to_equal("cranelift")
+
+    it "rejects rebuilds when no backend can satisfy heat and cost policy":
+        val cold = jit_hotspot_rebuild_choice(hot_profile(2), hotspot_config(), true, true, "high")
+        expect(cold.eligible).to_equal(false)
+        expect(cold.reason).to_equal("missing tier1 hot_count")
+
+        val unavailable = jit_hotspot_rebuild_choice(hot_profile(256), hotspot_config(), false, false, "high")
+        expect(unavailable.eligible).to_equal(false)
+        expect(unavailable.reason).to_equal("no backend available")
 
     it "invalidates an existing hotspot plan explicitly":
         val plan = jit_hotspot_plan_from_profile(hot_profile(64), hotspot_config(), true, true)

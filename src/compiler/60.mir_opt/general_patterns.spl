@@ -294,6 +294,22 @@ struct BackendOptimizationRecommendation:
     provider: OptimizationRuleProvider
     rationale: text
     source_hint: text
+    cost_class: text
+
+fn backend_optimization_cost_rank(cost_class: text) -> i64:
+    if cost_class == "free":
+        0
+    elif cost_class == "low":
+        1
+    elif cost_class == "medium":
+        2
+    elif cost_class == "high":
+        3
+    else:
+        99
+
+fn backend_optimization_cost_allowed(cost_class: text, max_cost_class: text) -> bool:
+    backend_optimization_cost_rank(cost_class) <= backend_optimization_cost_rank(max_cost_class)
 
 fn web_hot_path_facts() -> [OptimizationFact]:
     [
@@ -374,9 +390,10 @@ fn backend_recommendation(
     stable_name: text,
     provider: OptimizationRuleProvider,
     rationale: text,
-    source_hint: text
+    source_hint: text,
+    cost_class: text
 ) -> BackendOptimizationRecommendation:
-    BackendOptimizationRecommendation(stable_name, provider, rationale, source_hint)
+    BackendOptimizationRecommendation(stable_name, provider, rationale, source_hint, cost_class)
 
 fn ssa_var_canon_recommendation() -> BackendOptimizationRecommendation:
     val provider = backend_plugin_provider(
@@ -393,7 +410,27 @@ fn ssa_var_canon_recommendation() -> BackendOptimizationRecommendation:
         "ssa-var-canon",
         optimization_rule_provider_with_backend_policy(provider, policy),
         "Canonicalizes reassigned Simple var storage before Cranelift/interpreter JIT planning; LLVM should receive promotable IR and let SROA/mem2reg run.",
-        "LLVM frontend performance tips: SROA and Mem2Reg promote entry-block allocas; Cranelift frontend uses variables/block params for SSA values."
+        "LLVM frontend performance tips: SROA and Mem2Reg promote entry-block allocas; Cranelift frontend uses variables/block params for SSA values.",
+        "low"
+    )
+
+fn llvm_entry_alloca_shaping_recommendation() -> BackendOptimizationRecommendation:
+    val provider = backend_plugin_provider(
+        "llvm-entry-alloca-shaping",
+        ["typed_mir", "var.reassignment", "escape.no_escape", "borrow.reassign_safe"],
+        ["llvm.promotable_allocas", "backend_pipeline_selected"],
+        "escape-borrow-guarded"
+    )
+    val policy = optimization_backend_policy_only(
+        [OptimizerBackendKind.Llvm],
+        "llvm_frontend_alloca_promotion_shape"
+    )
+    backend_recommendation(
+        "llvm-entry-alloca-shaping",
+        optimization_rule_provider_with_backend_policy(provider, policy),
+        "Keeps reassigned var storage in the LLVM-promotable shape instead of running Simple-side SSA canonicalization that duplicates LLVM SROA/mem2reg.",
+        "LLVM frontend performance tips document that SROA and Mem2Reg only eliminate allocas they can promote, with entry-block allocas being the key frontend shape.",
+        "low"
     )
 
 fn early_dead_code_recommendation() -> BackendOptimizationRecommendation:
@@ -407,7 +444,27 @@ fn early_dead_code_recommendation() -> BackendOptimizationRecommendation:
         "early-dead-code-prune",
         optimization_rule_provider_with_backend_policy(provider, optimization_backend_policy_all()),
         "Prunes obviously dead MIR before backend optimization so later scalar promotion and pattern passes do less work.",
-        "LLVM new pass pipeline guidance favors canonical cleanup around scalar optimization pipelines."
+        "LLVM new pass pipeline guidance favors canonical cleanup around scalar optimization pipelines.",
+        "low"
+    )
+
+fn cranelift_local_licm_recommendation() -> BackendOptimizationRecommendation:
+    val provider = backend_plugin_provider(
+        "cranelift-local-licm",
+        ["typed_mir", "loop_preheader", "alias_stable"],
+        ["loop_invariants_hoisted"],
+        "alias-proof-guarded"
+    )
+    val policy = optimization_backend_policy_skip(
+        [OptimizerBackendKind.Llvm],
+        "llvm_default_pipeline_runs_loop_optimizations"
+    )
+    backend_recommendation(
+        "cranelift-local-licm",
+        optimization_rule_provider_with_backend_policy(provider, policy),
+        "Hoists cheap loop-invariant MIR work for Cranelift and interpreter JIT paths where Simple owns more of the mid-end; LLVM should use its loop pipeline.",
+        "LLVM pass documentation includes loop optimization passes such as LICM in the backend pipeline family.",
+        "medium"
     )
 
 fn bounds_check_elim_recommendation() -> BackendOptimizationRecommendation:
@@ -421,7 +478,8 @@ fn bounds_check_elim_recommendation() -> BackendOptimizationRecommendation:
         "bounds-check-elim",
         optimization_rule_provider_with_backend_policy(provider, optimization_backend_policy_all()),
         "Keeps Simple range proofs visible before lowering; backend optimizers cannot reliably reconstruct language-level bounds facts after runtime-call lowering.",
-        "General compiler practice: preserve high-level range facts before lowering to low-level IR."
+        "General compiler practice: preserve high-level range facts before lowering to low-level IR.",
+        "medium"
     )
 
 fn byte_scan_recommendation() -> BackendOptimizationRecommendation:
@@ -435,7 +493,8 @@ fn byte_scan_recommendation() -> BackendOptimizationRecommendation:
         "byte-scan-to-delimiter",
         optimization_rule_provider_with_backend_policy(provider, optimization_backend_policy_all()),
         "Recognizes delimiter scans while buffer and sentinel facts are still explicit, enabling memchr/SIMD or backend-specific lowering.",
-        "LLVM pass catalog includes loop/vector/scalar cleanup, but high-level delimiter intent is frontend-owned."
+        "LLVM pass catalog includes loop/vector/scalar cleanup, but high-level delimiter intent is frontend-owned.",
+        "medium"
     )
 
 fn checksum_reducer_recommendation() -> BackendOptimizationRecommendation:
@@ -449,7 +508,8 @@ fn checksum_reducer_recommendation() -> BackendOptimizationRecommendation:
         "checksum-reducer",
         optimization_rule_provider_with_backend_policy(provider, optimization_backend_policy_all()),
         "Keeps checksum associativity and reduction shape explicit for hardware CRC, vector reduction, or table-driven lowering.",
-        "Backend vectorizers help after lowering, but checksum semantics are easier to prove in MIR."
+        "Backend vectorizers help after lowering, but checksum semantics are easier to prove in MIR.",
+        "medium"
     )
 
 fn llvm_default_pipeline_recommendation() -> BackendOptimizationRecommendation:
@@ -467,13 +527,16 @@ fn llvm_default_pipeline_recommendation() -> BackendOptimizationRecommendation:
         "llvm-default-pipeline",
         optimization_rule_provider_with_backend_policy(provider, policy),
         "Uses LLVM's default optimization pipeline instead of duplicating low-level scalar, loop, and cleanup passes in Simple plugins.",
-        "LLVM New Pass Manager: PassBuilder default pipelines are the intended way to construct normal optimization pipelines."
+        "LLVM New Pass Manager: PassBuilder default pipelines are the intended way to construct normal optimization pipelines.",
+        "high"
     )
 
 fn all_backend_optimization_recommendations() -> [BackendOptimizationRecommendation]:
     [
         ssa_var_canon_recommendation(),
+        llvm_entry_alloca_shaping_recommendation(),
         early_dead_code_recommendation(),
+        cranelift_local_licm_recommendation(),
         bounds_check_elim_recommendation(),
         byte_scan_recommendation(),
         checksum_reducer_recommendation(),
@@ -490,6 +553,19 @@ fn backend_optimization_recommendations_for(backend_name: text) -> [BackendOptim
 fn backend_optimization_recommendation_names(backend_name: text) -> [text]:
     var names: [text] = []
     for rec in backend_optimization_recommendations_for(backend_name):
+        names = names.push(rec.stable_name)
+    names
+
+fn backend_optimization_recommendations_for_budget(backend_name: text, max_cost_class: text) -> [BackendOptimizationRecommendation]:
+    var selected: [BackendOptimizationRecommendation] = []
+    for rec in backend_optimization_recommendations_for(backend_name):
+        if backend_optimization_cost_allowed(rec.cost_class, max_cost_class):
+            selected = selected.push(rec)
+    selected
+
+fn backend_optimization_recommendation_names_for_budget(backend_name: text, max_cost_class: text) -> [text]:
+    var names: [text] = []
+    for rec in backend_optimization_recommendations_for_budget(backend_name, max_cost_class):
         names = names.push(rec.stable_name)
     names
 
@@ -519,7 +595,10 @@ export is_checksum_reducer_loop, is_prefix_scan_lookup, is_wal_batch_flush
 
 export OptimizationFact, web_hot_path_facts, fact_for_recognizer, all_fact_keys
 export BackendOptimizationRecommendation
+export backend_optimization_cost_allowed
 export all_backend_optimization_recommendations
 export backend_optimization_recommendations_for
 export backend_optimization_recommendation_names
+export backend_optimization_recommendations_for_budget
+export backend_optimization_recommendation_names_for_budget
 export backend_optimization_has_recommendation

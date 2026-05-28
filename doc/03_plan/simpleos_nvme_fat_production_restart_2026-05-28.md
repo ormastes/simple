@@ -84,8 +84,21 @@
 ```text
 bin/simple test test/unit/os/services/vfs/vfs_pure_fat_production_guard_spec.spl --mode=interpreter --clean
   PASSED: 2 examples, 0 failures; includes source-tree scan that rejects
-  legacy Fat32Driver imports/constructors outside the isolated compatibility
-  module
+  legacy Fat32Driver imports/constructors and legacy FAT helper-module imports
+  outside the isolated compatibility module
+bin/simple test test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl --mode=interpreter --clean
+  PASSED: 18 examples, 0 failures; confirms NVMe FAT mount factory uses
+  FsFat32Driver.new_with_direct_io for lease-backed direct I/O
+bin/simple test test/integration/storage/dbfs/dbfs_hw_passthrough_spec.spl --mode=interpreter --clean
+  PASSED: 4 examples, 0 failures; confirms DBFS and shared FsFat32Driver
+  variants register through the same MountTable driver path
+rg -n "Fat32Driver\\.new_ram_backed|impl Fat32Driver:|new_ram_backed" src/os/services/fat32 src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl src/lib/nogc_async_mut/fs_driver/fat32_stub.spl test/integration/storage/dbfs -g '*.spl'
+  PASSED: legacy Fat32Driver no longer exposes new_ram_backed/new_ram_backed_with_file shims;
+  shared FsFat32Driver constructors remain for current DBFS/shared-driver tests
+bin/simple test test/integration/storage/dbfs/fat32_no_regression_spec.spl --mode=interpreter --clean
+  PASSED: 3 examples, 0 failures; stale shim-style path traversal assertions
+  were replaced with shared FsFat32Driver mount-table registration and DBFS
+  coexistence assertions
 bin/simple test test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl --mode=interpreter --clean
   PASSED: 27 examples, 0 failures
 bin/simple test test/unit/os/drivers/nvme/nvme_driver_probe_contract_spec.spl --mode=interpreter --clean
@@ -127,12 +140,21 @@ scripts/perf/run-fat32-4k-cfat-baseline.shs
 REQUIRE_VFAT_BASELINE=1 scripts/perf/run-fat32-4k-cfat-baseline.shs
   FAILED cleanly: VFAT baseline is required but missing or unseeded; no shell
   integer-expression error from SKIPPED rows after parser tightening
+REQUIRE_VFAT_BASELINE=1 VFAT_MNT=/tmp/simple_vfat_bench_mnt_codex scripts/perf/run-fat32-4k-cfat-baseline.shs
+  FAILED cleanly: custom VFAT mount path is propagated into a generated
+  benchmark source copy, and missing/unseeded VFAT rows fail before integer
+  comparison rather than parsing SKIPPED as a number
 scripts/perf/prepare-fat32-4k-vfat.shs
   FAILED locally: /tmp/simple_vfat_bench_mnt is mounted rw as /dev/loop21 but
   owned by root:root, and passwordless sudo is unavailable for remount/reseed;
   the script now has a udisksctl fallback for a free mount point, but this
   stale root-owned mount must still be removed or remounted before the focused
   benchmark can consume VFAT files at its fixed path
+VFAT_MNT=/tmp/simple_vfat_bench_mnt_codex scripts/perf/prepare-fat32-4k-vfat.shs
+  FAILED locally: no passwordless sudo and udisksctl loop setup is denied by
+  polkit without a controlling terminal; this proves the repo gate can use a
+  non-default mount path, but local VFAT seeding still requires external mount
+  authorization
 sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_nvme_preflight_probe.sdn
   FAILED locally: default /dev/nvme*n1 matched 3 real NVMe namespaces, and
   standalone preflight now fails closed before identity probing when the device
@@ -171,7 +193,9 @@ SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/ta
      the shared `Fat32Core` image-population path for manual sector dumps.
    - DONE for production-path enforcement: `vfs_pure_fat_production_guard_spec`
      now walks `src/os` and rejects legacy FAT imports/constructors outside the
-     isolated compatibility module files.
+     isolated compatibility module files. Latest follow-up also rejects legacy
+     FAT helper-module imports (`fat32_write`, `fat32_filesystem_ops`,
+     `fat32_write_helpers`) outside that compatibility island.
    - 2026-05-28 follow-up: the debug helper now exits 0 with
      `Result::Ok(())` after removing a local `io` alias lowering blocker from
      the cached raw-image device and replacing JIT-incompatible `Result.Ok`
@@ -185,6 +209,16 @@ SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/ta
      reports 19 passed / 8 failed in this worktree and in a detached clean
      `HEAD` worktree. Keep that as pre-existing legacy FAT debt while retiring
      production dependencies on the old driver.
+   - 2026-05-28 follow-up: removed unused `Fat32Driver.new_ram_backed*`
+     compatibility constructors from the legacy implementation island. Current
+     DBFS/shared-driver coverage uses `FsFat32Driver.new_ram_backed*` directly;
+     `test/integration/storage/dbfs/dbfs_hw_passthrough_spec.spl` passes.
+   - 2026-05-28 follow-up:
+     `test/integration/storage/dbfs/fat32_no_regression_spec.spl` no longer
+     asserts obsolete shim-style FAT path traversal against an unmounted mock
+     image. It now passes as a focused shared `FsFat32Driver` mount-table
+     registration and DBFS coexistence guard, and its path-migration conflict
+     has been resolved toward the shared-driver surface.
 
 4. Finish performance proof for Simple FAT vs C/VFAT on 4K random read/write.
    - Keep `scripts/perf/run-fat32-4k-cfat-baseline.shs` as the focused gate.
@@ -203,6 +237,10 @@ SIMPLEOS_NVME_SERIAL_LOG=/tmp/nonexistent-simpleos-nvme.log src/compiler_rust/ta
      mount is root-owned and cannot be reseeded without passwordless sudo or a
      remount with `uid=$(id -u),gid=$(id -g)`. The script now also attempts a
      `udisksctl` loop mount when the target mount point is free.
+   - 2026-05-28 VFAT path follow-up: `run-fat32-4k-cfat-baseline.shs` now
+     honors `VFAT_MNT` by generating a temporary benchmark source with that
+     mount path as a literal, avoiding the Simple runtime crashes seen when
+     trying to read the path via argv/env inside the benchmark.
 
 5. Audit direct I/O for all three filesystem consumers.
    - FAT32 is wired through shared FAT extents.

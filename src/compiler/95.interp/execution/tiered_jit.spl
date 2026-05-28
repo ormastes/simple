@@ -78,6 +78,15 @@ struct JitHotspotRebuildPlan:
     cost_class: text
     required_count: i64
 
+struct JitHotspotRebuildChoice:
+    function_name: text
+    selected_backend: text
+    eligible: bool
+    reason: text
+    cost_class: text
+    required_count: i64
+    attempted_backends: [text]
+
 struct JitHotspotSpecializationProvider:
     name: text
     enabled: bool
@@ -235,8 +244,21 @@ fn jit_hotspot_plan_with_var_facts(
 fn jit_hotspot_rebuild_backend_name(backend: text) -> text:
     if backend == "cranlift":
         "cranelift"
+    elif backend == "llvm-lib" or backend == "llvmlib":
+        "llvm"
     else:
         backend
+
+fn jit_hotspot_cost_rank(cost_class: text) -> i64:
+    match cost_class:
+        case "free": 0
+        case "low": 1
+        case "medium": 2
+        case "high": 3
+        case _: 99
+
+fn jit_hotspot_cost_allowed(cost_class: text, max_cost_class: text) -> bool:
+    jit_hotspot_cost_rank(cost_class) <= jit_hotspot_cost_rank(max_cost_class)
 
 fn jit_hotspot_rebuild_plan(
     profile: FunctionProfile,
@@ -283,6 +305,79 @@ fn jit_hotspot_rebuild_plan(
             cost_class: "unknown",
             required_count: 0
         )
+
+fn jit_hotspot_rebuild_plan_with_cost_budget(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    backend: text,
+    backend_available: bool,
+    max_cost_class: text
+) -> JitHotspotRebuildPlan:
+    val plan = jit_hotspot_rebuild_plan(profile, config, backend, backend_available)
+    if not plan.eligible:
+        return plan
+    if not jit_hotspot_cost_allowed(plan.cost_class, max_cost_class):
+        return JitHotspotRebuildPlan(
+            function_name: plan.function_name,
+            backend: plan.backend,
+            eligible: false,
+            reason: "cost budget exceeded",
+            cost_class: plan.cost_class,
+            required_count: plan.required_count
+        )
+    plan
+
+fn jit_hotspot_rebuild_choice(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    cranelift_available: bool,
+    llvm_available: bool,
+    max_cost_class: text
+) -> JitHotspotRebuildChoice:
+    var attempted: [text] = []
+    val llvm_plan = jit_hotspot_rebuild_plan_with_cost_budget(profile, config, "llvm", llvm_available, max_cost_class)
+    attempted = attempted.push("llvm")
+    if llvm_plan.eligible:
+        return JitHotspotRebuildChoice(
+            function_name: profile.name,
+            selected_backend: "llvm",
+            eligible: true,
+            reason: "ready",
+            cost_class: llvm_plan.cost_class,
+            required_count: llvm_plan.required_count,
+            attempted_backends: attempted
+        )
+
+    val cranelift_plan = jit_hotspot_rebuild_plan_with_cost_budget(profile, config, "cranelift", cranelift_available, max_cost_class)
+    attempted = attempted.push("cranelift")
+    if cranelift_plan.eligible:
+        return JitHotspotRebuildChoice(
+            function_name: profile.name,
+            selected_backend: "cranelift",
+            eligible: true,
+            reason: "ready",
+            cost_class: cranelift_plan.cost_class,
+            required_count: cranelift_plan.required_count,
+            attempted_backends: attempted
+        )
+
+    val reason = if not cranelift_available and not llvm_available:
+        "no backend available"
+    elif llvm_plan.reason == "cost budget exceeded":
+        "llvm cost budget exceeded"
+    elif profile.call_count < config.tier1_threshold:
+        "missing tier1 hot_count"
+    else:
+        llvm_plan.reason
+    JitHotspotRebuildChoice(
+        function_name: profile.name,
+        selected_backend: "",
+        eligible: false,
+        reason: reason,
+        cost_class: "none",
+        required_count: config.tier1_threshold,
+        attempted_backends: attempted
+    )
 
 fn jit_hotspot_plan_invalidate(plan: JitHotspotPlan, reason: text) -> JitHotspotPlan:
     JitHotspotPlan(
@@ -510,6 +605,18 @@ class TieredJitManager:
         else:
             val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false)
             jit_hotspot_plan_from_profile(profile, self.config, typed_mir, safe_deopt)
+
+    fn get_hotspot_rebuild_choice(
+        name: text,
+        cranelift_available: bool,
+        llvm_available: bool,
+        max_cost_class: text
+    ) -> JitHotspotRebuildChoice:
+        if self.profiles.has(name):
+            jit_hotspot_rebuild_choice(self.profiles[name], self.config, cranelift_available, llvm_available, max_cost_class)
+        else:
+            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false)
+            jit_hotspot_rebuild_choice(profile, self.config, cranelift_available, llvm_available, max_cost_class)
 
     fn get_hotspot_plan_with_rules(
         name: text,

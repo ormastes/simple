@@ -18,15 +18,25 @@ The helper constructs a built-in, hot, pipeline-pass provider so runtime hotspot
 
 - Add `backend_policy` to manifest pass entries and propagate it into dynamic
   pass provider descriptors.
+- Add `cost_class` to manifest pass entries and dynamic descriptors, defaulting
+  existing manifest construction to medium compile cost.
 - Add `manifest_pass_entry_new` so existing dynamic manifest construction gets
   an explicit all-backend default without positional-field drift.
 - Add `manifest_pass_entry_with_backend_policy` and
   `manifest_pass_entry_new_with_backend_policy` so manifest construction can
   declare backend-specific apply/skip policy directly.
+- Add `manifest_pass_entry_with_cost_class` and
+  `manifest_pass_entry_new_with_backend_policy_and_cost` so expensive dynamic
+  plugins can declare high compile cost at registration time.
 - Add `dynamic_pass_registry_for_backend`,
   `dynamic_pass_registry_names_for_backend`, and
   `dynamic_pass_registry_skipped_names_for_backend` so backend planners consume
   a pre-filtered plugin view instead of duplicating policy checks.
+- Add `dynamic_pass_registry_for_backend_budget`,
+  `dynamic_pass_registry_names_for_backend_budget`, and
+  `dynamic_pass_registry_skipped_names_for_backend_budget` so backend planners
+  can reject high-cost dynamic plugins when the current compile-cost budget is
+  low or medium.
 - Add `run_manifest_pattern_rules_for_backend` so manifest-provided pattern
   rewrites execute only when at least one registered pass from that manifest is
   applicable to the requested backend. Rules-only manifests remain
@@ -41,10 +51,17 @@ mem2reg/SROA scalar promotion.
 
 - Add `optimizationpipeline_for_backend`.
 - Add `optimizationpipeline_passes_for_backend`.
+- Add `optimizationpipeline_for_backend_budget`.
+- Add `optimizationpipeline_passes_for_backend_budget`.
 - Add `mir_pass_applies_to_backend`.
+- Add `mir_pass_cost_class`, `mir_pass_cost_allowed`, and
+  `mir_pass_applies_to_backend_budget`.
 - Mark low-level scalar cleanup passes that LLVM already owns
   (`common_subexpr_elim`, `global_value_numbering`, `loop_unroll`, and
   `strength_reduction`) with skip-LLVM provider policy.
+- Mark aggressive inlining, auto-vectorization, and predicate promotion as
+  high compile-cost built-in passes so medium-budget JIT rebuilds can avoid
+  them without losing low/medium cleanup.
 
 The canonical pipeline remains the source of pass ordering, but backend-aware
 callers now consume a filtered view. Cranelift and the accepted `cranlift` alias
@@ -53,6 +70,14 @@ before lowering. LLVM keeps high-level Simple-owned proofs such as bounds,
 target narrowing, pattern idioms, and byte/copy cleanup, but skips duplicated
 scalar/loop cleanup so the LLVM default pipeline can handle it once IR has been
 lowered.
+
+Budget-aware built-in pipelines reuse the same pass ordering but additionally
+filter by descriptor `cost_class`. Under a medium budget, Cranelift keeps
+low/medium Simple MIR cleanup such as DCE and loop unroll while excluding
+high-cost aggressive inlining and vectorization. LLVM/`llvm-lib` composes both
+policies: backend-skipped scalar cleanup remains excluded, and high-cost
+built-in passes are also excluded when the caller does not permit high compile
+cost.
 
 `src/compiler/70.backend/backend/backend_helpers.spl`:
 
@@ -121,6 +146,7 @@ materialized optimizer MIR executable for tests and non-native paths.
 - Add `JitHotspotPlan`.
 - Add `JitVarOptimizationFacts`.
 - Add `JitHotspotRebuildPlan`.
+- Add `JitHotspotRebuildChoice`.
 - Add `jit_hotspot_profile_facts`.
 - Add `jit_hotspot_plan_from_profile`.
 - Add `jit_hotspot_plan_with_var_facts`.
@@ -128,13 +154,17 @@ materialized optimizer MIR executable for tests and non-native paths.
 - Add `jit_var_optimization_fact_list`.
 - Add `jit_var_optimization_reason`.
 - Add `jit_hotspot_rebuild_plan`.
+- Add `jit_hotspot_rebuild_plan_with_cost_budget`.
+- Add `jit_hotspot_rebuild_choice`.
 - Add `jit_hotspot_rebuild_backend_name`.
+- Add `jit_hotspot_cost_allowed`.
 - Add `jit_hotspot_plan_invalidate`.
 - Add `jit_hotspot_consume_plan`.
 - Add `JitHotspotSpecializationProvider`.
 - Add `jit_hotspot_specialization_provider`.
 - Add `jit_hotspot_consume_plan_with_provider`.
 - Add `TieredJitManager.get_hotspot_plan`.
+- Add `TieredJitManager.get_hotspot_rebuild_choice`.
 - Add `TieredJitManager.register_function_with_hotspot_facts`.
 - Add `TieredJitManager.register_function_with_hotspot_specialization`.
 
@@ -151,10 +181,14 @@ Var reassignment hotspot planning is intentionally fact-gated. Reassigned
 - `borrow.reassign_safe` so reassignment does not invalidate an outstanding
   borrow.
 
-Hotspot rebuild planning supports both Cranelift and LLVM at the policy layer.
-Cranelift/`cranlift` rebuilds are tier-1, medium-cost plans. LLVM rebuilds are
-tier-2, high-cost plans and remain ineligible until the tier-2 hot-count
-threshold is reached and the LLVM backend is available.
+Hotspot rebuild planning supports both Cranelift and LLVM at the policy layer
+and answers the "too high price" concern with an explicit compile-cost budget.
+Cranelift/`cranlift` rebuilds are tier-1, medium-cost plans. LLVM/`llvm-lib`
+rebuilds normalize to LLVM policy, are tier-2, high-cost plans, and remain
+ineligible until the tier-2 hot-count threshold is reached, the LLVM backend is
+available, and the caller allows high compile cost. `jit_hotspot_rebuild_choice`
+prefers LLVM only when all tier-2 and cost gates pass; otherwise it falls back
+to Cranelift when tier-1 heat and availability are sufficient.
 
 `src/compiler/60.mir_opt/general_patterns.spl`:
 
@@ -162,16 +196,23 @@ threshold is reached and the LLVM backend is available.
 - Add `all_backend_optimization_recommendations`.
 - Add `backend_optimization_recommendations_for`.
 - Add `backend_optimization_recommendation_names`.
+- Add `backend_optimization_recommendations_for_budget`.
+- Add `backend_optimization_recommendation_names_for_budget`.
+- Add `backend_optimization_cost_allowed`.
 - Add `backend_optimization_has_recommendation`.
 
 The general pattern catalog now turns researched optimization items into
 backend-aware plugin recommendations. Cranelift/`cranlift` keeps Simple-side
 `ssa-var-canon` because var reassignment facts, escape facts, and borrow safety
-are available in MIR before Cranelift lowering. LLVM skips `ssa-var-canon` and
-selects `llvm-default-pipeline` because LLVM's backend pipeline can run scalar
-promotion and cleanup itself. High-level MIR optimizations whose proofs are
-frontend-owned, including bounds-check elimination, delimiter byte scans, and
-checksum reducers, remain recommended for both backends.
+are available in MIR before Cranelift lowering. LLVM skips `ssa-var-canon`,
+uses `llvm-entry-alloca-shaping` to keep reassigned `var` storage promotable,
+and selects `llvm-default-pipeline` only when the compile-cost budget permits a
+high-cost backend-managed pipeline. Cranelift and the interpreter can receive
+`cranelift-local-licm` because Simple owns more mid-end loop cleanup on those
+paths, while LLVM skips it and relies on its default loop pipeline. High-level
+MIR optimizations whose proofs are frontend-owned, including bounds-check
+elimination, delimiter byte scans, and checksum reducers, remain recommended
+for both backends.
 
 ## Tests
 
@@ -186,6 +227,8 @@ checksum reducers, remain recommended for both backends.
 - Backend policies can skip LLVM while still applying to Cranelift, including
   the accepted `cranlift` spelling from the user request.
 - Expensive hotspot rebuild providers can be restricted to one backend.
+- Manifest dynamic plugins can be filtered by backend and compile-cost budget,
+  so a high-cost LLVM-only plugin is not selected under a medium JIT budget.
 
 `test/compiler/mir_opt/optimizer_manifest_backend_policy_spec.spl` adds manifest coverage:
 
@@ -194,6 +237,9 @@ checksum reducers, remain recommended for both backends.
 - Registered dynamic pass descriptors can be filtered for Cranelift/`cranlift`
   and LLVM, including skip-list visibility for passes intentionally not run on
   a backend.
+- Registered dynamic pass descriptors can be filtered by both backend and
+  compile-cost budget; high-cost LLVM plugins are skipped under a medium
+  budget while low-cost LLVM plugins remain selected.
 - Manifest pattern rules are applied to real MIR for Cranelift/`cranlift` when
   the registered pass applies, and are skipped for LLVM when backend policy
   excludes that pass.
@@ -226,7 +272,10 @@ checksum reducers, remain recommended for both backends.
 - Cranelift/`cranlift` receives `ssa-var-canon` and general high-level MIR
   optimizations.
 - LLVM skips `ssa-var-canon` and receives the backend-managed
-  `llvm-default-pipeline`.
+  `llvm-entry-alloca-shaping` and budget-gated `llvm-default-pipeline`.
+- Cranelift/interpreter receive `cranelift-local-licm`; LLVM skips it.
+- Medium compile-cost budgets keep low/medium recommendations while excluding
+  high-cost LLVM default pipeline selection.
 - Bounds-check elimination, byte-scan recognition, and checksum reduction stay
   recommended for both Cranelift and LLVM.
 
@@ -250,6 +299,9 @@ checksum reducers, remain recommended for both backends.
   and unsafe borrow reassignment.
 - Cranelift hotspot rebuilds are accepted at tier 1; LLVM rebuilds are deferred
   until tier 2 and marked high cost.
+- LLVM/`llvm-lib` rebuilds are blocked by a medium compile-cost budget, and the
+  backend choice helper falls back to Cranelift when LLVM is too expensive or
+  unavailable.
 - Invalidation disables a previously eligible plan.
 - Disabled providers do not consume plans and preserve fallback source.
 - Eligible plans are consumed into compile decisions.

@@ -27,7 +27,7 @@ REQ-OPJH-012: JIT hotspot specialization providers shall only replace compile so
 
 REQ-OPJH-013: JIT hotspot planning for reassigned `var` storage shall require explicit SSA transform, escape/no-escape, and borrow-reassignment-safe facts before accepting specialization.
 
-REQ-OPJH-014: Hotspot rebuild planning shall distinguish Cranelift tier-1 medium-cost rebuilds from LLVM tier-2 high-cost rebuilds and shall not schedule LLVM rebuilds before the tier-2 threshold or when the backend is unavailable.
+REQ-OPJH-014: Hotspot rebuild planning shall distinguish Cranelift tier-1 medium-cost rebuilds from LLVM tier-2 high-cost rebuilds and shall not schedule LLVM rebuilds before the tier-2 threshold, when the backend is unavailable, or when the caller's compile-cost budget is below LLVM's high-cost class.
 
 REQ-OPJH-015: The MIR optimizer shall expose analyzer-derived JIT var facts from repeated local definitions, escape evidence, and borrow-reassignment safety rather than requiring all `var` hotspot facts to be supplied manually.
 
@@ -43,10 +43,12 @@ REQ-OPJH-020: The interpreter shall consume the `__simple_ssa_phi` pseudo-intrin
 
 REQ-OPJH-021: SSA pseudo-phi materialization shall expose backend lowering policy: Cranelift/`cranlift` lowers to block parameters, LLVM lowers to native phi nodes, the interpreter uses the fallback intrinsic, and unsupported backends reject pseudo-phi MIR explicitly.
 
-REQ-OPJH-022: The general optimization catalog shall expose backend-aware plugin recommendations so LLVM can prefer its backend-managed scalar pipeline while Cranelift keeps Simple-side SSA-var, bounds, scan, and checksum MIR optimizations that preserve high-level facts.
+REQ-OPJH-022: The general optimization catalog shall expose backend-aware plugin recommendations so LLVM can prefer promotable `var` IR shaping and its backend-managed scalar pipeline while Cranelift keeps Simple-side SSA-var, loop-invariant, bounds, scan, and checksum MIR optimizations that preserve high-level facts.
 
-REQ-OPJH-023: Dynamic optimizer plugin registries shall expose backend-filtered descriptor views so backend planners can apply or skip manifest passes without duplicating backend-policy logic.
+REQ-OPJH-026: Backend-aware optimization recommendation and built-in pipeline selection shall expose compile-cost classes and budget-filtered views so high-cost LLVM default pipeline selection and high-cost Simple aggressive passes can be excluded while retaining low/medium Simple-side MIR optimizations.
+
+REQ-OPJH-023: Dynamic optimizer plugin registries shall expose backend-filtered and backend-plus-budget descriptor views so backend planners can apply or skip manifest passes without duplicating backend-policy or compile-cost logic.
 
 REQ-OPJH-024: Manifest-backed pattern-rule execution shall honor backend-filtered dynamic pass registration before rewriting MIR, so a pass skipped for LLVM cannot still apply its rules through the generic pattern runner.
 
-REQ-OPJH-025: Canonical MIR pipeline execution shall honor backend policy for built-in pass descriptors, keeping Simple-side scalar cleanup for Cranelift/`cranlift` while skipping LLVM-duplicated scalar cleanup before LLVM codegen.
+REQ-OPJH-025: Canonical MIR pipeline execution shall honor backend policy and compile-cost budget for built-in pass descriptors, keeping Simple-side scalar cleanup for Cranelift/`cranlift` while skipping LLVM-duplicated scalar cleanup before LLVM codegen and high-cost passes under medium JIT budgets.

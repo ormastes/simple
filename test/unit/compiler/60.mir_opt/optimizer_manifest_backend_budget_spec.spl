@@ -1,0 +1,86 @@
+use std.spec
+use compiler.mir_opt.optimizer_manifest.{
+    ManifestPassContract,
+    manifest_pass_entry_new,
+    manifest_pass_entry_new_with_backend_policy_and_cost,
+    dynamic_pass_registry_new,
+    dynamic_pass_registry_register,
+    dynamic_pass_registry_names_for_backend,
+    dynamic_pass_registry_names_for_backend_budget,
+    manifest_cost_allowed,
+    load_manifest_v1_from_parsed
+}
+use compiler.mir_opt.mir_opt.mod.{PassScope}
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizerBackendKind,
+    optimization_backend_policy_only
+}
+
+describe "optimizer manifest backend and cost budget policy":
+    it "defaults manifest-created passes to all backends and medium cost":
+        val entry = manifest_pass_entry_new(
+            "budget_default_pass",
+            [],
+            PassScope.Function,
+            [],
+            ManifestPassContract(["typed_mir"], ["canonical_mir"], "pure"),
+            "budget_default_pass_entry"
+        )
+        val manifest_result = load_manifest_v1_from_parsed(
+            1,
+            "simple.opt.mir.v1",
+            "budget_default_plugin",
+            "1.0.0",
+            "0.9.0",
+            [entry]
+        )
+        expect(manifest_result.?).to_equal(true)
+        val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest_result.unwrap())
+        expect(registry_result.?).to_equal(true)
+
+        val registry = registry_result.unwrap()
+        expect(dynamic_pass_registry_names_for_backend(registry, "cranlift").contains("budget_default_pass")).to_equal(true)
+        expect(dynamic_pass_registry_names_for_backend_budget(registry, "llvm-lib", "medium").contains("budget_default_pass")).to_equal(true)
+
+    it "skips high-cost LLVM-only dynamic plugins under a medium budget":
+        val low = manifest_pass_entry_new_with_backend_policy_and_cost(
+            "budget_low_llvm_pass",
+            [],
+            PassScope.Function,
+            [],
+            ManifestPassContract(["typed_mir"], ["canonical_mir"], "pure"),
+            optimization_backend_policy_only([OptimizerBackendKind.Llvm], "llvm_only"),
+            "low",
+            "budget_low_llvm_pass_entry"
+        )
+        val high = manifest_pass_entry_new_with_backend_policy_and_cost(
+            "budget_high_llvm_pass",
+            [],
+            PassScope.Function,
+            [],
+            ManifestPassContract(["typed_mir"], ["canonical_mir"], "pure"),
+            optimization_backend_policy_only([OptimizerBackendKind.Llvm], "llvm_only"),
+            "high",
+            "budget_high_llvm_pass_entry"
+        )
+        val manifest_result = load_manifest_v1_from_parsed(
+            1,
+            "simple.opt.mir.v1",
+            "budget_llvm_plugin",
+            "1.0.0",
+            "0.9.0",
+            [low, high]
+        )
+        expect(manifest_result.?).to_equal(true)
+        val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest_result.unwrap())
+        expect(registry_result.?).to_equal(true)
+
+        val registry = registry_result.unwrap()
+        val medium = dynamic_pass_registry_names_for_backend_budget(registry, "llvm-lib", "medium")
+        val high_budget = dynamic_pass_registry_names_for_backend_budget(registry, "llvm", "high")
+
+        expect(manifest_cost_allowed("low", "medium")).to_equal(true)
+        expect(manifest_cost_allowed("high", "medium")).to_equal(false)
+        expect(medium.contains("budget_low_llvm_pass")).to_equal(true)
+        expect(medium.contains("budget_high_llvm_pass")).to_equal(false)
+        expect(high_budget.contains("budget_high_llvm_pass")).to_equal(true)

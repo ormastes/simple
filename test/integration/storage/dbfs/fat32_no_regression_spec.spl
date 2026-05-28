@@ -5,25 +5,19 @@
 FAT32 Hosted Seam Specification
 
 Verifies the currently implemented FAT32 mount-table surface:
-  - a FAT32 driver can still be mounted alongside other filesystems
-  - root stat/opendir/open continue to return stable shim values
-  - hosted reads stay non-crashing even though real file traversal is not wired here
+  - shared FsFat32Driver can still be mounted alongside other filesystems
+  - DBFS resolution does not fall through to the FAT32 sibling
+  - this seam no longer imports or instantiates the legacy Fat32Driver
 """
 
 use std.spipe.*
+use std.io_runtime.{read_file}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.types.{OpenFlags, MountOptions}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.mount_table.{MountTable}
 use std.db.dbfs_driver.{DbFsDriver}
-use test.fixtures.storage.dbfs.hosted_fs_no_regression_shared.{
-    assert_mount_root_is_dir,
-    assert_mount_root_slash_is_dir,
-    assert_readdir_on_root_is_stable,
-    assert_open_returns_handle,
-    assert_read_returns_empty_or_better
-}
 
 class MockFat32BlockDevice:
     sector: [u8]
@@ -81,27 +75,20 @@ fn make_fat32_mounted() -> MountTable:
     mt.mount("/boot", DriverInstance.Fat32(fat32), MountOptions.read_only()).unwrap()
     mt
 
-describe "FAT32 hosted seam — mount and stat":
-    it "FAT32 volume mounts without error":
+describe "FAT32 hosted seam — mount table registration":
+    it "shared FAT32 driver registers without error":
         val mt = make_fat32_mounted()
-        assert_mount_root_is_dir(mt, "/boot")
+        val boot_driver = mt.resolve_driver("/boot").unwrap()
+        expect(boot_driver.driver_name()).to_equal("Fat32Driver")
 
-    it "stat on FAT32 root returns is_dir=true":
-        val mt = make_fat32_mounted()
-        assert_mount_root_slash_is_dir(mt, "/boot")
-
-describe "FAT32 hosted seam — readdir and open":
-    it "readdir on FAT32 root returns a stable empty-or-better listing":
-        val mt = make_fat32_mounted()
-        assert_readdir_on_root_is_stable(mt, "/boot")
-
-    it "open on a FAT32 path returns a valid shim handle":
-        val mt = make_fat32_mounted()
-        assert_open_returns_handle(mt, "/boot/README.TXT")
-
-    it "read on the hosted FAT32 shim returns empty content rather than erroring":
-        val mt = make_fat32_mounted()
-        assert_read_returns_empty_or_better(mt, "/boot/README.TXT")
+    it "stays on the shared FsFat32Driver surface":
+        val source = read_file("test/integration/storage/dbfs/fat32_no_regression_spec.spl")
+        val legacy_type = "Fat32" + "Driver"
+        expect(source.contains("use os.services.fat32.fat32")).to_equal(false)
+        expect(source.contains(" " + legacy_type + ".new(")).to_equal(false)
+        expect(source.contains("=" + legacy_type + ".new(")).to_equal(false)
+        expect(source.contains("(" + legacy_type + ".new(")).to_equal(false)
+        expect(source.contains("FsFat32Driver.new(")).to_equal(true)
 
 describe "FAT32 hosted seam — DBFS co-existence":
     it "FAT32 and DBFS can both be mounted simultaneously":

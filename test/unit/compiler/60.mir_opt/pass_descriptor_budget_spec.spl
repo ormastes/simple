@@ -1,0 +1,39 @@
+use std.spec
+use compiler.mir_opt.mir_opt.mod.{
+    OptLevel,
+    mir_pass_cost_allowed,
+    mir_pass_cost_class,
+    mir_pass_applies_to_backend_budget,
+    optimizationpipeline_passes_for_backend,
+    optimizationpipeline_passes_for_backend_budget
+}
+
+describe "MIR built-in pass backend cost budget":
+    it "classifies high-cost aggressive passes separately from cleanup passes":
+        expect(mir_pass_cost_class("dead_code_elimination")).to_equal("low")
+        expect(mir_pass_cost_class("inline_aggressive")).to_equal("high")
+        expect(mir_pass_cost_class("auto_vectorize")).to_equal("high")
+        expect(mir_pass_cost_allowed("medium", "medium")).to_equal(true)
+        expect(mir_pass_cost_allowed("high", "medium")).to_equal(false)
+
+    it "filters Cranelift aggressive pipelines by compile-cost budget":
+        val normal = optimizationpipeline_passes_for_backend(OptLevel.Aggressive, "cranlift")
+        val medium = optimizationpipeline_passes_for_backend_budget(OptLevel.Aggressive, "cranlift", "medium")
+
+        expect(normal.contains("inline_aggressive")).to_equal(true)
+        expect(normal.contains("auto_vectorize")).to_equal(true)
+        expect(medium.contains("inline_aggressive")).to_equal(false)
+        expect(medium.contains("auto_vectorize")).to_equal(false)
+        expect(medium.contains("dead_code_elimination")).to_equal(true)
+        expect(medium.contains("loop_unroll")).to_equal(true)
+
+    it "combines LLVM backend skips with compile-cost budget skips":
+        val medium = optimizationpipeline_passes_for_backend_budget(OptLevel.Aggressive, "llvm-lib", "medium")
+
+        expect(medium.contains("dead_code_elimination")).to_equal(true)
+        expect(medium.contains("bounds_check_elimination")).to_equal(true)
+        expect(medium.contains("strength_reduction")).to_equal(false)
+        expect(medium.contains("loop_unroll")).to_equal(false)
+        expect(medium.contains("inline_aggressive")).to_equal(false)
+        expect(mir_pass_applies_to_backend_budget("strength_reduction", "llvm", "high")).to_equal(false)
+        expect(mir_pass_applies_to_backend_budget("inline_aggressive", "cranelift", "medium")).to_equal(false)

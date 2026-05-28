@@ -103,6 +103,7 @@ struct ManifestPassEntry:
     capability_requires: [text]
     contract: ManifestPassContract
     backend_policy: OptimizationBackendPolicy
+    cost_class: text
     entry_symbol: text
 
 # ============================================================================
@@ -128,7 +129,23 @@ struct DynamicPassDescriptor:
     scope: PassScope
     capability_requires: [text]
     provider: OptimizationRuleProvider
+    cost_class: text
     entry_symbol: text
+
+fn manifest_cost_rank(cost_class: text) -> i64:
+    if cost_class == "free":
+        0
+    elif cost_class == "low":
+        1
+    elif cost_class == "medium":
+        2
+    elif cost_class == "high":
+        3
+    else:
+        99
+
+fn manifest_cost_allowed(cost_class: text, max_cost_class: text) -> bool:
+    manifest_cost_rank(cost_class) <= manifest_cost_rank(max_cost_class)
 
 fn dynamic_pass_provider(entry: ManifestPassEntry, plugin_name: text) -> OptimizationRuleProvider:
     val provider = optimization_rule_provider_builtin_with_contract(
@@ -157,6 +174,7 @@ fn manifest_pass_entry_new(
         capability_requires: capability_requires,
         contract: contract,
         backend_policy: optimization_backend_policy_all(),
+        cost_class: "medium",
         entry_symbol: entry_symbol
     )
 
@@ -171,6 +189,22 @@ fn manifest_pass_entry_with_backend_policy(
         capability_requires: entry.capability_requires,
         contract: entry.contract,
         backend_policy: backend_policy,
+        cost_class: entry.cost_class,
+        entry_symbol: entry.entry_symbol
+    )
+
+fn manifest_pass_entry_with_cost_class(
+    entry: ManifestPassEntry,
+    cost_class: text
+) -> ManifestPassEntry:
+    ManifestPassEntry(
+        stable_name: entry.stable_name,
+        aliases: entry.aliases,
+        scope: entry.scope,
+        capability_requires: entry.capability_requires,
+        contract: entry.contract,
+        backend_policy: entry.backend_policy,
+        cost_class: cost_class,
         entry_symbol: entry.entry_symbol
     )
 
@@ -188,6 +222,21 @@ fn manifest_pass_entry_new_with_backend_policy(
         backend_policy
     )
 
+fn manifest_pass_entry_new_with_backend_policy_and_cost(
+    stable_name: text,
+    aliases: [text],
+    scope: PassScope,
+    capability_requires: [text],
+    contract: ManifestPassContract,
+    backend_policy: OptimizationBackendPolicy,
+    cost_class: text,
+    entry_symbol: text
+) -> ManifestPassEntry:
+    manifest_pass_entry_with_cost_class(
+        manifest_pass_entry_new_with_backend_policy(stable_name, aliases, scope, capability_requires, contract, backend_policy, entry_symbol),
+        cost_class
+    )
+
 fn dynamic_pass_descriptor_from_entry(entry: ManifestPassEntry, plugin_name: text) -> DynamicPassDescriptor:
     DynamicPassDescriptor(
         name: entry.stable_name,
@@ -195,6 +244,7 @@ fn dynamic_pass_descriptor_from_entry(entry: ManifestPassEntry, plugin_name: tex
         scope: entry.scope,
         capability_requires: entry.capability_requires,
         provider: dynamic_pass_provider(entry, plugin_name),
+        cost_class: entry.cost_class,
         entry_symbol: entry.entry_symbol
     )
 
@@ -233,6 +283,9 @@ fn dynamic_pass_registry_lookup(registry: DynamicPassRegistry, name: text) -> Dy
 fn dynamic_pass_descriptor_applies_to_backend(desc: DynamicPassDescriptor, backend_name: text) -> bool:
     optimization_rule_provider_applies_to_backend_name(desc.provider, backend_name)
 
+fn dynamic_pass_descriptor_cost_allowed(desc: DynamicPassDescriptor, max_cost_class: text) -> bool:
+    manifest_cost_allowed(desc.cost_class, max_cost_class)
+
 fn dynamic_pass_registry_for_backend(registry: DynamicPassRegistry, backend_name: text) -> DynamicPassRegistry:
     """Return a registry containing only descriptors that apply to backend_name."""
     var selected: [DynamicPassDescriptor] = []
@@ -252,6 +305,28 @@ fn dynamic_pass_registry_skipped_names_for_backend(registry: DynamicPassRegistry
     var names: [text] = []
     for desc in registry.descriptors:
         if not dynamic_pass_descriptor_applies_to_backend(desc, backend_name):
+            names = names.push(desc.name)
+    names
+
+fn dynamic_pass_registry_for_backend_budget(registry: DynamicPassRegistry, backend_name: text, max_cost_class: text) -> DynamicPassRegistry:
+    """Return descriptors that match backend policy and compile-cost budget."""
+    var selected: [DynamicPassDescriptor] = []
+    for desc in registry.descriptors:
+        if dynamic_pass_descriptor_applies_to_backend(desc, backend_name) and dynamic_pass_descriptor_cost_allowed(desc, max_cost_class):
+            selected = selected.push(desc)
+    DynamicPassRegistry(descriptors: selected)
+
+fn dynamic_pass_registry_names_for_backend_budget(registry: DynamicPassRegistry, backend_name: text, max_cost_class: text) -> [text]:
+    var names: [text] = []
+    val filtered = dynamic_pass_registry_for_backend_budget(registry, backend_name, max_cost_class)
+    for desc in filtered.descriptors:
+        names = names.push(desc.name)
+    names
+
+fn dynamic_pass_registry_skipped_names_for_backend_budget(registry: DynamicPassRegistry, backend_name: text, max_cost_class: text) -> [text]:
+    var names: [text] = []
+    for desc in registry.descriptors:
+        if not dynamic_pass_descriptor_applies_to_backend(desc, backend_name) or not dynamic_pass_descriptor_cost_allowed(desc, max_cost_class):
             names = names.push(desc.name)
     names
 
@@ -463,14 +538,20 @@ export ManifestError, manifest_error_message
 export ManifestPassContract, manifest_pass_contract_default
 export ManifestPassEntry, manifest_pass_entry_new
 export manifest_pass_entry_with_backend_policy, manifest_pass_entry_new_with_backend_policy
+export manifest_pass_entry_with_cost_class, manifest_pass_entry_new_with_backend_policy_and_cost
 export OptimizerManifest
 export DynamicPassDescriptor, dynamic_pass_descriptor_from_entry
 export DynamicPassRegistry, dynamic_pass_registry_new
 export dynamic_pass_registry_lookup, dynamic_pass_registry_register
 export dynamic_pass_descriptor_applies_to_backend
+export dynamic_pass_descriptor_cost_allowed
 export dynamic_pass_registry_for_backend
 export dynamic_pass_registry_names_for_backend
 export dynamic_pass_registry_skipped_names_for_backend
+export dynamic_pass_registry_for_backend_budget
+export dynamic_pass_registry_names_for_backend_budget
+export dynamic_pass_registry_skipped_names_for_backend_budget
+export manifest_cost_allowed
 export load_manifest_v1, load_manifest_v1_from_parsed, load_manifest_v1_from_parsed_with_rules
 export validate_manifest, validate_manifest_pass
 export is_builtin_stable_name, is_builtin_alias
