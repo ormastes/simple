@@ -19,6 +19,8 @@ use compiler.interp.execution.tiered_jit.{
     jit_hotspot_specialization_provider,
     jit_hotspot_consume_plan_with_provider
 }
+use compiler.mir_opt.mir_opt.mod.{OptLevel, optimizationpipeline_backend_plan_for_budget}
+use compiler.mir_opt.general_patterns.{backend_optimization_plan_for_budget}
 
 fn hot_profile(call_count: i64) -> FunctionProfile:
     FunctionProfile(
@@ -220,6 +222,15 @@ describe "Tiered JIT hotspot facts":
             if decision.stable_name == "ssa-var-canon" and decision.reason == "llvm_backend_runs_mem2reg_sroa_pipeline":
                 found_llvm_owned_plugin_skip = true
         expect(found_llvm_owned_plugin_skip).to_equal(true)
+
+    it "keeps hotspot optimization plans consistent with shared backend budget planners":
+        val hotspot = jit_hotspot_optimization_plan(hot_profile(256), hotspot_config(), true, true, "medium")
+        val mir_plan = optimizationpipeline_backend_plan_for_budget(OptLevel.Aggressive, "cranelift", "medium")
+        val plugin_plan = backend_optimization_plan_for_budget("cranelift", "medium")
+        expect(hotspot.passes).to_equal(mir_plan.passes)
+        expect(hotspot.skipped_passes.len()).to_equal(mir_plan.skipped_passes.len())
+        expect(hotspot.plugin_recommendations).to_equal(plugin_plan.recommendation_names)
+        expect(hotspot.skipped_plugin_recommendations.len()).to_equal(plugin_plan.skipped_decisions.len())
 
     it "does not create optimization passes for ineligible hotspot rebuilds":
         val plan = jit_hotspot_optimization_plan(hot_profile(2), hotspot_config(), true, true, "high")
