@@ -189,6 +189,14 @@ BROWSER_EXAMPLE_SOURCE_LINES="$(lines_of_tree examples/browser)"
 X86_64_STUB="examples/simple_os/arch/x86_64/boot/baremetal_stubs.c"
 X86_64_STUB_BYTES="$(bytes_of "$X86_64_STUB")"
 X86_64_STUB_LINES="$(wc -l <"$X86_64_STUB" 2>/dev/null | tr -d ' ' || echo n/a)"
+X86_64_MIN_BOOT_STDOUT="examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c"
+X86_64_MIN_BOOT_STDOUT_OBJ="$BUILD_DIR/baremetal_boot_stdout.o"
+X86_64_MIN_BOOT_STDOUT_LOG="$BUILD_DIR/baremetal_boot_stdout.build.log"
+X86_64_MIN_BOOT_STDOUT_BYTES="$(bytes_of "$X86_64_MIN_BOOT_STDOUT")"
+X86_64_MIN_BOOT_STDOUT_LINES="$(wc -l <"$X86_64_MIN_BOOT_STDOUT" 2>/dev/null | tr -d ' ' || echo n/a)"
+CONSOLE_POLICY="src/lib/nogc_async_mut_noalloc/baremetal/console_policy.spl"
+CONSOLE_POLICY_BYTES="$(bytes_of "$CONSOLE_POLICY")"
+CONSOLE_POLICY_LINES="$(wc -l <"$CONSOLE_POLICY" 2>/dev/null | tr -d ' ' || echo n/a)"
 
 BROWSER_SMOKE_CHECK="$(check_simple_file examples/browser/smoke_test.spl "$BUILD_DIR/browser_smoke_check.log")"
 BROWSER_RENDER_CHECK="$(check_simple_file examples/browser/test/compat/simple_render_html.spl "$BUILD_DIR/simple_render_html_check.log")"
@@ -197,12 +205,25 @@ BROWSER_RENDER_BUILD="$(build_simple_native examples/browser/test/compat/simple_
 STATIC_WEB_BUILD="$(build_simple_native "$STATIC_WEB_ENTRY" "$BUILD_DIR/simple_web_static_native" "$BUILD_DIR/simple_web_static_native.log")"
 SCRIPT_WEB_BUILD="$(build_simple_native "$SCRIPT_WEB_ENTRY" "$BUILD_DIR/simple_web_script_native" "$BUILD_DIR/simple_web_script_native.log")"
 RV32_SEMIHOST_BUILD="$(build_rv32_semihost)"
+if [ -f "$X86_64_MIN_BOOT_STDOUT" ] && have clang && [ "$SKIP_NATIVE_BUILDS" != "1" ]; then
+    if with_timeout clang -target x86_64-unknown-none-elf -ffreestanding -nostdlib \
+        -fno-pie -mno-red-zone -Os -ffunction-sections -fdata-sections \
+        -c "$X86_64_MIN_BOOT_STDOUT" -o "$X86_64_MIN_BOOT_STDOUT_OBJ" \
+        >"$X86_64_MIN_BOOT_STDOUT_LOG" 2>&1; then
+        X86_64_MIN_BOOT_STDOUT_BUILD="ok"
+    else
+        X86_64_MIN_BOOT_STDOUT_BUILD="fail"
+    fi
+else
+    X86_64_MIN_BOOT_STDOUT_BUILD="skipped"
+fi
 
 BROWSER_SMOKE_BYTES="$(bytes_of "$BUILD_DIR/browser_smoke_native")"
 BROWSER_RENDER_BYTES="$(bytes_of "$BUILD_DIR/simple_render_html_native")"
 STATIC_WEB_BYTES="$(bytes_of "$BUILD_DIR/simple_web_static_native")"
 SCRIPT_WEB_BYTES="$(bytes_of "$BUILD_DIR/simple_web_script_native")"
 RV32_SEMIHOST_BYTES="$(bytes_of "$BUILD_DIR/hello_riscv32_semihost.elf")"
+X86_64_MIN_BOOT_STDOUT_OBJ_BYTES="$(bytes_of "$X86_64_MIN_BOOT_STDOUT_OBJ")"
 
 if [ -n "$MAX_BROWSER_EXAMPLE_SOURCE_BYTES" ] && [ "$BROWSER_EXAMPLE_SOURCE_BYTES" -gt "$MAX_BROWSER_EXAMPLE_SOURCE_BYTES" ]; then
     echo "web_baremetal_size_audit_ready=false"
@@ -238,6 +259,7 @@ fi
     echo "| Simple web static facade | n/a | $STATIC_WEB_BUILD | $STATIC_WEB_BYTES | $(section_dec "$BUILD_DIR/simple_web_static_native") | \`$BUILD_DIR/simple_web_static_native.log\` |"
     echo "| Simple web script URL facade | n/a | $SCRIPT_WEB_BUILD | $SCRIPT_WEB_BYTES | $(section_dec "$BUILD_DIR/simple_web_script_native") | \`$BUILD_DIR/simple_web_script_native.log\` |"
     echo "| RV32 semihost stdout hello | n/a | $RV32_SEMIHOST_BUILD | $RV32_SEMIHOST_BYTES | $(section_dec "$BUILD_DIR/hello_riscv32_semihost.elf") | \`$BUILD_DIR/hello_riscv32_semihost.build.log\` |"
+    echo "| x86_64 minimal boot/stdout capsule | n/a | $X86_64_MIN_BOOT_STDOUT_BUILD | $X86_64_MIN_BOOT_STDOUT_OBJ_BYTES | $(section_dec "$X86_64_MIN_BOOT_STDOUT_OBJ") | \`$X86_64_MIN_BOOT_STDOUT_LOG\` |"
     echo
     echo "## Source Size Surfaces"
     echo
@@ -245,6 +267,8 @@ fi
     echo "|---|---:|---:|---:|"
     echo "| \`examples/browser\` | $(file_count_tree examples/browser) | $BROWSER_EXAMPLE_SOURCE_LINES | $BROWSER_EXAMPLE_SOURCE_BYTES |"
     echo "| \`$X86_64_STUB\` | 1 | $X86_64_STUB_LINES | $X86_64_STUB_BYTES |"
+    echo "| \`$X86_64_MIN_BOOT_STDOUT\` | 1 | $X86_64_MIN_BOOT_STDOUT_LINES | $X86_64_MIN_BOOT_STDOUT_BYTES |"
+    echo "| \`$CONSOLE_POLICY\` | 1 | $CONSOLE_POLICY_LINES | $CONSOLE_POLICY_BYTES |"
     echo
     echo "## Browser Cluster Source Sizes"
     echo
@@ -257,7 +281,9 @@ fi
     echo "- Browser render size work should first split static render from script/session/network paths."
     echo "- The static simple-web facade is measured separately from the script URL facade so script/runtime growth stays visible."
     echo "- x86_64 SimpleOS size work should split \`baremetal_stubs.c\` into boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes."
+    echo "- \`baremetal_boot_stdout.c\` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple."
     echo "- Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule."
+    echo "- \`baremetal/console_policy.spl\` is the pure-Simple policy surface for shared semihost/UART stdout selection."
     echo "- Set \`MAX_BROWSER_EXAMPLE_SOURCE_BYTES\`, \`MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES\`, or \`MAX_RV32_SEMIHOST_ELF_BYTES\` to turn this audit into a budget gate."
 } >"$REPORT_PATH"
 
@@ -275,5 +301,8 @@ echo "simple_web_script_build=$SCRIPT_WEB_BUILD"
 echo "simple_web_script_bytes=$SCRIPT_WEB_BYTES"
 echo "rv32_semihost_build=$RV32_SEMIHOST_BUILD"
 echo "rv32_semihost_bytes=$RV32_SEMIHOST_BYTES"
+echo "x86_64_min_boot_stdout_build=$X86_64_MIN_BOOT_STDOUT_BUILD"
+echo "x86_64_min_boot_stdout_obj_bytes=$X86_64_MIN_BOOT_STDOUT_OBJ_BYTES"
 echo "browser_example_source_bytes=$BROWSER_EXAMPLE_SOURCE_BYTES"
 echo "x86_64_baremetal_stub_source_bytes=$X86_64_STUB_BYTES"
+echo "x86_64_min_boot_stdout_source_bytes=$X86_64_MIN_BOOT_STDOUT_BYTES"
