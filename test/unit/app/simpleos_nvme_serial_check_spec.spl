@@ -110,6 +110,19 @@ fn _run_lab_wrapper_production_with_both_preflight_paths(serial_path: text, pref
         15000
     )
 
+fn _run_lab_wrapper_live_production_with_preflight_out(serial_path: text, fake_nvme_path: text, fake_sysfs_root: text, preflight_out: text, report_path: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SERIAL_PORT=/tmp/simpleos_nvme_missing_serial_port SIMPLEOS_NVME_DEVICE_GLOB=\"" + fake_nvme_path + "\" " +
+                "SIMPLEOS_NVME_SYSFS_ROOT=\"" + fake_sysfs_root + "\" " +
+                "sh scripts/run_simpleos_physical_nvme_perf.shs --production --serial-log \"" + serial_path +
+                "\" --preflight-out \"" + preflight_out + "\" --report-out \"" + report_path + "\""
+        ],
+        15000
+    )
+
 fn _run_lab_preflight(fake_nvme_path: text) -> (text, text, i32):
     rt_process_run_timeout(
         "/bin/sh",
@@ -749,6 +762,37 @@ describe "SimpleOS physical NVMe serial checker app":
         expect(same_report_stderr).to_contain("--preflight-out must differ from --report-out")
         expect(same_serial_code).to_equal(2)
         expect(same_serial_stderr).to_contain("--preflight-out must differ from --serial-log")
+
+    it "rejects one-shot production when evidence output paths already exist":
+        val fake_root = "/tmp/simpleos_nvme_production_existing_output_sysfs"
+        val fake_dev = "/tmp/simpleos_nvme_production_existing_output_device/nvme9n1"
+        val fake_sysfs = fake_root + "/nvme9n1"
+        val serial_path = "/tmp/simpleos_nvme_production_existing_output.log"
+        val preflight_out = "/tmp/simpleos_nvme_production_existing_output_preflight.sdn"
+        val report = "/tmp/simpleos_nvme_production_existing_output_report.sdn"
+        val _cleanup = rt_process_run_timeout("/bin/sh", ["-c", "rm -rf \"" + fake_root + "\" \"" + fake_dev + "\" \"" + preflight_out + "\" \"" + report + "\" \"" + serial_path + "\""], 5000)
+        val _mkdir = rt_process_run_timeout("/bin/sh", ["-c", "mkdir -p \"" + fake_sysfs + "/device\" \"$(dirname \"" + fake_dev + "\")\""], 5000)
+        expect(rt_file_write_text(fake_dev, "device")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs + "/device/model", "Samsung PM9A3\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs + "/device/serial", "SN123456\n")).to_equal(true)
+        expect(rt_file_write_text(fake_sysfs + "/nsid", "1\n")).to_equal(true)
+
+        expect(rt_file_write_text(serial_path, "old serial\n")).to_equal(true)
+        val (_serial_stdout, serial_stderr, serial_code) = _run_lab_wrapper_live_production_with_preflight_out(serial_path, fake_dev, fake_root, preflight_out, report)
+        expect(serial_code).to_equal(2)
+        expect(serial_stderr).to_contain("serial log already exists")
+        val _serial_cleanup = rt_file_delete(serial_path)
+
+        expect(rt_file_write_text(preflight_out, "old preflight\n")).to_equal(true)
+        val (_preflight_stdout, preflight_stderr, preflight_code) = _run_lab_wrapper_live_production_with_preflight_out(serial_path, fake_dev, fake_root, preflight_out, report)
+        expect(preflight_code).to_equal(2)
+        expect(preflight_stderr).to_contain("preflight output already exists")
+        val _preflight_cleanup = rt_file_delete(preflight_out)
+
+        expect(rt_file_write_text(report, "old report\n")).to_equal(true)
+        val (_report_stdout, report_stderr, report_code) = _run_lab_wrapper_live_production_with_preflight_out(serial_path, fake_dev, fake_root, preflight_out, report)
+        expect(report_code).to_equal(2)
+        expect(report_stderr).to_contain("validation report already exists")
 
     it "rejects one-shot production when host preflight identity is incomplete":
         val fake_root = "/tmp/simpleos_nvme_production_preflight_unknown_sysfs"
