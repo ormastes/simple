@@ -36,6 +36,7 @@ Date: 2026-05-28
 ## Direction
 
 - Browser render size work should first split static render from script/session/network paths.
+- The static simple-web facade is measured separately from the script URL facade so script/runtime growth stays visible.
 - x86_64 SimpleOS size work should split `baremetal_stubs.c` into boot, serial/stdout, interrupt, GUI, filesystem, network, and crypto/helper lanes.
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
 - Set `MAX_BROWSER_EXAMPLE_SOURCE_BYTES`, `MAX_X86_64_BAREMETAL_STUB_SOURCE_BYTES`, or `MAX_RV32_SEMIHOST_ELF_BYTES` to turn this audit into a budget gate.
