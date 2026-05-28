@@ -17,6 +17,7 @@ Date: 2026-05-28
 | x86_64 minimal boot/stdout capsule | n/a | ok | 1968 | 250 | `build/web_baremetal_size_audit/baremetal_boot_stdout.build.log` |
 | ARM64 minimal PL011 startup/stdout capsule | n/a | ok | 1976 | 296 | `build/web_baremetal_size_audit/arm64_baremetal_uart_stdout.build.log` |
 | ARM32 minimal PL011 startup/stdout capsule | n/a | ok | 2000 | 332 | `build/web_baremetal_size_audit/arm32_baremetal_uart_stdout.build.log` |
+| RV64 minimal 16550 startup/stdout capsule | n/a | ok | 2736 | 178 | `build/web_baremetal_size_audit/rv64_baremetal_uart_stdout.build.log` |
 | x86_64 interrupt-control capsule | n/a | ok | 1272 | 33 | `build/web_baremetal_size_audit/baremetal_interrupt_control.build.log` |
 | x86_64 startup handoff capsule | n/a | ok | 1936 | 118 | `build/web_baremetal_size_audit/baremetal_startup_handoff.build.log` |
 
@@ -40,6 +41,8 @@ Date: 2026-05-28
 | ARM64 minimal PL011 startup/stdout source | 2600 |
 | ARM32 minimal PL011 startup/stdout object file / dec section | 2200 / 340 |
 | ARM32 minimal PL011 startup/stdout source | 2800 |
+| RV64 minimal 16550 startup/stdout object file / dec section | 2800 / 220 |
+| RV64 minimal 16550 startup/stdout source | 2200 |
 | x86_64 interrupt-control object file / dec section | 1536 / 64 |
 | x86_64 interrupt-control source | 1024 |
 | x86_64 startup handoff object file / dec section | 2048 / 128 |
@@ -59,6 +62,7 @@ Date: 2026-05-28
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 107 | 2752 |
 | `examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c` | 1 | 83 | 2210 |
 | `examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c` | 1 | 94 | 2555 |
+| `examples/simple_os/arch/riscv64/boot/baremetal_uart_stdout.c` | 1 | 66 | 1710 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_interrupt_control.c` | 1 | 27 | 558 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 35 | 685 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv32/semihost_trap.S` | 1 | 30 | 867 |
@@ -96,6 +100,7 @@ Date: 2026-05-28
 | x86_64 minimal boot/stdout capsule | 0 | n/a |
 | ARM64 minimal PL011 startup/stdout capsule | 0 | n/a |
 | ARM32 minimal PL011 startup/stdout capsule | 0 | n/a |
+| RV64 minimal 16550 startup/stdout capsule | 0 | n/a |
 | x86_64 interrupt-control capsule | 0 | n/a |
 | x86_64 startup handoff capsule | 0 | n/a |
 
@@ -111,6 +116,7 @@ Date: 2026-05-28
 - `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple.
 - `arm64/boot/baremetal_uart_stdout.c` is the ARM64 PL011 capsule baseline for startup/stdout only; GIC, PCI, filesystem, network, and GUI stay out of this lane.
 - `arm32/boot/baremetal_uart_stdout.c` is the ARM32 PL011 capsule baseline for startup/stdout only; GIC, framebuffer, filesystem, and GUI stay out of this lane.
+- `riscv64/boot/baremetal_uart_stdout.c` is the RV64 16550 capsule baseline for startup/stdout only; PLIC, CLINT, virtio, filesystem, and GUI stay out of this lane.
 - `baremetal_interrupt_control.c` is the x86_64 platform capsule baseline for CLI/STI/HLT and PIC masking only; APIC policy stays in pure Simple until controller code is explicitly imported.
 - `baremetal_startup_handoff.c` is the x86_64 platform capsule baseline for module-init and `spl_start` handoff only; stack/hart policy stays in pure Simple.
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
