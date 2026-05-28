@@ -52,9 +52,10 @@ Date: 2026-05-28
 | Bare-metal pure policy probe source | 1300 |
 | RV32 semihost stdout ELF file / dec section | 6000 / 512 |
 | RV32 semihost trap object file / dec section | 768 / 64 |
-| RV32 semihost trap source | 1024 |
+| RV32 semihost trap source | 256 |
 | RV64 semihost trap object file / dec section | 1024 / 64 |
-| RV64 semihost trap source | 1024 |
+| RV64 semihost trap source | 256 |
+| Shared RISC-V semihost trap source | 768 |
 | ARM semihost trap object file / dec section | 768 / 64 |
 | ARM semihost trap source | 1024 |
 | ARM64 semihost trap object file / dec section | 768 / 64 |
@@ -125,8 +126,9 @@ Date: 2026-05-28
 | `examples/simple_os/arch/common/baremetal_riscv_interrupt_control.S` | 1 | 20 | 442 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_startup_handoff.c` | 1 | 1 | 52 |
 | `examples/simple_os/arch/common/baremetal_startup_handoff.c` | 1 | 35 | 685 |
-| `src/lib/nogc_async_mut_noalloc/baremetal/riscv32/semihost_trap.S` | 1 | 30 | 867 |
-| `src/lib/nogc_async_mut_noalloc/baremetal/riscv/semihost_trap.S` | 1 | 30 | 867 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/riscv32/semihost_trap.S` | 1 | 2 | 206 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/riscv/semihost_trap.S` | 1 | 2 | 206 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/riscv_common/semihost_trap.S` | 1 | 26 | 471 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/arm/semihost_trap.S` | 1 | 27 | 786 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/arm64/semihost_trap.S` | 1 | 25 | 787 |
 | `examples/09_embedded/baremetal/baremetal/pure_policy_probe.spl` | 1 | 23 | 833 |
@@ -215,8 +217,9 @@ Date: 2026-05-28
 - `common/baremetal_startup_handoff.c` is the shared multiplatform capsule baseline for module-init and `spl_start` handoff only; stack/hart policy stays in pure Simple.
 - `x86_64/boot/baremetal_startup_handoff.c` is a thin compatibility wrapper over the shared startup handoff capsule.
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
-- `riscv32/semihost_trap.S` is the RV32 platform capsule baseline for the semihost magic sequence only; stdout operation policy stays in pure Simple.
-- `riscv/semihost_trap.S` is the RV64 platform capsule baseline for the semihost magic sequence only; stdout operation policy stays in pure Simple.
+- `riscv_common/semihost_trap.S` is the shared RV32/RV64 semihost trap scaffold for the magic sequence, WRITE0, and EXIT wrappers only.
+- `riscv32/semihost_trap.S` is a thin RV32 compatibility wrapper over the shared RISC-V semihost trap scaffold.
+- `riscv/semihost_trap.S` is a thin RV64 compatibility wrapper over the shared RISC-V semihost trap scaffold.
 - `arm/semihost_trap.S` is the ARM/Thumb platform capsule baseline for the BKPT semihost trap only; stdout operation policy stays in pure Simple.
 - `arm64/semihost_trap.S` is the AArch64 platform capsule baseline for the HLT semihost trap only; stdout operation policy stays in pure Simple.
 - `baremetal/console_policy.spl` is the pure-Simple policy surface for shared semihost/UART stdout selection.
