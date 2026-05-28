@@ -1,0 +1,51 @@
+use std.nogc_async_mut_noalloc.baremetal.interrupt_policy.{
+    BAREMETAL_INTERRUPT_APIC,
+    BAREMETAL_INTERRUPT_NONE,
+    BAREMETAL_INTERRUPT_NVIC,
+    BAREMETAL_INTERRUPT_PLIC,
+    BAREMETAL_VECTOR_EXCEPTION,
+    BAREMETAL_VECTOR_EXTERNAL_IRQ,
+    BAREMETAL_VECTOR_SOFTWARE,
+    BAREMETAL_VECTOR_UNKNOWN,
+    baremetal_interrupt_choose,
+    baremetal_interrupt_is_enabled,
+    baremetal_interrupt_vector_in_range,
+    baremetal_interrupt_vector_kind
+}
+
+use std.spec.{describe, it, expect}
+
+describe "baremetal interrupt policy":
+    it "chooses architecture controllers without hardware imports":
+        expect(baremetal_interrupt_choose("arm32", 0xE000E100u32).controller).to_equal(BAREMETAL_INTERRUPT_NVIC)
+        expect(baremetal_interrupt_choose("riscv64", 0x0C000000u32).controller).to_equal(BAREMETAL_INTERRUPT_PLIC)
+        expect(baremetal_interrupt_choose("x86_64", 0xFEE00000u32).controller).to_equal(BAREMETAL_INTERRUPT_APIC)
+        expect(baremetal_interrupt_choose("unknown", 0u32).controller).to_equal(BAREMETAL_INTERRUPT_NONE)
+
+    it "validates controller vector ranges":
+        val nvic = baremetal_interrupt_choose("cortex-m", 0xE000E100u32)
+        val plic = baremetal_interrupt_choose("riscv32", 0x0C000000u32)
+        val apic = baremetal_interrupt_choose("x86_64", 0xFEE00000u32)
+        expect(baremetal_interrupt_vector_in_range(nvic, 16)).to_equal(true)
+        expect(baremetal_interrupt_vector_in_range(nvic, 255)).to_equal(true)
+        expect(baremetal_interrupt_vector_in_range(nvic, 256)).to_equal(false)
+        expect(baremetal_interrupt_vector_in_range(plic, 1)).to_equal(true)
+        expect(baremetal_interrupt_vector_in_range(plic, 1023)).to_equal(true)
+        expect(baremetal_interrupt_vector_in_range(plic, 1024)).to_equal(false)
+        expect(baremetal_interrupt_vector_in_range(apic, 32)).to_equal(true)
+        expect(baremetal_interrupt_vector_in_range(apic, 255)).to_equal(true)
+        expect(baremetal_interrupt_vector_in_range(apic, 256)).to_equal(false)
+
+    it "classifies exception, software, external, and unknown vectors":
+        val nvic = baremetal_interrupt_choose("arm", 0xE000E100u32)
+        val plic = baremetal_interrupt_choose("riscv64", 0x0C000000u32)
+        val apic = baremetal_interrupt_choose("x86_64", 0xFEE00000u32)
+        val none = baremetal_interrupt_choose("none", 0u32)
+        expect(baremetal_interrupt_vector_kind(nvic, 3)).to_equal(BAREMETAL_VECTOR_EXCEPTION)
+        expect(baremetal_interrupt_vector_kind(nvic, 16)).to_equal(BAREMETAL_VECTOR_EXTERNAL_IRQ)
+        expect(baremetal_interrupt_vector_kind(plic, 7)).to_equal(BAREMETAL_VECTOR_SOFTWARE)
+        expect(baremetal_interrupt_vector_kind(plic, 11)).to_equal(BAREMETAL_VECTOR_EXTERNAL_IRQ)
+        expect(baremetal_interrupt_vector_kind(apic, 14)).to_equal(BAREMETAL_VECTOR_EXCEPTION)
+        expect(baremetal_interrupt_vector_kind(apic, 48)).to_equal(BAREMETAL_VECTOR_EXTERNAL_IRQ)
+        expect(baremetal_interrupt_vector_kind(none, 1)).to_equal(BAREMETAL_VECTOR_UNKNOWN)
+        expect(baremetal_interrupt_is_enabled(none)).to_equal(false)

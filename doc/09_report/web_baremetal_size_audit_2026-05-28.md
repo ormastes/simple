@@ -25,6 +25,7 @@ Date: 2026-05-28
 | x86_64 minimal boot/stdout object file / dec section | 4096 / 512 |
 | x86_64 minimal boot/stdout source | 4096 |
 | Pure Simple console policy source | 2500 |
+| Pure Simple interrupt policy source | 5000 |
 
 ## Source Size Surfaces
 
@@ -34,6 +35,7 @@ Date: 2026-05-28
 | `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | 1 | 15509 | 576503 |
 | `examples/simple_os/arch/x86_64/boot/baremetal_boot_stdout.c` | 1 | 126 | 2982 |
 | `src/lib/nogc_async_mut_noalloc/baremetal/console_policy.spl` | 1 | 56 | 1870 |
+| `src/lib/nogc_async_mut_noalloc/baremetal/interrupt_policy.spl` | 1 | 72 | 3315 |
 
 ## Browser Cluster Source Sizes
 
@@ -58,4 +60,5 @@ Date: 2026-05-28
 - `baremetal_boot_stdout.c` is the current x86_64 platform capsule baseline for boot/stdout only; keep it small while moving policy and reusable behavior into pure Simple.
 - Semihost stdout should use the noalloc bare-metal transport library as the shared cross-platform API surface, with only the trap instruction in the platform capsule.
 - `baremetal/console_policy.spl` is the pure-Simple policy surface for shared semihost/UART stdout selection.
+- `baremetal/interrupt_policy.spl` is the pure-Simple policy surface for interrupt controller selection and vector classification.
 - The split lanes now have default regression budgets. Set any `MAX_...` environment value higher, lower, or empty to tune a specific gate.
