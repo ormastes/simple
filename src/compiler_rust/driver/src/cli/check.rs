@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use simple_common::target::Target;
 use simple_compiler::module_resolver::ModuleResolver;
+use simple_compiler::short_grammar::collect_short_grammar_suggestions;
 use simple_compiler::{LintChecker, LintConfig, LintLevel, LintName};
 use simple_parser::ast::{Block, Expr, ImportTarget, ModulePath, Node, Pattern, Type};
 use simple_parser::{NumericSuffix, Parser, ParseError};
@@ -229,6 +230,7 @@ fn check_file(path: &Path, source_roots: &[PathBuf], deny_gc_boundary_crossings:
             validate_gc_boundary_lints(path, &module.items, &mut errors, deny_gc_boundary_crossings);
             validate_noalloc_reachable_import_closure(path, &mut errors, source_roots, deny_gc_boundary_crossings);
             validate_basic_type_annotations(path, &module.items, &mut errors);
+            validate_short_grammar_suggestions(path, &source, &mut errors);
         }
         Err(e) => {
             // Convert ParseError to CheckError
@@ -249,6 +251,23 @@ fn check_file(path: &Path, source_roots: &[PathBuf], deny_gc_boundary_crossings:
         file: path.display().to_string(),
         status,
         errors,
+    }
+}
+
+fn validate_short_grammar_suggestions(file_path: &Path, source: &str, errors: &mut Vec<CheckError>) {
+    for suggestion in collect_short_grammar_suggestions(source) {
+        errors.push(CheckError {
+            file: file_path.display().to_string(),
+            line: suggestion.line,
+            column: suggestion.column,
+            severity: ErrorSeverity::Warning,
+            code: Some("STYLE_SHORT_GRAMMAR".to_string()),
+            message: "readable callback can use short grammar".to_string(),
+            expected: None,
+            found: None,
+            notes: Vec::new(),
+            help: vec![format!("replace with `{}`", suggestion.replacement)],
+        });
     }
 }
 
@@ -1301,6 +1320,19 @@ mod tests {
         assert_eq!(result.errors[0].expected.as_deref(), Some("i64"));
         assert_eq!(result.errors[0].found.as_deref(), Some("text"));
         assert!(!result.errors[0].help.is_empty());
+    }
+
+    #[test]
+    fn test_check_reports_short_grammar_warning() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "fn main():\n    val doubled = nums.map(\\x: x * 2)").unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].severity, ErrorSeverity::Warning);
+        assert_eq!(result.errors[0].code.as_deref(), Some("STYLE_SHORT_GRAMMAR"));
+        assert!(result.errors[0].help.iter().any(|h| h.contains("_1 * 2")));
     }
 
     #[test]

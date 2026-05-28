@@ -1,6 +1,7 @@
 //! LSP MCP Tool Implementations
 
 use crate::lsp_mcp::types::*;
+use crate::short_grammar::collect_short_grammar_suggestions;
 use simple_parser::ast::{Block, ClassDef, EnumDef, Expr, FunctionDef, Node, StructDef, TraitDef, Type, Visibility};
 use simple_parser::token::Span;
 use simple_parser::Parser;
@@ -107,6 +108,7 @@ impl LspMcpTools {
                 self.file_cache.insert(path.to_string(), module.items.clone());
                 if include_warnings {
                     collect_semantic_warnings(&module.items, &mut diagnostics);
+                    collect_short_grammar_warnings(source, &mut diagnostics);
                 }
             }
             Err(err) => {
@@ -116,6 +118,23 @@ impl LspMcpTools {
             }
         }
         diagnostics
+    }
+}
+
+fn collect_short_grammar_warnings(source: &str, diagnostics: &mut Vec<Diagnostic>) {
+    for suggestion in collect_short_grammar_suggestions(source) {
+        diagnostics.push(
+            Diagnostic::warning(
+                Range::from_span(
+                    suggestion.line,
+                    suggestion.column,
+                    suggestion.line,
+                    suggestion.end_column,
+                ),
+                suggestion.message,
+            )
+            .with_code("STYLE_SHORT_GRAMMAR"),
+        );
     }
 }
 
@@ -684,5 +703,21 @@ mod tests {
             hover.visibility_v2.as_ref().map(|v| v.kind),
             Some(ScopedVisibilityKind::Up)
         );
+    }
+
+    #[test]
+    fn diagnostics_include_short_grammar_warning() {
+        let mut tools = LspMcpTools::new();
+        let diagnostics = tools.diagnostics(
+            "sample.spl",
+            "fn main():\n    val doubled = nums.map(\\x: x * 2)\n",
+            true,
+        );
+
+        assert!(diagnostics.iter().any(|diag| {
+            diag.code.as_deref() == Some("STYLE_SHORT_GRAMMAR")
+                && diag.message.contains("_1 * 2")
+                && diag.severity == DiagnosticSeverity::Warning
+        }));
     }
 }

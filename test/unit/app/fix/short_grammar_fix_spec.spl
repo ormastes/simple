@@ -36,6 +36,20 @@ describe "short grammar easy fix":
         val reps = easyfix_replacements(fixes[0])
         expect(reps[0].new_text).to_equal("_1 * 2")
 
+    it "rewrites map identity callbacks to numbered placeholders":
+        val source = "fn sample():\n    val same = values.map(\\x: x)\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("_1")
+
+    it "rewrites then identity callbacks to numbered placeholders":
+        val source = "fn sample():\n    val same = promise.then(\\value: value)\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("_1")
+
     it "does not rewrite parenthesized pipe lambdas until parser support exists":
         val source = "fn sample():\n    val tripled = 5 |> (\\x: x * 3)\n"
         val fixes = check_short_grammar_refactor(source, "sample.spl")
@@ -213,6 +227,11 @@ describe "short grammar easy fix":
         val reps = easyfix_replacements(fixes[0])
         expect(reps[0].new_text).to_equal("\\_: Err(\"bad\")")
 
+    it "does not rewrite already-wildcard constant callbacks":
+        val source = "fn sample():\n    val headers = columns.map(\\_: \"---\")\n    val p = Pipeline.new().filter(\\_: true)\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(0)
+
     it "rewrites indexed predicates with param-free index expressions":
         val source = "fn sample():\n    val open = rows.filter(\\row: row[self.table.column_index(\"status\")] == status)\n"
         val fixes = check_short_grammar_refactor(source, "sample.spl")
@@ -241,12 +260,86 @@ describe "short grammar easy fix":
         val reps = easyfix_replacements(fixes[0])
         expect(reps[0].new_text).to_equal("_1.len() > 0 and _1[0] == \"GET\"")
 
-    it "does not rewrite string interpolation transforms until parser support exists":
+    it "rewrites string interpolation transforms to numbered placeholders":
         val open = "{"
         val close = "}"
         val source = "fn sample():\n    val text = bytes.map(\\b: \"" + open + "b" + close + "\")\n"
         val fixes = check_short_grammar_refactor(source, "sample.spl")
-        expect(fixes.len()).to_equal(0)
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("\"" + open + "_1" + close + "\"")
+
+    it "rewrites prefixed string interpolation transforms to numbered placeholders":
+        val open = "{"
+        val close = "}"
+        val source = "fn sample():\n    val text = bytes.map(\\b: \"byte:" + open + "b" + close + "\")\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("\"byte:" + open + "_1" + close + "\"")
+
+    it "rewrites indexed string interpolation transforms to numbered placeholders":
+        val open = "{"
+        val close = "}"
+        val source = "fn sample():\n    val text = rows.map(\\row: \"first:" + open + "row[0]" + close + "\")\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("\"first:" + open + "_1[0]" + close + "\"")
+
+    it "rewrites indexed interpolation callbacks outside map":
+        val open = "{"
+        val close = "}"
+        val source = "fn sample():\n    table.register(\"greet\", \\args: \"Hello, " + open + "args[0]" + close + "!\")\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("\"Hello, " + open + "_1[0]" + close + "!\"")
+
+    it "does not stop string interpolation rewrites at commas inside strings":
+        val open = "{"
+        val close = "}"
+        val source = "fn sample():\n    val text = rows.map(\\row: \"left, right " + open + "row[0]" + close + "\")\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("\"left, right " + open + "_1[0]" + close + "\"")
+
+    it "rewrites formatted string interpolation transforms to numbered placeholders":
+        val open = "{"
+        val close = "}"
+        val source = "fn sample():\n    val text = counts.map(\\count: \"count:" + open + "count:05d" + close + "\")\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("\"count:" + open + "_1:05d" + close + "\"")
+
+    it "does not rewrite matching literal text around interpolation placeholders":
+        val open = "{"
+        val close = "}"
+        val source = "fn sample():\n    val text = counts.map(\\count: \"count=" + open + "count" + close + "\")\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("\"count=" + open + "_1" + close + "\"")
+
+    it "does not rewrite escaped interpolation braces":
+        val open = "{"
+        val close = "}"
+        val source = "fn sample():\n    val text = counts.map(\\count: \"" + open + open + "count" + close + close + " " + open + "count" + close + "\")\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("\"" + open + open + "count" + close + close + " " + open + "_1" + close + "\"")
+
+    it "does not rewrite interpolation identifiers with matching prefixes":
+        val open = "{"
+        val close = "}"
+        val source = "fn sample():\n    val text = counts.map(\\count: \"" + open + "countdown" + close + " " + open + "count" + close + "\")\n"
+        val fixes = check_short_grammar_refactor(source, "sample.spl")
+        expect(fixes.len()).to_equal(1)
+        val reps = easyfix_replacements(fixes[0])
+        expect(reps[0].new_text).to_equal("\"" + open + "countdown" + close + " " + open + "_1" + close + "\"")
 
     it "does not rewrite match selector lambdas until interpreter support exists":
         val source = "fn sample():\n    val names = values.map(\\value: match value:\n        case 1: \"one\"\n        case _: \"many\"\n    )\n"

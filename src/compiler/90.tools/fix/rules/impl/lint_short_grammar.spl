@@ -1,14 +1,3 @@
-# EasyFix Rules - Short Grammar Refactors (Text-Scanning)
-#
-# Conservative rewrites from explicit long grammar to proven short grammar:
-#   L:short_grammar_method_ref — `\x: x.method()` -> `&:method`
-#   L:short_grammar_function_ref — `\x: f(x)` -> `f`
-#   L:short_grammar_placeholder — `\x: x * 2` -> `_1 * 2`
-#                               — `\x: x.method() > 0` -> `_1.method() > 0`
-#   L:short_grammar_ignored_param — `\x: constant()` -> `\_: constant()`
-# Interpolation rewrites are intentionally not emitted until the parser
-# transforms placeholders inside interpolation expressions.
-
 use std.tooling.easy_fix.*
 use compiler.tools.fix.rules.helpers.*
 
@@ -39,7 +28,6 @@ fn check_short_grammar_refactor(source: text, file: text) -> [EasyFix]:
                 fixes.push(fix)
         byte_offset = byte_offset + _text_index_len(line) + 1
     fixes
-
 fn _count_triple_quotes(line: text) -> i64:
     var count = 0
     var search_from = 0
@@ -50,7 +38,6 @@ fn _count_triple_quotes(line: text) -> i64:
         count = count + 1
         search_from = pos + 3
     count
-
 fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
     var fixes: [EasyFix] = []
     var search_from = 0
@@ -151,7 +138,6 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
                                         search_from = lambda_start + 1
 
     fixes
-
 fn _find_next_lambda_start(line: text, search_from: i64) -> i64:
     val candidate = _find_text_from(line, "\\", search_from)
     if candidate < 0:
@@ -194,7 +180,6 @@ fn _line_has_pipe_parenthesized_lambda_before(line: text, pos: i64) -> bool:
     while before >= 0 and line[before:before + 1] == " ":
         before = before - 1
     before >= 1 and line[before - 1:before + 1] == "|>"
-
 fn _line_has_local_lambda_binding_before(line: text, pos: i64) -> bool:
     var before = pos - 1
     while before >= 0 and (line[before:before + 1] == " " or line[before:before + 1] == "\\"):
@@ -205,14 +190,12 @@ fn _line_has_local_lambda_binding_before(line: text, pos: i64) -> bool:
     if prefix.contains("fn("):
         return false
     prefix.starts_with("val ") or prefix.starts_with("var ")
-
 fn _arrow_is_function_type_return(line: text, arrow_pos: i64) -> bool:
     var before = arrow_pos - 1
     while before >= 0 and line[before:before + 1] == " ":
         before = before - 1
     if before < 0 or line[before:before + 1] != ")":
         return false
-
     var depth = 0
     var i = before
     while i >= 0:
@@ -231,7 +214,6 @@ fn _arrow_is_function_type_return(line: text, arrow_pos: i64) -> bool:
                 return line[name_start:name_end] == "fn"
         i = i - 1
     false
-
 fn _position_is_inside_string(line: text, pos: i64) -> bool:
     var i = 0
     var in_string = false
@@ -377,7 +359,7 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
     val member_prefix = param + "."
     if not expr.starts_with(value_prefix) and not expr.starts_with(member_prefix) and not _expr_contains_plain_identifier(expr, param):
         return nil
-    if not _placeholder_brackets_are_param_free(expr, param):
+    if not _placeholder_expr_is_interpolation(expr, param) and not _placeholder_brackets_are_param_free(expr, param):
         if not _placeholder_expr_is_array_literal(expr, param):
             return nil
     if not _placeholder_quotes_are_safe(expr, param):
@@ -390,10 +372,13 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
         if unary_new_text == expr:
             return nil
         return Some(ShortGrammarPlaceholderCandidate(new_text: unary_new_text, end_offset: expr_end))
-    if not _placeholder_expr_is_safe(expr) and not _placeholder_expr_is_single_param_call(expr, param) and not _placeholder_expr_is_param_cast(expr, param) and not _placeholder_expr_is_call_with_safe_args(expr, param) and not _placeholder_expr_is_field_access(expr, param) and not _placeholder_expr_is_presence_check(expr, param) and not _placeholder_expr_is_unary_not_safe(expr, param) and not _placeholder_expr_is_array_literal(expr, param):
+    if not _placeholder_expr_is_safe_identity(line, lambda_start, expr, param) and not _placeholder_expr_is_safe(expr) and not _placeholder_expr_is_single_param_call(expr, param) and not _placeholder_expr_is_param_cast(expr, param) and not _placeholder_expr_is_call_with_safe_args(expr, param) and not _placeholder_expr_is_field_access(expr, param) and not _placeholder_expr_is_presence_check(expr, param) and not _placeholder_expr_is_unary_not_safe(expr, param) and not _placeholder_expr_is_array_literal(expr, param) and not _placeholder_expr_is_interpolation(expr, param):
         return nil
 
-    val new_text = _replace_plain_identifier(expr, param, replacement)
+    val new_text = if _placeholder_expr_is_interpolation(expr, param):
+        replace_interpolation_identifier(expr, param, replacement)
+    else:
+        _replace_plain_identifier(expr, param, replacement)
     if new_text == expr:
         return nil
     Some(ShortGrammarPlaceholderCandidate(new_text: new_text, end_offset: expr_end))
@@ -516,19 +501,25 @@ fn _scan_simple_lambda_expr_end(line: text, start: i64) -> i64:
     var i = start
     var paren_depth = 0
     var bracket_depth = 0
+    var in_string = false
     while i < line.len():
         val ch = line[i:i + 1]
-        if ch == "(":
+        if ch == "\\" and in_string:
+            i = i + 2
+            continue
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string and ch == "(":
             paren_depth = paren_depth + 1
-        elif ch == "[":
+        elif not in_string and ch == "[":
             bracket_depth = bracket_depth + 1
-        elif ch == "]" and bracket_depth > 0:
+        elif not in_string and ch == "]" and bracket_depth > 0:
             bracket_depth = bracket_depth - 1
-        elif ch == ")":
+        elif not in_string and ch == ")":
             if paren_depth == 0 and bracket_depth == 0:
                 return i
             paren_depth = paren_depth - 1
-        elif ch == "," and paren_depth == 0 and bracket_depth == 0:
+        elif not in_string and ch == "," and paren_depth == 0 and bracket_depth == 0:
             return i
         i = i + 1
     i
@@ -614,6 +605,8 @@ fn _placeholder_brackets_are_param_free(expr: text, param: text) -> bool:
 fn _placeholder_quotes_are_safe(expr: text, param: text) -> bool:
     if not expr.contains("\""):
         return true
+    if _placeholder_expr_is_interpolation(expr, param):
+        return true
     if expr == "\"{" + param + "}\"":
         return true
     if not expr.contains(param):
@@ -626,6 +619,19 @@ fn _placeholder_quotes_are_safe(expr: text, param: text) -> bool:
             return false
         i = i + 1
     true
+
+fn _placeholder_expr_is_interpolation(expr: text, param: text) -> bool:
+    if not expr.starts_with("\"") or not expr.ends_with("\""):
+        return false
+    if not expr.contains("{" + param):
+        return false
+    expr.contains("{" + param + "}") or expr.contains("{" + param + ".") or expr.contains("{" + param + "[") or expr.contains("{" + param + ":")
+
+fn _placeholder_expr_is_safe_identity(line: text, lambda_start: i64, expr: text, param: text) -> bool:
+    if expr != param:
+        return false
+    val prefix = line[0:lambda_start]
+    prefix.ends_with(".map(") or prefix.ends_with(".then(")
 
 fn _placeholder_expr_is_field_access(expr: text, param: text) -> bool:
     val prefix = param + "."
@@ -690,7 +696,6 @@ fn _placeholder_position_is_inside_brackets(expr: text, pos: i64) -> bool:
             depth = depth - 1
         i = i + 1
     depth > 0
-
 fn _placeholder_expr_is_single_param_call(expr: text, param: text) -> bool:
     val open = _find_text_from(expr, "(", 0)
     if open <= 0:
@@ -702,7 +707,6 @@ fn _placeholder_expr_is_single_param_call(expr: text, param: text) -> bool:
     if close != expr.len() - 1:
         return false
     expr[open + 1:close].trim() == param
-
 fn _placeholder_expr_is_call_with_safe_args(expr: text, param: text) -> bool:
     val open = _find_text_from(expr, "(", 0)
     if open <= 0:
@@ -711,7 +715,6 @@ fn _placeholder_expr_is_call_with_safe_args(expr: text, param: text) -> bool:
     if close != expr.len() - 1:
         return false
     _placeholder_call_args_are_safe(expr[open + 1:close].trim(), param)
-
 fn _find_matching_paren_on_line(text_value: text, open_paren: i64) -> i64:
     var i = open_paren
     var depth = 0
@@ -729,10 +732,8 @@ fn _find_matching_paren_on_line(text_value: text, open_paren: i64) -> i64:
                     return i
         i = i + 1
     -1
-
 fn _expr_contains_plain_identifier(expr: text, param: text) -> bool:
     _replace_plain_identifier(expr, param, "_") != expr
-
 fn _replace_plain_identifier(expr: text, param: text, replacement: text) -> text:
     var result = ""
     var i = 0

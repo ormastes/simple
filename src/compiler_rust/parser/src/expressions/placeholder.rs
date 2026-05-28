@@ -10,7 +10,7 @@
 //! - `_2 - _1` -> `\__p0, __p1: __p1 - __p0`
 
 use crate::ast::enums::MoveMode;
-use crate::ast::{Argument, Expr, LambdaParam};
+use crate::ast::{extract_fstring_keys, Argument, Expr, FStringPart, LambdaParam, TypeMeta};
 
 /// Check if an identifier is a numbered placeholder like `_1`, `_2`, etc.
 fn is_numbered_placeholder(name: &str) -> bool {
@@ -117,7 +117,7 @@ fn find_max_numbered(expr: &Expr) -> usize {
             let r = find_max_numbered(receiver);
             args.iter().fold(r, |acc, a| acc.max(find_max_numbered(&a.value)))
         }
-        Expr::FieldAccess { receiver, .. } => find_max_numbered(receiver),
+        Expr::FieldAccess { receiver, .. } | Expr::TupleIndex { receiver, .. } => find_max_numbered(receiver),
         Expr::Index { receiver, index } => find_max_numbered(receiver).max(find_max_numbered(index)),
         Expr::If {
             condition,
@@ -132,6 +132,12 @@ fn find_max_numbered(expr: &Expr) -> usize {
         Expr::Dict(entries) => entries
             .iter()
             .fold(0, |acc, (k, v)| acc.max(find_max_numbered(k)).max(find_max_numbered(v))),
+        Expr::FString { parts, .. } => parts.iter().fold(0, |acc, part| {
+            acc.max(match part {
+                FStringPart::Expr(expr) | FStringPart::ExprWithFormat(expr, _) => find_max_numbered(expr),
+                FStringPart::Literal(_) => 0,
+            })
+        }),
         Expr::OptionalChain { expr, .. } => find_max_numbered(expr),
         Expr::Coalesce { expr, default } => find_max_numbered(expr).max(find_max_numbered(default)),
         Expr::Slice {
@@ -203,6 +209,10 @@ fn replace_numbered_placeholders(expr: Expr) -> Expr {
             receiver: Box::new(replace_numbered_placeholders(*receiver)),
             field,
         },
+        Expr::TupleIndex { receiver, index } => Expr::TupleIndex {
+            receiver: Box::new(replace_numbered_placeholders(*receiver)),
+            index,
+        },
         Expr::Index { receiver, index } => Expr::Index {
             receiver: Box::new(replace_numbered_placeholders(*receiver)),
             index: Box::new(replace_numbered_placeholders(*index)),
@@ -226,6 +236,11 @@ fn replace_numbered_placeholders(expr: Expr) -> Expr {
                 .map(|(k, v)| (replace_numbered_placeholders(k), replace_numbered_placeholders(v)))
                 .collect(),
         ),
+        Expr::FString { parts, .. } => {
+            let parts = replace_numbered_fstring_parts(parts);
+            let type_meta = TypeMeta::with_const_keys(extract_fstring_keys(&parts));
+            Expr::FString { parts, type_meta }
+        }
         Expr::OptionalChain { expr, field } => Expr::OptionalChain {
             expr: Box::new(replace_numbered_placeholders(*expr)),
             field,
@@ -267,7 +282,7 @@ fn count_placeholders(expr: &Expr) -> usize {
         Expr::MethodCall { receiver, args, .. } => {
             count_placeholders(receiver) + args.iter().map(|a| count_placeholders(&a.value)).sum::<usize>()
         }
-        Expr::FieldAccess { receiver, .. } => count_placeholders(receiver),
+        Expr::FieldAccess { receiver, .. } | Expr::TupleIndex { receiver, .. } => count_placeholders(receiver),
         Expr::Index { receiver, index } => count_placeholders(receiver) + count_placeholders(index),
         Expr::If {
             condition,
@@ -283,6 +298,13 @@ fn count_placeholders(expr: &Expr) -> usize {
         Expr::Dict(entries) => entries
             .iter()
             .map(|(k, v)| count_placeholders(k) + count_placeholders(v))
+            .sum(),
+        Expr::FString { parts, .. } => parts
+            .iter()
+            .map(|part| match part {
+                FStringPart::Expr(expr) | FStringPart::ExprWithFormat(expr, _) => count_placeholders(expr),
+                FStringPart::Literal(_) => 0,
+            })
             .sum(),
         Expr::OptionalChain { expr, .. } => count_placeholders(expr),
         Expr::Coalesce { expr, default } => count_placeholders(expr) + count_placeholders(default),
@@ -356,6 +378,10 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
             receiver: Box::new(replace_placeholders(*receiver, counter)),
             field,
         },
+        Expr::TupleIndex { receiver, index } => Expr::TupleIndex {
+            receiver: Box::new(replace_placeholders(*receiver, counter)),
+            index,
+        },
         Expr::Index { receiver, index } => Expr::Index {
             receiver: Box::new(replace_placeholders(*receiver, counter)),
             index: Box::new(replace_placeholders(*index, counter)),
@@ -379,6 +405,11 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
                 .map(|(k, v)| (replace_placeholders(k, counter), replace_placeholders(v, counter)))
                 .collect(),
         ),
+        Expr::FString { parts, .. } => {
+            let parts = replace_fstring_parts(parts, counter);
+            let type_meta = TypeMeta::with_const_keys(extract_fstring_keys(&parts));
+            Expr::FString { parts, type_meta }
+        }
         Expr::OptionalChain { expr, field } => Expr::OptionalChain {
             expr: Box::new(replace_placeholders(*expr, counter)),
             field,
@@ -407,5 +438,122 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
         Expr::Lambda { .. } => expr,
         // Terminal expressions with no sub-expressions - return unchanged
         _ => expr,
+    }
+}
+
+fn replace_numbered_fstring_parts(parts: Vec<FStringPart>) -> Vec<FStringPart> {
+    parts
+        .into_iter()
+        .map(|part| match part {
+            FStringPart::Expr(expr) => FStringPart::Expr(replace_numbered_placeholders(expr)),
+            FStringPart::ExprWithFormat(expr, format_spec) => {
+                FStringPart::ExprWithFormat(replace_numbered_placeholders(expr), format_spec)
+            }
+            FStringPart::Literal(text) => FStringPart::Literal(text),
+        })
+        .collect()
+}
+
+fn replace_fstring_parts(parts: Vec<FStringPart>, counter: &mut usize) -> Vec<FStringPart> {
+    parts
+        .into_iter()
+        .map(|part| match part {
+            FStringPart::Expr(expr) => FStringPart::Expr(replace_placeholders(expr, counter)),
+            FStringPart::ExprWithFormat(expr, format_spec) => {
+                FStringPart::ExprWithFormat(replace_placeholders(expr, counter), format_spec)
+            }
+            FStringPart::Literal(text) => FStringPart::Literal(text),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fstring_with_expr(expr: Expr) -> Expr {
+        let parts = vec![FStringPart::Literal("item:".to_string()), FStringPart::Expr(expr)];
+        Expr::FString {
+            type_meta: TypeMeta::with_const_keys(extract_fstring_keys(&parts)),
+            parts,
+        }
+    }
+
+    #[test]
+    fn transforms_numbered_placeholders_inside_fstring_interpolation() {
+        let transformed = force_transform_placeholder_lambda(fstring_with_expr(Expr::Identifier("_1".to_string())));
+
+        match transformed {
+            Expr::Lambda { params, body, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "__p0");
+                match *body {
+                    Expr::FString { parts, type_meta } => {
+                        assert_eq!(type_meta.const_keys(), Some(&vec!["__p0".to_string()]));
+                        assert_eq!(parts[0], FStringPart::Literal("item:".to_string()));
+                        assert_eq!(parts[1], FStringPart::Expr(Expr::Identifier("__p0".to_string())));
+                    }
+                    other => panic!("expected f-string body, got {other:?}"),
+                }
+            }
+            other => panic!("expected lambda, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transforms_bare_placeholders_inside_formatted_fstring_interpolation() {
+        let parts = vec![FStringPart::ExprWithFormat(
+            Expr::Identifier("_".to_string()),
+            ">8".to_string(),
+        )];
+        let transformed = force_transform_placeholder_lambda(Expr::FString {
+            type_meta: TypeMeta::with_const_keys(extract_fstring_keys(&parts)),
+            parts,
+        });
+
+        match transformed {
+            Expr::Lambda { params, body, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "__p0");
+                match *body {
+                    Expr::FString { parts, .. } => {
+                        assert_eq!(
+                            parts[0],
+                            FStringPart::ExprWithFormat(Expr::Identifier("__p0".to_string()), ">8".to_string())
+                        );
+                    }
+                    other => panic!("expected f-string body, got {other:?}"),
+                }
+            }
+            other => panic!("expected lambda, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transforms_tuple_index_placeholders_inside_fstring_interpolation() {
+        let transformed = force_transform_placeholder_lambda(fstring_with_expr(Expr::TupleIndex {
+            receiver: Box::new(Expr::Identifier("_1".to_string())),
+            index: 1,
+        }));
+
+        match transformed {
+            Expr::Lambda { params, body, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "__p0");
+                match *body {
+                    Expr::FString { parts, .. } => {
+                        assert_eq!(
+                            parts[1],
+                            FStringPart::Expr(Expr::TupleIndex {
+                                receiver: Box::new(Expr::Identifier("__p0".to_string())),
+                                index: 1,
+                            })
+                        );
+                    }
+                    other => panic!("expected f-string body, got {other:?}"),
+                }
+            }
+            other => panic!("expected lambda, got {other:?}"),
+        }
     }
 }

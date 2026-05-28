@@ -15,8 +15,9 @@
 #   L:deprecated_if_let          — Replace `if let` with `if val`
 #   L:short_grammar_method_ref   — Replace `\x: x.method()` with `&:method`
 #   L:short_grammar_function_ref — Replace `\x: f(x)` with `f`
-#   L:short_grammar_placeholder  — Replace `\x: x * 2` with `_1 * 2`
-#                                  Replace `\x: x.method() > 0` with `_1.method() > 0`
+#   L:short_grammar_placeholder  — Replace simple one-line lambda bodies with
+#                                  placeholder expressions, including
+#                                  interpolation transforms.
 #
 # Sub-modules:
 #   rules_helpers.spl  — LineContext, line_contexts, byte offset helpers, parsing helpers
@@ -797,7 +798,7 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
     val member_prefix = param + "."
     if not expr.starts_with(value_prefix) and not expr.starts_with(member_prefix) and not _short_expr_contains_plain_identifier(expr: expr, param: param):
         return nil
-    if not _short_placeholder_brackets_are_param_free(expr: expr, param: param):
+    if not _short_placeholder_expr_is_interpolation(expr: expr, param: param) and not _short_placeholder_brackets_are_param_free(expr: expr, param: param):
         if not _short_placeholder_expr_is_array_literal(expr: expr, param: param):
             return nil
     if not _short_placeholder_quotes_are_safe(expr: expr, param: param):
@@ -810,10 +811,13 @@ fn _parse_placeholder_candidate(line: text, lambda_start: i64) -> Option<ShortGr
         if unary_new_text == expr:
             return nil
         return Some(ShortGrammarPlaceholderCandidate(new_text: unary_new_text, end_offset: expr_end))
-    if not _short_placeholder_expr_is_safe(expr) and not _short_placeholder_expr_is_single_param_call(expr: expr, param: param) and not _short_placeholder_expr_is_param_cast(expr: expr, param: param) and not _short_placeholder_expr_is_call_with_safe_args(expr: expr, param: param) and not _short_placeholder_expr_is_field_access(expr: expr, param: param) and not _short_placeholder_expr_is_presence_check(expr: expr, param: param) and not _short_placeholder_expr_is_unary_not_safe(expr: expr, param: param) and not _short_placeholder_expr_is_array_literal(expr: expr, param: param):
+    if not _short_placeholder_expr_is_safe_identity(line: line, lambda_start: lambda_start, expr: expr, param: param) and not _short_placeholder_expr_is_safe(expr) and not _short_placeholder_expr_is_single_param_call(expr: expr, param: param) and not _short_placeholder_expr_is_param_cast(expr: expr, param: param) and not _short_placeholder_expr_is_call_with_safe_args(expr: expr, param: param) and not _short_placeholder_expr_is_field_access(expr: expr, param: param) and not _short_placeholder_expr_is_presence_check(expr: expr, param: param) and not _short_placeholder_expr_is_unary_not_safe(expr: expr, param: param) and not _short_placeholder_expr_is_array_literal(expr: expr, param: param) and not _short_placeholder_expr_is_interpolation(expr: expr, param: param):
         return nil
 
-    val new_text = _short_replace_plain_identifier(expr: expr, param: param, replacement: replacement)
+    val new_text = if _short_placeholder_expr_is_interpolation(expr: expr, param: param):
+        _short_replace_interpolation_identifier(expr: expr, param: param, replacement: replacement)
+    else:
+        _short_replace_plain_identifier(expr: expr, param: param, replacement: replacement)
     if new_text == expr:
         return nil
     Some(ShortGrammarPlaceholderCandidate(new_text: new_text, end_offset: expr_end))
@@ -936,19 +940,25 @@ fn _short_scan_simple_lambda_expr_end(line: text, start: i64) -> i64:
     var i = start
     var paren_depth = 0
     var bracket_depth = 0
+    var in_string = false
     while i < line.len():
         val ch = line.slice(i, i + 1)
-        if ch == "(":
+        if ch == "\\" and in_string:
+            i = i + 2
+            continue
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string and ch == "(":
             paren_depth = paren_depth + 1
-        elif ch == "[":
+        elif not in_string and ch == "[":
             bracket_depth = bracket_depth + 1
-        elif ch == "]" and bracket_depth > 0:
+        elif not in_string and ch == "]" and bracket_depth > 0:
             bracket_depth = bracket_depth - 1
-        elif ch == ")":
+        elif not in_string and ch == ")":
             if paren_depth == 0 and bracket_depth == 0:
                 return i
             paren_depth = paren_depth - 1
-        elif ch == "," and paren_depth == 0 and bracket_depth == 0:
+        elif not in_string and ch == "," and paren_depth == 0 and bracket_depth == 0:
             return i
         i = i + 1
     i
@@ -1034,6 +1044,8 @@ fn _short_placeholder_brackets_are_param_free(expr: text, param: text) -> bool:
 fn _short_placeholder_quotes_are_safe(expr: text, param: text) -> bool:
     if not expr.contains("\""):
         return true
+    if _short_placeholder_expr_is_interpolation(expr: expr, param: param):
+        return true
     if expr == "\"{" + param + "}\"":
         return true
     if not expr.contains(param):
@@ -1046,6 +1058,19 @@ fn _short_placeholder_quotes_are_safe(expr: text, param: text) -> bool:
             return false
         i = i + 1
     true
+
+fn _short_placeholder_expr_is_interpolation(expr: text, param: text) -> bool:
+    if not expr.starts_with("\"") or not expr.ends_with("\""):
+        return false
+    if not expr.contains("{" + param):
+        return false
+    expr.contains("{" + param + "}") or expr.contains("{" + param + ".") or expr.contains("{" + param + "[") or expr.contains("{" + param + ":")
+
+fn _short_placeholder_expr_is_safe_identity(line: text, lambda_start: i64, expr: text, param: text) -> bool:
+    if expr != param:
+        return false
+    val prefix = line.slice(0, lambda_start)
+    prefix.ends_with(".map(") or prefix.ends_with(".then(")
 
 fn _short_placeholder_expr_is_field_access(expr: text, param: text) -> bool:
     val prefix = param + "."
@@ -1150,6 +1175,40 @@ fn _short_replace_plain_identifier(expr: text, param: text, replacement: text) -
                 i = i + 1
         else:
             result = result + expr.slice(i, i + 1)
+            i = i + 1
+    result
+
+fn _short_replace_interpolation_identifier(expr: text, param: text, replacement: text) -> text:
+    var result = ""
+    var i = 0
+    var in_interpolation = false
+    while i < expr.len():
+        val ch = expr.slice(i, i + 1)
+        if ch == "{" and i + 1 < expr.len() and expr.slice(i + 1, i + 2) == "{":
+            result = result + "{" + "{"
+            i = i + 2
+        elif ch == "}" and i + 1 < expr.len() and expr.slice(i + 1, i + 2) == "}":
+            result = result + "}" + "}"
+            i = i + 2
+        elif ch == "{":
+            in_interpolation = true
+            result = result + ch
+            i = i + 1
+        elif ch == "}":
+            in_interpolation = false
+            result = result + ch
+            i = i + 1
+        elif in_interpolation and i + param.len() <= expr.len() and expr.slice(i, i + param.len()) == param:
+            val before = if i == 0: "" else: expr.slice(i - 1, i)
+            val after = if i + param.len() >= expr.len(): "" else: expr.slice(i + param.len(), i + param.len() + 1)
+            if (before == "" or not _short_is_identifier_char(before)) and (after == "" or not _short_is_identifier_char(after)):
+                result = result + replacement
+                i = i + param.len()
+            else:
+                result = result + ch
+                i = i + 1
+        else:
+            result = result + ch
             i = i + 1
     result
 

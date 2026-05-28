@@ -65,6 +65,7 @@ pub mod runtime_profile;
 pub mod semantic_diff;
 pub mod semantics;
 pub mod security;
+pub mod short_grammar;
 pub mod smf_builder;
 pub mod smf_writer;
 pub mod spec_coverage;

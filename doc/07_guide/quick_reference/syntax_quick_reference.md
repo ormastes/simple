@@ -41,6 +41,7 @@ not clarity. Prefer them for small, local, single-expression transformations:
 fn double(x: i64) -> i64: x * 2
 items.map(_ * 2)
 items.zip(other).map(_1 + _2)
+items.map(\_: 0)  # canonical compact form for ignored callback arguments
 words.map(&:len)
 [for x in items if x > 0: x * x]
 user?.name ?? "Anonymous"
@@ -50,6 +51,7 @@ Runtime notes:
 
 - `|>` pipe-forward and `>>` composition are useful in interpreter-oriented code, but native support must be proven with `SIMPLE_NO_STUB_FALLBACK=1`.
 - `:=` is documented as a walrus-style `val` shorthand in older guidance, but current executable coverage does not prove the actual token. Use `val name = expr` until parser/runtime tests pass.
+- Keep `\_:` for constant callbacks that must still be functions, such as `headers.map(\_: "---")`; replacing them with the constant expression would change the value passed to the higher-order call.
 - Use explicit lambdas or helper functions once the expression has side effects, nested decisions, or non-obvious runtime behavior.
 
 ---

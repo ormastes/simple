@@ -20,6 +20,7 @@ fn main() {
     let content = fs::read_to_string(&source).expect("read runtime_symbols.rs");
     let runtime_src = manifest_dir.join("src");
     let runtime_symbol_table = env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some();
+    let runtime_regex = env::var_os("CARGO_FEATURE_RUNTIME_REGEX").is_some();
 
     // Symbols provided by simple-native-all (not the runtime stub) when driver-hooks is active.
     // Under driver-hooks, the runtime stub is cfg-gated out; the real C symbol lives in native_all.
@@ -67,7 +68,7 @@ fn main() {
     generated.push_str("mod exported_symbols {\n");
     generated.push_str("    unsafe extern \"C\" {\n");
     for symbol in &symbols {
-        if runtime_defines_symbol(&runtime_src, symbol) {
+        if runtime_defines_symbol(&runtime_src, symbol, runtime_regex) {
             if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
                 // Under driver-hooks, native_all owns the real C symbol; skip the unconditional
                 // link-name reference here to avoid an unresolved-symbol error in simple-driver.
@@ -80,7 +81,7 @@ fn main() {
     generated.push_str("}\n\n");
     generated.push_str("pub static RUNTIME_SYMBOL_ENTRIES: &[RuntimeSymbolEntry] = &[\n");
     for symbol in &symbols {
-        if runtime_defines_symbol(&runtime_src, symbol) {
+        if runtime_defines_symbol(&runtime_src, symbol, runtime_regex) {
             if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
                 // Omit from the static table; native_all registers the real symbol separately
                 // when it links in (it owns the #[no_mangle] definition).
@@ -150,7 +151,7 @@ fn compile_c_runtime_sources() {
     }
 }
 
-fn runtime_defines_symbol(root: &Path, symbol: &str) -> bool {
+fn runtime_defines_symbol(root: &Path, symbol: &str, runtime_regex: bool) -> bool {
     let needle = format!("fn {symbol}");
     let mut stack = vec![root.to_path_buf()];
 
@@ -167,13 +168,33 @@ fn runtime_defines_symbol(root: &Path, symbol: &str) -> bool {
             if entry_path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
                 continue;
             }
+            if !runtime_regex && entry_path.file_name().and_then(|name| name.to_str()) == Some("regex.rs") {
+                continue;
+            }
             if let Ok(file) = fs::read_to_string(&entry_path) {
-                if file.contains(&needle) {
+                if rust_file_exports_symbol(&file, &needle, symbol) {
                     return true;
                 }
             }
         }
     }
 
+    false
+}
+
+fn rust_file_exports_symbol(file: &str, needle: &str, symbol: &str) -> bool {
+    let lines: Vec<&str> = file.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
+        if line.contains(&format!("#[export_name = \"{symbol}\"]")) {
+            return true;
+        }
+        if !line.contains(needle) {
+            continue;
+        }
+        let start = idx.saturating_sub(4);
+        if lines[start..idx].iter().any(|prev| prev.trim() == "#[no_mangle]") {
+            return true;
+        }
+    }
     false
 }

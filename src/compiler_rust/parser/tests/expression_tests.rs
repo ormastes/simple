@@ -78,6 +78,94 @@ fn test_method_call() {
 }
 
 #[test]
+fn test_map_placeholder_inside_fstring_interpolation() {
+    let module = parse("[\"a\"].map(\"item:{_1}\")").unwrap();
+    if let Node::Expression(Expr::MethodCall { method, args, .. }) = &module.items[0] {
+        assert_eq!(method, "map");
+        assert_eq!(args.len(), 1);
+        match &args[0].value {
+            Expr::Lambda { params, body, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "__p0");
+                match &**body {
+                    Expr::FString { parts, type_meta } => {
+                        assert_eq!(type_meta.const_keys(), Some(&vec!["__p0".to_string()]));
+                        assert_eq!(parts[0], FStringPart::Literal("item:".to_string()));
+                        assert_eq!(parts[1], FStringPart::Expr(Expr::Identifier("__p0".to_string())));
+                    }
+                    other => panic!("Expected f-string lambda body, got {other:?}"),
+                }
+            }
+            other => panic!("Expected lambda argument, got {other:?}"),
+        }
+    } else {
+        panic!("Expected map method call");
+    }
+}
+
+#[test]
+fn test_map_tuple_placeholder_inside_fstring_interpolation() {
+    let module = parse("[\"i64\"].enumerate().map(\"{_1.0}:{_1.1}\")").unwrap();
+    if let Node::Expression(Expr::MethodCall { method, args, .. }) = &module.items[0] {
+        assert_eq!(method, "map");
+        assert_eq!(args.len(), 1);
+        match &args[0].value {
+            Expr::Lambda { params, body, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "__p0");
+                match &**body {
+                    Expr::FString { parts, .. } => {
+                        assert_eq!(
+                            parts[0],
+                            FStringPart::Expr(Expr::TupleIndex {
+                                receiver: Box::new(Expr::Identifier("__p0".to_string())),
+                                index: 0,
+                            })
+                        );
+                        assert_eq!(parts[1], FStringPart::Literal(":".to_string()));
+                        assert_eq!(
+                            parts[2],
+                            FStringPart::Expr(Expr::TupleIndex {
+                                receiver: Box::new(Expr::Identifier("__p0".to_string())),
+                                index: 1,
+                            })
+                        );
+                    }
+                    other => panic!("Expected f-string lambda body, got {other:?}"),
+                }
+            }
+            other => panic!("Expected lambda argument, got {other:?}"),
+        }
+    } else {
+        panic!("Expected map method call");
+    }
+}
+
+#[test]
+fn test_coalesce_default_parses_full_arithmetic_expression() {
+    let module = parse("value ?? -1 * 100").unwrap();
+    if let Node::Expression(Expr::Coalesce { expr, default }) = &module.items[0] {
+        assert_eq!(**expr, Expr::Identifier("value".to_string()));
+        match &**default {
+            Expr::Binary { op, left, right } => {
+                assert_eq!(*op, BinOp::Mul);
+                assert_eq!(
+                    **left,
+                    Expr::Unary {
+                        op: UnaryOp::Neg,
+                        operand: Box::new(Expr::Integer(1)),
+                    }
+                );
+                assert_eq!(**right, Expr::Integer(100));
+            }
+            other => panic!("Expected arithmetic default expression, got {other:?}"),
+        }
+    } else {
+        panic!("Expected coalesce expression");
+    }
+}
+
+#[test]
 fn test_array_literal() {
     let module = parse("[1, 2, 3]").unwrap();
     if let Node::Expression(Expr::Array(elements)) = &module.items[0] {

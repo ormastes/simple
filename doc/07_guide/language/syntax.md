@@ -196,6 +196,14 @@ Simple supports three equivalent lambda syntaxes:
 | `\:` | `\x: x * 2` | Concise |
 | `_` placeholder | `_ * 2` | Shortest |
 
+Use `\_:` as the canonical compact callback form when the argument is ignored
+but the higher-order call still needs a function:
+
+```simple
+val separators = headers.map(\_: "---")
+val no_op = future.then(\_: ())
+```
+
 ### fn() Syntax
 
 ```simple

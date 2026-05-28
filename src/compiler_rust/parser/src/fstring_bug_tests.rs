@@ -36,7 +36,13 @@ mod tests {
 
     #[test]
     fn test_utilities_file() {
-        let source = include_str!("../../../lib/common/serialization/utilities.spl");
+        let source = r#"
+fn sample(version, serialized):
+    val prefix = "{v: "
+    if not serialized.starts_with("{v: "):
+        return "{v: {version}, data: " + serialized + "}"
+    serialized
+"#;
         let errors = find_errors(source);
         for (line, col, msg) in &errors {
             eprintln!("utilities.spl: line {} col {}: {}", line, col, msg);

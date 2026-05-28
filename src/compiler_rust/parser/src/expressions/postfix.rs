@@ -539,7 +539,7 @@ impl<'a> Parser<'a> {
                     // Supports multi-line: expr ??\n    default
                     self.advance();
                     self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
-                    let default = self.parse_unary()?; // Higher precedence than ??
+                    let default = self.parse_pipe()?;
                     expr = Expr::Coalesce {
                         expr: Box::new(expr),
                         default: Box::new(default),
