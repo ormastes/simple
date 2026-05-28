@@ -4,6 +4,7 @@ use std.fs_driver.mem_block_device.{MemBlockDevice}
 use std.fs_driver.types.{Path, OpenFlags}
 use std.fs_driver.capability.{Capability}
 use std.fs_driver.extension.{Extension}
+use std.fs_driver.error.{FsError}
 use std.fs_driver.direct_io.{direct_io_nvme_filesystem_extension}
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks}
@@ -98,7 +99,7 @@ describe "NVMe filesystem mount factory":
             case _:
                 expect(false).to_equal(true)
 
-    it "maps NVFS direct I/O file offsets onto the shared NVMe arena data region":
+    it "requires committed NVFS arena bytes before exposing DirectIo extents":
         val lease = _mount_test_lease()
         val nvfs = vfs_nvme_driver_instance_for_lease("nvfs-root", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Nvfs)
         expect(nvfs.is_ok()).to_equal(true)
@@ -106,12 +107,7 @@ describe "NVMe filesystem mount factory":
         val handle = driver.open_path(Path(raw: "/hot.dat"), OpenFlags.read_write().with_create())
         expect(handle.is_ok()).to_equal(true)
         val extent = driver.direct_io_extent_for_handle(handle.unwrap(), 4096i64, 4096u64)
-        expect(extent.is_ok()).to_equal(true)
-        val mapped = extent.unwrap()
-        expect(mapped.consumer).to_equal("nvfs")
-        expect(mapped.storage_lba).to_equal(9u64)
-        expect(mapped.byte_len).to_equal(4096u64)
-        expect(mapped.sector_size).to_equal(512u32)
+        expect(extent.unwrap_err()).to_equal(FsError.Unsupported)
 
     it "builds DBFS from the shared lease-backed BlockDevice surface":
         val lease = _mount_test_lease()
@@ -126,20 +122,14 @@ describe "NVMe filesystem mount factory":
             case _:
                 expect(false).to_equal(true)
 
-    it "maps DBFS direct I/O file offsets onto the shared NVMe arena data region":
+    it "requires committed DBFS arena bytes before exposing DirectIo extents":
         val lease = _mount_test_lease()
         val dbfs = vfs_nvme_driver_instance_for_lease("dbfs-root", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs)
         expect(dbfs.is_ok()).to_equal(true)
         val driver = dbfs.unwrap()
         val handle = driver.open_path(Path(raw: "/hot.db"), OpenFlags.read_write().with_create())
         expect(handle.is_ok()).to_equal(true)
-        val extent = driver.direct_io_extent_for_handle(handle.unwrap(), 0i64, 4096u64)
-        expect(extent.is_ok()).to_equal(true)
-        val mapped = extent.unwrap()
-        expect(mapped.consumer).to_equal("dbfs")
-        expect(mapped.storage_lba).to_equal(1u64)
-        expect(mapped.byte_len).to_equal(4096u64)
-        expect(mapped.sector_size).to_equal(512u32)
+        expect(driver.direct_io_extent_for_handle(handle.unwrap(), 0i64, 512u64).unwrap_err()).to_equal(FsError.Unsupported)
 
     it "persists DBFS normal writes through the raw NVMe arena on device-backed mounts":
         val driver_source = read_file("src/lib/nogc_sync_mut/db/dbfs_driver/dbfs_driver.spl")
@@ -150,6 +140,7 @@ describe "NVMe filesystem mount factory":
         expect(driver_source.contains("if self.direct_io.is_none():\n            return Ok(false)")).to_equal(true)
         expect(driver_source.contains("val handle = arena.arena_handle()\n        val r = arena.arena_append(handle, data, DurabilityClass.BestEffort)")).to_equal(true)
         expect(driver_source.contains("_dbfs_record_device_blob(self.inst_id, inode_id, offset, r.bytes_written)")).to_equal(true)
+        expect(driver_source.contains("val storage_offset = blob_offset + file_offset")).to_equal(true)
         expect(driver_source.contains("val bytes = arena.arena_read_bytes(handle, _dbfs_device_blob_offsets[blob_idx], want)")).to_equal(true)
         expect(driver_source.contains("val committed = self._commit_inode_bytes_to_device(old.id, _dbfs_slice_bytes(content, content.len() as i64))")).to_equal(true)
         expect(driver_source.contains("if committed.is_err():\n            return Ok(())")).to_equal(true)
