@@ -46,16 +46,6 @@ void serial_putchar(char c)
     outb(COM1_PORT, (uint8_t)c);
 }
 
-void serial_puts(const char *s)
-{
-    if (!s) return;
-    while (*s) {
-        if (*s == '\n') serial_putchar('\r');
-        serial_putchar(*s);
-        s++;
-    }
-}
-
 static RuntimeValue serial_write_value(RuntimeValue data)
 {
     if (IS_HEAP(data)) {
@@ -73,22 +63,14 @@ RuntimeValue rt_stdout_write(RuntimeValue data)
     return serial_write_value(data);
 }
 
-RuntimeValue rt_stderr_write(RuntimeValue data)
-{
-    return serial_write_value(data);
-}
-
 RuntimeValue rt_stdout_flush(RuntimeValue data)
 {
     (void)data;
     return ENCODE_INT(0);
 }
 
-RuntimeValue rt_stderr_flush(RuntimeValue data)
-{
-    (void)data;
-    return ENCODE_INT(0);
-}
+RuntimeValue rt_stderr_write(RuntimeValue data) __attribute__((alias("rt_stdout_write")));
+RuntimeValue rt_stderr_flush(RuntimeValue data) __attribute__((alias("rt_stdout_flush")));
 
 RuntimeValue rt_port_outb(RuntimeValue port, RuntimeValue val)
 {
@@ -118,7 +100,6 @@ void _start(void)
     outb(0x21u, 0xFFu);
     outb(0xA1u, 0xFFu);
     serial_init();
-    serial_puts("[BOOT] minimal x86_64 stdout capsule\r\n");
     if (__simple_call_module_inits) __simple_call_module_inits();
     if (spl_start) spl_start();
     outb(ISA_DEBUG_EXIT_PORT, 0u);
