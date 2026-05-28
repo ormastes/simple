@@ -82,10 +82,29 @@ write_preflight_report() {
                 echo "[physical-nvme] incomplete NVMe sysfs identity for $dev" >&2
                 exit 1
             fi
+            controller="$(printf '%s\n' "$name" | sed 's/n[0-9][0-9]*$//')"
+            user_nsid_trimmed="unknown"
+            for user_entry in "${NVME_SYSFS_ROOT}/${controller}"n*; do
+                if [ ! -e "$user_entry" ]; then
+                    continue
+                fi
+                user_name="$(basename "$user_entry")"
+                user_nsid="$(cat "${NVME_SYSFS_ROOT}/${user_name}/nsid" 2>/dev/null || cat "${NVME_SYSFS_ROOT}/${user_name}/device/nsid" 2>/dev/null || echo unknown)"
+                user_nsid_candidate="$(echo "$user_nsid" | xargs)"
+                if [ "$user_nsid_candidate" != "unknown" ] && [ "$user_nsid_candidate" != "$nsid_trimmed" ]; then
+                    user_nsid_trimmed="$user_nsid_candidate"
+                    break
+                fi
+            done
+            if [ "$user_nsid_trimmed" = "unknown" ]; then
+                echo "[physical-nvme] no distinct assignable user namespace found for $dev" >&2
+                exit 1
+            fi
             echo "  device: $dev"
             echo "    model: $model_trimmed"
             echo "    serial: $serial_trimmed"
             echo "    namespace_nsid: $nsid_trimmed"
+            echo "    user_namespace_nsid: $user_nsid_trimmed"
         done
     } > "$report_path"
 }
